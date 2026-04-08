@@ -1,0 +1,53 @@
+{
+  "product": {
+    "name": "UncleCode",
+    "version": "0.1.0",
+    "scope": "engine-first local OSS CLI"
+  },
+  "subsystems": {
+    "contracts": {
+      "status": "rewritten",
+      "notes": "Canonical workspace contracts were redefined under packages/contracts for events, policies, modes, sessions, and capability manifests."
+    },
+    "config-core": {
+      "status": "rewritten",
+      "notes": "Config precedence, prompt-section layering, and mode overlays were rebuilt inside packages/config-core."
+    },
+    "session-store": {
+      "status": "rewritten",
+      "notes": "Session persistence, checkpointing, and resumable state live in packages/session-store under .unclecode state conventions."
+    },
+    "context-broker": {
+      "status": "clean-room-adapted",
+      "notes": "Repo-map and research packet assembly were rebuilt from public reference patterns without retaining vendored runtime coupling."
+    },
+    "policy-engine": {
+      "status": "rewritten",
+      "notes": "Approval intents, trust zones, and deterministic policy outcomes were rebuilt as a first-class package."
+    },
+    "providers-auth": {
+      "status": "clean-room-adapted",
+      "notes": "Provider selection plus OpenAI OAuth/device flows were implemented against documented APIs for UncleCode-specific auth handling."
+    },
+    "runtime-broker": {
+      "status": "rewritten",
+      "notes": "Local runtime execution and sandbox escalation boundaries were rebuilt behind packages/runtime-broker."
+    },
+    "mcp-host": {
+      "status": "clean-room-adapted",
+      "notes": "MCP registry merge, trust tiers, and governed profile startup were implemented from capability-governance requirements."
+    },
+    "orchestrator-research": {
+      "status": "clean-room-adapted",
+      "notes": "Research mode, bounded orchestration, and replayable task flows were rebuilt from inspiration-only public references."
+    },
+    "tui": {
+      "status": "rewritten",
+      "notes": "The session-center TUI, shell state reducer, and UncleCode HUD are new Ink-based UI surfaces for this repo."
+    },
+    "cli-release-surface": {
+      "status": "rewritten",
+      "notes": "The root bin, CLI command router, docs, and operational surfaces now expose UncleCode as the primary product identity."
+    }
+  }
+}

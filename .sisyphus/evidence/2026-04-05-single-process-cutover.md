@@ -1,0 +1,205 @@
+# 2026-04-05 single-process cutover evidence
+
+## Goal
+Record the remaining runtime boundaries after the TUI/orchestration redesign migration work.
+
+## Completed cutovers
+- `apps/unclecode-cli/src/work-launcher.ts` removed.
+- `apps/unclecode-cli/src/index.ts` now imports `launchWorkEntrypoint()` and `shouldLaunchDefaultWorkSession()` directly from `apps/unclecode-cli/src/interactive-shell.ts`.
+- `apps/unclecode-cli/src/program.ts` now imports `launchSessionCenter()` / `launchWorkEntrypoint()` directly from `apps/unclecode-cli/src/interactive-shell.ts`.
+- `unclecode`, `unclecode work`, `unclecode tui`, interactive `resume`, and `center` all share the same interactive bootstrap helpers.
+- Session-center handoff no longer forces a terminal clear before opening the work shell.
+- `launchWorkEntrypoint()` dispatches to the work module in-process via `runWorkCli()` instead of spawning a child node process.
+
+## Remaining boundaries
+- Obsolete root runtime wrappers `src/index.ts` and `src/work-shell-runtime.ts` have now been deleted; app-owned `apps/unclecode-cli/src/work-entry.ts` and `apps/unclecode-cli/src/work-runtime.ts` own the packaged work bootstrap/runtime entry path directly.
+- `src/cli.tsx` still owns the work-shell Ink app while `packages/tui/src/index.tsx` owns the session-center shell.
+- Root `src/*` still contains one major transitional work runtime surface (`cli.tsx`) that has not yet been fully absorbed into `packages/orchestrator` / `packages/tui`, but the remaining code is now mostly engine assembly, session wiring, and Dashboard/work-pane composition rather than pure lifecycle/composer preview state, home-sync effects, slash suggestion/selection/active-panel state, input/submit controller execution, composer input/submit branching helpers, reasoning/auth parsing, Dashboard prop assembly, or engine-construction helpers.
+- The work shell render tree now has a package seam: `packages/tui/src/work-shell-view.tsx` owns the shared presenter while `src/cli.tsx` still owns engine/composer/runtime wiring.
+- `startRepl()` now renders the package `Dashboard` shell with an embedded work pane instead of rendering a standalone root work app directly.
+- `packages/tui/src/index.tsx` now exposes `shouldCaptureDashboardInput()` plus an embedded `renderWorkPane` seam so Work-tab input can bypass session-center key handling.
+- `apps/unclecode-cli/src/work-runtime.ts` now owns work-session bootstrap, arg parsing, session restore, and Dashboard prop loading without a root runtime wrapper layer in between.
+- `apps/unclecode-cli/src/work-runtime.ts` now also exports app-owned managed dashboard helpers (`createManagedDashboardInput(...)`, `createManagedDashboardProps(...)`), so the root `src/cli.tsx` shim no longer duplicates pane-runtime/dashboard assembly.
+- `apps/unclecode-cli/src/work-runtime.ts` now also owns the compatibility-facing `StartReplOptions`, `resolveWorkShellInlineCommand(...)`, `createWorkShellDashboardProps(...)`, and `startRepl(...)` seams, with `runWorkCli(...)` reusing the same `startRepl(...)` path.
+- `packages/session-store/src/root.ts` now owns canonical session-store root resolution via `getSessionStoreRoot(...)`; `src/session-store-paths.ts` is reduced to a thin compatibility shim, and root/app work-session callers now prefer the shared package export.
+- `packages/orchestrator/src/work-agent.ts` now owns the complex-turn orchestration wrapper, and `src/work-agent.ts` is reduced to a thin compatibility shim.
+- `packages/orchestrator/src/work-agent.ts` now also accepts an optional executable-guardian-check seam so complex turns can fold bounded real verification summaries into guardian review and final synthesis instead of relying on LLM-only review.
+- `packages/orchestrator/src/coding-agent.ts` now owns the direct turn-trace wrapper, and `src/agent.ts` is reduced to a thin provider-wiring shim.
+- Repo-internal runtime coverage now imports `apps/unclecode-cli/src/work-runtime.ts` directly for work-session resume/bootstrap behavior instead of going through a deleted root runtime shim.
+- `apps/unclecode-cli/src/work-runtime.ts` now imports work config, tool metadata, cached runtime guidance, `WorkAgent`, the shared managed Dashboard/startRepl helper, and an app-owned runtime coding-agent seam directly from package/local app code, so the work-runtime bootstrap no longer dynamically imports `src/agent.ts`.
+- `packages/providers/src/runtime.ts` now owns the concrete OpenAI/Anthropic/Gemini work-shell provider implementations behind an injected tool-runtime seam.
+- `packages/providers/src/runtime.ts` now also exports a shared `createRuntimeProvider(...)` helper so provider selection/wiring is no longer duplicated across root and app agent wrappers.
+- `apps/unclecode-cli/src/runtime-coding-agent.ts` now imports the shared package helper from `@unclecode/providers`, so the app runtime no longer imports `src/providers.ts` at all.
+- `src/providers.ts` is reduced to a compatibility wrapper over `@unclecode/providers`, injecting the existing tool runtime for legacy root consumers.
+- `src/agent.ts` now also reuses the shared package `createRuntimeProvider(...)` helper instead of open-coding provider selection branches.
+- `packages/tui/src/index.tsx` now owns shared managed Dashboard/startRepl assembly via `createManagedWorkShellDashboardProps(...)` and `renderManagedWorkShellDashboard(...)`, and both `src/cli.tsx` and `apps/unclecode-cli/src/work-runtime.ts` now consume that seam instead of owning direct Dashboard render assembly separately.
+- `packages/tui/src/work-shell-panels.ts` now owns shared work-shell panel/presenter helpers (`buildContextPanel`, `buildInlineCommandPanel`, `buildSlashSuggestionPanel`, `buildWorkShellHelpPanel`, `buildWorkShellStatusPanel`, auth-panel refinement helpers), and `src/cli.tsx` now consumes those package exports instead of owning the pure panel logic.
+- `packages/tui/src/work-shell-formatters.ts` now owns shared work-shell trace/runtime/error formatters (`formatAgentTraceLine`, `formatToolTraceLine`, `formatRuntimeLabel`, `formatWorkShellError`), and `src/cli.tsx` now re-exports those package helpers instead of implementing them locally.
+- `packages/tui/src/work-shell-attachments.ts` now owns shared attachment/inline-preview helpers (`formatAttachmentBadgeLine`, `buildAttachmentPreviewLines`, `formatInlineImageSupportLine`, `buildTerminalInlineImageSequence`), and `src/cli.tsx` now re-exports those package helpers instead of implementing them locally.
+- `packages/orchestrator/src/composer-input.ts` now owns work-shell composer image-path parsing and attachment loading (`resolveComposerInput`), and `src/cli.tsx` now imports/re-exports that package helper instead of implementing it locally.
+- `packages/orchestrator/src/work-shell-slash.ts` now owns registry-backed work-shell slash resolution/suggestion/blocking helpers (`resolveWorkShellSlashCommand`, `getWorkShellSlashSuggestions`, `shouldBlockSlashSubmit`), and `src/cli.tsx` now imports/re-exports those package helpers instead of implementing them locally.
+- `packages/orchestrator/src/model-command.ts` now owns `resolveModelCommand(...)`, restoring the shared model-picker compatibility export without putting model-routing logic back into `src/cli.tsx`.
+- `packages/orchestrator/src/command-registry.ts` now resolves slash commands by exact command first, then explicit aliases, then unique 3+-character prefixes, so fast inputs like `/ses`, `/rev`, and `/com` work without regressing exact routes like `/browser`.
+- `packages/orchestrator/src/command-registry.ts` and `packages/orchestrator/src/work-shell-slash.ts` now expose builtin prompt-style work-shell commands for `/review` and `/commit`, including argument-preserving slash resolution (`["prompt", "review"|"commit", ...focus]`).
+- `packages/orchestrator/src/command-registry.ts` and `packages/orchestrator/src/work-shell-slash.ts` now also expose `/research` and `/research status` in the work shell, mapping `/research <topic>` directly to the existing local research execution path as `["research", "run", ...topic]`.
+- `packages/orchestrator/src/work-shell-engine.ts` now executes those prompt commands in-process by rewriting them into focused review/commit prompts while reusing the normal turn persistence/bridge/memory path instead of adding a separate controller lane.
+- `packages/tui/src/work-shell-panels.ts` now advertises `/review`, `/commit`, `/research <topic>`, and `/research status` in the shared work-shell help surface.
+- `src/cli.tsx` is now a pure compatibility import/re-export surface for runtime/work-shell helpers; its last local wrapper/type definitions for inline-command resolution and start-repl/dashboard assembly moved into `apps/unclecode-cli/src/work-runtime.ts`.
+- `packages/orchestrator/src/runtime-coding-agent.ts` now owns the direct runtime coding-agent/provider-wiring seam, preserving constructor-based `CodingAgent` compatibility and `createRuntimeCodingAgent(...)` auth-refresh behavior in one place.
+- `packages/orchestrator/src/workspace-providers.ts` now owns the root-compatibility provider wrappers that inject the shared tool runtime once for OpenAI/Anthropic/Gemini provider classes.
+- `apps/unclecode-cli/src/runtime-coding-agent.ts` is now a thin compatibility shim over orchestrator-owned seams.
+- The obsolete root agent/provider compatibility surfaces (`src/agent.ts`, `src/providers.ts`, `src/agent.d.ts`, `src/providers.d.ts`) have now been deleted after repo-internal imports, declaration shims, and packaged runtime paths were cut over to owner seams.
+- Repo-internal behavioral coverage now imports the owning package/app seams directly (`@unclecode/orchestrator`, `@unclecode/tui`, `@unclecode/context-broker`, `apps/unclecode-cli/src/work-runtime.ts`) instead of routing through root compatibility shims; only dedicated compatibility contracts continue to assert the `src/*` surfaces.
+- Remaining root declaration files (`src/cli.d.ts`, `src/composer.d.ts`, `src/config.d.ts`, `src/context-memory.d.ts`, `src/session-store-paths.d.ts`, `src/tools.d.ts`, `src/work-agent.d.ts`, `src/workspace-guidance.d.ts`, `src/workspace-skills.d.ts`) are now reduced to owner-seam re-export/signature shims, eliminating stale generated declaration drift.
+- The dist-work packaging gate now points at an app-owned work entrypoint (`apps/unclecode-cli/src/work-entry.ts` → `dist-work/apps/unclecode-cli/src/work-entry.js`) instead of `dist-work/src/index.js`, so the packaged work bootstrap no longer depends on `src/index.ts` / `src/work-shell-runtime.ts` as its built entry surface.
+- The workspace build script now cleans `dist-work/` before rebuilding, and integration coverage locks that stale legacy outputs (`dist-work/src/index.js`, `dist-work/src/work-shell-runtime.js`) do not survive the build once the app-owned entrypoint is in place.
+- The repo root `src/` tree no longer keeps stale checked-in generated compat runtime artifacts (`*.js`, `*.js.map`, `*.d.ts.map`) for the surviving root shim modules; only source shims and the small remaining declaration shims persist.
+- `apps/unclecode-cli/src/guardian-checks.ts` now performs changed-files-aware script selection: docs-only changes skip executable checks honestly, test-only changes narrow to a test subset, and source/config changes continue to select bounded lint/check/test candidates.
+- When a generic `test` candidate is requested but the workspace only exposes targeted test scripts, the guardian runner now expands source changes into available subset scripts such as `test:providers`, `test:context-broker`, `test:runtime-broker`, `test:contracts`, and `test:performance` based on the changed file paths.
+- The workspace now also exposes targeted scripts for the remaining major runtime surfaces (`test:work`, `test:orchestrator`, `test:tui`, `test:commands`), and guardian selection maps changed files in `apps/unclecode-cli`, `packages/orchestrator`, `packages/tui`, `tests/work`, and `tests/commands` onto those narrower subsets instead of falling back to coarse whole-suite execution.
+- `packages/orchestrator/src/work-agent.ts` now forwards extracted changed-file hints from planned tasks into guardian executable hooks so runtime verification can choose a tighter subset.
+- `apps/unclecode-cli/src/guardian-checks.ts` now owns the app-level bounded executable guardian runner, discovering available workspace scripts and executing `check` by default or `lint`+`check` for `ultrawork` so complex-turn review can include honest PASS/FAIL verification summaries.
+- `apps/unclecode-cli/src/operational.ts` now routes work-shell inline `research run ...` and `research status` commands into the existing research session-center actions instead of requiring a separate TUI surface.
+- `packages/orchestrator/src/reasoning.ts` now owns work-shell reasoning display/update helpers (`describeReasoning`, `resolveReasoningCommand`), and `src/cli.tsx` now imports/re-exports those package helpers instead of implementing them locally.
+- `packages/orchestrator/src/work-shell-inline-command.ts` now owns inline-command execution/error collection (`runWorkShellInlineCommand`), and `src/cli.tsx` now keeps only a thin formatter-binding wrapper for the legacy `resolveWorkShellInlineCommand(...)` export.
+- `packages/orchestrator/src/work-shell-session.ts` now owns work-shell session listing/snapshot persistence helpers (`listSessionLines(...)`, `persistWorkShellSessionSnapshot(...)`), and `src/cli.tsx` now imports/re-exports those helpers instead of implementing them locally.
+- `packages/orchestrator/src/work-shell-pane-runtime.ts` now owns pane runtime assembly (`createWorkShellPaneRuntime(...)`) for engine construction plus slash/runtime callback wiring, so `src/cli.tsx` no longer assembles `createWorkShellEngine(...)` and slash helpers directly inside `App`.
+- `packages/context-broker/src/context-memory.ts` now owns project bridge + scoped memory helpers (`publishContextBridge(...)`, `listProjectBridgeLines(...)`, `writeScopedMemory(...)`, `listScopedMemoryLines(...)`), and both `src/cli.tsx` and `apps/unclecode-cli/src/operational.ts` now consume that shared package seam instead of root/local implementations.
+- `packages/context-broker/src/workspace-skills.ts` now owns workspace-skill discovery/cache/load helpers (`clearWorkspaceSkillCache(...)`, `discoverSkillMetadata(...)`, `listAvailableSkills(...)`, `loadNamedSkill(...)`), and both `src/cli.tsx` and `src/workspace-guidance.ts` now consume that shared package seam instead of root ownership.
+- `packages/context-broker/src/workspace-guidance.ts` now also owns cached runtime guidance loading via `loadCachedWorkspaceGuidance(...)` / `clearCachedWorkspaceGuidance(...)`, while `src/workspace-guidance.ts` is reduced to a signature-compatibility shim.
+- `packages/orchestrator/src/work-config.ts` now owns work-session config loading (`loadConfig(...)`, `AppConfig`, `AppReasoningConfig`), and `src/config.ts` is reduced to a thin compatibility shim.
+- `packages/orchestrator/src/tools.ts` now owns workspace tool definitions/handlers (`toolDefinitions`, `toolHandlers`), and `src/tools.ts` is reduced to a thin compatibility shim.
+- `packages/tui/src/work-shell-dashboard-sync.ts` now owns the shared Dashboard refresh gate (`shouldRefreshDashboardHomeState`), and `src/cli.tsx` now imports/re-exports that package helper instead of implementing it locally.
+- `packages/tui/src/work-shell-panels.ts` now exports the shared auth-label parser (`extractAuthLabel`), and `src/cli.tsx` now imports that helper instead of duplicating the parser locally.
+- `packages/tui/src/index.tsx` now owns shared embedded work Dashboard prop assembly via `createEmbeddedWorkShellDashboardProps(...)`, and `src/cli.tsx` now wraps that package helper instead of assembling the full Dashboard prop object inline.
+- `packages/orchestrator/src/work-shell-engine-factory.ts` now owns shared `WorkShellEngine` assembly via `createWorkShellEngine(...)`, and `src/cli.tsx` now calls that package factory instead of instantiating `new WorkShellEngine(...)` directly.
+- `packages/tui/src/work-shell-panels.ts` now also owns shared slash-selection/panel helpers (`clampWorkShellSlashSelection(...)`, `cycleWorkShellSlashSelection(...)`, `resolveWorkShellActivePanel(...)`), and `src/cli.tsx` now consumes/re-exports those helpers instead of open-coding slash panel state transitions.
+- `packages/tui/src/work-shell-dashboard-sync.ts` now also owns shared home-sync payload helpers (`createWorkShellDashboardHomePatch(...)`, `createWorkShellDashboardHomeSyncState(...)`), and `src/cli.tsx` now consumes/re-exports those helpers instead of assembling home-sync payload objects inline.
+- `packages/tui/src/work-shell-input.ts` now owns shared work-shell input/submit decision helpers (`resolveWorkShellInputAction(...)`, `resolveWorkShellSubmitAction(...)`), and `src/cli.tsx` now consumes/re-exports those helpers instead of open-coding controller branching for `useInput(...)` and submit dispatch.
+- `packages/tui/src/work-shell-hooks.ts` now owns shared lifecycle/composer hooks (`useWorkShellEngineState(...)`, `useWorkShellComposerPreview(...)`) plus `createEmptyWorkShellComposerPreview(...)`, and `src/cli.tsx` now consumes those hooks instead of open-coding engine subscription/initialize/dispose and composer-preview resolution effects.
+- `packages/tui/src/work-shell-hooks.ts` now also owns `useWorkShellDashboardHomeSync(...)`, `useWorkShellSlashState(...)`, and `useWorkShellInputController(...)`, so `src/cli.tsx` no longer open-codes Dashboard home-sync patch/refresh effects, slash suggestion/selection/active-panel state management, or the `useInput(...)` + submit controller execution path.
+- `packages/tui/src/work-shell-pane.tsx` now owns pane-level work-shell composition (`useWorkShellPaneState(...)`, `Composer`, `WorkShellView`, attachment preview wiring, auth-label formatting), so `src/cli.tsx` is reduced further toward engine assembly + session wiring instead of view/controller composition.
+- `packages/tui/src/work-shell-dashboard.tsx` plus `packages/tui/src/index.tsx` now own embedded Dashboard/work-pane composition (`EmbeddedWorkShellPane`, `createEmbeddedWorkShellPaneDashboardProps(...)`, `renderEmbeddedWorkShellPaneDashboard(...)`), so `src/cli.tsx` no longer owns a local `App` component or direct `render(<Dashboard ... />)` wiring.
+- `src/context-memory.ts` is now reduced to a compatibility shim re-exporting the shared context-memory helpers from `@unclecode/context-broker`.
+- `src/workspace-skills.ts` is now reduced to a compatibility shim re-exporting the shared workspace-skill helpers from `@unclecode/context-broker`.
+- `packages/orchestrator/src/work-shell-engine.ts` now includes a permission-stall hook that trims trailing `If you want...` outros and can auto-inject one continue-follow-up pass instead of stalling for reconfirmation.
+- `apps/unclecode-cli/src/work-runtime.ts` now seeds `startRepl()` with real `buildTuiHomeState()` data, so embedded work sessions start with live mode/auth/session/MCP shell state instead of placeholder shell chrome.
+- `packages/tui/src/shell-state.ts` now supports `home.updated`, letting the embedded work pane refresh shell home state without dropping active work transcript state.
+- `src/cli.tsx` now syncs embedded work auth/bridge/memory into the Dashboard immediately and triggers a full shell home-state refresh after completed work turns or auth-state mutations.
+- `src/cli.tsx` now exports `createWorkShellDashboardProps(...)`, so Dashboard prop assembly is a reusable seam instead of being inlined inside `startRepl()`.
+- `apps/unclecode-cli/src/work-runtime.ts` exports `loadWorkShellDashboardProps(...)`, so other interactive surfaces can request a live embedded work pane without reimplementing work-runtime bootstrap.
+- `apps/unclecode-cli/src/interactive-shell.ts` now mounts a live embedded work pane into the session center when the work module exposes dashboard props, including work-session resume ids for the Work tab bootstrap.
+- Opening Sessions from embedded work now refreshes the resumable session list before switching tabs.
+- Skill metadata discovery exists in `src/workspace-skills.ts`; full plugin/skill runtime injection beyond slash-command registration is still pending.
+- The session center can now mount the live work pane in the same shell tree, but session resume/launch flows still keep a handoff path and runtime ownership remains split across `apps/unclecode-cli`, package-owned TUI/orchestrator seams, and the remaining root `src/cli.tsx` compatibility surface.
+- The shell tab contract is now aligned around `[Work][Sessions][MCP][Research]`, with work-first default startup and explicit session-center startup on `Sessions`.
+
+## Orchestrator safety groundwork completed
+- `packages/orchestrator/src/file-ownership-registry.ts` now provides per-worker write claims with `claim()`, `claimAll()`, `release()`, and `releaseAll()`.
+- `runBoundedExecutorPool()` now honors declared `writePaths` and serializes overlapping writes while allowing unrelated tasks to run in parallel.
+- `createTurnOrchestrator()` now supports an optional guardian auto-review hook and emits real reviewer trace steps for that review pass.
+- `src/work-agent.ts` now runs a guardian review pass before final synthesis and carries the guardian summary into the synthesis prompt.
+
+## Verification used
+- `tests/contracts/unclecode-cli.contract.test.mjs`
+- `tests/commands/work-forwarding.test.mjs`
+- `tests/orchestrator/turn-orchestrator.test.mjs`
+- `tests/work/work-agent.test.mjs`
+- `node --conditions=source --import tsx --test tests/tui/shell-state.test.mjs tests/contracts/unclecode-cli.contract.test.mjs`
+- `node --conditions=source --import tsx --test tests/work/repl.test.mjs tests/work/work-cli-resume.test.mjs tests/contracts/tui-session-center.contract.test.mjs tests/contracts/tui-work-shell.contract.test.mjs tests/commands/tui-action-runner.test.mjs`
+- `node --conditions=source --import tsx --test tests/contracts/*.test.mjs tests/tui/*.test.mjs tests/work/*.test.mjs`
+- `node --conditions=source --import tsx --test tests/contracts/session-store.persistence.test.ts tests/contracts/unclecode-cli.contract.test.mjs tests/work/work-cli-resume.test.mjs`
+  - verified after canonicalizing `getSessionStoreRoot(...)` behind `@unclecode/session-store`
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/work-cli-resume.test.mjs`
+  - verified after moving work runtime bootstrap to `apps/unclecode-cli/src/work-runtime.ts`
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/work-cli-resume.test.mjs tests/work/repl.test.mjs tests/contracts/tui-work-shell.contract.test.mjs`
+  - verified after deleting the obsolete root runtime wrappers (`src/index.ts`, `src/work-shell-runtime.ts`) and moving remaining internal runtime coverage to app-owned seams
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/agent.test.mjs tests/work/openai-provider.test.mjs tests/work/repl.test.mjs tests/work/work-cli-resume.test.mjs`
+  - verified after removing stale checked-in compat artifacts, realigning the remaining root declaration shims, and deleting the obsolete root agent/provider compatibility surfaces
+- `node --conditions=source --import tsx --test tests/contracts/tui-work-shell.contract.test.mjs tests/work/repl.test.mjs`
+  - verified after moving work-shell panel helpers to `packages/tui/src/work-shell-panels.ts`
+  - re-verified after moving work-shell trace/runtime/error formatters to `packages/tui/src/work-shell-formatters.ts`
+  - re-verified after moving attachment/inline-preview helpers to `packages/tui/src/work-shell-attachments.ts`
+  - re-verified after moving pane-level work-shell composition to `packages/tui/src/work-shell-pane.tsx`
+  - re-verified after moving embedded Dashboard/work-pane composition to `packages/tui/src/work-shell-dashboard.tsx`
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/repl.test.mjs`
+  - verified after moving composer image-path parsing/attachment loading to `packages/orchestrator/src/composer-input.ts`
+  - re-verified after moving work-shell session list/snapshot helpers to `packages/orchestrator/src/work-shell-session.ts`
+  - re-verified after moving pane runtime assembly to `packages/orchestrator/src/work-shell-pane-runtime.ts`
+  - re-verified after moving slash resolution/suggestion/blocking helpers to `packages/orchestrator/src/work-shell-slash.ts`
+  - re-verified after moving reasoning helpers to `packages/orchestrator/src/reasoning.ts`
+  - re-verified after moving the Dashboard home-sync helper to `packages/tui/src/work-shell-dashboard-sync.ts`
+  - re-verified after moving inline-command execution/error collection to `packages/orchestrator/src/work-shell-inline-command.ts`
+  - re-verified after reusing the shared `extractAuthLabel(...)` export from `packages/tui/src/work-shell-panels.ts`
+  - re-verified after moving embedded Dashboard prop assembly to `packages/tui/src/index.tsx` via `createEmbeddedWorkShellDashboardProps(...)`
+  - re-verified after moving `WorkShellEngine` assembly to `packages/orchestrator/src/work-shell-engine-factory.ts` via `createWorkShellEngine(...)`
+  - re-verified after moving slash selection/panel resolution to `packages/tui/src/work-shell-panels.ts`
+  - re-verified after moving dashboard home-sync payload builders to `packages/tui/src/work-shell-dashboard-sync.ts`
+  - re-verified after moving work-shell input/submit decision helpers to `packages/tui/src/work-shell-input.ts`
+  - re-verified after moving work-shell lifecycle/composer hooks to `packages/tui/src/work-shell-hooks.ts`
+  - re-verified after moving Dashboard home-sync and slash-state hooks to `packages/tui/src/work-shell-hooks.ts`
+  - re-verified after moving input/submit controller execution to `packages/tui/src/work-shell-hooks.ts`
+  - re-verified after moving pane-level work-shell composition to `packages/tui/src/work-shell-pane.tsx`
+  - re-verified after moving embedded Dashboard/work-pane composition to `packages/tui/src/work-shell-dashboard.tsx`
+  - re-verified after moving context-memory helpers to `packages/context-broker/src/context-memory.ts`
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/agent.test.mjs tests/work/work-agent.test.mjs tests/orchestrator/work-shell-engine.test.mjs`
+- `node --conditions=source --import tsx --test tests/work/repl.test.mjs tests/contracts/unclecode-cli.contract.test.mjs`
+- `node --conditions=source --import tsx --test tests/orchestrator/*.test.mjs tests/work/*.test.mjs tests/tui/*.test.mjs tests/performance/*.test.mjs`
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/repl.test.mjs tests/integration/unclecode-sessions.integration.test.mjs`
+  - verified after moving work-shell session list/snapshot helpers to `packages/orchestrator/src/work-shell-session.ts`
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/orchestrator/work-shell-engine.test.mjs tests/work/repl.test.mjs`
+  - verified after moving pane runtime assembly to `packages/orchestrator/src/work-shell-pane-runtime.ts`
+- `node --conditions=source --import tsx --test tests/contracts/tui-work-shell.contract.test.mjs tests/contracts/unclecode-cli.contract.test.mjs tests/work/repl.test.mjs`
+  - verified after moving embedded Dashboard/work-pane composition to `packages/tui/src/work-shell-dashboard.tsx`
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/context-broker/context-memory.test.mjs tests/work/context-memory.test.mjs tests/commands/tui-home-state.test.mjs`
+  - verified after moving context-memory helpers to `packages/context-broker/src/context-memory.ts`
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/context-broker/workspace-skills.test.mjs tests/work/workspace-skills.test.mjs tests/work/workspace-guidance.test.mjs`
+  - verified after moving workspace-skill helpers to `packages/context-broker/src/workspace-skills.ts`
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/context-broker/workspace-guidance.test.mjs tests/work/workspace-guidance.test.mjs tests/work/tools.test.mjs tests/work/openai-provider.test.mjs`
+  - verified after moving work config/tools to `packages/orchestrator` and cached runtime guidance loading to `packages/context-broker`
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/work-cli-resume.test.mjs tests/work/repl.test.mjs tests/orchestrator/work-shell-engine.test.mjs`
+  - verified after moving managed Dashboard/startRepl assembly into the shared TUI seam and removing `src/cli.js` from `apps/unclecode-cli/src/work-runtime.ts`
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/runtime-coding-agent.test.mjs tests/work/work-cli-resume.test.mjs tests/work/repl.test.mjs`
+  - verified after moving concrete agent assembly into `apps/unclecode-cli/src/runtime-coding-agent.ts` and removing `src/agent.js` from `apps/unclecode-cli/src/work-runtime.ts`
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/runtime-coding-agent.test.mjs tests/work/openai-provider.test.mjs tests/work/agent.test.mjs`
+  - verified after moving concrete runtime provider implementations into `packages/providers/src/runtime.ts`, switching `apps/unclecode-cli/src/runtime-coding-agent.ts` to package imports, and reducing `src/providers.ts` to a compatibility wrapper
+  - re-verified after exporting shared `createRuntimeProvider(...)` from `packages/providers/src/runtime.ts` and reusing it from both `src/agent.ts` and `apps/unclecode-cli/src/runtime-coding-agent.ts`
+- `node --conditions=source --import tsx --test tests/commands/command-registry.test.mjs tests/work/repl.test.mjs tests/orchestrator/work-shell-engine.test.mjs`
+  - verified after adding builtin prompt-style `/review` and `/commit` work-shell commands plus shared prompt-command execution in `packages/orchestrator/src/work-shell-engine.ts`
+- `node --conditions=source --import tsx --test tests/work/work-agent.test.mjs tests/work/guardian-checks.test.mjs`
+  - verified after adding the bounded executable guardian-check seam to `packages/orchestrator/src/work-agent.ts` and wiring the app-owned runner in `apps/unclecode-cli/src/guardian-checks.ts`
+- `node --conditions=source --import tsx --test tests/commands/command-registry.test.mjs tests/work/repl.test.mjs`
+  - verified after enabling exact/alias/unique-prefix slash resolution for CLI and work-shell registries
+- `node --conditions=source --import tsx --test tests/commands/command-registry.test.mjs tests/work/repl.test.mjs tests/orchestrator/work-shell-engine.test.mjs tests/commands/tui-action-runner.test.mjs`
+  - verified after wiring `/research <topic>` and `/research status` into the work-shell registry, slash resolution, and inline operational execution path
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/repl.test.mjs`
+  - verified after shrinking `src/cli.tsx` to reuse app-owned managed dashboard helpers and restoring `resolveModelCommand(...)` through `packages/orchestrator/src/model-command.ts`
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/repl.test.mjs`
+  - re-verified after turning `src/cli.tsx` into a pure compatibility re-export surface and moving `StartReplOptions`, `resolveWorkShellInlineCommand(...)`, `createWorkShellDashboardProps(...)`, and `startRepl(...)` into `apps/unclecode-cli/src/work-runtime.ts`
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/agent.test.mjs tests/work/runtime-coding-agent.test.mjs`
+  - verified after moving direct coding-agent/provider wiring into `packages/orchestrator/src/runtime-coding-agent.ts` and shrinking `src/agent.ts` plus `apps/unclecode-cli/src/runtime-coding-agent.ts` to shims
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/openai-provider.test.mjs`
+  - verified after moving root provider compatibility wrappers into `packages/orchestrator/src/workspace-providers.ts` and shrinking `src/providers.ts` to a shim
+- `node --conditions=source --import tsx --test tests/work/guardian-checks.test.mjs tests/work/work-agent.test.mjs`
+  - verified after adding changed-files-aware guardian subset selection and forwarding changed-file hints from complex planned tasks
+- `node --conditions=source --import tsx --test tests/work/guardian-checks.test.mjs tests/work/work-agent.test.mjs`
+  - re-verified after expanding source-change handling so generic `test` requests can map onto available targeted subset scripts
+- `node --conditions=source --import tsx --test tests/work/guardian-checks.test.mjs`
+  - re-verified after adding additional targeted workspace test scripts and path-to-subset mapping for work/orchestrator/tui/commands surfaces
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/agent.test.mjs tests/work/openai-provider.test.mjs tests/work/repl.test.mjs tests/integration/unclecode-sessions.integration.test.mjs`
+  - verified after migrating repo-internal behavioral/integration coverage off `src/cli.tsx`, `src/agent.ts`, and `src/providers.ts` onto package/app-owned seams
+- `node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs`
+  - re-verified after collapsing root declaration shims (`src/agent.d.ts`, `src/cli.d.ts`, `src/providers.d.ts`) to owner-seam re-exports
+- `npm run build && node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/integration/unclecode-work.integration.test.mjs`
+  - verified after cutting the dist-work packaging gate over to the app-owned `apps/unclecode-cli/src/work-entry.ts` output and retargeting bin/runtime loaders away from `dist-work/src/index.js`
+  - re-verified after cleaning `dist-work/` in the build script and locking the built artifact shape so stale legacy outputs no longer survive the build
+- `npm run check`
+- `npm run build`
+- `npm run lint`
+- `npm run test:providers`
+- `npm run test:integration`
+- `node --conditions=source --import tsx --test tests/contracts/*.test.mjs tests/contracts/*.test.ts tests/work/*.test.mjs tests/orchestrator/*.test.mjs tests/tui/*.test.mjs tests/context-broker/*.test.mjs tests/commands/*.test.mjs tests/integration/unclecode-work.integration.test.mjs`
+  - full re-verification passed with `pass 317 / fail 0` after the root runtime wrapper deletion pass
+
+## Risk note
+The largest remaining migration risk is now the UI/runtime split plus residual compatibility shims: the session center and the work shell are still separate Ink trees, and the main root compatibility surface left is `src/cli.tsx` plus a handful of small source/declaration shim files. The dist-work packaging gate no longer blocks further deletions, but those remaining surfaces still persist as compatibility wrappers until the final root shim pass is complete. The new file-ownership and guardian paths are groundwork only until more executor tasks declare concrete write claims and richer guardian checks (lint/typecheck/test subsets) are wired in.

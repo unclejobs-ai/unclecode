@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, readFile, readdir, rm, unlink } from "node:fs/promises";
+import {
+  appendFile,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  unlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -80,7 +87,9 @@ type SessionStore = {
     readonly memoryId: string;
     readonly content: string;
   }): Promise<void>;
-  listProjectMemories(projectPath: string): Promise<readonly ProjectMemoryRecord[]>;
+  listProjectMemories(
+    projectPath: string,
+  ): Promise<readonly ProjectMemoryRecord[]>;
   getSessionPaths(ref: SessionRef): {
     readonly eventLogPath: string;
     readonly checkpointPath: string;
@@ -91,7 +100,10 @@ type SessionStore = {
 };
 
 type SessionStoreModule = {
-  readonly createSessionStore?: (options: { readonly rootDir: string }) => SessionStore;
+  readonly createSessionStore?: (options: {
+    readonly rootDir: string;
+  }) => SessionStore;
+  readonly getSessionStoreRoot?: (env?: NodeJS.ProcessEnv) => string;
 };
 
 const SECRET = "ghp_123456789012345678901234567890123456";
@@ -109,6 +121,17 @@ function getStore(rootDir: string): SessionStore {
 async function createRootDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "unclecode-session-store-"));
 }
+
+test("session-store exports the canonical session-store root helper", () => {
+  const moduleView: SessionStoreModule = sessionStoreModule;
+  assert.equal(typeof moduleView.getSessionStoreRoot, "function");
+  assert.equal(
+    moduleView.getSessionStoreRoot?.({
+      UNCLECODE_SESSION_STORE_ROOT: "/tmp/custom-root",
+    } as NodeJS.ProcessEnv),
+    "/tmp/custom-root",
+  );
+});
 
 test("session-store resumes append-only event logs without a checkpoint", async () => {
   const rootDir = await createRootDir();
@@ -280,7 +303,10 @@ test("session-store redacts secrets before writing events checkpoints and memory
     assert.doesNotMatch(memoryFile.toString("utf8"), new RegExp(SECRET));
     assert.match(eventLog, /\[REDACTED\]/);
     assert.match(checkpoint, /\[REDACTED\]/);
-    assert.equal(memoryFile.subarray(0, 15).toString("utf8"), "SQLite format 3");
+    assert.equal(
+      memoryFile.subarray(0, 15).toString("utf8"),
+      "SQLite format 3",
+    );
     assert.deepEqual(projectMemoryEntries, ["project-memory.sqlite"]);
     assert.equal(resumed.metadata.taskSummary, "Checkpoint [REDACTED]");
   } finally {
@@ -365,8 +391,12 @@ test("session-store keeps project memory isolated per project path", async () =>
       content: "beta memory",
     });
 
-    const projectAMemory = await store.listProjectMemories("/workspace/epsilon-a");
-    const projectBMemory = await store.listProjectMemories("/workspace/epsilon-b");
+    const projectAMemory = await store.listProjectMemories(
+      "/workspace/epsilon-a",
+    );
+    const projectBMemory = await store.listProjectMemories(
+      "/workspace/epsilon-b",
+    );
 
     assert.deepEqual(projectAMemory, [
       {
@@ -447,7 +477,11 @@ test("session-store recovers the valid JSONL prefix when trailing lines are malf
         durationMs: 10,
       },
     });
-    await appendFile(store.getSessionPaths(ref).eventLogPath, "{\"kind\":\"engine_event\",bad-json\n", "utf8");
+    await appendFile(
+      store.getSessionPaths(ref).eventLogPath,
+      '{"kind":"engine_event",bad-json\n',
+      "utf8",
+    );
 
     const resumed = await store.resumeSession(ref);
 

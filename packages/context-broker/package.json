@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@unclecode/contracts": "file:../contracts"
+    "@unclecode/contracts": "file:../contracts",
+    "@unclecode/session-store": "file:../session-store"
   },
   "exports": {
     ".": {

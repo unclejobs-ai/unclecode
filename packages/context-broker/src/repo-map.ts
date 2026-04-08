@@ -72,7 +72,7 @@ async function runGit(rootDir: string, args: readonly string[]): Promise<string>
   }
 }
 
-async function getHeadSha(rootDir: string): Promise<string> {
+export async function getRepoMapCacheToken(rootDir: string): Promise<string> {
   try {
     return (await runGit(rootDir, ["rev-parse", "HEAD"])).trim();
   } catch (error) {
@@ -171,7 +171,7 @@ async function readRepoMapEntry(
 export async function generateRepoMap(rootDir: string): Promise<RepoMap> {
   const generatedAt = new Date().toISOString();
   const [gitHeadSha, trackedFilesOutput] = await Promise.all([
-    getHeadSha(rootDir),
+    getRepoMapCacheToken(rootDir),
     runGit(rootDir, ["ls-files"]),
   ]);
   const [lastModifiedOutput, changeFrequencyOutput] =

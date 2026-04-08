@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.82.0",
+    "@google/genai": "^1.48.0",
     "@unclecode/contracts": "file:../contracts"
   },
   "exports": {
@@ -12,6 +14,18 @@
       "source": "./src/index.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./openai-status": {
+      "types": "./dist/openai-status.d.ts",
+      "source": "./src/openai-status.ts",
+      "import": "./dist/openai-status.js",
+      "default": "./dist/openai-status.js"
+    },
+    "./runtime": {
+      "types": "./dist/runtime.d.ts",
+      "source": "./src/runtime.ts",
+      "import": "./dist/runtime.js",
+      "default": "./dist/runtime.js"
     }
   }
 }

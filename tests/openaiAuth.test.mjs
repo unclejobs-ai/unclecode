@@ -23,7 +23,22 @@ test("resolveOpenAIAuth prefers OPENAI_API_KEY when present", () => {
   assert.equal(result.bearerToken, "sk-test-123");
 });
 
-test("resolveOpenAIAuth ignores example OPENAI_API_KEY placeholders and reuses Codex auth", () => {
+test("resolveOpenAIAuth reports expired OPENAI_AUTH_TOKEN honestly", () => {
+  const pastExp = Math.floor(Date.now() / 1000) - 3600;
+  const result = resolveOpenAIAuth({
+    env: { OPENAI_AUTH_TOKEN: buildJwtWithExp(pastExp) },
+    authJsonPath: "/does/not/matter",
+    readAuthJson: () => {
+      throw new Error("should not read auth.json when OPENAI_AUTH_TOKEN is set");
+    },
+  });
+
+  assert.equal(result.status, "expired");
+  assert.equal(result.authType, "oauth");
+  assert.equal(result.source, "env-openai-auth-token");
+});
+
+test("resolveOpenAIAuth ignores example OPENAI_API_KEY placeholders and reuses legacy auth schema", () => {
   const futureExp = Math.floor(Date.now() / 1000) + 3600;
   const result = resolveOpenAIAuth({
     env: { OPENAI_API_KEY: "your_openai_api_key_here" },
@@ -40,10 +55,10 @@ test("resolveOpenAIAuth ignores example OPENAI_API_KEY placeholders and reuses C
 
   assert.equal(result.status, "ok");
   assert.equal(result.authType, "oauth");
-  assert.equal(result.source, "codex-auth-json");
+  assert.equal(result.source, "unclecode-auth-file");
 });
 
-test("resolveOpenAIAuth reuses Codex auth.json access token when valid", () => {
+test("resolveOpenAIAuth reuses legacy auth schema access token when valid", () => {
   const futureExp = Math.floor(Date.now() / 1000) + 3600;
   const result = resolveOpenAIAuth({
     env: {},
@@ -61,7 +76,26 @@ test("resolveOpenAIAuth reuses Codex auth.json access token when valid", () => {
 
   assert.equal(result.status, "ok");
   assert.equal(result.authType, "oauth");
-  assert.equal(result.source, "codex-auth-json");
+  assert.equal(result.source, "unclecode-auth-file");
+  assert.match(result.bearerToken, /\./);
+});
+
+test("resolveOpenAIAuth reuses current UncleCode credential schema when valid", () => {
+  const futureExp = Math.floor(Date.now() / 1000) + 3600;
+  const result = resolveOpenAIAuth({
+    env: {},
+    authJsonPath: "/mock/.unclecode/credentials/openai.json",
+    readAuthJson: () =>
+      JSON.stringify({
+        accessToken: buildJwtWithExp(futureExp),
+        refreshToken: "rt_123",
+        accountId: "acct_123",
+      }),
+  });
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.authType, "oauth");
+  assert.equal(result.source, "unclecode-auth-file");
   assert.match(result.bearerToken, /\./);
 });
 

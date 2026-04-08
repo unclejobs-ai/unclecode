@@ -8,8 +8,13 @@
   },
   "dependencies": {
     "@unclecode/config-core": "file:../../packages/config-core",
+    "@unclecode/context-broker": "file:../../packages/context-broker",
     "@unclecode/contracts": "file:../../packages/contracts",
+    "@unclecode/mcp-host": "file:../../packages/mcp-host",
+    "@unclecode/orchestrator": "file:../../packages/orchestrator",
     "@unclecode/providers": "file:../../packages/providers",
+    "@unclecode/runtime-broker": "file:../../packages/runtime-broker",
+    "@unclecode/session-store": "file:../../packages/session-store",
     "@unclecode/tui": "file:../../packages/tui",
     "commander": "^13.1.0"
   },

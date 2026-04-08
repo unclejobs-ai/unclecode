@@ -4,7 +4,8 @@ import path from "node:path";
 
 import { detectHotspots, summarizeDiff } from "./hotspot.js";
 import { assertFreshContext, checkFreshness, getWorktreeFingerprint } from "./freshness.js";
-import { generateRepoMap } from "./repo-map.js";
+import { defaultRepoMapCache } from "./repo-map-cache.js";
+import { generateRepoMap, getRepoMapCacheToken } from "./repo-map.js";
 import {
   ContextBrokerError,
   type AssembleOptions,
@@ -162,7 +163,12 @@ export function getTokenBudget(mode: AssembleOptions["mode"]): TokenBudget {
 
 export async function assembleContextPacket(options: AssembleOptions): Promise<ContextPacket> {
   const generatedAt = new Date().toISOString();
-  const repoMap = await generateRepoMap(options.rootDir);
+  const repoMapCacheToken = await getRepoMapCacheToken(options.rootDir);
+  const { repoMap } = await defaultRepoMapCache.load({
+    rootDir: options.rootDir,
+    gitHeadSha: repoMapCacheToken,
+    loader: () => generateRepoMap(options.rootDir),
+  });
   const hotspots = detectHotspots(repoMap);
   const changedFiles = options.sinceSha
     ? await summarizeDiff(options.rootDir, options.sinceSha)

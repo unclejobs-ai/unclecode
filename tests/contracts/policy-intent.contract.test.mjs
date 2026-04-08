@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  APPROVAL_INTENT_TYPES,
   APPROVAL_INTENTS,
+  APPROVAL_INTENT_TYPES,
   TRUST_ZONES,
 } from "@unclecode/contracts";
 

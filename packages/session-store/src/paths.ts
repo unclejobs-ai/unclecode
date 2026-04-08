@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, normalize } from "node:path";
 
@@ -16,7 +17,18 @@ function toOpaqueId(value: string, prefix: string): string {
 }
 
 function toProjectBucket(projectPath: string): string {
-  const normalizedProjectPath = normalize(projectPath).replace(/\\/g, "/").replace(/\/+$/g, "").normalize("NFC");
+  let canonicalProjectPath = projectPath;
+
+  try {
+    canonicalProjectPath = realpathSync(projectPath);
+  } catch {
+    canonicalProjectPath = projectPath;
+  }
+
+  const normalizedProjectPath = normalize(canonicalProjectPath)
+    .replace(/\\/g, "/")
+    .replace(/\/+$/g, "")
+    .normalize("NFC");
   return toOpaqueId(normalizedProjectPath || "/", "project");
 }
 

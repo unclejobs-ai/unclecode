@@ -1,0 +1,8 @@
+Mode status is covered by integration verification.
+Representative check:
+- `unclecode mode set ultrawork`
+- `unclecode mode status`
+Expected and verified output includes:
+- `Active mode: ultrawork`
+- `Source: project config`
+See `tests/integration/unclecode-mode-doctor.integration.test.mjs`.

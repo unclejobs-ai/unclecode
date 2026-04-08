@@ -5,8 +5,12 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  clearOpenAICredentials,
+  clearOpenAICodexCredentials,
   readOpenAICredentials,
+  readOpenAICodexCredentials,
   writeOpenAICredentials,
+  writeOpenAICodexCredentials,
 } from "@unclecode/providers";
 
 test("credential store writes strict fallback file permissions and round-trips oauth credentials", async () => {
@@ -108,4 +112,72 @@ test("credential store falls back to file storage when keytar write fails", asyn
   const loaded = await readOpenAICredentials({ credentialsPath });
 
   assert.equal(loaded?.accessToken, "at_123");
+});
+
+test("credential store round-trips api-key credentials", async () => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "unclecode-creds-api-key-"));
+  const credentialsPath = path.join(rootDir, "openai.json");
+
+  await writeOpenAICredentials({
+    credentialsPath,
+    credentials: {
+      authType: "api-key",
+      apiKey: "sk-file-123",
+      organizationId: "org_file",
+      projectId: "proj_file",
+    },
+  });
+
+  const loaded = await readOpenAICredentials({ credentialsPath });
+
+  assert.equal(loaded?.authType, "api-key");
+  assert.equal(loaded?.apiKey, "sk-file-123");
+  assert.equal(loaded?.organizationId, "org_file");
+  assert.equal(loaded?.projectId, "proj_file");
+});
+
+test("credential store can clear persisted credentials", async () => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "unclecode-creds-clear-"));
+  const credentialsPath = path.join(rootDir, "openai.json");
+
+  await writeOpenAICredentials({
+    credentialsPath,
+    credentials: {
+      authType: "api-key",
+      apiKey: "sk-file-123",
+      organizationId: null,
+      projectId: null,
+    },
+  });
+
+  await clearOpenAICredentials({ credentialsPath });
+  const loaded = await readOpenAICredentials({ credentialsPath });
+
+  assert.equal(loaded, null);
+});
+
+test("codex credential store round-trips oauth credentials independently from the API key store", async () => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "unclecode-codex-creds-"));
+  const credentialsPath = path.join(rootDir, "openai-codex.json");
+
+  await writeOpenAICodexCredentials({
+    credentialsPath,
+    credentials: {
+      authType: "oauth",
+      accessToken: "at_codex_123",
+      refreshToken: "rt_codex_123",
+      expiresAt: null,
+      organizationId: null,
+      projectId: null,
+      accountId: "acct_codex",
+    },
+  });
+
+  const loaded = await readOpenAICodexCredentials({ credentialsPath });
+  assert.equal(loaded?.authType, "oauth");
+  assert.equal(loaded?.refreshToken, "rt_codex_123");
+
+  await clearOpenAICodexCredentials({ credentialsPath });
+  const cleared = await readOpenAICodexCredentials({ credentialsPath });
+  assert.equal(cleared, null);
 });

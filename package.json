@@ -3,19 +3,33 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "UncleCode workspace scaffold with package boundaries and a new CLI entrypoint.",
+  "bin": {
+    "unclecode": "./bin/unclecode.cjs"
+  },
+  "description": "UncleCode repo-local coding shell with package boundaries and a unified CLI entrypoint.",
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
     "lint": "biome check .",
     "format": "biome format --write .",
     "check": "tsc -p tsconfig.check.json --noEmit",
-    "build": "tsc -b tsconfig.json",
+    "build": "node -e \"require('node:fs').rmSync('dist-work', { recursive: true, force: true })\" && tsc -b tsconfig.json && tsc -p tsconfig.work.json",
     "test:context-broker": "node --conditions=source --import tsx --test tests/context-broker/*.test.mjs",
     "test:providers": "node --conditions=source --import tsx --test tests/providers/*.test.mjs",
     "test:contracts": "node --conditions=source --import tsx --test tests/contracts/*.test.mjs",
     "test:runtime-broker": "node --conditions=source --import tsx --test tests/runtime-broker/*.test.mjs",
+    "test:orchestrator": "node --conditions=source --import tsx --test tests/orchestrator/*.test.mjs",
+    "test:tui": "node --conditions=source --import tsx --test tests/tui/*.test.mjs",
+    "test:commands": "node --conditions=source --import tsx --test tests/commands/*.test.mjs",
+    "test:work": "node --conditions=source --import tsx --test tests/work/*.test.mjs",
+    "test:performance": "node --conditions=source --import tsx --test tests/performance/*.test.mjs",
     "test:integration": "npm run build --silent && node --test tests/integration/*.test.mjs",
-    "unclecode": "npm run build --silent && node apps/unclecode-cli/dist/index.js"
+    "test:integration:performance": "npm run build --silent && node --test tests/integration/unclecode-performance.integration.test.mjs",
+    "unclecode": "npm run build --silent && node apps/unclecode-cli/dist/index.js",
+    "omx": "CODEX_HOME=\"$PWD/.codex\" OMX_OPENCLAW=1 ./node_modules/.bin/omx",
+    "omx:setup": "CODEX_HOME=\"$PWD/.codex\" ./node_modules/.bin/omx setup --scope project --force --verbose",
+    "omx:doctor": "CODEX_HOME=\"$PWD/.codex\" ./node_modules/.bin/omx doctor",
+    "omx:openclaw:local": "node ./scripts/configure-omx-openclaw.mjs --gateway local",
+    "omx:openclaw:clawship": "node ./scripts/configure-omx-openclaw.mjs --gateway clawship"
   },
   "engines": {
     "node": ">=22"
@@ -24,7 +38,16 @@
     "@biomejs/biome": "^1.9.4",
     "@types/node": "^24.5.2",
     "@types/react": "^19.2.2",
+    "oh-my-codex": "^0.11.12",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.82.0",
+    "@google/genai": "^1.48.0",
+    "dotenv": "^17.4.0",
+    "ink-text-input": "^6.0.0",
+    "picocolors": "^1.1.1",
+    "zod": "^4.3.6"
   }
 }

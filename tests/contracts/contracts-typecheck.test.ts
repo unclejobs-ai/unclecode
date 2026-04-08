@@ -1,10 +1,10 @@
-import { APPROVAL_INTENTS } from "@unclecode/contracts";
+import type { APPROVAL_INTENTS } from "@unclecode/contracts";
 import type {
   ApprovalIntent,
-  JsonObject,
-  JsonValue,
   PolicyDecision as CanonicalPolicyDecision,
   ProviderId as CanonicalProviderId,
+  JsonObject,
+  JsonValue,
   SessionMetadata,
   SessionPendingAction,
 } from "@unclecode/contracts";
@@ -18,18 +18,30 @@ type ExtendsJsonValue<T extends JsonValue> = true;
 type ToolExecutionIntent = Extract<ApprovalIntent, { type: "tool_execution" }>;
 type McpServerIntent = Extract<ApprovalIntent, { type: "mcp_server" }>;
 
-type ProviderAliasIsCanonical = Assert<IsExact<PackageProviderId, CanonicalProviderId>>;
-type PolicyDecisionAliasIsCanonical = Assert<IsExact<PolicyEngineDecision, CanonicalPolicyDecision>>;
+type ProviderAliasIsCanonical = Assert<
+  IsExact<PackageProviderId, CanonicalProviderId>
+>;
+type PolicyDecisionAliasIsCanonical = Assert<
+  IsExact<PolicyEngineDecision, CanonicalPolicyDecision>
+>;
 type ToolTrustZoneMatchesMetadata = Assert<
-  IsExact<ToolExecutionIntent["trustZone"], typeof APPROVAL_INTENTS.tool_execution.trustZone>
+  IsExact<
+    ToolExecutionIntent["trustZone"],
+    typeof APPROVAL_INTENTS.tool_execution.trustZone
+  >
 >;
 type McpTrustZoneMatchesMetadata = Assert<
-  IsExact<McpServerIntent["trustZone"], typeof APPROVAL_INTENTS.mcp_server.trustZone>
+  IsExact<
+    McpServerIntent["trustZone"],
+    typeof APPROVAL_INTENTS.mcp_server.trustZone
+  >
 >;
 type PendingActionInputIsJsonObject = Assert<
   IsExact<NonNullable<SessionPendingAction["input"]>, JsonObject>
 >;
-type PostTurnSummaryIsJsonValue = ExtendsJsonValue<NonNullable<SessionMetadata["postTurnSummary"]>>;
+type PostTurnSummaryIsJsonValue = ExtendsJsonValue<
+  NonNullable<SessionMetadata["postTurnSummary"]>
+>;
 
 const pendingActionInput: JsonObject = {
   nested: ["ok", 1, true, null, { safe: "yes" }],

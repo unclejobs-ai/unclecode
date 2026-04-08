@@ -18,6 +18,10 @@ export const MODE_EXPLANATION_STYLES = ["concise", "balanced", "detailed"] as co
 
 export type ModeExplanationStyle = (typeof MODE_EXPLANATION_STYLES)[number];
 
+export const MODE_REASONING_EFFORTS = ["low", "medium", "high"] as const;
+
+export type ModeReasoningEffort = (typeof MODE_REASONING_EFFORTS)[number];
+
 export type ModeProfile = {
   readonly id: ModeProfileId;
   readonly label: string;
@@ -25,6 +29,7 @@ export type ModeProfile = {
   readonly searchDepth: ModeSearchDepth;
   readonly backgroundTasks: ModeBackgroundTaskPolicy;
   readonly explanationStyle: ModeExplanationStyle;
+  readonly reasoningDefault: ModeReasoningEffort;
 };
 
 export const MODE_PROFILES = {
@@ -35,6 +40,7 @@ export const MODE_PROFILES = {
     searchDepth: "balanced",
     backgroundTasks: "allowed",
     explanationStyle: "balanced",
+    reasoningDefault: "medium",
   },
   ultrawork: {
     id: "ultrawork",
@@ -43,6 +49,7 @@ export const MODE_PROFILES = {
     searchDepth: "deep",
     backgroundTasks: "preferred",
     explanationStyle: "concise",
+    reasoningDefault: "high",
   },
   search: {
     id: "search",
@@ -51,6 +58,7 @@ export const MODE_PROFILES = {
     searchDepth: "deep",
     backgroundTasks: "preferred",
     explanationStyle: "concise",
+    reasoningDefault: "low",
   },
   analyze: {
     id: "analyze",
@@ -59,5 +67,6 @@ export const MODE_PROFILES = {
     searchDepth: "balanced",
     backgroundTasks: "allowed",
     explanationStyle: "detailed",
+    reasoningDefault: "high",
   },
 } as const satisfies Readonly<Record<ModeProfileId, ModeProfile>>;

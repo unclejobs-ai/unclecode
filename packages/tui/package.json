@@ -5,7 +5,9 @@
   "type": "module",
   "dependencies": {
     "@unclecode/contracts": "file:../contracts",
+    "@unclecode/orchestrator": "file:../orchestrator",
     "ink": "^6.8.0",
+    "ink-text-input": "^6.0.0",
     "react": "^19.2.4"
   },
   "exports": {

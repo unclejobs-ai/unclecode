@@ -4,7 +4,12 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@unclecode/contracts": "file:../contracts"
+    "@unclecode/config-core": "file:../config-core",
+    "@unclecode/contracts": "file:../contracts",
+    "@unclecode/providers": "file:../providers",
+    "@unclecode/session-store": "file:../session-store",
+    "dotenv": "^17.4.0",
+    "zod": "^4.3.6"
   },
   "exports": {
     ".": {
@@ -12,6 +17,12 @@
       "source": "./src/index.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./extension-registry": {
+      "types": "./dist/extension-registry.d.ts",
+      "source": "./src/extension-registry.ts",
+      "import": "./dist/extension-registry.js",
+      "default": "./dist/extension-registry.js"
     }
   }
 }

@@ -12,6 +12,16 @@ UncleCode is a local multi-provider coding assistant launcher for the bundled te
 
 UncleCode is designed to feel like one tool rather than a provider-specific wrapper. The launcher, provider prompts, environment variables, and documentation are all centered around the `UncleCode` name.
 
+## Current Product Surfaces
+
+- `npm run unclecode` or `unclecode`
+  - launches the UncleCode session-center TUI and operational shell
+- `unclecode work`
+  - launches the interactive coding assistant work shell
+  - currently supports `openai`, `anthropic`, and `gemini`
+- compatibility-proxy mode
+  - provides the broader OpenAI/Gemini/Groq/Copilot/z.ai/Ollama routing surfaces documented below
+
 ## Repository Layout
 
 - `Leonxlnx-claude-code/`
@@ -31,7 +41,7 @@ Use the bundled client with the normal Anthropic login flow or with `ANTHROPIC_A
 
 ### OpenAI
 
-Route requests through the local compatibility proxy. By default UncleCode uses `OPENAI_API_KEY`. As an experimental fallback, it can also reuse an existing ChatGPT/Codex login from `~/.codex/auth.json` when available.
+Route requests through the local compatibility proxy. By default UncleCode uses `OPENAI_API_KEY`. As an experimental fallback, it can also reuse an existing UncleCode OAuth credential from `~/.unclecode/credentials/openai.json` when available.
 
 ### Gemini
 
@@ -69,7 +79,7 @@ Provider-specific requirements:
   - an Anthropic account for in-app login, or `ANTHROPIC_API_KEY`
 - OpenAI
   - `OPENAI_API_KEY`
-  - or `codex login` if you want to reuse your ChatGPT/Codex OAuth session from `~/.codex/auth.json` as an experimental fallback
+  - or `unclecode auth login --browser` if you want to create an UncleCode OAuth credential in `~/.unclecode/credentials/openai.json`
 - Gemini
   - `GEMINI_API_KEY`
 - Groq
@@ -129,7 +139,7 @@ This guidance is an implementation recommendation based on Ollama's documented r
 From the repository root on Windows:
 
 ```powershell
-cd E:\myclaudecode
+cd E:\unclecode
 npm install
 copy .env.example .env
 ```
@@ -137,7 +147,7 @@ copy .env.example .env
 From the repository root on macOS or Linux:
 
 ```bash
-cd /path/to/myclaudecode
+cd /path/to/unclecode
 npm install
 cp .env.example .env
 ```
@@ -155,14 +165,14 @@ npm run unclecode
 Or launch it directly through the UncleCode workspace script on Windows:
 
 ```powershell
-cd E:\myclaudecode
+cd E:\unclecode
 npm run unclecode
 ```
 
 Or launch it directly through the UncleCode workspace script on macOS or Linux:
 
 ```bash
-cd /path/to/myclaudecode
+cd /path/to/unclecode
 npm run unclecode
 ```
 
@@ -221,7 +231,7 @@ OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_MODEL=gpt-5.4
 ```
 
-If `~/.codex/auth.json` exists, UncleCode can reuse that ChatGPT/Codex login as an experimental fallback. Example placeholder values such as `your_openai_api_key_here` are ignored. The in-app `/model` picker is filtered toward the active provider where possible, but provider-specific labels may still appear. Keyring-backed Codex auth is not supported yet.
+If `~/.unclecode/credentials/openai.json` exists, UncleCode can reuse that OAuth credential as an experimental fallback. Example placeholder values such as `your_openai_api_key_here` are ignored. The in-app `/model` picker is filtered toward the active provider where possible, but provider-specific labels may still appear.
 
 ## How To Use Ollama With UncleCode
 
@@ -264,7 +274,7 @@ http://127.0.0.1:11434
 ### 4. Start UncleCode and choose Ollama
 
 ```powershell
-cd E:\myclaudecode
+cd E:\unclecode
 npm run unclecode
 ```
 
@@ -312,7 +322,7 @@ This shows which models are currently loaded and whether they are using CPU, GPU
 You can also confirm that the UncleCode proxy is healthy:
 
 ```powershell
-npm run proxy:compat
+node --import tsx src/anthropicCompatProxy.ts
 ```
 
 Then open:
@@ -360,7 +370,7 @@ OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_MODEL=gpt-5.4
 ```
 
-If you already ran `codex login`, you can leave `OPENAI_API_KEY` unset and UncleCode will reuse `~/.codex/auth.json` as an experimental fallback. Example placeholder values are treated as unset.
+If you already ran `unclecode auth login --browser`, you can leave `OPENAI_API_KEY` unset and UncleCode will reuse `~/.unclecode/credentials/openai.json` as an experimental fallback. Example placeholder values are treated as unset.
 
 ### Gemini
 
@@ -409,14 +419,14 @@ ZAI_MODEL=glm-5
 Check the installed launcher version:
 
 ```powershell
-cd E:\myclaudecode
+cd E:\unclecode
 npm run unclecode -- --version
 ```
 
 Check the installed launcher version on macOS or Linux:
 
 ```bash
-cd /path/to/myclaudecode
+cd /path/to/unclecode
 npm run unclecode -- --version
 ```
 

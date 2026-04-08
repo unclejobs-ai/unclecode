@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist-work",
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": true,
+    "tsBuildInfoFile": "./dist-work/.tsbuildinfo"
+  },
+  "include": ["apps/unclecode-cli/src/work-entry.ts"],
+  "exclude": ["dist-work/**", "node_modules/**", "Leonxlnx-claude-code/**"]
+}

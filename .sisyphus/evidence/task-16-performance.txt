@@ -1,0 +1,36 @@
+# Task 16 Performance Evidence
+
+Measured on a temporary git workspace using the built CLI.
+
+## Commands
+- `unclecode doctor --verbose`
+- `unclecode auth status`
+- `unclecode research status`
+
+## `/usr/bin/time -p` measurements
+- `doctor --verbose`
+  - `real 0.74`
+  - `user 0.59`
+  - `sys 0.20`
+- `auth status`
+  - `real 0.62`
+  - `user 0.62`
+  - `sys 0.09`
+- `research status`
+  - `real 0.56`
+  - `user 0.62`
+  - `sys 0.09`
+
+## In-product latency counters
+From `unclecode doctor --verbose` on a temporary workspace:
+- `configMs=2`
+- `authMs=0`
+- `runtimeMs=0`
+- `sessionStoreMs=2`
+- `mcpMs=2`
+- `totalMs=6`
+
+## Interpretation
+- The product now emits measurable support/debug latency counters.
+- Startup-adjacent commands complete sub-second in this local environment.
+- Formal threshold enforcement is now backed by dedicated performance fixtures and integration coverage (`tests/performance/*.test.mjs`, `tests/integration/unclecode-performance.integration.test.mjs`) in addition to these observational timings.

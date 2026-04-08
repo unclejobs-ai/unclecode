@@ -19,6 +19,7 @@ test("session-checkpoint fixtures expose canonical restore-safe checkpoint shape
   assert.deepEqual(SESSION_METADATA_FIELDS, [
     "permissionMode",
     "isUltraworkMode",
+    "traceMode",
     "model",
     "pendingAction",
     "postTurnSummary",

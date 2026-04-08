@@ -6,10 +6,10 @@ import test from "node:test";
 
 import { completeOpenAIDeviceLogin } from "@unclecode/providers";
 
-
-
 test("completeOpenAIDeviceLogin completes device flow end-to-end with fake server", async () => {
-  const credentialsDir = mkdtempSync(path.join(os.tmpdir(), "unclecode-integ-"));
+  const credentialsDir = mkdtempSync(
+    path.join(os.tmpdir(), "unclecode-integ-"),
+  );
   const credentialsPath = path.join(credentialsDir, "openai.json");
   const writes = [];
 

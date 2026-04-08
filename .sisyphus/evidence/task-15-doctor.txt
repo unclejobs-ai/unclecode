@@ -1,0 +1,4 @@
+Doctor walkthrough evidence captured in `.sisyphus/evidence/f3-agent-walkthrough.md`.
+Key outcomes:
+- `unclecode doctor --verbose` reported PASS for mode/auth/runtime/session store/MCP host
+- latency counters were printed successfully

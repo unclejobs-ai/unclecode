@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export function defaultCodexAuthPath() {
-  return join(homedir(), ".codex", "auth.json");
+  return join(homedir(), ".unclecode", "credentials", "openai.json");
 }
 
 export function resolveOpenAIAuth(options = {}) {
@@ -13,6 +13,16 @@ export function resolveOpenAIAuth(options = {}) {
 
   const injectedToken = normalizeCredential(env.OPENAI_AUTH_TOKEN);
   if (injectedToken) {
+    if (isJwtExpired(injectedToken)) {
+      return {
+        status: "expired",
+        authType: "oauth",
+        authPath: authJsonPath,
+        source: "env-openai-auth-token",
+        reason: "auth-token-expired",
+      };
+    }
+
     return {
       status: "ok",
       authType: "oauth",
@@ -54,7 +64,7 @@ export function resolveOpenAIAuth(options = {}) {
     };
   }
 
-  const accessToken = parsed?.tokens?.access_token?.trim();
+  const accessToken = normalizeCredential(parsed?.accessToken) || normalizeCredential(parsed?.tokens?.access_token);
   if (!accessToken) {
     return {
       status: "missing",
@@ -73,22 +83,22 @@ export function resolveOpenAIAuth(options = {}) {
     };
   }
 
-  return {
-    status: "ok",
-    authType: "oauth",
-    bearerToken: accessToken,
-    source: "codex-auth-json",
-    authPath: authJsonPath,
-    accountId: parsed?.tokens?.account_id ?? null,
-  };
+    return {
+      status: "ok",
+      authType: "oauth",
+      bearerToken: accessToken,
+      source: "unclecode-auth-file",
+      authPath: authJsonPath,
+      accountId: parsed?.accountId ?? parsed?.tokens?.account_id ?? null,
+    };
 }
 
 export function formatOpenAIAuthHint(result) {
   if (result.status === "expired") {
-    return `Found an expired Codex auth session at ${result.authPath}. Run \`codex login\` to refresh it, or provide OPENAI_API_KEY as a fallback.`;
+    return `Found an expired UncleCode auth session at ${result.authPath}. Run \`unclecode auth login --browser\` to refresh it, or provide OPENAI_API_KEY as a fallback.`;
   }
 
-  return `No reusable Codex auth session was found at ${result.authPath}. Run \`codex login\` first, or provide OPENAI_API_KEY as a fallback.`;
+  return `No reusable UncleCode auth session was found at ${result.authPath}. Run \`unclecode auth login --browser\` first, or provide OPENAI_API_KEY as a fallback.`;
 }
 
 function isMissingFileError(error) {

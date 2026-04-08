@@ -82,6 +82,9 @@ export function sanitizeSessionMetadata(value: unknown): SessionMetadata {
     ...(typeof value.isUltraworkMode === "boolean" || value.isUltraworkMode === null
       ? { isUltraworkMode: value.isUltraworkMode }
       : {}),
+    ...(value.traceMode === "minimal" || value.traceMode === "verbose" || value.traceMode === null
+      ? { traceMode: value.traceMode }
+      : {}),
     ...(typeof value.model === "string" || value.model === null
       ? {
           model:

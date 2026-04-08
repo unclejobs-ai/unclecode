@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -46,27 +46,34 @@ test("config-core explains precedence in the documented source order", () => {
   const explanation = explainUncleCodeConfig({
     workspaceRoot,
     userHomeDir,
-    pluginOverlays: [{ name: "example-plugin", config: { model: "plugin-model" } }],
+    pluginOverlays: [
+      { name: "example-plugin", config: { model: "plugin-model" } },
+    ],
     env: { UNCLECODE_MODEL: "env-model" },
     cliFlags: { model: "flag-model" },
     sessionOverrides: { model: "session-model" },
   });
 
   assert.equal(CONFIG_CORE_DEFAULT_MODE_PROFILE, MODE_PROFILES.default.id);
-  assert.deepEqual(CONFIG_SOURCE_ORDER.map((source) => source.id), [
-    "built-in-defaults",
-    "built-in-mode-profile",
-    "plugin-overlay",
-    "project-config",
-    "user-config",
-    "environment",
-    "cli-flags",
-    "session-overrides",
-  ]);
+  assert.deepEqual(
+    CONFIG_SOURCE_ORDER.map((source) => source.id),
+    [
+      "built-in-defaults",
+      "built-in-mode-profile",
+      "plugin-overlay",
+      "project-config",
+      "user-config",
+      "environment",
+      "cli-flags",
+      "session-overrides",
+    ],
+  );
   assert.equal(explanation.settings.model.value, "session-model");
   assert.equal(explanation.settings.model.winner.sourceId, "session-overrides");
   assert.deepEqual(
-    explanation.settings.model.contributors.map((contributor) => contributor.sourceId),
+    explanation.settings.model.contributors.map(
+      (contributor) => contributor.sourceId,
+    ),
     [
       "built-in-defaults",
       "plugin-overlay",
@@ -91,9 +98,18 @@ test("config-core exposes the active mode and mode-derived setting contributions
   assert.equal(explanation.activeMode.id, "search");
   assert.equal(explanation.settings.mode.value, "search");
   assert.equal(explanation.settings.mode.winner.sourceId, "environment");
-  assert.equal(explanation.settings.editing.value, MODE_PROFILES.search.editing);
-  assert.equal(explanation.settings.editing.winner.sourceId, "built-in-mode-profile");
-  assert.equal(explanation.settings.searchDepth.value, MODE_PROFILES.search.searchDepth);
+  assert.equal(
+    explanation.settings.editing.value,
+    MODE_PROFILES.search.editing,
+  );
+  assert.equal(
+    explanation.settings.editing.winner.sourceId,
+    "built-in-mode-profile",
+  );
+  assert.equal(
+    explanation.settings.searchDepth.value,
+    MODE_PROFILES.search.searchDepth,
+  );
 
   const activeModeSection = explanation.prompt.sections.find(
     (section) => section.id === "active-mode",
@@ -154,9 +170,18 @@ test("config-core assembles the effective prompt and injects mode overlays decla
     ["identity", "execution", "plugin-note", "project-note", "active-mode"],
   );
   assert.equal(explanation.prompt.sections[0]?.winner.sourceId, "user-config");
-  assert.equal(explanation.prompt.sections[2]?.winner.sourceId, "plugin-overlay");
-  assert.equal(explanation.prompt.sections[3]?.winner.sourceId, "project-config");
-  assert.equal(explanation.prompt.sections[4]?.winner.sourceId, "built-in-mode-profile");
+  assert.equal(
+    explanation.prompt.sections[2]?.winner.sourceId,
+    "plugin-overlay",
+  );
+  assert.equal(
+    explanation.prompt.sections[3]?.winner.sourceId,
+    "project-config",
+  );
+  assert.equal(
+    explanation.prompt.sections[4]?.winner.sourceId,
+    "built-in-mode-profile",
+  );
   assert.match(explanation.prompt.rendered, /User override identity\./);
   assert.match(explanation.prompt.rendered, /Plugin overlay note\./);
   assert.match(explanation.prompt.rendered, /Respect repository conventions\./);
@@ -167,7 +192,10 @@ test("config-core assembles the effective prompt and injects mode overlays decla
 test("config-core explains when a file-backed source is broken instead of treating it as silent no-op", () => {
   const { workspaceRoot, userHomeDir } = createWorkspaceFixture();
 
-  writeRawFile(path.join(workspaceRoot, ".unclecode", "config.json"), "{\n  \"model\": \"broken\",\n");
+  writeRawFile(
+    path.join(workspaceRoot, ".unclecode", "config.json"),
+    '{\n  "model": "broken",\n',
+  );
 
   const explanation = explainUncleCodeConfig({
     workspaceRoot,
@@ -175,7 +203,11 @@ test("config-core explains when a file-backed source is broken instead of treati
   });
   const formatted = formatUncleCodeConfigExplanation(explanation);
 
-  assert.ok(explanation.sourceIssues.some((issue) => issue.sourceId === "project-config"));
+  assert.ok(
+    explanation.sourceIssues.some(
+      (issue) => issue.sourceId === "project-config",
+    ),
+  );
   assert.match(formatted, /Broken sources:/);
   assert.match(formatted, /project config/i);
   assert.match(formatted, /invalid json|unexpected end/i);
@@ -206,7 +238,9 @@ test("config-core preserves null prompt-section deletion provenance in the expla
     workspaceRoot,
     userHomeDir,
   });
-  const deletedSection = explanation.prompt.sections.find((section) => section.id === "project-note");
+  const deletedSection = explanation.prompt.sections.find(
+    (section) => section.id === "project-note",
+  );
   const formatted = formatUncleCodeConfigExplanation(explanation);
 
   assert.ok(deletedSection);
@@ -217,7 +251,10 @@ test("config-core preserves null prompt-section deletion provenance in the expla
     deletedSection.contributors.map((contributor) => contributor.sourceId),
     ["project-config", "user-config"],
   );
-  assert.doesNotMatch(explanation.prompt.rendered, /This note was deleted upstream\./);
+  assert.doesNotMatch(
+    explanation.prompt.rendered,
+    /This note was deleted upstream\./,
+  );
   assert.match(formatted, /project-note \(deleted\)/i);
   assert.match(formatted, /user config=null/i);
 });

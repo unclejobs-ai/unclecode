@@ -4,6 +4,7 @@ import type { JsonValue } from "./json.js";
 export const SESSION_METADATA_FIELDS = [
   "permissionMode",
   "isUltraworkMode",
+  "traceMode",
   "model",
   "pendingAction",
   "postTurnSummary",
@@ -15,6 +16,7 @@ export type SessionMetadataField = (typeof SESSION_METADATA_FIELDS)[number];
 export type SessionMetadata = {
   readonly permissionMode?: string | null;
   readonly isUltraworkMode?: boolean | null;
+  readonly traceMode?: "minimal" | "verbose" | null;
   readonly model?: string | null;
   readonly pendingAction?: SessionPendingAction | null;
   readonly postTurnSummary?: JsonValue | null;

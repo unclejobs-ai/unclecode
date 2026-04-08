@@ -1,16 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  PROVIDER_CAPABILITIES,
-  PROVIDER_IDS,
-} from "@unclecode/contracts";
+import { PROVIDER_CAPABILITIES, PROVIDER_IDS } from "@unclecode/contracts";
 
 test("provider-capability fixtures expose canonical provider metadata", () => {
   assert.deepEqual(PROVIDER_IDS, [
     "anthropic",
     "gemini",
-    "openai",
+    "openai-api",
+    "openai-codex",
     "groq",
     "ollama",
     "copilot",
@@ -39,6 +37,31 @@ test("provider-capability fixtures expose canonical provider metadata", () => {
     supportsPromptCaching: false,
   });
 
+  assert.deepEqual(PROVIDER_CAPABILITIES["openai-api"], {
+    id: "openai-api",
+    label: "OpenAI API",
+    transport: "compat",
+    defaultModel: "gpt-5.4",
+    envKeys: ["OPENAI_API_KEY", "OPENAI_MODEL"],
+    supportsToolCalls: true,
+    supportsSessionMemory: true,
+    supportsPromptCaching: false,
+  });
+
+  assert.deepEqual(PROVIDER_CAPABILITIES["openai-codex"], {
+    id: "openai-codex",
+    label: "OpenAI Codex",
+    transport: "compat",
+    defaultModel: "gpt-5.4",
+    envKeys: ["OPENAI_AUTH_TOKEN", "OPENAI_MODEL"],
+    supportsToolCalls: true,
+    supportsSessionMemory: true,
+    supportsPromptCaching: false,
+  });
+
   assert.equal(PROVIDER_CAPABILITIES.ollama.transport, "compat");
-  assert.equal(PROVIDER_CAPABILITIES.copilot.defaultModel, "openai/gpt-4.1-mini");
+  assert.equal(
+    PROVIDER_CAPABILITIES.copilot.defaultModel,
+    "openai/gpt-4.1-mini",
+  );
 });

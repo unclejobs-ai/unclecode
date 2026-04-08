@@ -86,7 +86,14 @@ const COPILOT_TOKEN =
   process.env.GH_TOKEN?.trim();
 const ZAI_API_KEY = process.env.ZAI_API_KEY?.trim();
 const geminiClient = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
-const OPENAI_AUTH = PROVIDER === "openai" ? resolveOpenAIAuth({ env: process.env }) : null;
+const OPENAI_AUTH = PROVIDER === "openai"
+  ? resolveOpenAIAuth({
+      env: process.env,
+      ...(process.env.UNCLECODE_OPENAI_CREDENTIALS_PATH?.trim()
+        ? { authJsonPath: process.env.UNCLECODE_OPENAI_CREDENTIALS_PATH.trim() }
+        : {}),
+    })
+  : null;
 
 assertProviderConfiguration();
 
@@ -204,7 +211,7 @@ function defaultPortFor(provider: CompatProvider): string {
 function resolveModel(provider: CompatProvider): string {
   switch (provider) {
     case "openai":
-      return process.env.OPENAI_MODEL?.trim() || "gpt-4.1-mini";
+      return process.env.OPENAI_MODEL?.trim() || "gpt-5.4";
     case "gemini":
       return process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash";
     case "groq":
@@ -223,7 +230,7 @@ function assertProviderConfiguration(): void {
     const auth = OPENAI_AUTH ?? {
       status: "missing" as const,
       authType: "none" as const,
-      authPath: "~/.codex/auth.json",
+      authPath: "~/.unclecode/credentials/openai.json",
       reason: "auth-not-initialized",
     };
     if (auth.status !== "ok") {
