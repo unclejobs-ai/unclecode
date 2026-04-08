@@ -26,15 +26,15 @@ Record the remaining runtime boundaries after the TUI/orchestration redesign mig
 - The work shell render tree now has package ownership, but state/runtime convergence is still incomplete: `packages/tui/src/work-shell-view.tsx` owns the shared presenter while runtime bootstrap and orchestration assembly still flow through app/orchestrator seams.
 - `startRepl()` now renders the package `Dashboard` shell with an embedded work pane instead of rendering a standalone root work app directly.
 - `packages/tui/src/index.tsx` now exposes `shouldCaptureDashboardInput()` plus an embedded `renderWorkPane` seam so Work-tab input can bypass session-center key handling.
-- `apps/unclecode-cli/src/work-runtime.ts` now owns work-session bootstrap, arg parsing, session restore, and Dashboard prop loading without a root runtime wrapper layer in between.
-- `apps/unclecode-cli/src/work-runtime.ts` now also exports app-owned managed dashboard helpers (`createManagedDashboardInput(...)`, `createManagedDashboardProps(...)`), so the root `src/cli.tsx` shim no longer duplicates pane-runtime/dashboard assembly.
-- `apps/unclecode-cli/src/work-runtime.ts` now also owns the compatibility-facing `StartReplOptions`, `resolveWorkShellInlineCommand(...)`, `createWorkShellDashboardProps(...)`, and `startRepl(...)` seams, with `runWorkCli(...)` reusing the same `startRepl(...)` path.
+- `apps/unclecode-cli/src/work-runtime.ts` is now a thinner work-runtime orchestration shell instead of the owner of every bootstrap detail.
+- `apps/unclecode-cli/src/work-runtime-args.ts`, `apps/unclecode-cli/src/work-runtime-session.ts`, `apps/unclecode-cli/src/work-runtime-dashboard.ts`, and `apps/unclecode-cli/src/work-runtime-bootstrap.ts` now own argv parsing, session restore/auth issue mapping, managed Dashboard assembly, and work-session bootstrap respectively.
+- `apps/unclecode-cli/src/work-runtime.ts` now keeps the compatibility-facing `resolveWorkShellInlineCommand(...)`, `createWorkShellDashboardProps(...)`, `startRepl(...)`, `loadWorkShellDashboardProps(...)`, and `runWorkCli(...)` seams, with `runWorkCli(...)` reusing the shared bootstrap result from `loadWorkCliBootstrap(...)`.
 - `packages/session-store/src/root.ts` now owns canonical session-store root resolution via `getSessionStoreRoot(...)`; `src/session-store-paths.ts` is reduced to a thin compatibility shim, and root/app work-session callers now prefer the shared package export.
 - `packages/orchestrator/src/work-agent.ts` now owns the complex-turn orchestration wrapper, and `src/work-agent.ts` is reduced to a thin compatibility shim.
 - `packages/orchestrator/src/work-agent.ts` now also accepts an optional executable-guardian-check seam so complex turns can fold bounded real verification summaries into guardian review and final synthesis instead of relying on LLM-only review.
 - `packages/orchestrator/src/coding-agent.ts` now owns the direct turn-trace wrapper, and `src/agent.ts` is reduced to a thin provider-wiring shim.
 - Repo-internal runtime coverage now imports `apps/unclecode-cli/src/work-runtime.ts` directly for work-session resume/bootstrap behavior instead of going through a deleted root runtime shim.
-- `apps/unclecode-cli/src/work-runtime.ts` now imports work config, tool metadata, cached runtime guidance, `WorkAgent`, the shared managed Dashboard/startRepl helper, and an app-owned runtime coding-agent seam directly from package/local app code, so the work-runtime bootstrap no longer dynamically imports `src/agent.ts`.
+- `apps/unclecode-cli/src/work-runtime-bootstrap.ts` now imports work config, cached runtime guidance, `WorkAgent`, and the app-owned runtime coding-agent seam directly from package/local app code, so the work-runtime bootstrap no longer dynamically imports `src/agent.ts`.
 - `packages/providers/src/runtime.ts` now owns the concrete OpenAI/Anthropic/Gemini work-shell provider implementations behind an injected tool-runtime seam.
 - `packages/providers/src/runtime.ts` now also exports a shared `createRuntimeProvider(...)` helper so provider selection/wiring is no longer duplicated across root and app agent wrappers.
 - `apps/unclecode-cli/src/runtime-coding-agent.ts` now imports the shared package helper from `@unclecode/providers`, so the app runtime no longer imports `src/providers.ts` at all.
@@ -316,6 +316,10 @@ Record the remaining runtime boundaries after the TUI/orchestration redesign mig
 - `npm run build && node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/integration/unclecode-work.integration.test.mjs`
   - verified after cutting the dist-work packaging gate over to the app-owned `apps/unclecode-cli/src/work-entry.ts` output and retargeting bin/runtime loaders away from `dist-work/src/index.js`
   - re-verified after cleaning `dist-work/` in the build script and locking the built artifact shape so stale legacy outputs no longer survive the build
+- `npm run check && node --conditions=source --import tsx --test tests/contracts/unclecode-cli.contract.test.mjs tests/work/work-runtime.test.mjs tests/work/repl.test.mjs tests/commands/work-forwarding.test.mjs`
+  - re-verified after introducing `work-runtime-bootstrap.ts`, cutting `runWorkCli(...)` over to `loadWorkCliBootstrap(...)`, and thinning `apps/unclecode-cli/src/work-runtime.ts` into a bootstrap-driven orchestration shell
+- `node --conditions=source --import tsx --test tests/providers/model-registry.test.mjs tests/work/repl.test.mjs`
+  - re-verified after refreshing the OpenAI model picker catalog so newer `gpt-5` defaults appear ahead of stale fallback models in `/model` suggestions/panels
 - `npm run check`
 - `npm run build`
 - `npm run lint`

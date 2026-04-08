@@ -166,10 +166,10 @@ These are the largest remaining owner files and therefore the highest-likelihood
 - Modify: `tests/work/work-cli-resume.test.mjs`
 - Modify: `tests/contracts/unclecode-cli.contract.test.mjs`
 
-- [ ] Step 1: Lock owner seams for session restore, dashboard prop loading, and auth/home refresh helpers.
-- [ ] Step 2: Move pure/mostly-pure bootstrap helpers first.
-- [ ] Step 3: Isolate the imperative startup sequence into a thin top-level orchestration path.
-- [ ] Step 4: Re-run targeted work-runtime/resume/contracts coverage.
+- [x] Step 1: Lock owner seams for session restore, dashboard prop loading, and auth/home refresh helpers.
+- [x] Step 2: Move pure/mostly-pure bootstrap helpers first.
+- [x] Step 3: Isolate the imperative startup sequence into a thin top-level orchestration path.
+- [x] Step 4: Re-run targeted work-runtime/resume/contracts coverage.
 
 ### Task 7: Separate runtime bootstrap from interactive REPL startup
 **Why:** `work-runtime.ts` currently mixes “prepare runtime dependencies” and “start the interactive shell.” A narrower bootstrap surface will make future unified-store work easier.
@@ -180,10 +180,10 @@ These are the largest remaining owner files and therefore the highest-likelihood
 - Modify: `tests/work/work-runtime.test.mjs`
 - Modify: `tests/commands/work-forwarding.test.mjs`
 
-- [ ] Step 1: Introduce an explicit bootstrap result type for everything required to call `startRepl(...)`.
-- [ ] Step 2: Cut `runWorkCli(...)` over to that bootstrap result.
-- [ ] Step 3: Preserve current packaged entry behavior and session resume semantics.
-- [ ] Step 4: Re-run targeted work/command coverage.
+- [x] Step 1: Introduce an explicit bootstrap result type for everything required to call `startRepl(...)`.
+- [x] Step 2: Cut `runWorkCli(...)` over to that bootstrap result.
+- [x] Step 3: Preserve current packaged entry behavior and session resume semantics.
+- [x] Step 4: Re-run targeted work/command coverage.
 
 ---
 

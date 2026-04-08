@@ -16,6 +16,18 @@ test("openai provider exposes a model registry with the configured model first",
   assert.ok(registry.models.includes("gpt-5.4"));
 });
 
+test("openai provider keeps newer gpt-5 picks ahead of stale fallback models", () => {
+  const adapter = getProviderAdapter("openai");
+  const registry = adapter.getModelRegistry({ OPENAI_MODEL: "gpt-5.4" });
+
+  assert.deepEqual(registry.models.slice(0, 4), [
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "o4-mini",
+    "gpt-4.1-mini",
+  ]);
+});
+
 test("provider adapter raises a capability mismatch error for unsupported requirements", () => {
   const adapter = getProviderAdapter("openai");
 
