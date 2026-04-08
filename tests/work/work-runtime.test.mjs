@@ -12,6 +12,7 @@ import {
   deriveAuthIssueLines,
   loadResumedWorkSession,
 } from "../../apps/unclecode-cli/src/work-runtime-session.ts";
+import { loadWorkCliBootstrap } from "../../apps/unclecode-cli/src/work-runtime-bootstrap.ts";
 import { loadWorkShellDashboardProps } from "../../apps/unclecode-cli/src/work-runtime.ts";
 
 test("parseArgs extracts cwd/provider/model/reasoning/session/help/tools/prompt from work argv", () => {
@@ -85,6 +86,52 @@ test("loadResumedWorkSession reports missing session ids honestly", async () => 
       /Session not found: work-missing/,
     );
   } finally {
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without starting the repl", async () => {
+  const originalEnv = { ...process.env };
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-runtime-bootstrap-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+
+  try {
+    mkdirSync(path.join(fakeHome, ".codex"), { recursive: true });
+    const futureExp = Math.floor(Date.now() / 1000) + 3600;
+    const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+    const accessPayload = Buffer.from(JSON.stringify({ exp: futureExp, scp: ["openid", "profile", "offline_access", "api.connectors.read"] })).toString("base64url");
+    const idPayload = Buffer.from(JSON.stringify({ aud: ["client-derived-789"] })).toString("base64url");
+    writeFileSync(
+      path.join(fakeHome, ".codex", "auth.json"),
+      JSON.stringify({
+        tokens: {
+          access_token: `${header}.${accessPayload}.sig`,
+          id_token: `header.${idPayload}.sig`,
+        },
+      }),
+      "utf8",
+    );
+
+    process.env = {
+      ...originalEnv,
+      LLM_PROVIDER: "openai",
+      OPENAI_MODEL: "gpt-5.4",
+      HOME: fakeHome,
+      OPENAI_OAUTH_CLIENT_ID: "",
+    };
+    delete process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_AUTH_TOKEN;
+
+    const result = await loadWorkCliBootstrap({
+      argv: ["--cwd", workspaceRoot, "summarize", "repo"],
+    });
+
+    assert.equal(result.prompt, "summarize repo");
+    assert.equal(result.options.cwd, workspaceRoot);
+    assert.equal(result.options.browserOAuthAvailable, false);
+    assert.equal(typeof result.agent.runTurn, "function");
+  } finally {
+    process.env = originalEnv;
     rmSync(workspaceRoot, { recursive: true, force: true });
   }
 });
