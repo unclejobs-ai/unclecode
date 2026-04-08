@@ -20,6 +20,11 @@ import {
   createWorkShellTraceLinePatch,
   createWorkShellTraceModePatch,
 } from "./work-shell-engine-state.js";
+import {
+  extractCurrentTurnStartedAt,
+  resolveBusyStatusFromTraceEvent,
+  resolveTraceEntryRole,
+} from "./work-shell-engine-trace.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 
 export type WorkShellChatEntry = {
@@ -805,7 +810,12 @@ export class WorkShellEngine<
 
       const result = await this.agent.runTurn(input.prompt, input.attachments ?? []);
       const lastTurnDurationMs = Date.now() - turnStartedAt;
-      const assistantText = await this.finalizeAssistantReply(input.prompt, result.text || "(empty response)");
+      const assistantText = await WorkShellTurns.finalizeWorkShellAssistantReply({
+        prompt: input.prompt,
+        assistantText: result.text || "(empty response)",
+        autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
+        runTurn: (prompt) => this.agent.runTurn(prompt, []),
+      });
       this.appendEntries({ role: "assistant", text: assistantText });
 
       const postTurnEffects = await WorkShellPostTurns.runWorkShellPostTurnSuccessEffects({
@@ -863,14 +873,14 @@ export class WorkShellEngine<
     const line = this.formatAgentTraceLine(event);
     const busyStatus = resolveBusyStatusFromTraceEvent(event, line);
     if (busyStatus !== null) {
-      const startedAt = (event as { readonly startedAt?: unknown }).startedAt;
+      const currentTurnStartedAt = extractCurrentTurnStartedAt(
+        event as { readonly type: string; readonly startedAt?: unknown },
+      );
       this.setState(createWorkShellBusyStatePatch({
         state: this.state,
         isBusy: this.state.isBusy,
         ...(busyStatus ? { busyStatus } : {}),
-        ...(event.type === "turn.started" && typeof startedAt === "number"
-          ? { currentTurnStartedAt: startedAt }
-          : {}),
+        ...(currentTurnStartedAt !== undefined ? { currentTurnStartedAt } : {}),
         ...(event.type === "turn.completed"
           ? { clearCurrentTurnStartedAt: true }
           : {}),
@@ -885,23 +895,9 @@ export class WorkShellEngine<
       return;
     }
 
-    const role = event.type === "turn.started" || event.type === "turn.completed" ? "system" : "tool";
+    const role = resolveTraceEntryRole(event);
     this.appendEntries({ role, text: line });
     this.pushTraceLine(line);
-  }
-
-  private async finalizeAssistantReply(prompt: string, assistantText: string): Promise<string> {
-    const cleanedAssistantText = WorkShellTurns.stripPermissionSeekingStallOutro(assistantText) || "(empty response)";
-    if (!this.options.autoContinueOnPermissionStall || !WorkShellTurns.detectPermissionSeekingStall(assistantText)) {
-      return cleanedAssistantText;
-    }
-
-    const followUp = await this.agent.runTurn(
-      WorkShellTurns.buildPermissionStallContinuePrompt(prompt, cleanedAssistantText),
-      [],
-    );
-    const continuedText = WorkShellTurns.stripPermissionSeekingStallOutro(followUp.text || "").trim();
-    return continuedText || cleanedAssistantText;
   }
 
   private modeDefaultReasoning(): Reasoning {
@@ -983,26 +979,6 @@ export class WorkShellEngine<
       subscriber(this.state);
     }
   }
-}
-
-function resolveBusyStatusFromTraceEvent(
-  event: { readonly type: string; readonly status?: string },
-  line: string,
-): string | null | undefined {
-  if (event.type === "turn.completed") {
-    return undefined;
-  }
-
-  if (
-    event.type === "turn.started" ||
-    event.type === "provider.calling" ||
-    event.type === "tool.started" ||
-    (event.type === "orchestrator.step" && event.status === "running")
-  ) {
-    return line || "thinking";
-  }
-
-  return null;
 }
 
 function redactSensitiveInlineCommandArgs(args: readonly string[]): readonly string[] {

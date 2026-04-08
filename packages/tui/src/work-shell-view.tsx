@@ -371,6 +371,92 @@ function renderWorkShellPanelLine(line: string, index: number): React.ReactNode 
   return <Text key={`${index}-${line}`} color="white">{line}</Text>;
 }
 
+const WorkShellConversationBlock = React.memo(function WorkShellConversationBlock(props: {
+  readonly entries: readonly WorkShellEntry[];
+  readonly panelPlacement: "side" | "bottom";
+}) {
+  return (
+    <Box flexDirection="column" width={props.panelPlacement === "side" ? "68%" : undefined} paddingRight={props.panelPlacement === "side" ? 1 : 0}>
+      <Box borderStyle="round" borderColor="gray" paddingX={1}>
+        <Text bold color="white">Conversation</Text>
+      </Box>
+      <Box marginTop={1} flexDirection="column">
+        {props.entries.length === 0 ? (
+          <Text color="gray">{getWorkShellEmptyConversationHint()}</Text>
+        ) : props.entries.slice(-12).map((entry, index) => {
+          const presentation = getWorkShellEntryPresentation(entry.role);
+          const layout = getWorkShellConversationLayout(entry.role);
+          return (
+            <Box
+              key={`${entry.role}-${index}`}
+              marginBottom={layout.marginBottom}
+              {...(layout.hasBorder && presentation.borderColor
+                ? {
+                    borderStyle: getWorkShellEntryBorderStyle(entry.role),
+                    borderColor: presentation.borderColor,
+                    paddingX: 1,
+                    paddingY: 0,
+                  }
+                : {})}
+              paddingLeft={layout.paddingLeft}
+              flexDirection="column"
+            >
+              <Text bold color={presentation.labelColor}>{`${presentation.badge} ${presentation.label}`}</Text>
+              <Text color={presentation.bodyColor}>{entry.role === "assistant" ? normalizeMarkdownDisplayText(entry.text) : entry.text}</Text>
+            </Box>
+          );
+        })}
+      </Box>
+    </Box>
+  );
+});
+
+const WorkShellPanelBlock = React.memo(function WorkShellPanelBlock(props: {
+  readonly title: string;
+  readonly lines: readonly string[];
+  readonly panelPlacement: "side" | "bottom";
+  readonly panelBorderColor: string;
+  readonly panelDisplayMode: "hidden" | "overlay" | "side" | "bottom";
+  readonly inputValue: string;
+}) {
+  return (
+    <Box flexDirection="column" width={props.panelPlacement === "side" ? "32%" : undefined} paddingLeft={props.panelPlacement === "side" ? 1 : 0} marginTop={props.panelPlacement === "bottom" ? 1 : 0}>
+      <Box borderStyle="round" borderColor={props.panelBorderColor} paddingX={1}>
+        <Text bold color="white">{props.title}</Text>
+      </Box>
+      <Box
+        marginTop={1}
+        flexDirection="column"
+        paddingLeft={1}
+        minHeight={getWorkShellBottomDrawerMinHeight(props.panelDisplayMode, props.title, props.inputValue)}
+      >
+        {props.lines.map((line, index) => renderWorkShellPanelLine(line, index))}
+      </Box>
+    </Box>
+  );
+});
+
+const WorkShellAttachmentBlock = React.memo(function WorkShellAttachmentBlock(props: {
+  readonly attachmentLines: readonly string[];
+}) {
+  if (props.attachmentLines.length === 0 || getWorkShellAttachmentPlacement() !== "after-composer") {
+    return null;
+  }
+
+  return (
+    <Box marginTop={1} flexDirection="column">
+      <Box borderStyle="round" borderColor="cyan" paddingX={1}>
+        <Text bold color="cyan">Attachments</Text>
+      </Box>
+      <Box marginTop={1} flexDirection="column" paddingLeft={1} minHeight={getWorkShellAttachmentMinHeight()}>
+        {props.attachmentLines.map((line, index) => (
+          <Text key={`${index}-${line}`} color={getWorkShellAttachmentLineColor(index)}>{line}</Text>
+        ))}
+      </Box>
+    </Box>
+  );
+});
+
 export function WorkShellView(props: {
   readonly provider: string;
   readonly model: string;
@@ -433,54 +519,21 @@ export function WorkShellView(props: {
   const panelPlacement = panelDisplayMode === "side" ? "side" : "bottom";
 
   const conversation = (
-    <Box flexDirection="column" width={panelPlacement === "side" ? "68%" : undefined} paddingRight={panelPlacement === "side" ? 1 : 0}>
-      <Box borderStyle="round" borderColor="gray" paddingX={1}>
-        <Text bold color="white">Conversation</Text>
-      </Box>
-      <Box marginTop={1} flexDirection="column">
-        {props.entries.length === 0 ? (
-          <Text color="gray">{getWorkShellEmptyConversationHint()}</Text>
-        ) : props.entries.slice(-12).map((entry, index) => {
-          const presentation = getWorkShellEntryPresentation(entry.role);
-          const layout = getWorkShellConversationLayout(entry.role);
-          return (
-            <Box
-              key={`${entry.role}-${index}`}
-              marginBottom={layout.marginBottom}
-              {...(layout.hasBorder && presentation.borderColor
-                ? {
-                    borderStyle: getWorkShellEntryBorderStyle(entry.role),
-                    borderColor: presentation.borderColor,
-                    paddingX: 1,
-                    paddingY: 0,
-                  }
-                : {})}
-              paddingLeft={layout.paddingLeft}
-              flexDirection="column"
-            >
-              <Text bold color={presentation.labelColor}>{`${presentation.badge} ${presentation.label}`}</Text>
-              <Text color={presentation.bodyColor}>{entry.role === "assistant" ? normalizeMarkdownDisplayText(entry.text) : entry.text}</Text>
-            </Box>
-          );
-        })}
-      </Box>
-    </Box>
+    <WorkShellConversationBlock
+      entries={props.entries}
+      panelPlacement={panelPlacement}
+    />
   );
 
   const panel = (
-    <Box flexDirection="column" width={panelPlacement === "side" ? "32%" : undefined} paddingLeft={panelPlacement === "side" ? 1 : 0} marginTop={panelPlacement === "bottom" ? 1 : 0}>
-      <Box borderStyle="round" borderColor={panelBorderColor} paddingX={1}>
-        <Text bold color="white">{props.activePanel.title}</Text>
-      </Box>
-      <Box
-        marginTop={1}
-        flexDirection="column"
-        paddingLeft={1}
-        minHeight={getWorkShellBottomDrawerMinHeight(panelDisplayMode, props.activePanel.title, props.inputValue)}
-      >
-        {props.activePanel.lines.map((line, index) => renderWorkShellPanelLine(line, index))}
-      </Box>
-    </Box>
+    <WorkShellPanelBlock
+      title={props.activePanel.title}
+      lines={props.activePanel.lines}
+      panelPlacement={panelPlacement}
+      panelBorderColor={panelBorderColor}
+      panelDisplayMode={panelDisplayMode}
+      inputValue={props.inputValue}
+    />
   );
 
   return (
@@ -510,18 +563,9 @@ export function WorkShellView(props: {
       <Box minHeight={getWorkShellComposerHintMinHeight()} flexDirection="column">
         <Text color="gray">{composerHint ?? " "}</Text>
       </Box>
-      {props.attachmentLines && props.attachmentLines.length > 0 && getWorkShellAttachmentPlacement() === "after-composer" ? (
-        <Box marginTop={1} flexDirection="column">
-          <Box borderStyle="round" borderColor="cyan" paddingX={1}>
-            <Text bold color="cyan">Attachments</Text>
-          </Box>
-          <Box marginTop={1} flexDirection="column" paddingLeft={1} minHeight={getWorkShellAttachmentMinHeight()}>
-            {props.attachmentLines.map((line, index) => (
-              <Text key={`${index}-${line}`} color={getWorkShellAttachmentLineColor(index)}>{line}</Text>
-            ))}
-          </Box>
-        </Box>
-      ) : null}
+      {props.attachmentLines
+        ? <WorkShellAttachmentBlock attachmentLines={props.attachmentLines} />
+        : null}
       {panelDisplayMode === "overlay" ? (
         <Box marginTop={1} borderStyle="round" borderColor={panelBorderColor} paddingX={1} flexDirection="column">
           <Text bold color="white">{props.activePanel.title}</Text>

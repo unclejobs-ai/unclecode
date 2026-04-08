@@ -138,3 +138,21 @@ export function buildPermissionStallContinuePrompt(originalPrompt: string, previ
     .filter((segment) => segment.length > 0)
     .join("\n\n");
 }
+
+export async function finalizeWorkShellAssistantReply(input: {
+  prompt: string;
+  assistantText: string;
+  autoContinueOnPermissionStall?: boolean | undefined;
+  runTurn: (prompt: string) => Promise<{ text: string }>;
+}): Promise<string> {
+  const cleanedAssistantText = stripPermissionSeekingStallOutro(input.assistantText) || "(empty response)";
+  if (!input.autoContinueOnPermissionStall || !detectPermissionSeekingStall(input.assistantText)) {
+    return cleanedAssistantText;
+  }
+
+  const followUp = await input.runTurn(
+    buildPermissionStallContinuePrompt(input.prompt, cleanedAssistantText),
+  );
+  const continuedText = stripPermissionSeekingStallOutro(followUp.text || "").trim();
+  return continuedText || cleanedAssistantText;
+}

@@ -22,11 +22,17 @@ import {
   runWorkShellPostTurnSuccessEffects,
 } from "../../packages/orchestrator/src/work-shell-engine-post-turns.ts";
 import {
+  extractCurrentTurnStartedAt,
+  resolveBusyStatusFromTraceEvent,
+  resolveTraceEntryRole,
+} from "../../packages/orchestrator/src/work-shell-engine-trace.ts";
+import {
   buildPermissionStallContinuePrompt,
   createChatPromptTurnInput,
   createConversationTurnSummary,
   createPromptCommandTurnInput,
   detectPermissionSeekingStall,
+  finalizeWorkShellAssistantReply,
   stripPermissionSeekingStallOutro,
 } from "../../packages/orchestrator/src/work-shell-engine-turns.ts";
 import {
@@ -264,7 +270,7 @@ test("work-shell command helpers classify builtins and build reusable panels/pro
   assert.match(buildPromptCommandPrompt({ kind: "commit", focus: "auth flow" }), /Lore protocol/);
 });
 
-test("work-shell turn helpers build summaries and permission-stall continuations", () => {
+test("work-shell turn helpers build summaries and permission-stall continuations", async () => {
   assert.deepEqual(
     createChatPromptTurnInput({
       line: "review everything in this repo please",
@@ -314,6 +320,17 @@ test("work-shell turn helpers build summaries and permission-stall continuations
     buildPermissionStallContinuePrompt("finish cleanup", "Done."),
     /Continue automatically without asking for permission/,
   );
+  assert.equal(
+    await finalizeWorkShellAssistantReply({
+      prompt: "finish cleanup",
+      assistantText: "Done.\n\nIf you want, I can continue.",
+      autoContinueOnPermissionStall: true,
+      async runTurn() {
+        return { text: "I continued automatically and completed the rest." };
+      },
+    }),
+    "I continued automatically and completed the rest.",
+  );
 });
 
 test("work-shell post-turn helpers persist summaries and auth recovery deterministically", async () => {
@@ -352,6 +369,25 @@ test("work-shell post-turn helpers persist summaries and auth recovery determini
   assert.equal(effects.memoryTraceEvent.type, "memory.written");
   assert.equal(authLabel, "api-key-file");
   assert.deepEqual(refreshedAuthIssues, ["Auth issue: saved OAuth needs refresh."]);
+});
+
+test("work-shell trace helpers derive busy status and transcript roles honestly", () => {
+  assert.equal(
+    resolveBusyStatusFromTraceEvent({ type: "turn.started" }, "thinking inspect repo"),
+    "thinking inspect repo",
+  );
+  assert.equal(
+    resolveBusyStatusFromTraceEvent({ type: "orchestrator.step", status: "running" }, "executor inspect login.ts"),
+    "executor inspect login.ts",
+  );
+  assert.equal(
+    resolveBusyStatusFromTraceEvent({ type: "turn.completed" }, "done 123"),
+    undefined,
+  );
+  assert.equal(resolveTraceEntryRole({ type: "turn.started" }), "system");
+  assert.equal(resolveTraceEntryRole({ type: "provider.calling" }), "tool");
+  assert.equal(extractCurrentTurnStartedAt({ type: "turn.started", startedAt: 123 }), 123);
+  assert.equal(extractCurrentTurnStartedAt({ type: "tool.started", startedAt: 123 }), undefined);
 });
 
 test("createInitialWorkShellEngineState derives the shell defaults from options", () => {
