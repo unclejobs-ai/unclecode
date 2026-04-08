@@ -41,6 +41,32 @@ export type WorkLaunchInput = {
   readonly loadModule?: (() => Promise<WorkModule>) | undefined;
 };
 
+export type WorkCommandArgOptions = {
+  readonly provider?: string;
+  readonly model?: string;
+  readonly reasoning?: string;
+  readonly cwd?: string;
+  readonly sessionId?: string;
+  readonly tools?: boolean;
+  readonly help?: boolean;
+};
+
+export function buildWorkCommandArgs(
+  promptParts: readonly string[],
+  options: WorkCommandArgOptions,
+): string[] {
+  const forwardedArgs: string[] = [];
+  if (options.help) forwardedArgs.push("--help");
+  if (options.tools) forwardedArgs.push("--tools");
+  if (options.cwd) forwardedArgs.push("--cwd", options.cwd);
+  if (options.provider) forwardedArgs.push("--provider", options.provider);
+  if (options.model) forwardedArgs.push("--model", options.model);
+  if (options.reasoning) forwardedArgs.push("--reasoning", options.reasoning);
+  if (options.sessionId) forwardedArgs.push("--session-id", options.sessionId);
+  forwardedArgs.push(...promptParts);
+  return forwardedArgs;
+}
+
 export function withWorkCwd(
   forwardedArgs: readonly string[],
   callerCwd: string,

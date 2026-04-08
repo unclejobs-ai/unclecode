@@ -40,7 +40,7 @@ import {
 } from "./operational.js";
 import { shouldLaunchDefaultWorkSession } from "./startup-paths.js";
 import { launchSessionCenter } from "./session-center-launcher.js";
-import { launchWorkEntrypoint, withWorkCwd } from "./work-bootstrap.js";
+import { buildWorkCommandArgs, launchWorkEntrypoint, withWorkCwd } from "./work-bootstrap.js";
 
 const UNCLECODE_CLI_VERSION = "0.1.0";
 
@@ -89,6 +89,13 @@ type AuthLoginRuntimeContext = {
   readonly shouldUseDevice: boolean;
   readonly redirectUri: string;
   readonly baseUrl?: string;
+};
+
+type AuthLoginMethod = "api-key-stdin" | "device" | "browser" | "saved-auth";
+
+type AuthLoginMethodSelection = {
+  readonly method: AuthLoginMethod;
+  readonly error?: string;
 };
 
 type ApiKeyStdinLoginInput = {
@@ -221,6 +228,45 @@ async function handleApiKeyStdinLogin(input: ApiKeyStdinLoginInput): Promise<boo
   return true;
 }
 
+async function handleSavedAuthLogin(): Promise<boolean> {
+  const status = await resolveOpenAIAuthStatus({ env: process.env });
+  if (status.activeSource !== "none" && !status.isExpired) {
+    process.stdout.write("Saved auth found.\n");
+    process.stdout.write(`Auth: ${status.activeSource}\n`);
+    process.stdout.write("Use `unclecode auth status` to inspect it. The next model request will verify provider access.\n");
+    return true;
+  }
+
+  if (status.activeSource !== "none" && status.expiresAt === "insufficient-scope") {
+    throw new Error("Saved OAuth was found but it lacks model.request scope for UncleCode API calls. Use unclecode auth login --api-key-stdin, OPENAI_API_KEY, or browser OAuth with OPENAI_OAUTH_CLIENT_ID.");
+  }
+
+  return false;
+}
+
+function selectAuthLoginMethod(options: AuthLoginCommandOptions, runtimeContext: AuthLoginRuntimeContext): AuthLoginMethodSelection {
+  if (options.apiKeyStdin) {
+    return { method: "api-key-stdin" };
+  }
+
+  if (!runtimeContext.browserClientId && !runtimeContext.deviceClientId) {
+    return { method: "saved-auth" };
+  }
+
+  if ((options.browser || options.print) && !runtimeContext.browserClientId) {
+    return {
+      method: "browser",
+      error: "Browser OAuth needs OPENAI_OAUTH_CLIENT_ID. Reused Codex auth can start device OAuth instead. Run `unclecode auth login --device`.",
+    };
+  }
+
+  if (runtimeContext.shouldUseDevice) {
+    return { method: "device" };
+  }
+
+  return { method: "browser" };
+}
+
 async function runDeviceAuthLogin(input: DeviceAuthLoginInput): Promise<void> {
   const deviceLoginClientId = input.runtimeContext.deviceClientId;
   if (!deviceLoginClientId) {
@@ -298,19 +344,6 @@ function formatLogoutResult(status: ResolvedOpenAIAuthStatus): readonly string[]
   }
 
   return ["Local credentials cleared.", `Auth: ${status.activeSource}`];
-}
-
-function buildWorkCommandArgs(promptParts: readonly string[], options: WorkCommandOptions): string[] {
-  const forwardedArgs: string[] = [];
-  if (options.help) forwardedArgs.push("--help");
-  if (options.tools) forwardedArgs.push("--tools");
-  if (options.cwd) forwardedArgs.push("--cwd", options.cwd);
-  if (options.provider) forwardedArgs.push("--provider", options.provider);
-  if (options.model) forwardedArgs.push("--model", options.model);
-  if (options.reasoning) forwardedArgs.push("--reasoning", options.reasoning);
-  if (options.sessionId) forwardedArgs.push("--session-id", options.sessionId);
-  forwardedArgs.push(...promptParts);
-  return forwardedArgs;
 }
 
 async function handleRootCommand(program: Command): Promise<void> {
@@ -482,145 +515,16 @@ function handleMcpListCommand(): void {
   );
 }
 
-export function createUncleCodeProgram(): Command {
-  const program = new Command();
-
-  program
-    .name(UNCLECODE_COMMAND_NAME)
-    .description("UncleCode workspace shell")
-    .version(UNCLECODE_CLI_VERSION)
-    .showHelpAfterError();
-
+function registerRootCommands(program: Command): void {
   program.action(async () => {
     await handleRootCommand(program);
   });
-
-  program
-    .command("tui")
-    .description("Launch the interactive work shell")
-    .allowUnknownOption(true)
-    .helpOption(false)
-    .option("--provider <provider>")
-    .option("--model <model>")
-    .option("--reasoning <effort>")
-    .option("--cwd <cwd>")
-    .option("--session-id <sessionId>")
-    .option("--tools")
-    .option("--help")
-    .action(async (_promptParts: string[], options: WorkCommandOptions) => {
-      await handleTuiCommand(options);
-    });
 
   program
     .command("center")
     .description("Launch the secondary session center")
     .action(async () => {
       await handleCenterCommand();
-    });
-
-  const configCommand = program.command("config").description("Inspect effective UncleCode config");
-  const authCommand = program.command("auth").description("Inspect and manage provider authentication");
-  const workCommand = program.command("work [prompt...]").description("Launch the repo-local coding assistant entrypoint");
-  const mcpCommand = program.command("mcp").description("Inspect configured MCP servers");
-  const modeCommand = program.command("mode").description("Inspect and persist the active UncleCode mode");
-  const researchCommand = program.command("research").description("Inspect and run research-mode flows");
-
-  configCommand
-    .command("explain")
-    .description("Explain resolved settings, prompt sections, and active mode overlays")
-    .addOption(
-      new Option("--mode <mode>", "Override the active mode for this invocation").choices(
-        MODE_PROFILE_IDS,
-      ),
-    )
-    .option("--model <model>", "Override the configured model for this invocation")
-    .action((options: ConfigExplainCommandOptions) => {
-      handleConfigExplainCommand(options);
-    });
-
-  authCommand
-    .command("login")
-    .description("Sign in with OpenAI OAuth or save an OpenAI API key")
-    .option("--browser", "Generate a browser-based login URL")
-    .option("--device", "Use device-code login")
-    .option("--api-key-stdin", "Read an OpenAI API key from stdin and store it as local UncleCode auth")
-    .addOption(new Option("--api-key <key>").hideHelp())
-    .option("--org <org>", "Store default OpenAI organization context with an API key login")
-    .option("--project <project>", "Store default OpenAI project context with an API key login")
-    .option("--print", "Print the login URL explicitly (default browser behavior today)")
-    .action(async (options: AuthLoginCommandOptions) => {
-      const credentialsPath = resolveOpenAICredentialsPath();
-      if (await handleApiKeyStdinLogin({ options, credentialsPath })) {
-        return;
-      }
-
-      const runtimeContext = await resolveAuthLoginRuntimeContext(options);
-      if (!runtimeContext.browserClientId && !runtimeContext.deviceClientId) {
-        const status = await resolveOpenAIAuthStatus({ env: process.env });
-        if (status.activeSource !== "none" && !status.isExpired) {
-          process.stdout.write("Saved auth found.\n");
-          process.stdout.write(`Auth: ${status.activeSource}\n`);
-          process.stdout.write("Use `unclecode auth status` to inspect it. The next model request will verify provider access.\n");
-          return;
-        }
-        if (status.activeSource !== "none" && status.expiresAt === "insufficient-scope") {
-          throw new Error("Saved OAuth was found but it lacks model.request scope for UncleCode API calls. Use unclecode auth login --api-key-stdin, OPENAI_API_KEY, or browser OAuth with OPENAI_OAUTH_CLIENT_ID.");
-        }
-        throw new Error("OPENAI_OAUTH_CLIENT_ID is required for OAuth login. Existing ~/.codex/auth.json is reused automatically when present.");
-      }
-
-      if ((options.browser || options.print) && !runtimeContext.browserClientId) {
-        throw new Error("Browser OAuth needs OPENAI_OAUTH_CLIENT_ID. Reused Codex auth can start device OAuth instead. Run `unclecode auth login --device`.");
-      }
-
-      if (runtimeContext.shouldUseDevice) {
-        await runDeviceAuthLogin({ runtimeContext, credentialsPath });
-        return;
-      }
-
-      await runBrowserAuthLogin({ runtimeContext, options, credentialsPath });
-    });
-
-  workCommand
-    .allowUnknownOption(true)
-    .helpOption(false)
-    .option("--provider <provider>")
-    .option("--model <model>")
-    .option("--reasoning <effort>")
-    .option("--cwd <cwd>")
-    .option("--session-id <sessionId>")
-    .option("--tools")
-    .option("--help")
-    .action(async (promptParts: string[], options: WorkCommandOptions, _command) => {
-      await handleWorkCommand(promptParts, options);
-    });
-
-  authCommand
-    .command("status")
-    .description("Show OpenAI auth source, org/project context, and expiry state")
-    .action(async () => {
-      await handleAuthStatusCommand();
-    });
-
-  authCommand
-    .command("logout")
-    .description("Clear locally stored UncleCode auth credentials")
-    .action(async () => {
-      await handleAuthLogoutCommand();
-    });
-
-  modeCommand
-    .command("status")
-    .description("Show the active mode and where it came from")
-    .action(() => {
-      handleModeStatusCommand();
-    });
-
-  modeCommand
-    .command("set <mode>")
-    .description("Persist the active mode in the project config")
-    .action(async (mode: string) => {
-      await handleModeSetCommand(mode);
     });
 
   program
@@ -654,6 +558,145 @@ export function createUncleCodeProgram(): Command {
     .action(async (sessionId: string, options: ResumeCommandOptions) => {
       await handleResumeCommand(sessionId, options);
     });
+}
+
+function registerWorkCommands(program: Command): void {
+  program
+    .command("tui")
+    .description("Launch the interactive work shell")
+    .allowUnknownOption(true)
+    .helpOption(false)
+    .option("--provider <provider>")
+    .option("--model <model>")
+    .option("--reasoning <effort>")
+    .option("--cwd <cwd>")
+    .option("--session-id <sessionId>")
+    .option("--tools")
+    .option("--help")
+    .action(async (_promptParts: string[], options: WorkCommandOptions) => {
+      await handleTuiCommand(options);
+    });
+
+  program
+    .command("work [prompt...]")
+    .description("Launch the repo-local coding assistant entrypoint")
+    .allowUnknownOption(true)
+    .helpOption(false)
+    .option("--provider <provider>")
+    .option("--model <model>")
+    .option("--reasoning <effort>")
+    .option("--cwd <cwd>")
+    .option("--session-id <sessionId>")
+    .option("--tools")
+    .option("--help")
+    .action(async (promptParts: string[], options: WorkCommandOptions, _command) => {
+      await handleWorkCommand(promptParts, options);
+    });
+}
+
+function registerConfigCommands(program: Command): void {
+  const configCommand = program.command("config").description("Inspect effective UncleCode config");
+
+  configCommand
+    .command("explain")
+    .description("Explain resolved settings, prompt sections, and active mode overlays")
+    .addOption(
+      new Option("--mode <mode>", "Override the active mode for this invocation").choices(
+        MODE_PROFILE_IDS,
+      ),
+    )
+    .option("--model <model>", "Override the configured model for this invocation")
+    .action((options: ConfigExplainCommandOptions) => {
+      handleConfigExplainCommand(options);
+    });
+}
+
+function registerAuthCommands(program: Command): void {
+  const authCommand = program.command("auth").description("Inspect and manage provider authentication");
+
+  authCommand
+    .command("login")
+    .description("Sign in with OpenAI OAuth or save an OpenAI API key")
+    .option("--browser", "Generate a browser-based login URL")
+    .option("--device", "Use device-code login")
+    .option("--api-key-stdin", "Read an OpenAI API key from stdin and store it as local UncleCode auth")
+    .addOption(new Option("--api-key <key>").hideHelp())
+    .option("--org <org>", "Store default OpenAI organization context with an API key login")
+    .option("--project <project>", "Store default OpenAI project context with an API key login")
+    .option("--print", "Print the login URL explicitly (default browser behavior today)")
+    .action(async (options: AuthLoginCommandOptions) => {
+      const credentialsPath = resolveOpenAICredentialsPath();
+      if (await handleApiKeyStdinLogin({ options, credentialsPath })) {
+        return;
+      }
+
+      const runtimeContext = await resolveAuthLoginRuntimeContext(options);
+      if (!runtimeContext.browserClientId && !runtimeContext.deviceClientId) {
+        if (await handleSavedAuthLogin()) {
+          return;
+        }
+        throw new Error("OPENAI_OAUTH_CLIENT_ID is required for OAuth login. Existing ~/.codex/auth.json is reused automatically when present.");
+      }
+
+      const methodSelection = selectAuthLoginMethod(options, runtimeContext);
+      if (methodSelection.error) {
+        throw new Error(methodSelection.error);
+      }
+
+      if (methodSelection.method === "saved-auth") {
+        if (await handleSavedAuthLogin()) {
+          return;
+        }
+        throw new Error("OPENAI_OAUTH_CLIENT_ID is required for OAuth login. Existing ~/.codex/auth.json is reused automatically when present.");
+      }
+
+      if (methodSelection.method === "api-key-stdin") {
+        return;
+      }
+
+      if (methodSelection.method === "device") {
+        await runDeviceAuthLogin({ runtimeContext, credentialsPath });
+        return;
+      }
+
+      await runBrowserAuthLogin({ runtimeContext, options, credentialsPath });
+    });
+
+  authCommand
+    .command("status")
+    .description("Show OpenAI auth source, org/project context, and expiry state")
+    .action(async () => {
+      await handleAuthStatusCommand();
+    });
+
+  authCommand
+    .command("logout")
+    .description("Clear locally stored UncleCode auth credentials")
+    .action(async () => {
+      await handleAuthLogoutCommand();
+    });
+}
+
+function registerModeCommands(program: Command): void {
+  const modeCommand = program.command("mode").description("Inspect and persist the active UncleCode mode");
+
+  modeCommand
+    .command("status")
+    .description("Show the active mode and where it came from")
+    .action(() => {
+      handleModeStatusCommand();
+    });
+
+  modeCommand
+    .command("set <mode>")
+    .description("Persist the active mode in the project config")
+    .action(async (mode: string) => {
+      await handleModeSetCommand(mode);
+    });
+}
+
+function registerResearchCommands(program: Command): void {
+  const researchCommand = program.command("research").description("Inspect and run research-mode flows");
 
   researchCommand
     .command("status")
@@ -669,6 +712,10 @@ export function createUncleCodeProgram(): Command {
     .action(async (promptParts: string[], options: ResearchRunCommandOptions) => {
       await handleResearchRunCommand(promptParts, options);
     });
+}
+
+function registerMcpCommands(program: Command): void {
+  const mcpCommand = program.command("mcp").description("Inspect configured MCP servers");
 
   mcpCommand
     .command("list")
@@ -676,6 +723,24 @@ export function createUncleCodeProgram(): Command {
     .action(() => {
       handleMcpListCommand();
     });
+}
+
+export function createUncleCodeProgram(): Command {
+  const program = new Command();
+
+  program
+    .name(UNCLECODE_COMMAND_NAME)
+    .description("UncleCode workspace shell")
+    .version(UNCLECODE_CLI_VERSION)
+    .showHelpAfterError();
+
+  registerRootCommands(program);
+  registerWorkCommands(program);
+  registerConfigCommands(program);
+  registerAuthCommands(program);
+  registerModeCommands(program);
+  registerResearchCommands(program);
+  registerMcpCommands(program);
 
   return program;
 }

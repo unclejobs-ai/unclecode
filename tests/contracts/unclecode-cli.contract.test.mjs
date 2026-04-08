@@ -113,6 +113,14 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
     path.join(workspaceRoot, "apps/unclecode-cli/src/startup-paths.ts"),
     "utf8",
   );
+  const workRuntimeArgsSource = readFileSync(
+    path.join(workspaceRoot, "apps/unclecode-cli/src/work-runtime-args.ts"),
+    "utf8",
+  );
+  const workRuntimeSource = readFileSync(
+    path.join(workspaceRoot, "apps/unclecode-cli/src/work-runtime.ts"),
+    "utf8",
+  );
   const programSource = readFileSync(
     path.join(workspaceRoot, "apps/unclecode-cli/src/program.ts"),
     "utf8",
@@ -150,8 +158,24 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
     workBootstrapSource,
     /import\s+type\s+\{[\s\S]*EmbeddedWorkDashboardSnapshot[\s\S]*EmbeddedWorkPaneRenderOptions[\s\S]*\}\s+from\s+"@unclecode\/tui"/,
   );
+  assert.match(
+    workRuntimeSource,
+    /from\s+"\.\/work-runtime-args\.js"/,
+  );
+  assert.doesNotMatch(workRuntimeSource, /function\s+printHelp\(/);
+  assert.doesNotMatch(workRuntimeSource, /function\s+printTools\(/);
+  assert.doesNotMatch(workRuntimeSource, /function\s+resolveRuntimeProvider\(/);
+  assert.doesNotMatch(workRuntimeSource, /function\s+parseArgs\(/);
+  assert.match(workRuntimeArgsSource, /export\s+type\s+ParsedArgs\s*=\s*\{/);
+  assert.match(workRuntimeArgsSource, /export\s+function\s+printHelp\(\):\s*void/);
+  assert.match(workRuntimeArgsSource, /export\s+function\s+printTools\(\):\s*void/);
+  assert.match(workRuntimeArgsSource, /export\s+function\s+resolveRuntimeProvider\(/);
+  assert.match(workRuntimeArgsSource, /export\s+function\s+parseArgs\(argv:\s*string\[]\):\s*ParsedArgs/);
   assert.doesNotMatch(programSource, /from\s+"\.\/interactive-shell\.js"/);
-  assert.match(programSource, /from\s+"\.\/work-bootstrap\.js"/);
+  assert.match(
+    programSource,
+    /import\s+\{\s*buildWorkCommandArgs,\s*launchWorkEntrypoint,\s*withWorkCwd\s*\}\s+from\s+"\.\/work-bootstrap\.js"/,
+  );
   assert.match(programSource, /from\s+"\.\/session-center-launcher\.js"/);
   assert.match(programSource, /type\s+BrowserOAuthCallbackInput\s*=\s*\{/);
   assert.match(
@@ -187,7 +211,20 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
   );
   assert.match(
     programSource,
+    /type\s+AuthLoginMethod\s*=\s*"api-key-stdin"\s*\|\s*"device"\s*\|\s*"browser"\s*\|\s*"saved-auth"/,
+  );
+  assert.match(programSource, /type\s+AuthLoginMethodSelection\s*=\s*\{/);
+  assert.match(
+    programSource,
     /async\s+function\s+handleApiKeyStdinLogin\(\s*input:\s*ApiKeyStdinLoginInput\s*\):\s*Promise<boolean>/,
+  );
+  assert.match(
+    programSource,
+    /async\s+function\s+handleSavedAuthLogin\(\):\s*Promise<boolean>/,
+  );
+  assert.match(
+    programSource,
+    /function\s+selectAuthLoginMethod\(\s*options:\s*AuthLoginCommandOptions,\s*runtimeContext:\s*AuthLoginRuntimeContext\s*\):\s*AuthLoginMethodSelection/,
   );
   assert.match(
     programSource,
@@ -197,9 +234,13 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
     programSource,
     /async\s+function\s+runBrowserAuthLogin\(\s*input:\s*BrowserAuthLoginInput\s*\):\s*Promise<void>/,
   );
-  assert.match(
+  assert.doesNotMatch(
     programSource,
-    /function\s+buildWorkCommandArgs\(\s*promptParts:\s*readonly string\[],\s*options:\s*WorkCommandOptions\s*\):\s*string\[]/,
+    /function\s+buildWorkCommandArgs\(/,
+  );
+  assert.match(
+    workBootstrapSource,
+    /export\s+function\s+buildWorkCommandArgs\(/,
   );
   assert.match(
     programSource,
@@ -216,6 +257,62 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
   assert.match(
     programSource,
     /async\s+function\s+handleWorkCommand\(promptParts:\s*string\[],\s*options:\s*WorkCommandOptions\):\s*Promise<void>/,
+  );
+  assert.match(
+    programSource,
+    /function\s+registerRootCommands\(program:\s*Command\):\s*void/,
+  );
+  assert.match(
+    programSource,
+    /function\s+registerWorkCommands\(program:\s*Command\):\s*void/,
+  );
+  assert.match(
+    programSource,
+    /function\s+registerConfigCommands\(program:\s*Command\):\s*void/,
+  );
+  assert.match(
+    programSource,
+    /function\s+registerAuthCommands\(program:\s*Command\):\s*void/,
+  );
+  assert.match(
+    programSource,
+    /function\s+registerModeCommands\(program:\s*Command\):\s*void/,
+  );
+  assert.match(
+    programSource,
+    /function\s+registerResearchCommands\(program:\s*Command\):\s*void/,
+  );
+  assert.match(
+    programSource,
+    /function\s+registerMcpCommands\(program:\s*Command\):\s*void/,
+  );
+  assert.match(
+    programSource,
+    /createUncleCodeProgram\([\s\S]*registerRootCommands\(program\)/,
+  );
+  assert.match(
+    programSource,
+    /createUncleCodeProgram\([\s\S]*registerWorkCommands\(program\)/,
+  );
+  assert.match(
+    programSource,
+    /createUncleCodeProgram\([\s\S]*registerConfigCommands\(program\)/,
+  );
+  assert.match(
+    programSource,
+    /createUncleCodeProgram\([\s\S]*registerAuthCommands\(program\)/,
+  );
+  assert.match(
+    programSource,
+    /createUncleCodeProgram\([\s\S]*registerModeCommands\(program\)/,
+  );
+  assert.match(
+    programSource,
+    /createUncleCodeProgram\([\s\S]*registerResearchCommands\(program\)/,
+  );
+  assert.match(
+    programSource,
+    /createUncleCodeProgram\([\s\S]*registerMcpCommands\(program\)/,
   );
   assert.match(
     programSource,
@@ -252,6 +349,18 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
   assert.match(
     programSource,
     /\.action\(async \(options: AuthLoginCommandOptions\)[\s\S]*const\s+runtimeContext\s*=\s*await\s+resolveAuthLoginRuntimeContext\(options\)/,
+  );
+  assert.match(
+    programSource,
+    /\.action\(async \(options: AuthLoginCommandOptions\)[\s\S]*if\s*\(await\s+handleSavedAuthLogin\(\)\)\s*\{/,
+  );
+  assert.match(
+    programSource,
+    /\.action\(async \(options: AuthLoginCommandOptions\)[\s\S]*const\s+methodSelection\s*=\s*selectAuthLoginMethod\(options, runtimeContext\)/,
+  );
+  assert.match(
+    programSource,
+    /\.action\(async \(options: AuthLoginCommandOptions\)[\s\S]*if\s*\(methodSelection\.method === "device"\)\s*\{/,
   );
   assert.match(
     programSource,

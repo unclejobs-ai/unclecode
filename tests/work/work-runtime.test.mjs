@@ -4,7 +4,46 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import {
+  parseArgs,
+  resolveRuntimeProvider,
+} from "../../apps/unclecode-cli/src/work-runtime-args.ts";
 import { loadWorkShellDashboardProps } from "../../apps/unclecode-cli/src/work-runtime.ts";
+
+test("parseArgs extracts cwd/provider/model/reasoning/session/help/tools/prompt from work argv", () => {
+  assert.deepEqual(
+    parseArgs([
+      "--cwd",
+      "/tmp/project-a",
+      "--provider",
+      "openai",
+      "--model",
+      "gpt-5.4",
+      "--reasoning",
+      "high",
+      "--session-id",
+      "work-123",
+      "--tools",
+      "fix",
+      "auth",
+    ]),
+    {
+      cwd: "/tmp/project-a",
+      provider: "openai",
+      model: "gpt-5.4",
+      reasoning: "high",
+      sessionId: "work-123",
+      prompt: "fix auth",
+      showHelp: false,
+      showTools: true,
+    },
+  );
+});
+
+test("resolveRuntimeProvider rejects unsupported providers honestly", () => {
+  assert.equal(resolveRuntimeProvider("openai"), "openai");
+  assert.throws(() => resolveRuntimeProvider("bogus"), /Unsupported runtime provider: bogus/);
+});
 
 function buildScopedOutJwt() {
   const futureExp = Math.floor(Date.now() / 1000) + 3600;

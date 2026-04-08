@@ -5,17 +5,25 @@ Record the remaining runtime boundaries after the TUI/orchestration redesign mig
 
 ## Completed cutovers
 - `apps/unclecode-cli/src/work-launcher.ts` removed.
-- `apps/unclecode-cli/src/index.ts` now imports `launchWorkEntrypoint()` and `shouldLaunchDefaultWorkSession()` directly from `apps/unclecode-cli/src/interactive-shell.ts`.
-- `apps/unclecode-cli/src/program.ts` now imports `launchSessionCenter()` / `launchWorkEntrypoint()` directly from `apps/unclecode-cli/src/interactive-shell.ts`.
-- `unclecode`, `unclecode work`, `unclecode tui`, interactive `resume`, and `center` all share the same interactive bootstrap helpers.
+- `apps/unclecode-cli/src/index.ts` now uses app-owned startup seams (`startup-paths.ts`, `work-bootstrap.ts`, `program.ts`) instead of routing through the deleted `interactive-shell.ts` shim.
+- `apps/unclecode-cli/src/program.ts` now imports `launchSessionCenter()` from `session-center-launcher.ts` and `launchWorkEntrypoint()` from `work-bootstrap.ts` directly.
+- `unclecode`, `unclecode work`, `unclecode tui`, interactive `resume`, and `center` all share the same single-process bootstrap family.
 - Session-center handoff no longer forces a terminal clear before opening the work shell.
 - `launchWorkEntrypoint()` dispatches to the work module in-process via `runWorkCli()` instead of spawning a child node process.
+- The old root compatibility layer and the root `src/` tree have been removed entirely.
+
+## Completed vs follow-up
+- **Completed in the redesign plan:** launcher-shim removal, root `src/` retirement, shared package seams for work/runtime/TUI/controller logic, same-tree embedded work navigation, provider/runtime cutover, and broad verification stabilization.
+- **Deferred to follow-up refactor work:** further thinning the remaining large owner files, converging embedded work and session-center state behind a richer shared runtime/store model, completing plugin/skill runtime behavior beyond metadata and slash registration, and deepening guardian/orchestrator safety beyond path heuristics.
 
 ## Remaining boundaries
-- Obsolete root runtime wrappers `src/index.ts` and `src/work-shell-runtime.ts` have now been deleted; app-owned `apps/unclecode-cli/src/work-entry.ts` and `apps/unclecode-cli/src/work-runtime.ts` own the packaged work bootstrap/runtime entry path directly.
-- `src/cli.tsx` still owns the work-shell Ink app while `packages/tui/src/index.tsx` owns the session-center shell.
-- Root `src/*` still contains one major transitional work runtime surface (`cli.tsx`) that has not yet been fully absorbed into `packages/orchestrator` / `packages/tui`, but the remaining code is now mostly engine assembly, session wiring, and Dashboard/work-pane composition rather than pure lifecycle/composer preview state, home-sync effects, slash suggestion/selection/active-panel state, input/submit controller execution, composer input/submit branching helpers, reasoning/auth parsing, Dashboard prop assembly, or engine-construction helpers.
-- The work shell render tree now has a package seam: `packages/tui/src/work-shell-view.tsx` owns the shared presenter while `src/cli.tsx` still owns engine/composer/runtime wiring.
+- The primary remaining hotspots are no longer deleted root shims; they are large live owner seams:
+  - `apps/unclecode-cli/src/program.ts`
+  - `apps/unclecode-cli/src/work-runtime.ts`
+  - `packages/orchestrator/src/work-shell-engine.ts`
+  - `packages/tui/src/index.tsx`
+- `apps/unclecode-cli/src/work-runtime.ts` owns the packaged work bootstrap/runtime entry path directly.
+- The work shell render tree now has package ownership, but state/runtime convergence is still incomplete: `packages/tui/src/work-shell-view.tsx` owns the shared presenter while runtime bootstrap and orchestration assembly still flow through app/orchestrator seams.
 - `startRepl()` now renders the package `Dashboard` shell with an embedded work pane instead of rendering a standalone root work app directly.
 - `packages/tui/src/index.tsx` now exposes `shouldCaptureDashboardInput()` plus an embedded `renderWorkPane` seam so Work-tab input can bypass session-center key handling.
 - `apps/unclecode-cli/src/work-runtime.ts` now owns work-session bootstrap, arg parsing, session restore, and Dashboard prop loading without a root runtime wrapper layer in between.
