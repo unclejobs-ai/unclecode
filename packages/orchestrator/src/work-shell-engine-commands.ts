@@ -1,5 +1,6 @@
 import type {
   WorkShellLoadedSkill,
+  WorkShellMemoryScope,
   WorkShellPanel,
   WorkShellSkillListItem,
 } from "./work-shell-engine.js";
@@ -78,6 +79,83 @@ export function createLoadedSkillPanel(skill: WorkShellLoadedSkill): WorkShellPa
   return {
     title: `Skill · ${skill.name}`,
     lines: skill.content.split(/\r?\n/).slice(0, 12),
+  };
+}
+
+export type ResolvedWorkShellLocalCommand =
+  | { readonly kind: "memories" }
+  | { readonly kind: "remember"; readonly scope: WorkShellMemoryScope; readonly summary: string }
+  | { readonly kind: "remember"; readonly usageError: string };
+
+export function resolveWorkShellLocalCommand(line: string): ResolvedWorkShellLocalCommand | undefined {
+  if (line === "/memories") {
+    return { kind: "memories" };
+  }
+
+  if (!line.startsWith("/remember")) {
+    return undefined;
+  }
+
+  const parts = line.split(/\s+/).filter(Boolean);
+  const scope = parts[1] === "session" || parts[1] === "project" || parts[1] === "user" || parts[1] === "agent"
+    ? parts[1]
+    : "project";
+  const summary = (scope === "project" ? parts.slice(1) : parts.slice(2)).join(" ").trim();
+  if (!summary) {
+    return { kind: "remember", usageError: "Usage: /remember [session|project|user|agent] <text>" };
+  }
+
+  return {
+    kind: "remember",
+    scope,
+    summary,
+  };
+}
+
+export function createMemoriesPanel(
+  sessionMemory: readonly string[],
+  projectMemory: readonly string[],
+): WorkShellPanel {
+  return {
+    title: "Memories",
+    lines: [
+      "Session",
+      ...(sessionMemory.length > 0 ? sessionMemory : ["No session memories yet."]),
+      "",
+      "Project",
+      ...(projectMemory.length > 0 ? projectMemory : ["No project memories yet."]),
+    ],
+  };
+}
+
+export function redactSensitiveInlineCommandArgs(args: readonly string[]): readonly string[] {
+  const redacted = [...args];
+  const apiKeyIndex = redacted.findIndex((arg) => arg === "--api-key");
+  if (apiKeyIndex >= 0 && apiKeyIndex + 1 < redacted.length) {
+    redacted[apiKeyIndex + 1] = "[REDACTED]";
+  }
+  return redacted;
+}
+
+export function redactSensitiveInlineCommandLine(line: string): string {
+  return redactSensitiveInlineCommandArgs(line.trim().split(/\s+/).filter(Boolean)).join(" ");
+}
+
+export function resolveVisibleInlineCommand(input: {
+  line: string;
+  slashCommand: readonly string[];
+}): {
+  readonly visibleLine: string;
+  readonly visibleArgs: readonly string[];
+  readonly isAuthCommand: boolean;
+  readonly isAuthLogin: boolean;
+} {
+  const visibleArgs = redactSensitiveInlineCommandArgs(input.slashCommand);
+  return {
+    visibleLine: redactSensitiveInlineCommandLine(input.line),
+    visibleArgs,
+    isAuthCommand: input.slashCommand[0] === "auth",
+    isAuthLogin: input.slashCommand[0] === "auth" && input.slashCommand[1] === "login",
   };
 }
 

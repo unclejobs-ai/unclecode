@@ -7,15 +7,39 @@ import {
   createWorkShellPaneRuntime,
 } from "@unclecode/orchestrator";
 import {
+  createAuthKeyBuiltinResult,
+  createBuiltinStatusPanel,
+  createContextBuiltinResult,
+  createHelpBuiltinResult,
+  createLoadedSkillBuiltinResult,
+  createSkillLoadErrorEntries,
+  createSkillsBuiltinResult,
+  createSkillUsageErrorEntries,
+  createStatusBuiltinResult,
+  createToolsBuiltinResult,
+  createTraceModeBuiltinResult,
+  resolveModelBuiltinResult,
+  resolveReasoningBuiltinResult,
+} from "../../packages/orchestrator/src/work-shell-engine-builtins.ts";
+import {
   buildAuthProgressPanelLines,
   buildPromptCommandPrompt,
   createAuthLoginPendingPanel,
   createLoadedSkillPanel,
+  createMemoriesPanel,
   createSecureApiKeyEntryPanel,
   createSkillsPanel,
+  redactSensitiveInlineCommandArgs,
+  redactSensitiveInlineCommandLine,
   resolvePromptSlashCommand,
+  resolveVisibleInlineCommand,
   resolveWorkShellBuiltinCommand,
+  resolveWorkShellLocalCommand,
 } from "../../packages/orchestrator/src/work-shell-engine-commands.ts";
+import {
+  resolveInlineOperationalCommandResult,
+  resolveSecureApiKeyEntrySubmission,
+} from "../../packages/orchestrator/src/work-shell-engine-operations.ts";
 import {
   createWorkShellSessionSnapshotInput,
   loadWorkShellContextState,
@@ -243,7 +267,7 @@ function createEngine(overrides = {}) {
   };
 }
 
-test("work-shell command helpers classify builtins and build reusable panels/prompts", () => {
+test("work-shell command helpers classify builtins, local commands, and reusable panels/prompts", () => {
   assert.deepEqual(resolveWorkShellBuiltinCommand("/help"), { kind: "help" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/v"), { kind: "trace-mode", traceMode: "verbose" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/minimal"), { kind: "trace-mode", traceMode: "minimal" });
@@ -270,8 +294,152 @@ test("work-shell command helpers classify builtins and build reusable panels/pro
     "  Keep moving.",
   ]);
   assert.equal(createLoadedSkillPanel({ name: "analyze", path: "/skills/analyze", content: "# Analyze\nLook deeper.", attempts: [] }).title, "Skill · analyze");
+  assert.deepEqual(createMemoriesPanel(["session-1"], ["project-1"]).lines, [
+    "Session",
+    "session-1",
+    "",
+    "Project",
+    "project-1",
+  ]);
+  assert.deepEqual(resolveWorkShellLocalCommand("/memories"), { kind: "memories" });
+  assert.deepEqual(resolveWorkShellLocalCommand("/remember session keep this"), {
+    kind: "remember",
+    scope: "session",
+    summary: "keep this",
+  });
+  assert.deepEqual(resolveWorkShellLocalCommand("/remember"), {
+    kind: "remember",
+    usageError: "Usage: /remember [session|project|user|agent] <text>",
+  });
+  assert.deepEqual(redactSensitiveInlineCommandArgs(["auth", "login", "--api-key", "sk-secret"]), [
+    "auth",
+    "login",
+    "--api-key",
+    "[REDACTED]",
+  ]);
+  assert.equal(
+    redactSensitiveInlineCommandLine("/auth login --api-key sk-secret"),
+    "/auth login --api-key [REDACTED]",
+  );
+  assert.deepEqual(resolveVisibleInlineCommand({
+    line: "/auth login --api-key sk-secret",
+    slashCommand: ["auth", "login", "--api-key", "sk-secret"],
+  }), {
+    visibleLine: "/auth login --api-key [REDACTED]",
+    visibleArgs: ["auth", "login", "--api-key", "[REDACTED]"],
+    isAuthCommand: true,
+    isAuthLogin: true,
+  });
   assert.deepEqual(resolvePromptSlashCommand(["prompt", "review", "auth", "flow"]), { kind: "review", focus: "auth flow" });
   assert.match(buildPromptCommandPrompt({ kind: "commit", focus: "auth flow" }), /Lore protocol/);
+});
+
+test("work-shell builtin helpers resolve panels, transcript entries, and runtime transitions", () => {
+  const state = createState({
+    bridgeLines: ["bridge-1"],
+    memoryLines: ["memory-1"],
+    traceLines: ["trace-1"],
+  });
+  const help = createHelpBuiltinResult("/help", () => ({ title: "Help", lines: ["help"] }));
+  const context = createContextBuiltinResult({
+    line: "/context",
+    contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    state,
+    buildContextPanel,
+  });
+  const status = createStatusBuiltinResult({
+    line: "/status",
+    reasoning: supportedReasoning,
+    authLabel: "api-key-env",
+    buildStatusPanel: (reasoning, authLabel) => ({ title: "Status", lines: [reasoning.effort, authLabel] }),
+  });
+  const traceMode = createTraceModeBuiltinResult({
+    line: "/minimal",
+    traceMode: "minimal",
+    state,
+    contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    buildContextPanel,
+  });
+  const reasoning = resolveReasoningBuiltinResult({
+    line: "/reasoning low",
+    currentReasoning: supportedReasoning,
+    modeDefaultReasoning: supportedReasoning,
+    authLabel: "api-key-env",
+    resolveReasoningCommand: () => ({
+      nextReasoning: { ...supportedReasoning, effort: "low", source: "override" },
+      message: "Reasoning set to low.",
+    }),
+    buildStatusPanel: (nextReasoning, authLabel) => ({ title: "Status", lines: [nextReasoning.effort, authLabel] }),
+  });
+  const model = resolveModelBuiltinResult({
+    line: "/model gpt-4.1-mini",
+    currentModel: "gpt-5.4",
+    currentReasoning: supportedReasoning,
+    modeDefaultReasoning: supportedReasoning,
+    resolveModelCommand: () => ({
+      nextModel: "gpt-4.1-mini",
+      nextReasoning: {
+        effort: "unsupported",
+        source: "model-capability",
+        support: { status: "unsupported", supportedEfforts: [] },
+      },
+      message: "Model set to gpt-4.1-mini. Reasoning unsupported.",
+      panel: { title: "Models", lines: ["Current"] },
+    }),
+  });
+  const authKey = createAuthKeyBuiltinResult("/auth key");
+  const skills = createSkillsBuiltinResult("/skills", [{ name: "autopilot", path: "/skills/autopilot", scope: "project", summary: "Keep moving." }]);
+  const loadedSkill = createLoadedSkillBuiltinResult("/skill analyze", {
+    name: "analyze",
+    path: "/skills/analyze",
+    content: "# Analyze",
+    attempts: [{ path: "/skills/analyze", ok: true }],
+  });
+
+  assert.deepEqual(help.entries, [
+    { role: "user", text: "/help" },
+    { role: "system", text: "Help shown." },
+  ]);
+  assert.equal(context.panel.title, "Context expanded");
+  assert.deepEqual(status.panel.lines, ["high", "api-key-env"]);
+  assert.equal(traceMode.patch.traceMode, "minimal");
+  assert.deepEqual(reasoning.entries.at(-1), { role: "system", text: "Reasoning set to low." });
+  assert.equal(reasoning.nextReasoning.effort, "low");
+  assert.equal(model?.nextModel, "gpt-4.1-mini");
+  assert.equal(model?.shouldUpdateRuntime, true);
+  assert.equal(createToolsBuiltinResult("/tools", ["tool-a"]).at(-1)?.text, "tool-a");
+  assert.equal(authKey.composerMode, "api-key-entry");
+  assert.equal(skills.panel.title, "Skills");
+  assert.equal(loadedSkill.panel.title, "Skill · analyze");
+  assert.deepEqual(createSkillUsageErrorEntries("/skill").at(-1), {
+    role: "system",
+    text: "Usage: /skill <name>",
+  });
+  assert.deepEqual(createSkillLoadErrorEntries("/skill analyze", new Error("boom")).at(-1), {
+    role: "system",
+    text: "boom",
+  });
+  assert.deepEqual(
+    createBuiltinStatusPanel({
+      options: {
+        provider: "openai",
+        model: "gpt-5.4",
+        mode: "default",
+        authLabel: "api-key-env",
+        reasoning: supportedReasoning,
+        cwd: "/repo",
+        contextSummaryLines: [],
+      },
+      stateModel: "gpt-4.1-mini",
+      reasoning: supportedReasoning,
+      authLabel: "oauth-file",
+      buildStatusPanel: (options, reasoning, authLabel) => ({
+        title: "Status",
+        lines: [options.model, reasoning.effort, authLabel],
+      }),
+    }).lines,
+    ["gpt-4.1-mini", "high", "oauth-file"],
+  );
 });
 
 test("work-shell turn helpers build summaries and permission-stall continuations", async () => {
@@ -335,6 +503,49 @@ test("work-shell turn helpers build summaries and permission-stall continuations
     }),
     "I continued automatically and completed the rest.",
   );
+});
+
+test("work-shell operational helpers resolve secure auth entry and inline command results", async () => {
+  const appliedAuthIssues = [];
+  const secureResult = await resolveSecureApiKeyEntrySubmission({
+    line: "sk-secret-123 --org demo",
+    currentAuthLabel: "api-key-env",
+    saveApiKeyAuth: async () => ["API key login saved.", "Auth: api-key-file"],
+    refreshAuthState: async () => ({ authLabel: "api-key-file", authIssueLines: [] }),
+    extractAuthLabel: (lines) => lines[1]?.replace(/^Auth:\s*/, ""),
+    applyAuthIssueLines: (lines) => appliedAuthIssues.push(...(lines ?? [])),
+    formatWorkShellError: (message) => `ERR:${message}`,
+  });
+  const inlineProgress = [];
+  const inlineResult = await resolveInlineOperationalCommandResult({
+    line: "/auth login --api-key sk-secret-123",
+    slashCommand: ["auth", "login", "--api-key", "sk-secret-123"],
+    currentAuthLabel: "api-key-env",
+    async resolveWorkShellInlineCommand(_args, _runInlineCommand, onProgress) {
+      onProgress?.("Opening browser…");
+      onProgress?.("Enter code: ABCD-1234");
+      return { lines: ["OAuth login complete.", "Auth: oauth-file"], failed: false };
+    },
+    async runInlineCommand() {
+      return [];
+    },
+    refreshAuthState: async () => ({ authLabel: "oauth-file", authIssueLines: ["Auth issue cleared."] }),
+    extractAuthLabel: (lines) => lines[1]?.replace(/^Auth:\s*/, ""),
+    applyAuthIssueLines: (lines) => appliedAuthIssues.push(...(lines ?? [])),
+    onAuthProgressLines: (lines) => inlineProgress.push(lines),
+  });
+
+  assert.deepEqual(secureResult, {
+    kind: "success",
+    resultLines: ["API key login saved.", "Auth: api-key-file"],
+    nextAuthLabel: "api-key-file",
+  });
+  assert.equal(inlineResult.visibleLine, "/auth login --api-key [REDACTED]");
+  assert.deepEqual(inlineResult.visibleArgs, ["auth", "login", "--api-key", "[REDACTED]"]);
+  assert.equal(inlineResult.completionLine, "✓ auth login --api-key [REDACTED]");
+  assert.equal(inlineResult.nextAuthLabel, "oauth-file");
+  assert.deepEqual(inlineProgress.at(-1), ["Enter code: ABCD-1234", "Opening browser…"]);
+  assert.deepEqual(appliedAuthIssues, ["Auth issue cleared."]);
 });
 
 test("work-shell post-turn helpers persist summaries and auth recovery deterministically", async () => {
@@ -941,6 +1152,43 @@ test("WorkShellEngine can execute /research topics through the inline action lan
   assert.deepEqual(calls.inline, [["research", "run", "current", "workspace"]]);
   assert.equal(engine.getState().panel.title, "research run current workspace");
   assert.ok(engine.getState().entries.some((entry) => entry.text.includes("Research completed")));
+});
+
+test("WorkShellEngine shows memories and records /remember through the local command seam", async () => {
+  const writes = [];
+  const { engine } = createEngine({
+    sessionId: "work-shell-test-session",
+    async listScopedMemoryLines({ scope }) {
+      return scope === "session" ? ["session memory"] : ["project memory"];
+    },
+    async writeScopedMemory(input) {
+      writes.push(input);
+      return { memoryId: `${input.scope}:${input.summary}` };
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/memories");
+
+  assert.equal(engine.getState().panel.title, "Memories");
+  assert.deepEqual(engine.getState().panel.lines, [
+    "Session",
+    "session memory",
+    "",
+    "Project",
+    "project memory",
+  ]);
+
+  await engine.handleSubmit("/remember session keep auth fix visible");
+
+  assert.deepEqual(writes, [{
+    scope: "session",
+    cwd: "/repo",
+    summary: "keep auth fix visible",
+    sessionId: "work-shell-test-session",
+    agentId: "work-shell",
+  }]);
+  assert.ok(engine.getState().entries.some((entry) => entry.role === "tool" && /memory keep auth fix visible/.test(entry.text)));
 });
 
 test("WorkShellEngine reloads workspace context on demand", async () => {
