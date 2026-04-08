@@ -10,8 +10,15 @@ const workEntrypoint = path.join(
   repoRoot,
   "dist-work/apps/unclecode-cli/src/work-entry.js",
 );
+const localDistWorkEntrypoint = path.join(
+  repoRoot,
+  "apps/unclecode-cli/dist/work-entry.js",
+);
 
-if (!fs.existsSync(entrypoint) || !fs.existsSync(workEntrypoint)) {
+if (
+  !fs.existsSync(entrypoint)
+  || (!fs.existsSync(workEntrypoint) && !fs.existsSync(localDistWorkEntrypoint))
+) {
   process.stderr.write("UncleCode is not built yet. Run `npm run build` first.\n");
   process.exit(1);
 }

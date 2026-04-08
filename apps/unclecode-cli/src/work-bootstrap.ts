@@ -3,9 +3,13 @@ import type {
   EmbeddedWorkDashboardSnapshot,
   EmbeddedWorkPaneRenderOptions,
 } from "@unclecode/tui";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { TuiHomeState } from "./session-center-bootstrap.js";
+import type {
+  EmbeddedWorkPaneLoadInput,
+  TuiHomeState,
+} from "./session-center-bootstrap.js";
 
 const CLI_SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(CLI_SOURCE_DIR, "../../..");
@@ -17,6 +21,10 @@ const WORK_ENTRYPOINT = path.join(
   "src",
   "work-entry.js",
 );
+const LOCAL_DIST_DIR = path.basename(CLI_SOURCE_DIR) === "dist"
+  ? CLI_SOURCE_DIR
+  : path.resolve(CLI_SOURCE_DIR, "../dist");
+const LOCAL_DIST_WORK_ENTRYPOINT = path.join(LOCAL_DIST_DIR, "work-entry.js");
 
 type WorkShellDashboardSnapshot =
   EmbeddedWorkDashboardSnapshot<TuiHomeState>;
@@ -26,6 +34,11 @@ export type WorkModule = {
   loadWorkShellDashboardProps?: (
     args: readonly string[],
   ) => Promise<WorkShellDashboardSnapshot>;
+};
+
+export type WorkLaunchInput = {
+  readonly callerCwd?: string;
+  readonly loadModule?: (() => Promise<WorkModule>) | undefined;
 };
 
 export function withWorkCwd(
@@ -39,10 +52,30 @@ export function withWorkCwd(
   return ["--cwd", callerCwd, ...forwardedArgs];
 }
 
+export function resolveWorkEntrypointModuleUrls(): readonly string[] {
+  return [WORK_ENTRYPOINT, LOCAL_DIST_WORK_ENTRYPOINT]
+    .filter((entry, index, entries) => entries.indexOf(entry) === index)
+    .filter((entry) => existsSync(entry))
+    .map((entry) => pathToFileURL(entry).href);
+}
+
 export async function loadWorkEntrypointModule(
   moduleUrl = pathToFileURL(WORK_ENTRYPOINT).href,
 ): Promise<WorkModule> {
-  return import(moduleUrl) as Promise<WorkModule>;
+  const moduleUrls = moduleUrl === pathToFileURL(WORK_ENTRYPOINT).href
+    ? resolveWorkEntrypointModuleUrls()
+    : [moduleUrl];
+  let lastError: unknown;
+
+  for (const candidateUrl of moduleUrls) {
+    try {
+      return await import(candidateUrl) as Promise<WorkModule>;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError ?? new Error("Unable to load any built work entrypoint module.");
 }
 
 function resolveWorkModuleLoader(
@@ -53,10 +86,7 @@ function resolveWorkModuleLoader(
 
 export async function launchWorkEntrypoint(
   forwardedArgs: readonly string[],
-  input?: {
-    callerCwd?: string;
-    loadModule?: (() => Promise<WorkModule>) | undefined;
-  },
+  input?: WorkLaunchInput,
 ): Promise<void> {
   const argsWithCwd = withWorkCwd(
     [...forwardedArgs],
@@ -72,11 +102,7 @@ export async function launchWorkEntrypoint(
   await module.runWorkCli(argsWithCwd);
 }
 
-export async function loadEmbeddedWorkPane(input: {
-  workspaceRoot: string;
-  initialSelectedSessionId?: string | undefined;
-  loadWorkModule?: (() => Promise<WorkModule>) | undefined;
-}): Promise<EmbeddedWorkPaneRenderOptions<TuiHomeState> | undefined> {
+export async function loadEmbeddedWorkPane(input: EmbeddedWorkPaneLoadInput<WorkModule>): Promise<EmbeddedWorkPaneRenderOptions<TuiHomeState> | undefined> {
   const loadModule = resolveWorkModuleLoader(input.loadWorkModule);
   const module = await loadModule().catch(() => undefined);
   if (typeof module?.loadWorkShellDashboardProps !== "function") {

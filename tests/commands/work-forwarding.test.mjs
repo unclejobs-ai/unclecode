@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { withWorkCwd } from "../../apps/unclecode-cli/src/work-bootstrap.ts";
+import {
+  resolveWorkEntrypointModuleUrls,
+  withWorkCwd,
+} from "../../apps/unclecode-cli/src/work-bootstrap.ts";
 
 test("withWorkCwd injects caller cwd when none is present", () => {
   assert.deepEqual(withWorkCwd(["--tools"], "/tmp/project-a"), ["--cwd", "/tmp/project-a", "--tools"]);
@@ -9,4 +12,11 @@ test("withWorkCwd injects caller cwd when none is present", () => {
 
 test("withWorkCwd preserves explicit cwd when already provided", () => {
   assert.deepEqual(withWorkCwd(["--cwd", "/tmp/other", "--tools"], "/tmp/project-a"), ["--cwd", "/tmp/other", "--tools"]);
+});
+
+test("resolveWorkEntrypointModuleUrls prefers dist-work and keeps a local dist fallback", () => {
+  const urls = resolveWorkEntrypointModuleUrls();
+
+  assert.ok(urls.some((value) => /dist-work\/apps\/unclecode-cli\/src\/work-entry\.js$/.test(value)));
+  assert.ok(urls.some((value) => /apps\/unclecode-cli\/dist\/work-entry\.js$/.test(value)));
 });
