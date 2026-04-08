@@ -17,6 +17,10 @@ import {
   resolveWorkShellBuiltinCommand,
 } from "../../packages/orchestrator/src/work-shell-engine-commands.ts";
 import {
+  createWorkShellSessionSnapshotInput,
+  loadWorkShellContextState,
+} from "../../packages/orchestrator/src/work-shell-engine-persistence.ts";
+import {
   isWorkShellAuthFailure,
   resolveWorkShellFailureAuthLabel,
   runWorkShellPostTurnSuccessEffects,
@@ -388,6 +392,33 @@ test("work-shell trace helpers derive busy status and transcript roles honestly"
   assert.equal(resolveTraceEntryRole({ type: "provider.calling" }), "tool");
   assert.equal(extractCurrentTurnStartedAt({ type: "turn.started", startedAt: 123 }), 123);
   assert.equal(extractCurrentTurnStartedAt({ type: "tool.started", startedAt: 123 }), undefined);
+});
+
+test("work-shell persistence helpers build snapshot payloads and reload context state", async () => {
+  const snapshot = createWorkShellSessionSnapshotInput({
+    cwd: "/repo",
+    sessionId: "work-1",
+    model: "gpt-5.4",
+    mode: "default",
+    state: "idle",
+    summary: "Chat: hello",
+    traceMode: "minimal",
+  });
+  const context = await loadWorkShellContextState({
+    cwd: "/repo",
+    sessionId: "work-1",
+    currentContextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    reloadWorkspaceContext: async () => ["Loaded guidance: CLAUDE.md"],
+    listProjectBridgeLines: async () => ["bridge-1"],
+    listScopedMemoryLines: async () => ["memory-1"],
+  });
+
+  assert.equal(snapshot.sessionId, "work-1");
+  assert.deepEqual(context, {
+    contextSummaryLines: ["Loaded guidance: CLAUDE.md"],
+    bridgeLines: ["bridge-1"],
+    memoryLines: ["memory-1"],
+  });
 });
 
 test("createInitialWorkShellEngineState derives the shell defaults from options", () => {

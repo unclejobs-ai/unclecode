@@ -13,6 +13,10 @@ import {
 import * as WorkShellPostTurns from "./work-shell-engine-post-turns.js";
 import * as WorkShellTurns from "./work-shell-engine-turns.js";
 import {
+  createWorkShellSessionSnapshotInput,
+  loadWorkShellContextState,
+} from "./work-shell-engine-persistence.js";
+import {
   appendWorkShellEntries,
   createInitialWorkShellEngineState,
   createWorkShellAuthStatePatch,
@@ -938,7 +942,7 @@ export class WorkShellEngine<
     traceMode = this.state.traceMode,
   ): Promise<void> {
     this.lastSessionSummary = summary;
-    await this.persistWorkShellSessionSnapshot({
+    await this.persistWorkShellSessionSnapshot(createWorkShellSessionSnapshotInput({
       cwd: this.options.cwd,
       sessionId: this.sessionId,
       model: this.state.model,
@@ -946,15 +950,18 @@ export class WorkShellEngine<
       state,
       summary,
       traceMode,
-    });
+    }));
   }
 
   private async reloadContextState(): Promise<void> {
-    const [contextSummaryLines, bridgeLines, memoryLines] = await Promise.all([
-      this.reloadWorkspaceContext ? this.reloadWorkspaceContext(this.options.cwd) : Promise.resolve(this.currentContextSummaryLines),
-      this.listProjectBridgeLines(this.options.cwd),
-      this.listScopedMemoryLines({ scope: "session", cwd: this.options.cwd, sessionId: this.sessionId }),
-    ]);
+    const { contextSummaryLines, bridgeLines, memoryLines } = await loadWorkShellContextState({
+      cwd: this.options.cwd,
+      sessionId: this.sessionId,
+      currentContextSummaryLines: this.currentContextSummaryLines,
+      reloadWorkspaceContext: this.reloadWorkspaceContext,
+      listProjectBridgeLines: this.listProjectBridgeLines,
+      listScopedMemoryLines: this.listScopedMemoryLines,
+    });
     this.currentContextSummaryLines = contextSummaryLines;
     this.setState({
       bridgeLines,
