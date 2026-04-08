@@ -10,6 +10,7 @@ import {
   resolvePromptSlashCommand,
   resolveWorkShellBuiltinCommand,
 } from "./work-shell-engine-commands.js";
+import * as WorkShellTurns from "./work-shell-engine-turns.js";
 import {
   appendWorkShellEntries,
   createInitialWorkShellEngineState,
@@ -86,6 +87,7 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly composerMode: WorkShellComposerMode;
   readonly isBusy: boolean;
   readonly busyStatus?: string | undefined;
+  readonly currentTurnStartedAt?: number | undefined;
   readonly lastTurnDurationMs?: number | undefined;
 };
 
@@ -765,25 +767,25 @@ export class WorkShellEngine<
     }
 
     const composer = await this.resolveComposerInput(line, this.options.cwd);
-    await this.executePromptTurn({
-      transcriptText: composer.transcriptText,
-      prompt: composer.prompt,
-      attachments: composer.attachments,
-      sessionSummary: `Chat: ${summarizePrompt(composer.prompt)}`,
-      failureSummary: `Chat failed: ${summarizePrompt(line)}`,
-    });
+    await this.executePromptTurn(
+      WorkShellTurns.createChatPromptTurnInput({
+        line,
+        composer,
+      }),
+    );
   }
 
   private async executePromptCommand(
     transcriptText: string,
     promptCommand: { readonly kind: "review" | "commit"; readonly focus?: string },
   ): Promise<void> {
-    await this.executePromptTurn({
-      transcriptText,
-      prompt: buildPromptCommandPrompt(promptCommand),
-      sessionSummary: `${promptCommand.kind === "review" ? "Review" : "Commit draft"}: ${summarizePrompt(promptCommand.focus ?? "current changes")}`,
-      failureSummary: `${promptCommand.kind === "review" ? "Review" : "Commit draft"} failed: ${summarizePrompt(promptCommand.focus ?? transcriptText)}`,
-    });
+    await this.executePromptTurn(
+      WorkShellTurns.createPromptCommandTurnInput({
+        transcriptText,
+        prompt: buildPromptCommandPrompt(promptCommand),
+        promptCommand,
+      }),
+    );
   }
 
   private async executePromptTurn(input: {
@@ -794,8 +796,8 @@ export class WorkShellEngine<
     attachments?: readonly Attachment[];
   }): Promise<void> {
     this.appendEntries({ role: "user", text: input.transcriptText });
-    this.setState({ isBusy: true, busyStatus: "thinking" });
     const turnStartedAt = Date.now();
+    this.setState({ isBusy: true, busyStatus: "thinking", currentTurnStartedAt: turnStartedAt });
 
     try {
       await this.persistSessionSnapshot("running", input.sessionSummary).catch(() => undefined);
@@ -805,7 +807,10 @@ export class WorkShellEngine<
       const assistantText = await this.finalizeAssistantReply(input.prompt, result.text || "(empty response)");
       this.appendEntries({ role: "assistant", text: assistantText });
 
-      const bridgeSummary = summarizeText(`Q: ${input.transcriptText} · A: ${assistantText}`);
+      const bridgeSummary = WorkShellTurns.createConversationTurnSummary({
+        transcriptText: input.transcriptText,
+        assistantText,
+      });
       const bridge = await this.publishContextBridge({
         cwd: this.options.cwd,
         summary: bridgeSummary,
@@ -826,7 +831,10 @@ export class WorkShellEngine<
       this.setState({ bridgeLines: [bridge.line, ...this.state.bridgeLines].slice(0, 6) });
       this.pushTraceLine(bridgeTrace);
 
-      const memorySummary = summarizeText(`Q: ${input.transcriptText} · A: ${assistantText}`);
+      const memorySummary = WorkShellTurns.createConversationTurnSummary({
+        transcriptText: input.transcriptText,
+        assistantText,
+      });
       const memoryResult = await this.writeScopedMemory({
         scope: "session",
         cwd: this.options.cwd,
@@ -866,6 +874,7 @@ export class WorkShellEngine<
           state: this.state,
           authLabel: nextAuthLabel,
         }),
+        currentTurnStartedAt: undefined,
         lastTurnDurationMs: Date.now() - turnStartedAt,
         ...(isAuthFailure
           ? { panel: this.buildStatusPanelFor(this.state.reasoning, nextAuthLabel) }
@@ -876,6 +885,7 @@ export class WorkShellEngine<
       this.setState(createWorkShellBusyStatePatch({
         state: this.state,
         isBusy: false,
+        clearCurrentTurnStartedAt: true,
       }));
     }
   }
@@ -884,10 +894,17 @@ export class WorkShellEngine<
     const line = this.formatAgentTraceLine(event);
     const busyStatus = resolveBusyStatusFromTraceEvent(event, line);
     if (busyStatus !== null) {
+      const startedAt = (event as { readonly startedAt?: unknown }).startedAt;
       this.setState(createWorkShellBusyStatePatch({
         state: this.state,
         isBusy: this.state.isBusy,
         ...(busyStatus ? { busyStatus } : {}),
+        ...(event.type === "turn.started" && typeof startedAt === "number"
+          ? { currentTurnStartedAt: startedAt }
+          : {}),
+        ...(event.type === "turn.completed"
+          ? { clearCurrentTurnStartedAt: true }
+          : {}),
       }));
     }
 
@@ -905,13 +922,16 @@ export class WorkShellEngine<
   }
 
   private async finalizeAssistantReply(prompt: string, assistantText: string): Promise<string> {
-    const cleanedAssistantText = stripPermissionSeekingStallOutro(assistantText) || "(empty response)";
-    if (!this.options.autoContinueOnPermissionStall || !detectPermissionSeekingStall(assistantText)) {
+    const cleanedAssistantText = WorkShellTurns.stripPermissionSeekingStallOutro(assistantText) || "(empty response)";
+    if (!this.options.autoContinueOnPermissionStall || !WorkShellTurns.detectPermissionSeekingStall(assistantText)) {
       return cleanedAssistantText;
     }
 
-    const followUp = await this.agent.runTurn(buildPermissionStallContinuePrompt(prompt, cleanedAssistantText), []);
-    const continuedText = stripPermissionSeekingStallOutro(followUp.text || "").trim();
+    const followUp = await this.agent.runTurn(
+      WorkShellTurns.buildPermissionStallContinuePrompt(prompt, cleanedAssistantText),
+      [],
+    );
+    const continuedText = WorkShellTurns.stripPermissionSeekingStallOutro(followUp.text || "").trim();
     return continuedText || cleanedAssistantText;
   }
 
@@ -1016,17 +1036,6 @@ function resolveBusyStatusFromTraceEvent(
   return null;
 }
 
-const PERMISSION_STALL_PATTERNS = [
-  /^(?:if you want|if you'd like|if you want me to|if you'd like me to)\b/i,
-  /^(?:let me know|tell me) if you (?:want|would like)\b/i,
-  /^(?:i can|i could) (?:continue|keep going|also continue|also keep going|take another pass|handle the rest|do the rest|clean up the remaining)\b/i,
-  /^happy to (?:continue|keep going|take another pass)\b/i,
-];
-
-function summarizePrompt(value: string): string {
-  return value.length > 52 ? `${value.slice(0, 49)}...` : value;
-}
-
 function redactSensitiveInlineCommandArgs(args: readonly string[]): readonly string[] {
   const redacted = [...args];
   const apiKeyIndex = redacted.findIndex((arg) => arg === "--api-key");
@@ -1038,79 +1047,4 @@ function redactSensitiveInlineCommandArgs(args: readonly string[]): readonly str
 
 function redactSensitiveInlineCommandLine(line: string): string {
   return redactSensitiveInlineCommandArgs(line.trim().split(/\s+/).filter(Boolean)).join(" ");
-}
-
-function summarizeText(value: string): string {
-  return value.length > 72 ? `${value.slice(0, 69)}...` : value;
-}
-
-function splitReplyParagraphs(text: string): readonly string[] {
-  return text
-    .trim()
-    .split(/\n\s*\n/g)
-    .map((segment) => segment.trim())
-    .filter((segment) => segment.length > 0);
-}
-
-function splitReplySentences(text: string): readonly string[] {
-  return text
-    .trim()
-    .split(/(?<=[.!?])\s+/)
-    .map((segment) => segment.trim())
-    .filter((segment) => segment.length > 0);
-}
-
-function isPermissionSeekingSegment(text: string): boolean {
-  const normalized = text.trim().replace(/\s+/g, " ");
-  return normalized.length > 0 && PERMISSION_STALL_PATTERNS.some((pattern) => pattern.test(normalized));
-}
-
-export function detectPermissionSeekingStall(text: string): boolean {
-  const paragraphs = splitReplyParagraphs(text);
-  const lastParagraph = paragraphs.at(-1);
-  if (!lastParagraph) {
-    return false;
-  }
-  if (isPermissionSeekingSegment(lastParagraph)) {
-    return true;
-  }
-
-  const sentences = splitReplySentences(lastParagraph);
-  return sentences.length > 1 && isPermissionSeekingSegment(sentences.at(-1) ?? "");
-}
-
-export function stripPermissionSeekingStallOutro(text: string): string {
-  const normalized = text.trim();
-  if (!normalized) {
-    return normalized;
-  }
-
-  const paragraphs = splitReplyParagraphs(normalized);
-  const lastParagraph = paragraphs.at(-1);
-  if (!lastParagraph) {
-    return normalized;
-  }
-  if (paragraphs.length > 1 && isPermissionSeekingSegment(lastParagraph)) {
-    return paragraphs.slice(0, -1).join("\n\n").trim();
-  }
-
-  const sentences = splitReplySentences(lastParagraph);
-  if (sentences.length > 1 && isPermissionSeekingSegment(sentences.at(-1) ?? "")) {
-    const trimmedParagraph = sentences.slice(0, -1).join(" ").trim();
-    return [...paragraphs.slice(0, -1), trimmedParagraph].filter((segment) => segment.length > 0).join("\n\n").trim();
-  }
-
-  return normalized;
-}
-
-export function buildPermissionStallContinuePrompt(originalPrompt: string, previousAnswer: string): string {
-  return [
-    "Continue automatically without asking for permission.",
-    'Do not say "if you want", "if you\'d like", or "let me know".',
-    "Perform the next concrete pass now and report the completed work plus verification.",
-    `Original request: ${originalPrompt}`,
-    previousAnswer ? `Previous partial answer:\n${previousAnswer}` : "",
-  ]
-    .filter((segment) => segment.length > 0)
-    .join("\n\n");
 }

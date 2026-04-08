@@ -587,7 +587,7 @@ export function buildSlashSuggestionPanel(
       "",
       ...visible.map((entry, index) => `${index === selected ? "›" : " "} ${entry.command}  ${entry.description}`),
       "",
-      "↑↓ · Tab · Enter",
+      "↑↓ move · Enter run",
     ],
   };
 }

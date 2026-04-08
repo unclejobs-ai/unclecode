@@ -159,7 +159,7 @@ export function getWorkShellAttachmentLineColor(index: number): string {
 
 export function getWorkShellComposerHint(inputValue: string, slashSuggestionCount: number): string | undefined {
   if (inputValue.trim().startsWith("/")) {
-    return slashSuggestionCount > 0 ? "↑↓ · Tab · Enter" : "No slash yet.";
+    return slashSuggestionCount > 0 ? "↑↓ move · Enter run" : "No slash yet.";
   }
   if (inputValue.trim().length === 0) {
     return "Enter send · Shift+Enter newline · / commands · @file context";
@@ -234,14 +234,20 @@ export function formatWorkShellStatusLine(input: {
 export function formatWorkShellUsageLine(input: {
   readonly isBusy: boolean;
   readonly busyStatus?: string;
+  readonly currentTurnStartedAt?: number;
   readonly lastTurnDurationMs?: number;
+  readonly nowMs?: number;
 }): string {
   const activity = input.isBusy
     ? "Working now"
     : "Ready";
-  const usage = input.lastTurnDurationMs !== undefined
-    ? `last reply ${formatCompactDuration(input.lastTurnDurationMs)}`
-    : "no reply yet";
+  const usage = input.isBusy
+    ? input.currentTurnStartedAt !== undefined
+      ? `elapsed ${formatCompactDuration(Math.max(0, (input.nowMs ?? Date.now()) - input.currentTurnStartedAt))}`
+      : "elapsed now"
+    : input.lastTurnDurationMs !== undefined
+      ? `last reply ${formatCompactDuration(input.lastTurnDurationMs)}`
+      : "no reply yet";
   const detail = input.isBusy && input.busyStatus
     ? input.busyStatus.replace(/^[·→★✓✖↔]\s*/u, "").trim()
     : undefined;
@@ -376,6 +382,7 @@ export function WorkShellView(props: {
   readonly isBusy: boolean;
   readonly busyStatus?: string;
   readonly activePanel: WorkShellPanel;
+  readonly currentTurnStartedAt?: number;
   readonly lastTurnDurationMs?: number;
   readonly attachmentLines?: readonly string[];
   readonly composer: React.ReactNode;
@@ -396,6 +403,7 @@ export function WorkShellView(props: {
   const usageLine = formatWorkShellUsageLine({
     isBusy: props.isBusy,
     ...(props.busyStatus ? { busyStatus: props.busyStatus } : {}),
+    ...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {}),
     ...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {}),
   });
 

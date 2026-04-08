@@ -17,6 +17,14 @@ import {
   resolveWorkShellBuiltinCommand,
 } from "../../packages/orchestrator/src/work-shell-engine-commands.ts";
 import {
+  buildPermissionStallContinuePrompt,
+  createChatPromptTurnInput,
+  createConversationTurnSummary,
+  createPromptCommandTurnInput,
+  detectPermissionSeekingStall,
+  stripPermissionSeekingStallOutro,
+} from "../../packages/orchestrator/src/work-shell-engine-turns.ts";
+import {
   appendWorkShellEntries,
   createInitialWorkShellEngineState,
   createWorkShellAuthStatePatch,
@@ -251,6 +259,58 @@ test("work-shell command helpers classify builtins and build reusable panels/pro
   assert.match(buildPromptCommandPrompt({ kind: "commit", focus: "auth flow" }), /Lore protocol/);
 });
 
+test("work-shell turn helpers build summaries and permission-stall continuations", () => {
+  assert.deepEqual(
+    createChatPromptTurnInput({
+      line: "review everything in this repo please",
+      composer: {
+        prompt: "review everything in this repo please",
+        transcriptText: "review everything in this repo please",
+        attachments: ["img-1"],
+      },
+    }),
+    {
+      transcriptText: "review everything in this repo please",
+      prompt: "review everything in this repo please",
+      attachments: ["img-1"],
+      sessionSummary: "Chat: review everything in this repo please",
+      failureSummary: "Chat failed: review everything in this repo please",
+    },
+  );
+  assert.deepEqual(
+    createPromptCommandTurnInput({
+      transcriptText: "/review auth flow",
+      prompt: "prompt-body",
+      promptCommand: { kind: "review", focus: "auth flow" },
+    }),
+    {
+      transcriptText: "/review auth flow",
+      prompt: "prompt-body",
+      sessionSummary: "Review: auth flow",
+      failureSummary: "Review failed: auth flow",
+    },
+  );
+  assert.match(
+    createConversationTurnSummary({
+      transcriptText: "question",
+      assistantText: "answer",
+    }),
+    /^Q: question · A: answer/,
+  );
+  assert.equal(
+    detectPermissionSeekingStall("Done.\n\nIf you want, I can continue."),
+    true,
+  );
+  assert.equal(
+    stripPermissionSeekingStallOutro("Done.\n\nIf you want, I can continue."),
+    "Done.",
+  );
+  assert.match(
+    buildPermissionStallContinuePrompt("finish cleanup", "Done."),
+    /Continue automatically without asking for permission/,
+  );
+});
+
 test("createInitialWorkShellEngineState derives the shell defaults from options", () => {
   const state = createInitialWorkShellEngineState({
     options: {
@@ -276,13 +336,22 @@ test("work-shell state helpers append entries and update auth/busy transitions d
   const state = createState();
   const withEntries = { ...state, ...appendWorkShellEntries(state, { role: "system", text: "hello" }) };
   const withAuth = { ...withEntries, ...createWorkShellAuthStatePatch({ state: withEntries, authLabel: "oauth-file", authLauncherLines: ["Saved auth found."] }) };
-  const withBusy = { ...withAuth, ...createWorkShellBusyStatePatch({ state: withAuth, isBusy: true, busyStatus: "thinking" }) };
+  const withBusy = {
+    ...withAuth,
+    ...createWorkShellBusyStatePatch({
+      state: withAuth,
+      isBusy: true,
+      busyStatus: "thinking",
+      currentTurnStartedAt: 123,
+    }),
+  };
 
   assert.deepEqual(withEntries.entries, [{ role: "system", text: "hello" }]);
   assert.equal(withAuth.authLabel, "oauth-file");
   assert.deepEqual(withAuth.authLauncherLines, ["Saved auth found."]);
   assert.equal(withBusy.isBusy, true);
   assert.equal(withBusy.busyStatus, "thinking");
+  assert.equal(withBusy.currentTurnStartedAt, 123);
 });
 
 test("work-shell state helpers update trace mode and trace lines without mutating pinned panels", () => {
@@ -817,6 +886,7 @@ test("WorkShellEngine keeps a lightweight busy status even outside verbose trace
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.match(engine.getState().busyStatus ?? "", /thinking/i);
+  assert.equal(typeof engine.getState().currentTurnStartedAt, "number");
   assert.equal(engine.getState().traceLines.length, 0);
 });
 

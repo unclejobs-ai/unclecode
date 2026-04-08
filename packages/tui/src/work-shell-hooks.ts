@@ -151,6 +151,7 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly authLabel: string;
   readonly isBusy: boolean;
   readonly busyStatus?: string | undefined;
+  readonly currentTurnStartedAt?: number | undefined;
   readonly lastTurnDurationMs?: number | undefined;
   readonly bridgeLines: readonly string[];
   readonly memoryLines: readonly string[];

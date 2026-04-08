@@ -105,7 +105,7 @@ test("getWorkShellEntryPresentation keeps user, assistant, tool, and system role
 });
 
 test("getWorkShellComposerHint keeps slash discovery guidance inside the shared work presenter seam", () => {
-  assert.equal(getWorkShellComposerHint("/auth", 2), "↑↓ · Tab · Enter");
+  assert.equal(getWorkShellComposerHint("/auth", 2), "↑↓ move · Enter run");
   assert.equal(getWorkShellComposerHint("/unknown", 0), "No slash yet.");
   assert.equal(
     getWorkShellComposerHint("", 0),
@@ -514,9 +514,11 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
     formatWorkShellUsageLine({
       isBusy: true,
       busyStatus: "thinking inspect repo",
+      currentTurnStartedAt: 1000,
+      nowMs: 2480,
       lastTurnDurationMs: 1480,
     }),
-    "Working now · last reply 1.5s · thinking inspect repo",
+    "Working now · elapsed 1.5s · thinking inspect repo",
   );
   assert.equal(
     normalizeMarkdownDisplayText("## Heading\n- `npm run check`\n- **Done**"),

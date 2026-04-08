@@ -36,6 +36,7 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     composerMode: "default",
     isBusy: false,
     busyStatus: undefined,
+    currentTurnStartedAt: undefined,
     lastTurnDurationMs: undefined,
   };
 }
@@ -51,10 +52,17 @@ export function createWorkShellBusyStatePatch<Reasoning extends WorkShellReasoni
   state: WorkShellEngineState<Reasoning>;
   isBusy: boolean;
   busyStatus?: string | undefined;
+  currentTurnStartedAt?: number | undefined;
+  clearCurrentTurnStartedAt?: boolean | undefined;
 }): Partial<WorkShellEngineState<Reasoning>> {
   return {
     isBusy: input.isBusy,
     busyStatus: input.busyStatus,
+    ...(input.currentTurnStartedAt !== undefined
+      ? { currentTurnStartedAt: input.currentTurnStartedAt }
+      : input.clearCurrentTurnStartedAt
+        ? { currentTurnStartedAt: undefined }
+        : {}),
   };
 }
 

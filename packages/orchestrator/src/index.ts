@@ -15,6 +15,7 @@ export * from "./turn-orchestrator.js";
 export * from "./work-agent.js";
 export * from "./work-shell-engine.js";
 export * from "./work-shell-engine-commands.js";
+export * from "./work-shell-engine-turns.js";
 export * from "./work-shell-engine-factory.js";
 export * from "./work-shell-inline-command.js";
 export * from "./work-shell-pane-runtime.js";
