@@ -82,7 +82,6 @@ export function getWorkShellPanelDisplayMode(input: {
   readonly inputValue: string;
   readonly terminalColumns?: number;
 }): "hidden" | "overlay" | "side" | "bottom" {
-  const terminalColumns = input.terminalColumns ?? process.stdout.columns ?? 120;
   const slashActive = input.inputValue.trim().startsWith("/");
   const interactivePanel = input.panelTitle === "Auth" || input.panelTitle === "Commands" || input.panelTitle === "Models";
 
@@ -92,8 +91,8 @@ export function getWorkShellPanelDisplayMode(input: {
   if (input.panelTitle === "Context expanded") {
     return "overlay";
   }
-  if (slashActive && interactivePanel && terminalColumns >= 160) {
-    return "side";
+  if (slashActive && interactivePanel) {
+    return "bottom";
   }
 
   return "bottom";
@@ -120,7 +119,7 @@ export function getWorkShellBottomDrawerMinHeight(
     return 0;
   }
   if (inputValue.trim().startsWith("/")) {
-    return 8;
+    return 6;
   }
   if (
     panelTitle === "Commands" ||
@@ -131,7 +130,7 @@ export function getWorkShellBottomDrawerMinHeight(
     panelTitle === "Mode" ||
     panelTitle === "MCP"
   ) {
-    return 8;
+    return 6;
   }
   return 0;
 }
@@ -360,6 +359,12 @@ export function WorkShellView(props: {
 }) {
   const composerHint = props.composerHintOverride ?? getWorkShellComposerHint(props.inputValue, props.slashSuggestionCount);
   const [busyFrame, setBusyFrame] = React.useState(0);
+  const statusLine = formatWorkShellStatusLine({
+    model: props.model,
+    reasoningLabel: props.reasoningLabel,
+    mode: props.mode,
+    authLabel: props.authLabel,
+  });
 
   React.useEffect(() => {
     if (!props.isBusy) {
@@ -369,7 +374,7 @@ export function WorkShellView(props: {
 
     const interval = setInterval(() => {
       setBusyFrame((current) => current + 1);
-    }, 80);
+    }, 160);
 
     return () => {
       clearInterval(interval);
@@ -443,20 +448,10 @@ export function WorkShellView(props: {
     <Box flexDirection="column" paddingX={1}>
       <Box justifyContent="space-between">
         <Text bold>{formatWorkShellProviderTitle(props.provider)}</Text>
-        <Text color="gray">{props.headerHint ?? "Esc overlay · /auth sign-in · /review changes · /context"}</Text>
+        <Text color="gray">{props.headerHint ?? "Esc sessions · /auth · /model · /review"}</Text>
       </Box>
       <Box marginTop={1} borderStyle="round" borderColor="gray" paddingX={1}>
-        <Text>
-          <Text color="cyan">{props.model}</Text>
-          <Text color="gray">  ·  </Text>
-          <Text color={props.reasoningSupported ? "green" : "yellow"}>
-            {humanizeWorkShellReasoningLabel(props.reasoningLabel)}
-          </Text>
-          <Text color="gray">  ·  </Text>
-          <Text color="magenta">{humanizeWorkShellModeLabel(props.mode)}</Text>
-          <Text color="gray">  ·  </Text>
-          <Text color="yellow">{compactWorkShellAuthLabel(props.authLabel)}</Text>
-        </Text>
+        <Text color={props.reasoningSupported ? "white" : "yellow"}>{statusLine}</Text>
       </Box>
       {getWorkShellPanelAnchor(panelDisplayMode) === "with-conversation" ? (
         <Box marginTop={1}>

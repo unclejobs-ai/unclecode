@@ -144,7 +144,7 @@ test("getWorkShellPanelPlacement keeps long-session panels near the composer by 
       inputValue: "/auth",
       terminalColumns: 180,
     }),
-    "side",
+    "bottom",
   );
   assert.equal(
     getWorkShellPanelPlacement({
@@ -152,7 +152,7 @@ test("getWorkShellPanelPlacement keeps long-session panels near the composer by 
       inputValue: "/model",
       terminalColumns: 180,
     }),
-    "side",
+    "bottom",
   );
   assert.equal(
     getWorkShellPanelPlacement({
@@ -164,19 +164,19 @@ test("getWorkShellPanelPlacement keeps long-session panels near the composer by 
   );
   assert.equal(
     getWorkShellBottomDrawerMinHeight("bottom", "Commands", "/auth"),
-    8,
+    6,
   );
   assert.equal(
     getWorkShellBottomDrawerMinHeight("bottom", "Models", "/model"),
-    8,
+    6,
   );
   assert.equal(
     getWorkShellBottomDrawerMinHeight("bottom", "Session status", "plain text"),
-    8,
+    6,
   );
   assert.equal(
     getWorkShellBottomDrawerMinHeight("bottom", "Doctor", "plain text"),
-    8,
+    6,
   );
   assert.equal(getWorkShellAttachmentPlacement(), "after-composer");
   assert.equal(getWorkShellAttachmentMinHeight(), 4);

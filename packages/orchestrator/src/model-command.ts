@@ -109,13 +109,13 @@ function buildModelPanel(input: {
       `Thinking · ${describePanelReasoning(input.currentReasoning, currentSupport)}`,
       "",
       "Available",
-      ...input.models.map((model) => {
+      ...input.models.slice(0, 6).map((model) => {
         const support = getReasoningSupport(input.provider, model);
         const active = model === input.currentModel;
         return `${active ? "›" : " "} /model ${model}  ${formatModelPanelSupportLabel({ active, support })}`;
       }),
       "",
-      "Enter switches · Esc closes",
+      "Enter switch · Esc close",
     ],
   };
 }

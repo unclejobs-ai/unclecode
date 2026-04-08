@@ -521,7 +521,7 @@ function buildModelSlashSuggestionPanel(
   suggestions: readonly { readonly command: string; readonly description: string }[],
   selectedIndex: number,
 ): WorkShellPanel {
-  const visible = suggestions.slice(0, 8);
+  const visible = suggestions.slice(0, 6);
   const selected = clampWorkShellSlashSelection(selectedIndex, visible.length);
   const modelEntries = visible.filter(
     (entry) => entry.command.startsWith("/model ") && entry.command !== "/model list",
@@ -536,13 +536,11 @@ function buildModelSlashSuggestionPanel(
       "Current",
       `Model · ${currentModel}`,
       `Thinking · ${currentMeta.reasoning}`,
-      ...(currentMeta.support ? [`Support · ${currentMeta.support}`] : []),
       "",
       "Available",
       ...modelEntries.map((entry) => `${visible.indexOf(entry) === selected ? "›" : " "} ${entry.command}  ${compactModelSuggestionDescription(entry.description)}`),
       "",
-      "Enter switches · Esc closes",
-      "↑↓ · Tab · Enter",
+      "Enter switch · Esc close",
     ],
   };
 }
@@ -555,7 +553,7 @@ export function buildSlashSuggestionPanel(
   browserOAuthAvailable = true,
   authLauncherLines?: readonly string[],
 ): WorkShellPanel {
-  const visible = suggestions.slice(0, 8);
+  const visible = suggestions.slice(0, 6);
   const selected = clampWorkShellSlashSelection(selectedIndex, visible.length);
 
   if (input.trim().startsWith("/auth")) {
@@ -574,7 +572,6 @@ export function buildSlashSuggestionPanel(
         ...visible.map((entry, index) => `${index === selected ? "›" : " "} ${entry.command}  ${entry.description}`),
         "",
         signedIn ? "Tip · /auth logout" : "Tip · /auth login",
-        "↑↓ · Tab · Enter",
       ],
     };
   }
@@ -588,7 +585,7 @@ export function buildSlashSuggestionPanel(
     lines: [
       `${input.trim()} matches`,
       "",
-      ...visible.flatMap((entry, index) => [`${index === selected ? "›" : " "} ${entry.command}`, `  ${entry.description}`]),
+      ...visible.map((entry, index) => `${index === selected ? "›" : " "} ${entry.command}  ${entry.description}`),
       "",
       "↑↓ · Tab · Enter",
     ],

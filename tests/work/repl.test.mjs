@@ -113,7 +113,7 @@ test("resolveModelCommand lists models and updates reasoning support on switch",
   assert.match(listed.panel.lines.join("\n"), /Thinking · high \(mode-default\)/);
   assert.match(listed.panel.lines.join("\n"), /active · medium/);
   assert.match(listed.panel.lines.join("\n"), /no reasoning/);
-  assert.match(listed.panel.lines.join("\n"), /Enter switches · Esc closes/);
+  assert.match(listed.panel.lines.join("\n"), /Enter switch · Esc close/);
 
   const switched = resolveModelCommand("/model gpt-4.1-mini", {
     provider: "openai",
@@ -834,18 +834,17 @@ test("buildSlashSuggestionPanel shows a model-focused picker for /model intent",
   );
 
   assert.equal(panel.title, "Models");
-  assert.deepEqual(panel.lines.slice(0, 10), [
+  assert.deepEqual(panel.lines.slice(0, 8), [
     "Current",
     "Model · gpt-5.4",
     "Thinking · default medium",
-    "Support · low, medium, high",
     "",
     "Available",
     "› /model gpt-5.4  active · medium",
     "  /model gpt-4.1-mini  no reasoning",
     "",
-    "Enter switches · Esc closes",
   ]);
+  assert.equal(panel.lines.at(-1), "Enter switch · Esc close");
 });
 
 test("buildSlashSuggestionPanel describes api-key auth distinctly", () => {
@@ -1131,8 +1130,7 @@ test("buildSlashSuggestionPanel shows reload guidance in the general command pal
   );
 
   assert.equal(panel.title, "Commands");
-  assert.ok(panel.lines.includes("› /reload"));
-  assert.ok(panel.lines.includes("  Reload workspace guidance, skills, and extension context."));
+  assert.ok(panel.lines.includes("› /reload  Reload workspace guidance, skills, and extension context."));
 });
 
 test("getWorkShellSlashSuggestions surfaces prompt helpers for review, commit, and research", () => {
