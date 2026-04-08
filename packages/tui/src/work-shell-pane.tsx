@@ -85,29 +85,43 @@ export function WorkShellPane<
     lastTurnDurationMs,
   } = engineState;
   const isSecureApiKeyEntry = engineState.composerMode === "api-key-entry";
+  const reasoningLabel = React.useMemo(
+    () => props.getReasoningLabel(reasoning),
+    [props.getReasoningLabel, reasoning],
+  );
+  const reasoningSupported = React.useMemo(
+    () => props.isReasoningSupported(reasoning),
+    [props.isReasoningSupported, reasoning],
+  );
+  const authDisplayLabel = React.useMemo(
+    () => formatAuthLabelForDisplay(authLabel),
+    [authLabel],
+  );
+  const attachmentLines = React.useMemo(
+    () => composerPreview.attachments.length > 0
+      ? [
+          ...buildAttachmentPreviewLines(composerPreview.attachments),
+          formatInlineImageSupportLine(),
+        ]
+      : undefined,
+    [composerPreview.attachments],
+  );
 
   return (
     <WorkShellView
       provider={props.provider}
       model={model}
-      reasoningLabel={props.getReasoningLabel(reasoning)}
-      reasoningSupported={props.isReasoningSupported(reasoning)}
+      reasoningLabel={reasoningLabel}
+      reasoningSupported={reasoningSupported}
       mode={props.mode}
-      authLabel={formatAuthLabelForDisplay(authLabel)}
+      authLabel={authDisplayLabel}
       entries={entries}
       isBusy={isBusy}
       {...(busyStatus ? { busyStatus } : {})}
       {...(currentTurnStartedAt !== undefined ? { currentTurnStartedAt } : {})}
       {...(lastTurnDurationMs !== undefined ? { lastTurnDurationMs } : {})}
       activePanel={activePanel}
-      {...(composerPreview.attachments.length > 0
-        ? {
-            attachmentLines: [
-              ...buildAttachmentPreviewLines(composerPreview.attachments),
-              formatInlineImageSupportLine(),
-            ],
-          }
-        : {})}
+      {...(attachmentLines ? { attachmentLines } : {})}
       composer={
         <Composer
           value={inputValue}
