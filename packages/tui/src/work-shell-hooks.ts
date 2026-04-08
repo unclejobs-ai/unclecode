@@ -33,6 +33,25 @@ export function createEmptyWorkShellComposerPreview<Attachment = never>(): WorkS
   };
 }
 
+export function shouldUseSlowComposerPreview(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  return /(?:^|\s)@(?:"[^"\n]+"|\S+)/.test(trimmed) ||
+    /(?:^|\s|"|')(?:[^\s"']+\.(?:png|jpe?g|gif|webp|bmp))(?:$|\s|"|')/i.test(trimmed);
+}
+
+export function createFastWorkShellComposerPreview<Attachment = never>(value: string): WorkShellComposerPreview<Attachment> {
+  const trimmed = value.trim();
+  return {
+    prompt: trimmed,
+    attachments: [],
+    transcriptText: trimmed,
+  };
+}
+
 export interface WorkShellStateSource<State> {
   getState(): State;
   subscribe(listener: (state: State) => void): () => void;
@@ -131,6 +150,7 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly reasoning: Reasoning;
   readonly authLabel: string;
   readonly isBusy: boolean;
+  readonly busyStatus?: string | undefined;
   readonly bridgeLines: readonly string[];
   readonly memoryLines: readonly string[];
   readonly authLauncherLines?: readonly string[];
@@ -413,6 +433,11 @@ export function useWorkShellComposerPreview<Attachment>(input: {
   useEffect(() => {
     if (!input.value.trim()) {
       setPreview(createEmptyWorkShellComposerPreview());
+      return;
+    }
+
+    if (!shouldUseSlowComposerPreview(input.value)) {
+      setPreview(createFastWorkShellComposerPreview(input.value));
       return;
     }
 

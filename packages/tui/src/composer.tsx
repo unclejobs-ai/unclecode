@@ -1,5 +1,5 @@
+import { Box, Text, useInput } from "ink";
 import { useEffect, useRef, useState } from "react";
-import TextInput from "ink-text-input";
 
 const COMPOSER_PASTE_THRESHOLD = 48;
 const PASTE_SETTLE_MS = 120;
@@ -25,6 +25,134 @@ export function shouldTreatComposerChangeAsPaste(
   return nextValue.includes("\n") && !previousValue.includes("\n");
 }
 
+export function applyComposerEdit(input: {
+  readonly value: string;
+  readonly cursorOffset: number;
+  readonly input: string;
+  readonly key: {
+    readonly leftArrow?: boolean;
+    readonly rightArrow?: boolean;
+    readonly backspace?: boolean;
+    readonly delete?: boolean;
+    readonly return?: boolean;
+    readonly shift?: boolean;
+  };
+  readonly allowLineBreaks: boolean;
+}): {
+  readonly nextValue: string;
+  readonly nextCursorOffset: number;
+  readonly submitted: boolean;
+} {
+  const cursorOffset = Math.max(0, Math.min(input.cursorOffset, input.value.length));
+
+  if (input.key.return) {
+    if (input.key.shift && input.allowLineBreaks) {
+      return {
+        nextValue: `${input.value.slice(0, cursorOffset)}\n${input.value.slice(cursorOffset)}`,
+        nextCursorOffset: cursorOffset + 1,
+        submitted: false,
+      };
+    }
+
+    return {
+      nextValue: input.value,
+      nextCursorOffset: cursorOffset,
+      submitted: true,
+    };
+  }
+
+  if (input.key.leftArrow) {
+    return {
+      nextValue: input.value,
+      nextCursorOffset: Math.max(0, cursorOffset - 1),
+      submitted: false,
+    };
+  }
+
+  if (input.key.rightArrow) {
+    return {
+      nextValue: input.value,
+      nextCursorOffset: Math.min(input.value.length, cursorOffset + 1),
+      submitted: false,
+    };
+  }
+
+  if (input.key.backspace || input.key.delete) {
+    if (cursorOffset === 0) {
+      return {
+        nextValue: input.value,
+        nextCursorOffset: cursorOffset,
+        submitted: false,
+      };
+    }
+
+    return {
+      nextValue: `${input.value.slice(0, cursorOffset - 1)}${input.value.slice(cursorOffset)}`,
+      nextCursorOffset: cursorOffset - 1,
+      submitted: false,
+    };
+  }
+
+  const sanitizedInput = sanitizeComposerInput(input.input);
+  if (!sanitizedInput) {
+    return {
+      nextValue: input.value,
+      nextCursorOffset: cursorOffset,
+      submitted: false,
+    };
+  }
+
+  return {
+    nextValue: `${input.value.slice(0, cursorOffset)}${sanitizedInput}${input.value.slice(cursorOffset)}`,
+    nextCursorOffset: cursorOffset + sanitizedInput.length,
+    submitted: false,
+  };
+}
+
+function maskComposerValue(value: string, mask?: string): string {
+  if (!mask) {
+    return value;
+  }
+
+  return Array.from(value, (char) => (char === "\n" ? "\n" : mask)).join("");
+}
+
+function getCursorPosition(value: string, cursorOffset: number): {
+  readonly lineIndex: number;
+  readonly columnIndex: number;
+} {
+  const clampedOffset = Math.max(0, Math.min(cursorOffset, value.length));
+  const beforeCursor = value.slice(0, clampedOffset);
+  const lines = beforeCursor.split("\n");
+  return {
+    lineIndex: Math.max(0, lines.length - 1),
+    columnIndex: lines.at(-1)?.length ?? 0,
+  };
+}
+
+function renderComposerLine(line: string, cursorColumn: number | undefined): React.ReactNode {
+  if (cursorColumn === undefined) {
+    return <Text>{line.length > 0 ? line : " "}</Text>;
+  }
+
+  if (cursorColumn >= line.length) {
+    return (
+      <Text>
+        {line}
+        <Text inverse> </Text>
+      </Text>
+    );
+  }
+
+  return (
+    <Text>
+      {line.slice(0, cursorColumn)}
+      <Text inverse>{line[cursorColumn]}</Text>
+      {line.slice(cursorColumn + 1)}
+    </Text>
+  );
+}
+
 export function Composer(props: {
   readonly value: string;
   readonly onChange: (value: string) => void;
@@ -34,12 +162,17 @@ export function Composer(props: {
   readonly mask?: string | undefined;
 }) {
   const [isPasting, setIsPasting] = useState(false);
+  const [cursorOffset, setCursorOffset] = useState(props.value.length);
   const pasteTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const suppressNextSubmitRef = useRef(false);
 
   useEffect(() => {
     props.onIsPastingChange?.(isPasting);
   }, [isPasting, props.onIsPastingChange]);
+
+  useEffect(() => {
+    setCursorOffset((current) => Math.min(current, props.value.length));
+  }, [props.value]);
 
   useEffect(
     () => () => {
@@ -63,23 +196,58 @@ export function Composer(props: {
     }, PASTE_SETTLE_MS);
   };
 
+  useInput((input, key) => {
+    if (
+      key.upArrow ||
+      key.downArrow ||
+      key.tab ||
+      (key.shift && key.tab) ||
+      key.escape ||
+      (key.ctrl && input === "c")
+    ) {
+      return;
+    }
+
+    const result = applyComposerEdit({
+      value: props.value,
+      cursorOffset,
+      input,
+      key,
+      allowLineBreaks: props.mask === undefined,
+    });
+
+    setCursorOffset(result.nextCursorOffset);
+
+    if (result.submitted) {
+      if (suppressNextSubmitRef.current || isPasting) {
+        return;
+      }
+      void props.onSubmit(sanitizeComposerInput(result.nextValue));
+      return;
+    }
+
+    if (result.nextValue !== props.value) {
+      if (shouldTreatComposerChangeAsPaste(props.value, result.nextValue)) {
+        armPasteWindow(result.nextValue);
+      }
+      props.onChange(result.nextValue);
+    }
+  }, { isActive: true });
+
+  const visibleValue = maskComposerValue(props.value, props.mask);
+  const cursorPosition = getCursorPosition(visibleValue, cursorOffset);
+  const lines = (visibleValue.length > 0 ? visibleValue : "").split("\n");
+
   return (
-    <TextInput
-      value={props.value}
-      {...(props.mask !== undefined ? { mask: props.mask } : {})}
-      onChange={(rawNextValue) => {
-        const nextValue = sanitizeComposerInput(rawNextValue);
-        if (shouldTreatComposerChangeAsPaste(props.value, nextValue)) {
-          armPasteWindow(nextValue);
-        }
-        props.onChange(nextValue);
-      }}
-      onSubmit={(rawNextValue) => {
-        if (suppressNextSubmitRef.current || isPasting) {
-          return;
-        }
-        void props.onSubmit(sanitizeComposerInput(rawNextValue));
-      }}
-    />
+    <Box flexDirection="column">
+      {lines.map((line, index) => (
+        <Box key={`${index}-${line}`}>
+          {renderComposerLine(
+            line,
+            index === cursorPosition.lineIndex ? cursorPosition.columnIndex : undefined,
+          )}
+        </Box>
+      ))}
+    </Box>
   );
 }

@@ -664,6 +664,23 @@ test("WorkShellEngine starts in minimal trace mode for default sessions", async 
   assert.deepEqual(engine.getState().traceLines, []);
 });
 
+test("WorkShellEngine keeps a lightweight busy status even outside verbose trace mode", async () => {
+  const { engine, emitTrace } = createEngine();
+
+  await engine.initialize();
+  emitTrace({
+    type: "turn.started",
+    provider: "openai",
+    model: "gpt-5.4",
+    prompt: "inspect repo",
+    startedAt: 0,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.match(engine.getState().busyStatus ?? "", /thinking/i);
+  assert.equal(engine.getState().traceLines.length, 0);
+});
+
 test("WorkShellEngine can switch to verbose trace mode explicitly", async () => {
   const { engine, calls, emitTrace } = createEngine();
 

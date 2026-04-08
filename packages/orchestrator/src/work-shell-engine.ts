@@ -67,6 +67,7 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly traceMode: WorkShellTraceMode;
   readonly composerMode: WorkShellComposerMode;
   readonly isBusy: boolean;
+  readonly busyStatus?: string | undefined;
 };
 
 export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkShellReasoningConfig> {
@@ -326,6 +327,7 @@ export class WorkShellEngine<
       traceMode: input.options.initialTraceMode ?? (input.options.mode === "ultrawork" ? "verbose" : "minimal"),
       composerMode: "default",
       isBusy: false,
+      busyStatus: undefined,
     };
   }
 
@@ -866,7 +868,7 @@ export class WorkShellEngine<
     attachments?: readonly Attachment[];
   }): Promise<void> {
     this.appendEntries({ role: "user", text: input.transcriptText });
-    this.setState({ isBusy: true });
+    this.setState({ isBusy: true, busyStatus: "thinking" });
 
     try {
       await this.persistSessionSnapshot("running", input.sessionSummary).catch(() => undefined);
@@ -938,16 +940,21 @@ export class WorkShellEngine<
       });
       await this.persistSessionSnapshot("requires_action", input.failureSummary).catch(() => undefined);
     } finally {
-      this.setState({ isBusy: false });
+      this.setState({ isBusy: false, busyStatus: undefined });
     }
   }
 
   private async handleTraceEvent(event: TraceEvent): Promise<void> {
+    const line = this.formatAgentTraceLine(event);
+    const busyStatus = resolveBusyStatusFromTraceEvent(event, line);
+    if (busyStatus !== null) {
+      this.setState(busyStatus ? { busyStatus } : { busyStatus: undefined });
+    }
+
     if (this.state.traceMode !== "verbose") {
       return;
     }
 
-    const line = this.formatAgentTraceLine(event);
     if (!line) {
       return;
     }
@@ -1055,6 +1062,26 @@ export class WorkShellEngine<
       subscriber(this.state);
     }
   }
+}
+
+function resolveBusyStatusFromTraceEvent(
+  event: { readonly type: string; readonly status?: string },
+  line: string,
+): string | null | undefined {
+  if (event.type === "turn.completed") {
+    return undefined;
+  }
+
+  if (
+    event.type === "turn.started" ||
+    event.type === "provider.calling" ||
+    event.type === "tool.started" ||
+    (event.type === "orchestrator.step" && event.status === "running")
+  ) {
+    return line || "thinking";
+  }
+
+  return null;
 }
 
 function resolvePromptSlashCommand(

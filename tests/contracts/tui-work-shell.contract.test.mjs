@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   Composer,
   WorkShellPane,
+  applyComposerEdit,
   buildAttachmentPreviewLines,
   buildContextPanel,
   buildInlineCommandPanel,
@@ -14,6 +15,7 @@ import {
   clampWorkShellSlashSelection,
   createEmbeddedWorkShellPaneDashboardProps,
   createEmptyWorkShellComposerPreview,
+  createFastWorkShellComposerPreview,
   createWorkShellDashboardHomePatch,
   createWorkShellDashboardHomeSyncState,
   cycleWorkShellSlashSelection,
@@ -23,6 +25,7 @@ import {
   formatInlineImageSupportLine,
   formatRuntimeLabel,
   formatToolTraceLine,
+  formatWorkShellBusyStatusLine,
   formatWorkShellError,
   formatWorkShellProviderTitle,
   formatWorkShellStatusLine,
@@ -38,12 +41,14 @@ import {
   getWorkShellPanelDisplayMode,
   getWorkShellPanelPlacement,
   isWorkShellWarningLine,
+  normalizeMarkdownDisplayText,
   parseWorkShellPanelFactLine,
   refineInlineCommandPanelLines,
   renderEmbeddedWorkShellPaneDashboard,
   resolveWorkShellActivePanel,
   resolveWorkShellInputAction,
   resolveWorkShellSubmitAction,
+  shouldUseSlowComposerPreview,
   useWorkShellDashboardHomeSync,
   useWorkShellInputController,
   useWorkShellPaneState,
@@ -103,11 +108,11 @@ test("getWorkShellComposerHint keeps slash discovery guidance inside the shared 
   assert.equal(getWorkShellComposerHint("/unknown", 0), "No slash yet.");
   assert.equal(
     getWorkShellComposerHint("", 0),
-    "Enter send · / commands · @file context",
+    "Enter send · Shift+Enter newline · / commands · @file context",
   );
   assert.equal(
     getWorkShellComposerHint("plain text", 3),
-    "Enter send · / commands",
+    "Enter send · Shift+Enter newline · / commands",
   );
   assert.equal(getWorkShellComposerHintMinHeight(), 1);
 });
@@ -318,6 +323,16 @@ test("work-shell input decision helpers are exported from the shared tui package
     }),
     { type: "submit", line: "ship it", clearInput: true },
   );
+  assert.deepEqual(
+    applyComposerEdit({
+      value: "hello",
+      cursorOffset: 5,
+      input: "",
+      key: { return: true, shift: true },
+      allowLineBreaks: true,
+    }),
+    { nextValue: "hello\n", nextCursorOffset: 6, submitted: false },
+  );
 });
 
 test("work-shell lifecycle/composer helpers are exported from the shared tui package seam", () => {
@@ -334,6 +349,13 @@ test("work-shell lifecycle/composer helpers are exported from the shared tui pac
   assert.equal(typeof useWorkShellInputController, "function");
   assert.equal(typeof useWorkShellPaneState, "function");
   assert.equal(typeof useWorkShellSlashState, "function");
+  assert.equal(shouldUseSlowComposerPreview("plain text"), false);
+  assert.equal(shouldUseSlowComposerPreview("@README.md 요약"), true);
+  assert.deepEqual(createFastWorkShellComposerPreview("plain text"), {
+    prompt: "plain text",
+    attachments: [],
+    transcriptText: "plain text",
+  });
 });
 
 test("embedded work-shell dashboard helper maps dashboard props through the shared tui seam", () => {
@@ -474,7 +496,15 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       mode: "default",
       authLabel: "Browser OAuth · file",
     }),
-    "gpt-5.4 · medium · default · OAuth file",
+    "gpt-5.4 · Balanced thinking · Work mode · Saved OAuth",
+  );
+  assert.equal(
+    formatWorkShellBusyStatusLine("· thinking inspect repo", 0),
+    "⠋ thinking inspect repo",
+  );
+  assert.equal(
+    normalizeMarkdownDisplayText("## Heading\n- `npm run check`\n- **Done**"),
+    "Heading\n• npm run check\n• Done",
   );
   assert.equal(
     formatWorkShellError("OpenAI request failed with status 401"),

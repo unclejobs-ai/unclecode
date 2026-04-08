@@ -27,6 +27,8 @@ import {
   buildSlashSuggestionPanel,
   buildTerminalInlineImageSequence,
   clampWorkShellSlashSelection,
+  applyComposerEdit,
+  createFastWorkShellComposerPreview,
   createWorkShellDashboardHomePatch,
   createWorkShellDashboardHomeSyncState,
   cycleWorkShellSlashSelection,
@@ -36,14 +38,17 @@ import {
   formatInlineImageSupportLine,
   formatInlineCommandResultSummary,
   formatRuntimeLabel,
+  formatWorkShellBusyStatusLine,
   formatToolTraceLine,
   formatWorkShellError,
   getWorkShellConversationLayout as getConversationLayout,
+  normalizeMarkdownDisplayText,
   refineInlineCommandPanelLines,
   resolveWorkShellActivePanel,
   resolveWorkShellInputAction,
   resolveWorkShellSubmitAction,
   shouldRefreshDashboardHomeState,
+  shouldUseSlowComposerPreview,
 } from "@unclecode/tui";
 import {
   createWorkShellDashboardProps,
@@ -103,13 +108,12 @@ test("resolveModelCommand lists models and updates reasoning support on switch",
   assert.equal(listed.panel.title, "Models");
   assert.match(listed.panel.lines.join("\n"), /^Current/m);
   assert.match(listed.panel.lines.join("\n"), /^Available/m);
-  assert.match(listed.panel.lines.join("\n"), /^Routes/m);
   assert.match(listed.panel.lines.join("\n"), /\/model gpt-5\.4/);
   assert.match(listed.panel.lines.join("\n"), /\/model gpt-4\.1-mini/);
-  assert.match(listed.panel.lines.join("\n"), /Selected · \/model gpt-5\.4/);
-  assert.match(listed.panel.lines.join("\n"), /Support · low, medium, high/);
-  assert.match(listed.panel.lines.join("\n"), /Warning · reasoning unsupported/);
-  assert.match(listed.panel.lines.join("\n"), /Reasoning · high \(mode-default\)/);
+  assert.match(listed.panel.lines.join("\n"), /Thinking · high \(mode-default\)/);
+  assert.match(listed.panel.lines.join("\n"), /active · medium/);
+  assert.match(listed.panel.lines.join("\n"), /no reasoning/);
+  assert.match(listed.panel.lines.join("\n"), /Enter switches · Esc closes/);
 
   const switched = resolveModelCommand("/model gpt-4.1-mini", {
     provider: "openai",
@@ -359,6 +363,14 @@ test("formatWorkShellError collapses raw provider failures into operator guidanc
     "OpenAI OAuth lacks model.request scope. Use API key login or proper browser OAuth.",
   );
   assert.equal(formatWorkShellError("provider exploded"), "provider exploded");
+  assert.equal(
+    formatWorkShellBusyStatusLine("· thinking inspect repo", 0),
+    "⠋ thinking inspect repo",
+  );
+  assert.equal(
+    normalizeMarkdownDisplayText("## Heading\n- `npm run check`\n- **Done**"),
+    "Heading\n• npm run check\n• Done",
+  );
 });
 
 test("formatAgentTraceLine truncates wide-character summaries without leaking undefined bridge metadata", () => {
@@ -624,6 +636,26 @@ test("getWorkShellSlashSuggestions expands /model into concrete model picks", ()
   assert.match(suggestions[3]?.description ?? "", /Warning · reasoning unsupported/i);
 });
 
+test("composer helpers support multiline editing without slow preview for plain text", () => {
+  assert.deepEqual(
+    applyComposerEdit({
+      value: "hello",
+      cursorOffset: 5,
+      input: "",
+      key: { return: true, shift: true },
+      allowLineBreaks: true,
+    }),
+    { nextValue: "hello\n", nextCursorOffset: 6, submitted: false },
+  );
+  assert.equal(shouldUseSlowComposerPreview("plain text"), false);
+  assert.equal(shouldUseSlowComposerPreview("@README.md 요약"), true);
+  assert.deepEqual(createFastWorkShellComposerPreview("plain text"), {
+    prompt: "plain text",
+    attachments: [],
+    transcriptText: "plain text",
+  });
+});
+
 test("shouldBlockSlashSubmit guards partial slash commands from leaking to the model", () => {
   assert.equal(shouldBlockSlashSubmit("/auth"), true);
   assert.equal(shouldBlockSlashSubmit("/auth status"), false);
@@ -802,21 +834,17 @@ test("buildSlashSuggestionPanel shows a model-focused picker for /model intent",
   );
 
   assert.equal(panel.title, "Models");
-  assert.deepEqual(panel.lines.slice(0, 14), [
+  assert.deepEqual(panel.lines.slice(0, 10), [
     "Current",
     "Model · gpt-5.4",
-    "Selected · /model gpt-5.4",
-    "Reasoning · default medium",
+    "Thinking · default medium",
     "Support · low, medium, high",
     "",
     "Available",
-    "› /model gpt-5.4  Current · default medium · supports low, medium, high",
-    "  /model gpt-4.1-mini  Warning · reasoning unsupported",
+    "› /model gpt-5.4  active · medium",
+    "  /model gpt-4.1-mini  no reasoning",
     "",
-    "Routes",
-    "/model shows this picker.",
-    "/model <id> switches now.",
-    "/model list shows all model picks.",
+    "Enter switches · Esc closes",
   ]);
 });
 

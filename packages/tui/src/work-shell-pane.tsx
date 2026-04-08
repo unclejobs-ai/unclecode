@@ -74,7 +74,7 @@ export function WorkShellPane<
     shouldBlockSlashSubmit: props.shouldBlockSlashSubmit,
   });
 
-  const { entries, model, reasoning, authLabel, isBusy } = engineState;
+  const { entries, model, reasoning, authLabel, isBusy, busyStatus } = engineState;
   const isSecureApiKeyEntry = engineState.composerMode === "api-key-entry";
 
   return (
@@ -87,6 +87,7 @@ export function WorkShellPane<
       authLabel={formatAuthLabelForDisplay(authLabel)}
       entries={entries}
       isBusy={isBusy}
+      {...(busyStatus ? { busyStatus } : {})}
       activePanel={activePanel}
       {...(composerPreview.attachments.length > 0
         ? {

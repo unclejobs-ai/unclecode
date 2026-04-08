@@ -148,10 +148,10 @@ These are the largest remaining owner files and therefore the highest-likelihood
 - Modify: `tests/work/work-runtime.test.mjs`
 - Modify: `tests/contracts/unclecode-cli.contract.test.mjs`
 
-- [ ] Step 1: Add failing tests for owner seams around `parseArgs(...)`, `printHelp()`, `printTools()`, and runtime-provider parsing.
-- [ ] Step 2: Move pure argv/help logic behind a dedicated app helper module.
-- [ ] Step 3: Keep `work-runtime.ts` focused on runtime orchestration rather than CLI parsing minutiae.
-- [ ] Step 4: Re-run targeted work-runtime/contracts coverage.
+- [x] Step 1: Add failing tests for owner seams around `parseArgs(...)`, `printHelp()`, `printTools()`, and runtime-provider parsing.
+- [x] Step 2: Move pure argv/help logic behind a dedicated app helper module.
+- [x] Step 3: Keep `work-runtime.ts` focused on runtime orchestration rather than CLI parsing minutiae.
+- [x] Step 4: Re-run targeted work-runtime/contracts coverage.
 
 ### Task 6: Extract session-restore and dashboard-prop loading from `work-runtime.ts`
 **Why:** runtime bootstrap, session restore, auth refresh, dashboard home-state loading, and REPL startup are still tightly coupled.
@@ -309,6 +309,15 @@ These are the largest remaining owner files and therefore the highest-likelihood
 
 ### Task 15: Unify focus/composer behavior across views under one controller contract
 **Why:** unified shell convergence is not finished until Work / Sessions / MCP / Research use one consistent focus and key-routing model.
+
+**Immediate product debt called out during live dogfooding:**
+- [ ] Work shell needs real busy affordances: spinner, explicit thinking/progress text, and honest waiting states.
+- [ ] Composer needs multiline editing (`Shift+Enter`) and must stop leaking wrapped glyphs/cursor artifacts below the input box.
+- [ ] Plain-text typing should stay fast; composer preview must avoid slow file/image resolution when no `@file` or image path syntax is present.
+- [ ] Main shell chrome needs a compact usage/status strip (turn latency, token/usage facts when available) inspired by claw-dev/pi-agent quality bars.
+- [ ] Status chrome must stop surfacing raw internal labels like `low`, `search`, and `oauth-file`; operator-facing language should read like product UI, not enum dumps.
+- [ ] Conversation UI must remain product-facing; internal notes, self-talk, or implementation planning text must never leak into the operator surface.
+- [ ] Assistant responses should render markdown-oriented output as readable terminal prose instead of leaking raw markdown punctuation everywhere.
 
 **Files:**
 - Modify: `packages/tui/src/index.tsx`
@@ -529,12 +538,18 @@ These are the largest remaining owner files and therefore the highest-likelihood
 - Modify: `apps/unclecode-cli/src/work-runtime.ts`
 - Modify: `packages/tui/src/work-shell-panels.ts`
 - Modify: `packages/tui/src/index.tsx`
-- Modify: auth/session integration tests
+- Modify: `packages/orchestrator/src/model-command.ts`
+- Modify: `packages/providers/src/model-registry.ts`
+- Modify: auth/session/model/research integration tests
 
-- [ ] Step 1: Audit auth, resume, sessions, and same-tree work navigation for redundant refreshes or stale labels.
-- [ ] Step 2: Add regression tests for the specific operator-visible edge cases uncovered during that audit.
+**Edge cases to cover in this pass:**
+- `/research` / `research run` prompt-mode UX must not leak transient clipboard image temp paths (for example `/var/folders/.../clipboard-*.png`) into the visible research prompt or accidental research execution state.
+- `/model` picker must become runtime-aware for OpenAI/Codex paths instead of showing only the stale hardcoded OpenAI fallback list; Codex-relevant models should be surfaced and obviously stale models should not dominate the picker.
+
+- [ ] Step 1: Audit auth, resume, sessions, same-tree work navigation, research prompt-mode transitions, and model-picker/runtime alignment for redundant refreshes, stale labels, or leaked transient input.
+- [ ] Step 2: Add regression tests for the specific operator-visible edge cases uncovered during that audit, including clipboard-temp-path leakage and stale model catalogs.
 - [ ] Step 3: Keep UX changes incremental and contract-backed.
-- [ ] Step 4: Re-run targeted work/TUI/integration coverage.
+- [ ] Step 4: Re-run targeted work/TUI/integration/model coverage.
 
 ---
 

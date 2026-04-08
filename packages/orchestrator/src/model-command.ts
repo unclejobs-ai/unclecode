@@ -89,10 +89,9 @@ function formatModelPanelSupportLabel(input: {
   support: ReasoningSupport;
 }): string {
   if (input.support.status === "unsupported") {
-    return input.active ? "Current · Warning · reasoning unsupported" : "Warning · reasoning unsupported";
+    return input.active ? "active · no reasoning" : "no reasoning";
   }
-  const prefix = input.active ? "Current" : "Default";
-  return `${prefix} · ${input.support.defaultEffort} · supports ${formatSupportedEffortList(input.support)}`;
+  return input.active ? `active · ${input.support.defaultEffort}` : input.support.defaultEffort;
 }
 
 function buildModelPanel(input: {
@@ -107,9 +106,7 @@ function buildModelPanel(input: {
     lines: [
       "Current",
       `Model · ${input.currentModel}`,
-      `Selected · /model ${input.currentModel}`,
-      `Reasoning · ${describePanelReasoning(input.currentReasoning, currentSupport)}`,
-      `Support · ${formatSupportedEffortList(currentSupport)}`,
+      `Thinking · ${describePanelReasoning(input.currentReasoning, currentSupport)}`,
       "",
       "Available",
       ...input.models.map((model) => {
@@ -118,10 +115,7 @@ function buildModelPanel(input: {
         return `${active ? "›" : " "} /model ${model}  ${formatModelPanelSupportLabel({ active, support })}`;
       }),
       "",
-      "Routes",
-      "/model shows this picker.",
-      "/model <id> switches now.",
-      "/model list shows all model picks.",
+      "Enter switches · Esc closes",
     ],
   };
 }

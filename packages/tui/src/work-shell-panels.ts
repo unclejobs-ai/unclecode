@@ -486,7 +486,7 @@ function parseCurrentModelDescription(description: string): {
 } {
   const normalized = formatModelSuggestionDescription(description);
   if (/Warning · reasoning unsupported/i.test(normalized)) {
-    return { reasoning: "unsupported" };
+    return { reasoning: "no reasoning" };
   }
   const match = /^Current\s·\sdefault\s([^·]+)\s·\ssupports\s(.+)$/i.exec(normalized);
   if (match) {
@@ -499,6 +499,22 @@ function parseCurrentModelDescription(description: string): {
   return {
     reasoning: normalized.replace(/^Current\s*·\s*/i, "").trim(),
   };
+}
+
+function compactModelSuggestionDescription(description: string): string {
+  const normalized = formatModelSuggestionDescription(description);
+  if (/Warning · reasoning unsupported/i.test(normalized)) {
+    return "no reasoning";
+  }
+  const currentMatch = /^Current\s·\sdefault\s([^·]+)\s·\ssupports\s(.+)$/i.exec(normalized);
+  if (currentMatch) {
+    return `active · ${currentMatch[1]?.trim() ?? "unknown"}`;
+  }
+  const defaultMatch = /^Default\s·\s([^·]+)\s·\ssupports\s(.+)$/i.exec(normalized);
+  if (defaultMatch) {
+    return defaultMatch[1]?.trim() ?? normalized;
+  }
+  return normalized;
 }
 
 function buildModelSlashSuggestionPanel(
@@ -519,17 +535,13 @@ function buildModelSlashSuggestionPanel(
     lines: [
       "Current",
       `Model · ${currentModel}`,
-      `Selected · /model ${currentModel}`,
-      `Reasoning · ${currentMeta.reasoning}`,
+      `Thinking · ${currentMeta.reasoning}`,
       ...(currentMeta.support ? [`Support · ${currentMeta.support}`] : []),
       "",
       "Available",
-      ...modelEntries.map((entry) => `${visible.indexOf(entry) === selected ? "›" : " "} ${entry.command}  ${formatModelSuggestionDescription(entry.description)}`),
+      ...modelEntries.map((entry) => `${visible.indexOf(entry) === selected ? "›" : " "} ${entry.command}  ${compactModelSuggestionDescription(entry.description)}`),
       "",
-      "Routes",
-      "/model shows this picker.",
-      "/model <id> switches now.",
-      "/model list shows all model picks.",
+      "Enter switches · Esc closes",
       "↑↓ · Tab · Enter",
     ],
   };

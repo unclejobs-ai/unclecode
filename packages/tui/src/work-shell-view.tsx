@@ -1,4 +1,4 @@
-import { Box, Newline, Text } from "ink";
+import { Box, Text } from "ink";
 import React from "react";
 
 export type WorkShellEntryRole = "user" | "assistant" | "tool" | "system";
@@ -163,22 +163,59 @@ export function getWorkShellComposerHint(inputValue: string, slashSuggestionCoun
     return slashSuggestionCount > 0 ? "↑↓ · Tab · Enter" : "No slash yet.";
   }
   if (inputValue.trim().length === 0) {
-    return "Enter send · / commands · @file context";
+    return "Enter send · Shift+Enter newline · / commands · @file context";
   }
-  return "Enter send · / commands";
+  return "Enter send · Shift+Enter newline · / commands";
+}
+
+const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+
+export function formatWorkShellBusyStatusLine(status?: string, frame = 0): string {
+  const spinner = WORK_SHELL_BUSY_SPINNER_FRAMES[((frame % WORK_SHELL_BUSY_SPINNER_FRAMES.length) + WORK_SHELL_BUSY_SPINNER_FRAMES.length) % WORK_SHELL_BUSY_SPINNER_FRAMES.length];
+  const normalizedStatus = (status ?? "Thinking…")
+    .replace(/^[·→★✓✖↔]\s*/u, "")
+    .trim();
+  return `${spinner} ${normalizedStatus || "Thinking…"}`;
 }
 
 function compactWorkShellReasoningLabel(reasoningLabel: string): string {
   return reasoningLabel.replace(/\s*\([^)]*\)$/, "").trim();
 }
 
+function humanizeWorkShellReasoningLabel(reasoningLabel: string): string {
+  const compact = compactWorkShellReasoningLabel(reasoningLabel).toLowerCase();
+  if (compact === "low") return "Light thinking";
+  if (compact === "medium") return "Balanced thinking";
+  if (compact === "high") return "Deep thinking";
+  if (compact === "unsupported") return "Reasoning fixed";
+  return reasoningLabel;
+}
+
 function compactWorkShellAuthLabel(authLabel: string): string {
-  if (authLabel === "Browser OAuth · file") return "OAuth file";
+  if (authLabel === "Browser OAuth · file") return "Saved OAuth";
   if (authLabel === "Browser OAuth · env") return "OAuth env";
-  if (authLabel === "API key · file") return "Key file";
-  if (authLabel === "API key · env") return "Key env";
+  if (authLabel === "API key · file") return "Saved API key";
+  if (authLabel === "API key · env") return "API key env";
   if (authLabel === "Not signed in") return "No auth";
   return authLabel;
+}
+
+function humanizeWorkShellModeLabel(mode: string): string {
+  if (mode === "default") return "Work mode";
+  if (mode === "search") return "Search mode";
+  if (mode === "analyze") return "Analyze mode";
+  if (mode === "ultrawork") return "Parallel mode";
+  return `${mode} mode`;
+}
+
+export function normalizeMarkdownDisplayText(value: string): string {
+  return value
+    .replace(/^```[\s\S]*?\n?/gm, "")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*-\s+/gm, "• ")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1");
 }
 
 export function formatWorkShellStatusLine(input: {
@@ -189,8 +226,8 @@ export function formatWorkShellStatusLine(input: {
 }): string {
   return [
     input.model,
-    compactWorkShellReasoningLabel(input.reasoningLabel),
-    input.mode,
+    humanizeWorkShellReasoningLabel(input.reasoningLabel),
+    humanizeWorkShellModeLabel(input.mode),
     compactWorkShellAuthLabel(input.authLabel),
   ].join(" · ");
 }
@@ -311,6 +348,7 @@ export function WorkShellView(props: {
   readonly authLabel: string;
   readonly entries: readonly WorkShellEntry[];
   readonly isBusy: boolean;
+  readonly busyStatus?: string;
   readonly activePanel: WorkShellPanel;
   readonly attachmentLines?: readonly string[];
   readonly composer: React.ReactNode;
@@ -321,6 +359,26 @@ export function WorkShellView(props: {
   readonly terminalColumns?: number;
 }) {
   const composerHint = props.composerHintOverride ?? getWorkShellComposerHint(props.inputValue, props.slashSuggestionCount);
+  const [busyFrame, setBusyFrame] = React.useState(0);
+
+  React.useEffect(() => {
+    if (!props.isBusy) {
+      setBusyFrame(0);
+      return;
+    }
+
+    const interval = setInterval(() => {
+      setBusyFrame((current) => current + 1);
+    }, 80);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [props.isBusy]);
+
+  const busyLine = props.isBusy
+    ? formatWorkShellBusyStatusLine(props.busyStatus, busyFrame)
+    : undefined;
 
   const panelBorderColor = getWorkShellPanelBorderColor(props.inputValue, props.activePanel.title);
   const panelDisplayMode = getWorkShellPanelDisplayMode({
@@ -357,16 +415,10 @@ export function WorkShellView(props: {
               flexDirection="column"
             >
               <Text bold color={presentation.labelColor}>{`${presentation.badge} ${presentation.label}`}</Text>
-              <Text color={presentation.bodyColor}>{entry.text}</Text>
+              <Text color={presentation.bodyColor}>{entry.role === "assistant" ? normalizeMarkdownDisplayText(entry.text) : entry.text}</Text>
             </Box>
           );
         })}
-        {props.isBusy ? (
-          <Text color="gray">
-            thinking…
-            <Newline />
-          </Text>
-        ) : null}
       </Box>
     </Box>
   );
@@ -398,10 +450,10 @@ export function WorkShellView(props: {
           <Text color="cyan">{props.model}</Text>
           <Text color="gray">  ·  </Text>
           <Text color={props.reasoningSupported ? "green" : "yellow"}>
-            {compactWorkShellReasoningLabel(props.reasoningLabel)}
+            {humanizeWorkShellReasoningLabel(props.reasoningLabel)}
           </Text>
           <Text color="gray">  ·  </Text>
-          <Text color="magenta">{props.mode}</Text>
+          <Text color="magenta">{humanizeWorkShellModeLabel(props.mode)}</Text>
           <Text color="gray">  ·  </Text>
           <Text color="yellow">{compactWorkShellAuthLabel(props.authLabel)}</Text>
         </Text>
@@ -420,7 +472,8 @@ export function WorkShellView(props: {
         <Text color="gray">{"> "}</Text>
         {props.composer}
       </Box>
-      <Box minHeight={getWorkShellComposerHintMinHeight()}>
+      <Box minHeight={getWorkShellComposerHintMinHeight()} flexDirection="column">
+        {props.isBusy && busyLine ? <Text color="cyan">{busyLine}</Text> : null}
         <Text color="gray">{composerHint ?? " "}</Text>
       </Box>
       {props.attachmentLines && props.attachmentLines.length > 0 && getWorkShellAttachmentPlacement() === "after-composer" ? (
