@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 
 import {
   createAuthKeyBuiltinResult,
-  createBuiltinStatusPanel,
   createContextBuiltinResult,
   createHelpBuiltinResult,
   createLoadedSkillBuiltinResult,
@@ -28,7 +27,13 @@ import {
 } from "./work-shell-engine-commands.js";
 import * as WorkShellExecution from "./work-shell-engine-execution.js";
 import * as WorkShellOperations from "./work-shell-engine-operations.js";
-import * as WorkShellPostTurns from "./work-shell-engine-post-turns.js";
+import {
+  createCollapsedContextPanel,
+  createRecentSessionsLoadingPanel,
+  createRecentSessionsPanel,
+  createSensitiveInputCancelResult,
+  createWorkShellStatusPanel,
+} from "./work-shell-engine-panels.js";
 import * as WorkShellTurns from "./work-shell-engine-turns.js";
 import {
   createWorkShellSessionSnapshotInput,
@@ -395,7 +400,13 @@ export class WorkShellEngine<
     this.setState({
       bridgeLines,
       memoryLines,
-      panel: this.buildContextPanel(this.currentContextSummaryLines, bridgeLines, memoryLines, []),
+      panel: createCollapsedContextPanel({
+        contextSummaryLines: this.currentContextSummaryLines,
+        bridgeLines,
+        memoryLines,
+        traceLines: [],
+        buildContextPanel: this.buildContextPanel,
+      }),
     });
   }
 
@@ -404,9 +415,9 @@ export class WorkShellEngine<
   }
 
   async openSessionsPanel(): Promise<void> {
-    this.setState({ panel: { title: "Recent sessions", lines: ["Loading sessions…"] } });
+    this.setState({ panel: createRecentSessionsLoadingPanel() });
     const lines = await this.listSessionLines(this.options.cwd);
-    this.setState({ panel: { title: "Recent sessions", lines } });
+    this.setState({ panel: createRecentSessionsPanel(lines) });
   }
 
   cancelSensitiveInput(): void {
@@ -414,10 +425,17 @@ export class WorkShellEngine<
       return;
     }
 
-    this.appendEntries({ role: "system", text: "API key entry canceled." });
+    const result = createSensitiveInputCancelResult({
+      options: this.options,
+      stateModel: this.state.model,
+      reasoning: this.state.reasoning,
+      authLabel: this.state.authLabel,
+      buildStatusPanel: this.buildStatusPanel,
+    });
+    this.appendEntries(...result.entries);
     this.setState({
-      composerMode: "default",
-      panel: this.buildStatusPanelFor(this.state.reasoning, this.state.authLabel),
+      composerMode: result.composerMode,
+      panel: result.panel,
     });
   }
 
@@ -427,12 +445,13 @@ export class WorkShellEngine<
     }
 
     this.setState({
-      panel: this.buildContextPanel(
-        this.currentContextSummaryLines,
-        this.state.bridgeLines,
-        this.state.memoryLines,
-        this.state.traceLines,
-      ),
+      panel: createCollapsedContextPanel({
+        contextSummaryLines: this.currentContextSummaryLines,
+        bridgeLines: this.state.bridgeLines,
+        memoryLines: this.state.memoryLines,
+        traceLines: this.state.traceLines,
+        buildContextPanel: this.buildContextPanel,
+      }),
     });
   }
 
@@ -458,7 +477,13 @@ export class WorkShellEngine<
           this.appendEntries({ role: "system", text: "Secure API key entry is unavailable." });
           this.setState({
             composerMode: "default",
-            panel: this.buildStatusPanelFor(this.state.reasoning, this.state.authLabel),
+            panel: createWorkShellStatusPanel({
+              options: this.options,
+              stateModel: this.state.model,
+              reasoning: this.state.reasoning,
+              authLabel: this.state.authLabel,
+              buildStatusPanel: this.buildStatusPanel,
+            }),
           });
           return;
         }
@@ -530,7 +555,13 @@ export class WorkShellEngine<
             line,
             reasoning: this.state.reasoning,
             authLabel: this.state.authLabel,
-            buildStatusPanel: (reasoning, authLabel) => this.buildStatusPanelFor(reasoning, authLabel),
+            buildStatusPanel: (reasoning, authLabel) => createWorkShellStatusPanel({
+              options: this.options,
+              stateModel: this.state.model,
+              reasoning,
+              authLabel,
+              buildStatusPanel: this.buildStatusPanel,
+            }),
           });
           this.appendEntries(...result.entries);
           this.setState({ panel: result.panel });
@@ -560,7 +591,13 @@ export class WorkShellEngine<
             modeDefaultReasoning: this.modeDefaultReasoning(),
             authLabel: this.state.authLabel,
             resolveReasoningCommand: this.resolveReasoningCommand,
-            buildStatusPanel: (reasoning, authLabel) => this.buildStatusPanelFor(reasoning, authLabel),
+            buildStatusPanel: (reasoning, authLabel) => createWorkShellStatusPanel({
+              options: this.options,
+              stateModel: this.state.model,
+              reasoning,
+              authLabel,
+              buildStatusPanel: this.buildStatusPanel,
+            }),
           });
           this.agent.updateRuntimeSettings({ reasoning: result.nextReasoning });
           this.appendEntries(...result.entries);
@@ -771,26 +808,21 @@ export class WorkShellEngine<
     try {
       await this.persistSessionSnapshot("running", input.sessionSummary).catch(() => undefined);
 
-      const result = await this.agent.runTurn(input.prompt, input.attachments ?? []);
-      const lastTurnDurationMs = Date.now() - turnStartedAt;
-      const assistantText = await WorkShellTurns.finalizeWorkShellAssistantReply({
+      const { assistantText, lastTurnDurationMs, postTurnEffects } = await WorkShellExecution.runPromptTurnSuccessSequence({
         prompt: input.prompt,
-        assistantText: result.text || "(empty response)",
-        autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
-        runTurn: (prompt) => this.agent.runTurn(prompt, []),
-      });
-      this.appendEntries({ role: "assistant", text: assistantText });
-
-      const postTurnEffects = await WorkShellPostTurns.runWorkShellPostTurnSuccessEffects({
-        cwd: this.options.cwd,
         transcriptText: input.transcriptText,
-        assistantText,
+        ...(input.attachments ? { attachments: input.attachments } : {}),
+        turnStartedAt,
+        autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
+        runAgentTurn: (prompt, attachments) => this.agent.runTurn(prompt, attachments),
+        cwd: this.options.cwd,
         sessionId: this.sessionId,
         currentBridgeLines: this.state.bridgeLines,
         publishContextBridge: this.publishContextBridge,
         writeScopedMemory: this.writeScopedMemory,
         listScopedMemoryLines: this.listScopedMemoryLines,
       });
+      this.appendEntries({ role: "assistant", text: assistantText });
       this.setState(WorkShellExecution.createPromptTurnSuccessPatch({
         state: this.state,
         bridgeLines: postTurnEffects.bridgeLines,
@@ -801,22 +833,30 @@ export class WorkShellEngine<
       this.pushTraceLine(this.formatAgentTraceLine(postTurnEffects.memoryTraceEvent));
       await this.persistSessionSnapshot("idle", input.sessionSummary).catch(() => undefined);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const isAuthFailure = WorkShellPostTurns.isWorkShellAuthFailure(message);
-      const nextAuthLabel = await WorkShellPostTurns.resolveWorkShellFailureAuthLabel({
-        message,
+      const failure = await WorkShellExecution.resolvePromptTurnFailureResult({
+        error,
         currentAuthLabel: this.state.authLabel,
+        turnStartedAt,
         refreshAuthState: this.refreshAuthState,
         applyAuthIssueLines: (authIssueLines) => this.applyAuthIssueLines(authIssueLines),
+        formatWorkShellError: this.formatWorkShellError,
       });
-      this.appendEntries({ role: "system", text: this.formatWorkShellError(message) });
+      this.appendEntries({ role: "system", text: failure.formattedMessage });
       this.setState(WorkShellExecution.createPromptTurnFailurePatch({
         state: this.state,
-        nextAuthLabel,
-        lastTurnDurationMs: Date.now() - turnStartedAt,
-        isAuthFailure,
-        ...(isAuthFailure
-          ? { statusPanel: this.buildStatusPanelFor(this.state.reasoning, nextAuthLabel) }
+        nextAuthLabel: failure.nextAuthLabel,
+        lastTurnDurationMs: failure.lastTurnDurationMs,
+        isAuthFailure: failure.isAuthFailure,
+        ...(failure.isAuthFailure
+          ? {
+              statusPanel: createWorkShellStatusPanel({
+                options: this.options,
+                stateModel: this.state.model,
+                reasoning: this.state.reasoning,
+                authLabel: failure.nextAuthLabel,
+                buildStatusPanel: this.buildStatusPanel,
+              }),
+            }
           : {}),
       }));
       await this.persistSessionSnapshot("requires_action", input.failureSummary).catch(() => undefined);
@@ -870,16 +910,6 @@ export class WorkShellEngine<
     };
   }
 
-  private buildStatusPanelFor(reasoning: Reasoning, authLabel: string): WorkShellPanel {
-    return createBuiltinStatusPanel({
-      options: this.options,
-      stateModel: this.state.model,
-      reasoning,
-      authLabel,
-      buildStatusPanel: this.buildStatusPanel,
-    });
-  }
-
   private applyAuthIssueLines(authIssueLines: readonly string[] = []): void {
     const nonAuthIssueLines = this.currentContextSummaryLines.filter((line) => !line.startsWith("Auth issue:"));
     this.currentContextSummaryLines = [...authIssueLines, ...nonAuthIssueLines];
@@ -919,7 +949,13 @@ export class WorkShellEngine<
     this.setState({
       bridgeLines,
       memoryLines,
-      panel: this.buildContextPanel(this.currentContextSummaryLines, bridgeLines, memoryLines, this.state.traceLines),
+      panel: createCollapsedContextPanel({
+        contextSummaryLines: this.currentContextSummaryLines,
+        bridgeLines,
+        memoryLines,
+        traceLines: this.state.traceLines,
+        buildContextPanel: this.buildContextPanel,
+      }),
     });
   }
 

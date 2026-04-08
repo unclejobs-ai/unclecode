@@ -41,6 +41,8 @@ import {
   createPromptTurnFinalizePatch,
   createPromptTurnStartPatch,
   createPromptTurnSuccessPatch,
+  resolvePromptTurnFailureResult,
+  runPromptTurnSuccessSequence,
 } from "../../packages/orchestrator/src/work-shell-engine-execution.ts";
 import {
   loadWorkShellMemoriesPanel,
@@ -48,6 +50,13 @@ import {
   resolveSecureApiKeyEntrySubmission,
   writeWorkShellRememberCommand,
 } from "../../packages/orchestrator/src/work-shell-engine-operations.ts";
+import {
+  createCollapsedContextPanel,
+  createRecentSessionsLoadingPanel,
+  createRecentSessionsPanel,
+  createSensitiveInputCancelResult,
+  createWorkShellStatusPanel,
+} from "../../packages/orchestrator/src/work-shell-engine-panels.ts";
 import {
   createWorkShellSessionSnapshotInput,
   loadWorkShellContextState,
@@ -513,7 +522,97 @@ test("work-shell turn helpers build summaries and permission-stall continuations
   );
 });
 
-test("work-shell execution helpers assemble start, success, failure, and finalize state patches", () => {
+test("work-shell panel helpers assemble collapsed context, session panels, and cancel/status views", () => {
+  const options = {
+    provider: "openai",
+    model: "gpt-5.4",
+    mode: "default",
+    authLabel: "oauth-file",
+    reasoning: supportedReasoning,
+    cwd: "/repo",
+    contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+  };
+
+  assert.deepEqual(createCollapsedContextPanel({
+    contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    bridgeLines: ["bridge-1"],
+    memoryLines: ["memory-1"],
+    traceLines: ["trace-1"],
+    buildContextPanel,
+  }), {
+    title: "Context",
+    lines: ["Loaded guidance: AGENTS.md", "bridge-1", "memory-1", "trace-1"],
+  });
+  assert.deepEqual(createRecentSessionsLoadingPanel(), {
+    title: "Recent sessions",
+    lines: ["Loading sessions…"],
+  });
+  assert.deepEqual(createRecentSessionsPanel(["session-1"]), {
+    title: "Recent sessions",
+    lines: ["session-1"],
+  });
+  assert.deepEqual(createWorkShellStatusPanel({
+    options,
+    stateModel: "gpt-5.4-mini",
+    reasoning: supportedReasoning,
+    authLabel: "api-key-file",
+    buildStatusPanel(nextOptions, reasoning, authLabel) {
+      return { title: "Status", lines: [nextOptions.model, reasoning.effort, authLabel] };
+    },
+  }), {
+    title: "Status",
+    lines: ["gpt-5.4-mini", "high", "api-key-file"],
+  });
+  assert.deepEqual(createSensitiveInputCancelResult({
+    options,
+    stateModel: "gpt-5.4-mini",
+    reasoning: supportedReasoning,
+    authLabel: "api-key-file",
+    buildStatusPanel(nextOptions, reasoning, authLabel) {
+      return { title: "Status", lines: [nextOptions.model, reasoning.effort, authLabel] };
+    },
+  }), {
+    entries: [{ role: "system", text: "API key entry canceled." }],
+    composerMode: "default",
+    panel: {
+      title: "Status",
+      lines: ["gpt-5.4-mini", "high", "api-key-file"],
+    },
+  });
+});
+
+test("work-shell execution helpers assemble start, success, failure, and finalize state patches", async () => {
+  const success = await runPromptTurnSuccessSequence({
+    prompt: "finish cleanup",
+    transcriptText: "finish cleanup",
+    attachments: ["img-1"],
+    turnStartedAt: Date.now() - 5,
+    autoContinueOnPermissionStall: true,
+    async runAgentTurn(prompt, attachments) {
+      assert.equal(prompt, "finish cleanup");
+      assert.deepEqual(attachments, ["img-1"]);
+      return { text: "Done." };
+    },
+    cwd: "/repo",
+    sessionId: "work-1",
+    currentBridgeLines: ["bridge-0"],
+    async publishContextBridge({ summary }) {
+      return { bridgeId: "bridge-1", line: `bridge ${summary}` };
+    },
+    async writeScopedMemory() {
+      return { memoryId: "memory-1" };
+    },
+    async listScopedMemoryLines() {
+      return ["memory-1 line"];
+    },
+  });
+  const failure = await resolvePromptTurnFailureResult({
+    error: new Error("request failed with status 401"),
+    currentAuthLabel: "oauth-file",
+    turnStartedAt: Date.now() - 5,
+    refreshAuthState: async () => ({ authLabel: "api-key-file", authIssueLines: [] }),
+    formatWorkShellError: (message) => `ERR:${message}`,
+  });
   const state = createState({
     authLabel: "oauth-file",
     bridgeLines: ["bridge-0"],
@@ -521,6 +620,13 @@ test("work-shell execution helpers assemble start, success, failure, and finaliz
     isBusy: true,
     currentTurnStartedAt: 10,
   });
+
+  assert.equal(success.assistantText, "Done.");
+  assert.equal(success.postTurnEffects.bridgeTraceEvent.type, "bridge.published");
+  assert.equal(success.postTurnEffects.memoryTraceEvent.type, "memory.written");
+  assert.equal(failure.formattedMessage, "ERR:request failed with status 401");
+  assert.equal(failure.nextAuthLabel, "api-key-file");
+  assert.equal(failure.isAuthFailure, true);
 
   assert.deepEqual(createPromptTurnStartPatch({ state, turnStartedAt: 42 }), {
     isBusy: true,
