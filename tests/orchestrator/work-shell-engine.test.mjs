@@ -700,6 +700,20 @@ test("WorkShellEngine can restore a persisted trace mode for a resumed work sess
   assert.equal(engine.getState().traceMode, "verbose");
 });
 
+test("WorkShellEngine keeps automatic bridge and memory bookkeeping out of the conversation transcript", async () => {
+  const { engine } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("hello");
+
+  assert.deepEqual(
+    engine.getState().entries.map((entry) => entry.role),
+    ["user", "assistant"],
+  );
+  assert.ok(engine.getState().traceLines.some((line) => line.startsWith("bridge ")));
+  assert.ok(engine.getState().traceLines.some((line) => line.startsWith("memory ")));
+});
+
 test("WorkShellEngine trims permission-seeking stall outros from assistant replies", async () => {
   const { engine } = createEngine({
     agent: {

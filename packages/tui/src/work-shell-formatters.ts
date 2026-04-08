@@ -1,16 +1,17 @@
 import type { ExecutionTraceEvent } from "@unclecode/contracts";
 
+import { truncateForDisplayWidth } from "./text-width.js";
+
 function summarizePrompt(value: string): string {
-  return value.length > 52 ? `${value.slice(0, 49)}...` : value;
+  return truncateForDisplayWidth(value, 52);
 }
 
 function summarizeJson(value: Record<string, unknown>): string {
-  const serialized = JSON.stringify(value);
-  return serialized.length > 60 ? `${serialized.slice(0, 57)}...` : serialized;
+  return truncateForDisplayWidth(JSON.stringify(value), 60);
 }
 
 function summarizeText(value: string): string {
-  return value.length > 72 ? `${value.slice(0, 69)}...` : value;
+  return truncateForDisplayWidth(value, 72);
 }
 
 function getToolDisplayName(toolName: string): string {
@@ -111,10 +112,10 @@ export function formatAgentTraceLine(event: ExecutionTraceEvent): string {
   }
 
   if (event.type === "bridge.published") {
-    return `↔ bridge ${event.kind} ${summarizeText(event.summary)}`;
+    return `↔ context saved ${summarizeText(event.summary)}`;
   }
 
-  return `★ memory ${event.scope} ${summarizeText(event.summary)}`;
+  return `★ ${event.scope} memory saved ${summarizeText(event.summary)}`;
 }
 
 export function formatToolTraceLine(

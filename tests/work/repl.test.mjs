@@ -220,6 +220,32 @@ test("formatAgentTraceLine keeps thinking low-signal and visible", () => {
   );
 });
 
+test("formatAgentTraceLine keeps bridge and memory traces user-facing", () => {
+  assert.equal(
+    formatAgentTraceLine({
+      type: "bridge.published",
+      level: "high-signal",
+      bridgeId: "bridge-1",
+      scope: "project",
+      kind: "summary",
+      summary: "Q: 반갑다 · A: 반가워요! 무엇을 도와드릴까요?",
+      source: "work-shell",
+      target: "project-context",
+    }),
+    "↔ context saved Q: 반갑다 · A: 반가워요! 무엇을 도와드릴까요?",
+  );
+  assert.equal(
+    formatAgentTraceLine({
+      type: "memory.written",
+      level: "high-signal",
+      memoryId: "memory-1",
+      scope: "session",
+      summary: "Q: 반갑다 · A: 반가워요! 무엇을 도와드릴까요?",
+    }),
+    "★ session memory saved Q: 반갑다 · A: 반가워요! 무엇을 도와드릴까요?",
+  );
+});
+
 test("formatToolTraceLine makes tool execution visible in the work shell", () => {
   assert.match(
     formatToolTraceLine({
@@ -333,6 +359,23 @@ test("formatWorkShellError collapses raw provider failures into operator guidanc
     "OpenAI OAuth lacks model.request scope. Use API key login or proper browser OAuth.",
   );
   assert.equal(formatWorkShellError("provider exploded"), "provider exploded");
+});
+
+test("formatAgentTraceLine truncates wide-character summaries without leaking undefined bridge metadata", () => {
+  const line = formatAgentTraceLine({
+    type: "bridge.published",
+    level: "high-signal",
+    bridgeId: "bridge-korean",
+    scope: "project",
+    kind: "summary",
+    summary: "Q: 반갑습니다 여러분 · A: 한글 폭 계산이 틀리면 터미널에서 문장 끝이 이상하게 잘려 보입니다",
+    source: "work-shell",
+    target: "project-context",
+  });
+
+  assert.match(line, /^↔ context saved /);
+  assert.doesNotMatch(line, /undefined/);
+  assert.match(line, /…$/);
 });
 
 test("formatAgentTraceLine compresses executor auth failures", () => {

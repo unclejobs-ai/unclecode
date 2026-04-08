@@ -31,6 +31,7 @@ import {
 } from "./work-shell-dashboard.js";
 import type { WorkShellImageAttachment } from "./work-shell-attachments.js";
 import type { WorkShellPaneRuntimeState } from "./work-shell-hooks.js";
+import { truncateForDisplayWidth } from "./text-width.js";
 import {
   createInitialShellState,
   reduceShellEvent,
@@ -489,10 +490,7 @@ export function getWorkspaceDisplayName(workspacePath: string): string {
 }
 
 export function truncateForPane(value: string, maxLength: number): string {
-  if (maxLength <= 0) return "";
-  if (value.length <= maxLength) return value;
-  if (maxLength <= 3) return value.slice(0, maxLength);
-  return `${value.slice(0, maxLength - 1)}…`;
+  return truncateForDisplayWidth(value, maxLength);
 }
 
 export function formatSessionHeadline(session: SessionCenterSession): string {

@@ -823,6 +823,7 @@ export class WorkShellEngine<
       }
       const memoryTrace = this.formatAgentTraceLine({
         type: "memory.written",
+        level: "high-signal",
         memoryId: result.memoryId,
         scope,
         summary,
@@ -874,22 +875,24 @@ export class WorkShellEngine<
       const assistantText = await this.finalizeAssistantReply(input.prompt, result.text || "(empty response)");
       this.appendEntries({ role: "assistant", text: assistantText });
 
+      const bridgeSummary = summarizeText(`Q: ${input.transcriptText} · A: ${assistantText}`);
       const bridge = await this.publishContextBridge({
         cwd: this.options.cwd,
-        summary: summarizeText(`Q: ${input.transcriptText} · A: ${assistantText}`),
+        summary: bridgeSummary,
         source: "work-shell",
         target: "project-context",
         kind: "summary",
       });
       const bridgeTrace = this.formatAgentTraceLine({
         type: "bridge.published",
+        level: "high-signal",
         bridgeId: bridge.bridgeId,
         scope: "project",
-        summary: bridge.line,
+        kind: "summary",
+        summary: bridgeSummary,
         source: "work-shell",
         target: "project-context",
       });
-      this.appendEntries({ role: "tool", text: bridgeTrace });
       this.setState({ bridgeLines: [bridge.line, ...this.state.bridgeLines].slice(0, 6) });
       this.pushTraceLine(bridgeTrace);
 
@@ -903,11 +906,11 @@ export class WorkShellEngine<
       });
       const memoryTrace = this.formatAgentTraceLine({
         type: "memory.written",
+        level: "high-signal",
         memoryId: memoryResult.memoryId,
         scope: "session",
         summary: memorySummary,
       });
-      this.appendEntries({ role: "tool", text: memoryTrace });
       this.pushTraceLine(memoryTrace);
       const nextSessionMemoryLines = await this.listScopedMemoryLines({ scope: "session", cwd: this.options.cwd, sessionId: this.sessionId });
       this.setState({ memoryLines: nextSessionMemoryLines });

@@ -383,6 +383,7 @@ test("truncateForPane keeps short text and truncates long text with ellipsis", (
   assert.equal(truncateForPane("short text", 20), "short text");
   assert.equal(truncateForPane("1234567890abcdef", 10), "123456789…");
   assert.equal(truncateForPane("abc", 2), "ab");
+  assert.equal(truncateForPane("반갑습니다", 9), "반갑습니…");
 });
 
 test("getSessionCenterActionShortcut maps direct utility keys", () => {
