@@ -36,6 +36,7 @@ import {
   resolveWorkShellBuiltinCommand,
   resolveWorkShellLocalCommand,
 } from "../../packages/orchestrator/src/work-shell-engine-commands.ts";
+import { resolveWorkShellSubmitRoute } from "../../packages/orchestrator/src/work-shell-engine-submit.ts";
 import {
   createPromptTurnFailurePatch,
   createPromptTurnFinalizePatch,
@@ -44,6 +45,11 @@ import {
   resolvePromptTurnFailureResult,
   runPromptTurnSuccessSequence,
 } from "../../packages/orchestrator/src/work-shell-engine-execution.ts";
+import {
+  applyAuthIssueLinesToContextSummaryLines,
+  loadInitialWorkShellContextState,
+  reloadWorkShellContextState,
+} from "../../packages/orchestrator/src/work-shell-engine-context.ts";
 import {
   loadWorkShellMemoriesPanel,
   resolveInlineOperationalCommandResult,
@@ -356,6 +362,80 @@ test("work-shell command helpers classify builtins, local commands, and reusable
   assert.match(buildPromptCommandPrompt({ kind: "commit", focus: "auth flow" }), /Lore protocol/);
 });
 
+test("work-shell submit route helper classifies secure, builtin, prompt, inline, local, and chat turns", () => {
+  assert.equal(resolveWorkShellSubmitRoute({
+    value: "   ",
+    isBusy: false,
+    composerMode: "default",
+    resolveWorkShellSlashCommand: () => undefined,
+    hasInlineCommandRunner: true,
+  }), undefined);
+  assert.deepEqual(resolveWorkShellSubmitRoute({
+    value: "secret",
+    isBusy: false,
+    composerMode: "api-key-entry",
+    resolveWorkShellSlashCommand: () => undefined,
+    hasInlineCommandRunner: true,
+  }), {
+    kind: "secure-api-key-entry",
+    line: "secret",
+  });
+  assert.deepEqual(resolveWorkShellSubmitRoute({
+    value: "/help",
+    isBusy: false,
+    composerMode: "default",
+    resolveWorkShellSlashCommand: () => undefined,
+    hasInlineCommandRunner: true,
+  }), {
+    kind: "builtin",
+    line: "/help",
+    command: { kind: "help" },
+  });
+  assert.deepEqual(resolveWorkShellSubmitRoute({
+    value: "/review auth flow",
+    isBusy: false,
+    composerMode: "default",
+    resolveWorkShellSlashCommand: () => ["prompt", "review", "auth", "flow"],
+    hasInlineCommandRunner: true,
+  }), {
+    kind: "prompt-command",
+    line: "/review auth flow",
+    promptCommand: { kind: "review", focus: "auth flow" },
+  });
+  assert.deepEqual(resolveWorkShellSubmitRoute({
+    value: "/doctor",
+    isBusy: false,
+    composerMode: "default",
+    resolveWorkShellSlashCommand: () => ["doctor"],
+    hasInlineCommandRunner: true,
+  }), {
+    kind: "inline-command",
+    line: "/doctor",
+    slashCommand: ["doctor"],
+  });
+  assert.deepEqual(resolveWorkShellSubmitRoute({
+    value: "/remember session keep this",
+    isBusy: false,
+    composerMode: "default",
+    resolveWorkShellSlashCommand: () => undefined,
+    hasInlineCommandRunner: false,
+  }), {
+    kind: "local-command",
+    line: "/remember session keep this",
+    localCommand: { kind: "remember", scope: "session", summary: "keep this" },
+  });
+  assert.deepEqual(resolveWorkShellSubmitRoute({
+    value: "finish cleanup",
+    isBusy: false,
+    composerMode: "default",
+    resolveWorkShellSlashCommand: () => undefined,
+    hasInlineCommandRunner: false,
+  }), {
+    kind: "chat",
+    line: "finish cleanup",
+  });
+});
+
 test("work-shell builtin helpers resolve panels, transcript entries, and runtime transitions", () => {
   const state = createState({
     bridgeLines: ["bridge-1"],
@@ -524,6 +604,63 @@ test("work-shell turn helpers build summaries and permission-stall continuations
       },
     }),
     "I continued automatically and completed the rest.",
+  );
+});
+
+test("work-shell context helpers merge auth issues and assemble initial/reloaded context state", async () => {
+  assert.deepEqual(
+    applyAuthIssueLinesToContextSummaryLines(
+      ["Auth issue: stale oauth", "Loaded guidance: AGENTS.md", "Other note"],
+      ["Auth issue: saved OAuth needs refresh."],
+    ),
+    ["Auth issue: saved OAuth needs refresh.", "Loaded guidance: AGENTS.md", "Other note"],
+  );
+  assert.deepEqual(
+    await loadInitialWorkShellContextState({
+      cwd: "/repo",
+      sessionId: "work-1",
+      currentContextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      async listProjectBridgeLines() {
+        return ["bridge-1"];
+      },
+      async listScopedMemoryLines() {
+        return ["memory-1"];
+      },
+      buildContextPanel,
+    }),
+    {
+      bridgeLines: ["bridge-1"],
+      memoryLines: ["memory-1"],
+      panel: {
+        title: "Context",
+        lines: ["Loaded guidance: AGENTS.md", "bridge-1", "memory-1"],
+      },
+    },
+  );
+  assert.deepEqual(
+    await reloadWorkShellContextState({
+      cwd: "/repo",
+      sessionId: "work-1",
+      currentContextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      reloadWorkspaceContext: async () => ["Loaded guidance: CLAUDE.md"],
+      async listProjectBridgeLines() {
+        return ["bridge-2"];
+      },
+      async listScopedMemoryLines() {
+        return ["memory-2"];
+      },
+      traceLines: ["trace-1"],
+      buildContextPanel,
+    }),
+    {
+      contextSummaryLines: ["Loaded guidance: CLAUDE.md"],
+      bridgeLines: ["bridge-2"],
+      memoryLines: ["memory-2"],
+      panel: {
+        title: "Context",
+        lines: ["Loaded guidance: CLAUDE.md", "bridge-2", "memory-2", "trace-1"],
+      },
+    },
   );
 });
 

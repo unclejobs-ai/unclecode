@@ -20,11 +20,14 @@ import {
   createMemoriesPanel,
   createSecureApiKeyEntryPanel,
   redactSensitiveInlineCommandLine,
-  resolvePromptSlashCommand,
   resolveVisibleInlineCommand,
-  resolveWorkShellBuiltinCommand,
-  resolveWorkShellLocalCommand,
 } from "./work-shell-engine-commands.js";
+import {
+  applyAuthIssueLinesToContextSummaryLines,
+  loadInitialWorkShellContextState,
+  reloadWorkShellContextState,
+} from "./work-shell-engine-context.js";
+import { resolveWorkShellSubmitRoute } from "./work-shell-engine-submit.js";
 import * as WorkShellExecution from "./work-shell-engine-execution.js";
 import * as WorkShellOperations from "./work-shell-engine-operations.js";
 import {
@@ -37,10 +40,7 @@ import {
   loadRecentSessionsPanel,
 } from "./work-shell-engine-panels.js";
 import * as WorkShellTurns from "./work-shell-engine-turns.js";
-import {
-  createWorkShellSessionSnapshotInput,
-  loadWorkShellContextState,
-} from "./work-shell-engine-persistence.js";
+import { createWorkShellSessionSnapshotInput } from "./work-shell-engine-persistence.js";
 import {
   appendWorkShellEntries,
   createInitialWorkShellEngineState,
@@ -392,22 +392,26 @@ export class WorkShellEngine<
     });
     await this.persistSessionSnapshot("idle", this.lastSessionSummary).catch(() => undefined);
 
-    const [bridgeLines, memoryLines] = await Promise.all([
-      this.listProjectBridgeLines(this.options.cwd),
-      this.listScopedMemoryLines({ scope: "session", cwd: this.options.cwd, sessionId: this.sessionId }),
-    ]).catch(() => [[], []] as const);
-
-    this.setState({
-      bridgeLines,
-      memoryLines,
+    const contextState = await loadInitialWorkShellContextState({
+      cwd: this.options.cwd,
+      sessionId: this.sessionId,
+      currentContextSummaryLines: this.currentContextSummaryLines,
+      listProjectBridgeLines: this.listProjectBridgeLines,
+      listScopedMemoryLines: this.listScopedMemoryLines,
+      buildContextPanel: this.buildContextPanel,
+    }).catch(() => ({
+      bridgeLines: [],
+      memoryLines: [],
       panel: createCollapsedContextPanel({
         contextSummaryLines: this.currentContextSummaryLines,
-        bridgeLines,
-        memoryLines,
+        bridgeLines: [],
+        memoryLines: [],
         traceLines: [],
         buildContextPanel: this.buildContextPanel,
       }),
-    });
+    }));
+
+    this.setState(contextState);
   }
 
   dispose(): void {
@@ -458,12 +462,20 @@ export class WorkShellEngine<
   }
 
   async handleSubmit(value: string): Promise<void> {
-    const line = value.trim();
-    if (!line || this.state.isBusy) {
+    const route = resolveWorkShellSubmitRoute({
+      value,
+      isBusy: this.state.isBusy,
+      composerMode: this.state.composerMode,
+      resolveWorkShellSlashCommand: this.resolveWorkShellSlashCommand,
+      hasInlineCommandRunner: Boolean(this.runInlineCommand),
+    });
+    if (!route) {
       return;
     }
 
-    if (this.state.composerMode === "api-key-entry") {
+    switch (route.kind) {
+      case "secure-api-key-entry": {
+        const line = route.line;
       this.setState({ isBusy: true });
       try {
         const result = await WorkShellOperations.resolveSecureApiKeyEntrySubmission({
@@ -514,12 +526,13 @@ export class WorkShellEngine<
       } finally {
         this.setState({ isBusy: false });
       }
-      return;
-    }
+        return;
+      }
 
-    const builtinCommand = resolveWorkShellBuiltinCommand(line);
-    if (builtinCommand) {
-      switch (builtinCommand.kind) {
+      case "builtin": {
+        const line = route.line;
+        const builtinCommand = route.command;
+        switch (builtinCommand.kind) {
         case "exit":
           this.onExit();
           return;
@@ -664,21 +677,25 @@ export class WorkShellEngine<
           }
           return;
         }
+        }
+        return;
       }
-    }
 
-    const slashCommand = this.resolveWorkShellSlashCommand(line);
-    const promptCommand = resolvePromptSlashCommand(slashCommand);
-    if (promptCommand) {
-      await this.executePromptCommand(line, promptCommand);
-      return;
-    }
+      case "prompt-command":
+        await this.executePromptCommand(route.line, route.promptCommand);
+        return;
 
-    if (slashCommand && this.runInlineCommand) {
-      const { isAuthLogin } = resolveVisibleInlineCommand({
-        line,
-        slashCommand,
-      });
+      case "inline-command": {
+        const line = route.line;
+        const slashCommand = route.slashCommand;
+        const runInlineCommand = this.runInlineCommand;
+        if (!runInlineCommand) {
+          return;
+        }
+        const { isAuthLogin } = resolveVisibleInlineCommand({
+          line,
+          slashCommand,
+        });
       this.appendEntries({ role: "user", text: redactSensitiveInlineCommandLine(line) });
       this.setState({
         isBusy: true,
@@ -691,7 +708,7 @@ export class WorkShellEngine<
           slashCommand,
           currentAuthLabel: this.state.authLabel,
           resolveWorkShellInlineCommand: this.resolveWorkShellInlineCommand,
-          runInlineCommand: this.runInlineCommand,
+          runInlineCommand,
           refineInlineCommandResultLines: this.refineInlineCommandResultLines,
           refreshAuthState: this.refreshAuthState,
           extractAuthLabel: this.extractAuthLabel,
@@ -719,11 +736,13 @@ export class WorkShellEngine<
       } finally {
         this.setState({ isBusy: false });
       }
-      return;
-    }
+        return;
+      }
 
-    const localCommand = resolveWorkShellLocalCommand(line);
-    if (localCommand?.kind === "memories") {
+      case "local-command": {
+        const line = route.line;
+        const localCommand = route.localCommand;
+        if (localCommand.kind === "memories") {
       const { sessionMemory, projectMemory } = await WorkShellOperations.loadWorkShellMemoriesPanel({
         cwd: this.options.cwd,
         sessionId: this.sessionId,
@@ -737,18 +756,18 @@ export class WorkShellEngine<
         memoryLines: sessionMemory,
         panel: createMemoriesPanel(sessionMemory, projectMemory),
       });
-      return;
-    }
+          return;
+        }
 
-    if (localCommand?.kind === "remember" && "usageError" in localCommand) {
-      this.appendEntries(
-        { role: "user", text: line },
-        { role: "system", text: localCommand.usageError },
-      );
-      return;
-    }
+        if ("usageError" in localCommand) {
+          this.appendEntries(
+            { role: "user", text: line },
+            { role: "system", text: localCommand.usageError },
+          );
+          return;
+        }
 
-    if (localCommand?.kind === "remember") {
+        if (localCommand.kind === "remember") {
       const result = await WorkShellOperations.writeWorkShellRememberCommand({
         command: localCommand,
         cwd: this.options.cwd,
@@ -765,16 +784,22 @@ export class WorkShellEngine<
         { role: "tool", text: result.memoryTrace },
       );
       this.pushTraceLine(result.memoryTrace);
-      return;
-    }
+          return;
+        }
+        return;
+      }
 
-    const composer = await this.resolveComposerInput(line, this.options.cwd);
-    await this.executePromptTurn(
-      WorkShellTurns.createChatPromptTurnInput({
-        line,
-        composer,
-      }),
-    );
+      case "chat": {
+        const composer = await this.resolveComposerInput(route.line, this.options.cwd);
+        await this.executePromptTurn(
+          WorkShellTurns.createChatPromptTurnInput({
+            line: route.line,
+            composer,
+          }),
+        );
+        return;
+      }
+    }
   }
 
   private async executePromptCommand(
@@ -903,8 +928,10 @@ export class WorkShellEngine<
   }
 
   private applyAuthIssueLines(authIssueLines: readonly string[] = []): void {
-    const nonAuthIssueLines = this.currentContextSummaryLines.filter((line) => !line.startsWith("Auth issue:"));
-    this.currentContextSummaryLines = [...authIssueLines, ...nonAuthIssueLines];
+    this.currentContextSummaryLines = applyAuthIssueLinesToContextSummaryLines(
+      this.currentContextSummaryLines,
+      authIssueLines,
+    );
   }
 
   private appendEntries(...entries: readonly WorkShellChatEntry[]): void {
@@ -929,25 +956,21 @@ export class WorkShellEngine<
   }
 
   private async reloadContextState(): Promise<void> {
-    const { contextSummaryLines, bridgeLines, memoryLines } = await loadWorkShellContextState({
+    const contextState = await reloadWorkShellContextState({
       cwd: this.options.cwd,
       sessionId: this.sessionId,
       currentContextSummaryLines: this.currentContextSummaryLines,
       reloadWorkspaceContext: this.reloadWorkspaceContext,
       listProjectBridgeLines: this.listProjectBridgeLines,
       listScopedMemoryLines: this.listScopedMemoryLines,
+      traceLines: this.state.traceLines,
+      buildContextPanel: this.buildContextPanel,
     });
-    this.currentContextSummaryLines = contextSummaryLines;
+    this.currentContextSummaryLines = contextState.contextSummaryLines;
     this.setState({
-      bridgeLines,
-      memoryLines,
-      panel: createCollapsedContextPanel({
-        contextSummaryLines: this.currentContextSummaryLines,
-        bridgeLines,
-        memoryLines,
-        traceLines: this.state.traceLines,
-        buildContextPanel: this.buildContextPanel,
-      }),
+      bridgeLines: contextState.bridgeLines,
+      memoryLines: contextState.memoryLines,
+      panel: contextState.panel,
     });
   }
 

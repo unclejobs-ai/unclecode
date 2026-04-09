@@ -15,10 +15,12 @@ test("work-shell engine imports helper ownership seams instead of regrowing loca
   const engineSource = readWorkspaceFile("packages/orchestrator/src/work-shell-engine.ts");
 
   assert.match(engineSource, /from "\.\/work-shell-engine-builtins\.js"/);
+  assert.match(engineSource, /from "\.\/work-shell-engine-context\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-execution\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-operations\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-panels\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-persistence\.js"/);
+  assert.match(engineSource, /from "\.\/work-shell-engine-submit\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-trace\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-turns\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-state\.js"/);
@@ -30,10 +32,12 @@ test("work-shell engine imports helper ownership seams instead of regrowing loca
 
 test("work-shell helper owner files expose the builtin, execution, operational, trace, persistence, and turn seams", () => {
   const builtinsSource = readWorkspaceFile("packages/orchestrator/src/work-shell-engine-builtins.ts");
+  const contextSource = readWorkspaceFile("packages/orchestrator/src/work-shell-engine-context.ts");
   const executionSource = readWorkspaceFile("packages/orchestrator/src/work-shell-engine-execution.ts");
   const operationsSource = readWorkspaceFile("packages/orchestrator/src/work-shell-engine-operations.ts");
   const panelsSource = readWorkspaceFile("packages/orchestrator/src/work-shell-engine-panels.ts");
   const persistenceSource = readWorkspaceFile("packages/orchestrator/src/work-shell-engine-persistence.ts");
+  const submitSource = readWorkspaceFile("packages/orchestrator/src/work-shell-engine-submit.ts");
   const turnsSource = readWorkspaceFile("packages/orchestrator/src/work-shell-engine-turns.ts");
   const traceSource = readWorkspaceFile("packages/orchestrator/src/work-shell-engine-trace.ts");
 
@@ -43,6 +47,10 @@ test("work-shell helper owner files expose the builtin, execution, operational, 
   assert.match(builtinsSource, /export function resolveReasoningBuiltinResult/);
   assert.match(builtinsSource, /export function resolveModelBuiltinResult/);
   assert.match(builtinsSource, /export function createLoadedSkillBuiltinResult/);
+
+  assert.match(contextSource, /export function applyAuthIssueLinesToContextSummaryLines/);
+  assert.match(contextSource, /export async function loadInitialWorkShellContextState/);
+  assert.match(contextSource, /export async function reloadWorkShellContextState/);
 
   assert.match(executionSource, /export async function runPromptTurnSuccessSequence/);
   assert.match(executionSource, /export async function resolvePromptTurnFailureResult/);
@@ -67,6 +75,8 @@ test("work-shell helper owner files expose the builtin, execution, operational, 
 
   assert.match(persistenceSource, /export function createWorkShellSessionSnapshotInput/);
   assert.match(persistenceSource, /export async function loadWorkShellContextState/);
+
+  assert.match(submitSource, /export function resolveWorkShellSubmitRoute/);
 
   assert.match(turnsSource, /export async function finalizeWorkShellAssistantReply/);
   assert.match(traceSource, /export function resolveBusyStatusFromTraceEvent/);
