@@ -24,9 +24,14 @@ import {
 } from "./work-shell-engine-commands.js";
 import {
   applyAuthIssueLinesToContextSummaryLines,
-  loadInitialWorkShellContextState,
   reloadWorkShellContextState,
 } from "./work-shell-engine-context.js";
+import {
+  loadInitialWorkShellLifecycleState,
+  loadOpenSessionsPanelState,
+  resolveCloseOverlayState,
+  resolveSensitiveInputCancelState,
+} from "./work-shell-engine-lifecycle.js";
 import {
   resolveWorkShellSubmitRoute,
   type WorkShellSubmitRoute,
@@ -34,13 +39,9 @@ import {
 import * as WorkShellExecution from "./work-shell-engine-execution.js";
 import * as WorkShellOperations from "./work-shell-engine-operations.js";
 import {
-  createCollapsedContextPanel,
-  createRecentSessionsLoadingPanel,
-  createSensitiveInputCancelResult,
   createWorkShellStatusPanel,
   createWorkspaceReloadCompleteEntry,
   createWorkspaceReloadEntries,
-  loadRecentSessionsPanel,
 } from "./work-shell-engine-panels.js";
 import * as WorkShellTurns from "./work-shell-engine-turns.js";
 import { createWorkShellSessionSnapshotInput } from "./work-shell-engine-persistence.js";
@@ -395,24 +396,14 @@ export class WorkShellEngine<
     });
     await this.persistSessionSnapshot("idle", this.lastSessionSummary).catch(() => undefined);
 
-    const contextState = await loadInitialWorkShellContextState({
+    const contextState = await loadInitialWorkShellLifecycleState({
       cwd: this.options.cwd,
       sessionId: this.sessionId,
       currentContextSummaryLines: this.currentContextSummaryLines,
       listProjectBridgeLines: this.listProjectBridgeLines,
       listScopedMemoryLines: this.listScopedMemoryLines,
       buildContextPanel: this.buildContextPanel,
-    }).catch(() => ({
-      bridgeLines: [],
-      memoryLines: [],
-      panel: createCollapsedContextPanel({
-        contextSummaryLines: this.currentContextSummaryLines,
-        bridgeLines: [],
-        memoryLines: [],
-        traceLines: [],
-        buildContextPanel: this.buildContextPanel,
-      }),
-    }));
+    });
 
     this.setState(contextState);
   }
@@ -422,25 +413,27 @@ export class WorkShellEngine<
   }
 
   async openSessionsPanel(): Promise<void> {
-    this.setState({ panel: createRecentSessionsLoadingPanel() });
-    this.setState({ panel: await loadRecentSessionsPanel({
+    const { loadingPanel, loadedPanel } = await loadOpenSessionsPanelState({
       cwd: this.options.cwd,
       listSessionLines: this.listSessionLines,
-    }) });
+    });
+    this.setState({ panel: loadingPanel });
+    this.setState({ panel: loadedPanel });
   }
 
   cancelSensitiveInput(): void {
-    if (this.state.composerMode === "default") {
-      return;
-    }
-
-    const result = createSensitiveInputCancelResult({
+    const result = resolveSensitiveInputCancelState({
+      composerMode: this.state.composerMode,
       options: this.options,
       stateModel: this.state.model,
       reasoning: this.state.reasoning,
       authLabel: this.state.authLabel,
       buildStatusPanel: this.buildStatusPanel,
     });
+    if (!result) {
+      return;
+    }
+
     this.appendEntries(...result.entries);
     this.setState({
       composerMode: result.composerMode,
@@ -449,19 +442,19 @@ export class WorkShellEngine<
   }
 
   closeOverlay(): void {
-    if (this.state.panel.title !== "Context expanded") {
+    const panel = resolveCloseOverlayState({
+      panel: this.state.panel,
+      currentContextSummaryLines: this.currentContextSummaryLines,
+      bridgeLines: this.state.bridgeLines,
+      memoryLines: this.state.memoryLines,
+      traceLines: this.state.traceLines,
+      buildContextPanel: this.buildContextPanel,
+    });
+    if (!panel) {
       return;
     }
 
-    this.setState({
-      panel: createCollapsedContextPanel({
-        contextSummaryLines: this.currentContextSummaryLines,
-        bridgeLines: this.state.bridgeLines,
-        memoryLines: this.state.memoryLines,
-        traceLines: this.state.traceLines,
-        buildContextPanel: this.buildContextPanel,
-      }),
-    });
+    this.setState({ panel });
   }
 
   async handleSubmit(value: string): Promise<void> {
@@ -798,100 +791,71 @@ export class WorkShellEngine<
 
   private async handleChatSubmit(line: string): Promise<void> {
     const composer = await this.resolveComposerInput(line, this.options.cwd);
-    await this.executePromptTurn(
-      WorkShellTurns.createChatPromptTurnInput({
+    await WorkShellExecution.executeWorkShellPromptTurn({
+      promptTurn: WorkShellTurns.createChatPromptTurnInput({
         line,
         composer,
       }),
-    );
+      state: this.state,
+      cwd: this.options.cwd,
+      sessionId: this.sessionId,
+      autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
+      runAgentTurn: (prompt, attachments) => this.agent.runTurn(prompt, attachments),
+      publishContextBridge: this.publishContextBridge,
+      writeScopedMemory: this.writeScopedMemory,
+      listScopedMemoryLines: this.listScopedMemoryLines,
+      refreshAuthState: this.refreshAuthState,
+      applyAuthIssueLines: (authIssueLines) => this.applyAuthIssueLines(authIssueLines),
+      formatWorkShellError: this.formatWorkShellError,
+      formatAgentTraceLine: this.formatAgentTraceLine,
+      buildAuthFailureStatusPanel: (authLabel) => createWorkShellStatusPanel({
+        options: this.options,
+        stateModel: this.state.model,
+        reasoning: this.state.reasoning,
+        authLabel,
+        buildStatusPanel: this.buildStatusPanel,
+      }),
+      appendEntries: (...entries) => this.appendEntries(...entries),
+      setState: (patch) => this.setState(patch),
+      pushTraceLine: (traceLine) => this.pushTraceLine(traceLine),
+      persistSessionSnapshot: (sessionState, summary) => this.persistSessionSnapshot(sessionState, summary),
+    });
   }
+
   private async executePromptCommand(
     transcriptText: string,
     promptCommand: { readonly kind: "review" | "commit"; readonly focus?: string },
   ): Promise<void> {
-    await this.executePromptTurn(
-      WorkShellTurns.createPromptCommandTurnInput({
+    await WorkShellExecution.executeWorkShellPromptTurn({
+      promptTurn: WorkShellTurns.createPromptCommandTurnInput({
         transcriptText,
         prompt: buildPromptCommandPrompt(promptCommand),
         promptCommand,
       }),
-    );
-  }
-
-  private async executePromptTurn(input: {
-    transcriptText: string;
-    prompt: string;
-    sessionSummary: string;
-    failureSummary: string;
-    attachments?: readonly Attachment[];
-  }): Promise<void> {
-    this.appendEntries({ role: "user", text: input.transcriptText });
-    const turnStartedAt = Date.now();
-    this.setState(WorkShellExecution.createPromptTurnStartPatch({
       state: this.state,
-      turnStartedAt,
-    }));
-
-    try {
-      await this.persistSessionSnapshot("running", input.sessionSummary).catch(() => undefined);
-
-      const { assistantText, lastTurnDurationMs, postTurnEffects } = await WorkShellExecution.runPromptTurnSuccessSequence({
-        prompt: input.prompt,
-        transcriptText: input.transcriptText,
-        ...(input.attachments ? { attachments: input.attachments } : {}),
-        turnStartedAt,
-        autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
-        runAgentTurn: (prompt, attachments) => this.agent.runTurn(prompt, attachments),
-        cwd: this.options.cwd,
-        sessionId: this.sessionId,
-        currentBridgeLines: this.state.bridgeLines,
-        publishContextBridge: this.publishContextBridge,
-        writeScopedMemory: this.writeScopedMemory,
-        listScopedMemoryLines: this.listScopedMemoryLines,
-      });
-      this.appendEntries({ role: "assistant", text: assistantText });
-      this.setState(WorkShellExecution.createPromptTurnSuccessPatch({
-        state: this.state,
-        bridgeLines: postTurnEffects.bridgeLines,
-        memoryLines: postTurnEffects.memoryLines,
-        lastTurnDurationMs,
-      }));
-      this.pushTraceLine(this.formatAgentTraceLine(postTurnEffects.bridgeTraceEvent));
-      this.pushTraceLine(this.formatAgentTraceLine(postTurnEffects.memoryTraceEvent));
-      await this.persistSessionSnapshot("idle", input.sessionSummary).catch(() => undefined);
-    } catch (error) {
-      const failure = await WorkShellExecution.resolvePromptTurnFailureResult({
-        error,
-        currentAuthLabel: this.state.authLabel,
-        turnStartedAt,
-        refreshAuthState: this.refreshAuthState,
-        applyAuthIssueLines: (authIssueLines) => this.applyAuthIssueLines(authIssueLines),
-        formatWorkShellError: this.formatWorkShellError,
-      });
-      this.appendEntries({ role: "system", text: failure.formattedMessage });
-      this.setState(WorkShellExecution.createPromptTurnFailurePatch({
-        state: this.state,
-        nextAuthLabel: failure.nextAuthLabel,
-        lastTurnDurationMs: failure.lastTurnDurationMs,
-        isAuthFailure: failure.isAuthFailure,
-        ...(failure.isAuthFailure
-          ? {
-              statusPanel: createWorkShellStatusPanel({
-                options: this.options,
-                stateModel: this.state.model,
-                reasoning: this.state.reasoning,
-                authLabel: failure.nextAuthLabel,
-                buildStatusPanel: this.buildStatusPanel,
-              }),
-            }
-          : {}),
-      }));
-      await this.persistSessionSnapshot("requires_action", input.failureSummary).catch(() => undefined);
-    } finally {
-      this.setState(WorkShellExecution.createPromptTurnFinalizePatch({
-        state: this.state,
-      }));
-    }
+      cwd: this.options.cwd,
+      sessionId: this.sessionId,
+      autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
+      runAgentTurn: (prompt, attachments) => this.agent.runTurn(prompt, attachments),
+      publishContextBridge: this.publishContextBridge,
+      writeScopedMemory: this.writeScopedMemory,
+      listScopedMemoryLines: this.listScopedMemoryLines,
+      refreshAuthState: this.refreshAuthState,
+      applyAuthIssueLines: (authIssueLines) => this.applyAuthIssueLines(authIssueLines),
+      formatWorkShellError: this.formatWorkShellError,
+      formatAgentTraceLine: this.formatAgentTraceLine,
+      buildAuthFailureStatusPanel: (authLabel) => createWorkShellStatusPanel({
+        options: this.options,
+        stateModel: this.state.model,
+        reasoning: this.state.reasoning,
+        authLabel,
+        buildStatusPanel: this.buildStatusPanel,
+      }),
+      appendEntries: (...entries) => this.appendEntries(...entries),
+      setState: (patch) => this.setState(patch),
+      pushTraceLine: (traceLine) => this.pushTraceLine(traceLine),
+      persistSessionSnapshot: (sessionState, summary) => this.persistSessionSnapshot(sessionState, summary),
+    });
   }
 
   private async handleTraceEvent(event: TraceEvent): Promise<void> {

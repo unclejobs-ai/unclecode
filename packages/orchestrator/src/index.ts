@@ -18,6 +18,7 @@ export * from "./work-shell-engine-builtins.js";
 export * from "./work-shell-engine-commands.js";
 export * from "./work-shell-engine-context.js";
 export * from "./work-shell-engine-execution.js";
+export * from "./work-shell-engine-lifecycle.js";
 export * from "./work-shell-engine-operations.js";
 export * from "./work-shell-engine-panels.js";
 export * from "./work-shell-engine-persistence.js";

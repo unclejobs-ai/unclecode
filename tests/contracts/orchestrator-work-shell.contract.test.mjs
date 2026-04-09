@@ -19,6 +19,7 @@ test("work-shell engine imports helper ownership seams instead of regrowing loca
   assert.match(engineSource, /from "\.\/work-shell-engine-builtins\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-context\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-execution\.js"/);
+  assert.match(engineSource, /from "\.\/work-shell-engine-lifecycle\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-operations\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-panels\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-persistence\.js"/);
@@ -27,6 +28,7 @@ test("work-shell engine imports helper ownership seams instead of regrowing loca
   assert.match(engineSource, /from "\.\/work-shell-engine-turns\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-state\.js"/);
 
+  assert.doesNotMatch(engineSource, /private async executePromptTurn\(/);
   assert.doesNotMatch(engineSource, /private async finalizeAssistantReply\(/);
   assert.doesNotMatch(
     engineSource,
@@ -47,6 +49,9 @@ test("work-shell helper owner files expose the builtin, execution, operational, 
   );
   const executionSource = readWorkspaceFile(
     "packages/orchestrator/src/work-shell-engine-execution.ts",
+  );
+  const lifecycleSource = readWorkspaceFile(
+    "packages/orchestrator/src/work-shell-engine-lifecycle.ts",
   );
   const operationsSource = readWorkspaceFile(
     "packages/orchestrator/src/work-shell-engine-operations.ts",
@@ -102,6 +107,10 @@ test("work-shell helper owner files expose the builtin, execution, operational, 
     executionSource,
     /export async function resolvePromptTurnFailureResult/,
   );
+  assert.match(
+    executionSource,
+    /export async function executeWorkShellPromptTurn/,
+  );
   assert.match(executionSource, /export function createPromptTurnStartPatch/);
   assert.match(executionSource, /export function createPromptTurnSuccessPatch/);
   assert.match(executionSource, /export function createPromptTurnFailurePatch/);
@@ -109,6 +118,20 @@ test("work-shell helper owner files expose the builtin, execution, operational, 
     executionSource,
     /export function createPromptTurnFinalizePatch/,
   );
+
+  assert.match(
+    lifecycleSource,
+    /export async function loadInitialWorkShellLifecycleState/,
+  );
+  assert.match(
+    lifecycleSource,
+    /export async function loadOpenSessionsPanelState/,
+  );
+  assert.match(
+    lifecycleSource,
+    /export function resolveSensitiveInputCancelState/,
+  );
+  assert.match(lifecycleSource, /export function resolveCloseOverlayState/);
 
   assert.match(panelsSource, /export function createCollapsedContextPanel/);
   assert.match(
