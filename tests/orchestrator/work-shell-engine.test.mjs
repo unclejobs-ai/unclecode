@@ -53,6 +53,10 @@ import {
   runPromptTurnSuccessSequence,
 } from "../../packages/orchestrator/src/work-shell-engine-execution.ts";
 import {
+  executeWorkShellChatSubmit,
+  executeWorkShellPromptCommandSubmit,
+} from "../../packages/orchestrator/src/work-shell-engine-prompt-runtime.ts";
+import {
   applyAuthIssueLinesToContextSummaryLines,
   loadInitialWorkShellContextState,
   loadWorkShellContextState,
@@ -1045,6 +1049,103 @@ test("work-shell execution helpers assemble start, success, failure, finalize, a
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
   });
+});
+
+test("work-shell prompt runtime helpers adapt chat and prompt commands into execution turns", async () => {
+  const chatEntries = [];
+  const commandEntries = [];
+  const snapshots = [];
+
+  await executeWorkShellChatSubmit({
+    line: "summarize repo",
+    resolveComposerInput: async () => ({
+      prompt: "summarize repo",
+      transcriptText: "summarize repo",
+      attachments: ["img-1"],
+    }),
+    state: createState({ model: "gpt-5.4", reasoning: supportedReasoning }),
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "oauth-file",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    },
+    sessionId: "work-1",
+    buildStatusPanel: (_options, reasoning, authLabel) => ({
+      title: "Status",
+      lines: [reasoning.effort, authLabel],
+    }),
+    runAgentTurn: async (prompt, attachments) => {
+      assert.equal(prompt, "summarize repo");
+      assert.deepEqual(attachments, ["img-1"]);
+      return { text: "Chat done." };
+    },
+    publishContextBridge: async ({ summary }) => ({ bridgeId: "bridge-1", line: `bridge ${summary}` }),
+    writeScopedMemory: async () => ({ memoryId: "memory-1" }),
+    listScopedMemoryLines: async () => ["memory-1 line"],
+    refreshAuthState: async () => ({ authLabel: "oauth-file", authIssueLines: [] }),
+    applyAuthIssueLines() {},
+    formatWorkShellError: (message) => `ERR:${message}`,
+    formatAgentTraceLine: (event) => `${event.type}:${String(event.summary ?? "")}`,
+    appendEntries: (...entries) => {
+      chatEntries.push(...entries);
+    },
+    setState() {},
+    pushTraceLine() {},
+    persistSessionSnapshot: async (state, summary) => {
+      snapshots.push({ state, summary });
+    },
+  });
+
+  await executeWorkShellPromptCommandSubmit({
+    transcriptText: "/review auth flow",
+    promptCommand: { kind: "review", focus: "auth flow" },
+    state: createState({ model: "gpt-5.4", reasoning: supportedReasoning }),
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "oauth-file",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    },
+    sessionId: "work-1",
+    buildStatusPanel: (_options, reasoning, authLabel) => ({
+      title: "Status",
+      lines: [reasoning.effort, authLabel],
+    }),
+    runAgentTurn: async (prompt) => {
+      assert.match(prompt, /Review the current repository changes and implementation\./);
+      assert.match(prompt, /Focus request: auth flow/);
+      return { text: "Review done." };
+    },
+    publishContextBridge: async ({ summary }) => ({ bridgeId: "bridge-2", line: `bridge ${summary}` }),
+    writeScopedMemory: async () => ({ memoryId: "memory-2" }),
+    listScopedMemoryLines: async () => ["memory-2 line"],
+    refreshAuthState: async () => ({ authLabel: "oauth-file", authIssueLines: [] }),
+    applyAuthIssueLines() {},
+    formatWorkShellError: (message) => `ERR:${message}`,
+    formatAgentTraceLine: (event) => `${event.type}:${String(event.summary ?? "")}`,
+    appendEntries: (...entries) => {
+      commandEntries.push(...entries);
+    },
+    setState() {},
+    pushTraceLine() {},
+    persistSessionSnapshot: async () => {},
+  });
+
+  assert.deepEqual(chatEntries.map((entry) => entry.role), ["user", "assistant"]);
+  assert.equal(chatEntries[0]?.text, "summarize repo");
+  assert.equal(commandEntries[0]?.text, "/review auth flow");
+  assert.equal(commandEntries[1]?.text, "Review done.");
+  assert.deepEqual(snapshots, [
+    { state: "running", summary: "Chat: summarize repo" },
+    { state: "idle", summary: "Chat: summarize repo" },
+  ]);
 });
 
 test("work-shell lifecycle helpers load initial state, session panels, and overlay/cancel transitions", async () => {

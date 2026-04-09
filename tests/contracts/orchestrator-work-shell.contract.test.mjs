@@ -25,15 +25,15 @@ test("work-shell engine imports helper ownership seams instead of regrowing loca
     /from "\.\/work-shell-engine-command-runtime\.js"/,
   );
   assert.match(engineSource, /from "\.\/work-shell-engine-context\.js"/);
-  assert.match(engineSource, /from "\.\/work-shell-engine-execution\.js"/);
+  assert.match(engineSource, /from "\.\/work-shell-engine-prompt-runtime\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-lifecycle\.js"/);
-  assert.match(engineSource, /from "\.\/work-shell-engine-panels\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-persistence\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-submit\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-trace\.js"/);
-  assert.match(engineSource, /from "\.\/work-shell-engine-turns\.js"/);
   assert.match(engineSource, /from "\.\/work-shell-engine-state\.js"/);
 
+  assert.doesNotMatch(engineSource, /private async executePromptCommand\(/);
+  assert.doesNotMatch(engineSource, /private async handleChatSubmit\(/);
   assert.doesNotMatch(engineSource, /private async executePromptTurn\(/);
   assert.doesNotMatch(engineSource, /private async handleTraceEvent\(/);
   assert.doesNotMatch(engineSource, /private async finalizeAssistantReply\(/);
@@ -59,6 +59,9 @@ test("work-shell helper owner files expose the builtin, execution, operational, 
   );
   const executionSource = readWorkspaceFile(
     "packages/orchestrator/src/work-shell-engine-execution.ts",
+  );
+  const promptRuntimeSource = readWorkspaceFile(
+    "packages/orchestrator/src/work-shell-engine-prompt-runtime.ts",
   );
   const lifecycleSource = readWorkspaceFile(
     "packages/orchestrator/src/work-shell-engine-lifecycle.ts",
@@ -131,6 +134,15 @@ test("work-shell helper owner files expose the builtin, execution, operational, 
   assert.match(
     executionSource,
     /export function createPromptTurnFinalizePatch/,
+  );
+
+  assert.match(
+    promptRuntimeSource,
+    /export async function executeWorkShellChatSubmit/,
+  );
+  assert.match(
+    promptRuntimeSource,
+    /export async function executeWorkShellPromptCommandSubmit/,
   );
 
   assert.match(
