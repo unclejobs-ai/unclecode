@@ -801,10 +801,7 @@ test("work-shell-auth-panels.ts owns auth panel helpers as a dedicated module", 
     path.join(workspaceRoot, "packages/tui/src/work-shell-auth-panels.ts"),
     "utf8",
   );
-  assert.match(
-    authPanelsSource,
-    /export function formatAuthLabelForDisplay\(/,
-  );
+  assert.match(authPanelsSource, /export function formatAuthLabelForDisplay\(/);
   assert.match(
     authPanelsSource,
     /export function refineAuthStatusPanelLines\(/,

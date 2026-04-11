@@ -774,11 +774,15 @@ test("getWorkspaceDisplayName handles both POSIX and Windows paths", () => {
 
 test("new TUI dashboard owner seams exist as dedicated modules", () => {
   assert.ok(
-    existsSync(path.join(workspaceRoot, "packages/tui/src/dashboard-primitives.tsx")),
+    existsSync(
+      path.join(workspaceRoot, "packages/tui/src/dashboard-primitives.tsx"),
+    ),
     "dashboard-primitives.tsx exists",
   );
   assert.ok(
-    existsSync(path.join(workspaceRoot, "packages/tui/src/dashboard-components.tsx")),
+    existsSync(
+      path.join(workspaceRoot, "packages/tui/src/dashboard-components.tsx"),
+    ),
     "dashboard-components.tsx exists",
   );
   assert.ok(
