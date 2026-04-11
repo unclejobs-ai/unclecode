@@ -793,3 +793,24 @@ test("truncateForDisplayWidth adds ellipsis at the right display column", () => 
   assert.equal(truncateForDisplayWidth("abc", 10), "abc");
   assert.equal(truncateForDisplayWidth("abcdef", 5), "abcd…");
 });
+
+// ── Auth panels owner seam ────────────────────────────────────────
+
+test("work-shell-auth-panels.ts owns auth panel helpers as a dedicated module", () => {
+  const authPanelsSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-auth-panels.ts"),
+    "utf8",
+  );
+  assert.match(
+    authPanelsSource,
+    /export function formatAuthLabelForDisplay\(/,
+  );
+  assert.match(
+    authPanelsSource,
+    /export function refineAuthStatusPanelLines\(/,
+  );
+  assert.match(
+    authPanelsSource,
+    /export function buildDefaultAuthLauncherLines\(/,
+  );
+});

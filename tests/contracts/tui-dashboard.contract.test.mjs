@@ -771,3 +771,49 @@ test("getWorkspaceDisplayName handles both POSIX and Windows paths", () => {
   );
   assert.equal(getWorkspaceDisplayName("unclecode"), "unclecode");
 });
+
+test("new TUI dashboard owner seams exist as dedicated modules", () => {
+  assert.ok(
+    existsSync(path.join(workspaceRoot, "packages/tui/src/dashboard-primitives.tsx")),
+    "dashboard-primitives.tsx exists",
+  );
+  assert.ok(
+    existsSync(path.join(workspaceRoot, "packages/tui/src/dashboard-components.tsx")),
+    "dashboard-components.tsx exists",
+  );
+  assert.ok(
+    existsSync(path.join(workspaceRoot, "packages/tui/src/dashboard-model.ts")),
+    "dashboard-model.ts exists",
+  );
+
+  const primitivesSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/dashboard-primitives.tsx"),
+    "utf8",
+  );
+  assert.match(primitivesSource, /export const C =/);
+  assert.match(primitivesSource, /export function RoundedPanel\(/);
+  assert.match(primitivesSource, /export function StatusDot\(/);
+
+  const modelSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/dashboard-model.ts"),
+    "utf8",
+  );
+  assert.match(modelSource, /export type TuiDashboardHomeState =/);
+  assert.match(modelSource, /export type TuiRenderOptions</);
+
+  const componentsSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/dashboard-components.tsx"),
+    "utf8",
+  );
+  assert.match(componentsSource, /export function HeaderChrome\(/);
+  assert.match(componentsSource, /export function StatusBar\(/);
+  assert.match(componentsSource, /export function DetailPanel\(/);
+  assert.match(componentsSource, /export function SessionList\(/);
+
+  const tuiSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/index.tsx"),
+    "utf8",
+  );
+  assert.match(tuiSource, /export \* from "\.\/dashboard-components\.js"/);
+  assert.match(tuiSource, /export \* from "\.\/dashboard-model\.js"/);
+});
