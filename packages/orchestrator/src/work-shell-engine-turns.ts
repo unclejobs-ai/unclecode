@@ -83,6 +83,8 @@ const PERMISSION_STALL_PATTERNS = [
   /^(?:let me know|tell me) if you (?:want|would like)\b/i,
   /^(?:i can|i could) (?:continue|keep going|also continue|also keep going|take another pass|handle the rest|do the rest|clean up the remaining)\b/i,
   /^happy to (?:continue|keep going|take another pass)\b/i,
+  /(?:계속|진행|이어서).*(?:할까요|할게요|하겠습니다|해도 될까요)/,
+  /(?:원하시면|원한다면|필요하시면).*(?:진행|계속|수정)/,
 ];
 
 function splitReplyParagraphs(text: string): readonly string[] {

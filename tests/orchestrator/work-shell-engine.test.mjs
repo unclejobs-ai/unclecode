@@ -774,6 +774,16 @@ test("work-shell turn helpers build summaries and permission-stall continuations
     stripPermissionSeekingStallOutro("Done.\n\nIf you want, I can continue."),
     "Done.",
   );
+  assert.equal(
+    detectPermissionSeekingStall("완료했습니다.\n\n계속 진행할까요?"),
+    true,
+    "Korean permission stall detected",
+  );
+  assert.equal(
+    detectPermissionSeekingStall("원하시면 나머지도 수정하겠습니다."),
+    true,
+    "Korean conditional offer detected",
+  );
   assert.equal(detectEditIntent("provider parity 구현해줘"), true);
   assert.equal(detectEditIntent("summarize current repo"), false);
   assert.match(

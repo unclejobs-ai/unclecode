@@ -553,6 +553,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
   );
   assert.equal(buildWorkShellHelpPanel().title, "Work-first shell");
   assert.match(buildWorkShellHelpPanel().lines.join("\n"), /\/model/);
+  assert.match(buildWorkShellHelpPanel().lines.join("\n"), /\/harness/);
   assert.deepEqual(
     buildWorkShellStatusPanel({
       provider: "openai",
