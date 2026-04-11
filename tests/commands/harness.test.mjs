@@ -80,6 +80,50 @@ test("formatHarnessStatusLines handles missing config gracefully", () => {
   assert.ok(lines.some((l) => l.includes("not found")));
 });
 
+test("harness apply yolo patches config.toml values correctly", () => {
+  const applyDir = path.join(testDir, "apply-test");
+  mkdirSync(path.join(applyDir, ".codex"), { recursive: true });
+  writeFileSync(
+    path.join(applyDir, ".codex", "config.toml"),
+    [
+      'model = "gpt-5.4"',
+      'model_reasoning_effort = "high"',
+      'approvals_reviewer = "user"',
+    ].join("\n"),
+    "utf8",
+  );
+
+  const patch = getHarnessPresetPatch("yolo");
+  let content = readFileSync(
+    path.join(applyDir, ".codex", "config.toml"),
+    "utf8",
+  );
+
+  for (const [key, value] of Object.entries(patch)) {
+    const pattern = new RegExp(`^(${key}\\s*=\\s*)"[^"]*"`, "m");
+    content = content.replace(pattern, `$1"${value}"`);
+  }
+
+  writeFileSync(
+    path.join(applyDir, ".codex", "config.toml"),
+    content,
+    "utf8",
+  );
+
+  const status = inspectHarnessStatus(applyDir);
+  assert.equal(
+    status.reasoningEffort,
+    "medium",
+    "reasoning effort patched to medium",
+  );
+  assert.equal(
+    status.approvals,
+    "auto-edit",
+    "approvals patched to auto-edit",
+  );
+  assert.equal(status.model, "gpt-5.4", "model preserved unchanged");
+});
+
 test.after(() => {
   rmSync(testDir, { recursive: true, force: true });
 });
