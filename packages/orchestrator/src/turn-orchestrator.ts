@@ -31,8 +31,13 @@ export function classifyWorkIntent(prompt: string, mode: string): WorkIntent {
 
   const filePathCount = (prompt.match(/[\w-./]+\.\w{1,5}/g) ?? []).length;
   const complexKeywords = /\b(refactor|migrate|rewrite|redesign|rebuild|all files|entire|every)\b/i;
+  const yoloComplexKeywords = /\b(fix|implement|add|update|change|create|build|improve)\b/i;
 
   if (filePathCount >= 3 || complexKeywords.test(prompt)) {
+    return "complex";
+  }
+
+  if (mode === "yolo" && (filePathCount >= 2 || yoloComplexKeywords.test(prompt))) {
     return "complex";
   }
 

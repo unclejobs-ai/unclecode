@@ -17,6 +17,21 @@ test("classifyWorkIntent keeps fast paths simple and routes explicit complex or 
     "complex",
   );
   assert.equal(classifyWorkIntent("summarize this file", "default"), "simple");
+  assert.equal(
+    classifyWorkIntent("fix the auth bug in login.ts and session.ts", "yolo"),
+    "complex",
+    "yolo mode lowers the complex threshold with action keywords + 2 files",
+  );
+  assert.equal(
+    classifyWorkIntent("implement user dashboard", "yolo"),
+    "complex",
+    "yolo mode routes action keywords to complex",
+  );
+  assert.equal(
+    classifyWorkIntent("what is this?", "yolo"),
+    "simple",
+    "yolo mode still keeps pure questions simple",
+  );
 });
 
 test("createTurnOrchestrator executes complex plans with bounded concurrency and real steps", async () => {
