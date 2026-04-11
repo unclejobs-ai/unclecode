@@ -201,7 +201,7 @@ export function Dashboard(props: DashboardProps) {
           });
         }
         dispatch({ type: "view.changed", view: "work" });
-      })();
+      })().catch(() => undefined);
       return;
     }
 
@@ -232,7 +232,7 @@ export function Dashboard(props: DashboardProps) {
       const refreshedHomeState = props.refreshHomeState ? await props.refreshHomeState() : shellState.homeState;
       dispatch({ type: "home.updated", homeState: refreshedHomeState });
       dispatch({ type: "view.changed", view: "sessions" });
-    })();
+    })().catch(() => undefined);
   };
   const renderFullscreenWorkPane = shouldRenderEmbeddedWorkPaneFullscreen(shellState.view, Boolean(props.renderWorkPane));
 
@@ -265,7 +265,7 @@ export function Dashboard(props: DashboardProps) {
           outputLines: [message],
         });
       }
-    })();
+    })().catch(() => undefined);
   };
 
   const triggerActionById = (actionId: string, detail: string) => {
@@ -401,7 +401,7 @@ export function Dashboard(props: DashboardProps) {
               outputLines: [message],
             });
           }
-        })();
+        })().catch(() => undefined);
         return;
       }
     }
@@ -442,7 +442,7 @@ export function Dashboard(props: DashboardProps) {
               outputLines: [message],
             });
           }
-        })();
+        })().catch(() => undefined);
         return;
       }
 
@@ -504,7 +504,7 @@ export function Dashboard(props: DashboardProps) {
               outputLines: [message],
             });
           }
-        })();
+        })().catch(() => undefined);
         dispatch({ type: "focus.changed", focus: { ...result, shouldExit: false, selectedCommand: undefined, detailOpen: true } });
         return;
       }
@@ -535,7 +535,7 @@ export function Dashboard(props: DashboardProps) {
                 outputLines: [message],
               });
             }
-          })();
+          })().catch(() => undefined);
           dispatch({ type: "focus.changed", focus: { ...result, shouldExit: false, selectedCommand: undefined, detailOpen: true } });
           return;
         }
