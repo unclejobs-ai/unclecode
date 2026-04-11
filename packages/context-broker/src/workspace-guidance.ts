@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 
 import { clearWorkspaceSkillCache, listAvailableSkills } from "./workspace-skills.js";
@@ -180,6 +180,19 @@ async function discoverGuidanceSources(cwd: string, userHomeDir?: string): Promi
         candidates.push(source);
       }
     }
+  }
+
+  const rulesDir = path.join(cwd, ".sisyphus", "rules");
+  try {
+    const ruleFiles = await readdir(rulesDir);
+    for (const file of ruleFiles.filter((f) => f.endsWith(".md")).sort()) {
+      const source = await readGuidanceFile(path.join(rulesDir, file), `rules/${file}`);
+      if (source) {
+        candidates.push(source);
+      }
+    }
+  } catch {
+    // .sisyphus/rules/ may not exist — that's fine
   }
 
   const { sources, notes } = dedupeGuidanceSources(candidates);
