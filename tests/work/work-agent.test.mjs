@@ -135,8 +135,10 @@ test("WorkAgent includes executable guardian checks in review and synthesis prom
     resultCount: 3,
     changedFiles: ["login.ts", "oauth.ts", "session.ts"],
   }]);
-  assert.match(calls[3] ?? "", /Executable verification:/);
-  assert.match(calls[3] ?? "", /check PASS/);
-  assert.match(calls[4] ?? "", /Executable checks:/);
-  assert.match(calls[4] ?? "", /lint PASS/);
+  const reviewCall = calls.find((c) => /Executable verification:/.test(c));
+  const synthesisCall = calls.find((c) => /Executable checks:/.test(c));
+  assert.ok(reviewCall, "guardian review includes executable verification");
+  assert.match(reviewCall ?? "", /check PASS/);
+  assert.ok(synthesisCall, "synthesis includes executable checks");
+  assert.match(synthesisCall ?? "", /lint PASS/);
 });
