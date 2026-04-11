@@ -341,7 +341,7 @@ export function buildWorkShellHelpPanel(): WorkShellPanel {
       "/context, /reasoning, /model, /sessions, /reload",
       "/doctor, /auth status, /auth login, /auth key, /mcp list, /mode status",
       "/research <topic>, /research status, /review, /commit",
-      "/queue, /skills, /skill <name>, /memories, /clear, /help, /exit",
+      "/queue, /skills, /skill <name>, /memories, /harness, /clear, /help, /exit",
       "/remember [session|project|user|agent] <text>",
       "AGENTS.md / CLAUDE.md load automatically.",
     ],
