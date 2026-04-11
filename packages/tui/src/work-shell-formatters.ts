@@ -83,7 +83,8 @@ export function formatAgentTraceLine(event: ExecutionTraceEvent): string {
   }
 
   if (event.type === "tool.completed") {
-    return `${event.isError ? "✖" : "✓"} ${getToolDisplayName(event.toolName)} ${event.durationMs}ms ${summarizeText(event.output)}`;
+    const output = typeof event.output === "string" ? event.output : JSON.stringify(event.output);
+    return `${event.isError ? "✖" : "✓"} ${getToolDisplayName(event.toolName)} ${event.durationMs}ms ${summarizeText(output)}`;
   }
 
   if (event.type === "orchestrator.step") {
