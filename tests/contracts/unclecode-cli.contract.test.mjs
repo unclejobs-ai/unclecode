@@ -395,6 +395,11 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
   );
   assert.match(
     programSource,
+    /createUncleCodeProgram\([\s\S]*registerHarnessCommands\(program\)/,
+    "harness commands are registered in the program",
+  );
+  assert.match(
+    programSource,
     /program\.action\(async \(\) => \{[\s\S]*await\s+handleRootCommand\(program\)/,
   );
   assert.match(
@@ -1297,4 +1302,15 @@ test("shouldLaunchDefaultWorkSession enables no-arg interactive startup", () => 
     }),
     false,
   );
+});
+
+test("harness.ts owns harness inspection and preset application", () => {
+  const harnessSource = readFileSync(
+    path.join(workspaceRoot, "apps/unclecode-cli/src/harness.ts"),
+    "utf8",
+  );
+  assert.match(harnessSource, /export function inspectHarnessStatus\(/);
+  assert.match(harnessSource, /export function formatHarnessStatusLines\(/);
+  assert.match(harnessSource, /export function formatHarnessExplainLines\(/);
+  assert.match(harnessSource, /export function getHarnessPresetPatch\(/);
 });
