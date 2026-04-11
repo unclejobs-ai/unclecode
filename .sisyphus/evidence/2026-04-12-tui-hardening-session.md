@@ -50,7 +50,32 @@ Codex code review → bug fixes → TUI dashboard decomposition → product hard
 - Biome lint clean (our code)
 - Production build clean
 
+## Additional commits (late session)
+13. `84e54a3` — YOLO worker budget 4 + /queue enrichment
+14. `acd39fa` — resolveWorkerBudget test
+15. `3b452ba` — YOLO complex-turn threshold lowered
+16. `953aef4` — Ownership contract tests for new modules
+17. `b9f3db7` — Fix harness ESM import (require→static import)
+18. `85ed2b2` — Prior-session YOLO/slash/engine changes staged
+19. `36d14b6` — Planning/handoff docs
+20. `d8dabc8` — /queue mode+budget wiring
+21. `10de764` — harness apply yolo e2e test
+22. `4c9102b` — Lint formatting fixes
+23. `b05eb81` — .gitignore update
+24. `bd9148a` — Agent-driven task planning + resolveModeDefaultReasoning test
+25. `dcc42fc` — StatusBar rule count display
+26. `c9a190d` — Agent-driven planning (yolo/ultrawork)
+27. `906f87b` — Fix tool.completed trace crash (non-string output)
+28. `2f88b88` — Regression test for trace output
+29. `b4a18b1` — Fix work-agent guardian test (index-independent)
+
+## Final stats
+- 30 commits, 56+ files, +5500/-2550 lines
+- 416 source tests + 48 integration = 464 total, all passing
+- Build, typecheck, lint all clean
+
 ## Recommended next session
 - Task 13: multi-agent orchestration (the core differentiator)
 - oh-my-codex deeper harness integration (preset profiles beyond yolo)
 - Provider streaming intermediate text
+- operational.ts 1212줄 분해 (next hotspot)
