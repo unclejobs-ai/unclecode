@@ -213,7 +213,6 @@ test("work-shell helper owner files expose the builtin, execution, operational, 
   assert.match(traceSource, /export function createTraceEventBusyPatch/);
   assert.match(traceSource, /export function resolveVerboseTraceEntry/);
   assert.match(traceSource, /export function applyWorkShellTraceEvent/);
-  assert.match(traceSource, /export function applyWorkShellTraceEvent/);
 });
 
 test("work-agent exports agent-driven planning helpers", () => {
