@@ -186,16 +186,16 @@ test("getWorkShellEntryPresentation keeps user, assistant, tool, and system role
 test("getWorkShellComposerHint keeps slash discovery guidance inside the shared work presenter seam", () => {
   assert.equal(
     getWorkShellComposerHint("/auth", 2),
-    "↑↓ move · Enter run · Shift+Tab mode",
+    "↑↓ select · Enter run · Esc cancel",
   );
-  assert.equal(getWorkShellComposerHint("/unknown", 0), "No slash yet.");
+  assert.equal(getWorkShellComposerHint("/unknown", 0), "No matches");
   assert.equal(
     getWorkShellComposerHint("", 0),
-    "Enter send · Shift+Enter newline · Shift+Tab mode · / commands · @file context",
+    "Enter send · Shift+Enter newline · / commands",
   );
   assert.equal(
     getWorkShellComposerHint("plain text", 3),
-    "Enter send · Shift+Enter newline · Shift+Tab mode · / commands",
+    "Enter send · Shift+Enter newline",
   );
   assert.equal(getWorkShellComposerHintMinHeight(), 1);
 });
@@ -616,7 +616,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       mode: "default",
       authLabel: "Browser OAuth · file",
     }),
-    "Model · gpt-5.4 · Mode · Work mode · Auth · Saved OAuth",
+    "gpt-5.4 · Work mode · Saved OAuth",
   );
   assert.equal(
     formatWorkShellBusyStatusLine("· thinking inspect repo", 0),

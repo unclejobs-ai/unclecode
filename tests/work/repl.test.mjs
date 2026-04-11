@@ -1169,7 +1169,7 @@ test("getConversationLayout gives answer blocks more room than lower-signal note
       mode: "yolo",
       authLabel: "Browser OAuth · file",
     }),
-    /Mode · YOLO mode/,
+    /YOLO mode/,
   );
 });
 

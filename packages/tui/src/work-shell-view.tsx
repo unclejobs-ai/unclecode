@@ -189,12 +189,12 @@ export function getWorkShellAttachmentLineColor(index: number): string {
 
 export function getWorkShellComposerHint(inputValue: string, slashSuggestionCount: number): string | undefined {
   if (inputValue.trim().startsWith("/")) {
-    return slashSuggestionCount > 0 ? "↑↓ move · Enter run · Shift+Tab mode" : "No slash yet.";
+    return slashSuggestionCount > 0 ? "↑↓ select · Enter run · Esc cancel" : "No matches";
   }
   if (inputValue.trim().length === 0) {
-    return "Enter send · Shift+Enter newline · Shift+Tab mode · / commands · @file context";
+    return "Enter send · Shift+Enter newline · / commands";
   }
-  return "Enter send · Shift+Enter newline · Shift+Tab mode · / commands";
+  return "Enter send · Shift+Enter newline";
 }
 
 const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
@@ -258,11 +258,7 @@ export function formatWorkShellStatusLine(input: {
   readonly mode: string;
   readonly authLabel: string;
 }): string {
-  return [
-    `Model · ${input.model}`,
-    `Mode · ${humanizeWorkShellModeLabel(input.mode)}`,
-    `Auth · ${compactWorkShellAuthLabel(input.authLabel)}`,
-  ].join(" · ");
+  return `${input.model} · ${humanizeWorkShellModeLabel(input.mode)} · ${compactWorkShellAuthLabel(input.authLabel)}`;
 }
 
 export function formatWorkShellUsageLine(input: {
