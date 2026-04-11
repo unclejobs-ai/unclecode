@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -128,58 +128,106 @@ test("embedded work controller helpers share selected-session parsing and patch 
 });
 
 test("embedded work dashboard helpers return the shared TuiRenderOptions seam", () => {
-  const tuiSource = readFileSync(
-    path.join(workspaceRoot, "packages/tui/src/index.tsx"),
+  const dashboardRenderSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/dashboard-render.tsx"),
     "utf8",
   );
 
   assert.match(
-    tuiSource,
+    dashboardRenderSource,
     /export function createEmbeddedWorkShellDashboardProps\([\s\S]*\): TuiRenderOptions<TuiShellHomeState>/,
   );
   assert.match(
-    tuiSource,
+    dashboardRenderSource,
     /export function createEmbeddedWorkShellPaneDashboardProps<[\s\S]*\): TuiRenderOptions<TuiShellHomeState>/,
   );
   assert.doesNotMatch(
-    tuiSource,
+    dashboardRenderSource,
     /createEmbeddedWorkShellDashboardProps[\s\S]*React\.ComponentProps<typeof Dashboard>/,
   );
 });
 
+test("dashboard component and render entry live in dedicated owner seams", () => {
+  const dashboardShellPath = path.join(
+    workspaceRoot,
+    "packages/tui/src/dashboard-shell.tsx",
+  );
+  const dashboardShellSource = readFileSync(dashboardShellPath, "utf8");
+  const tuiEntryPath = path.join(
+    workspaceRoot,
+    "packages/tui/src/tui-entry.tsx",
+  );
+  const tuiEntrySource = readFileSync(tuiEntryPath, "utf8");
+
+  assert.ok(
+    existsSync(dashboardShellPath),
+    "dashboard-shell.tsx exists as dedicated component owner",
+  );
+  assert.match(
+    dashboardShellSource,
+    /export function Dashboard\(props: DashboardProps\)/,
+    "dashboard-shell exports Dashboard component",
+  );
+
+  assert.ok(existsSync(tuiEntryPath), "tui-entry.tsx exists as render owner");
+  assert.match(
+    tuiEntrySource,
+    /export\s+function\s+createDashboardElement\(/,
+    "tui-entry exports createDashboardElement",
+  );
+  assert.match(
+    tuiEntrySource,
+    /export\s+(?:async\s+)?function\s+renderEmbeddedWorkShellPaneDashboard\(/,
+    "tui-entry exports embedded dashboard renderer",
+  );
+  assert.match(
+    tuiEntrySource,
+    /export\s+(?:async\s+)?function\s+renderManagedWorkShellDashboard</,
+    "tui-entry exports managed dashboard renderer",
+  );
+  assert.match(
+    tuiEntrySource,
+    /export\s+async\s+function\s+renderTui\(/,
+    "tui-entry exports renderTui",
+  );
+});
+
 test("TUI render entrypoints share one Dashboard element builder", () => {
-  const tuiSource = readFileSync(
-    path.join(workspaceRoot, "packages/tui/src/index.tsx"),
+  const tuiEntrySource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/tui-entry.tsx"),
     "utf8",
   );
 
   assert.match(
-    tuiSource,
-    /function createDashboardElement\(props: TuiRenderOptions<TuiShellHomeState>\)/,
+    tuiEntrySource,
+    /function\s+createDashboardElement\([\s\S]*?props:\s*TuiRenderOptions<TuiShellHomeState>[\s\S]*?\)/,
   );
   assert.match(
-    tuiSource,
-    /renderEmbeddedWorkShellPaneDashboard\([\s\S]*render\(createDashboardElement\(props\)\)/,
+    tuiEntrySource,
+    /renderEmbeddedWorkShellPaneDashboard\([\s\S]*render\(\s*createDashboardElement\(props\)\s*\)/,
   );
   assert.match(
-    tuiSource,
-    /renderTui\([\s\S]*render\(createDashboardElement\(options \?\? \{\}\)\)/,
+    tuiEntrySource,
+    /renderTui\([\s\S]*createDashboardElement\(options\s*\?\?\s*\{\}\)/,
   );
 });
 
 test("Dashboard props derive from the shared TuiRenderOptions seam", () => {
-  const tuiSource = readFileSync(
-    path.join(workspaceRoot, "packages/tui/src/index.tsx"),
+  const dashboardShellSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/dashboard-shell.tsx"),
     "utf8",
   );
 
   assert.match(
-    tuiSource,
+    dashboardShellSource,
     /export type DashboardProps = TuiRenderOptions<TuiShellHomeState> & \{[\s\S]*readonly workspaceRoot: string;[\s\S]*\};/,
   );
-  assert.match(tuiSource, /export function Dashboard\(props: DashboardProps\)/);
+  assert.match(
+    dashboardShellSource,
+    /export function Dashboard\(props: DashboardProps\)/,
+  );
   assert.doesNotMatch(
-    tuiSource,
+    dashboardShellSource,
     /export function Dashboard\(props: \{[\s\S]*readonly workspaceRoot: string;/,
   );
 });
@@ -197,9 +245,76 @@ test("dashboard hotspot re-exports extracted dashboard owner seams instead of re
     path.join(workspaceRoot, "packages/tui/src/work-shell-dashboard-sync.ts"),
     "utf8",
   );
+  const dashboardActionsSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/dashboard-actions.ts"),
+    "utf8",
+  );
+  const dashboardNavigationSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/dashboard-navigation.ts"),
+    "utf8",
+  );
+  const dashboardRenderSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/dashboard-render.tsx"),
+    "utf8",
+  );
+  const dashboardShellSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/dashboard-shell.tsx"),
+    "utf8",
+  );
+  const tuiEntrySource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/tui-entry.tsx"),
+    "utf8",
+  );
 
+  assert.match(tuiSource, /export \* from "\.\/dashboard-actions\.js"/);
+  assert.match(tuiSource, /export \* from "\.\/dashboard-navigation\.js"/);
+  assert.match(tuiSource, /export \* from "\.\/dashboard-render\.js"/);
   assert.match(tuiSource, /export \* from "\.\/work-shell-dashboard\.js"/);
   assert.match(tuiSource, /export \* from "\.\/work-shell-dashboard-sync\.js"/);
+  assert.match(tuiSource, /export \* from "\.\/tui-entry\.js"/);
+  assert.doesNotMatch(
+    tuiSource,
+    /export \{ Dashboard \} from "\.\/dashboard-shell\.js"/,
+  );
+  assert.doesNotMatch(
+    tuiSource,
+    /export \{ renderTui \} from "\.\/dashboard-shell\.js"/,
+  );
+  assert.match(dashboardShellSource, /export function Dashboard\(/);
+  assert.match(
+    tuiEntrySource,
+    /export\s+function\s+createDashboardElement\([\s\S]*?:\s*TuiRenderOptions<TuiShellHomeState>\s*,/,
+  );
+  assert.match(
+    tuiEntrySource,
+    /export\s+(?:async\s+)?function\s+renderEmbeddedWorkShellPaneDashboard\([\s\S]*?await\s+instance\.waitUntilExit\(/,
+  );
+  assert.match(
+    tuiEntrySource,
+    /export\s+(?:async\s+)?function\s+renderManagedWorkShellDashboard<[\s\S]*?createManagedWorkShellDashboardProps\(input\)/,
+  );
+  assert.match(tuiEntrySource, /export\s+async\s+function\s+renderTui\(/);
+  assert.match(dashboardActionsSource, /export const DASHBOARD_ACTIONS/);
+  assert.match(
+    dashboardActionsSource,
+    /export function createSessionCenterModel\(/,
+  );
+  assert.match(
+    dashboardNavigationSource,
+    /export function handleDashboardInput\(/,
+  );
+  assert.match(
+    dashboardNavigationSource,
+    /export function handleSessionCenterInput\(/,
+  );
+  assert.match(
+    dashboardRenderSource,
+    /export function createEmbeddedWorkShellDashboardProps\(/,
+  );
+  assert.match(
+    dashboardRenderSource,
+    /export function createManagedWorkShellDashboardProps</,
+  );
   assert.match(dashboardSource, /export function EmbeddedWorkShellPane</);
   assert.match(
     dashboardSyncSource,
@@ -208,6 +323,18 @@ test("dashboard hotspot re-exports extracted dashboard owner seams instead of re
   assert.match(
     dashboardSyncSource,
     /export function createWorkShellDashboardHomeSyncState/,
+  );
+  assert.doesNotMatch(tuiSource, /export const DASHBOARD_ACTIONS/);
+  assert.doesNotMatch(tuiSource, /export function createSessionCenterModel\(/);
+  assert.doesNotMatch(tuiSource, /export function handleDashboardInput\(/);
+  assert.doesNotMatch(tuiSource, /export function handleSessionCenterInput\(/);
+  assert.doesNotMatch(
+    tuiSource,
+    /export function createEmbeddedWorkShellDashboardProps\(/,
+  );
+  assert.doesNotMatch(
+    tuiSource,
+    /export function createManagedWorkShellDashboardProps</,
   );
   assert.doesNotMatch(
     tuiSource,
@@ -221,31 +348,45 @@ test("dashboard hotspot re-exports extracted dashboard owner seams instead of re
 });
 
 test("embedded work dashboard snapshot and render-option helpers are formalized as shared TUI seams", () => {
-  const tuiSource = readFileSync(
-    path.join(workspaceRoot, "packages/tui/src/index.tsx"),
+  // Ownership moved to dashboard-model.ts; dashboard-shell.tsx re-exports these.
+  const dashboardModelSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/dashboard-model.ts"),
+    "utf8",
+  );
+  const dashboardShellSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/dashboard-shell.tsx"),
     "utf8",
   );
 
   assert.match(
-    tuiSource,
+    dashboardModelSource,
     /export type EmbeddedWorkDashboardSnapshot<[\s\S]*> = Pick<[\s\S]*TuiRenderOptions<HomeState>/,
   );
   assert.match(
-    tuiSource,
+    dashboardModelSource,
     /export type EmbeddedWorkPaneRenderOptions<[\s\S]*> = EmbeddedWorkDashboardSnapshot<HomeState> & Pick<[\s\S]*openEmbeddedWorkSession/,
   );
-  assert.match(tuiSource, /export function extractEmbeddedHomeStatePatch</);
   assert.match(
-    tuiSource,
+    dashboardModelSource,
+    /export function extractEmbeddedHomeStatePatch</,
+  );
+  assert.match(
+    dashboardModelSource,
     /export function buildEmbeddedWorkPaneRenderOptions</,
   );
   assert.match(
-    tuiSource,
+    dashboardModelSource,
     /export async function createEmbeddedWorkPaneController</,
   );
   assert.match(
-    tuiSource,
+    dashboardModelSource,
     /export function createSessionCenterDashboardRenderOptions</,
+  );
+  // dashboard-shell.tsx must re-export these for backward compatibility
+  assert.match(
+    dashboardShellSource,
+    /from "\.\/dashboard-model\.js"/,
+    "dashboard-shell re-exports from dashboard-model",
   );
 });
 

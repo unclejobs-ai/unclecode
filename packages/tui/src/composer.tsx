@@ -1,6 +1,8 @@
 import { Box, Text, useInput } from "ink";
 import { useEffect, useRef, useState } from "react";
 
+import { getDisplayWidth } from "./text-width.js";
+
 const COMPOSER_PASTE_THRESHOLD = 48;
 const PASTE_SETTLE_MS = 120;
 const BRACKETED_PASTE_ARTIFACT_PATTERN = /(?:\u001b\[(?:200|201|990)~|\[(?:200|201|990)~)/g;
@@ -124,10 +126,34 @@ function getCursorPosition(value: string, cursorOffset: number): {
   const clampedOffset = Math.max(0, Math.min(cursorOffset, value.length));
   const beforeCursor = value.slice(0, clampedOffset);
   const lines = beforeCursor.split("\n");
+  const lastLine = lines.at(-1) ?? "";
   return {
     lineIndex: Math.max(0, lines.length - 1),
-    columnIndex: lines.at(-1)?.length ?? 0,
+    columnIndex: getDisplayWidth(lastLine),
   };
+}
+
+function splitLineAtDisplayColumn(line: string, displayColumn: number): {
+  readonly before: string;
+  readonly atCursor: string;
+  readonly after: string;
+} {
+  let width = 0;
+  let beforeEnd = 0;
+  for (const char of line) {
+    const charWidth = getDisplayWidth(char);
+    if (width >= displayColumn) {
+      const cursorEnd = beforeEnd + char.length;
+      return {
+        before: line.slice(0, beforeEnd),
+        atCursor: char,
+        after: line.slice(cursorEnd),
+      };
+    }
+    width += charWidth;
+    beforeEnd += char.length;
+  }
+  return { before: line, atCursor: "", after: "" };
 }
 
 function renderComposerLine(line: string, cursorColumn: number | undefined): React.ReactNode {
@@ -135,7 +161,8 @@ function renderComposerLine(line: string, cursorColumn: number | undefined): Rea
     return <Text>{line.length > 0 ? line : " "}</Text>;
   }
 
-  if (cursorColumn >= line.length) {
+  const lineWidth = getDisplayWidth(line);
+  if (cursorColumn >= lineWidth) {
     return (
       <Text>
         {line}
@@ -144,11 +171,12 @@ function renderComposerLine(line: string, cursorColumn: number | undefined): Rea
     );
   }
 
+  const { before, atCursor, after } = splitLineAtDisplayColumn(line, cursorColumn);
   return (
     <Text>
-      {line.slice(0, cursorColumn)}
-      <Text inverse>{line[cursorColumn]}</Text>
-      {line.slice(cursorColumn + 1)}
+      {before}
+      <Text inverse>{atCursor}</Text>
+      {after}
     </Text>
   );
 }

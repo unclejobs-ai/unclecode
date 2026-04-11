@@ -51,8 +51,6 @@ export async function loadInitialWorkShellLifecycleState(input: {
   }));
 }
 
-export const loadWorkShellLifecycleState = loadInitialWorkShellLifecycleState;
-
 export async function loadOpenSessionsPanelState(input: {
   cwd: string;
   listSessionLines: (cwd: string) => Promise<readonly string[]>;

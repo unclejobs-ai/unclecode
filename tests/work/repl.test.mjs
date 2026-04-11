@@ -41,6 +41,8 @@ import {
   formatWorkShellBusyStatusLine,
   formatToolTraceLine,
   formatWorkShellError,
+  formatWorkShellStatusLine,
+  formatWorkShellThinkingLine,
   getWorkShellConversationLayout as getConversationLayout,
   normalizeMarkdownDisplayText,
   refineInlineCommandPanelLines,
@@ -292,6 +294,7 @@ test("resolveWorkShellSlashCommand maps supported operational and prompt surface
   assert.deepEqual(resolveWorkShellSlashCommand("/model list"), ["model", "list"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/mcp list"), ["mcp", "list"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/mode status"), ["mode", "status"]);
+  assert.deepEqual(resolveWorkShellSlashCommand("/mode set yolo"), ["mode", "set", "yolo"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/review"), ["prompt", "review"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/review auth flow"), ["prompt", "review", "auth", "flow"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/rev"), ["prompt", "review"]);
@@ -608,10 +611,14 @@ test("formatInlineImageSupportLine describes terminal preview capability", () =>
 
 test("getWorkShellSlashSuggestions surfaces command matches for slash-first input", () => {
   const suggestions = getWorkShellSlashSuggestions("/auth l");
+  const queueSuggestions = getWorkShellSlashSuggestions("/qu");
+  const skillSuggestions = getWorkShellSlashSuggestions("/sk");
 
   assert.ok(suggestions.some((item) => item.command === "/auth login"));
   assert.ok(suggestions.some((item) => item.command === "/auth key"));
   assert.ok(suggestions.some((item) => item.command === "/auth logout"));
+  assert.ok(queueSuggestions.some((item) => item.command === "/queue"));
+  assert.ok(skillSuggestions.some((item) => item.command === "/skills"));
 });
 
 test("getWorkShellSlashSuggestions keeps /auth launcher status-first", () => {
@@ -1150,10 +1157,20 @@ test("formatAuthLabelForDisplay humanizes auth labels", () => {
   assert.equal(formatAuthLabelForDisplay("none"), "Not signed in");
 });
 
-test("getConversationLayout gives answer blocks more room than notes", () => {
-  assert.deepEqual(getConversationLayout("assistant"), { marginBottom: 1, paddingLeft: 2, hasBorder: true });
-  assert.deepEqual(getConversationLayout("tool"), { marginBottom: 1, paddingLeft: 1, hasBorder: true });
-  assert.deepEqual(getConversationLayout("system"), { marginBottom: 1, paddingLeft: 1, hasBorder: true });
+test("getConversationLayout gives answer blocks more room than lower-signal notes", () => {
+  assert.deepEqual(getConversationLayout("assistant"), { marginBottom: 1, paddingLeft: 2, hasBorder: false });
+  assert.deepEqual(getConversationLayout("tool"), { marginBottom: 0, paddingLeft: 3, hasBorder: false });
+  assert.deepEqual(getConversationLayout("system"), { marginBottom: 0, paddingLeft: 3, hasBorder: false });
+  assert.equal(formatWorkShellThinkingLine("high (mode-default)"), "Thinking · Deep thinking");
+  assert.match(
+    formatWorkShellStatusLine({
+      model: "gpt-5.4",
+      reasoningLabel: "medium (mode-default)",
+      mode: "yolo",
+      authLabel: "Browser OAuth · file",
+    }),
+    /Mode · YOLO mode/,
+  );
 });
 
 test("createWorkShellDashboardProps maps work runtime state into unified Dashboard props", () => {

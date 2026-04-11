@@ -144,11 +144,11 @@ export function createPromptTurnFailurePatch<Reasoning extends WorkShellReasonin
   };
 }
 
-export function createPromptTurnFinalizePatch<Reasoning extends WorkShellReasoningConfig>(input: {
-  state: WorkShellEngineState<Reasoning>;
-}): Partial<WorkShellEngineState<Reasoning>> {
+export function createPromptTurnFinalizePatch<Reasoning extends WorkShellReasoningConfig>(
+  state: WorkShellEngineState<Reasoning>,
+): Partial<WorkShellEngineState<Reasoning>> {
   return createWorkShellBusyStatePatch({
-    state: input.state,
+    state,
     isBusy: false,
     clearCurrentTurnStartedAt: true,
   });
@@ -263,8 +263,6 @@ export async function executeWorkShellPromptTurn<
     }));
     await input.persistSessionSnapshot("requires_action", input.promptTurn.failureSummary).catch(() => undefined);
   } finally {
-    input.setState(createPromptTurnFinalizePatch({
-      state: input.state,
-    }));
+    input.setState(createPromptTurnFinalizePatch(input.state));
   }
 }

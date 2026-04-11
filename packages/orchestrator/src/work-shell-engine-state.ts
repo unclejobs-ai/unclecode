@@ -23,6 +23,7 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
   return {
     entries: [],
     model: input.options.model,
+    mode: input.options.mode,
     reasoning: input.options.reasoning,
     authLabel: input.options.authLabel,
     authLauncherLines: [],
@@ -123,6 +124,19 @@ export function createWorkShellTraceLinePatch<Reasoning extends WorkShellReasoni
   };
 }
 
+export function resolveModeDefaultReasoning<Reasoning extends WorkShellReasoningConfig>(
+  reasoning: Reasoning,
+): Reasoning {
+  if (reasoning.support.status === "unsupported") {
+    return reasoning;
+  }
+  return {
+    ...reasoning,
+    effort: reasoning.effort,
+    source: "mode-default",
+  };
+}
+
 export function isPinnedPanelTitle(title: string): boolean {
   return title === "Recent sessions"
     || title === "Session status"
@@ -130,5 +144,6 @@ export function isPinnedPanelTitle(title: string): boolean {
     || title === "Help"
     || title === "Memories"
     || title === "Skills"
+    || title === "Queue"
     || title.startsWith("Skill · ");
 }

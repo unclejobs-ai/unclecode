@@ -29,6 +29,7 @@ import {
   appendWorkShellEntries,
   createInitialWorkShellEngineState,
   createWorkShellTraceLinePatch,
+  resolveModeDefaultReasoning,
 } from "./work-shell-engine-state.js";
 import { applyWorkShellTraceEvent } from "./work-shell-engine-trace.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
@@ -88,6 +89,7 @@ export type WorkShellComposerMode = "default" | "api-key-entry";
 export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly entries: readonly WorkShellChatEntry[];
   readonly model: string;
+  readonly mode: string;
   readonly reasoning: Reasoning;
   readonly authLabel: string;
   readonly authLauncherLines: readonly string[];
@@ -107,6 +109,7 @@ export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkSh
   clear(): void;
   runTurn(prompt: string, attachments?: readonly Attachment[]): Promise<{ text: string }>;
   updateRuntimeSettings(settings: { reasoning?: Reasoning | undefined; model?: string | undefined }): void;
+  updateMode?(mode: string): void;
   setTraceListener(listener?: ((event: TraceEvent) => void) | undefined): void;
 }
 
@@ -547,7 +550,7 @@ export class WorkShellEngine<
       buildStatusPanel: this.buildStatusPanel,
       resolveReasoningCommand: this.resolveReasoningCommand,
       resolveModelCommand: this.resolveModelCommand,
-      modeDefaultReasoning: this.modeDefaultReasoning(),
+      modeDefaultReasoning: resolveModeDefaultReasoning(this.options.reasoning),
       listAvailableSkills: this.listAvailableSkills,
       loadNamedSkill: this.loadNamedSkill,
       toolLines: this.toolLines,
@@ -568,6 +571,10 @@ export class WorkShellEngine<
       line,
       slashCommand,
       state: this.state,
+      onModeChanged: async (mode) => {
+        this.agent.updateMode?.(mode);
+        this.setState({ mode });
+      },
       resolveWorkShellInlineCommand: this.resolveWorkShellInlineCommand,
       runInlineCommand: this.runInlineCommand,
       refineInlineCommandResultLines: this.refineInlineCommandResultLines,
@@ -600,18 +607,6 @@ export class WorkShellEngine<
     });
   }
 
-  private modeDefaultReasoning(): Reasoning {
-    if (this.options.reasoning.support.status === "unsupported") {
-      return this.options.reasoning;
-    }
-
-    return {
-      ...this.options.reasoning,
-      effort: this.options.reasoning.effort,
-      source: "mode-default",
-    };
-  }
-
   private applyAuthIssueLines(authIssueLines: readonly string[] = []): void {
     this.currentContextSummaryLines = applyAuthIssueLinesToContextSummaryLines(
       this.currentContextSummaryLines,
@@ -633,7 +628,7 @@ export class WorkShellEngine<
       cwd: this.options.cwd,
       sessionId: this.sessionId,
       model: this.state.model,
-      mode: this.options.mode,
+      mode: this.state.mode,
       state,
       summary,
       traceMode,

@@ -32,7 +32,9 @@ import {
   formatWorkShellError,
   formatWorkShellProviderTitle,
   formatWorkShellStatusLine,
+  formatWorkShellThinkingLine,
   formatWorkShellUsageLine,
+  getDisplayWidth,
   getWorkShellAttachmentMinHeight,
   getWorkShellAttachmentPlacement,
   getWorkShellBottomDrawerMinHeight,
@@ -53,6 +55,8 @@ import {
   resolveWorkShellInputAction,
   resolveWorkShellSubmitAction,
   shouldUseSlowComposerPreview,
+  sliceByDisplayWidth,
+  truncateForDisplayWidth,
   useWorkShellDashboardHomeSync,
   useWorkShellInputController,
   useWorkShellPaneState,
@@ -96,6 +100,19 @@ test("work-shell hotspot re-exports extracted helper owner seams instead of regr
   assert.match(panelsSource, /export function buildInlineCommandPanel\(/);
   assert.match(viewSource, /export function formatWorkShellProviderTitle\(/);
   assert.match(viewSource, /export function getWorkShellEntryPresentation\(/);
+  assert.match(viewSource, /function WorkShellSectionDivider\(/);
+  assert.doesNotMatch(
+    viewSource,
+    /<Text bold color="white">Conversation<\/Text>/,
+  );
+  assert.doesNotMatch(
+    viewSource,
+    /<Box borderStyle="round" borderColor=\{props\.panelBorderColor\} paddingX=\{1\}>/,
+  );
+  assert.doesNotMatch(
+    viewSource,
+    /<Box marginTop=\{1\} borderStyle="round" borderColor=\{W\.border\} paddingX=\{1\} flexDirection="column">/,
+  );
   assert.match(inputSource, /export function resolveWorkShellInputAction\(/);
   assert.match(inputSource, /export function resolveWorkShellSubmitAction\(/);
   assert.doesNotMatch(
@@ -129,32 +146,32 @@ test("formatWorkShellProviderTitle humanizes known providers for the unified wor
 
 test("getWorkShellEntryPresentation keeps user, assistant, tool, and system roles visually distinct", () => {
   assert.deepEqual(getWorkShellEntryPresentation("user"), {
-    label: "Request",
-    badge: "◉",
-    labelColor: "cyan",
-    borderColor: "cyan",
-    bodyColor: "white",
+    label: "You",
+    badge: "›",
+    labelColor: "#7dd3fc",
+    borderColor: "#7dd3fc",
+    bodyColor: "#e7e5e4",
   });
   assert.deepEqual(getWorkShellEntryPresentation("assistant"), {
-    label: "Answer",
+    label: "Assistant",
     badge: "✦",
-    labelColor: "green",
-    borderColor: "green",
-    bodyColor: "white",
+    labelColor: "#86efac",
+    borderColor: "#86efac",
+    bodyColor: "#e7e5e4",
   });
   assert.deepEqual(getWorkShellEntryPresentation("tool"), {
     label: "Step",
     badge: "→",
-    labelColor: "magenta",
-    borderColor: "magenta",
-    bodyColor: "white",
+    labelColor: "#fbbf24",
+    borderColor: "#57534e",
+    bodyColor: "#e7e5e4",
   });
   assert.deepEqual(getWorkShellEntryPresentation("system"), {
     label: "Status",
     badge: "·",
-    labelColor: "gray",
-    borderColor: "gray",
-    bodyColor: "gray",
+    labelColor: "#a8a29e",
+    borderColor: "#44403c",
+    bodyColor: "#a8a29e",
   });
   assert.equal(getWorkShellEntryBorderStyle("user"), "round");
   assert.equal(getWorkShellEntryBorderStyle("assistant"), "round");
@@ -167,15 +184,18 @@ test("getWorkShellEntryPresentation keeps user, assistant, tool, and system role
 });
 
 test("getWorkShellComposerHint keeps slash discovery guidance inside the shared work presenter seam", () => {
-  assert.equal(getWorkShellComposerHint("/auth", 2), "↑↓ move · Enter run");
+  assert.equal(
+    getWorkShellComposerHint("/auth", 2),
+    "↑↓ move · Enter run · Shift+Tab mode",
+  );
   assert.equal(getWorkShellComposerHint("/unknown", 0), "No slash yet.");
   assert.equal(
     getWorkShellComposerHint("", 0),
-    "Enter send · Shift+Enter newline · / commands · @file context",
+    "Enter send · Shift+Enter newline · Shift+Tab mode · / commands · @file context",
   );
   assert.equal(
     getWorkShellComposerHint("plain text", 3),
-    "Enter send · Shift+Enter newline · / commands",
+    "Enter send · Shift+Enter newline · Shift+Tab mode · / commands",
   );
   assert.equal(getWorkShellComposerHintMinHeight(), 1);
 });
@@ -379,6 +399,39 @@ test("work-shell input decision helpers are exported from the shared tui package
     { type: "submit-suggestion", line: "/auth status", clearInput: true },
   );
   assert.deepEqual(
+    resolveWorkShellInputAction({
+      value: "",
+      key: { escape: true },
+      input: "***",
+      slashSuggestionCount: 0,
+      isBusy: false,
+      hasRequestSessionsView: true,
+      hasSensitiveInput: true,
+    }),
+    { type: "cancel-sensitive-input" },
+  );
+  assert.deepEqual(
+    resolveWorkShellInputAction({
+      value: "",
+      key: { tab: true, shift: true },
+      input: "plain text",
+      slashSuggestionCount: 0,
+      isBusy: false,
+      hasRequestSessionsView: false,
+      currentMode: "default",
+    }),
+    { type: "cycle-mode", nextMode: "yolo" },
+  );
+  assert.deepEqual(
+    resolveWorkShellSubmitAction({
+      value: "/auth",
+      isBusy: false,
+      shouldBlockSlashSubmit: true,
+      selectedSlashCommand: "/auth status",
+    }),
+    { type: "submit-suggestion", line: "/auth status", clearInput: true },
+  );
+  assert.deepEqual(
     resolveWorkShellSubmitAction({
       value: "ship it",
       isBusy: false,
@@ -553,13 +606,17 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
     "Node v22 · darwin/arm64",
   );
   assert.equal(
+    formatWorkShellThinkingLine("medium (mode-default)"),
+    "Thinking · Balanced thinking",
+  );
+  assert.equal(
     formatWorkShellStatusLine({
       model: "gpt-5.4",
       reasoningLabel: "medium (mode-default)",
       mode: "default",
       authLabel: "Browser OAuth · file",
     }),
-    "gpt-5.4 · Balanced thinking · Work mode · Saved OAuth",
+    "Model · gpt-5.4 · Mode · Work mode · Auth · Saved OAuth",
   );
   assert.equal(
     formatWorkShellBusyStatusLine("· thinking inspect repo", 0),
@@ -640,4 +697,99 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
     }).slice(0, 2),
     ["Current", "Auth · Not signed in"],
   );
+});
+
+// ── Composer CJK/Hangul/emoji display-width behavior ──────────────────
+
+test("applyComposerEdit handles Hangul input and cursor positioning correctly", () => {
+  const result1 = applyComposerEdit({
+    value: "한글",
+    cursorOffset: 2,
+    input: "",
+    key: { leftArrow: true },
+    allowLineBreaks: false,
+  });
+  assert.equal(
+    result1.nextCursorOffset,
+    1,
+    "left arrow moves cursor back by one grapheme",
+  );
+  assert.equal(result1.nextValue, "한글");
+
+  const result2 = applyComposerEdit({
+    value: "한글",
+    cursorOffset: 1,
+    input: "",
+    key: { rightArrow: true },
+    allowLineBreaks: false,
+  });
+  assert.equal(
+    result2.nextCursorOffset,
+    2,
+    "right arrow moves cursor forward by one grapheme",
+  );
+
+  const result3 = applyComposerEdit({
+    value: "한글 테스트",
+    cursorOffset: 3,
+    input: "",
+    key: { backspace: true },
+    allowLineBreaks: false,
+  });
+  assert.equal(
+    result3.nextValue,
+    "한글테스트",
+    "backspace deletes one character at cursor",
+  );
+  assert.equal(result3.nextCursorOffset, 2);
+});
+
+test("applyComposerEdit inserts mixed-width characters at cursor", () => {
+  const result = applyComposerEdit({
+    value: "한a",
+    cursorOffset: 1,
+    input: "글",
+    key: {},
+    allowLineBreaks: false,
+  });
+  assert.equal(result.nextValue, "한글a");
+  assert.equal(result.nextCursorOffset, 2);
+});
+
+test("applyComposerEdit handles emoji input", () => {
+  const result = applyComposerEdit({
+    value: "hello",
+    cursorOffset: 5,
+    input: "🙂",
+    key: {},
+    allowLineBreaks: false,
+  });
+  assert.equal(result.nextValue, "hello🙂");
+  assert.equal(result.nextCursorOffset, 7, "emoji is 2 UTF-16 code units");
+});
+
+// ── Display width seam contract ────────────────────────────────────
+
+test("getDisplayWidth counts CJK characters as 2 columns", () => {
+  assert.equal(getDisplayWidth("한글"), 4);
+  assert.equal(getDisplayWidth("abc"), 3);
+  assert.equal(getDisplayWidth("한a글"), 5);
+  assert.equal(getDisplayWidth("🙂"), 2);
+  assert.equal(getDisplayWidth("a🙂b"), 4);
+  assert.equal(getDisplayWidth(""), 0);
+});
+
+test("sliceByDisplayWidth slices mixed-width strings correctly", () => {
+  assert.equal(sliceByDisplayWidth("한글abc", 4), "한글");
+  assert.equal(sliceByDisplayWidth("한글abc", 5), "한글a");
+  assert.equal(sliceByDisplayWidth("한글abc", 3), "한");
+  assert.equal(sliceByDisplayWidth("abc한글", 5), "abc한");
+  assert.equal(sliceByDisplayWidth("🙂abc", 2), "🙂");
+  assert.equal(sliceByDisplayWidth("🙂abc", 3), "🙂a");
+});
+
+test("truncateForDisplayWidth adds ellipsis at the right display column", () => {
+  assert.equal(truncateForDisplayWidth("한글 테스트", 8), "한글 테…");
+  assert.equal(truncateForDisplayWidth("abc", 10), "abc");
+  assert.equal(truncateForDisplayWidth("abcdef", 5), "abcd…");
 });

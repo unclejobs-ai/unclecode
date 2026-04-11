@@ -2,6 +2,7 @@ import { buildPromptCommandPrompt } from "./work-shell-engine-commands.js";
 import { executeWorkShellPromptTurn } from "./work-shell-engine-execution.js";
 import { createWorkShellStatusPanel } from "./work-shell-engine-panels.js";
 import * as WorkShellTurns from "./work-shell-engine-turns.js";
+import type { WorkShellPromptCommand } from "./work-shell-engine-turns.js";
 import type {
   WorkShellChatEntry,
   WorkShellComposerResolution,
@@ -10,11 +11,6 @@ import type {
   WorkShellPanel,
 } from "./work-shell-engine.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
-
-type PromptCommand = {
-  readonly kind: "review" | "commit";
-  readonly focus?: string;
-};
 
 type PromptRuntimeInput<Attachment, Reasoning extends WorkShellReasoningConfig> = {
   state: WorkShellEngineState<Reasoning>;
@@ -109,13 +105,27 @@ export async function executeWorkShellChatSubmit<
   resolveComposerInput: (value: string, cwd: string) => Promise<WorkShellComposerResolution<Attachment>>;
 } & PromptRuntimeInput<Attachment, Reasoning>): Promise<void> {
   const composer = await input.resolveComposerInput(input.line, input.options.cwd);
+  const promptTurn = WorkShellTurns.createChatPromptTurnInput({
+    line: input.line,
+    composer,
+  });
+  const readOnlyGuard = WorkShellTurns.resolveReadOnlyModeGuard({
+    mode: input.options.mode,
+    prompt: promptTurn.prompt,
+  });
+  if (readOnlyGuard) {
+    input.appendEntries(
+      { role: "user", text: promptTurn.transcriptText },
+      { role: "assistant", text: readOnlyGuard },
+    );
+    input.setState({ lastTurnDurationMs: 0 });
+    await input.persistSessionSnapshot("idle", promptTurn.sessionSummary).catch(() => undefined);
+    return;
+  }
   await executeWorkShellPromptTurn(
     createPromptRuntimeExecutionInput({
       ...input,
-      promptTurn: WorkShellTurns.createChatPromptTurnInput({
-        line: input.line,
-        composer,
-      }),
+      promptTurn,
     }),
   );
 }
@@ -125,7 +135,7 @@ export async function executeWorkShellPromptCommandSubmit<
   Reasoning extends WorkShellReasoningConfig,
 >(input: {
   transcriptText: string;
-  promptCommand: PromptCommand;
+  promptCommand: WorkShellPromptCommand;
 } & PromptRuntimeInput<Attachment, Reasoning>): Promise<void> {
   await executeWorkShellPromptTurn(
     createPromptRuntimeExecutionInput({

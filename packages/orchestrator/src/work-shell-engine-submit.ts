@@ -8,11 +8,7 @@ import type {
   ResolvedWorkShellLocalCommand,
 } from "./work-shell-engine-commands.js";
 import type { WorkShellComposerMode } from "./work-shell-engine.js";
-
-type WorkShellPromptCommand = {
-  readonly kind: "review" | "commit";
-  readonly focus?: string;
-};
+import type { WorkShellPromptCommand } from "./work-shell-engine-turns.js";
 
 export type WorkShellSubmitRoute =
   | { readonly kind: "secure-api-key-entry"; readonly line: string }

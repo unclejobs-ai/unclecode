@@ -94,6 +94,7 @@ export async function executeInlineCommandSubmit<Reasoning extends WorkShellReas
   line: string;
   slashCommand: readonly string[];
   state: WorkShellEngineState<Reasoning>;
+  onModeChanged?: ((mode: string) => void | Promise<void>) | undefined;
   resolveWorkShellInlineCommand: (
     args: readonly string[],
     runInlineCommand: (
@@ -165,6 +166,9 @@ export async function executeInlineCommandSubmit<Reasoning extends WorkShellReas
       ...(result.isAuthCommand ? { authLauncherLines: result.resultLines } : {}),
       panel: input.buildInlineCommandPanel(result.visibleArgs, result.resultLines),
     });
+    if (input.slashCommand[0] === "mode" && input.slashCommand[1] === "set" && input.slashCommand[2]) {
+      await input.onModeChanged?.(input.slashCommand[2]);
+    }
     input.pushTraceLine(`→ ${result.visibleArgs.join(" ")}`, true);
     input.pushTraceLine(result.completionLine, true);
   } finally {
@@ -202,6 +206,8 @@ export async function executeLocalCommandSubmit<Reasoning extends WorkShellReaso
   pushTraceLine: (line: string, preservePanel?: boolean) => void;
 }): Promise<void> {
   if (input.localCommand.kind === "memories") {
+    // Listing memories is a read-only display operation — no trace push.
+    // Only write operations (the "remember" branch below) emit a trace line.
     const { sessionMemory, projectMemory } = await WorkShellOperations.loadWorkShellMemoriesPanel({
       cwd: input.cwd,
       sessionId: input.sessionId,

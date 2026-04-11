@@ -21,6 +21,36 @@ export type WorkShellEntryPresentation = {
   readonly bodyColor: string;
 };
 
+const W = {
+  text: "#e7e5e4",
+  textMuted: "#a8a29e",
+  textDim: "#78716c",
+  border: "#44403c",
+  borderStrong: "#57534e",
+  user: "#7dd3fc",
+  assistant: "#86efac",
+  tool: "#fbbf24",
+  warning: "#facc15",
+} as const;
+
+function WorkShellSectionDivider(props: {
+  readonly label: string;
+  readonly accentColor?: string;
+  readonly width?: number;
+}) {
+  const width = props.width ?? 72;
+  const labelContent = ` ${props.label} `;
+  const leftLength = Math.max(1, Math.floor((width - labelContent.length) / 2));
+  const rightLength = Math.max(1, width - labelContent.length - leftLength);
+  return (
+    <Text color={W.border}>
+      {"─".repeat(leftLength)}
+      <Text color={props.accentColor ?? W.textMuted}>{labelContent}</Text>
+      {"─".repeat(rightLength)}
+    </Text>
+  );
+}
+
 export function formatWorkShellProviderTitle(provider: string): string {
   if (provider === "openai") return "UncleCode · OpenAI";
   if (provider === "gemini") return "UncleCode · Gemini";
@@ -30,15 +60,15 @@ export function formatWorkShellProviderTitle(provider: string): string {
 
 export function getWorkShellEntryPresentation(role: WorkShellEntryRole): WorkShellEntryPresentation {
   if (role === "user") {
-    return { label: "Request", badge: "◉", labelColor: "cyan", borderColor: "cyan", bodyColor: "white" };
+    return { label: "You", badge: "›", labelColor: W.user, borderColor: W.user, bodyColor: W.text };
   }
   if (role === "assistant") {
-    return { label: "Answer", badge: "✦", labelColor: "green", borderColor: "green", bodyColor: "white" };
+    return { label: "Assistant", badge: "✦", labelColor: W.assistant, borderColor: W.assistant, bodyColor: W.text };
   }
   if (role === "tool") {
-    return { label: "Step", badge: "→", labelColor: "magenta", borderColor: "magenta", bodyColor: "white" };
+    return { label: "Step", badge: "→", labelColor: W.tool, borderColor: W.borderStrong, bodyColor: W.text };
   }
-  return { label: "Status", badge: "·", labelColor: "gray", borderColor: "gray", bodyColor: "gray" };
+  return { label: "Status", badge: "·", labelColor: W.textMuted, borderColor: W.border, bodyColor: W.textMuted };
 }
 
 export function getWorkShellConversationLayout(role: WorkShellEntryRole): {
@@ -46,14 +76,14 @@ export function getWorkShellConversationLayout(role: WorkShellEntryRole): {
   readonly paddingLeft: number;
   readonly hasBorder: boolean;
 } {
-  if (role === "system") {
-    return { marginBottom: 1, paddingLeft: 1, hasBorder: true };
-  }
   if (role === "assistant") {
-    return { marginBottom: 1, paddingLeft: 2, hasBorder: true };
+    return { marginBottom: 1, paddingLeft: 2, hasBorder: false };
+  }
+  if (role === "tool" || role === "system") {
+    return { marginBottom: 0, paddingLeft: 3, hasBorder: false };
   }
 
-  return { marginBottom: 1, paddingLeft: 1, hasBorder: true };
+  return { marginBottom: 1, paddingLeft: 0, hasBorder: false };
 }
 
 export function getWorkShellEntryBorderStyle(role: WorkShellEntryRole): "round" | "single" {
@@ -66,15 +96,15 @@ export function getWorkShellEmptyConversationHint(): string {
 
 export function getWorkShellPanelBorderColor(inputValue: string, panelTitle: string): string {
   if (inputValue.trim().startsWith("/")) {
-    return "cyan";
+    return W.user;
   }
   if (panelTitle === "Auth") {
-    return "green";
+    return W.assistant;
   }
   if (panelTitle === "Commands" || panelTitle === "Models") {
-    return "cyan";
+    return W.borderStrong;
   }
-  return "gray";
+  return W.border;
 }
 
 export function getWorkShellPanelDisplayMode(input: {
@@ -149,22 +179,22 @@ export function getWorkShellAttachmentMinHeight(): 4 {
 
 export function getWorkShellAttachmentLineColor(index: number): string {
   if (index === 0) {
-    return "cyan";
+    return W.user;
   }
   if (index === 1) {
-    return "white";
+    return W.text;
   }
-  return "gray";
+  return W.textMuted;
 }
 
 export function getWorkShellComposerHint(inputValue: string, slashSuggestionCount: number): string | undefined {
   if (inputValue.trim().startsWith("/")) {
-    return slashSuggestionCount > 0 ? "↑↓ move · Enter run" : "No slash yet.";
+    return slashSuggestionCount > 0 ? "↑↓ move · Enter run · Shift+Tab mode" : "No slash yet.";
   }
   if (inputValue.trim().length === 0) {
-    return "Enter send · Shift+Enter newline · / commands · @file context";
+    return "Enter send · Shift+Enter newline · Shift+Tab mode · / commands · @file context";
   }
-  return "Enter send · Shift+Enter newline · / commands";
+  return "Enter send · Shift+Enter newline · Shift+Tab mode · / commands";
 }
 
 const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
@@ -190,6 +220,10 @@ function humanizeWorkShellReasoningLabel(reasoningLabel: string): string {
   return reasoningLabel;
 }
 
+export function formatWorkShellThinkingLine(reasoningLabel: string): string {
+  return `Thinking · ${humanizeWorkShellReasoningLabel(reasoningLabel)}`;
+}
+
 function compactWorkShellAuthLabel(authLabel: string): string {
   if (authLabel === "Browser OAuth · file") return "Saved OAuth";
   if (authLabel === "Browser OAuth · env") return "OAuth env";
@@ -204,6 +238,7 @@ function humanizeWorkShellModeLabel(mode: string): string {
   if (mode === "search") return "Search mode";
   if (mode === "analyze") return "Analyze mode";
   if (mode === "ultrawork") return "Parallel mode";
+  if (mode === "yolo") return "YOLO mode";
   return `${mode} mode`;
 }
 
@@ -224,10 +259,9 @@ export function formatWorkShellStatusLine(input: {
   readonly authLabel: string;
 }): string {
   return [
-    input.model,
-    humanizeWorkShellReasoningLabel(input.reasoningLabel),
-    humanizeWorkShellModeLabel(input.mode),
-    compactWorkShellAuthLabel(input.authLabel),
+    `Model · ${input.model}`,
+    `Mode · ${humanizeWorkShellModeLabel(input.mode)}`,
+    `Auth · ${compactWorkShellAuthLabel(input.authLabel)}`,
   ].join(" · ");
 }
 
@@ -293,7 +327,7 @@ function renderWorkShellPanelLine(line: string, index: number): React.ReactNode 
   if (sectionHeaders.has(trimmed)) {
     return (
       <Box key={`${index}-${line}`} marginTop={index === 0 ? 0 : 1}>
-        <Text bold color="white">{trimmed}</Text>
+        <Text bold color={W.textMuted}>{trimmed}</Text>
       </Box>
     );
   }
@@ -304,10 +338,10 @@ function renderWorkShellPanelLine(line: string, index: number): React.ReactNode 
     const spacing = treeMatch[3] ?? " ";
     const value = treeMatch[4] ?? "";
     return (
-      <Text key={`${index}-${line}`} color="gray">
-        {branch} <Text color="cyan">{label.trim()}</Text>
+      <Text key={`${index}-${line}`} color={W.textMuted}>
+        {branch} <Text color={W.user}>{label.trim()}</Text>
         {spacing}
-        <Text color="white">{value}</Text>
+        <Text color={W.text}>{value}</Text>
       </Text>
     );
   }
@@ -320,69 +354,69 @@ function renderWorkShellPanelLine(line: string, index: number): React.ReactNode 
     const isSelected = marker === "›";
     return (
       <Text key={`${index}-${line}`}>
-        <Text color={isSelected ? "cyanBright" : "gray"}>{marker}</Text>
-        <Text color={isSelected ? "cyanBright" : "cyan"}> {command}</Text>
-        <Text color={isWorkShellWarningLine(description) ? "yellow" : isSelected ? "white" : "gray"}>{spacing}{description}</Text>
-      </Text>
+      <Text color={isSelected ? W.user : W.textMuted}>{marker}</Text>
+      <Text color={isSelected ? W.user : W.user}> {command}</Text>
+      <Text color={isWorkShellWarningLine(description) ? W.warning : isSelected ? W.text : W.textMuted}>{spacing}{description}</Text>
+</Text>
     );
   }
   if (trimmed.startsWith("› /")) {
-    return <Text key={`${index}-${line}`} color="cyanBright">{trimmed}</Text>;
+    return <Text key={`${index}-${line}`} color={W.user}>{trimmed}</Text>;
   }
   if (trimmed.startsWith("/")) {
-    return <Text key={`${index}-${line}`} color="cyan">{trimmed}</Text>;
+    return <Text key={`${index}-${line}`} color={W.user}>{trimmed}</Text>;
   }
   const factLine = parseWorkShellPanelFactLine(trimmed);
   if (factLine) {
-    const labelColor = factLine.label === "Warning" ? "yellow" : "cyan";
-    const valueColor = isWorkShellWarningLine(trimmed) ? "yellow" : "white";
+    const labelColor = factLine.label === "Warning" ? W.warning : W.textMuted;
+    const valueColor = isWorkShellWarningLine(trimmed) ? W.warning : W.text;
     return (
       <Text key={`${index}-${line}`}>
         <Text color={labelColor}>{factLine.label}</Text>
-        <Text color="gray"> · </Text>
+        <Text color={W.textDim}> · </Text>
         <Text color={valueColor}>{factLine.value}</Text>
       </Text>
     );
   }
   if (trimmed.startsWith("Signed in · ")) {
-    return <Text key={`${index}-${line}`} color="green">{trimmed}</Text>;
+    return <Text key={`${index}-${line}`} color={W.assistant}>{trimmed}</Text>;
   }
   if (trimmed === "Not signed in yet" || trimmed === "Not signed in") {
-    return <Text key={`${index}-${line}`} color="yellow">{trimmed}</Text>;
+    return <Text key={`${index}-${line}`} color={W.warning}>{trimmed}</Text>;
   }
   if (trimmed === "Current" || trimmed === "Routes" || trimmed === "Next") {
-    return <Text key={`${index}-${line}`} color="white" bold>{trimmed}</Text>;
+    return <Text key={`${index}-${line}`} color={W.textMuted} bold>{trimmed}</Text>;
   }
   if (trimmed.startsWith("Browser OAuth needs refresh") || trimmed.startsWith("Browser OAuth unavailable")) {
-    return <Text key={`${index}-${line}`} color="yellow">{trimmed}</Text>;
+    return <Text key={`${index}-${line}`} color={W.warning}>{trimmed}</Text>;
   }
   if (trimmed.startsWith("Tip · ")) {
-    return <Text key={`${index}-${line}`} color="gray">{trimmed}</Text>;
+    return <Text key={`${index}-${line}`} color={W.textDim}>{trimmed}</Text>;
   }
   if (trimmed.startsWith("↑↓") || trimmed.startsWith("No slash")) {
-    return <Text key={`${index}-${line}`} color="yellow">{trimmed}</Text>;
+    return <Text key={`${index}-${line}`} color={W.warning}>{trimmed}</Text>;
   }
   if (trimmed.startsWith("Matches for ") || trimmed.endsWith(" matches")) {
-    return <Text key={`${index}-${line}`} color="gray">{trimmed}</Text>;
+    return <Text key={`${index}-${line}`} color={W.textDim}>{trimmed}</Text>;
   }
   if (line.startsWith("  ")) {
-    return <Text key={`${index}-${line}`} color="gray">{line}</Text>;
+    return <Text key={`${index}-${line}`} color={W.textMuted}>{line}</Text>;
   }
-  return <Text key={`${index}-${line}`} color="white">{line}</Text>;
+  return <Text key={`${index}-${line}`} color={W.text}>{line}</Text>;
 }
 
 const WorkShellConversationBlock = React.memo(function WorkShellConversationBlock(props: {
   readonly entries: readonly WorkShellEntry[];
   readonly panelPlacement: "side" | "bottom";
+  readonly isBusy: boolean;
+  readonly busyStatus?: string;
+  readonly reasoningLabel?: string;
 }) {
   return (
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "68%" : undefined} paddingRight={props.panelPlacement === "side" ? 1 : 0}>
-      <Box borderStyle="round" borderColor="gray" paddingX={1}>
-        <Text bold color="white">Conversation</Text>
-      </Box>
-      <Box marginTop={1} flexDirection="column">
+      <Box flexDirection="column">
         {props.entries.length === 0 ? (
-          <Text color="gray">{getWorkShellEmptyConversationHint()}</Text>
+          <Text color={W.textMuted}>{getWorkShellEmptyConversationHint()}</Text>
         ) : props.entries.slice(-12).map((entry, index) => {
           const presentation = getWorkShellEntryPresentation(entry.role);
           const layout = getWorkShellConversationLayout(entry.role);
@@ -390,14 +424,6 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
             <Box
               key={`${entry.role}-${index}`}
               marginBottom={layout.marginBottom}
-              {...(layout.hasBorder && presentation.borderColor
-                ? {
-                    borderStyle: getWorkShellEntryBorderStyle(entry.role),
-                    borderColor: presentation.borderColor,
-                    paddingX: 1,
-                    paddingY: 0,
-                  }
-                : {})}
               paddingLeft={layout.paddingLeft}
               flexDirection="column"
             >
@@ -406,6 +432,12 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
             </Box>
           );
         })}
+        {props.isBusy ? (
+          <Box paddingLeft={2} marginBottom={1}>
+            <Text color={W.assistant} bold>{"✦ "}</Text>
+            <Text color={W.textMuted}>{props.busyStatus ?? (props.reasoningLabel ? `Thinking · ${props.reasoningLabel}` : "Thinking…")}</Text>
+          </Box>
+        ) : null}
       </Box>
     </Box>
   );
@@ -421,9 +453,7 @@ const WorkShellPanelBlock = React.memo(function WorkShellPanelBlock(props: {
 }) {
   return (
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "32%" : undefined} paddingLeft={props.panelPlacement === "side" ? 1 : 0} marginTop={props.panelPlacement === "bottom" ? 1 : 0}>
-      <Box borderStyle="round" borderColor={props.panelBorderColor} paddingX={1}>
-        <Text bold color="white">{props.title}</Text>
-      </Box>
+      <WorkShellSectionDivider label={props.title} accentColor={props.panelBorderColor} />
       <Box
         marginTop={1}
         flexDirection="column"
@@ -445,9 +475,7 @@ const WorkShellAttachmentBlock = React.memo(function WorkShellAttachmentBlock(pr
 
   return (
     <Box marginTop={1} flexDirection="column">
-      <Box borderStyle="round" borderColor="cyan" paddingX={1}>
-        <Text bold color="cyan">Attachments</Text>
-      </Box>
+      <WorkShellSectionDivider label="attachments" accentColor={W.textMuted} />
       <Box marginTop={1} flexDirection="column" paddingLeft={1} minHeight={getWorkShellAttachmentMinHeight()}>
         {props.attachmentLines.map((line, index) => (
           <Text key={`${index}-${line}`} color={getWorkShellAttachmentLineColor(index)}>{line}</Text>
@@ -463,8 +491,8 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
 }) {
   return (
     <Box justifyContent="space-between">
-      <Text bold>{formatWorkShellProviderTitle(props.provider)}</Text>
-      <Text color="gray">{props.headerHint ?? "Esc sessions · /auth · /model · /review"}</Text>
+      <Text bold color={W.text}>{formatWorkShellProviderTitle(props.provider)}</Text>
+      <Text color={W.textMuted}>{props.headerHint ?? "Esc sessions · Shift+Tab mode · / commands"}</Text>
     </Box>
   );
 });
@@ -481,6 +509,7 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   readonly lastTurnDurationMs?: number;
 }) {
   const [nowMs, setNowMs] = React.useState(() => Date.now());
+  const thinkingLine = formatWorkShellThinkingLine(props.reasoningLabel);
   const statusLine = formatWorkShellStatusLine({
     model: props.model,
     reasoningLabel: props.reasoningLabel,
@@ -512,9 +541,13 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   }, [props.isBusy, props.currentTurnStartedAt]);
 
   return (
-    <Box marginTop={1} borderStyle="round" borderColor="gray" paddingX={1} flexDirection="column">
-      <Text color={props.reasoningSupported ? "white" : "yellow"}>{statusLine}</Text>
-      <Text color={props.isBusy ? "cyan" : "gray"}>{usageLine}</Text>
+    <Box marginTop={1} flexDirection="column">
+      <WorkShellSectionDivider label="session" accentColor={W.textMuted} />
+      <Box marginTop={1} paddingLeft={1} flexDirection="column">
+        <Text bold color={props.reasoningSupported ? W.user : W.warning}>{thinkingLine}</Text>
+        <Text color={W.text}>{statusLine}</Text>
+        <Text color={props.isBusy ? W.assistant : W.textMuted}>{usageLine}</Text>
+      </Box>
     </Box>
   );
 });
@@ -553,6 +586,9 @@ export function WorkShellView(props: {
     <WorkShellConversationBlock
       entries={props.entries}
       panelPlacement={panelPlacement}
+      isBusy={props.isBusy}
+      {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
+      {...(props.reasoningLabel ? { reasoningLabel: props.reasoningLabel } : {})}
     />
   );
 
@@ -594,20 +630,20 @@ export function WorkShellView(props: {
           {conversation}
         </Box>
       )}
-      <Box marginTop={1} borderStyle="single" borderColor={props.inputValue.trim().startsWith("/") ? "cyan" : "gray"} paddingX={1}>
-        <Text color="gray">{"> "}</Text>
+      <Box marginTop={1} borderStyle="single" borderColor={props.inputValue.trim().startsWith("/") ? W.borderStrong : W.border} paddingX={1}>
+        <Text color={W.textMuted}>{"> "}</Text>
         {props.composer}
       </Box>
       <Box minHeight={getWorkShellComposerHintMinHeight()} flexDirection="column">
-        <Text color="gray">{composerHint ?? " "}</Text>
+        <Text color={W.textDim}>{composerHint ?? " "}</Text>
       </Box>
       {props.attachmentLines
         ? <WorkShellAttachmentBlock attachmentLines={props.attachmentLines} />
         : null}
       {panelDisplayMode === "overlay" ? (
         <Box marginTop={1} borderStyle="round" borderColor={panelBorderColor} paddingX={1} flexDirection="column">
-          <Text bold color="white">{props.activePanel.title}</Text>
-          <Text color="gray">Esc closes · /context refreshes</Text>
+          <WorkShellSectionDivider label={props.activePanel.title} accentColor={panelBorderColor} />
+          <Text color={W.textMuted}>Esc closes · /context refreshes</Text>
           <Box marginTop={1} flexDirection="column">
             {props.activePanel.lines.map((line, index) => renderWorkShellPanelLine(line, index))}
           </Box>

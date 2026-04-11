@@ -63,7 +63,7 @@ import {
   reloadWorkShellContextState,
 } from "../../packages/orchestrator/src/work-shell-engine-context.ts";
 import {
-  loadWorkShellLifecycleState,
+  loadInitialWorkShellLifecycleState as loadWorkShellLifecycleState,
   loadOpenSessionsPanelState,
   resolveCloseOverlayState,
   resolveSensitiveInputCancelState,
@@ -103,10 +103,13 @@ import {
   createChatPromptTurnInput,
   createConversationTurnSummary,
   createPromptCommandTurnInput,
+  detectEditIntent,
   detectPermissionSeekingStall,
   finalizeWorkShellAssistantReply,
+  resolveReadOnlyModeGuard,
   stripPermissionSeekingStallOutro,
 } from "../../packages/orchestrator/src/work-shell-engine-turns.ts";
+
 import {
   appendWorkShellEntries,
   createInitialWorkShellEngineState,
@@ -316,6 +319,7 @@ test("work-shell command helpers classify builtins, local commands, and reusable
   assert.deepEqual(resolveWorkShellBuiltinCommand("/v"), { kind: "trace-mode", traceMode: "verbose" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/minimal"), { kind: "trace-mode", traceMode: "minimal" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/auth key"), { kind: "auth-key" });
+  assert.deepEqual(resolveWorkShellBuiltinCommand("/queue"), { kind: "queue" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/skill analyze"), { kind: "skill", line: "/skill analyze", skillName: "analyze" });
   assert.equal(resolveWorkShellBuiltinCommand("hello"), undefined);
 
@@ -450,6 +454,17 @@ test("work-shell submit route helper classifies secure, builtin, prompt, inline,
     kind: "chat",
     line: "finish cleanup",
   });
+  assert.equal(
+    resolveWorkShellSubmitRoute({
+      value: "second submit while busy",
+      isBusy: true,
+      composerMode: "default",
+      resolveWorkShellSlashCommand: () => undefined,
+      hasInlineCommandRunner: true,
+    }),
+    undefined,
+    "submitting while busy returns undefined (dropped)",
+  );
 });
 
 test("work-shell builtin helpers resolve panels, transcript entries, and runtime transitions", () => {
@@ -749,9 +764,19 @@ test("work-shell turn helpers build summaries and permission-stall continuations
     stripPermissionSeekingStallOutro("Done.\n\nIf you want, I can continue."),
     "Done.",
   );
+  assert.equal(
+    stripPermissionSeekingStallOutro("Done.\n\nIf you want, I can continue."),
+    "Done.",
+  );
+  assert.equal(detectEditIntent("provider parity 구현해줘"), true);
+  assert.equal(detectEditIntent("summarize current repo"), false);
   assert.match(
-    buildPermissionStallContinuePrompt("finish cleanup", "Done."),
-    /Continue automatically without asking for permission/,
+    resolveReadOnlyModeGuard({ mode: "search", prompt: "Anthropic parity 구현해줘" }) ?? "",
+    /Search mode is read-only/,
+  );
+  assert.equal(
+    resolveReadOnlyModeGuard({ mode: "default", prompt: "Anthropic parity 구현해줘" }),
+    undefined,
   );
   assert.equal(
     await finalizeWorkShellAssistantReply({
@@ -1044,7 +1069,7 @@ test("work-shell execution helpers assemble start, success, failure, finalize, a
     lastTurnDurationMs: 456,
     panel: { title: "Status", lines: ["auth:api-key-file"] },
   });
-  assert.deepEqual(createPromptTurnFinalizePatch({ state }), {
+  assert.deepEqual(createPromptTurnFinalizePatch(state), {
     isBusy: false,
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
@@ -1145,6 +1170,63 @@ test("work-shell prompt runtime helpers adapt chat and prompt commands into exec
   assert.deepEqual(snapshots, [
     { state: "running", summary: "Chat: summarize repo" },
     { state: "idle", summary: "Chat: summarize repo" },
+  ]);
+});
+
+test("work-shell chat runtime short-circuits edit requests in search mode with a concise local reply", async () => {
+  const entries = [];
+  const snapshots = [];
+  let agentCalls = 0;
+
+  await executeWorkShellChatSubmit({
+    line: "Anthropic parity 구현해줘",
+    resolveComposerInput: async () => ({
+      prompt: "Anthropic parity 구현해줘",
+      transcriptText: "Anthropic parity 구현해줘",
+      attachments: [],
+    }),
+    state: createState({ model: "gpt-5.4", reasoning: supportedReasoning, mode: "search" }),
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "search",
+      authLabel: "oauth-file",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    },
+    sessionId: "work-1",
+    buildStatusPanel: (_options, reasoning, authLabel) => ({
+      title: "Status",
+      lines: [reasoning.effort, authLabel],
+    }),
+    runAgentTurn: async () => {
+      agentCalls += 1;
+      return { text: "should not run" };
+    },
+    publishContextBridge: async ({ summary }) => ({ bridgeId: "bridge-3", line: `bridge ${summary}` }),
+    writeScopedMemory: async () => ({ memoryId: "memory-3" }),
+    listScopedMemoryLines: async () => ["memory-3 line"],
+    refreshAuthState: async () => ({ authLabel: "oauth-file", authIssueLines: [] }),
+    applyAuthIssueLines() {},
+    formatWorkShellError: (message) => `ERR:${message}`,
+    formatAgentTraceLine: (event) => `${event.type}:${String(event.summary ?? "")}`,
+    appendEntries: (...nextEntries) => {
+      entries.push(...nextEntries);
+    },
+    setState() {},
+    pushTraceLine() {},
+    persistSessionSnapshot: async (state, summary) => {
+      snapshots.push({ state, summary });
+    },
+  });
+
+  assert.equal(agentCalls, 0);
+  assert.deepEqual(entries.map((entry) => entry.role), ["user", "assistant"]);
+  assert.match(entries[1]?.text ?? "", /Search mode is read-only\./);
+  assert.match(entries[1]?.text ?? "", /Shift\+Tab|\/mode set yolo/);
+  assert.deepEqual(snapshots, [
+    { state: "idle", summary: "Chat: Anthropic parity 구현해줘" },
   ]);
 });
 
