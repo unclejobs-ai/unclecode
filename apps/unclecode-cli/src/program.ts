@@ -3,6 +3,12 @@ import {
   formatUncleCodeConfigExplanation,
 } from "@unclecode/config-core";
 import {
+  formatHarnessExplainLines,
+  formatHarnessStatusLines,
+  getHarnessPresetPatch,
+  inspectHarnessStatus,
+} from "./harness.js";
+import {
   MODE_PROFILE_IDS,
   UNCLECODE_COMMAND_NAME,
 } from "@unclecode/contracts";
@@ -757,7 +763,6 @@ function registerHarnessCommands(program: Command): void {
     .command("status")
     .description("Show the current harness configuration from .codex/config.toml")
     .action(() => {
-      const { inspectHarnessStatus, formatHarnessStatusLines } = require("./harness.js") as typeof import("./harness.js");
       const status = inspectHarnessStatus(process.cwd());
       for (const line of formatHarnessStatusLines(status)) {
         process.stdout.write(`${line}\n`);
@@ -768,7 +773,6 @@ function registerHarnessCommands(program: Command): void {
     .command("explain")
     .description("Explain available harness presets and how they work")
     .action(() => {
-      const { formatHarnessExplainLines } = require("./harness.js") as typeof import("./harness.js");
       for (const line of formatHarnessExplainLines()) {
         process.stdout.write(`${line}\n`);
       }
@@ -777,8 +781,7 @@ function registerHarnessCommands(program: Command): void {
   harness
     .command("apply <preset>")
     .description("Apply a named harness preset (e.g. yolo)")
-    .action((preset: string) => {
-      const { inspectHarnessStatus, getHarnessPresetPatch, formatHarnessStatusLines } = require("./harness.js") as typeof import("./harness.js");
+    .action(async (preset: string) => {
       if (preset !== "yolo") {
         process.stderr.write(`Unknown preset: ${preset}. Available: yolo\n`);
         process.exitCode = 1;
@@ -795,7 +798,7 @@ function registerHarnessCommands(program: Command): void {
         return;
       }
 
-      const { readFileSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+      const { readFileSync, writeFileSync } = await import("node:fs");
       let content = readFileSync(status.configPath, "utf8");
 
       for (const [key, value] of Object.entries(patch)) {
