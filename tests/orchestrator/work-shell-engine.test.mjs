@@ -32,6 +32,7 @@ import {
   buildPromptCommandPrompt,
   createAuthLoginPendingPanel,
   createLoadedSkillPanel,
+  createHarnessPanel,
   createMemoriesPanel,
   createSecureApiKeyEntryPanel,
   createSkillsPanel,
@@ -320,6 +321,7 @@ test("work-shell command helpers classify builtins, local commands, and reusable
   assert.deepEqual(resolveWorkShellBuiltinCommand("/minimal"), { kind: "trace-mode", traceMode: "minimal" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/auth key"), { kind: "auth-key" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/queue"), { kind: "queue" });
+  assert.deepEqual(resolveWorkShellBuiltinCommand("/harness"), { kind: "harness" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/skill analyze"), { kind: "skill", line: "/skill analyze", skillName: "analyze" });
   assert.equal(resolveWorkShellBuiltinCommand("hello"), undefined);
 
@@ -342,6 +344,10 @@ test("work-shell command helpers classify builtins, local commands, and reusable
     "  Keep moving.",
   ]);
   assert.equal(createLoadedSkillPanel({ name: "analyze", path: "/skills/analyze", content: "# Analyze\nLook deeper.", attempts: [] }).title, "Skill · analyze");
+  const harnessPanel = createHarnessPanel({ mode: "yolo", workerBudget: 4, autoContinue: true });
+  assert.equal(harnessPanel.title, "Harness");
+  assert.ok(harnessPanel.lines.some((l) => l.includes("yolo")));
+  assert.ok(harnessPanel.lines.some((l) => l.includes("4 max")));
   assert.deepEqual(createMemoriesPanel(["session-1"], ["project-1"]).lines, [
     "Session",
     "session-1",
