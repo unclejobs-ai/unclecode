@@ -179,7 +179,7 @@ test("getWorkShellEntryPresentation keeps user, assistant, tool, and system role
   assert.equal(getWorkShellEntryBorderStyle("system"), "single");
   assert.equal(
     getWorkShellEmptyConversationHint(),
-    "Start with a task, or use /auth, /review, /context, or @file.",
+    "Type a task to start. Use / for commands, @file for context.",
   );
 });
 

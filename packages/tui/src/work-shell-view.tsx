@@ -91,7 +91,7 @@ export function getWorkShellEntryBorderStyle(role: WorkShellEntryRole): "round" 
 }
 
 export function getWorkShellEmptyConversationHint(): string {
-  return "Start with a task, or use /auth, /review, /context, or @file.";
+  return "Type a task to start. Use / for commands, @file for context.";
 }
 
 export function getWorkShellPanelBorderColor(inputValue: string, panelTitle: string): string {
