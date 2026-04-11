@@ -117,7 +117,12 @@ test("config-core exposes the active mode and mode-derived setting contributions
 
   assert.ok(activeModeSection);
   assert.equal(activeModeSection.winner.sourceId, "built-in-mode-profile");
-  assert.match(activeModeSection.body, /Search/);
+  assert.match(activeModeSection.body, /Search mode is active\./);
+  assert.match(
+    activeModeSection.body,
+    /Stay read-only and do not edit files\./,
+  );
+  assert.match(activeModeSection.body, /\/mode set yolo/);
 });
 
 test("config-core assembles the effective prompt and injects mode overlays declaratively", () => {
@@ -185,8 +190,11 @@ test("config-core assembles the effective prompt and injects mode overlays decla
   assert.match(explanation.prompt.rendered, /User override identity\./);
   assert.match(explanation.prompt.rendered, /Plugin overlay note\./);
   assert.match(explanation.prompt.rendered, /Respect repository conventions\./);
-  assert.match(explanation.prompt.rendered, /Ultra Work/);
-  assert.match(explanation.prompt.rendered, /background tasks: preferred/i);
+  assert.match(explanation.prompt.rendered, /Ultra Work mode is active\./);
+  assert.match(
+    explanation.prompt.rendered,
+    /prefer background or parallel work/i,
+  );
 });
 
 test("config-core explains when a file-backed source is broken instead of treating it as silent no-op", () => {
