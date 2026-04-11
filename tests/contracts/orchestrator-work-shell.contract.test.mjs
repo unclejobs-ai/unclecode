@@ -215,3 +215,13 @@ test("work-shell helper owner files expose the builtin, execution, operational, 
   assert.match(traceSource, /export function applyWorkShellTraceEvent/);
   assert.match(traceSource, /export function applyWorkShellTraceEvent/);
 });
+
+test("work-agent exports agent-driven planning helpers", () => {
+  const agentSource = readFileSync(
+    path.join(workspaceRoot, "packages/orchestrator/src/work-agent.ts"),
+    "utf8",
+  );
+  assert.match(agentSource, /export function parseAgentPlanResponse\(/);
+  assert.match(agentSource, /export function resolveWorkerBudget\(/);
+  assert.match(agentSource, /export class WorkAgent</);
+});
