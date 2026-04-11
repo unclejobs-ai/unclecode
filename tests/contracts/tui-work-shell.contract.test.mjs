@@ -601,6 +601,22 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
     }),
     /✓ read 5ms/,
   );
+  assert.doesNotThrow(
+    () =>
+      formatToolTraceLine({
+        type: "tool.completed",
+        level: "default",
+        provider: "openai",
+        toolName: "search_text",
+        toolCallId: "call-2",
+        isError: false,
+        output: '{"result":"found"}',
+        startedAt: 0,
+        completedAt: 10,
+        durationMs: 10,
+      }),
+    "tool.completed with JSON-like output does not crash",
+  );
   assert.equal(
     formatRuntimeLabel({ node: "v22", platform: "darwin", arch: "arm64" }),
     "Node v22 · darwin/arm64",
