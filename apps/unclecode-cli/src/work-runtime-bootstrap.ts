@@ -154,7 +154,7 @@ export async function loadWorkCliBootstrap(
     reasoning: config.reasoning,
     model: config.model,
     async runExecutableGuardianChecks(guardianInput) {
-      const scripts = guardianInput.mode === "ultrawork"
+      const scripts = guardianInput.mode === "ultrawork" || guardianInput.mode === "yolo"
         ? ["lint", "check", "test"]
         : ["check", "test"];
       return runWorkspaceGuardianChecks({
