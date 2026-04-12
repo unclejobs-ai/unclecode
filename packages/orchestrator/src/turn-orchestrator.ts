@@ -31,13 +31,15 @@ export function classifyWorkIntent(prompt: string, mode: string): WorkIntent {
 
   const filePathCount = (prompt.match(/[\w-./]+\.\w{1,5}/g) ?? []).length;
   const complexKeywords = /\b(refactor|migrate|rewrite|redesign|rebuild|all files|entire|every)\b/i;
+  const complexKeywordsKo = /(리팩터|마이그레이션|전체|모든 파일|재작성|재설계)/;
   const yoloComplexKeywords = /\b(fix|implement|add|update|change|create|build|improve)\b/i;
+  const yoloComplexKeywordsKo = /(수정|구현|추가|변경|고쳐|만들어|개선|빌드)/;
 
-  if (filePathCount >= 3 || complexKeywords.test(prompt)) {
+  if (filePathCount >= 3 || complexKeywords.test(prompt) || complexKeywordsKo.test(prompt)) {
     return "complex";
   }
 
-  if (mode === "yolo" && (filePathCount >= 2 || yoloComplexKeywords.test(prompt))) {
+  if (mode === "yolo" && (filePathCount >= 2 || yoloComplexKeywords.test(prompt) || yoloComplexKeywordsKo.test(prompt))) {
     return "complex";
   }
 

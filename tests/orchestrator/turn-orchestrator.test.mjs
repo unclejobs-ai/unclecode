@@ -32,6 +32,16 @@ test("classifyWorkIntent keeps fast paths simple and routes explicit complex or 
     "simple",
     "yolo mode still keeps pure questions simple",
   );
+  assert.equal(
+    classifyWorkIntent("auth 버그 수정해줘", "yolo"),
+    "complex",
+    "Korean action keyword triggers complex in yolo",
+  );
+  assert.equal(
+    classifyWorkIntent("전체 리팩터링", "default"),
+    "complex",
+    "Korean complex keyword triggers complex in any mode",
+  );
 });
 
 test("createTurnOrchestrator executes complex plans with bounded concurrency and real steps", async () => {
