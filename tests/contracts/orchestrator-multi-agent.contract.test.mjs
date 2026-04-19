@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { FileOwnershipRegistry } from "../../packages/orchestrator/src/file-ownership-registry.ts";
 import {
   classifyWorkIntent,
   runBoundedExecutorPool,
 } from "../../packages/orchestrator/src/turn-orchestrator.ts";
-import { FileOwnershipRegistry } from "../../packages/orchestrator/src/file-ownership-registry.ts";
 import { resolveWorkerBudget } from "../../packages/orchestrator/src/work-agent.ts";
 
 test("classifyWorkIntent routes yolo action prompts to complex orchestration", () => {
