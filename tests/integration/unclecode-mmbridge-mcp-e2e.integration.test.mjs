@@ -146,9 +146,8 @@ const hasMmbridgeBuild = fileExists(mmbridgeMcpDist);
 test(
   "host drives real tools/call mmbridge_doctor via project-local stdio MCP",
   {
-    skip: hasMmbridgeBuild
-      ? false
-      : "mmbridge MCP dist not found; build mmbridge first",
+    skip:
+      !hasMmbridgeBuild && "mmbridge MCP dist not found; build mmbridge first",
     timeout: 30_000,
   },
   async () => {

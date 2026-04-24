@@ -98,21 +98,22 @@ export async function runMmbridgeMcpTool(input: {
     pending.clear();
   };
 
+  const clearTimer = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+
   const armTimeout = () => {
-    if (timer || timeoutMs <= 0) return;
+    clearTimer();
+    if (timeoutMs <= 0) return;
     timer = setTimeout(() => {
       if (pending.size === 0) return;
       failPending(new Error(`mmbridge MCP request timed out after ${timeoutMs}ms. ${stderrText}`.trim()));
       child.kill("SIGTERM");
     }, timeoutMs);
     if (typeof timer.unref === "function") timer.unref();
-  };
-
-  const clearTimer = () => {
-    if (timer) {
-      clearTimeout(timer);
-      timer = null;
-    }
   };
 
   const request = (method: string, params: Record<string, unknown> = {}) => {
@@ -154,7 +155,11 @@ export async function runMmbridgeMcpTool(input: {
       if (typeof message.id === "number" && pending.has(message.id)) {
         const entry = pending.get(message.id);
         pending.delete(message.id);
-        if (pending.size === 0) clearTimer();
+        if (pending.size === 0) {
+          clearTimer();
+        } else {
+          armTimeout();
+        }
         if (message.error) {
           entry?.reject(new Error(message.error.message ?? `MCP ${message.method ?? "request"} failed`));
         } else {
