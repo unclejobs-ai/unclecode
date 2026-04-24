@@ -63,7 +63,11 @@ function resolveMmbridgeServerConfig(input: {
   return entry.config;
 }
 
-const DEFAULT_MMBRIDGE_MCP_TIMEOUT_MS = 30_000;
+// Default must exceed worst-case mmbridge tool runtime. mmbridge_review and
+// mmbridge_gate dispatch to LLM adapters that routinely take 60-180s+; 10min
+// leaves headroom for slow adapters while still bounding true hangs. Callers
+// may override via input.timeoutMs, or pass 0/negative to disable.
+const DEFAULT_MMBRIDGE_MCP_TIMEOUT_MS = 600_000;
 
 export async function runMmbridgeMcpTool(input: {
   workspaceRoot: string;

@@ -452,3 +452,45 @@ The answer is:
 
 In one sentence:
 - the architecture direction is right, the harness shape is good, and the biggest remaining gap is cross-repo execution proof.
+
+---
+
+## Addendum — 2026-04-24 post-merge
+
+The Priority 1 "true host-driven end-to-end smoke" gap called out in the original text was closed immediately after this doc landed, and the closure itself exposed that the "minimum real MCP lane" was not actually functional at merge time. Recording the correction here so the next maintainer does not trust the Executive Summary in isolation.
+
+### What we found
+
+While adding the host-driven smoke, empirical probing confirmed that `apps/unclecode-cli/src/mmbridge-mcp.ts` had been hand-rolling LSP-style `Content-Length` framing, but the real `@mmbridge/mcp` server uses `@modelcontextprotocol/sdk`'s `StdioServerTransport` which speaks newline-delimited JSON. Every real `tools/call` invocation was silently dropped by the server's line-based `ReadBuffer`. The fake MCP server used in `tests/commands/tui-action-runner.test.mjs` used the same broken framing, so the existing tests passed against a fake that mirrored the broken client. None of the three shipped operational actions (`/mmbridge context`, `/mmbridge review`, `/mmbridge gate`) could reach the real server.
+
+### What changed after this doc
+
+mmbridge (3 follow-up commits):
+- `9cd1ee2` Add host-driven MCP E2E smoke for mmbridge (SDK Client + stdio server)
+- `c9f7e9f` Harden MCP smoke: transport-leak guard, timeouts, non-null assertion
+- `be47769` Simplify MCP smoke: use SDK TextContent type
+
+unclecode (4 follow-up commits):
+- `c34b8aa` Fix mmbridge MCP stdio framing (LSP → NDJSON) and add host-driven E2E smoke
+- `f083728` Harden mmbridge MCP client and E2E smoke with timeouts and lifecycle fixes
+- `9860396` Simplify mmbridge MCP client: correct timeout race and cleaner skip
+- `bf8b557` Simplify mmbridge MCP client: drop redundant Buffer copy and snapshot
+
+### Revised status
+
+- The operational MCP lane is now actually functional end-to-end, not just structurally wired. Verified by `tests/integration/unclecode-mmbridge-mcp-e2e.integration.test.mjs` which spawns `scripts/run-mmbridge-mcp.mjs`, performs `initialize` + `tools/list` + `tools/call mmbridge_doctor`, and asserts response shape.
+- mmbridge's `smoke:mcp` script locks the host-facing contract on the mmbridge side independently.
+- Default per-request timeout raised to 10 minutes so real `mmbridge_review` / `mmbridge_gate` LLM dispatches do not misleadingly fail fast. Callers may override per-invocation via `input.timeoutMs`, or pass a non-positive value to disable.
+
+### What the original "Still missing" list should read now
+
+1. Priority 1 (true host-driven E2E smoke) — done on the unclecode side; mmbridge has a peer smoke too.
+2. Priority 2 (explicit cross-repo compatibility contract) — still open.
+3. Priority 3 (richer discoverability / generic MCP runtime) — still open, and should still wait until the contract is explicit.
+4. Release gate in mmbridge now covers host-facing MCP surface via `smoke:mcp`; still not integrated into a cross-repo gate.
+
+### Do-not-regress additions
+
+- Keep stdio framing aligned with `@modelcontextprotocol/sdk` (NDJSON). Never reintroduce `Content-Length` headers on this transport.
+- Fake MCP servers in tests must mirror real SDK framing, not the client's current implementation.
+- The E2E smoke must actually perform `tools/call`, not just `tools/list`. A surface-only assertion hid the framing bug for one full merge cycle.
