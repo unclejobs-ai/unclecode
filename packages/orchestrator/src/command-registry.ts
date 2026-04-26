@@ -183,6 +183,16 @@ export function createWorkShellCommandRegistry(extraEntries: readonly Registered
       metadata: builtinLocal("Check mmbridge review freshness for the current workspace via MCP."),
     },
     {
+      command: "/mmbridge handoff",
+      routeTo: ["mmbridge", "handoff"],
+      metadata: builtinLocal("Show the latest mmbridge handoff artifact via MCP."),
+    },
+    {
+      command: "/mmbridge doctor",
+      routeTo: ["mmbridge", "doctor"],
+      metadata: builtinLocal("Inspect mmbridge adapter/runtime readiness via MCP."),
+    },
+    {
       command: "/mode status",
       routeTo: ["mode", "status"],
       metadata: builtinLocal("Show the active mode and its source."),

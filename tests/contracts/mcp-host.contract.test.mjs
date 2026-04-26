@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,7 +10,11 @@ test("loadMcpHostRegistry resolves relative stdio command args against config lo
 
   try {
     mkdirSync(path.join(workspaceRoot, "scripts"), { recursive: true });
-    writeFileSync(path.join(workspaceRoot, "scripts", "run-mmbridge-mcp.mjs"), "#!/usr/bin/env node\n", "utf8");
+    writeFileSync(
+      path.join(workspaceRoot, "scripts", "run-mmbridge-mcp.mjs"),
+      "#!/usr/bin/env node\n",
+      "utf8",
+    );
     writeFileSync(
       path.join(workspaceRoot, ".mcp.json"),
       JSON.stringify(
@@ -34,7 +38,10 @@ test("loadMcpHostRegistry resolves relative stdio command args against config lo
     assert.ok(entry);
     assert.equal(entry?.config.type, "stdio");
     assert.equal(entry?.config.command, "node");
-    assert.equal(entry?.config.args?.[0], path.join(workspaceRoot, "scripts", "run-mmbridge-mcp.mjs"));
+    assert.equal(
+      entry?.config.args?.[0],
+      path.join(workspaceRoot, "scripts", "run-mmbridge-mcp.mjs"),
+    );
   } finally {
     rmSync(workspaceRoot, { recursive: true, force: true });
   }

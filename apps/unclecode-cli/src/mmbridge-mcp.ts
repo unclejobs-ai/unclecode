@@ -71,7 +71,12 @@ const DEFAULT_MMBRIDGE_MCP_TIMEOUT_MS = 600_000;
 
 export async function runMmbridgeMcpTool(input: {
   workspaceRoot: string;
-  toolName: "mmbridge_context_packet" | "mmbridge_review" | "mmbridge_gate";
+  toolName:
+    | "mmbridge_context_packet"
+    | "mmbridge_review"
+    | "mmbridge_gate"
+    | "mmbridge_handoff"
+    | "mmbridge_doctor";
   args: Record<string, unknown>;
   userHomeDir?: string;
   onProgress?: (line: string) => void;
@@ -197,7 +202,11 @@ export async function runMmbridgeMcpTool(input: {
       name: input.toolName,
       arguments: input.args,
     });
-    return extractTextContent(response.result);
+    const resultLines = extractTextContent(response.result);
+    if (response.result?.isError === true) {
+      throw new Error(resultLines.join("\n") || `${input.toolName} failed`);
+    }
+    return resultLines;
   } finally {
     clearTimer();
     child.stdin.end();
@@ -226,5 +235,21 @@ export function buildMmbridgeGateReport(lines: readonly string[]): readonly stri
   return [
     "mmbridge gate finished.",
     ...(joined ? joined.split("\n").slice(0, 10) : []),
+  ];
+}
+
+export function buildMmbridgeHandoffReport(lines: readonly string[]): readonly string[] {
+  const joined = lines.join("\n");
+  return [
+    "mmbridge handoff ready.",
+    ...(joined ? joined.split("\n").slice(0, 12) : []),
+  ];
+}
+
+export function buildMmbridgeDoctorReport(lines: readonly string[]): readonly string[] {
+  const joined = lines.join("\n");
+  return [
+    "mmbridge doctor finished.",
+    ...(joined ? joined.split("\n").slice(0, 12) : []),
   ];
 }

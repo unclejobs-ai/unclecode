@@ -124,7 +124,9 @@ export function elapsedSince(startedAt: number): number {
 
 import {
   buildMmbridgeContextSummary,
+  buildMmbridgeDoctorReport,
   buildMmbridgeGateReport,
+  buildMmbridgeHandoffReport,
   buildMmbridgeReviewReport,
   runMmbridgeMcpTool,
 } from "./mmbridge-mcp.js";
@@ -572,6 +574,8 @@ export function resolveWorkShellInlineActionId(args: readonly string[]): string 
   if (normalized === "mmbridge context") return "mmbridge-context";
   if (normalized === "mmbridge review") return "mmbridge-review";
   if (normalized === "mmbridge gate") return "mmbridge-gate";
+  if (normalized === "mmbridge handoff") return "mmbridge-handoff";
+  if (normalized === "mmbridge doctor") return "mmbridge-doctor";
   return undefined;
 }
 
@@ -840,6 +844,30 @@ export async function runTuiSessionCenterAction(input: {
         },
       });
       return buildMmbridgeGateReport(lines);
+    }
+    case "mmbridge-handoff": {
+      const lines = await runMmbridgeMcpTool({
+        workspaceRoot: input.workspaceRoot,
+        ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
+        ...(input.onProgress ? { onProgress: input.onProgress } : {}),
+        toolName: "mmbridge_handoff",
+        args: {
+          projectDir: input.workspaceRoot,
+        },
+      });
+      return buildMmbridgeHandoffReport(lines);
+    }
+    case "mmbridge-doctor": {
+      const lines = await runMmbridgeMcpTool({
+        workspaceRoot: input.workspaceRoot,
+        ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
+        ...(input.onProgress ? { onProgress: input.onProgress } : {}),
+        toolName: "mmbridge_doctor",
+        args: {
+          projectDir: input.workspaceRoot,
+        },
+      });
+      return buildMmbridgeDoctorReport(lines);
     }
     case "mode-status":
       return formatModeStatusReport({

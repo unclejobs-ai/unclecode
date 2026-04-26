@@ -6,7 +6,10 @@ import { fileURLToPath } from "node:url";
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(testDirectory, "../..");
-const builtCliEntrypoint = path.join(workspaceRoot, "apps/unclecode-cli/dist/index.js");
+const builtCliEntrypoint = path.join(
+  workspaceRoot,
+  "apps/unclecode-cli/dist/index.js",
+);
 
 test("built unclecode cli lists the project-local mmbridge MCP server", () => {
   const result = spawnSync("node", [builtCliEntrypoint, "mcp", "list"], {
@@ -17,5 +20,8 @@ test("built unclecode cli lists the project-local mmbridge MCP server", () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MCP servers/i);
-  assert.match(result.stdout, /mmbridge \| stdio \| project \| project config/i);
+  assert.match(
+    result.stdout,
+    /mmbridge \| stdio \| project \| project config/i,
+  );
 });

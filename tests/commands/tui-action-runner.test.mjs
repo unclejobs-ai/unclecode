@@ -734,6 +734,8 @@ process.stdin.on("data", (chunk) => {
         mmbridge_context_packet: "context packet ok\\nworkspace context ready",
         mmbridge_review: "review ok\\n0 findings",
         mmbridge_gate: "gate ok\\nstale-review: none",
+        mmbridge_handoff: "handoff ok\\nlatest handoff ready",
+        mmbridge_doctor: "doctor ok\\nadapters ready",
       };
       writeMessage({ jsonrpc: "2.0", id: payload.id, result: { content: [{ type: "text", text: lines[name] ?? "unknown" }] } });
     }
@@ -775,6 +777,90 @@ process.stdin.on("data", (chunk) => {
     });
     assert.match(gateLines.join("\n"), /mmbridge gate finished/);
     assert.match(gateLines.join("\n"), /stale-review/);
+
+    const handoffLines = await runWorkShellInlineAction({
+      args: ["mmbridge", "handoff"],
+      workspaceRoot: cwd,
+      env: process.env,
+    });
+    assert.match(handoffLines.join("\n"), /mmbridge handoff ready/);
+    assert.match(handoffLines.join("\n"), /latest handoff ready/);
+
+    const doctorLines = await runWorkShellInlineAction({
+      args: ["mmbridge", "doctor"],
+      workspaceRoot: cwd,
+      env: process.env,
+    });
+    assert.match(doctorLines.join("\n"), /mmbridge doctor finished/);
+    assert.match(doctorLines.join("\n"), /adapters ready/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+
+test("runWorkShellInlineAction surfaces mmbridge MCP tool errors instead of success labels", async () => {
+  const cwd = makeTempWorkspace();
+
+  try {
+    const fakeServerPath = path.join(cwd, "fake-mmbridge-mcp-error.mjs");
+    writeFileSync(
+      fakeServerPath,
+      `
+import process from "node:process";
+
+let buffer = Buffer.alloc(0);
+function writeMessage(payload) {
+  process.stdout.write(JSON.stringify(payload) + "\\n");
+}
+process.stdin.on("data", (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (true) {
+    const newlineIndex = buffer.indexOf(0x0a);
+    if (newlineIndex < 0) break;
+    const line = buffer.subarray(0, newlineIndex).toString("utf8").replace(/\\r$/, "");
+    buffer = buffer.subarray(newlineIndex + 1);
+    if (line.length === 0) continue;
+    let payload;
+    try { payload = JSON.parse(line); } catch { continue; }
+    if (payload.method === "initialize") {
+      writeMessage({ jsonrpc: "2.0", id: payload.id, result: { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "fake-mmbridge", version: "0.0.0" } } });
+      continue;
+    }
+    if (payload.method === "tools/call") {
+      writeMessage({ jsonrpc: "2.0", id: payload.id, result: { isError: true, content: [{ type: "text", text: "No handoff found for this project." }] } });
+    }
+  }
+});
+`,
+      "utf8",
+    );
+    writeFileSync(
+      path.join(cwd, ".mcp.json"),
+      JSON.stringify(
+        {
+          mcpServers: {
+            mmbridge: {
+              type: "stdio",
+              command: "node",
+              args: ["./fake-mmbridge-mcp-error.mjs"],
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    await assert.rejects(
+      runWorkShellInlineAction({
+        args: ["mmbridge", "handoff"],
+        workspaceRoot: cwd,
+        env: process.env,
+      }),
+      /No handoff found for this project\./,
+    );
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

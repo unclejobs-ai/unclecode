@@ -1782,6 +1782,8 @@ test("createWorkShellPaneRuntime builds shared engine and slash runtime helpers"
   assert.ok(runtime.getSuggestions("/mmbridge").some((item) => item.command === "/mmbridge context"));
   assert.ok(runtime.getSuggestions("/mmbridge").some((item) => item.command === "/mmbridge review"));
   assert.ok(runtime.getSuggestions("/mmbridge").some((item) => item.command === "/mmbridge gate"));
+  assert.ok(runtime.getSuggestions("/mmbridge").some((item) => item.command === "/mmbridge handoff"));
+  assert.ok(runtime.getSuggestions("/mmbridge").some((item) => item.command === "/mmbridge doctor"));
   assert.equal(runtime.shouldBlockSlashSubmit("/auth"), true);
 });
 
