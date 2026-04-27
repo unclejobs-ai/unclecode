@@ -202,10 +202,13 @@ export function parseResponsesSseToAnthropicContent(sseText) {
   return parseResponsesSseToResult(sseText).content;
 }
 
-export function parseResponsesSseToResult(sseText) {
+export function parseResponsesSseToResult(sseText, options = {}) {
   const blocks = [];
   const toolCallIds = [];
   const textByMessageId = new Map();
+  const reasoningSummaryByItemId = new Map();
+  const reasoningTextByItemId = new Map();
+  const onReasoningDelta = typeof options.onReasoningDelta === "function" ? options.onReasoningDelta : null;
   let responseId = null;
 
   for (const event of parseSseJsonEvents(sseText)) {
@@ -215,6 +218,26 @@ export function parseResponsesSseToResult(sseText) {
       const itemId = typeof event.item_id === "string" ? event.item_id : `msg_${randomUUID()}`;
       const delta = typeof event.delta === "string" ? event.delta : "";
       textByMessageId.set(itemId, (textByMessageId.get(itemId) ?? "") + delta);
+      continue;
+    }
+
+    if (type === "response.reasoning_summary_text.delta") {
+      const itemId = typeof event.item_id === "string" ? event.item_id : `rsn_${randomUUID()}`;
+      const delta = typeof event.delta === "string" ? event.delta : "";
+      reasoningSummaryByItemId.set(itemId, (reasoningSummaryByItemId.get(itemId) ?? "") + delta);
+      if (onReasoningDelta && delta.length > 0) {
+        onReasoningDelta({ kind: "summary", itemId, delta });
+      }
+      continue;
+    }
+
+    if (type === "response.reasoning_text.delta") {
+      const itemId = typeof event.item_id === "string" ? event.item_id : `rsn_${randomUUID()}`;
+      const delta = typeof event.delta === "string" ? event.delta : "";
+      reasoningTextByItemId.set(itemId, (reasoningTextByItemId.get(itemId) ?? "") + delta);
+      if (onReasoningDelta && delta.length > 0) {
+        onReasoningDelta({ kind: "text", itemId, delta });
+      }
       continue;
     }
 
@@ -246,6 +269,35 @@ export function parseResponsesSseToResult(sseText) {
           type: "text",
           text: fallbackText,
           citations: null,
+        });
+      }
+      continue;
+    }
+
+    if (itemType === "reasoning") {
+      const itemId = typeof item.id === "string" ? item.id : `rsn_${randomUUID()}`;
+      const summaryParts = Array.isArray(item.summary) ? item.summary : [];
+      const summaryFromItem = summaryParts
+        .map((part) => (isRecord(part) && typeof part.text === "string" ? part.text : ""))
+        .filter(Boolean)
+        .join("\n");
+      const contentParts = Array.isArray(item.content) ? item.content : [];
+      const textFromItem = contentParts
+        .map((part) =>
+          isRecord(part) && (part.type === "reasoning_text" || part.type === "text") && typeof part.text === "string"
+            ? part.text
+            : "",
+        )
+        .filter(Boolean)
+        .join("\n");
+      const summary = summaryFromItem.length > 0 ? summaryFromItem : (reasoningSummaryByItemId.get(itemId) ?? "");
+      const text = textFromItem.length > 0 ? textFromItem : (reasoningTextByItemId.get(itemId) ?? "");
+      if (summary.length > 0 || text.length > 0) {
+        blocks.push({
+          type: "reasoning",
+          itemId,
+          summary,
+          text,
         });
       }
       continue;

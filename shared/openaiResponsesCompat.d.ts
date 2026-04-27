@@ -20,7 +20,12 @@ export function openAICompatibleToolsToResponsesTools(
 
 export function parseResponsesSseToAnthropicContent(sseText: string): Array<Record<string, unknown>>;
 
-export function parseResponsesSseToResult(sseText: string): {
+export function parseResponsesSseToResult(
+  sseText: string,
+  options?: {
+    onReasoningDelta?: (event: { kind: "summary" | "text"; itemId: string; delta: string }) => void;
+  },
+): {
   responseId: string | null;
   toolCallIds: string[];
   content: Array<Record<string, unknown>>;

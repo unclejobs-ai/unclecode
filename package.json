@@ -33,7 +33,7 @@
     "omx:openclaw:clawship": "node ./scripts/configure-omx-openclaw.mjs --gateway clawship"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18.0 <24"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

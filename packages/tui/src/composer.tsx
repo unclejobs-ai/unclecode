@@ -285,7 +285,7 @@ export function Composer(props: {
   return (
     <Box flexDirection="column">
       {lines.map((line, index) => (
-        <Box key={`${index}-${line}`}>
+        <Box key={index}>
           {renderComposerLine(
             line,
             index === cursorPosition.lineIndex ? cursorPosition.columnIndex : undefined,

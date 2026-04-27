@@ -9,6 +9,7 @@ export const EXECUTION_TRACE_EVENT_TYPES = [
   "orchestrator.step",
   "bridge.published",
   "memory.written",
+  "reasoning.delta",
 ] as const;
 
 export type ExecutionTraceEventType = (typeof EXECUTION_TRACE_EVENT_TYPES)[number];
@@ -99,6 +100,16 @@ export type MemoryWrittenTraceEvent = {
   readonly summary: string;
 };
 
+export type ReasoningDeltaTraceEvent = {
+  readonly type: "reasoning.delta";
+  readonly level: "default";
+  readonly provider: ProviderId | "unknown";
+  readonly model: string;
+  readonly kind: "summary" | "text";
+  readonly itemId: string;
+  readonly delta: string;
+};
+
 export type ExecutionTraceEvent =
   | TurnStartedTraceEvent
   | ProviderCallingTraceEvent
@@ -107,4 +118,5 @@ export type ExecutionTraceEvent =
   | ToolCompletedTraceEvent
   | OrchestratorStepTraceEvent
   | BridgePublishedTraceEvent
-  | MemoryWrittenTraceEvent;
+  | MemoryWrittenTraceEvent
+  | ReasoningDeltaTraceEvent;

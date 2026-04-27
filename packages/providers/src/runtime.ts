@@ -15,7 +15,7 @@ export type AgentTurnResult = {
 
 export type ProviderToolTraceEvent = Extract<
   ExecutionTraceEvent,
-  { type: "tool.started" | "tool.completed" }
+  { type: "tool.started" | "tool.completed" | "reasoning.delta" }
 >;
 
 export type ProviderInputAttachment = {
@@ -232,6 +232,7 @@ export class OpenAIProvider implements LlmProvider {
       choices?: Array<{
         message?: {
           content?: string | null;
+          reasoning_content?: string | null;
           tool_calls?: Array<{
             id?: string;
             function?: { name?: string; arguments?: string };
@@ -240,7 +241,20 @@ export class OpenAIProvider implements LlmProvider {
       }>;
     };
 
-    return payload.choices?.[0]?.message ?? {};
+    const message = payload.choices?.[0]?.message ?? {};
+    const reasoningContent = typeof message.reasoning_content === "string" ? message.reasoning_content : "";
+    if (reasoningContent.length > 0) {
+      emitProviderTrace(this.traceListener, {
+        type: "reasoning.delta",
+        level: "default",
+        provider: "openai",
+        model: this.model,
+        kind: "text",
+        itemId: `chat_${Date.now()}`,
+        delta: reasoningContent,
+      });
+    }
+    return message;
   }
 
   private async requestCodexMessage(): Promise<{
@@ -281,10 +295,15 @@ export class OpenAIProvider implements LlmProvider {
           tools,
           tool_choice: tools.length > 0 ? "auto" : "none",
           parallel_tool_calls: true,
-          reasoning: { effort: "none" },
+          ...(this.reasoning.support.status === "supported" && this.reasoning.effort !== "unsupported"
+            ? { reasoning: { effort: this.reasoning.effort, summary: "auto" } }
+            : { reasoning: { effort: "none" } }),
           store: false,
           stream: true,
-          include: [],
+          include:
+            this.reasoning.support.status === "supported" && this.reasoning.effort !== "unsupported"
+              ? ["reasoning.encrypted_content"]
+              : [],
           text: {
             format: { type: "text" },
             verbosity: "medium",
@@ -302,7 +321,19 @@ export class OpenAIProvider implements LlmProvider {
       );
     }
 
-    const parsed = parseResponsesSseToResult(responseText);
+    const parsed = parseResponsesSseToResult(responseText, {
+      onReasoningDelta: ({ kind, itemId, delta }) => {
+        emitProviderTrace(this.traceListener, {
+          type: "reasoning.delta",
+          level: "default",
+          provider: "openai",
+          model: this.model,
+          kind,
+          itemId,
+          delta,
+        });
+      },
+    });
     const toolCalls = parsed.content
       .filter((item): item is { type: "tool_use"; id: string; name: string; input: Record<string, unknown> } =>
         isRecord(item) && item.type === "tool_use" && typeof item.id === "string" && typeof item.name === "string",
@@ -485,15 +516,43 @@ export class AnthropicProvider implements LlmProvider {
     attachments: readonly ProviderInputAttachment[] = [],
   ): Promise<AgentTurnResult> {
     if (attachments.length > 0) {
-      throw new Error(
-        "Image attachments are currently supported only in the OpenAI work shell.",
-      );
+      const supportedMimes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+      const blocks: Array<
+        | { type: "text"; text: string }
+        | {
+            type: "image";
+            source: {
+              type: "base64";
+              media_type: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+              data: string;
+            };
+          }
+      > = [{ type: "text", text: prompt }];
+      for (const attachment of attachments) {
+        if (!supportedMimes.has(attachment.mimeType)) {
+          continue;
+        }
+        const commaIndex = attachment.dataUrl.indexOf(",");
+        const base64Data = commaIndex >= 0 ? attachment.dataUrl.slice(commaIndex + 1) : "";
+        if (base64Data.length === 0) {
+          continue;
+        }
+        blocks.push({
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: attachment.mimeType as "image/png" | "image/jpeg" | "image/gif" | "image/webp",
+            data: base64Data,
+          },
+        });
+      }
+      this.messages.push({ role: "user", content: blocks });
+    } else {
+      this.messages.push({
+        role: "user",
+        content: prompt,
+      });
     }
-
-    this.messages.push({
-      role: "user",
-      content: prompt,
-    });
 
     let assistantText = "";
 
@@ -658,15 +717,21 @@ export class GeminiProvider implements LlmProvider {
     prompt: string,
     attachments: readonly ProviderInputAttachment[] = [],
   ): Promise<AgentTurnResult> {
-    if (attachments.length > 0) {
-      throw new Error(
-        "Image attachments are currently supported only in the OpenAI work shell.",
-      );
+    const userParts: Array<
+      | { text: string }
+      | { inlineData: { mimeType: string; data: string } }
+    > = [{ text: prompt }];
+    for (const attachment of attachments) {
+      const commaIndex = attachment.dataUrl.indexOf(",");
+      const base64Data = commaIndex >= 0 ? attachment.dataUrl.slice(commaIndex + 1) : "";
+      if (base64Data.length === 0) {
+        continue;
+      }
+      userParts.push({ inlineData: { mimeType: attachment.mimeType, data: base64Data } });
     }
-
     this.contents.push({
       role: "user",
-      parts: [{ text: prompt }],
+      parts: userParts,
     });
 
     let assistantText = "";
@@ -992,12 +1057,20 @@ function removeUnpairedResponsesToolItems(input: Array<Record<string, unknown>>)
   });
 }
 
-function parseResponsesSseToResult(sseText: string): {
+function parseResponsesSseToResult(
+  sseText: string,
+  options: {
+    onReasoningDelta?: (event: { kind: "summary" | "text"; itemId: string; delta: string }) => void;
+  } = {},
+): {
   responseId: string | null;
   content: Array<Record<string, unknown>>;
 } {
   const blocks: Array<Record<string, unknown>> = [];
   const textByMessageId = new Map<string, string>();
+  const reasoningSummaryByItemId = new Map<string, string>();
+  const reasoningTextByItemId = new Map<string, string>();
+  const onReasoningDelta = options.onReasoningDelta;
   let responseId: string | null = null;
 
   for (const event of parseSseJsonEvents(sseText)) {
@@ -1007,6 +1080,26 @@ function parseResponsesSseToResult(sseText: string): {
       const itemId = typeof event.item_id === "string" ? event.item_id : `msg_${randomUUID()}`;
       const delta = typeof event.delta === "string" ? event.delta : "";
       textByMessageId.set(itemId, (textByMessageId.get(itemId) ?? "") + delta);
+      continue;
+    }
+
+    if (type === "response.reasoning_summary_text.delta") {
+      const itemId = typeof event.item_id === "string" ? event.item_id : `rsn_${randomUUID()}`;
+      const delta = typeof event.delta === "string" ? event.delta : "";
+      reasoningSummaryByItemId.set(itemId, (reasoningSummaryByItemId.get(itemId) ?? "") + delta);
+      if (onReasoningDelta && delta.length > 0) {
+        onReasoningDelta({ kind: "summary", itemId, delta });
+      }
+      continue;
+    }
+
+    if (type === "response.reasoning_text.delta") {
+      const itemId = typeof event.item_id === "string" ? event.item_id : `rsn_${randomUUID()}`;
+      const delta = typeof event.delta === "string" ? event.delta : "";
+      reasoningTextByItemId.set(itemId, (reasoningTextByItemId.get(itemId) ?? "") + delta);
+      if (onReasoningDelta && delta.length > 0) {
+        onReasoningDelta({ kind: "text", itemId, delta });
+      }
       continue;
     }
 
@@ -1033,6 +1126,34 @@ function parseResponsesSseToResult(sseText: string): {
       const fallbackText = text.length > 0 ? text : typeof item.id === "string" ? (textByMessageId.get(item.id) ?? "") : "";
       if (fallbackText.length > 0) {
         blocks.push({ type: "text", text: fallbackText });
+      }
+      continue;
+    }
+
+    if (itemType === "reasoning") {
+      const itemId = typeof item.id === "string" ? item.id : `rsn_${randomUUID()}`;
+      const summaryParts = Array.isArray(item.summary) ? item.summary : [];
+      const summaryFromItem = summaryParts
+        .map((part) =>
+          isRecord(part) && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "",
+        )
+        .filter(Boolean)
+        .join("\n");
+      const contentParts = Array.isArray(item.content) ? item.content : [];
+      const textFromItem = contentParts
+        .map((part) =>
+          isRecord(part)
+            && (part.type === "reasoning_text" || part.type === "text")
+            && typeof (part as { text?: unknown }).text === "string"
+            ? (part as { text: string }).text
+            : "",
+        )
+        .filter(Boolean)
+        .join("\n");
+      const summary = summaryFromItem.length > 0 ? summaryFromItem : (reasoningSummaryByItemId.get(itemId) ?? "");
+      const text = textFromItem.length > 0 ? textFromItem : (reasoningTextByItemId.get(itemId) ?? "");
+      if (summary.length > 0 || text.length > 0) {
+        blocks.push({ type: "reasoning", itemId, summary, text });
       }
       continue;
     }

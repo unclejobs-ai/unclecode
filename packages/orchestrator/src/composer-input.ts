@@ -20,7 +20,8 @@ const IMAGE_EXTENSION_TO_MIME = new Map<string, string>([
   [".bmp", "image/bmp"],
 ]);
 
-const IMAGE_PATH_PATTERN = /(?:"([^"\n]+\.(?:png|jpe?g|gif|webp|bmp))"|(\S+\.(?:png|jpe?g|gif|webp|bmp)))/gi;
+const IMAGE_PATH_PATTERN =
+  /(?:"([^"\n]+\.(?:png|jpe?g|gif|webp|bmp))"|file:\/\/(\S+\.(?:png|jpe?g|gif|webp|bmp))|((?:\\ |\S)+\.(?:png|jpe?g|gif|webp|bmp)))/gi;
 const REFERENCE_PATH_PATTERN = /(?:^|\s)@(?:"([^"\n]+)"|(\S+))/g;
 const MAX_TEXT_REFERENCE_CHARS = 2_000;
 const MAX_DIRECTORY_ENTRIES = 12;
@@ -127,11 +128,12 @@ export async function resolveComposerInput(
   const imageMatches = Array.from(raw.matchAll(IMAGE_PATH_PATTERN));
   const resolvedImages = await Promise.all(
     imageMatches.map(async (match) => {
-      const candidatePath = match[1] ?? match[2];
-      if (!candidatePath) {
+      const rawCandidate = match[1] ?? match[2] ?? match[3];
+      if (!rawCandidate) {
         return undefined;
       }
 
+      const candidatePath = rawCandidate.replace(/\\ /g, " ");
       const attachment = await toImageAttachment(candidatePath, cwd);
       if (!attachment) {
         return undefined;

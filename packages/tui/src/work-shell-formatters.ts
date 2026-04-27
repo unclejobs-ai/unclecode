@@ -116,7 +116,16 @@ export function formatAgentTraceLine(event: ExecutionTraceEvent): string {
     return `↔ context saved ${summarizeText(event.summary)}`;
   }
 
-  return `★ ${event.scope} memory saved ${summarizeText(event.summary)}`;
+  if (event.type === "memory.written") {
+    return `★ ${event.scope} memory saved ${summarizeText(event.summary)}`;
+  }
+
+  if (event.type === "reasoning.delta") {
+    const prefix = event.kind === "summary" ? "✦ thinking·" : "✦ reasoning·";
+    return `${prefix} ${summarizeText(event.delta)}`;
+  }
+
+  return "";
 }
 
 export function formatToolTraceLine(
