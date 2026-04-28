@@ -81,9 +81,9 @@ function truncate(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}…`;
 }
 
-type LiveProvider = "openai" | "anthropic";
+export type LiveProvider = "openai" | "anthropic";
 
-function detectProviderForModel(model: string): LiveProvider {
+export function detectProviderForModel(model: string): LiveProvider {
   return model.toLowerCase().startsWith("claude") ? "anthropic" : "openai";
 }
 
