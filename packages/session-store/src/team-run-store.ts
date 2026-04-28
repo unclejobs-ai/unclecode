@@ -26,6 +26,7 @@ import type {
 const TEAM_RUNS_DIRNAME = "team-runs";
 const MANIFEST_FILENAME = "manifest.json";
 const CHECKPOINTS_FILENAME = "checkpoints.ndjson";
+const TIP_FILENAME = ".tip";
 const LOCK_FILENAME = ".lock";
 const WORKERS_DIRNAME = "workers";
 const REVIEWS_DIRNAME = "reviews";
@@ -141,7 +142,14 @@ export function readTeamRunManifest(runRoot: string): TeamRunManifest {
   return JSON.parse(readFileSync(path, "utf8")) as TeamRunManifest;
 }
 
-function getCurrentTipHash(checkpointsPath: string): string {
+function getCurrentTipHash(runRoot: string, checkpointsPath: string): string {
+  const tipPath = join(runRoot, TIP_FILENAME);
+  if (existsSync(tipPath)) {
+    const cached = readFileSync(tipPath, "utf8").trim();
+    if (/^[0-9a-f]{64}$/.test(cached)) {
+      return cached;
+    }
+  }
   if (!existsSync(checkpointsPath)) {
     return ZERO_HASH;
   }
@@ -156,7 +164,11 @@ function getCurrentTipHash(checkpointsPath: string): string {
   }
   try {
     const parsed = JSON.parse(last) as { lineHash?: string };
-    return typeof parsed.lineHash === "string" ? parsed.lineHash : ZERO_HASH;
+    const recovered = typeof parsed.lineHash === "string" ? parsed.lineHash : ZERO_HASH;
+    if (recovered !== ZERO_HASH) {
+      writeFileSync(tipPath, recovered);
+    }
+    return recovered;
   } catch {
     return ZERO_HASH;
   }
@@ -167,7 +179,7 @@ export function appendTeamCheckpoint(
   checkpoint: AppendableTeamCheckpoint,
 ): TeamCheckpoint {
   const checkpointsPath = join(runRoot, CHECKPOINTS_FILENAME);
-  const prevTipHash = getCurrentTipHash(checkpointsPath);
+  const prevTipHash = getCurrentTipHash(runRoot, checkpointsPath);
 
   if (
     typeof checkpoint.prevTipHash === "string"
@@ -182,6 +194,7 @@ export function appendTeamCheckpoint(
   const lineHash = hashLine(prevTipHash, withoutLineHash);
   const finalCheckpoint = { ...withoutLineHash, lineHash } as TeamCheckpoint;
   appendFileSync(checkpointsPath, `${JSON.stringify(finalCheckpoint)}\n`);
+  writeFileSync(join(runRoot, TIP_FILENAME), lineHash);
   return finalCheckpoint;
 }
 

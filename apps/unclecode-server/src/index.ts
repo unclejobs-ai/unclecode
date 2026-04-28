@@ -10,7 +10,61 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+
+const ALLOWED_ORIGINS = new Set([
+  "http://localhost",
+  "http://127.0.0.1",
+]);
+
+function defaultTokenPath(): string {
+  return join(homedir(), ".unclecode", "server.token");
+}
+
+export function ensureServerToken(tokenPath: string = defaultTokenPath()): string {
+  if (existsSync(tokenPath)) {
+    const existing = readFileSync(tokenPath, "utf8").trim();
+    if (existing.length >= 32) return existing;
+  }
+  mkdirSync(dirname(tokenPath), { recursive: true });
+  const token = randomBytes(32).toString("hex");
+  writeFileSync(tokenPath, token);
+  try {
+    chmodSync(tokenPath, 0o600);
+  } catch {
+    // best-effort on platforms without chmod semantics
+  }
+  return token;
+}
+
+function checkAuth(req: IncomingMessage, expectedToken: string): { ok: boolean; reason?: string } {
+  const origin = req.headers.origin;
+  if (typeof origin === "string") {
+    try {
+      const parsed = new URL(origin);
+      const baseOrigin = `${parsed.protocol}//${parsed.hostname}`;
+      if (!ALLOWED_ORIGINS.has(baseOrigin)) {
+        return { ok: false, reason: `origin_not_allowed: ${origin}` };
+      }
+    } catch {
+      return { ok: false, reason: "invalid_origin_header" };
+    }
+  }
+  const auth = req.headers.authorization ?? "";
+  const match = /^Bearer\s+(.+)$/i.exec(auth);
+  if (!match) {
+    return { ok: false, reason: "missing_bearer_token" };
+  }
+  const supplied = Buffer.from(match[1] ?? "");
+  const expected = Buffer.from(expectedToken);
+  if (supplied.length !== expected.length) {
+    return { ok: false, reason: "bad_token_length" };
+  }
+  return timingSafeEqual(supplied, expected) ? { ok: true } : { ok: false, reason: "bad_token" };
+}
 
 export type ServerHealth = {
   readonly ok: true;
@@ -52,19 +106,29 @@ export type ServerOptions = {
   readonly port?: number;
   readonly host?: string;
   readonly handlers: ServerHandlers;
+  readonly authToken?: string;
+  readonly insecure?: boolean;
 };
 
 export async function startServer(options: ServerOptions): Promise<{
   readonly url: string;
+  readonly token: string;
   readonly stop: () => Promise<void>;
 }> {
   const port = options.port ?? 17677;
   const host = options.host ?? "127.0.0.1";
   const startedAt = Date.now();
+  const insecure = options.insecure === true;
+  if (!insecure && host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+    throw new Error(
+      `Refusing to bind ${host}: pass insecure: true to bind a non-loopback host.`,
+    );
+  }
+  const authToken = options.authToken ?? ensureServerToken();
 
   const server = createServer(async (req, res) => {
     try {
-      await routeRequest({ req, res, options, startedAt });
+      await routeRequest({ req, res, options, startedAt, authToken });
     } catch (error) {
       writeJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
     }
@@ -76,6 +140,7 @@ export async function startServer(options: ServerOptions): Promise<{
   const url = `http://${host}:${actualPort}`;
   return {
     url,
+    token: authToken,
     async stop() {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
@@ -87,8 +152,9 @@ async function routeRequest(input: {
   readonly res: ServerResponse;
   readonly options: ServerOptions;
   readonly startedAt: number;
+  readonly authToken: string;
 }): Promise<void> {
-  const { req, res, options, startedAt } = input;
+  const { req, res, options, startedAt, authToken } = input;
   const url = req.url ?? "/";
   const method = req.method ?? "GET";
 
@@ -100,6 +166,12 @@ async function routeRequest(input: {
       uptimeMs: Date.now() - startedAt,
     };
     writeJson(res, 200, body);
+    return;
+  }
+
+  const auth = checkAuth(req, authToken);
+  if (!auth.ok) {
+    writeJson(res, 401, { error: auth.reason ?? "unauthorized" });
     return;
   }
 

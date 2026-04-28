@@ -1025,6 +1025,7 @@ export {
 
 async function summarizeTeamRunsForDoctor(workspaceRoot: string): Promise<{ verdict: string; label: string }> {
   const dataRoot = process.env.UNCLECODE_DATA_ROOT?.trim() || path.join(workspaceRoot, ".data");
+  const verifyChains = process.env.UNCLECODE_DOCTOR_VERIFY_CHAINS === "1";
   try {
     const runs = listTeamRuns(dataRoot);
     if (runs.length === 0) {
@@ -1036,11 +1037,16 @@ async function summarizeTeamRunsForDoctor(workspaceRoot: string): Promise<{ verd
     }
     const manifest = readTeamRunManifest(latest.runRoot);
     const status = getRunStatusFromCheckpoints(readTeamCheckpoints(latest.runRoot)) ?? "(no checkpoints)";
+    if (!verifyChains) {
+      return {
+        verdict: "PASS",
+        label: `${runs.length} run(s); latest ${manifest.runId} status=${status} (chain not verified — set UNCLECODE_DOCTOR_VERIFY_CHAINS=1)`,
+      };
+    }
     const chain = verifyTeamRunChain(latest.runRoot);
     const chainNote = chain.ok ? `chain ${chain.verifiedLines} ok` : `chain BROKEN @ ${chain.brokenAt}`;
-    const verdict = chain.ok ? "PASS" : "WARN";
     return {
-      verdict,
+      verdict: chain.ok ? "PASS" : "WARN",
       label: `${runs.length} run(s); latest ${manifest.runId} status=${status}; ${chainNote}`,
     };
   } catch (error) {

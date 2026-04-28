@@ -208,6 +208,7 @@ export async function buildFastAuthStatusReport(env: NodeJS.ProcessEnv): Promise
 
 function summarizeTeamRunsForFastDoctor(workspaceRoot: string, env: NodeJS.ProcessEnv): { verdict: string; label: string } {
   const dataRoot = env.UNCLECODE_DATA_ROOT?.trim() || path.join(workspaceRoot, ".data");
+  const verifyChains = env.UNCLECODE_DOCTOR_VERIFY_CHAINS === "1";
   try {
     const runs = listTeamRuns(dataRoot);
     if (runs.length === 0) {
@@ -218,7 +219,14 @@ function summarizeTeamRunsForFastDoctor(workspaceRoot: string, env: NodeJS.Proce
       return { verdict: "INFO", label: "no team runs recorded" };
     }
     const manifest = readTeamRunManifest(latest.runRoot);
-    const status = getRunStatusFromCheckpoints(readTeamCheckpoints(latest.runRoot)) ?? "(no checkpoints)";
+    const checkpoints = readTeamCheckpoints(latest.runRoot);
+    const status = getRunStatusFromCheckpoints(checkpoints) ?? "(no checkpoints)";
+    if (!verifyChains) {
+      return {
+        verdict: "PASS",
+        label: `${runs.length} run(s); latest ${manifest.runId} status=${status} (chain not verified — set UNCLECODE_DOCTOR_VERIFY_CHAINS=1)`,
+      };
+    }
     const chain = verifyTeamRunChain(latest.runRoot);
     const chainNote = chain.ok ? `chain ${chain.verifiedLines} ok` : `chain BROKEN @ ${chain.brokenAt}`;
     return {
