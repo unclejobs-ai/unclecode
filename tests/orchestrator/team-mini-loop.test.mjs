@@ -80,11 +80,11 @@ test("createTeamMiniLoopExecutor dispatches run_shell actions", async () => {
 test("createTeamMiniLoopExecutor rejects unknown tools without throwing", async () => {
   const executor = createTeamMiniLoopExecutor();
   const observation = await executor.execute(
-    { tool: "write_file", input: { path: "x", contents: "y" } },
+    { tool: "not_a_real_tool", input: {} },
     process.cwd(),
   );
   assert.equal(observation.exitCode, -1);
-  assert.match(observation.stderr, /Unknown tool: write_file/);
+  assert.match(observation.stderr, /Unknown tool: not_a_real_tool/);
 });
 
 test("miniLoopMessagesToProviderQuery passes plain user/system messages through", () => {
@@ -177,4 +177,153 @@ test("miniLoopMessagesToProviderQuery emits assistant without tool_calls when no
   assert.equal(wire.length, 2);
   assert.equal(wire[1].role, "assistant");
   assert.equal(wire[1].toolCalls, undefined);
+});
+
+test("createTeamMiniLoopExecutor reads files via the file-viewer ACI", async () => {
+  const { writeFileSync, mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const path = (await import("node:path")).default;
+  const dir = mkdtempSync(path.join(tmpdir(), "unclecode-exec-read-"));
+  try {
+    writeFileSync(path.join(dir, "hello.txt"), "alpha\nbravo\ncharlie\n", "utf8");
+    const executor = createTeamMiniLoopExecutor();
+    const observation = await executor.execute(
+      { tool: "read_file", input: { path: "hello.txt" } },
+      dir,
+    );
+    assert.equal(observation.exitCode, 0);
+    assert.match(observation.stdout, /alpha/);
+    assert.match(observation.stdout, /bravo/);
+    assert.match(observation.stdout, /\[Total\] 4 lines/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createTeamMiniLoopExecutor reports missing path for read_file without throwing", async () => {
+  const executor = createTeamMiniLoopExecutor();
+  const observation = await executor.execute(
+    { tool: "read_file", input: {} },
+    process.cwd(),
+  );
+  assert.equal(observation.exitCode, -1);
+  assert.match(observation.stderr, /missing path/);
+});
+
+test("createTeamMiniLoopExecutor writes files inside the workspace", async () => {
+  const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const path = (await import("node:path")).default;
+  const dir = mkdtempSync(path.join(tmpdir(), "unclecode-exec-write-"));
+  try {
+    const executor = createTeamMiniLoopExecutor();
+    const observation = await executor.execute(
+      {
+        tool: "write_file",
+        input: { path: "out/note.txt", contents: "hello world\n" },
+      },
+      dir,
+    );
+    assert.equal(observation.exitCode, 0);
+    assert.match(observation.stdout, /wrote 12 bytes/);
+    const written = readFileSync(path.join(dir, "out", "note.txt"), "utf8");
+    assert.equal(written, "hello world\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createTeamMiniLoopExecutor refuses workspace-escape writes", async () => {
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const path = (await import("node:path")).default;
+  const dir = mkdtempSync(path.join(tmpdir(), "unclecode-exec-escape-"));
+  try {
+    const executor = createTeamMiniLoopExecutor();
+    const observation = await executor.execute(
+      { tool: "write_file", input: { path: "../escape.txt", contents: "no" } },
+      dir,
+    );
+    assert.equal(observation.exitCode, -1);
+    assert.match(observation.stderr, /traversal segment|escapes workspace/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createTeamMiniLoopExecutor returns ripgrep hits for search_text", async () => {
+  const { writeFileSync, mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const path = (await import("node:path")).default;
+  const dir = mkdtempSync(path.join(tmpdir(), "unclecode-exec-search-"));
+  try {
+    writeFileSync(path.join(dir, "a.ts"), "const NEEDLE = 1;\n", "utf8");
+    writeFileSync(path.join(dir, "b.ts"), "const other = 2;\n", "utf8");
+    const executor = createTeamMiniLoopExecutor();
+    const observation = await executor.execute(
+      { tool: "search_text", input: { query: "NEEDLE" } },
+      dir,
+    );
+    assert.equal(observation.exitCode, 0);
+    assert.match(observation.stdout, /a\.ts:1:.*NEEDLE/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createTeamMiniLoopExecutor lists files matching a glob", async () => {
+  const { writeFileSync, mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const path = (await import("node:path")).default;
+  const dir = mkdtempSync(path.join(tmpdir(), "unclecode-exec-glob-"));
+  try {
+    mkdirSync(path.join(dir, "src"));
+    writeFileSync(path.join(dir, "src", "one.ts"), "x", "utf8");
+    writeFileSync(path.join(dir, "src", "two.ts"), "x", "utf8");
+    writeFileSync(path.join(dir, "README.md"), "x", "utf8");
+    const executor = createTeamMiniLoopExecutor();
+    const observation = await executor.execute(
+      { tool: "list_files", input: { pattern: "**/*.ts" } },
+      dir,
+    );
+    assert.equal(observation.exitCode, 0);
+    const lines = observation.stdout.split("\n").filter(Boolean);
+    assert.equal(lines.length, 2);
+    for (const line of lines) {
+      assert.ok(line.endsWith(".ts"));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createTeamMiniLoopExecutor applies a unified diff via apply_patch", async () => {
+  const { writeFileSync, readFileSync, mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const path = (await import("node:path")).default;
+  const dir = mkdtempSync(path.join(tmpdir(), "unclecode-exec-patch-"));
+  try {
+    writeFileSync(path.join(dir, "src.txt"), "alpha\nbeta\ngamma\n", "utf8");
+    const patch = [
+      "--- a/src.txt",
+      "+++ b/src.txt",
+      "@@ -1,3 +1,3 @@",
+      " alpha",
+      "-beta",
+      "+BETA",
+      " gamma",
+      "",
+    ].join("\n");
+    const executor = createTeamMiniLoopExecutor();
+    const observation = await executor.execute(
+      { tool: "apply_patch", input: { patch } },
+      dir,
+    );
+    assert.equal(observation.exitCode, 0);
+    assert.match(observation.stdout, /src\.txt \(1 hunks\)/);
+    const updated = readFileSync(path.join(dir, "src.txt"), "utf8");
+    assert.equal(updated, "alpha\nBETA\ngamma\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

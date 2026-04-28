@@ -11,6 +11,8 @@
  */
 
 import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 import type {
   MiniLoopAction,
@@ -27,7 +29,15 @@ import type {
 import { MiniLoopAgent, type MiniLoopModelClient } from "./mini-loop-agent.js";
 import { getPersonaConfig } from "./personas/index.js";
 import type { TeamBinding } from "./team-binding.js";
+import { applyPatch } from "./aci/apply-patch.js";
+import { openFile } from "./aci/file-viewer.js";
+import {
+  PathContainmentError,
+  assertWithinWorkspace,
+} from "./aci/path-containment.js";
+import { glob } from "./aci/quick-tools.js";
 import { runShell } from "./aci/run-shell.js";
+import { searchDir } from "./aci/search.js";
 
 export type TeamMiniLoopExecutor = {
   execute(
@@ -39,25 +49,164 @@ export type TeamMiniLoopExecutor = {
 export function createTeamMiniLoopExecutor(): TeamMiniLoopExecutor {
   return {
     async execute(action, cwd) {
-      if (action.tool === "run_shell") {
-        const command = typeof action.input.command === "string"
-          ? action.input.command
-          : "";
-        const result = await runShell({ command, cwd });
-        return {
-          stdout: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.exitCode,
-          truncated: result.truncated,
-        };
+      try {
+        switch (action.tool) {
+          case "run_shell":
+            return await dispatchRunShell(action, cwd);
+          case "read_file":
+            return dispatchReadFile(action, cwd);
+          case "write_file":
+            return dispatchWriteFile(action, cwd);
+          case "search_text":
+            return await dispatchSearchText(action, cwd);
+          case "list_files":
+            return await dispatchListFiles(action, cwd);
+          case "apply_patch":
+            return dispatchApplyPatch(action, cwd);
+          default:
+            return errorObservation(`Unknown tool: ${action.tool}`);
+        }
+      } catch (error) {
+        if (error instanceof PathContainmentError) {
+          return errorObservation(error.message);
+        }
+        return errorObservation(
+          error instanceof Error ? error.message : String(error),
+        );
       }
-      return {
-        stdout: "",
-        stderr: `Unknown tool: ${action.tool}`,
-        exitCode: -1,
-        truncated: false,
-      };
     },
+  };
+}
+
+function errorObservation(message: string): MiniLoopObservation {
+  return { stdout: "", stderr: message, exitCode: -1, truncated: false };
+}
+
+function readString(input: Record<string, unknown>, key: string): string {
+  const value = input[key];
+  return typeof value === "string" ? value : "";
+}
+
+async function dispatchRunShell(
+  action: MiniLoopAction,
+  cwd: string,
+): Promise<MiniLoopObservation> {
+  const command = readString(action.input, "command");
+  const result = await runShell({ command, cwd });
+  return {
+    stdout: result.stdout,
+    stderr: result.stderr,
+    exitCode: result.exitCode,
+    truncated: result.truncated,
+  };
+}
+
+function dispatchReadFile(
+  action: MiniLoopAction,
+  cwd: string,
+): MiniLoopObservation {
+  const path = readString(action.input, "path");
+  if (path.length === 0) {
+    return errorObservation("read_file: missing path");
+  }
+  const windowRaw = action.input.window;
+  const windowSize = typeof windowRaw === "number" && windowRaw > 0
+    ? Math.floor(windowRaw)
+    : undefined;
+  const result = openFile(
+    windowSize !== undefined ? { cwd, path, window: windowSize } : { cwd, path },
+  );
+  return {
+    stdout: result.content,
+    stderr: "",
+    exitCode: 0,
+    truncated: result.state.totalLines > result.state.windowEnd,
+  };
+}
+
+function dispatchWriteFile(
+  action: MiniLoopAction,
+  cwd: string,
+): MiniLoopObservation {
+  const path = readString(action.input, "path");
+  if (path.length === 0) {
+    return errorObservation("write_file: missing path");
+  }
+  const contents = readString(action.input, "contents");
+  const absPath = assertWithinWorkspace(cwd, path, { allowMissing: true });
+  mkdirSync(dirname(absPath), { recursive: true });
+  writeFileSync(absPath, contents, "utf8");
+  return {
+    stdout: `wrote ${contents.length} bytes to ${path}`,
+    stderr: "",
+    exitCode: 0,
+    truncated: false,
+  };
+}
+
+async function dispatchSearchText(
+  action: MiniLoopAction,
+  cwd: string,
+): Promise<MiniLoopObservation> {
+  const query = readString(action.input, "query");
+  if (query.length === 0) {
+    return errorObservation("search_text: missing query");
+  }
+  const path = readString(action.input, "path");
+  const result = await searchDir({
+    cwd,
+    query,
+    ...(path.length > 0 ? { path } : {}),
+  });
+  const lines = result.hits.map((hit) =>
+    hit.line !== undefined && hit.text !== undefined
+      ? `${hit.path}:${hit.line}:${hit.text}`
+      : hit.path,
+  );
+  return {
+    stdout: lines.join("\n"),
+    stderr: "",
+    exitCode: 0,
+    truncated: result.truncated,
+  };
+}
+
+async function dispatchListFiles(
+  action: MiniLoopAction,
+  cwd: string,
+): Promise<MiniLoopObservation> {
+  const pattern = readString(action.input, "pattern") || "**/*";
+  const result = await glob({ cwd, pattern });
+  return {
+    stdout: result.hits.map((hit) => hit.path).join("\n"),
+    stderr: "",
+    exitCode: 0,
+    truncated: result.truncated,
+  };
+}
+
+function dispatchApplyPatch(
+  action: MiniLoopAction,
+  cwd: string,
+): MiniLoopObservation {
+  const patch = readString(action.input, "patch");
+  if (patch.length === 0) {
+    return errorObservation("apply_patch: missing patch");
+  }
+  const result = applyPatch({ cwd, patch });
+  const appliedSummary = result.applied
+    .map((entry) => `${entry.path} (${entry.hunkCount} hunks)`)
+    .join("\n");
+  const rejectedSummary = result.rejected
+    .map(
+      (entry) => `${entry.path}@hunk${entry.hunkIndex}: ${entry.reason}`,
+    )
+    .join("\n");
+  return {
+    stdout: appliedSummary,
+    stderr: rejectedSummary,
+    exitCode: result.rejected.length === 0 ? 0 : 1,
+    truncated: false,
   };
 }
 
@@ -172,6 +321,103 @@ export const TEAM_RUN_SHELL_TOOL: ToolDefinition = {
   },
 };
 
+export const TEAM_READ_FILE_TOOL: ToolDefinition = {
+  name: "read_file",
+  description:
+    "Open a workspace-relative file and return a numbered window of lines.",
+  input_schema: {
+    type: "object",
+    properties: {
+      path: {
+        type: "string",
+        description: "Workspace-relative file path.",
+      },
+      window: {
+        type: "number",
+        description: "Visible line window size (default 100).",
+      },
+    },
+    required: ["path"],
+  },
+};
+
+export const TEAM_WRITE_FILE_TOOL: ToolDefinition = {
+  name: "write_file",
+  description:
+    "Overwrite (or create) a workspace-relative file with the given contents.",
+  input_schema: {
+    type: "object",
+    properties: {
+      path: {
+        type: "string",
+        description: "Workspace-relative file path.",
+      },
+      contents: {
+        type: "string",
+        description: "Full file contents to write (UTF-8).",
+      },
+    },
+    required: ["path", "contents"],
+  },
+};
+
+export const TEAM_SEARCH_TEXT_TOOL: ToolDefinition = {
+  name: "search_text",
+  description:
+    "Search the workspace for a pattern with ripgrep; returns at most 50 path:line:text hits.",
+  input_schema: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "Regex or fixed string to search for." },
+      path: {
+        type: "string",
+        description: "Workspace-relative subdirectory to scope the search (optional).",
+      },
+    },
+    required: ["query"],
+  },
+};
+
+export const TEAM_LIST_FILES_TOOL: ToolDefinition = {
+  name: "list_files",
+  description:
+    "List workspace files matching the given glob pattern (default '**/*').",
+  input_schema: {
+    type: "object",
+    properties: {
+      pattern: {
+        type: "string",
+        description: "Glob pattern (e.g. 'src/**/*.ts').",
+      },
+    },
+  },
+};
+
+export const TEAM_APPLY_PATCH_TOOL: ToolDefinition = {
+  name: "apply_patch",
+  description:
+    "Apply a unified diff to the workspace. Reports applied and rejected hunks.",
+  input_schema: {
+    type: "object",
+    properties: {
+      patch: {
+        type: "string",
+        description: "Unified diff (multi-file) to apply.",
+      },
+    },
+    required: ["patch"],
+  },
+};
+
+export const TEAM_DEFAULT_TOOLS: ReadonlyArray<ToolDefinition> = [
+  TEAM_RUN_SHELL_TOOL,
+  TEAM_READ_FILE_TOOL,
+  TEAM_WRITE_FILE_TOOL,
+  TEAM_SEARCH_TEXT_TOOL,
+  TEAM_LIST_FILES_TOOL,
+  TEAM_APPLY_PATCH_TOOL,
+];
+
 export type RunTeamMiniLoopArgs = {
   readonly workerId: string;
   readonly persona: PersonaId;
@@ -204,7 +450,7 @@ export async function runTeamMiniLoop(
   }
   const config = getPersonaConfig(args.persona);
   const executor = createTeamMiniLoopExecutor();
-  const tools = args.tools ?? [TEAM_RUN_SHELL_TOOL];
+  const tools = args.tools ?? TEAM_DEFAULT_TOOLS;
   const query = args.provider.query.bind(args.provider);
 
   const modelClient: MiniLoopModelClient = {
