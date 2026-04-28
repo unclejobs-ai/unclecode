@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   AnthropicProvider,
+  GeminiProvider,
   OpenAIProvider,
   TeamBinding,
   getPersonaConfig,
@@ -81,14 +82,26 @@ function truncate(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}…`;
 }
 
-export type LiveProvider = "openai" | "anthropic";
+export type LiveProvider = "openai" | "anthropic" | "gemini";
 
 export function detectProviderForModel(model: string): LiveProvider {
-  return model.toLowerCase().startsWith("claude") ? "anthropic" : "openai";
+  const lower = model.toLowerCase();
+  if (lower.startsWith("claude")) {
+    return "anthropic";
+  }
+  if (lower.startsWith("gemini")) {
+    return "gemini";
+  }
+  return "openai";
 }
 
 function readApiKeyForProvider(name: LiveProvider): string | undefined {
-  const envName = name === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
+  const envName =
+    name === "anthropic"
+      ? "ANTHROPIC_API_KEY"
+      : name === "gemini"
+        ? "GEMINI_API_KEY"
+        : "OPENAI_API_KEY";
   return process.env[envName]?.trim();
 }
 
@@ -98,6 +111,14 @@ function buildProvider(
 ): LlmProvider {
   if (name === "anthropic") {
     return new AnthropicProvider({
+      apiKey: args.apiKey,
+      model: args.model,
+      cwd: process.cwd(),
+      systemPrompt: args.systemPrompt,
+    });
+  }
+  if (name === "gemini") {
+    return new GeminiProvider({
       apiKey: args.apiKey,
       model: args.model,
       cwd: process.cwd(),

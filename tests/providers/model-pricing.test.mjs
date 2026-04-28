@@ -17,6 +17,13 @@ test("getModelPrice returns the anthropic entry for known claude models", () => 
   assert.equal(price.outputUsdPer1M, 15.0);
 });
 
+test("getModelPrice returns the gemini entry for known gemini models", () => {
+  const price = getModelPrice("gemini-3.1-pro");
+  assert.ok(price);
+  assert.equal(price.inputUsdPer1M, 2.0);
+  assert.equal(price.outputUsdPer1M, 12.0);
+});
+
 test("getModelPrice falls back to the family entry for date-suffixed claude variants", () => {
   const price = getModelPrice("claude-sonnet-4-6-20260301");
   assert.ok(price);

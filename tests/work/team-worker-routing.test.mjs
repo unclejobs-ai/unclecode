@@ -9,6 +9,12 @@ test("detectProviderForModel routes claude-* models to Anthropic", () => {
   assert.equal(detectProviderForModel("Claude-Sonnet"), "anthropic");
 });
 
+test("detectProviderForModel routes gemini-* models to Gemini", () => {
+  assert.equal(detectProviderForModel("gemini-3.1-pro"), "gemini");
+  assert.equal(detectProviderForModel("gemini-2.5-flash"), "gemini");
+  assert.equal(detectProviderForModel("Gemini-3.1"), "gemini");
+});
+
 test("detectProviderForModel falls back to OpenAI for everything else", () => {
   assert.equal(detectProviderForModel("gpt-4.1-mini"), "openai");
   assert.equal(detectProviderForModel("gpt-5.4"), "openai");

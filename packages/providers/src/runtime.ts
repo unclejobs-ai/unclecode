@@ -895,8 +895,9 @@ export class GeminiProvider implements LlmProvider {
     toolRuntime?: ToolRuntime;
     traceListener?: ProviderTraceListener;
     systemPrompt?: string;
+    client?: GoogleGenAI;
   }) {
-    this.client = new GoogleGenAI({ apiKey: args.apiKey });
+    this.client = args.client ?? new GoogleGenAI({ apiKey: args.apiKey });
     this.model = args.model;
     this.cwd = args.cwd;
     this.systemPrompt = args.systemPrompt?.trim()
@@ -1091,6 +1092,91 @@ export class GeminiProvider implements LlmProvider {
     return {
       text: assistantText || "Stopped after reaching the tool iteration limit.",
     };
+  }
+
+  async query(
+    messages: ReadonlyArray<ProviderQueryMessage>,
+    options: ProviderQueryOptions = {},
+  ): Promise<ProviderQueryResult> {
+    const tools = options.tools ?? this.toolRuntime.definitions;
+    const model = options.model?.trim() ? options.model.trim() : this.model;
+    const { systemInstruction, contents } = providerMessagesToGemini(
+      messages,
+      this.systemPrompt,
+    );
+
+    const response = await this.client.models.generateContent({
+      model,
+      contents,
+      config: {
+        systemInstruction,
+        tools: tools.length > 0
+          ? [
+              {
+                functionDeclarations: tools.map((tool) => ({
+                  name: tool.name,
+                  description: tool.description,
+                  parametersJsonSchema: tool.input_schema,
+                })),
+              },
+            ]
+          : [],
+        toolConfig: {
+          functionCallingConfig: {
+            mode: FunctionCallingConfigMode.AUTO,
+          },
+        },
+      },
+    });
+
+    const candidate = response.candidates?.[0];
+    const parts = (candidate?.content?.parts ?? []) as Array<Record<string, unknown>>;
+    const textParts: string[] = [];
+    for (const part of parts) {
+      if (typeof part.text === "string" && part.text.length > 0) {
+        textParts.push(part.text);
+      }
+    }
+    const content = textParts.length > 0
+      ? textParts.join("\n")
+      : (typeof response.text === "string" ? response.text : "");
+
+    const actions: ProviderQueryAction[] = [];
+    for (const part of parts) {
+      const call = part.functionCall;
+      if (!isRecord(call)) {
+        continue;
+      }
+      const name = typeof call.name === "string" ? call.name.trim() : "";
+      if (name.length === 0) {
+        continue;
+      }
+      const callId = typeof call.id === "string" && call.id.length > 0
+        ? call.id
+        : name;
+      const input = isRecord(call.args) ? (call.args as Record<string, unknown>) : {};
+      actions.push({ callId, tool: name, input });
+    }
+
+    const usage = (response as {
+      usageMetadata?: {
+        promptTokenCount?: number;
+        candidatesTokenCount?: number;
+      };
+    }).usageMetadata;
+    const promptTokens = typeof usage?.promptTokenCount === "number"
+      ? usage.promptTokenCount
+      : 0;
+    const completionTokens = typeof usage?.candidatesTokenCount === "number"
+      ? usage.candidatesTokenCount
+      : 0;
+    const costUsd = estimateCostUsd({
+      modelId: model,
+      promptTokens,
+      completionTokens,
+    });
+
+    return { content, actions, costUsd };
   }
 }
 
@@ -1431,6 +1517,73 @@ function emitProviderTrace(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function providerMessagesToGemini(
+  messages: ReadonlyArray<ProviderQueryMessage>,
+  defaultSystemPrompt: string,
+): { systemInstruction: string; contents: GeminiContent[] } {
+  let systemInstruction = defaultSystemPrompt;
+  const contents: GeminiContent[] = [];
+  for (const message of messages) {
+    if (message.role === "system") {
+      systemInstruction = message.content;
+      continue;
+    }
+    if (message.role === "user") {
+      contents.push({
+        role: "user",
+        parts: [{ text: message.content }],
+      });
+      continue;
+    }
+    if (message.role === "assistant") {
+      const parts: Array<Record<string, unknown>> = [];
+      if (message.content.length > 0) {
+        parts.push({ text: message.content });
+      }
+      for (const call of message.toolCalls ?? []) {
+        let parsed: Record<string, unknown> = {};
+        if (call.argumentsJson.trim().length > 0) {
+          try {
+            const candidate = JSON.parse(call.argumentsJson) as unknown;
+            if (isRecord(candidate)) {
+              parsed = candidate;
+            }
+          } catch {
+            // Empty args on parse failure.
+          }
+        }
+        parts.push({
+          functionCall: {
+            id: call.callId,
+            name: call.name,
+            args: parsed,
+          },
+        });
+      }
+      if (parts.length === 0) {
+        parts.push({ text: "" });
+      }
+      contents.push({ role: "model", parts });
+      continue;
+    }
+    if (message.role === "tool") {
+      contents.push({
+        role: "user",
+        parts: [
+          {
+            functionResponse: {
+              id: message.callId,
+              name: message.callId,
+              response: { output: message.content },
+            },
+          },
+        ],
+      });
+    }
+  }
+  return { systemInstruction, contents };
 }
 
 function providerMessagesToAnthropic(

@@ -34,13 +34,25 @@ const ANTHROPIC_PRICES: Record<string, ModelPrice> = {
   "claude-opus-4-7": { inputUsdPer1M: 15.0, outputUsdPer1M: 75.0 },
 };
 
+const GEMINI_PRICES: Record<string, ModelPrice> = {
+  // 2026-04 snapshot from Google AI pricing page.
+  "gemini-2.5-flash": { inputUsdPer1M: 0.3, outputUsdPer1M: 2.5 },
+  "gemini-2.5-pro": { inputUsdPer1M: 1.25, outputUsdPer1M: 10.0 },
+  "gemini-3.1-flash": { inputUsdPer1M: 0.5, outputUsdPer1M: 3.0 },
+  "gemini-3.1-pro": { inputUsdPer1M: 2.0, outputUsdPer1M: 12.0 },
+};
+
 export function getModelPrice(modelId: string): ModelPrice | undefined {
   const normalized = modelId.trim();
   if (normalized.length === 0) {
     return undefined;
   }
-  if (normalized.toLowerCase().startsWith("claude")) {
+  const lower = normalized.toLowerCase();
+  if (lower.startsWith("claude")) {
     return ANTHROPIC_PRICES[normalized] ?? matchPrefix(ANTHROPIC_PRICES, normalized);
+  }
+  if (lower.startsWith("gemini")) {
+    return GEMINI_PRICES[normalized] ?? matchPrefix(GEMINI_PRICES, normalized);
   }
   return OPENAI_PRICES[normalized] ?? matchPrefix(OPENAI_PRICES, normalized);
 }
