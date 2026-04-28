@@ -844,7 +844,7 @@ function registerHarnessCommands(program: Command): void {
 }
 
 function registerTeamCommands(program: import("commander").Command): void {
-  const team = program.command("team").description("Coordinate multi-agent team runs (Phase C)");
+  const team = program.command("team").description("Coordinate multi-agent team runs");
 
   team
     .command("run <objective...>")
@@ -854,10 +854,32 @@ function registerTeamCommands(program: import("commander").Command): void {
     .option("--gate <level>", "strict|warn|off", "strict")
     .option("--runtime <mode>", "local|docker|e2b", "local")
     .option("--record <runId>", "Force a specific RUN_ID (resume / external dispatch)")
+    .option("--dispatch", "Spawn worker child processes after recording")
+    .option("--worker-timeout <ms>", "Per-worker SIGKILL timeout (default 600000)", "600000")
     .option("--quiet", "Print only the RUN_ID on stdout")
-    .action(async (objective: string[], options: { persona?: string; lanes?: string; gate?: string; runtime?: string; record?: string; quiet?: boolean }) => {
+    .action(async (objective: string[], options: { persona?: string; lanes?: string; gate?: string; runtime?: string; record?: string; dispatch?: boolean; workerTimeout?: string; quiet?: boolean }) => {
       const teamModule = await import("./team.js");
       await teamModule.handleTeamRun(objective, options);
+    });
+
+  team
+    .command("worker")
+    .description("Worker child entry — bound to UNCLECODE_TEAM_RUN_ID/ROOT")
+    .requiredOption("--persona <id>", "coder|builder|hardener|auditor|agentless-fix|agentless-then-agent|mini")
+    .requiredOption("--worker-id <id>", "Stable worker id within the run")
+    .requiredOption("--task <text>", "Task description handed to the persona")
+    .action(async (options: { persona: string; workerId: string; task: string }) => {
+      const workerModule = await import("./team-worker.js");
+      const { handleTeamWorker } = workerModule;
+      const { PERSONA_IDS } = await import("@unclecode/contracts");
+      if (!PERSONA_IDS.includes(options.persona as (typeof PERSONA_IDS)[number])) {
+        throw new Error(`Unknown persona "${options.persona}". Valid: ${PERSONA_IDS.join(", ")}`);
+      }
+      await handleTeamWorker({
+        persona: options.persona as (typeof PERSONA_IDS)[number],
+        workerId: options.workerId,
+        task: options.task,
+      });
     });
 
   team

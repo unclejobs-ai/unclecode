@@ -1,11 +1,6 @@
 /**
- * `unclecode team` subcommand surface.
- *
- * Phase C.2 ships read-light operations only — run/status/ls/inspect/abort.
- * Worker dispatch loop arrives in Phase C.3 once MMBridge hooks (Phase D) and
- * agentless lane (Phase G) are wired. Today this CLI lets a coordinator (Layer
- * A or shell user) record a run, propagate RUN_ID env to children, and audit
- * the resulting hash chain.
+ * `unclecode team` subcommand surface — record/list/inspect/abort runs and
+ * dispatch worker child processes via TeamRunner.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -38,6 +33,8 @@ type RunOptions = {
   readonly gate?: string;
   readonly runtime?: string;
   readonly record?: string;
+  readonly dispatch?: boolean;
+  readonly workerTimeout?: string;
   readonly quiet?: boolean;
 };
 
@@ -71,12 +68,73 @@ export async function handleTeamRun(objective: string[], options: RunOptions): P
     process.stdout.write(`RUN_ID=${handle.runId}\n`);
     process.stdout.write(`RUN_ROOT=${handle.runRoot}\n`);
     process.stdout.write(`persona=${persona} lanes=${lanes} gate=${gate} runtime=${runtime}\n`);
-    process.stdout.write("Phase C.2 records the run and propagates env; worker dispatch lands in C.3.\n");
   }
 
-  // Release lock immediately — Phase C.2 has no long-running coordinator process.
-  // Phase C.3 will hold the lock for the lifetime of the worker pool.
-  handle.release();
+  if (!options.dispatch) {
+    handle.release();
+    return;
+  }
+
+  try {
+    const cliEntry = resolveCliEntry();
+    const workers = Array.from({ length: lanes }, (_, idx) => ({
+      workerId: `w${idx + 1}`,
+      persona,
+      task: objective.join(" "),
+    }));
+    const timeoutMs = parseTimeout(options.workerTimeout ?? "600000");
+
+    if (!options.quiet) {
+      process.stdout.write(`Dispatching ${lanes} worker(s)…\n`);
+    }
+    const result = await handle.dispatch({
+      workerCommand: { command: process.execPath, args: [cliEntry, "team", "worker"] },
+      workers,
+      perWorkerTimeoutMs: timeoutMs,
+      ...(options.quiet
+        ? {}
+        : {
+            onStdout: (id: string, line: string) =>
+              void process.stdout.write(`[${id}] ${line}\n`),
+            onStderr: (id: string, line: string) =>
+              void process.stderr.write(`[${id}!] ${line}\n`),
+          }),
+    });
+
+    if (!options.quiet) {
+      process.stdout.write(`Final status: ${result.status}\n`);
+      for (const outcome of result.outcomes) {
+        process.stdout.write(
+          `  ${outcome.workerId} ${outcome.persona.padEnd(22)} ${outcome.status.padEnd(9)} exit=${outcome.exitCode} ${outcome.durationMs}ms\n`,
+        );
+      }
+      if (result.sweep.swept > 0) {
+        process.stdout.write(`Stale lock sweep: removed=${result.sweep.swept} live=${result.sweep.live}\n`);
+      }
+    }
+
+    if (result.status !== "accepted") {
+      process.exitCode = 1;
+    }
+  } finally {
+    handle.release();
+  }
+}
+
+function resolveCliEntry(): string {
+  const argv1 = process.argv[1];
+  if (!argv1) {
+    throw new Error("team run --dispatch: cannot resolve CLI entrypoint from process.argv[1].");
+  }
+  return argv1;
+}
+
+function parseTimeout(value: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`Invalid --worker-timeout "${value}". Expected non-negative integer ms.`);
+  }
+  return parsed;
 }
 
 export function handleTeamStatus(runId?: string): void {
