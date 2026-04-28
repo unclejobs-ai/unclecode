@@ -626,8 +626,9 @@ export class AnthropicProvider implements LlmProvider {
     toolRuntime?: ToolRuntime;
     traceListener?: ProviderTraceListener;
     systemPrompt?: string;
+    client?: Anthropic;
   }) {
-    this.client = new Anthropic({ apiKey: args.apiKey });
+    this.client = args.client ?? new Anthropic({ apiKey: args.apiKey });
     this.model = args.model;
     this.cwd = args.cwd;
     this.systemPrompt = args.systemPrompt?.trim()
@@ -804,6 +805,50 @@ export class AnthropicProvider implements LlmProvider {
     return {
       text: assistantText || "Stopped after reaching the tool iteration limit.",
     };
+  }
+
+  async query(
+    messages: ReadonlyArray<ProviderQueryMessage>,
+    options: ProviderQueryOptions = {},
+  ): Promise<ProviderQueryResult> {
+    const tools = options.tools ?? this.toolRuntime.definitions;
+    const model = options.model?.trim() ? options.model.trim() : this.model;
+    const { system, wireMessages } = providerMessagesToAnthropic(
+      messages,
+      this.systemPrompt,
+    );
+
+    const response = await this.client.messages.create({
+      model,
+      max_tokens: 2048,
+      system,
+      messages: wireMessages,
+      tools: [...tools],
+    });
+
+    const textParts: string[] = [];
+    for (const block of response.content) {
+      if (block.type === "text" && typeof block.text === "string") {
+        textParts.push(block.text);
+      }
+    }
+    const content = textParts.join("\n");
+
+    const actions: ProviderQueryAction[] = [];
+    for (const block of response.content) {
+      if (
+        isRecord(block)
+        && block.type === "tool_use"
+        && typeof block.id === "string"
+        && typeof block.name === "string"
+      ) {
+        const rawInput = (block as Record<string, unknown>).input;
+        const input = isRecord(rawInput) ? (rawInput as Record<string, unknown>) : {};
+        actions.push({ callId: block.id, tool: block.name, input });
+      }
+    }
+
+    return { content, actions, costUsd: 0 };
   }
 }
 
@@ -1364,6 +1409,69 @@ function emitProviderTrace(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function providerMessagesToAnthropic(
+  messages: ReadonlyArray<ProviderQueryMessage>,
+  defaultSystemPrompt: string,
+): { system: string; wireMessages: MessageParam[] } {
+  let system = defaultSystemPrompt;
+  const wireMessages: MessageParam[] = [];
+  for (const message of messages) {
+    if (message.role === "system") {
+      system = message.content;
+      continue;
+    }
+    if (message.role === "user") {
+      wireMessages.push({ role: "user", content: message.content });
+      continue;
+    }
+    if (message.role === "assistant") {
+      const blocks: Array<
+        | { type: "text"; text: string }
+        | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+      > = [];
+      if (message.content.length > 0) {
+        blocks.push({ type: "text", text: message.content });
+      }
+      for (const call of message.toolCalls ?? []) {
+        let parsed: Record<string, unknown> = {};
+        if (call.argumentsJson.trim().length > 0) {
+          try {
+            const candidate = JSON.parse(call.argumentsJson) as unknown;
+            if (isRecord(candidate)) {
+              parsed = candidate;
+            }
+          } catch {
+            // Keep parsed empty when arguments fail to parse.
+          }
+        }
+        blocks.push({
+          type: "tool_use",
+          id: call.callId,
+          name: call.name,
+          input: parsed,
+        });
+      }
+      // Anthropic rejects empty content arrays — fall back to plain text.
+      const content = blocks.length > 0 ? blocks : [{ type: "text" as const, text: "" }];
+      wireMessages.push({ role: "assistant", content });
+      continue;
+    }
+    if (message.role === "tool") {
+      wireMessages.push({
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: message.callId,
+            content: message.content,
+          } satisfies ToolResultBlockParam,
+        ],
+      });
+    }
+  }
+  return { system, wireMessages };
 }
 
 function providerMessagesToOpenAI(
