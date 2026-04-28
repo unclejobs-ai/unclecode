@@ -62,11 +62,56 @@ export type ToolRuntime = {
   readonly handlers: Readonly<Record<string, ToolHandler>>;
 };
 
+export type ProviderQueryMessage =
+  | { readonly role: "system" | "user"; readonly content: string }
+  | {
+      readonly role: "assistant";
+      readonly content: string;
+      readonly toolCalls?: ReadonlyArray<{
+        readonly callId: string;
+        readonly name: string;
+        readonly argumentsJson: string;
+      }>;
+    }
+  | {
+      readonly role: "tool";
+      readonly content: string;
+      readonly callId: string;
+    };
+
+export type ProviderQueryAction = {
+  readonly callId: string;
+  readonly tool: string;
+  readonly input: Record<string, unknown>;
+};
+
+export type ProviderQueryResult = {
+  readonly content: string;
+  readonly actions: ReadonlyArray<ProviderQueryAction>;
+  readonly costUsd: number;
+};
+
+export type ProviderQueryOptions = {
+  readonly tools?: readonly ToolDefinition[];
+  readonly model?: string;
+  readonly reasoning?: RuntimeReasoningConfig;
+};
+
 export interface LlmProvider {
   runTurn(
     prompt: string,
     attachments?: readonly ProviderInputAttachment[],
   ): Promise<AgentTurnResult>;
+  /**
+   * Stateless one-shot query for caller-managed message histories
+   * (e.g. MiniLoopAgent). Caller owns the message log; the provider
+   * does not mutate internal state and does not execute tool actions —
+   * tool intents come back as `actions[]` for the caller to dispatch.
+   */
+  query?(
+    messages: ReadonlyArray<ProviderQueryMessage>,
+    options?: ProviderQueryOptions,
+  ): Promise<ProviderQueryResult>;
   clear(): void;
   updateRuntimeSettings(settings: {
     reasoning?: RuntimeReasoningConfig | undefined;
@@ -465,6 +510,103 @@ export class OpenAIProvider implements LlmProvider {
     }
 
     return { text: assistantText || "Stopped after reaching the tool iteration limit." };
+  }
+
+  async query(
+    messages: ReadonlyArray<ProviderQueryMessage>,
+    options: ProviderQueryOptions = {},
+  ): Promise<ProviderQueryResult> {
+    const tools = options.tools ?? this.toolRuntime.definitions;
+    const model = options.model?.trim() ? options.model.trim() : this.model;
+    const reasoning = options.reasoning ?? this.reasoning;
+    const wireMessages = providerMessagesToOpenAI(messages, this.systemPrompt);
+
+    const body: Record<string, unknown> = {
+      model,
+      messages: wireMessages,
+      tool_choice: "auto",
+    };
+    if (tools.length > 0) {
+      body.tools = tools.map((tool) => ({
+        type: "function",
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.input_schema,
+        },
+      }));
+    }
+    if (
+      reasoning.support.status === "supported"
+      && reasoning.effort !== "unsupported"
+    ) {
+      body.reasoning = { effort: reasoning.effort };
+    }
+
+    const response = await this.fetchImpl(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      },
+    );
+
+    if (!response.ok) {
+      const responseText = await response.text().catch(() => "");
+      throw new Error(
+        responseText.trim().length > 0
+          ? `OpenAI request failed with status ${response.status}: ${responseText.trim()}`
+          : `OpenAI request failed with status ${response.status}`,
+      );
+    }
+
+    const payload = (await response.json()) as {
+      choices?: Array<{
+        message?: {
+          content?: string | null;
+          tool_calls?: Array<{
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          }>;
+        };
+      }>;
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+      };
+    };
+
+    const message = payload.choices?.[0]?.message ?? {};
+    const content = typeof message.content === "string" ? message.content : "";
+    const rawCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+
+    const actions: ProviderQueryAction[] = [];
+    for (const call of rawCalls) {
+      const name = call.function?.name?.trim();
+      if (!name) {
+        continue;
+      }
+      const callId = call.id?.trim() || name;
+      let input: Record<string, unknown> = {};
+      const rawArgs = call.function?.arguments;
+      if (typeof rawArgs === "string" && rawArgs.trim().length > 0) {
+        try {
+          const parsed = JSON.parse(rawArgs) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            input = parsed as Record<string, unknown>;
+          }
+        } catch {
+          // Leave input empty when args fail to parse — caller decides.
+        }
+      }
+      actions.push({ callId, tool: name, input });
+    }
+
+    return { content, actions, costUsd: 0 };
   }
 }
 
@@ -1222,4 +1364,42 @@ function emitProviderTrace(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function providerMessagesToOpenAI(
+  messages: ReadonlyArray<ProviderQueryMessage>,
+  defaultSystemPrompt: string,
+): OpenAIMessage[] {
+  const out: OpenAIMessage[] = [];
+  let sawSystem = false;
+  for (const message of messages) {
+    if (message.role === "system") {
+      out.push({ role: "system", content: message.content });
+      sawSystem = true;
+    } else if (message.role === "user") {
+      out.push({ role: "user", content: message.content });
+    } else if (message.role === "assistant") {
+      const toolCalls = message.toolCalls ?? [];
+      const wireToolCalls = toolCalls.map((call) => ({
+        id: call.callId,
+        type: "function" as const,
+        function: { name: call.name, arguments: call.argumentsJson },
+      }));
+      out.push({
+        role: "assistant",
+        content: message.content,
+        ...(wireToolCalls.length > 0 ? { tool_calls: wireToolCalls } : {}),
+      });
+    } else if (message.role === "tool") {
+      out.push({
+        role: "tool",
+        content: message.content,
+        tool_call_id: message.callId,
+      });
+    }
+  }
+  if (!sawSystem && defaultSystemPrompt.trim().length > 0) {
+    out.unshift({ role: "system", content: defaultSystemPrompt });
+  }
+  return out;
 }
