@@ -17,7 +17,7 @@
     "test:providers": "node --conditions=source --import tsx --test tests/providers/*.test.mjs",
     "test:contracts": "node --conditions=source --import tsx --test tests/contracts/*.test.mjs",
     "test:runtime-broker": "node --conditions=source --import tsx --test tests/runtime-broker/*.test.mjs",
-    "test:orchestrator": "node --conditions=source --import tsx --test tests/orchestrator/*.test.mjs",
+    "test:orchestrator": "node --conditions=source --import tsx --test tests/orchestrator/*.test.mjs tests/orchestrator/mini-loop/*.test.mjs",
     "test:tui": "node --conditions=source --import tsx --test tests/tui/*.test.mjs",
     "test:commands": "node --conditions=source --import tsx --test tests/commands/*.test.mjs",
     "test:work": "node --conditions=source --import tsx --test tests/work/*.test.mjs",

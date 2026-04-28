@@ -1,6 +1,9 @@
 import { BACKGROUND_TASK_TYPES } from "@unclecode/contracts";
 
 export * from "./coding-agent.js";
+export * from "./mini-loop-agent.js";
+export * from "./aci/observation-collapser.js";
+export * from "./personas/index.js";
 export * from "./command-registry.js";
 export * from "./composer-input.js";
 export * from "./extension-registry.js";
