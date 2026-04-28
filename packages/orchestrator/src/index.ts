@@ -7,6 +7,8 @@ export * from "./aci/file-viewer.js";
 export * from "./aci/file-editor.js";
 export * from "./aci/linter-guardrail.js";
 export * from "./aci/search.js";
+export * from "./aci/apply-patch.js";
+export * from "./aci/quick-tools.js";
 export * from "./personas/index.js";
 export * from "./team-binding.js";
 export * from "./team-runner.js";
