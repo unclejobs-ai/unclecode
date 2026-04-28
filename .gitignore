@@ -8,6 +8,7 @@ dist-work
 .omx/
 .claude/
 .unclecode/
+.data/
 test-ink*.tsx
 src/*.d.ts
 src/*.d.ts.map

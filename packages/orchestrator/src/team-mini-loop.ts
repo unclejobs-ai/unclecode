@@ -10,13 +10,23 @@
  *   tool-call IDs so OpenAI accepts the assistant + tool message pair.
  */
 
+import { createHash } from "node:crypto";
+
 import type {
   MiniLoopAction,
   MiniLoopMessage,
   MiniLoopObservation,
+  PersonaId,
 } from "@unclecode/contracts";
-import type { ProviderQueryMessage } from "@unclecode/providers";
+import type {
+  LlmProvider,
+  ProviderQueryMessage,
+  ToolDefinition,
+} from "@unclecode/providers";
 
+import { MiniLoopAgent, type MiniLoopModelClient } from "./mini-loop-agent.js";
+import { getPersonaConfig } from "./personas/index.js";
+import type { TeamBinding } from "./team-binding.js";
 import { runShell } from "./aci/run-shell.js";
 
 export type TeamMiniLoopExecutor = {
@@ -144,4 +154,107 @@ export function miniLoopMessagesToProviderQuery(
     i += 1;
   }
   return out;
+}
+
+export const TEAM_RUN_SHELL_TOOL: ToolDefinition = {
+  name: "run_shell",
+  description:
+    "Run a shell command in the worker workspace. Returns combined stdout/stderr and the exit code.",
+  input_schema: {
+    type: "object",
+    properties: {
+      command: {
+        type: "string",
+        description: "Shell command to execute via /bin/sh -c.",
+      },
+    },
+    required: ["command"],
+  },
+};
+
+export type RunTeamMiniLoopArgs = {
+  readonly workerId: string;
+  readonly persona: PersonaId;
+  readonly task: string;
+  readonly binding: TeamBinding;
+  readonly provider: LlmProvider;
+  readonly cwd: string;
+  readonly tools?: readonly ToolDefinition[];
+};
+
+export type RunTeamMiniLoopResult = {
+  readonly status: "submitted" | "limits_exceeded" | "halted" | "errored";
+  readonly submission: string;
+  readonly steps: number;
+  readonly costUsd: number;
+};
+
+/**
+ * Drive a MiniLoopAgent against the given LlmProvider, publishing one
+ * `team_step` per executed action. Pure wiring — no env, no process I/O —
+ * so tests and the CLI entrypoint can both call it.
+ */
+export async function runTeamMiniLoop(
+  args: RunTeamMiniLoopArgs,
+): Promise<RunTeamMiniLoopResult> {
+  if (typeof args.provider.query !== "function") {
+    throw new Error(
+      "team worker: provider does not implement the stateless query() contract",
+    );
+  }
+  const config = getPersonaConfig(args.persona);
+  const executor = createTeamMiniLoopExecutor();
+  const tools = args.tools ?? [TEAM_RUN_SHELL_TOOL];
+  const query = args.provider.query.bind(args.provider);
+
+  const modelClient: MiniLoopModelClient = {
+    async query(messages: ReadonlyArray<MiniLoopMessage>) {
+      const wireMessages = miniLoopMessagesToProviderQuery(messages);
+      const response = await query(wireMessages, { tools });
+      return {
+        content: response.content,
+        actions: response.actions.map((action) => ({
+          tool: action.tool,
+          input: action.input,
+        })),
+        costUsd: response.costUsd,
+      };
+    },
+  };
+
+  const agent = new MiniLoopAgent({
+    config,
+    executor,
+    model: modelClient,
+    cwd: args.cwd,
+    hooks: {
+      onAfterStep: async (ctx, action, observation) => {
+        const argHash = createHash("sha256")
+          .update(JSON.stringify(action.input ?? {}))
+          .digest("hex");
+        const observationHash = createHash("sha256")
+          .update(observation.stdout)
+          .update(observation.stderr)
+          .digest("hex");
+        args.binding.publish({
+          type: "team_step",
+          runId: args.binding.runId,
+          workerId: args.workerId,
+          stepIndex: ctx.stepIndex,
+          action: { tool: action.tool, argHash },
+          observationHash,
+          timestamp: new Date().toISOString(),
+        });
+        return { kind: "continue" };
+      },
+    },
+  });
+
+  const result = await agent.run(args.task);
+  return {
+    status: result.status,
+    submission: result.submission,
+    steps: result.steps,
+    costUsd: result.costUsd,
+  };
 }
