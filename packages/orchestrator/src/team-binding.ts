@@ -88,18 +88,39 @@ export class TeamBinding {
 
   cite(category: SsotCategory, key: string): VersionedRef {
     let versionHash = "";
-    if (category === "code") {
-      try {
-        versionHash = this.readCode(key).sha256;
-      } catch {
-        versionHash = "";
+    switch (category) {
+      case "code":
+        try {
+          versionHash = this.readCode(key).sha256;
+        } catch {
+          versionHash = "";
+        }
+        break;
+      case "checkpoint": {
+        const checkpoints = this.readCheckpoints();
+        const index = Number.parseInt(key, 10);
+        const entry = checkpoints[index];
+        if (entry && (entry as { lineHash?: string }).lineHash) {
+          versionHash = (entry as { lineHash: string }).lineHash;
+        }
+        break;
       }
-    } else if (category === "checkpoint") {
-      const checkpoints = this.readCheckpoints();
-      const index = Number.parseInt(key, 10);
-      const entry = checkpoints[index];
-      if (entry && (entry as { lineHash?: string }).lineHash) {
-        versionHash = (entry as { lineHash: string }).lineHash;
+      case "worker_message":
+      case "context_packet":
+      case "review":
+      case "credential":
+      case "policy_decision":
+      case "workspace_guidance":
+      case "session_metadata":
+      case "mmbridge_session":
+      case "memory_observation":
+      case "external_doc":
+        throw new Error(
+          `Not implemented: TeamBinding.cite for category="${category}". Caller must produce versionHash directly via the canonical owner store.`,
+        );
+      default: {
+        const exhaustive: never = category;
+        throw new Error(`Unhandled SsotCategory: ${exhaustive as string}`);
       }
     }
     return {
