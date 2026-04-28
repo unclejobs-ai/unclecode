@@ -551,11 +551,29 @@ function registerRootCommands(program: Command): void {
       await handleDoctorCommand(options);
     });
 
-  program
+  const sessionsCommand = program
     .command("sessions")
     .description("List resumable local sessions for this workspace")
     .action(async () => {
       await handleSessionsCommand();
+    });
+
+  sessionsCommand
+    .command("fork <sessionId>")
+    .description("Fork a session into a new session id; optionally truncate at a turn")
+    .option("--at <turn>", "Truncate the forked transcript at this turn index (inclusive)")
+    .action(async (sessionId: string, options: { at?: string }) => {
+      const teamModule = await import("./sessions-fork-share.js");
+      await teamModule.handleSessionFork(sessionId, options);
+    });
+
+  sessionsCommand
+    .command("share <sessionId>")
+    .description("Pack a compacted session transcript and emit a share slug + path")
+    .option("--out <dir>", "Override output directory (default .unclecode/shares/)")
+    .action(async (sessionId: string, options: { out?: string }) => {
+      const teamModule = await import("./sessions-fork-share.js");
+      await teamModule.handleSessionShare(sessionId, options);
     });
 
   program
