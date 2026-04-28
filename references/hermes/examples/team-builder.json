@@ -1,0 +1,24 @@
+{
+  "skill": "team-builder",
+  "task": "Replace the placeholder objective with the feature request.",
+  "persona": "builder",
+  "lanes": 2,
+  "gate": "strict",
+  "runtime": "local",
+  "policy": {
+    "writeCapableRoles": ["impl"],
+    "readOnlyRoles": ["review", "docs"],
+    "preflight": [
+      {
+        "kind": "shell",
+        "command": "node --version"
+      }
+    ]
+  },
+  "outputs": {
+    "summary": "summary.md",
+    "manifest": "manifest.json",
+    "gate": "reviews/mmbridge-gate.json",
+    "review": "reviews/mmbridge-review.json"
+  }
+}
