@@ -1,15 +1,18 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
+import type { ClipboardImageAttachment } from "@unclecode/contracts";
+
 import type { WorkShellComposerResolution } from "./work-shell-engine.js";
 
-export type WorkShellComposerImageAttachment = {
-  readonly type: "image";
-  readonly mimeType: string;
-  readonly dataUrl: string;
-  readonly path: string;
-  readonly displayName: string;
-};
+/**
+ * Composer-side image attachment payload. Aliased to the canonical
+ * ClipboardImageAttachment from @unclecode/contracts so that the
+ * composer text-path resolver, the clipboard capture utility, and the
+ * provider adapters all consume the identical shape. The three
+ * formerly-duplicate type declarations had byte-identical fields.
+ */
+export type WorkShellComposerImageAttachment = ClipboardImageAttachment;
 
 const IMAGE_EXTENSION_TO_MIME = new Map<string, string>([
   [".png", "image/png"],

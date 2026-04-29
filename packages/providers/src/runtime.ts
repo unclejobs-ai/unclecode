@@ -1,4 +1,8 @@
-import type { ExecutionTraceEvent, ModeReasoningEffort } from "@unclecode/contracts";
+import type {
+  ClipboardImageAttachment,
+  ExecutionTraceEvent,
+  ModeReasoningEffort,
+} from "@unclecode/contracts";
 import Anthropic from "@anthropic-ai/sdk";
 import type {
   MessageParam,
@@ -20,13 +24,15 @@ export type ProviderToolTraceEvent = Extract<
   { type: "tool.started" | "tool.completed" | "reasoning.delta" }
 >;
 
-export type ProviderInputAttachment = {
-  type: "image";
-  mimeType: string;
-  dataUrl: string;
-  path: string;
-  displayName: string;
-};
+/**
+ * Provider-side input attachment payload. Aliased to the canonical
+ * ClipboardImageAttachment from @unclecode/contracts so that the TUI
+ * composer, the orchestrator clipboard utility, and every provider
+ * adapter share a single source-of-truth shape. No fields differ — the
+ * three formerly-duplicate types had identical structure; this alias
+ * removes the drift risk without any wire-format change.
+ */
+export type ProviderInputAttachment = ClipboardImageAttachment;
 
 export type ProviderTraceListener = (event: ProviderToolTraceEvent) => void;
 
