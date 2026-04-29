@@ -3,6 +3,7 @@ import { BACKGROUND_TASK_TYPES } from "@unclecode/contracts";
 export * from "./coding-agent.js";
 export * from "./mini-loop-agent.js";
 export * from "./aci/observation-collapser.js";
+export * from "./aci/path-containment.js";
 export * from "./aci/file-viewer.js";
 export * from "./aci/file-editor.js";
 export * from "./aci/linter-guardrail.js";

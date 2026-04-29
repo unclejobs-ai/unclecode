@@ -8,6 +8,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
 
+import { assertWithinWorkspace } from "./path-containment.js";
+
 const execFileAsync = promisify(execFile);
 
 export const DEFAULT_SEARCH_CAP = 50;
@@ -86,14 +88,24 @@ export async function findFile(input: FindFileInput): Promise<SearchResult> {
 
 export async function searchDir(input: SearchDirInput): Promise<SearchResult> {
   const cap = input.cap ?? DEFAULT_SEARCH_CAP;
-  const target = resolve(input.cwd, input.path ?? ".");
+  // Containment guard — model-supplied `input.path` could escape the
+  // workspace via `../../`, an absolute path, or a symlink. Refuse before
+  // handing it to ripgrep so a misbehaving agent cannot read arbitrary
+  // filesystem locations under the harness's privilege.
+  const target = assertWithinWorkspace(input.cwd, input.path ?? ".");
   const maxCountPerFile = input.maxCountPerFile ?? Math.max(1, cap);
+  // The "--" sentinel forces ripgrep's clap parser to treat every following
+  // token as a positional argument, never a flag. Without it, a malicious
+  // `input.query` such as `--follow` would re-enable symlink traversal
+  // inside the workspace (a read-side escape), and `--type-add` /
+  // `--pcre2` / `--multiline` would silently change search semantics.
   const args = [
     "-n",
     "--hidden",
     "--max-count",
     String(maxCountPerFile),
     ...buildGlobArgs(input.globs),
+    "--",
     input.query,
     target,
   ];
