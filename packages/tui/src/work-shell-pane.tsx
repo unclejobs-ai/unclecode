@@ -55,6 +55,8 @@ export function WorkShellPane<
     activePanel,
     slashSuggestionCount,
     submit,
+    addClipboardAttachment,
+    clearClipboardAttachments,
   } = useWorkShellPaneState<Attachment, State>({
     engine: props.engine,
     cwd: props.cwd,
@@ -127,7 +129,22 @@ export function WorkShellPane<
         <Composer
           value={inputValue}
           onChange={setInputValue}
-          onSubmit={submit}
+          onSubmit={(line) => {
+            // Pending clipboard attachments are flushed at submit time so a
+            // paste-then-edit sequence carries the image into the turn but
+            // a submitted turn does not leak attachments back into the next.
+            clearClipboardAttachments();
+            return submit(line);
+          }}
+          onClipboardImage={(attachment) => {
+            // The composer surface is generic over Attachment but in
+            // practice every consumer resolves it to ClipboardImageAttachment
+            // (= WorkShellImageAttachment). The structural shape is
+            // identical; cast at the seam keeps the generic constraint
+            // honest without leaking ClipboardImageAttachment names into
+            // every caller.
+            addClipboardAttachment(attachment as Attachment);
+          }}
           {...(isSecureApiKeyEntry ? { mask: "•" } : {})}
         />
       }

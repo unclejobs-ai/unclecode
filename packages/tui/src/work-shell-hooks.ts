@@ -331,7 +331,7 @@ export function useWorkShellInputController(input: {
 }
 
 export function useWorkShellPaneState<
-  Attachment,
+  Attachment extends { readonly dataUrl: string },
   State extends WorkShellPaneRuntimeState,
 >(input: {
   readonly engine: WorkShellPaneEngine<State>;
@@ -349,11 +349,32 @@ export function useWorkShellPaneState<
   readonly shouldBlockSlashSubmit: (line: string) => boolean;
 }) {
   const [inputValue, setInputValue] = useState("");
+  // Clipboard-pasted attachments live alongside the input value but
+  // outside the text-derived `resolveComposerInput` flow. They are kept
+  // in pane state so they survive every keystroke and only flush on
+  // submit. The structural shape is identical to text-derived
+  // attachments (dataUrl + mimeType + path + displayName), so the merge
+  // in useWorkShellComposerPreview can dedup by dataUrl.
+  const [pendingClipboardAttachments, setPendingClipboardAttachments] = useState<
+    readonly Attachment[]
+  >([]);
+  const addClipboardAttachment = useCallback((attachment: Attachment) => {
+    setPendingClipboardAttachments((current) => {
+      if (current.some((existing) => existing.dataUrl === attachment.dataUrl)) {
+        return current;
+      }
+      return [...current, attachment];
+    });
+  }, []);
+  const clearClipboardAttachments = useCallback(() => {
+    setPendingClipboardAttachments((current) => (current.length === 0 ? current : []));
+  }, []);
   const engineState = useWorkShellEngineState(input.engine);
   const composerPreview = useWorkShellComposerPreview({
     value: inputValue,
     cwd: input.cwd,
     resolveComposerInput: input.resolveComposerInput,
+    pendingAttachments: pendingClipboardAttachments,
   });
 
   useWorkShellDashboardHomeSync({
@@ -433,16 +454,42 @@ export function useWorkShellPaneState<
     activePanel,
     slashSuggestionCount: slashSuggestions.length,
     submit,
+    addClipboardAttachment,
+    clearClipboardAttachments,
+    pendingClipboardAttachmentCount: pendingClipboardAttachments.length,
   };
 }
 
-export function useWorkShellComposerPreview<Attachment>(input: {
+/**
+ * Identity for an attachment used when merging `resolveComposerInput`
+ * output (text-derived attachments) with `pendingAttachments` (clipboard
+ * paste, etc). Two attachments are the same payload when their dataUrl is
+ * byte-equal — that captures both the source bytes and the mime header
+ * without forcing both producer paths to agree on a stable id.
+ */
+function dedupAttachmentsByDataUrl<A extends { readonly dataUrl: string }>(
+  items: readonly A[],
+): readonly A[] {
+  const seen = new Set<string>();
+  const out: A[] = [];
+  for (const item of items) {
+    if (seen.has(item.dataUrl)) {
+      continue;
+    }
+    seen.add(item.dataUrl);
+    out.push(item);
+  }
+  return out;
+}
+
+export function useWorkShellComposerPreview<Attachment extends { readonly dataUrl: string }>(input: {
   readonly value: string;
   readonly cwd: string;
   readonly resolveComposerInput: (
     value: string,
     cwd: string,
   ) => Promise<WorkShellComposerPreview<Attachment>>;
+  readonly pendingAttachments?: readonly Attachment[] | undefined;
 }): WorkShellComposerPreview<Attachment> {
   const [preview, setPreview] = useState<WorkShellComposerPreview<Attachment>>(
     () => createEmptyWorkShellComposerPreview(),
@@ -473,5 +520,15 @@ export function useWorkShellComposerPreview<Attachment>(input: {
     };
   }, [input.cwd, input.resolveComposerInput, input.value]);
 
-  return preview;
+  // Merge text-derived attachments with clipboard / pending attachments at
+  // render time so a paste-then-keystroke sequence does not lose the
+  // pasted image. dataUrl is the canonical dedup key — see helper above.
+  const pending = input.pendingAttachments;
+  if (!pending || pending.length === 0) {
+    return preview;
+  }
+  return {
+    ...preview,
+    attachments: dedupAttachmentsByDataUrl([...preview.attachments, ...pending]),
+  };
 }
