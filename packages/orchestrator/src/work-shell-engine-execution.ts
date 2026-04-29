@@ -49,7 +49,13 @@ export async function runPromptTurnSuccessSequence<Attachment>(input: {
     prompt: input.prompt,
     assistantText: result.text || "(empty response)",
     autoContinueOnPermissionStall: input.autoContinueOnPermissionStall,
-    runTurn: (prompt) => input.runAgentTurn(prompt, []),
+    // Carry the original attachments into the permission-stall continuation
+    // turn so vision context (clipboard-pasted images, file references) is
+    // not silently dropped on the auto-continue. Memo §4 step 4 / Q5. The
+    // continuation only fires when detectPermissionSeekingStall matches an
+    // assistant outro that asked permission, so the extra image bytes are a
+    // rare-event cost — never paid on the happy path.
+    runTurn: (prompt) => input.runAgentTurn(prompt, input.attachments ?? []),
   });
   const postTurnEffects = await WorkShellPostTurns.runWorkShellPostTurnSuccessEffects({
     cwd: input.cwd,
