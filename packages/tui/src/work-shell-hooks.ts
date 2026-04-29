@@ -358,20 +358,28 @@ export function useWorkShellPaneState<
   const [pendingClipboardAttachments, setPendingClipboardAttachments] = useState<
     readonly Attachment[]
   >([]);
-  const addClipboardAttachment = useCallback((attachment: Attachment) => {
-    setPendingClipboardAttachments((current) => {
-      if (current.some((existing) => existing.dataUrl === attachment.dataUrl)) {
-        return current;
+  const addClipboardAttachment = useCallback(
+    (attachment: Attachment): { readonly accepted: true } | ClipboardAttachmentRejection => {
+      const violation = checkClipboardCapViolation(attachment, pendingClipboardAttachments);
+      if (violation) {
+        return violation;
       }
-      return [...current, attachment];
-    });
-  }, []);
+      setPendingClipboardAttachments((current) => {
+        if (current.some((existing) => existing.dataUrl === attachment.dataUrl)) {
+          return current;
+        }
+        return [...current, attachment];
+      });
+      return { accepted: true };
+    },
+    [pendingClipboardAttachments],
+  );
   const clearClipboardAttachments = useCallback(() => {
-    setPendingClipboardAttachments((current) => (current.length === 0 ? current : []));
     // The same-reference return on empty avoids triggering a re-render when
     // the caller's clear racewise no-ops (e.g. submit on a turn that had no
     // attachments to begin with). Without it the pane re-renders on every
     // submit even when nothing changed.
+    setPendingClipboardAttachments((current) => (current.length === 0 ? current : []));
   }, []);
   const engineState = useWorkShellEngineState(input.engine);
   const composerPreview = useWorkShellComposerPreview({
@@ -466,6 +474,72 @@ export function useWorkShellPaneState<
     clearClipboardAttachments,
     pendingClipboardAttachmentCount: pendingClipboardAttachments.length,
   };
+}
+
+/**
+ * Pre-flight cap defaults. v1 keeps these inline here — Gemini's design
+ * memo recommends promoting them to packages/config-core under a new
+ * `composer` subkey of UncleCodeConfigLayer so the precedence chain
+ * (built-in → plugin → project → user → env → cli → session) can override.
+ * Tracked as memo §4 follow-up; for v1 the constants below match the
+ * Anthropic vision per-image limit (5 MiB) and a TUI-friendly count
+ * ceiling that prevents runaway clipboard accumulation.
+ */
+export const MAX_CLIPBOARD_ATTACHMENT_COUNT = 5;
+export const MAX_CLIPBOARD_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+
+export type ClipboardAttachmentRejection = {
+  readonly accepted: false;
+  readonly reason: string;
+  readonly status: "no-image" | "unsupported" | "failed";
+};
+
+/**
+ * Estimate the decoded byte size of a data URL payload without allocating
+ * the buffer. We slice past the comma so the `data:image/png;base64,`
+ * header bytes do not inflate the count — Hermes review of the v1 cap
+ * scope flagged that header inclusion makes the cap conservatively wrong.
+ * Each base64 character encodes 3/4 of a byte after dropping padding.
+ */
+function estimateDataUrlBytes(dataUrl: string): number {
+  const commaIndex = dataUrl.indexOf(",");
+  const payload = commaIndex === -1 ? dataUrl : dataUrl.slice(commaIndex + 1);
+  let trailingPad = 0;
+  for (let i = payload.length - 1; i >= 0; i -= 1) {
+    if (payload[i] !== "=") break;
+    trailingPad += 1;
+  }
+  return Math.max(0, Math.floor((payload.length * 3) / 4) - trailingPad);
+}
+
+/**
+ * Pre-flight cap check applied at the addClipboardAttachment seam. Returns
+ * a rejection record on violation so the caller can surface a one-line
+ * toast through the existing onClipboardImageError channel without growing
+ * the status taxonomy. v1 enforces only at the TUI boundary; provider-side
+ * defensive caps are tracked as a follow-up per the Gemini design memo.
+ */
+function checkClipboardCapViolation<A extends { readonly dataUrl: string }>(
+  attachment: A,
+  current: readonly A[],
+): ClipboardAttachmentRejection | undefined {
+  if (current.length >= MAX_CLIPBOARD_ATTACHMENT_COUNT) {
+    return {
+      accepted: false,
+      status: "failed",
+      reason: `clipboard attachment cap reached (${MAX_CLIPBOARD_ATTACHMENT_COUNT} images max — submit or clear before adding more)`,
+    };
+  }
+  const bytes = estimateDataUrlBytes(attachment.dataUrl);
+  if (bytes > MAX_CLIPBOARD_ATTACHMENT_BYTES) {
+    const mib = (bytes / (1024 * 1024)).toFixed(1);
+    return {
+      accepted: false,
+      status: "failed",
+      reason: `image too large (${mib} MiB — max ${MAX_CLIPBOARD_ATTACHMENT_BYTES / (1024 * 1024)} MiB per image)`,
+    };
+  }
+  return undefined;
 }
 
 /**

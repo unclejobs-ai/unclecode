@@ -37,6 +37,25 @@ const TARGET_MIME = "image/png";
  */
 const CLIPBOARD_PATH_SENTINEL = "(clipboard)";
 
+/**
+ * Per-image byte ceiling enforced at capture time so a clipboard payload
+ * larger than the eventual TUI gate never crosses base64 encoding. Mirrors
+ * MAX_CLIPBOARD_ATTACHMENT_BYTES in @unclecode/tui — Hermes review of the
+ * v1 cap scope flagged that without a capture-side check, large pastes are
+ * fully read into memory + base64-encoded only for the TUI to reject the
+ * dataUrl after the work is done. Kept inline (no shared constant) because
+ * the TUI gate is the user-facing cap; this one is a defensive backstop.
+ */
+const MAX_CAPTURE_BYTES = 5 * 1024 * 1024;
+
+function tooLarge(byteLength: number): ClipboardImageResult {
+  const mib = (byteLength / (1024 * 1024)).toFixed(1);
+  return {
+    status: "failed",
+    reason: `clipboard image too large at capture (${mib} MiB; max ${MAX_CAPTURE_BYTES / (1024 * 1024)} MiB)`,
+  };
+}
+
 function captureMacOs(): ClipboardImageResult {
   const dir = mkdtempSync(join(tmpdir(), "uc-clip-"));
   const path = join(dir, "clip.png");
@@ -77,6 +96,9 @@ function captureMacOs(): ClipboardImageResult {
   }
   const bytes = readFileSync(path);
   rmSync(dir, { recursive: true, force: true });
+  if (bytes.length > MAX_CAPTURE_BYTES) {
+    return tooLarge(bytes.length);
+  }
   return {
     status: "ok",
     attachment: {
@@ -97,6 +119,9 @@ function captureLinux(): ClipboardImageResult {
     });
     if (bytes.length === 0) {
       return { status: "no-image", reason: "xclip returned empty buffer" };
+    }
+    if (bytes.length > MAX_CAPTURE_BYTES) {
+      return tooLarge(bytes.length);
     }
     return {
       status: "ok",
@@ -135,6 +160,9 @@ function captureWindows(): ClipboardImageResult {
   }
   const bytes = readFileSync(path);
   rmSync(dir, { recursive: true, force: true });
+  if (bytes.length > MAX_CAPTURE_BYTES) {
+    return tooLarge(bytes.length);
+  }
   return {
     status: "ok",
     attachment: {

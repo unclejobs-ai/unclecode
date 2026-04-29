@@ -88,6 +88,17 @@ export function WorkShellPane<
     lastTurnDurationMs,
   } = engineState;
   const isSecureApiKeyEntry = engineState.composerMode === "api-key-entry";
+  // Most recent rejection reason from the clipboard capture or cap gate.
+  // Surfaces in the attachment preview area so the user sees one line of
+  // explanation instead of a paste silently disappearing. Auto-clears when
+  // the user starts typing again or successfully attaches the next image.
+  const [lastClipboardError, setLastClipboardError] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    if (lastClipboardError === null) return;
+    if (inputValue.length > 0) {
+      setLastClipboardError(null);
+    }
+  }, [inputValue, lastClipboardError]);
   const reasoningLabel = React.useMemo(
     () => props.getReasoningLabel(reasoning),
     [props.getReasoningLabel, reasoning],
@@ -146,8 +157,16 @@ export function WorkShellPane<
             // ClipboardImageAttachment is byte-identical to the project-wide
             // WorkShellImageAttachment alias from contracts. Cast at this
             // seam keeps the generic constraint honest.
-            addClipboardAttachment(attachment as Attachment);
+            const outcome = addClipboardAttachment(attachment as Attachment);
+            if (outcome.accepted === false) {
+              // Surface the cap rejection through the same channel the
+              // capture-side errors use — the user sees a single line of
+              // explanation instead of the pasted image silently
+              // disappearing into the void.
+              setLastClipboardError(outcome.reason);
+            }
           }}
+          onClipboardImageError={(reason) => setLastClipboardError(reason)}
           {...(isSecureApiKeyEntry ? { mask: "•" } : {})}
         />
       }
