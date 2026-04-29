@@ -57,11 +57,14 @@ test("createTurnOrchestrator executes complex plans with bounded concurrency and
       return { text: `research:${prompt}` };
     },
     async planComplexTurn() {
-      return [
-        { id: "task-1", summary: "Inspect login.ts" },
-        { id: "task-2", summary: "Inspect oauth.ts" },
-        { id: "task-3", summary: "Inspect session.ts" },
-      ];
+      return {
+        tasks: [
+          { id: "task-1", summary: "Inspect login.ts" },
+          { id: "task-2", summary: "Inspect oauth.ts" },
+          { id: "task-3", summary: "Inspect session.ts" },
+        ],
+        usedLlm: true,
+      };
     },
     async executeComplexTask(task) {
       activeWorkers += 1;
@@ -95,8 +98,21 @@ test("createTurnOrchestrator executes complex plans with bounded concurrency and
   );
   assert.ok(
     traces.some(
-      (event) => event.role === "coordinator" && event.status === "completed",
+      (event) =>
+        event.role === "turn" &&
+        event.kind === "span" &&
+        event.status === "completed",
     ),
+    "complex turn must emit a structural turn-span completed event (kind:span, role:turn)",
+  );
+  assert.ok(
+    traces.every(
+      (event) =>
+        event.type !== "orchestrator.step" ||
+        event.role !== "executor" ||
+        event.kind === "agent-step",
+    ),
+    "executor steps must be tagged kind:agent-step",
   );
 });
 
@@ -145,7 +161,10 @@ test("createTurnOrchestrator runs guardian auto-review after complex execution",
     },
     async planComplexTurn() {
       calls.push(["plan"]);
-      return [{ id: "task-1", summary: "Inspect login.ts", writePaths: ["src/login.ts"] }];
+      return {
+        tasks: [{ id: "task-1", summary: "Inspect login.ts", writePaths: ["src/login.ts"] }],
+        usedLlm: true,
+      };
     },
     async executeComplexTask(task) {
       calls.push(["execute", task.id]);
@@ -197,7 +216,7 @@ test("createTurnOrchestrator preserves direct simple and research paths", async 
     },
     async planComplexTurn() {
       calls.push(["plan"]);
-      return [];
+      return { tasks: [], usedLlm: false };
     },
     async executeComplexTask(task) {
       calls.push(["execute", task.id]);
@@ -222,4 +241,73 @@ test("createTurnOrchestrator preserves direct simple and research paths", async 
     ["simple", "summarize this file"],
     ["research", "inspect repo"],
   ]);
+});
+
+test("createTurnOrchestrator suppresses planner step trace when planning skipped LLM", async () => {
+  const traces = [];
+  const orchestrator = createTurnOrchestrator({
+    async runSimpleTurn(prompt) {
+      return { text: `simple:${prompt}` };
+    },
+    async runResearchTurn(prompt) {
+      return { text: `research:${prompt}` };
+    },
+    async planComplexTurn() {
+      return {
+        tasks: [
+          { id: "task-1", summary: "Inspect login.ts" },
+          { id: "task-2", summary: "Inspect oauth.ts" },
+        ],
+        usedLlm: false,
+      };
+    },
+    async executeComplexTask(task) {
+      return { id: task.id, summary: `done:${task.summary}` };
+    },
+  });
+
+  const result = await orchestrator.run({
+    prompt: "refactor login.ts oauth.ts",
+    mode: "default",
+    onTrace(event) {
+      traces.push(event);
+    },
+  });
+
+  assert.equal(result.kind, "complex");
+  assert.equal(
+    traces.filter((event) => event.role === "planner").length,
+    0,
+    "planner role events must not be emitted when planComplexTurn did not invoke an LLM",
+  );
+  assert.equal(
+    traces.filter((event) => event.role === "executor" && event.status === "running").length,
+    2,
+    "executor traces should still emit for real work",
+  );
+  // The structural turn span must still bracket the work even when planning
+  // never invoked an LLM — UIs need it to group executor + reviewer events
+  // into a single complex-turn unit.
+  assert.equal(
+    traces.filter(
+      (event) =>
+        event.type === "orchestrator.step" &&
+        event.role === "turn" &&
+        event.kind === "span" &&
+        event.status === "running",
+    ).length,
+    1,
+    "turn-span running event must fire exactly once per complex turn",
+  );
+  assert.equal(
+    traces.filter(
+      (event) =>
+        event.type === "orchestrator.step" &&
+        event.role === "turn" &&
+        event.kind === "span" &&
+        event.status === "completed",
+    ).length,
+    1,
+    "turn-span completed event must close the bracket exactly once",
+  );
 });

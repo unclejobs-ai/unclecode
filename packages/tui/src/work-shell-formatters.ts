@@ -88,7 +88,10 @@ export function formatAgentTraceLine(event: ExecutionTraceEvent): string {
   }
 
   if (event.type === "orchestrator.step") {
-    if (event.role === "coordinator") {
+    // Structural spans (turn role or kind:"span") group an entire complex turn
+    // for UI but are not agent participants. Suppress them in the line view.
+    // "coordinator" retained for backward compatibility with historical logs.
+    if (event.role === "turn" || event.role === "coordinator" || event.kind === "span") {
       return "";
     }
     if ((event.role === "planner" || event.role === "reviewer") && event.status === "completed") {

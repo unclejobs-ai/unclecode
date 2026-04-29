@@ -148,13 +148,21 @@ External (existing infrastructure):
 
 ## 5. Progressive Disclosure TUI
 
-### Phase 0 prerequisite: Clean up fake orchestrator traces
-Current `src/agent.ts` emits fake coordinator/planner/executor/reviewer steps around a single API call. If progressive disclosure renders these, the UX lies about what the engine actually does.
+### Phase 0 prerequisite: Trace honesty (revised 2026-04-29)
+Original v1 mandate ("remove fake events from `CodingAgent.runTurn()`") is **resolved** — `coding-agent.ts` now emits only honest `turn.started` → `provider.calling` → `turn.completed` events. Multi-stage orchestration moved to `packages/orchestrator/src/turn-orchestrator.ts` + `work-agent.ts`, where executor/guardian-reviewer/synthesis-reviewer steps now correspond to real `directAgent.runTurn` calls (verified 2026-04-29 by 3-model consensus: Claude team-debugger HIGH confidence, Codex GPT-5 CONFIRMED, Gemini design-reviewed).
 
-**Before adding verbose mode:**
-1. Remove fake orchestrator.step events from `CodingAgent.runTurn()`
-2. Replace with honest trace: `turn.started` → `provider.calling` → `turn.completed`
-3. Real orchestrator steps only appear when real orchestration exists (Phase 4)
+**Revised mandate — every `orchestrator.step` event must accurately reflect work performed:**
+1. **Agent-role events (`role: "planner" | "executor" | "reviewer" | "researcher"`) require a corresponding model call.** Emitting them around synchronous in-memory work is forbidden.
+2. **Structural span events** (turn-wide brackets used for UI grouping) must be typed as spans, not as agent participants. Add `kind?: "span" | "agent-step"` to the contract or replace with a distinct role (e.g. `"turn"`).
+3. **Real orchestrator steps only appear when real orchestration exists** (Phase 4 promotes the existing pipeline to public surface).
+
+**Outstanding violations as of 2026-04-29 (Phase 0 cleanup remainders):**
+- `coordinator` emit at `turn-orchestrator.ts:174-183, 271-282` — no LLM dispatch corresponds to it (structural wrapper miscast as agent role).
+- `planner` emit at `turn-orchestrator.ts:185-208` — fires unconditionally, but `work-agent.ts:155-178` only invokes an LLM when `mode === "yolo" || mode === "ultrawork"`. Default complex mode wraps the synchronous static `buildComplexTasks` (`work-agent.ts:60-87`) — emission is dishonest.
+
+**Fix order (must precede progressive disclosure rollout):**
+1. Gate `planner` emission on a `usedLlm` flag returned by `planComplexTurn`.
+2. Either retype `coordinator` emit as a span (`kind: "span"`) or rename to `role: "turn"` so consumers can render it as a container, not an agent.
 
 ### Two rendering modes (user-controlled):
 
@@ -195,7 +203,7 @@ Current `src/agent.ts` emits fake coordinator/planner/executor/reviewer steps ar
 │  You: Refactor the entire auth system                    │
 │                                                          │
 │  Step ─────────────────────────────────────────────       │
-│  → coordinator Scheduling turn                           │
+│  → turn (span) Routing complex turn to planner           │
 │  ✓ planner 120ms Prepared 3-task plan                    │
 │  → executor[1] Reading auth/login.ts                     │
 │  → executor[2] Reading auth/oauth.ts                     │

@@ -69,17 +69,52 @@ export type ToolCompletedTraceEvent = {
   readonly durationMs: number;
 };
 
-export type OrchestratorStepTraceEvent = {
+/**
+ * Roles whose events MUST correspond to a real model dispatch. Emitting these
+ * events around synchronous in-memory work is forbidden by the spec.
+ */
+export type OrchestratorStepAgentRole =
+  | "planner"
+  | "researcher"
+  | "reviewer"
+  | "executor";
+
+/**
+ * Roles that are structural spans used purely for UI grouping. They do NOT
+ * correspond to any LLM call. "coordinator" is the legacy alias retained so
+ * historical logs keep parsing; new producers should emit "turn".
+ */
+export type OrchestratorStepSpanRole = "turn" | "coordinator";
+
+type OrchestratorStepTraceEventBase = {
   readonly type: "orchestrator.step";
   readonly level: "high-signal";
   readonly stepId: string;
-  readonly role: "planner" | "researcher" | "reviewer" | "executor" | "coordinator";
   readonly status: "pending" | "running" | "completed" | "failed";
   readonly summary: string;
   readonly startedAt?: number;
   readonly completedAt?: number;
   readonly durationMs?: number;
 };
+
+/**
+ * Trace event for one orchestrator step. The role/kind pairing is enforced as
+ * a discriminated union so producers cannot emit invalid combinations such as
+ * `role: "turn", kind: "agent-step"` — they will fail the typecheck. `kind`
+ * stays optional so historical logs that pre-date the field continue to
+ * parse; new code should always set it.
+ */
+export type OrchestratorStepTraceEvent = OrchestratorStepTraceEventBase &
+  (
+    | {
+        readonly role: OrchestratorStepAgentRole;
+        readonly kind?: "agent-step";
+      }
+    | {
+        readonly role: OrchestratorStepSpanRole;
+        readonly kind?: "span";
+      }
+  );
 
 export type BridgePublishedTraceEvent = {
   readonly type: "bridge.published";

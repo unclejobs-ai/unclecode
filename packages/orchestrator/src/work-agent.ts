@@ -152,10 +152,12 @@ export class WorkAgent<
     this.directAgent.clear();
   }
 
-  private async planTasks(prompt: string): Promise<readonly PlannedWorkTask[]> {
+  private async planTasks(
+    prompt: string,
+  ): Promise<{ readonly tasks: readonly PlannedWorkTask[]; readonly usedLlm: boolean }> {
     const staticTasks = buildComplexTasks(prompt);
     if (this.mode !== "yolo" && this.mode !== "ultrawork") {
-      return staticTasks;
+      return { tasks: staticTasks, usedLlm: false };
     }
 
     try {
@@ -168,13 +170,13 @@ export class WorkAgent<
       const result = await this.directAgent.runTurn(planPrompt, []);
       const parsed = parseAgentPlanResponse(result.text);
       if (parsed.length >= 2) {
-        return parsed;
+        return { tasks: parsed, usedLlm: true };
       }
     } catch {
       // Fall back to static decomposition on any failure
     }
 
-    return staticTasks;
+    return { tasks: staticTasks, usedLlm: false };
   }
 
   setTraceListener(listener?: ((event: OrchestratedWorkAgentTraceEvent<TraceEvent>) => void) | undefined): void {
@@ -205,7 +207,10 @@ export class WorkAgent<
     const orchestrator = createTurnOrchestrator<PlannedWorkTask, { id: string; summary: string }>({
       runSimpleTurn: (simplePrompt) => this.directAgent.runTurn(simplePrompt, attachments),
       runResearchTurn: (researchPrompt) => this.directAgent.runTurn(researchPrompt, attachments),
-      planComplexTurn: async (complexPrompt) => this.planTasks(complexPrompt),
+      planComplexTurn: async (complexPrompt) => {
+        const { tasks, usedLlm } = await this.planTasks(complexPrompt);
+        return { tasks, usedLlm };
+      },
       executeComplexTask: async (task) => {
         const result = await this.directAgent.runTurn(task.prompt, []);
         return { id: task.id, summary: result.text };

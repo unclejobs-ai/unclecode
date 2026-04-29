@@ -77,6 +77,7 @@ export async function runBoundedExecutorPool<Task extends ComplexPlanTask, Resul
             level: "high-signal",
             stepId: `executor-${workerIndex + 1}-${task.id}-ownership`,
             role: "executor",
+            kind: "agent-step",
             status: "pending",
             summary: `Waiting for write ownership: ${writePaths.join(", ")}`,
           });
@@ -91,6 +92,7 @@ export async function runBoundedExecutorPool<Task extends ComplexPlanTask, Resul
         level: "high-signal",
         stepId: `executor-${workerIndex + 1}-${task.id}`,
         role: "executor",
+        kind: "agent-step",
         status: "running",
         summary: task.summary,
         startedAt,
@@ -104,6 +106,7 @@ export async function runBoundedExecutorPool<Task extends ComplexPlanTask, Resul
           level: "high-signal",
           stepId: `executor-${workerIndex + 1}-${task.id}`,
           role: "executor",
+          kind: "agent-step",
           status: "completed",
           summary: task.summary,
           startedAt,
@@ -118,6 +121,7 @@ export async function runBoundedExecutorPool<Task extends ComplexPlanTask, Resul
           level: "high-signal",
           stepId: `executor-${workerIndex + 1}-${task.id}`,
           role: "executor",
+          kind: "agent-step",
           status: "failed",
           summary: `${task.summary}: ${message}`,
           startedAt,
@@ -138,7 +142,9 @@ export async function runBoundedExecutorPool<Task extends ComplexPlanTask, Resul
 export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(deps: {
   readonly runSimpleTurn: (prompt: string) => Promise<{ text: string }>;
   readonly runResearchTurn: (prompt: string) => Promise<{ text: string }>;
-  readonly planComplexTurn: (prompt: string) => Promise<readonly Task[]>;
+  readonly planComplexTurn: (
+    prompt: string,
+  ) => Promise<{ readonly tasks: readonly Task[]; readonly usedLlm: boolean }>;
   readonly executeComplexTask: (task: Task) => Promise<Result>;
   readonly runGuardianReview?: ((input: {
     readonly prompt: string;
@@ -171,41 +177,62 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
         return { kind: "research", text: result.text };
       }
 
-      const coordinatorStartedAt = Date.now();
+      // Structural span bracketing the entire complex turn for UI grouping.
+      // This is NOT an agent participant — no LLM dispatch corresponds to it.
+      // See docs/specs/2026-04-05-unclecode-tui-orchestration-redesign.md §Phase 0.
+      const turnStartedAt = Date.now();
       input.onTrace?.({
         type: "orchestrator.step",
         level: "high-signal",
-        stepId: `coordinator-${coordinatorStartedAt}`,
-        role: "coordinator",
+        stepId: `turn-${turnStartedAt}`,
+        role: "turn",
+        kind: "span",
         status: "running",
         summary: "Routing complex turn to planner",
-        startedAt: coordinatorStartedAt,
+        startedAt: turnStartedAt,
       });
 
+      // Phase 0 trace honesty: only emit a planner step when planning actually
+      // invoked an LLM. Synchronous static decomposition (e.g. default complex
+      // mode `buildComplexTasks`) returns no agent-visible work, so emitting a
+      // planner role would mislead consumers about the engine's capabilities.
+      // See docs/specs/2026-04-05-unclecode-tui-orchestration-redesign.md §Phase 0.
+      //
+      // Live-progress nuance: because the orchestrator only knows `usedLlm`
+      // after `planComplexTurn` resolves, the `running` and `completed` events
+      // here fire in the same tick — UIs rendering a spinner for slow LLM
+      // planning will not see an intermediate state. A follow-up refactor
+      // should let the planner implementation emit `running` itself (e.g. by
+      // accepting a trace listener), but that touches the dependency contract
+      // and is out of scope for this Phase 0 cleanup.
       const plannerStartedAt = Date.now();
-      input.onTrace?.({
-        type: "orchestrator.step",
-        level: "high-signal",
-        stepId: `planner-${plannerStartedAt}`,
-        role: "planner",
-        status: "running",
-        summary: `Planning: ${input.prompt}`,
-        startedAt: plannerStartedAt,
-      });
-
-      const tasks = await deps.planComplexTurn(input.prompt);
+      const planOutcome = await deps.planComplexTurn(input.prompt);
+      const tasks = planOutcome.tasks;
       const plannerCompletedAt = Date.now();
-      input.onTrace?.({
-        type: "orchestrator.step",
-        level: "high-signal",
-        stepId: `planner-${plannerStartedAt}`,
-        role: "planner",
-        status: "completed",
-        summary: `Prepared ${tasks.length} task${tasks.length === 1 ? "" : "s"}`,
-        startedAt: plannerStartedAt,
-        completedAt: plannerCompletedAt,
-        durationMs: plannerCompletedAt - plannerStartedAt,
-      });
+      if (planOutcome.usedLlm) {
+        input.onTrace?.({
+          type: "orchestrator.step",
+          level: "high-signal",
+          stepId: `planner-${plannerStartedAt}`,
+          role: "planner",
+          kind: "agent-step",
+          status: "running",
+          summary: `Planning: ${input.prompt}`,
+          startedAt: plannerStartedAt,
+        });
+        input.onTrace?.({
+          type: "orchestrator.step",
+          level: "high-signal",
+          stepId: `planner-${plannerStartedAt}`,
+          role: "planner",
+          kind: "agent-step",
+          status: "completed",
+          summary: `Prepared ${tasks.length} task${tasks.length === 1 ? "" : "s"}`,
+          startedAt: plannerStartedAt,
+          completedAt: plannerCompletedAt,
+          durationMs: plannerCompletedAt - plannerStartedAt,
+        });
+      }
 
       const results = await runBoundedExecutorPool({
         tasks,
@@ -224,6 +251,7 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
               level: "high-signal",
               stepId: `reviewer-${reviewerStartedAt}`,
               role: "reviewer",
+              kind: "agent-step",
               status: "running",
               summary: "Guardian auto-review",
               startedAt: reviewerStartedAt,
@@ -242,6 +270,7 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
                 level: "high-signal",
                 stepId: `reviewer-${reviewerStartedAt}`,
                 role: "reviewer",
+                kind: "agent-step",
                 status: "completed",
                 summary: `Guardian review: ${result.summary}`,
                 startedAt: reviewerStartedAt,
@@ -257,6 +286,7 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
                 level: "high-signal",
                 stepId: `reviewer-${reviewerStartedAt}`,
                 role: "reviewer",
+                kind: "agent-step",
                 status: "failed",
                 summary: `Guardian review failed: ${message}`,
                 startedAt: reviewerStartedAt,
@@ -268,17 +298,18 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
           })()
         : undefined;
 
-      const coordinatorCompletedAt = Date.now();
+      const turnCompletedAt = Date.now();
       input.onTrace?.({
         type: "orchestrator.step",
         level: "high-signal",
-        stepId: `coordinator-${coordinatorStartedAt}`,
-        role: "coordinator",
+        stepId: `turn-${turnStartedAt}`,
+        role: "turn",
+        kind: "span",
         status: "completed",
         summary: `Completed ${results.length} task${results.length === 1 ? "" : "s"}`,
-        startedAt: coordinatorStartedAt,
-        completedAt: coordinatorCompletedAt,
-        durationMs: coordinatorCompletedAt - coordinatorStartedAt,
+        startedAt: turnStartedAt,
+        completedAt: turnCompletedAt,
+        durationMs: turnCompletedAt - turnStartedAt,
       });
 
       return {
