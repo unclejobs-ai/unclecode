@@ -167,7 +167,37 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   openSessionsPanel(): Promise<void>;
   cancelSensitiveInput?(): void;
   closeOverlay?(): void;
+  // Optional because not every pane host wires trace plumbing — when
+  // absent, the hook silently drops the event. In practice WorkShellEngine
+  // always implements this since commit b891c19's follow-up.
+  recordTraceEvent?(event: AttachmentLifecycleTraceEvent): void;
 }
+
+/**
+ * Subset of ExecutionTraceEvent the TUI hook emits on its own. Kept as a
+ * narrower type at the seam so hosts that opt in cannot accidentally
+ * forward arbitrary trace events through this channel — agent traces
+ * still flow through the regular setTraceListener path inside the
+ * engine.
+ */
+export type AttachmentLifecycleTraceEvent =
+  | {
+      readonly type: "attachment.attached";
+      readonly level: "default";
+      readonly source: "clipboard";
+      readonly mimeType: string;
+      readonly byteEstimate: number;
+      readonly startedAt: number;
+    }
+  | {
+      readonly type: "attachment.dropped";
+      readonly level: "default";
+      readonly source: "clipboard";
+      readonly reason: "cap-exceeded" | "capture-too-large" | "user-cleared";
+      readonly byteEstimate?: number;
+      readonly mimeType?: string;
+      readonly startedAt: number;
+    };
 
 export function useWorkShellSlashState(input: {
   readonly value: string;
@@ -360,8 +390,19 @@ export function useWorkShellPaneState<
   >([]);
   const addClipboardAttachment = useCallback(
     (attachment: Attachment): { readonly accepted: true } | ClipboardAttachmentRejection => {
+      const startedAt = Date.now();
       const violation = checkClipboardCapViolation(attachment, pendingClipboardAttachments);
       if (violation) {
+        input.engine.recordTraceEvent?.({
+          type: "attachment.dropped",
+          level: "default",
+          source: "clipboard",
+          reason: "cap-exceeded",
+          byteEstimate: estimateAttachmentBytes(attachment),
+          mimeType:
+            (attachment as { readonly mimeType?: string }).mimeType ?? "application/octet-stream",
+          startedAt,
+        });
         return violation;
       }
       setPendingClipboardAttachments((current) => {
@@ -370,15 +411,45 @@ export function useWorkShellPaneState<
         }
         return [...current, attachment];
       });
+      input.engine.recordTraceEvent?.({
+        type: "attachment.attached",
+        level: "default",
+        source: "clipboard",
+        mimeType:
+          (attachment as { readonly mimeType?: string }).mimeType ?? "application/octet-stream",
+        byteEstimate: estimateAttachmentBytes(attachment),
+        startedAt,
+      });
       return { accepted: true };
     },
-    [pendingClipboardAttachments],
+    [pendingClipboardAttachments, input.engine],
   );
+  // User-initiated clear (NOT submit clear — that path stays silent per
+  // the Q6 design: emitting one dropped per cleared attachment on every
+  // successful turn would create N attached + N dropped noise).
+  const dropClipboardAttachmentsAsUserCleared = useCallback(() => {
+    setPendingClipboardAttachments((current) => {
+      if (current.length === 0) return current;
+      const startedAt = Date.now();
+      for (const item of current) {
+        input.engine.recordTraceEvent?.({
+          type: "attachment.dropped",
+          level: "default",
+          source: "clipboard",
+          reason: "user-cleared",
+          byteEstimate: estimateAttachmentBytes(item),
+          mimeType:
+            (item as { readonly mimeType?: string }).mimeType ?? "application/octet-stream",
+          startedAt,
+        });
+      }
+      return [];
+    });
+  }, [input.engine]);
   const clearClipboardAttachments = useCallback(() => {
-    // The same-reference return on empty avoids triggering a re-render when
-    // the caller's clear racewise no-ops (e.g. submit on a turn that had no
-    // attachments to begin with). Without it the pane re-renders on every
-    // submit even when nothing changed.
+    // Submit-time clear — stays silent (no dropped events) so a normal
+    // turn does not log N attached + N dropped lines. The same-reference
+    // return on empty avoids re-rendering when there was nothing to clear.
     setPendingClipboardAttachments((current) => (current.length === 0 ? current : []));
   }, []);
   const engineState = useWorkShellEngineState(input.engine);
@@ -519,6 +590,16 @@ function estimateDataUrlBytes(dataUrl: string): number {
  * the status taxonomy. v1 enforces only at the TUI boundary; provider-side
  * defensive caps are tracked as a follow-up per the Gemini design memo.
  */
+/**
+ * Decoded byte estimate for an attachment, exposed so the trace emit
+ * sites and the cap check can share a single calculation. Sliced past
+ * the comma so the `data:image/png;base64,` header bytes do not inflate
+ * the count.
+ */
+function estimateAttachmentBytes(attachment: { readonly dataUrl: string }): number {
+  return estimateDataUrlBytes(attachment.dataUrl);
+}
+
 function checkClipboardCapViolation<A extends { readonly dataUrl: string }>(
   attachment: A,
   current: readonly A[],

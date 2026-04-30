@@ -17,6 +17,8 @@ test("execution trace contract exposes canonical event kinds", () => {
     "bridge.published",
     "memory.written",
     "reasoning.delta",
+    "attachment.attached",
+    "attachment.dropped",
   ]);
 });
 

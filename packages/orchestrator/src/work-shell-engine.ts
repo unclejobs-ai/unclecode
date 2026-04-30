@@ -32,6 +32,32 @@ import {
   resolveModeDefaultReasoning,
 } from "./work-shell-engine-state.js";
 import { applyWorkShellTraceEvent } from "./work-shell-engine-trace.js";
+
+/**
+ * Render a one-liner for an attachment lifecycle trace event. Kept inline
+ * here rather than the shared formatter because the agent-stream formatter
+ * is generic over TraceEvent and broadening that union cascades through
+ * every app entry point. Returns "" when the event has no actionable
+ * surface (e.g. submit-time clear is silent per the Q6 design).
+ */
+export function formatAttachmentTraceLine(event: {
+  readonly type: "attachment.attached" | "attachment.dropped";
+  readonly source: "clipboard";
+  readonly mimeType?: string;
+  readonly byteEstimate?: number;
+  readonly reason?: "cap-exceeded" | "capture-too-large" | "user-cleared";
+}): string {
+  const sizeNote =
+    typeof event.byteEstimate === "number"
+      ? ` ${(event.byteEstimate / 1024).toFixed(0)}kB`
+      : "";
+  const mime = event.mimeType ? ` ${event.mimeType}` : "";
+  if (event.type === "attachment.attached") {
+    return `📎 attached ${event.source}${mime}${sizeNote}`;
+  }
+  const why = event.reason ? ` (${event.reason})` : "";
+  return `📎 dropped ${event.source}${mime}${sizeNote}${why}`;
+}
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 
 export type WorkShellChatEntry = {
@@ -448,6 +474,38 @@ export class WorkShellEngine<
     }
 
     this.setState({ panel });
+  }
+
+  /**
+   * Record an attachment lifecycle trace event from the TUI side. The
+   * pane fires this when a clipboard image is accepted, rejected by the
+   * pre-flight cap, or explicitly cleared. Non-attachment trace events
+   * still flow through the agent listener installed in initialize() —
+   * this method is the only seam for events the agent never sees.
+   *
+   * Routed through `applyWorkShellTraceEvent` so the same formatter,
+   * trace-line buffer, and panel state machine handle it as the agent
+   * stream. Unknown event types fall through harmlessly (formatter
+   * returns empty string for anything it does not recognise).
+   */
+  recordTraceEvent(event: {
+    readonly type: "attachment.attached" | "attachment.dropped";
+    readonly source: "clipboard";
+    readonly mimeType?: string;
+    readonly byteEstimate?: number;
+    readonly reason?: "cap-exceeded" | "capture-too-large" | "user-cleared";
+    readonly startedAt: number;
+  }): void {
+    // Attachment lifecycle events are emitted from the TUI hook side.
+    // Render inline here rather than routing through the agent stream
+    // formatter (formatAgentTraceLine generic does not include these
+    // types, and broadening it cascades into every app entry point).
+    // Trace lines are diagnostic only — not appended to the conversation
+    // transcript.
+    const line = formatAttachmentTraceLine(event);
+    if (line) {
+      this.pushTraceLine(line);
+    }
   }
 
   /**

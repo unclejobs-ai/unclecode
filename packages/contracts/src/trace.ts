@@ -10,6 +10,8 @@ export const EXECUTION_TRACE_EVENT_TYPES = [
   "bridge.published",
   "memory.written",
   "reasoning.delta",
+  "attachment.attached",
+  "attachment.dropped",
 ] as const;
 
 export type ExecutionTraceEventType = (typeof EXECUTION_TRACE_EVENT_TYPES)[number];
@@ -145,6 +147,44 @@ export type ReasoningDeltaTraceEvent = {
   readonly delta: string;
 };
 
+/**
+ * Source identifier for attachment lifecycle events. v1 only emits the
+ * "clipboard" producer; future producers (drag-drop, file picker, MCP
+ * supplier) get their own values rather than a free-form string so each
+ * source can be log-filtered without parsing.
+ */
+export type AttachmentTraceSource = "clipboard";
+
+/**
+ * Reason an attachment was dropped from the pending list. v1 distinguishes
+ * cap rejection from explicit user clear; submit-time clear is intentionally
+ * NOT traced to avoid N attached + N dropped noise on every successful
+ * turn (Hermes design review of #26).
+ */
+export type AttachmentDropReason = "cap-exceeded" | "capture-too-large" | "user-cleared";
+
+export type AttachmentAttachedTraceEvent = {
+  readonly type: "attachment.attached";
+  readonly level: "default";
+  readonly source: AttachmentTraceSource;
+  readonly mimeType: string;
+  readonly byteEstimate: number;
+  readonly startedAt: number;
+};
+
+export type AttachmentDroppedTraceEvent = {
+  readonly type: "attachment.dropped";
+  readonly level: "default";
+  readonly source: AttachmentTraceSource;
+  readonly reason: AttachmentDropReason;
+  // Optional because capture-side rejection happens before the dataUrl
+  // exists, so we only have the raw byte count from the read syscall —
+  // the cap-exceeded path carries the estimated bytes from the dataUrl.
+  readonly byteEstimate?: number;
+  readonly mimeType?: string;
+  readonly startedAt: number;
+};
+
 export type ExecutionTraceEvent =
   | TurnStartedTraceEvent
   | ProviderCallingTraceEvent
@@ -154,4 +194,6 @@ export type ExecutionTraceEvent =
   | OrchestratorStepTraceEvent
   | BridgePublishedTraceEvent
   | MemoryWrittenTraceEvent
-  | ReasoningDeltaTraceEvent;
+  | ReasoningDeltaTraceEvent
+  | AttachmentAttachedTraceEvent
+  | AttachmentDroppedTraceEvent;
