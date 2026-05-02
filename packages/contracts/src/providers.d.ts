@@ -37,7 +37,7 @@ export declare const PROVIDER_CAPABILITIES: {
         readonly id: "openai";
         readonly label: "OpenAI";
         readonly transport: "compat";
-        readonly defaultModel: "gpt-5.4";
+        readonly defaultModel: "gpt-5.5";
         readonly envKeys: readonly ["OPENAI_API_KEY", "OPENAI_MODEL"];
         readonly supportsToolCalls: true;
         readonly supportsSessionMemory: true;

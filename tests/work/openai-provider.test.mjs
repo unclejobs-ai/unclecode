@@ -42,7 +42,7 @@ test("loadConfig supports openai provider selection", async () => {
 });
 
 
-test("loadConfig uses gpt-5.4 and mode-default reasoning for openai work sessions", async () => {
+test("loadConfig uses gpt-5.5 and mode-default reasoning for openai work sessions", async () => {
   const originalEnv = { ...process.env };
   const workspaceRoot = createWorkspaceWithMode("analyze");
 
@@ -53,7 +53,7 @@ test("loadConfig uses gpt-5.4 and mode-default reasoning for openai work session
 
     const config = await loadConfig({ cwd: workspaceRoot });
     assert.equal(config.provider, "openai");
-    assert.equal(config.model, "gpt-5.4");
+    assert.equal(config.model, "gpt-5.5");
     assert.equal(config.mode, "analyze");
     assert.equal(config.reasoning.effort, "high");
     assert.equal(config.reasoning.source, "mode-default");

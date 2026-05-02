@@ -22,7 +22,7 @@ const providerSchema = z.enum(["anthropic", "gemini", "openai"]);
 const envSchema = z.object({
   LLM_PROVIDER: providerSchema.default("openai"),
   OPENAI_API_KEY: z.string().optional(),
-  OPENAI_MODEL: z.string().min(1).default("gpt-5.4"),
+  OPENAI_MODEL: z.string().min(1).default("gpt-5.5"),
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_MODEL: z.string().min(1).default("claude-sonnet-4-20250514"),
   GEMINI_API_KEY: z.string().optional(),

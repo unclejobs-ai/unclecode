@@ -173,7 +173,7 @@ function getModelSuggestions(
   options?: WorkShellSlashOptions,
 ): readonly { readonly command: string; readonly description: string }[] {
   const provider = options?.provider ?? "openai";
-  const currentModel = options?.currentModel ?? "gpt-5.4";
+  const currentModel = options?.currentModel ?? "gpt-5.5";
   const dynamic = listProviderModelSuggestions(provider, currentModel);
   const modelEntries = [
     ...entries.filter((entry) => entry.command === "/model" || entry.command === "/model list"),

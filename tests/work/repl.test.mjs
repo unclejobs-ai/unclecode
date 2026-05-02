@@ -667,7 +667,7 @@ test("getWorkShellSlashSuggestions expands /model into concrete model picks", ()
 
   assert.deepEqual(
     suggestions.slice(0, 5).map((item) => item.command),
-    ["/model", "/model list", "/model gpt-5.4", "/model gpt-5.4-mini", "/model o4-mini"],
+    ["/model", "/model list", "/model gpt-5.4", "/model gpt-5.5", "/model gpt-5.4-mini"],
   );
   assert.match(suggestions[2]?.description ?? "", /Current · default medium · supports low, medium, high/i);
   assert.match(suggestions[3]?.description ?? "", /Default · default medium · supports low, medium, high/i);

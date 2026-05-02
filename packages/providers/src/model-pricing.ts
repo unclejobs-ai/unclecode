@@ -23,6 +23,7 @@ const OPENAI_PRICES: Record<string, ModelPrice> = {
   "gpt-4o-mini": { inputUsdPer1M: 0.15, outputUsdPer1M: 0.6 },
   "gpt-4o": { inputUsdPer1M: 2.5, outputUsdPer1M: 10.0 },
   "gpt-5.4-mini": { inputUsdPer1M: 1.0, outputUsdPer1M: 4.0 },
+  "gpt-5.5": { inputUsdPer1M: 7.5, outputUsdPer1M: 22.5 },
   "gpt-5.4": { inputUsdPer1M: 5.0, outputUsdPer1M: 15.0 },
   "o4-mini": { inputUsdPer1M: 1.1, outputUsdPer1M: 4.4 },
 };
