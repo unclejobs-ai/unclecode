@@ -34,6 +34,45 @@ export type ProviderToolTraceEvent = Extract<
  */
 export type ProviderInputAttachment = ClipboardImageAttachment;
 
+/**
+ * Provider-layer defensive attachment caps. Mirrors the TUI constants
+ * in work-shell-hooks.ts (§ MAX_CLIPBOARD_ATTACHMENT_COUNT / _BYTES).
+ * The TUI cap is the primary UX gate; this provider backstop silently
+ * drops excess so that the merged attachment list from resolveComposerInput
+ * + clipboard cannot escape the process unbounded (Gemini design memo Q4).
+ */
+const PROVIDER_MAX_ATTACHMENT_COUNT = 5;
+const PROVIDER_MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+
+function estimateDataUrlBytes(dataUrl: string): number {
+  const commaIndex = dataUrl.indexOf(",");
+  const payload = commaIndex === -1 ? dataUrl : dataUrl.slice(commaIndex + 1);
+  let trailingPad = 0;
+  for (let i = payload.length - 1; i >= 0; i -= 1) {
+    if (payload[i] !== "=") break;
+    trailingPad += 1;
+  }
+  return Math.max(0, Math.floor((payload.length * 3) / 4) - trailingPad);
+}
+
+export function applyProviderAttachmentCaps(
+  attachments: readonly ProviderInputAttachment[],
+): readonly ProviderInputAttachment[] {
+  if (attachments.length <= PROVIDER_MAX_ATTACHMENT_COUNT) {
+    const oversized = attachments.some(
+      (a) => estimateDataUrlBytes(a.dataUrl) > PROVIDER_MAX_ATTACHMENT_BYTES,
+    );
+    if (!oversized) return attachments;
+  }
+  const capped: ProviderInputAttachment[] = [];
+  for (const a of attachments) {
+    if (capped.length >= PROVIDER_MAX_ATTACHMENT_COUNT) break;
+    if (estimateDataUrlBytes(a.dataUrl) > PROVIDER_MAX_ATTACHMENT_BYTES) continue;
+    capped.push(a);
+  }
+  return capped;
+}
+
 export type ProviderTraceListener = (event: ProviderToolTraceEvent) => void;
 
 export type ProviderName = "anthropic" | "gemini" | "openai";
@@ -415,13 +454,14 @@ export class OpenAIProvider implements LlmProvider {
     prompt: string,
     attachments: readonly ProviderInputAttachment[] = [],
   ): Promise<AgentTurnResult> {
+    const cappedAttachments = applyProviderAttachmentCaps(attachments);
     this.messages.push({
       role: "user",
       content:
-        attachments.length > 0
+        cappedAttachments.length > 0
           ? [
               { type: "text", text: prompt },
-              ...attachments.map((attachment) => ({
+              ...cappedAttachments.map((attachment) => ({
                 type: "image_url" as const,
                 image_url: { url: attachment.dataUrl },
               })),
@@ -678,7 +718,8 @@ export class AnthropicProvider implements LlmProvider {
     prompt: string,
     attachments: readonly ProviderInputAttachment[] = [],
   ): Promise<AgentTurnResult> {
-    if (attachments.length > 0) {
+    const cappedAttachments = applyProviderAttachmentCaps(attachments);
+    if (cappedAttachments.length > 0) {
       const supportedMimes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
       const blocks: Array<
         | { type: "text"; text: string }
@@ -691,7 +732,7 @@ export class AnthropicProvider implements LlmProvider {
             };
           }
       > = [{ type: "text", text: prompt }];
-      for (const attachment of attachments) {
+      for (const attachment of cappedAttachments) {
         if (!supportedMimes.has(attachment.mimeType)) {
           continue;
         }
@@ -934,11 +975,12 @@ export class GeminiProvider implements LlmProvider {
     prompt: string,
     attachments: readonly ProviderInputAttachment[] = [],
   ): Promise<AgentTurnResult> {
+    const cappedAttachments = applyProviderAttachmentCaps(attachments);
     const userParts: Array<
       | { text: string }
       | { inlineData: { mimeType: string; data: string } }
     > = [{ text: prompt }];
-    for (const attachment of attachments) {
+    for (const attachment of cappedAttachments) {
       const commaIndex = attachment.dataUrl.indexOf(",");
       const base64Data = commaIndex >= 0 ? attachment.dataUrl.slice(commaIndex + 1) : "";
       if (base64Data.length === 0) {
