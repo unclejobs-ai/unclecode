@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { closeSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -539,6 +539,34 @@ test("resolveComposerInput supports @image references as first-class attachments
   assert.equal(input.attachments.length, 1);
   assert.equal(input.prompt, "inspect");
   assert.match(input.transcriptText, /Attached image: shot\.png/);
+});
+
+test("resolveComposerInput silently drops text-derived images over 5 MiB", async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-compose-"));
+  const bigPath = path.join(cwd, "big.jpg");
+  const fd = openSync(bigPath, "w");
+  ftruncateSync(fd, 6 * 1024 * 1024); // 6 MiB — sparse, instant
+  closeSync(fd);
+
+  const input = await resolveComposerInput(`look at ${bigPath}`, cwd);
+
+  assert.equal(input.attachments.length, 0);
+  // Path stays in prompt as plain text — user typed it, don't silently strip
+  assert.ok(input.prompt.includes("look at"));
+});
+
+test("resolveComposerInput caps text-derived images at 5", async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-compose-"));
+  const paths = [];
+  for (let i = 0; i < 7; i += 1) {
+    const imgPath = path.join(cwd, `img${i}.png`);
+    writeFileSync(imgPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]), "binary");
+    paths.push(imgPath);
+  }
+
+  const input = await resolveComposerInput(paths.join(" "), cwd);
+
+  assert.equal(input.attachments.length, 5);
 });
 
 test("formatAttachmentBadgeLine shows attachment count and filenames", () => {

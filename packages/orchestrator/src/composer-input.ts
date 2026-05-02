@@ -29,6 +29,18 @@ const REFERENCE_PATH_PATTERN = /(?:^|\s)@(?:"([^"\n]+)"|(\S+))/g;
 const MAX_TEXT_REFERENCE_CHARS = 2_000;
 const MAX_DIRECTORY_ENTRIES = 12;
 
+/**
+ * Pre-flight caps for text-derived image attachments. Mirrors the TUI
+ * clipboard constants in work-shell-hooks.ts. The clipboard path is
+ * capped at the hook layer; this applies the same ceiling to images
+ * referenced via bare paths or @file references in the composer text.
+ * Hermes review flagged this as a larger long-tail risk than the
+ * already-capped clipboard path — a long prompt referencing 50 image
+ * paths would read + base64 all of them into memory unbounded.
+ */
+const MAX_TEXT_ATTACHMENT_COUNT = 5;
+const MAX_TEXT_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+
 async function toImageAttachment(
   candidatePath: string,
   cwd: string,
@@ -40,6 +52,10 @@ async function toImageAttachment(
 
   const resolvedPath = path.isAbsolute(candidatePath) ? candidatePath : path.resolve(cwd, candidatePath);
   try {
+    const fileStat = await stat(resolvedPath);
+    if (fileStat.size > MAX_TEXT_ATTACHMENT_BYTES) {
+      return undefined;
+    }
     const buffer = await readFile(resolvedPath);
     return {
       type: "image",
@@ -172,7 +188,7 @@ export async function resolveComposerInput(
     ...validImages
       .map((entry) => entry.attachment)
       .filter((attachment) => !referencedImagePaths.has(attachment.path)),
-  ];
+  ].slice(0, MAX_TEXT_ATTACHMENT_COUNT);
 
   let prompt = raw;
   for (const entry of validReferences) {
