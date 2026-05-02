@@ -39,12 +39,13 @@ const CLIPBOARD_PATH_SENTINEL = "(clipboard)";
 
 /**
  * Per-image byte ceiling enforced at capture time so a clipboard payload
- * larger than the eventual TUI gate never crosses base64 encoding. Mirrors
- * MAX_CLIPBOARD_ATTACHMENT_BYTES in @unclecode/tui — Hermes review of the
- * v1 cap scope flagged that without a capture-side check, large pastes are
- * fully read into memory + base64-encoded only for the TUI to reject the
- * dataUrl after the work is done. Kept inline (no shared constant) because
- * the TUI gate is the user-facing cap; this one is a defensive backstop.
+ * larger than the eventual TUI gate never crosses base64 encoding. Canonical
+ * value lives in packages/config-core/src/defaults.ts (CONFIG_CORE_DEFAULT_*).
+ *
+ * When multi-image clipboard burst (drag-drop / batch paste) is implemented,
+ * the TUI hook cap (MAX_CLIPBOARD_ATTACHMENT_COUNT=5) and the provider
+ * defensive backstop already bound the merged list. The capture layer only
+ * needs a per-image size gate — the count cap belongs at the hook seam.
  */
 const MAX_CAPTURE_BYTES = 5 * 1024 * 1024;
 

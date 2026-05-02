@@ -153,6 +153,8 @@ export function applyPatch(input: ApplyPatchInput): ApplyPatchResult {
     }
 
     if (success) {
+      // Best-effort TOCTOU guard: assertWithinWorkspace + stat chain runs
+      // before the write; pure-userland Node has no O_NOFOLLOW seam.
       writeFileSync(absPath, working.join("\n"));
       applied.push({ path: target, hunkCount: file.hunks.length });
     }

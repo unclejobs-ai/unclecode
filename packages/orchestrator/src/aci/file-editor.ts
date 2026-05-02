@@ -51,6 +51,9 @@ export async function editFile(input: EditInput, options: EditOptions = {}): Pro
   const next = [...before, ...replacementLines, ...after].join("\n");
 
   writeFileSync(absPath, next, "utf8");
+  // Best-effort rollback on lint failure. TOCTOU between validation and
+  // write is inherent to pure-userland Node (no O_NOFOLLOW); the upstream
+  // assertWithinWorkspace + statSync chain is the primary guard.
   const lintResult = await lintRunner({ absPath, content: next });
   if (!lintResult.ok) {
     writeFileSync(absPath, original, "utf8");
