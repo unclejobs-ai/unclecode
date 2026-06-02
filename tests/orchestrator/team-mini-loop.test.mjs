@@ -6,6 +6,7 @@ import path from "node:path";
 
 import {
   createTeamMiniLoopExecutor,
+  createTeamMiniLoopPolicyEvaluator,
   miniLoopMessagesToProviderQuery,
   runShell,
 } from "@unclecode/orchestrator";
@@ -185,6 +186,64 @@ test("createTeamMiniLoopExecutor blocks non-local filesystem read tools by defau
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("team mini-loop policy evaluator canonicalizes path prefixes and command boundaries", () => {
+  const evaluator = createTeamMiniLoopPolicyEvaluator({
+    id: "team.openshell.test",
+    mode: "enforce",
+    defaultEffect: "deny",
+    rules: [
+      {
+        id: "team.files.src",
+        capability: "filesystem.read",
+        effect: "allow",
+        reason: "src reads are allowed",
+        match: { runtimeMode: "openshell", pathPrefix: "src" },
+      },
+      {
+        id: "team.shell.npm-test",
+        capability: "shell.run",
+        effect: "allow",
+        reason: "npm tests are allowed",
+        match: { runtimeMode: "openshell", commandPrefix: "npm test" },
+      },
+    ],
+  });
+
+  assert.equal(evaluator({
+    capability: "filesystem.read",
+    tool: "read_file",
+    path: "src/lib/../index.ts",
+    cwd: process.cwd(),
+    runtimeMode: "openshell",
+  })?.effect, "allow");
+
+  for (const traversalPath of ["src/../secret.txt", "./src/../secret.txt", "src\\..\\secret.txt"]) {
+    const decision = evaluator({
+      capability: "filesystem.read",
+      tool: "read_file",
+      path: traversalPath,
+      cwd: process.cwd(),
+      runtimeMode: "openshell",
+    });
+    assert.equal(decision?.effect, "deny", `${traversalPath} must not satisfy src prefix`);
+  }
+
+  assert.equal(evaluator({
+    capability: "shell.run",
+    tool: "run_shell",
+    command: "npm test -- --runInBand",
+    cwd: process.cwd(),
+    runtimeMode: "openshell",
+  })?.effect, "allow");
+  assert.equal(evaluator({
+    capability: "shell.run",
+    tool: "run_shell",
+    command: "npm testevil",
+    cwd: process.cwd(),
+    runtimeMode: "openshell",
+  })?.effect, "deny");
 });
 
 test("createTeamMiniLoopExecutor rejects unknown tools without throwing", async () => {

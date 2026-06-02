@@ -92,6 +92,9 @@ function pathMatchesPrefix(path: string | undefined, prefix: string): boolean {
   }
   const normalizedPath = normalizePolicyPath(path);
   const normalizedPrefix = normalizePolicyPath(prefix);
+  if (normalizedPath === undefined || normalizedPrefix === undefined) {
+    return false;
+  }
   if (normalizedPrefix === "" || normalizedPrefix === ".") {
     return true;
   }
@@ -103,13 +106,32 @@ function commandMatchesPrefix(command: string | undefined, prefix: string): bool
   if (command === undefined) {
     return false;
   }
-  return command.trimStart().startsWith(prefix.trimStart());
+  const normalizedCommand = command.trimStart();
+  const normalizedPrefix = prefix.trim();
+  if (normalizedPrefix === "") {
+    return true;
+  }
+  if (normalizedCommand === normalizedPrefix) {
+    return true;
+  }
+  return normalizedCommand.startsWith(`${normalizedPrefix} `)
+    || normalizedCommand.startsWith(`${normalizedPrefix}\t`);
 }
 
-function normalizePolicyPath(value: string): string {
-  let normalized = value.replace(/\\/g, "/").replace(/^\.\/+/, "");
-  while (normalized.endsWith("/") && normalized.length > 1) {
-    normalized = normalized.slice(0, -1);
+function normalizePolicyPath(value: string): string | undefined {
+  const parts: string[] = [];
+  for (const segment of value.replace(/\\/g, "/").split("/")) {
+    if (segment === "" || segment === ".") {
+      continue;
+    }
+    if (segment === "..") {
+      if (parts.length === 0) {
+        return undefined;
+      }
+      parts.pop();
+      continue;
+    }
+    parts.push(segment);
   }
-  return normalized;
+  return parts.join("/");
 }

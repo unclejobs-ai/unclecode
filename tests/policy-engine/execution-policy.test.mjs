@@ -71,6 +71,27 @@ test("execution policy enforces filesystem path prefix rules", () => {
   assert.equal(allowed.effect, "allow");
   assert.equal(allowed.matchedRule, "workspace.filesystem.write.src");
 
+  const normalizedInside = evaluateExecutionPolicy(profile, {
+    capability: "filesystem.write",
+    path: "src/lib/../index.ts",
+    runtimeMode: "local",
+  });
+  assert.equal(normalizedInside.effect, "allow");
+
+  for (const traversalPath of [
+    "src/../secret.txt",
+    "./src/../secret.txt",
+    "src\\..\\secret.txt",
+  ]) {
+    const denied = evaluateExecutionPolicy(profile, {
+      capability: "filesystem.write",
+      path: traversalPath,
+      runtimeMode: "local",
+    });
+    assert.equal(denied.effect, "deny", `${traversalPath} must not satisfy src prefix`);
+    assert.equal(denied.matchedRule, "workspace.enforce.filesystem.write.default");
+  }
+
   const denied = evaluateExecutionPolicy(profile, {
     capability: "filesystem.write",
     path: "package.json",
@@ -103,6 +124,20 @@ test("execution policy enforces shell command prefix rules", () => {
   });
   assert.equal(allowed.effect, "allow");
   assert.equal(allowed.matchedRule, "workspace.shell.npm-test");
+
+  const exact = evaluateExecutionPolicy(profile, {
+    capability: "shell.run",
+    command: "npm test",
+    runtimeMode: "local",
+  });
+  assert.equal(exact.effect, "allow");
+
+  const deniedOvermatch = evaluateExecutionPolicy(profile, {
+    capability: "shell.run",
+    command: "npm testevil",
+    runtimeMode: "local",
+  });
+  assert.equal(deniedOvermatch.effect, "deny");
 
   const denied = evaluateExecutionPolicy(profile, {
     capability: "shell.run",
