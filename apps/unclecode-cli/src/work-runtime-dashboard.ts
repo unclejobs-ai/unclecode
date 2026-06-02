@@ -37,6 +37,7 @@ import {
   formatWorkShellError,
   refineInlineCommandPanelLines,
   type TuiShellHomeState,
+  type TuiRenderOptions,
 } from "@unclecode/tui";
 
 export type StartReplOptions = {
@@ -54,6 +55,9 @@ export type StartReplOptions = {
   refreshHomeState?: (() => Promise<TuiShellHomeState>) | undefined;
   refreshAuthState?: (() => Promise<{ authLabel: string; authIssueLines?: readonly string[] }>) | undefined;
   runInlineCommand?: ((args: readonly string[]) => Promise<readonly string[]>) | undefined;
+  runAction?: TuiRenderOptions<TuiShellHomeState>["runAction"];
+  runSession?: TuiRenderOptions<TuiShellHomeState>["runSession"];
+  launchWorkSession?: TuiRenderOptions<TuiShellHomeState>["launchWorkSession"];
   saveApiKeyAuth?: ((raw: string) => Promise<readonly string[]>) | undefined;
   browserOAuthAvailable?: boolean | undefined;
 };
@@ -102,6 +106,11 @@ export function createManagedDashboardInput(
     homeState: session.options.homeState,
     ...(session.options.refreshHomeState
       ? { refreshHomeState: session.options.refreshHomeState }
+      : {}),
+    ...(session.options.runAction ? { runAction: session.options.runAction } : {}),
+    ...(session.options.runSession ? { runSession: session.options.runSession } : {}),
+    ...(session.options.launchWorkSession
+      ? { launchWorkSession: session.options.launchWorkSession }
       : {}),
     paneRuntime: {
       agent: session.agent,

@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -116,6 +116,74 @@ pub fn format_mcp_host_inspect(entries: &[McpHostRegistryEntry], server_name: &s
     }
 
     lines.join("\n")
+}
+
+pub fn add_project_mcp_server(
+    workspace_root: &Path,
+    name: &str,
+    command: &str,
+    args: &[String],
+) -> Result<PathBuf, String> {
+    if !name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.')
+    {
+        return Err("MCP server name may only contain letters, numbers, dot, underscore, and dash.".to_string());
+    }
+
+    let mut config = read_project_mcp_config(workspace_root)?;
+    if config.get("mcpServers").and_then(Value::as_object).is_none() {
+        config["mcpServers"] = json!({});
+    }
+    let server = if args.is_empty() {
+        json!({ "type": "stdio", "command": command })
+    } else {
+        json!({ "type": "stdio", "command": command, "args": args })
+    };
+    config["mcpServers"][name] = server;
+    write_project_mcp_config(workspace_root, &config)
+}
+
+pub fn remove_project_mcp_server(
+    workspace_root: &Path,
+    server_name: &str,
+) -> Result<PathBuf, String> {
+    let mut config = read_project_mcp_config(workspace_root)?;
+    let Some(servers) = config.get_mut("mcpServers").and_then(Value::as_object_mut) else {
+        return Err(format!("MCP server not found in .mcp.json: {server_name}"));
+    };
+    if servers.remove(server_name).is_none() {
+        return Err(format!("MCP server not found in .mcp.json: {server_name}"));
+    }
+    write_project_mcp_config(workspace_root, &config)
+}
+
+fn project_mcp_config_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(".mcp.json")
+}
+
+fn read_project_mcp_config(workspace_root: &Path) -> Result<Value, String> {
+    let config_path = project_mcp_config_path(workspace_root);
+    match fs::read_to_string(&config_path) {
+        Ok(raw) => {
+            let parsed: Value = serde_json::from_str(&raw)
+                .map_err(|error| format!("Invalid {}: {error}", config_path.display()))?;
+            if !parsed.is_object() {
+                return Err(format!("{} must contain a JSON object.", config_path.display()));
+            }
+            Ok(parsed)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(json!({})),
+        Err(error) => Err(format!("Failed to read {}: {error}", config_path.display())),
+    }
+}
+
+fn write_project_mcp_config(workspace_root: &Path, config: &Value) -> Result<PathBuf, String> {
+    let config_path = project_mcp_config_path(workspace_root);
+    let raw = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
+    fs::write(&config_path, format!("{raw}\n"))
+        .map_err(|error| format!("Failed to write {}: {error}", config_path.display()))?;
+    Ok(config_path)
 }
 
 fn read_mcp_config_file(path: &Path, scope: &str) -> Result<Vec<McpHostRegistryEntry>, String> {

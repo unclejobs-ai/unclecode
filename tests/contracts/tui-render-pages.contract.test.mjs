@@ -24,9 +24,9 @@ function createInkInput() {
   return input;
 }
 
-async function captureDashboardFrame(initialView) {
+async function captureDashboardFrame(initialView, columns = 120) {
   const stdout = new PassThrough();
-  stdout.columns = 120;
+  stdout.columns = columns;
   stdout.rows = 40;
   stdout.isTTY = true;
   let output = "";
@@ -40,7 +40,7 @@ async function captureDashboardFrame(initialView) {
       callback();
     },
   });
-  stderr.columns = 120;
+  stderr.columns = columns;
   stderr.rows = 40;
   stderr.isTTY = true;
 
@@ -90,7 +90,7 @@ async function captureDashboardFrame(initialView) {
         Box,
         { flexDirection: "column" },
         React.createElement(Text, null, "Work composer"),
-        React.createElement(Text, null, "Esc sessions"),
+        React.createElement(Text, null, "Ctrl+O sessions"),
       ),
   });
 
@@ -111,10 +111,10 @@ async function captureDashboardFrame(initialView) {
 test("dashboard renders distinct Work, History, MCP, and Research pages", async () => {
   const work = await captureDashboardFrame("work");
   assert.match(work, /Work composer/);
-  assert.match(work, /Esc sessions/);
+  assert.match(work, /Ctrl\+O sessions/);
 
   const history = await captureDashboardFrame("sessions");
-  assert.match(history, /History & context/);
+  assert.match(history, /history/);
   assert.match(history, /History detail/);
   assert.match(history, /Review ESC flow/);
   assert.match(history, /Enter resume/);
@@ -126,26 +126,50 @@ test("dashboard renders distinct Work, History, MCP, and Research pages", async 
   assert.doesNotMatch(history, /L\s+Logout/);
 
   const mcp = await captureDashboardFrame("mcp");
-  assert.match(mcp, /MCP servers/);
+  assert.match(mcp, /Servers/);
+  assert.match(mcp, /MCP detail/);
   assert.match(mcp, /Selected server/);
+  assert.match(mcp, /A\s+Add/);
+  assert.match(mcp, /X\s+Remove/);
   assert.match(mcp, /M\s+MCP/);
   assert.match(mcp, /I\s+Inspect/);
-  assert.match(mcp, /D\s+Doctor/);
   assert.match(mcp, /unclecode mcp inspect memory/);
-  assert.match(mcp, /Health · not checked from this page yet/);
+  assert.match(mcp, /M lists merged config/);
+  assert.doesNotMatch(mcp, /D\s+Doctor/);
+  assert.doesNotMatch(mcp, /W\s+Work/);
   assert.doesNotMatch(mcp, /B\s+Browser/);
   assert.doesNotMatch(mcp, /K\s+Key/);
   assert.doesNotMatch(mcp, /L\s+Logout/);
 
   const research = await captureDashboardFrame("research");
-  assert.match(research, /Research runs/);
+  assert.match(research, /Runs/);
+  assert.match(research, /Research detail/);
   assert.match(research, /Selected research/);
   assert.match(research, /audit workflow/);
-  assert.match(research, /Press R to start research/);
+  assert.match(research, /Press R to write a prompt/);
   assert.match(research, /R\s+Research/);
-  assert.match(research, /W\s+Work/);
-  assert.match(research, /M\s+MCP/);
+  assert.match(research, /S\s+Status/);
+  assert.doesNotMatch(research, /W\s+Work/);
+  assert.doesNotMatch(research, /M\s+MCP/);
+  assert.doesNotMatch(research, /D\s+Doctor/);
   assert.doesNotMatch(research, /B\s+Browser/);
   assert.doesNotMatch(research, /K\s+Key/);
   assert.doesNotMatch(research, /L\s+Logout/);
+});
+
+test("dashboard keeps Research readable in a narrow terminal", async () => {
+  const research = await captureDashboardFrame("research", 60);
+  assert.match(research, /local research/);
+  assert.match(research, /Research detail/);
+  assert.match(research, /R\s+Research/);
+  assert.match(research, /Press R to write a prompt/);
+  assert.doesNotMatch(research, /W\s+Work/);
+  assert.doesNotMatch(research, /M\s+MCP/);
+  assert.doesNotMatch(research, /Quick actions/);
+  assert.doesNotMatch(research, /Inspector/);
+  assert.equal(
+    research.split("\n").some((line) => /^──$/.test(line.trim())),
+    false,
+    "divider must not wrap into orphan fragments at 60 columns",
+  );
 });

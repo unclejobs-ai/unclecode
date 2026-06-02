@@ -65,6 +65,19 @@ test("built unclecode cli forwards tui --help to the real assistant entrypoint",
   assert.match(result.stdout, /--reasoning/);
 });
 
+test("built unclecode cli tui --smoke verifies runtime action wiring", () => {
+  const result = spawnSync("node", [builtCliEntrypoint, "tui", "--smoke"], {
+    cwd: workspaceRoot,
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Work shell TUI smoke OK/);
+  assert.match(result.stdout, /MCP inspect action connected/);
+  assert.match(result.stdout, /Research status action connected/);
+  assert.match(result.stdout, /History resume action connected/);
+});
+
 test("built unclecode cli center uses the Rust-native center surface", () => {
   const result = spawnSync("node", [builtCliEntrypoint, "center"], {
     cwd: workspaceRoot,

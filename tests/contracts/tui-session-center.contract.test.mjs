@@ -26,6 +26,7 @@ import {
   handleApprovalInput,
   handleResearchDraftInput,
   handleSessionCenterInput,
+  isSessionCenterImplicitSubmitInput,
   shouldCaptureDashboardInput,
   shouldOpenResearchPromptLane,
   shouldReturnToWorkOnEscape,
@@ -95,10 +96,22 @@ test("createSessionCenterModel prioritizes recent sessions over generic actions"
     true,
   );
   assert.equal(
+    model.utilityActions.some((action) => action.id === "mcp-add"),
+    true,
+  );
+  assert.equal(
+    model.utilityActions.some((action) => action.id === "mcp-remove"),
+    true,
+  );
+  assert.equal(
+    model.utilityActions.some((action) => action.id === "research-status"),
+    true,
+  );
+  assert.equal(
     model.utilityActions.some((action) => action.id === "mode-cycle"),
     false,
   );
-  assert.equal(model.utilityActions.length, 8);
+  assert.equal(model.utilityActions.length, 11);
 });
 
 test("getVisibleSessionCenterActionsForView hides global auth repair actions from contextual pages", () => {
@@ -119,13 +132,13 @@ test("getVisibleSessionCenterActionsForView hides global auth repair actions fro
     getVisibleSessionCenterActionsForView("mcp", model.utilityActions).map(
       (action) => action.id,
     ),
-    ["mcp-list", "mcp-inspect", "doctor", "work-session"],
+    ["mcp-add", "mcp-remove", "mcp-list", "mcp-inspect"],
   );
   assert.deepEqual(
     getVisibleSessionCenterActionsForView("research", model.utilityActions).map(
       (action) => action.id,
     ),
-    ["new-research", "work-session", "mcp-list", "doctor"],
+    ["new-research", "research-status"],
   );
 });
 
@@ -167,6 +180,17 @@ test("formatSessionHeadline prefers task summaries over raw ids and recognizes s
       taskSummary: null,
     }),
     "Research session",
+  );
+
+  assert.equal(
+    formatSessionHeadline({
+      sessionId: "work-with-control",
+      state: "idle",
+      updatedAt: "2026-04-02T10:00:00.000Z",
+      model: "gpt-5.4",
+      taskSummary: "Chat failed: 고잇냐 \u007f\u007f 고 잇느냐 지?",
+    }),
+    "Chat failed: 고잇냐 고 잇느냐 지?",
   );
 });
 
@@ -283,8 +307,9 @@ test("buildHistoryContextSummaryLines separates resumable history from workspace
   });
 
   assert.deepEqual(lines, [
+    "History = saved conversations",
     "History · idle",
-    "Resume loads the saved conversation",
+    "Enter opens Work with this saved context",
     "Context · 2 sources",
   ]);
 });
@@ -418,19 +443,22 @@ test("handleSessionCenterInput navigates visible action indexes without losing g
     "",
     { downArrow: true },
     { column: "actions", sessionIndex: 0, actionIndex: 0, detailOpen: false },
-    { sessionCount: 1, actionCount: 8 },
+    { sessionCount: 1, actionCount: 11 },
     [
       "unclecode work",
       "unclecode auth login --browser",
       "unclecode auth login --api-key-stdin",
       "unclecode auth logout",
       "unclecode research run",
+      "unclecode research status",
       "unclecode mcp list",
+      "unclecode mcp add <name> <command> [args...]",
+      "unclecode mcp remove <server>",
       "unclecode mcp inspect <server>",
       "unclecode doctor",
     ],
     undefined,
-    { visibleActionIndexes: [0, 4, 7] },
+    { visibleActionIndexes: [0, 4, 10] },
   );
 
   assert.equal(selected.actionIndex, 4);
@@ -439,19 +467,22 @@ test("handleSessionCenterInput navigates visible action indexes without losing g
     "",
     { return: true },
     selected,
-    { sessionCount: 1, actionCount: 8 },
+    { sessionCount: 1, actionCount: 11 },
     [
       "unclecode work",
       "unclecode auth login --browser",
       "unclecode auth login --api-key-stdin",
       "unclecode auth logout",
       "unclecode research run",
+      "unclecode research status",
       "unclecode mcp list",
+      "unclecode mcp add <name> <command> [args...]",
+      "unclecode mcp remove <server>",
       "unclecode mcp inspect <server>",
       "unclecode doctor",
     ],
     undefined,
-    { visibleActionIndexes: [0, 4, 7] },
+    { visibleActionIndexes: [0, 4, 10] },
   );
 
   assert.equal(submitted.selectedCommand, "unclecode research run");
@@ -500,12 +531,12 @@ test("createSessionCenterFocusForView resets hidden detail state on tab switches
     {
       column: "actions",
       sessionIndex: 1,
-      actionIndex: 5,
+      actionIndex: 7,
       detailOpen: false,
       shouldExit: false,
       selectedCommand: undefined,
     },
-    "MCP tab focuses the MCP list action instead of inheriting stale action focus",
+    "MCP tab focuses the MCP add action instead of inheriting stale action focus",
   );
 
   assert.deepEqual(
@@ -592,19 +623,22 @@ test("handleSessionCenterInput does not exit detail mode without a contextual co
     "",
     { return: true },
     { column: "sessions", sessionIndex: 0, actionIndex: 5, detailOpen: true },
-    { sessionCount: 1, actionCount: 8 },
+    { sessionCount: 1, actionCount: 11 },
     [
       "unclecode work",
       "unclecode auth login --browser",
       "unclecode auth login --api-key-stdin",
       "unclecode auth logout",
       "unclecode research run",
+      "unclecode research status",
       "unclecode mcp list",
+      "unclecode mcp add <name> <command> [args...]",
+      "unclecode mcp remove <server>",
       "unclecode mcp inspect <server>",
       "unclecode doctor",
     ],
     undefined,
-    { visibleActionIndexes: [5, 6, 7, 0] },
+    { visibleActionIndexes: [7, 8, 6, 9] },
   );
 
   assert.equal(result.shouldExit, false);
@@ -642,6 +676,16 @@ test("handleResearchDraftInput submits only when prompt is non-empty", () => {
   assert.equal(submitWithCarriageReturn.submitted, true);
 });
 
+test("isSessionCenterImplicitSubmitInput recognizes Ink empty Enter events", () => {
+  assert.equal(isSessionCenterImplicitSubmitInput("", {}), true);
+  assert.equal(isSessionCenterImplicitSubmitInput("", { escape: true }), false);
+  assert.equal(
+    isSessionCenterImplicitSubmitInput("", { upArrow: true }),
+    false,
+  );
+  assert.equal(isSessionCenterImplicitSubmitInput("x", {}), false);
+});
+
 test("buildResearchInspectorLines shows the page-native research draft state", () => {
   const closed = buildResearchInspectorLines({
     latestResearchSessionId: null,
@@ -652,7 +696,15 @@ test("buildResearchInspectorLines shows the page-native research draft state", (
     researchDraft: "",
     isDraftOpen: false,
   });
-  assert.ok(closed.some((line) => line.text === "Press R to start research"));
+  assert.ok(closed.some((line) => line.text === "Press R to write a prompt"));
+  assert.ok(closed.some((line) => line.text === "Research = workspace brief"));
+  assert.ok(
+    closed.some(
+      (line) =>
+        line.text ===
+        "Use before Work to gather repo context without changing code.",
+    ),
+  );
 
   const open = buildResearchInspectorLines({
     latestResearchSessionId: "research-123",
@@ -672,9 +724,12 @@ test("buildResearchInspectorLines shows the page-native research draft state", (
     researchDraft: "audit MCP workflow",
     isDraftOpen: true,
   });
-  assert.ok(open.some((line) => line.text === "Prompt"));
+  assert.ok(open.some((line) => line.text === "Research = workspace brief"));
+  assert.ok(open.some((line) => line.text === "Prompt draft"));
   assert.ok(open.some((line) => line.text === "audit MCP workflow"));
-  assert.ok(open.some((line) => line.text === "Enter run · Esc cancel"));
+  assert.ok(
+    open.some((line) => line.text === "Enter or Ctrl+R runs · Esc cancels"),
+  );
   assert.ok(open.some((line) => line.text === "Selected research"));
   assert.ok(open.some((line) => line.text === "Recent research"));
   assert.ok(open.some((line) => line.text === "done · audit MCP workflow"));
@@ -688,11 +743,22 @@ test("buildMcpInspectorLines separates configured servers from unchecked health"
   });
   assert.ok(
     empty.some(
-      (line) => line.text === "Health · not checked from this page yet",
+      (line) =>
+        line.text === "M lists merged config · I inspects selected server",
+    ),
+  );
+  assert.ok(
+    empty.some((line) => line.text === "MCP = external tools and data servers"),
+  );
+  assert.ok(
+    empty.some(
+      (line) =>
+        line.text ===
+        "Add, remove, list, and inspect servers for this workspace.",
     ),
   );
   assert.ok(empty.some((line) => line.text === "No MCP servers configured."));
-  assert.ok(empty.some((line) => line.text === "Press M to run MCP list"));
+  assert.ok(empty.some((line) => line.text === "Press M to run list"));
 
   const configured = buildMcpInspectorLines({
     mcpServerCount: 5,
@@ -736,12 +802,18 @@ test("buildMcpInspectorLines separates configured servers from unchecked health"
     ],
   });
 
-  assert.ok(configured.some((line) => line.text === "5 configured server(s)"));
+  assert.ok(
+    configured.some(
+      (line) => line.text === "5 configured server(s) from user/project config",
+    ),
+  );
   assert.ok(configured.some((line) => line.text === "Selected server"));
   assert.ok(configured.some((line) => line.text === "docs · http"));
   assert.ok(configured.some((line) => line.text === "memory · stdio"));
-  assert.ok(configured.some((line) => line.text === "project · trusted"));
-  assert.ok(configured.some((line) => line.text === "+1 more server(s)"));
+  assert.ok(
+    configured.some((line) => line.text === "project · trusted · .mcp.json"),
+  );
+  assert.ok(configured.some((line) => line.text === "+2 more server(s)"));
   assert.ok(configured.some((line) => line.text === "unclecode mcp list"));
   assert.ok(
     configured.some((line) => line.text === "Press I to inspect selected"),
@@ -807,11 +879,13 @@ test("getSessionCenterActionShortcut maps direct utility keys", () => {
   assert.equal(getSessionCenterActionShortcut("b"), "browser-login");
   assert.equal(getSessionCenterActionShortcut("v"), undefined);
   assert.equal(getSessionCenterActionShortcut("w"), "work-session");
-  assert.equal(getSessionCenterActionShortcut("s"), undefined);
+  assert.equal(getSessionCenterActionShortcut("s"), "research-status");
   assert.equal(getSessionCenterActionShortcut("r"), "new-research");
   assert.equal(getSessionCenterActionShortcut("d"), "doctor");
   assert.equal(getSessionCenterActionShortcut("m"), "mcp-list");
   assert.equal(getSessionCenterActionShortcut("i"), "mcp-inspect");
+  assert.equal(getSessionCenterActionShortcut("a"), "mcp-add");
+  assert.equal(getSessionCenterActionShortcut("x"), "mcp-remove");
   assert.equal(getSessionCenterActionShortcut("n"), undefined);
   assert.equal(getSessionCenterActionShortcut("z"), undefined);
 });
@@ -827,10 +901,12 @@ test("getSessionCenterViewShortcut maps numeric tab keys to unified shell tabs",
 test("getImmediateActionShortcut maps uppercase run-now hotkeys", () => {
   assert.equal(getImmediateActionShortcut("W"), "work-session");
   assert.equal(getImmediateActionShortcut("B"), "browser-login");
-  assert.equal(getImmediateActionShortcut("S"), undefined);
+  assert.equal(getImmediateActionShortcut("S"), "research-status");
   assert.equal(getImmediateActionShortcut("D"), "doctor");
   assert.equal(getImmediateActionShortcut("M"), "mcp-list");
   assert.equal(getImmediateActionShortcut("I"), "mcp-inspect");
+  assert.equal(getImmediateActionShortcut("A"), "mcp-add");
+  assert.equal(getImmediateActionShortcut("X"), "mcp-remove");
   assert.equal(getImmediateActionShortcut("N"), undefined);
   assert.equal(getImmediateActionShortcut("R"), "new-research");
 });
@@ -889,7 +965,7 @@ test("getSessionCenterEscapeHint describes the next visible Escape action", () =
       hasSelectedApproval: false,
       hasEmbeddedWorkPane: true,
     }),
-    "Esc sessions",
+    "Ctrl+O sessions",
   );
   assert.equal(
     getSessionCenterEscapeHint({
@@ -908,6 +984,15 @@ test("getSessionCenterEscapeHint describes the next visible Escape action", () =
       hasEmbeddedWorkPane: true,
     }),
     "Esc close",
+  );
+  assert.equal(
+    getSessionCenterEscapeHint({
+      view: "research",
+      detailOpen: true,
+      hasSelectedApproval: false,
+      hasEmbeddedWorkPane: true,
+    }),
+    "Esc cancel",
   );
   assert.equal(
     getSessionCenterEscapeHint({
@@ -943,7 +1028,7 @@ test("buildSessionCenterStatusLine gives each Escape screen tab an honest page s
       hasSelectedApproval: false,
       hasEmbeddedWorkPane: true,
     }),
-    "MCP · 2 server(s) · M list · I inspect · Esc work",
+    "MCP · 2 server(s) · A add · X remove · Esc work",
   );
   assert.equal(
     buildSessionCenterStatusLine({
@@ -955,7 +1040,7 @@ test("buildSessionCenterStatusLine gives each Escape screen tab an honest page s
       hasSelectedApproval: false,
       hasEmbeddedWorkPane: true,
     }),
-    "Research · 1 run(s) · Enter run · Esc close",
+    "Research · 1 run(s) · Enter/Ctrl+R run · Esc cancel",
   );
 });
 

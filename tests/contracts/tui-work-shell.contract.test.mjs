@@ -197,7 +197,7 @@ test("getWorkShellEntryPresentation keeps user, assistant, tool, and system role
   assert.equal(getWorkShellEntryBorderStyle("system"), "single");
   assert.equal(
     getWorkShellEmptyConversationHint(),
-    "Type a task to start. Use / for commands, @file for context.",
+    "Work = live coding chat. Type a task, /command, or @file context.",
   );
 });
 
@@ -614,7 +614,7 @@ test("work-shell input decision helpers are exported from the shared tui package
       isBusy: false,
       hasRequestSessionsView: true,
     }),
-    { type: "open-sessions-view" },
+    { type: "none" },
   );
   assert.deepEqual(
     resolveWorkShellInputAction({
@@ -623,6 +623,17 @@ test("work-shell input decision helpers are exported from the shared tui package
       input: "plain text",
       slashSuggestionCount: 0,
       isBusy: true,
+      hasRequestSessionsView: true,
+    }),
+    { type: "none" },
+  );
+  assert.deepEqual(
+    resolveWorkShellInputAction({
+      value: "o",
+      key: { ctrl: true },
+      input: "plain text",
+      slashSuggestionCount: 0,
+      isBusy: false,
       hasRequestSessionsView: true,
     }),
     { type: "open-sessions-view" },
@@ -971,7 +982,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
   );
   assert.equal(
     formatWorkShellThinkingLine("medium (mode-default)"),
-    "Thinking · Balanced thinking",
+    "Reasoning · Balanced thinking",
   );
   assert.equal(
     formatWorkShellStatusLine({

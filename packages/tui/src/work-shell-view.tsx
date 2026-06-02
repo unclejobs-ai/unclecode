@@ -50,12 +50,23 @@ const W = {
   warning: "#facc15",
 } as const;
 
+function getWorkShellDividerWidth(input: {
+  readonly terminalColumns?: number;
+  readonly maxWidth?: number;
+  readonly reservedColumns?: number;
+} = {}): number {
+  const terminalColumns = input.terminalColumns ?? process.stdout.columns ?? 96;
+  const reservedColumns = input.reservedColumns ?? 4;
+  const availableWidth = terminalColumns - reservedColumns;
+  return Math.max(24, input.maxWidth === undefined ? availableWidth : Math.min(input.maxWidth, availableWidth));
+}
+
 function WorkShellSectionDivider(props: {
   readonly label: string;
   readonly accentColor?: string;
   readonly width?: number;
 }) {
-  const width = props.width ?? 72;
+  const width = props.width ?? getWorkShellDividerWidth();
   const labelContent = ` ${props.label} `;
   const leftLength = Math.max(1, Math.floor((width - labelContent.length) / 2));
   const rightLength = Math.max(1, width - labelContent.length - leftLength);
@@ -758,10 +769,21 @@ const WorkShellPanelBlock = React.memo(function WorkShellPanelBlock(props: {
   readonly panelBorderColor: string;
   readonly panelDisplayMode: WorkShellPanelDisplayMode;
   readonly inputValue: string;
+  readonly terminalColumns?: number;
 }) {
+  const dividerWidth = props.panelPlacement === "side"
+    ? getWorkShellDividerWidth({
+        ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
+        maxWidth: 36,
+        reservedColumns: Math.max(8, Math.floor((props.terminalColumns ?? 96) * 0.68)),
+      })
+    : getWorkShellDividerWidth({
+        ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
+      });
+
   return (
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "32%" : undefined} paddingLeft={props.panelPlacement === "side" ? 1 : 0} marginTop={props.panelPlacement === "bottom" ? 1 : 0}>
-      <WorkShellSectionDivider label={props.title} accentColor={props.panelBorderColor} />
+      <WorkShellSectionDivider label={props.title} accentColor={props.panelBorderColor} width={dividerWidth} />
       <Box
         marginTop={1}
         flexDirection="column"
@@ -776,6 +798,7 @@ const WorkShellPanelBlock = React.memo(function WorkShellPanelBlock(props: {
 
 const WorkShellAttachmentBlock = React.memo(function WorkShellAttachmentBlock(props: {
   readonly attachmentLines: readonly string[];
+  readonly terminalColumns?: number;
 }) {
   if (props.attachmentLines.length === 0 || getWorkShellAttachmentPlacement() !== "after-composer") {
     return null;
@@ -783,7 +806,13 @@ const WorkShellAttachmentBlock = React.memo(function WorkShellAttachmentBlock(pr
 
   return (
     <Box marginTop={1} flexDirection="column">
-      <WorkShellSectionDivider label="attachments" accentColor={W.textMuted} />
+      <WorkShellSectionDivider
+        label="attachments"
+        accentColor={W.textMuted}
+        width={getWorkShellDividerWidth({
+          ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
+        })}
+      />
       <Box marginTop={1} flexDirection="column" paddingLeft={1} minHeight={getWorkShellAttachmentMinHeight()}>
         {props.attachmentLines.map((line, index) => (
           <Text key={`${index}-${line}`} color={getWorkShellAttachmentLineColor(index)}>{line}</Text>
@@ -800,7 +829,7 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
   return (
     <Box justifyContent="space-between">
       <Text bold color={W.text}>{formatWorkShellProviderTitle(props.provider)}</Text>
-      <Text color={W.textMuted}>{props.headerHint ?? "Esc sessions · Shift+Tab mode · / commands"}</Text>
+      <Text color={W.textMuted}>{props.headerHint ?? "Ctrl+O sessions · Shift+Tab mode · / commands"}</Text>
     </Box>
   );
 });
@@ -815,6 +844,7 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   readonly busyStatus?: string;
   readonly currentTurnStartedAt?: number;
   readonly lastTurnDurationMs?: number;
+  readonly terminalColumns?: number;
 }) {
   const [nowMs, setNowMs] = React.useState(() => Date.now());
   const [spinnerFrame, setSpinnerFrame] = React.useState(0);
@@ -856,7 +886,13 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
 
   return (
     <Box marginTop={1} flexDirection="column">
-      <WorkShellSectionDivider label="session" accentColor={W.textMuted} />
+      <WorkShellSectionDivider
+        label="session"
+        accentColor={W.textMuted}
+        width={getWorkShellDividerWidth({
+          ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
+        })}
+      />
       <Box marginTop={1} paddingLeft={1} flexDirection="column">
         <Text bold color={props.reasoningSupported ? W.user : W.warning}>{props.isBusy ? `${spinner} ${thinkingLine}` : thinkingLine}</Text>
         <Text color={W.text}>{statusLine}</Text>
@@ -946,6 +982,11 @@ export function WorkShellView(props: {
     ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
   });
   const panelPlacement = panelDisplayMode === "side" ? "side" : "bottom";
+  const hasComposerInput = props.inputValue.trim().length > 0;
+  const shouldSuppressPassivePanel =
+    panelDisplayMode === "bottom" &&
+    props.activePanel.title === "Session status" &&
+    (hasComposerInput || !props.isBusy);
 
   const conversation = (
     <WorkShellConversationBlock
@@ -967,6 +1008,7 @@ export function WorkShellView(props: {
       panelBorderColor={panelBorderColor}
       panelDisplayMode={panelDisplayMode}
       inputValue={props.inputValue}
+      {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
     />
   );
 
@@ -986,6 +1028,7 @@ export function WorkShellView(props: {
         {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
         {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
         {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
+        {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
       />
       {getWorkShellPanelAnchor(panelDisplayMode) === "with-conversation" ? (
         <Box marginTop={1}>
@@ -1010,17 +1053,27 @@ export function WorkShellView(props: {
         {...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {})}
       />
       {props.attachmentLines
-        ? <WorkShellAttachmentBlock attachmentLines={props.attachmentLines} />
+        ? <WorkShellAttachmentBlock
+            attachmentLines={props.attachmentLines}
+            {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+          />
         : null}
       {panelDisplayMode === "overlay" ? (
         <Box marginTop={1} borderStyle="round" borderColor={panelBorderColor} paddingX={1} flexDirection="column">
-          <WorkShellSectionDivider label={props.activePanel.title} accentColor={panelBorderColor} />
+          <WorkShellSectionDivider
+            label={props.activePanel.title}
+            accentColor={panelBorderColor}
+            width={getWorkShellDividerWidth({
+              ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
+              reservedColumns: 8,
+            })}
+          />
           <Text color={W.textMuted}>Esc closes · /context refreshes</Text>
           <Box marginTop={1} flexDirection="column">
             {props.activePanel.lines.map((line, index) => renderWorkShellPanelLine(line, index))}
           </Box>
         </Box>
-      ) : panelDisplayMode === "bottom" ? (
+      ) : panelDisplayMode === "bottom" && !shouldSuppressPassivePanel ? (
         panel
       ) : null}
     </Box>

@@ -20,6 +20,9 @@ export function createEmbeddedWorkShellDashboardProps(input: {
   readonly homeState: TuiShellHomeState;
   readonly contextLines: readonly string[];
   readonly refreshHomeState?: (() => Promise<TuiShellHomeState>) | undefined;
+  readonly runAction?: TuiRenderOptions<TuiShellHomeState>["runAction"];
+  readonly runSession?: TuiRenderOptions<TuiShellHomeState>["runSession"];
+  readonly launchWorkSession?: TuiRenderOptions<TuiShellHomeState>["launchWorkSession"];
   readonly renderWorkPane: NonNullable<
     TuiRenderOptions<TuiShellHomeState>["renderWorkPane"]
   >;
@@ -40,6 +43,11 @@ export function createEmbeddedWorkShellDashboardProps(input: {
     bridgeLines: input.homeState.bridgeLines ?? [],
     memoryLines: input.homeState.memoryLines ?? [],
     refreshHomeState: input.refreshHomeState,
+    ...(input.runAction ? { runAction: input.runAction } : {}),
+    ...(input.runSession ? { runSession: input.runSession } : {}),
+    ...(input.launchWorkSession
+      ? { launchWorkSession: input.launchWorkSession }
+      : {}),
     initialView: "work",
     contextLines: input.contextLines,
     renderWorkPane: input.renderWorkPane,
@@ -54,6 +62,9 @@ export function createEmbeddedWorkShellPaneDashboardProps<
   readonly homeState: TuiShellHomeState;
   readonly contextLines: readonly string[];
   readonly refreshHomeState?: (() => Promise<TuiShellHomeState>) | undefined;
+  readonly runAction?: TuiRenderOptions<TuiShellHomeState>["runAction"];
+  readonly runSession?: TuiRenderOptions<TuiShellHomeState>["runSession"];
+  readonly launchWorkSession?: TuiRenderOptions<TuiShellHomeState>["launchWorkSession"];
   readonly buildPane: (input: {
     readonly onExit: () => void;
   }) => EmbeddedWorkShellPaneProps<Attachment, State>;
@@ -64,6 +75,11 @@ export function createEmbeddedWorkShellPaneDashboardProps<
     contextLines: input.contextLines,
     ...(input.refreshHomeState
       ? { refreshHomeState: input.refreshHomeState }
+      : {}),
+    ...(input.runAction ? { runAction: input.runAction } : {}),
+    ...(input.runSession ? { runSession: input.runSession } : {}),
+    ...(input.launchWorkSession
+      ? { launchWorkSession: input.launchWorkSession }
       : {}),
     renderWorkPane: ({ openSessions, syncHomeState }) => (
       <EmbeddedWorkShellPane<Attachment, State>
@@ -85,6 +101,9 @@ export type ManagedWorkShellDashboardInput<
 > = {
   readonly homeState: TuiShellHomeState;
   readonly refreshHomeState?: (() => Promise<TuiShellHomeState>) | undefined;
+  readonly runAction?: TuiRenderOptions<TuiShellHomeState>["runAction"];
+  readonly runSession?: TuiRenderOptions<TuiShellHomeState>["runSession"];
+  readonly launchWorkSession?: TuiRenderOptions<TuiShellHomeState>["launchWorkSession"];
   readonly paneRuntime: Omit<
     CreateWorkShellEngineInput<Attachment, Reasoning, TraceEvent>,
     "onExit"
@@ -109,6 +128,11 @@ export function createManagedWorkShellDashboardProps<
     contextLines: input.paneRuntime.options.contextSummaryLines,
     ...(input.refreshHomeState
       ? { refreshHomeState: input.refreshHomeState }
+      : {}),
+    ...(input.runAction ? { runAction: input.runAction } : {}),
+    ...(input.runSession ? { runSession: input.runSession } : {}),
+    ...(input.launchWorkSession
+      ? { launchWorkSession: input.launchWorkSession }
       : {}),
     buildPane: ({ onExit }): EmbeddedWorkShellPaneProps<
       Attachment,

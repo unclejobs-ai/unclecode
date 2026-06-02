@@ -335,6 +335,15 @@ export function useWorkShellInputController(input: {
   readonly closeOverlay?: (() => void) | undefined;
 }): { readonly submit: (value: string) => Promise<void> } {
   useInput((value, key) => {
+    if (
+      input.onRequestSessionsView &&
+      (value === "\u000f" || (key.ctrl && value.toLowerCase() === "o"))
+    ) {
+      input.replaceValue("");
+      input.onRequestSessionsView();
+      return;
+    }
+
     const slashInput = input.activeSlashInput;
     const action = resolveWorkShellInputAction({
       value,

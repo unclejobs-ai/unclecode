@@ -38,6 +38,7 @@ import { createServer } from "node:http";
 import {
   buildDoctorReport,
   buildDoctorReportData,
+  addProjectMcpServer,
   buildMcpInspectReport,
   buildMcpListReport,
   buildResearchStatusReport,
@@ -47,6 +48,7 @@ import {
   formatSessionsReport,
   listSessions,
   persistProjectMode,
+  removeProjectMcpServer,
   runResearchPassData,
 } from "./operational.js";
 import { shouldLaunchDefaultWorkSession } from "./startup-paths.js";
@@ -70,6 +72,7 @@ type WorkCommandOptions = {
   readonly sessionId?: string;
   readonly tools?: boolean;
   readonly help?: boolean;
+  readonly smoke?: boolean;
 };
 
 type ConfigExplainCommandOptions = {
@@ -371,7 +374,28 @@ async function handleRootCommand(program: Command): Promise<void> {
   program.outputHelp();
 }
 
+async function handleTuiSmokeCommand(options: WorkCommandOptions): Promise<void> {
+  const { loadWorkEntrypointModule } = await import("./work-bootstrap.js");
+  const module = await loadWorkEntrypointModule();
+  if (typeof module.smokeWorkShellRuntime !== "function") {
+    throw new Error("work entrypoint does not export smokeWorkShellRuntime()");
+  }
+  const lines = await module.smokeWorkShellRuntime(buildWorkCommandArgs([], {
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    ...(options.provider ? { provider: options.provider } : {}),
+    ...(options.model ? { model: options.model } : {}),
+    ...(options.reasoning ? { reasoning: options.reasoning } : {}),
+    ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+  }));
+  process.stdout.write(`${lines.join("\n")}\n`);
+}
+
 async function handleTuiCommand(options: WorkCommandOptions): Promise<void> {
+  if (options.smoke) {
+    await handleTuiSmokeCommand(options);
+    return;
+  }
+
   if (process.env.UNCLECODE_FORCE_TS_TUI === "1") {
     await launchWorkEntrypoint(buildWorkCommandArgs([], options), {
       callerCwd: process.cwd(),
@@ -551,6 +575,24 @@ function handleMcpInspectCommand(serverName: string): void {
   );
 }
 
+async function handleMcpAddCommand(parts: string[]): Promise<void> {
+  const lines = await addProjectMcpServer({
+    workspaceRoot: process.cwd(),
+    prompt: parts.join(" "),
+  });
+  process.stdout.write(`${lines.join("\n")}\n`);
+}
+
+async function handleMcpRemoveCommand(serverName: string): Promise<void> {
+  const userHomeDir = process.env.HOME;
+  const lines = await removeProjectMcpServer({
+    workspaceRoot: process.cwd(),
+    serverName,
+    ...(userHomeDir ? { userHomeDir } : {}),
+  });
+  process.stdout.write(`${lines.join("\n")}\n`);
+}
+
 function registerRootCommands(program: Command): void {
   program.action(async () => {
     await handleRootCommand(program);
@@ -629,6 +671,7 @@ function registerWorkCommands(program: Command): void {
     .option("--session-id <sessionId>")
     .option("--tools")
     .option("--help")
+    .option("--smoke", "Run non-interactive TUI runtime smoke checks")
     .action(async (options: WorkCommandOptions) => {
       await handleTuiCommand(options);
     });
@@ -772,6 +815,21 @@ function registerResearchCommands(program: Command): void {
 
 function registerMcpCommands(program: Command): void {
   const mcpCommand = program.command("mcp").description("Inspect configured MCP servers");
+
+  mcpCommand
+    .command("add <parts...>")
+    .description("Add a stdio MCP server to this workspace .mcp.json")
+    .action(async (parts: string[]) => {
+      await handleMcpAddCommand(parts);
+    });
+
+  mcpCommand
+    .command("remove <server>")
+    .alias("rm")
+    .description("Remove a workspace MCP server from .mcp.json")
+    .action(async (serverName: string) => {
+      await handleMcpRemoveCommand(serverName);
+    });
 
   mcpCommand
     .command("list")

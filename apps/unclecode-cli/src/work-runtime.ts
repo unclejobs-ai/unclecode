@@ -65,9 +65,16 @@ export async function startRepl(
   agent: StartReplAgent,
   options: StartReplOptions,
 ): Promise<void> {
+  const effectiveOptions: StartReplOptions = {
+    ...options,
+    launchWorkSession:
+      options.launchWorkSession ??
+      ((forwardedArgs: readonly string[] = []) => runWorkCli(forwardedArgs)),
+  };
+
   await renderManagedWorkShellDashboard(
     createManagedDashboardInput(
-      { agent, options },
+      { agent, options: effectiveOptions },
       {
         resolveWorkShellInlineCommand,
         ...(process.env.HOME ? { userHomeDir: process.env.HOME } : {}),
@@ -85,6 +92,71 @@ export async function loadWorkShellDashboardProps(
   }
 
   return createManagedDashboardProps(session);
+}
+
+export async function smokeWorkShellRuntime(
+  argv: readonly string[] = [],
+): Promise<readonly string[]> {
+  const session = await loadWorkCliBootstrap({ argv });
+  if (session.prompt) {
+    throw new Error("Cannot smoke-test interactive TUI with a prompt.");
+  }
+
+  const input = createManagedDashboardInput(
+    { agent: session.agent, options: {
+      ...session.options,
+      launchWorkSession:
+        session.options.launchWorkSession ??
+        ((forwardedArgs: readonly string[] = []) => runWorkCli(forwardedArgs)),
+    } },
+    {
+      resolveWorkShellInlineCommand,
+      ...(process.env.HOME ? { userHomeDir: process.env.HOME } : {}),
+    },
+  );
+  const props = createManagedWorkShellDashboardProps(input);
+  const lines = ["Work shell TUI smoke OK"];
+
+  if (!props.renderWorkPane) {
+    throw new Error("renderWorkPane is not connected.");
+  }
+  if (!props.runAction) {
+    throw new Error("runAction is not connected.");
+  }
+  if (!props.runSession) {
+    throw new Error("runSession is not connected.");
+  }
+  if (!props.launchWorkSession) {
+    throw new Error("launchWorkSession is not connected.");
+  }
+
+  const mcpServerName = props.mcpServers?.[0]?.name;
+  const mcpLines = await props.runAction({
+    actionId: "mcp-inspect",
+    ...(mcpServerName ? { prompt: mcpServerName } : {}),
+  });
+  if (!mcpLines.some((line) => /MCP server inspect|No MCP server selected/i.test(line))) {
+    throw new Error("MCP inspect smoke did not return an inspect result.");
+  }
+  lines.push("MCP inspect action connected");
+
+  const researchLines = await props.runAction({ actionId: "research-status" });
+  if (!researchLines.some((line) => /Research status|Latest research/i.test(line))) {
+    throw new Error("Research status smoke did not return a status result.");
+  }
+  lines.push("Research status action connected");
+
+  if (props.sessions?.[0]) {
+    const resumeLines = await props.runSession(props.sessions[0].sessionId);
+    if (!resumeLines.some((line) => /Resume|Resuming session|Workspace context|Context/i.test(line))) {
+      throw new Error("History resume smoke did not return session context.");
+    }
+    lines.push("History resume action connected");
+  } else {
+    lines.push("History resume action connected (no saved sessions)");
+  }
+
+  return lines;
 }
 
 export async function runWorkCli(

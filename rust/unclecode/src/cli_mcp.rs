@@ -3,7 +3,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use unclecode_core::mcp_host::{
-    format_mcp_host_inspect, format_mcp_host_registry, load_mcp_host_registry,
+    add_project_mcp_server, format_mcp_host_inspect, format_mcp_host_registry,
+    load_mcp_host_registry, remove_project_mcp_server,
 };
 
 pub fn top_level_mcp_args(args: &[OsString]) -> Option<Vec<OsString>> {
@@ -48,6 +49,44 @@ pub fn run_top_level_mcp_command(args: &[OsString]) -> Result<u8, String> {
             println!("{}", format_mcp_host_inspect(&entries, server_name));
             Ok(0)
         }
+        Some("add") => {
+            let name = args
+                .get(1)
+                .and_then(|arg| arg.to_str())
+                .ok_or_else(mcp_usage)?;
+            let command = args
+                .get(2)
+                .and_then(|arg| arg.to_str())
+                .ok_or_else(mcp_usage)?;
+            let server_args = args
+                .iter()
+                .skip(3)
+                .map(|arg| arg.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            let cwd = resolve_workspace_dir()?;
+            let config_path = add_project_mcp_server(&cwd, name, command, &server_args)?;
+            println!("MCP server added");
+            println!("Name: {name}");
+            println!("Config: {}", config_path.display());
+            println!("Run `unclecode mcp list` to verify.");
+            Ok(0)
+        }
+        Some("remove") | Some("rm") => {
+            let server_name = args
+                .get(1)
+                .and_then(|arg| arg.to_str())
+                .ok_or_else(mcp_usage)?;
+            if args.len() > 2 {
+                return Err(mcp_usage());
+            }
+            let cwd = resolve_workspace_dir()?;
+            let config_path = remove_project_mcp_server(&cwd, server_name)?;
+            println!("MCP server removed");
+            println!("Name: {server_name}");
+            println!("Config: {}", config_path.display());
+            println!("Run `unclecode mcp list` to verify.");
+            Ok(0)
+        }
         _ => Err(mcp_usage()),
     }
 }
@@ -65,10 +104,12 @@ fn print_mcp_help() {
     println!("{}", mcp_usage());
     println!();
     println!("Rust-native MCP commands:");
+    println!("  unclecode mcp add <name> <command> [args...]");
+    println!("  unclecode mcp remove <server>");
     println!("  unclecode mcp list");
     println!("  unclecode mcp inspect <server>");
 }
 
 fn mcp_usage() -> String {
-    "Usage: unclecode mcp <list|inspect> [server]".to_string()
+    "Usage: unclecode mcp <add|remove|list|inspect> [args...]".to_string()
 }

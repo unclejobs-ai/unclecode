@@ -15,7 +15,7 @@ function getPreferredActionIndexForView(view: TuiShellState["view"]): number | u
     view === "work"
       ? "work-session"
       : view === "mcp"
-        ? "mcp-list"
+        ? "mcp-add"
         : view === "research"
           ? "new-research"
           : undefined;
@@ -165,13 +165,7 @@ export function handleSessionCenterInput(
   const isSubmitInput =
     input === "\r" ||
     input === "\n" ||
-    (input === "" &&
-      !key.upArrow &&
-      !key.downArrow &&
-      !key.leftArrow &&
-      !key.rightArrow &&
-      !key.escape &&
-      !key.ctrl);
+    isSessionCenterImplicitSubmitInput(input, key);
   const base: SessionCenterResolvedState = {
     column: state.column,
     sessionIndex: state.sessionIndex,
@@ -295,6 +289,34 @@ export function handleSessionCenterInput(
   return base;
 }
 
+export function isSessionCenterImplicitSubmitInput(
+  input: string,
+  key: {
+    readonly upArrow?: boolean;
+    readonly downArrow?: boolean;
+    readonly leftArrow?: boolean;
+    readonly rightArrow?: boolean;
+    readonly tab?: boolean;
+    readonly escape?: boolean;
+    readonly ctrl?: boolean;
+    readonly backspace?: boolean;
+    readonly delete?: boolean;
+  },
+): boolean {
+  return (
+    input === "" &&
+    !key.upArrow &&
+    !key.downArrow &&
+    !key.leftArrow &&
+    !key.rightArrow &&
+    !key.tab &&
+    !key.escape &&
+    !key.ctrl &&
+    !key.backspace &&
+    !key.delete
+  );
+}
+
 export function handleResearchDraftInput(
   currentValue: string,
   input: string,
@@ -328,6 +350,12 @@ export function getSessionCenterActionShortcut(
       return "auth-logout";
     case "r":
       return "new-research";
+    case "s":
+      return "research-status";
+    case "a":
+      return "mcp-add";
+    case "x":
+      return "mcp-remove";
     case "m":
       return "mcp-list";
     case "i":
@@ -351,6 +379,12 @@ export function getImmediateActionShortcut(input: string): string | undefined {
       return "auth-logout";
     case "R":
       return "new-research";
+    case "S":
+      return "research-status";
+    case "A":
+      return "mcp-add";
+    case "X":
+      return "mcp-remove";
     case "M":
       return "mcp-list";
     case "I":
@@ -400,15 +434,18 @@ export function getSessionCenterEscapeHint(input: {
   readonly detailOpen: boolean;
   readonly hasSelectedApproval: boolean;
   readonly hasEmbeddedWorkPane: boolean;
-}): "Esc cancel" | "Esc close" | "Esc sessions" | "Esc work" {
+}): "Esc cancel" | "Esc close" | "Ctrl+O sessions" | "Esc work" {
   if (input.hasSelectedApproval) {
+    return "Esc cancel";
+  }
+  if (input.view === "research" && input.detailOpen) {
     return "Esc cancel";
   }
   if (input.detailOpen) {
     return "Esc close";
   }
   if (input.view === "work" && input.hasEmbeddedWorkPane) {
-    return "Esc sessions";
+    return "Ctrl+O sessions";
   }
   return "Esc work";
 }
@@ -427,10 +464,10 @@ export function buildSessionCenterStatusLine(input: {
     return `Work · live session · ${escapeHint} · Shift+Tab mode · / commands`;
   }
   if (input.view === "mcp") {
-    return `MCP · ${String(input.mcpServerCount)} server(s) · M list · I inspect · ${escapeHint}`;
+    return `MCP · ${String(input.mcpServerCount)} server(s) · A add · X remove · ${escapeHint}`;
   }
   if (input.view === "research") {
-    const primaryHint = input.detailOpen ? "Enter run" : "R prompt";
+    const primaryHint = input.detailOpen ? "Enter/Ctrl+R run" : "R prompt";
     return `Research · ${String(input.researchRunCount)} run(s) · ${primaryHint} · ${escapeHint}`;
   }
   return `History · ${String(input.savedSessionCount)} saved · ↑↓ select · Enter resume · ${escapeHint}`;

@@ -1,5 +1,7 @@
 import { formatMcpHostRegistry, loadMcpHostRegistry } from "@unclecode/mcp-host";
 import { runRustCommand } from "@unclecode/orchestrator";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 
 const RESEARCH_LATENCY_THRESHOLDS = {
   firstEventMsBudget: 1_500,
@@ -95,6 +97,124 @@ export function buildMcpInspectReport(input: {
     "Health: not checked by inspect.",
     ...configLines,
   ].join("\n");
+}
+
+type ProjectMcpConfigFile = {
+  readonly mcpServers?: Record<string, unknown>;
+  readonly [key: string]: unknown;
+};
+
+function getProjectMcpConfigPath(workspaceRoot: string): string {
+  return path.join(workspaceRoot, ".mcp.json");
+}
+
+async function readProjectMcpConfig(workspaceRoot: string): Promise<ProjectMcpConfigFile> {
+  try {
+    const raw = await readFile(getProjectMcpConfigPath(workspaceRoot), "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error(".mcp.json must contain a JSON object.");
+    }
+    return parsed as ProjectMcpConfigFile;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return {};
+    }
+    throw error;
+  }
+}
+
+async function writeProjectMcpConfig(workspaceRoot: string, config: ProjectMcpConfigFile): Promise<string> {
+  const configPath = getProjectMcpConfigPath(workspaceRoot);
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  return configPath;
+}
+
+export async function addProjectMcpServer(input: {
+  readonly workspaceRoot: string;
+  readonly prompt?: string;
+}): Promise<readonly string[]> {
+  const parts = input.prompt?.trim().split(/\s+/).filter(Boolean) ?? [];
+  const [name, command, ...args] = parts;
+  if (!name || !command) {
+    return [
+      "MCP add needs: name command [args...]",
+      "Example: memory node ./memory-server.js",
+    ];
+  }
+  if (!/^[A-Za-z0-9_.-]+$/.test(name)) {
+    return ["MCP server name may only contain letters, numbers, dot, underscore, and dash."];
+  }
+
+  const config = await readProjectMcpConfig(input.workspaceRoot);
+  const mcpServers = {
+    ...(typeof config.mcpServers === "object" && config.mcpServers !== null
+      ? config.mcpServers
+      : {}),
+    [name]: {
+      type: "stdio",
+      command,
+      ...(args.length > 0 ? { args } : {}),
+    },
+  };
+  const configPath = await writeProjectMcpConfig(input.workspaceRoot, {
+    ...config,
+    mcpServers,
+  });
+
+  return [
+    "MCP server added",
+    `Name: ${name}`,
+    `Config: ${configPath}`,
+    "Run M to refresh the list.",
+  ];
+}
+
+export async function removeProjectMcpServer(input: {
+  readonly workspaceRoot: string;
+  readonly serverName?: string;
+  readonly userHomeDir?: string;
+}): Promise<readonly string[]> {
+  const serverName = input.serverName?.trim();
+  if (!serverName) {
+    return ["Select an MCP server first."];
+  }
+
+  const registry = loadMcpHostRegistry({
+    workspaceRoot: input.workspaceRoot,
+    ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
+  });
+  const entry = registry.byName.get(serverName);
+  if (entry && entry.scope !== "project" && entry.scope !== "local") {
+    return [
+      "MCP server is not in this workspace config.",
+      `Name: ${serverName}`,
+      `Origin: ${entry.originLabel}`,
+      "Edit the source config directly to remove it.",
+    ];
+  }
+
+  const config = await readProjectMcpConfig(input.workspaceRoot);
+  const currentServers = typeof config.mcpServers === "object" && config.mcpServers !== null
+    ? { ...config.mcpServers }
+    : {};
+  if (!(serverName in currentServers)) {
+    return [`MCP server not found in .mcp.json: ${serverName}`];
+  }
+
+  delete currentServers[serverName];
+  const configPath = await writeProjectMcpConfig(input.workspaceRoot, {
+    ...config,
+    mcpServers: currentServers,
+  });
+
+  return [
+    "MCP server removed",
+    `Name: ${serverName}`,
+    `Config: ${configPath}`,
+    "Run M to refresh the list.",
+  ];
 }
 
 function redactMcpUrl(url: string): string {

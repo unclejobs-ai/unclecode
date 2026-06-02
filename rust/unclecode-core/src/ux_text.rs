@@ -90,7 +90,7 @@ pub fn resolve_work_shell_viewport_layout_json(input_json: &str) -> Result<Strin
     } else {
         terminal_columns - 6
     };
-    let conversation_width = available_columns.clamp(32, 118);
+    let conversation_width = available_columns.max(32);
     let dock_width = (terminal_columns - 4).max(32);
     serde_json::to_string(&json!({
         "conversationWidth": conversation_width,
@@ -592,7 +592,7 @@ pub fn format_runtime_label(node: &str, platform: &str, arch: &str) -> String {
 }
 
 pub fn work_shell_empty_conversation_hint() -> &'static str {
-    "Type a task to start. Use / for commands, @file for context."
+    "Work = live coding chat. Type a task, /command, or @file context."
 }
 
 pub fn work_shell_composer_hint_json(input_json: &str) -> Result<String, String> {
@@ -626,7 +626,7 @@ pub fn work_shell_composer_hint(input_value: &str, slash_suggestion_count: i64) 
 
 pub fn format_work_shell_thinking_line(reasoning_label: &str) -> String {
     format!(
-        "Thinking · {}",
+        "Reasoning · {}",
         humanize_work_shell_reasoning_label(reasoning_label)
     )
 }
@@ -1415,11 +1415,11 @@ mod tests {
         assert_eq!(work_shell_composer_hint("/unknown", 0), "No matches");
         assert_eq!(
             work_shell_empty_conversation_hint(),
-            "Type a task to start. Use / for commands, @file for context."
+            "Work = live coding chat. Type a task, /command, or @file context."
         );
         assert_eq!(
             format_work_shell_thinking_line("medium (mode-default)"),
-            "Thinking · Balanced thinking"
+            "Reasoning · Balanced thinking"
         );
         assert_eq!(
             format_work_shell_status_line("gpt-5.4", "default", "Browser OAuth · file"),
@@ -1617,7 +1617,7 @@ mod tests {
                 r#"{"panelPlacement":"bottom","terminalColumns":240}"#
             )
             .unwrap(),
-            r#"{"conversationWidth":118,"dockWidth":236}"#
+            r#"{"conversationWidth":234,"dockWidth":236}"#
         );
         assert_eq!(
             resolve_work_shell_viewport_layout_json("").unwrap(),

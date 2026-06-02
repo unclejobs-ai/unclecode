@@ -1761,14 +1761,14 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
     }),
     { role: "tool", text: "calling openai gpt-5.4" },
   );
-  assert.deepEqual(
+  assert.equal(
     resolveVerboseTraceEntry({
       traceMode: "minimal",
       event: { type: "provider.route" },
       line: "route openai direct",
     }),
-    { role: "tool", text: "route openai direct" },
-    "provider.route stays visible in minimal mode as transport context",
+    undefined,
+    "provider.route stays out of the default conversation transcript",
   );
   assert.equal(
     resolveVerboseTraceEntry({
@@ -1788,14 +1788,14 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
     { role: "tool", text: "Reading src/index.ts" },
     "tool.started shows in minimal mode as inline progress",
   );
-  assert.deepEqual(
+  assert.equal(
     resolveVerboseTraceEntry({
       traceMode: "minimal",
       event: { type: "reasoning.delta" },
       line: "✦ thinking· inspect repo before editing",
     }),
-    { role: "assistant", text: "✦ thinking· inspect repo before editing" },
-    "reasoning.delta shows in minimal mode as conversation progress",
+    undefined,
+    "reasoning.delta stays out of the conversation transcript",
   );
   assert.deepEqual(
     resolveVerboseTraceEntry({

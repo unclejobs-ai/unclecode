@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -594,6 +594,41 @@ test("runTuiSessionCenterAction executes mcp list inline", async () => {
   }
 });
 
+test("runTuiSessionCenterAction can add and remove a project MCP server", async () => {
+  const cwd = makeTempWorkspace();
+
+  try {
+    const added = await runTuiSessionCenterAction({
+      actionId: "mcp-add",
+      workspaceRoot: cwd,
+      env: process.env,
+      prompt: "memory node ./memory-server.js --flag",
+    });
+
+    assert.match(added.join("\n"), /MCP server added/);
+    assert.match(readFileSync(path.join(cwd, ".mcp.json"), "utf8"), /"memory"/);
+
+    const listed = await runTuiSessionCenterAction({
+      actionId: "mcp-list",
+      workspaceRoot: cwd,
+      env: process.env,
+    });
+    assert.match(listed.join("\n"), /memory \| stdio \| project \| project config/);
+
+    const removed = await runTuiSessionCenterAction({
+      actionId: "mcp-remove",
+      workspaceRoot: cwd,
+      env: process.env,
+      prompt: "memory",
+    });
+
+    assert.match(removed.join("\n"), /MCP server removed/);
+    assert.doesNotMatch(readFileSync(path.join(cwd, ".mcp.json"), "utf8"), /"memory"/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("runTuiSessionCenterAction inspects one MCP server without claiming health", async () => {
   const cwd = makeTempWorkspace();
   const fakeHome = path.join(cwd, "fake-home");
@@ -647,7 +682,7 @@ test("runTuiSessionCenterAction gives a short prompt hint for research without a
       env: process.env,
     });
 
-    assert.deepEqual(lines, ["Type a research prompt and press Enter."]);
+    assert.deepEqual(lines, ["Type a research prompt. Enter or Ctrl+R runs it."]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

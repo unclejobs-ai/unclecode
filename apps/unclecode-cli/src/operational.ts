@@ -863,6 +863,17 @@ export async function runTuiSessionCenterAction(input: {
         workspaceRoot: input.workspaceRoot,
         ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
       }).split("\n");
+    case "mcp-add":
+      return addProjectMcpServer({
+        workspaceRoot: input.workspaceRoot,
+        ...(input.prompt ? { prompt: input.prompt } : {}),
+      });
+    case "mcp-remove":
+      return removeProjectMcpServer({
+        workspaceRoot: input.workspaceRoot,
+        ...(input.prompt ? { serverName: input.prompt } : {}),
+        ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
+      });
     case "mcp-inspect":
       return buildMcpInspectReport({
         workspaceRoot: input.workspaceRoot,
@@ -961,7 +972,7 @@ export async function runTuiSessionCenterAction(input: {
         });
       }
 
-      return ["Type a research prompt and press Enter."];
+      return ["Type a research prompt. Enter or Ctrl+R runs it."];
     default:
       return ["Unknown action."];
   }
@@ -1069,19 +1080,23 @@ export async function buildResumeSummary(input: {
 
 
 import {
+  addProjectMcpServer,
   buildMcpInspectReport,
   buildMcpListReport,
   buildResearchStatusReport,
   createTuiActivityEntry,
+  removeProjectMcpServer,
   runResearchPass,
   runResearchPassData,
 } from "./operational-research.js";
 
 export {
+  addProjectMcpServer,
   buildMcpInspectReport,
   buildMcpListReport,
   buildResearchStatusReport,
   createTuiActivityEntry,
+  removeProjectMcpServer,
   runResearchPass,
   runResearchPassData,
 } from "./operational-research.js";

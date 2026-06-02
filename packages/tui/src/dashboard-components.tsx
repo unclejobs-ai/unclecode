@@ -425,10 +425,11 @@ export function buildHistoryContextSummaryLines(input: {
     input.memoryLines.length > 0,
   ].filter(Boolean).length;
   return [
+    "History = saved conversations",
     `History · ${input.session.state}`,
     input.session.pendingAction
       ? `Pending · ${input.session.pendingAction}`
-      : "Resume loads the saved conversation",
+      : "Enter opens Work with this saved context",
     contextSourceCount > 0
       ? `Context · ${contextSourceCount} source${contextSourceCount > 1 ? "s" : ""}`
       : "Context · no workspace packet yet",
@@ -498,31 +499,35 @@ export function buildResearchInspectorLines(input: {
   readonly isDraftOpen: boolean;
 }): readonly { readonly text: string; readonly tone: "muted" | "text" | "success" | "warning" }[] {
   const lines: { text: string; tone: "muted" | "text" | "success" | "warning" }[] = [
-    { text: "Latest research summary", tone: "muted" },
-    { text: `session: ${input.latestResearchSessionId ?? "none"}`, tone: "muted" },
-    { text: `runs: ${String(input.researchRunCount)}`, tone: "muted" },
-    { text: `updated: ${input.latestResearchTimestamp ?? "none"}`, tone: "muted" },
-    {
-      text: input.latestResearchSummary ?? "No research run recorded yet.",
-      tone: "text",
-    },
+    { text: "Research = workspace brief", tone: "text" },
+    { text: "Scans local context and writes a reusable artifact.", tone: "muted" },
+    { text: "Use before Work to gather repo context without changing code.", tone: "muted" },
+    { text: `Runs · ${String(input.researchRunCount)}`, tone: "muted" },
   ];
 
   if (input.isDraftOpen) {
     lines.push(
-      { text: "Prompt", tone: "muted" },
+      { text: "Prompt draft", tone: "muted" },
       {
         text: input.researchDraft.length > 0
           ? formatSessionCenterDraftValue("new-research", input.researchDraft)
-          : "Type a research prompt and press Enter",
+          : "Example: summarize auth flow risks",
         tone: "warning",
       },
-      { text: "Enter run · Esc cancel", tone: "muted" },
+      { text: "Enter or Ctrl+R runs · Esc cancels", tone: "success" },
     );
   } else {
     lines.push(
-      { text: "Press R to start research", tone: "warning" },
-      { text: "unclecode research run <your prompt>", tone: "success" },
+      { text: "Press R to write a prompt", tone: "warning" },
+      { text: "Creates .unclecode/research-artifacts/research.md", tone: "muted" },
+    );
+  }
+
+  if (input.latestResearchSessionId || input.latestResearchSummary) {
+    lines.push(
+      { text: "Latest result", tone: "muted" },
+      { text: input.latestResearchSummary ?? "No summary recorded.", tone: "text" },
+      { text: input.latestResearchTimestamp ?? input.latestResearchSessionId ?? "no timestamp", tone: "muted" },
     );
   }
 
@@ -538,13 +543,13 @@ export function buildResearchInspectorLines(input: {
       );
     }
     lines.push({ text: "Recent research", tone: "muted" });
-    for (const run of input.recentResearchRuns.slice(0, 3)) {
+    for (const run of input.recentResearchRuns.slice(0, 2)) {
       const statusLabel = run.status === "failed" ? "failed" : run.status === "completed" ? "done" : "unknown";
       lines.push({
         text: `${statusLabel} · ${run.prompt || run.sessionId}`,
         tone: run.status === "failed" ? "warning" : "muted",
       });
-      if (run.summary.trim().length > 0) {
+      if (run.summary.trim().length > 0 && run.summary !== input.latestResearchSummary) {
         lines.push({ text: run.summary, tone: "text" });
       }
     }
@@ -572,9 +577,10 @@ export function buildMcpInspectorLines(input: {
   readonly selectedServerIndex?: number;
 }): readonly { readonly text: string; readonly tone: "muted" | "text" | "success" | "warning" }[] {
   const lines: { text: string; tone: "muted" | "text" | "success" | "warning" }[] = [
-    { text: "MCP status", tone: "muted" },
-    { text: `${String(input.mcpServerCount)} configured server(s)`, tone: "text" },
-    { text: "Health · not checked from this page yet", tone: "warning" },
+    { text: "MCP = external tools and data servers", tone: "text" },
+    { text: "Add, remove, list, and inspect servers for this workspace.", tone: "muted" },
+    { text: `${String(input.mcpServerCount)} configured server(s) from user/project config`, tone: "muted" },
+    { text: "M lists merged config · I inspects selected server", tone: "success" },
   ];
   const selectedServer = input.selectedServerIndex !== undefined
     ? input.mcpServers[input.selectedServerIndex]
@@ -594,24 +600,23 @@ export function buildMcpInspectorLines(input: {
         { text: selectedServer.originLabel, tone: "muted" },
       );
     }
-    lines.push({ text: "Configured servers", tone: "muted" });
-    for (const server of input.mcpServers.slice(0, 4)) {
+    lines.push({ text: "Servers", tone: "muted" });
+    for (const server of input.mcpServers.slice(0, 3)) {
       lines.push(
         { text: `${server.name} · ${server.transport}`, tone: "muted" },
-        { text: `${server.scope} · ${server.trustTier}`, tone: "muted" },
-        { text: server.originLabel, tone: "muted" },
+        { text: `${server.scope} · ${server.trustTier} · ${server.originLabel}`, tone: "muted" },
       );
     }
-    if (input.mcpServers.length > 4) {
+    if (input.mcpServers.length > 3) {
       lines.push({
-        text: `+${String(input.mcpServers.length - 4)} more server(s)`,
+        text: `+${String(input.mcpServers.length - 3)} more server(s)`,
         tone: "muted",
       });
     }
   }
 
   lines.push(
-    { text: "Press M to run MCP list", tone: "warning" },
+    { text: "Press M to run list", tone: "warning" },
     { text: "unclecode mcp list", tone: "success" },
   );
   if (selectedServer) {
@@ -788,6 +793,7 @@ export function DetailPanel(props: {
       researchDraft: props.researchDraft,
       isDraftOpen: props.shellState.focus.detailOpen,
     });
+    const resultPreviewLines = props.shellState.outputLines.slice(0, 3);
 
     return (
       <Box flexDirection="column">
@@ -796,6 +802,16 @@ export function DetailPanel(props: {
             {truncateForPane(line.text, 40)}
           </Text>
         ))}
+        {resultPreviewLines.length > 0 ? (
+          <Box flexDirection="column" marginTop={1}>
+            <Text color={C.textMuted}>Last action</Text>
+            {resultPreviewLines.map((line, index) => (
+              <Text key={`${String(index)}-${line}`} color={index === 0 ? C.success : C.textMuted}>
+                {truncateForPane(line, 40)}
+              </Text>
+            ))}
+          </Box>
+        ) : null}
       </Box>
     );
   }
@@ -806,6 +822,7 @@ export function DetailPanel(props: {
       mcpServers: props.model.mcpServers,
       selectedServerIndex: props.primarySelectionIndex,
     });
+    const resultPreviewLines = props.shellState.outputLines.slice(0, 4);
 
     return (
       <Box flexDirection="column">
@@ -814,6 +831,16 @@ export function DetailPanel(props: {
             {truncateForPane(line.text, 40)}
           </Text>
         ))}
+        {resultPreviewLines.length > 0 ? (
+          <Box flexDirection="column" marginTop={1}>
+            <Text color={C.textMuted}>Last action</Text>
+            {resultPreviewLines.map((line, index) => (
+              <Text key={`${String(index)}-${line}`} color={index === 0 ? C.success : C.textMuted}>
+                {truncateForPane(line, 40)}
+              </Text>
+            ))}
+          </Box>
+        ) : null}
       </Box>
     );
   }
@@ -832,12 +859,13 @@ export function DetailPanel(props: {
         <Text wrap="truncate-end" color={C.textMuted}>{truncateForPane(props.selectedSession.sessionId, 40)}</Text>
         <Box marginTop={1} flexDirection="column">
           {historyContextLines.map((line) => (
-            <Text key={line} color={line.startsWith("History") ? C.textSecondary : C.textMuted}>{truncateForPane(line, 42)}</Text>
+            <Text key={line} color={line.includes(" = ") ? C.text : line.startsWith("History") ? C.textSecondary : C.textMuted}>{truncateForPane(line, 42)}</Text>
           ))}
         </Box>
         <Box marginTop={1} flexDirection="column">
-          <Text color={C.textMuted}>Resume</Text>
-          <Text wrap="truncate-end" color={C.success}>unclecode resume {truncateForPane(props.selectedSession.sessionId, 30)}</Text>
+          <Text color={C.textMuted}>Resume action</Text>
+          <Text wrap="truncate-end" color={C.success}>Enter resumes this conversation in Work</Text>
+          <Text wrap="truncate-end" color={C.textMuted}>{truncateForPane(`unclecode resume ${props.selectedSession.sessionId}`, 42)}</Text>
         </Box>
         <Box marginTop={1} flexDirection="column">
           <Text color={C.textMuted}>Session</Text>
@@ -876,7 +904,7 @@ export function DetailPanel(props: {
         {props.selectedActionId === "new-research" ? (
           <Box flexDirection="column" marginTop={1}>
             <Text color={C.textMuted}>Prompt</Text>
-            <Text color={C.warning}>{props.researchDraft.length > 0 ? formatSessionCenterDraftValue(props.selectedActionId, props.researchDraft) : "Type a research prompt and press Enter"}</Text>
+            <Text color={C.warning}>{props.researchDraft.length > 0 ? formatSessionCenterDraftValue(props.selectedActionId, props.researchDraft) : "Type a research prompt. Enter or Ctrl+R runs."}</Text>
           </Box>
         ) : null}
         {props.selectedActionId === "api-key-login" ? (
@@ -885,11 +913,18 @@ export function DetailPanel(props: {
             <Text color={C.warning}>{props.researchDraft.length > 0 ? formatSessionCenterDraftValue(props.selectedActionId, props.researchDraft) : "Paste an OpenAI API key and press Enter"}</Text>
           </Box>
         ) : null}
+        {props.selectedActionId === "mcp-add" ? (
+          <Box flexDirection="column" marginTop={1}>
+            <Text color={C.textMuted}>Add server</Text>
+            <Text color={C.warning}>{props.researchDraft.length > 0 ? props.researchDraft : "name command [args...]"}</Text>
+            <Text color={C.textMuted}>Example: memory node ./memory-server.js</Text>
+          </Box>
+        ) : null}
         <Box marginTop={1}>
           <Text color={C.textMuted}>mode {props.model.modeLabel} · auth {props.model.authLabel}</Text>
         </Box>
         <Box marginTop={1}>
-          <Text color={C.textMuted}>Enter run · {escapeHint}</Text>
+          <Text color={C.textMuted}>Enter/Ctrl+R run · {escapeHint}</Text>
         </Box>
         <Box marginTop={1} flexDirection="column">
           <Text color={C.textMuted}>Workspace context</Text>

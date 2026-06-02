@@ -165,13 +165,31 @@ export const SESSION_CENTER_ACTIONS: readonly SessionCenterAction[] = [
     id: "new-research",
     label: "R Research",
     command: "unclecode research run",
-    description: "Start a fresh local research pass for the current workspace.",
+    description: "Build a local workspace context artifact you can resume or hand to Work.",
+  },
+  {
+    id: "research-status",
+    label: "S Status",
+    command: "unclecode research status",
+    description: "Show the latest local research artifact and resumable session.",
   },
   {
     id: "mcp-list",
     label: "M MCP",
     command: "unclecode mcp list",
     description: "List configured MCP servers, transport, scope, trust tier, and origin.",
+  },
+  {
+    id: "mcp-add",
+    label: "A Add",
+    command: "unclecode mcp add <name> <command> [args...]",
+    description: "Add a stdio MCP server to this workspace .mcp.json.",
+  },
+  {
+    id: "mcp-remove",
+    label: "X Remove",
+    command: "unclecode mcp remove <server>",
+    description: "Remove the selected workspace MCP server from .mcp.json.",
   },
   {
     id: "mcp-inspect",
@@ -193,8 +211,8 @@ const VISIBLE_SESSION_CENTER_ACTION_IDS_BY_VIEW: Record<
 > = {
   work: ["work-session", "new-research", "mcp-list", "doctor"],
   sessions: ["work-session", "new-research", "doctor"],
-  mcp: ["mcp-list", "mcp-inspect", "doctor", "work-session"],
-  research: ["new-research", "work-session", "mcp-list", "doctor"],
+  mcp: ["mcp-add", "mcp-remove", "mcp-list", "mcp-inspect"],
+  research: ["new-research", "research-status"],
 } as const;
 
 export function getVisibleSessionCenterActionsForView(
@@ -229,8 +247,12 @@ export function getWorkspaceDisplayName(workspacePath: string): string {
 }
 
 export function formatSessionHeadline(session: SessionCenterSession): string {
-  if (session.taskSummary && session.taskSummary.trim().length > 0) {
-    return session.taskSummary.trim();
+  const summary = session.taskSummary
+    ?.replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (summary && summary.length > 0) {
+    return summary;
   }
   if (session.sessionId.startsWith("research-")) {
     return "Research session";

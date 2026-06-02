@@ -5,6 +5,7 @@ export {
   runWorkCli,
   loadResumedWorkSession,
   loadWorkShellDashboardProps,
+  smokeWorkShellRuntime,
 } from "./work-runtime.js";
 import { runWorkCli } from "./work-runtime.js";
 

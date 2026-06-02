@@ -12,6 +12,7 @@ import {
 } from "@unclecode/orchestrator";
 
 import {
+  buildResumeSummary,
   buildTuiHomeState,
   runTuiSessionCenterAction,
   runWorkShellInlineAction,
@@ -258,6 +259,21 @@ export async function loadWorkCliBootstrap(
           env,
           ...(userHomeDir ? { userHomeDir } : {}),
           ...(onProgress ? { onProgress } : {}),
+        }),
+      runAction: ({ actionId, prompt, onProgress }) =>
+        runTuiSessionCenterAction({
+          actionId,
+          workspaceRoot: cwd,
+          env,
+          ...(prompt ? { prompt } : {}),
+          ...(userHomeDir ? { userHomeDir } : {}),
+          ...(onProgress ? { onProgress } : {}),
+        }),
+      runSession: (sessionId) =>
+        buildResumeSummary({
+          sessionId,
+          workspaceRoot: cwd,
+          env,
         }),
       saveApiKeyAuth: (raw: string) =>
         runTuiSessionCenterAction({

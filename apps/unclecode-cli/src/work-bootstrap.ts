@@ -21,6 +21,7 @@ export type WorkModule = {
   loadWorkShellDashboardProps?: (
     args: readonly string[],
   ) => Promise<WorkShellDashboardSnapshot>;
+  smokeWorkShellRuntime?: (args: readonly string[]) => Promise<readonly string[]>;
 };
 
 export type WorkLaunchInput = {

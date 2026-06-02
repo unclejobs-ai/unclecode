@@ -174,6 +174,13 @@ fn resolve_work_shell_input_action(input: &Value) -> Value {
         return json!({ "type": "move-slash-selection", "direction": "next" });
     }
 
+    if bool_field(key, "ctrl")
+        && str_field(input, "value") == Some("o")
+        && bool_field(input, "hasRequestSessionsView")
+    {
+        return json!({ "type": "open-sessions-view" });
+    }
+
     if bool_field(key, "escape") {
         if bool_field(input, "hasSensitiveInput") {
             return json!({ "type": "cancel-sensitive-input" });
@@ -185,7 +192,7 @@ fn resolve_work_shell_input_action(input: &Value) -> Value {
             return json!({ "type": "close-overlay" });
         }
         if bool_field(input, "hasRequestSessionsView") {
-            return json!({ "type": "open-sessions-view" });
+            return json!({ "type": "none" });
         }
         return json!({ "type": "open-engine-sessions" });
     }
@@ -406,11 +413,18 @@ mod tests {
                 r#"{"value":"","key":{"escape":true},"input":"plain","slashSuggestionCount":0,"isBusy":false,"hasRequestSessionsView":true}"#
             )
             .unwrap(),
-            r#"{"type":"open-sessions-view"}"#
+            r#"{"type":"none"}"#
         );
         assert_eq!(
             resolve_work_shell_input_action_json(
                 r#"{"value":"","key":{"escape":true},"input":"plain","slashSuggestionCount":0,"isBusy":true,"hasRequestSessionsView":true}"#
+            )
+            .unwrap(),
+            r#"{"type":"none"}"#
+        );
+        assert_eq!(
+            resolve_work_shell_input_action_json(
+                r#"{"value":"o","key":{"ctrl":true},"input":"plain","slashSuggestionCount":0,"isBusy":false,"hasRequestSessionsView":true}"#
             )
             .unwrap(),
             r#"{"type":"open-sessions-view"}"#

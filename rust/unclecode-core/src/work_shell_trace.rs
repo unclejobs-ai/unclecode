@@ -41,7 +41,7 @@ fn resolve_work_shell_trace_event(input: &Value) -> Value {
 fn resolve_busy_status_action(event: &Value, line: &str) -> &'static str {
     match str_field(event, "type").unwrap_or_default() {
         "turn.completed" => "clear",
-        "turn.started" | "provider.route" | "provider.calling" | "tool.started" => "set",
+        "turn.started" | "provider.calling" | "tool.started" => "set",
         "orchestrator.step" if str_field(event, "status") == Some("running") => "set",
         _ => {
             let _ = line;
@@ -91,12 +91,8 @@ fn resolve_verbose_trace_entry(trace_mode: &str, event: &Value, line: &str) -> O
     }
 
     match str_field(event, "type").unwrap_or_default() {
-        "provider.route" | "tool.started" | "tool.completed" | "policy.denied" => Some(json!({
+        "tool.started" | "tool.completed" | "policy.denied" => Some(json!({
             "role": "tool",
-            "text": line,
-        })),
-        "reasoning.delta" => Some(json!({
-            "role": "assistant",
             "text": line,
         })),
         _ => None,
@@ -150,14 +146,14 @@ mod tests {
                 r#"{"event":{"type":"provider.route"},"line":"route openai direct","traceMode":"minimal"}"#,
             )
             .unwrap(),
-            r#"{"busyStatus":"route openai direct","busyStatusAction":"set","traceEntry":{"role":"tool","text":"route openai direct"},"traceEntryRole":"tool"}"#
+            r#"{"busyStatusAction":"none","traceEntryRole":"tool"}"#
         );
         assert_eq!(
             resolve_work_shell_trace_event_json(
                 r#"{"event":{"type":"reasoning.delta"},"line":"✦ thinking· inspect repo","traceMode":"minimal"}"#,
             )
             .unwrap(),
-            r#"{"busyStatusAction":"none","traceEntry":{"role":"assistant","text":"✦ thinking· inspect repo"},"traceEntryRole":"assistant"}"#
+            r#"{"busyStatusAction":"none","traceEntryRole":"assistant"}"#
         );
         assert_eq!(
             resolve_work_shell_trace_event_json(
