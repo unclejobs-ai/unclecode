@@ -775,6 +775,61 @@ test("OpenAIProvider streams Codex reasoning deltas without replaying buffered t
   );
 });
 
+test("OpenAIProvider redacts split dapi reasoning tokens", async () => {
+  const stream = createControlledTextStream();
+  const traces = [];
+  const provider = new BaseOpenAIProvider({
+    apiKey: "header.eyJzY3...Il19.sig",
+    model: "gpt-5.4",
+    cwd: process.cwd(),
+    runtime: "codex",
+    reasoning: {
+      effort: "medium",
+      source: "mode-default",
+      support: { status: "supported", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high"] },
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      body: stream.body,
+    }),
+  });
+  provider.setTraceListener((event) => traces.push(event));
+
+  const resultPromise = provider.runTurn("think dapi");
+  const fakeToken = `dapi${"a".repeat(32)}`;
+  stream.push(
+    `data: ${JSON.stringify({
+      type: "response.reasoning_summary_text.delta",
+      item_id: "rsn_dapi",
+      delta: "checking da",
+    })}\n\n`,
+  );
+  stream.push(
+    `data: ${JSON.stringify({
+      type: "response.reasoning_summary_text.delta",
+      item_id: "rsn_dapi",
+      delta: `pi${"a".repeat(32)}`,
+    })}\n\n`,
+  );
+  stream.push(
+    'data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rsn_dapi","summary":[],"content":[]}}\n\n',
+  );
+  stream.push(
+    'data: {"type":"response.output_item.done","item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"done"}]}}\n\n',
+  );
+  stream.close();
+
+  const result = await resultPromise;
+  assert.equal(result.text, "done");
+  const reasoningText = traces
+    .filter((event) => event.type === "reasoning.delta")
+    .map((event) => String(event.delta))
+    .join("");
+  assert.equal(reasoningText.includes(fakeToken), false);
+  assert.match(reasoningText, /\[REDACTED\]/);
+});
+
 test("OpenAIProvider parses Codex Responses tool calls through Rust SSE records", async () => {
   const seenInputs = [];
   let callCount = 0;

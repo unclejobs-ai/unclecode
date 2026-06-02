@@ -1340,6 +1340,8 @@ const STREAM_SECRET_PREFIXES = [
   "AIza",
   "npm_",
   "hf_",
+  "dapi",
+  "sk-",
   "sk-ant-api03-",
   "sk-proj-",
   "sk-svcacct-",
