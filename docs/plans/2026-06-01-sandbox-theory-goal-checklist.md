@@ -94,3 +94,8 @@ Latest verification:
 - `node --conditions=source --import tsx --test tests/orchestrator/run-team-mini-loop.test.mjs tests/orchestrator/team-adapters/sdk-adapter.test.mjs tests/orchestrator/team-mini-loop.test.mjs`
 - `node --conditions=source --import tsx --test tests/runtime-broker/sandbox-escalation.test.mjs`
 - `npm run check --silent`
+- `node --conditions=source --import tsx --test --test-name-pattern "Codex backend" tests/work/openai-provider.test.mjs`
+- `node --conditions=source --import tsx --test --test-name-pattern "assistant delta" tests/orchestrator/work-shell-engine.test.mjs`
+- `npm run test:tui --silent`
+- `npm run lint --silent`
+- `git diff --check`

@@ -195,7 +195,9 @@ export class OpenShellAdapter {
     const available = this.cliAvailable === true && this.gatewaySelected !== false;
     return {
       healthy: available,
-      activeContainers: this.containers.size,
+      activeContainers: [...this.containers.values()].filter((container) =>
+        container.state === "pending" || container.state === "running"
+      ).length,
       adapters: [
         { mode: "openshell" as const, available },
       ],

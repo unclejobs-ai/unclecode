@@ -267,6 +267,7 @@ test("openshell adapter executes configured sandbox lifecycle through CLI", asyn
     assert.ok(container.startedAt <= container.finishedAt);
     assert.ok(events.some((event) => event.type === "stdout" && event.data === "openshell-ok\n"));
     assert.ok(events.some((event) => event.type === "exited" && event.exitCode === 0));
+    assert.equal(broker.health().activeContainers, 0);
 
     const calls = readFakeOpenShellLog(logPath);
     assert.deepEqual(calls[0], ["--help"]);
@@ -348,6 +349,7 @@ test("openshell adapter returns failed container for nonzero sandbox exec", asyn
     assert.equal(container.exitCode, 7);
     assert.equal(container.stderr, "exec failed\n");
     assert.ok(events.some((event) => event.type === "error" && event.exitCode === 7));
+    assert.equal(broker.health().activeContainers, 0);
 
     const calls = readFakeOpenShellLog(logPath);
     assert.ok(calls.some((call) => call[0] === "sandbox" && call[1] === "exec"));
