@@ -12,7 +12,7 @@
 1. **mini-SWE-agent 100 LOC 자체는 가져올 가치 없음.** 가져올 것은 4가지 디자인 결정: append-only message log, stateless subprocess per action, output-marker exit, 설정 분리.
 2. **새 클래스 `MiniLoopAgent`** 를 `packages/orchestrator/src/mini-loop-agent.ts` 에. Pi-fast hot path. 기존 `WorkAgent` 그대로 유지.
 3. **MMBridge 철학 계승**: review/security/gate/handoff 를 step boundary hook 으로 attach (루프 안 baked-in X).
-4. **OMX/OMO 스타일 CLI 표면**: `unclecode team run <obj> --persona builder --lanes 3` — 단, 본 표면은 UncleCode 가 standalone 일 때 기능. Layer A 가 호출할 때는 RUN_ID env 만으로 join.
+4. **external/OMO 스타일 CLI 표면**: `unclecode team run <obj> --persona builder --lanes 3` — 단, 본 표면은 UncleCode 가 standalone 일 때 기능. Layer A 가 호출할 때는 RUN_ID env 만으로 join.
 5. **Persistent bindings (§5.5)**: RUN_ID 한 개가 manifest + checkpoint NDJSON + per-worker NDJSON + reviews + UDS + mmbridge session 묶음. 기존 SessionCheckpoint + context-broker + openai-credential-store 80% 커버. 추가: disk-backed ownership registry + team-run-store + UDS.
 6. **SSOT (§5.6)**: 카테고리마다 권한자 1명, 인용=`(key, versionHash)`, write=prevTipHash CAS, log=sha256 chain. 코드 ground truth = git working tree.
 7. **ACI 채택 (§5.7)**: line-anchored edit + linter guardrail + summarized search (50 cap) + observation collapsing. **고수준 mini-SWE-agent + 저수준 SWE-agent ACI 의 합성.** GPT-4 era 데이터 (12.5% Verified) 는 historical 참고만 — 현재 SOTA Claude Opus 4.7 = 87.6%, GPT-5.3-Codex = 85.0%. 모델-비특이적 우위 확보 목적.
@@ -31,7 +31,7 @@
 ┌──────────────────────────────────────────────────────────────────────┐
 │  LAYER A — CONDUCTOR  (Claude Code, this session, claude-opus-4-7)   │
 │   * 1M context, hook system, 4% of GitHub commits (March 2026)       │
-│   * 이미 부착: mmbridge MCP, hermes-fanout, codex-rescue, OMX, agent  │
+│   * 이미 부착: mmbridge MCP, hermes-fanout, codex-rescue, external Codex orchestration, agent  │
 │     teams, claude-mem, second-claude-code skills                      │
 │   * 역할: 사용자 의도 파싱 → 멀티 CLI 디스패치 → 결과 통합 → 사용자 보고  │
 │   * SSOT 권한자: 이 layer 의 conversation + tool result log           │
@@ -91,10 +91,10 @@
 | Policy | `packages/policy-engine/src/{decision-table,delegation,overrides}.ts` | tool-allow rules, mode overlays |
 | MMBridge MCP | `apps/unclecode-cli/src/mmbridge-mcp.ts` + `scripts/run-mmbridge-mcp.mjs` | bridge 호출 wiring |
 | Hermes 외부 | `~/.claude/plugins/marketplaces/second-claude-code/references/hermes/` | external operator skillpack — Hermes runs OUTSIDE, calls in via shell |
-| OMX integration | root `package.json` scripts + `AGENTS.md` (omx:generated) | `omx exec`, `omx setup`, openclaw gateway |
+| external Codex orchestration integration | root `package.json` scripts + `AGENTS.md` (external-codex-orchestration:generated) | `external-codex-orchestration exec`, `external-codex-orchestration setup`, openclaw gateway |
 
 **중요 사실 (advisor가 짚어준 것):**
-- `AGENTS.md`는 OMX가 generate함 (`<!-- omx:generated:agents-md -->`). **수정 surface 로 쓰지 말 것** — overlay 가 덮어씀. 통합 surface는 `prompts/*.md`(OMX 지정) 또는 우리 contracts 안.
+- `AGENTS.md`는 external Codex orchestration가 generate함 (`<!-- external-codex-orchestration:generated:agents-md -->`). **수정 surface 로 쓰지 말 것** — overlay 가 덮어씀. 통합 surface는 `prompts/*.md`(external Codex orchestration 지정) 또는 우리 contracts 안.
 - "hermes -p coder & -p builder" 는 Hermes CLI 의 literal flag 가 아니다. Hermes operator-prompt **role profile** 로 해석해야 한다 (PROMPTS.md 의 Bug Fix / Feature Delivery / Security Hardening 패턴 = persona). `external-coding-supervisor` skill 이 single write-capable + read-only reviewer + mmbridge gate 의 역할 분리를 강제함.
 
 ---
@@ -171,8 +171,8 @@ result = subprocess.run(command, shell=True, cwd=cwd,
             │                              │                  │
             ▼                              ▼                  ▼
 ┌─────────────────────┐  ┌─────────────────────┐  ┌─────────────────────┐
-│ WORKER (mini-loop)  │  │ WORKER (codex/omx)  │  │ REVIEWER (mmbridge) │
-│  MiniLoopAgent      │  │  omx exec --lane N  │  │  mmbridge_review    │
+│ WORKER (mini-loop)  │  │ WORKER (codex/external-codex-orchestration)  │  │ REVIEWER (mmbridge) │
+│  MiniLoopAgent      │  │  external-codex-orchestration exec --lane N  │  │  mmbridge_review    │
 │  via LocalAdapter   │  │  via Bash spawn     │  │  mmbridge_gate      │
 │  - bounded steps    │  │  - sandbox modes    │  │  mmbridge_security  │
 │  - file ownership   │  │  - parallel lanes   │  │  - read-only        │
@@ -223,7 +223,7 @@ Persona 정의: `packages/orchestrator/src/personas/<id>.ts` (system_template + 
 
 ---
 
-## 4. CLI 표면 — OMX/OMO 스타일
+## 4. CLI 표면 — external/OMO 스타일
 
 ### 4.1 새 subcommand 트리
 
@@ -363,7 +363,7 @@ bindings:
   RUN_ID  →  workers[*].containerId            (runtime-broker)
 ```
 
-**환경 전파**: 모든 워커는 `UNCLECODE_TEAM_RUN_ID=<RUN_ID>` 와 `UNCLECODE_TEAM_RUN_ROOT=<abs_path>` 두 env 만 받으면 즉시 같은 run 에 bind. Hermes / OMX / 외부 호출자도 동일 변수로 진입.
+**환경 전파**: 모든 워커는 `UNCLECODE_TEAM_RUN_ID=<RUN_ID>` 와 `UNCLECODE_TEAM_RUN_ROOT=<abs_path>` 두 env 만 받으면 즉시 같은 run 에 bind. Hermes / external Codex orchestration / 외부 호출자도 동일 변수로 진입.
 
 ### 5.5.3 새 checkpoint type 2 종
 
@@ -475,7 +475,7 @@ $ unclecode team resume tr_x
 
 기존 `unclecode resume <sessionId>` (program.ts:560) 와 contract 호환. Resume 은 **새 체크포인트로 redirect**, 원본 log 는 immutable.
 
-### 5.5.9 Hermes / OMX 와의 binding
+### 5.5.9 Hermes / external Codex orchestration 와의 binding
 
 Hermes 가 `unclecode team run` 을 spawn 하면:
 
@@ -483,7 +483,7 @@ Hermes 가 `unclecode team run` 을 spawn 하면:
 2. Hermes 가 그 RUN_ID 로 즉시 `unclecode team status tr_xxx` polling 가능 (fast-path, 100ms 이하)
 3. Hermes 의 standard read order (OPERATIONS.md) 가 그대로 적용:
    - `summary.md` → `manifest.json` → `reviews/mmbridge-gate.json` → `reviews/mmbridge-review.json` → `workers/<id>/result.json`
-4. OMX worker 도 같은 RUN_ID 로 join — `omx exec --run-id tr_xxx` (oh-my-codex side 에서 env 만 읽으면 됨, 우리 변경 불필요)
+4. external Codex orchestration worker 도 같은 RUN_ID 로 join — `external-codex-orchestration exec --run-id tr_xxx` (external Codex orchestration side 에서 env 만 읽으면 됨, 우리 변경 불필요)
 5. mmbridge MCP 가 RUN_ID 를 자기 `mmbridge_sessions.session_id` 와 매핑 → `mmbridge_context_packet` 호출 시 같은 packet 을 반환
 
 ### 5.5.10 신규 contract / API
@@ -624,7 +624,7 @@ if context_broker.currentPacketId(runId) != worker.heldPacketId:
 | 두 워커가 같은 path 다른 버전 인용 | divergence | freshness gate 가 fail-fast |
 | Hermes 가 자기 prompt history 로 결정 | external silo | RUN_ROOT artifact 만 read |
 | MMBridge 가 캐시된 review 재사용 | stale | review 마다 packetId 검증 |
-| OMX 워커가 자기 lane 의 caching agent | divergence | RUN_ROOT 의 context-packet 강제 reload |
+| external Codex orchestration 워커가 자기 lane 의 caching agent | divergence | RUN_ROOT 의 context-packet 강제 reload |
 
 ### 5.6.5 전체 공유 vs SSOT — 충돌 해결
 
@@ -863,7 +863,7 @@ Layer A (Claude Code 여기) 가 의도 파싱 후 어느 worker 에게 무엇�
 | CLI | 핵심 강점 | 약점 / 비용 | Layer A 가 보낼 작업 | 비고 |
 |---|---|---|---|---|
 | **Claude Code (this)** | 1M context, supervised in-loop, hook 시스템, MCP 가장 풍부, 87.6% Verified | 동기적 (사용자 대기), Anthropic 의존 | 큰 컨텍스트 합성, 최종 통합, conductor 역할 자체, 사용자 대화 | **Layer A** |
-| **Codex CLI** | async/background, 격리 sandbox, GitHub native delegation, AGENTS.md 표준, 85.0% Verified | 매 invocation 비동기 → Layer A 가 polling 필요 | "이 GitHub issue 처리해" 던져두고 잊는 작업, long-running 빌드 | OAuth+OMX wired in this session |
+| **Codex CLI** | async/background, 격리 sandbox, GitHub native delegation, AGENTS.md 표준, 85.0% Verified | 매 invocation 비동기 → Layer A 가 polling 필요 | "이 GitHub issue 처리해" 던져두고 잊는 작업, long-running 빌드 | OAuth+external Codex orchestration wired in this session |
 | **UncleCode** (our project) | **Pi-fast cold start** (421ms), OSS, OpenAI/Codex first, Codex-style harness, 본 doc 후 ACI+mini-loop | 본 PR 들 끝나기 전엔 ACI 부재, GPT 의존 | Pi-fast 단발 query, GPT-only lane, OAuth credential 공유, mini-loop 단위 작업 | UncleCode 강점 = 친속도 + OSS |
 | **Aider** | git native, commit-by-commit workflow, model-agnostic | TUI 경험 약함, large context 약함 | "이 한 파일에서 함수 X 를 Y 로 바꾸고 commit 해" 같은 atomic git 단위 작업 | |
 | **Cursor CLI / Cursor 3** | Design Mode (이미지→구현), parallel Agent Tabs, /worktree built-in, IDE 통합 | 외부 API 라 본 session 에 직접 invoke 불가능 (사용자 IDE 로 보내야 함) | 디자인 mockup → React 구현 같은 시각 작업 | 사용자가 IDE 에 있을 때만 |
@@ -896,7 +896,7 @@ Layer A (Claude Code 여기) 가 의도 파싱 후 어느 worker 에게 무엇�
 2. `mmbridge_debate` / `mmbridge_review` 로 N-way fan-out (한 task 를 codex/qwen/gemini/kimi 에게 동시 query, 의견 합성)
 3. `hermes-fanout` skill 로 acpx 다중 lane 실행
 4. `codex-rescue` agent 로 stuck 시 codex 에게 핸드오프
-5. `omx` skill 로 codex 워커 lane 분기
+5. `external-codex-orchestration` skill 로 codex 워커 lane 분기
 6. **UncleCode CLI** 는 별도 Bash invocation: `unclecode mini run "..."` → JSON output 으로 결과 capture
 
 위 모든 호출이 본 doc 의 §5.5 RUN_ID 환경변수로 같은 RUN_ROOT 를 공유하면 **Layer C 가 SSOT** 가 됨. UncleCode 가 자기 결과를 RUN_ROOT 에 dump → mmbridge gate 가 read → Claude Code 가 종합.
@@ -907,7 +907,7 @@ Layer A (Claude Code 여기) 가 의도 파싱 후 어느 worker 에게 무엇�
 
 - **Pi-fast**: 421ms cold start (실측). Codex CLI 가 1-2s, Claude Code 가 3-5s 인 시장에서 단발 query 의 latency floor 점유.
 - **OSS + OpenAI-OAuth-first**: ChatGPT 구독자가 API key 없이도 무료로 쓸 수 있는 OSS 코딩 CLI 의 자리. (Codex CLI 도 이 자리지만 OSS 가 아니거나 license 제약 있음.)
-- **Harness customization**: `harness apply <preset>` + `.codex/config.toml` overlay → 사용자가 모델/reasoning/approval 을 패치 가능. OMX 와 호환.
+- **Harness customization**: `harness apply <preset>` + `.codex/config.toml` overlay → 사용자가 모델/reasoning/approval 을 패치 가능. external Codex orchestration 와 호환.
 - **Mini-loop 단위 작업**: 본 doc 의 §5.7 ACI 채택 후 → SWE-agent 수준 도구를 GPT 에 부착, mini-SWE-agent 의 단순함 + SWE-agent ACI 의 효과.
 - **MCP-native**: mmbridge / hermes / serena / claude-mem 등을 Codex 측에서도 쓸 수 있게 wiring 해줌.
 - **Team-mode 의 GPT lane**: Claude Code (Anthropic) 가 conductor 일 때 OpenAI/Codex side worker 가 필요 → UncleCode 가 그 자리.
@@ -1193,7 +1193,7 @@ Phase I — Memory Architecture (1-2 PR)
 | `context7` MCP (resolve-library-id + query-docs) | external doc SSOT |
 | `agent-teams` plugin (team-spawn/feature/debug/review/delegate/shutdown) | parallel agent 부트 |
 | `hermes-fanout` skill | acpx 다중 lane orchestration |
-| `omx` skill (`omx exec --ephemeral --sandbox`) | codex 워커 lane |
+| `external-codex-orchestration` skill (`external-codex-orchestration exec --ephemeral --sandbox`) | codex 워커 lane |
 | `second-claude-code` PDCA (research/analyze/write/review/refine/loop/batch) | knowledge work pipeline |
 | `serena` MCP | semantic code search |
 | `kimi-researcher` agent | depth-research lane (BrowseComp 60.6%) |
@@ -1224,7 +1224,7 @@ Phase I — Memory Architecture (1-2 PR)
 | A-C | UncleCode 자체가 mini-loop + team scaffold + RUN_ID binding |
 | D | mmbridge hook + SSOT citation 강제 |
 | E | Hermes operator 가 unclecode 호출 |
-| F | OMX `harness apply` 통합 |
+| F | external Codex orchestration `harness apply` 통합 |
 | G | Agentless lane (32% 의 cheap path) |
 | **H** | **Layer A 의 router agent + RUN_ID env propagation** ← 이게 핵심 |
 | **I** | **Memory bus (Honcho+mem0+Walnut+claude-mem+context7 통합)** ← 메모리 통일 |
@@ -1293,7 +1293,7 @@ Phase H 가 제일 중요. **본 repo 변경 없이** Claude Code 측 `~/.claude
 
 ### Phase F — Doctor / Harness 통합 (1 PR)
 - `unclecode doctor` 에 `team` 섹션 — runtime mode 가용성, 최근 run 상태
-- `unclecode harness apply <persona>` 옵션 — persona 의 model/reasoning 을 `.codex/config.toml` 에 stamp (OMX 와 호환)
+- `unclecode harness apply <persona>` 옵션 — persona 의 model/reasoning 을 `.codex/config.toml` 에 stamp (external Codex orchestration 와 호환)
 - `unclecode mode set yolo+builder` 같은 합성 mode 검증
 
 각 phase 단독 mergeable. Phase A→F 순서 강제. C 까지만 가도 mini-loop 단독 사용 가능.
@@ -1342,7 +1342,7 @@ Phase H 가 제일 중요. **본 repo 변경 없이** Claude Code 측 `~/.claude
 
 주의: `file-ownership-registry.ts` 는 기존 파일을 **확장** (disk-backed mode 추가), 기존 API 시그니처 유지 — 위 표의 수정 4 파일에는 안 들어감 (in-place additive).
 
-**`AGENTS.md` 는 건드리지 않는다** (OMX generated).
+**`AGENTS.md` 는 건드리지 않는다** (external Codex orchestration generated).
 
 ---
 
@@ -1366,7 +1366,7 @@ Phase H 가 제일 중요. **본 repo 변경 없이** Claude Code 측 `~/.claude
 - [ ] `team abort` 가 워커 SIGTERM + manifest 의 status="killed" + advisory `.lock` release
 - [ ] 두 번째 coordinator 가 같은 RUN_ID 로 진입하면 `.lock` 으로 차단 (명시적 에러 메시지)
 - [ ] `team resume <id>` 가 `checkpoints.ndjson` replay → 마지막 상태 복원 → 동일 RUN_ID 로 새 step 추가
-- [ ] 워커 환경에 `UNCLECODE_TEAM_RUN_ID` / `UNCLECODE_TEAM_RUN_ROOT` 가 정확히 전파됨 (외부 OMX/Codex 가 join 가능한지 smoke test)
+- [ ] 워커 환경에 `UNCLECODE_TEAM_RUN_ID` / `UNCLECODE_TEAM_RUN_ROOT` 가 정확히 전파됨 (외부 external Codex orchestration/Codex 가 join 가능한지 smoke test)
 - [ ] 두 워커가 `openai-credential-store` 를 공유 — re-auth 발생 안 함
 
 ### Phase D 완료 조건 (SSOT)
@@ -1392,7 +1392,7 @@ Phase H 가 제일 중요. **본 repo 변경 없이** Claude Code 측 `~/.claude
 1. **mini-loop 의 marker exit 가 user prompt 우연 일치 시 false-submit.** → marker 를 entropy-rich default (`__UNCLECODE_SUBMIT_${runId.slice(0,8)}__`) 로.
 2. **`run_shell` 은 현재 `UNCLECODE_ALLOW_RUN_SHELL=1` env-gated.** Team 모드는 LocalAdapter 직접 사용 → 정책 재평가 필요. **결정**: Persona 가 명시적으로 `tools: ["run_shell"]` 를 declare 했을 때만, 그리고 policy-engine 의 mode 가 `yolo` 또는 `team-trusted` 일 때만 허용.
 3. **Hermes 외부 의존**: 본 repo 는 Hermes binary 를 install 하지 않는다. Hermes 가 없는 환경에서 `unclecode team run` 은 standalone 으로 동작해야 함 (coordinator 자리는 CLI 자신이 fallback).
-4. **OMX `AGENTS.md` overlay 와의 충돌**: OMX 가 marker-bounded 영역 안에 우리 정책을 inject 하지 않도록, `prompts/team-coder.md` / `prompts/team-builder.md` 를 OMX 의 prompts/ 로 따로 둔다.
+4. **external Codex orchestration `AGENTS.md` overlay 와의 충돌**: external Codex orchestration 가 marker-bounded 영역 안에 우리 정책을 inject 하지 않도록, `prompts/team-coder.md` / `prompts/team-builder.md` 를 external Codex orchestration 의 prompts/ 로 따로 둔다.
 5. **e2b runtime adapter 미구현**: contract 에는 있으나 adapter 없음. Phase B 는 local 만, docker 는 mock. e2b 는 별도 후속.
 
 ---
@@ -1403,6 +1403,6 @@ Phase H 가 제일 중요. **본 repo 변경 없이** Claude Code 측 `~/.claude
 
 - **GO**: Phase A 부터 즉시 구현 시작
 - **GO with edits**: 어느 phase / 어느 contract 를 바꿀지 적시
-- **HOLD**: 추가 조사가 필요한 항목 지정 (예: e2b 어댑터, OMX prompts 통합, Hermes operator skill 의 정확한 entrypoint)
+- **HOLD**: 추가 조사가 필요한 항목 지정 (예: e2b 어댑터, external Codex orchestration prompts 통합, Hermes operator skill 의 정확한 entrypoint)
 
 본 제안은 기존 17-task Sisyphus plan 의 Task 13 (multi-agent foundation) 위에 얹힌다. Task 16 (performance hardening) 과는 Phase F 에서 합류.

@@ -5,6 +5,7 @@ export const SESSION_METADATA_FIELDS = [
   "permissionMode",
   "isUltraworkMode",
   "traceMode",
+  "reasoningEffort",
   "model",
   "pendingAction",
   "postTurnSummary",
@@ -17,6 +18,7 @@ export type SessionMetadata = {
   readonly permissionMode?: string | null;
   readonly isUltraworkMode?: boolean | null;
   readonly traceMode?: "minimal" | "verbose" | null;
+  readonly reasoningEffort?: "low" | "medium" | "high" | null;
   readonly model?: string | null;
   readonly pendingAction?: SessionPendingAction | null;
   readonly postTurnSummary?: JsonValue | null;

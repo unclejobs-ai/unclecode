@@ -30,14 +30,14 @@ test("built work packaging exposes only the app-owned work entrypoint", () => {
   assert.equal(existsSync(staleBuiltRootWorkRuntime), false);
 });
 
-test("built unclecode cli exposes the real work entrypoint via --tools", () => {
+test("built unclecode cli exposes the Rust-native work tool surface via --tools", () => {
   const result = spawnSync("node", [builtCliEntrypoint, "work", "--tools"], {
     cwd: workspaceRoot,
     encoding: "utf8",
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Available tools:/);
+  assert.match(result.stdout, /Available Rust-native work tools:/);
   assert.match(result.stdout, /list_files/);
   assert.match(result.stdout, /read_file/);
 });
@@ -63,4 +63,26 @@ test("built unclecode cli forwards tui --help to the real assistant entrypoint",
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /UncleCode Work/);
   assert.match(result.stdout, /--reasoning/);
+});
+
+test("built unclecode cli center uses the Rust-native center surface", () => {
+  const result = spawnSync("node", [builtCliEntrypoint, "center"], {
+    cwd: workspaceRoot,
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /UncleCode Center/);
+  assert.match(result.stdout, /runtime: rust-native/);
+});
+
+test("built unclecode cli center --help forwards to Rust-native center help", () => {
+  const result = spawnSync("node", [builtCliEntrypoint, "center", "--help"], {
+    cwd: workspaceRoot,
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Usage: unclecode center/);
+  assert.match(result.stdout, /Rust-native session center/);
 });

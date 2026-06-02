@@ -22,6 +22,7 @@ test("session-checkpoint fixtures expose canonical restore-safe checkpoint shape
     "permissionMode",
     "isUltraworkMode",
     "traceMode",
+    "reasoningEffort",
     "model",
     "pendingAction",
     "postTurnSummary",

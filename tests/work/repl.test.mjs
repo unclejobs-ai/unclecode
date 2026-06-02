@@ -32,6 +32,7 @@ import {
   createWorkShellDashboardHomePatch,
   createWorkShellDashboardHomeSyncState,
   cycleWorkShellSlashSelection,
+  extractAuthLabel,
   formatAgentTraceLine,
   formatAttachmentBadgeLine,
   formatAuthLabelForDisplay,
@@ -109,15 +110,17 @@ test("resolveModelCommand lists models and updates reasoning support on switch",
   });
 
   assert.equal(listed.nextModel, "gpt-5.4");
-  assert.equal(listed.panel.title, "Models");
-  assert.match(listed.panel.lines.join("\n"), /^Current/m);
-  assert.match(listed.panel.lines.join("\n"), /^Available/m);
+  assert.equal(listed.panel.title, "Model picker");
+  assert.match(listed.panel.lines.join("\n"), /^Current model/m);
+  assert.match(listed.panel.lines.join("\n"), /^Catalog/m);
+  assert.match(listed.panel.lines.join("\n"), /Provider · OpenAI/);
+  assert.match(listed.panel.lines.join("\n"), /Available · \d+ models/);
   assert.match(listed.panel.lines.join("\n"), /\/model gpt-5\.4/);
   assert.match(listed.panel.lines.join("\n"), /\/model gpt-4\.1-mini/);
-  assert.match(listed.panel.lines.join("\n"), /Thinking · high \(mode-default\)/);
-  assert.match(listed.panel.lines.join("\n"), /active · medium/);
-  assert.match(listed.panel.lines.join("\n"), /no reasoning/);
-  assert.match(listed.panel.lines.join("\n"), /Enter switch · Esc close/);
+  assert.match(listed.panel.lines.join("\n"), /Thinking · high \(mode default\)/);
+  assert.match(listed.panel.lines.join("\n"), /active · reasoning medium/);
+  assert.match(listed.panel.lines.join("\n"), /reasoning unavailable/);
+  assert.match(listed.panel.lines.join("\n"), /exact \/model <name> switches/);
 
   const switched = resolveModelCommand("/model gpt-4.1-mini", {
     provider: "openai",
@@ -177,6 +180,61 @@ test("formatAgentTraceLine keeps work traces tool/action first", () => {
       durationMs: 42,
     }),
     "",
+  );
+  assert.match(
+    formatAgentTraceLine({
+      type: "provider.route",
+      level: "default",
+      provider: "openai",
+      model: "gpt-5.4",
+      label: "OpenAI",
+      transport: "native",
+      runtimeSupported: true,
+      endpointUrl: "https://api.openai.com/v1/responses",
+      proxyPolicy: {
+        proxyUrl: null,
+        source: "none",
+        bypassed: false,
+        targetHost: "api.openai.com",
+        noProxy: [],
+      },
+      startedAt: 0,
+    }),
+    /↗ route OpenAI · https:\/\/api\.openai\.com\/v1\/responses · direct to api\.openai\.com/,
+  );
+  const proxiedRouteLine = formatAgentTraceLine({
+    type: "provider.route",
+    level: "default",
+    provider: "openai",
+    model: "gpt-5.4",
+    label: "OpenAI",
+    transport: "native",
+    runtimeSupported: true,
+    endpointUrl: "https://api.openai.com/v1/responses",
+    proxyPolicy: {
+      proxyUrl: "http://user:secret@proxy.local:8080",
+      source: "HTTPS_PROXY",
+      bypassed: false,
+      targetHost: "api.openai.com",
+      noProxy: [],
+    },
+    startedAt: 0,
+  });
+  assert.match(proxiedRouteLine, /HTTPS_PROXY via http:\/\/redacted@proxy\.local:8080\//);
+  assert.doesNotMatch(proxiedRouteLine, /secret/);
+  assert.equal(
+    formatAgentTraceLine({
+      type: "policy.denied",
+      level: "high-signal",
+      capability: "filesystem.write",
+      source: "runtime",
+      reason: "OpenShell runtime requires an explicit filesystem write policy.",
+      matchedRule: "workspace.filesystem.write.openshell.default-deny",
+      runtimeMode: "openshell",
+      toolName: "write_file",
+      startedAt: 42,
+    }),
+    "✖ policy denied filesystem.write/write_file · openshell · OpenShell runtime requires an explicit filesystem write policy.",
   );
   assert.match(
     formatAgentTraceLine({
@@ -367,6 +425,23 @@ test("formatWorkShellError collapses raw provider failures into operator guidanc
     formatWorkShellError("OpenAI request failed with status 401: {\"error\":{\"code\":\"missing_scope\",\"message\":\"Missing scopes: model.request\"}}"),
     "OpenAI OAuth lacks model.request scope. Use API key login or proper browser OAuth.",
   );
+  assert.equal(
+    formatWorkShellError([
+      "OpenAI request failed with status 401",
+      "Route · openai · https://api.openai.com/v1/responses",
+      "Proxy · direct to api.openai.com",
+      "Auth · rejected credentials; inspect /auth status or refresh login",
+      "Retry · 1 attempt; not retryable by default",
+    ].join("\n")),
+    [
+      "OpenAI rejected current auth (401/403). Run /auth status, /auth login, or /auth logout.",
+      "OpenAI request failed with status 401",
+      "Route · openai · https://api.openai.com/v1/responses",
+      "Proxy · direct to api.openai.com",
+      "Auth · rejected credentials; inspect /auth status or refresh login",
+      "Retry · 1 attempt; not retryable by default",
+    ].join("\n"),
+  );
   assert.equal(formatWorkShellError("provider exploded"), "provider exploded");
   assert.equal(
     formatWorkShellBusyStatusLine("· thinking inspect repo", 0),
@@ -434,12 +509,14 @@ test("buildContextPanel stays compact by default and expands on demand", () => {
     ["→ model openai gpt-5.4"],
   );
   assert.equal(compact.title, "Context");
-  assert.equal(compact.lines[0], "Focus");
-  assert.match(compact.lines[1] ?? "", /^! Issue\s+saved OAuth lacks model\.request/);
-  assert.equal(compact.lines[2], "□ Guide   AGENTS.md, CLAUDE.md");
-  assert.equal(compact.lines[3], "□ Bridge  Project summary line");
-  assert.equal(compact.lines[4], "□ Memory  Remembered preference");
-  assert.equal(compact.lines[5], "→ Live    → model openai gpt-5.4");
+  assert.equal(compact.lines[0], "Snapshot");
+  assert.equal(compact.lines[1], "Sources · guidance · bridge · memory");
+  assert.equal(compact.lines[2], "Health · auth issue");
+  assert.match(compact.lines[3] ?? "", /^! Issue\s+saved OAuth lacks model\.request/);
+  assert.match(compact.lines[4] ?? "", /^□ Guide\s+AGENTS\.md, CLAUDE\.md/);
+  assert.equal(compact.lines[5], "□ Bridge  Project summary line");
+  assert.equal(compact.lines[6], "□ Memory  Remembered preference");
+  assert.equal(compact.lines[7], "→ Live    → model openai gpt-5.4");
 
   const expanded = buildContextPanel(
     [
@@ -469,8 +546,8 @@ test("buildContextPanel truncates long compact values aggressively", () => {
   );
 
   assert.equal(compact.title, "Context");
-  assert.equal(compact.lines[1]?.startsWith("□ Guide   ext extremely-long-extension"), true);
-  assert.equal(compact.lines[1]?.endsWith("..."), true);
+  assert.equal(compact.lines[3]?.startsWith("□ Guide   ext extremely-long-extension"), true);
+  assert.equal(compact.lines[3]?.endsWith("..."), true);
 });
 
 test("resolveComposerInput turns pasted image paths into image attachments", async () => {
@@ -664,13 +741,13 @@ test("getWorkShellSlashSuggestions expands /model into concrete model picks", ()
     provider: "openai",
     currentModel: "gpt-5.4",
   });
+  const commands = suggestions.map((item) => item.command);
 
-  assert.deepEqual(
-    suggestions.slice(0, 5).map((item) => item.command),
-    ["/model", "/model list", "/model gpt-5.4", "/model gpt-5.5", "/model gpt-5.4-mini"],
-  );
-  assert.match(suggestions[2]?.description ?? "", /Current · default medium · supports low, medium, high/i);
-  assert.match(suggestions[3]?.description ?? "", /Default · default medium · supports low, medium, high/i);
+  assert.deepEqual(commands.slice(0, 3), ["/model gpt-5.4", "/model gpt-5.5", "/model gpt-5.4-mini"]);
+  assert.equal(commands.includes("/model"), false);
+  assert.equal(commands.includes("/model list"), true);
+  assert.match(suggestions[0]?.description ?? "", /Current · reasoning default medium · supports low, medium, high/i);
+  assert.match(suggestions[1]?.description ?? "", /Available · reasoning default medium · supports low, medium, high/i);
 });
 
 test("composer helpers support multiline editing without slow preview for plain text", () => {
@@ -696,6 +773,8 @@ test("composer helpers support multiline editing without slow preview for plain 
 test("shouldBlockSlashSubmit guards partial slash commands from leaking to the model", () => {
   assert.equal(shouldBlockSlashSubmit("/auth"), true);
   assert.equal(shouldBlockSlashSubmit("/auth status"), false);
+  assert.equal(shouldBlockSlashSubmit("/model"), true);
+  assert.equal(shouldBlockSlashSubmit("/model gpt-5.4"), false);
   assert.equal(shouldBlockSlashSubmit("explain /auth"), false);
 });
 
@@ -826,7 +905,16 @@ test("shared input decision helpers stay available through shared seams", () => 
       isBusy: true,
       shouldBlockSlashSubmit: false,
     }),
-    { type: "noop" },
+    { type: "submit", line: "ship it", clearInput: true },
+  );
+  assert.deepEqual(
+    resolveWorkShellSubmitAction({
+      value: "gkdl",
+      isBusy: false,
+      shouldBlockSlashSubmit: false,
+      activePanelTitle: "Model picker",
+    }),
+    { type: "submit", line: "/model gkdl", clearInput: true },
   );
 });
 
@@ -864,24 +952,48 @@ test("buildSlashSuggestionPanel shows a model-focused picker for /model intent",
     [
       { command: "/model", description: "Show the current model and available model picks." },
       { command: "/model list", description: "List available models and reasoning support." },
-      { command: "/model gpt-5.4", description: "Current · default medium · supports low, medium, high" },
-      { command: "/model gpt-5.4-mini", description: "Default · default medium · supports low, medium, high" },
+      { command: "/model gpt-5.4", description: "Current · reasoning default medium · supports low, medium, high" },
+      { command: "/model gpt-5.4-mini", description: "Available · reasoning default medium · supports low, medium, high" },
     ],
     2,
   );
 
-  assert.equal(panel.title, "Models");
+  assert.equal(panel.title, "Model picker");
   assert.deepEqual(panel.lines.slice(0, 8), [
-    "Current",
+    "Current model",
     "Model · gpt-5.4",
     "Thinking · default medium",
+    "Supports · low, medium, high",
     "",
-    "Available",
-    "› /model gpt-5.4  active · medium",
-    "  /model gpt-5.4-mini  default medium",
-    "",
+    "Pick model",
+    "› /model gpt-5.4  active · reasoning medium",
+    "  /model gpt-5.4-mini  reasoning medium",
   ]);
-  assert.equal(panel.lines.at(-1), "Enter switch · Esc close");
+  assert.deepEqual(panel.lines.slice(8, 10), [
+    "",
+    "Controls",
+  ]);
+  assert.equal(panel.lines.at(-1), "↑↓ choose · Enter switch · type to filter · Esc close");
+});
+
+test("buildSlashSuggestionPanel keeps the current model visible when a filter has no matches", () => {
+  const panel = buildSlashSuggestionPanel(
+    "/model gkdl",
+    [
+      { command: "/model list", description: "List available models and reasoning support." },
+    ],
+    0,
+    undefined,
+    true,
+    undefined,
+    "gpt-5.4",
+  );
+
+  assert.equal(panel.title, "Model picker");
+  assert.match(panel.lines.join("\n"), /Current model\nModel · gpt-5\.4/);
+  assert.match(panel.lines.join("\n"), /Query · gkdl/);
+  assert.match(panel.lines.join("\n"), /No model id matches gkdl\. Current model unchanged\./);
+  assert.equal(panel.lines.at(-1), "Backspace edit · Enter keeps current · Esc close");
 });
 
 test("buildSlashSuggestionPanel describes api-key auth distinctly", () => {
@@ -1185,6 +1297,15 @@ test("formatAuthLabelForDisplay humanizes auth labels", () => {
   assert.equal(formatAuthLabelForDisplay("oauth-file"), "Browser OAuth · file");
   assert.equal(formatAuthLabelForDisplay("api-key-env"), "API key · env");
   assert.equal(formatAuthLabelForDisplay("none"), "Not signed in");
+});
+
+test("extractAuthLabel delegates auth status parsing to Rust", () => {
+  assert.equal(
+    extractAuthLabel(["Provider: openai", "Source: oauth-file"]),
+    "oauth-file",
+  );
+  assert.equal(extractAuthLabel(["Auth source: api-key-file"]), "api-key-file");
+  assert.equal(extractAuthLabel(["No auth here"]), undefined);
 });
 
 test("getConversationLayout gives answer blocks more room than lower-signal notes", () => {

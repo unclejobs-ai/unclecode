@@ -91,6 +91,7 @@ export async function handleTeamWorker(options: TeamWorkerOptions): Promise<void
     });
 
     const adapter = getLaneAdapter(runtime);
+    const runtimeMode = binding.manifest().runtime;
     const spec = {
       workerId: options.workerId,
       persona: options.persona,
@@ -103,6 +104,7 @@ export async function handleTeamWorker(options: TeamWorkerOptions): Promise<void
     const result = await adapter.run(spec, {
       binding,
       cwd: process.cwd(),
+      runtimeMode,
       env: process.env,
       systemPrompt: config.systemPrompt,
     });

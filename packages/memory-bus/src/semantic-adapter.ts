@@ -1,8 +1,7 @@
-import { createHash } from "node:crypto";
-
 import type { Citation, MemoryQuery, Observation, Peer } from "@unclecode/contracts";
 
 import type { MemoryQueryAdapter } from "./dialectic.js";
+import { rustSha256 } from "./rust-command.js";
 
 export type Mem0Hit = {
   readonly id: string;
@@ -54,11 +53,7 @@ export function createMem0Adapter(
 
       for (const hit of hits) {
         if (minScore !== undefined && hit.score !== undefined && hit.score < minScore) continue;
-        const versionHash = createHash("sha256")
-          .update(hit.id)
-          .update("\n")
-          .update(hit.memory)
-          .digest("hex");
+        const versionHash = rustSha256(`${hit.id}\n${hit.memory}`);
         citations.push({
           category: "memory_observation",
           key: `mem0:${hit.id}`,

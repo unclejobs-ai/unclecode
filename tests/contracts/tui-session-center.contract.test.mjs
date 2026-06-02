@@ -1,23 +1,41 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   appendActivityEntry,
   buildActivityInspectorModel,
+  buildHistoryContextSummaryLines,
   buildInspectorContextLines,
+  buildInspectorContextSnapshotLines,
+  buildMcpInspectorLines,
+  buildResearchInspectorLines,
+  buildSessionCenterStatusLine,
   createApprovalRequestForAction,
+  createSessionCenterFocusForView,
   createSessionCenterModel,
   formatSessionCenterDraftValue,
   formatSessionHeadline,
   getImmediateActionShortcut,
   getSessionCenterActionShortcut,
+  getSessionCenterEscapeHint,
   getSessionCenterViewShortcut,
+  getVisibleSessionCenterActionsForView,
   handleApprovalInput,
   handleResearchDraftInput,
   handleSessionCenterInput,
   shouldCaptureDashboardInput,
+  shouldOpenResearchPromptLane,
+  shouldReturnToWorkOnEscape,
   truncateForPane,
 } from "../../packages/tui/src/index.tsx";
+
+const workspaceRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../..",
+);
 
 test("createSessionCenterModel prioritizes recent sessions over generic actions", () => {
   const model = createSessionCenterModel({
@@ -43,7 +61,7 @@ test("createSessionCenterModel prioritizes recent sessions over generic actions"
   });
 
   assert.equal(model.title, "unclecode");
-  assert.match(model.subtitle, /resume recent work/i);
+  assert.match(model.subtitle, /session center/i);
   assert.equal(model.primarySessions.length, 2);
   assert.equal(model.primarySessions[0].sessionId, "research-123");
   assert.ok(
@@ -70,13 +88,45 @@ test("createSessionCenterModel prioritizes recent sessions over generic actions"
   );
   assert.equal(
     model.utilityActions.some((action) => action.id === "mcp-list"),
-    false,
+    true,
+  );
+  assert.equal(
+    model.utilityActions.some((action) => action.id === "mcp-inspect"),
+    true,
   );
   assert.equal(
     model.utilityActions.some((action) => action.id === "mode-cycle"),
     false,
   );
-  assert.equal(model.utilityActions.length, 6);
+  assert.equal(model.utilityActions.length, 8);
+});
+
+test("getVisibleSessionCenterActionsForView hides global auth repair actions from contextual pages", () => {
+  const model = createSessionCenterModel({
+    workspaceRoot: "/Users/parkeungje/project/unclecode",
+    modeLabel: "default",
+    authLabel: "oauth-file",
+    sessions: [],
+  });
+
+  assert.deepEqual(
+    getVisibleSessionCenterActionsForView("sessions", model.utilityActions).map(
+      (action) => action.id,
+    ),
+    ["work-session", "new-research", "doctor"],
+  );
+  assert.deepEqual(
+    getVisibleSessionCenterActionsForView("mcp", model.utilityActions).map(
+      (action) => action.id,
+    ),
+    ["mcp-list", "mcp-inspect", "doctor", "work-session"],
+  );
+  assert.deepEqual(
+    getVisibleSessionCenterActionsForView("research", model.utilityActions).map(
+      (action) => action.id,
+    ),
+    ["new-research", "work-session", "mcp-list", "doctor"],
+  );
 });
 
 test("formatSessionCenterDraftValue masks api-key drafts but leaves other drafts visible", () => {
@@ -196,6 +246,49 @@ test("buildInspectorContextLines groups workspace context, bridge, and memory", 
   ]);
 });
 
+test("buildInspectorContextSnapshotLines bounds noisy workspace context", () => {
+  const lines = buildInspectorContextSnapshotLines({
+    contextLines: [
+      "AGENTS: stay in workspace",
+      "CLAUDE: loaded",
+      "rules: modular",
+      "extra: hidden",
+    ],
+    bridgeLines: ["Bridge summary", "Bridge duplicate"],
+    memoryLines: ["Project memory"],
+  });
+
+  assert.deepEqual(lines, [
+    "Workspace context · 4 lines",
+    "AGENTS: stay in workspace",
+    "CLAUDE: loaded",
+    "rules: modular",
+    "Bridge summaries · 2",
+    "Memory notes · 1",
+  ]);
+});
+
+test("buildHistoryContextSummaryLines separates resumable history from workspace context", () => {
+  const lines = buildHistoryContextSummaryLines({
+    session: {
+      sessionId: "work-123",
+      state: "idle",
+      updatedAt: "2026-04-02T10:00:00.000Z",
+      model: "gpt-5.4",
+      taskSummary: "Fix TUI",
+    },
+    contextLines: ["Loaded guidance: AGENTS.md"],
+    bridgeLines: ["bridge summary"],
+    memoryLines: [],
+  });
+
+  assert.deepEqual(lines, [
+    "History · idle",
+    "Resume loads the saved conversation",
+    "Context · 2 sources",
+  ]);
+});
+
 test("createSessionCenterModel exposes an empty-state CTA when no sessions exist", () => {
   const model = createSessionCenterModel({
     workspaceRoot: "/Users/parkeungje/project/unclecode",
@@ -205,7 +298,7 @@ test("createSessionCenterModel exposes an empty-state CTA when no sessions exist
   });
 
   assert.equal(model.primarySessions.length, 0);
-  assert.match(model.emptyState, /Press W to open work/i);
+  assert.match(model.emptyState, /Press W to start work/i);
 });
 
 test("handleSessionCenterInput navigates sessions and utility actions", () => {
@@ -262,6 +355,196 @@ test("handleSessionCenterInput can switch to actions and emit a selected command
   );
 });
 
+test("handleSessionCenterInput keeps History as a two-column resume surface", () => {
+  const stayOnHistory = handleSessionCenterInput(
+    "",
+    { rightArrow: true },
+    { column: "sessions", sessionIndex: 0, actionIndex: 0, detailOpen: false },
+    { sessionCount: 2, actionCount: 3 },
+    ["unclecode work", "unclecode research run", "unclecode doctor"],
+    ["unclecode resume work-1", "unclecode resume work-2"],
+    { allowActionColumn: false },
+  );
+
+  assert.equal(stayOnHistory.column, "sessions");
+  assert.equal(stayOnHistory.shouldExit, false);
+
+  const tabStaysOnHistory = handleSessionCenterInput(
+    "\t",
+    {},
+    stayOnHistory,
+    { sessionCount: 2, actionCount: 3 },
+    ["unclecode work", "unclecode research run", "unclecode doctor"],
+    ["unclecode resume work-1", "unclecode resume work-2"],
+    { allowActionColumn: false },
+  );
+
+  assert.equal(tabStaysOnHistory.column, "sessions");
+
+  const resumed = handleSessionCenterInput(
+    "",
+    { return: true },
+    tabStaysOnHistory,
+    { sessionCount: 2, actionCount: 3 },
+    ["unclecode work", "unclecode research run", "unclecode doctor"],
+    ["unclecode resume work-1", "unclecode resume work-2"],
+    { allowActionColumn: false },
+  );
+
+  assert.equal(resumed.shouldExit, true);
+  assert.equal(resumed.selectedCommand, "unclecode resume work-1");
+});
+
+test("dashboard shell renders History without duplicate action buttons", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/dashboard-shell.tsx"),
+    "utf8",
+  );
+  const sessionsBranch = source.match(
+    /shellState\.view === "sessions" \? \([\s\S]*?\) : \(/,
+  )?.[0];
+
+  assert.ok(sessionsBranch);
+  assert.match(source, /allowActionColumn: shellState\.view !== "sessions"/);
+  assert.match(sessionsBranch, />History detail</);
+  assert.doesNotMatch(
+    sessionsBranch,
+    /ActionShortcutStrip|<ActionList|>Actions</,
+  );
+});
+
+test("handleSessionCenterInput navigates visible action indexes without losing global commands", () => {
+  const selected = handleSessionCenterInput(
+    "",
+    { downArrow: true },
+    { column: "actions", sessionIndex: 0, actionIndex: 0, detailOpen: false },
+    { sessionCount: 1, actionCount: 8 },
+    [
+      "unclecode work",
+      "unclecode auth login --browser",
+      "unclecode auth login --api-key-stdin",
+      "unclecode auth logout",
+      "unclecode research run",
+      "unclecode mcp list",
+      "unclecode mcp inspect <server>",
+      "unclecode doctor",
+    ],
+    undefined,
+    { visibleActionIndexes: [0, 4, 7] },
+  );
+
+  assert.equal(selected.actionIndex, 4);
+
+  const submitted = handleSessionCenterInput(
+    "",
+    { return: true },
+    selected,
+    { sessionCount: 1, actionCount: 8 },
+    [
+      "unclecode work",
+      "unclecode auth login --browser",
+      "unclecode auth login --api-key-stdin",
+      "unclecode auth logout",
+      "unclecode research run",
+      "unclecode mcp list",
+      "unclecode mcp inspect <server>",
+      "unclecode doctor",
+    ],
+    undefined,
+    { visibleActionIndexes: [0, 4, 7] },
+  );
+
+  assert.equal(submitted.selectedCommand, "unclecode research run");
+});
+
+test("handleSessionCenterInput resumes the selected history item on one Enter", () => {
+  const selected = handleSessionCenterInput(
+    "",
+    { return: true },
+    { column: "sessions", sessionIndex: 1, actionIndex: 0, detailOpen: false },
+    { sessionCount: 2, actionCount: 3 },
+    ["unclecode research run", "unclecode doctor", "unclecode mode status"],
+    ["unclecode resume work-1", "unclecode resume work-2"],
+  );
+
+  assert.equal(selected.shouldExit, true);
+  assert.equal(selected.selectedCommand, "unclecode resume work-2");
+  assert.equal(selected.detailOpen, false);
+});
+
+test("createSessionCenterFocusForView resets hidden detail state on tab switches", () => {
+  assert.deepEqual(
+    createSessionCenterFocusForView("sessions", {
+      column: "actions",
+      sessionIndex: 2,
+      actionIndex: 3,
+      detailOpen: true,
+    }),
+    {
+      column: "sessions",
+      sessionIndex: 2,
+      actionIndex: 3,
+      detailOpen: false,
+      shouldExit: false,
+      selectedCommand: undefined,
+    },
+  );
+
+  assert.deepEqual(
+    createSessionCenterFocusForView("mcp", {
+      column: "sessions",
+      sessionIndex: 1,
+      actionIndex: 0,
+      detailOpen: true,
+    }),
+    {
+      column: "actions",
+      sessionIndex: 1,
+      actionIndex: 5,
+      detailOpen: false,
+      shouldExit: false,
+      selectedCommand: undefined,
+    },
+    "MCP tab focuses the MCP list action instead of inheriting stale action focus",
+  );
+
+  assert.deepEqual(
+    createSessionCenterFocusForView("research", {
+      column: "sessions",
+      sessionIndex: 1,
+      actionIndex: 0,
+      detailOpen: true,
+    }),
+    {
+      column: "actions",
+      sessionIndex: 1,
+      actionIndex: 4,
+      detailOpen: false,
+      shouldExit: false,
+      selectedCommand: undefined,
+    },
+    "Research tab focuses the research action instead of inheriting stale action focus",
+  );
+
+  assert.deepEqual(
+    createSessionCenterFocusForView("work", {
+      column: "sessions",
+      sessionIndex: 1,
+      actionIndex: 5,
+      detailOpen: true,
+    }),
+    {
+      column: "actions",
+      sessionIndex: 1,
+      actionIndex: 0,
+      detailOpen: false,
+      shouldExit: false,
+      selectedCommand: undefined,
+    },
+    "Work tab focuses the work action instead of inheriting stale action focus",
+  );
+});
+
 test("handleSessionCenterInput supports hjkl-style navigation aliases", () => {
   const toActions = handleSessionCenterInput(
     "l",
@@ -304,6 +587,31 @@ test("handleSessionCenterInput lets arrow movement escape detail-open traps", ()
   assert.equal(moved.shouldExit, false);
 });
 
+test("handleSessionCenterInput does not exit detail mode without a contextual command", () => {
+  const result = handleSessionCenterInput(
+    "",
+    { return: true },
+    { column: "sessions", sessionIndex: 0, actionIndex: 5, detailOpen: true },
+    { sessionCount: 1, actionCount: 8 },
+    [
+      "unclecode work",
+      "unclecode auth login --browser",
+      "unclecode auth login --api-key-stdin",
+      "unclecode auth logout",
+      "unclecode research run",
+      "unclecode mcp list",
+      "unclecode mcp inspect <server>",
+      "unclecode doctor",
+    ],
+    undefined,
+    { visibleActionIndexes: [5, 6, 7, 0] },
+  );
+
+  assert.equal(result.shouldExit, false);
+  assert.equal(result.selectedCommand, undefined);
+  assert.equal(result.detailOpen, true);
+});
+
 test("handleResearchDraftInput appends characters and backspaces safely", () => {
   const typed = handleResearchDraftInput("repo", "s", {});
   assert.equal(typed.value, "repos");
@@ -332,6 +640,115 @@ test("handleResearchDraftInput submits only when prompt is non-empty", () => {
     {},
   );
   assert.equal(submitWithCarriageReturn.submitted, true);
+});
+
+test("buildResearchInspectorLines shows the page-native research draft state", () => {
+  const closed = buildResearchInspectorLines({
+    latestResearchSessionId: null,
+    latestResearchSummary: null,
+    latestResearchTimestamp: null,
+    researchRunCount: 0,
+    recentResearchRuns: [],
+    researchDraft: "",
+    isDraftOpen: false,
+  });
+  assert.ok(closed.some((line) => line.text === "Press R to start research"));
+
+  const open = buildResearchInspectorLines({
+    latestResearchSessionId: "research-123",
+    latestResearchSummary: "Summarize current workspace",
+    latestResearchTimestamp: "2026-06-01T00:00:00.000Z",
+    researchRunCount: 2,
+    recentResearchRuns: [
+      {
+        sessionId: "research-123",
+        prompt: "audit MCP workflow",
+        status: "completed",
+        summary: "Prepared a local research bundle",
+        timestamp: "2026-06-01T00:00:00.000Z",
+      },
+    ],
+    selectedRunIndex: 0,
+    researchDraft: "audit MCP workflow",
+    isDraftOpen: true,
+  });
+  assert.ok(open.some((line) => line.text === "Prompt"));
+  assert.ok(open.some((line) => line.text === "audit MCP workflow"));
+  assert.ok(open.some((line) => line.text === "Enter run · Esc cancel"));
+  assert.ok(open.some((line) => line.text === "Selected research"));
+  assert.ok(open.some((line) => line.text === "Recent research"));
+  assert.ok(open.some((line) => line.text === "done · audit MCP workflow"));
+  assert.ok(open.some((line) => line.text === "unclecode resume research-123"));
+});
+
+test("buildMcpInspectorLines separates configured servers from unchecked health", () => {
+  const empty = buildMcpInspectorLines({
+    mcpServerCount: 0,
+    mcpServers: [],
+  });
+  assert.ok(
+    empty.some(
+      (line) => line.text === "Health · not checked from this page yet",
+    ),
+  );
+  assert.ok(empty.some((line) => line.text === "No MCP servers configured."));
+  assert.ok(empty.some((line) => line.text === "Press M to run MCP list"));
+
+  const configured = buildMcpInspectorLines({
+    mcpServerCount: 5,
+    selectedServerIndex: 1,
+    mcpServers: [
+      {
+        name: "memory",
+        transport: "stdio",
+        scope: "project",
+        trustTier: "trusted",
+        originLabel: ".mcp.json",
+      },
+      {
+        name: "docs",
+        transport: "http",
+        scope: "user",
+        trustTier: "review",
+        originLabel: "~/.unclecode/mcp.json",
+      },
+      {
+        name: "one",
+        transport: "stdio",
+        scope: "project",
+        trustTier: "trusted",
+        originLabel: ".mcp.json",
+      },
+      {
+        name: "two",
+        transport: "stdio",
+        scope: "project",
+        trustTier: "trusted",
+        originLabel: ".mcp.json",
+      },
+      {
+        name: "three",
+        transport: "stdio",
+        scope: "project",
+        trustTier: "trusted",
+        originLabel: ".mcp.json",
+      },
+    ],
+  });
+
+  assert.ok(configured.some((line) => line.text === "5 configured server(s)"));
+  assert.ok(configured.some((line) => line.text === "Selected server"));
+  assert.ok(configured.some((line) => line.text === "docs · http"));
+  assert.ok(configured.some((line) => line.text === "memory · stdio"));
+  assert.ok(configured.some((line) => line.text === "project · trusted"));
+  assert.ok(configured.some((line) => line.text === "+1 more server(s)"));
+  assert.ok(configured.some((line) => line.text === "unclecode mcp list"));
+  assert.ok(
+    configured.some((line) => line.text === "Press I to inspect selected"),
+  );
+  assert.ok(
+    configured.some((line) => line.text === "unclecode mcp inspect docs"),
+  );
 });
 
 test("appendActivityEntry prepends new transcript entries and caps history", () => {
@@ -393,7 +810,8 @@ test("getSessionCenterActionShortcut maps direct utility keys", () => {
   assert.equal(getSessionCenterActionShortcut("s"), undefined);
   assert.equal(getSessionCenterActionShortcut("r"), "new-research");
   assert.equal(getSessionCenterActionShortcut("d"), "doctor");
-  assert.equal(getSessionCenterActionShortcut("m"), undefined);
+  assert.equal(getSessionCenterActionShortcut("m"), "mcp-list");
+  assert.equal(getSessionCenterActionShortcut("i"), "mcp-inspect");
   assert.equal(getSessionCenterActionShortcut("n"), undefined);
   assert.equal(getSessionCenterActionShortcut("z"), undefined);
 });
@@ -411,7 +829,8 @@ test("getImmediateActionShortcut maps uppercase run-now hotkeys", () => {
   assert.equal(getImmediateActionShortcut("B"), "browser-login");
   assert.equal(getImmediateActionShortcut("S"), undefined);
   assert.equal(getImmediateActionShortcut("D"), "doctor");
-  assert.equal(getImmediateActionShortcut("M"), undefined);
+  assert.equal(getImmediateActionShortcut("M"), "mcp-list");
+  assert.equal(getImmediateActionShortcut("I"), "mcp-inspect");
   assert.equal(getImmediateActionShortcut("N"), undefined);
   assert.equal(getImmediateActionShortcut("R"), "new-research");
 });
@@ -421,4 +840,200 @@ test("shouldCaptureDashboardInput yields to embedded work pane input while the W
   assert.equal(shouldCaptureDashboardInput("sessions", true), true);
   assert.equal(shouldCaptureDashboardInput("research", true), true);
   assert.equal(shouldCaptureDashboardInput("work", false), true);
+});
+
+test("shouldReturnToWorkOnEscape applies to every non-work top-level tab only", () => {
+  const topLevel = {
+    column: "actions",
+    sessionIndex: 0,
+    actionIndex: 0,
+    detailOpen: false,
+  };
+  const detailOpen = { ...topLevel, detailOpen: true };
+
+  assert.equal(
+    shouldReturnToWorkOnEscape("sessions", { escape: true }, topLevel, false),
+    true,
+  );
+  assert.equal(
+    shouldReturnToWorkOnEscape("mcp", { escape: true }, topLevel, false),
+    true,
+  );
+  assert.equal(
+    shouldReturnToWorkOnEscape("research", { escape: true }, topLevel, false),
+    true,
+  );
+  assert.equal(
+    shouldReturnToWorkOnEscape("work", { escape: true }, topLevel, false),
+    false,
+  );
+  assert.equal(
+    shouldReturnToWorkOnEscape("research", { escape: false }, topLevel, false),
+    false,
+  );
+  assert.equal(
+    shouldReturnToWorkOnEscape("research", { escape: true }, detailOpen, false),
+    false,
+  );
+  assert.equal(
+    shouldReturnToWorkOnEscape("research", { escape: true }, topLevel, true),
+    false,
+  );
+});
+
+test("getSessionCenterEscapeHint describes the next visible Escape action", () => {
+  assert.equal(
+    getSessionCenterEscapeHint({
+      view: "work",
+      detailOpen: false,
+      hasSelectedApproval: false,
+      hasEmbeddedWorkPane: true,
+    }),
+    "Esc sessions",
+  );
+  assert.equal(
+    getSessionCenterEscapeHint({
+      view: "sessions",
+      detailOpen: false,
+      hasSelectedApproval: false,
+      hasEmbeddedWorkPane: true,
+    }),
+    "Esc work",
+  );
+  assert.equal(
+    getSessionCenterEscapeHint({
+      view: "sessions",
+      detailOpen: true,
+      hasSelectedApproval: false,
+      hasEmbeddedWorkPane: true,
+    }),
+    "Esc close",
+  );
+  assert.equal(
+    getSessionCenterEscapeHint({
+      view: "mcp",
+      detailOpen: false,
+      hasSelectedApproval: true,
+      hasEmbeddedWorkPane: true,
+    }),
+    "Esc cancel",
+  );
+});
+
+test("buildSessionCenterStatusLine gives each Escape screen tab an honest page status", () => {
+  assert.equal(
+    buildSessionCenterStatusLine({
+      view: "sessions",
+      savedSessionCount: 3,
+      mcpServerCount: 2,
+      researchRunCount: 1,
+      detailOpen: false,
+      hasSelectedApproval: false,
+      hasEmbeddedWorkPane: true,
+    }),
+    "History · 3 saved · ↑↓ select · Enter resume · Esc work",
+  );
+  assert.equal(
+    buildSessionCenterStatusLine({
+      view: "mcp",
+      savedSessionCount: 3,
+      mcpServerCount: 2,
+      researchRunCount: 1,
+      detailOpen: false,
+      hasSelectedApproval: false,
+      hasEmbeddedWorkPane: true,
+    }),
+    "MCP · 2 server(s) · M list · I inspect · Esc work",
+  );
+  assert.equal(
+    buildSessionCenterStatusLine({
+      view: "research",
+      savedSessionCount: 3,
+      mcpServerCount: 2,
+      researchRunCount: 1,
+      detailOpen: true,
+      hasSelectedApproval: false,
+      hasEmbeddedWorkPane: true,
+    }),
+    "Research · 1 run(s) · Enter run · Esc close",
+  );
+});
+
+test("shouldOpenResearchPromptLane makes Research prompt page-native", () => {
+  const topLevel = {
+    column: "sessions",
+    sessionIndex: 0,
+    actionIndex: 4,
+    detailOpen: false,
+  };
+  const detailOpen = { ...topLevel, detailOpen: true };
+  const actionColumn = { ...topLevel, column: "actions" };
+
+  assert.equal(
+    shouldOpenResearchPromptLane("research", "r", {}, topLevel, false),
+    true,
+  );
+  assert.equal(
+    shouldOpenResearchPromptLane("research", "R", {}, topLevel, false),
+    true,
+  );
+  assert.equal(
+    shouldOpenResearchPromptLane(
+      "research",
+      "",
+      { return: true },
+      topLevel,
+      false,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldOpenResearchPromptLane("sessions", "r", {}, topLevel, false),
+    false,
+  );
+  assert.equal(
+    shouldOpenResearchPromptLane("research", "r", {}, detailOpen, false),
+    false,
+  );
+  assert.equal(
+    shouldOpenResearchPromptLane("research", "r", {}, topLevel, true),
+    false,
+  );
+  assert.equal(
+    shouldOpenResearchPromptLane(
+      "research",
+      "",
+      { return: true },
+      actionColumn,
+      false,
+    ),
+    false,
+  );
+});
+
+test("dashboard shell does not let the Research page prompt hijack action Enter", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/dashboard-shell.tsx"),
+    "utf8",
+  );
+  const promptBranch = source.match(
+    /if \(\s*[\s\S]{0,120}shouldOpenResearchPromptLane\([\s\S]*?\)\s*\) \{/,
+  )?.[0];
+
+  assert.ok(promptBranch);
+  assert.match(promptBranch, /centerState\.column === "sessions"/);
+  assert.doesNotMatch(promptBranch, /selectedAction\?\.id === "new-research"/);
+});
+
+test("dashboard shell keeps normal action runs out of prompt detail mode", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/dashboard-shell.tsx"),
+    "utf8",
+  );
+  const actionRunBranch = source.match(
+    /prettifyWorkerDetail\("loading action output"\)[\s\S]{0,2400}dispatch\(\{ type: "focus\.changed"[\s\S]*?\}\);/,
+  )?.[0];
+
+  assert.ok(actionRunBranch);
+  assert.match(actionRunBranch, /detailOpen: false/);
 });

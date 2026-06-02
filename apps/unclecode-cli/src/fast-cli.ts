@@ -1,4 +1,13 @@
-export type FastCliPath = "auth-status" | "doctor" | "doctor-json" | "setup" | "mode-status" | "sessions" | "config-explain";
+export type FastCliPath =
+  | "auth-status"
+  | "doctor"
+  | "doctor-json"
+  | "setup"
+  | "mode-status"
+  | "sessions"
+  | "config-explain"
+  | "research-status"
+  | "research-status-json";
 
 function isSupportedDoctorFastPath(args: readonly string[]): boolean {
   if (args[0] !== "doctor") {
@@ -31,6 +40,14 @@ export function resolveFastCliPath(args: readonly string[]): FastCliPath | undef
 
   if (args.length === 2 && args[0] === "config" && args[1] === "explain") {
     return "config-explain";
+  }
+
+  if (args.length === 2 && args[0] === "research" && args[1] === "status") {
+    return "research-status";
+  }
+
+  if (args.length === 3 && args[0] === "research" && args[1] === "status" && args[2] === "--json") {
+    return "research-status-json";
   }
 
   return undefined;
@@ -95,6 +112,19 @@ export async function maybeRunFastCliPath(args: readonly string[]): Promise<bool
       process.stdout.write(
         `${buildFastConfigExplainReport({ workspaceRoot: process.cwd(), env: process.env })}\n`,
       );
+      return true;
+    }
+    case "research-status": {
+      const { buildResearchStatusReport } = await import("./operational-research.js");
+      process.stdout.write(
+        `${await buildResearchStatusReport({ workspaceRoot: process.cwd(), env: process.env })}\n`,
+      );
+      return true;
+    }
+    case "research-status-json": {
+      const { runRustCommand } = await import("@unclecode/orchestrator");
+      const output = await runRustCommand(["research", "status", "--json"], process.cwd(), undefined, process.env);
+      process.stdout.write(output.endsWith("\n") ? output : `${output}\n`);
       return true;
     }
   }

@@ -12,6 +12,8 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "check": "tsc -p tsconfig.check.json --noEmit",
+    "provenance:check": "node scripts/provenance-check.mjs",
+    "node:check": "node scripts/node-version-check.mjs",
     "rust:check": "cargo check --workspace",
     "rust:test": "cargo test --workspace",
     "rust:build": "cargo build --workspace",
@@ -32,14 +34,16 @@
     "test:commands": "node --conditions=source --import tsx --test tests/commands/*.test.mjs",
     "test:work": "node --conditions=source --import tsx --test tests/work/*.test.mjs",
     "test:performance": "node --conditions=source --import tsx --test tests/performance/*.test.mjs",
-    "test:integration": "npm run build --silent && node --test tests/integration/*.test.mjs",
+    "test:integration": "npm run build --silent && node --test --test-concurrency=1 tests/integration/*.test.mjs",
     "test:integration:performance": "npm run build --silent && node --test tests/integration/unclecode-performance.integration.test.mjs",
+    "test": "npm run test:context-broker && npm run test:session-store && npm run test:memory-bus && npm run test:snapshot-store && npm run test:plugin-host && npm run test:lsp-bridge && npm run test:server && npm run test:providers && npm run test:contracts && npm run test:runtime-broker && npm run test:orchestrator && npm run test:tui && npm run test:cli && npm run test:commands && npm run test:work",
+    "test:all": "npm run lint && npm run check && npm run provenance:check && npm run node:check && npm run rust:check && npm run test && npm run rust:test",
     "unclecode": "target/debug/unclecode",
     "unclecode:rust": "cargo run --bin unclecode --",
     "unclecode:dev": "npm run build --silent && node apps/unclecode-cli/dist/index.js"
   },
   "engines": {
-    "node": ">=22.18.0 <24"
+    "node": ">=22.18.0 <26"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
@@ -49,8 +53,7 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.99.0",
-    "@google/genai": "^1.48.0",
+    "@google/genai": "^2.7.0",
     "dotenv": "^17.4.0",
     "ink-text-input": "^6.0.0",
     "picocolors": "^1.1.1",

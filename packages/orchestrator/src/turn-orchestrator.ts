@@ -1,6 +1,7 @@
 import type { OrchestratorStepTraceEvent } from "@unclecode/contracts";
 
 import { FileOwnershipRegistry } from "./file-ownership-registry.js";
+import { runRustCommandSync } from "./rust-command.js";
 
 export type WorkIntent = "simple" | "complex" | "research";
 
@@ -17,33 +18,34 @@ export type GuardianReviewResult = {
 export type TurnOrchestratorTraceListener = (event: OrchestratorStepTraceEvent) => void;
 
 export function classifyWorkIntent(prompt: string, mode: string): WorkIntent {
-  if (mode === "ultrawork") {
-    return "complex";
+  const raw = runRustCommandSync(
+    ["rust", "orchestrator", "classify-intent"],
+    process.cwd(),
+    JSON.stringify({ prompt, mode }),
+  );
+  const parsed: unknown = JSON.parse(raw);
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !["simple", "complex", "research"].includes(String((parsed as { intent?: unknown }).intent))
+  ) {
+    throw new Error("Rust orchestrator returned an invalid work intent.");
   }
+  return (parsed as { intent: WorkIntent }).intent;
+}
 
-  if (mode === "search" || mode === "analyze") {
-    return "research";
+function resolveOrchestratorTraceEvent(input: Record<string, unknown>): OrchestratorStepTraceEvent {
+  const parsed: unknown = JSON.parse(
+    runRustCommandSync(
+      ["rust", "orchestrator", "trace-event"],
+      process.cwd(),
+      JSON.stringify(input),
+    ),
+  );
+  if (typeof parsed !== "object" || parsed === null || (parsed as { type?: unknown }).type !== "orchestrator.step") {
+    throw new Error("Rust orchestrator returned an invalid trace event.");
   }
-
-  if (prompt.startsWith("/")) {
-    return "simple";
-  }
-
-  const filePathCount = (prompt.match(/[\w-./]+\.\w{1,5}/g) ?? []).length;
-  const complexKeywords = /\b(refactor|migrate|rewrite|redesign|rebuild|all files|entire|every)\b/i;
-  const complexKeywordsKo = /(리팩터|마이그레이션|전체|모든 파일|재작성|재설계)/;
-  const yoloComplexKeywords = /\b(fix|implement|add|update|change|create|build|improve)\b/i;
-  const yoloComplexKeywordsKo = /(수정|구현|추가|변경|고쳐|만들어|개선|빌드)/;
-
-  if (filePathCount >= 3 || complexKeywords.test(prompt) || complexKeywordsKo.test(prompt)) {
-    return "complex";
-  }
-
-  if (mode === "yolo" && (filePathCount >= 2 || yoloComplexKeywords.test(prompt) || yoloComplexKeywordsKo.test(prompt))) {
-    return "complex";
-  }
-
-  return "simple";
+  return parsed as OrchestratorStepTraceEvent;
 }
 
 export async function runBoundedExecutorPool<Task extends ComplexPlanTask, Result>(input: {
@@ -72,62 +74,49 @@ export async function runBoundedExecutorPool<Task extends ComplexPlanTask, Resul
       let reportedWait = false;
       while (writePaths.length > 0 && input.ownershipRegistry && !input.ownershipRegistry.claimAll(workerId, writePaths)) {
         if (!reportedWait) {
-          input.onTrace?.({
-            type: "orchestrator.step",
-            level: "high-signal",
-            stepId: `executor-${workerIndex + 1}-${task.id}-ownership`,
-            role: "executor",
-            kind: "agent-step",
-            status: "pending",
-            summary: `Waiting for write ownership: ${writePaths.join(", ")}`,
-          });
+          input.onTrace?.(resolveOrchestratorTraceEvent({
+            kind: "ownership-pending",
+            workerId,
+            taskId: task.id,
+            writePaths,
+          }));
           reportedWait = true;
         }
         await new Promise((resolve) => setTimeout(resolve, 1));
       }
 
       const startedAt = Date.now();
-      input.onTrace?.({
-        type: "orchestrator.step",
-        level: "high-signal",
-        stepId: `executor-${workerIndex + 1}-${task.id}`,
-        role: "executor",
-        kind: "agent-step",
-        status: "running",
+      input.onTrace?.(resolveOrchestratorTraceEvent({
+        kind: "executor-running",
+        workerId,
+        taskId: task.id,
         summary: task.summary,
         startedAt,
-      });
+      }));
 
       try {
         results[taskIndex] = await input.executeTask(task);
         const completedAt = Date.now();
-        input.onTrace?.({
-          type: "orchestrator.step",
-          level: "high-signal",
-          stepId: `executor-${workerIndex + 1}-${task.id}`,
-          role: "executor",
-          kind: "agent-step",
-          status: "completed",
+        input.onTrace?.(resolveOrchestratorTraceEvent({
+          kind: "executor-completed",
+          workerId,
+          taskId: task.id,
           summary: task.summary,
           startedAt,
           completedAt,
-          durationMs: completedAt - startedAt,
-        });
+        }));
       } catch (error) {
         const completedAt = Date.now();
         const message = error instanceof Error ? error.message : String(error);
-        input.onTrace?.({
-          type: "orchestrator.step",
-          level: "high-signal",
-          stepId: `executor-${workerIndex + 1}-${task.id}`,
-          role: "executor",
-          kind: "agent-step",
-          status: "failed",
-          summary: `${task.summary}: ${message}`,
+        input.onTrace?.(resolveOrchestratorTraceEvent({
+          kind: "executor-failed",
+          workerId,
+          taskId: task.id,
+          summary: task.summary,
+          message,
           startedAt,
           completedAt,
-          durationMs: completedAt - startedAt,
-        });
+        }));
         throw error;
       } finally {
         input.ownershipRegistry?.releaseAll(workerId);
@@ -182,16 +171,10 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
       // This is NOT an agent participant — no LLM dispatch corresponds to it.
       // See docs/specs/2026-04-05-unclecode-tui-orchestration-redesign.md §Phase 0.
       const turnStartedAt = Date.now();
-      input.onTrace?.({
-        type: "orchestrator.step",
-        level: "high-signal",
-        stepId: `turn-${turnStartedAt}`,
-        role: "turn",
-        kind: "span",
-        status: "running",
-        summary: "Routing complex turn to planner",
+      input.onTrace?.(resolveOrchestratorTraceEvent({
+        kind: "turn-running",
         startedAt: turnStartedAt,
-      });
+      }));
 
       // Phase 0 trace honesty: only emit a planner step when planning actually
       // invoked an LLM. Synchronous static decomposition (e.g. default complex
@@ -219,18 +202,12 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
         // matching completed event keyed on the same step id. Step ids
         // use the orchestrator-side timestamp so consumers can rely on
         // matching pairs without seeing the planner's internal clock.
-        input.onTrace?.({
-          type: "orchestrator.step",
-          level: "high-signal",
-          stepId: `planner-${plannerStartedAt}`,
-          role: "planner",
-          kind: "agent-step",
-          status: "completed",
-          summary: `Prepared ${tasks.length} task${tasks.length === 1 ? "" : "s"}`,
+        input.onTrace?.(resolveOrchestratorTraceEvent({
+          kind: "planner-completed",
+          taskCount: tasks.length,
           startedAt: plannerStartedAt,
           completedAt: plannerCompletedAt,
-          durationMs: plannerCompletedAt - plannerStartedAt,
-        });
+        }));
       }
 
       const results = await runBoundedExecutorPool({
@@ -245,16 +222,10 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
       const guardian = runGuardianReview
         ? await (async () => {
             const reviewerStartedAt = Date.now();
-            input.onTrace?.({
-              type: "orchestrator.step",
-              level: "high-signal",
-              stepId: `reviewer-${reviewerStartedAt}`,
-              role: "reviewer",
-              kind: "agent-step",
-              status: "running",
-              summary: "Guardian auto-review",
+            input.onTrace?.(resolveOrchestratorTraceEvent({
+              kind: "guardian-running",
               startedAt: reviewerStartedAt,
-            });
+            }));
 
             try {
               const result = await runGuardianReview({
@@ -264,52 +235,34 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
                 results,
               });
               const reviewerCompletedAt = Date.now();
-              input.onTrace?.({
-                type: "orchestrator.step",
-                level: "high-signal",
-                stepId: `reviewer-${reviewerStartedAt}`,
-                role: "reviewer",
-                kind: "agent-step",
-                status: "completed",
-                summary: `Guardian review: ${result.summary}`,
+              input.onTrace?.(resolveOrchestratorTraceEvent({
+                kind: "guardian-completed",
+                summary: result.summary,
                 startedAt: reviewerStartedAt,
                 completedAt: reviewerCompletedAt,
-                durationMs: reviewerCompletedAt - reviewerStartedAt,
-              });
+              }));
               return result;
             } catch (error) {
               const reviewerCompletedAt = Date.now();
               const message = error instanceof Error ? error.message : String(error);
-              input.onTrace?.({
-                type: "orchestrator.step",
-                level: "high-signal",
-                stepId: `reviewer-${reviewerStartedAt}`,
-                role: "reviewer",
-                kind: "agent-step",
-                status: "failed",
-                summary: `Guardian review failed: ${message}`,
+              input.onTrace?.(resolveOrchestratorTraceEvent({
+                kind: "guardian-failed",
+                message,
                 startedAt: reviewerStartedAt,
                 completedAt: reviewerCompletedAt,
-                durationMs: reviewerCompletedAt - reviewerStartedAt,
-              });
+              }));
               throw error;
             }
           })()
         : undefined;
 
       const turnCompletedAt = Date.now();
-      input.onTrace?.({
-        type: "orchestrator.step",
-        level: "high-signal",
-        stepId: `turn-${turnStartedAt}`,
-        role: "turn",
-        kind: "span",
-        status: "completed",
-        summary: `Completed ${results.length} task${results.length === 1 ? "" : "s"}`,
+      input.onTrace?.(resolveOrchestratorTraceEvent({
+        kind: "turn-completed",
+        taskCount: results.length,
         startedAt: turnStartedAt,
         completedAt: turnCompletedAt,
-        durationMs: turnCompletedAt - turnStartedAt,
-      });
+      }));
 
       return {
         kind: "complex",

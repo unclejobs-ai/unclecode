@@ -1,7 +1,13 @@
 import type { ProviderId } from "./providers.js";
+import type {
+  ExecutionPolicyCapability,
+  PolicyDecisionEffect,
+  PolicyDecisionSource,
+} from "./policy.js";
 
 export const EXECUTION_TRACE_EVENT_TYPES = [
   "turn.started",
+  "provider.route",
   "provider.calling",
   "turn.completed",
   "tool.started",
@@ -12,6 +18,7 @@ export const EXECUTION_TRACE_EVENT_TYPES = [
   "reasoning.delta",
   "attachment.attached",
   "attachment.dropped",
+  "policy.denied",
 ] as const;
 
 export type ExecutionTraceEventType = (typeof EXECUTION_TRACE_EVENT_TYPES)[number];
@@ -34,6 +41,26 @@ export type ProviderCallingTraceEvent = {
   readonly level: "default";
   readonly provider: ProviderId | "unknown";
   readonly model: string;
+  readonly startedAt: number;
+};
+
+export type ProviderRouteTraceEvent = {
+  readonly type: "provider.route";
+  readonly level: "default";
+  readonly provider: ProviderId | "unknown";
+  readonly model: string;
+  readonly label?: string;
+  readonly transport?: string;
+  readonly runtimeSupported?: boolean;
+  readonly endpointUrl?: string;
+  readonly proxyPolicy?: {
+    readonly proxyUrl: string | null;
+    readonly source: string;
+    readonly bypassed: boolean;
+    readonly targetHost: string;
+    readonly noProxy: readonly string[];
+  };
+  readonly error?: string;
   readonly startedAt: number;
 };
 
@@ -185,8 +212,23 @@ export type AttachmentDroppedTraceEvent = {
   readonly startedAt: number;
 };
 
+export type PolicyDeniedTraceEvent = {
+  readonly type: "policy.denied";
+  readonly level: "high-signal";
+  readonly capability: ExecutionPolicyCapability;
+  readonly effect: PolicyDecisionEffect;
+  readonly source: PolicyDecisionSource;
+  readonly reason: string;
+  readonly matchedRule: string;
+  readonly runtimeMode: string;
+  readonly toolName?: string;
+  readonly requestId?: string;
+  readonly startedAt: number;
+};
+
 export type ExecutionTraceEvent =
   | TurnStartedTraceEvent
+  | ProviderRouteTraceEvent
   | ProviderCallingTraceEvent
   | TurnCompletedTraceEvent
   | ToolStartedTraceEvent
@@ -196,4 +238,5 @@ export type ExecutionTraceEvent =
   | MemoryWrittenTraceEvent
   | ReasoningDeltaTraceEvent
   | AttachmentAttachedTraceEvent
-  | AttachmentDroppedTraceEvent;
+  | AttachmentDroppedTraceEvent
+  | PolicyDeniedTraceEvent;

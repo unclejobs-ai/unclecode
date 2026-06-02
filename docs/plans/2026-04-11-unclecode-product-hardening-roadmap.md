@@ -2,15 +2,15 @@
 
 > For Hermes: use subagent-driven-development to execute this plan task-by-task after the owner approves scope changes.
 
-Goal: turn UncleCode into a fast, Korean-safe, work-first agent shell with first-class YOLO behavior, discoverable slash surfaces, a real `/queue` operator view, and OMX-style harness controls that reduce needless re-asking.
+Goal: turn UncleCode into a fast, Korean-safe, work-first agent shell with first-class YOLO behavior, discoverable slash surfaces, a real `/queue` operator view, and external-orchestration-style harness controls that reduce needless re-asking.
 
 Architecture:
 - Keep the existing package boundaries (`contracts` → `config-core` / `policy-engine` → `orchestrator` → `tui` → `apps/unclecode-cli`).
 - Fix correctness inside shared seams instead of patching one caller at a time.
-- Treat “YOLO mode” as three linked layers, not one flag: mode profile defaults, approval/policy behavior, and Codex/OMX harness settings.
+- Treat “YOLO mode” as three linked layers, not one flag: mode profile defaults, approval/policy behavior, and Codex/external orchestration harness settings.
 - Do not add new dependencies unless the display-width work proves impossible with a small internal utility and that tradeoff is explicitly reviewed.
 
-Tech stack: TypeScript, Ink, Commander, oh-my-codex, local workspace packages, Node 22+
+Tech stack: TypeScript, Ink, Commander, external Codex orchestration, local workspace packages, Node 22+
 
 Success bars:
 - Korean/Hangul/CJK/emoji composer cases stop drifting or leaking wrapped glyphs.
@@ -25,7 +25,7 @@ Success bars:
 Non-goals:
 - Rebuilding the shell from scratch.
 - Replacing the current orchestration model wholesale.
-- Blindly copying oh-my-codex config; only port the bounded parts that help UncleCode’s product behavior.
+- Blindly copying external Codex orchestration config; only port the bounded parts that help UncleCode’s product behavior.
 
 ---
 
@@ -303,10 +303,10 @@ Verify:
 
 ---
 
-## Phase 6 — Add Codex/OMX-style harness controls instead of ad-hoc repo tweaking
+## Phase 6 — Add Codex/external orchestration-style harness controls instead of ad-hoc repo tweaking
 
 ### Task 12: Add a first-class `harness` command family
-Objective: give operators an UncleCode-native place to inspect/apply low-friction Codex/OMX settings.
+Objective: give operators an UncleCode-native place to inspect/apply low-friction Codex/external orchestration settings.
 
 Files:
 - Create: `apps/unclecode-cli/src/harness.ts`
@@ -322,7 +322,7 @@ Initial subcommands:
 
 Status should inspect:
 - project `.codex/config.toml`
-- presence of OMX features (`multi_agent`, MCP servers, status line)
+- presence of external Codex orchestration features (`multi_agent`, MCP servers, status line)
 - whether current harness settings match the expected YOLO preset
 
 Apply should:
@@ -336,7 +336,7 @@ Verify:
 - `npm run test:commands --silent`
 
 ### Task 13: Define a bounded YOLO harness preset anchored in `.codex/config.toml`
-Objective: make “oh-my-codex-like low friction” concrete and reversible.
+Objective: make “external Codex orchestration-like low friction” concrete and reversible.
 
 Files:
 - Modify: `.codex/config.toml` (via harness command, not by hand in tests)
@@ -350,7 +350,7 @@ Preset scope:
   - approvals review posture metadata if supported
   - TUI status-line defaults
   - project trust level
-  - OMX feature toggles already present in the repo
+  - external Codex orchestration feature toggles already present in the repo
 
 Important guardrail:
 - because `.codex/config.toml` already contains project-specific absolute paths and MCP setup, apply must be a structured merge, not template overwrite.
@@ -358,7 +358,7 @@ Important guardrail:
 Verify:
 - run `unclecode harness apply yolo`
 - inspect resulting `.codex/config.toml`
-- run `npm run omx:doctor`
+- run `npm run external-codex-orchestration:doctor`
 
 ---
 

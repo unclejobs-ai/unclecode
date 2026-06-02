@@ -5,6 +5,7 @@ import {
   type ComplexPlanTask,
   type TurnOrchestratorTraceListener,
 } from "./turn-orchestrator.js";
+import { runRustCommandSync } from "./rust-command.js";
 
 type ReasoningLike = {
   readonly effort: string;
@@ -31,87 +32,113 @@ export interface OrchestratedWorkTurnAgent<
 }
 
 export function parseAgentPlanResponse(text: string): readonly PlannedWorkTask[] {
-  const jsonMatch = text.match(/\[[\s\S]*]/);
-  if (!jsonMatch) return [];
-
-  try {
-    const parsed: unknown = JSON.parse(jsonMatch[0]);
-    if (!Array.isArray(parsed)) return [];
-
-    return parsed
-      .filter(
-        (item): item is { id: string; summary: string; prompt: string } =>
-          typeof item === "object" &&
-          item !== null &&
-          typeof (item as Record<string, unknown>).id === "string" &&
-          typeof (item as Record<string, unknown>).summary === "string" &&
-          typeof (item as Record<string, unknown>).prompt === "string",
-      )
-      .map((item) => ({
-        id: item.id,
-        summary: item.summary,
-        prompt: item.prompt,
-      }));
-  } catch {
-    return [];
-  }
+  return parsePlannedWorkTasks(
+    runRustCommandSync(["rust", "orchestrator", "parse-plan-response"], process.cwd(), text),
+  );
 }
 
-function extractFilePaths(prompt: string): readonly string[] {
-  return [...new Set(prompt.match(/[\w./-]+\.\w{1,5}/g) ?? [])];
+function parsePlannedWorkTasks(raw: string): readonly PlannedWorkTask[] {
+  const parsed: unknown = JSON.parse(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error("Rust orchestrator returned invalid complex tasks.");
+  }
+  return parsed.map((item) => {
+    if (
+      typeof item !== "object" ||
+      item === null ||
+      typeof (item as Record<string, unknown>).id !== "string" ||
+      typeof (item as Record<string, unknown>).summary !== "string" ||
+      typeof (item as Record<string, unknown>).prompt !== "string"
+    ) {
+      throw new Error("Rust orchestrator returned invalid complex task entries.");
+    }
+    return {
+      id: (item as { id: string }).id,
+      summary: (item as { summary: string }).summary,
+      prompt: (item as { prompt: string }).prompt,
+    };
+  });
 }
 
 function buildComplexTasks(prompt: string): readonly PlannedWorkTask[] {
-  const filePaths = extractFilePaths(prompt);
-  if (filePaths.length > 0) {
-    return filePaths.map((filePath, index) => ({
-      id: `task-${index + 1}`,
-      summary: `Inspect ${filePath}`,
-      prompt: `Inspect ${filePath} for this request and report the concrete changes or risks.\n\nOriginal request: ${prompt}`,
-    }));
-  }
+  return parsePlannedWorkTasks(
+    runRustCommandSync(["rust", "orchestrator", "complex-tasks"], process.cwd(), prompt),
+  );
+}
 
-  return [
-    {
-      id: "task-1",
-      summary: "Investigate scope and current implementation",
-      prompt: `Read the relevant code to understand what exists today. Identify the files, functions, and types involved.\n\nRequest: ${prompt}`,
-    },
-    {
-      id: "task-2",
-      summary: "Plan changes and identify risks",
-      prompt: `Based on the codebase, outline what needs to change, what tests are needed, and what could break.\n\nRequest: ${prompt}`,
-    },
-    {
-      id: "task-3",
-      summary: "Verify constraints and edge cases",
-      prompt: `Check for edge cases, type safety concerns, and existing test coverage gaps related to this request.\n\nRequest: ${prompt}`,
-    },
-  ];
+function buildPlannerPrompt(prompt: string): string {
+  return runRustCommandSync(
+    ["rust", "orchestrator", "planner-prompt"],
+    process.cwd(),
+    JSON.stringify({ prompt }),
+  ).trimEnd();
+}
+
+function buildGuardianReviewPrompt(input: {
+  readonly prompt: string;
+  readonly results: readonly { readonly summary: string }[];
+  readonly executableChecks?: string | undefined;
+}): string {
+  return runRustCommandSync(
+    ["rust", "orchestrator", "guardian-review-prompt"],
+    process.cwd(),
+    JSON.stringify(input),
+  ).trimEnd();
+}
+
+function buildSynthesisPrompt(input: {
+  readonly prompt: string;
+  readonly model: string;
+  readonly reasoning: string;
+  readonly results: readonly { readonly summary: string }[];
+  readonly guardianSummary?: string | undefined;
+}): string {
+  return runRustCommandSync(
+    ["rust", "orchestrator", "synthesis-prompt"],
+    process.cwd(),
+    JSON.stringify(input),
+  ).trimEnd();
+}
+
+function resolveAgentTraceEvent(input: Record<string, unknown>): OrchestratorStepTraceEvent {
+  const parsed: unknown = JSON.parse(
+    runRustCommandSync(
+      ["rust", "orchestrator", "trace-event"],
+      process.cwd(),
+      JSON.stringify(input),
+    ),
+  );
+  if (typeof parsed !== "object" || parsed === null || (parsed as { type?: unknown }).type !== "orchestrator.step") {
+    throw new Error("Rust orchestrator returned an invalid trace event.");
+  }
+  return parsed as OrchestratorStepTraceEvent;
 }
 
 function extractChangedFilesFromTasks(tasks: readonly PlannedWorkTask[]): readonly string[] {
-  return [
-    ...new Set(
-      tasks.flatMap((task) => [
-        ...extractFilePaths(task.summary),
-        ...extractFilePaths(task.prompt),
-      ]),
+  const parsed: unknown = JSON.parse(
+    runRustCommandSync(
+      ["rust", "orchestrator", "changed-files"],
+      process.cwd(),
+      JSON.stringify(tasks),
     ),
-  ];
+  );
+  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) {
+    throw new Error("Rust orchestrator returned invalid changed file paths.");
+  }
+  return parsed;
 }
 
 export function resolveWorkerBudget(mode: string): number {
-  if (mode === "ultrawork") {
-    return 5;
+  const parsed: unknown = JSON.parse(
+    runRustCommandSync(["rust", "orchestrator", "worker-budget", mode], process.cwd()),
+  );
+  const workerBudget = typeof parsed === "object" && parsed !== null
+    ? (parsed as { workerBudget?: unknown }).workerBudget
+    : undefined;
+  if (typeof workerBudget !== "number" || !Number.isInteger(workerBudget) || workerBudget < 1) {
+    throw new Error("Rust orchestrator returned an invalid worker budget.");
   }
-  if (mode === "yolo") {
-    return 4;
-  }
-  if (mode === "search" || mode === "analyze") {
-    return 3;
-  }
-  return 1;
+  return workerBudget;
 }
 
 export class WorkAgent<
@@ -166,28 +193,18 @@ export class WorkAgent<
     }
 
     try {
-      const planPrompt = [
-        "Break this request into 2-4 independent subtasks.",
-        "Return ONLY a JSON array of objects with {id, summary, prompt} fields.",
-        "Each subtask should be independently executable.",
-        `Request: ${prompt}`,
-      ].join("\n");
+      const planPrompt = buildPlannerPrompt(prompt);
       // Emit running BEFORE the LLM call so a UI rendering live progress
       // sees the planner's spinner state for the duration of the actual
       // model invocation. The orchestrator emits the matching completed
       // event after planComplexTurn resolves with usedLlm:true. This is
       // option C from Hermes review of c91cd24's Codex S3 finding.
       const plannerStartedAt = Date.now();
-      onTrace?.({
-        type: "orchestrator.step",
-        level: "high-signal",
-        stepId: `planner-${plannerStartedAt}`,
-        role: "planner",
-        kind: "agent-step",
-        status: "running",
-        summary: `Planning: ${prompt}`,
+      onTrace?.(resolveAgentTraceEvent({
+        kind: "planner-running",
+        prompt,
         startedAt: plannerStartedAt,
-      });
+      }));
       const result = await this.directAgent.runTurn(planPrompt, []);
       const parsed = parseAgentPlanResponse(result.text);
       if (parsed.length >= 2) {
@@ -252,13 +269,11 @@ export class WorkAgent<
           results,
           changedFiles,
         });
-        const reviewPrompt = [
-          "Review the executor findings for gaps, contradictions, and missing verification.",
-          `Original request: ${originalPrompt}`,
-          "Executor findings:",
-          ...results.map((item, index) => `- [${index + 1}] ${item.summary}`),
-          ...(executableChecks ? ["Executable verification:", executableChecks] : []),
-        ].join("\n\n");
+        const reviewPrompt = buildGuardianReviewPrompt({
+          prompt: originalPrompt,
+          results,
+          ...(executableChecks ? { executableChecks } : {}),
+        });
         const review = await this.directAgent.runTurn(reviewPrompt, []);
         return {
           summary: executableChecks
@@ -280,39 +295,28 @@ export class WorkAgent<
     }
 
     const reviewerStartedAt = Date.now();
-    this.emitTrace({
-      type: "orchestrator.step",
-      level: "high-signal",
-      stepId: `reviewer-${reviewerStartedAt}`,
-      role: "reviewer",
-      status: "running",
-      summary: `Synthesizing ${result.results.length} executor result${result.results.length === 1 ? "" : "s"}`,
+    this.emitTrace(resolveAgentTraceEvent({
+      kind: "synthesis-running",
+      resultCount: result.results.length,
       startedAt: reviewerStartedAt,
-    });
+    }));
 
-    const synthesisPrompt = [
-      "Synthesize executor findings into a single answer for the original request.",
-      `Model: ${this.model}`,
-      `Reasoning: ${this.reasoning.effort}`,
-      `Original request: ${prompt}`,
-      "Findings:",
-      ...result.results.map((item, index) => `- [${index + 1}] ${item.summary}`),
-      ...(result.guardian ? ["Guardian review:", result.guardian.summary] : []),
-    ].join("\n\n");
+    const synthesisPrompt = buildSynthesisPrompt({
+      prompt,
+      model: this.model,
+      reasoning: this.reasoning.effort,
+      results: result.results,
+      ...(result.guardian ? { guardianSummary: result.guardian.summary } : {}),
+    });
 
     const synthesis = await this.directAgent.runTurn(synthesisPrompt, []);
     const reviewerCompletedAt = Date.now();
-    this.emitTrace({
-      type: "orchestrator.step",
-      level: "high-signal",
-      stepId: `reviewer-${reviewerStartedAt}`,
-      role: "reviewer",
-      status: "completed",
-      summary: `Synthesized ${result.results.length} executor result${result.results.length === 1 ? "" : "s"}`,
+    this.emitTrace(resolveAgentTraceEvent({
+      kind: "synthesis-completed",
+      resultCount: result.results.length,
       startedAt: reviewerStartedAt,
       completedAt: reviewerCompletedAt,
-      durationMs: reviewerCompletedAt - reviewerStartedAt,
-    });
+    }));
 
     return { text: synthesis.text };
   }

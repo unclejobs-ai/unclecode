@@ -21,6 +21,11 @@ test("resolveFastCliPath recognizes lightweight operator startup", () => {
   assert.equal(resolveFastCliPath(["mode", "status"]), "mode-status");
   assert.equal(resolveFastCliPath(["sessions"]), "sessions");
   assert.equal(resolveFastCliPath(["config", "explain"]), "config-explain");
+  assert.equal(resolveFastCliPath(["research", "status"]), "research-status");
+  assert.equal(
+    resolveFastCliPath(["research", "status", "--json"]),
+    "research-status-json",
+  );
 });
 
 test("createUncleCodeProgram exposes the unclecode root command and tui boundary", () => {
@@ -60,7 +65,111 @@ test("fast sessions path avoids the full session-store runtime barrel", () => {
   );
 
   assert.doesNotMatch(source, /from\s+"@unclecode\/session-store"/);
+  assert.doesNotMatch(
+    source,
+    /newestSourceMtimeMs|isFreshRustBinary|readdirSync|statSync/,
+  );
   assert.match(source, /function\s+getSessionPaths\(/);
+});
+
+test("team run scalar runtime config is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "apps/unclecode-cli/src/team.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"team",\s*"run-config"/);
+  assert.doesNotMatch(
+    source,
+    /PERSONA_IDS|TEAM_GATE_LEVELS|TEAM_RUNTIME_MODES/,
+  );
+  assert.doesNotMatch(source, /function\s+parseTimeout\(/);
+});
+
+test("team worker option validation is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "apps/unclecode-cli/src/program.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"team",\s*"worker-options"/);
+  assert.doesNotMatch(source, /isTeamLaneRuntime|TEAM_LANE_RUNTIMES/);
+  assert.doesNotMatch(source, /extras\.\$\{key\} must be a string/);
+});
+
+test("team lane spec parsing is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/orchestrator/src/team-lanes.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"team",\s*"lanes"/);
+  assert.doesNotMatch(source, /isTeamLaneRuntime|TEAM_LANE_RUNTIMES/);
+  assert.doesNotMatch(source, /function\s+parseSingleLaneToken/);
+});
+
+test("team worker spawn argv construction is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/orchestrator/src/team-runner.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"team",\s*"worker-spawn-args"/);
+  assert.doesNotMatch(source, /function\s+normalizeWorkerSpec/);
+  assert.doesNotMatch(source, /args\.push\("--extras"/);
+});
+
+test("team dispatch final status is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/orchestrator/src/team-runner.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"team",\s*"dispatch-status"/);
+  assert.doesNotMatch(source, /allCompleted|anyKilled/);
+});
+
+test("team child env construction is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/orchestrator/src/team-runner.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"team",\s*"child-env"/);
+  assert.doesNotMatch(source, /function\s+filterEnv/);
+});
+
+test("team worker close outcome classification is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/orchestrator/src/team-runner.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"team",\s*"worker-close-outcome"/);
+  assert.doesNotMatch(source, /exitCode === 0/);
+});
+
+test("team run listing is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/orchestrator/src/team-runner.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"team",\s*"list-runs"/);
+  assert.doesNotMatch(source, /readdirSync|statSync/);
+});
+
+test("auth issue context merging is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(
+      workspaceRoot,
+      "packages/orchestrator/src/work-shell-engine-context.ts",
+    ),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"context",\s*"auth-issues"/);
+  assert.doesNotMatch(source, /startsWith\("Auth issue:"\)/);
 });
 
 test("workspace build script cleans stale dist-work outputs before rebuilding the app-owned work entrypoint", () => {
@@ -161,7 +270,7 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
   assert.match(indexSource, /await maybeRunFastCliPath\(args\)/);
   assert.match(
     indexSource,
-    /await\s*\(await import\("\.\/work-bootstrap\.js"\)\)\.launchWorkEntrypoint\(\[\]\)/,
+    /await import\("@unclecode\/orchestrator"\)[\s\S]*runRustCommandPassthrough\(\s*\[\s*"work"\s*\]/,
   );
   assert.match(
     indexSource,
@@ -256,9 +365,12 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
   assert.doesNotMatch(programSource, /from\s+"\.\/interactive-shell\.js"/);
   assert.match(
     programSource,
-    /import\s+\{\s*buildWorkCommandArgs,\s*launchWorkEntrypoint,\s*withWorkCwd\s*\}\s+from\s+"\.\/work-bootstrap\.js"/,
+    /import\s+\{\s*buildWorkCommandArgs,\s*launchWorkEntrypoint\s*\}\s+from\s+"\.\/work-bootstrap\.js"/,
   );
-  assert.match(programSource, /from\s+"\.\/session-center-launcher\.js"/);
+  assert.doesNotMatch(
+    programSource,
+    /from\s+"\.\/session-center-launcher\.js"/,
+  );
   assert.match(programSource, /type\s+BrowserOAuthCallbackInput\s*=\s*\{/);
   assert.match(
     programSource,
@@ -323,19 +435,19 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
   );
   assert.match(
     programSource,
-    /async\s+function\s+handleRootCommand\(program:\s*Command\):\s*Promise<void>/,
+    /async\s+function\s+handleRootCommand\(program:\s*Command\):\s*Promise<void>[\s\S]*runRustCommandPassthrough\(\s*\[\s*"work"\s*\]/,
   );
   assert.match(
     programSource,
-    /async\s+function\s+handleTuiCommand\(options:\s*WorkCommandOptions\):\s*Promise<void>/,
+    /async\s+function\s+handleTuiCommand\(options:\s*WorkCommandOptions\):\s*Promise<void>[\s\S]*UNCLECODE_FORCE_TS_TUI[\s\S]*launchWorkEntrypoint\(buildWorkCommandArgs\(\[\],\s*options\)[\s\S]*runRustCommandPassthrough\(\s*\[\s*"tui",\s*\.\.\.buildWorkCommandArgs\(\[\],\s*options\)\s*\]/,
   );
   assert.match(
     programSource,
-    /async\s+function\s+handleCenterCommand\(\):\s*Promise<void>/,
+    /async\s+function\s+handleCenterCommand\(args:\s*string\[\]\s*=\s*\[\]\):\s*Promise<void>[\s\S]*runRustCommand\(\["center",\s*\.\.\.args\]/,
   );
   assert.match(
     programSource,
-    /async\s+function\s+handleWorkCommand\(promptParts:\s*string\[],\s*options:\s*WorkCommandOptions\):\s*Promise<void>/,
+    /async\s+function\s+handleWorkCommand\(promptParts:\s*string\[],\s*options:\s*WorkCommandOptions\):\s*Promise<void>[\s\S]*runRustCommandPassthrough\(\s*\[\s*"work",\s*\.\.\.buildWorkCommandArgs\(promptParts,\s*options\)\s*\]/,
   );
   assert.match(
     programSource,
@@ -404,11 +516,11 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
   );
   assert.match(
     programSource,
-    /\.command\("tui"\)[\s\S]*\.action\(async \(_promptParts: string\[], options: WorkCommandOptions\) => \{[\s\S]*await\s+handleTuiCommand\(options\)/,
+    /\.command\("tui"\)[\s\S]*\.action\(async \(options: WorkCommandOptions\) => \{[\s\S]*await\s+handleTuiCommand\(options\)/,
   );
   assert.match(
     programSource,
-    /\.command\("center"\)[\s\S]*\.action\(async \(\) => \{[\s\S]*await\s+handleCenterCommand\(\)/,
+    /\.command\("center \[args\.\.\.\]"\)[\s\S]*\.helpOption\(false\)[\s\S]*\.action\(async \(args: string\[\]\) => \{[\s\S]*await\s+handleCenterCommand\(args\)/,
   );
   assert.match(
     programSource,
@@ -460,7 +572,11 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
   );
   assert.match(
     programSource,
-    /async\s+function\s+handleResumeCommand\(sessionId:\s*string,\s*options:\s*ResumeCommandOptions\):\s*Promise<void>/,
+    /async\s+function\s+handleResumeCommand\(sessionId:\s*string,\s*options:\s*ResumeCommandOptions\):\s*Promise<void>[\s\S]*runRustCommand\(\s*buildResumeCommandArgs\(sessionId,\s*options\)/,
+  );
+  assert.match(
+    programSource,
+    /function\s+buildResumeCommandArgs\(sessionId:\s*string,\s*options:\s*ResumeCommandOptions\):\s*string\[\][\s\S]*"resume"[\s\S]*"--verbose"[\s\S]*"--json"/,
   );
   assert.match(
     programSource,
@@ -653,7 +769,11 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
   );
   assert.match(
     sessionCenterLauncherSource,
-    /launchWorkSession:\s*\(forwardedArgs\s*=\s*\[\]\)\s*=>[\s\S]*launchWorkEntrypoint\(forwardedArgs/,
+    /loadEmbeddedWorkPane:\s*\(\)\s*=>[\s\S]*deps\?\.loadWorkModule[\s\S]*:\s*Promise\.resolve\(undefined\)/,
+  );
+  assert.match(
+    sessionCenterLauncherSource,
+    /launchWorkSession:\s*\(forwardedArgs\s*=\s*\[\]\)\s*=>[\s\S]*deps\?\.loadWorkModule[\s\S]*launchWorkEntrypoint\(forwardedArgs[\s\S]*runRustCommandPassthrough\(\s*\[\s*"work",\s*\.\.\.withWorkCwd\(forwardedArgs,\s*workspaceRoot\)\s*\]/,
   );
   assert.match(
     interactiveLaunchInputsSource,
@@ -759,18 +879,20 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
   assert.equal(existsSync(interactiveShellPath), false);
   assert.match(
     workBootstrapSource,
-    /dist-work[\s\S]*apps[\s\S]*unclecode-cli[\s\S]*src[\s\S]*work-entry\.js/,
+    /"rust",\s*"work-runtime",\s*"entrypoint-paths"/,
   );
   assert.doesNotMatch(
     workBootstrapSource,
     /dist-work[\/",\s]+src[\/",\s]+index\.js/,
   );
   assert.doesNotMatch(programSource, /\.\/work-launcher\.js/);
-  assert.match(
+  assert.doesNotMatch(
     binSource,
-    /dist-work[\/",\s]+apps[\/",\s]+unclecode-cli[\/",\s]+src[\/",\s]+work-entry\.js/,
+    /apps[\/",\s]+unclecode-cli[\/",\s]+dist[\/",\s]+index\.js/,
   );
   assert.doesNotMatch(binSource, /dist-work[\/",\s]+src[\/",\s]+index\.js/);
+  assert.match(binSource, /cargo build -p unclecode/);
+  assert.doesNotMatch(binSource, /temporary Node fallback/);
   assert.match(
     workTsconfig,
     /"include"\s*:\s*\[\s*"apps\/unclecode-cli\/src\/work-entry\.ts"\s*\]/,

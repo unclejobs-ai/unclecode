@@ -13,7 +13,7 @@ import {
   getResearchMcpProfile,
   loadMcpHostRegistry,
 } from "@unclecode/mcp-host";
-import { createOrchestrator, loadExtensionConfigOverlays, loadExtensionManifestSummaries } from "@unclecode/orchestrator";
+import { createOrchestrator, loadExtensionConfigOverlays, loadExtensionManifestSummaries, runRustCommand, runRustCommandSync } from "@unclecode/orchestrator";
 import type { ModeProfileId } from "@unclecode/contracts";
 import { MODE_PROFILE_IDS, MODE_PROFILES } from "@unclecode/contracts";
 import {
@@ -21,13 +21,11 @@ import {
   completeOpenAIBrowserLogin,
   completeOpenAICodexDeviceLogin,
   createOpenAIPkcePair,
-  clearOpenAICredentials,
   formatOpenAIAuthStatus,
   requestOpenAICodexDeviceAuthorization,
   requestOpenAIDeviceAuthorization,
   resolveOpenAIAuthStatus,
   resolveReusableOpenAIOAuthClientId,
-  writeOpenAICredentials,
 } from "@unclecode/providers";
 import { createRuntimeBroker } from "@unclecode/runtime-broker";
 import {
@@ -53,6 +51,42 @@ type PersistedProjectConfig = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isModeProfileId(value: string): value is ModeProfileId {
+  return MODE_PROFILE_IDS.includes(value as ModeProfileId);
+}
+
+type ResearchRunListItem = {
+  readonly sessionId: string;
+  readonly prompt: string;
+  readonly status: "completed" | "failed" | "unknown";
+  readonly summary: string;
+  readonly timestamp: string | null;
+};
+
+function parseResearchLedgerLine(line: string): ResearchRunListItem | null {
+  try {
+    const parsed = JSON.parse(line) as unknown;
+    if (!isRecord(parsed) || typeof parsed.sessionId !== "string") {
+      return null;
+    }
+
+    const status =
+      parsed.status === "completed" || parsed.status === "failed"
+        ? parsed.status
+        : "unknown";
+
+    return {
+      sessionId: parsed.sessionId,
+      prompt: typeof parsed.prompt === "string" ? parsed.prompt : parsed.sessionId,
+      status,
+      summary: typeof parsed.summary === "string" ? parsed.summary : "",
+      timestamp: typeof parsed.timestamp === "string" ? parsed.timestamp : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function getProjectConfigPath(workspaceRoot: string): string {
@@ -135,7 +169,9 @@ import {
   buildMmbridgeDoctorReport,
   buildMmbridgeGateReport,
   buildMmbridgeHandoffReport,
+  buildMmbridgeHealthReport,
   buildMmbridgeReviewReport,
+  runMmbridgeMcpHealthCheck,
   runMmbridgeMcpTool,
 } from "./mmbridge-mcp.js";
 
@@ -380,6 +416,7 @@ export type TuiHomeState = {
   readonly latestResearchSummary: string | null;
   readonly latestResearchTimestamp: string | null;
   readonly researchRunCount: number;
+  readonly recentResearchRuns: readonly ResearchRunListItem[];
   readonly bridgeLines: readonly string[];
   readonly memoryLines: readonly string[];
 };
@@ -473,6 +510,7 @@ export async function buildTuiHomeState(input: {
   const ledgerPath = path.join(canonicalWorkspaceRoot, ".unclecode", "research-runs.jsonl");
   let researchRunCount = 0;
   let latestResearchTimestamp: string | null = null;
+  let recentResearchRuns: readonly ResearchRunListItem[] = [];
   const [bridgeLines, memoryLines] = await Promise.all([
     listProjectBridgeLines(input.workspaceRoot, input.env),
     listScopedMemoryLines({
@@ -492,14 +530,15 @@ export async function buildTuiHomeState(input: {
     const ledger = await readFile(ledgerPath, "utf8");
     const lines = ledger.split("\n").filter((line) => line.trim().length > 0);
     researchRunCount = lines.length;
-    const latest = lines.at(-1);
-    if (latest) {
-      const parsed = JSON.parse(latest) as Record<string, unknown>;
-      latestResearchTimestamp = typeof parsed.timestamp === "string" ? parsed.timestamp : null;
-    }
+    const parsedRuns = lines
+      .map((line) => parseResearchLedgerLine(line))
+      .filter((run): run is ResearchRunListItem => run !== null);
+    recentResearchRuns = parsedRuns.slice(-3).reverse();
+    latestResearchTimestamp = parsedRuns.at(-1)?.timestamp ?? null;
   } catch {
     researchRunCount = 0;
     latestResearchTimestamp = null;
+    recentResearchRuns = [];
   }
 
   return {
@@ -519,6 +558,7 @@ export async function buildTuiHomeState(input: {
     latestResearchSummary: latestResearch?.taskSummary ?? null,
     latestResearchTimestamp,
     researchRunCount,
+    recentResearchRuns,
     bridgeLines,
     memoryLines: [...extensionSummaryLines, ...memoryLines].slice(0, 6),
   };
@@ -571,23 +611,7 @@ async function waitForBrowserOAuthCallback(input: { readonly redirectUri: string
 }
 
 export function resolveWorkShellInlineActionId(args: readonly string[]): string | undefined {
-  const normalized = args.join(" ").trim().replace(/\s+/g, " ");
-
-  if (normalized === "doctor") return "doctor";
-  if (normalized === "auth status") return "auth-status";
-  if (normalized === "auth login" || normalized === "auth login --browser") return "browser-login";
-  if (normalized === "auth logout") return "auth-logout";
-  if (normalized.startsWith("auth login --api-key ")) return "api-key-login";
-  if (normalized === "mcp list") return "mcp-list";
-  if (normalized === "mode status") return "mode-status";
-  if (normalized === "research status") return "research-status";
-  if (normalized === "research run" || normalized.startsWith("research run ")) return "new-research";
-  if (normalized === "mmbridge context") return "mmbridge-context";
-  if (normalized === "mmbridge review") return "mmbridge-review";
-  if (normalized === "mmbridge gate") return "mmbridge-gate";
-  if (normalized === "mmbridge handoff") return "mmbridge-handoff";
-  if (normalized === "mmbridge doctor") return "mmbridge-doctor";
-  return undefined;
+  return resolveWorkShellInlineAction(args)?.actionId;
 }
 
 export async function runWorkShellInlineAction(input: {
@@ -600,14 +624,13 @@ export async function runWorkShellInlineAction(input: {
   readonly openExternalUrl?: ((url: string) => Promise<void> | void) | undefined;
   readonly onProgress?: ((line: string) => void) | undefined;
 }): Promise<readonly string[]> {
-  const actionId = resolveWorkShellInlineActionId(input.args);
-  if (!actionId) {
+  const action = resolveWorkShellInlineAction(input.args);
+  if (!action) {
     throw new Error(`Unsupported work-shell inline command: ${input.args.join(" ")}`.trim());
   }
 
-  const prompt = actionId === "new-research"
-    ? input.args.slice(2).join(" ").trim()
-    : undefined;
+  const actionId = action.actionId;
+  const prompt = action.prompt;
 
   return runTuiSessionCenterAction({
     actionId,
@@ -620,6 +643,26 @@ export async function runWorkShellInlineAction(input: {
     ...(input.openExternalUrl ? { openExternalUrl: input.openExternalUrl } : {}),
     ...(input.onProgress ? { onProgress: input.onProgress } : {}),
   });
+}
+
+function resolveWorkShellInlineAction(args: readonly string[]): { readonly actionId: string; readonly prompt?: string } | undefined {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "command", "inline-action"],
+      process.cwd(),
+      JSON.stringify({ args }),
+    ),
+  ) as unknown;
+  if (parsed === null) {
+    return undefined;
+  }
+  if (!isRecord(parsed) || typeof parsed.actionId !== "string") {
+    throw new Error("Rust inline action command returned an invalid payload.");
+  }
+  if (parsed.prompt !== undefined && typeof parsed.prompt !== "string") {
+    throw new Error("Rust inline action command returned an invalid prompt payload.");
+  }
+  return parsed.prompt ? { actionId: parsed.actionId, prompt: parsed.prompt } : { actionId: parsed.actionId };
 }
 
 export async function runTuiSessionCenterAction(input: {
@@ -654,6 +697,14 @@ export async function runTuiSessionCenterAction(input: {
         MODE_PROFILE_IDS[(currentIndex + 1) % MODE_PROFILE_IDS.length] ?? MODE_PROFILE_IDS[0] ?? "default";
       const configPath = await persistProjectMode(input.workspaceRoot, nextMode);
       return formatModeSetReport(nextMode, configPath).split("\n");
+    }
+    case "mode-set": {
+      const mode = input.prompt?.trim() ?? "";
+      if (!isModeProfileId(mode)) {
+        return [`Unsupported mode: ${mode || "<empty>"}`, `Supported: ${MODE_PROFILE_IDS.join(", ")}`];
+      }
+      const configPath = await persistProjectMode(input.workspaceRoot, mode);
+      return formatModeSetReport(mode, configPath).split("\n");
     }
     case "browser-login": {
       const browserClientId = input.env.OPENAI_OAUTH_CLIENT_ID?.trim();
@@ -789,19 +840,16 @@ export async function runTuiSessionCenterAction(input: {
       if (!apiKey) {
         return ["Paste an OpenAI API key and press Enter."];
       }
-      await writeOpenAICredentials({
-        credentialsPath: getOpenAICredentialsPath(input.env),
-        credentials: {
-          authType: "api-key",
-          apiKey,
-          organizationId,
-          projectId,
-        },
-      });
+      await runRustCommand(
+        ["rust", "auth", "save-api-key", organizationId ?? "-", projectId ?? "-"],
+        input.workspaceRoot,
+        apiKey,
+        input.env,
+      );
       return ["API key login saved.", "Auth: api-key-file"];
     }
     case "auth-logout": {
-      await clearOpenAICredentials({ credentialsPath: getOpenAICredentialsPath(input.env) });
+      await runRustCommand(["rust", "auth", "logout"], input.workspaceRoot, undefined, input.env);
       const status = await resolveOpenAIAuthStatus({ env: input.env });
       return formatAuthLogoutLines(status);
     }
@@ -813,6 +861,12 @@ export async function runTuiSessionCenterAction(input: {
     case "mcp-list":
       return buildMcpListReport({
         workspaceRoot: input.workspaceRoot,
+        ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
+      }).split("\n");
+    case "mcp-inspect":
+      return buildMcpInspectReport({
+        workspaceRoot: input.workspaceRoot,
+        ...(input.prompt ? { serverName: input.prompt } : {}),
         ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
       }).split("\n");
     case "mmbridge-context": {
@@ -867,6 +921,13 @@ export async function runTuiSessionCenterAction(input: {
         },
       });
       return buildMmbridgeHandoffReport(lines);
+    }
+    case "mmbridge-health": {
+      const report = await runMmbridgeMcpHealthCheck({
+        workspaceRoot: input.workspaceRoot,
+        ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
+      });
+      return buildMmbridgeHealthReport(report);
     }
     case "mmbridge-doctor": {
       const lines = await runMmbridgeMcpTool({
@@ -1008,6 +1069,7 @@ export async function buildResumeSummary(input: {
 
 
 import {
+  buildMcpInspectReport,
   buildMcpListReport,
   buildResearchStatusReport,
   createTuiActivityEntry,
@@ -1016,6 +1078,7 @@ import {
 } from "./operational-research.js";
 
 export {
+  buildMcpInspectReport,
   buildMcpListReport,
   buildResearchStatusReport,
   createTuiActivityEntry,

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 
 import { executeWorkShellBuiltinSubmit } from "./work-shell-engine-builtin-runtime.js";
 import {
@@ -15,8 +16,10 @@ import {
   executeWorkShellPromptCommandSubmit,
 } from "./work-shell-engine-prompt-runtime.js";
 import {
+  createOpenSessionsFailurePanel,
+  createOpenSessionsLoadingPanel,
   loadInitialWorkShellLifecycleState,
-  loadOpenSessionsPanelState,
+  loadOpenSessionsLoadedPanel,
   resolveCloseOverlayState,
   resolveSensitiveInputCancelState,
 } from "./work-shell-engine-lifecycle.js";
@@ -32,13 +35,13 @@ import {
   resolveModeDefaultReasoning,
 } from "./work-shell-engine-state.js";
 import { applyWorkShellTraceEvent } from "./work-shell-engine-trace.js";
+import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 
 /**
- * Render a one-liner for an attachment lifecycle trace event. Kept inline
- * here rather than the shared formatter because the agent-stream formatter
- * is generic over TraceEvent and broadening that union cascades through
- * every app entry point. Returns "" when the event has no actionable
- * surface (e.g. submit-time clear is silent per the Q6 design).
+ * Render a one-liner for an attachment lifecycle trace event through the Rust
+ * UX text contract. This wrapper stays narrowly typed so broadening the
+ * generic agent-stream TraceEvent union does not cascade through every app
+ * entry point.
  */
 export function formatAttachmentTraceLine(event: {
   readonly type: "attachment.attached" | "attachment.dropped";
@@ -47,16 +50,172 @@ export function formatAttachmentTraceLine(event: {
   readonly byteEstimate?: number;
   readonly reason?: "cap-exceeded" | "capture-too-large" | "user-cleared";
 }): string {
-  const sizeNote =
-    typeof event.byteEstimate === "number"
-      ? ` ${(event.byteEstimate / 1024).toFixed(0)}kB`
-      : "";
-  const mime = event.mimeType ? ` ${event.mimeType}` : "";
-  if (event.type === "attachment.attached") {
-    return `📎 attached ${event.source}${mime}${sizeNote}`;
+  return runRustCommandSync(
+    ["rust", "ux", "text", "trace-line"],
+    process.cwd(),
+    JSON.stringify(event),
+  ).trimEnd();
+}
+
+function parseQueuedSubmit(stdout: string): { readonly id: number; readonly line: string } | undefined {
+  const trimmed = stdout.trim();
+  if (!trimmed || trimmed === "null") {
+    return undefined;
   }
-  const why = event.reason ? ` (${event.reason})` : "";
-  return `📎 dropped ${event.source}${mime}${sizeNote}${why}`;
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error(`Invalid Rust queue response: ${trimmed}`);
+  }
+  const candidate = parsed as { id?: unknown; line?: unknown };
+  if (
+    typeof candidate.id !== "number" ||
+    !Number.isSafeInteger(candidate.id) ||
+    candidate.id <= 0 ||
+    typeof candidate.line !== "string"
+  ) {
+    throw new Error(`Invalid Rust queue response: ${trimmed}`);
+  }
+  return { id: candidate.id, line: candidate.line };
+}
+
+function parseQueueLength(stdout: string): number {
+  const trimmed = stdout.trim();
+  if (!trimmed) {
+    return 0;
+  }
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error("Invalid Rust queue length response.");
+  }
+  const length = (parsed as { length?: unknown }).length;
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
+    throw new Error("Invalid Rust queue length response.");
+  }
+  return length;
+}
+
+function parseQueuedSubmitList(stdout: string): readonly { readonly id: number; readonly line: string }[] {
+  const trimmed = stdout.trim();
+  if (!trimmed) {
+    return [];
+  }
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error("Invalid Rust queue list response.");
+  }
+  return parsed.map((item) => {
+    if (typeof item !== "object" || item === null) {
+      throw new Error("Invalid Rust queue list response.");
+    }
+    const candidate = item as { id?: unknown; line?: unknown };
+    if (
+      typeof candidate.id !== "number" ||
+      !Number.isSafeInteger(candidate.id) ||
+      candidate.id <= 0 ||
+      typeof candidate.line !== "string"
+    ) {
+      throw new Error("Invalid Rust queue list response.");
+    }
+    return { id: candidate.id, line: candidate.line };
+  });
+}
+
+type BusySubmitDecision =
+  | { readonly action: "ignore" }
+  | { readonly action: "show_queue"; readonly line: string }
+  | { readonly action: "clear_queue"; readonly line: string; readonly message: string }
+  | { readonly action: "reject_slash"; readonly line: string; readonly message: string }
+  | { readonly action: "queue"; readonly line: string; readonly displayIndex: number; readonly message: string };
+
+function parseBusySubmitDecision(stdout: string): BusySubmitDecision {
+  const parsed = JSON.parse(stdout.trim()) as Partial<BusySubmitDecision>;
+  if (parsed.action === "ignore") {
+    return { action: "ignore" };
+  }
+  if (parsed.action === "show_queue" && typeof parsed.line === "string") {
+    return { action: "show_queue", line: parsed.line };
+  }
+  if (parsed.action === "clear_queue" && typeof parsed.line === "string" && typeof parsed.message === "string") {
+    return { action: "clear_queue", line: parsed.line, message: parsed.message };
+  }
+  if (parsed.action === "reject_slash" && typeof parsed.line === "string" && typeof parsed.message === "string") {
+    return { action: "reject_slash", line: parsed.line, message: parsed.message };
+  }
+  if (
+    parsed.action === "queue"
+    && typeof parsed.line === "string"
+    && typeof parsed.message === "string"
+    && typeof parsed.displayIndex === "number"
+    && Number.isSafeInteger(parsed.displayIndex)
+    && parsed.displayIndex > 0
+  ) {
+    return {
+      action: "queue",
+      line: parsed.line,
+      displayIndex: parsed.displayIndex,
+      message: parsed.message,
+    };
+  }
+  throw new Error("Invalid Rust busy submit response.");
+}
+
+type QueueDrainStartDecision = { readonly action: "skip" | "drain" };
+
+function parseQueueDrainStartDecision(stdout: string): QueueDrainStartDecision {
+  const parsed = JSON.parse(stdout.trim()) as Partial<QueueDrainStartDecision>;
+  if (parsed.action === "skip" || parsed.action === "drain") {
+    return { action: parsed.action };
+  }
+  throw new Error("Invalid Rust queue drain start response.");
+}
+
+type QueueDrainStepDecision =
+  | { readonly action: "empty"; readonly queuedCount: number }
+  | {
+      readonly action: "run";
+      readonly queuedCount: number;
+      readonly message: string;
+      readonly item: { readonly id: number; readonly line: string };
+    };
+
+function isQueueItem(value: unknown): value is { readonly id: number; readonly line: string } {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as { id?: unknown; line?: unknown };
+  return typeof candidate.id === "number"
+    && Number.isSafeInteger(candidate.id)
+    && candidate.id > 0
+    && typeof candidate.line === "string"
+    && candidate.line.length > 0;
+}
+
+function parseQueueDrainStepDecision(stdout: string): QueueDrainStepDecision {
+  const parsed = JSON.parse(stdout.trim()) as Partial<QueueDrainStepDecision>;
+  if (
+    parsed.action === "empty"
+    && typeof parsed.queuedCount === "number"
+    && Number.isSafeInteger(parsed.queuedCount)
+    && parsed.queuedCount === 0
+  ) {
+    return { action: "empty", queuedCount: 0 };
+  }
+  if (
+    parsed.action === "run"
+    && typeof parsed.queuedCount === "number"
+    && Number.isSafeInteger(parsed.queuedCount)
+    && parsed.queuedCount >= 0
+    && typeof parsed.message === "string"
+    && isQueueItem(parsed.item)
+  ) {
+    return {
+      action: "run",
+      queuedCount: parsed.queuedCount,
+      message: parsed.message,
+      item: parsed.item,
+    };
+  }
+  throw new Error("Invalid Rust queue drain step response.");
 }
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 
@@ -68,6 +227,13 @@ export type WorkShellChatEntry = {
 export type WorkShellPanel = {
   readonly title: string;
   readonly lines: readonly string[];
+};
+
+export type WorkShellStatusContext = {
+  readonly contextSummaryLines: readonly string[];
+  readonly bridgeLines: readonly string[];
+  readonly memoryLines: readonly string[];
+  readonly traceLines: readonly string[];
 };
 
 export type WorkShellComposerResolution<Attachment> = {
@@ -158,6 +324,7 @@ export type WorkShellEngineInput<
     options: WorkShellEngineOptions<Reasoning>,
     reasoning: Reasoning,
     authLabel: string,
+    statusContext?: WorkShellStatusContext,
   ) => WorkShellPanel;
   buildInlineCommandPanel: (args: readonly string[], lines: readonly string[]) => WorkShellPanel;
   formatInlineCommandResultSummary: (args: readonly string[], lines: readonly string[]) => string;
@@ -244,7 +411,7 @@ export class WorkShellEngine<
   TraceEvent extends { readonly type: string },
 > {
   private readonly agent: WorkShellAgent<Attachment, TraceEvent, Reasoning>;
-  private readonly options: WorkShellEngineOptions<Reasoning>;
+  private options: WorkShellEngineOptions<Reasoning>;
   private readonly buildContextPanel: (
     contextSummaryLines: readonly string[],
     bridgeLines: readonly string[],
@@ -257,6 +424,7 @@ export class WorkShellEngine<
     options: WorkShellEngineOptions<Reasoning>,
     reasoning: Reasoning,
     authLabel: string,
+    statusContext?: WorkShellStatusContext,
   ) => WorkShellPanel;
   private readonly buildInlineCommandPanel: (args: readonly string[], lines: readonly string[]) => WorkShellPanel;
   private readonly formatInlineCommandResultSummary: (args: readonly string[], lines: readonly string[]) => string;
@@ -339,8 +507,11 @@ export class WorkShellEngine<
   private readonly onExit: () => void;
   private readonly sessionId: string;
   private readonly subscribers = new Set<(state: WorkShellEngineState<Reasoning>) => void>();
+  private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
+  private queuedCountCache = 0;
   private currentContextSummaryLines: readonly string[];
   private lastSessionSummary = "Work shell ready.";
+  private drainingQueue = false;
   private state: WorkShellEngineState<Reasoning>;
 
   constructor(input: WorkShellEngineInput<Attachment, Reasoning, TraceEvent>) {
@@ -407,6 +578,7 @@ export class WorkShellEngine<
     });
 
     try {
+      this.queuedCountCache = await this.loadQueuedSubmitCount();
       await this.persistSessionSnapshot("idle", this.lastSessionSummary).catch(() => undefined);
 
       const contextState = await loadInitialWorkShellLifecycleState({
@@ -432,12 +604,16 @@ export class WorkShellEngine<
   }
 
   async openSessionsPanel(): Promise<void> {
-    const { loadingPanel, loadedPanel } = await loadOpenSessionsPanelState({
-      cwd: this.options.cwd,
-      listSessionLines: this.listSessionLines,
-    });
-    this.setState({ panel: loadingPanel });
-    this.setState({ panel: loadedPanel });
+    this.setState({ panel: createOpenSessionsLoadingPanel() });
+    try {
+      const loadedPanel = await loadOpenSessionsLoadedPanel({
+        cwd: this.options.cwd,
+        listSessionLines: this.listSessionLines,
+      });
+      this.setState({ panel: loadedPanel });
+    } catch (error: unknown) {
+      this.setState({ panel: createOpenSessionsFailurePanel(error) });
+    }
   }
 
   cancelSensitiveInput(): void {
@@ -447,6 +623,12 @@ export class WorkShellEngine<
       stateModel: this.state.model,
       reasoning: this.state.reasoning,
       authLabel: this.state.authLabel,
+      statusContext: {
+        contextSummaryLines: this.currentContextSummaryLines,
+        bridgeLines: this.state.bridgeLines,
+        memoryLines: this.state.memoryLines,
+        traceLines: this.state.traceLines,
+      },
       buildStatusPanel: this.buildStatusPanel,
     });
     if (!result) {
@@ -508,6 +690,17 @@ export class WorkShellEngine<
     }
   }
 
+  async setMode(mode: string): Promise<void> {
+    this.applyMode(mode);
+    await this.persistSessionSnapshot("idle", this.lastSessionSummary).catch(() => undefined);
+  }
+
+  private applyMode(mode: string): void {
+    this.options = { ...this.options, mode };
+    this.agent.updateMode?.(mode);
+    this.setState({ mode });
+  }
+
   /**
    * Submit the composer value plus any attachments produced outside the
    * text-resolution path (e.g. clipboard paste). The optional
@@ -519,8 +712,17 @@ export class WorkShellEngine<
     value: string,
     pendingAttachments?: readonly Attachment[],
   ): Promise<void> {
+    const line = value.trim();
+    if (!line) {
+      return;
+    }
+    if (this.state.isBusy) {
+      await this.handleBusySubmit(line, pendingAttachments);
+      return;
+    }
+
     const route = resolveWorkShellSubmitRoute({
-      value,
+      value: line,
       isBusy: this.state.isBusy,
       composerMode: this.state.composerMode,
       resolveWorkShellSlashCommand: this.resolveWorkShellSlashCommand,
@@ -530,13 +732,21 @@ export class WorkShellEngine<
       return;
     }
 
+    await this.executeSubmitRoute(route, pendingAttachments);
+    await this.drainQueuedSubmits();
+  }
+
+  private async executeSubmitRoute(
+    route: WorkShellSubmitRoute,
+    pendingAttachments?: readonly Attachment[],
+  ): Promise<void> {
     switch (route.kind) {
       case "secure-api-key-entry":
         await this.handleSecureApiKeyEntrySubmit(route.line);
-        return;
+        break;
       case "builtin":
         await this.handleBuiltinSubmit(route.line, route.command);
-        return;
+        break;
       case "prompt-command":
         await executeWorkShellPromptCommandSubmit({
           transcriptText: route.line,
@@ -559,13 +769,13 @@ export class WorkShellEngine<
           pushTraceLine: (traceLine) => this.pushTraceLine(traceLine),
           persistSessionSnapshot: (sessionState, summary) => this.persistSessionSnapshot(sessionState, summary),
         });
-        return;
+        break;
       case "inline-command":
         await this.handleInlineCommandSubmit(route.line, route.slashCommand);
-        return;
+        break;
       case "local-command":
         await this.handleLocalCommandSubmit(route.line, route.localCommand);
-        return;
+        break;
       case "chat":
         await executeWorkShellChatSubmit({
           line: route.line,
@@ -591,7 +801,58 @@ export class WorkShellEngine<
           pushTraceLine: (traceLine) => this.pushTraceLine(traceLine),
           persistSessionSnapshot: (sessionState, summary) => this.persistSessionSnapshot(sessionState, summary),
         });
+        break;
+    }
+  }
+
+  private async handleBusySubmit(line: string, pendingAttachments?: readonly Attachment[]): Promise<void> {
+    const decision = await this.resolveBusySubmitDecision(line);
+    switch (decision.action) {
+      case "ignore":
         return;
+      case "show_queue":
+        await this.handleBuiltinSubmit(decision.line, { kind: "queue" });
+        return;
+      case "clear_queue":
+        await this.handleBuiltinSubmit(decision.line, { kind: "queue-clear" });
+        return;
+      case "reject_slash":
+        this.appendEntries({ role: "system", text: decision.message });
+        return;
+      case "queue": {
+        const item = await this.pushQueuedSubmit(decision.line);
+        this.queuedCountCache = decision.displayIndex;
+        if (pendingAttachments && pendingAttachments.length > 0) {
+          this.queuedAttachments.set(item.id, pendingAttachments);
+        }
+        this.appendEntries({ role: "system", text: decision.message });
+        return;
+      }
+    }
+  }
+
+  private async drainQueuedSubmits(): Promise<void> {
+    const start = await this.resolveQueueDrainStartDecision();
+    if (start.action === "skip") {
+      return;
+    }
+    this.drainingQueue = true;
+    try {
+      while ((await this.resolveQueueDrainContinueDecision()).action === "drain") {
+        const next = await this.popQueuedSubmit();
+        const step = await this.resolveQueueDrainStepDecision(next);
+        if (step.action === "empty") {
+          this.queuedCountCache = step.queuedCount;
+          break;
+        }
+        this.queuedCountCache = step.queuedCount;
+        const pendingAttachments = this.queuedAttachments.get(step.item.id);
+        this.queuedAttachments.delete(step.item.id);
+        this.appendEntries({ role: "system", text: step.message });
+        await this.handleSubmit(step.item.line, pendingAttachments);
+      }
+    } finally {
+      this.drainingQueue = false;
     }
   }
 
@@ -638,6 +899,9 @@ export class WorkShellEngine<
       onExit: this.onExit,
       openSessionsPanel: () => this.openSessionsPanel(),
       reloadContextState: () => this.reloadContextState(),
+      queuedCount: () => this.queuedCountCache,
+      queuedItems: () => this.listQueuedSubmits(),
+      clearQueuedItems: () => this.clearQueuedSubmits(),
       appendEntries: (...entries) => this.appendEntries(...entries),
       setState: (patch) => this.setState(patch),
       persistSessionSnapshot: (state, summary, traceMode) => this.persistSessionSnapshot(state, summary, traceMode),
@@ -650,10 +914,7 @@ export class WorkShellEngine<
       line,
       slashCommand,
       state: this.state,
-      onModeChanged: async (mode) => {
-        this.agent.updateMode?.(mode);
-        this.setState({ mode });
-      },
+      onModeChanged: (mode) => this.setMode(mode),
       resolveWorkShellInlineCommand: this.resolveWorkShellInlineCommand,
       runInlineCommand: this.runInlineCommand,
       refineInlineCommandResultLines: this.refineInlineCommandResultLines,
@@ -702,6 +963,14 @@ export class WorkShellEngine<
     summary: string,
     traceMode = this.state.traceMode,
   ): Promise<void> {
+    const overrideReasoningEffort =
+      this.state.reasoning.support.status === "supported" &&
+      this.state.reasoning.source === "override" &&
+      (this.state.reasoning.effort === "low" ||
+        this.state.reasoning.effort === "medium" ||
+        this.state.reasoning.effort === "high")
+        ? this.state.reasoning.effort
+        : undefined;
     this.lastSessionSummary = summary;
     await this.persistWorkShellSessionSnapshot(createWorkShellSessionSnapshotInput({
       cwd: this.options.cwd,
@@ -711,7 +980,90 @@ export class WorkShellEngine<
       state,
       summary,
       traceMode,
+      reasoningEffort: overrideReasoningEffort,
     }));
+  }
+
+  private async pushQueuedSubmit(line: string): Promise<{ readonly id: number; readonly line: string }> {
+    const stdout = await runRustCommand(["rust", "queue", "push-json", this.sessionId, line], this.queueCommandCwd());
+    const item = parseQueuedSubmit(stdout);
+    if (!item) {
+      throw new Error("Rust queue push did not return an item.");
+    }
+    return item;
+  }
+
+  private async resolveBusySubmitDecision(line: string): Promise<BusySubmitDecision> {
+    const stdout = await runRustCommand(
+      ["rust", "steer", "busy-submit", String(this.queuedCountCache)],
+      this.queueCommandCwd(),
+      line,
+    );
+    return parseBusySubmitDecision(stdout);
+  }
+
+  private async resolveQueueDrainStartDecision(): Promise<QueueDrainStartDecision> {
+    const stdout = await runRustCommand(
+      [
+        "rust",
+        "steer",
+        "drain-start",
+        String(this.drainingQueue),
+        String(this.state.isBusy),
+        String(this.queuedCountCache),
+      ],
+      this.queueCommandCwd(),
+    );
+    return parseQueueDrainStartDecision(stdout);
+  }
+
+  private async resolveQueueDrainContinueDecision(): Promise<QueueDrainStartDecision> {
+    const stdout = await runRustCommand(
+      [
+        "rust",
+        "steer",
+        "drain-start",
+        "false",
+        String(this.state.isBusy),
+        String(this.queuedCountCache),
+      ],
+      this.queueCommandCwd(),
+    );
+    return parseQueueDrainStartDecision(stdout);
+  }
+
+  private async resolveQueueDrainStepDecision(
+    item: { readonly id: number; readonly line: string } | undefined,
+  ): Promise<QueueDrainStepDecision> {
+    const stdout = await runRustCommand(
+      ["rust", "steer", "drain-step", String(this.queuedCountCache)],
+      this.queueCommandCwd(),
+      JSON.stringify(item ?? null),
+    );
+    return parseQueueDrainStepDecision(stdout);
+  }
+
+  private async popQueuedSubmit(): Promise<{ readonly id: number; readonly line: string } | undefined> {
+    const stdout = await runRustCommand(["rust", "queue", "pop-json", this.sessionId], this.queueCommandCwd());
+    return parseQueuedSubmit(stdout);
+  }
+
+  private async clearQueuedSubmits(): Promise<void> {
+    await runRustCommand(["rust", "queue", "clear", this.sessionId], this.queueCommandCwd());
+    this.queuedCountCache = 0;
+    this.queuedAttachments.clear();
+  }
+
+  private async loadQueuedSubmitCount(): Promise<number> {
+    return parseQueueLength(await runRustCommand(["rust", "queue", "len-json", this.sessionId], this.queueCommandCwd()));
+  }
+
+  private async listQueuedSubmits(): Promise<readonly { readonly id: number; readonly line: string }[]> {
+    return parseQueuedSubmitList(await runRustCommand(["rust", "queue", "list", this.sessionId], this.queueCommandCwd()));
+  }
+
+  private queueCommandCwd(): string {
+    return existsSync(this.options.cwd) ? this.options.cwd : process.cwd();
   }
 
   private async reloadContextState(): Promise<void> {
@@ -724,6 +1076,7 @@ export class WorkShellEngine<
       listScopedMemoryLines: this.listScopedMemoryLines,
       traceLines: this.state.traceLines,
       buildContextPanel: this.buildContextPanel,
+      expanded: this.state.panel.title === "Context expanded",
     });
     this.currentContextSummaryLines = contextState.contextSummaryLines;
     this.setState({

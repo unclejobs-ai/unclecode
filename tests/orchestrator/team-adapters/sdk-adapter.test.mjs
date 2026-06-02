@@ -75,6 +75,47 @@ test("sdk adapter run() returns submission from injected mini-loop", async () =>
   }
 });
 
+test("sdk adapter forwards runtime mode and execution policy profile to mini-loop", async () => {
+  const { binding, dataRoot } = makeBinding();
+  let observedArgs;
+  const profile = {
+    id: "test.enforce",
+    mode: "enforce",
+    defaultEffect: "deny",
+    rules: [],
+  };
+  try {
+    const adapter = createSdkAdapter({
+      id: "openai",
+      providerFactory: fakeProvider,
+      miniLoopRunner: async (args) => {
+        observedArgs = args;
+        return {
+          status: "submitted",
+          submission: "ok",
+          steps: 1,
+          costUsd: 0,
+        };
+      },
+    });
+    await adapter.run(
+      { workerId: "w1", persona: "coder", task: "stub task", runtime: "openai" },
+      {
+        binding,
+        cwd: dataRoot,
+        runtimeMode: "openshell",
+        executionPolicyProfile: profile,
+        env: { OPENAI_API_KEY: "sk-test" },
+      },
+    );
+
+    assert.equal(observedArgs.runtimeMode, "openshell");
+    assert.equal(observedArgs.executionPolicyProfile, profile);
+  } finally {
+    rmSync(dataRoot, { recursive: true, force: true });
+  }
+});
+
 test("sdk adapter run() reports ok=false when mini-loop returns non-submitted status", async () => {
   const { binding, dataRoot } = makeBinding();
   try {

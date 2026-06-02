@@ -1,3 +1,5 @@
+import { runRustCommandSync } from "./rust-command.js";
+
 export type WorkShellReasoningSupport =
   | {
       readonly status: "supported";
@@ -27,42 +29,43 @@ export function resolveReasoningCommand<Reasoning extends WorkShellReasoningConf
   reasoning: Reasoning,
   modeDefault: Reasoning,
 ): { nextReasoning: Reasoning; message: string } {
-  const [, rawCommand] = input.trim().split(/\s+/, 2);
-
-  if (reasoning.support.status === "unsupported") {
-    return {
-      nextReasoning: reasoning,
-      message: "Reasoning controls are visible, but this model does not support them.",
-    };
-  }
-
-  if (!rawCommand) {
-    return {
-      nextReasoning: reasoning,
-      message: `Reasoning is ${reasoning.effort}. Supported: ${reasoning.support.supportedEfforts.join(", ")}.`,
-    };
-  }
-
-  if (rawCommand === "default") {
-    return {
-      nextReasoning: modeDefault,
-      message: `Reasoning reset to ${modeDefault.effort}.`,
-    };
-  }
-
-  if (!reasoning.support.supportedEfforts.includes(rawCommand)) {
-    return {
-      nextReasoning: reasoning,
-      message: `Unsupported reasoning value: ${rawCommand}. Use one of ${reasoning.support.supportedEfforts.join(", ")} or default.`,
-    };
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "ux", "reasoning-command"],
+      process.cwd(),
+      JSON.stringify({
+        input,
+        currentReasoning: reasoning,
+        modeDefaultReasoning: modeDefault,
+      }),
+    ),
+  ) as unknown;
+  if (!isReasoningCommandResult(parsed)) {
+    throw new Error("Rust reasoning command returned an invalid payload.");
   }
 
   return {
-    nextReasoning: {
-      ...reasoning,
-      effort: rawCommand,
-      source: "override",
-    } as Reasoning,
-    message: `Reasoning set to ${rawCommand}.`,
+    nextReasoning: parsed.nextReasoning as Reasoning,
+    message: parsed.message,
   };
+}
+
+function isReasoningCommandResult(value: unknown): value is {
+  nextReasoning: WorkShellReasoningConfig;
+  message: string;
+} {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as { nextReasoning?: unknown; message?: unknown };
+  return typeof candidate.message === "string" && isReasoningConfig(candidate.nextReasoning);
+}
+
+function isReasoningConfig(value: unknown): value is WorkShellReasoningConfig {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as { effort?: unknown; source?: unknown; support?: unknown };
+  return (
+    typeof candidate.effort === "string" &&
+    typeof candidate.source === "string" &&
+    typeof candidate.support === "object" &&
+    candidate.support !== null
+  );
 }

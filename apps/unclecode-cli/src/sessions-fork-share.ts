@@ -7,9 +7,10 @@
  */
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
+import { runRustCommandSync } from "@unclecode/orchestrator";
 import { getSessionStoreRoot } from "@unclecode/session-store";
 
 const SESSIONS_DIRNAME = "sessions";
@@ -48,7 +49,9 @@ function generateForkId(): string {
 
 function generateShareSlug(sessionId: string): string {
   const stamp = Date.now().toString(36);
-  const fingerprint = createHash("sha256").update(`${sessionId}:${stamp}`).digest("hex").slice(0, 8);
+  const fingerprint = runRustCommandSync(["rust", "sha256"], process.cwd(), `${sessionId}:${stamp}`)
+    .trim()
+    .slice(0, 8);
   return `share-${stamp}-${fingerprint}`;
 }
 

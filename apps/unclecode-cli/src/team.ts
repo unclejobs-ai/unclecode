@@ -10,15 +10,11 @@ import {
   generateRunIdForCli,
   listTeamRuns,
   parseLanesSpec,
+  runRustCommandSync,
   runLaneDoctor,
   startTeamRun,
   type ParsedLaneSpec,
 } from "@unclecode/orchestrator";
-import {
-  PERSONA_IDS,
-  TEAM_GATE_LEVELS,
-  TEAM_RUNTIME_MODES,
-} from "@unclecode/contracts";
 import type { PersonaId, TeamGateLevel, TeamRuntimeMode } from "@unclecode/contracts";
 import {
   appendTeamCheckpoint,
@@ -27,8 +23,6 @@ import {
   readTeamRunManifest,
   verifyTeamRunChain,
 } from "@unclecode/session-store";
-
-const DEFAULT_DATA_ROOT_RELATIVE = ".data";
 
 type RunOptions = {
   readonly persona?: string;
@@ -41,15 +35,24 @@ type RunOptions = {
   readonly quiet?: boolean;
 };
 
+type TeamRunRustConfig = {
+  readonly persona: PersonaId;
+  readonly gate: TeamGateLevel;
+  readonly runtime: TeamRuntimeMode;
+  readonly workerTimeoutMs: number;
+  readonly dataRoot: string;
+  readonly createdBy: string;
+  readonly cliEntry: string | null;
+};
+
 export async function handleTeamRun(objective: string[], options: RunOptions): Promise<void> {
   if (objective.length === 0) {
     throw new Error("`unclecode team run` requires an objective string.");
   }
-  const persona = parsePersona(options.persona ?? "coder");
-  const gate = parseGate(options.gate ?? "strict");
-  const runtime = parseRuntime(options.runtime ?? "local");
+  const runConfig = resolveTeamRunRustConfig(options);
+  const { persona, gate, runtime } = runConfig;
   const laneSpecs = parseLanesSpec(options.lanes ?? "1");
-  const dataRoot = resolveDataRoot();
+  const dataRoot = runConfig.dataRoot;
   const runId = options.record?.trim() || generateRunIdForCli();
 
   const handle = startTeamRun({
@@ -61,7 +64,7 @@ export async function handleTeamRun(objective: string[], options: RunOptions): P
     gate,
     runtime,
     workspaceRoot: process.cwd(),
-    createdBy: process.env.USER ?? "unclecode-cli",
+    createdBy: runConfig.createdBy,
   });
   handle.start();
 
@@ -81,7 +84,7 @@ export async function handleTeamRun(objective: string[], options: RunOptions): P
   }
 
   try {
-    const cliEntry = resolveCliEntry();
+    const cliEntry = resolveCliEntry(runConfig);
     const task = objective.join(" ");
     const workers = laneSpecs.map((lane, idx) => ({
       workerId: `w${idx + 1}`,
@@ -91,7 +94,7 @@ export async function handleTeamRun(objective: string[], options: RunOptions): P
       ...(lane.model !== undefined ? { model: lane.model } : {}),
       ...(lane.extras !== undefined ? { extras: lane.extras } : {}),
     }));
-    const timeoutMs = parseTimeout(options.workerTimeout ?? "600000");
+    const timeoutMs = runConfig.workerTimeoutMs;
 
     if (!options.quiet) {
       process.stdout.write(`Dispatching ${workers.length} worker(s)…\n`);
@@ -130,20 +133,11 @@ export async function handleTeamRun(objective: string[], options: RunOptions): P
   }
 }
 
-function resolveCliEntry(): string {
-  const argv1 = process.argv[1];
-  if (!argv1) {
+function resolveCliEntry(config: TeamRunRustConfig): string {
+  if (!config.cliEntry) {
     throw new Error("team run --dispatch: cannot resolve CLI entrypoint from process.argv[1].");
   }
-  return argv1;
-}
-
-function parseTimeout(value: string): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    throw new Error(`Invalid --worker-timeout "${value}". Expected non-negative integer ms.`);
-  }
-  return parsed;
+  return config.cliEntry;
 }
 
 export function handleTeamStatus(runId?: string): void {
@@ -258,27 +252,6 @@ function printRunSummary(runRoot: string): void {
   process.stdout.write(`Objective: ${manifest.objective}\n`);
 }
 
-function parsePersona(value: string): PersonaId {
-  if (!PERSONA_IDS.includes(value as PersonaId)) {
-    throw new Error(`Unknown persona "${value}". Valid: ${PERSONA_IDS.join(", ")}`);
-  }
-  return value as PersonaId;
-}
-
-function parseGate(value: string): TeamGateLevel {
-  if (!TEAM_GATE_LEVELS.includes(value as TeamGateLevel)) {
-    throw new Error(`Unknown gate "${value}". Valid: ${TEAM_GATE_LEVELS.join(", ")}`);
-  }
-  return value as TeamGateLevel;
-}
-
-function parseRuntime(value: string): TeamRuntimeMode {
-  if (!TEAM_RUNTIME_MODES.includes(value as TeamRuntimeMode)) {
-    throw new Error(`Unknown runtime "${value}". Valid: ${TEAM_RUNTIME_MODES.join(", ")}`);
-  }
-  return value as TeamRuntimeMode;
-}
-
 function formatLanesSummary(specs: readonly ParsedLaneSpec[]): string {
   const counts = new Map<string, number>();
   for (const s of specs) counts.set(s.runtime, (counts.get(s.runtime) ?? 0) + 1);
@@ -287,7 +260,51 @@ function formatLanesSummary(specs: readonly ParsedLaneSpec[]): string {
 }
 
 function resolveDataRoot(): string {
-  return process.env.UNCLECODE_DATA_ROOT?.trim()
-    ? process.env.UNCLECODE_DATA_ROOT.trim()
-    : join(process.cwd(), DEFAULT_DATA_ROOT_RELATIVE);
+  return resolveTeamRunRustConfig({}).dataRoot;
+}
+
+function resolveTeamRunRustConfig(options: RunOptions): TeamRunRustConfig {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "team", "run-config"],
+      process.cwd(),
+      JSON.stringify({
+        cwd: process.cwd(),
+        argv1: process.argv[1],
+        env: process.env,
+        options,
+      }),
+    ),
+  ) as unknown;
+
+  if (!isRecord(parsed)) {
+    throw new Error("Rust team run config returned invalid payload");
+  }
+  const workerTimeoutMs = parsed.workerTimeoutMs;
+  if (
+    typeof parsed.persona !== "string"
+    || typeof parsed.gate !== "string"
+    || typeof parsed.runtime !== "string"
+    || typeof parsed.dataRoot !== "string"
+    || typeof parsed.createdBy !== "string"
+    || (parsed.cliEntry !== null && typeof parsed.cliEntry !== "string")
+    || typeof workerTimeoutMs !== "number"
+    || !Number.isSafeInteger(workerTimeoutMs)
+    || workerTimeoutMs < 0
+  ) {
+    throw new Error("Rust team run config returned invalid fields");
+  }
+  return {
+    persona: parsed.persona as PersonaId,
+    gate: parsed.gate as TeamGateLevel,
+    runtime: parsed.runtime as TeamRuntimeMode,
+    workerTimeoutMs,
+    dataRoot: parsed.dataRoot,
+    createdBy: parsed.createdBy,
+    cliEntry: parsed.cliEntry,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

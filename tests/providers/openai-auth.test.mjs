@@ -65,6 +65,64 @@ test("package resolveOpenAIAuth accepts stored api-key credential schema", async
   assert.equal(result.projectId, "proj_file");
 });
 
+test("package resolveOpenAIAuth uses Rust resolver for default credential-file path", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "unclecode-rust-auth-"));
+  const credentialsPath = path.join(root, "openai.json");
+  const futureExp = Math.floor(Date.now() / 1000) + 3600;
+  writeFileSync(
+    credentialsPath,
+    `${JSON.stringify({
+      authType: "oauth",
+      accessToken: buildJwtWithExp(futureExp),
+      refreshToken: "rt_123",
+      organizationId: "org_rust",
+      projectId: "proj_rust",
+      runtime: "api",
+    })}\n`,
+    "utf8",
+  );
+
+  const result = await resolveOpenAIAuth({
+    env: {
+      UNCLECODE_OPENAI_CREDENTIALS_PATH: credentialsPath,
+    },
+  });
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.authType, "oauth");
+  assert.equal(result.source, "unclecode-auth-file");
+  assert.equal(result.organizationId, "org_rust");
+  assert.equal(result.projectId, "proj_rust");
+  assert.equal(result.runtime, "api");
+});
+
+test("package resolveOpenAIAuth uses Rust resolver for a single fallback credential path", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "unclecode-rust-auth-fallback-"));
+  const credentialsPath = path.join(root, "openai.json");
+  writeFileSync(
+    credentialsPath,
+    `${JSON.stringify({
+      authType: "api-key",
+      apiKey: "sk-rust-fallback",
+      organizationId: "org_single",
+      projectId: "proj_single",
+    })}\n`,
+    "utf8",
+  );
+
+  const result = await resolveOpenAIAuth({
+    env: {},
+    fallbackAuthPath: credentialsPath,
+  });
+
+  assert.equal(result.status, "ok");
+  assert.equal(result.authType, "api-key");
+  assert.equal(result.source, "unclecode-api-key-file");
+  assert.equal(result.bearerToken, "sk-rust-fallback");
+  assert.equal(result.organizationId, "org_single");
+  assert.equal(result.projectId, "proj_single");
+});
+
 test("package resolveOpenAIAuth reports expired env oauth token honestly", async () => {
   const pastExp = Math.floor(Date.now() / 1000) - 3600;
   const result = await resolveOpenAIAuth({

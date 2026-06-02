@@ -308,6 +308,10 @@ test("dashboard hotspot re-exports extracted dashboard owner seams instead of re
     /export function handleSessionCenterInput\(/,
   );
   assert.match(
+    dashboardNavigationSource,
+    /export function createSessionCenterFocusForView\(/,
+  );
+  assert.match(
     dashboardRenderSource,
     /export function createEmbeddedWorkShellDashboardProps\(/,
   );
@@ -316,6 +320,10 @@ test("dashboard hotspot re-exports extracted dashboard owner seams instead of re
     /export function createManagedWorkShellDashboardProps</,
   );
   assert.match(dashboardSource, /export function EmbeddedWorkShellPane</);
+  assert.doesNotMatch(
+    dashboardShellSource,
+    /shellState\.view === "sessions"[\s\S]*<ActionShortcutStrip actions=\{visibleUtilityActions\}[\s\S]*<ActionList actions=\{visibleUtilityActions\}/,
+  );
   assert.match(
     dashboardSyncSource,
     /export function createWorkShellDashboardHomePatch/,
@@ -324,6 +332,8 @@ test("dashboard hotspot re-exports extracted dashboard owner seams instead of re
     dashboardSyncSource,
     /export function createWorkShellDashboardHomeSyncState/,
   );
+  assert.match(dashboardSyncSource, /"rust",\s*"ux",\s*operation/);
+  assert.doesNotMatch(dashboardSyncSource, /previous\.isBusy && !next\.isBusy/);
   assert.doesNotMatch(tuiSource, /export const DASHBOARD_ACTIONS/);
   assert.doesNotMatch(tuiSource, /export function createSessionCenterModel\(/);
   assert.doesNotMatch(tuiSource, /export function handleDashboardInput\(/);

@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 
+import { runRustCommandSync } from "./rust-command.js";
 import { clearWorkspaceSkillCache, listAvailableSkills } from "./workspace-skills.js";
 
 export type WorkspaceGuidanceSkill = {
@@ -88,7 +88,7 @@ function dedupeGuidanceSources(sources: readonly WorkspaceGuidanceSource[]): {
 } {
   const latestIndexByHash = new Map<string, number>();
   const hashes = sources.map((source, index) => {
-    const hash = createHash("sha256").update(source.content).digest("hex");
+    const hash = runRustCommandSync(["rust", "sha256"], process.cwd(), source.content).trim();
     latestIndexByHash.set(hash, index);
     return hash;
   });
@@ -208,57 +208,29 @@ export async function loadWorkspaceGuidance(input: {
   readonly userHomeDir?: string | undefined;
   readonly workspaceSkills?: readonly WorkspaceGuidanceSkill[];
 }): Promise<WorkspaceGuidance> {
-  const discovered = await discoverGuidanceSources(input.cwd, input.userHomeDir);
-  const sources = discovered.sources;
-  const workspaceSkills = (input.workspaceSkills ?? []).filter((skill) => skill.scope === "project");
-
-  if (sources.length === 0 && workspaceSkills.length === 0) {
-    return {
-      systemPromptAppendix: "",
-      contextSummaryLines: [
-        "No AGENTS.md, CLAUDE.md, GEMINI.md, UNCLECODE.md, or project skills found.",
-        "Use /context after adding one to reload context.",
-      ],
-      sources: [],
-    };
+  const raw = runRustCommandSync(
+    ["rust", "context", "guidance", input.cwd, input.userHomeDir ?? "-"],
+    process.cwd(),
+    JSON.stringify(input.workspaceSkills ?? []),
+  ).trim();
+  const parsed = JSON.parse(raw) as unknown;
+  if (!isWorkspaceGuidance(parsed)) {
+    throw new Error("Rust workspace guidance command returned an invalid payload.");
   }
+  return parsed;
+}
 
-  const appendixBlocks = [
-    ...sources
-      .filter((source) => source.name !== "AGENTS.md")
-      .map((source) => `## ${source.name} (${source.path})\n${source.content.trim()}`),
-    ...workspaceSkills.map((skill) => `## SKILL ${skill.name} (${skill.path})\n${skill.content.trim()}`),
-  ];
-  const skillSummaryLines =
-    workspaceSkills.length === 0
-      ? []
-      : [
-          `Loaded skills: ${workspaceSkills.slice(0, 6).map((skill) => skill.name).join(", ")}`,
-          ...workspaceSkills
-            .slice(0, 2)
-            .map((skill) => `Skill ${skill.name}: ${skill.summary}`),
-        ];
-
-  return {
-    systemPromptAppendix: `Workspace guidance:\n\n${appendixBlocks.join("\n\n")}`,
-    contextSummaryLines: [
-      ...(sources.length > 0
-        ? [`Loaded guidance: ${sources.map((source) => source.name).join(", ")}`]
-        : []),
-      ...sources.slice(0, 4).map((source) => `${source.name}: ${summarizeContent(source.content)}`),
-      ...discovered.dedupNotes.slice(0, 2),
-      ...discovered.conflicts.map(
-        (conflict) =>
-          `Conflict: ${conflict.kind} guidance differs → ${conflict.winner} wins over ${conflict.loser}`,
-      ),
-      ...skillSummaryLines,
-      "/context · /help · /sessions · /reasoning · /skills",
-    ],
-    sources: [
-      ...sources.map((source) => source.path),
-      ...workspaceSkills.map((skill) => skill.path),
-    ],
-  };
+function isWorkspaceGuidance(value: unknown): value is WorkspaceGuidance {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    typeof (value as { systemPromptAppendix?: unknown }).systemPromptAppendix === "string" &&
+    Array.isArray((value as { contextSummaryLines?: unknown }).contextSummaryLines) &&
+    Array.isArray((value as { sources?: unknown }).sources) &&
+    (value as { contextSummaryLines: unknown[] }).contextSummaryLines.every((line) => typeof line === "string") &&
+    (value as { sources: unknown[] }).sources.every((source) => typeof source === "string")
+  );
 }
 
 export function clearCachedWorkspaceGuidance(cwd?: string, userHomeDir?: string): void {

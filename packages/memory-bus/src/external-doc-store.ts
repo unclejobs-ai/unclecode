@@ -10,9 +10,9 @@
  * citation set (§5.6).
  */
 
-import { createHash } from "node:crypto";
-
 import type { Citation } from "@unclecode/contracts";
+
+import { rustSha256 } from "./rust-command.js";
 
 export type Context7Doc = {
   readonly libraryId: string;
@@ -63,7 +63,7 @@ export async function consultDocs(
 ): Promise<ContextDocResult> {
   const libraryId = await client.resolveLibraryId(input.library);
   const content = await client.queryDocs(libraryId, input.topic);
-  const versionHash = createHash("sha256").update(content).digest("hex");
+  const versionHash = rustSha256(content);
   const citation: Citation = {
     category: "external_doc",
     key: `context7://${libraryId}#${input.topic}`,

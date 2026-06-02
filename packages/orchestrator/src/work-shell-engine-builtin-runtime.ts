@@ -1,9 +1,13 @@
 import {
   createAuthKeyBuiltinResult,
+  createClearBuiltinResult,
   createContextBuiltinResult,
+  createHarnessBuiltinResult,
   createHelpBuiltinResult,
   createLoadedSkillBuiltinResult,
   createQueueBuiltinResult,
+  createReloadBuiltinResult,
+  createSessionsBuiltinResult,
   createSkillLoadErrorEntries,
   createSkillsBuiltinResult,
   createSkillUsageErrorEntries,
@@ -14,11 +18,8 @@ import {
   resolveReasoningBuiltinResult,
 } from "./work-shell-engine-builtins.js";
 import { resolveWorkerBudget } from "./work-agent.js";
-import { createHarnessPanel } from "./work-shell-engine-commands.js";
 import {
   createWorkShellStatusPanel,
-  createWorkspaceReloadCompleteEntry,
-  createWorkspaceReloadEntries,
 } from "./work-shell-engine-panels.js";
 import type {
   WorkShellChatEntry,
@@ -55,6 +56,12 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
     options: WorkShellEngineOptions<Reasoning>,
     reasoning: Reasoning,
     authLabel: string,
+    statusContext?: {
+      readonly contextSummaryLines: readonly string[];
+      readonly bridgeLines: readonly string[];
+      readonly memoryLines: readonly string[];
+      readonly traceLines: readonly string[];
+    },
   ) => WorkShellPanel;
   resolveReasoningCommand: (
     input: string,
@@ -84,6 +91,9 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
   onExit: () => void;
   openSessionsPanel: () => Promise<void>;
   reloadContextState: () => Promise<void>;
+  queuedCount?: (() => number) | undefined;
+  queuedItems?: (() => Promise<readonly { readonly id: number; readonly line: string }[]>) | undefined;
+  clearQueuedItems?: (() => Promise<void>) | undefined;
   appendEntries: (...entries: readonly WorkShellChatEntry[]) => void;
   setState: (patch: Partial<WorkShellEngineState<Reasoning>>) => void;
   persistSessionSnapshot: (
@@ -99,7 +109,7 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
       return;
     case "clear":
       input.clearAgent();
-      input.setState({ entries: [{ role: "system", text: "Conversation cleared." }] });
+      input.setState(createClearBuiltinResult(input.line).patch);
       return;
     case "help": {
       const result = createHelpBuiltinResult(input.line, input.buildHelpPanel);
@@ -119,22 +129,44 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
       return;
     }
     case "reload":
-      input.appendEntries(...createWorkspaceReloadEntries(input.line));
-      await input.reloadContextState();
-      input.appendEntries(createWorkspaceReloadCompleteEntry());
+      {
+        const result = createReloadBuiltinResult(input.line);
+        input.appendEntries(...result.startEntries);
+        await input.reloadContextState();
+        input.appendEntries(result.completeEntry);
+      }
       return;
     case "status": {
       const result = createStatusBuiltinResult({
         line: input.line,
+        options: input.options,
+        stateModel: input.state.model,
         reasoning: input.state.reasoning,
         authLabel: input.state.authLabel,
-        buildStatusPanel: (reasoning, authLabel) => createWorkShellStatusPanel({
-          options: input.options,
-          stateModel: input.state.model,
-          reasoning,
-          authLabel,
-          buildStatusPanel: input.buildStatusPanel,
-        }),
+        statusContext: {
+          contextSummaryLines: input.currentContextSummaryLines,
+          bridgeLines: input.state.bridgeLines,
+          memoryLines: input.state.memoryLines,
+          traceLines: input.state.traceLines,
+        },
+        isBusy: input.state.isBusy,
+        ...(input.state.busyStatus ? { busyStatus: input.state.busyStatus } : {}),
+        ...(input.state.currentTurnStartedAt !== undefined
+          ? { currentTurnStartedAt: input.state.currentTurnStartedAt }
+          : {}),
+        ...(input.state.lastTurnDurationMs !== undefined
+          ? { lastTurnDurationMs: input.state.lastTurnDurationMs }
+          : {}),
+        nowMs: Date.now(),
+        buildStatusPanel: (reasoning, authLabel, statusContext) =>
+          createWorkShellStatusPanel({
+            options: input.options,
+            stateModel: input.state.model,
+            reasoning,
+            authLabel,
+            statusContext,
+            buildStatusPanel: input.buildStatusPanel,
+          }),
       });
       input.appendEntries(...result.entries);
       input.setState({ panel: result.panel });
@@ -154,21 +186,34 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
       return;
     }
     case "sessions":
-      input.appendEntries({ role: "user", text: input.line });
+      input.appendEntries(...createSessionsBuiltinResult(input.line).entries);
       await input.openSessionsPanel();
       return;
     case "reasoning": {
       const result = resolveReasoningBuiltinResult({
         line: input.line,
+        options: input.options,
+        stateModel: input.state.model,
         currentReasoning: input.state.reasoning,
         modeDefaultReasoning: input.modeDefaultReasoning,
         authLabel: input.state.authLabel,
-        resolveReasoningCommand: input.resolveReasoningCommand,
+        statusContext: {
+          contextSummaryLines: input.currentContextSummaryLines,
+          bridgeLines: input.state.bridgeLines,
+          memoryLines: input.state.memoryLines,
+          traceLines: input.state.traceLines,
+        },
         buildStatusPanel: (reasoning, authLabel) => createWorkShellStatusPanel({
           options: input.options,
           stateModel: input.state.model,
           reasoning,
           authLabel,
+          statusContext: {
+            contextSummaryLines: input.currentContextSummaryLines,
+            bridgeLines: input.state.bridgeLines,
+            memoryLines: input.state.memoryLines,
+            traceLines: input.state.traceLines,
+          },
           buildStatusPanel: input.buildStatusPanel,
         }),
       });
@@ -183,22 +228,34 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
     case "model": {
       const result = resolveModelBuiltinResult({
         line: input.line,
+        provider: input.options.provider,
         currentModel: input.state.model,
         currentReasoning: input.state.reasoning,
         modeDefaultReasoning: input.modeDefaultReasoning,
-        resolveModelCommand: input.resolveModelCommand,
       });
-      if (!result) {
-        return;
-      }
       if (result.shouldUpdateRuntime) {
         input.updateRuntimeSettings({ model: result.nextModel, reasoning: result.nextReasoning });
       }
+      const panel = result.shouldUpdateRuntime
+        ? createWorkShellStatusPanel({
+            options: input.options,
+            stateModel: result.nextModel,
+            reasoning: result.nextReasoning,
+            authLabel: input.state.authLabel,
+            statusContext: {
+              contextSummaryLines: input.currentContextSummaryLines,
+              bridgeLines: input.state.bridgeLines,
+              memoryLines: input.state.memoryLines,
+              traceLines: input.state.traceLines,
+            },
+            buildStatusPanel: input.buildStatusPanel,
+          })
+        : result.panel;
       input.appendEntries(...result.entries);
       input.setState({
         model: result.nextModel,
         reasoning: result.nextReasoning,
-        panel: result.panel,
+        panel,
       });
       await input.persistSessionSnapshot("idle", input.lastSessionSummary).catch(() => undefined);
       return;
@@ -207,29 +264,47 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
       input.appendEntries(...createToolsBuiltinResult(input.line, input.toolLines));
       return;
     case "queue": {
+      const queuedItems = input.queuedItems ? await input.queuedItems() : undefined;
       const result = createQueueBuiltinResult({
         line: input.line,
         isBusy: input.state.isBusy,
         ...(input.state.busyStatus ? { busyStatus: input.state.busyStatus } : {}),
         mode: input.state.mode,
         workerBudget: resolveWorkerBudget(input.state.mode),
+        ...(input.queuedCount ? { queuedCount: input.queuedCount() } : {}),
+        ...(queuedItems ? { queuedItems } : {}),
+      });
+      input.appendEntries(...result.entries);
+      input.setState({ panel: result.panel });
+      return;
+    }
+    case "queue-clear": {
+      await input.clearQueuedItems?.();
+      const result = createQueueBuiltinResult({
+        line: input.line,
+        isBusy: input.state.isBusy,
+        ...(input.state.busyStatus ? { busyStatus: input.state.busyStatus } : {}),
+        mode: input.state.mode,
+        workerBudget: resolveWorkerBudget(input.state.mode),
+        queuedCount: 0,
+        queuedItems: [],
+        transcriptText: input.state.isBusy
+          ? "Queue cleared. Active turn is still running."
+          : "Queue cleared.",
       });
       input.appendEntries(...result.entries);
       input.setState({ panel: result.panel });
       return;
     }
     case "harness": {
-      input.appendEntries(
-        { role: "user", text: input.line },
-        { role: "system", text: "Harness shown." },
-      );
-      input.setState({
-        panel: createHarnessPanel({
-          mode: input.state.mode,
-          workerBudget: resolveWorkerBudget(input.state.mode),
-          autoContinue: true,
-        }),
+      const result = createHarnessBuiltinResult({
+        line: input.line,
+        mode: input.state.mode,
+        workerBudget: resolveWorkerBudget(input.state.mode),
+        autoContinue: true,
       });
+      input.appendEntries(...result.entries);
+      input.setState({ panel: result.panel });
       return;
     }
     case "auth-key": {

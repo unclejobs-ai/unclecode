@@ -4,6 +4,7 @@ import type {
   WorkShellPanel,
   WorkShellSkillListItem,
 } from "./work-shell-engine.js";
+import { runRustCommandSync } from "./rust-command.js";
 
 export type ResolvedWorkShellBuiltinCommand =
   | { readonly kind: "exit" }
@@ -16,6 +17,7 @@ export type ResolvedWorkShellBuiltinCommand =
   | { readonly kind: "tools" }
   | { readonly kind: "skills" }
   | { readonly kind: "queue" }
+  | { readonly kind: "queue-clear" }
   | { readonly kind: "harness" }
   | { readonly kind: "auth-key" }
   | { readonly kind: "trace-mode"; readonly traceMode: "verbose" | "minimal" }
@@ -26,57 +28,58 @@ export type ResolvedWorkShellBuiltinCommand =
 export function resolveWorkShellBuiltinCommand(
   line: string,
 ): ResolvedWorkShellBuiltinCommand | undefined {
-  if (line === "/exit") return { kind: "exit" };
-  if (line === "/clear") return { kind: "clear" };
-  if (line === "/help") return { kind: "help" };
-  if (line === "/context") return { kind: "context" };
-  if (line === "/reload") return { kind: "reload" };
-  if (line === "/status") return { kind: "status" };
-  if (line === "/sessions") return { kind: "sessions" };
-  if (line === "/tools") return { kind: "tools" };
-  if (line === "/skills") return { kind: "skills" };
-  if (line === "/queue") return { kind: "queue" };
-  if (line === "/harness") return { kind: "harness" };
-  if (line === "/auth key") return { kind: "auth-key" };
-  if (line === "/verbose" || line === "/v") {
-    return { kind: "trace-mode", traceMode: "verbose" };
+  const parsed = JSON.parse(
+    runRustCommandSync(["rust", "command", "builtin-command"], process.cwd(), line),
+  ) as unknown;
+  if (parsed === null) {
+    return undefined;
   }
-  if (line === "/minimal" || line === "/m") {
-    return { kind: "trace-mode", traceMode: "minimal" };
+  if (!isBuiltinCommand(parsed)) {
+    throw new Error("Rust builtin command returned an invalid payload.");
   }
-  if (line.startsWith("/reasoning")) return { kind: "reasoning", line };
-  if (line.startsWith("/model")) return { kind: "model", line };
-  if (line.startsWith("/skill ")) {
-    const skillName = line.slice(7).trim();
-    return skillName.length > 0 ? { kind: "skill", line, skillName } : { kind: "skill", line };
+  return parsed;
+}
+
+function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinCommand {
+  if (!value || typeof value !== "object") {
+    return false;
   }
-  return undefined;
+  const command = value as { kind?: unknown; traceMode?: unknown; line?: unknown; skillName?: unknown };
+  if (typeof command.kind !== "string") {
+    return false;
+  }
+  if (command.kind === "trace-mode") {
+    return command.traceMode === "verbose" || command.traceMode === "minimal";
+  }
+  if (command.kind === "reasoning" || command.kind === "model") {
+    return typeof command.line === "string";
+  }
+  if (command.kind === "skill") {
+    return typeof command.line === "string" && (command.skillName === undefined || typeof command.skillName === "string");
+  }
+  return [
+    "exit",
+    "clear",
+    "help",
+    "context",
+    "reload",
+    "status",
+    "sessions",
+    "tools",
+    "skills",
+    "queue",
+    "queue-clear",
+    "harness",
+    "auth-key",
+  ].includes(command.kind);
 }
 
 export function createSecureApiKeyEntryPanel(message = "Paste key. Optional: --org <id> --project <id>."): WorkShellPanel {
-  return {
-    title: "Auth",
-    lines: [
-      "Current",
-      "Secure API key entry.",
-      "",
-      "Next",
-      message,
-      "Enter saves · Esc cancels.",
-    ],
-  };
+  return buildRustUxPanel("auth-secure-entry", { message });
 }
 
 export function createSkillsPanel(skills: readonly WorkShellSkillListItem[]): WorkShellPanel {
-  return {
-    title: "Skills",
-    lines: skills.length > 0
-      ? skills.slice(0, 12).flatMap((skill) => [
-          `${skill.name} · ${skill.scope}`,
-          ...(skill.summary ? [`  ${skill.summary}`] : []),
-        ])
-      : ["No skills found."],
-  };
+  return buildRustUxPanel("skills", { skills });
 }
 
 export function createQueuePanel(input: {
@@ -84,33 +87,10 @@ export function createQueuePanel(input: {
   readonly busyStatus?: string;
   readonly mode?: string;
   readonly workerBudget?: number;
+  readonly queuedCount?: number;
+  readonly queuedItems?: readonly { readonly id: number; readonly line: string }[];
 }): WorkShellPanel {
-  const detail = input.busyStatus?.trim();
-  const modeInfo = input.mode ? `Mode · ${input.mode}` : undefined;
-  const budgetInfo = input.workerBudget !== undefined ? `Workers · ${input.workerBudget} max` : undefined;
-  return {
-    title: "Queue",
-    lines: input.isBusy
-      ? [
-          "Current",
-          "State · running",
-          detail ? `Now · ${detail}` : "Now · active turn",
-          ...(modeInfo ? [modeInfo] : []),
-          ...(budgetInfo ? [budgetInfo] : []),
-          "",
-          "Queued",
-          "No queued work beyond the active turn.",
-        ]
-      : [
-          "Current",
-          "State · idle",
-          ...(modeInfo ? [modeInfo] : []),
-          ...(budgetInfo ? [budgetInfo] : []),
-          "",
-          "Queued",
-          "No queued work in this shell.",
-        ],
-  };
+  return buildRustUxPanel("queue", input);
 }
 
 export function createHarnessPanel(input: {
@@ -118,27 +98,36 @@ export function createHarnessPanel(input: {
   readonly workerBudget: number;
   readonly autoContinue: boolean;
 }): WorkShellPanel {
-  return {
-    title: "Harness",
-    lines: [
-      "Runtime",
-      `Mode · ${input.mode}`,
-      `Workers · ${input.workerBudget} max`,
-      `Auto-continue · ${input.autoContinue ? "enabled" : "disabled"}`,
-      "",
-      "Commands",
-      "unclecode harness status — full config",
-      "unclecode harness apply yolo — low friction",
-      "/mode set <profile> — change mode",
-    ],
-  };
+  return buildRustUxPanel("harness", input);
 }
 
 export function createLoadedSkillPanel(skill: WorkShellLoadedSkill): WorkShellPanel {
-  return {
-    title: `Skill · ${skill.name}`,
-    lines: skill.content.split(/\r?\n/).slice(0, 12),
-  };
+  return buildRustUxPanel("skill", skill);
+}
+
+function buildRustUxPanel(
+  kind: "queue" | "harness" | "skills" | "skill" | "memories" | "auth-secure-entry" | "auth-progress",
+  input: unknown,
+): WorkShellPanel {
+  const parsed = JSON.parse(
+    runRustCommandSync(["rust", "ux", "panel", kind], process.cwd(), JSON.stringify(input)),
+  ) as unknown;
+  if (!isWorkShellPanel(parsed)) {
+    throw new Error("Rust UX panel command returned an invalid payload.");
+  }
+  return parsed;
+}
+
+function isWorkShellPanel(value: unknown): value is WorkShellPanel {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as { title?: unknown; lines?: unknown };
+  return (
+    typeof candidate.title === "string" &&
+    Array.isArray(candidate.lines) &&
+    candidate.lines.every((line) => typeof line === "string")
+  );
 }
 
 export type ResolvedWorkShellLocalCommand =
@@ -147,57 +136,57 @@ export type ResolvedWorkShellLocalCommand =
   | { readonly kind: "remember"; readonly usageError: string };
 
 export function resolveWorkShellLocalCommand(line: string): ResolvedWorkShellLocalCommand | undefined {
-  if (line === "/memories") {
-    return { kind: "memories" };
-  }
-
-  if (!line.startsWith("/remember")) {
+  const parsed = JSON.parse(
+    runRustCommandSync(["rust", "command", "local-command"], process.cwd(), line),
+  ) as unknown;
+  if (parsed === null) {
     return undefined;
   }
-
-  const parts = line.split(/\s+/).filter(Boolean);
-  const scope = parts[1] === "session" || parts[1] === "project" || parts[1] === "user" || parts[1] === "agent"
-    ? parts[1]
-    : "project";
-  const summary = (scope === "project" ? parts.slice(1) : parts.slice(2)).join(" ").trim();
-  if (!summary) {
-    return { kind: "remember", usageError: "Usage: /remember [session|project|user|agent] <text>" };
+  if (!isLocalCommand(parsed)) {
+    throw new Error("Rust local command returned an invalid payload.");
   }
+  return parsed;
+}
 
-  return {
-    kind: "remember",
-    scope,
-    summary,
-  };
+function isLocalCommand(value: unknown): value is ResolvedWorkShellLocalCommand {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const command = value as { kind?: unknown; scope?: unknown; summary?: unknown; usageError?: unknown };
+  if (command.kind === "memories") {
+    return true;
+  }
+  if (command.kind !== "remember") {
+    return false;
+  }
+  if (typeof command.usageError === "string") {
+    return true;
+  }
+  return (
+    (command.scope === "session" || command.scope === "project" || command.scope === "user" || command.scope === "agent") &&
+    typeof command.summary === "string"
+  );
 }
 
 export function createMemoriesPanel(
   sessionMemory: readonly string[],
   projectMemory: readonly string[],
 ): WorkShellPanel {
-  return {
-    title: "Memories",
-    lines: [
-      "Session",
-      ...(sessionMemory.length > 0 ? sessionMemory : ["No session memories yet."]),
-      "",
-      "Project",
-      ...(projectMemory.length > 0 ? projectMemory : ["No project memories yet."]),
-    ],
-  };
+  return buildRustUxPanel("memories", { sessionMemory, projectMemory });
 }
 
 export function redactSensitiveInlineCommandArgs(args: readonly string[]): readonly string[] {
-  const redacted = [...args];
-  const apiKeyIndex = redacted.findIndex((arg) => arg === "--api-key");
-  if (apiKeyIndex >= 0 && apiKeyIndex + 1 < redacted.length) {
-    redacted[apiKeyIndex + 1] = "[REDACTED]";
-  }
-  return redacted;
+  return resolveInlineCommandVisibility({
+    line: `/${args.join(" ")}`,
+    slashCommand: args,
+  }).visibleArgs;
 }
 
 export function redactSensitiveInlineCommandLine(line: string): string {
-  return redactSensitiveInlineCommandArgs(line.trim().split(/\s+/).filter(Boolean)).join(" ");
+  return resolveInlineCommandVisibility({
+    line,
+    slashCommand: line.trim().replace(/^\//, "").split(/\s+/).filter(Boolean),
+  }).visibleLine;
 }
 
 export function resolveVisibleInlineCommand(input: {
@@ -209,90 +198,99 @@ export function resolveVisibleInlineCommand(input: {
   readonly isAuthCommand: boolean;
   readonly isAuthLogin: boolean;
 } {
-  const visibleArgs = redactSensitiveInlineCommandArgs(input.slashCommand);
-  return {
-    visibleLine: redactSensitiveInlineCommandLine(input.line),
-    visibleArgs,
-    isAuthCommand: input.slashCommand[0] === "auth",
-    isAuthLogin: input.slashCommand[0] === "auth" && input.slashCommand[1] === "login",
+  return resolveInlineCommandVisibility(input);
+}
+
+function resolveInlineCommandVisibility(input: {
+  readonly line: string;
+  readonly slashCommand: readonly string[];
+}): {
+  readonly visibleLine: string;
+  readonly visibleArgs: readonly string[];
+  readonly isAuthCommand: boolean;
+  readonly isAuthLogin: boolean;
+} {
+  const parsed = JSON.parse(
+    runRustCommandSync(["rust", "ux", "inline-command-visibility"], process.cwd(), JSON.stringify(input)),
+  ) as unknown;
+  if (!isInlineCommandVisibility(parsed)) {
+    throw new Error("Rust inline command visibility returned an invalid payload.");
+  }
+  return parsed;
+}
+
+function isInlineCommandVisibility(value: unknown): value is {
+  readonly visibleLine: string;
+  readonly visibleArgs: readonly string[];
+  readonly isAuthCommand: boolean;
+  readonly isAuthLogin: boolean;
+} {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as {
+    visibleLine?: unknown;
+    visibleArgs?: unknown;
+    isAuthCommand?: unknown;
+    isAuthLogin?: unknown;
   };
+  return (
+    typeof candidate.visibleLine === "string" &&
+    Array.isArray(candidate.visibleArgs) &&
+    candidate.visibleArgs.every((arg) => typeof arg === "string") &&
+    typeof candidate.isAuthCommand === "boolean" &&
+    typeof candidate.isAuthLogin === "boolean"
+  );
 }
 
 export function createAuthLoginPendingPanel(): WorkShellPanel {
-  return {
-    title: "Auth",
-    lines: [
-      "Starting OAuth…",
-      "Check the browser window.",
-    ],
-  };
+  return buildRustUxPanel("auth-progress", { progressLines: [] });
 }
 
 export function buildAuthProgressPanelLines(progressLines: readonly string[]): readonly string[] {
-  const normalizedLines = progressLines
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  if (normalizedLines.length === 0) {
-    return createAuthLoginPendingPanel().lines;
-  }
-
-  const latestCodeLine = [...normalizedLines]
-    .reverse()
-    .find((line) => line.startsWith("Enter code:"));
-  const latestStatusLine = normalizedLines.at(-1);
-  const historyLines = normalizedLines.filter(
-    (line) => line !== latestCodeLine && line !== latestStatusLine,
-  );
-
-  return [
-    ...(latestCodeLine ? [latestCodeLine] : []),
-    ...(latestStatusLine && latestStatusLine !== latestCodeLine
-      ? [latestStatusLine]
-      : []),
-    ...historyLines,
-    ...(latestCodeLine ? [] : latestStatusLine ? [] : ["Check the browser window."]),
-  ];
+  return buildRustUxPanel("auth-progress", { progressLines }).lines;
 }
 
 export function resolvePromptSlashCommand(
   slashCommand: readonly string[] | undefined,
 ): { readonly kind: "review" | "commit"; readonly focus?: string } | undefined {
-  if (!slashCommand || slashCommand[0] !== "prompt") {
+  if (!slashCommand) {
     return undefined;
   }
-
-  const kind = slashCommand[1];
-  if (kind !== "review" && kind !== "commit") {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "command", "prompt-slash-command"],
+      process.cwd(),
+      JSON.stringify({ slashCommand }),
+    ),
+  ) as unknown;
+  if (parsed === null) {
     return undefined;
   }
+  if (!isPromptSlashCommand(parsed)) {
+    throw new Error("Rust prompt slash command returned an invalid payload.");
+  }
+  return parsed;
+}
 
-  const focus = slashCommand.slice(2).join(" ").trim();
-  return focus.length > 0 ? { kind, focus } : { kind };
+function isPromptSlashCommand(value: unknown): value is { readonly kind: "review" | "commit"; readonly focus?: string } {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as { kind?: unknown; focus?: unknown };
+  return (
+    (candidate.kind === "review" || candidate.kind === "commit") &&
+    (candidate.focus === undefined || typeof candidate.focus === "string")
+  );
 }
 
 export function buildPromptCommandPrompt(input: {
   readonly kind: "review" | "commit";
   readonly focus?: string;
 }): string {
-  const focusLine = `Focus request: ${input.focus ?? "current changes in this workspace"}`;
-
-  if (input.kind === "review") {
-    return [
-      "Review the current repository changes and implementation.",
-      focusLine,
-      "Report concrete issues, risks, missing verification, and the smallest high-value next fixes.",
-      "If no major issue is found, say that explicitly and still list remaining risks and verification gaps.",
-      "Respond with sections: Findings, Risks, Recommended tests, Verdict.",
-    ].join("\n\n");
-  }
-
-  return [
-    "Draft a single git commit message using the Lore protocol.",
-    focusLine,
-    "The first line must explain why, not what changed.",
-    "Then provide a short body plus git trailers using this vocabulary when applicable:",
-    "Constraint:\nRejected:\nConfidence:\nScope-risk:\nDirective:\nTested:\nNot-tested:",
-    "If some details are unknown, keep them honest and concise instead of inventing facts.",
-    "Output only the commit message.",
-  ].join("\n\n");
+  return runRustCommandSync(
+    ["rust", "command", "prompt-command"],
+    process.cwd(),
+    JSON.stringify(input),
+  ).trimEnd();
 }

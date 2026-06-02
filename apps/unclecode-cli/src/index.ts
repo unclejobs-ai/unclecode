@@ -12,7 +12,12 @@ async function main(): Promise<void> {
       stdoutIsTTY: process.stdout.isTTY ?? false,
     })
   ) {
-    await (await import("./work-bootstrap.js")).launchWorkEntrypoint([]);
+    const { runRustCommandPassthrough } = await import("@unclecode/orchestrator");
+    process.exitCode = await runRustCommandPassthrough(
+      ["work"],
+      process.cwd(),
+      process.env,
+    );
     return;
   }
 

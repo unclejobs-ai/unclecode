@@ -7,7 +7,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import type {
@@ -19,17 +19,15 @@ import type {
   WorkerSpec as ContractWorkerSpec,
 } from "@unclecode/contracts";
 
-import { DEFAULT_LANE_RUNTIME } from "./team-lanes.js";
 import {
   createTeamRun,
   generateRunId,
-  getTeamRunRoot,
-  getTeamRunsRoot,
   lockTeamRun,
 } from "@unclecode/session-store";
 
 import { TeamBinding } from "./team-binding.js";
 import { sweepStaleLocks } from "./disk-ownership-registry.js";
+import { runRustCommandSync } from "./rust-command.js";
 
 export type TeamRunnerOptions = {
   readonly dataRoot: string;
@@ -61,13 +59,6 @@ export type TeamRunnerHandle = {
  * downstream breakage. `runtime` is required; `model`/`extras` optional.
  */
 export type WorkerSpec = ContractWorkerSpec;
-
-function normalizeWorkerSpec(spec: WorkerSpec): WorkerSpec {
-  // Defensive: allow .mjs callers that omit runtime to inherit the canonical
-  // default rather than crashing the spawn loop. TS callers are type-enforced.
-  if (spec.runtime !== undefined) return spec;
-  return { ...spec, runtime: DEFAULT_LANE_RUNTIME };
-}
 
 export type WorkerCommand = {
   readonly command: string;
@@ -194,16 +185,16 @@ async function runDispatch(input: {
     timestamp: new Date().toISOString(),
   });
 
-  const childEnv: Record<string, string> = {
-    ...filterEnv(process.env),
-    ...input.binding.envForChild(),
-    ...(input.dispatch.extraEnv ?? {}),
-  };
+  const childEnv = resolveChildEnv({
+    baseEnv: process.env,
+    bindingEnv: input.binding.envForChild(),
+    ...(input.dispatch.extraEnv !== undefined ? { extraEnv: input.dispatch.extraEnv } : {}),
+  });
 
   const outcomes = await Promise.all(
     input.dispatch.workers.map((rawSpec) =>
       runWorker({
-        spec: normalizeWorkerSpec(rawSpec),
+        spec: rawSpec,
         command: input.dispatch.workerCommand,
         env: childEnv,
         cwd: input.dispatch.cwd ?? process.cwd(),
@@ -216,13 +207,7 @@ async function runDispatch(input: {
     ),
   );
 
-  const allCompleted = outcomes.every((o) => o.status === "completed");
-  const anyKilled = outcomes.some((o) => o.status === "killed");
-  const finalStatus: TeamRunStatus = allCompleted
-    ? "accepted"
-    : anyKilled
-      ? "killed"
-      : "errored";
+  const finalStatus = resolveDispatchStatus(outcomes);
 
   input.binding.publish({
     type: "team_run",
@@ -237,18 +222,6 @@ async function runDispatch(input: {
   return { status: finalStatus, outcomes, sweep };
 }
 
-// Workers inherit the full coordinator env minus undefined values. Callers
-// that need to scrub credentials must pass `extraEnv` overrides; this helper
-// does not denylist by name to avoid silently dropping legitimate per-host
-// vars (HOME, PATH, *_TOKEN used by the agent itself).
-function filterEnv(env: NodeJS.ProcessEnv): Record<string, string> {
-  const filtered: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (typeof value === "string") filtered[key] = value;
-  }
-  return filtered;
-}
-
 function runWorker(input: {
   readonly spec: WorkerSpec;
   readonly command: WorkerCommand;
@@ -260,23 +233,7 @@ function runWorker(input: {
 }): Promise<WorkerOutcome> {
   return new Promise((resolve) => {
     const startedAt = Date.now();
-    const args = [
-      ...input.command.args,
-      "--worker-id",
-      input.spec.workerId,
-      "--persona",
-      input.spec.persona,
-      "--task",
-      input.spec.task,
-      "--runtime",
-      input.spec.runtime,
-    ];
-    if (input.spec.model !== undefined) {
-      args.push("--model", input.spec.model);
-    }
-    if (input.spec.extras !== undefined && Object.keys(input.spec.extras).length > 0) {
-      args.push("--extras", JSON.stringify(input.spec.extras));
-    }
+    const args = buildWorkerSpawnArgs(input.command.args, input.spec);
     const child = spawn(input.command.command, args, {
       cwd: input.cwd,
       env: input.env,
@@ -351,15 +308,97 @@ function runWorker(input: {
       finish("failed", -1, null, error instanceof Error ? error.message : String(error));
     });
     child.on("close", (code, signal) => {
-      const exitCode = typeof code === "number" ? code : -1;
-      const status: WorkerOutcome["status"] = killedByTimeout
-        ? "killed"
-        : exitCode === 0
-          ? "completed"
-          : "failed";
-      finish(status, exitCode, signal ?? null);
+      const outcome = resolveWorkerCloseOutcome({ killedByTimeout, code, signal });
+      finish(outcome.status, outcome.exitCode, outcome.signal);
     });
   });
+}
+
+function buildWorkerSpawnArgs(baseArgs: ReadonlyArray<string>, spec: WorkerSpec): string[] {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "team", "worker-spawn-args"],
+      process.cwd(),
+      JSON.stringify({ baseArgs, spec }),
+    ),
+  ) as unknown;
+  if (!isRecord(parsed) || !Array.isArray(parsed.args) || !parsed.args.every((arg) => typeof arg === "string")) {
+    throw new Error("Rust team worker spawn args returned invalid payload");
+  }
+  return parsed.args;
+}
+
+function resolveDispatchStatus(outcomes: ReadonlyArray<WorkerOutcome>): TeamRunStatus {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "team", "dispatch-status"],
+      process.cwd(),
+      JSON.stringify({ outcomes }),
+    ),
+  ) as unknown;
+  if (!isRecord(parsed) || typeof parsed.status !== "string") {
+    throw new Error("Rust team dispatch status returned invalid payload");
+  }
+  return parsed.status as TeamRunStatus;
+}
+
+function resolveChildEnv(input: {
+  readonly baseEnv: NodeJS.ProcessEnv;
+  readonly bindingEnv: Readonly<Record<string, string>>;
+  readonly extraEnv?: Readonly<Record<string, string>>;
+}): Record<string, string> {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "team", "child-env"],
+      process.cwd(),
+      JSON.stringify(input),
+    ),
+  ) as unknown;
+  if (!isRecord(parsed) || !isStringRecord(parsed.env)) {
+    throw new Error("Rust team child env returned invalid payload");
+  }
+  return parsed.env;
+}
+
+function resolveWorkerCloseOutcome(input: {
+  readonly killedByTimeout: boolean;
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+}): Pick<WorkerOutcome, "status" | "exitCode" | "signal"> {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "team", "worker-close-outcome"],
+      process.cwd(),
+      JSON.stringify(input),
+    ),
+  ) as unknown;
+  if (
+    !isRecord(parsed)
+    || !isWorkerOutcomeStatus(parsed.status)
+    || typeof parsed.exitCode !== "number"
+    || !Number.isSafeInteger(parsed.exitCode)
+    || (parsed.signal !== null && typeof parsed.signal !== "string")
+  ) {
+    throw new Error("Rust team worker close outcome returned invalid payload");
+  }
+  return {
+    status: parsed.status,
+    exitCode: parsed.exitCode,
+    signal: parsed.signal as NodeJS.Signals | null,
+  };
+}
+
+function isWorkerOutcomeStatus(value: unknown): value is WorkerOutcome["status"] {
+  return value === "completed" || value === "failed" || value === "killed";
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value)
+    && Object.values(value).every((entry) => typeof entry === "string");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function createCappedBuffer(capBytes: number): {
@@ -400,20 +439,23 @@ export function listTeamRuns(dataRoot: string): ReadonlyArray<{
   readonly runId: string;
   readonly runRoot: string;
 }> {
-  const teamRunsRoot = getTeamRunsRoot(dataRoot);
-  if (!existsSync(teamRunsRoot)) {
-    return [];
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "team", "list-runs"],
+      process.cwd(),
+      JSON.stringify({ dataRoot }),
+    ),
+  ) as unknown;
+  if (
+    !isRecord(parsed)
+    || !Array.isArray(parsed.runs)
+    || !parsed.runs.every((run) =>
+      isRecord(run) && typeof run.runId === "string" && typeof run.runRoot === "string"
+    )
+  ) {
+    throw new Error("Rust team run list returned invalid payload");
   }
-  return readdirSync(teamRunsRoot)
-    .filter((name) => name.startsWith("tr_"))
-    .filter((name) => {
-      try {
-        return statSync(join(teamRunsRoot, name)).isDirectory();
-      } catch {
-        return false;
-      }
-    })
-    .map((runId) => ({ runId, runRoot: getTeamRunRoot(dataRoot, runId) }));
+  return parsed.runs;
 }
 
 export function generateRunIdForCli(): string {

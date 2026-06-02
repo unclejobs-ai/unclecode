@@ -1,3 +1,5 @@
+import { runRustCommandSync } from "./rust-command.js";
+
 export type WorkShellPromptCommand = {
   readonly kind: "review" | "commit";
   readonly focus?: string;
@@ -12,11 +14,17 @@ export type WorkShellPromptTurnInput<Attachment> = {
 };
 
 export function summarizeWorkShellPrompt(value: string): string {
-  return value.length > 52 ? `${value.slice(0, 49)}...` : value;
+  return parseRustStringField(
+    runPromptTurnRust("summary-prompt", { value }),
+    "summary",
+  );
 }
 
 export function summarizeWorkShellText(value: string): string {
-  return value.length > 72 ? `${value.slice(0, 69)}...` : value;
+  return parseRustStringField(
+    runPromptTurnRust("summary-text", { value }),
+    "summary",
+  );
 }
 
 export function createChatPromptTurnInput<Attachment>(input: {
@@ -27,13 +35,9 @@ export function createChatPromptTurnInput<Attachment>(input: {
     attachments: readonly Attachment[];
   };
 }): WorkShellPromptTurnInput<Attachment> {
-  return {
-    transcriptText: input.composer.transcriptText,
-    prompt: input.composer.prompt,
-    attachments: input.composer.attachments,
-    sessionSummary: `Chat: ${summarizeWorkShellPrompt(input.composer.prompt)}`,
-    failureSummary: `Chat failed: ${summarizeWorkShellPrompt(input.line)}`,
-  };
+  return parseRustPromptTurnInput<Attachment>(
+    runPromptTurnRust("chat-input", input),
+  );
 }
 
 export function createPromptCommandTurnInput(input: {
@@ -41,124 +45,48 @@ export function createPromptCommandTurnInput(input: {
   prompt: string;
   promptCommand: WorkShellPromptCommand;
 }): WorkShellPromptTurnInput<never> {
-  const label = input.promptCommand.kind === "review" ? "Review" : "Commit draft";
-  const focus = input.promptCommand.focus ?? "current changes";
-  return {
-    transcriptText: input.transcriptText,
-    prompt: input.prompt,
-    sessionSummary: `${label}: ${summarizeWorkShellPrompt(focus)}`,
-    failureSummary: `${label} failed: ${summarizeWorkShellPrompt(input.promptCommand.focus ?? input.transcriptText)}`,
-  };
+  return parseRustPromptTurnInput<never>(
+    runPromptTurnRust("prompt-command-input", input),
+  );
 }
 
 export function createConversationTurnSummary(input: {
   transcriptText: string;
   assistantText: string;
 }): string {
-  return summarizeWorkShellText(`Q: ${input.transcriptText} · A: ${input.assistantText}`);
+  return parseRustStringField(
+    runPromptTurnRust("conversation-summary", input),
+    "summary",
+  );
 }
 
-const EDIT_INTENT_PATTERNS = [
-  /\b(edit|modify|change|update|fix|patch|implement|add|remove|delete|refactor|rewrite|create)\b/i,
-  /(수정|변경|고쳐|구현|추가|삭제|리팩터|리팩토|바꿔|만들어|넣어|보강)/,
-];
-
 export function detectEditIntent(text: string): boolean {
-  const normalized = text.trim();
-  return normalized.length > 0 && EDIT_INTENT_PATTERNS.some((pattern) => pattern.test(normalized));
+  return parseRustBooleanField(runPromptTurnRust("edit-intent", { text }), "detected");
 }
 
 export function resolveReadOnlyModeGuard(input: {
   mode: string;
   prompt: string;
 }): string | undefined {
-  if (input.mode === "search" && detectEditIntent(input.prompt)) {
-    return "Search mode is read-only. Shift+Tab or run /mode set yolo, then resend the edit request.";
-  }
-  return undefined;
-}
-
-const PERMISSION_STALL_PATTERNS = [
-  /^(?:if you want|if you'd like|if you want me to|if you'd like me to)\b/i,
-  /^(?:let me know|tell me) if you (?:want|would like)\b/i,
-  /^(?:i can|i could) (?:continue|keep going|also continue|also keep going|take another pass|handle the rest|do the rest|clean up the remaining)\b/i,
-  /^happy to (?:continue|keep going|take another pass)\b/i,
-  /(?:계속|진행|이어서).*(?:할까요|할게요|하겠습니다|해도 될까요)/,
-  /(?:원하시면|원한다면|필요하시면).*(?:진행|계속|수정)/,
-];
-
-function splitReplyParagraphs(text: string): readonly string[] {
-  return text
-    .trim()
-    .split(/\n\s*\n/g)
-    .map((segment) => segment.trim())
-    .filter((segment) => segment.length > 0);
-}
-
-function splitReplySentences(text: string): readonly string[] {
-  return text
-    .trim()
-    .split(/(?<=[.!?])\s+/)
-    .map((segment) => segment.trim())
-    .filter((segment) => segment.length > 0);
-}
-
-function isPermissionSeekingSegment(text: string): boolean {
-  const normalized = text.trim().replace(/\s+/g, " ");
-  return normalized.length > 0 && PERMISSION_STALL_PATTERNS.some((pattern) => pattern.test(normalized));
+  return parseRustOptionalStringField(
+    runPromptTurnRust("read-only-guard", input),
+    "message",
+  );
 }
 
 export function detectPermissionSeekingStall(text: string): boolean {
-  const paragraphs = splitReplyParagraphs(text);
-  const lastParagraph = paragraphs.at(-1);
-  if (!lastParagraph) {
-    return false;
-  }
-  if (isPermissionSeekingSegment(lastParagraph)) {
-    return true;
-  }
-
-  const sentences = splitReplySentences(lastParagraph);
-  return sentences.length > 1 && isPermissionSeekingSegment(sentences.at(-1) ?? "");
+  return parseRustBooleanField(runPromptTurnRust("permission-stall", { text }), "detected");
 }
 
 export function stripPermissionSeekingStallOutro(text: string): string {
-  const normalized = text.trim();
-  if (!normalized) {
-    return normalized;
-  }
-
-  const paragraphs = splitReplyParagraphs(normalized);
-  const lastParagraph = paragraphs.at(-1);
-  if (!lastParagraph) {
-    return normalized;
-  }
-  if (paragraphs.length > 1 && isPermissionSeekingSegment(lastParagraph)) {
-    return paragraphs.slice(0, -1).join("\n\n").trim();
-  }
-
-  const sentences = splitReplySentences(lastParagraph);
-  if (sentences.length > 1 && isPermissionSeekingSegment(sentences.at(-1) ?? "")) {
-    const trimmedParagraph = sentences.slice(0, -1).join(" ").trim();
-    return [...paragraphs.slice(0, -1), trimmedParagraph]
-      .filter((segment) => segment.length > 0)
-      .join("\n\n")
-      .trim();
-  }
-
-  return normalized;
+  return parseRustStringField(runPromptTurnRust("permission-stall", { text }), "cleaned");
 }
 
 export function buildPermissionStallContinuePrompt(originalPrompt: string, previousAnswer: string): string {
-  return [
-    "Continue automatically without asking for permission.",
-    'Do not say "if you want", "if you\'d like", "let me know", "계속할까요", "진행할까요", or "원하시면".',
-    "Perform the next concrete pass now and report the completed work plus verification.",
-    `Original request: ${originalPrompt}`,
-    previousAnswer ? `Previous partial answer:\n${previousAnswer}` : "",
-  ]
-    .filter((segment) => segment.length > 0)
-    .join("\n\n");
+  return parseRustStringField(
+    runPromptTurnRust("continue-prompt", { originalPrompt, previousAnswer }),
+    "prompt",
+  );
 }
 
 export async function finalizeWorkShellAssistantReply(input: {
@@ -177,4 +105,70 @@ export async function finalizeWorkShellAssistantReply(input: {
   );
   const continuedText = stripPermissionSeekingStallOutro(followUp.text || "").trim();
   return continuedText || cleanedAssistantText;
+}
+
+function runPromptTurnRust(operation: string, input: unknown): string {
+  return runRustCommandSync(
+    ["rust", "ux", "prompt-turn", operation],
+    process.cwd(),
+    JSON.stringify(input),
+  );
+}
+
+function parseRustPromptTurnInput<Attachment>(raw: string): WorkShellPromptTurnInput<Attachment> {
+  const parsed = JSON.parse(raw) as unknown;
+  if (
+    !isRecord(parsed) ||
+    typeof parsed.transcriptText !== "string" ||
+    typeof parsed.prompt !== "string" ||
+    typeof parsed.sessionSummary !== "string" ||
+    typeof parsed.failureSummary !== "string"
+  ) {
+    throw new Error("Rust prompt turn command returned an invalid payload.");
+  }
+  const result: WorkShellPromptTurnInput<Attachment> = {
+    transcriptText: parsed.transcriptText,
+    prompt: parsed.prompt,
+    sessionSummary: parsed.sessionSummary,
+    failureSummary: parsed.failureSummary,
+  };
+  if (Array.isArray(parsed.attachments)) {
+    return { ...result, attachments: parsed.attachments as readonly Attachment[] };
+  }
+  return result;
+}
+
+function parseRustStringField(raw: string, field: string): string {
+  const parsed = JSON.parse(raw) as unknown;
+  if (!isRecord(parsed) || typeof parsed[field] !== "string") {
+    throw new Error(`Rust prompt turn command returned an invalid ${field} payload.`);
+  }
+  return parsed[field];
+}
+
+function parseRustOptionalStringField(raw: string, field: string): string | undefined {
+  const parsed = JSON.parse(raw) as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error(`Rust prompt turn command returned an invalid ${field} payload.`);
+  }
+  const value = parsed[field];
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`Rust prompt turn command returned an invalid ${field} payload.`);
+  }
+  return value;
+}
+
+function parseRustBooleanField(raw: string, field: string): boolean {
+  const parsed = JSON.parse(raw) as unknown;
+  if (!isRecord(parsed) || typeof parsed[field] !== "boolean") {
+    throw new Error(`Rust prompt turn command returned an invalid ${field} payload.`);
+  }
+  return parsed[field];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

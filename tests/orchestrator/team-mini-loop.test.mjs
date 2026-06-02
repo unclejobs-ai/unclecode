@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -75,6 +75,116 @@ test("createTeamMiniLoopExecutor dispatches run_shell actions", async () => {
   assert.equal(observation.exitCode, 0);
   assert.match(observation.stdout, /ready/);
   assert.equal(observation.truncated, false);
+});
+
+test("createTeamMiniLoopExecutor emits policy.denied and blocks denied run_shell actions", async () => {
+  const traces = [];
+  const executor = createTeamMiniLoopExecutor({
+    runtimeMode: "openshell",
+    evaluatePolicy(request) {
+      assert.equal(request.capability, "shell.run");
+      assert.equal(request.tool, "run_shell");
+      assert.equal(request.runtimeMode, "openshell");
+      assert.equal(request.command, "echo denied");
+      return {
+        capability: "shell.run",
+        effect: "deny",
+        source: "runtime",
+        reason: "OpenShell runtime requires an explicit shell policy.",
+        matchedRule: "workspace.shell.run.openshell.default-deny",
+        auditOnly: false,
+      };
+    },
+    onPolicyDenied(event) {
+      traces.push(event);
+    },
+  });
+
+  const observation = await executor.execute(
+    { tool: "run_shell", input: { command: "echo denied" } },
+    process.cwd(),
+  );
+
+  assert.equal(observation.exitCode, -1);
+  assert.match(observation.stderr, /policy denied shell\.run/);
+  assert.equal(traces.length, 1);
+  assert.deepEqual(
+    {
+      type: traces[0].type,
+      capability: traces[0].capability,
+      source: traces[0].source,
+      matchedRule: traces[0].matchedRule,
+      runtimeMode: traces[0].runtimeMode,
+      toolName: traces[0].toolName,
+    },
+    {
+      type: "policy.denied",
+      capability: "shell.run",
+      source: "runtime",
+      matchedRule: "workspace.shell.run.openshell.default-deny",
+      runtimeMode: "openshell",
+      toolName: "run_shell",
+    },
+  );
+  assert.equal(typeof traces[0].startedAt, "number");
+});
+
+test("createTeamMiniLoopExecutor installs default non-local deny policy", async () => {
+  const traces = [];
+  const executor = createTeamMiniLoopExecutor({
+    runtimeMode: "openshell",
+    onPolicyDenied(event) {
+      traces.push(event);
+    },
+  });
+
+  const observation = await executor.execute(
+    { tool: "run_shell", input: { command: "echo should-not-run" } },
+    process.cwd(),
+  );
+
+  assert.equal(observation.exitCode, -1);
+  assert.match(observation.stderr, /policy denied shell\.run/);
+  assert.equal(traces.length, 1);
+  assert.equal(traces[0].effect, "deny");
+  assert.equal(traces[0].matchedRule, "team.openshell.default-deny.shell.run.default");
+});
+
+test("createTeamMiniLoopExecutor blocks non-local filesystem read tools by default", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "unclecode-exec-read-policy-"));
+  const traces = [];
+  try {
+    writeFileSync(path.join(dir, "secret.txt"), "do not read", "utf8");
+    const executor = createTeamMiniLoopExecutor({
+      runtimeMode: "openshell",
+      onPolicyDenied(event) {
+        traces.push(event);
+      },
+    });
+
+    const readObservation = await executor.execute(
+      { tool: "read_file", input: { path: "secret.txt" } },
+      dir,
+    );
+    const searchObservation = await executor.execute(
+      { tool: "search_text", input: { query: "secret", path: "." } },
+      dir,
+    );
+    const listObservation = await executor.execute(
+      { tool: "list_files", input: { pattern: "**/*" } },
+      dir,
+    );
+
+    assert.equal(readObservation.exitCode, -1);
+    assert.equal(searchObservation.exitCode, -1);
+    assert.equal(listObservation.exitCode, -1);
+    assert.match(readObservation.stderr, /policy denied filesystem\.read/);
+    assert.equal(traces.length, 3);
+    assert.deepEqual(traces.map((event) => event.toolName), ["read_file", "search_text", "list_files"]);
+    assert.equal(traces.every((event) => event.effect === "deny"), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("createTeamMiniLoopExecutor rejects unknown tools without throwing", async () => {
@@ -233,6 +343,69 @@ test("createTeamMiniLoopExecutor writes files inside the workspace", async () =>
   }
 });
 
+test("createTeamMiniLoopExecutor emits policy.denied and blocks denied write_file actions", async () => {
+  const { existsSync, mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const path = (await import("node:path")).default;
+  const dir = mkdtempSync(path.join(tmpdir(), "unclecode-exec-write-policy-"));
+  const traces = [];
+  try {
+    const executor = createTeamMiniLoopExecutor({
+      runtimeMode: "openshell",
+      evaluatePolicy(request) {
+        assert.equal(request.capability, "filesystem.write");
+        assert.equal(request.tool, "write_file");
+        assert.equal(request.runtimeMode, "openshell");
+        assert.equal(request.path, "out/blocked.txt");
+        return {
+          capability: "filesystem.write",
+          effect: "deny",
+          source: "runtime",
+          reason: "OpenShell runtime requires an explicit filesystem write policy.",
+          matchedRule: "workspace.filesystem.write.openshell.default-deny",
+          auditOnly: false,
+        };
+      },
+      onPolicyDenied(event) {
+        traces.push(event);
+      },
+    });
+
+    const observation = await executor.execute(
+      {
+        tool: "write_file",
+        input: { path: "out/blocked.txt", contents: "no write\n" },
+      },
+      dir,
+    );
+
+    assert.equal(observation.exitCode, -1);
+    assert.match(observation.stderr, /policy denied filesystem\.write/);
+    assert.equal(existsSync(path.join(dir, "out", "blocked.txt")), false);
+    assert.equal(traces.length, 1);
+    assert.deepEqual(
+      {
+        type: traces[0].type,
+        capability: traces[0].capability,
+        source: traces[0].source,
+        matchedRule: traces[0].matchedRule,
+        runtimeMode: traces[0].runtimeMode,
+        toolName: traces[0].toolName,
+      },
+      {
+        type: "policy.denied",
+        capability: "filesystem.write",
+        source: "runtime",
+        matchedRule: "workspace.filesystem.write.openshell.default-deny",
+        runtimeMode: "openshell",
+        toolName: "write_file",
+      },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("createTeamMiniLoopExecutor refuses workspace-escape writes", async () => {
   const { mkdtempSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
@@ -246,6 +419,77 @@ test("createTeamMiniLoopExecutor refuses workspace-escape writes", async () => {
     );
     assert.equal(observation.exitCode, -1);
     assert.match(observation.stderr, /traversal segment|escapes workspace/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("createTeamMiniLoopExecutor emits policy.denied and blocks denied apply_patch actions", async () => {
+  const { writeFileSync, readFileSync, mkdtempSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const path = (await import("node:path")).default;
+  const dir = mkdtempSync(path.join(tmpdir(), "unclecode-exec-patch-policy-"));
+  const traces = [];
+  try {
+    writeFileSync(path.join(dir, "src.txt"), "alpha\nbeta\ngamma\n", "utf8");
+    const patch = [
+      "--- a/src.txt",
+      "+++ b/src.txt",
+      "@@ -1,3 +1,3 @@",
+      " alpha",
+      "-beta",
+      "+BETA",
+      " gamma",
+      "",
+    ].join("\n");
+    const executor = createTeamMiniLoopExecutor({
+      runtimeMode: "openshell",
+      evaluatePolicy(request) {
+        assert.equal(request.capability, "filesystem.write");
+        assert.equal(request.tool, "apply_patch");
+        assert.equal(request.runtimeMode, "openshell");
+        assert.equal(request.patchLength, patch.length);
+        return {
+          capability: "filesystem.write",
+          effect: "deny",
+          source: "runtime",
+          reason: "OpenShell runtime requires an explicit patch policy.",
+          matchedRule: "workspace.apply_patch.openshell.default-deny",
+          auditOnly: false,
+        };
+      },
+      onPolicyDenied(event) {
+        traces.push(event);
+      },
+    });
+
+    const observation = await executor.execute(
+      { tool: "apply_patch", input: { patch } },
+      dir,
+    );
+
+    assert.equal(observation.exitCode, -1);
+    assert.match(observation.stderr, /policy denied filesystem\.write/);
+    assert.equal(readFileSync(path.join(dir, "src.txt"), "utf8"), "alpha\nbeta\ngamma\n");
+    assert.equal(traces.length, 1);
+    assert.deepEqual(
+      {
+        type: traces[0].type,
+        capability: traces[0].capability,
+        source: traces[0].source,
+        matchedRule: traces[0].matchedRule,
+        runtimeMode: traces[0].runtimeMode,
+        toolName: traces[0].toolName,
+      },
+      {
+        type: "policy.denied",
+        capability: "filesystem.write",
+        source: "runtime",
+        matchedRule: "workspace.apply_patch.openshell.default-deny",
+        runtimeMode: "openshell",
+        toolName: "apply_patch",
+      },
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

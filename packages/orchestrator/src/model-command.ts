@@ -1,7 +1,8 @@
-import { getProviderAdapter, type ProviderId, type ReasoningSupport } from "@unclecode/providers";
+import type { ProviderId } from "@unclecode/providers";
 
 import type { WorkShellPanel } from "./work-shell-engine.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
+import { runRustCommandSync } from "./rust-command.js";
 
 export function resolveModelCommand<Reasoning extends WorkShellReasoningConfig>(
   input: string,
@@ -17,168 +18,59 @@ export function resolveModelCommand<Reasoning extends WorkShellReasoningConfig>(
   message: string;
   panel: WorkShellPanel;
 } {
-  const normalized = input.trim().replace(/\s+/g, " ");
-  const models = listProviderModels(state.provider, state.currentModel);
-
-  if (normalized === "/model" || normalized === "/model list") {
-    return {
-      nextModel: state.currentModel,
-      nextReasoning: state.currentReasoning,
-      message: "Model picker shown.",
-      panel: buildModelPanel({
-        models,
-        currentModel: state.currentModel,
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "ux", "model-command"],
+      process.cwd(),
+      JSON.stringify({
+        input,
         provider: state.provider,
-        currentReasoning: state.currentReasoning,
-      }),
-    };
-  }
-
-  const nextModel = normalized.slice("/model ".length).trim();
-  if (!normalized.startsWith("/model ") || nextModel.length === 0) {
-    return {
-      nextModel: state.currentModel,
-      nextReasoning: state.currentReasoning,
-      message: "Usage: /model <name>",
-      panel: buildModelPanel({
-        models,
         currentModel: state.currentModel,
-        provider: state.provider,
         currentReasoning: state.currentReasoning,
+        modeDefaultReasoning: state.modeDefaultReasoning,
       }),
-    };
+    ),
+  ) as unknown;
+  if (!isModelCommandResult(parsed)) {
+    throw new Error("Rust model command returned an invalid payload.");
   }
+  return {
+    nextModel: parsed.nextModel,
+    nextReasoning: parsed.nextReasoning as Reasoning,
+    message: parsed.message,
+    panel: parsed.panel,
+  };
+}
 
-  const nextReasoning = resolveReasoningForModel(
-    state.provider,
-    nextModel,
-    state.currentReasoning,
-    state.modeDefaultReasoning,
+function isModelCommandResult(value: unknown): value is {
+  nextModel: string;
+  nextReasoning: WorkShellReasoningConfig;
+  message: string;
+  panel: WorkShellPanel;
+} {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as {
+    nextModel?: unknown;
+    nextReasoning?: unknown;
+    message?: unknown;
+    panel?: unknown;
+  };
+  return (
+    typeof candidate.nextModel === "string" &&
+    typeof candidate.message === "string" &&
+    isReasoningConfig(candidate.nextReasoning) &&
+    isWorkShellPanel(candidate.panel)
   );
-
-  return {
-    nextModel,
-    nextReasoning,
-    message:
-      nextReasoning.support.status === "unsupported"
-        ? `Model set to ${nextModel}. Reasoning unsupported.`
-        : `Model set to ${nextModel}. Reasoning ${nextReasoning.effort}.`,
-    panel: buildModelPanel({
-      models: models.includes(nextModel) ? models : [...models, nextModel],
-      currentModel: nextModel,
-      provider: state.provider,
-      currentReasoning: nextReasoning,
-    }),
-  };
 }
 
-function listProviderModels(provider: ProviderId, currentModel: string): readonly string[] {
-  try {
-    return [...new Set([currentModel, ...getProviderAdapter(provider).getModelRegistry().models])];
-  } catch {
-    return [currentModel];
-  }
+function isReasoningConfig(value: unknown): value is WorkShellReasoningConfig {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as { effort?: unknown; source?: unknown; support?: unknown };
+  return typeof candidate.effort === "string" && typeof candidate.source === "string" && typeof candidate.support === "object" && candidate.support !== null;
 }
 
-function formatSupportedEffortList(support: ReasoningSupport): string {
-  return support.status === "supported" ? support.supportedEfforts.join(", ") : "unsupported";
-}
-
-function formatModelPanelSupportLabel(input: {
-  active: boolean;
-  support: ReasoningSupport;
-}): string {
-  if (input.support.status === "unsupported") {
-    return input.active ? "active · no reasoning" : "no reasoning";
-  }
-  return input.active ? `active · ${input.support.defaultEffort}` : input.support.defaultEffort;
-}
-
-function buildModelPanel(input: {
-  models: readonly string[];
-  currentModel: string;
-  provider: ProviderId;
-  currentReasoning?: WorkShellReasoningConfig;
-}): WorkShellPanel {
-  const currentSupport = getReasoningSupport(input.provider, input.currentModel);
-  return {
-    title: "Models",
-    lines: [
-      "Current",
-      `Model · ${input.currentModel}`,
-      `Thinking · ${describePanelReasoning(input.currentReasoning, currentSupport)}`,
-      "",
-      "Available",
-      ...input.models.slice(0, 6).map((model) => {
-        const support = getReasoningSupport(input.provider, model);
-        const active = model === input.currentModel;
-        return `${active ? "›" : " "} /model ${model}  ${formatModelPanelSupportLabel({ active, support })}`;
-      }),
-      "",
-      "Enter switch · Esc close",
-    ],
-  };
-}
-
-function describePanelReasoning(
-  reasoning: WorkShellReasoningConfig | undefined,
-  support: ReasoningSupport,
-): string {
-  if (!reasoning) {
-    return support.status === "unsupported" ? "unsupported" : `${support.defaultEffort} (mode-default)`;
-  }
-  if (reasoning.support.status === "unsupported" || reasoning.effort === "unsupported") {
-    return "unsupported";
-  }
-  return `${reasoning.effort} (${reasoning.source})`;
-}
-
-function resolveReasoningForModel<Reasoning extends WorkShellReasoningConfig>(
-  provider: ProviderId,
-  model: string,
-  currentReasoning: Reasoning,
-  modeDefaultReasoning: Reasoning,
-): Reasoning {
-  const support = getReasoningSupport(provider, model);
-  if (support.status === "unsupported") {
-    return {
-      ...currentReasoning,
-      effort: "unsupported",
-      source: "model-capability",
-      support,
-    };
-  }
-
-  const currentEffort =
-    currentReasoning.support.status === "supported"
-    && (currentReasoning.effort === "low" || currentReasoning.effort === "medium" || currentReasoning.effort === "high")
-      ? currentReasoning.effort
-      : undefined;
-  const canKeepCurrent = currentEffort !== undefined && support.supportedEfforts.includes(currentEffort);
-  const nextEffort = canKeepCurrent
-    ? currentEffort
-    : modeDefaultReasoning.support.status === "supported" && modeDefaultReasoning.effort !== "unsupported"
-      ? modeDefaultReasoning.effort
-      : support.defaultEffort;
-  const nextSource = canKeepCurrent && currentReasoning.source === "override"
-    ? "override"
-    : "mode-default";
-
-  return {
-    ...modeDefaultReasoning,
-    effort: nextEffort,
-    source: nextSource,
-    support,
-  };
-}
-
-function getReasoningSupport(provider: ProviderId, model: string): ReasoningSupport {
-  try {
-    return getProviderAdapter(provider).getReasoningSupport({ modelId: model });
-  } catch {
-    return {
-      status: "unsupported",
-      supportedEfforts: [],
-    };
-  }
+function isWorkShellPanel(value: unknown): value is WorkShellPanel {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as { title?: unknown; lines?: unknown };
+  return typeof candidate.title === "string" && Array.isArray(candidate.lines) && candidate.lines.every((line) => typeof line === "string");
 }

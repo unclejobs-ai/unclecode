@@ -8,6 +8,7 @@ export type WorkShellSessionSnapshotInput = {
   state: "running" | "idle" | "requires_action";
   summary: string;
   traceMode: WorkShellTraceMode;
+  reasoningEffort?: "low" | "medium" | "high" | undefined;
 };
 
 export function createWorkShellSessionSnapshotInput(

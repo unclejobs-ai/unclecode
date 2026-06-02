@@ -5,28 +5,33 @@ const path = require("node:path");
 const fs = require("node:fs");
 
 const repoRoot = path.resolve(__dirname, "..");
-const entrypoint = path.join(repoRoot, "apps/unclecode-cli/dist/index.js");
-const workEntrypoint = path.join(
-  repoRoot,
-  "dist-work/apps/unclecode-cli/src/work-entry.js",
-);
-const localDistWorkEntrypoint = path.join(
-  repoRoot,
-  "apps/unclecode-cli/dist/work-entry.js",
-);
+const rustEntrypoints = [
+  path.join(repoRoot, "target", "release", "unclecode"),
+  path.join(repoRoot, "target", "debug", "unclecode"),
+];
 
-if (
-  !fs.existsSync(entrypoint)
-  || (!fs.existsSync(workEntrypoint) && !fs.existsSync(localDistWorkEntrypoint))
-) {
-  process.stderr.write("UncleCode is not built yet. Run `npm run build` first.\n");
-  process.exit(1);
+const rustEntrypoint = process.env.UNCLECODE_DISABLE_RUST_BRIDGE
+  ? undefined
+  : newestExistingRustEntrypoint(rustEntrypoints);
+
+function newestExistingRustEntrypoint(candidates) {
+  return candidates
+    .filter((candidate) => fs.existsSync(candidate))
+    .map((candidate) => ({ candidate, mtimeMs: fs.statSync(candidate).mtimeMs }))
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .at(0)?.candidate;
 }
 
-const result = spawnSync(process.execPath, [entrypoint, ...process.argv.slice(2)], {
-  cwd: process.cwd(),
-  stdio: "inherit",
-  env: process.env,
-});
+if (rustEntrypoint) {
+  const result = spawnSync(rustEntrypoint, process.argv.slice(2), {
+    cwd: process.cwd(),
+    stdio: "inherit",
+    env: process.env,
+  });
+  process.exit(result.status ?? 0);
+}
 
-process.exit(result.status ?? 0);
+process.stderr.write(
+  "UncleCode Rust CLI is not built yet. Run `cargo build -p unclecode`.\n",
+);
+process.exit(1);

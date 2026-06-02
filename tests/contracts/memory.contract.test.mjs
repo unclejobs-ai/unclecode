@@ -1,7 +1,7 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
+import { test } from "node:test";
 
-import { PEER_KINDS, MEMORY_CATEGORIES } from "@unclecode/contracts";
+import { MEMORY_CATEGORIES, PEER_KINDS } from "@unclecode/contracts";
 
 test("peer kinds match Honcho-style entity model", () => {
   assert.deepEqual(PEER_KINDS, ["user", "agent", "team", "run"]);

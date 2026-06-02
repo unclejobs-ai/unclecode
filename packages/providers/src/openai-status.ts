@@ -1,42 +1,48 @@
-import { readOpenAICredentials } from "./openai-credential-store.js";
-import { resolveOpenAIAuth } from "./openai-auth.js";
+import { runRustCommand } from "./rust-command.js";
 import type { OpenAIAuthStatus } from "./types.js";
 
 export async function resolveOpenAIAuthStatus(options: {
   readonly env?: NodeJS.ProcessEnv;
 } = {}): Promise<OpenAIAuthStatus> {
   const env = options.env ?? process.env;
-  const credentialsPath = env.UNCLECODE_OPENAI_CREDENTIALS_PATH?.trim();
-  const auth = await resolveOpenAIAuth({
-    env,
-    ...(credentialsPath ? { fallbackAuthPath: credentialsPath } : {}),
-  });
-  const refreshRequired = auth.status !== "ok" && auth.reason === "auth-refresh-required";
-  const insufficientScope = auth.status !== "ok" && auth.reason === "auth-insufficient-scope";
-  const storedCredentials = credentialsPath ? await readOpenAICredentials({ credentialsPath }) : null;
+  const stdout = await runRustCommand(["rust", "auth", "status"], process.cwd(), undefined, env);
+  const fields = parseRustKeyValueLines(stdout);
 
   return {
     providerId: "openai",
-    activeSource:
-      auth.source === "env-openai-api-key"
-        ? "api-key-env"
-        : auth.source === "env-openai-auth-token"
-          ? "oauth-env"
-        : auth.source === "unclecode-auth-file" || auth.source === "codex-auth-file"
-          ? auth.authType === "api-key"
-            ? "api-key-file"
-            : "oauth-file"
-          : "none",
-    authType: auth.authType,
-    organizationId:
-      String(env.OPENAI_ORG_ID ?? "").trim() ||
-      (auth.status === "ok" ? auth.organizationId ?? null : storedCredentials?.organizationId ?? null),
-    projectId:
-      String(env.OPENAI_PROJECT_ID ?? "").trim() ||
-      (auth.status === "ok" ? auth.projectId ?? null : storedCredentials?.projectId ?? null),
-    expiresAt: refreshRequired ? "refresh-required" : insufficientScope ? "insufficient-scope" : null,
-    isExpired: auth.status === "expired" || refreshRequired || insufficientScope,
+    activeSource: normalizeAuthSource(fields.get("activeSource")),
+    authType: normalizeAuthType(fields.get("authType")),
+    organizationId: normalizeOptionalField(fields.get("organizationId")),
+    projectId: normalizeOptionalField(fields.get("projectId")),
+    expiresAt: normalizeOptionalField(fields.get("expiresAt")),
+    isExpired: fields.get("expired") === "yes",
   };
+}
+
+function parseRustKeyValueLines(stdout: string): Map<string, string> {
+  return new Map(
+    stdout
+      .split(/\r?\n/)
+      .map((line) => line.split("=", 2))
+      .filter((parts): parts is [string, string] => parts.length === 2),
+  );
+}
+
+function normalizeAuthSource(value: string | undefined): OpenAIAuthStatus["activeSource"] {
+  return value === "api-key-env"
+    || value === "api-key-file"
+    || value === "oauth-env"
+    || value === "oauth-file"
+    ? value
+    : "none";
+}
+
+function normalizeAuthType(value: string | undefined): OpenAIAuthStatus["authType"] {
+  return value === "api-key" || value === "oauth" ? value : "none";
+}
+
+function normalizeOptionalField(value: string | undefined): string | null {
+  return value && value !== "none" ? value : null;
 }
 
 export function formatOpenAIAuthStatus(status: OpenAIAuthStatus): string {

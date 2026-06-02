@@ -1,7 +1,8 @@
 import type { SkillMetadata } from "@unclecode/contracts";
-import { readFile, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+
+import { runRustCommandSync } from "./rust-command.js";
 
 export type WorkspaceSkillItem = {
   readonly name: string;
@@ -26,7 +27,6 @@ export type WorkspaceSkillMetadata = SkillMetadata & {
   readonly scope: "project" | "user";
 };
 
-const SKILL_SEARCH_LIMIT = 64;
 const HOME_DIR = os.homedir();
 const skillMetadataCache = new Map<string, readonly WorkspaceSkillMetadata[]>();
 
@@ -43,112 +43,6 @@ export function clearWorkspaceSkillCache(cwd?: string, homeDir = HOME_DIR): void
   skillMetadataCache.delete(getSkillCacheKey(cwd, homeDir));
 }
 
-function parseSkillFrontmatter(content: string): Record<string, string> {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-  if (!match) {
-    return {};
-  }
-
-  const body = match[1];
-  if (!body) {
-    return {};
-  }
-
-  const fields: Record<string, string> = {};
-  for (const line of body.split(/\r?\n/)) {
-    const fieldMatch = line.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/);
-    if (!fieldMatch) {
-      continue;
-    }
-
-    const key = fieldMatch[1];
-    const rawValue = fieldMatch[2];
-    if (!key || rawValue === undefined) {
-      continue;
-    }
-
-    const value = rawValue.trim().replace(/^['"]|['"]$/g, "");
-    fields[key] = value;
-  }
-
-  return fields;
-}
-
-function summarizeSkillContent(content: string): string {
-  const line = content
-    .split(/\r?\n/)
-    .map((entry) => entry.trim())
-    .find(
-      (entry) =>
-        entry.length > 0 &&
-        !entry.startsWith("#") &&
-        !entry.startsWith("<!--") &&
-        !entry.startsWith("-->") &&
-        entry !== "-",
-    );
-
-  if (!line) {
-    return "skill loaded";
-  }
-
-  return line.length > 88 ? `${line.slice(0, 85)}...` : line;
-}
-
-function candidateSkillPaths(
-  name: string,
-  cwd: string,
-  homeDir: string,
-): readonly string[] {
-  return [
-    path.join(cwd, ".codex", "skills", name, "SKILL.md"),
-    path.join(homeDir, ".codex", "skills", name, "SKILL.md"),
-    path.join(homeDir, ".agents", "skills", name, "SKILL.md"),
-  ];
-}
-
-function isLegacySuperpowersSkillPath(filePath: string, homeDir: string): boolean {
-  const legacyRoot = path.join(homeDir, ".agents", "skills", "superpowers") + path.sep;
-  return filePath.startsWith(legacyRoot);
-}
-
-async function collectSkillFiles(
-  root: string,
-  limit = SKILL_SEARCH_LIMIT,
-): Promise<readonly string[]> {
-  const found: string[] = [];
-  const queue = [root];
-
-  while (queue.length > 0 && found.length < limit) {
-    const current = queue.shift();
-    if (!current) {
-      continue;
-    }
-
-    let entries;
-    try {
-      entries = await readdir(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-
-    for (const entry of entries) {
-      const nextPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        queue.push(nextPath);
-        continue;
-      }
-      if (entry.isFile() && entry.name === "SKILL.md") {
-        found.push(nextPath);
-        if (found.length >= limit) {
-          break;
-        }
-      }
-    }
-  }
-
-  return found;
-}
-
 export async function discoverSkillMetadata(
   cwd: string,
   homeDir = HOME_DIR,
@@ -159,58 +53,30 @@ export async function discoverSkillMetadata(
     return cached;
   }
 
-  const projectFiles = await collectSkillFiles(path.join(cwd, ".codex", "skills"));
-  const userCodexFiles = await collectSkillFiles(path.join(homeDir, ".codex", "skills"));
-  const userAgentFiles = await collectSkillFiles(path.join(homeDir, ".agents", "skills"));
-
-  const deduped = new Map<string, WorkspaceSkillMetadata>();
-  for (const filePath of [
-    ...projectFiles,
-    ...userCodexFiles,
-    ...userAgentFiles.filter((entry) => !isLegacySuperpowersSkillPath(entry, homeDir)),
-  ]) {
-    const inferredName = path.basename(path.dirname(filePath));
-    if (!inferredName || deduped.has(inferredName)) {
-      continue;
-    }
-
-    const content = await readFile(filePath, "utf8");
-    const frontmatter = parseSkillFrontmatter(content);
-    const name = frontmatter.name?.trim() || inferredName;
-    if (deduped.has(name)) {
-      continue;
-    }
-
-    deduped.set(name, {
-      name,
-      description: frontmatter.description?.trim() || summarizeSkillContent(content),
-      source: "skills",
-      commandType: "prompt",
-      paths: [filePath],
-      path: filePath,
-      scope: filePath.startsWith(cwd) ? "project" : "user",
-    });
+  const parsed = JSON.parse(
+    runRustCommandSync(["rust", "context", "skills", "metadata", cwd, homeDir], cwd),
+  ) as unknown;
+  if (!Array.isArray(parsed) || !parsed.every(isWorkspaceSkillMetadata)) {
+    throw new Error("Rust workspace skill metadata command returned an invalid payload.");
   }
 
-  const discovered = [...deduped.values()].sort((left, right) =>
-    left.name.localeCompare(right.name),
-  );
-  skillMetadataCache.set(cacheKey, discovered);
-  return discovered;
+  skillMetadataCache.set(cacheKey, parsed);
+  return parsed;
 }
 
 export async function listAvailableSkills(
   cwd: string,
   homeDir = HOME_DIR,
 ): Promise<readonly WorkspaceSkillItem[]> {
-  const discovered = await discoverSkillMetadata(cwd, homeDir);
+  const parsed = JSON.parse(
+    runRustCommandSync(["rust", "context", "skills", "list", cwd, homeDir], cwd),
+  ) as unknown;
 
-  return discovered.map((skill) => ({
-    name: skill.name,
-    path: skill.path,
-    scope: skill.scope,
-    summary: skill.description,
-  }));
+  if (!Array.isArray(parsed) || !parsed.every(isWorkspaceSkillItem)) {
+    throw new Error("Rust workspace skill list command returned an invalid payload.");
+  }
+
+  return parsed;
 }
 
 export async function loadNamedSkill(
@@ -218,33 +84,99 @@ export async function loadNamedSkill(
   cwd: string,
   homeDir = HOME_DIR,
 ): Promise<LoadedWorkspaceSkill> {
-  const attempts: Array<{
-    path: string;
-    ok: boolean;
-    error?: string | undefined;
-  }> = [];
+  const parsed = JSON.parse(
+    runRustCommandSync(["rust", "context", "skill-load", name, cwd, homeDir], cwd),
+  ) as unknown;
 
-  for (const filePath of candidateSkillPaths(name, cwd, homeDir)) {
-    try {
-      const content = await readFile(filePath, "utf8");
-      attempts.push({ path: filePath, ok: true });
-      return { name, path: filePath, content, attempts };
-    } catch (error) {
-      attempts.push({
-        path: filePath,
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+  if (!isLoadedWorkspaceSkill(parsed)) {
+    throw new Error("Rust workspace skill load command returned an invalid payload.");
   }
 
-  const discovered = await listAvailableSkills(cwd, homeDir);
-  const discoveredMatch = discovered.find((skill) => skill.name === name);
-  if (discoveredMatch) {
-    const content = await readFile(discoveredMatch.path, "utf8");
-    attempts.push({ path: discoveredMatch.path, ok: true });
-    return { name, path: discoveredMatch.path, content, attempts };
+  return parsed;
+}
+
+function isWorkspaceSkillMetadata(value: unknown): value is WorkspaceSkillMetadata {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
   }
 
-  throw new Error(`Skill not found: ${name}`);
+  const candidate = value as {
+    name?: unknown;
+    description?: unknown;
+    source?: unknown;
+    commandType?: unknown;
+    paths?: unknown;
+    path?: unknown;
+    scope?: unknown;
+  };
+
+  return (
+    typeof candidate.name === "string" &&
+    typeof candidate.description === "string" &&
+    candidate.source === "skills" &&
+    candidate.commandType === "prompt" &&
+    Array.isArray(candidate.paths) &&
+    candidate.paths.every((entry) => typeof entry === "string") &&
+    typeof candidate.path === "string" &&
+    isWorkspaceSkillScope(candidate.scope)
+  );
+}
+
+function isWorkspaceSkillItem(value: unknown): value is WorkspaceSkillItem {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const candidate = value as {
+    name?: unknown;
+    path?: unknown;
+    scope?: unknown;
+    summary?: unknown;
+  };
+
+  return (
+    typeof candidate.name === "string" &&
+    typeof candidate.path === "string" &&
+    isWorkspaceSkillScope(candidate.scope) &&
+    typeof candidate.summary === "string"
+  );
+}
+
+function isLoadedWorkspaceSkill(value: unknown): value is LoadedWorkspaceSkill {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const candidate = value as {
+    name?: unknown;
+    path?: unknown;
+    content?: unknown;
+    attempts?: unknown;
+  };
+
+  return (
+    typeof candidate.name === "string" &&
+    typeof candidate.path === "string" &&
+    typeof candidate.content === "string" &&
+    Array.isArray(candidate.attempts) &&
+    candidate.attempts.every(isLoadAttempt)
+  );
+}
+
+function isLoadAttempt(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const candidate = value as { path?: unknown; ok?: unknown; error?: unknown };
+
+  return (
+    typeof candidate.path === "string" &&
+    typeof candidate.ok === "boolean" &&
+    (candidate.error === undefined || typeof candidate.error === "string")
+  );
+}
+
+function isWorkspaceSkillScope(value: unknown): value is "project" | "user" {
+  return value === "project" || value === "user";
 }

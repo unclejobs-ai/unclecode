@@ -14,6 +14,10 @@ test("classifyWorkIntent routes yolo action prompts to complex orchestration", (
   assert.equal(classifyWorkIntent("what is this?", "yolo"), "simple");
   assert.equal(classifyWorkIntent("explain the auth flow", "yolo"), "simple");
   assert.equal(classifyWorkIntent("/help", "yolo"), "simple");
+  assert.equal(
+    classifyWorkIntent("전체 점검하고 개선해", "default"),
+    "complex",
+  );
 });
 
 test("classifyWorkIntent routes ultrawork prompts to complex regardless of content", () => {

@@ -22,6 +22,7 @@ import {
   createWorkShellDashboardHomePatch,
   createWorkShellDashboardHomeSyncState,
   cycleWorkShellSlashSelection,
+  extractAuthLabel,
   formatAgentTraceLine,
   formatAttachmentBadgeLine,
   formatAuthLabelForDisplay,
@@ -33,6 +34,7 @@ import {
   formatWorkShellProviderTitle,
   formatWorkShellStatusLine,
   formatWorkShellThinkingLine,
+  formatWorkShellToolEntryLines,
   formatWorkShellUsageLine,
   getDisplayWidth,
   getWorkShellAttachmentMinHeight,
@@ -46,12 +48,15 @@ import {
   getWorkShellPanelAnchor,
   getWorkShellPanelDisplayMode,
   getWorkShellPanelPlacement,
+  getWorkShellThinkingDetailLines,
   isWorkShellWarningLine,
   normalizeMarkdownDisplayText,
   parseWorkShellPanelFactLine,
   refineInlineCommandPanelLines,
   renderEmbeddedWorkShellPaneDashboard,
+  resolveComposerCursorOffsetAfterValueChange,
   resolveWorkShellActivePanel,
+  resolveWorkShellActiveSlashInput,
   resolveWorkShellInputAction,
   resolveWorkShellSubmitAction,
   shouldUseSlowComposerPreview,
@@ -115,6 +120,11 @@ test("work-shell hotspot re-exports extracted helper owner seams instead of regr
   );
   assert.match(inputSource, /export function resolveWorkShellInputAction\(/);
   assert.match(inputSource, /export function resolveWorkShellSubmitAction\(/);
+  assert.match(hooksSource, /setMode\(mode: string\): void \| Promise<void>/);
+  assert.doesNotMatch(
+    hooksSource,
+    /handleSubmit\(`\/mode set \$\{nextMode\}`\)/,
+  );
   assert.doesNotMatch(
     tuiSource,
     /export function useWorkShellDashboardHomeSync\(/,
@@ -317,7 +327,25 @@ test("work-shell slash selection helpers are exported from the shared tui packag
     },
   });
   assert.equal(noMatchPanel.title, "Commands");
-  assert.match(noMatchPanel.lines.join("\n"), /No slash yet\./);
+  assert.match(noMatchPanel.lines.join("\n"), /No matches for \/zz\./);
+  const noModelMatchPanel = resolveWorkShellActivePanel({
+    input: "/model gkdl",
+    suggestions: [
+      {
+        command: "/model list",
+        description: "List available models and reasoning support.",
+      },
+    ],
+    selectedIndex: 0,
+    currentModel: "gpt-5.4",
+    fallbackPanel: {
+      title: "Context",
+      lines: ["Loaded guidance: AGENTS.md"],
+    },
+  });
+  assert.equal(noModelMatchPanel.title, "Model picker");
+  assert.match(noModelMatchPanel.lines.join("\n"), /Model · gpt-5\.4/);
+  assert.match(noModelMatchPanel.lines.join("\n"), /Current model unchanged/);
 });
 
 test("work-shell dashboard sync helpers are exported from the shared tui package seam", () => {
@@ -349,7 +377,188 @@ test("work-shell dashboard sync helpers are exported from the shared tui package
   );
 });
 
+test("work-shell slash selection navigation is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-panels.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"ux",\s*"slash-selection"/);
+  assert.doesNotMatch(source, /selectedIndex\s*<=\s*0/);
+  assert.doesNotMatch(source, /suggestionCount\s*-\s*1/);
+});
+
+test("work-shell clipboard attachment cap decisions are delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-hooks.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"ux",\s*"clipboard-cap"/);
+  assert.doesNotMatch(source, /clipboard attachment cap reached/);
+  assert.doesNotMatch(source, /image too large/);
+});
+
+test("work-shell attachment dedup decisions are delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-hooks.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"ux",\s*"attachment-dedup"/);
+  assert.doesNotMatch(source, /new Set<string>/);
+  assert.doesNotMatch(source, /seen\.has/);
+});
+
+test("work-shell composer preview mode decisions are delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-hooks.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"ux",\s*"composer-preview-mode"/);
+  assert.equal(source.includes("jpe?g"), false);
+  assert.equal(source.includes("(?:^|\\s)@"), false);
+});
+
+test("work-shell composer dock chrome decisions are delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-view.tsx"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"ux",\s*"text",\s*"composer-dock-layout"/);
+  assert.equal(source.includes('inputValue.trim().startsWith("/")'), false);
+  assert.equal(source.includes("attachmentCount >= 5"), false);
+  assert.equal(source.includes('replace(/ /g, "─")'), false);
+});
+
+test("work-shell auth label display is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-auth-panels.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"ux",\s*"auth-label"/);
+  assert.equal(source.includes('authLabel === "oauth-file"'), false);
+  assert.equal(source.includes('"Browser OAuth · file"'), false);
+  assert.equal(source.includes('"API key · env"'), false);
+});
+
+test("work-shell auth label extraction is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-auth-panels.ts"),
+    "utf8",
+  );
+
+  assert.equal(extractAuthLabel(["Auth source: oauth-file"]), "oauth-file");
+  assert.match(source, /"rust",\s*"ux",\s*"auth-extract-label"/);
+  assert.equal(source.includes("?:Auth|Source"), false);
+  assert.equal(source.includes(".exec(line.trim())"), false);
+});
+
+test("work-shell auth launcher copy is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-auth-panels.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"ux",\s*"auth-launcher-lines"/);
+  assert.equal(source.includes("formatAuthRouteLabel"), false);
+  assert.equal(source.includes("getPreferredAuthRoute"), false);
+  assert.equal(source.includes("formatAuthStatusBlurb"), false);
+  assert.equal(source.includes("buildAuthLauncherNextLines"), false);
+});
+
+test("work-shell auth status panel copy is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-auth-panels.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"ux",\s*"auth-status-panel-lines"/);
+  assert.equal(source.includes("parseAuthStatusLine"), false);
+  assert.equal(
+    source.includes("OAuth token lacks model.request scope."),
+    false,
+  );
+  assert.equal(source.includes("Browser OAuth needs refresh."), false);
+  assert.equal(source.includes("API key active."), false);
+});
+
+test("work-shell browser auth failure copy is delegated to Rust", () => {
+  const authSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-auth-panels.ts"),
+    "utf8",
+  );
+  const panelSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-panels.ts"),
+    "utf8",
+  );
+
+  assert.match(authSource, /"rust",\s*"ux",\s*"auth-browser-failure-lines"/);
+  assert.equal(panelSource.includes("isMissingOAuthClientId"), false);
+  assert.equal(panelSource.includes("authLabel.startsWith"), false);
+  assert.equal(
+    panelSource.includes("Browser OAuth here needs OPENAI_OAUTH_CLIENT_ID."),
+    false,
+  );
+  assert.equal(
+    panelSource.includes("Set OPENAI_OAUTH_CLIENT_ID for browser login."),
+    false,
+  );
+});
+
+test("work-shell no-match slash copy is delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-panels.ts"),
+    "utf8",
+  );
+
+  assert.equal(source.includes("No slash yet."), false);
+  assert.equal(source.includes("Try /model, /auth, /doctor, /context."), false);
+  assert.equal(source.includes("No matches for"), false);
+});
+
+test("work-shell runtime labels are delegated to Rust", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-formatters.ts"),
+    "utf8",
+  );
+
+  assert.match(source, /"rust",\s*"ux",\s*"text",\s*"runtime-label"/);
+  assert.equal(source.includes("`Node ${runtime.node}"), false);
+});
+
 test("work-shell input decision helpers are exported from the shared tui package seam", () => {
+  assert.equal(
+    resolveWorkShellActiveSlashInput({
+      value: "",
+      fallbackPanelTitle: "Model picker",
+    }),
+    "/model",
+  );
+  assert.equal(
+    resolveWorkShellActiveSlashInput({
+      value: "gpt-5",
+      fallbackPanelTitle: "Model picker",
+    }),
+    "/model gpt-5",
+  );
+  assert.equal(
+    resolveWorkShellActiveSlashInput({
+      value: "/auth",
+      fallbackPanelTitle: "Context",
+    }),
+    "/auth",
+  );
+  assert.equal(
+    resolveWorkShellActiveSlashInput({
+      value: "plain",
+      fallbackPanelTitle: "Context",
+    }),
+    undefined,
+  );
   assert.deepEqual(
     resolveWorkShellInputAction({
       value: "",
@@ -361,6 +570,40 @@ test("work-shell input decision helpers are exported from the shared tui package
       hasRequestSessionsView: false,
     }),
     { type: "complete-slash", value: "/auth status " },
+  );
+  assert.deepEqual(
+    resolveWorkShellInputAction({
+      value: "",
+      key: { downArrow: true },
+      input: "/model",
+      slashSuggestionCount: 8,
+      isBusy: false,
+      hasRequestSessionsView: true,
+      hasSlashPicker: true,
+    }),
+    { type: "move-slash-selection", direction: "next" },
+  );
+  assert.deepEqual(
+    resolveWorkShellInputAction({
+      value: "",
+      key: { escape: true },
+      input: "/model",
+      slashSuggestionCount: 8,
+      isBusy: false,
+      hasRequestSessionsView: true,
+      hasSlashPicker: true,
+    }),
+    { type: "close-slash-picker" },
+  );
+  assert.deepEqual(
+    resolveWorkShellSubmitAction({
+      value: "/model g",
+      isBusy: false,
+      shouldBlockSlashSubmit: true,
+      selectedSlashCommand: "/model gpt-5.5",
+      activePanelTitle: "Model picker",
+    }),
+    { type: "submit-suggestion", line: "/model gpt-5.5", clearInput: true },
   );
   assert.deepEqual(
     resolveWorkShellInputAction({
@@ -379,11 +622,33 @@ test("work-shell input decision helpers are exported from the shared tui package
       key: { escape: true },
       input: "plain text",
       slashSuggestionCount: 0,
+      isBusy: true,
+      hasRequestSessionsView: true,
+    }),
+    { type: "open-sessions-view" },
+  );
+  assert.deepEqual(
+    resolveWorkShellInputAction({
+      value: "",
+      key: { escape: true },
+      input: "plain text",
+      slashSuggestionCount: 0,
       isBusy: false,
       hasRequestSessionsView: true,
       hasOverlayOpen: true,
     }),
     { type: "close-overlay" },
+  );
+  assert.deepEqual(
+    resolveWorkShellInputAction({
+      value: "",
+      key: { escape: true },
+      input: "plain text",
+      slashSuggestionCount: 0,
+      isBusy: false,
+      hasRequestSessionsView: false,
+    }),
+    { type: "open-engine-sessions" },
   );
   assert.deepEqual(
     resolveWorkShellInputAction({
@@ -446,6 +711,15 @@ test("work-shell input decision helpers are exported from the shared tui package
       shouldBlockSlashSubmit: false,
     }),
     { type: "submit", line: "ship it", clearInput: true },
+  );
+  assert.deepEqual(
+    resolveWorkShellSubmitAction({
+      value: "gkdl",
+      isBusy: false,
+      shouldBlockSlashSubmit: false,
+      activePanelTitle: "Model picker",
+    }),
+    { type: "submit", line: "/model gkdl", clearInput: true },
   );
   assert.deepEqual(
     applyComposerEdit({
@@ -534,6 +808,22 @@ test("embedded work-shell dashboard helper maps dashboard props through the shar
   assert.equal(props.initialView, "work");
   assert.equal(props.authLabel, "api-key-env");
   assert.equal(typeof props.renderWorkPane, "function");
+
+  let sessionsOpened = false;
+  let syncedHomeState = undefined;
+  const element = props.renderWorkPane({
+    openSessions() {
+      sessionsOpened = true;
+    },
+    syncHomeState(homeState) {
+      syncedHomeState = homeState;
+    },
+  });
+  element.props.onRequestSessionsView();
+  element.props.onSyncHomeState({ authLabel: "oauth-file" });
+
+  assert.equal(sessionsOpened, true);
+  assert.deepEqual(syncedHomeState, { authLabel: "oauth-file" });
 });
 
 test("work-shell panel helpers are exported from the shared tui package seam", () => {
@@ -562,27 +852,43 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
   assert.equal(buildWorkShellHelpPanel().title, "Work-first shell");
   assert.match(buildWorkShellHelpPanel().lines.join("\n"), /\/model/);
   assert.match(buildWorkShellHelpPanel().lines.join("\n"), /\/harness/);
-  assert.deepEqual(
-    buildWorkShellStatusPanel({
-      provider: "openai",
-      model: "gpt-5.4",
-      mode: "default",
-      cwd: "/repo",
-      reasoningLabel: "medium (mode-default)",
-      authLabel: "api-key-env",
-    }).lines,
-    [
-      "Current",
-      "Provider · openai",
-      "Model · gpt-5.4",
-      "Reasoning · medium (mode-default)",
-      "Mode · default",
-      "Auth · API key · env",
-      "",
-      "Workspace",
-      "Cwd · /repo",
-    ],
+  const statusPanel = buildWorkShellStatusPanel({
+    provider: "openai",
+    model: "gpt-5.4",
+    mode: "default",
+    cwd: "/repo",
+    reasoningLabel: "medium (mode-default)",
+    authLabel: "api-key-env",
+    contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    bridgeLines: ["project-context bridge ready"],
+    memoryLines: ["project memory ready"],
+  });
+  assert.deepEqual(statusPanel.lines.slice(0, 6), [
+    "Current",
+    "Provider · openai",
+    "Model · gpt-5.4",
+    "Reasoning · medium (mode-default)",
+    "Mode · default",
+    "Auth · API key · env",
+  ]);
+  assert.ok(statusPanel.lines.includes("Route"));
+  assert.ok(
+    statusPanel.lines.some((line) =>
+      /^Runtime · OpenAI \(openai\) · native$/.test(line),
+    ),
   );
+  assert.ok(
+    statusPanel.lines.includes(
+      "Endpoint · https://api.openai.com/v1/responses",
+    ),
+  );
+  assert.ok(statusPanel.lines.some((line) => line.startsWith("Proxy · ")));
+  assert.ok(statusPanel.lines.includes("Context"));
+  assert.ok(statusPanel.lines.includes("Sources · guidance · bridge · memory"));
+  assert.ok(statusPanel.lines.includes("Health · ready"));
+  assert.ok(statusPanel.lines.includes("Guide · AGENTS.md"));
+  assert.ok(statusPanel.lines.includes("Workspace"));
+  assert.ok(statusPanel.lines.includes("Cwd · /repo"));
   assert.match(
     formatAgentTraceLine({
       type: "tool.started",
@@ -627,6 +933,39 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
     "tool.completed with JSON-like output does not crash",
   );
   assert.equal(
+    formatAgentTraceLine({
+      type: "reasoning.delta",
+      level: "default",
+      provider: "openai",
+      model: "gpt-5.4",
+      kind: "summary",
+      itemId: "rsn_1",
+      delta: "thinking",
+    }),
+    "",
+    "generic provider thinking deltas are not useful reasoning content",
+  );
+  assert.equal(
+    formatAgentTraceLine({
+      type: "reasoning.delta",
+      level: "default",
+      provider: "openai",
+      model: "gpt-5.4",
+      kind: "summary",
+      itemId: "rsn_2",
+      delta: "inspect repo before editing",
+    }),
+    "✦ thinking· inspect repo before editing",
+  );
+  assert.deepEqual(
+    formatWorkShellToolEntryLines(
+      '✓ read 55ms {\n  "name": "web-app",\n  "private": true\n}',
+      72,
+    ),
+    ["✓ read 55ms {", '  "name": "web-app",', '  "private": true', "}"],
+    "tool entries render as compact text lines, not padded surface rows",
+  );
+  assert.equal(
     formatRuntimeLabel({ node: "v22", platform: "darwin", arch: "arm64" }),
     "Node v22 · darwin/arm64",
   );
@@ -647,6 +986,22 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
     formatWorkShellBusyStatusLine("· thinking inspect repo", 0),
     "⠋ thinking inspect repo",
   );
+  assert.deepEqual(
+    getWorkShellThinkingDetailLines({
+      busyStatus: "thinking",
+      spinnerFrame: 0,
+    }),
+    [],
+    "generic thinking status is already represented by the session header",
+  );
+  assert.deepEqual(
+    getWorkShellThinkingDetailLines({
+      busyStatus: "thinking inspect repo",
+      spinnerFrame: 0,
+    }),
+    ["⠋ thinking inspect repo"],
+    "specific progress still appears inside the conversation pane",
+  );
   assert.equal(
     formatWorkShellUsageLine({
       isBusy: false,
@@ -662,7 +1017,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       nowMs: 2480,
       lastTurnDurationMs: 1480,
     }),
-    "Working now · elapsed 1.5s · thinking inspect repo",
+    "⠋ Working now · elapsed 1.5s · thinking inspect repo",
   );
   assert.equal(
     normalizeMarkdownDisplayText("## Heading\n- `npm run check`\n- **Done**"),
@@ -791,6 +1146,91 @@ test("applyComposerEdit handles emoji input", () => {
   });
   assert.equal(result.nextValue, "hello🙂");
   assert.equal(result.nextCursorOffset, 7, "emoji is 2 UTF-16 code units");
+});
+
+test("applyComposerEdit keeps emoji cursor movement and deletion on character boundaries", () => {
+  assert.deepEqual(
+    applyComposerEdit({
+      value: "🙂한",
+      cursorOffset: 2,
+      input: "",
+      key: { leftArrow: true },
+      allowLineBreaks: false,
+    }),
+    { nextValue: "🙂한", nextCursorOffset: 0, submitted: false },
+  );
+  assert.deepEqual(
+    applyComposerEdit({
+      value: "🙂한",
+      cursorOffset: 0,
+      input: "",
+      key: { rightArrow: true },
+      allowLineBreaks: false,
+    }),
+    { nextValue: "🙂한", nextCursorOffset: 2, submitted: false },
+  );
+  assert.deepEqual(
+    applyComposerEdit({
+      value: "🙂한",
+      cursorOffset: 2,
+      input: "",
+      key: { backspace: true },
+      allowLineBreaks: false,
+    }),
+    { nextValue: "한", nextCursorOffset: 0, submitted: false },
+  );
+  assert.deepEqual(
+    applyComposerEdit({
+      value: "🙂한",
+      cursorOffset: 3,
+      input: "",
+      key: { delete: true },
+      allowLineBreaks: false,
+    }),
+    { nextValue: "🙂", nextCursorOffset: 2, submitted: false },
+  );
+});
+
+test("applyComposerEdit treats Ink delete events as terminal Backspace", () => {
+  assert.deepEqual(
+    applyComposerEdit({
+      value: "/u dd ddd",
+      cursorOffset: "/u dd ddd".length,
+      input: "",
+      key: { delete: true },
+      allowLineBreaks: true,
+    }),
+    {
+      nextValue: "/u dd dd",
+      nextCursorOffset: "/u dd dd".length,
+      submitted: false,
+    },
+  );
+});
+
+test("resolveComposerCursorOffsetAfterValueChange moves external replacements to a safe end cursor", () => {
+  assert.equal(
+    resolveComposerCursorOffsetAfterValueChange({
+      nextValue: "/model gpt-5.5 ",
+      currentCursorOffset: 3,
+    }),
+    "/model gpt-5.5 ".length,
+  );
+  assert.equal(
+    resolveComposerCursorOffsetAfterValueChange({
+      nextValue: "🙂",
+      currentCursorOffset: 1,
+    }),
+    "🙂".length,
+  );
+  assert.equal(
+    resolveComposerCursorOffsetAfterValueChange({
+      nextValue: "a🙂",
+      currentCursorOffset: 2,
+      pendingLocalValue: "a🙂",
+    }),
+    1,
+  );
 });
 
 // ── Display width seam contract ────────────────────────────────────

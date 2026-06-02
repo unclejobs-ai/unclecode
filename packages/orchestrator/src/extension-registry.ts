@@ -1,5 +1,4 @@
 import type {
-  CommandMetadata,
   ModeBackgroundTaskPolicy,
   ModeEditingPolicy,
   ModeExplanationStyle,
@@ -8,9 +7,9 @@ import type {
 } from "@unclecode/contracts";
 import { homedir } from "node:os";
 import path from "node:path";
-import { readdirSync, readFileSync } from "node:fs";
 
 import type { RegisteredSlashCommand } from "./command-registry.js";
+import { runRustCommandSync } from "./rust-command.js";
 
 export type ExtensionManifestConfigLayer = {
   readonly mode?: ModeProfileId;
@@ -32,22 +31,12 @@ export type ExtensionManifestSummary = {
   readonly statusLines: readonly string[];
 };
 
-type ExtensionCommandManifest = {
-  readonly name?: string;
-  readonly commands?: readonly {
-    readonly command: string;
-    readonly routeTo: readonly string[];
-    readonly description: string;
-    readonly aliases?: readonly string[];
-  }[];
-  readonly config?: ExtensionManifestConfigLayer;
-  readonly status?: {
-    readonly label?: string;
-    readonly lines?: readonly string[];
-  };
+type ExtensionManifestPayload = {
+  readonly configOverlays: readonly { readonly name: string; readonly config: ExtensionManifestConfigLayer }[];
+  readonly summaries: readonly ExtensionManifestSummary[];
 };
 
-const manifestCache = new Map<string, readonly { readonly filePath: string; readonly manifest: ExtensionCommandManifest }[]>();
+const manifestCache = new Map<string, ExtensionManifestPayload>();
 
 function getManifestCacheKey(input: {
   readonly workspaceRoot?: string;
@@ -70,43 +59,10 @@ export function clearExtensionRegistryCache(input?: {
   manifestCache.delete(getManifestCacheKey(input));
 }
 
-function normalizeSlashInput(input: string): string {
-  return input.trim().replace(/\s+/g, " ");
-}
-
-function loadManifestFile(filePath: string): ExtensionCommandManifest | undefined {
-  try {
-    return JSON.parse(readFileSync(filePath, "utf8")) as ExtensionCommandManifest;
-  } catch {
-    return undefined;
-  }
-}
-
-function listManifestFiles(root: string): readonly string[] {
-  try {
-    return readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
-      .map((entry) => path.join(root, entry.name));
-  } catch {
-    return [];
-  }
-}
-
-function pluginLocal(description: string, aliases?: readonly string[]): CommandMetadata {
-  return {
-    name: description,
-    description,
-    type: "local",
-    source: "plugin",
-    ...(aliases ? { aliases } : {}),
-    userInvocable: true,
-  };
-}
-
-function listLoadedManifests(input: {
+function loadExtensionManifestPayload(input: {
   readonly workspaceRoot?: string;
   readonly userHomeDir?: string;
-} = {}): readonly { readonly filePath: string; readonly manifest: ExtensionCommandManifest }[] {
+} = {}): ExtensionManifestPayload {
   const cacheKey = getManifestCacheKey(input);
   const cached = manifestCache.get(cacheKey);
   if (cached) {
@@ -115,14 +71,18 @@ function listLoadedManifests(input: {
 
   const workspaceRoot = input.workspaceRoot ?? process.cwd();
   const userHomeDir = input.userHomeDir ?? process.env.HOME ?? homedir();
-  const manifestFiles = [
-    ...listManifestFiles(path.join(workspaceRoot, ".unclecode", "extensions")),
-    ...listManifestFiles(path.join(userHomeDir, ".unclecode", "extensions")),
-  ];
-
-  const loaded = manifestFiles
-    .map((filePath) => ({ filePath, manifest: loadManifestFile(filePath) }))
-    .filter((entry): entry is { readonly filePath: string; readonly manifest: ExtensionCommandManifest } => entry.manifest !== undefined);
+  const raw = runRustCommandSync(
+    ["rust", "command", "extension-manifests", workspaceRoot, userHomeDir || "-"],
+    workspaceRoot,
+  ).trim();
+  const parsed = JSON.parse(raw) as unknown;
+  if (!isRecord(parsed) || !Array.isArray(parsed.configOverlays) || !Array.isArray(parsed.summaries)) {
+    throw new Error("Rust extension manifest loader returned an invalid payload.");
+  }
+  const loaded: ExtensionManifestPayload = {
+    configOverlays: parsed.configOverlays.filter(isExtensionConfigOverlay),
+    summaries: parsed.summaries.filter(isExtensionManifestSummary),
+  };
 
   manifestCache.set(cacheKey, loaded);
   return loaded;
@@ -132,47 +92,62 @@ export function loadExtensionSlashCommands(input: {
   readonly workspaceRoot?: string;
   readonly userHomeDir?: string;
 } = {}): readonly RegisteredSlashCommand[] {
-  const commands: RegisteredSlashCommand[] = [];
-
-  for (const { manifest } of listLoadedManifests(input)) {
-    if (!manifest.commands) {
-      continue;
-    }
-
-    for (const command of manifest.commands) {
-      if (!command.command.startsWith("/") || command.routeTo.length === 0) {
-        continue;
-      }
-      commands.push({
-        command: normalizeSlashInput(command.command),
-        routeTo: [...command.routeTo],
-        metadata: pluginLocal(command.description, command.aliases),
-      });
-    }
+  const workspaceRoot = input.workspaceRoot ?? process.cwd();
+  const userHomeDir = input.userHomeDir ?? process.env.HOME ?? homedir();
+  const raw = runRustCommandSync(
+    ["rust", "command", "extension-slash-commands", workspaceRoot, userHomeDir || "-"],
+    workspaceRoot,
+  ).trim();
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error("Rust extension slash command loader returned an invalid payload.");
   }
 
-  return commands;
+  return parsed.filter(isRegisteredSlashCommand);
+}
+
+function isRegisteredSlashCommand(value: unknown): value is RegisteredSlashCommand {
+  if (!isRecord(value) || typeof value.command !== "string" || !Array.isArray(value.routeTo) || !isRecord(value.metadata)) {
+    return false;
+  }
+  const metadata = value.metadata;
+  return (
+    value.routeTo.every((item) => typeof item === "string")
+    && typeof metadata.description === "string"
+    && typeof metadata.name === "string"
+    && metadata.type === "local"
+    && metadata.source === "plugin"
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function loadExtensionConfigOverlays(input: {
   readonly workspaceRoot?: string;
   readonly userHomeDir?: string;
 } = {}): readonly { readonly name: string; readonly config: ExtensionManifestConfigLayer }[] {
-  return listLoadedManifests(input)
-    .filter((entry) => entry.manifest.config !== undefined)
-    .map((entry) => ({
-      name: entry.manifest.name?.trim() || path.basename(entry.filePath, ".json"),
-      config: entry.manifest.config as ExtensionManifestConfigLayer,
-    }));
+  return loadExtensionManifestPayload(input).configOverlays;
 }
 
 export function loadExtensionManifestSummaries(input: {
   readonly workspaceRoot?: string;
   readonly userHomeDir?: string;
 } = {}): readonly ExtensionManifestSummary[] {
-  return listLoadedManifests(input).map((entry) => ({
-    name: entry.manifest.name?.trim() || path.basename(entry.filePath, ".json"),
-    sourcePath: entry.filePath,
-    statusLines: [...(entry.manifest.status?.lines ?? [])],
-  }));
+  return loadExtensionManifestPayload(input).summaries;
+}
+
+function isExtensionConfigOverlay(value: unknown): value is { readonly name: string; readonly config: ExtensionManifestConfigLayer } {
+  return isRecord(value) && typeof value.name === "string" && isRecord(value.config);
+}
+
+function isExtensionManifestSummary(value: unknown): value is ExtensionManifestSummary {
+  return (
+    isRecord(value)
+    && typeof value.name === "string"
+    && typeof value.sourcePath === "string"
+    && Array.isArray(value.statusLines)
+    && value.statusLines.every((line) => typeof line === "string")
+  );
 }

@@ -140,3 +140,60 @@ export type PolicyDecision = {
   readonly reason: string;
   readonly matchedRule: string;
 };
+
+export const EXECUTION_POLICY_DOMAINS = [
+  "filesystem",
+  "shell",
+  "network",
+  "secrets",
+  "inference",
+] as const;
+
+export type ExecutionPolicyDomain = (typeof EXECUTION_POLICY_DOMAINS)[number];
+
+export const EXECUTION_POLICY_CAPABILITIES = [
+  "filesystem.read",
+  "filesystem.write",
+  "shell.run",
+  "network.egress",
+  "secret.read",
+  "inference.request",
+] as const;
+
+export type ExecutionPolicyCapability = (typeof EXECUTION_POLICY_CAPABILITIES)[number];
+
+export const EXECUTION_POLICY_MODES = ["audit", "prompt", "enforce"] as const;
+
+export type ExecutionPolicyMode = (typeof EXECUTION_POLICY_MODES)[number];
+
+export type ExecutionPolicyRuleMatch = {
+  readonly pathPrefix?: string;
+  readonly commandPrefix?: string;
+  readonly host?: string;
+  readonly provider?: string;
+  readonly runtimeMode?: string;
+};
+
+export type ExecutionPolicyRule = {
+  readonly id: string;
+  readonly capability: ExecutionPolicyCapability;
+  readonly effect: PolicyDecisionEffect;
+  readonly reason: string;
+  readonly match?: ExecutionPolicyRuleMatch;
+};
+
+export type ExecutionPolicyProfile = {
+  readonly id: string;
+  readonly mode: ExecutionPolicyMode;
+  readonly defaultEffect: PolicyDecisionEffect;
+  readonly rules: readonly ExecutionPolicyRule[];
+};
+
+export type ExecutionPolicyEvaluation = {
+  readonly capability: ExecutionPolicyCapability;
+  readonly effect: PolicyDecisionEffect;
+  readonly source: PolicyDecisionSource;
+  readonly reason: string;
+  readonly matchedRule: string;
+  readonly auditOnly: boolean;
+};

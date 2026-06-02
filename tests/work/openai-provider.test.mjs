@@ -3,8 +3,10 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { Worker } from "node:worker_threads";
 
 import { loadConfig, OpenAIProvider } from "@unclecode/orchestrator";
+import { OpenAIProvider as BaseOpenAIProvider } from "@unclecode/providers";
 
 function buildJwtWithExp(expSeconds) {
   const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
@@ -21,6 +23,50 @@ function createWorkspaceWithMode(mode) {
     "utf8",
   );
   return workspaceRoot;
+}
+
+function waitForWorkerMessage(worker, type) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for worker message: ${type}`));
+    }, 5000);
+    const onMessage = (message) => {
+      if (message?.type === type) {
+        cleanup();
+        resolve(message);
+      }
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      worker.off("message", onMessage);
+      worker.off("error", onError);
+    };
+    worker.on("message", onMessage);
+    worker.on("error", onError);
+  });
+}
+
+function waitForRequestCount(requests, count) {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    const poll = () => {
+      if (requests.length >= count) {
+        resolve();
+        return;
+      }
+      if (Date.now() - startedAt > 5000) {
+        reject(new Error(`Timed out waiting for ${count} requests; saw ${requests.length}`));
+        return;
+      }
+      setTimeout(poll, 10);
+    };
+    poll();
+  });
 }
 
 test("loadConfig supports openai provider selection", async () => {
@@ -305,6 +351,135 @@ test("OpenAIProvider can return a plain text response without tools", async () =
   assert.equal(result.text, "hello from openai");
 });
 
+test("OpenAIProvider.runTurn uses Rust chat completion when fetch is not injected", async () => {
+  const originalBaseUrl = process.env.OPENAI_API_BASE_URL;
+  const originalNoProxy = process.env.NO_PROXY;
+  const worker = new Worker(`
+    const http = require("node:http");
+    const { parentPort } = require("node:worker_threads");
+    let count = 0;
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.setEncoding("utf8");
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        count += 1;
+        parentPort.postMessage({
+          type: "request",
+          request: {
+            index: count,
+            method: req.method,
+            url: req.url,
+            authorization: req.headers.authorization,
+            body: JSON.parse(body),
+          },
+        });
+        const responseBody = JSON.stringify({
+          choices: [{
+            message: count === 1
+              ? {
+                  content: "",
+                  reasoning_content: "thinking",
+                  tool_calls: [{
+                    id: "call_1",
+                    function: {
+                      name: "capture_args",
+                      arguments: JSON.stringify({ command: "echo rust" }),
+                    },
+                  }],
+                }
+              : { content: "done via rust" },
+          }],
+        });
+        res.writeHead(200, {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(responseBody),
+          connection: "close",
+        });
+        res.end(responseBody);
+      });
+    });
+    parentPort.on("message", (message) => {
+      if (message === "close") server.close(() => parentPort.postMessage({ type: "closed" }));
+    });
+    server.listen(0, "127.0.0.1", () => {
+      parentPort.postMessage({ type: "listening", port: server.address().port });
+    });
+  `, { eval: true });
+
+  try {
+    const port = await waitForWorkerMessage(worker, "listening").then((message) => message.port);
+    process.env.OPENAI_API_BASE_URL = `http://127.0.0.1:${port}/v1`;
+    process.env.NO_PROXY = [originalNoProxy, "127.0.0.1", "localhost"].filter(Boolean).join(",");
+    const traces = [];
+    const seenInputs = [];
+    const requests = [];
+    const onRequest = (message) => {
+      if (message?.type === "request") {
+        requests.push(message.request);
+      }
+    };
+    worker.on("message", onRequest);
+    const provider = new BaseOpenAIProvider({
+      apiKey: "sk-test-rust",
+      model: "gpt-5.4",
+      cwd: process.cwd(),
+      reasoning: {
+        effort: "medium",
+        source: "mode-default",
+        support: { status: "supported", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high"] },
+      },
+      toolRuntime: {
+        definitions: [
+          {
+            name: "capture_args",
+            description: "capture args",
+            input_schema: { type: "object", properties: {} },
+          },
+        ],
+        handlers: {
+          capture_args: async (input) => {
+            seenInputs.push(input);
+            return { content: "tool-ok" };
+          },
+        },
+      },
+    });
+    provider.setTraceListener((event) => traces.push(event));
+
+    const result = await provider.runTurn("use tool");
+    await waitForRequestCount(requests, 2);
+    worker.off("message", onRequest);
+    const [firstRequest, secondRequest] = requests;
+
+    assert.equal(result.text, "done via rust");
+    assert.deepEqual(seenInputs, [{ command: "echo rust" }]);
+    assert.equal(requests.length, 2);
+    assert.equal(firstRequest.method, "POST");
+    assert.equal(firstRequest.url, "/v1/chat/completions");
+    assert.equal(firstRequest.authorization, "Bearer sk-test-rust");
+    assert.equal(firstRequest.body.messages[1].role, "user");
+    assert.equal(firstRequest.body.tools[0].function.name, "capture_args");
+    assert.equal(secondRequest.body.messages.at(-1).role, "tool");
+    assert.equal(traces[0]?.type, "reasoning.delta");
+    assert.equal(traces[0]?.delta, "thinking");
+  } finally {
+    if (originalBaseUrl === undefined) {
+      delete process.env.OPENAI_API_BASE_URL;
+    } else {
+      process.env.OPENAI_API_BASE_URL = originalBaseUrl;
+    }
+    if (originalNoProxy === undefined) {
+      delete process.env.NO_PROXY;
+    } else {
+      process.env.NO_PROXY = originalNoProxy;
+    }
+    worker.postMessage("close");
+    await waitForWorkerMessage(worker, "closed");
+    await worker.terminate();
+  }
+});
+
 
 test("OpenAIProvider includes supported reasoning effort in request payloads", async () => {
   let capturedBody;
@@ -383,6 +558,97 @@ test("OpenAIProvider uses the Codex backend for codex oauth runtime", async () =
   assert.deepEqual(capturedBody.include, ["reasoning.encrypted_content"]);
   assert.equal(capturedBody.instructions.includes("UncleCode"), true);
   assert.equal(capturedHeaders["ChatGPT-Account-Id"], "acct_123");
+  assert.equal(capturedHeaders.originator, "codex_cli_rs");
+  assert.match(capturedHeaders["x-client-request-id"], /^uc-rs-/);
+});
+
+test("OpenAIProvider parses Codex Responses tool calls through Rust SSE records", async () => {
+  const seenInputs = [];
+  let callCount = 0;
+  const provider = new BaseOpenAIProvider({
+    apiKey: "header.eyJzY3AiOlsib3BlbmlkIl19.sig",
+    model: "gpt-5.4",
+    cwd: process.cwd(),
+    runtime: "codex",
+    openAIAccountId: "acct_123",
+    reasoning: {
+      effort: "medium",
+      source: "mode-default",
+      support: { status: "supported", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high"] },
+    },
+    toolRuntime: {
+      definitions: [
+        {
+          name: "capture_args",
+          description: "capture args",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+      handlers: {
+        capture_args: async (input) => {
+          seenInputs.push(input);
+          return { content: "tool-ok" };
+        },
+      },
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      async text() {
+        callCount += 1;
+        if (callCount === 1) {
+          return [
+            'data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"capture_args","arguments":"{\\"command\\":\\"echo ok\\"}"}}',
+            '',
+          ].join("\n");
+        }
+        return [
+          'data: {"type":"response.output_item.done","item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"done"}]}}',
+          '',
+        ].join("\n");
+      },
+    }),
+  });
+
+  const result = await provider.runTurn("use tool");
+
+  assert.equal(result.text, "done");
+  assert.deepEqual(seenInputs, [{ command: "echo ok" }]);
+});
+
+test("OpenAIProvider emits Codex reasoning deltas parsed by Rust SSE records", async () => {
+  const traces = [];
+  const provider = new BaseOpenAIProvider({
+    apiKey: "header.eyJzY3AiOlsib3BlbmlkIl19.sig",
+    model: "gpt-5.4",
+    cwd: process.cwd(),
+    runtime: "codex",
+    reasoning: {
+      effort: "medium",
+      source: "mode-default",
+      support: { status: "supported", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high"] },
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      async text() {
+        return [
+          'data: {"type":"response.reasoning_summary_text.delta","item_id":"rsn_1","delta":"thinking"}',
+          '',
+          'data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rsn_1","summary":[],"content":[]}}',
+          '',
+          'data: {"type":"response.output_item.done","item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"done"}]}}',
+          '',
+        ].join("\n");
+      },
+    }),
+  });
+
+  provider.setTraceListener((event) => traces.push(event));
+  const result = await provider.runTurn("think");
+
+  assert.equal(result.text, "done");
+  assert.equal(traces[0]?.type, "reasoning.delta");
+  assert.equal(traces[0]?.provider, "openai");
+  assert.equal(traces[0]?.delta, "thinking");
 });
 
 test("OpenAIProvider keeps codex reasoning effort=none when reasoning support is unavailable", async () => {
@@ -528,4 +794,67 @@ test("OpenAIProvider emits tool trace events for visible tool use", async () => 
   assert.equal(traces[1]?.isError, false);
   assert.equal(typeof traces[1]?.durationMs, "number");
   assert.match(traces[1]?.output ?? "", /hello trace/);
+});
+
+test("OpenAIProvider defaults malformed tool arguments through Rust normalization", async () => {
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-openai-bad-args-"));
+  const seenInputs = [];
+  let callCount = 0;
+  const provider = new BaseOpenAIProvider({
+    apiKey: "sk-test-123",
+    model: "gpt-5.4",
+    cwd: workspaceRoot,
+    reasoning: {
+      effort: "medium",
+      source: "mode-default",
+      support: { status: "supported", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high"] },
+    },
+    toolRuntime: {
+      definitions: [
+        {
+          name: "capture_args",
+          description: "capture args",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+      handlers: {
+        capture_args: async (input) => {
+          seenInputs.push(input);
+          return { content: "ok" };
+        },
+      },
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        callCount += 1;
+        if (callCount === 1) {
+          return {
+            choices: [
+              {
+                message: {
+                  content: "",
+                  tool_calls: [
+                    {
+                      id: "call-1",
+                      function: {
+                        name: "capture_args",
+                        arguments: "[1,2,3]",
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          };
+        }
+        return { choices: [{ message: { content: "done" } }] };
+      },
+    }),
+  });
+
+  const result = await provider.runTurn("bad args");
+
+  assert.equal(result.text, "done");
+  assert.deepEqual(seenInputs, [{}]);
 });

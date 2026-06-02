@@ -10,7 +10,6 @@
  * grounded (§5.6).
  */
 
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -24,6 +23,8 @@ import {
   readTeamRunManifest,
   type TeamCheckpoint,
 } from "@unclecode/session-store";
+
+import { runRustCommandSync } from "./rust-command.js";
 
 export const RUN_ID_ENV = "UNCLECODE_TEAM_RUN_ID";
 export const RUN_ROOT_ENV = "UNCLECODE_TEAM_RUN_ROOT";
@@ -81,7 +82,7 @@ export class TeamBinding {
       throw new Error(`readCode: path does not exist: ${absPath}`);
     }
     const content = readFileSync(absPath, "utf8");
-    const sha256 = createHash("sha256").update(content).digest("hex");
+    const sha256 = runRustCommandSync(["rust", "sha256"], this.workspaceRoot, content).trim();
     const mtime = statSync(absPath).mtimeMs;
     return { content, sha256, mtime };
   }

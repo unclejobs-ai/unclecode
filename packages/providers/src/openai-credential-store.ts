@@ -1,5 +1,4 @@
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { runRustCommand } from "./rust-command.js";
 
 const UNCLECODE_KEYTAR_SERVICE = "unclecode.openai";
 const UNCLECODE_KEYTAR_ACCOUNT = "oauth";
@@ -28,34 +27,6 @@ type KeytarLike = {
   readonly deletePassword?: (service: string, account: string) => Promise<boolean>;
 };
 
-type DynamicImport = (specifier: string) => Promise<unknown>;
-
-const dynamicImport = new Function("specifier", "return import(specifier)") as DynamicImport;
-
-async function loadKeytar(): Promise<KeytarLike | null> {
-  try {
-    const imported = await dynamicImport("keytar");
-
-    if (
-      typeof imported === "object" &&
-      imported !== null &&
-      "default" in imported &&
-      typeof imported.default === "object" &&
-      imported.default !== null &&
-      "getPassword" in imported.default &&
-      typeof imported.default.getPassword === "function" &&
-      "setPassword" in imported.default &&
-      typeof imported.default.setPassword === "function"
-    ) {
-      return imported.default as KeytarLike;
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 type WriteOpenAICredentialsInput =
   | {
       readonly credentialsPath: string;
@@ -72,19 +43,24 @@ type WriteOpenAICredentialsInput =
 
 export async function writeOpenAICredentials(input: WriteOpenAICredentialsInput): Promise<void> {
   const serialized = input.rawContents ?? JSON.stringify(input.credentials, null, 2);
-  const keytar = input.keytar ?? (await loadKeytar());
 
-  if (keytar !== null) {
+  if (input.keytar) {
     try {
-      await keytar.setPassword(UNCLECODE_KEYTAR_SERVICE, UNCLECODE_KEYTAR_ACCOUNT, serialized);
+      await input.keytar.setPassword(UNCLECODE_KEYTAR_SERVICE, UNCLECODE_KEYTAR_ACCOUNT, serialized);
       return;
     } catch {
     }
   }
 
-  await mkdir(path.dirname(input.credentialsPath), { recursive: true });
-  await writeFile(input.credentialsPath, serialized, "utf8");
-  await chmod(input.credentialsPath, 0o600);
+  await runRustCommand(
+    ["rust", "auth", "write-raw"],
+    process.cwd(),
+    serialized,
+    {
+      ...process.env,
+      UNCLECODE_OPENAI_CREDENTIALS_PATH: input.credentialsPath,
+    },
+  );
 }
 
 function parseStoredOpenAICredentials(parsed: any): StoredOpenAICredentials | null {
@@ -117,11 +93,12 @@ export async function readOpenAICredentials(input: {
   readonly credentialsPath: string;
   readonly keytar?: KeytarLike;
 }): Promise<StoredOpenAICredentials | null> {
-  const keytar = input.keytar ?? (await loadKeytar());
-
-  if (keytar !== null) {
+  if (input.keytar) {
     try {
-      const stored = await keytar.getPassword(UNCLECODE_KEYTAR_SERVICE, UNCLECODE_KEYTAR_ACCOUNT);
+      const stored = await input.keytar.getPassword(
+        UNCLECODE_KEYTAR_SERVICE,
+        UNCLECODE_KEYTAR_ACCOUNT,
+      );
 
       if (stored !== null) {
         return parseStoredOpenAICredentials(JSON.parse(stored));
@@ -131,7 +108,16 @@ export async function readOpenAICredentials(input: {
   }
 
   try {
-    return parseStoredOpenAICredentials(JSON.parse(await readFile(input.credentialsPath, "utf8")));
+    const stdout = await runRustCommand(
+      ["rust", "auth", "read-credentials"],
+      process.cwd(),
+      undefined,
+      {
+        ...process.env,
+        UNCLECODE_OPENAI_CREDENTIALS_PATH: input.credentialsPath,
+      },
+    );
+    return parseRustStoredOpenAICredentials(stdout);
   } catch {
     return null;
   }
@@ -141,14 +127,77 @@ export async function clearOpenAICredentials(input: {
   readonly credentialsPath: string;
   readonly keytar?: KeytarLike;
 }): Promise<void> {
-  const keytar = input.keytar ?? (await loadKeytar());
-
-  if (keytar?.deletePassword) {
+  if (input.keytar?.deletePassword) {
     try {
-      await keytar.deletePassword(UNCLECODE_KEYTAR_SERVICE, UNCLECODE_KEYTAR_ACCOUNT);
+      await input.keytar.deletePassword(UNCLECODE_KEYTAR_SERVICE, UNCLECODE_KEYTAR_ACCOUNT);
     } catch {
     }
   }
 
-  await rm(input.credentialsPath, { force: true });
+  await runRustCommand(
+    ["rust", "auth", "logout"],
+    process.cwd(),
+    undefined,
+    {
+      ...process.env,
+      UNCLECODE_OPENAI_CREDENTIALS_PATH: input.credentialsPath,
+    },
+  );
+}
+
+function parseRustStoredOpenAICredentials(stdout: string): StoredOpenAICredentials | null {
+  const fields = parseRustKeyValueLines(stdout);
+  const authType = fields.get("authType");
+  if (fields.get("status") !== "ok") {
+    return null;
+  }
+
+  if (authType === "oauth") {
+    return {
+      authType,
+      accessToken: fields.get("accessToken") ?? "",
+      refreshToken: fields.get("refreshToken") ?? "",
+      expiresAt: parseOptionalNumber(fields.get("expiresAt")),
+      organizationId: normalizeOptionalField(fields.get("organizationId")),
+      projectId: normalizeOptionalField(fields.get("projectId")),
+      accountId: normalizeOptionalField(fields.get("accountId")),
+      runtime: parseRuntime(fields.get("runtime")),
+    };
+  }
+
+  if (authType === "api-key") {
+    return {
+      authType,
+      apiKey: fields.get("apiKey") ?? "",
+      organizationId: normalizeOptionalField(fields.get("organizationId")),
+      projectId: normalizeOptionalField(fields.get("projectId")),
+    };
+  }
+
+  return null;
+}
+
+function parseRustKeyValueLines(stdout: string): Map<string, string> {
+  return new Map(
+    stdout
+      .split(/\r?\n/)
+      .map((line) => line.split("=", 2))
+      .filter((parts): parts is [string, string] => parts.length === 2),
+  );
+}
+
+function normalizeOptionalField(value: string | undefined): string | null {
+  return value && value !== "none" ? value : null;
+}
+
+function parseOptionalNumber(value: string | undefined): number | null {
+  if (!value || value === "none") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseRuntime(value: string | undefined): "api" | "codex" | null {
+  return value === "api" || value === "codex" ? value : null;
 }

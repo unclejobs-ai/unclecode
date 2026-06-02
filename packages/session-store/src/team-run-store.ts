@@ -12,9 +12,9 @@
 
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { appendFileSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { join } from "node:path";
 
+import { runRustCommandSync } from "./rust-command.js";
 import type {
   PersonaId,
   TeamRunManifest,
@@ -78,11 +78,12 @@ export function getTeamRunRoot(dataRoot: string, runId: string): string {
 
 export function generateRunId(): string {
   const ts = Date.now();
-  const rand = createHash("sha256")
-    .update(`${ts}-${Math.random()}-${process.pid}`)
-    .digest("hex")
-    .slice(0, 6);
+  const rand = rustSha256(`${ts}-${Math.random()}-${process.pid}`).slice(0, 6);
   return `tr_${ts}_${rand}`;
+}
+
+function rustSha256(input: string): string {
+  return runRustCommandSync(["rust", "sha256"], process.cwd(), input).trim();
 }
 
 function canonicalJson(value: unknown): string {
@@ -100,10 +101,7 @@ function canonicalJson(value: unknown): string {
 }
 
 function hashLine(prevHash: string, line: Record<string, unknown>): string {
-  return createHash("sha256")
-    .update(prevHash)
-    .update(canonicalJson(line))
-    .digest("hex");
+  return rustSha256(`${prevHash}${canonicalJson(line)}`);
 }
 
 export function createTeamRun(input: CreateTeamRunInput): TeamRunRef {

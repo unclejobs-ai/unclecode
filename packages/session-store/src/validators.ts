@@ -85,6 +85,12 @@ export function sanitizeSessionMetadata(value: unknown): SessionMetadata {
     ...(value.traceMode === "minimal" || value.traceMode === "verbose" || value.traceMode === null
       ? { traceMode: value.traceMode }
       : {}),
+    ...(value.reasoningEffort === "low" ||
+    value.reasoningEffort === "medium" ||
+    value.reasoningEffort === "high" ||
+    value.reasoningEffort === null
+      ? { reasoningEffort: value.reasoningEffort }
+      : {}),
     ...(typeof value.model === "string" || value.model === null
       ? {
           model:

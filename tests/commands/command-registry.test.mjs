@@ -30,6 +30,7 @@ test("work-shell command registry shares builtin metadata for inline operational
   assert.ok(commands.some((entry) => entry.command === "/research" && entry.metadata.type === "prompt"));
   assert.ok(commands.some((entry) => entry.command === "/research status" && entry.metadata.type === "local"));
   assert.ok(commands.some((entry) => entry.command === "/mmbridge handoff" && entry.metadata.type === "local"));
+  assert.ok(commands.some((entry) => entry.command === "/mmbridge health" && entry.metadata.type === "local"));
   assert.ok(commands.some((entry) => entry.command === "/mmbridge doctor" && entry.metadata.type === "local"));
   assert.deepEqual(registry.resolve("/auth login"), ["auth", "login"]);
   assert.deepEqual(registry.resolve("/auth logout"), ["auth", "logout"]);
@@ -39,6 +40,7 @@ test("work-shell command registry shares builtin metadata for inline operational
   assert.deepEqual(registry.resolve("/research"), ["research", "run"]);
   assert.deepEqual(registry.resolve("/research status"), ["research", "status"]);
   assert.deepEqual(registry.resolve("/mmbridge handoff"), ["mmbridge", "handoff"]);
+  assert.deepEqual(registry.resolve("/mmbridge health"), ["mmbridge", "health"]);
   assert.deepEqual(registry.resolve("/mmbridge doctor"), ["mmbridge", "doctor"]);
   assert.equal(registry.resolve("/aut"), undefined);
   assert.deepEqual(registry.resolve("/mode status"), ["mode", "status"]);

@@ -1,17 +1,13 @@
-import { MODE_REASONING_EFFORTS, PROVIDER_CAPABILITIES, type ModeReasoningEffort, type ProviderId } from "@unclecode/contracts";
+import { MODE_REASONING_EFFORTS, type ModeReasoningEffort, type ProviderId } from "@unclecode/contracts";
 
 import { ProviderCapabilityMismatchError } from "./errors.js";
+import { runRustCommandSync } from "./rust-command.js";
 import type { ModelRegistry, ProviderCapabilityName, ReasoningSupport } from "./types.js";
 
-const OPENAI_DEFAULT_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "o4-mini", "gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o"];
 const UNSUPPORTED_REASONING: ReasoningSupport = {
   status: "unsupported",
   supportedEfforts: [],
 };
-
-function unique(values: readonly string[]): string[] {
-  return [...new Set(values.filter((value) => value.trim().length > 0))];
-}
 
 function supportedReasoning(defaultEffort: ModeReasoningEffort): ReasoningSupport {
   return {
@@ -22,13 +18,8 @@ function supportedReasoning(defaultEffort: ModeReasoningEffort): ReasoningSuppor
 }
 
 export function getOpenAIReasoningSupport(modelId: string): ReasoningSupport {
-  const normalized = modelId.trim().toLowerCase();
-
-  if (normalized.startsWith("gpt-5") || normalized.startsWith("o4")) {
-    return supportedReasoning("medium");
-  }
-
-  return UNSUPPORTED_REASONING;
+  const stdout = runRustCommandSync(["rust", "model", "openai-reasoning", modelId], process.cwd());
+  return parseRustReasoningSupport(parseRustKeyValueLines(stdout));
 }
 
 export function getReasoningSupport(providerId: ProviderId, modelId: string): ReasoningSupport {
@@ -39,18 +30,172 @@ export function getReasoningSupport(providerId: ProviderId, modelId: string): Re
   return UNSUPPORTED_REASONING;
 }
 
+export function detectProviderForModel(modelId: string): Extract<ProviderId, "openai" | "anthropic" | "gemini"> {
+  const stdout = runRustCommandSync(["rust", "model", "detect-provider", modelId], process.cwd());
+  const provider = parseRustKeyValueLines(stdout).get("provider");
+  return provider === "anthropic" || provider === "gemini" ? provider : "openai";
+}
+
+export type ProviderRoute = {
+  readonly providerId: ProviderId;
+  readonly label: string;
+  readonly transport: "native" | "compat";
+  readonly runtimeSupported: boolean;
+  readonly defaultModel: string;
+  readonly endpointUrl: string;
+  readonly proxyPolicy: {
+    readonly proxyUrl: string | null;
+    readonly source: string;
+    readonly bypassed: boolean;
+    readonly targetHost: string;
+    readonly noProxy: readonly string[];
+  };
+  readonly envKeys: readonly string[];
+};
+
+export function resolveProviderRoute(providerId: ProviderId | "auto", modelId = ""): ProviderRoute {
+  const args = ["rust", "model", "provider-route-json", providerId];
+  if (modelId.trim()) {
+    args.push(modelId.trim());
+  }
+  const parsed = JSON.parse(runRustCommandSync(args, process.cwd()).trim()) as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error("Rust provider route returned an invalid payload.");
+  }
+  const provider = typeof parsed.providerId === "string" ? parsed.providerId : undefined;
+  if (!isProviderId(provider)) {
+    throw new Error(`Rust provider route returned unsupported provider: ${provider ?? ""}`);
+  }
+  const proxyPolicy = isRecord(parsed.proxyPolicy) ? parsed.proxyPolicy : {};
+  return {
+    providerId: provider,
+    label: typeof parsed.label === "string" ? parsed.label : provider,
+    transport: parsed.transport === "native" ? "native" : "compat",
+    runtimeSupported: parsed.runtimeSupported === true,
+    defaultModel: typeof parsed.defaultModel === "string" ? parsed.defaultModel : "",
+    endpointUrl: typeof parsed.endpointUrl === "string" ? parsed.endpointUrl : "",
+    proxyPolicy: {
+      proxyUrl: typeof proxyPolicy.proxyUrl === "string" && proxyPolicy.proxyUrl.trim() ? proxyPolicy.proxyUrl : null,
+      source: typeof proxyPolicy.source === "string" ? proxyPolicy.source : "none",
+      bypassed: proxyPolicy.bypassed === true,
+      targetHost: typeof proxyPolicy.targetHost === "string" ? proxyPolicy.targetHost : "",
+      noProxy: Array.isArray(proxyPolicy.noProxy)
+        ? proxyPolicy.noProxy.filter((entry): entry is string => typeof entry === "string")
+        : [],
+    },
+    envKeys: Array.isArray(parsed.envKeys)
+      ? parsed.envKeys.filter((key): key is string => typeof key === "string")
+      : [],
+  };
+}
+
+export function getProviderModelCatalog(providerId: ProviderId, env: NodeJS.ProcessEnv = process.env): {
+  readonly label: string;
+  readonly models: readonly string[];
+} {
+  const stdout = runRustCommandSync(["rust", "model", "catalog", providerId], process.cwd(), env);
+  let label: string = providerId;
+  const models: string[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.startsWith("label=")) {
+      label = line.slice("label=".length).trim() || label;
+    } else if (line.startsWith("model=")) {
+      const model = line.slice("model=".length).trim();
+      if (model) {
+        models.push(model);
+      }
+    }
+  }
+  return { label, models };
+}
+
 export function getOpenAIModelRegistry(env: NodeJS.ProcessEnv = process.env): ModelRegistry {
-  const activeModel = String(env.OPENAI_MODEL ?? "").trim();
-  const models = unique([activeModel, ...OPENAI_DEFAULT_MODELS]);
+  const stdout = runRustCommandSync(["rust", "model", "openai-registry"], process.cwd(), env);
+  const parsed = parseRustModelRegistry(stdout);
 
   return {
     providerId: "openai",
-    defaultModel: PROVIDER_CAPABILITIES.openai.defaultModel,
-    models,
-    reasoningByModel: Object.fromEntries(
-      models.map((modelId) => [modelId, getOpenAIReasoningSupport(modelId)]),
-    ),
+    defaultModel: parsed.defaultModel,
+    models: parsed.models,
+    reasoningByModel: parsed.reasoningByModel,
   };
+}
+
+export function getGenericModelRegistry(providerId: ProviderId, env: NodeJS.ProcessEnv = process.env): ModelRegistry {
+  const catalog = getProviderModelCatalog(providerId, env);
+  return {
+    providerId,
+    defaultModel: catalog.models[0] ?? "",
+    models: [...catalog.models],
+    reasoningByModel: Object.fromEntries(catalog.models.map((model) => [model, UNSUPPORTED_REASONING])),
+  };
+}
+
+function isProviderId(value: string | undefined): value is ProviderId {
+  return value === "anthropic"
+    || value === "gemini"
+    || value === "openai"
+    || value === "groq"
+    || value === "ollama"
+    || value === "copilot"
+    || value === "zai";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseRustModelRegistry(stdout: string): Pick<ModelRegistry, "defaultModel" | "models" | "reasoningByModel"> {
+  let defaultModel = "";
+  const models: string[] = [];
+  const reasoningByModel: Record<string, ReasoningSupport> = {};
+
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.startsWith("defaultModel=")) {
+      defaultModel = line.slice("defaultModel=".length).trim() || defaultModel;
+      continue;
+    }
+    if (!line.startsWith("model=")) {
+      continue;
+    }
+    const fields = parseRustTabbedFields(line);
+    const model = fields.get("model");
+    if (!model) {
+      continue;
+    }
+    models.push(model);
+    reasoningByModel[model] = parseRustReasoningSupport(fields);
+  }
+
+  return { defaultModel, models, reasoningByModel };
+}
+
+function parseRustKeyValueLines(stdout: string): Map<string, string> {
+  return new Map(
+    stdout
+      .split(/\r?\n/)
+      .map((line) => line.split("=", 2))
+      .filter((parts): parts is [string, string] => parts.length === 2),
+  );
+}
+
+function parseRustTabbedFields(line: string): Map<string, string> {
+  return new Map(
+    line
+      .split("\t")
+      .map((field) => field.split("=", 2))
+      .filter((parts): parts is [string, string] => parts.length === 2),
+  );
+}
+
+function parseRustReasoningSupport(fields: Map<string, string>): ReasoningSupport {
+  if (fields.get("status") !== "supported" && fields.get("reasoning") !== "supported") {
+    return UNSUPPORTED_REASONING;
+  }
+  const defaultEffort = fields.get("defaultEffort");
+  return supportedReasoning(
+    defaultEffort === "low" || defaultEffort === "high" ? defaultEffort : "medium",
+  );
 }
 
 export function assertProviderCapability(
@@ -58,18 +203,14 @@ export function assertProviderCapability(
   capability: ProviderCapabilityName,
   modelId: string,
 ): void {
-  const provider = PROVIDER_CAPABILITIES[providerId];
+  const parsed = JSON.parse(
+    runRustCommandSync(["rust", "model", "capability", providerId, capability, modelId], process.cwd()).trim(),
+  ) as unknown;
+  if (!isRecord(parsed) || parsed.supported !== true && parsed.supported !== false) {
+    throw new Error("Rust provider capability returned an invalid payload.");
+  }
 
-  const supported =
-    capability === "tool-calls"
-      ? provider.supportsToolCalls
-      : capability === "session-memory"
-        ? provider.supportsSessionMemory
-        : capability === "prompt-caching"
-          ? provider.supportsPromptCaching
-          : providerId === "openai";
-
-  if (!supported) {
+  if (!parsed.supported) {
     throw new ProviderCapabilityMismatchError({
       providerId,
       requiredCapability: capability,

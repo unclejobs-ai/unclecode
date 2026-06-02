@@ -28,7 +28,7 @@ test("team gate levels map to mmbridge severity", () => {
 });
 
 test("team runtime modes mirror runtime-broker contract", () => {
-  assert.deepEqual(TEAM_RUNTIME_MODES, ["local", "docker", "e2b"]);
+  assert.deepEqual(TEAM_RUNTIME_MODES, ["local", "docker", "e2b", "openshell"]);
 });
 
 test("session checkpoint types now include team_run + team_step", () => {

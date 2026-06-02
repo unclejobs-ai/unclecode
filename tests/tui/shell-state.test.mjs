@@ -65,7 +65,9 @@ test("createInitialShellState stays work-first even when resumable sessions exis
 });
 
 test("reduceShellEvent marks action as running and keeps focus stable", () => {
-  const initial = createInitialShellState(baseHomeState);
+  const initial = createInitialShellState(baseHomeState, {
+    initialView: "sessions",
+  });
 
   const next = reduceShellEvent(initial, {
     type: "action.started",
@@ -74,7 +76,7 @@ test("reduceShellEvent marks action as running and keeps focus stable", () => {
 
   assert.equal(next.isRunning, true);
   assert.equal(next.runningActionId, "doctor");
-  assert.equal(next.view, "work");
+  assert.equal(next.view, "sessions");
   assert.equal(next.focus.column, initial.focus.column);
   assert.equal(next.activityEntries[0]?.title, "Running doctor");
   assert.equal(next.activityEntries[0]?.tone, "info");
@@ -142,7 +144,9 @@ test("reduceShellEvent appends completed activity entries and refreshes home sta
 });
 
 test("reduceShellEvent records failed runs as warning activity", () => {
-  const running = reduceShellEvent(createInitialShellState(baseHomeState), {
+  const running = reduceShellEvent(createInitialShellState(baseHomeState, {
+    initialView: "mcp",
+  }), {
     type: "action.started",
     actionId: "doctor",
   });
@@ -161,7 +165,7 @@ test("reduceShellEvent records failed runs as warning activity", () => {
 
   assert.equal(next.isRunning, false);
   assert.equal(next.activityEntries[0]?.tone, "warning");
-  assert.equal(next.view, "work");
+  assert.equal(next.view, "mcp");
   assert.deepEqual(next.outputLines, ["Doctor failed"]);
   assert.match(next.traceEntries[0]?.message ?? "", /failed/);
 });
@@ -189,6 +193,30 @@ test("reduceShellEvent can switch shell views without disturbing activity state"
   assert.equal(next.view, "work");
   assert.equal(next.activityEntries.length, 1);
   assert.equal(next.outputLines[0], "Doctor report");
+});
+
+test("reduceShellEvent keeps non-research quick actions on the current tab", () => {
+  const initial = createInitialShellState(baseHomeState, {
+    initialView: "sessions",
+  });
+  const running = reduceShellEvent(initial, {
+    type: "action.started",
+    actionId: "doctor",
+  });
+  const completed = reduceShellEvent(running, {
+    type: "action.completed",
+    entry: {
+      id: "doctor-2",
+      source: "doctor",
+      title: "Doctor",
+      lines: ["Doctor report"],
+      tone: "success",
+    },
+    outputLines: ["Doctor report"],
+    homeState: baseHomeState,
+  });
+
+  assert.equal(completed.view, "sessions");
 });
 
 test("reduceShellEvent ignores no-op home.updated patches", () => {
@@ -336,6 +364,35 @@ test("reduceShellEvent tracks worker progress while an action is running", () =>
 
   assert.equal(updated.workers.length, 1);
   assert.equal(updated.workers[0]?.detail, "writing artifact");
+});
+
+test("reduceShellEvent ignores duplicate worker progress updates to reduce redraw churn", () => {
+  const started = reduceShellEvent(createInitialShellState(baseHomeState), {
+    type: "action.started",
+    actionId: "doctor",
+  });
+
+  const progressed = reduceShellEvent(started, {
+    type: "worker.progressed",
+    worker: {
+      id: "worker-1",
+      label: "doctor",
+      status: "running",
+      detail: "loading report",
+    },
+  });
+
+  const duplicate = reduceShellEvent(progressed, {
+    type: "worker.progressed",
+    worker: {
+      id: "worker-1",
+      label: "doctor",
+      status: "running",
+      detail: "loading report",
+    },
+  });
+
+  assert.equal(duplicate, progressed);
 });
 
 test("reduceShellEvent queues and clears approval requests deterministically", () => {

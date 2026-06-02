@@ -84,13 +84,14 @@ test("built unclecode cli maps /research status and /mcp list to their surfaces"
   }
 });
 
-test("built unclecode cli maps /work --tools to the real assistant entrypoint", () => {
+test("built unclecode cli maps /work --tools to the Rust-native work tool surface", () => {
   const result = spawnSync("node", [builtCliEntrypoint, "/work", "--tools"], {
     cwd: workspaceRoot,
     encoding: "utf8",
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Available tools:/);
+  assert.match(result.stdout, /Available Rust-native work tools:/);
+  assert.match(result.stdout, /list_files/);
   assert.match(result.stdout, /read_file/);
 });

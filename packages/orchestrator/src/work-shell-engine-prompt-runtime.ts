@@ -9,8 +9,9 @@ import type {
   WorkShellEngineOptions,
   WorkShellEngineState,
   WorkShellPanel,
+  WorkShellStatusContext,
 } from "./work-shell-engine.js";
-import type { WorkShellReasoningConfig } from "./reasoning.js";
+import { describeReasoning, type WorkShellReasoningConfig } from "./reasoning.js";
 
 /**
  * Merge text-derived attachments (from resolveComposerInput) with attachments
@@ -50,6 +51,7 @@ type PromptRuntimeInput<Attachment, Reasoning extends WorkShellReasoningConfig> 
     options: WorkShellEngineOptions<Reasoning>,
     reasoning: Reasoning,
     authLabel: string,
+    statusContext?: WorkShellStatusContext,
   ) => WorkShellPanel;
   autoContinueOnPermissionStall?: boolean | undefined;
   runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => Promise<{ text: string }>;
@@ -120,6 +122,18 @@ function createPromptRuntimeExecutionInput<Attachment, Reasoning extends WorkShe
         authLabel,
         buildStatusPanel: input.buildStatusPanel,
       }),
+    buildAuthFailureStatusInput: (authLabel: string) => ({
+      provider: input.options.provider,
+      model: input.state.model,
+      mode: input.options.mode,
+      cwd: input.options.cwd,
+      reasoningLabel: describeReasoning(input.state.reasoning),
+      authLabel,
+      contextSummaryLines: input.options.contextSummaryLines,
+      bridgeLines: input.state.bridgeLines,
+      memoryLines: input.state.memoryLines,
+      traceLines: input.state.traceLines,
+    }),
     appendEntries: input.appendEntries,
     setState: input.setState,
     pushTraceLine: input.pushTraceLine,

@@ -1,4 +1,5 @@
 import { createCollapsedContextPanel } from "./work-shell-engine-panels.js";
+import { runRustCommandSync } from "./rust-command.js";
 import type { WorkShellPanel } from "./work-shell-engine.js";
 
 type BuildContextPanel = (
@@ -13,8 +14,22 @@ export function applyAuthIssueLinesToContextSummaryLines(
   currentContextSummaryLines: readonly string[],
   authIssueLines: readonly string[] = [],
 ): readonly string[] {
-  const nonAuthIssueLines = currentContextSummaryLines.filter((line) => !line.startsWith("Auth issue:"));
-  return [...authIssueLines, ...nonAuthIssueLines];
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "context", "auth-issues"],
+      process.cwd(),
+      JSON.stringify({ currentContextSummaryLines, authIssueLines }),
+    ),
+  ) as unknown;
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !Array.isArray((parsed as { contextSummaryLines?: unknown }).contextSummaryLines) ||
+    !(parsed as { contextSummaryLines: unknown[] }).contextSummaryLines.every((line) => typeof line === "string")
+  ) {
+    throw new Error("Rust auth issue context returned an invalid payload.");
+  }
+  return (parsed as { contextSummaryLines: string[] }).contextSummaryLines;
 }
 
 export async function loadInitialWorkShellContextState(input: {
@@ -102,6 +117,7 @@ export async function reloadWorkShellContextState(input: {
   }) => Promise<readonly string[]>;
   traceLines: readonly string[];
   buildContextPanel: BuildContextPanel;
+  expanded?: boolean | undefined;
 }): Promise<{
   readonly contextSummaryLines: readonly string[];
   readonly bridgeLines: readonly string[];
@@ -127,6 +143,7 @@ export async function reloadWorkShellContextState(input: {
       memoryLines,
       traceLines: input.traceLines,
       buildContextPanel: input.buildContextPanel,
+      ...(input.expanded ? { expanded: true } : {}),
     }),
   };
 }

@@ -12,7 +12,7 @@ import {
 export { POLICY_DECISION_EFFECTS };
 export type { PolicyDecision, PolicyDecisionEffect, PolicyDecisionSource } from "@unclecode/contracts";
 
-export const POLICY_RUNTIME_MODES = ["local", "sandbox", "remote"] as const;
+export const POLICY_RUNTIME_MODES = ["local", "sandbox", "remote", "openshell"] as const;
 
 export type PolicyRuntimeMode = (typeof POLICY_RUNTIME_MODES)[number];
 

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Worker } from "node:worker_threads";
 
+import { GeminiProvider as BaseGeminiProvider } from "@unclecode/providers";
 import { GeminiProvider } from "@unclecode/orchestrator";
 
 function makeStubClient(responses) {
@@ -177,4 +179,336 @@ test("GeminiProvider.query reports non-zero costUsd when usageMetadata is presen
   const result = await provider.query([{ role: "user", content: "hi" }]);
   // gemini-3.1-flash: $0.5/M input + $3.0/M output → $3.50 for 1M+1M
   assert.equal(result.costUsd, 3.5);
+});
+
+test("GeminiProvider.query uses Rust HTTP transport when no SDK client is injected", async () => {
+  const originalBaseUrl = process.env.GEMINI_API_BASE_URL;
+  const originalNoProxy = process.env.NO_PROXY;
+  const worker = new Worker(`
+    const http = require("node:http");
+    const { parentPort } = require("node:worker_threads");
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.setEncoding("utf8");
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        parentPort.postMessage({
+          type: "request",
+          request: {
+            method: req.method,
+            url: req.url,
+            apiKey: req.headers["x-goog-api-key"],
+            body: JSON.parse(body),
+          },
+        });
+        const responseBody = JSON.stringify({
+          candidates: [{ content: { parts: [{ text: "rust transport" }] } }],
+          usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 3 },
+        });
+        res.writeHead(200, {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(responseBody),
+          connection: "close",
+        });
+        res.end(responseBody);
+      });
+    });
+    parentPort.on("message", (message) => {
+      if (message === "close") server.close(() => parentPort.postMessage({ type: "closed" }));
+    });
+    server.listen(0, "127.0.0.1", () => {
+      parentPort.postMessage({ type: "listening", port: server.address().port });
+    });
+  `, { eval: true });
+
+  try {
+    const port = await waitForWorkerMessage(worker, "listening").then((message) => message.port);
+    process.env.GEMINI_API_BASE_URL = `http://127.0.0.1:${port}/v1beta`;
+    process.env.NO_PROXY = [originalNoProxy, "127.0.0.1", "localhost"].filter(Boolean).join(",");
+    const provider = new BaseGeminiProvider({
+      apiKey: "g-test",
+      model: "gemini-3.1-flash",
+      cwd: process.cwd(),
+    });
+
+    const observedRequestPromise = waitForWorkerMessage(worker, "request").then((message) => message.request);
+    const result = await provider.query([{ role: "user", content: "hi" }]);
+    const observedRequest = await observedRequestPromise;
+
+    assert.equal(result.content, "rust transport");
+    assert.equal(observedRequest.method, "POST");
+    assert.equal(observedRequest.url, "/v1beta/models/gemini-3.1-flash:generateContent");
+    assert.equal(observedRequest.apiKey, "g-test");
+    assert.equal(observedRequest.body.contents[0].parts[0].text, "hi");
+  } finally {
+    if (originalBaseUrl === undefined) {
+      delete process.env.GEMINI_API_BASE_URL;
+    } else {
+      process.env.GEMINI_API_BASE_URL = originalBaseUrl;
+    }
+    if (originalNoProxy === undefined) {
+      delete process.env.NO_PROXY;
+    } else {
+      process.env.NO_PROXY = originalNoProxy;
+    }
+    worker.postMessage("close");
+    await waitForWorkerMessage(worker, "closed");
+    await worker.terminate();
+  }
+});
+
+function waitForWorkerMessage(worker, type) {
+  return new Promise((resolve, reject) => {
+    const onMessage = (message) => {
+      if (message?.type !== type) return;
+      cleanup();
+      resolve(message);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      worker.off("message", onMessage);
+      worker.off("error", onError);
+    };
+    worker.on("message", onMessage);
+    worker.on("error", onError);
+  });
+}
+
+function waitForWorkerMessages(worker, type, count) {
+  return new Promise((resolve, reject) => {
+    const messages = [];
+    const onMessage = (message) => {
+      if (message?.type !== type) return;
+      messages.push(message);
+      if (messages.length === count) {
+        cleanup();
+        resolve(messages);
+      }
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      worker.off("message", onMessage);
+      worker.off("error", onError);
+    };
+    worker.on("message", onMessage);
+    worker.on("error", onError);
+  });
+}
+
+test("GeminiProvider.runTurn sends Rust-built user content with inline attachments", async () => {
+  const { client, captured } = makeStubClient([
+    { candidates: [{ content: { parts: [{ text: "seen" }] } }] },
+  ]);
+  const provider = new BaseGeminiProvider({
+    apiKey: "g-test",
+    model: "gemini-3.1-flash",
+    cwd: process.cwd(),
+    client,
+  });
+
+  const result = await provider.runTurn("inspect this", [
+    {
+      type: "image",
+      mimeType: "image/png",
+      dataUrl: "data:image/png;base64,AAAA",
+      displayName: "clip.png",
+    },
+  ]);
+
+  assert.equal(result.text, "seen");
+  assert.equal(captured[0].contents[0].role, "user");
+  assert.deepEqual(captured[0].contents[0].parts, [
+    { text: "inspect this" },
+    { inlineData: { mimeType: "image/png", data: "AAAA" } },
+  ]);
+});
+
+test("GeminiProvider.runTurn uses Rust HTTP transport for live tool loop when no SDK client is injected", async () => {
+  const originalBaseUrl = process.env.GEMINI_API_BASE_URL;
+  const originalNoProxy = process.env.NO_PROXY;
+  const worker = new Worker(`
+    const http = require("node:http");
+    const { parentPort } = require("node:worker_threads");
+    let count = 0;
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.setEncoding("utf8");
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        count += 1;
+        const parsedBody = JSON.parse(body);
+        parentPort.postMessage({
+          type: "request",
+          request: {
+            count,
+            method: req.method,
+            url: req.url,
+            apiKey: req.headers["x-goog-api-key"],
+            body: parsedBody,
+          },
+        });
+        const responseBody = count === 1
+          ? JSON.stringify({
+              candidates: [{
+                content: {
+                  parts: [{
+                    functionCall: {
+                      id: "fc_1",
+                      name: "run_shell",
+                      args: { command: "echo ok" },
+                    },
+                  }],
+                },
+              }],
+              usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 1 },
+            })
+          : JSON.stringify({
+              candidates: [{ content: { parts: [{ text: "done via rust" }] } }],
+              usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 4 },
+            });
+        res.writeHead(200, {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(responseBody),
+          connection: "close",
+        });
+        res.end(responseBody);
+      });
+    });
+    parentPort.on("message", (message) => {
+      if (message === "close") server.close(() => parentPort.postMessage({ type: "closed" }));
+    });
+    server.listen(0, "127.0.0.1", () => {
+      parentPort.postMessage({ type: "listening", port: server.address().port });
+    });
+  `, { eval: true });
+
+  try {
+    const port = await waitForWorkerMessage(worker, "listening").then((message) => message.port);
+    process.env.GEMINI_API_BASE_URL = `http://127.0.0.1:${port}/v1beta`;
+    process.env.NO_PROXY = [originalNoProxy, "127.0.0.1", "localhost"].filter(Boolean).join(",");
+    const provider = new BaseGeminiProvider({
+      apiKey: "g-test",
+      model: "gemini-3.1-flash",
+      cwd: process.cwd(),
+      toolRuntime: {
+        definitions: [
+          {
+            name: "run_shell",
+            description: "Execute a shell command.",
+            input_schema: {
+              type: "object",
+              properties: { command: { type: "string" } },
+              required: ["command"],
+            },
+          },
+        ],
+        handlers: {
+          async run_shell(input) {
+            assert.deepEqual(input, { command: "echo ok" });
+            return { content: "ok", isError: false };
+          },
+        },
+      },
+    });
+
+    const requestMessagesPromise = waitForWorkerMessages(worker, "request", 2);
+    const resultPromise = provider.runTurn("use tool");
+    const [firstRequest, secondRequest] = (await requestMessagesPromise).map((message) => message.request);
+    const result = await resultPromise;
+
+    assert.equal(result.text, "done via rust");
+    assert.equal(firstRequest.method, "POST");
+    assert.equal(firstRequest.url, "/v1beta/models/gemini-3.1-flash:generateContent");
+    assert.equal(firstRequest.apiKey, "g-test");
+    assert.equal(firstRequest.body.contents[0].parts[0].text, "use tool");
+    assert.equal(secondRequest.body.contents[1].parts[0].functionCall.name, "run_shell");
+    assert.equal(secondRequest.body.contents[2].parts[0].functionResponse.response.content, "ok");
+  } finally {
+    if (originalBaseUrl === undefined) {
+      delete process.env.GEMINI_API_BASE_URL;
+    } else {
+      process.env.GEMINI_API_BASE_URL = originalBaseUrl;
+    }
+    if (originalNoProxy === undefined) {
+      delete process.env.NO_PROXY;
+    } else {
+      process.env.NO_PROXY = originalNoProxy;
+    }
+    worker.postMessage("close");
+    await waitForWorkerMessage(worker, "closed");
+    await worker.terminate();
+  }
+});
+
+test("GeminiProvider.runTurn sends Rust-built functionResponse parts after tool calls", async () => {
+  const { client, captured } = makeStubClient([
+    {
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                functionCall: {
+                  id: "fc_1",
+                  name: "run_shell",
+                  args: { command: "echo ok" },
+                },
+              },
+            ],
+          },
+        },
+      ],
+    },
+    { candidates: [{ content: { parts: [{ text: "done" }] } }] },
+  ]);
+  const provider = new BaseGeminiProvider({
+    apiKey: "g-test",
+    model: "gemini-3.1-flash",
+    cwd: process.cwd(),
+    client,
+    toolRuntime: {
+      definitions: [
+        {
+          name: "run_shell",
+          description: "Execute a shell command.",
+          input_schema: {
+            type: "object",
+            properties: { command: { type: "string" } },
+            required: ["command"],
+          },
+        },
+      ],
+      handlers: {
+        async run_shell(input) {
+          assert.deepEqual(input, { command: "echo ok" });
+          return { content: "ok", isError: false };
+        },
+      },
+    },
+  });
+
+  const result = await provider.runTurn("use tool");
+
+  assert.equal(result.text, "done");
+  assert.ok(captured[0].config.tools[0].functionDeclarations.some(
+    (declaration) => declaration.name === "run_shell",
+  ));
+  assert.deepEqual(captured[1].contents[2], {
+    role: "user",
+    parts: [
+      {
+        functionResponse: {
+          name: "run_shell",
+          id: "fc_1",
+          response: { content: "ok", isError: false },
+        },
+      },
+    ],
+  });
 });

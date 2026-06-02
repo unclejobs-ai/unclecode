@@ -1,50 +1,52 @@
-import { execFile as execFileCallback } from "node:child_process";
-import { promisify } from "node:util";
-
-import { GitCommandError, type RepoMap, type RepoMapEntry } from "./types.js";
-
-const execFile = promisify(execFileCallback);
-
-function splitLines(output: string): string[] {
-  return output
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-}
-
-async function runGit(rootDir: string, args: readonly string[]): Promise<string> {
-  const command = ["git", ...args];
-
-  try {
-    const { stdout } = await execFile("git", [...args], {
-      cwd: rootDir,
-      encoding: "utf8",
-      maxBuffer: 8 * 1024 * 1024,
-    });
-
-    return stdout;
-  } catch (error) {
-    throw new GitCommandError(command, { cause: error });
-  }
-}
+import { runRustCommandSync } from "./rust-command.js";
+import { type RepoMap, type RepoMapEntry } from "./types.js";
 
 export function detectHotspots(repoMap: RepoMap, topN = 10): RepoMapEntry[] {
-  if (topN <= 0) {
-    return [];
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "context", "hotspots", String(topN)],
+      repoMap.rootDir,
+      JSON.stringify(repoMap),
+    ),
+  ) as unknown;
+
+  if (!Array.isArray(parsed) || !parsed.every(isRepoMapEntry)) {
+    throw new Error("Rust hotspot command returned an invalid payload.");
   }
 
-  return [...repoMap.entries]
-    .sort(
-      (left, right) =>
-        right.hotspotScore - left.hotspotScore ||
-        right.changeFrequency - left.changeFrequency ||
-        left.path.localeCompare(right.path),
-    )
-    .slice(0, topN);
+  return parsed;
 }
 
 export async function summarizeDiff(rootDir: string, sinceSha: string): Promise<readonly string[]> {
-  const output = await runGit(rootDir, ["diff", "--name-only", sinceSha, "HEAD"]);
+  const parsed = JSON.parse(
+    runRustCommandSync(["rust", "context", "diff", rootDir, sinceSha], rootDir),
+  ) as unknown;
 
-  return splitLines(output);
+  if (!Array.isArray(parsed) || !parsed.every((path) => typeof path === "string")) {
+    throw new Error("Rust diff command returned an invalid payload.");
+  }
+
+  return parsed;
+}
+
+function isRepoMapEntry(value: unknown): value is RepoMapEntry {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const candidate = value as {
+    path?: unknown;
+    lastModified?: unknown;
+    lineCount?: unknown;
+    changeFrequency?: unknown;
+    hotspotScore?: unknown;
+  };
+
+  return (
+    typeof candidate.path === "string" &&
+    typeof candidate.lastModified === "string" &&
+    typeof candidate.lineCount === "number" &&
+    typeof candidate.changeFrequency === "number" &&
+    typeof candidate.hotspotScore === "number"
+  );
 }

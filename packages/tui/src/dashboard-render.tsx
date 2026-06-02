@@ -35,6 +35,7 @@ export function createEmbeddedWorkShellDashboardProps(input: {
     latestResearchSummary: input.homeState.latestResearchSummary,
     latestResearchTimestamp: input.homeState.latestResearchTimestamp,
     researchRunCount: input.homeState.researchRunCount,
+    recentResearchRuns: input.homeState.recentResearchRuns ?? [],
     sessions: input.homeState.sessions,
     bridgeLines: input.homeState.bridgeLines ?? [],
     memoryLines: input.homeState.memoryLines ?? [],

@@ -1,19 +1,19 @@
 import { explainUncleCodeConfig } from "@unclecode/config-core";
 import {
-  MODE_PROFILES,
   type ModeProfileId,
   type ModeReasoningEffort,
   type ProviderId,
 } from "@unclecode/contracts";
 import {
-  getProviderAdapter,
   resolveOpenAIAuth,
   type ReasoningSupport,
+  type ResolvedOpenAIAuth,
 } from "@unclecode/providers";
 import { config as loadEnv } from "dotenv";
 import { z } from "zod";
 
 import { loadExtensionConfigOverlays } from "./extension-registry.js";
+import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 
 loadEnv({ quiet: true });
 
@@ -28,6 +28,8 @@ const envSchema = z.object({
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_MODEL: z.string().min(1).default("gemini-2.5-flash"),
 });
+
+const appReasoningConfigCache = new Map<string, AppReasoningConfig>();
 
 export type AppReasoningConfig = {
   effort: ModeReasoningEffort | "unsupported";
@@ -47,66 +49,155 @@ export type AppConfig = {
   authIssueMessage?: string;
 };
 
-function parseJwtPayload(token: string): Record<string, unknown> | null {
-  const payloadPart = token.split(".")[1];
-  if (!payloadPart) {
-    return null;
-  }
-  try {
-    const payload = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8"));
-    return typeof payload === "object" && payload !== null ? payload as Record<string, unknown> : null;
-  } catch {
-    return null;
-  }
-}
-
-function tokenHasModelRequestScope(token: string): boolean {
-  const payload = parseJwtPayload(token);
-  if (!payload) {
-    return true;
-  }
-  const scopeValue = payload.scp ?? payload.scope;
-  const scopes = Array.isArray(scopeValue)
-    ? scopeValue.filter((value): value is string => typeof value === "string")
-    : typeof scopeValue === "string"
-      ? scopeValue.split(/\s+/).filter(Boolean)
-      : [];
-  return scopes.length === 0 || scopes.includes("model.request");
-}
-
 function resolveReasoningConfig(input: {
   provider: ProviderId;
   model: string;
   mode: ModeProfileId;
   override?: ModeReasoningEffort;
 }): AppReasoningConfig {
-  if (input.provider !== "openai") {
+  const cacheKey = JSON.stringify({
+    provider: input.provider,
+    model: input.model,
+    mode: input.mode,
+    override: input.override ?? null,
+  });
+  const cached = appReasoningConfigCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const raw = runRustCommandSync(
+    [
+      "rust",
+      "provider",
+      "app-reasoning",
+      input.provider,
+      input.model,
+      input.mode,
+      input.override ?? "-",
+    ],
+    process.cwd(),
+  ).trim();
+  const parsed = JSON.parse(raw) as unknown;
+  if (!isAppReasoningConfig(parsed)) {
+    throw new Error("Rust app reasoning config returned an invalid payload.");
+  }
+  appReasoningConfigCache.set(cacheKey, parsed);
+  return parsed;
+}
+
+function isAppReasoningConfig(value: unknown): value is AppReasoningConfig {
+  if (!isRecord(value) || !isRecord(value.support)) {
+    return false;
+  }
+  const effortOk = value.effort === "low"
+    || value.effort === "medium"
+    || value.effort === "high"
+    || value.effort === "unsupported";
+  const sourceOk = value.source === "mode-default"
+    || value.source === "override"
+    || value.source === "model-capability";
+  return effortOk
+    && sourceOk
+    && typeof value.support.status === "string"
+    && Array.isArray(value.support.supportedEfforts);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function resolveOpenAIAuthForConfig(input: {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  readOpenAiAuthFile?: () => Promise<string>;
+}): Promise<ResolvedOpenAIAuth> {
+  if (input.readOpenAiAuthFile) {
+    return await resolveOpenAIAuth({
+      env: input.env,
+      ...(input.env.UNCLECODE_OPENAI_CREDENTIALS_PATH?.trim()
+        ? { fallbackAuthPath: input.env.UNCLECODE_OPENAI_CREDENTIALS_PATH.trim() }
+        : {}),
+      readFallbackFile: input.readOpenAiAuthFile,
+    });
+  }
+
+  const stdout = await runRustCommand(["rust", "auth", "resolve"], input.cwd, undefined, input.env);
+  const fields = parseRustKeyValueLines(stdout);
+  const status = fields.get("status");
+  const authType = fields.get("authType");
+  const source = fields.get("source") ?? "none";
+  const bearerToken = normalizeRustOptionalField(fields.get("bearerToken")) ?? "";
+  const organizationId = normalizeRustOptionalField(fields.get("organizationId"));
+  const projectId = normalizeRustOptionalField(fields.get("projectId"));
+  const accountId = normalizeRustOptionalField(fields.get("accountId"));
+  const runtime = normalizeRustRuntime(fields.get("runtime"));
+  const reason = normalizeRustOptionalField(fields.get("reason")) ?? "auth-file-missing";
+
+  if (status === "ok" && (authType === "api-key" || authType === "oauth") && bearerToken) {
     return {
-      effort: "unsupported",
-      source: "model-capability",
-      support: {
-        status: "unsupported",
-        supportedEfforts: [],
-      },
+      status,
+      authType,
+      source: normalizeRustAuthSource(source),
+      bearerToken,
+      organizationId,
+      projectId,
+      accountId,
+      ...(runtime ? { runtime } : {}),
     };
   }
 
-  const adapter = getProviderAdapter("openai");
-  const support = adapter.getReasoningSupport({ modelId: input.model });
-
-  if (support.status === "unsupported") {
+  if (status === "expired") {
     return {
-      effort: "unsupported",
-      source: "model-capability",
-      support,
+      status,
+      authType: "oauth",
+      source: normalizeRustOAuthFailureSource(source),
+      reason,
     };
   }
 
   return {
-    effort: input.override ?? MODE_PROFILES[input.mode].reasoningDefault,
-    source: input.override ? "override" : "mode-default",
-    support,
+    status: "missing",
+    authType: authType === "oauth" ? "oauth" : "none",
+    source: source === "unclecode-auth-file" || source === "codex-auth-file" ? source : "none",
+    reason,
   };
+}
+
+function parseRustKeyValueLines(stdout: string): Map<string, string> {
+  return new Map(
+    stdout
+      .split(/\r?\n/)
+      .map((line) => line.split("=", 2))
+      .filter((parts): parts is [string, string] => parts.length === 2),
+  );
+}
+
+function normalizeRustOptionalField(value: string | undefined): string | null {
+  return value && value !== "none" ? value : null;
+}
+
+function normalizeRustRuntime(value: string | undefined): "api" | "codex" | null {
+  return value === "api" || value === "codex" ? value : null;
+}
+
+function normalizeRustAuthSource(source: string): Extract<ResolvedOpenAIAuth, { status: "ok" }>["source"] {
+  switch (source) {
+    case "env-openai-api-key":
+    case "env-openai-auth-token":
+    case "codex-auth-file":
+    case "unclecode-api-key-file":
+      return source;
+    default:
+      return "unclecode-auth-file";
+  }
+}
+
+function normalizeRustOAuthFailureSource(
+  source: string,
+): Extract<ResolvedOpenAIAuth, { status: "expired" }>["source"] {
+  return source === "env-openai-auth-token" || source === "codex-auth-file"
+    ? source
+    : "unclecode-auth-file";
 }
 
 export async function loadConfig(
@@ -134,13 +225,11 @@ export async function loadConfig(
   }).activeMode.id;
 
   if (provider === "openai") {
-    const auth = await resolveOpenAIAuth({
+    const auth = await resolveOpenAIAuthForConfig({
+      cwd: workspaceRoot,
       env: process.env,
-      ...(process.env.UNCLECODE_OPENAI_CREDENTIALS_PATH?.trim()
-        ? { fallbackAuthPath: process.env.UNCLECODE_OPENAI_CREDENTIALS_PATH.trim() }
-        : {}),
       ...(overrides?.readOpenAiAuthFile
-        ? { readFallbackFile: overrides.readOpenAiAuthFile }
+        ? { readOpenAiAuthFile: overrides.readOpenAiAuthFile }
         : {}),
     });
 
@@ -165,7 +254,6 @@ export async function loadConfig(
           && (
             auth.runtime === "codex"
             || auth.source === "codex-auth-file"
-            || (auth.source === "env-openai-auth-token" && !tokenHasModelRequestScope(auth.bearerToken))
           )
             ? "codex"
             : "api",

@@ -50,7 +50,11 @@ import {
   createPromptTurnStartPatch,
   createPromptTurnSuccessPatch,
   executeWorkShellPromptTurn,
+  resolvePromptTurnFailurePayload,
   resolvePromptTurnFailureResult,
+  resolvePromptTurnFinalizePatch,
+  resolvePromptTurnStartPatch,
+  resolvePromptTurnSuccessPayload,
   runPromptTurnSuccessSequence,
 } from "../../packages/orchestrator/src/work-shell-engine-execution.ts";
 import {
@@ -64,7 +68,10 @@ import {
   reloadWorkShellContextState,
 } from "../../packages/orchestrator/src/work-shell-engine-context.ts";
 import {
+  createOpenSessionsFailurePanel,
+  createOpenSessionsLoadingPanel,
   loadInitialWorkShellLifecycleState as loadWorkShellLifecycleState,
+  loadOpenSessionsLoadedPanel,
   loadOpenSessionsPanelState,
   resolveCloseOverlayState,
   resolveSensitiveInputCancelState,
@@ -88,6 +95,7 @@ import {
 import { createWorkShellSessionSnapshotInput } from "../../packages/orchestrator/src/work-shell-engine-persistence.ts";
 import {
   isWorkShellAuthFailure,
+  resolveWorkShellPostTurnSuccessEffectsPayload,
   resolveWorkShellFailureAuthLabel,
   runWorkShellPostTurnSuccessEffects,
 } from "../../packages/orchestrator/src/work-shell-engine-post-turns.ts";
@@ -162,6 +170,7 @@ function createEngineInput(overrides = {}) {
     runtimeSettings: [],
     snapshots: [],
     inline: [],
+    modeUpdates: [],
     secureAuth: [],
     refreshedAuth: 0,
     traceListener: undefined,
@@ -173,6 +182,9 @@ function createEngineInput(overrides = {}) {
     },
     updateRuntimeSettings(settings) {
       calls.runtimeSettings.push(settings);
+    },
+    updateMode(mode) {
+      calls.modeUpdates.push(mode);
     },
     setTraceListener(listener) {
       calls.traceListener = listener;
@@ -321,6 +333,7 @@ test("work-shell command helpers classify builtins, local commands, and reusable
   assert.deepEqual(resolveWorkShellBuiltinCommand("/minimal"), { kind: "trace-mode", traceMode: "minimal" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/auth key"), { kind: "auth-key" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/queue"), { kind: "queue" });
+  assert.deepEqual(resolveWorkShellBuiltinCommand("/queue clear"), { kind: "queue-clear" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/harness"), { kind: "harness" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/skill analyze"), { kind: "skill", line: "/skill analyze", skillName: "analyze" });
   assert.equal(resolveWorkShellBuiltinCommand("hello"), undefined);
@@ -371,7 +384,7 @@ test("work-shell command helpers classify builtins, local commands, and reusable
     "--api-key",
     "[REDACTED]",
   ]);
-  assert.equal(
+  assert.deepEqual(
     redactSensitiveInlineCommandLine("/auth login --api-key sk-secret"),
     "/auth login --api-key [REDACTED]",
   );
@@ -421,7 +434,9 @@ test("work-shell submit route helper classifies secure, builtin, prompt, inline,
     value: "/review auth flow",
     isBusy: false,
     composerMode: "default",
-    resolveWorkShellSlashCommand: () => ["prompt", "review", "auth", "flow"],
+    resolveWorkShellSlashCommand: () => {
+      throw new Error("Rust-owned prompt routes should not need TS re-resolution");
+    },
     hasInlineCommandRunner: true,
   }), {
     kind: "prompt-command",
@@ -443,12 +458,25 @@ test("work-shell submit route helper classifies secure, builtin, prompt, inline,
     value: "/remember session keep this",
     isBusy: false,
     composerMode: "default",
-    resolveWorkShellSlashCommand: () => undefined,
+    resolveWorkShellSlashCommand: () => {
+      throw new Error("Rust-owned local routes should not need TS re-resolution");
+    },
     hasInlineCommandRunner: false,
   }), {
     kind: "local-command",
     line: "/remember session keep this",
     localCommand: { kind: "remember", scope: "session", summary: "keep this" },
+  });
+  assert.deepEqual(resolveWorkShellSubmitRoute({
+    value: "/focus",
+    isBusy: false,
+    composerMode: "default",
+    resolveWorkShellSlashCommand: () => ["doctor"],
+    hasInlineCommandRunner: true,
+  }), {
+    kind: "inline-command",
+    line: "/focus",
+    slashCommand: ["doctor"],
   });
   assert.deepEqual(resolveWorkShellSubmitRoute({
     value: "finish cleanup",
@@ -469,7 +497,7 @@ test("work-shell submit route helper classifies secure, builtin, prompt, inline,
       hasInlineCommandRunner: true,
     }),
     undefined,
-    "submitting while busy returns undefined (dropped)",
+    "busy queuing is handled before route resolution",
   );
 });
 
@@ -488,8 +516,28 @@ test("work-shell builtin helpers resolve panels, transcript entries, and runtime
   });
   const status = createStatusBuiltinResult({
     line: "/status",
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    },
+    stateModel: "gpt-5.4",
     reasoning: supportedReasoning,
     authLabel: "api-key-env",
+    statusContext: {
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      bridgeLines: state.bridgeLines,
+      memoryLines: state.memoryLines,
+      traceLines: state.traceLines,
+    },
+    isBusy: true,
+    busyStatus: "· thinking inspect repo",
+    currentTurnStartedAt: 1000,
+    nowMs: 2480,
     buildStatusPanel: (reasoning, authLabel) => ({ title: "Status", lines: [reasoning.effort, authLabel] }),
   });
   const traceMode = createTraceModeBuiltinResult({
@@ -501,30 +549,33 @@ test("work-shell builtin helpers resolve panels, transcript entries, and runtime
   });
   const reasoning = resolveReasoningBuiltinResult({
     line: "/reasoning low",
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    },
+    stateModel: "gpt-5.4",
     currentReasoning: supportedReasoning,
     modeDefaultReasoning: supportedReasoning,
     authLabel: "api-key-env",
-    resolveReasoningCommand: () => ({
-      nextReasoning: { ...supportedReasoning, effort: "low", source: "override" },
-      message: "Reasoning set to low.",
-    }),
+    statusContext: {
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      bridgeLines: state.bridgeLines,
+      memoryLines: state.memoryLines,
+      traceLines: state.traceLines,
+    },
     buildStatusPanel: (nextReasoning, authLabel) => ({ title: "Status", lines: [nextReasoning.effort, authLabel] }),
   });
   const model = resolveModelBuiltinResult({
     line: "/model gpt-4.1-mini",
+    provider: "openai",
     currentModel: "gpt-5.4",
     currentReasoning: supportedReasoning,
     modeDefaultReasoning: supportedReasoning,
-    resolveModelCommand: () => ({
-      nextModel: "gpt-4.1-mini",
-      nextReasoning: {
-        effort: "unsupported",
-        source: "model-capability",
-        support: { status: "unsupported", supportedEfforts: [] },
-      },
-      message: "Model set to gpt-4.1-mini. Reasoning unsupported.",
-      panel: { title: "Models", lines: ["Current"] },
-    }),
   });
   const authKey = createAuthKeyBuiltinResult("/auth key");
   const skills = createSkillsBuiltinResult("/skills", [{ name: "autopilot", path: "/skills/autopilot", scope: "project", summary: "Keep moving." }]);
@@ -540,10 +591,18 @@ test("work-shell builtin helpers resolve panels, transcript entries, and runtime
     { role: "system", text: "Help shown." },
   ]);
   assert.equal(context.panel.title, "Context expanded");
-  assert.deepEqual(status.panel.lines, ["high", "api-key-env"]);
+  assert.equal(status.panel.title, "Session status");
+  assert.ok(status.panel.lines.includes("Provider · openai"));
+  assert.ok(status.panel.lines.includes("Activity"));
+  assert.ok(status.panel.lines.includes("State · running"));
+  assert.ok(status.panel.lines.includes("Now · thinking inspect repo"));
+  assert.ok(status.panel.lines.includes("Elapsed · 1.5s"));
+  assert.ok(status.panel.lines.some((line) => line.includes("Runtime · OpenAI")));
   assert.equal(traceMode.patch.traceMode, "minimal");
   assert.deepEqual(reasoning.entries.at(-1), { role: "system", text: "Reasoning set to low." });
   assert.equal(reasoning.nextReasoning.effort, "low");
+  assert.equal(reasoning.panel.title, "Session status");
+  assert.ok(reasoning.panel.lines.some((line) => line.includes("Reasoning · low (override)")));
   assert.equal(model?.nextModel, "gpt-4.1-mini");
   assert.equal(model?.shouldUpdateRuntime, true);
   assert.equal(createToolsBuiltinResult("/tools", ["tool-a"]).at(-1)?.text, "tool-a");
@@ -714,7 +773,7 @@ test("work-shell builtin runtime helper orchestrates stateful builtin transition
   assert.equal(runtimeSettings.length, 1);
   assert.equal(runtimeSettings[0]?.reasoning?.effort, "low");
   assert.equal(statePatches[0]?.reasoning?.effort, "low");
-  assert.equal(statePatches[0]?.panel?.title, "Status");
+  assert.equal(statePatches[0]?.panel?.title, "Session status");
   assert.equal(openedSessions, 1);
   assert.equal(reloadedContext, 0);
   assert.equal(exited, 0);
@@ -851,13 +910,14 @@ test("work-shell context helpers merge auth issues and assemble initial/reloaded
       },
       traceLines: ["trace-1"],
       buildContextPanel,
+      expanded: true,
     }),
     {
       contextSummaryLines: ["Loaded guidance: CLAUDE.md"],
       bridgeLines: ["bridge-2"],
       memoryLines: ["memory-2"],
       panel: {
-        title: "Context",
+        title: "Context expanded",
         lines: ["Loaded guidance: CLAUDE.md", "bridge-2", "memory-2", "trace-1"],
       },
     },
@@ -893,6 +953,18 @@ test("work-shell panel helpers assemble collapsed context, session panels, reloa
     title: "Recent sessions",
     lines: ["session-1"],
   });
+  assert.deepEqual(createRecentSessionsPanel([]), {
+    title: "Recent sessions",
+    lines: [
+      "No recent sessions found.",
+      "Run unclecode work to start one, then press Esc here to resume.",
+      "Use /context for workspace guidance and memory.",
+    ],
+  });
+  assert.deepEqual(createOpenSessionsLoadingPanel(), {
+    title: "Recent sessions",
+    lines: ["Loading sessions…"],
+  });
   assert.deepEqual(
     await loadRecentSessionsPanel({
       cwd: "/repo",
@@ -905,6 +977,25 @@ test("work-shell panel helpers assemble collapsed context, session panels, reloa
       lines: ["session-2"],
     },
   );
+  assert.deepEqual(
+    await loadOpenSessionsLoadedPanel({
+      cwd: "/repo",
+      async listSessionLines() {
+        return ["session-3"];
+      },
+    }),
+    {
+      title: "Recent sessions",
+      lines: ["session-3"],
+    },
+  );
+  assert.deepEqual(createOpenSessionsFailurePanel(new Error("store unavailable")), {
+    title: "Recent sessions",
+    lines: [
+      "Unable to load sessions · store unavailable",
+      "Use /context to inspect the loaded workspace context.",
+    ],
+  });
   assert.deepEqual(createWorkspaceReloadEntries("/reload"), [
     { role: "user", text: "/reload" },
     { role: "system", text: "Reloading workspace context…" },
@@ -925,7 +1016,7 @@ test("work-shell panel helpers assemble collapsed context, session panels, reloa
     title: "Status",
     lines: ["gpt-5.4-mini", "high", "api-key-file"],
   });
-  assert.deepEqual(createSensitiveInputCancelResult({
+  const cancelResult = createSensitiveInputCancelResult({
     options,
     stateModel: "gpt-5.4-mini",
     reasoning: supportedReasoning,
@@ -933,14 +1024,12 @@ test("work-shell panel helpers assemble collapsed context, session panels, reloa
     buildStatusPanel(nextOptions, reasoning, authLabel) {
       return { title: "Status", lines: [nextOptions.model, reasoning.effort, authLabel] };
     },
-  }), {
-    entries: [{ role: "system", text: "API key entry canceled." }],
-    composerMode: "default",
-    panel: {
-      title: "Status",
-      lines: ["gpt-5.4-mini", "high", "api-key-file"],
-    },
   });
+  assert.deepEqual(cancelResult.entries, [{ role: "system", text: "API key entry canceled." }]);
+  assert.equal(cancelResult.composerMode, "default");
+  assert.equal(cancelResult.panel.title, "Session status");
+  assert.ok(cancelResult.panel.lines.includes("Model · gpt-5.4-mini"));
+  assert.ok(cancelResult.panel.lines.includes("Auth · API key · file"));
 });
 
 test("work-shell execution helpers assemble start, success, failure, finalize, and full prompt-turn orchestration", async () => {
@@ -1063,12 +1152,29 @@ test("work-shell execution helpers assemble start, success, failure, finalize, a
     busyStatus: "thinking",
     currentTurnStartedAt: 42,
   });
+  assert.deepEqual(resolvePromptTurnStartPatch(42), {
+    isBusy: true,
+    busyStatus: "thinking",
+    currentTurnStartedAt: 42,
+  });
   assert.deepEqual(createPromptTurnSuccessPatch({
     state,
     bridgeLines: ["bridge-1"],
     memoryLines: ["memory-1"],
     lastTurnDurationMs: 123,
   }), {
+    bridgeLines: ["bridge-1"],
+    memoryLines: ["memory-1"],
+    lastTurnDurationMs: 123,
+  });
+  const rustSuccessPayload = resolvePromptTurnSuccessPayload({
+    assistantText: "Done.",
+    bridgeLines: ["bridge-1"],
+    memoryLines: ["memory-1"],
+    lastTurnDurationMs: 123,
+  });
+  assert.deepEqual(rustSuccessPayload.entries, [{ role: "assistant", text: "Done." }]);
+  assert.deepEqual(rustSuccessPayload.patch, {
     bridgeLines: ["bridge-1"],
     memoryLines: ["memory-1"],
     lastTurnDurationMs: 123,
@@ -1085,7 +1191,38 @@ test("work-shell execution helpers assemble start, success, failure, finalize, a
     lastTurnDurationMs: 456,
     panel: { title: "Status", lines: ["auth:api-key-file"] },
   });
+  const rustFailurePayload = resolvePromptTurnFailurePayload({
+    state,
+    formattedMessage: "ERR:request failed with status 401",
+    nextAuthLabel: "api-key-file",
+    lastTurnDurationMs: 456,
+    isAuthFailure: true,
+    statusInput: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      cwd: "/repo",
+      reasoningLabel: "high (override)",
+      authLabel: "api-key-file",
+      contextSummaryLines: ["Auth issue: saved OAuth needs refresh."],
+      bridgeLines: [],
+      memoryLines: [],
+      traceLines: [],
+    },
+  });
+  assert.deepEqual(rustFailurePayload.entries, [
+    { role: "system", text: "ERR:request failed with status 401" },
+  ]);
+  assert.equal(rustFailurePayload.patch.authLabel, "api-key-file");
+  assert.equal(rustFailurePayload.patch.lastTurnDurationMs, 456);
+  assert.equal(rustFailurePayload.patch.panel.title, "Session status");
+  assert.ok(rustFailurePayload.patch.panel.lines.includes("Auth · API key · file"));
   assert.deepEqual(createPromptTurnFinalizePatch(state), {
+    isBusy: false,
+    busyStatus: undefined,
+    currentTurnStartedAt: undefined,
+  });
+  assert.deepEqual(resolvePromptTurnFinalizePatch(), {
     isBusy: false,
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
@@ -1318,7 +1455,7 @@ test("work-shell lifecycle helpers load initial state, session panels, and overl
       return { title: "Status", lines: [nextOptions.model, reasoning.effort, authLabel] };
     },
   }), undefined);
-  assert.deepEqual(resolveSensitiveInputCancelState({
+  const cancelState = resolveSensitiveInputCancelState({
     composerMode: "api-key-entry",
     options,
     stateModel: "gpt-5.4",
@@ -1327,11 +1464,12 @@ test("work-shell lifecycle helpers load initial state, session panels, and overl
     buildStatusPanel(nextOptions, reasoning, authLabel) {
       return { title: "Status", lines: [nextOptions.model, reasoning.effort, authLabel] };
     },
-  }), {
-    entries: [{ role: "system", text: "API key entry canceled." }],
-    composerMode: "default",
-    panel: { title: "Status", lines: ["gpt-5.4", "high", "api-key-file"] },
   });
+  assert.deepEqual(cancelState.entries, [{ role: "system", text: "API key entry canceled." }]);
+  assert.equal(cancelState.composerMode, "default");
+  assert.equal(cancelState.panel.title, "Session status");
+  assert.ok(cancelState.panel.lines.includes("Model · gpt-5.4"));
+  assert.ok(cancelState.panel.lines.includes("Auth · API key · file"));
   assert.equal(resolveCloseOverlayState({
     panel: { title: "Status", lines: [] },
     currentContextSummaryLines: ["Loaded guidance: AGENTS.md"],
@@ -1445,7 +1583,7 @@ test("work-shell command runtime helpers orchestrate secure, inline, and local c
   });
 
   assert.equal(commandEntries[0]?.text, "✓ auth key");
-  assert.match(commandEntries[1]?.text ?? "", /auth key :: API key login saved/);
+  assert.match(commandEntries[1]?.text ?? "", /Auth · API key login saved/);
   assert.match(commandEntries[2]?.text ?? "", /\[REDACTED\]/);
   assert.match(commandEntries.at(-1)?.text ?? "", /memory keep this/);
   assert.equal(commandPatches[0]?.isBusy, true);
@@ -1564,6 +1702,17 @@ test("work-shell post-turn helpers persist summaries and auth recovery determini
   assert.deepEqual(effects.memoryLines, ["memory-1 line"]);
   assert.equal(effects.bridgeTraceEvent.type, "bridge.published");
   assert.equal(effects.memoryTraceEvent.type, "memory.written");
+  const rustEffects = resolveWorkShellPostTurnSuccessEffectsPayload({
+    summary: "User: hello\nAssistant: world",
+    bridgeId: "bridge-1",
+    bridgeLine: "bridge-1 line",
+    currentBridgeLines: ["bridge-0"],
+    memoryId: "memory-1",
+    memoryLines: ["memory-1 line"],
+  });
+  assert.deepEqual(rustEffects.bridgeLines, ["bridge-1 line", "bridge-0"]);
+  assert.equal(rustEffects.bridgeTraceEvent.type, "bridge.published");
+  assert.equal(rustEffects.memoryTraceEvent.type, "memory.written");
   assert.equal(authLabel, "api-key-file");
   assert.deepEqual(refreshedAuthIssues, ["Auth issue: saved OAuth needs refresh."]);
 });
@@ -1580,6 +1729,14 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
   assert.equal(
     resolveBusyStatusFromTraceEvent({ type: "turn.completed" }, "done 123"),
     undefined,
+  );
+  assert.equal(
+    resolveBusyStatusFromTraceEvent(
+      { type: "policy.denied" },
+      "✖ policy denied filesystem.write/write_file · openshell · denied",
+    ),
+    null,
+    "policy.denied must not overwrite the active busy status",
   );
   const state = createState({ isBusy: true, currentTurnStartedAt: 10 });
   assert.deepEqual(
@@ -1602,6 +1759,15 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
     }),
     { role: "tool", text: "calling openai gpt-5.4" },
   );
+  assert.deepEqual(
+    resolveVerboseTraceEntry({
+      traceMode: "minimal",
+      event: { type: "provider.route" },
+      line: "route openai direct",
+    }),
+    { role: "tool", text: "route openai direct" },
+    "provider.route stays visible in minimal mode as transport context",
+  );
   assert.equal(
     resolveVerboseTraceEntry({
       traceMode: "minimal",
@@ -1620,8 +1786,30 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
     { role: "tool", text: "Reading src/index.ts" },
     "tool.started shows in minimal mode as inline progress",
   );
+  assert.deepEqual(
+    resolveVerboseTraceEntry({
+      traceMode: "minimal",
+      event: { type: "reasoning.delta" },
+      line: "✦ thinking· inspect repo before editing",
+    }),
+    { role: "assistant", text: "✦ thinking· inspect repo before editing" },
+    "reasoning.delta shows in minimal mode as conversation progress",
+  );
+  assert.deepEqual(
+    resolveVerboseTraceEntry({
+      traceMode: "minimal",
+      event: { type: "policy.denied" },
+      line: "✖ policy denied filesystem.write/write_file · openshell · denied",
+    }),
+    {
+      role: "tool",
+      text: "✖ policy denied filesystem.write/write_file · openshell · denied",
+    },
+    "policy.denied shows in minimal mode as a single high-signal tool entry",
+  );
   assert.equal(resolveTraceEntryRole({ type: "turn.started" }), "system");
   assert.equal(resolveTraceEntryRole({ type: "provider.calling" }), "tool");
+  assert.equal(resolveTraceEntryRole({ type: "reasoning.delta" }), "assistant");
   assert.equal(extractCurrentTurnStartedAt({ type: "turn.started", startedAt: 123 }), 123);
   assert.equal(extractCurrentTurnStartedAt({ type: "tool.started", startedAt: 123 }), undefined);
 
@@ -1693,11 +1881,35 @@ test("createInitialWorkShellEngineState derives the shell defaults from options"
   assert.equal(state.traceMode, "verbose");
   assert.equal(state.authLabel, "oauth-file");
   assert.deepEqual(state.entries, []);
+
+  const defaultState = createInitialWorkShellEngineState({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4-mini",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    },
+    contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    buildContextPanel,
+  });
+  assert.equal(defaultState.traceMode, "minimal");
+  assert.equal(defaultState.composerMode, "default");
+  assert.equal(defaultState.isBusy, false);
 });
 
 test("work-shell state helpers append entries and update auth/busy transitions deterministically", () => {
   const state = createState();
-  const withEntries = { ...state, ...appendWorkShellEntries(state, { role: "system", text: "hello" }) };
+  const withEntries = {
+    ...state,
+    ...appendWorkShellEntries(
+      state,
+      { role: "system", text: "hello" },
+      { role: "assistant", text: "world" },
+    ),
+  };
   const withAuth = { ...withEntries, ...createWorkShellAuthStatePatch({ state: withEntries, authLabel: "oauth-file", authLauncherLines: ["Saved auth found."] }) };
   const withBusy = {
     ...withAuth,
@@ -1709,9 +1921,16 @@ test("work-shell state helpers append entries and update auth/busy transitions d
     }),
   };
 
-  assert.deepEqual(withEntries.entries, [{ role: "system", text: "hello" }]);
+  assert.deepEqual(withEntries.entries, [
+    { role: "system", text: "hello" },
+    { role: "assistant", text: "world" },
+  ]);
   assert.equal(withAuth.authLabel, "oauth-file");
   assert.deepEqual(withAuth.authLauncherLines, ["Saved auth found."]);
+  assert.deepEqual(
+    createWorkShellAuthStatePatch({ state: withEntries, authLabel: "none", authLauncherLines: [] }),
+    { authLabel: "none", authLauncherLines: [] },
+  );
   assert.equal(withBusy.isBusy, true);
   assert.equal(withBusy.busyStatus, "thinking");
   assert.equal(withBusy.currentTurnStartedAt, 123);
@@ -1752,6 +1971,45 @@ test("work-shell state helpers update trace mode and trace lines without mutatin
   assert.equal(traced.panel.title, "Status");
 });
 
+test("work-shell state helpers keep expanded context open across trace rebuilds", () => {
+  const state = createState({
+    panel: { title: "Context expanded", lines: ["Loaded guidance: AGENTS.md"] },
+    bridgeLines: ["bridge-1"],
+    memoryLines: ["memory-1"],
+    traceLines: ["old trace"],
+  });
+
+  const traced = {
+    ...state,
+    ...createWorkShellTraceLinePatch({
+      state,
+      line: "new trace",
+      preservePanel: false,
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      buildContextPanel,
+    }),
+  };
+  const minimal = {
+    ...state,
+    ...createWorkShellTraceModePatch({
+      state,
+      traceMode: "minimal",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      buildContextPanel,
+    }),
+  };
+
+  assert.equal(traced.panel.title, "Context expanded");
+  assert.deepEqual(traced.panel.lines, [
+    "Loaded guidance: AGENTS.md",
+    "bridge-1",
+    "memory-1",
+    "new trace",
+    "old trace",
+  ]);
+  assert.equal(minimal.panel.title, "Context expanded");
+});
+
 test("createWorkShellPaneRuntime builds shared engine and slash runtime helpers", () => {
   const { input } = createEngineInput();
   const runtime = createWorkShellPaneRuntime({
@@ -1783,6 +2041,7 @@ test("createWorkShellPaneRuntime builds shared engine and slash runtime helpers"
   assert.ok(runtime.getSuggestions("/mmbridge").some((item) => item.command === "/mmbridge review"));
   assert.ok(runtime.getSuggestions("/mmbridge").some((item) => item.command === "/mmbridge gate"));
   assert.ok(runtime.getSuggestions("/mmbridge").some((item) => item.command === "/mmbridge handoff"));
+  assert.ok(runtime.getSuggestions("/mmbridge").some((item) => item.command === "/mmbridge health"));
   assert.ok(runtime.getSuggestions("/mmbridge").some((item) => item.command === "/mmbridge doctor"));
   assert.equal(runtime.shouldBlockSlashSubmit("/auth"), true);
 });
@@ -1832,7 +2091,7 @@ test("WorkShellEngine applies /reasoning updates and syncs agent runtime setting
   assert.equal(engine.getState().reasoning.effort, "low");
   assert.equal(calls.runtimeSettings.length, 1);
   assert.equal(calls.runtimeSettings[0]?.reasoning?.effort, "low");
-  assert.equal(engine.getState().panel.title, "Status");
+  assert.equal(engine.getState().panel.title, "Session status");
 });
 
 test("WorkShellEngine applies /model updates and syncs model plus reasoning runtime settings", async () => {
@@ -1846,7 +2105,49 @@ test("WorkShellEngine applies /model updates and syncs model plus reasoning runt
   assert.equal(calls.runtimeSettings.length, 1);
   assert.equal(calls.runtimeSettings[0]?.model, "gpt-4.1-mini");
   assert.equal(calls.runtimeSettings[0]?.reasoning?.effort, "unsupported");
-  assert.equal(engine.getState().panel.title, "Models");
+  assert.equal(engine.getState().panel.title, "Status");
+  assert.ok(engine.getState().panel.lines.includes("model:gpt-4.1-mini"));
+  assert.ok(engine.getState().panel.lines.includes("reasoning:unsupported"));
+});
+
+test("WorkShellEngine opens sessions with immediate loading and visible failure states", async () => {
+  let resolveSessions;
+  const { engine } = createEngine({
+    async listSessionLines() {
+      return new Promise((resolve) => {
+        resolveSessions = resolve;
+      });
+    },
+  });
+
+  await engine.initialize();
+  const pending = engine.openSessionsPanel();
+  assert.deepEqual(engine.getState().panel, {
+    title: "Recent sessions",
+    lines: ["Loading sessions…"],
+  });
+
+  resolveSessions(["session-1"]);
+  await pending;
+  assert.deepEqual(engine.getState().panel, {
+    title: "Recent sessions",
+    lines: ["session-1"],
+  });
+
+  const failing = createEngine({
+    async listSessionLines() {
+      throw new Error("store unavailable");
+    },
+  }).engine;
+  await failing.initialize();
+  await failing.openSessionsPanel();
+  assert.deepEqual(failing.getState().panel, {
+    title: "Recent sessions",
+    lines: [
+      "Unable to load sessions · store unavailable",
+      "Use /context to inspect the loaded workspace context.",
+    ],
+  });
 });
 
 test("WorkShellEngine opens /context as an overlay and can dismiss it", async () => {
@@ -1874,9 +2175,47 @@ test("WorkShellEngine runs inline commands directly and updates auth label from 
   await engine.handleSubmit("/doctor");
 
   assert.deepEqual(calls.inline, [["doctor"]]);
-  assert.equal(engine.getState().panel.title, "doctor");
+  assert.equal(engine.getState().panel.title, "Doctor");
   assert.equal(engine.getState().authLabel, "oauth-file");
-  assert.ok(engine.getState().entries.some((entry) => entry.text.includes("doctor :: Doctor report")));
+  assert.ok(engine.getState().entries.some((entry) => entry.text.includes("Doctor · Doctor report")));
+});
+
+test("WorkShellEngine setMode switches runtime mode without transcript residue", async () => {
+  const { engine, calls } = createEngine();
+
+  await engine.initialize();
+  const entriesBefore = engine.getState().entries.length;
+  await engine.setMode("search");
+
+  assert.equal(engine.getState().mode, "search");
+  assert.deepEqual(calls.modeUpdates, ["search"]);
+  assert.deepEqual(calls.inline, []);
+  assert.equal(engine.getState().entries.length, entriesBefore);
+
+  await engine.handleSubmit("please edit src/app.ts");
+
+  assert.ok(engine.getState().entries.some((entry) => /Search mode is read-only/.test(entry.text)));
+  assert.deepEqual(calls.inline, []);
+});
+
+test("WorkShellEngine accepts explicit /mode set without unsupported inline residue", async () => {
+  const { engine, calls } = createEngine({
+    async runInlineCommand(args) {
+      calls.inline.push(args);
+      return ["Active mode saved: search", "Label: Search"];
+    },
+    resolveWorkShellSlashCommand(input) {
+      throw new Error(`Rust-owned mode route should not need TS re-resolution for ${input}`);
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/mode set search");
+
+  assert.deepEqual(calls.inline, [["mode", "set", "search"]]);
+  assert.deepEqual(calls.modeUpdates, ["search"]);
+  assert.equal(engine.getState().mode, "search");
+  assert.doesNotMatch(engine.getState().entries.map((entry) => entry.text).join("\n"), /Unsupported work-shell inline command/);
 });
 
 test("WorkShellEngine redacts api-key slash secrets from transcript and panels", async () => {
@@ -1947,7 +2286,7 @@ test("WorkShellEngine opens secure api-key entry and saves without leaking the s
 test("WorkShellEngine refreshes runtime auth after inline auth commands", async () => {
   const { engine, calls } = createEngine({
     resolveWorkShellSlashCommand(input) {
-      return input === "/auth login" ? ["auth", "login", "--browser"] : undefined;
+      throw new Error(`Rust-owned auth submit route should not need TS re-resolution for ${input}`);
     },
     async resolveWorkShellInlineCommand() {
       return { lines: ["Saved auth found.", "Auth: oauth-file"], failed: false };
@@ -1959,7 +2298,7 @@ test("WorkShellEngine refreshes runtime auth after inline auth commands", async 
   });
 
   await engine.initialize();
-  await engine.handleSubmit("/auth login");
+  await engine.handleSubmit("/browser");
 
   assert.equal(calls.refreshedAuth, 1);
   assert.equal(engine.getState().authLabel, "oauth-file");
@@ -2032,7 +2371,7 @@ test("WorkShellEngine shows auth progress while inline oauth is pending", async 
   resolveInline({ lines: ["OAuth login complete.", "Auth: oauth-file", "Route: device-oauth"], failed: false });
   await pending;
 
-  assert.equal(engine.getState().panel.title, "auth login");
+  assert.equal(engine.getState().panel.title, "Auth");
   assert.equal(engine.getState().panel.lines[0], "OAuth login complete.");
 });
 
@@ -2044,14 +2383,15 @@ test("WorkShellEngine cancels secure api-key entry without opening sessions", as
   engine.cancelSensitiveInput();
 
   assert.equal(engine.getState().composerMode, "default");
-  assert.equal(engine.getState().panel.title, "Status");
+  assert.equal(engine.getState().panel.title, "Session status");
+  assert.ok(engine.getState().panel.lines.includes("Auth · API key · env"));
   assert.ok(engine.getState().entries.some((entry) => entry.text === "API key entry canceled."));
 });
 
 test("WorkShellEngine can refine inline auth failures into product guidance", async () => {
   const { engine } = createEngine({
     resolveWorkShellSlashCommand(input) {
-      return input === "/auth login" ? ["auth", "login", "--browser"] : undefined;
+      throw new Error(`Rust-owned auth submit route should not need TS re-resolution for ${input}`);
     },
     async resolveWorkShellInlineCommand() {
       return { lines: ["Browser OAuth unavailable. Set OPENAI_OAUTH_CLIENT_ID."], failed: true };
@@ -2066,9 +2406,9 @@ test("WorkShellEngine can refine inline auth failures into product guidance", as
   });
 
   await engine.initialize();
-  await engine.handleSubmit("/auth login");
+  await engine.handleSubmit("/browser");
 
-  assert.equal(engine.getState().panel.title, "auth login --browser");
+  assert.equal(engine.getState().panel.title, "Auth");
   assert.deepEqual(engine.getState().panel.lines, ["Signed in · API key · env", "Browser OAuth is separate."]);
 });
 
@@ -2262,6 +2602,40 @@ test("WorkShellEngine reloads workspace context on demand", async () => {
   assert.ok(engine.getState().entries.some((entry) => entry.text === "Workspace context reloaded."));
 });
 
+test("WorkShellEngine preserves expanded context while reloading workspace context", async () => {
+  const { engine } = createEngine({
+    reloadWorkspaceContext: async () => ["Loaded guidance: CLAUDE.md", "Loaded extension: focus-tools"],
+    async listProjectBridgeLines() {
+      return ["bridge refreshed"];
+    },
+    async listScopedMemoryLines() {
+      return ["memory refreshed"];
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  await engine.handleSubmit("/reload");
+
+  assert.equal(engine.getState().panel.title, "Context expanded");
+  assert.deepEqual(engine.getState().panel.lines, [
+    "Loaded guidance: CLAUDE.md",
+    "Loaded extension: focus-tools",
+    "bridge refreshed",
+    "memory refreshed",
+  ]);
+
+  engine.closeOverlay();
+
+  assert.equal(engine.getState().panel.title, "Context");
+  assert.deepEqual(engine.getState().panel.lines, [
+    "Loaded guidance: CLAUDE.md",
+    "Loaded extension: focus-tools",
+    "bridge refreshed",
+    "memory refreshed",
+  ]);
+});
+
 test("WorkShellEngine starts in minimal trace mode for default sessions", async () => {
   const { engine, emitTrace } = createEngine();
 
@@ -2293,6 +2667,93 @@ test("WorkShellEngine keeps a lightweight busy status even outside verbose trace
   assert.match(engine.getState().busyStatus ?? "", /thinking/i);
   assert.equal(typeof engine.getState().currentTurnStartedAt, "number");
   assert.equal(engine.getState().traceLines.length, 0);
+});
+
+test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
+  let releaseFirst;
+  const prompts = [];
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        prompts.push(prompt);
+        if (prompt === "first") {
+          await new Promise((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        return { text: `reply:${prompt}` };
+      },
+    },
+  });
+
+  await engine.initialize();
+  const firstTurn = engine.handleSubmit("first");
+  while (!engine.getState().isBusy) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  await engine.handleSubmit("second");
+  assert.ok(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)));
+  assert.ok(engine.getState().entries.some((entry) => /run automatically/.test(entry.text)));
+  assert.ok(engine.getState().entries.some((entry) => /\/queue shows backlog/.test(entry.text)));
+  await engine.handleSubmit("/queue");
+  assert.ok(engine.getState().panel?.lines.some((line) => line === "Next · #1 · second"));
+  assert.ok(!engine.getState().panel?.lines.some((line) => line === "Queued #1 · second"));
+  assert.ok(engine.getState().panel?.lines.some((line) => /Slash commands are not queued/.test(line)));
+  assert.ok(engine.getState().panel?.lines.some((line) => /\/queue clear drops queued follow-ups/.test(line)));
+
+  releaseFirst();
+  await firstTurn;
+
+  assert.deepEqual(prompts, ["first", "second"]);
+  assert.ok(engine.getState().entries.some((entry) => /Running queued follow-up #1: second/.test(entry.text)));
+});
+
+test("WorkShellEngine clears queued follow-ups while busy", async () => {
+  let releaseFirst;
+  const prompts = [];
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        prompts.push(prompt);
+        if (prompt === "first") {
+          await new Promise((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        return { text: `reply:${prompt}` };
+      },
+    },
+  });
+
+  await engine.initialize();
+  const firstTurn = engine.handleSubmit("first");
+  while (!engine.getState().isBusy) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  await engine.handleSubmit("second");
+  await engine.handleSubmit("/queue clear");
+  assert.equal(
+    engine.getState().entries.filter((entry) => /Queue cleared/.test(entry.text)).length,
+    1,
+  );
+  assert.equal(
+    engine.getState().entries.filter((entry) => /Queue shown/.test(entry.text)).length,
+    0,
+  );
+  assert.ok(engine.getState().panel?.lines.some((line) => line === "No queued work beyond the active turn."));
+
+  releaseFirst();
+  await firstTurn;
+
+  assert.deepEqual(prompts, ["first"]);
 });
 
 test("WorkShellEngine can switch to verbose trace mode explicitly", async () => {
@@ -2416,10 +2877,10 @@ test("resolveWorkerBudget returns correct budget per mode including yolo", async
 test("resolveModeDefaultReasoning preserves unsupported and tags supported with mode-default source", async () => {
   const { resolveModeDefaultReasoning } = await import("../../packages/orchestrator/src/work-shell-engine-state.ts");
 
-  const unsupported = { effort: "medium", support: { status: "unsupported" }, source: "user" };
+  const unsupported = { effort: "medium", support: { status: "unsupported" }, source: "override" };
   assert.deepEqual(resolveModeDefaultReasoning(unsupported), unsupported);
 
-  const supported = { effort: "high", support: { status: "supported" }, source: "user" };
+  const supported = { effort: "high", support: { status: "supported" }, source: "override" };
   const result = resolveModeDefaultReasoning(supported);
   assert.equal(result.effort, "high");
   assert.equal(result.source, "mode-default");

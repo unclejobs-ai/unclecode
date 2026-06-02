@@ -4,6 +4,9 @@ import test from "node:test";
 import {
   APPROVAL_INTENTS,
   APPROVAL_INTENT_TYPES,
+  EXECUTION_POLICY_CAPABILITIES,
+  EXECUTION_POLICY_DOMAINS,
+  EXECUTION_POLICY_MODES,
   TRUST_ZONES,
 } from "@unclecode/contracts";
 
@@ -42,4 +45,25 @@ test("policy-intent fixtures expose serializable trust zones and approval intent
     requiresRequestId: true,
     supportsMode: true,
   });
+});
+
+test("execution policy fixtures expose sandbox-theory capability domains", () => {
+  assert.deepEqual(EXECUTION_POLICY_DOMAINS, [
+    "filesystem",
+    "shell",
+    "network",
+    "secrets",
+    "inference",
+  ]);
+
+  assert.deepEqual(EXECUTION_POLICY_CAPABILITIES, [
+    "filesystem.read",
+    "filesystem.write",
+    "shell.run",
+    "network.egress",
+    "secret.read",
+    "inference.request",
+  ]);
+
+  assert.deepEqual(EXECUTION_POLICY_MODES, ["audit", "prompt", "enforce"]);
 });

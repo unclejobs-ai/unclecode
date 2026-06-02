@@ -1,39 +1,20 @@
-const MODEL_ENV_KEY_BY_PROVIDER = {
-  openai: "OPENAI_MODEL",
-  gemini: "GEMINI_MODEL",
-  groq: "GROQ_MODEL",
-  ollama: "OLLAMA_MODEL",
-  copilot: "COPILOT_MODEL",
-  zai: "ZAI_MODEL",
-};
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const PROVIDER_LABELS = {
-  openai: "OpenAI",
-  gemini: "Google Gemini",
-  groq: "Groq",
-  ollama: "Ollama",
-  copilot: "GitHub Copilot",
-  zai: "z.ai",
-};
-
-const DEFAULT_MODEL_CATALOG = {
-  openai: ["gpt-5.4", "gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o", "o4-mini"],
-  gemini: ["gemini-2.5-flash", "gemini-2.5-pro", "gemma-3-27b-it"],
-  groq: ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3-32b", "llama-3.3-70b-versatile"],
-  ollama: ["qwen3", "qwen2.5-coder:7b", "qwen2.5-coder:14b", "deepseek-r1:8b"],
-  copilot: ["openai/gpt-4.1-mini", "openai/gpt-4.1", "openai/gpt-4o", "openai/o4-mini"],
-  zai: ["glm-5", "glm-4.5", "glm-4.5-air"],
-};
+const modulePath = fileURLToPath(import.meta.url);
 
 export function providerLabel(provider) {
-  return PROVIDER_LABELS[provider] ?? provider;
+  return parseRustKeyValueLines(runRustModelCommand(["label", provider])).get("label") ?? provider;
 }
 
 export function providerModelCatalog(provider, env = process.env) {
-  const modelEnvKey = MODEL_ENV_KEY_BY_PROVIDER[provider];
-  const activeModel = modelEnvKey ? (env[modelEnvKey] ?? "").trim() : "";
-  const customModels = parseProviderCustomCatalog(provider, env);
-  return uniqueStrings([activeModel, ...customModels, ...(DEFAULT_MODEL_CATALOG[provider] ?? [])]);
+  return runRustModelCommand(["catalog", provider], env)
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("model="))
+    .map((line) => line.slice("model=".length).trim())
+    .filter((model) => model.length > 0);
 }
 
 export function providerPromptSuggestions(provider, env = process.env) {
@@ -49,14 +30,58 @@ export function providerAdditionalModelOptions(provider, env = process.env) {
   }));
 }
 
-function parseProviderCustomCatalog(provider, env) {
-  const envKey = `${provider.toUpperCase()}_MODELS`;
-  return String(env[envKey] ?? "")
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
+function parseRustKeyValueLines(stdout) {
+  return new Map(
+    stdout
+      .split(/\r?\n/)
+      .map((line) => line.split("=", 2))
+      .filter((parts) => parts.length === 2),
+  );
 }
 
-function uniqueStrings(values) {
-  return [...new Set(values.filter((value) => String(value ?? "").trim().length > 0))];
+function runRustModelCommand(args, env = process.env) {
+  const rust = findRustEntrypoint();
+  return execFileSync(rust.command, [...rust.argsPrefix, "rust", "model", ...args], {
+    cwd: rust.runCwd ?? process.cwd(),
+    env: { ...process.env, ...env, UNCLECODE_WORK_CWD: process.cwd() },
+    encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024,
+    windowsHide: true,
+  });
+}
+
+function findRustEntrypoint() {
+  if (process.env.UNCLECODE_RUST_BIN) {
+    return { command: process.env.UNCLECODE_RUST_BIN, argsPrefix: [] };
+  }
+  for (const start of [path.dirname(modulePath), process.cwd()]) {
+    let cursor = path.resolve(start);
+    while (true) {
+      for (const candidate of [
+        path.join(cursor, "target", "release", "unclecode"),
+        path.join(cursor, "target", "debug", "unclecode"),
+      ]) {
+        if (existsSync(candidate)) {
+          return { command: candidate, argsPrefix: [] };
+        }
+      }
+      if (existsSync(path.join(cursor, "Cargo.toml")) && existsSync(path.join(cursor, "rust"))) {
+        return {
+          command: "cargo",
+          argsPrefix: ["run", "--quiet", "--bin", "unclecode", "--"],
+          runCwd: cursor,
+        };
+      }
+      const parent = path.dirname(cursor);
+      if (parent === cursor) {
+        break;
+      }
+      cursor = parent;
+    }
+  }
+  return {
+    command: "cargo",
+    argsPrefix: ["run", "--quiet", "--bin", "unclecode", "--"],
+    runCwd: process.cwd(),
+  };
 }

@@ -1,9 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 
 import { writeOpenAICredentials } from "./openai-credential-store.js";
+import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 
 export function buildOpenAIAuthorizationUrl(input: {
   readonly clientId: string;
@@ -13,35 +14,37 @@ export function buildOpenAIAuthorizationUrl(input: {
   readonly scopes: readonly string[];
   readonly baseUrl?: string | undefined;
 }): URL {
-  const url = new URL(`${input.baseUrl ?? DEFAULT_OAUTH_BASE_URL}/oauth/authorize`);
-
-  url.searchParams.set("client_id", input.clientId);
-  url.searchParams.set("redirect_uri", input.redirectUri);
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("state", input.state);
-  url.searchParams.set("code_challenge", input.codeChallenge);
-  url.searchParams.set("code_challenge_method", "S256");
-  url.searchParams.set("scope", input.scopes.join(" "));
-
-  return url;
+  const stdout = runRustCommandSync(
+    [
+      "rust",
+      "auth",
+      "authorization-url",
+      input.clientId,
+      input.redirectUri,
+      input.state,
+      input.codeChallenge,
+      input.baseUrl ?? "-",
+      ...input.scopes,
+    ],
+    process.cwd(),
+  );
+  return new URL(stdout.trim());
 }
 
 export function parseOpenAICallback(input: {
   readonly requestUrl: string;
   readonly expectedState: string;
 }): string {
-  const url = new URL(input.requestUrl);
-  const code = url.searchParams.get("code");
-  const state = url.searchParams.get("state");
-
+  const stdout = runRustCommandSync(
+    ["rust", "auth", "parse-callback", input.expectedState],
+    process.cwd(),
+    process.env,
+    input.requestUrl,
+  );
+  const code = parseRustKeyValueLines(stdout).get("code");
   if (!code) {
     throw new Error("Missing authorization code.");
   }
-
-  if (state !== input.expectedState) {
-    throw new Error("Invalid OAuth state.");
-  }
-
   return code;
 }
 
@@ -52,7 +55,12 @@ export function createOpenAIPkcePair(): {
 } {
   const state = randomUUID();
   const codeVerifier = randomUUID().replaceAll("-", "");
-  const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
+  const codeChallenge = runRustCommandSync(
+    ["rust", "sha256-base64url"],
+    process.cwd(),
+    process.env,
+    codeVerifier,
+  ).trim();
 
   return {
     state,
@@ -66,54 +74,267 @@ type WriteOpenAICredentialsLike = typeof writeOpenAICredentials;
 
 const DEFAULT_OAUTH_BASE_URL = "https://auth.openai.com";
 
-function parseJwtPayload(token: string): Record<string, unknown> | null {
-  const payloadPart = token.split(".")[1];
-  if (!payloadPart) {
-    return null;
+type OpenAIOAuthTokenInspection = {
+  readonly clientId?: string;
+  readonly hasModelRequestScope: boolean;
+};
+
+type OpenAIOAuthTokenResponse = {
+  readonly accessToken: string;
+  readonly refreshToken: string;
+  readonly error?: string;
+};
+
+type OpenAIDeviceAuthorizationResponse = {
+  readonly deviceCode: string;
+  readonly userCode: string;
+  readonly verificationUri: string;
+  readonly expiresIn: number;
+  readonly interval: number;
+  readonly error?: string;
+};
+
+type OpenAICodexDeviceAuthorizationResponse = {
+  readonly deviceAuthId: string;
+  readonly userCode: string;
+  readonly interval: number;
+  readonly error?: string;
+};
+
+type OpenAICodexDeviceTokenResponse = {
+  readonly authorizationCode: string;
+  readonly codeVerifier: string;
+  readonly error?: string;
+};
+
+type RustHttpResponse = {
+  readonly ok: boolean;
+  readonly status: number;
+  readonly text: string;
+};
+
+async function writeOpenAICredentialsViaRust(input: Parameters<WriteOpenAICredentialsLike>[0]): Promise<void> {
+  if ("rawContents" in input) {
+    await writeOpenAICredentials(input);
+    return;
   }
-  try {
-    const payload = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8"));
-    return typeof payload === "object" && payload !== null ? payload as Record<string, unknown> : null;
-  } catch {
-    return null;
+  if (input.credentials.authType !== "oauth") {
+    await writeOpenAICredentials(input);
+    return;
   }
+  await runRustCommand(
+    [
+      "rust",
+      "auth",
+      "save-oauth",
+      input.credentials.runtime ?? "api",
+      input.credentials.organizationId ?? "-",
+      input.credentials.projectId ?? "-",
+      input.credentials.accountId ?? "-",
+    ],
+    process.cwd(),
+    `${input.credentials.accessToken}\n${input.credentials.refreshToken}\n`,
+    {
+      ...process.env,
+      UNCLECODE_OPENAI_CREDENTIALS_PATH: input.credentialsPath,
+    },
+  );
 }
 
-function extractOAuthClientIdFromPayload(payload: Record<string, unknown> | null): string | undefined {
-  if (!payload) {
-    return undefined;
-  }
-  if (typeof payload.client_id === "string" && payload.client_id.trim()) {
-    return payload.client_id.trim();
-  }
-  if (Array.isArray(payload.aud)) {
-    const value = payload.aud.find((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-    return value?.trim();
-  }
-  if (typeof payload.aud === "string" && payload.aud.trim()) {
-    return payload.aud.trim();
-  }
-  return undefined;
+function inspectOAuthToken(token: string): OpenAIOAuthTokenInspection {
+  const stdout = runRustCommandSync(
+    ["rust", "auth", "inspect-oauth-token"],
+    process.cwd(),
+    process.env,
+    token,
+  );
+  const fields = parseRustKeyValueLines(stdout);
+  const clientId = normalizeOptionalField(fields.get("clientId"));
+  return {
+    ...(clientId ? { clientId } : {}),
+    hasModelRequestScope: fields.get("hasModelRequestScope") !== "false",
+  };
 }
 
-function hasRequiredModelRequestScope(token: string): boolean {
-  const payload = parseJwtPayload(token);
-  if (!payload) {
-    return true;
+function parseOAuthTokenResponseBody(raw: string): OpenAIOAuthTokenResponse {
+  const stdout = runRustCommandSync(
+    ["rust", "auth", "parse-token-response"],
+    process.cwd(),
+    process.env,
+    raw,
+  );
+  const fields = parseRustKeyValueLines(stdout);
+  const error = normalizeOptionalField(fields.get("error"));
+  return {
+    accessToken: normalizeOptionalField(fields.get("accessToken")) ?? "",
+    refreshToken: normalizeOptionalField(fields.get("refreshToken")) ?? "",
+    ...(error ? { error } : {}),
+  };
+}
+
+function parseDeviceAuthorizationResponseBody(raw: string): OpenAIDeviceAuthorizationResponse {
+  const stdout = runRustCommandSync(
+    ["rust", "auth", "parse-device-response"],
+    process.cwd(),
+    process.env,
+    raw,
+  );
+  const fields = parseRustKeyValueLines(stdout);
+  const error = normalizeOptionalField(fields.get("error"));
+  return {
+    deviceCode: normalizeOptionalField(fields.get("deviceCode")) ?? "",
+    userCode: normalizeOptionalField(fields.get("userCode")) ?? "",
+    verificationUri: normalizeOptionalField(fields.get("verificationUri")) ?? "",
+    expiresIn: parseOptionalNumber(fields.get("expiresIn"), 0),
+    interval: parseOptionalNumber(fields.get("interval"), 5),
+    ...(error ? { error } : {}),
+  };
+}
+
+function parseCodexDeviceAuthorizationResponseBody(raw: string): OpenAICodexDeviceAuthorizationResponse {
+  const stdout = runRustCommandSync(
+    ["rust", "auth", "parse-codex-device-response"],
+    process.cwd(),
+    process.env,
+    raw,
+  );
+  const fields = parseRustKeyValueLines(stdout);
+  const error = normalizeOptionalField(fields.get("error"));
+  return {
+    deviceAuthId: normalizeOptionalField(fields.get("deviceAuthId")) ?? "",
+    userCode: normalizeOptionalField(fields.get("userCode")) ?? "",
+    interval: parseOptionalNumber(fields.get("interval"), 5),
+    ...(error ? { error } : {}),
+  };
+}
+
+function parseCodexDeviceTokenResponseBody(raw: string): OpenAICodexDeviceTokenResponse {
+  const stdout = runRustCommandSync(
+    ["rust", "auth", "parse-codex-token-response"],
+    process.cwd(),
+    process.env,
+    raw,
+  );
+  const fields = parseRustKeyValueLines(stdout);
+  const error = normalizeOptionalField(fields.get("error"));
+  return {
+    authorizationCode: normalizeOptionalField(fields.get("authorizationCode")) ?? "",
+    codeVerifier: normalizeOptionalField(fields.get("codeVerifier")) ?? "",
+    ...(error ? { error } : {}),
+  };
+}
+
+async function readResponseBodyForRustParsing(response: Response): Promise<string> {
+  if (typeof response.text === "function") {
+    return response.text();
   }
+  const json = await response.json();
+  return JSON.stringify(json);
+}
 
-  const scopeValue = payload.scp ?? payload.scope;
-  const scopes = Array.isArray(scopeValue)
-    ? scopeValue.filter((value): value is string => typeof value === "string")
-    : typeof scopeValue === "string"
-      ? scopeValue.split(/\s+/).filter(Boolean)
-      : [];
+function buildOAuthRequestSpec(kind: string, baseUrl: string | undefined): {
+  readonly url: string;
+  readonly contentType: string;
+} {
+  const stdout = runRustCommandSync(
+    ["rust", "auth", "request-spec", kind, baseUrl ?? "-"],
+    process.cwd(),
+    process.env,
+  );
+  const fields = parseRustKeyValueLines(stdout);
+  return {
+    url: normalizeRequiredField(fields.get("url"), "url"),
+    contentType: normalizeRequiredField(fields.get("contentType"), "contentType"),
+  };
+}
 
-  return scopes.length === 0 || scopes.includes("model.request");
+function postOAuthWithRust(kind: string, baseUrl: string | undefined, body: string): RustHttpResponse {
+  const spec = buildOAuthRequestSpec(kind, baseUrl);
+  const raw = runRustCommandSync(
+    ["rust", "http", "post", spec.url],
+    process.cwd(),
+    process.env,
+    `${JSON.stringify({ "content-type": spec.contentType })}\0${body}`,
+  ).trim();
+  const parsed = JSON.parse(raw) as unknown;
+  if (!isRecord(parsed) || typeof parsed.ok !== "boolean" || typeof parsed.status !== "number") {
+    throw new Error("Rust OAuth HTTP transport returned an invalid response envelope.");
+  }
+  return {
+    ok: parsed.ok,
+    status: parsed.status,
+    text: typeof parsed.text === "string"
+      ? parsed.text
+      : typeof parsed.body === "string"
+        ? parsed.body
+        : "",
+  };
+}
+
+async function postOAuthRequest(input: {
+  readonly kind: string;
+  readonly baseUrl?: string | undefined;
+  readonly body: string;
+  readonly fetch?: FetchLike | undefined;
+}): Promise<RustHttpResponse> {
+  if (!input.fetch) {
+    return postOAuthWithRust(input.kind, input.baseUrl, input.body);
+  }
+  const spec = buildOAuthRequestSpec(input.kind, input.baseUrl);
+  const response = await input.fetch(spec.url, {
+    method: "POST",
+    headers: { "content-type": spec.contentType },
+    body: input.body,
+  });
+  return {
+    ok: response.ok,
+    status: response.status,
+    text: await readResponseBodyForRustParsing(response),
+  };
+}
+
+function parseRustKeyValueLines(stdout: string): Map<string, string> {
+  return new Map(
+    stdout
+      .split(/\r?\n/)
+      .map((line) => line.split("=", 2))
+      .filter((parts): parts is [string, string] => parts.length === 2),
+  );
+}
+
+function normalizeRequiredField(value: string | undefined, field: string): string {
+  const normalized = normalizeOptionalField(value);
+  if (!normalized) {
+    throw new Error(`Rust OAuth command did not return ${field}.`);
+  }
+  return normalized;
+}
+
+function normalizeOptionalField(value: string | undefined): string | undefined {
+  return value && value !== "none" ? value : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseOptionalNumber(value: string | undefined, fallback: number): number {
+  if (!value || value === "none") {
+    return fallback;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function buildOAuthRequestBody(kind: string, args: readonly string[]): string {
+  return runRustCommandSync(
+    ["rust", "auth", "request-body", kind, ...args],
+    process.cwd(),
+  ).trim();
 }
 
 function assertModelRequestScope(accessToken: string): void {
-  if (!hasRequiredModelRequestScope(accessToken)) {
+  if (!inspectOAuthToken(accessToken).hasModelRequestScope) {
     throw new Error("OAuth token lacks model.request scope. Use API key login or proper browser OAuth with OPENAI_OAUTH_CLIENT_ID.");
   }
 }
@@ -133,11 +354,11 @@ export async function resolveReusableOpenAIOAuthClientId(input: {
       const parsed = JSON.parse(await readAuthFile(authPath));
       const idToken = String(parsed?.idToken ?? parsed?.tokens?.id_token ?? "").trim();
       const accessToken = String(parsed?.accessToken ?? parsed?.tokens?.access_token ?? "").trim();
-      const fromId = extractOAuthClientIdFromPayload(parseJwtPayload(idToken));
+      const fromId = idToken ? inspectOAuthToken(idToken).clientId : undefined;
       if (fromId) {
         return fromId;
       }
-      const fromAccess = extractOAuthClientIdFromPayload(parseJwtPayload(accessToken));
+      const fromAccess = accessToken ? inspectOAuthToken(accessToken).clientId : undefined;
       if (fromAccess) {
         return fromAccess;
       }
@@ -167,35 +388,28 @@ export async function requestOpenAIDeviceAuthorization(input: {
   readonly expiresIn: number;
   readonly interval: number;
 }> {
-  const executeFetch = input.fetch ?? fetch;
-  const endpoint = `${input.baseUrl ?? DEFAULT_OAUTH_BASE_URL}/oauth/device/code`;
-  const body = new URLSearchParams({
-    client_id: input.clientId,
-    scope: input.scopes.join(" "),
+  const body = buildOAuthRequestBody("device-code", [input.clientId, ...input.scopes]);
+  const response = await postOAuthRequest({
+    kind: "device-code",
+    baseUrl: input.baseUrl ?? DEFAULT_OAUTH_BASE_URL,
+    body,
+    fetch: input.fetch,
   });
-  const response = await executeFetch(endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-  const payload = await response.json();
-  const deviceCode = String(payload.device_code ?? "").trim();
-  const userCode = String(payload.user_code ?? "").trim();
-  const verificationUri = String(payload.verification_uri ?? "").trim();
+  const payload = parseDeviceAuthorizationResponseBody(response.text);
 
   if (!response.ok) {
     throw new Error(String(payload.error ?? "Device authorization request failed."));
   }
-  if (!deviceCode || !userCode || !verificationUri) {
+  if (!payload.deviceCode || !payload.userCode || !payload.verificationUri) {
     throw new Error("Missing device authorization fields in OAuth response.");
   }
 
   return {
-    deviceCode,
-    userCode,
-    verificationUri,
-    expiresIn: Number(payload.expires_in ?? 0),
-    interval: Number(payload.interval ?? 5),
+    deviceCode: payload.deviceCode,
+    userCode: payload.userCode,
+    verificationUri: payload.verificationUri,
+    expiresIn: payload.expiresIn,
+    interval: payload.interval,
   };
 }
 
@@ -210,8 +424,6 @@ export async function pollOpenAIDeviceAuthorization(input: {
   readonly accessToken: string;
   readonly refreshToken: string;
 }> {
-  const executeFetch = input.fetch ?? fetch;
-  const endpoint = `${input.baseUrl ?? DEFAULT_OAUTH_BASE_URL}/oauth/token`;
   const startedAt = Date.now();
   let intervalSeconds = Math.max(0, input.intervalSeconds);
 
@@ -223,19 +435,16 @@ export async function pollOpenAIDeviceAuthorization(input: {
       }
     }
 
-    const body = new URLSearchParams({
-      client_id: input.clientId,
-      device_code: input.deviceCode,
-      grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+    const body = buildOAuthRequestBody("device-token", [input.clientId, input.deviceCode]);
+    const response = await postOAuthRequest({
+      kind: "device-token",
+      baseUrl: input.baseUrl ?? DEFAULT_OAUTH_BASE_URL,
+      body,
+      fetch: input.fetch,
     });
-    const response = await executeFetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
-    });
-    const payload = await response.json();
+    const payload = parseOAuthTokenResponseBody(response.text);
 
-    if (!response.ok && payload?.error === "slow_down") {
+    if (!response.ok && payload.error === "slow_down") {
       intervalSeconds = Math.max(intervalSeconds + 5, 5);
       if (intervalSeconds > 0) {
         await sleep(intervalSeconds * 1000);
@@ -243,27 +452,24 @@ export async function pollOpenAIDeviceAuthorization(input: {
       continue;
     }
 
-    if (!response.ok && payload?.error === "authorization_pending") {
+    if (!response.ok && payload.error === "authorization_pending") {
       if (input.intervalSeconds > 0) {
         await sleep(intervalSeconds * 1000);
       }
       continue;
     }
 
-    if (!response.ok && payload?.error === "expired_token") {
+    if (!response.ok && payload.error === "expired_token") {
       break;
     }
 
-    const accessToken = String(payload.access_token ?? "").trim();
-    const refreshToken = String(payload.refresh_token ?? "").trim();
-
-    if (!accessToken || !refreshToken) {
+    if (!payload.accessToken || !payload.refreshToken) {
       throw new Error("Missing access token or refresh token in device authorization response.");
     }
 
     return {
-      accessToken,
-      refreshToken,
+      accessToken: payload.accessToken,
+      refreshToken: payload.refreshToken,
     };
   }
 
@@ -281,35 +487,30 @@ export async function exchangeOpenAIAuthorizationCode(input: {
   readonly accessToken: string;
   readonly refreshToken: string;
 }> {
-  const executeFetch = input.fetch ?? fetch;
-  const endpoint = `${input.baseUrl ?? DEFAULT_OAUTH_BASE_URL}/oauth/token`;
-  const body = new URLSearchParams({
-    client_id: input.clientId,
-    code: input.code,
-    code_verifier: input.codeVerifier,
-    redirect_uri: input.redirectUri,
-    grant_type: "authorization_code",
+  const body = buildOAuthRequestBody("authorization-code", [
+    input.clientId,
+    input.code,
+    input.codeVerifier,
+    input.redirectUri,
+  ]);
+  const response = await postOAuthRequest({
+    kind: "authorization-code",
+    baseUrl: input.baseUrl ?? DEFAULT_OAUTH_BASE_URL,
+    body,
+    fetch: input.fetch,
   });
-  const response = await executeFetch(endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-  const payload = await response.json();
-
-  const accessToken = String(payload.access_token ?? "").trim();
-  const refreshToken = String(payload.refresh_token ?? "").trim();
+  const payload = parseOAuthTokenResponseBody(response.text);
 
   if (!response.ok) {
     throw new Error(String(payload.error ?? "OAuth token exchange failed."));
   }
-  if (!accessToken || !refreshToken) {
+  if (!payload.accessToken || !payload.refreshToken) {
     throw new Error("Missing access token or refresh token in OAuth response.");
   }
 
   return {
-    accessToken,
-    refreshToken,
+    accessToken: payload.accessToken,
+    refreshToken: payload.refreshToken,
   };
 }
 
@@ -323,29 +524,27 @@ export async function requestOpenAICodexDeviceAuthorization(input: {
   readonly verificationUri: string;
   readonly interval: number;
 }> {
-  const executeFetch = input.fetch ?? fetch;
   const baseUrl = input.baseUrl ?? DEFAULT_OAUTH_BASE_URL;
-  const response = await executeFetch(`${baseUrl}/api/accounts/deviceauth/usercode`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ client_id: input.clientId }),
+  const response = await postOAuthRequest({
+    kind: "codex-device-code",
+    baseUrl,
+    body: buildOAuthRequestBody("codex-device-code", [input.clientId]),
+    fetch: input.fetch,
   });
-  const payload = await response.json();
-  const deviceAuthId = String(payload.device_auth_id ?? "").trim();
-  const userCode = String(payload.user_code ?? "").trim();
+  const payload = parseCodexDeviceAuthorizationResponseBody(response.text);
 
   if (!response.ok) {
     throw new Error(String(payload.error ?? "Codex device authorization request failed."));
   }
-  if (!deviceAuthId || !userCode) {
+  if (!payload.deviceAuthId || !payload.userCode) {
     throw new Error("Missing device auth fields in Codex authorization response.");
   }
 
   return {
-    deviceAuthId,
-    userCode,
+    deviceAuthId: payload.deviceAuthId,
+    userCode: payload.userCode,
     verificationUri: `${baseUrl}/codex/device`,
-    interval: Number(payload.interval ?? 5),
+    interval: payload.interval,
   };
 }
 
@@ -359,8 +558,6 @@ export async function pollOpenAICodexDeviceAuthorization(input: {
   readonly authorizationCode: string;
   readonly codeVerifier: string;
 }> {
-  const executeFetch = input.fetch ?? fetch;
-  const endpoint = `${input.baseUrl ?? DEFAULT_OAUTH_BASE_URL}/api/accounts/deviceauth/token`;
   const startedAt = Date.now();
   const maxWaitSeconds = 15 * 60;
 
@@ -369,33 +566,29 @@ export async function pollOpenAICodexDeviceAuthorization(input: {
       await sleep(input.intervalSeconds * 1000);
     }
 
-    const response = await executeFetch(endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        device_auth_id: input.deviceAuthId,
-        user_code: input.userCode,
-      }),
+    const response = await postOAuthRequest({
+      kind: "codex-device-token",
+      baseUrl: input.baseUrl ?? DEFAULT_OAUTH_BASE_URL,
+      body: buildOAuthRequestBody("codex-device-token", [input.deviceAuthId, input.userCode]),
+      fetch: input.fetch,
     });
 
     if (response.status === 403 || response.status === 404) {
       continue;
     }
 
-    const payload = await response.json();
+    const payload = parseCodexDeviceTokenResponseBody(response.text);
     if (!response.ok) {
       throw new Error(String(payload.error ?? "Codex device authorization polling failed."));
     }
 
-    const authorizationCode = String(payload.authorization_code ?? "").trim();
-    const codeVerifier = String(payload.code_verifier ?? "").trim();
-    if (!authorizationCode || !codeVerifier) {
+    if (!payload.authorizationCode || !payload.codeVerifier) {
       throw new Error("Missing authorization code or code verifier in Codex device authorization response.");
     }
 
     return {
-      authorizationCode,
-      codeVerifier,
+      authorizationCode: payload.authorizationCode,
+      codeVerifier: payload.codeVerifier,
     };
   }
 
@@ -439,7 +632,7 @@ export async function completeOpenAICodexDeviceLogin(input: {
     fetch: input.fetch,
   });
 
-  await (input.writeCredentials ?? writeOpenAICredentials)({
+  await (input.writeCredentials ?? writeOpenAICredentialsViaRust)({
     credentialsPath: input.credentialsPath,
     credentials: {
       authType: "oauth",
@@ -492,7 +685,7 @@ export async function completeOpenAIDeviceLogin(input: {
 
   assertModelRequestScope(tokens.accessToken);
 
-  await (input.writeCredentials ?? writeOpenAICredentials)({
+  await (input.writeCredentials ?? writeOpenAICredentialsViaRust)({
     credentialsPath: input.credentialsPath,
     credentials: {
       authType: "oauth",
@@ -540,7 +733,7 @@ export async function completeOpenAIBrowserLogin(input: {
 
   assertModelRequestScope(tokens.accessToken);
 
-  await (input.writeCredentials ?? writeOpenAICredentials)({
+  await (input.writeCredentials ?? writeOpenAICredentialsViaRust)({
     credentialsPath: input.credentialsPath,
     credentials: {
       authType: "oauth",

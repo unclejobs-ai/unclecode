@@ -1,9 +1,9 @@
 import { createEmbeddedWorkPaneController } from "@unclecode/tui";
+import { runRustCommandSync } from "@unclecode/orchestrator";
 import type {
   EmbeddedWorkDashboardSnapshot,
   EmbeddedWorkPaneRenderOptions,
 } from "@unclecode/tui";
-import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
@@ -12,19 +12,6 @@ import type {
 } from "./session-center-bootstrap.js";
 
 const CLI_SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(CLI_SOURCE_DIR, "../../..");
-const WORK_ENTRYPOINT = path.join(
-  REPO_ROOT,
-  "dist-work",
-  "apps",
-  "unclecode-cli",
-  "src",
-  "work-entry.js",
-);
-const LOCAL_DIST_DIR = path.basename(CLI_SOURCE_DIR) === "dist"
-  ? CLI_SOURCE_DIR
-  : path.resolve(CLI_SOURCE_DIR, "../dist");
-const LOCAL_DIST_WORK_ENTRYPOINT = path.join(LOCAL_DIST_DIR, "work-entry.js");
 
 type WorkShellDashboardSnapshot =
   EmbeddedWorkDashboardSnapshot<TuiHomeState>;
@@ -55,42 +42,42 @@ export function buildWorkCommandArgs(
   promptParts: readonly string[],
   options: WorkCommandArgOptions,
 ): string[] {
-  const forwardedArgs: string[] = [];
-  if (options.help) forwardedArgs.push("--help");
-  if (options.tools) forwardedArgs.push("--tools");
-  if (options.cwd) forwardedArgs.push("--cwd", options.cwd);
-  if (options.provider) forwardedArgs.push("--provider", options.provider);
-  if (options.model) forwardedArgs.push("--model", options.model);
-  if (options.reasoning) forwardedArgs.push("--reasoning", options.reasoning);
-  if (options.sessionId) forwardedArgs.push("--session-id", options.sessionId);
-  forwardedArgs.push(...promptParts);
-  return forwardedArgs;
+  return parseRustArgsArray(
+    runRustCommandSync(
+      ["rust", "work-runtime", "build-command-args"],
+      process.cwd(),
+      JSON.stringify({ promptParts, options }),
+    ),
+  );
 }
 
 export function withWorkCwd(
   forwardedArgs: readonly string[],
   callerCwd: string,
 ): readonly string[] {
-  if (forwardedArgs.includes("--cwd")) {
-    return forwardedArgs;
-  }
-
-  return ["--cwd", callerCwd, ...forwardedArgs];
+  return parseRustArgsArray(
+    runRustCommandSync(
+      ["rust", "work-runtime", "with-cwd"],
+      process.cwd(),
+      JSON.stringify({ forwardedArgs, callerCwd }),
+    ),
+  );
 }
 
 export function resolveWorkEntrypointModuleUrls(): readonly string[] {
-  return [WORK_ENTRYPOINT, LOCAL_DIST_WORK_ENTRYPOINT]
-    .filter((entry, index, entries) => entries.indexOf(entry) === index)
-    .filter((entry) => existsSync(entry))
-    .map((entry) => pathToFileURL(entry).href);
+  return parseRustPathsArray(
+    runRustCommandSync(
+      ["rust", "work-runtime", "entrypoint-paths"],
+      process.cwd(),
+      JSON.stringify({ cliSourceDir: CLI_SOURCE_DIR }),
+    ),
+  ).map((entry) => pathToFileURL(entry).href);
 }
 
 export async function loadWorkEntrypointModule(
-  moduleUrl = pathToFileURL(WORK_ENTRYPOINT).href,
+  moduleUrl?: string,
 ): Promise<WorkModule> {
-  const moduleUrls = moduleUrl === pathToFileURL(WORK_ENTRYPOINT).href
-    ? resolveWorkEntrypointModuleUrls()
-    : [moduleUrl];
+  const moduleUrls = moduleUrl === undefined ? resolveWorkEntrypointModuleUrls() : [moduleUrl];
   let lastError: unknown;
 
   for (const candidateUrl of moduleUrls) {
@@ -144,4 +131,32 @@ export async function loadEmbeddedWorkPane(input: EmbeddedWorkPaneLoadInput<Work
         withWorkCwd(forwardedArgs, input.workspaceRoot),
       ),
   });
+}
+
+function parseRustArgsArray(raw: string): string[] {
+  const parsed = JSON.parse(raw) as unknown;
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    !Array.isArray((parsed as { args?: unknown }).args) ||
+    !(parsed as { args: unknown[] }).args.every((item) => typeof item === "string")
+  ) {
+    throw new Error("Rust work-runtime command returned an invalid args payload.");
+  }
+  return (parsed as { args: string[] }).args;
+}
+
+function parseRustPathsArray(raw: string): string[] {
+  const parsed = JSON.parse(raw) as unknown;
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    !Array.isArray((parsed as { paths?: unknown }).paths) ||
+    !(parsed as { paths: unknown[] }).paths.every((item) => typeof item === "string")
+  ) {
+    throw new Error("Rust work-runtime command returned an invalid paths payload.");
+  }
+  return (parsed as { paths: string[] }).paths;
 }

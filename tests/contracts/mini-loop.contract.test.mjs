@@ -1,7 +1,7 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
+import { test } from "node:test";
 
-import { PERSONA_IDS, MINI_LOOP_EXIT_STATUSES } from "@unclecode/contracts";
+import { MINI_LOOP_EXIT_STATUSES, PERSONA_IDS } from "@unclecode/contracts";
 
 test("mini-loop persona ids are stable", () => {
   assert.deepEqual(PERSONA_IDS, [

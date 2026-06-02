@@ -27,12 +27,22 @@ export type SessionCenterSession = {
   readonly worktreeBranch?: string | null;
 };
 
+export type SessionCenterResearchRun = {
+  readonly sessionId: string;
+  readonly prompt: string;
+  readonly status: "completed" | "failed" | "unknown";
+  readonly summary: string;
+  readonly timestamp: string | null;
+};
+
 export type SessionCenterAction = {
   readonly id: string;
   readonly label: string;
   readonly command: string;
   readonly description: string;
 };
+
+export type SessionCenterActionView = "work" | "sessions" | "mcp" | "research";
 
 export type SessionCenterModel = {
   readonly title: string;
@@ -52,6 +62,7 @@ export type SessionCenterModel = {
   readonly latestResearchSummary: string | null;
   readonly latestResearchTimestamp: string | null;
   readonly researchRunCount: number;
+  readonly recentResearchRuns: readonly SessionCenterResearchRun[];
   readonly primarySessions: readonly SessionCenterSession[];
   readonly utilityActions: readonly SessionCenterAction[];
   readonly emptyState: string;
@@ -157,12 +168,58 @@ export const SESSION_CENTER_ACTIONS: readonly SessionCenterAction[] = [
     description: "Start a fresh local research pass for the current workspace.",
   },
   {
+    id: "mcp-list",
+    label: "M MCP",
+    command: "unclecode mcp list",
+    description: "List configured MCP servers, transport, scope, trust tier, and origin.",
+  },
+  {
+    id: "mcp-inspect",
+    label: "I Inspect",
+    command: "unclecode mcp inspect <server>",
+    description: "Inspect the selected MCP server config without starting or health-checking it.",
+  },
+  {
     id: "doctor",
     label: "D Doctor",
     command: "unclecode doctor",
     description: "Check auth, runtime, session-store, and MCP readiness.",
   },
 ] as const;
+
+const VISIBLE_SESSION_CENTER_ACTION_IDS_BY_VIEW: Record<
+  SessionCenterActionView,
+  readonly string[]
+> = {
+  work: ["work-session", "new-research", "mcp-list", "doctor"],
+  sessions: ["work-session", "new-research", "doctor"],
+  mcp: ["mcp-list", "mcp-inspect", "doctor", "work-session"],
+  research: ["new-research", "work-session", "mcp-list", "doctor"],
+} as const;
+
+export function getVisibleSessionCenterActionsForView(
+  view: SessionCenterActionView,
+  actions: readonly SessionCenterAction[],
+): readonly SessionCenterAction[] {
+  const ids = VISIBLE_SESSION_CENTER_ACTION_IDS_BY_VIEW[view];
+  return ids
+    .map((id) => actions.find((action) => action.id === id))
+    .filter((action): action is SessionCenterAction => Boolean(action));
+}
+
+export function ensureSelectedSessionCenterActionVisible(
+  actions: readonly SessionCenterAction[],
+  selectedAction: SessionCenterAction | undefined,
+  shouldIncludeSelectedAction: boolean,
+): readonly SessionCenterAction[] {
+  if (!shouldIncludeSelectedAction || !selectedAction) {
+    return actions;
+  }
+  if (actions.some((action) => action.id === selectedAction.id)) {
+    return actions;
+  }
+  return [...actions, selectedAction];
+}
 
 export function getWorkspaceDisplayName(workspacePath: string): string {
   const segments = workspacePath
@@ -201,12 +258,13 @@ export function createSessionCenterModel(input: {
   latestResearchSummary?: string | null;
   latestResearchTimestamp?: string | null;
   researchRunCount?: number;
+  recentResearchRuns?: readonly SessionCenterResearchRun[];
   sessions: readonly SessionCenterSession[];
 }): SessionCenterModel {
   return {
     title: UNCLECODE_COMMAND_NAME,
     subtitle:
-      "Resume recent work. Use Work to continue or connect auth with Browser, Key, or Logout.",
+      "Session Center. Resume recent work, open a new work session, or repair auth.",
     modeLabel: input.modeLabel,
     authLabel: input.authLabel,
     sessionCount: input.sessionCount ?? input.sessions.length,
@@ -216,10 +274,11 @@ export function createSessionCenterModel(input: {
     latestResearchSummary: input.latestResearchSummary ?? null,
     latestResearchTimestamp: input.latestResearchTimestamp ?? null,
     researchRunCount: input.researchRunCount ?? 0,
+    recentResearchRuns: input.recentResearchRuns ?? [],
     primarySessions: input.sessions.slice(0, 6),
     utilityActions: SESSION_CENTER_ACTIONS,
     emptyState:
-      "Press W to open work. Sessions will appear here after your first run.",
+      "No saved sessions yet. Press W to start work.",
   };
 }
 

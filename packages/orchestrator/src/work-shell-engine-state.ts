@@ -1,3 +1,4 @@
+import { runRustCommandSync } from "./rust-command.js";
 import type {
   WorkShellChatEntry,
   WorkShellEngineOptions,
@@ -15,27 +16,77 @@ type BuildContextPanel<Reasoning extends WorkShellReasoningConfig> = (
   expanded?: boolean,
 ) => WorkShellPanel;
 
+type WorkShellTraceLinePatchDecision = {
+  readonly traceLines: readonly string[];
+  readonly preservePanel: boolean;
+  readonly shouldRebuildContextPanel: boolean;
+};
+
+type WorkShellTraceModePatchDecision = {
+  readonly traceMode: WorkShellTraceMode;
+  readonly clearTraceLines: boolean;
+  readonly shouldRebuildContextPanel: boolean;
+};
+
+type WorkShellBusyStatePatchDecision = {
+  readonly isBusy: boolean;
+  readonly busyStatusAction: "set" | "clear";
+  readonly busyStatus?: string;
+  readonly currentTurnStartedAtAction: "set" | "clear" | "keep";
+  readonly currentTurnStartedAt?: number;
+};
+
+type WorkShellAuthStatePatchDecision = {
+  readonly authLabel: string;
+  readonly authLauncherLinesAction: "set" | "keep";
+  readonly authLauncherLines?: readonly string[];
+};
+
+type WorkShellInitialStateDecision<Reasoning extends WorkShellReasoningConfig> = {
+  readonly entries: readonly WorkShellChatEntry[];
+  readonly model: string;
+  readonly mode: WorkShellEngineOptions<Reasoning>["mode"];
+  readonly reasoning: Reasoning;
+  readonly authLabel: string;
+  readonly authLauncherLines: readonly string[];
+  readonly bridgeLines: readonly string[];
+  readonly memoryLines: readonly string[];
+  readonly traceLines: readonly string[];
+  readonly traceMode: WorkShellTraceMode;
+  readonly composerMode: WorkShellEngineState<Reasoning>["composerMode"];
+  readonly isBusy: boolean;
+};
+
+type WorkShellAppendEntriesPatchDecision = {
+  readonly entries: readonly WorkShellChatEntry[];
+};
+
 export function createInitialWorkShellEngineState<Reasoning extends WorkShellReasoningConfig>(input: {
   options: WorkShellEngineOptions<Reasoning>;
   contextSummaryLines: readonly string[];
   buildContextPanel: BuildContextPanel<Reasoning>;
 }): WorkShellEngineState<Reasoning> {
-  return {
-    entries: [],
+  const decision = resolveWorkShellInitialStateDecision<Reasoning>({
     model: input.options.model,
     mode: input.options.mode,
     reasoning: input.options.reasoning,
     authLabel: input.options.authLabel,
-    authLauncherLines: [],
-    bridgeLines: [],
-    memoryLines: [],
-    panel: input.buildContextPanel(input.contextSummaryLines, [], [], []),
-    traceLines: [],
-    traceMode:
-      input.options.initialTraceMode
-      ?? (input.options.mode === "ultrawork" ? "verbose" : "minimal"),
-    composerMode: "default",
-    isBusy: false,
+    ...(input.options.initialTraceMode !== undefined ? { initialTraceMode: input.options.initialTraceMode } : {}),
+  });
+  return {
+    entries: [...decision.entries],
+    model: decision.model,
+    mode: decision.mode,
+    reasoning: decision.reasoning,
+    authLabel: decision.authLabel,
+    authLauncherLines: [...decision.authLauncherLines],
+    bridgeLines: [...decision.bridgeLines],
+    memoryLines: [...decision.memoryLines],
+    panel: input.buildContextPanel(input.contextSummaryLines, decision.bridgeLines, decision.memoryLines, decision.traceLines),
+    traceLines: [...decision.traceLines],
+    traceMode: decision.traceMode,
+    composerMode: decision.composerMode,
+    isBusy: decision.isBusy,
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
     lastTurnDurationMs: undefined,
@@ -46,7 +97,11 @@ export function appendWorkShellEntries<Reasoning extends WorkShellReasoningConfi
   state: WorkShellEngineState<Reasoning>,
   ...entries: readonly WorkShellChatEntry[]
 ): Partial<WorkShellEngineState<Reasoning>> {
-  return { entries: [...state.entries, ...entries] };
+  const decision = resolveWorkShellAppendEntriesPatchDecision({
+    entries: state.entries,
+    nextEntries: entries,
+  });
+  return { entries: [...decision.entries] };
 }
 
 export function createWorkShellBusyStatePatch<Reasoning extends WorkShellReasoningConfig>(input: {
@@ -56,12 +111,18 @@ export function createWorkShellBusyStatePatch<Reasoning extends WorkShellReasoni
   currentTurnStartedAt?: number | undefined;
   clearCurrentTurnStartedAt?: boolean | undefined;
 }): Partial<WorkShellEngineState<Reasoning>> {
-  return {
+  const decision = resolveWorkShellBusyStatePatchDecision({
     isBusy: input.isBusy,
-    busyStatus: input.busyStatus,
-    ...(input.currentTurnStartedAt !== undefined
-      ? { currentTurnStartedAt: input.currentTurnStartedAt }
-      : input.clearCurrentTurnStartedAt
+    ...(input.busyStatus !== undefined ? { busyStatus: input.busyStatus } : {}),
+    ...(input.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: input.currentTurnStartedAt } : {}),
+    ...(input.clearCurrentTurnStartedAt !== undefined ? { clearCurrentTurnStartedAt: input.clearCurrentTurnStartedAt } : {}),
+  });
+  return {
+    isBusy: decision.isBusy,
+    busyStatus: decision.busyStatusAction === "set" ? decision.busyStatus : undefined,
+    ...(decision.currentTurnStartedAtAction === "set" && decision.currentTurnStartedAt !== undefined
+      ? { currentTurnStartedAt: decision.currentTurnStartedAt }
+      : decision.currentTurnStartedAtAction === "clear"
         ? { currentTurnStartedAt: undefined }
         : {}),
   };
@@ -72,9 +133,13 @@ export function createWorkShellAuthStatePatch<Reasoning extends WorkShellReasoni
   authLabel: string;
   authLauncherLines?: readonly string[] | undefined;
 }): Partial<WorkShellEngineState<Reasoning>> {
-  return {
+  const decision = resolveWorkShellAuthStatePatchDecision({
     authLabel: input.authLabel,
-    ...(input.authLauncherLines ? { authLauncherLines: input.authLauncherLines } : {}),
+    ...(input.authLauncherLines !== undefined ? { authLauncherLines: input.authLauncherLines } : {}),
+  });
+  return {
+    authLabel: decision.authLabel,
+    ...(decision.authLauncherLinesAction === "set" ? { authLauncherLines: decision.authLauncherLines ?? [] } : {}),
   };
 }
 
@@ -84,19 +149,22 @@ export function createWorkShellTraceModePatch<Reasoning extends WorkShellReasoni
   contextSummaryLines: readonly string[];
   buildContextPanel: BuildContextPanel<Reasoning>;
 }): Partial<WorkShellEngineState<Reasoning>> {
-  if (input.traceMode === "verbose") {
-    return { traceMode: "verbose" };
-  }
+  const decision = resolveWorkShellTraceModePatchDecision(input.traceMode);
 
   return {
-    traceMode: "minimal",
-    traceLines: [],
-    panel: input.buildContextPanel(
-      input.contextSummaryLines,
-      input.state.bridgeLines,
-      input.state.memoryLines,
-      [],
-    ),
+    traceMode: decision.traceMode,
+    ...(decision.clearTraceLines ? { traceLines: [] } : {}),
+    ...(decision.shouldRebuildContextPanel
+      ? {
+          panel: input.buildContextPanel(
+            input.contextSummaryLines,
+            input.state.bridgeLines,
+            input.state.memoryLines,
+            [],
+            input.state.panel.title === "Context expanded",
+          ),
+        }
+      : {}),
   };
 }
 
@@ -107,18 +175,23 @@ export function createWorkShellTraceLinePatch<Reasoning extends WorkShellReasoni
   buildContextPanel: BuildContextPanel<Reasoning>;
   preservePanel?: boolean | undefined;
 }): Partial<WorkShellEngineState<Reasoning>> {
-  const traceLines = [input.line, ...input.state.traceLines].slice(0, 8);
-  const shouldKeepPanel = Boolean(input.preservePanel) || isPinnedPanelTitle(input.state.panel.title);
+  const decision = resolveWorkShellTraceLinePatchDecision({
+    line: input.line,
+    traceLines: input.state.traceLines,
+    panelTitle: input.state.panel.title,
+    preservePanel: Boolean(input.preservePanel),
+  });
   return {
-    traceLines,
-    ...(shouldKeepPanel
+    traceLines: decision.traceLines,
+    ...(!decision.shouldRebuildContextPanel
       ? {}
       : {
           panel: input.buildContextPanel(
             input.contextSummaryLines,
             input.state.bridgeLines,
             input.state.memoryLines,
-            traceLines,
+            decision.traceLines,
+            input.state.panel.title === "Context expanded",
           ),
         }),
   };
@@ -127,23 +200,101 @@ export function createWorkShellTraceLinePatch<Reasoning extends WorkShellReasoni
 export function resolveModeDefaultReasoning<Reasoning extends WorkShellReasoningConfig>(
   reasoning: Reasoning,
 ): Reasoning {
-  if (reasoning.support.status === "unsupported") {
-    return reasoning;
-  }
-  return {
-    ...reasoning,
-    effort: reasoning.effort,
-    source: "mode-default",
-  };
+  return resolveWorkShellModeDefaultReasoningDecision(reasoning);
 }
 
 export function isPinnedPanelTitle(title: string): boolean {
-  return title === "Recent sessions"
-    || title === "Session status"
-    || title === "Status"
-    || title === "Help"
-    || title === "Memories"
-    || title === "Skills"
-    || title === "Queue"
-    || title.startsWith("Skill · ");
+  return resolveWorkShellTraceLinePatchDecision({
+    line: "",
+    traceLines: [],
+    panelTitle: title,
+    preservePanel: false,
+  }).preservePanel;
+}
+
+function resolveWorkShellTraceLinePatchDecision(input: {
+  readonly line: string;
+  readonly traceLines: readonly string[];
+  readonly panelTitle: string;
+  readonly preservePanel: boolean;
+}): WorkShellTraceLinePatchDecision {
+  const raw = runRustCommandSync(
+    ["rust", "ux", "trace-line-patch"],
+    process.cwd(),
+    JSON.stringify(input),
+  );
+  return JSON.parse(raw) as WorkShellTraceLinePatchDecision;
+}
+
+function resolveWorkShellTraceModePatchDecision(traceMode: WorkShellTraceMode): WorkShellTraceModePatchDecision {
+  const raw = runRustCommandSync(
+    ["rust", "ux", "trace-mode-patch"],
+    process.cwd(),
+    JSON.stringify({ traceMode }),
+  );
+  return JSON.parse(raw) as WorkShellTraceModePatchDecision;
+}
+
+function resolveWorkShellBusyStatePatchDecision(input: {
+  readonly isBusy: boolean;
+  readonly busyStatus?: string;
+  readonly currentTurnStartedAt?: number;
+  readonly clearCurrentTurnStartedAt?: boolean;
+}): WorkShellBusyStatePatchDecision {
+  const raw = runRustCommandSync(
+    ["rust", "ux", "busy-state-patch"],
+    process.cwd(),
+    JSON.stringify(input),
+  );
+  return JSON.parse(raw) as WorkShellBusyStatePatchDecision;
+}
+
+function resolveWorkShellAuthStatePatchDecision(input: {
+  readonly authLabel: string;
+  readonly authLauncherLines?: readonly string[];
+}): WorkShellAuthStatePatchDecision {
+  const raw = runRustCommandSync(
+    ["rust", "ux", "auth-state-patch"],
+    process.cwd(),
+    JSON.stringify(input),
+  );
+  return JSON.parse(raw) as WorkShellAuthStatePatchDecision;
+}
+
+function resolveWorkShellInitialStateDecision<Reasoning extends WorkShellReasoningConfig>(input: {
+  readonly model: string;
+  readonly mode: WorkShellEngineOptions<Reasoning>["mode"];
+  readonly reasoning: Reasoning;
+  readonly authLabel: string;
+  readonly initialTraceMode?: WorkShellTraceMode;
+}): WorkShellInitialStateDecision<Reasoning> {
+  const raw = runRustCommandSync(
+    ["rust", "ux", "initial-state"],
+    process.cwd(),
+    JSON.stringify(input),
+  );
+  return JSON.parse(raw) as WorkShellInitialStateDecision<Reasoning>;
+}
+
+function resolveWorkShellAppendEntriesPatchDecision(input: {
+  readonly entries: readonly WorkShellChatEntry[];
+  readonly nextEntries: readonly WorkShellChatEntry[];
+}): WorkShellAppendEntriesPatchDecision {
+  const raw = runRustCommandSync(
+    ["rust", "ux", "append-entries-patch"],
+    process.cwd(),
+    JSON.stringify(input),
+  );
+  return JSON.parse(raw) as WorkShellAppendEntriesPatchDecision;
+}
+
+function resolveWorkShellModeDefaultReasoningDecision<Reasoning extends WorkShellReasoningConfig>(
+  reasoning: Reasoning,
+): Reasoning {
+  const raw = runRustCommandSync(
+    ["rust", "ux", "mode-default-reasoning"],
+    process.cwd(),
+    JSON.stringify(reasoning),
+  );
+  return JSON.parse(raw) as Reasoning;
 }

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { startTeamRun } from "@unclecode/orchestrator";
+import { listTeamRuns, startTeamRun } from "@unclecode/orchestrator";
 import { readTeamCheckpoints, verifyTeamRunChain } from "@unclecode/session-store";
 
 // Place tmp dirs inside the workspace so spawned worker scripts can resolve
@@ -183,6 +183,43 @@ test("dispatch sweeps stale locks before launching workers", async () => {
     assert.equal(result.status, "accepted");
     assert.ok(result.sweep.swept >= 1, "sweepStaleLocks removed dead-pid lock");
     assert.equal(existsSync(stalePath), false, "stale lock file deleted");
+  } finally {
+    rmSync(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("listTeamRuns is backed by Rust and returns recorded run directories", () => {
+  const dataRoot = makeRun();
+  try {
+    const first = startTeamRun({
+      dataRoot,
+      objective: "list first",
+      persona: "coder",
+      lanes: 1,
+      gate: "warn",
+      runtime: "local",
+      workspaceRoot: dataRoot,
+      createdBy: "tests",
+      runId: "tr_100",
+    });
+    const second = startTeamRun({
+      dataRoot,
+      objective: "list second",
+      persona: "coder",
+      lanes: 1,
+      gate: "warn",
+      runtime: "local",
+      workspaceRoot: dataRoot,
+      createdBy: "tests",
+      runId: "tr_200",
+    });
+    first.release();
+    second.release();
+
+    assert.deepEqual(
+      listTeamRuns(dataRoot).map((run) => run.runId),
+      ["tr_100", "tr_200"],
+    );
   } finally {
     rmSync(dataRoot, { recursive: true, force: true });
   }

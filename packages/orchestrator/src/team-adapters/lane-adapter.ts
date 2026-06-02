@@ -5,7 +5,12 @@
  * formats the resulting submission into the legacy stdout contract.
  */
 
-import type { TeamLaneRuntime, WorkerSpec } from "@unclecode/contracts";
+import type {
+  ExecutionPolicyProfile,
+  TeamLaneRuntime,
+  TeamRuntimeMode,
+  WorkerSpec,
+} from "@unclecode/contracts";
 
 import type { TeamBinding } from "../team-binding.js";
 
@@ -21,6 +26,8 @@ export type LanePreflight =
 export type LaneRunContext = {
   readonly binding: TeamBinding;
   readonly cwd: string;
+  readonly runtimeMode?: TeamRuntimeMode;
+  readonly executionPolicyProfile?: ExecutionPolicyProfile;
   readonly timeoutMs?: number;
   readonly env: Readonly<Record<string, string | undefined>>;
   /**

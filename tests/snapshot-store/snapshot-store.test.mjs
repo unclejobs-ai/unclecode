@@ -30,6 +30,10 @@ test("captureSnapshot writes manifest + blobs and roundtrips on restore", () => 
       paths: ["src/a.ts", "src/b.ts"],
     });
     assert.equal(manifest.entries.length, 2);
+    assert.equal(
+      manifest.entries.find((entry) => entry.path === "src/a.ts")?.sha256,
+      "8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8",
+    );
     writeFileSync(join(dir, "src", "a.ts"), "MUTATED");
     writeFileSync(join(dir, "src", "b.ts"), "MUTATED");
     const restored = restoreSnapshot({ workspaceRoot: dir, sessionId: "s1", turnIdx: 0 });

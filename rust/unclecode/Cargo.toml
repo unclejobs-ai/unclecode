@@ -1,0 +1,12 @@
+[package]
+name = "unclecode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+unclecode-core = { path = "../unclecode-core" }
+
+[[bin]]
+name = "unclecode"
+path = "src/main.rs"

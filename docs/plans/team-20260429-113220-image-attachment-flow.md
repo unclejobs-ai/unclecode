@@ -53,7 +53,7 @@ The brief asked for a 5-model fan-out. Empirical reality:
 |---|---|---|---|
 | agent-teams | Claude Opus 4.7 (1M ctx) | **completed** (synthesizer) | Read primary sources; produced verdicts |
 | hermes-fanout / coder | Kimi K2.6 | **completed** | Returned full structured 7-question JSON |
-| omx | GPT-5.4 (Codex) | **skipped** | refresh token reused; requires interactive `codex login` |
+| external-codex-orchestration | GPT-5.4 (Codex) | **skipped** | refresh token reused; requires interactive `codex login` |
 | hermes-fanout / glmbuilder | GLM-5.1 | **skipped** | `GLM_API_KEY` env var not set |
 | mmbridge | multi-tool (kimi/codex/gemini) | **skipped** | `mmbridge debate` is a git-diff review tool. Codex returned a security review of the repo, not answers to design questions. Gemini + Kimi tools silently returned empty positions. |
 | unclecode | Gemini side | **skipped** | `better-sqlite3` ABI mismatch (Node 25 shell vs module compiled for Node 22) |
@@ -216,7 +216,7 @@ This memo is plan-only. When implementation begins, the suggested ordering is:
 
 ## 5. Final synthesis
 
-**Provenance, stated honestly:** Kimi K2.6 (via `hermes coder`) produced an *independent* verdict on all 7 questions, returning the structured JSON in `~/.data/team-runs/team-20260429-113220/hermes-fanout/coder.txt`. Claude Opus 4.7 (the synthesizer) had previously read all cited files end-to-end (Q1–Q7 grounded in primary-source citations recorded under § 0), then reviewed Kimi's output against that primary read and concurred on every question. This is **one independent vote (Kimi) plus a synthesizer concurrence grounded in primary sources** — *not* two fully independent samples. The agreement is still informative (different model families, different read paths, same verdict) but the rhetorical weight should not exceed that. Three additional lanes (omx/Codex, glmbuilder/GLM, mmbridge multi-tool, unclecode/Gemini) were skipped due to environmental/auth issues unrelated to the design work; their absence is documented in the manifest rather than being papered over.
+**Provenance, stated honestly:** Kimi K2.6 (via `hermes coder`) produced an *independent* verdict on all 7 questions, returning the structured JSON in `~/.data/team-runs/team-20260429-113220/hermes-fanout/coder.txt`. Claude Opus 4.7 (the synthesizer) had previously read all cited files end-to-end (Q1–Q7 grounded in primary-source citations recorded under § 0), then reviewed Kimi's output against that primary read and concurred on every question. This is **one independent vote (Kimi) plus a synthesizer concurrence grounded in primary sources** — *not* two fully independent samples. The agreement is still informative (different model families, different read paths, same verdict) but the rhetorical weight should not exceed that. Three additional lanes (external-codex-orchestration/Codex, glmbuilder/GLM, mmbridge multi-tool, unclecode/Gemini) were skipped due to environmental/auth issues unrelated to the design work; their absence is documented in the manifest rather than being papered over.
 
 **The chosen direction:**
 

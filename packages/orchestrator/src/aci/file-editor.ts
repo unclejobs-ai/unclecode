@@ -1,16 +1,6 @@
-/**
- * ACI File Editor — line-anchored multi-line edit with linter guardrail.
- * Linter runs against the proposed content; on syntax error the edit is
- * reverted and a 3-part error message (error code + preview + original
- * snippet) is returned so the agent can self-correct (SWE-agent NeurIPS
- * 2024, §3 + §A.1).
- */
-
-import { readFileSync, writeFileSync, statSync } from "node:fs";
-
+import { runRustCommand, runRustCommandSync } from "../rust-command.js";
 import type { LintResult, LintRunner } from "./linter-guardrail.js";
 import { defaultLintRunner } from "./linter-guardrail.js";
-import { assertWithinWorkspace } from "./path-containment.js";
 
 export type EditInput = {
   readonly cwd: string;
@@ -30,68 +20,107 @@ export type EditOptions = {
   readonly lintRunner?: LintRunner;
 };
 
+type RustEditResult =
+  | {
+      readonly status: "applied";
+      readonly absPath: string;
+      readonly contentPreview: string;
+      readonly originalContent: string;
+      readonly proposedContent: string;
+    }
+  | { readonly status: "out_of_range"; readonly totalLines: number; readonly errorMessage: string };
+
 export async function editFile(input: EditInput, options: EditOptions = {}): Promise<EditResult> {
   const lintRunner = options.lintRunner ?? defaultLintRunner;
-  const absPath = assertWithinWorkspace(input.cwd, input.path);
-  statSync(absPath);
-  const original = readFileSync(absPath, "utf8");
-  const lines = original.split(/\r?\n/);
+  const editResult = parseRustEditResult(
+    await runRustCommand(
+      [
+        "rust",
+        "aci",
+        "edit-json",
+        input.path,
+        String(input.startLine),
+        String(input.endLine),
+      ],
+      input.cwd,
+      input.replacement,
+    ),
+  );
+  if (editResult.status === "out_of_range") {
+    return editResult;
+  }
 
-  if (input.startLine < 1 || input.endLine > lines.length || input.startLine > input.endLine + 1) {
+  const lintResult = await lintRunner({
+    absPath: editResult.absPath,
+    content: editResult.proposedContent,
+  });
+  if (lintResult.ok) {
     return {
-      status: "out_of_range",
-      totalLines: lines.length,
-      errorMessage: `start=${input.startLine} end=${input.endLine} outside 1..${lines.length}`,
+      status: "applied",
+      contentPreview: editResult.contentPreview,
+      lintResult,
     };
   }
 
-  const replacementLines = input.replacement.split(/\r?\n/);
-  const before = lines.slice(0, input.startLine - 1);
-  const after = lines.slice(input.endLine);
-  const next = [...before, ...replacementLines, ...after].join("\n");
+  await runRustCommand(["rust", "aci", "restore", input.path], input.cwd, editResult.originalContent);
+  return {
+    status: "lint_failed",
+    errorMessage: buildRustLintFailureMessage(input, editResult, lintResult),
+    lintResult,
+  };
+}
 
-  writeFileSync(absPath, next, "utf8");
-  // Best-effort rollback on lint failure. TOCTOU between validation and
-  // write is inherent to pure-userland Node (no O_NOFOLLOW); the upstream
-  // assertWithinWorkspace + statSync chain is the primary guard.
-  const lintResult = await lintRunner({ absPath, content: next });
-  if (!lintResult.ok) {
-    writeFileSync(absPath, original, "utf8");
-    const snippetContext = input.snippetContext ?? 5;
-    const previewStart = Math.max(0, input.startLine - 1 - snippetContext);
-    const previewEnd = Math.min(lines.length, input.startLine - 1 + replacementLines.length + snippetContext);
-    const proposedSnippet = next
-      .split(/\r?\n/)
-      .slice(previewStart, previewEnd)
-      .map((line, index) => `${previewStart + index + 1}: ${line}`)
-      .join("\n");
-    const originalSnippet = lines
-      .slice(previewStart, previewEnd)
-      .map((line, index) => `${previewStart + index + 1}: ${line}`)
-      .join("\n");
-    const findingsText = lintResult.findings
-      .slice(0, 5)
-      .map((finding) => `- [${finding.code}] line ${finding.line ?? "?"}: ${finding.message}`)
-      .join("\n");
-    const errorMessage = [
-      "[file-editor] lint failed; edit reverted.",
-      "Errors:",
-      findingsText || "(linter returned no structured findings)",
-      "",
-      "Proposed (would-have-been):",
-      proposedSnippet,
-      "",
-      "Original (current state):",
-      originalSnippet,
-    ].join("\n");
-    return { status: "lint_failed", errorMessage, lintResult };
+function parseRustEditResult(stdout: string): RustEditResult {
+  const parsed = JSON.parse(stdout) as unknown;
+  if (!isRustEditResult(parsed)) {
+    throw new Error("file-editor: invalid Rust result");
   }
-  const previewStart = Math.max(0, input.startLine - 1 - 2);
-  const previewEnd = Math.min(next.split(/\r?\n/).length, input.startLine - 1 + replacementLines.length + 2);
-  const contentPreview = next
-    .split(/\r?\n/)
-    .slice(previewStart, previewEnd)
-    .map((line, index) => `${previewStart + index + 1}: ${line}`)
+  return parsed;
+}
+
+function buildRustLintFailureMessage(
+  input: EditInput,
+  editResult: Extract<RustEditResult, { status: "applied" }>,
+  lintResult: LintResult,
+): string {
+  const findingsText = lintResult.findings
+    .slice(0, 5)
+    .map((finding) => `- [${finding.code}] line ${finding.line ?? "?"}: ${finding.message}`)
     .join("\n");
-  return { status: "applied", contentPreview, lintResult };
+  return runRustCommandSync(
+    [
+      "rust",
+      "aci",
+      "lint-failure-message",
+      String(input.startLine),
+      String(input.snippetContext ?? 5),
+    ],
+    input.cwd,
+    [
+      editResult.originalContent,
+      editResult.proposedContent,
+      input.replacement,
+      findingsText,
+    ].join("\0"),
+  );
+}
+
+function isRustEditResult(value: unknown): value is RustEditResult {
+  if (!isRecord(value) || typeof value.status !== "string") {
+    return false;
+  }
+  if (value.status === "out_of_range") {
+    return Number.isInteger(value.totalLines) && typeof value.errorMessage === "string";
+  }
+  return (
+    value.status === "applied" &&
+    typeof value.absPath === "string" &&
+    typeof value.contentPreview === "string" &&
+    typeof value.originalContent === "string" &&
+    typeof value.proposedContent === "string"
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

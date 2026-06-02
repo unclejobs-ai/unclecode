@@ -1,20 +1,22 @@
 import {
   createAuthLoginPendingPanel,
-  createMemoriesPanel,
-  createSecureApiKeyEntryPanel,
   redactSensitiveInlineCommandLine,
   resolveVisibleInlineCommand,
 } from "./work-shell-engine-commands.js";
+import {
+  createMemoriesLocalCommandResult,
+  createRememberLocalCommandResult,
+  createRememberUsageErrorResult,
+} from "./work-shell-engine-builtins.js";
 import * as WorkShellOperations from "./work-shell-engine-operations.js";
-import { createWorkShellStatusPanel } from "./work-shell-engine-panels.js";
-import { createWorkShellAuthStatePatch } from "./work-shell-engine-state.js";
 import type {
   WorkShellChatEntry,
   WorkShellEngineOptions,
   WorkShellEngineState,
   WorkShellPanel,
+  WorkShellStatusContext,
 } from "./work-shell-engine.js";
-import type { WorkShellReasoningConfig } from "./reasoning.js";
+import { describeReasoning, type WorkShellReasoningConfig } from "./reasoning.js";
 import type { WorkShellSubmitRoute } from "./work-shell-engine-submit.js";
 
 export async function executeSecureApiKeyEntrySubmit<Reasoning extends WorkShellReasoningConfig>(input: {
@@ -25,6 +27,7 @@ export async function executeSecureApiKeyEntrySubmit<Reasoning extends WorkShell
     options: WorkShellEngineOptions<Reasoning>,
     reasoning: Reasoning,
     authLabel: string,
+    statusContext?: WorkShellStatusContext,
   ) => WorkShellPanel;
   buildInlineCommandPanel: (args: readonly string[], lines: readonly string[]) => WorkShellPanel;
   formatInlineCommandResultSummary: (args: readonly string[], lines: readonly string[]) => string;
@@ -49,42 +52,42 @@ export async function executeSecureApiKeyEntrySubmit<Reasoning extends WorkShell
       formatWorkShellError: input.formatWorkShellError,
     });
     if (result.kind === "unavailable") {
-      input.appendEntries({ role: "system", text: "Secure API key entry is unavailable." });
-      input.setState({
-        composerMode: "default",
-        panel: createWorkShellStatusPanel({
-          options: input.options,
-          stateModel: input.state.model,
-          reasoning: input.state.reasoning,
-          authLabel: input.state.authLabel,
-          buildStatusPanel: input.buildStatusPanel,
-        }),
+      const payload = WorkShellOperations.resolveSecureApiKeyEntryResultPayload({
+        kind: "unavailable",
+        provider: input.options.provider,
+        model: input.state.model,
+        mode: input.options.mode,
+        cwd: input.options.cwd,
+        reasoningLabel: describeReasoning(input.state.reasoning),
+        authLabel: input.state.authLabel,
+        contextSummaryLines: input.options.contextSummaryLines,
+        bridgeLines: input.state.bridgeLines,
+        memoryLines: input.state.memoryLines,
+        traceLines: input.state.traceLines,
       });
+      input.appendEntries(...payload.entries);
+      input.setState(payload.patch);
       return;
     }
     if (result.kind === "error") {
-      input.appendEntries({ role: "system", text: result.message });
-      input.setState({ panel: createSecureApiKeyEntryPanel(result.message) });
+      const payload = WorkShellOperations.resolveSecureApiKeyEntryResultPayload({
+        kind: "error",
+        message: result.message,
+      });
+      input.appendEntries(...payload.entries);
+      input.setState(payload.patch);
       return;
     }
-    input.appendEntries(
-      { role: "tool", text: "✓ auth key" },
-      {
-        role: "system",
-        text: input.formatInlineCommandResultSummary(["auth", "key"], result.resultLines),
-      },
-    );
-    input.setState({
-      composerMode: "default",
-      ...createWorkShellAuthStatePatch({
-        state: input.state,
-        authLabel: result.nextAuthLabel,
-        authLauncherLines: result.resultLines,
-      }),
-      panel: input.buildInlineCommandPanel(["auth", "key"], result.resultLines),
+    const payload = WorkShellOperations.resolveSecureApiKeyEntryResultPayload({
+      kind: "success",
+      resultLines: result.resultLines,
+      nextAuthLabel: result.nextAuthLabel,
     });
-    input.pushTraceLine("→ auth key", true);
-    input.pushTraceLine("✓ auth key", true);
+    input.appendEntries(...payload.entries);
+    input.setState(payload.patch);
+    for (const traceLine of payload.traceLines) {
+      input.pushTraceLine(traceLine, true);
+    }
   } finally {
     input.setState({ isBusy: false });
   }
@@ -145,32 +148,16 @@ export async function executeInlineCommandSubmit<Reasoning extends WorkShellReas
       refreshAuthState: input.refreshAuthState,
       extractAuthLabel: input.extractAuthLabel,
       applyAuthIssueLines: input.applyAuthIssueLines,
-      onAuthProgressLines: (lines) => {
-        input.setState({
-          panel: {
-            title: "Auth",
-            lines,
-          },
-        });
-      },
+      onAuthProgressPatch: (patch) => input.setState(patch),
     });
-    input.appendEntries(
-      { role: "tool", text: result.completionLine },
-      {
-        role: "system",
-        text: input.formatInlineCommandResultSummary(result.visibleArgs, result.resultLines),
-      },
-    );
-    input.setState({
-      authLabel: result.nextAuthLabel,
-      ...(result.isAuthCommand ? { authLauncherLines: result.resultLines } : {}),
-      panel: input.buildInlineCommandPanel(result.visibleArgs, result.resultLines),
-    });
+    input.appendEntries(...result.entries);
+    input.setState(result.patch);
     if (input.slashCommand[0] === "mode" && input.slashCommand[1] === "set" && input.slashCommand[2]) {
       await input.onModeChanged?.(input.slashCommand[2]);
     }
-    input.pushTraceLine(`→ ${result.visibleArgs.join(" ")}`, true);
-    input.pushTraceLine(result.completionLine, true);
+    for (const traceLine of result.traceLines) {
+      input.pushTraceLine(traceLine, true);
+    }
   } finally {
     input.setState({ isBusy: false });
   }
@@ -213,21 +200,19 @@ export async function executeLocalCommandSubmit<Reasoning extends WorkShellReaso
       sessionId: input.sessionId,
       listScopedMemoryLines: input.listScopedMemoryLines,
     });
-    input.appendEntries(
-      { role: "user", text: input.line },
-      { role: "system", text: "Memories shown." },
-    );
-    input.setState({
-      memoryLines: sessionMemory,
-      panel: createMemoriesPanel(sessionMemory, projectMemory),
+    const result = createMemoriesLocalCommandResult<Reasoning>({
+      line: input.line,
+      sessionMemory,
+      projectMemory,
     });
+    input.appendEntries(...result.entries);
+    input.setState(result.patch);
     return;
   }
 
   if ("usageError" in input.localCommand) {
     input.appendEntries(
-      { role: "user", text: input.line },
-      { role: "system", text: input.localCommand.usageError },
+      ...createRememberUsageErrorResult(input.line, input.localCommand.usageError).entries,
     );
     return;
   }
@@ -240,12 +225,15 @@ export async function executeLocalCommandSubmit<Reasoning extends WorkShellReaso
     listScopedMemoryLines: input.listScopedMemoryLines,
     formatAgentTraceLine: input.formatAgentTraceLine,
   });
-  if (input.localCommand.scope === "session") {
-    input.setState({ memoryLines: result.nextMemoryLines });
+  const commandResult = createRememberLocalCommandResult<Reasoning>({
+    line: input.line,
+    scope: input.localCommand.scope,
+    memoryTrace: result.memoryTrace,
+    nextMemoryLines: result.nextMemoryLines,
+  });
+  if (commandResult.patch) {
+    input.setState(commandResult.patch);
   }
-  input.appendEntries(
-    { role: "user", text: input.line },
-    { role: "tool", text: result.memoryTrace },
-  );
-  input.pushTraceLine(result.memoryTrace);
+  input.appendEntries(...commandResult.entries);
+  input.pushTraceLine(commandResult.traceLine);
 }

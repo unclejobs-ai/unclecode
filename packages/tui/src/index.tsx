@@ -5,6 +5,7 @@ export * from "./dashboard-model.js";
 export * from "./dashboard-navigation.js";
 export * from "./dashboard-render.js";
 export * from "./dashboard-shell.js";
+export * from "./renderer-capabilities.js";
 export * from "./tui-entry.js";
 export * from "./work-shell-attachments.js";
 export * from "./work-shell-auth-panels.js";

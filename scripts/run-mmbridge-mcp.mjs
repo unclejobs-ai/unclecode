@@ -28,13 +28,31 @@ async function main() {
       return;
     }
 
+    if (isLikelyPath(override)) {
+      process.stderr.write(
+        [
+          "[unclecode] MMBRIDGE_MCP_ENTRYPOINT points to a file that is not readable.",
+          `- Override: ${override}`,
+          `- Resolved: ${path.resolve(override)}`,
+          "- Build mmbridge first or point MMBRIDGE_MCP_ENTRYPOINT at packages/mcp/dist/index.js.",
+        ].join("\n") + "\n",
+      );
+      process.exit(1);
+    }
+
     const child = spawn(override, process.argv.slice(2), { stdio: "inherit", env: process.env });
     child.on("exit", (code, signal) => {
       if (signal) process.kill(process.pid, signal);
       process.exit(code ?? 0);
     });
     child.on("error", (error) => {
-      process.stderr.write(`[unclecode] Failed to launch overridden mmbridge MCP entrypoint: ${error.message}\n`);
+      process.stderr.write(
+        [
+          "[unclecode] Failed to launch MMBRIDGE_MCP_ENTRYPOINT command.",
+          `- Override command: ${override}`,
+          `- Error: ${error.message}`,
+        ].join("\n") + "\n",
+      );
       process.exit(1);
     });
     return;
@@ -50,11 +68,13 @@ async function main() {
     if (signal) process.kill(process.pid, signal);
     process.exit(code ?? 0);
   });
-  child.on("error", () => {
+  child.on("error", (error) => {
     process.stderr.write(
       [
         "[unclecode] Could not locate mmbridge-mcp.",
         `- Expected sibling build: ${siblingDistEntrypoint}`,
+        `- PATH fallback command: mmbridge-mcp`,
+        `- PATH fallback error: ${error.message}`,
         "- Or set MMBRIDGE_MCP_ENTRYPOINT to a local mmbridge MCP entrypoint.",
         "- Or install @mmbridge/mcp globally so `mmbridge-mcp` is on PATH.",
       ].join("\n") + "\n",

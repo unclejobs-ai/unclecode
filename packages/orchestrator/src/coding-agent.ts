@@ -1,13 +1,18 @@
 import type { ExecutionTraceEvent } from "@unclecode/contracts";
+import { runRustCommandSync } from "./rust-command.js";
 
 type TraceProviderName = Extract<ExecutionTraceEvent, { type: "provider.calling" }>["provider"];
+type ProviderRouteTraceEvent = Extract<ExecutionTraceEvent, { type: "provider.route" }>;
+type TurnStartedTraceEvent = Extract<ExecutionTraceEvent, { type: "turn.started" }>;
+type ProviderCallingTraceEvent = Extract<ExecutionTraceEvent, { type: "provider.calling" }>;
+type TurnCompletedTraceEvent = Extract<ExecutionTraceEvent, { type: "turn.completed" }>;
 
 export type AgentTurnResult = {
   text: string;
 };
 
 export type CodingAgentTraceEvent<ToolTraceEvent extends { readonly type: string }> =
-  | Extract<ExecutionTraceEvent, { type: "turn.started" | "provider.calling" | "turn.completed" }>
+  | Extract<ExecutionTraceEvent, { type: "turn.started" | "provider.route" | "provider.calling" | "turn.completed" }>
   | ToolTraceEvent;
 
 export interface CodingAgentProvider<
@@ -70,35 +75,104 @@ export class CodingAgent<
 
   async runTurn(prompt: string, attachments: readonly Attachment[] = []): Promise<AgentTurnResult> {
     const turnStartedAt = Date.now();
-    this.emitTrace({
-      type: "turn.started",
-      level: "low-signal",
-      provider: this.providerName,
-      model: this.model,
-      prompt,
-      startedAt: turnStartedAt,
-    });
-    this.emitTrace({
-      type: "provider.calling",
-      level: "default",
-      provider: this.providerName,
-      model: this.model,
-      startedAt: turnStartedAt,
-    });
+    this.emitTrace(this.buildTurnStartedTrace(prompt, turnStartedAt));
+    this.emitTrace(this.buildProviderRouteTrace(turnStartedAt));
+    this.emitTrace(this.buildProviderCallingTrace(turnStartedAt));
 
     const result = await this.provider.runTurn(prompt, attachments);
     const completedAt = Date.now();
-    this.emitTrace({
-      type: "turn.completed",
-      level: "low-signal",
-      provider: this.providerName,
-      model: this.model,
-      text: result.text,
-      startedAt: turnStartedAt,
-      completedAt,
-      durationMs: completedAt - turnStartedAt,
-    });
+    this.emitTrace(this.buildTurnCompletedTrace(result.text, turnStartedAt, completedAt));
     return result;
+  }
+
+  private buildTurnStartedTrace(prompt: string, startedAt: number): TurnStartedTraceEvent {
+    try {
+      return parseLifecycleTrace(runRustCommandSync([
+        "rust",
+        "provider",
+        "turn-started-trace",
+        this.providerName,
+        this.model,
+        String(startedAt),
+      ], process.cwd(), prompt), "turn.started");
+    } catch {
+      return {
+        type: "turn.started",
+        level: "low-signal",
+        provider: this.providerName,
+        model: this.model,
+        prompt,
+        startedAt,
+      };
+    }
+  }
+
+  private buildProviderRouteTrace(startedAt: number): ProviderRouteTraceEvent {
+    try {
+      return parseProviderRouteTrace(runRustCommandSync([
+        "rust",
+        "provider",
+        "route-trace",
+        this.providerName,
+        this.model,
+        String(startedAt),
+      ], process.cwd()));
+    } catch (error) {
+      return {
+        type: "provider.route",
+        level: "default",
+        provider: this.providerName,
+        model: this.model,
+        error: error instanceof Error ? error.message : String(error),
+        startedAt,
+      };
+    }
+  }
+
+  private buildProviderCallingTrace(startedAt: number): ProviderCallingTraceEvent {
+    try {
+      return parseLifecycleTrace(runRustCommandSync([
+        "rust",
+        "provider",
+        "calling-trace",
+        this.providerName,
+        this.model,
+        String(startedAt),
+      ], process.cwd()), "provider.calling");
+    } catch {
+      return {
+        type: "provider.calling",
+        level: "default",
+        provider: this.providerName,
+        model: this.model,
+        startedAt,
+      };
+    }
+  }
+
+  private buildTurnCompletedTrace(text: string, startedAt: number, completedAt: number): TurnCompletedTraceEvent {
+    try {
+      return parseLifecycleTrace(runRustCommandSync([
+        "rust",
+        "provider",
+        "turn-completed-trace",
+        this.providerName,
+        this.model,
+        String(startedAt),
+        String(completedAt),
+      ], process.cwd(), text), "turn.completed");
+    } catch {
+      return {
+        type: "turn.completed",
+        level: "low-signal",
+        provider: this.providerName,
+        model: this.model,
+        text,
+        startedAt,
+        completedAt,
+        durationMs: completedAt - startedAt,
+      };
+    }
   }
 
   private emitTrace(event: CodingAgentTraceEvent<ToolTraceEvent>): void {
@@ -112,4 +186,38 @@ export class CodingAgent<
       // Trace visibility must not break the work loop.
     }
   }
+}
+
+function parseProviderRouteTrace(raw: string): ProviderRouteTraceEvent {
+  const parsed = JSON.parse(raw) as unknown;
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    (parsed as { type?: unknown }).type !== "provider.route" ||
+    (parsed as { level?: unknown }).level !== "default" ||
+    typeof (parsed as { provider?: unknown }).provider !== "string" ||
+    typeof (parsed as { model?: unknown }).model !== "string" ||
+    typeof (parsed as { startedAt?: unknown }).startedAt !== "number"
+  ) {
+    throw new Error("Rust provider route trace returned an invalid payload.");
+  }
+  return parsed as ProviderRouteTraceEvent;
+}
+
+function parseLifecycleTrace<Type extends "turn.started" | "provider.calling" | "turn.completed">(
+  raw: string,
+  type: Type,
+): Extract<ExecutionTraceEvent, { type: Type }> {
+  const parsed = JSON.parse(raw) as unknown;
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    (parsed as { type?: unknown }).type !== type ||
+    typeof (parsed as { provider?: unknown }).provider !== "string" ||
+    typeof (parsed as { model?: unknown }).model !== "string" ||
+    typeof (parsed as { startedAt?: unknown }).startedAt !== "number"
+  ) {
+    throw new Error(`Rust ${type} trace returned an invalid payload.`);
+  }
+  return parsed as Extract<ExecutionTraceEvent, { type: Type }>;
 }

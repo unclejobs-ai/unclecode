@@ -1,4 +1,8 @@
-import { createCliSlashCommandRegistry, loadExtensionSlashCommands } from "@unclecode/orchestrator";
+import {
+  createCliSlashCommandRegistry,
+  loadExtensionSlashCommands,
+  runRustCommandSync,
+} from "@unclecode/orchestrator";
 
 export type ParsedSlashCommand =
   | {
@@ -23,6 +27,11 @@ function getCliSlashCommandRegistry(options?: { readonly workspaceRoot?: string;
 function getCliSlashCommands(options?: { readonly workspaceRoot?: string; readonly userHomeDir?: string }) {
   return getCliSlashCommandRegistry(options).list();
 }
+
+type RustSlashRoute = {
+  readonly kind: "plain" | "matched" | "dynamic" | "fallback";
+  readonly route: readonly string[];
+};
 
 export function parseSlashCommand(input: string): ParsedSlashCommand {
   const raw = input.trim();
@@ -49,16 +58,44 @@ export function routeSlashCommand(input: string, options?: { readonly workspaceR
     return [];
   }
 
-  const exact = getCliSlashCommandRegistry(options).resolve(normalizeSlashInput(parsed.raw));
-  if (exact) {
-    return exact;
+  const routed = routeSlashCommandWithRust(parsed.raw, options);
+  if (routed.kind === "matched" || routed.kind === "dynamic" || routed.kind === "plain") {
+    return routed.route;
   }
 
-  if (parsed.name === "mode" && parsed.args[0] === "set" && parsed.args[1]) {
-    return ["mode", "set", parsed.args[1]];
+  const extensionRoute = getCliSlashCommandRegistry(options).resolve(normalizeSlashInput(parsed.raw));
+  if (extensionRoute) {
+    return extensionRoute;
   }
 
-  return [parsed.name, ...parsed.args];
+  return routed.route;
+}
+
+function routeSlashCommandWithRust(
+  input: string,
+  options?: { readonly workspaceRoot?: string; readonly userHomeDir?: string },
+): RustSlashRoute {
+  const stdout = runRustCommandSync(
+    ["rust", "command", "route", normalizeSlashInput(input)],
+    options?.workspaceRoot ?? process.cwd(),
+  ).trim();
+  const parsed = JSON.parse(stdout) as unknown;
+  if (!isRecord(parsed) || !isRustRouteKind(parsed.kind) || !Array.isArray(parsed.route)) {
+    throw new Error("Rust slash command router returned an invalid payload.");
+  }
+
+  return {
+    kind: parsed.kind,
+    route: parsed.route.filter((item): item is string => typeof item === "string"),
+  };
+}
+
+function isRustRouteKind(value: unknown): value is RustSlashRoute["kind"] {
+  return value === "plain" || value === "matched" || value === "dynamic" || value === "fallback";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function formatSlashCommandHelp(options?: { readonly workspaceRoot?: string; readonly userHomeDir?: string }): string {

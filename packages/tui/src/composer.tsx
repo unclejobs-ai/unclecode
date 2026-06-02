@@ -56,7 +56,7 @@ export function applyComposerEdit(input: {
   readonly nextCursorOffset: number;
   readonly submitted: boolean;
 } {
-  const cursorOffset = Math.max(0, Math.min(input.cursorOffset, input.value.length));
+  const cursorOffset = normalizeComposerCursorOffset(input.value, input.cursorOffset);
 
   if (input.key.return) {
     if (input.key.shift && input.allowLineBreaks) {
@@ -77,7 +77,7 @@ export function applyComposerEdit(input: {
   if (input.key.leftArrow) {
     return {
       nextValue: input.value,
-      nextCursorOffset: Math.max(0, cursorOffset - 1),
+      nextCursorOffset: previousComposerCursorOffset(input.value, cursorOffset),
       submitted: false,
     };
   }
@@ -85,7 +85,7 @@ export function applyComposerEdit(input: {
   if (input.key.rightArrow) {
     return {
       nextValue: input.value,
-      nextCursorOffset: Math.min(input.value.length, cursorOffset + 1),
+      nextCursorOffset: nextComposerCursorOffset(input.value, cursorOffset),
       submitted: false,
     };
   }
@@ -99,9 +99,10 @@ export function applyComposerEdit(input: {
       };
     }
 
+    const previousOffset = previousComposerCursorOffset(input.value, cursorOffset);
     return {
-      nextValue: `${input.value.slice(0, cursorOffset - 1)}${input.value.slice(cursorOffset)}`,
-      nextCursorOffset: cursorOffset - 1,
+      nextValue: `${input.value.slice(0, previousOffset)}${input.value.slice(cursorOffset)}`,
+      nextCursorOffset: previousOffset,
       submitted: false,
     };
   }
@@ -120,6 +121,65 @@ export function applyComposerEdit(input: {
     nextCursorOffset: cursorOffset + sanitizedInput.length,
     submitted: false,
   };
+}
+
+function composerCharacterBoundaries(value: string): number[] {
+  const boundaries = [0];
+  let offset = 0;
+  for (const char of value) {
+    offset += char.length;
+    boundaries.push(offset);
+  }
+  return boundaries;
+}
+
+function normalizeComposerCursorOffset(value: string, cursorOffset: number): number {
+  const clamped = Math.max(0, Math.min(cursorOffset, value.length));
+  let previous = 0;
+  for (const boundary of composerCharacterBoundaries(value)) {
+    if (boundary === clamped) {
+      return boundary;
+    }
+    if (boundary > clamped) {
+      return previous;
+    }
+    previous = boundary;
+  }
+  return value.length;
+}
+
+function previousComposerCursorOffset(value: string, cursorOffset: number): number {
+  const normalized = normalizeComposerCursorOffset(value, cursorOffset);
+  let previous = 0;
+  for (const boundary of composerCharacterBoundaries(value)) {
+    if (boundary >= normalized) {
+      return previous;
+    }
+    previous = boundary;
+  }
+  return previous;
+}
+
+function nextComposerCursorOffset(value: string, cursorOffset: number): number {
+  const normalized = normalizeComposerCursorOffset(value, cursorOffset);
+  for (const boundary of composerCharacterBoundaries(value)) {
+    if (boundary > normalized) {
+      return boundary;
+    }
+  }
+  return value.length;
+}
+
+export function resolveComposerCursorOffsetAfterValueChange(input: {
+  readonly nextValue: string;
+  readonly currentCursorOffset: number;
+  readonly pendingLocalValue?: string | undefined;
+}): number {
+  if (input.pendingLocalValue === input.nextValue) {
+    return normalizeComposerCursorOffset(input.nextValue, input.currentCursorOffset);
+  }
+
+  return input.nextValue.length;
 }
 
 function maskComposerValue(value: string, mask?: string): string {
@@ -250,6 +310,7 @@ export function Composer(props: {
 }) {
   const [isPasting, setIsPasting] = useState(false);
   const [cursorOffset, setCursorOffset] = useState(props.value.length);
+  const pendingLocalValueRef = useRef<string | undefined>(undefined);
   const pasteTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const suppressNextSubmitRef = useRef(false);
 
@@ -258,7 +319,16 @@ export function Composer(props: {
   }, [isPasting, props.onIsPastingChange]);
 
   useEffect(() => {
-    setCursorOffset((current) => Math.min(current, props.value.length));
+    setCursorOffset((current) =>
+      resolveComposerCursorOffsetAfterValueChange({
+        nextValue: props.value,
+        currentCursorOffset: current,
+        pendingLocalValue: pendingLocalValueRef.current,
+      }),
+    );
+    if (pendingLocalValueRef.current === props.value) {
+      pendingLocalValueRef.current = undefined;
+    }
   }, [props.value]);
 
   useEffect(
@@ -333,6 +403,7 @@ export function Composer(props: {
       if (shouldTreatComposerChangeAsPaste(props.value, result.nextValue)) {
         armPasteWindow(result.nextValue);
       }
+      pendingLocalValueRef.current = result.nextValue;
       props.onChange(result.nextValue);
     }
   }, { isActive: true });

@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 
+import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 import type { ResolveOpenAIAuthInput, ResolvedOpenAIAuth } from "./types.js";
 
 function normalizeCredential(value: string | undefined): string {
@@ -38,35 +39,8 @@ function defaultFallbackAuthPaths(env?: NodeJS.ProcessEnv): readonly string[] {
   return [defaultFallbackAuthPath(env), defaultCodexAuthPath(env)];
 }
 
-function parseJwtPayload(token: string): Record<string, unknown> | null {
-  const parts = token.split(".");
-  const payloadPart = parts[1];
-
-  if (parts.length < 2 || payloadPart === undefined) {
-    return null;
-  }
-
-  try {
-    const payload = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8"));
-    return typeof payload === "object" && payload !== null ? payload as Record<string, unknown> : null;
-  } catch {
-    return null;
-  }
-}
-
-function getJwtExpiry(token: string): number | null {
-  const payload = parseJwtPayload(token);
-  return typeof payload?.exp === "number" ? payload.exp : null;
-}
-
 function isExpired(token: string): boolean {
-  const exp = getJwtExpiry(token);
-
-  if (exp === null) {
-    return false;
-  }
-
-  return exp <= Math.floor(Date.now() / 1000) + 60;
+  return inspectOAuthToken(token).expired;
 }
 
 function getAuthFileSource(authPath: string | undefined): "unclecode-auth-file" | "codex-auth-file" {
@@ -74,19 +48,21 @@ function getAuthFileSource(authPath: string | undefined): "unclecode-auth-file" 
 }
 
 function hasRequiredModelRequestScope(token: string): boolean {
-  const payload = parseJwtPayload(token);
-  if (!payload) {
-    return true;
-  }
+  return inspectOAuthToken(token).hasModelRequestScope;
+}
 
-  const scopeValue = payload.scp ?? payload.scope;
-  const scopes = Array.isArray(scopeValue)
-    ? scopeValue.filter((value): value is string => typeof value === "string")
-    : typeof scopeValue === "string"
-      ? scopeValue.split(/\s+/).filter(Boolean)
-      : [];
-
-  return scopes.length === 0 || scopes.includes("model.request");
+function inspectOAuthToken(token: string): { readonly expired: boolean; readonly hasModelRequestScope: boolean } {
+  const stdout = runRustCommandSync(
+    ["rust", "auth", "inspect-oauth-token"],
+    process.cwd(),
+    process.env,
+    token,
+  );
+  const fields = parseRustKeyValueLines(stdout);
+  return {
+    expired: fields.get("expired") === "true",
+    hasModelRequestScope: fields.get("hasModelRequestScope") !== "false",
+  };
 }
 
 function normalizeStoredRuntime(value: unknown): "api" | "codex" | null {
@@ -102,6 +78,110 @@ function rankFailure(result: ResolvedOpenAIAuth): number {
 }
 
 export async function resolveOpenAIAuth(
+  input: ResolveOpenAIAuthInput = {},
+): Promise<ResolvedOpenAIAuth> {
+  if (shouldUseRustResolver(input)) {
+    return resolveOpenAIAuthViaRust(resolveRustAuthEnv(input));
+  }
+  return resolveOpenAIAuthViaTypescript(input);
+}
+
+function shouldUseRustResolver(input: ResolveOpenAIAuthInput): boolean {
+  return !input.readFallbackFile && (!input.fallbackAuthPaths || input.fallbackAuthPaths.length <= 1);
+}
+
+function resolveRustAuthEnv(input: ResolveOpenAIAuthInput): NodeJS.ProcessEnv {
+  const env = { ...(input.env ?? process.env) };
+  const explicitPath = input.fallbackAuthPath ?? input.fallbackAuthPaths?.[0];
+  if (explicitPath && explicitPath.trim().length > 0) {
+    env.UNCLECODE_OPENAI_CREDENTIALS_PATH = explicitPath;
+  }
+  return env;
+}
+
+async function resolveOpenAIAuthViaRust(env: NodeJS.ProcessEnv): Promise<ResolvedOpenAIAuth> {
+  const stdout = await runRustCommand(["rust", "auth", "resolve"], process.cwd(), undefined, env);
+  const fields = parseRustKeyValueLines(stdout);
+  const status = fields.get("status");
+  const authType = fields.get("authType");
+  const source = fields.get("source");
+  const reason = normalizeOptionalField(fields.get("reason"));
+
+  if (status === "ok" && (authType === "api-key" || authType === "oauth")) {
+    const runtime = normalizeRuntime(fields.get("runtime"));
+    return {
+      status,
+      authType,
+      source: normalizeOkSource(source),
+      bearerToken: normalizeRequiredField(fields.get("bearerToken"), "bearerToken"),
+      organizationId: normalizeOptionalField(fields.get("organizationId")),
+      projectId: normalizeOptionalField(fields.get("projectId")),
+      accountId: normalizeOptionalField(fields.get("accountId")),
+      ...(runtime ? { runtime } : {}),
+    };
+  }
+
+  if (status === "expired" && authType === "oauth") {
+    return {
+      status,
+      authType,
+      source: normalizeOAuthFileOrEnvSource(source),
+      reason: reason ?? "auth-token-expired",
+    };
+  }
+
+  return {
+    status: "missing",
+    authType: authType === "oauth" ? "oauth" : "none",
+    source: normalizeMissingSource(source),
+    reason: reason ?? "auth-file-missing",
+  };
+}
+
+function parseRustKeyValueLines(stdout: string): Map<string, string> {
+  return new Map(
+    stdout
+      .split(/\r?\n/)
+      .map((line) => line.split("=", 2))
+      .filter((parts): parts is [string, string] => parts.length === 2),
+  );
+}
+
+function normalizeRequiredField(value: string | undefined, field: string): string {
+  const normalized = normalizeOptionalField(value);
+  if (!normalized) {
+    throw new Error(`Rust auth resolver did not return ${field}.`);
+  }
+  return normalized;
+}
+
+function normalizeOptionalField(value: string | undefined): string | null {
+  return value && value !== "none" ? value : null;
+}
+
+function normalizeRuntime(value: string | undefined): "api" | "codex" | undefined {
+  return value === "api" || value === "codex" ? value : undefined;
+}
+
+function normalizeOkSource(value: string | undefined): Extract<ResolvedOpenAIAuth, { status: "ok" }>["source"] {
+  return value === "env-openai-api-key"
+    || value === "env-openai-auth-token"
+    || value === "unclecode-auth-file"
+    || value === "codex-auth-file"
+    || value === "unclecode-api-key-file"
+    ? value
+    : "unclecode-auth-file";
+}
+
+function normalizeOAuthFileOrEnvSource(value: string | undefined): Extract<ResolvedOpenAIAuth, { status: "expired" }>["source"] {
+  return value === "env-openai-auth-token" || value === "codex-auth-file" ? value : "unclecode-auth-file";
+}
+
+function normalizeMissingSource(value: string | undefined): Extract<ResolvedOpenAIAuth, { status: "missing" }>["source"] {
+  return value === "unclecode-auth-file" || value === "codex-auth-file" ? value : "none";
+}
+
+async function resolveOpenAIAuthViaTypescript(
   input: ResolveOpenAIAuthInput = {},
 ): Promise<ResolvedOpenAIAuth> {
   const env = input.env ?? process.env;

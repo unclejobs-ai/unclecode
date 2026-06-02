@@ -108,10 +108,16 @@ export function createManagedDashboardInput(
       options: session.options,
       buildContextPanel,
       buildHelpPanel: buildWorkShellHelpPanel,
-      buildStatusPanel: ({ options, reasoningLabel, authLabel }: {
+      buildStatusPanel: ({ options, reasoningLabel, authLabel, statusContext }: {
         options: { model: string; mode: string };
         reasoningLabel: string;
         authLabel: string;
+        statusContext?: {
+          readonly contextSummaryLines: readonly string[];
+          readonly bridgeLines: readonly string[];
+          readonly memoryLines: readonly string[];
+          readonly traceLines: readonly string[];
+        } | undefined;
       }) =>
         buildWorkShellStatusPanel({
           provider: session.options.provider,
@@ -120,6 +126,7 @@ export function createManagedDashboardInput(
           cwd: session.options.cwd,
           reasoningLabel,
           authLabel,
+          ...(statusContext ?? {}),
         }),
       buildInlineCommandPanel,
       formatInlineCommandResultSummary,

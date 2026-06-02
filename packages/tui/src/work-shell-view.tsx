@@ -1,7 +1,8 @@
 import { Box, Text } from "ink";
 import React from "react";
+import { runRustCommandSync } from "@unclecode/orchestrator";
 
-import { getDisplayWidth, sliceByDisplayWidth } from "./text-width.js";
+import { getDisplayWidth } from "./text-width.js";
 
 export type WorkShellEntryRole = "user" | "assistant" | "tool" | "system";
 
@@ -68,41 +69,11 @@ function WorkShellSectionDivider(props: {
 }
 
 export function formatWorkShellProviderTitle(provider: string): string {
-  if (provider === "openai") return "UncleCode · OpenAI";
-  if (provider === "gemini") return "UncleCode · Gemini";
-  if (provider === "anthropic") return "UncleCode · Anthropic";
-  return `UncleCode · ${provider}`;
+  return runRustCommandSync(["rust", "ux", "text", "provider-title"], process.cwd(), provider).trimEnd();
 }
 
 export function getWorkShellEntryPresentation(role: WorkShellEntryRole): WorkShellEntryPresentation {
-  if (role === "user") {
-    return {
-      label: "You",
-      badge: "›",
-      labelColor: W.user,
-      labelTextColor: W.userBadgeText,
-      labelBackgroundColor: W.userBadgeBg,
-      railColor: W.user,
-      borderColor: W.user,
-      bodyColor: W.userBody,
-    };
-  }
-  if (role === "assistant") {
-    return {
-      label: "UncleCode",
-      badge: "✦",
-      labelColor: W.assistant,
-      labelTextColor: W.assistantBadgeText,
-      labelBackgroundColor: W.assistantBadgeBg,
-      railColor: W.assistant,
-      borderColor: W.assistant,
-      bodyColor: W.assistantBody,
-    };
-  }
-  if (role === "tool") {
-    return { label: "Step", badge: "→", labelColor: W.tool, railColor: W.borderStrong, borderColor: W.borderStrong, bodyColor: W.text };
-  }
-  return { label: "Status", badge: "·", labelColor: W.textMuted, railColor: W.border, borderColor: W.border, bodyColor: W.textMuted };
+  return resolveWorkShellEntryPresentation(role).presentation;
 }
 
 export function getWorkShellConversationLayout(role: WorkShellEntryRole): {
@@ -110,180 +81,186 @@ export function getWorkShellConversationLayout(role: WorkShellEntryRole): {
   readonly paddingLeft: number;
   readonly hasBorder: boolean;
 } {
-  if (role === "assistant") {
-    return { marginBottom: 1, paddingLeft: 2, hasBorder: false };
-  }
-  if (role === "tool" || role === "system") {
-    return { marginBottom: 0, paddingLeft: 3, hasBorder: false };
-  }
-
-  return { marginBottom: 1, paddingLeft: 0, hasBorder: false };
+  return resolveWorkShellEntryPresentation(role).layout;
 }
 
 export function getWorkShellEntryBorderStyle(role: WorkShellEntryRole): "round" | "single" {
-  return role === "tool" || role === "system" ? "single" : "round";
+  return resolveWorkShellEntryPresentation(role).borderStyle;
 }
 
 export function getWorkShellEmptyConversationHint(): string {
-  return "Type a task to start. Use / for commands, @file for context.";
+  return runRustCommandSync(["rust", "ux", "text", "empty-conversation-hint"], process.cwd()).trimEnd();
 }
 
 export function getWorkShellPanelBorderColor(inputValue: string, panelTitle: string): string {
-  if (inputValue.trim().startsWith("/")) {
-    return W.user;
-  }
-  if (panelTitle === "Auth") {
-    return W.assistant;
-  }
-  if (panelTitle === "Commands" || panelTitle === "Models") {
-    return W.borderStrong;
-  }
-  return W.border;
+  const role = resolveWorkShellPanelLayout({ panelTitle, inputValue }).borderColorRole;
+  return role === "user" ? W.user : role === "assistant" ? W.assistant : role === "borderStrong" ? W.borderStrong : W.border;
 }
 
 export function getWorkShellPanelDisplayMode(input: {
   readonly panelTitle: string;
   readonly inputValue: string;
   readonly terminalColumns?: number;
-}): "hidden" | "overlay" | "side" | "bottom" {
-  const slashActive = input.inputValue.trim().startsWith("/");
-  const interactivePanel = input.panelTitle === "Auth" || input.panelTitle === "Commands" || input.panelTitle === "Models";
-
-  if (input.panelTitle === "Context") {
-    return "hidden";
-  }
-  if (input.panelTitle === "Context expanded") {
-    return "overlay";
-  }
-  if (slashActive && interactivePanel) {
-    return "bottom";
-  }
-
-  return "bottom";
+}): WorkShellPanelDisplayMode {
+  return resolveWorkShellPanelLayout(input).displayMode;
 }
 
 export function getWorkShellPanelPlacement(input: {
   readonly panelTitle: string;
   readonly inputValue: string;
   readonly terminalColumns?: number;
-}): "side" | "bottom" {
-  return getWorkShellPanelDisplayMode(input) === "side" ? "side" : "bottom";
+}): WorkShellPanelPlacement {
+  return resolveWorkShellPanelLayout(input).placement;
 }
 
-export function getWorkShellPanelAnchor(displayMode: "hidden" | "overlay" | "side" | "bottom"): "with-conversation" | "after-composer" {
-  return displayMode === "side" ? "with-conversation" : "after-composer";
+export function getWorkShellPanelAnchor(displayMode: WorkShellPanelDisplayMode): WorkShellPanelAnchor {
+  return resolveWorkShellPanelLayout({ panelTitle: "", inputValue: "", displayMode }).anchor;
 }
 
 export function getWorkShellBottomDrawerMinHeight(
-  displayMode: "hidden" | "overlay" | "side" | "bottom",
+  displayMode: WorkShellPanelDisplayMode,
   panelTitle: string,
   inputValue: string,
 ): number {
-  if (displayMode !== "bottom") {
-    return 0;
-  }
-  if (inputValue.trim().startsWith("/")) {
-    return 6;
-  }
-  if (
-    panelTitle === "Commands" ||
-    panelTitle === "Auth" ||
-    panelTitle === "Models" ||
-    panelTitle === "Session status" ||
-    panelTitle === "Doctor" ||
-    panelTitle === "Mode" ||
-    panelTitle === "MCP"
-  ) {
-    return 6;
-  }
-  return 0;
+  return resolveWorkShellPanelLayout({ panelTitle, inputValue, displayMode }).bottomDrawerMinHeight;
 }
 
 export function getWorkShellComposerHintMinHeight(): 1 {
-  return 1;
+  return resolveWorkShellAttachmentLayout().composerHintMinHeight;
 }
 
 export function getWorkShellAttachmentPlacement(): "after-composer" {
-  return "after-composer";
+  return resolveWorkShellAttachmentLayout().attachmentPlacement;
 }
 
 export function getWorkShellAttachmentMinHeight(): 4 {
-  return 4;
+  return resolveWorkShellAttachmentLayout().attachmentMinHeight;
 }
 
 export function getWorkShellAttachmentLineColor(index: number): string {
-  if (index === 0) {
-    return W.user;
-  }
-  if (index === 1) {
-    return W.text;
-  }
+  const role = resolveWorkShellAttachmentLayout(index).attachmentLineColorRole;
+  if (role === "user") return W.user;
+  if (role === "text") return W.text;
   return W.textMuted;
 }
 
 export function getWorkShellComposerHint(inputValue: string, slashSuggestionCount: number): string | undefined {
-  if (inputValue.trim().startsWith("/")) {
-    return slashSuggestionCount > 0 ? "↑↓ select · Enter run · Esc cancel" : "No matches";
-  }
-  if (inputValue.trim().length === 0) {
-    return "Enter send · Shift+Enter newline · / commands";
-  }
-  return "Enter send · Shift+Enter newline";
+  const raw = runRustCommandSync(
+    ["rust", "ux", "text", "composer-hint"],
+    process.cwd(),
+    JSON.stringify({ inputValue, slashSuggestionCount }),
+  );
+  const parsed = JSON.parse(raw) as { hint?: string | null };
+  return parsed.hint ?? undefined;
 }
 
 const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const rustBusyStatusCache = new Map<string, string>();
+const rustMarkdownDisplayCache = new Map<string, string>();
+const rustThinkingLineCache = new Map<string, string>();
+const rustStatusLineCache = new Map<string, string>();
+const rustFooterLineCache = new Map<string, string>();
+const rustWrapDisplayCache = new Map<string, readonly string[]>();
+const rustPanelLineClassCache = new Map<string, WorkShellPanelLineClass>();
+const rustPanelLayoutCache = new Map<string, WorkShellPanelLayout>();
+const rustEntryPresentationCache = new Map<WorkShellEntryRole, WorkShellEntryRolePresentationContract>();
+const rustAttachmentLayoutCache = new Map<number, WorkShellAttachmentLayout>();
+const rustViewportLayoutCache = new Map<string, WorkShellViewportLayout>();
+const rustComposerDockLayoutCache = new Map<string, WorkShellComposerDockLayout>();
+
+type WorkShellPanelDisplayMode = "hidden" | "overlay" | "side" | "bottom";
+type WorkShellPanelPlacement = "side" | "bottom";
+type WorkShellPanelAnchor = "with-conversation" | "after-composer";
+
+type WorkShellPanelLayout = {
+  readonly borderColorRole: "user" | "assistant" | "borderStrong" | "border";
+  readonly displayMode: WorkShellPanelDisplayMode;
+  readonly placement: WorkShellPanelPlacement;
+  readonly anchor: WorkShellPanelAnchor;
+  readonly bottomDrawerMinHeight: number;
+};
+
+type WorkShellEntryRolePresentationContract = {
+  readonly presentation: WorkShellEntryPresentation;
+  readonly layout: {
+    readonly marginBottom: number;
+    readonly paddingLeft: number;
+    readonly hasBorder: boolean;
+  };
+  readonly borderStyle: "round" | "single";
+};
+
+type WorkShellAttachmentLayout = {
+  readonly composerHintMinHeight: 1;
+  readonly attachmentPlacement: "after-composer";
+  readonly attachmentMinHeight: 4;
+  readonly attachmentLineColorRole: "user" | "text" | "textMuted";
+};
+
+type WorkShellViewportLayout = {
+  readonly conversationWidth: number;
+  readonly dockWidth: number;
+};
+
+type WorkShellComposerDockLayout = {
+  readonly accentColorRole: "user" | "borderStrong";
+  readonly attachmentBadgeColorRole: "warning" | "textDim";
+  readonly topDivider: string;
+  readonly bottomDivider: string;
+  readonly footerLine: string;
+};
+
+type WorkShellPanelLineClass =
+  | { readonly kind: "blank"; readonly trimmed: string }
+  | { readonly kind: "section"; readonly trimmed: string }
+  | { readonly kind: "tree"; readonly branch: string; readonly label: string; readonly spacing: string; readonly value: string }
+  | {
+    readonly kind: "suggestion";
+    readonly marker: string;
+    readonly command: string;
+    readonly spacing: string;
+    readonly description: string;
+    readonly isSelected: boolean;
+    readonly isWarning: boolean;
+  }
+  | { readonly kind: "selected-command" | "command" | "signed-in" | "not-signed-in" | "warning" | "tip" | "hint-warning" | "match-summary"; readonly trimmed: string }
+  | { readonly kind: "fact"; readonly label: string; readonly value: string; readonly isWarning: boolean }
+  | { readonly kind: "indent"; readonly line: string; readonly trimmed: string }
+  | { readonly kind: "text"; readonly line: string; readonly trimmed: string };
+
+function runRustUxText(operation: "busy-status" | "normalize-markdown", value: string): string {
+  return runRustCommandSync(["rust", "ux", "text", operation], process.cwd(), value).trimEnd();
+}
 
 export function formatWorkShellBusyStatusLine(status?: string, frame = 0): string {
   const spinner = WORK_SHELL_BUSY_SPINNER_FRAMES[((frame % WORK_SHELL_BUSY_SPINNER_FRAMES.length) + WORK_SHELL_BUSY_SPINNER_FRAMES.length) % WORK_SHELL_BUSY_SPINNER_FRAMES.length];
-  const normalizedStatus = (status ?? "Thinking…")
-    .replace(/^[·→★✓✖↔]\s*/u, "")
-    .trim();
-  return `${spinner} ${normalizedStatus || "Thinking…"}`;
-}
-
-function compactWorkShellReasoningLabel(reasoningLabel: string): string {
-  return reasoningLabel.replace(/\s*\([^)]*\)$/, "").trim();
-}
-
-function humanizeWorkShellReasoningLabel(reasoningLabel: string): string {
-  const compact = compactWorkShellReasoningLabel(reasoningLabel).toLowerCase();
-  if (compact === "low") return "Light thinking";
-  if (compact === "medium") return "Balanced thinking";
-  if (compact === "high") return "Deep thinking";
-  if (compact === "unsupported") return "Reasoning fixed";
-  return reasoningLabel;
+  const key = status ?? "";
+  const cached = rustBusyStatusCache.get(key);
+  const normalizedStatus = cached ?? runRustUxText("busy-status", key);
+  if (!cached) {
+    rustBusyStatusCache.set(key, normalizedStatus);
+  }
+  return `${spinner} ${normalizedStatus || "Thinking..."}`;
 }
 
 export function formatWorkShellThinkingLine(reasoningLabel: string): string {
-  return `Thinking · ${humanizeWorkShellReasoningLabel(reasoningLabel)}`;
-}
-
-function compactWorkShellAuthLabel(authLabel: string): string {
-  if (authLabel === "Browser OAuth · file") return "Saved OAuth";
-  if (authLabel === "Browser OAuth · env") return "OAuth env";
-  if (authLabel === "API key · file") return "Saved API key";
-  if (authLabel === "API key · env") return "API key env";
-  if (authLabel === "Not signed in") return "No auth";
-  return authLabel;
-}
-
-function humanizeWorkShellModeLabel(mode: string): string {
-  if (mode === "default") return "Work mode";
-  if (mode === "search") return "Search mode";
-  if (mode === "analyze") return "Analyze mode";
-  if (mode === "ultrawork") return "Parallel mode";
-  if (mode === "yolo") return "YOLO mode";
-  return `${mode} mode`;
+  const cached = rustThinkingLineCache.get(reasoningLabel);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const line = runRustCommandSync(["rust", "ux", "text", "thinking-line"], process.cwd(), reasoningLabel).trimEnd();
+  rustThinkingLineCache.set(reasoningLabel, line);
+  return line;
 }
 
 export function normalizeMarkdownDisplayText(value: string): string {
-  return value
-    .replace(/^```[\s\S]*?\n?/gm, "")
-    .replace(/^#{1,6}\s+/gm, "")
-    .replace(/^\s*-\s+/gm, "• ")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/__([^_]+)__/g, "$1");
+  const cached = rustMarkdownDisplayCache.get(value);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const normalized = runRustUxText("normalize-markdown", value);
+  rustMarkdownDisplayCache.set(value, normalized);
+  return normalized;
 }
 
 export function formatWorkShellStatusLine(input: {
@@ -292,7 +269,14 @@ export function formatWorkShellStatusLine(input: {
   readonly mode: string;
   readonly authLabel: string;
 }): string {
-  return `${input.model} · ${humanizeWorkShellModeLabel(input.mode)} · ${compactWorkShellAuthLabel(input.authLabel)}`;
+  const key = JSON.stringify(input);
+  const cached = rustStatusLineCache.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const line = runRustCommandSync(["rust", "ux", "text", "status-line"], process.cwd(), key).trimEnd();
+  rustStatusLineCache.set(key, line);
+  return line;
 }
 
 export function formatWorkShellUsageLine(input: {
@@ -301,149 +285,206 @@ export function formatWorkShellUsageLine(input: {
   readonly currentTurnStartedAt?: number;
   readonly lastTurnDurationMs?: number;
   readonly nowMs?: number;
+  readonly spinnerFrame?: number;
 }): string {
-  const activity = input.isBusy
-    ? "Working now"
-    : "Ready";
+  const spinner = WORK_SHELL_BUSY_SPINNER_FRAMES[(((input.spinnerFrame ?? 0) % WORK_SHELL_BUSY_SPINNER_FRAMES.length) + WORK_SHELL_BUSY_SPINNER_FRAMES.length) % WORK_SHELL_BUSY_SPINNER_FRAMES.length];
+  const activity = input.isBusy ? `${spinner} Working now` : "Ready";
   const usage = input.isBusy
-    ? input.currentTurnStartedAt !== undefined
-      ? `elapsed ${formatCompactDuration(Math.max(0, (input.nowMs ?? Date.now()) - input.currentTurnStartedAt))}`
-      : "elapsed now"
-    : input.lastTurnDurationMs !== undefined
-      ? `last reply ${formatCompactDuration(input.lastTurnDurationMs)}`
-      : "no reply yet";
-  const detail = input.isBusy && input.busyStatus
-    ? input.busyStatus.replace(/^[·→★✓✖↔]\s*/u, "").trim()
-    : undefined;
-  return [activity, usage, detail].filter((value) => value && value.length > 0).join(" · ");
+    ? input.currentTurnStartedAt === undefined
+      ? "elapsed now"
+      : `elapsed ${formatCompactDuration(Math.max(0, (input.nowMs ?? input.currentTurnStartedAt) - input.currentTurnStartedAt))}`
+    : input.lastTurnDurationMs === undefined
+      ? "no reply yet"
+      : `last reply ${formatCompactDuration(input.lastTurnDurationMs)}`;
+  const detail = input.isBusy ? normalizeBusyDetail(input.busyStatus ?? "") : "";
+  return [activity, usage, detail].filter((part) => part.length > 0).join(" · ");
 }
 
 function formatCompactDuration(durationMs: number): string {
-  if (durationMs < 1000) {
-    return `${Math.max(0, Math.round(durationMs))}ms`;
+  const duration = Math.max(0, Math.trunc(durationMs));
+  if (duration < 1000) {
+    return `${duration}ms`;
   }
-  if (durationMs < 10_000) {
-    return `${(durationMs / 1000).toFixed(1)}s`;
+  if (duration < 10_000) {
+    return `${(duration / 1000).toFixed(1)}s`;
   }
-  return `${Math.round(durationMs / 1000)}s`;
+  return `${Math.trunc(duration / 1000)}s`;
+}
+
+function normalizeBusyDetail(value: string): string {
+  return value.replace(/^[·→★✓✖↔\s]+/u, "").trim();
 }
 
 export function parseWorkShellPanelFactLine(line: string): { readonly label: string; readonly value: string } | undefined {
-  const match = /^(?!\/)([A-Z][A-Za-z ]+)\s·\s(.+)$/.exec(line.trim());
-  if (!match) {
-    return undefined;
-  }
-  return {
-    label: match[1] ?? "",
-    value: match[2] ?? "",
-  };
+  const classified = classifyWorkShellPanelLine(line);
+  return classified.kind === "fact" ? { label: classified.label, value: classified.value } : undefined;
 }
 
 export function isWorkShellWarningLine(line: string): boolean {
-  const normalized = line.trim().toLowerCase();
-  return normalized.includes("unsupported") ||
-    normalized.includes("unavailable") ||
-    normalized.includes("needs refresh") ||
-    normalized.includes("lacks") ||
-    normalized.startsWith("warning ·");
+  const classified = classifyWorkShellPanelLine(line);
+  if ("isWarning" in classified) {
+    return classified.isWarning;
+  }
+  return classified.kind === "warning" || classified.kind === "hint-warning";
+}
+
+function classifyWorkShellPanelLine(line: string): WorkShellPanelLineClass {
+  const cached = rustPanelLineClassCache.get(line);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const raw = runRustCommandSync(["rust", "ux", "text", "panel-line-class"], process.cwd(), line);
+  const parsed = JSON.parse(raw) as WorkShellPanelLineClass;
+  rustPanelLineClassCache.set(line, parsed);
+  return parsed;
+}
+
+function resolveWorkShellPanelLayout(input: {
+  readonly panelTitle: string;
+  readonly inputValue: string;
+  readonly terminalColumns?: number;
+  readonly displayMode?: WorkShellPanelDisplayMode;
+}): WorkShellPanelLayout {
+  const key = JSON.stringify(input);
+  const cached = rustPanelLayoutCache.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const raw = runRustCommandSync(["rust", "ux", "text", "panel-layout"], process.cwd(), key);
+  const parsed = JSON.parse(raw) as WorkShellPanelLayout;
+  rustPanelLayoutCache.set(key, parsed);
+  return parsed;
+}
+
+function resolveWorkShellEntryPresentation(role: WorkShellEntryRole): WorkShellEntryRolePresentationContract {
+  const cached = rustEntryPresentationCache.get(role);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const raw = runRustCommandSync(["rust", "ux", "text", "entry-presentation"], process.cwd(), role);
+  const parsed = JSON.parse(raw) as WorkShellEntryRolePresentationContract;
+  rustEntryPresentationCache.set(role, parsed);
+  return parsed;
+}
+
+function resolveWorkShellAttachmentLayout(lineIndex = 0): WorkShellAttachmentLayout {
+  const cached = rustAttachmentLayoutCache.get(lineIndex);
+  if (cached) {
+    return cached;
+  }
+  const raw = runRustCommandSync(
+    ["rust", "ux", "text", "attachment-layout"],
+    process.cwd(),
+    JSON.stringify({ lineIndex }),
+  );
+  const parsed = JSON.parse(raw) as WorkShellAttachmentLayout;
+  rustAttachmentLayoutCache.set(lineIndex, parsed);
+  return parsed;
+}
+
+function resolveWorkShellViewportLayout(input: {
+  readonly panelPlacement?: WorkShellPanelPlacement;
+  readonly terminalColumns?: number;
+}): WorkShellViewportLayout {
+  const key = JSON.stringify({
+    panelPlacement: input.panelPlacement ?? "bottom",
+    terminalColumns: input.terminalColumns ?? process.stdout.columns ?? 96,
+  });
+  const cached = rustViewportLayoutCache.get(key);
+  if (cached) {
+    return cached;
+  }
+  const raw = runRustCommandSync(["rust", "ux", "text", "viewport-layout"], process.cwd(), key);
+  const parsed = JSON.parse(raw) as WorkShellViewportLayout;
+  rustViewportLayoutCache.set(key, parsed);
+  return parsed;
 }
 
 function renderWorkShellPanelLine(line: string, index: number): React.ReactNode {
-  const trimmed = line.trim();
-  const sectionHeaders = new Set(["Workspace", "Guidance", "Bridge", "Memory", "Live steps", "Current", "Available", "Routes", "Next"]);
-  if (trimmed.length === 0) {
+  const classified = classifyWorkShellPanelLine(line);
+  if (classified.kind === "blank") {
     return <Text key={`${index}-blank`}> </Text>;
   }
-  if (sectionHeaders.has(trimmed)) {
+  if (classified.kind === "section") {
     return (
       <Box key={`${index}-${line}`} marginTop={index === 0 ? 0 : 1}>
-        <Text bold color={W.textMuted}>{trimmed}</Text>
+        <Text bold color={W.textMuted}>{classified.trimmed}</Text>
       </Box>
     );
   }
-  const treeMatch = /^(├|└)\s+([^\s].*?)(\s{2,})(.+)$/.exec(line);
-  if (treeMatch) {
-    const branch = treeMatch[1] ?? "";
-    const label = treeMatch[2] ?? "";
-    const spacing = treeMatch[3] ?? " ";
-    const value = treeMatch[4] ?? "";
+  if (classified.kind === "tree") {
     return (
       <Text key={`${index}-${line}`} color={W.textMuted}>
-        {branch} <Text color={W.user}>{label.trim()}</Text>
-        {spacing}
-        <Text color={W.text}>{value}</Text>
+        {classified.branch} <Text color={W.user}>{classified.label}</Text>
+        {classified.spacing}
+        <Text color={W.text}>{classified.value}</Text>
       </Text>
     );
   }
-  const suggestionMatch = /^(›| )\s+(\/\S(?:.*?))(\s{2,})(.+)$/.exec(line);
-  if (suggestionMatch) {
-    const marker = suggestionMatch[1] ?? " ";
-    const command = suggestionMatch[2] ?? "";
-    const spacing = suggestionMatch[3] ?? "  ";
-    const description = suggestionMatch[4] ?? "";
-    const isSelected = marker === "›";
+  if (classified.kind === "suggestion") {
     return (
       <Text key={`${index}-${line}`}>
-      <Text color={isSelected ? W.user : W.textMuted}>{marker}</Text>
-      <Text color={isSelected ? W.user : W.user}> {command}</Text>
-      <Text color={isWorkShellWarningLine(description) ? W.warning : isSelected ? W.text : W.textMuted}>{spacing}{description}</Text>
+      <Text color={classified.isSelected ? W.user : W.textMuted}>{classified.marker}</Text>
+      <Text color={classified.isSelected ? W.user : W.user}> {classified.command}</Text>
+      <Text color={classified.isWarning ? W.warning : classified.isSelected ? W.text : W.textMuted}>{classified.spacing}{classified.description}</Text>
 </Text>
     );
   }
-  if (trimmed.startsWith("› /")) {
-    return <Text key={`${index}-${line}`} color={W.user}>{trimmed}</Text>;
+  if (classified.kind === "selected-command") {
+    return <Text key={`${index}-${line}`} color={W.user}>{classified.trimmed}</Text>;
   }
-  if (trimmed.startsWith("/")) {
-    return <Text key={`${index}-${line}`} color={W.user}>{trimmed}</Text>;
+  if (classified.kind === "command") {
+    return <Text key={`${index}-${line}`} color={W.user}>{classified.trimmed}</Text>;
   }
-  const factLine = parseWorkShellPanelFactLine(trimmed);
-  if (factLine) {
-    const labelColor = factLine.label === "Warning" ? W.warning : W.textMuted;
-    const valueColor = isWorkShellWarningLine(trimmed) ? W.warning : W.text;
+  if (classified.kind === "fact") {
+    const labelColor = classified.label === "Warning" ? W.warning : W.textMuted;
+    const valueColor = classified.isWarning ? W.warning : W.text;
     return (
       <Text key={`${index}-${line}`}>
-        <Text color={labelColor}>{factLine.label}</Text>
+        <Text color={labelColor}>{classified.label}</Text>
         <Text color={W.textDim}> · </Text>
-        <Text color={valueColor}>{factLine.value}</Text>
+        <Text color={valueColor}>{classified.value}</Text>
       </Text>
     );
   }
-  if (trimmed.startsWith("Signed in · ")) {
-    return <Text key={`${index}-${line}`} color={W.assistant}>{trimmed}</Text>;
+  if (classified.kind === "signed-in") {
+    return <Text key={`${index}-${line}`} color={W.assistant}>{classified.trimmed}</Text>;
   }
-  if (trimmed === "Not signed in yet" || trimmed === "Not signed in") {
-    return <Text key={`${index}-${line}`} color={W.warning}>{trimmed}</Text>;
+  if (classified.kind === "not-signed-in") {
+    return <Text key={`${index}-${line}`} color={W.warning}>{classified.trimmed}</Text>;
   }
-  if (trimmed === "Current" || trimmed === "Routes" || trimmed === "Next") {
-    return <Text key={`${index}-${line}`} color={W.textMuted} bold>{trimmed}</Text>;
+  if (classified.kind === "warning") {
+    return <Text key={`${index}-${line}`} color={W.warning}>{classified.trimmed}</Text>;
   }
-  if (trimmed.startsWith("Browser OAuth needs refresh") || trimmed.startsWith("Browser OAuth unavailable")) {
-    return <Text key={`${index}-${line}`} color={W.warning}>{trimmed}</Text>;
+  if (classified.kind === "tip") {
+    return <Text key={`${index}-${line}`} color={W.textDim}>{classified.trimmed}</Text>;
   }
-  if (trimmed.startsWith("Tip · ")) {
-    return <Text key={`${index}-${line}`} color={W.textDim}>{trimmed}</Text>;
+  if (classified.kind === "hint-warning") {
+    return <Text key={`${index}-${line}`} color={W.warning}>{classified.trimmed}</Text>;
   }
-  if (trimmed.startsWith("↑↓") || trimmed.startsWith("No slash")) {
-    return <Text key={`${index}-${line}`} color={W.warning}>{trimmed}</Text>;
+  if (classified.kind === "match-summary") {
+    return <Text key={`${index}-${line}`} color={W.textDim}>{classified.trimmed}</Text>;
   }
-  if (trimmed.startsWith("Matches for ") || trimmed.endsWith(" matches")) {
-    return <Text key={`${index}-${line}`} color={W.textDim}>{trimmed}</Text>;
+  if (classified.kind === "indent") {
+    return <Text key={`${index}-${line}`} color={W.textMuted}>{classified.line}</Text>;
   }
-  if (line.startsWith("  ")) {
-    return <Text key={`${index}-${line}`} color={W.textMuted}>{line}</Text>;
+  if (classified.kind === "text") {
+    return <Text key={`${index}-${line}`} color={W.text}>{classified.line}</Text>;
   }
   return <Text key={`${index}-${line}`} color={W.text}>{line}</Text>;
 }
 
 function getWorkShellConversationWidth(input: {
-  readonly panelPlacement: "side" | "bottom";
+  readonly panelPlacement: WorkShellPanelPlacement;
   readonly terminalColumns?: number;
 }): number {
-  const terminalColumns = input.terminalColumns ?? process.stdout.columns ?? 96;
-  const availableColumns = input.panelPlacement === "side"
-    ? Math.floor(terminalColumns * 0.62)
-    : terminalColumns - 6;
-  return Math.max(32, Math.min(availableColumns, 118));
+  return resolveWorkShellViewportLayout(input).conversationWidth;
+}
+
+function getWorkShellDockWidth(terminalColumns?: number): number {
+  return resolveWorkShellViewportLayout(
+    terminalColumns === undefined ? {} : { terminalColumns },
+  ).dockWidth;
 }
 
 function padDisplayLine(value: string, width: number): string {
@@ -451,35 +492,12 @@ function padDisplayLine(value: string, width: number): string {
   return `${value}${" ".repeat(padding)}`;
 }
 
-function truncateDisplayLine(value: string, width: number): string {
-  if (getDisplayWidth(value) <= width) {
-    return value;
+export function formatWorkShellToolEntryLines(text: string, width: number): readonly string[] {
+  const normalized = text.trimEnd();
+  if (!normalized) {
+    return [];
   }
-  if (width <= 1) {
-    return sliceByDisplayWidth(value, width);
-  }
-  return `${sliceByDisplayWidth(value, width - 1)}…`;
-}
-
-function getWorkShellDockWidth(terminalColumns?: number): number {
-  const columns = terminalColumns ?? process.stdout.columns ?? 96;
-  return Math.max(32, columns - 4);
-}
-
-function compactWorkShellPath(cwd?: string): string {
-  if (!cwd) {
-    return "";
-  }
-  const home = process.env.HOME;
-  const normalized = home && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
-  const parts = normalized.split("/").filter(Boolean);
-  if (normalized.startsWith("~") && parts.length > 3) {
-    return `~/${parts.slice(-2).join("/")}`;
-  }
-  if (!normalized.startsWith("~") && parts.length > 3) {
-    return `…/${parts.slice(-2).join("/")}`;
-  }
-  return normalized;
+  return wrapDisplayText(normalized, Math.max(20, width - 4));
 }
 
 export function formatWorkShellFooterLine(input: {
@@ -491,45 +509,47 @@ export function formatWorkShellFooterLine(input: {
   readonly composerHint?: string;
   readonly width?: number;
 }): string {
-  const statusLine = formatWorkShellStatusLine({
-    model: input.model,
-    reasoningLabel: input.reasoningLabel,
-    mode: input.mode,
-    authLabel: input.authLabel,
-  });
-  const footer = [
-    compactWorkShellPath(input.cwd),
-    statusLine,
-    input.composerHint,
-  ].filter((item): item is string => typeof item === "string" && item.length > 0).join("  ·  ");
-  return input.width ? truncateDisplayLine(footer, input.width) : footer;
-}
-
-function wrapDisplayLine(line: string, width: number): string[] {
-  if (width <= 0) {
-    return [line];
+  const payload = {
+    ...input,
+    home: process.env.HOME,
+  };
+  const key = JSON.stringify(payload);
+  const cached = rustFooterLineCache.get(key);
+  if (cached !== undefined) {
+    return cached;
   }
-  if (getDisplayWidth(line) <= width) {
-    return [line];
-  }
-
-  const output: string[] = [];
-  let remaining = line;
-  while (remaining.length > 0) {
-    const chunk = sliceByDisplayWidth(remaining, width);
-    if (chunk.length === 0) {
-      break;
-    }
-    output.push(chunk.trimEnd());
-    remaining = remaining.slice(chunk.length).trimStart();
-  }
-  return output.length > 0 ? output : [line];
+  const line = runRustCommandSync(["rust", "ux", "text", "footer-line"], process.cwd(), key).trimEnd();
+  rustFooterLineCache.set(key, line);
+  return line;
 }
 
 function wrapDisplayText(value: string, width: number): string[] {
-  return value
-    .split("\n")
-    .flatMap((line) => line.length === 0 ? [""] : wrapDisplayLine(line, width));
+  const key = JSON.stringify({ text: value, width });
+  const cached = rustWrapDisplayCache.get(key);
+  if (cached !== undefined) {
+    return [...cached];
+  }
+  const raw = runRustCommandSync(["rust", "ux", "text", "wrap-display"], process.cwd(), key);
+  const parsed = JSON.parse(raw) as string[];
+  rustWrapDisplayCache.set(key, parsed);
+  return parsed;
+}
+
+function resolveWorkShellComposerDockLayout(input: {
+  readonly inputValue: string;
+  readonly dockWidth: number;
+  readonly footerLine: string;
+  readonly attachmentCount?: number;
+}): WorkShellComposerDockLayout {
+  const key = JSON.stringify(input);
+  const cached = rustComposerDockLayoutCache.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const raw = runRustCommandSync(["rust", "ux", "text", "composer-dock-layout"], process.cwd(), key);
+  const parsed = JSON.parse(raw) as WorkShellComposerDockLayout;
+  rustComposerDockLayoutCache.set(key, parsed);
+  return parsed;
 }
 
 function renderSurfaceText(input: {
@@ -606,22 +626,22 @@ function renderWorkShellEntryBlock(input: {
   }
 
   if (input.entry.role === "tool") {
+    const lines = formatWorkShellToolEntryLines(bodyText, input.width);
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
         marginBottom={1}
+        paddingLeft={1}
         flexDirection="column"
       >
-        <Text backgroundColor={W.toolSurface} color={W.toolAccent} bold>
-          {padDisplayLine(` ${presentation.label.toLowerCase()} `, input.width)}
-        </Text>
-        {renderSurfaceText({
-          text: bodyText,
-          width: input.width,
-          backgroundColor: W.toolSurface,
-          color: W.text,
-          keyPrefix: `tool-${String(input.index)}`,
-        })}
+        <Text bold color={W.toolAccent}>{presentation.label}</Text>
+        <Box marginTop={lines.length > 0 ? 1 : 0} paddingLeft={1} flexDirection="column">
+          {lines.map((line, lineIndex) => (
+            <Text key={`tool-${String(input.index)}-${String(lineIndex)}`} color={W.text}>
+              {line}
+            </Text>
+          ))}
+        </Box>
       </Box>
     );
   }
@@ -644,33 +664,49 @@ function renderWorkShellThinkingBlock(input: {
   readonly reasoningLabel?: string;
   readonly spinnerFrame: number;
 }): React.ReactNode {
-  const statusLine = formatWorkShellBusyStatusLine(input.busyStatus, input.spinnerFrame);
-  const detailLines = [
-    input.reasoningLabel
-      ? formatWorkShellThinkingLine(input.reasoningLabel).replace(/^Thinking · /, "Reasoning · ")
-      : undefined,
-    statusLine,
-  ].filter((line): line is string => typeof line === "string" && line.length > 0);
+  const detailLines = getWorkShellThinkingDetailLines({
+    ...(input.busyStatus ? { busyStatus: input.busyStatus } : {}),
+    spinnerFrame: input.spinnerFrame,
+  });
+  if (detailLines.length === 0) {
+    return null;
+  }
 
   return (
-    <Box marginBottom={1} flexDirection="column">
-      <Text backgroundColor={W.border} color={W.assistantBody} bold>
-        {padDisplayLine(" thinking ", input.width)}
-      </Text>
-      {renderSurfaceText({
-        text: detailLines.join("\n"),
-        width: input.width,
-        backgroundColor: W.border,
-        color: W.assistantMuted,
-        keyPrefix: "thinking",
-      })}
+    <Box marginBottom={1} paddingLeft={1} flexDirection="column">
+      <Text bold color={W.assistantMuted}>Thinking</Text>
+      <Box marginTop={1} paddingLeft={1} flexDirection="column">
+        {detailLines.flatMap((line, lineIndex) =>
+          wrapDisplayText(line, Math.max(20, input.width - 4)).map((wrappedLine, wrappedIndex) => (
+            <Text key={`thinking-${String(lineIndex)}-${String(wrappedIndex)}`} color={W.assistantMuted}>
+              {wrappedLine}
+            </Text>
+          )),
+        )}
+      </Box>
     </Box>
   );
 }
 
+export function getWorkShellThinkingDetailLines(input: {
+  readonly busyStatus?: string;
+  readonly spinnerFrame?: number;
+}): readonly string[] {
+  if (!input.busyStatus || isLowSignalThinkingStatus(input.busyStatus)) {
+    return [];
+  }
+
+  return [formatWorkShellBusyStatusLine(input.busyStatus, input.spinnerFrame ?? 0)];
+}
+
+function isLowSignalThinkingStatus(status: string): boolean {
+  const normalized = status.trim().replace(/^·\s*/, "").toLowerCase();
+  return normalized === "" || normalized === "thinking" || normalized === "thinking...";
+}
+
 const WorkShellConversationBlock = React.memo(function WorkShellConversationBlock(props: {
   readonly entries: readonly WorkShellEntry[];
-  readonly panelPlacement: "side" | "bottom";
+  readonly panelPlacement: WorkShellPanelPlacement;
   readonly isBusy: boolean;
   readonly busyStatus?: string;
   readonly reasoningLabel?: string;
@@ -711,9 +747,9 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
 const WorkShellPanelBlock = React.memo(function WorkShellPanelBlock(props: {
   readonly title: string;
   readonly lines: readonly string[];
-  readonly panelPlacement: "side" | "bottom";
+  readonly panelPlacement: WorkShellPanelPlacement;
   readonly panelBorderColor: string;
-  readonly panelDisplayMode: "hidden" | "overlay" | "side" | "bottom";
+  readonly panelDisplayMode: WorkShellPanelDisplayMode;
   readonly inputValue: string;
 }) {
   return (
@@ -774,6 +810,8 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   readonly lastTurnDurationMs?: number;
 }) {
   const [nowMs, setNowMs] = React.useState(() => Date.now());
+  const [spinnerFrame, setSpinnerFrame] = React.useState(0);
+  const spinner = WORK_SHELL_BUSY_SPINNER_FRAMES[((spinnerFrame % WORK_SHELL_BUSY_SPINNER_FRAMES.length) + WORK_SHELL_BUSY_SPINNER_FRAMES.length) % WORK_SHELL_BUSY_SPINNER_FRAMES.length];
   const thinkingLine = formatWorkShellThinkingLine(props.reasoningLabel);
   const statusLine = formatWorkShellStatusLine({
     model: props.model,
@@ -787,18 +825,22 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
     ...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {}),
     ...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {}),
     nowMs,
+    spinnerFrame,
   });
 
   React.useEffect(() => {
     if (!props.isBusy) {
       setNowMs(Date.now());
+      setSpinnerFrame(0);
       return;
     }
 
     setNowMs(Date.now());
+    setSpinnerFrame((frame) => frame + 1);
     const interval = setInterval(() => {
       setNowMs(Date.now());
-    }, 1000);
+      setSpinnerFrame((frame) => frame + 1);
+    }, 120);
 
     return () => {
       clearInterval(interval);
@@ -809,7 +851,7 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
     <Box marginTop={1} flexDirection="column">
       <WorkShellSectionDivider label="session" accentColor={W.textMuted} />
       <Box marginTop={1} paddingLeft={1} flexDirection="column">
-        <Text bold color={props.reasoningSupported ? W.user : W.warning}>{thinkingLine}</Text>
+        <Text bold color={props.reasoningSupported ? W.user : W.warning}>{props.isBusy ? `${spinner} ${thinkingLine}` : thinkingLine}</Text>
         <Text color={W.text}>{statusLine}</Text>
         <Text color={props.isBusy ? W.assistant : W.textMuted}>{usageLine}</Text>
       </Box>
@@ -830,7 +872,6 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   readonly attachmentCount?: number;
 }) {
   const dockWidth = getWorkShellDockWidth(props.terminalColumns);
-  const accent = props.inputValue.trim().startsWith("/") ? W.user : W.borderStrong;
   const footerLine = formatWorkShellFooterLine({
     ...(props.cwd ? { cwd: props.cwd } : {}),
     model: props.model,
@@ -840,12 +881,18 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
     ...(props.composerHint ? { composerHint: props.composerHint } : {}),
     width: dockWidth,
   });
-
-  const badgeColor = props.attachmentCount !== undefined && props.attachmentCount >= 5 ? "#e6a817" : W.textDim;
+  const dockLayout = resolveWorkShellComposerDockLayout({
+    inputValue: props.inputValue,
+    dockWidth,
+    footerLine,
+    ...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {}),
+  });
+  const accent = dockLayout.accentColorRole === "user" ? W.user : W.borderStrong;
+  const badgeColor = dockLayout.attachmentBadgeColorRole === "warning" ? W.warning : W.textDim;
 
   return (
     <Box marginTop={1} flexDirection="column">
-      <Text color={accent}>{padDisplayLine("", dockWidth).replace(/ /g, "─")}</Text>
+      <Text color={accent}>{dockLayout.topDivider}</Text>
       <Box minHeight={1} paddingLeft={1}>
         <Text backgroundColor={accent} color={W.text}>{" "}</Text>
         <Text color={W.textMuted}>{" "}</Text>
@@ -854,8 +901,8 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
           <Text color={badgeColor}> [{props.attachmentCount}/5]</Text>
         ) : null}
       </Box>
-      <Text color={W.border}>{padDisplayLine("", dockWidth).replace(/ /g, "─")}</Text>
-      <Text color={W.textDim}>{padDisplayLine(footerLine, dockWidth)}</Text>
+      <Text color={W.border}>{dockLayout.bottomDivider}</Text>
+      <Text color={W.textDim}>{dockLayout.footerLine}</Text>
     </Box>
   );
 });

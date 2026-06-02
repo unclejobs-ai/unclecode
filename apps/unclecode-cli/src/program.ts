@@ -14,8 +14,13 @@ import {
   MODE_PROFILE_IDS,
   UNCLECODE_COMMAND_NAME,
 } from "@unclecode/contracts";
-import type { ModeProfileId } from "@unclecode/contracts";
-import { loadExtensionConfigOverlays, runRustCommand } from "@unclecode/orchestrator";
+import type { ModeProfileId, PersonaId, TeamLaneRuntime } from "@unclecode/contracts";
+import {
+  loadExtensionConfigOverlays,
+  runRustCommand,
+  runRustCommandPassthrough,
+  runRustCommandSync,
+} from "@unclecode/orchestrator";
 import {
   buildOpenAIAuthorizationUrl,
   completeOpenAIBrowserLogin,
@@ -33,9 +38,9 @@ import { createServer } from "node:http";
 import {
   buildDoctorReport,
   buildDoctorReportData,
+  buildMcpInspectReport,
   buildMcpListReport,
   buildResearchStatusReport,
-  buildResumeSummaryData,
   buildSetupReport,
   formatModeSetReport,
   formatModeStatusReport,
@@ -45,8 +50,7 @@ import {
   runResearchPassData,
 } from "./operational.js";
 import { shouldLaunchDefaultWorkSession } from "./startup-paths.js";
-import { launchSessionCenter } from "./session-center-launcher.js";
-import { buildWorkCommandArgs, launchWorkEntrypoint, withWorkCwd } from "./work-bootstrap.js";
+import { buildWorkCommandArgs, launchWorkEntrypoint } from "./work-bootstrap.js";
 
 const UNCLECODE_CLI_VERSION = "0.1.0";
 
@@ -356,7 +360,11 @@ async function handleRootCommand(program: Command): Promise<void> {
       stdoutIsTTY: process.stdout.isTTY ?? false,
     })
   ) {
-    await launchWorkEntrypoint([]);
+    process.exitCode = await runRustCommandPassthrough(
+      ["work"],
+      process.cwd(),
+      process.env,
+    );
     return;
   }
 
@@ -364,18 +372,38 @@ async function handleRootCommand(program: Command): Promise<void> {
 }
 
 async function handleTuiCommand(options: WorkCommandOptions): Promise<void> {
-  await launchWorkEntrypoint(buildWorkCommandArgs([], options));
+  if (process.env.UNCLECODE_FORCE_TS_TUI === "1") {
+    await launchWorkEntrypoint(buildWorkCommandArgs([], options), {
+      callerCwd: process.cwd(),
+    });
+    return;
+  }
+
+  process.exitCode = await runRustCommandPassthrough(
+    ["tui", ...buildWorkCommandArgs([], options)],
+    process.cwd(),
+    process.env,
+  );
 }
 
-async function handleCenterCommand(): Promise<void> {
-  await launchSessionCenter({
-    workspaceRoot: process.cwd(),
-    env: process.env,
-  });
+async function handleCenterCommand(args: string[] = []): Promise<void> {
+  if (process.env.UNCLECODE_FORCE_TS_TUI === "1" && args.length === 0) {
+    const { launchSessionCenter } = await import("./session-center-launcher.js");
+    await launchSessionCenter({ workspaceRoot: process.cwd() });
+    return;
+  }
+
+  process.stdout.write(
+    await runRustCommand(["center", ...args], process.cwd(), undefined, process.env),
+  );
 }
 
 async function handleWorkCommand(promptParts: string[], options: WorkCommandOptions): Promise<void> {
-  await launchWorkEntrypoint(buildWorkCommandArgs(promptParts, options));
+  process.exitCode = await runRustCommandPassthrough(
+    ["work", ...buildWorkCommandArgs(promptParts, options)],
+    process.cwd(),
+    process.env,
+  );
 }
 
 async function handleDoctorCommand(options: DoctorCommandOptions): Promise<void> {
@@ -395,28 +423,23 @@ async function handleDoctorCommand(options: DoctorCommandOptions): Promise<void>
 }
 
 async function handleResumeCommand(sessionId: string, options: ResumeCommandOptions): Promise<void> {
-  const { lines, report } = await buildResumeSummaryData({
-    workspaceRoot: process.cwd(),
-    env: process.env,
+  process.stdout.write(
+    await runRustCommand(
+      buildResumeCommandArgs(sessionId, options),
+      process.cwd(),
+      undefined,
+      process.env,
+    ),
+  );
+}
+
+function buildResumeCommandArgs(sessionId: string, options: ResumeCommandOptions): string[] {
+  return [
+    "resume",
     sessionId,
-  });
-
-  if (options.json) {
-    process.stdout.write(`${JSON.stringify(report)}\n`);
-    return;
-  }
-
-  if ((process.stdin.isTTY ?? false) && (process.stdout.isTTY ?? false)) {
-    await launchSessionCenter({
-      workspaceRoot: process.cwd(),
-      env: process.env,
-      initialSelectedSessionId: sessionId,
-      contextLines: lines,
-    });
-    return;
-  }
-
-  process.stdout.write(`${lines.join("\n")}\n`);
+    ...(options.verbose ? ["--verbose"] : []),
+    ...(options.json ? ["--json"] : []),
+  ];
 }
 
 async function handleResearchStatusCommand(): Promise<void> {
@@ -516,16 +539,30 @@ function handleMcpListCommand(): void {
   );
 }
 
+function handleMcpInspectCommand(serverName: string): void {
+  const userHomeDir = process.env.HOME;
+
+  process.stdout.write(
+    `${buildMcpInspectReport({
+      workspaceRoot: process.cwd(),
+      serverName,
+      ...(userHomeDir ? { userHomeDir } : {}),
+    })}\n`,
+  );
+}
+
 function registerRootCommands(program: Command): void {
   program.action(async () => {
     await handleRootCommand(program);
   });
 
   program
-    .command("center")
+    .command("center [args...]")
     .description("Launch the secondary session center")
-    .action(async () => {
-      await handleCenterCommand();
+    .allowUnknownOption(true)
+    .helpOption(false)
+    .action(async (args: string[]) => {
+      await handleCenterCommand(args);
     });
 
   program
@@ -592,7 +629,7 @@ function registerWorkCommands(program: Command): void {
     .option("--session-id <sessionId>")
     .option("--tools")
     .option("--help")
-    .action(async (_promptParts: string[], options: WorkCommandOptions) => {
+    .action(async (options: WorkCommandOptions) => {
       await handleTuiCommand(options);
     });
 
@@ -742,6 +779,13 @@ function registerMcpCommands(program: Command): void {
     .action(() => {
       handleMcpListCommand();
     });
+
+  mcpCommand
+    .command("inspect <server>")
+    .description("Inspect one configured MCP server without starting it")
+    .action((serverName: string) => {
+      handleMcpInspectCommand(serverName);
+    });
 }
 
 export function createUncleCodeProgram(): Command {
@@ -806,7 +850,7 @@ function registerHarnessCommands(program: Command): void {
 
       if (!status.exists) {
         process.stderr.write(`No .codex/config.toml found at ${status.configPath}\n`);
-        process.stderr.write("Install oh-my-codex or create the config first.\n");
+        process.stderr.write("Run 'unclecode harness init' or create the config first.\n");
         process.exitCode = 1;
         return;
       }
@@ -873,41 +917,14 @@ function registerTeamCommands(program: import("commander").Command): void {
       }) => {
         const workerModule = await import("./team-worker.js");
         const { handleTeamWorker } = workerModule;
-        const { PERSONA_IDS, isTeamLaneRuntime, TEAM_LANE_RUNTIMES } = await import("@unclecode/contracts");
-        if (!PERSONA_IDS.includes(options.persona as (typeof PERSONA_IDS)[number])) {
-          throw new Error(`Unknown persona "${options.persona}". Valid: ${PERSONA_IDS.join(", ")}`);
-        }
-        const runtime = options.runtime ?? "openai";
-        if (!isTeamLaneRuntime(runtime)) {
-          throw new Error(`Unknown runtime "${runtime}". Valid: ${TEAM_LANE_RUNTIMES.join(", ")}`);
-        }
-        let extras: Record<string, string> | undefined;
-        if (options.extras !== undefined && options.extras.trim().length > 0) {
-          try {
-            const parsed = JSON.parse(options.extras) as unknown;
-            if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-              throw new Error("not a JSON object");
-            }
-            extras = {};
-            for (const [key, value] of Object.entries(parsed)) {
-              if (typeof value !== "string") {
-                throw new Error(`extras.${key} must be a string`);
-              }
-              extras[key] = value;
-            }
-          } catch (err) {
-            throw new Error(
-              `--extras must be a JSON object of string values (${err instanceof Error ? err.message : String(err)})`,
-            );
-          }
-        }
+        const resolved = resolveTeamWorkerOptions(options);
         await handleTeamWorker({
-          persona: options.persona as (typeof PERSONA_IDS)[number],
-          workerId: options.workerId,
-          task: options.task,
-          runtime,
-          ...(options.model !== undefined ? { model: options.model } : {}),
-          ...(extras !== undefined ? { extras } : {}),
+          persona: resolved.persona,
+          workerId: resolved.workerId,
+          task: resolved.task,
+          runtime: resolved.runtime,
+          ...(resolved.model !== undefined ? { model: resolved.model } : {}),
+          ...(resolved.extras !== undefined ? { extras: resolved.extras } : {}),
         });
       },
     );
@@ -952,4 +969,60 @@ function registerTeamCommands(program: import("commander").Command): void {
       const teamModule = await import("./team.js");
       teamModule.handleTeamDoctor();
     });
+}
+
+type ResolvedTeamWorkerOptions = {
+  readonly persona: PersonaId;
+  readonly workerId: string;
+  readonly task: string;
+  readonly runtime: TeamLaneRuntime;
+  readonly model?: string;
+  readonly extras?: Readonly<Record<string, string>>;
+};
+
+function resolveTeamWorkerOptions(options: {
+  readonly persona: string;
+  readonly workerId: string;
+  readonly task: string;
+  readonly runtime?: string;
+  readonly model?: string;
+  readonly extras?: string;
+}): ResolvedTeamWorkerOptions {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "team", "worker-options"],
+      process.cwd(),
+      JSON.stringify({ options }),
+    ),
+  ) as unknown;
+  if (!isRecord(parsed)) {
+    throw new Error("Rust team worker options returned invalid payload");
+  }
+  if (
+    typeof parsed.persona !== "string"
+    || typeof parsed.workerId !== "string"
+    || typeof parsed.task !== "string"
+    || typeof parsed.runtime !== "string"
+    || (parsed.model !== undefined && typeof parsed.model !== "string")
+    || (parsed.extras !== undefined && !isStringRecord(parsed.extras))
+  ) {
+    throw new Error("Rust team worker options returned invalid fields");
+  }
+  return {
+    persona: parsed.persona as PersonaId,
+    workerId: parsed.workerId,
+    task: parsed.task,
+    runtime: parsed.runtime as TeamLaneRuntime,
+    ...(parsed.model !== undefined ? { model: parsed.model } : {}),
+    ...(parsed.extras !== undefined ? { extras: parsed.extras } : {}),
+  };
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value)
+    && Object.values(value).every((entry) => typeof entry === "string");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -1,6 +1,7 @@
 import { loadInitialWorkShellContextState } from "./work-shell-engine-context.js";
 import {
   createCollapsedContextPanel,
+  createRecentSessionsPanel,
   createRecentSessionsLoadingPanel,
   createSensitiveInputCancelResult,
   loadRecentSessionsPanel,
@@ -10,6 +11,7 @@ import type {
   WorkShellComposerMode,
   WorkShellEngineOptions,
   WorkShellPanel,
+  WorkShellStatusContext,
 } from "./work-shell-engine.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 
@@ -64,6 +66,25 @@ export async function loadOpenSessionsPanelState(input: {
   };
 }
 
+export function createOpenSessionsLoadingPanel(): WorkShellPanel {
+  return createRecentSessionsLoadingPanel();
+}
+
+export async function loadOpenSessionsLoadedPanel(input: {
+  cwd: string;
+  listSessionLines: (cwd: string) => Promise<readonly string[]>;
+}): Promise<WorkShellPanel> {
+  return loadRecentSessionsPanel(input);
+}
+
+export function createOpenSessionsFailurePanel(error: unknown): WorkShellPanel {
+  const message = error instanceof Error ? error.message : String(error);
+  return createRecentSessionsPanel([
+    `Unable to load sessions · ${message}`,
+    "Use /context to inspect the loaded workspace context.",
+  ]);
+}
+
 export function resolveSensitiveInputCancelState<Reasoning extends WorkShellReasoningConfig>(input: {
   composerMode: WorkShellComposerMode;
   options: WorkShellEngineOptions<Reasoning>;
@@ -74,7 +95,9 @@ export function resolveSensitiveInputCancelState<Reasoning extends WorkShellReas
     options: WorkShellEngineOptions<Reasoning>,
     reasoning: Reasoning,
     authLabel: string,
+    statusContext?: WorkShellStatusContext,
   ) => WorkShellPanel;
+  statusContext?: WorkShellStatusContext;
 }): {
   readonly entries: readonly WorkShellChatEntry[];
   readonly composerMode: "default";
@@ -89,6 +112,7 @@ export function resolveSensitiveInputCancelState<Reasoning extends WorkShellReas
     stateModel: input.stateModel,
     reasoning: input.reasoning,
     authLabel: input.authLabel,
+    ...(input.statusContext ? { statusContext: input.statusContext } : {}),
     buildStatusPanel: input.buildStatusPanel,
   });
 }

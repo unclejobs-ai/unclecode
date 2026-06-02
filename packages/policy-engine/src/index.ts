@@ -52,4 +52,9 @@ export function formatApprovalMessage(decision: PolicyDecision): string {
   return `[${decision.effect.toUpperCase()}] ${decision.reason} (${decision.matchedRule})`;
 }
 
+export {
+  LOCAL_AUDIT_EXECUTION_POLICY_PROFILE,
+  evaluateExecutionPolicy,
+} from "./execution-policy.js";
+export type { ExecutionPolicyRequest } from "./execution-policy.js";
 export { getPolicyEffectRank } from "./delegation.js";

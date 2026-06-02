@@ -1,24 +1,13 @@
-/**
- * Team-worker glue between the stateless `LlmProvider.query` shape (in
- * `@unclecode/providers`) and the caller-managed MiniLoopAgent loop.
- *
- * - `teamMiniLoopExecutor` resolves a `MiniLoopAction` to its ACI
- *   helper (currently: run_shell only; file/patch/search tools land in
- *   later slices).
- * - `miniLoopMessagesToProviderQuery` translates the agent's message
- *   log into the provider's wire-bound shape, generating synthetic
- *   tool-call IDs so OpenAI accepts the assistant + tool message pair.
- */
-
-import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
-
 import type {
+  ExecutionPolicyEvaluation,
+  ExecutionPolicyCapability,
+  ExecutionPolicyProfile,
+  ExecutionPolicyRule,
   MiniLoopAction,
   MiniLoopMessage,
   MiniLoopObservation,
   PersonaId,
+  PolicyDeniedTraceEvent,
 } from "@unclecode/contracts";
 import type {
   LlmProvider,
@@ -29,15 +18,8 @@ import type {
 import { MiniLoopAgent, type MiniLoopModelClient } from "./mini-loop-agent.js";
 import { getPersonaConfig } from "./personas/index.js";
 import type { TeamBinding } from "./team-binding.js";
-import { applyPatch } from "./aci/apply-patch.js";
-import { openFile } from "./aci/file-viewer.js";
-import {
-  PathContainmentError,
-  assertWithinWorkspace,
-} from "./aci/path-containment.js";
-import { glob } from "./aci/quick-tools.js";
 import { runShell } from "./aci/run-shell.js";
-import { searchDir } from "./aci/search.js";
+import { runRustCommand } from "./rust-command.js";
 
 export type TeamMiniLoopExecutor = {
   execute(
@@ -46,36 +28,243 @@ export type TeamMiniLoopExecutor = {
   ): Promise<MiniLoopObservation>;
 };
 
-export function createTeamMiniLoopExecutor(): TeamMiniLoopExecutor {
+type TeamMiniLoopPolicyRequestBase = {
+  readonly cwd: string;
+  readonly runtimeMode: string;
+};
+
+export type TeamMiniLoopPolicyRequest =
+  | (TeamMiniLoopPolicyRequestBase & {
+      readonly capability: "shell.run";
+      readonly tool: "run_shell";
+      readonly command: string;
+    })
+  | (TeamMiniLoopPolicyRequestBase & {
+      readonly capability: "filesystem.read";
+      readonly tool: "read_file";
+      readonly path: string;
+    })
+  | (TeamMiniLoopPolicyRequestBase & {
+      readonly capability: "filesystem.read";
+      readonly tool: "search_text";
+      readonly path: string;
+      readonly query: string;
+    })
+  | (TeamMiniLoopPolicyRequestBase & {
+      readonly capability: "filesystem.read";
+      readonly tool: "list_files";
+      readonly pattern: string;
+    })
+  | (TeamMiniLoopPolicyRequestBase & {
+      readonly capability: "filesystem.write";
+      readonly tool: "write_file";
+      readonly path: string;
+    })
+  | (TeamMiniLoopPolicyRequestBase & {
+      readonly capability: "filesystem.write";
+      readonly tool: "apply_patch";
+      readonly patchLength: number;
+    });
+
+export type TeamMiniLoopPolicyEvaluator = (
+  request: TeamMiniLoopPolicyRequest,
+) => ExecutionPolicyEvaluation | undefined;
+
+export type TeamMiniLoopExecutorOptions = {
+  readonly runtimeMode?: string;
+  readonly evaluatePolicy?: TeamMiniLoopPolicyEvaluator;
+  readonly onPolicyDenied?: (event: PolicyDeniedTraceEvent) => void;
+};
+
+export const TEAM_LOCAL_AUDIT_EXECUTION_POLICY_PROFILE: ExecutionPolicyProfile = {
+  id: "team.local.audit",
+  mode: "audit",
+  defaultEffect: "allow",
+  rules: [],
+};
+
+export function createTeamRuntimeExecutionPolicyProfile(
+  runtimeMode: string,
+): ExecutionPolicyProfile {
+  if (runtimeMode === "local") {
+    return TEAM_LOCAL_AUDIT_EXECUTION_POLICY_PROFILE;
+  }
+  return {
+    id: `team.${runtimeMode}.default-deny`,
+    mode: "enforce",
+    defaultEffect: "deny",
+    rules: [],
+  };
+}
+
+export function createTeamMiniLoopPolicyEvaluator(
+  profile: ExecutionPolicyProfile,
+): TeamMiniLoopPolicyEvaluator {
+  return (request) => evaluateTeamMiniLoopPolicy(profile, request);
+}
+
+function evaluateTeamMiniLoopPolicy(
+  profile: ExecutionPolicyProfile,
+  request: TeamMiniLoopPolicyRequest,
+): ExecutionPolicyEvaluation {
+  const matchedRule = profile.rules.find((rule) => ruleMatchesTeamMiniLoopRequest(rule, request));
+  const rawEffect = matchedRule?.effect ?? profile.defaultEffect;
+  const auditOnly = profile.mode === "audit" && rawEffect !== "allow";
+  return {
+    capability: request.capability,
+    effect: profile.mode === "audit" ? "allow" : rawEffect,
+    source: matchedRule?.match?.runtimeMode ? "runtime" : "base",
+    reason: auditOnly
+      ? `Audit only: ${matchedRule?.reason ?? `Default ${rawEffect} for ${request.capability}.`}`
+      : matchedRule?.reason ?? `Default ${rawEffect} for ${request.capability}.`,
+    matchedRule: matchedRule?.id ?? `${profile.id}.${request.capability}.default`,
+    auditOnly,
+  };
+}
+
+function ruleMatchesTeamMiniLoopRequest(
+  rule: ExecutionPolicyRule,
+  request: TeamMiniLoopPolicyRequest,
+): boolean {
+  if (rule.capability !== request.capability) {
+    return false;
+  }
+  const match = rule.match;
+  if (!match) {
+    return true;
+  }
+  if (match.runtimeMode !== undefined && match.runtimeMode !== request.runtimeMode) {
+    return false;
+  }
+  if (match.pathPrefix !== undefined) {
+    const path = getPolicyRequestPath(request);
+    if (path === undefined || !pathMatchesPrefix(path, match.pathPrefix)) {
+      return false;
+    }
+  }
+  if (match.commandPrefix !== undefined) {
+    if (request.tool !== "run_shell" || !request.command.trimStart().startsWith(match.commandPrefix.trimStart())) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getPolicyRequestPath(request: TeamMiniLoopPolicyRequest): string | undefined {
+  switch (request.tool) {
+    case "read_file":
+    case "search_text":
+    case "write_file":
+      return request.path;
+    case "list_files":
+      return request.pattern;
+    case "run_shell":
+    case "apply_patch":
+      return undefined;
+  }
+}
+
+function pathMatchesPrefix(path: string, prefix: string): boolean {
+  const normalizedPath = normalizePolicyPath(path);
+  const normalizedPrefix = normalizePolicyPath(prefix);
+  if (normalizedPrefix === "" || normalizedPrefix === ".") {
+    return true;
+  }
+  return normalizedPath === normalizedPrefix
+    || normalizedPath.startsWith(`${normalizedPrefix}/`);
+}
+
+function normalizePolicyPath(value: string): string {
+  let normalized = value.replace(/\\/g, "/").replace(/^\.\/+/, "");
+  while (normalized.endsWith("/") && normalized.length > 1) {
+    normalized = normalized.slice(0, -1);
+  }
+  return normalized;
+}
+
+export function createTeamMiniLoopExecutor(
+  options: TeamMiniLoopExecutorOptions = {},
+): TeamMiniLoopExecutor {
+  const runtimeMode = options.runtimeMode ?? "local";
+  const normalizedOptions: TeamMiniLoopExecutorOptions = {
+    ...options,
+    runtimeMode,
+    evaluatePolicy: options.evaluatePolicy
+      ?? createTeamMiniLoopPolicyEvaluator(createTeamRuntimeExecutionPolicyProfile(runtimeMode)),
+  };
   return {
     async execute(action, cwd) {
       try {
         switch (action.tool) {
           case "run_shell":
-            return await dispatchRunShell(action, cwd);
+            return await dispatchRunShell(action, cwd, normalizedOptions);
           case "read_file":
-            return dispatchReadFile(action, cwd);
+            return await dispatchReadFile(action, cwd, normalizedOptions);
           case "write_file":
-            return dispatchWriteFile(action, cwd);
+            return await dispatchWriteFile(action, cwd, normalizedOptions);
           case "search_text":
-            return await dispatchSearchText(action, cwd);
+            return await dispatchSearchText(action, cwd, normalizedOptions);
           case "list_files":
-            return await dispatchListFiles(action, cwd);
+            return await dispatchListFiles(action, cwd, normalizedOptions);
           case "apply_patch":
-            return dispatchApplyPatch(action, cwd);
+            return await dispatchApplyPatch(action, cwd, normalizedOptions);
           default:
             return errorObservation(`Unknown tool: ${action.tool}`);
         }
       } catch (error) {
-        if (error instanceof PathContainmentError) {
-          return errorObservation(error.message);
-        }
         return errorObservation(
           error instanceof Error ? error.message : String(error),
         );
       }
     },
   };
+}
+
+function emitPolicyDenied(
+  options: TeamMiniLoopExecutorOptions,
+  input: {
+    readonly capability: ExecutionPolicyCapability;
+    readonly effect: ExecutionPolicyEvaluation["effect"];
+    readonly runtimeMode: string;
+    readonly toolName: string;
+    readonly reason: string;
+    readonly matchedRule: string;
+    readonly source: ExecutionPolicyEvaluation["source"];
+  },
+): void {
+  options.onPolicyDenied?.({
+    type: "policy.denied",
+    level: "high-signal",
+    capability: input.capability,
+    effect: input.effect,
+    runtimeMode: input.runtimeMode,
+    toolName: input.toolName,
+    reason: input.reason,
+    matchedRule: input.matchedRule,
+    source: input.source,
+    startedAt: Date.now(),
+  });
+}
+
+function blockedByPolicyObservation(
+  options: TeamMiniLoopExecutorOptions,
+  input: {
+    readonly capability: ExecutionPolicyCapability;
+    readonly runtimeMode: string;
+    readonly toolName: string;
+    readonly decision: ExecutionPolicyEvaluation;
+  },
+): MiniLoopObservation {
+  emitPolicyDenied(options, {
+    capability: input.capability,
+    effect: input.decision.effect,
+    runtimeMode: input.runtimeMode,
+    toolName: input.toolName,
+    reason: input.decision.reason,
+    matchedRule: input.decision.matchedRule,
+    source: input.decision.source,
+  });
+  return errorObservation(`policy denied ${input.capability}: ${input.decision.reason}`);
 }
 
 function errorObservation(message: string): MiniLoopObservation {
@@ -87,11 +276,32 @@ function readString(input: Record<string, unknown>, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
+async function runRustAci(args: readonly string[], cwd: string, stdin?: string): Promise<string> {
+  return await runRustCommand(["rust", "aci", ...args], cwd, stdin);
+}
+
 async function dispatchRunShell(
   action: MiniLoopAction,
   cwd: string,
+  options: TeamMiniLoopExecutorOptions,
 ): Promise<MiniLoopObservation> {
   const command = readString(action.input, "command");
+  const runtimeMode = options.runtimeMode ?? "local";
+  const policyDecision = options.evaluatePolicy?.({
+    capability: "shell.run",
+    tool: "run_shell",
+    command,
+    cwd,
+    runtimeMode,
+  });
+  if (policyDecision !== undefined && policyDecision.effect !== "allow") {
+    return blockedByPolicyObservation(options, {
+      capability: "shell.run",
+      runtimeMode,
+      toolName: "run_shell",
+      decision: policyDecision,
+    });
+  }
   const result = await runShell({ command, cwd });
   return {
     stdout: result.stdout,
@@ -101,41 +311,78 @@ async function dispatchRunShell(
   };
 }
 
-function dispatchReadFile(
+async function dispatchReadFile(
   action: MiniLoopAction,
   cwd: string,
-): MiniLoopObservation {
+  options: TeamMiniLoopExecutorOptions,
+): Promise<MiniLoopObservation> {
   const path = readString(action.input, "path");
   if (path.length === 0) {
     return errorObservation("read_file: missing path");
+  }
+  const runtimeMode = options.runtimeMode ?? "local";
+  const policyDecision = options.evaluatePolicy?.({
+    capability: "filesystem.read",
+    tool: "read_file",
+    path,
+    cwd,
+    runtimeMode,
+  });
+  if (policyDecision !== undefined && policyDecision.effect !== "allow") {
+    return blockedByPolicyObservation(options, {
+      capability: "filesystem.read",
+      runtimeMode,
+      toolName: "read_file",
+      decision: policyDecision,
+    });
   }
   const windowRaw = action.input.window;
   const windowSize = typeof windowRaw === "number" && windowRaw > 0
     ? Math.floor(windowRaw)
     : undefined;
-  const result = openFile(
-    windowSize !== undefined ? { cwd, path, window: windowSize } : { cwd, path },
+  const stdout = await runRustAci(
+    windowSize !== undefined ? ["view", path, String(windowSize)] : ["view", path],
+    cwd,
   );
+  const totalMatch = stdout.match(/^\[Total\] (\d+) lines$/m);
+  const windowMatch = stdout.match(/^\[Window\] lines \d+-(\d+) /m);
+  const totalLines = Number.parseInt(totalMatch?.[1] ?? "0", 10);
+  const windowEnd = Number.parseInt(windowMatch?.[1] ?? "0", 10);
   return {
-    stdout: result.content,
+    stdout,
     stderr: "",
     exitCode: 0,
-    truncated: result.state.totalLines > result.state.windowEnd,
+    truncated: totalLines > windowEnd,
   };
 }
 
-function dispatchWriteFile(
+async function dispatchWriteFile(
   action: MiniLoopAction,
   cwd: string,
-): MiniLoopObservation {
+  options: TeamMiniLoopExecutorOptions,
+): Promise<MiniLoopObservation> {
   const path = readString(action.input, "path");
   if (path.length === 0) {
     return errorObservation("write_file: missing path");
   }
+  const runtimeMode = options.runtimeMode ?? "local";
+  const policyDecision = options.evaluatePolicy?.({
+    capability: "filesystem.write",
+    tool: "write_file",
+    path,
+    cwd,
+    runtimeMode,
+  });
+  if (policyDecision !== undefined && policyDecision.effect !== "allow") {
+    return blockedByPolicyObservation(options, {
+      capability: "filesystem.write",
+      runtimeMode,
+      toolName: "write_file",
+      decision: policyDecision,
+    });
+  }
   const contents = readString(action.input, "contents");
-  const absPath = assertWithinWorkspace(cwd, path, { allowMissing: true });
-  mkdirSync(dirname(absPath), { recursive: true });
-  writeFileSync(absPath, contents, "utf8");
+  await runRustAci(["write", path], cwd, contents);
   return {
     stdout: `wrote ${contents.length} bytes to ${path}`,
     stderr: "",
@@ -147,53 +394,105 @@ function dispatchWriteFile(
 async function dispatchSearchText(
   action: MiniLoopAction,
   cwd: string,
+  options: TeamMiniLoopExecutorOptions,
 ): Promise<MiniLoopObservation> {
   const query = readString(action.input, "query");
   if (query.length === 0) {
     return errorObservation("search_text: missing query");
   }
   const path = readString(action.input, "path");
-  const result = await searchDir({
-    cwd,
+  const runtimeMode = options.runtimeMode ?? "local";
+  const policyDecision = options.evaluatePolicy?.({
+    capability: "filesystem.read",
+    tool: "search_text",
+    path: path.length > 0 ? path : ".",
     query,
-    ...(path.length > 0 ? { path } : {}),
+    cwd,
+    runtimeMode,
   });
-  const lines = result.hits.map((hit) =>
-    hit.line !== undefined && hit.text !== undefined
-      ? `${hit.path}:${hit.line}:${hit.text}`
-      : hit.path,
-  );
+  if (policyDecision !== undefined && policyDecision.effect !== "allow") {
+    return blockedByPolicyObservation(options, {
+      capability: "filesystem.read",
+      runtimeMode,
+      toolName: "search_text",
+      decision: policyDecision,
+    });
+  }
+  const stdout = await runRustAci(path.length > 0 ? ["search", query, path] : ["search", query], cwd);
   return {
-    stdout: lines.join("\n"),
+    stdout: stdout.trimEnd(),
     stderr: "",
     exitCode: 0,
-    truncated: result.truncated,
+    truncated: stdout.includes(" total hits; refine query"),
   };
 }
 
 async function dispatchListFiles(
   action: MiniLoopAction,
   cwd: string,
+  options: TeamMiniLoopExecutorOptions,
 ): Promise<MiniLoopObservation> {
   const pattern = readString(action.input, "pattern") || "**/*";
-  const result = await glob({ cwd, pattern });
+  const runtimeMode = options.runtimeMode ?? "local";
+  const policyDecision = options.evaluatePolicy?.({
+    capability: "filesystem.read",
+    tool: "list_files",
+    pattern,
+    cwd,
+    runtimeMode,
+  });
+  if (policyDecision !== undefined && policyDecision.effect !== "allow") {
+    return blockedByPolicyObservation(options, {
+      capability: "filesystem.read",
+      runtimeMode,
+      toolName: "list_files",
+      decision: policyDecision,
+    });
+  }
+  const stdout = await runRustAci(["glob", pattern], cwd);
   return {
-    stdout: result.hits.map((hit) => hit.path).join("\n"),
+    stdout: stdout.trimEnd(),
     stderr: "",
     exitCode: 0,
-    truncated: result.truncated,
+    truncated: stdout.includes(" total hits; tighten pattern"),
   };
 }
 
-function dispatchApplyPatch(
+type RustApplyPatchResult = {
+  readonly applied: readonly { readonly path: string; readonly hunkCount: number }[];
+  readonly rejected: readonly { readonly path: string; readonly hunkIndex: number; readonly reason: string }[];
+};
+
+async function dispatchApplyPatch(
   action: MiniLoopAction,
   cwd: string,
-): MiniLoopObservation {
+  options: TeamMiniLoopExecutorOptions,
+): Promise<MiniLoopObservation> {
   const patch = readString(action.input, "patch");
   if (patch.length === 0) {
     return errorObservation("apply_patch: missing patch");
   }
-  const result = applyPatch({ cwd, patch });
+  const runtimeMode = options.runtimeMode ?? "local";
+  const policyDecision = options.evaluatePolicy?.({
+    capability: "filesystem.write",
+    tool: "apply_patch",
+    patchLength: patch.length,
+    cwd,
+    runtimeMode,
+  });
+  if (policyDecision !== undefined && policyDecision.effect !== "allow") {
+    return blockedByPolicyObservation(options, {
+      capability: "filesystem.write",
+      runtimeMode,
+      toolName: "apply_patch",
+      decision: policyDecision,
+    });
+  }
+  const parsed = JSON.parse(await runRustAci(["apply-patch"], cwd, patch)) as unknown;
+  if (!isRustApplyPatchResult(parsed)) {
+    return errorObservation("apply_patch: invalid Rust result");
+  }
+  const result = parsed;
   const appliedSummary = result.applied
     .map((entry) => `${entry.path} (${entry.hunkCount} hunks)`)
     .join("\n");
@@ -210,14 +509,25 @@ function dispatchApplyPatch(
   };
 }
 
-/**
- * Convert MiniLoopAgent's message log into provider-wire messages.
- * - "exit" role messages (internal sentinels) are dropped.
- * - assistant messages followed by consecutive tool messages with the
- *   same `stepIndex` are paired into one `toolCalls[]`. Synthetic
- *   callIds derive from position so the same log always produces the
- *   same wire shape.
- */
+function isRustApplyPatchResult(value: unknown): value is RustApplyPatchResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as { applied?: unknown; rejected?: unknown };
+  return Array.isArray(candidate.applied)
+    && Array.isArray(candidate.rejected)
+    && candidate.applied.every((entry) => {
+      const item = entry as { path?: unknown; hunkCount?: unknown };
+      return typeof item.path === "string" && typeof item.hunkCount === "number";
+    })
+    && candidate.rejected.every((entry) => {
+      const item = entry as { path?: unknown; hunkIndex?: unknown; reason?: unknown };
+      return typeof item.path === "string"
+        && typeof item.hunkIndex === "number"
+        && typeof item.reason === "string";
+    });
+}
+
 export function miniLoopMessagesToProviderQuery(
   messages: ReadonlyArray<MiniLoopMessage>,
 ): ProviderQueryMessage[] {
@@ -425,6 +735,9 @@ export type RunTeamMiniLoopArgs = {
   readonly binding: TeamBinding;
   readonly provider: LlmProvider;
   readonly cwd: string;
+  readonly runtimeMode?: string;
+  readonly executionPolicyProfile?: ExecutionPolicyProfile;
+  readonly onPolicyDenied?: (event: PolicyDeniedTraceEvent) => void;
   readonly tools?: readonly ToolDefinition[];
 };
 
@@ -449,7 +762,18 @@ export async function runTeamMiniLoop(
     );
   }
   const config = getPersonaConfig(args.persona);
-  const executor = createTeamMiniLoopExecutor();
+  const runtimeMode = args.runtimeMode ?? "local";
+  const executionPolicyProfile = args.executionPolicyProfile
+    ?? createTeamRuntimeExecutionPolicyProfile(runtimeMode);
+  const deniedPolicyEvents: PolicyDeniedTraceEvent[] = [];
+  const executor = createTeamMiniLoopExecutor({
+    runtimeMode,
+    evaluatePolicy: createTeamMiniLoopPolicyEvaluator(executionPolicyProfile),
+    onPolicyDenied(event) {
+      deniedPolicyEvents.push(event);
+      args.onPolicyDenied?.(event);
+    },
+  });
   const tools = args.tools ?? TEAM_DEFAULT_TOOLS;
   const query = args.provider.query.bind(args.provider);
 
@@ -475,19 +799,28 @@ export async function runTeamMiniLoop(
     cwd: args.cwd,
     hooks: {
       onAfterStep: async (ctx, action, observation) => {
-        const argHash = createHash("sha256")
-          .update(JSON.stringify(action.input ?? {}))
-          .digest("hex");
-        const observationHash = createHash("sha256")
-          .update(observation.stdout)
-          .update(observation.stderr)
-          .digest("hex");
+        const argHash = await rustSha256(JSON.stringify(action.input ?? {}), args.cwd);
+        const observationHash = await rustSha256(`${observation.stdout}${observation.stderr}`, args.cwd);
+        const policyDenied = deniedPolicyEvents.shift();
         args.binding.publish({
           type: "team_step",
           runId: args.binding.runId,
           workerId: args.workerId,
           stepIndex: ctx.stepIndex,
           action: { tool: action.tool, argHash },
+          ...(policyDenied
+            ? {
+                policy: {
+                  capability: policyDenied.capability,
+                  effect: policyDenied.effect,
+                  source: policyDenied.source,
+                  reason: policyDenied.reason,
+                  matchedRule: policyDenied.matchedRule,
+                  runtimeMode: policyDenied.runtimeMode,
+                  ...(policyDenied.toolName !== undefined ? { toolName: policyDenied.toolName } : {}),
+                },
+              }
+            : {}),
           observationHash,
           timestamp: new Date().toISOString(),
         });
@@ -503,4 +836,8 @@ export async function runTeamMiniLoop(
     steps: result.steps,
     costUsd: result.costUsd,
   };
+}
+
+async function rustSha256(input: string, cwd: string): Promise<string> {
+  return (await runRustCommand(["rust", "sha256"], cwd, input)).trim();
 }

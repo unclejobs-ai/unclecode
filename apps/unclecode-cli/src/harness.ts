@@ -1,5 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
+import { runRustCommandSync } from "@unclecode/orchestrator";
 
 type HarnessStatus = {
   readonly configPath: string;
@@ -13,71 +12,125 @@ type HarnessStatus = {
   readonly mcpServers: readonly string[];
 };
 
-function resolveCodexConfigPath(cwd: string): string {
-  return path.join(cwd, ".codex", "config.toml");
-}
-
-function parseTomlValue(content: string, key: string): string | null {
-  const pattern = new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m");
-  const match = content.match(pattern);
-  return match?.[1] ?? null;
-}
-
-function parseTomlBool(content: string, key: string): boolean {
-  const pattern = new RegExp(`^${key}\\s*=\\s*(true|false)`, "m");
-  const match = content.match(pattern);
-  return match?.[1] === "true";
-}
-
-function parseTomlArray(content: string, key: string): readonly string[] {
-  const pattern = new RegExp(`^${key}\\s*=\\s*\\[([^\\]]*)]`, "m");
-  const match = content.match(pattern);
-  if (!match?.[1]) return [];
-  return match[1]
-    .split(",")
-    .map((v) => v.trim().replace(/^"|"$/g, ""))
-    .filter((v) => v.length > 0);
-}
-
-function parseMcpServerNames(content: string): readonly string[] {
-  const names: string[] = [];
-  const pattern = /^\[mcp_servers\.(\w+)]/gm;
-  let match = pattern.exec(content);
-  while (match) {
-    names.push(match[1] ?? "");
-    match = pattern.exec(content);
-  }
-  return names.filter((n) => n.length > 0);
-}
+type HarnessApplyChange = {
+  readonly key: string;
+  readonly value: string;
+  readonly changed: boolean;
+};
 
 export function inspectHarnessStatus(cwd: string): HarnessStatus {
-  const configPath = resolveCodexConfigPath(cwd);
-  if (!existsSync(configPath)) {
-    return {
-      configPath,
-      exists: false,
-      model: null,
-      reasoningEffort: null,
-      approvals: null,
-      trustLevel: null,
-      multiAgent: false,
-      statusLine: [],
-      mcpServers: [],
-    };
-  }
-
-  const content = readFileSync(configPath, "utf8");
+  const fields = parseRustHarnessStatus(
+    runRustCommandSync(["rust", "harness", "inspect", cwd], process.cwd()),
+  );
   return {
-    configPath,
-    exists: true,
-    model: parseTomlValue(content, "model"),
-    reasoningEffort: parseTomlValue(content, "model_reasoning_effort"),
-    approvals: parseTomlValue(content, "approvals_reviewer"),
-    trustLevel: parseTomlValue(content, "trust_level"),
-    multiAgent: parseTomlBool(content, "multi_agent"),
-    statusLine: parseTomlArray(content, "status_line"),
-    mcpServers: parseMcpServerNames(content),
+    configPath: fields.single.configPath ?? "",
+    exists: fields.single.exists === "true",
+    model: normalizeOptional(fields.single.model),
+    reasoningEffort: normalizeOptional(fields.single.reasoningEffort),
+    approvals: normalizeOptional(fields.single.approvals),
+    trustLevel: normalizeOptional(fields.single.trustLevel),
+    multiAgent: fields.single.multiAgent === "true",
+    statusLine: fields.repeated.statusLine ?? [],
+    mcpServers: fields.repeated.mcpServer ?? [],
   };
+}
+
+export function applyHarnessPreset(cwd: string, preset: HarnessPresetId): readonly HarnessApplyChange[] {
+  const stdout = runRustCommandSync(["rust", "harness", "apply", preset, cwd], process.cwd());
+  return parseRustHarnessApply(stdout);
+}
+
+export function getRustStartupProbe(): { readonly probe: string; readonly elapsedMs: number } {
+  const fields = parseRustKeyValueLines(
+    runRustCommandSync(["rust", "perf", "startup"], process.cwd()),
+  );
+  return {
+    probe: fields.get("probe") ?? "native-startup",
+    elapsedMs: Number.parseFloat(fields.get("elapsedMs") ?? "0"),
+  };
+}
+
+function parseRustHarnessStatus(stdout: string): {
+  readonly single: Record<string, string>;
+  readonly repeated: Record<string, string[]>;
+} {
+  const single: Record<string, string> = {};
+  const repeated: Record<string, string[]> = {};
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) {
+      continue;
+    }
+    const separator = line.indexOf("\t");
+    if (separator < 0) {
+      continue;
+    }
+    const key = line.slice(0, separator);
+    const value = unescapeField(line.slice(separator + 1));
+    if (key === "statusLine" || key === "mcpServer") {
+      repeated[key] = [...(repeated[key] ?? []), value];
+    } else {
+      single[key] = value;
+    }
+  }
+  return { single, repeated };
+}
+
+function unescapeField(value: string): string {
+  let output = "";
+  let escaped = false;
+  for (const char of value) {
+    if (escaped) {
+      output += char === "n" ? "\n" : char === "t" ? "\t" : char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    output += char;
+  }
+  return escaped ? `${output}\\` : output;
+}
+
+function normalizeOptional(value: string | undefined): string | null {
+  return value?.trim() ? value : null;
+}
+
+function parseRustHarnessApply(stdout: string): readonly HarnessApplyChange[] {
+  const changes: HarnessApplyChange[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.startsWith("change\t")) {
+      continue;
+    }
+    const fields = parseTabbedFields(line);
+    const key = fields.get("key");
+    const value = fields.get("value");
+    if (!key || value === undefined) {
+      continue;
+    }
+    changes.push({
+      key,
+      value,
+      changed: fields.get("changed") === "true",
+    });
+  }
+  return changes;
+}
+
+function parseTabbedFields(line: string): Map<string, string> {
+  return new Map(
+    line
+      .split("\t")
+      .slice(1)
+      .map((field) => {
+        const separator = field.indexOf("=");
+        return separator < 0
+          ? []
+          : [field.slice(0, separator), unescapeField(field.slice(separator + 1))];
+      })
+      .filter((parts): parts is [string, string] => parts.length === 2),
+  );
 }
 
 export function formatHarnessStatusLines(status: HarnessStatus): readonly string[] {
@@ -86,7 +139,7 @@ export function formatHarnessStatusLines(status: HarnessStatus): readonly string
       `Config: ${status.configPath} (not found)`,
       "",
       "No .codex/config.toml found.",
-      "Run 'unclecode harness apply yolo' to create one, or install oh-my-codex.",
+      "Run 'unclecode harness init' or create the config manually.",
     ];
   }
 
@@ -133,37 +186,27 @@ export const HARNESS_PRESET_IDS = [
 
 export type HarnessPresetId = (typeof HARNESS_PRESET_IDS)[number];
 
-const HARNESS_PRESETS: Record<HarnessPresetId, Record<string, string>> = {
-  yolo: {
-    model_reasoning_effort: "medium",
-    approvals_reviewer: "auto-edit",
-  },
-  "team-coder": {
-    model_reasoning_effort: "medium",
-    approvals_reviewer: "auto-edit",
-  },
-  "team-builder": {
-    model_reasoning_effort: "high",
-    approvals_reviewer: "user",
-  },
-  "team-hardener": {
-    model_reasoning_effort: "high",
-    approvals_reviewer: "user",
-  },
-  "team-auditor": {
-    model_reasoning_effort: "low",
-    approvals_reviewer: "user",
-  },
-  "team-agentless": {
-    model_reasoning_effort: "low",
-    approvals_reviewer: "auto-edit",
-  },
-};
-
 export function isHarnessPresetId(value: string): value is HarnessPresetId {
   return (HARNESS_PRESET_IDS as readonly string[]).includes(value);
 }
 
 export function getHarnessPresetPatch(preset: HarnessPresetId): Record<string, string> {
-  return HARNESS_PRESETS[preset] ?? {};
+  const stdout = runRustCommandSync(["rust", "harness", "preset", preset], process.cwd());
+  return Object.fromEntries(
+    stdout
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("patch\t"))
+      .map((line) => parseTabbedFields(line))
+      .map((fields) => [fields.get("key"), fields.get("value")])
+      .filter((entry): entry is [string, string] => Boolean(entry[0]) && entry[1] !== undefined),
+  );
+}
+
+function parseRustKeyValueLines(stdout: string): Map<string, string> {
+  return new Map(
+    stdout
+      .split(/\r?\n/)
+      .map((line) => line.split("=", 2))
+      .filter((parts): parts is [string, string] => parts.length === 2),
+  );
 }

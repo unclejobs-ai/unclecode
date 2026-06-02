@@ -4,8 +4,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.82.0",
-    "@google/genai": "^1.48.0",
     "@unclecode/contracts": "file:../contracts"
   },
   "exports": {

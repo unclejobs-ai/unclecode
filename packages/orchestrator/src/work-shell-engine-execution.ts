@@ -1,6 +1,7 @@
 import * as WorkShellPostTurns from "./work-shell-engine-post-turns.js";
 import * as WorkShellTurns from "./work-shell-engine-turns.js";
-import { createWorkShellAuthStatePatch, createWorkShellBusyStatePatch } from "./work-shell-engine-state.js";
+import { runRustCommandSync } from "./rust-command.js";
+import { createWorkShellAuthStatePatch } from "./work-shell-engine-state.js";
 import type {
   WorkShellChatEntry,
   WorkShellEngineState,
@@ -109,12 +110,8 @@ export function createPromptTurnStartPatch<Reasoning extends WorkShellReasoningC
   state: WorkShellEngineState<Reasoning>;
   turnStartedAt: number;
 }): Partial<WorkShellEngineState<Reasoning>> {
-  return createWorkShellBusyStatePatch({
-    state: input.state,
-    isBusy: true,
-    busyStatus: "thinking",
-    currentTurnStartedAt: input.turnStartedAt,
-  });
+  void input.state;
+  return resolvePromptTurnStartPatch<Reasoning>(input.turnStartedAt);
 }
 
 export function createPromptTurnSuccessPatch<Reasoning extends WorkShellReasoningConfig>(input: {
@@ -123,11 +120,12 @@ export function createPromptTurnSuccessPatch<Reasoning extends WorkShellReasonin
   memoryLines: readonly string[];
   lastTurnDurationMs: number;
 }): Partial<WorkShellEngineState<Reasoning>> {
-  return {
+  return resolvePromptTurnSuccessPayload<Reasoning>({
+    assistantText: "",
     bridgeLines: input.bridgeLines,
     memoryLines: input.memoryLines,
     lastTurnDurationMs: input.lastTurnDurationMs,
-  };
+  }).patch;
 }
 
 export function createPromptTurnFailurePatch<Reasoning extends WorkShellReasoningConfig>(input: {
@@ -150,14 +148,200 @@ export function createPromptTurnFailurePatch<Reasoning extends WorkShellReasonin
   };
 }
 
+function isWorkShellChatEntry(value: unknown): value is WorkShellChatEntry {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    ((value as { role?: unknown }).role === "system" ||
+      (value as { role?: unknown }).role === "user" ||
+      (value as { role?: unknown }).role === "assistant" ||
+      (value as { role?: unknown }).role === "tool") &&
+    typeof (value as { text?: unknown }).text === "string"
+  );
+}
+
+function isWorkShellPanel(value: unknown): value is WorkShellPanel {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { title?: unknown }).title === "string" &&
+    Array.isArray((value as { lines?: unknown }).lines) &&
+    (value as { lines: unknown[] }).lines.every((line) => typeof line === "string")
+  );
+}
+
+function isPromptSuccessPatch(value: unknown): value is {
+  bridgeLines: readonly string[];
+  memoryLines: readonly string[];
+  lastTurnDurationMs: number;
+} {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as { bridgeLines?: unknown }).bridgeLines) &&
+    (value as { bridgeLines: unknown[] }).bridgeLines.every((line) => typeof line === "string") &&
+    Array.isArray((value as { memoryLines?: unknown }).memoryLines) &&
+    (value as { memoryLines: unknown[] }).memoryLines.every((line) => typeof line === "string") &&
+    typeof (value as { lastTurnDurationMs?: unknown }).lastTurnDurationMs === "number"
+  );
+}
+
+function isPromptStartPatch(value: unknown): value is {
+  isBusy: true;
+  busyStatus: string;
+  currentTurnStartedAt: number;
+} {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { isBusy?: unknown }).isBusy === true &&
+    typeof (value as { busyStatus?: unknown }).busyStatus === "string" &&
+    typeof (value as { currentTurnStartedAt?: unknown }).currentTurnStartedAt === "number"
+  );
+}
+
+function isPromptFinalizePatch(value: unknown): value is {
+  isBusy: false;
+  clearBusyStatus: true;
+  clearCurrentTurnStartedAt: true;
+} {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { isBusy?: unknown }).isBusy === false &&
+    (value as { clearBusyStatus?: unknown }).clearBusyStatus === true &&
+    (value as { clearCurrentTurnStartedAt?: unknown }).clearCurrentTurnStartedAt === true
+  );
+}
+
+export function resolvePromptTurnStartPatch<Reasoning extends WorkShellReasoningConfig>(
+  turnStartedAt: number,
+): Partial<WorkShellEngineState<Reasoning>> {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "ux", "prompt-start-result"],
+      process.cwd(),
+      JSON.stringify({ turnStartedAt }),
+    ),
+  ) as unknown;
+  const patch = (parsed as { patch?: unknown })?.patch;
+  if (!isPromptStartPatch(patch)) {
+    throw new Error("Rust prompt start returned an invalid payload.");
+  }
+  return patch;
+}
+
+export function resolvePromptTurnSuccessPayload<Reasoning extends WorkShellReasoningConfig>(input: {
+  assistantText: string;
+  bridgeLines: readonly string[];
+  memoryLines: readonly string[];
+  lastTurnDurationMs: number;
+}): {
+  readonly entries: readonly WorkShellChatEntry[];
+  readonly patch: Partial<WorkShellEngineState<Reasoning>>;
+} {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "ux", "prompt-success-result"],
+      process.cwd(),
+      JSON.stringify(input),
+    ),
+  ) as unknown;
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error("Rust prompt success returned an invalid payload.");
+  }
+  const candidate = parsed as { entries?: unknown; patch?: unknown };
+  if (
+    !Array.isArray(candidate.entries) ||
+    !candidate.entries.every(isWorkShellChatEntry) ||
+    !isPromptSuccessPatch(candidate.patch)
+  ) {
+    throw new Error("Rust prompt success returned an invalid payload.");
+  }
+  return {
+    entries: candidate.entries,
+    patch: candidate.patch,
+  };
+}
+
+export function resolvePromptTurnFailurePayload<Reasoning extends WorkShellReasoningConfig>(input: {
+  state: WorkShellEngineState<Reasoning>;
+  formattedMessage: string;
+  nextAuthLabel: string;
+  lastTurnDurationMs: number;
+  isAuthFailure: boolean;
+  statusInput?: Record<string, unknown> | undefined;
+}): {
+  readonly entries: readonly WorkShellChatEntry[];
+  readonly patch: Partial<WorkShellEngineState<Reasoning>>;
+} {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "ux", "prompt-failure-result"],
+      process.cwd(),
+      JSON.stringify({
+        ...(input.statusInput ?? {}),
+        formattedMessage: input.formattedMessage,
+        nextAuthLabel: input.nextAuthLabel,
+        lastTurnDurationMs: input.lastTurnDurationMs,
+        isAuthFailure: input.isAuthFailure,
+      }),
+    ),
+  ) as unknown;
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error("Rust prompt failure returned an invalid payload.");
+  }
+  const candidate = parsed as { entries?: unknown; patch?: unknown };
+  const patch = candidate.patch as {
+    authLabel?: unknown;
+    lastTurnDurationMs?: unknown;
+    clearCurrentTurnStartedAt?: unknown;
+    panel?: unknown;
+  } | undefined;
+  if (
+    !Array.isArray(candidate.entries) ||
+    !candidate.entries.every(isWorkShellChatEntry) ||
+    typeof patch !== "object" ||
+    patch === null ||
+    typeof patch.authLabel !== "string" ||
+    typeof patch.lastTurnDurationMs !== "number"
+  ) {
+    throw new Error("Rust prompt failure returned an invalid payload.");
+  }
+  return {
+    entries: candidate.entries,
+    patch: {
+      ...createWorkShellAuthStatePatch({
+        state: input.state,
+        authLabel: patch.authLabel,
+      }),
+      currentTurnStartedAt: patch.clearCurrentTurnStartedAt === true ? undefined : input.state.currentTurnStartedAt,
+      lastTurnDurationMs: patch.lastTurnDurationMs,
+      ...(isWorkShellPanel(patch.panel) ? { panel: patch.panel } : {}),
+    },
+  };
+}
+
 export function createPromptTurnFinalizePatch<Reasoning extends WorkShellReasoningConfig>(
   state: WorkShellEngineState<Reasoning>,
 ): Partial<WorkShellEngineState<Reasoning>> {
-  return createWorkShellBusyStatePatch({
-    state,
+  void state;
+  return resolvePromptTurnFinalizePatch<Reasoning>();
+}
+
+export function resolvePromptTurnFinalizePatch<Reasoning extends WorkShellReasoningConfig>(): Partial<WorkShellEngineState<Reasoning>> {
+  const parsed = JSON.parse(
+    runRustCommandSync(["rust", "ux", "prompt-finalize-result"], process.cwd(), "{}"),
+  ) as unknown;
+  const patch = (parsed as { patch?: unknown })?.patch;
+  if (!isPromptFinalizePatch(patch)) {
+    throw new Error("Rust prompt finalize returned an invalid payload.");
+  }
+  return {
     isBusy: false,
-    clearCurrentTurnStartedAt: true,
-  });
+    busyStatus: undefined,
+    currentTurnStartedAt: undefined,
+  };
 }
 
 export async function executeWorkShellPromptTurn<
@@ -204,6 +388,7 @@ export async function executeWorkShellPromptTurn<
     readonly [key: string]: unknown;
   }) => string;
   buildAuthFailureStatusPanel: (authLabel: string) => WorkShellPanel;
+  buildAuthFailureStatusInput?: ((authLabel: string) => Record<string, unknown>) | undefined;
   appendEntries: (...entries: readonly WorkShellChatEntry[]) => void;
   setState: (patch: Partial<WorkShellEngineState<Reasoning>>) => void;
   pushTraceLine: (line: string) => void;
@@ -236,13 +421,14 @@ export async function executeWorkShellPromptTurn<
       writeScopedMemory: input.writeScopedMemory,
       listScopedMemoryLines: input.listScopedMemoryLines,
     });
-    input.appendEntries({ role: "assistant", text: assistantText });
-    input.setState(createPromptTurnSuccessPatch({
-      state: input.state,
+    const successPayload = resolvePromptTurnSuccessPayload<Reasoning>({
+      assistantText,
       bridgeLines: postTurnEffects.bridgeLines,
       memoryLines: postTurnEffects.memoryLines,
       lastTurnDurationMs,
-    }));
+    });
+    input.appendEntries(...successPayload.entries);
+    input.setState(successPayload.patch);
     input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.bridgeTraceEvent));
     input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.memoryTraceEvent));
     await input.persistSessionSnapshot("idle", input.promptTurn.sessionSummary).catch(() => undefined);
@@ -255,18 +441,18 @@ export async function executeWorkShellPromptTurn<
       applyAuthIssueLines: input.applyAuthIssueLines,
       formatWorkShellError: input.formatWorkShellError,
     });
-    input.appendEntries({ role: "system", text: failure.formattedMessage });
-    input.setState(createPromptTurnFailurePatch({
+    const failurePayload = resolvePromptTurnFailurePayload({
       state: input.state,
+      formattedMessage: failure.formattedMessage,
       nextAuthLabel: failure.nextAuthLabel,
       lastTurnDurationMs: failure.lastTurnDurationMs,
       isAuthFailure: failure.isAuthFailure,
-      ...(failure.isAuthFailure
-        ? {
-            statusPanel: input.buildAuthFailureStatusPanel(failure.nextAuthLabel),
-          }
+      ...(failure.isAuthFailure && input.buildAuthFailureStatusInput
+        ? { statusInput: input.buildAuthFailureStatusInput(failure.nextAuthLabel) }
         : {}),
-    }));
+    });
+    input.appendEntries(...failurePayload.entries);
+    input.setState(failurePayload.patch);
     await input.persistSessionSnapshot("requires_action", input.promptTurn.failureSummary).catch(() => undefined);
   } finally {
     input.setState(createPromptTurnFinalizePatch(input.state));

@@ -118,6 +118,10 @@ export function createSdkAdapter(args: CreateSdkAdapterArgs): LaneAdapter {
         binding: ctx.binding,
         provider,
         cwd: ctx.cwd,
+        ...(ctx.runtimeMode !== undefined ? { runtimeMode: ctx.runtimeMode } : {}),
+        ...(ctx.executionPolicyProfile !== undefined
+          ? { executionPolicyProfile: ctx.executionPolicyProfile }
+          : {}),
       });
 
       return {

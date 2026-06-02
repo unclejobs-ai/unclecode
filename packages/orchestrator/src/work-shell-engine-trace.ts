@@ -1,37 +1,54 @@
+import { runRustCommandSync } from "./rust-command.js";
 import { createWorkShellBusyStatePatch } from "./work-shell-engine-state.js";
 import type { WorkShellChatEntry, WorkShellEngineState } from "./work-shell-engine.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
+
+type WorkShellTraceEventDecision = {
+  readonly busyStatusAction: "set" | "clear" | "none";
+  readonly busyStatus?: string;
+  readonly currentTurnStartedAt?: number;
+  readonly traceEntryRole: WorkShellChatEntry["role"];
+  readonly traceEntry?: WorkShellChatEntry;
+};
+
+function resolveWorkShellTraceEventDecision(input: {
+  readonly event: { readonly type: string; readonly status?: string; readonly startedAt?: unknown };
+  readonly line: string;
+  readonly traceMode?: "minimal" | "verbose";
+}): WorkShellTraceEventDecision {
+  const raw = runRustCommandSync(
+    ["rust", "ux", "trace-event"],
+    process.cwd(),
+    JSON.stringify({
+      event: input.event,
+      line: input.line,
+      traceMode: input.traceMode ?? "minimal",
+    }),
+  );
+  return JSON.parse(raw) as WorkShellTraceEventDecision;
+}
 
 export function resolveBusyStatusFromTraceEvent(
   event: { readonly type: string; readonly status?: string },
   line: string,
 ): string | null | undefined {
-  if (event.type === "turn.completed") {
+  const decision = resolveWorkShellTraceEventDecision({ event, line });
+  if (decision.busyStatusAction === "clear") {
     return undefined;
   }
-
-  if (
-    event.type === "turn.started"
-    || event.type === "provider.calling"
-    || event.type === "tool.started"
-    || (event.type === "orchestrator.step" && event.status === "running")
-  ) {
-    return line || "thinking";
+  if (decision.busyStatusAction === "set") {
+    return decision.busyStatus ?? "thinking";
   }
 
   return null;
 }
 
-export function resolveTraceEntryRole(event: { readonly type: string }): "system" | "tool" {
-  return event.type === "turn.started" || event.type === "turn.completed"
-    ? "system"
-    : "tool";
+export function resolveTraceEntryRole(event: { readonly type: string }): WorkShellChatEntry["role"] {
+  return resolveWorkShellTraceEventDecision({ event, line: "" }).traceEntryRole;
 }
 
 export function extractCurrentTurnStartedAt(event: { readonly type: string; readonly startedAt?: unknown }): number | undefined {
-  return event.type === "turn.started" && typeof event.startedAt === "number"
-    ? event.startedAt
-    : undefined;
+  return resolveWorkShellTraceEventDecision({ event, line: "" }).currentTurnStartedAt;
 }
 
 export function createTraceEventBusyPatch<Reasoning extends WorkShellReasoningConfig>(input: {
@@ -39,18 +56,17 @@ export function createTraceEventBusyPatch<Reasoning extends WorkShellReasoningCo
   event: { readonly type: string; readonly status?: string; readonly startedAt?: unknown };
   line: string;
 }): Partial<WorkShellEngineState<Reasoning>> | undefined {
-  const busyStatus = resolveBusyStatusFromTraceEvent(input.event, input.line);
-  if (busyStatus === null) {
+  const decision = resolveWorkShellTraceEventDecision({ event: input.event, line: input.line });
+  if (decision.busyStatusAction === "none") {
     return undefined;
   }
 
-  const currentTurnStartedAt = extractCurrentTurnStartedAt(input.event);
   return createWorkShellBusyStatePatch({
     state: input.state,
     isBusy: input.state.isBusy,
-    ...(busyStatus ? { busyStatus } : {}),
-    ...(currentTurnStartedAt !== undefined ? { currentTurnStartedAt } : {}),
-    ...(input.event.type === "turn.completed"
+    ...(decision.busyStatusAction === "set" ? { busyStatus: decision.busyStatus ?? "thinking" } : {}),
+    ...(decision.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: decision.currentTurnStartedAt } : {}),
+    ...(decision.busyStatusAction === "clear"
       ? { clearCurrentTurnStartedAt: true }
       : {}),
   });
@@ -61,25 +77,7 @@ export function resolveVerboseTraceEntry(input: {
   event: { readonly type: string };
   line: string;
 }): WorkShellChatEntry | undefined {
-  if (!input.line) {
-    return undefined;
-  }
-
-  if (input.traceMode === "verbose") {
-    return {
-      role: resolveTraceEntryRole(input.event),
-      text: input.line,
-    };
-  }
-
-  if (input.event.type === "tool.started" || input.event.type === "tool.completed") {
-    return {
-      role: "tool",
-      text: input.line,
-    };
-  }
-
-  return undefined;
+  return resolveWorkShellTraceEventDecision(input).traceEntry;
 }
 
 export function applyWorkShellTraceEvent<

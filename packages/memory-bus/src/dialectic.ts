@@ -5,8 +5,6 @@
  * MemoryQueryAdapter and arrive in Phase I.2.
  */
 
-import { createHash } from "node:crypto";
-
 import type {
   Citation,
   MemoryQuery,
@@ -17,6 +15,7 @@ import type {
 import type { Context7Client } from "./external-doc-store.js";
 import { consultDocs } from "./external-doc-store.js";
 import { listSops } from "./procedural-store.js";
+import { rustSha256 } from "./rust-command.js";
 
 export interface MemoryQueryAdapter {
   readonly category: MemoryQuery["category"];
@@ -45,7 +44,7 @@ export async function dialectic(
     const target = query.about ?? query.asker;
     for (const sop of listSops({ workspaceRoot: options.workspaceRoot, peer: target })) {
       if (sop.content.toLowerCase().includes(query.query.toLowerCase())) {
-        const versionHash = createHash("sha256").update(sop.content).digest("hex");
+        const versionHash = rustSha256(sop.content, options.workspaceRoot);
         citations.push({
           category: "memory_observation",
           key: sop.path,
@@ -76,10 +75,7 @@ export async function dialectic(
   }
 
   const synthesized = snippets.length > 0 ? snippets.join("\n\n---\n\n") : undefined;
-  const retrievalHash = createHash("sha256")
-    .update(JSON.stringify(citations))
-    .update(synthesized ?? "")
-    .digest("hex");
+  const retrievalHash = rustSha256(`${JSON.stringify(citations)}${synthesized ?? ""}`, options.workspaceRoot);
 
   return {
     citations,

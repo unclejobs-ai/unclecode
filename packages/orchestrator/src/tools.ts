@@ -1,11 +1,4 @@
-import { exec, execFile } from "node:child_process";
-import { promises as fs } from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { promisify } from "node:util";
-
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
+import { runRustCommand } from "./rust-command.js";
 
 export type ToolDefinition = {
   name: string;
@@ -24,40 +17,42 @@ export type ToolResult = {
 
 export type ToolHandler = (input: Record<string, unknown>, cwd: string) => Promise<ToolResult>;
 
-async function resolveWithinCwd(cwd: string, maybeRelative: string): Promise<string> {
-  const root = await fs.realpath(path.resolve(cwd)).catch(() => path.resolve(cwd));
-  const resolved = path.resolve(cwd, maybeRelative);
-  const existingTarget = await fs.realpath(resolved).catch(async () => {
-    const parent = path.dirname(resolved);
-    const realParent = await fs.realpath(parent).catch(() => parent);
-    return path.join(realParent, path.basename(resolved));
-  });
-  const relative = path.relative(root, existingTarget);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error(`Path escapes working directory: ${maybeRelative}`);
+async function runRustAci(args: readonly string[], cwd: string, stdin?: string): Promise<string> {
+  return await runRustCommand(["rust", "aci", ...args], cwd, stdin);
+}
+
+async function runRustShell(command: string, cwd: string): Promise<string> {
+  return await runRustCommand(["rust", "shell", "--", command], cwd);
+}
+
+function normalizeRustPathError(error: unknown, requestedPath: string): never {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/path (contains traversal segment|escapes workspace)|absolute path rejected/i.test(message)) {
+    throw new Error(`Path escapes working directory: ${requestedPath}`);
   }
-  return existingTarget;
+  throw error;
 }
 
 async function listFiles(input: Record<string, unknown>, cwd: string): Promise<ToolResult> {
   const target = typeof input.path === "string" ? input.path : ".";
-  const fullPath = await resolveWithinCwd(cwd, target);
-  const entries = await fs.readdir(fullPath, { withFileTypes: true });
-  const lines = entries
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((entry) => `${entry.isDirectory() ? "dir " : "file"} ${entry.name}`);
-  return {
-    content: lines.length > 0 ? lines.join("\n") : "(empty directory)",
-  };
+  try {
+    const stdout = await runRustAci(["list", target], cwd);
+    return { content: stdout.trim() || "(empty directory)" };
+  } catch (error) {
+    normalizeRustPathError(error, target);
+  }
 }
 
 async function readFile(input: Record<string, unknown>, cwd: string): Promise<ToolResult> {
   if (typeof input.path !== "string") {
     throw new Error("path is required");
   }
-  const fullPath = await resolveWithinCwd(cwd, input.path);
-  const content = await fs.readFile(fullPath, "utf8");
-  return { content };
+  try {
+    const content = await runRustAci(["read", input.path], cwd);
+    return { content };
+  } catch (error) {
+    normalizeRustPathError(error, input.path);
+  }
 }
 
 async function writeFile(input: Record<string, unknown>, cwd: string): Promise<ToolResult> {
@@ -67,10 +62,12 @@ async function writeFile(input: Record<string, unknown>, cwd: string): Promise<T
   if (typeof input.content !== "string") {
     throw new Error("content is required");
   }
-  const fullPath = await resolveWithinCwd(cwd, input.path);
-  await fs.mkdir(path.dirname(fullPath), { recursive: true });
-  await fs.writeFile(fullPath, input.content, "utf8");
-  return { content: `Wrote ${input.path}` };
+  try {
+    const stdout = await runRustAci(["write", input.path], cwd, input.content);
+    return { content: stdout.trim() || `Wrote ${input.path}` };
+  } catch (error) {
+    normalizeRustPathError(error, input.path);
+  }
 }
 
 async function searchText(input: Record<string, unknown>, cwd: string): Promise<ToolResult> {
@@ -78,21 +75,12 @@ async function searchText(input: Record<string, unknown>, cwd: string): Promise<
     throw new Error("query is required");
   }
   const target = typeof input.path === "string" ? input.path : ".";
-  const fullPath = await resolveWithinCwd(cwd, target);
-  const result = await execFileAsync(
-    "rg",
-    ["-n", "--hidden", "--glob", "!node_modules", "--glob", "!dist", input.query, fullPath],
-    {
-      cwd,
-      windowsHide: true,
-      maxBuffer: 1024 * 1024,
-    },
-  ).catch((error: { stdout?: string; stderr?: string; code?: string }) => ({
-    stdout: error.stdout ?? "",
-    stderr: error.stderr ?? (error.code === "ENOENT" ? "rg not found" : ""),
-  }));
-  const content = result.stdout?.trim() || result.stderr?.trim() || "(no matches)";
-  return { content };
+  try {
+    const stdout = await runRustAci(["search", input.query, target], cwd);
+    return { content: stdout.trim() || "(no matches)" };
+  } catch (error) {
+    normalizeRustPathError(error, target);
+  }
 }
 
 async function runShell(input: Record<string, unknown>, cwd: string): Promise<ToolResult> {
@@ -102,14 +90,8 @@ async function runShell(input: Record<string, unknown>, cwd: string): Promise<To
   if (process.env.UNCLECODE_ALLOW_RUN_SHELL !== "1") {
     throw new Error("run_shell is disabled by default. Set UNCLECODE_ALLOW_RUN_SHELL=1 to enable it.");
   }
-  const shell = os.platform() === "win32" ? "powershell.exe" : "/bin/sh";
-  const { stdout, stderr } = await execAsync(input.command, {
-    cwd,
-    shell,
-    windowsHide: true,
-    maxBuffer: 1024 * 1024,
-  });
-  const content = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
+  const stdout = await runRustShell(input.command, cwd);
+  const content = stdout.trim();
   return { content: content || "(command produced no output)" };
 }
 

@@ -1,6 +1,13 @@
 import { PROVIDER_IDS, type ProviderId } from "@unclecode/contracts";
 import { ProviderCapabilityMismatchError } from "./errors.js";
-import { assertProviderCapability, getOpenAIModelRegistry, getReasoningSupport } from "./model-registry.js";
+import {
+  assertProviderCapability,
+  detectProviderForModel,
+  getGenericModelRegistry,
+  getOpenAIModelRegistry,
+  getReasoningSupport,
+  resolveProviderRoute,
+} from "./model-registry.js";
 import { resolveOpenAIAuth } from "./openai-auth.js";
 import { clearOpenAICredentials, readOpenAICredentials, writeOpenAICredentials } from "./openai-credential-store.js";
 import {
@@ -25,13 +32,10 @@ export type { ModelRegistry, OpenAIAuthStatus, ReasoningSupport, ResolveOpenAIAu
 export { ProviderCapabilityMismatchError };
 export const PROVIDERS_SUPPORTED_IDS = PROVIDER_IDS;
 export function getProviderAdapter(providerId: ProviderId) {
-  if (providerId !== "openai") {
-    throw new Error(`Provider ${providerId} is not implemented yet.`);
-  }
   return {
     providerId,
     getModelRegistry(env?: NodeJS.ProcessEnv) {
-      return getOpenAIModelRegistry(env);
+      return providerId === "openai" ? getOpenAIModelRegistry(env) : getGenericModelRegistry(providerId, env);
     },
     assertCapability(capability: Parameters<typeof assertProviderCapability>[1], options: { modelId: string }) {
       assertProviderCapability(providerId, capability, options.modelId);
@@ -42,6 +46,8 @@ export function getProviderAdapter(providerId: ProviderId) {
   };
 }
 export {
+  detectProviderForModel,
+  resolveProviderRoute,
   buildOpenAIAuthorizationUrl,
   completeOpenAIBrowserLogin,
   completeOpenAICodexDeviceLogin,

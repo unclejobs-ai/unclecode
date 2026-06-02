@@ -40,11 +40,14 @@ test("CodingAgent emits honest turn traces around a successful turn", async () =
   assert.equal(result.text, "done");
   assert.deepEqual(traces.map((event) => event.type), [
     "turn.started",
+    "provider.route",
     "provider.calling",
     "turn.completed",
   ]);
   assert.equal(traces[1]?.provider, "openai");
-  assert.equal(traces[1]?.model, "gpt-5.4");
+  assert.equal(traces[1]?.endpointUrl, "https://api.openai.com/v1/responses");
+  assert.equal(traces[2]?.provider, "openai");
+  assert.equal(traces[2]?.model, "gpt-5.4");
   assert.equal(traces.filter((event) => event.type === "orchestrator.step").length, 0);
 });
 
@@ -73,6 +76,7 @@ test("CodingAgent keeps failures honest without fake orchestrator steps", async 
   await assert.rejects(() => agent.runTurn("inspect the repo"), /provider exploded/);
   assert.deepEqual(traces.map((event) => event.type), [
     "turn.started",
+    "provider.route",
     "provider.calling",
   ]);
   assert.equal(traces.filter((event) => event.type === "orchestrator.step").length, 0);

@@ -3,12 +3,24 @@ import React from "react";
 import type { WorkShellReasoningConfig } from "@unclecode/orchestrator";
 
 import { Dashboard, type TuiRenderOptions } from "./dashboard-shell.js";
+import { resolveTuiRendererPlan } from "./renderer-capabilities.js";
 import {
   createManagedWorkShellDashboardProps,
   type ManagedWorkShellDashboardInput,
 } from "./dashboard-render.js";
 import type { WorkShellImageAttachment } from "./work-shell-attachments.js";
 import type { TuiShellHomeState } from "./shell-state.js";
+
+let rendererFallbackWarned = false;
+
+function warnIfRequestedRendererFallsBack(): void {
+  const plan = resolveTuiRendererPlan();
+  if (plan.renderer !== "opentui" || plan.status !== "blocked" || rendererFallbackWarned) {
+    return;
+  }
+  rendererFallbackWarned = true;
+  process.stderr.write(`[unclecode] ${plan.reason ?? "OpenTUI renderer is not available yet."} Falling back to Ink.\n`);
+}
 
 export function createDashboardElement(
   props: TuiRenderOptions<TuiShellHomeState>,
@@ -37,6 +49,9 @@ export function createDashboardElement(
       {...(props.researchRunCount !== undefined
         ? { researchRunCount: props.researchRunCount }
         : {})}
+      {...(props.recentResearchRuns !== undefined
+        ? { recentResearchRuns: props.recentResearchRuns }
+        : {})}
       {...(props.initialSelectedSessionId
         ? { initialSelectedSessionId: props.initialSelectedSessionId }
         : {})}
@@ -64,6 +79,7 @@ export function createDashboardElement(
 export async function renderEmbeddedWorkShellPaneDashboard(
   props: TuiRenderOptions<TuiShellHomeState>,
 ): Promise<void> {
+  warnIfRequestedRendererFallsBack();
   const instance = render(createDashboardElement(props));
   await instance.waitUntilExit();
 }
@@ -83,6 +99,7 @@ export async function renderManagedWorkShellDashboard<
 export async function renderTui(
   options?: TuiRenderOptions<TuiShellHomeState>,
 ): Promise<void> {
+  warnIfRequestedRendererFallsBack();
   const instance = render(createDashboardElement(options ?? {}));
   await instance.waitUntilExit();
 }

@@ -1,6 +1,5 @@
 import type { ModeReasoningEffort } from "@unclecode/contracts";
-import { toolDefinitions } from "@unclecode/orchestrator";
-import * as path from "node:path";
+import { runRustCommandSync, toolDefinitions } from "@unclecode/orchestrator";
 
 export type ParsedArgs = {
   cwd: string;
@@ -37,85 +36,63 @@ export function printTools(): void {
 }
 
 export function resolveRuntimeProvider(provider: string): "anthropic" | "gemini" | "openai" {
-  if (provider === "anthropic" || provider === "gemini" || provider === "openai") {
-    return provider;
+  const parsed = JSON.parse(
+    runRustCommandSync(["rust", "model", "provider-runtime-json", provider], process.cwd()).trim(),
+  ) as unknown;
+  const decision = isRecord(parsed) ? parsed : {};
+  const routed = typeof decision.runtimeKind === "string" ? decision.runtimeKind : undefined;
+  if (
+    (routed === "anthropic" || routed === "gemini" || routed === "openai")
+    && decision.runtimeSupported === true
+  ) {
+    return routed;
   }
 
-  throw new Error(`Unsupported runtime provider: ${provider}`);
+  throw new Error(
+    typeof decision.error === "string" ? decision.error : `Unsupported runtime provider: ${provider}`,
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
-  let cwd = process.cwd();
-  let provider: "anthropic" | "gemini" | "openai" | undefined;
-  let model: string | undefined;
-  let reasoning: ModeReasoningEffort | undefined;
-  let sessionId: string | undefined;
-  const promptParts: string[] = [];
-  let showHelp = false;
-  let showTools = false;
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === undefined) {
-      continue;
-    }
-    if (arg === "--help") {
-      showHelp = true;
-      continue;
-    }
-    if (arg === "--tools") {
-      showTools = true;
-      continue;
-    }
-    if (arg === "--cwd") {
-      cwd = path.resolve(argv[i + 1] ?? cwd);
-      i += 1;
-      continue;
-    }
-    if (arg === "--provider") {
-      const next = argv[i + 1];
-      if (next === "anthropic" || next === "gemini" || next === "openai") {
-        provider = next;
-      }
-      i += 1;
-      continue;
-    }
-    if (arg === "--model") {
-      model = argv[i + 1];
-      i += 1;
-      continue;
-    }
-    if (arg === "--reasoning") {
-      const next = argv[i + 1];
-      if (next === "low" || next === "medium" || next === "high") {
-        reasoning = next;
-      }
-      i += 1;
-      continue;
-    }
-    if (arg === "--session-id") {
-      sessionId = argv[i + 1];
-      i += 1;
-      continue;
-    }
-    promptParts.push(arg);
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "work-runtime", "parse-args"],
+      process.cwd(),
+      JSON.stringify({ argv, cwd: process.cwd() }),
+    ),
+  ) as unknown;
+  if (
+    !isRecord(parsed) ||
+    typeof parsed.cwd !== "string" ||
+    typeof parsed.showHelp !== "boolean" ||
+    typeof parsed.showTools !== "boolean"
+  ) {
+    throw new Error("Rust work runtime args command returned an invalid payload.");
   }
 
-  const parsed: ParsedArgs = { cwd, showHelp, showTools };
-  if (provider !== undefined) {
-    parsed.provider = provider;
+  const result: ParsedArgs = {
+    cwd: parsed.cwd,
+    showHelp: parsed.showHelp,
+    showTools: parsed.showTools,
+  };
+  if (parsed.provider === "anthropic" || parsed.provider === "gemini" || parsed.provider === "openai") {
+    result.provider = parsed.provider;
   }
-  if (model !== undefined) {
-    parsed.model = model;
+  if (typeof parsed.model === "string") {
+    result.model = parsed.model;
   }
-  if (reasoning !== undefined) {
-    parsed.reasoning = reasoning;
+  if (parsed.reasoning === "low" || parsed.reasoning === "medium" || parsed.reasoning === "high") {
+    result.reasoning = parsed.reasoning;
   }
-  if (sessionId !== undefined) {
-    parsed.sessionId = sessionId;
+  if (typeof parsed.sessionId === "string") {
+    result.sessionId = parsed.sessionId;
   }
-  if (promptParts.length > 0) {
-    parsed.prompt = promptParts.join(" ");
+  if (typeof parsed.prompt === "string") {
+    result.prompt = parsed.prompt;
   }
-  return parsed;
+  return result;
 }

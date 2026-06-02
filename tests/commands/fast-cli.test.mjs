@@ -19,5 +19,8 @@ test("resolveFastCliPath recognizes lightweight operator startup paths", () => {
   assert.equal(resolveFastCliPath(["sessions", "--json"]), undefined);
   assert.equal(resolveFastCliPath(["config", "explain"]), "config-explain");
   assert.equal(resolveFastCliPath(["config", "explain", "--json"]), undefined);
+  assert.equal(resolveFastCliPath(["research", "status"]), "research-status");
+  assert.equal(resolveFastCliPath(["research", "status", "--json"]), "research-status-json");
+  assert.equal(resolveFastCliPath(["research", "run", "topic"]), undefined);
   assert.equal(resolveFastCliPath(["/auth", "status"]), undefined);
 });

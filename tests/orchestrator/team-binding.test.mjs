@@ -41,7 +41,7 @@ test("readCode returns content + sha256 + mtime for in-workspace files", () => {
     });
     const result = binding.readCode("fixture.txt");
     assert.equal(result.content, "alpha");
-    assert.match(result.sha256, /^[0-9a-f]{64}$/);
+    assert.equal(result.sha256, "8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8");
   } finally {
     rmSync(dataRoot, { recursive: true, force: true });
   }

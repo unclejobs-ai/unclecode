@@ -8,6 +8,7 @@ import {
   type WorkShellLoadedSkill,
   type WorkShellMemoryScope,
   type WorkShellPanel,
+  type WorkShellStatusContext,
   type WorkShellSkillListItem,
 } from "./work-shell-engine.js";
 
@@ -24,6 +25,7 @@ export type CreateWorkShellEngineInput<
     readonly reasoning: Reasoning;
     readonly authLabel: string;
     readonly reasoningLabel: string;
+    readonly statusContext?: WorkShellStatusContext | undefined;
   }) => WorkShellPanel;
   readonly resolveWorkShellSlashCommand: (
     input: string,
@@ -56,12 +58,13 @@ export function createWorkShellEngine<
     },
     buildContextPanel: input.buildContextPanel,
     buildHelpPanel: input.buildHelpPanel,
-    buildStatusPanel: (options, reasoning, authLabel) =>
+    buildStatusPanel: (options, reasoning, authLabel, statusContext) =>
       input.buildStatusPanel({
         options,
         reasoning,
         authLabel,
         reasoningLabel: describeReasoning(reasoning),
+        ...(statusContext ? { statusContext } : {}),
       }),
     buildInlineCommandPanel: input.buildInlineCommandPanel,
     formatInlineCommandResultSummary: input.formatInlineCommandResultSummary,

@@ -10,10 +10,6 @@ import {
   loadExtensionManifestSummaries,
   WorkAgent,
 } from "@unclecode/orchestrator";
-import {
-  resolveOpenAIAuth,
-  resolveOpenAIAuthStatus,
-} from "@unclecode/providers";
 
 import {
   buildTuiHomeState,
@@ -31,6 +27,8 @@ import type {
 import {
   deriveAuthIssueLines,
   loadResumedWorkSession,
+  resolveRustOpenAIAuth,
+  resolveRustOpenAIAuthStatus,
 } from "./work-runtime-session.js";
 import { runWorkspaceGuardianChecks } from "./guardian-checks.js";
 import { createRuntimeCodingAgent } from "./runtime-coding-agent.js";
@@ -107,11 +105,18 @@ export async function loadWorkCliBootstrap(
   const { cwd, provider, model, reasoning, sessionId, prompt } = parseArgs([
     ...input.argv,
   ]);
+  const resumedSession = sessionId
+    ? await loadResumedWorkSession({ cwd, sessionId, env })
+    : undefined;
   const config = await loadConfig({
     cwd,
     ...(provider !== undefined ? { provider } : {}),
     ...(model !== undefined ? { model } : {}),
-    ...(reasoning !== undefined ? { reasoning } : {}),
+    ...(reasoning !== undefined
+      ? { reasoning }
+      : resumedSession?.reasoningEffort
+        ? { reasoning: resumedSession.reasoningEffort }
+        : {}),
     allowProblematicOpenAIAuth: true,
   });
   const guidance = await loadCachedWorkspaceGuidance({
@@ -170,13 +175,8 @@ export async function loadWorkCliBootstrap(
     authLabel: string;
     authIssueLines?: readonly string[];
   }> => {
-    const status = await resolveOpenAIAuthStatus({ env });
-    const resolved = await resolveOpenAIAuth({
-      env,
-      ...(env.UNCLECODE_OPENAI_CREDENTIALS_PATH?.trim()
-        ? { fallbackAuthPath: env.UNCLECODE_OPENAI_CREDENTIALS_PATH.trim() }
-        : {}),
-    });
+    const status = await resolveRustOpenAIAuthStatus({ cwd, env });
+    const resolved = await resolveRustOpenAIAuth({ cwd, env });
 
     directAgent.refreshAuthToken(resolved.status === "ok" ? resolved.bearerToken : "");
     return {
@@ -191,7 +191,7 @@ export async function loadWorkCliBootstrap(
   };
 
   const authStatus = config.provider === "openai"
-    ? await resolveOpenAIAuthStatus({ env })
+    ? await resolveRustOpenAIAuthStatus({ cwd, env })
     : undefined;
   const browserOAuthAvailable = config.provider === "openai"
     ? Boolean(env.OPENAI_OAUTH_CLIENT_ID?.trim())
@@ -201,9 +201,6 @@ export async function loadWorkCliBootstrap(
     ...(config.authIssueMessage ? { authIssueMessage: config.authIssueMessage } : {}),
   });
 
-  const resumedSession = sessionId
-    ? await loadResumedWorkSession({ cwd, sessionId, env })
-    : undefined;
   const refreshHomeState = () =>
     buildTuiHomeState({
       workspaceRoot: cwd,

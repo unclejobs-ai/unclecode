@@ -10,10 +10,12 @@ import { RUNTIME_MODES } from "@unclecode/contracts";
 import { RuntimeBrokerError } from "./errors.js";
 import { DockerAdapter } from "./docker-adapter.js";
 import { LocalAdapter } from "./local-adapter.js";
+import { OpenShellAdapter } from "./openshell-adapter.js";
 import type { LocalAdapterConfig } from "./local-adapter.js";
 import type { DockerAdapterConfig } from "./types.js";
 
 export type { LocalAdapterConfig } from "./local-adapter.js";
+export type { OpenShellAdapterConfig } from "./openshell-adapter.js";
 export type { DockerAdapterConfig } from "./types.js";
 export { RuntimeBrokerError } from "./errors.js";
 export type { RuntimeBrokerErrorCode } from "./errors.js";
@@ -40,6 +42,15 @@ export function createRuntimeBroker(
   });
 
   let dockerAdapter: DockerAdapter | null = null;
+  const openshellAdapter = config.openshell?.enabled
+    ? new OpenShellAdapter({
+        ...config.openshell,
+        workingDirectory: config.workingDirectory,
+        environment: config.environment,
+        timeoutMs: config.timeoutMs,
+        captureOutput: config.captureOutput,
+      })
+    : null;
 
   function getOrCreateDockerAdapter(): DockerAdapter {
     if (dockerAdapter === null) {
@@ -61,12 +72,18 @@ export function createRuntimeBroker(
       if (dockerAdapter !== null) {
         dockerAdapter.onEvent(listener);
       }
+      if (openshellAdapter !== null) {
+        openshellAdapter.onEvent(listener);
+      }
     },
 
     removeEventListener(listener: (event: RuntimeEvent) => void): void {
       localAdapter.removeEventListener(listener);
       if (dockerAdapter !== null) {
         dockerAdapter.removeEventListener(listener);
+      }
+      if (openshellAdapter !== null) {
+        openshellAdapter.removeEventListener(listener);
       }
     },
 
@@ -82,6 +99,10 @@ export function createRuntimeBroker(
         return adapter.spawn(request.command, request.args);
       }
 
+      if (mode === "openshell" && openshellAdapter !== null) {
+        return openshellAdapter.spawn(request.command, request.args);
+      }
+
       throw new RuntimeBrokerError(
         `Runtime mode "${mode}" is not yet supported`,
         "ADAPTER_UNAVAILABLE",
@@ -93,17 +114,32 @@ export function createRuntimeBroker(
       if (dockerAdapter !== null) {
         dockerAdapter.kill(containerId);
       }
+      if (openshellAdapter !== null) {
+        openshellAdapter.kill(containerId);
+      }
     },
 
     health(): RuntimeHealth {
       const localHealth = localAdapter.health();
-      if (dockerAdapter !== null) {
-        const dockerHealth = dockerAdapter.health();
+      if (dockerAdapter !== null || openshellAdapter !== null) {
+        const dockerHealth = dockerAdapter?.health();
+        const openshellHealth = openshellAdapter?.health();
         return {
-          healthy: localHealth.healthy && dockerHealth.healthy,
+          healthy: [
+            localHealth,
+            dockerHealth,
+            openshellHealth,
+          ].filter((health): health is RuntimeHealth => health !== undefined)
+            .every((health) => health.healthy),
           activeContainers:
-            localHealth.activeContainers + dockerHealth.activeContainers,
-          adapters: [...localHealth.adapters, ...dockerHealth.adapters],
+            localHealth.activeContainers
+            + (dockerHealth?.activeContainers ?? 0)
+            + (openshellHealth?.activeContainers ?? 0),
+          adapters: [
+            ...localHealth.adapters,
+            ...(dockerHealth?.adapters ?? []),
+            ...(openshellHealth?.adapters ?? []),
+          ],
         };
       }
       return localHealth;

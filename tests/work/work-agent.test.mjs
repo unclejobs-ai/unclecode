@@ -74,14 +74,7 @@ test("WorkAgent routes complex turns through the real orchestrator and synthesiz
   assert.ok(calls[2]?.includes("session.ts"));
   assert.ok(calls[3]?.startsWith("Review the executor findings"));
   assert.ok(calls[4]?.startsWith("Synthesize executor findings"));
-  assert.ok(
-    traces.some(
-      (event) =>
-        event.type === "orchestrator.step" &&
-        event.role === "planner" &&
-        event.status === "completed",
-    ),
-  );
+  assert.equal(traces.some((event) => event.type === "orchestrator.step" && event.role === "planner"), false);
   assert.ok(
     traces.some(
       (event) =>

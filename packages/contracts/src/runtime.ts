@@ -1,4 +1,4 @@
-export const RUNTIME_MODES = ["local", "docker", "e2b"] as const;
+export const RUNTIME_MODES = ["local", "docker", "e2b", "openshell"] as const;
 
 export type RuntimeMode = (typeof RUNTIME_MODES)[number];
 
@@ -34,6 +34,25 @@ export type RuntimeBrokerConfig = {
   readonly runtimeMode?: RuntimeMode | undefined;
   readonly timeoutMs?: number | undefined;
   readonly captureOutput?: boolean | undefined;
+  readonly openshell?: OpenShellRuntimeConfig | undefined;
+};
+
+export type OpenShellRuntimeConfig = {
+  readonly enabled: boolean;
+  readonly cliPath?: string | undefined;
+  readonly gatewayName?: string | undefined;
+  readonly sandboxNamePrefix?: string | undefined;
+  readonly sandboxImage?: string | undefined;
+  readonly policyPath?: string | undefined;
+  readonly providers?: readonly string[] | undefined;
+  readonly uploadWorkspace?: boolean | undefined;
+  readonly sandboxWorkspace?: string | undefined;
+  readonly downloadPaths?: readonly OpenShellDownloadPath[] | undefined;
+};
+
+export type OpenShellDownloadPath = {
+  readonly sandboxPath: string;
+  readonly localPath: string;
 };
 
 export type DockerAdapterConfig = RuntimeBrokerConfig & {

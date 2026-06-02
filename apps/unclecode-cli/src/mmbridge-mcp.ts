@@ -1,6 +1,6 @@
 import { loadMcpHostRegistry } from "@unclecode/mcp-host";
 import type { McpServerConfig } from "@unclecode/contracts";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 const MCP_PROTOCOL_VERSION = "2025-11-25";
 
@@ -68,15 +68,80 @@ function resolveMmbridgeServerConfig(input: {
 // leaves headroom for slow adapters while still bounding true hangs. Callers
 // may override via input.timeoutMs, or pass 0/negative to disable.
 const DEFAULT_MMBRIDGE_MCP_TIMEOUT_MS = 600_000;
+const MMBRIDGE_HEALTH_TIMEOUT_MS = 15_000;
+const MMBRIDGE_SHUTDOWN_GRACE_MS = 1_000;
+
+function redactDiagnosticText(value: string): string {
+  return value
+    .replace(/\bsk-[A-Za-z0-9._-]{4,}\b/g, "sk-***")
+    .replace(/\bghp_[A-Za-z0-9_]{4,}\b/g, "ghp_***")
+    .replace(/\b(xox[baprs]-)[A-Za-z0-9-]{4,}\b/g, "$1***")
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._-]{4,}\b/gi, "$1***")
+    .replace(/\b(api[_-]?key|token|secret|password)(\s*[:=]\s*)[^\s,;"'}]+/gi, "$1$2***");
+}
+
+function wait(ms: number): Promise<"timeout"> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve("timeout"), ms);
+    if (typeof timer.unref === "function") timer.unref();
+  });
+}
+
+async function shutdownMcpChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+
+  const closed = new Promise<"closed">((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve("closed");
+      return;
+    }
+    child.once("close", () => resolve("closed"));
+  });
+
+  child.stdin.end();
+  child.kill("SIGTERM");
+  if ((await Promise.race([closed, wait(MMBRIDGE_SHUTDOWN_GRACE_MS)])) === "closed") {
+    return;
+  }
+
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+  }
+  await Promise.race([closed, wait(MMBRIDGE_SHUTDOWN_GRACE_MS)]);
+}
+
+type MmbridgeToolName =
+  | "mmbridge_context_packet"
+  | "mmbridge_review"
+  | "mmbridge_gate"
+  | "mmbridge_handoff"
+  | "mmbridge_doctor";
+
+const MMBRIDGE_TOOL_TIMEOUTS_MS: Record<MmbridgeToolName, number> = {
+  mmbridge_context_packet: 120_000,
+  mmbridge_review: 600_000,
+  mmbridge_gate: 600_000,
+  mmbridge_handoff: 120_000,
+  mmbridge_doctor: 120_000,
+};
+
+const REQUIRED_MMBRIDGE_TOOLS: readonly MmbridgeToolName[] = [
+  "mmbridge_context_packet",
+  "mmbridge_review",
+  "mmbridge_gate",
+  "mmbridge_handoff",
+  "mmbridge_doctor",
+];
+
+function getMmbridgeToolTimeoutMs(toolName: MmbridgeToolName): number {
+  return MMBRIDGE_TOOL_TIMEOUTS_MS[toolName] ?? DEFAULT_MMBRIDGE_MCP_TIMEOUT_MS;
+}
 
 export async function runMmbridgeMcpTool(input: {
   workspaceRoot: string;
-  toolName:
-    | "mmbridge_context_packet"
-    | "mmbridge_review"
-    | "mmbridge_gate"
-    | "mmbridge_handoff"
-    | "mmbridge_doctor";
+  toolName: MmbridgeToolName;
   args: Record<string, unknown>;
   userHomeDir?: string;
   onProgress?: (line: string) => void;
@@ -86,7 +151,7 @@ export async function runMmbridgeMcpTool(input: {
     workspaceRoot: input.workspaceRoot,
     ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
   });
-  const timeoutMs = input.timeoutMs ?? DEFAULT_MMBRIDGE_MCP_TIMEOUT_MS;
+  const timeoutMs = input.timeoutMs ?? getMmbridgeToolTimeoutMs(input.toolName);
 
   const child = spawn(config.command, [...(config.args ?? [])], {
     cwd: input.workspaceRoot,
@@ -119,7 +184,7 @@ export async function runMmbridgeMcpTool(input: {
     if (timeoutMs <= 0) return;
     timer = setTimeout(() => {
       if (pending.size === 0) return;
-      failPending(new Error(`mmbridge MCP request timed out after ${timeoutMs}ms. ${stderrText}`.trim()));
+      failPending(new Error(`mmbridge MCP request timed out after ${timeoutMs}ms. ${redactDiagnosticText(stderrText)}`.trim()));
       child.kill("SIGTERM");
     }, timeoutMs);
     if (typeof timer.unref === "function") timer.unref();
@@ -128,10 +193,10 @@ export async function runMmbridgeMcpTool(input: {
   const request = (method: string, params: Record<string, unknown> = {}) => {
     const id = nextId++;
     const payload: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
-    child.stdin.write(encodeFrame(payload), "utf8");
-    armTimeout();
     return new Promise<JsonRpcResponse>((resolve, reject) => {
       pending.set(id, { resolve, reject });
+      child.stdin.write(encodeFrame(payload), "utf8");
+      armTimeout();
     });
   };
 
@@ -187,7 +252,7 @@ export async function runMmbridgeMcpTool(input: {
   child.on("error", (error) => failPending(error instanceof Error ? error : new Error(String(error))));
   child.on("close", (code) => {
     if (pending.size > 0) {
-      failPending(new Error(`mmbridge MCP process exited early with code ${code ?? 0}. ${stderrText}`.trim()));
+      failPending(new Error(`mmbridge MCP process exited early with code ${code ?? 0}. ${redactDiagnosticText(stderrText)}`.trim()));
     }
   });
 
@@ -209,9 +274,158 @@ export async function runMmbridgeMcpTool(input: {
     return resultLines;
   } finally {
     clearTimer();
-    child.stdin.end();
-    child.kill("SIGTERM");
+    await shutdownMcpChild(child);
   }
+}
+
+export async function runMmbridgeMcpHealthCheck(input: {
+  workspaceRoot: string;
+  userHomeDir?: string;
+  timeoutMs?: number;
+}): Promise<{
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly reachable: boolean;
+  readonly tools: readonly string[];
+  readonly missingTools: readonly string[];
+  readonly error?: string;
+}> {
+  const config = resolveMmbridgeServerConfig({
+    workspaceRoot: input.workspaceRoot,
+    ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
+  });
+  const timeoutMs = input.timeoutMs ?? MMBRIDGE_HEALTH_TIMEOUT_MS;
+  const child = spawn(config.command, [...(config.args ?? [])], {
+    cwd: input.workspaceRoot,
+    env: { ...process.env, ...(config.env ?? {}) },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  let nextId = 1;
+  const pending = new Map<number, { resolve: (value: JsonRpcResponse) => void; reject: (error: Error) => void }>();
+  let stdoutBuffer = Buffer.alloc(0);
+  let stderrText = "";
+  let timer: NodeJS.Timeout | null = null;
+
+  const failPending = (error: Error) => {
+    for (const entry of pending.values()) {
+      entry.reject(error);
+    }
+    pending.clear();
+  };
+
+  const clearTimer = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+
+  const armTimeout = () => {
+    clearTimer();
+    if (timeoutMs <= 0) return;
+    timer = setTimeout(() => {
+      if (pending.size === 0) return;
+      failPending(new Error(`mmbridge MCP health check timed out after ${timeoutMs}ms. Diagnostics hidden.`));
+      child.kill("SIGTERM");
+    }, timeoutMs);
+    if (typeof timer.unref === "function") timer.unref();
+  };
+
+  const request = (method: string, params: Record<string, unknown> = {}) => {
+    const id = nextId++;
+    return new Promise<JsonRpcResponse>((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      child.stdin.write(encodeFrame({ jsonrpc: "2.0", id, method, params }), "utf8");
+      armTimeout();
+    });
+  };
+
+  const notify = (method: string, params: Record<string, unknown> = {}) => {
+    child.stdin.write(encodeFrame({ jsonrpc: "2.0", method, params }), "utf8");
+  };
+
+  child.stdin.on("error", () => {});
+  child.stderr.on("data", (chunk) => {
+    stderrText += chunk.toString();
+  });
+  child.stdout.on("data", (chunk) => {
+    stdoutBuffer = Buffer.concat([stdoutBuffer, chunk]);
+    while (true) {
+      const newlineIndex = stdoutBuffer.indexOf(0x0a);
+      if (newlineIndex < 0) return;
+      const line = stdoutBuffer.subarray(0, newlineIndex).toString("utf8").replace(/\r$/, "");
+      stdoutBuffer = stdoutBuffer.subarray(newlineIndex + 1);
+      if (line.length === 0) continue;
+
+      let message: JsonRpcResponse;
+      try {
+        message = JSON.parse(line) as JsonRpcResponse;
+      } catch {
+        continue;
+      }
+
+      if (typeof message.id === "number" && pending.has(message.id)) {
+        const entry = pending.get(message.id);
+        pending.delete(message.id);
+        if (pending.size === 0) {
+          clearTimer();
+        } else {
+          armTimeout();
+        }
+        if (message.error) {
+          entry?.reject(new Error(message.error.message ?? `MCP ${message.method ?? "request"} failed`));
+        } else {
+          entry?.resolve(message);
+        }
+      }
+    }
+  });
+  child.on("error", (error) => failPending(error instanceof Error ? error : new Error(String(error))));
+  child.on("close", (code) => {
+    if (pending.size > 0) {
+      failPending(new Error(`mmbridge MCP process exited early with code ${code ?? 0}. Diagnostics hidden.`));
+    }
+  });
+
+  try {
+    await request("initialize", {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: "unclecode", version: "0.1.0" },
+    });
+    notify("notifications/initialized", {});
+    const response = await request("tools/list");
+    const tools = extractToolNames(response.result);
+    const missingTools = REQUIRED_MMBRIDGE_TOOLS.filter((toolName) => !tools.includes(toolName));
+    return {
+      command: config.command,
+      args: config.args ?? [],
+      reachable: true,
+      tools,
+      missingTools,
+    };
+  } catch (error) {
+    return {
+      command: config.command,
+      args: config.args ?? [],
+      reachable: false,
+      tools: [],
+      missingTools: REQUIRED_MMBRIDGE_TOOLS,
+      error: "health check failed; diagnostics hidden",
+    };
+  } finally {
+    clearTimer();
+    await shutdownMcpChild(child);
+  }
+}
+
+function extractToolNames(result: Record<string, unknown> | undefined): readonly string[] {
+  const tools = Array.isArray(result?.tools) ? result.tools : [];
+  return tools
+    .map((tool) => (tool && typeof tool === "object" && "name" in tool && typeof tool.name === "string" ? tool.name : null))
+    .filter((toolName): toolName is string => toolName !== null)
+    .sort((left, right) => left.localeCompare(right));
 }
 
 export function buildMmbridgeContextSummary(lines: readonly string[]): readonly string[] {
@@ -251,5 +465,17 @@ export function buildMmbridgeDoctorReport(lines: readonly string[]): readonly st
   return [
     "mmbridge doctor finished.",
     ...(joined ? joined.split("\n").slice(0, 12) : []),
+  ];
+}
+
+export function buildMmbridgeHealthReport(input: Awaited<ReturnType<typeof runMmbridgeMcpHealthCheck>>): readonly string[] {
+  return [
+    "mmbridge health",
+    `Reachable: ${input.reachable ? "yes" : "no"}`,
+    `Command: ${redactDiagnosticText(input.command)}`,
+    `Args: ${input.args.length === 0 ? "none" : `${input.args.length} configured (hidden)`}`,
+    `Tools: ${input.tools.length > 0 ? input.tools.join(", ") : "none"}`,
+    `Required tools: ${input.missingTools.length === 0 ? "all present" : `missing ${input.missingTools.join(", ")}`}`,
+    ...(input.error ? [`Error: ${redactDiagnosticText(input.error)}`] : []),
   ];
 }

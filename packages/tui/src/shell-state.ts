@@ -1,3 +1,5 @@
+import type { SessionCenterResearchRun } from "./dashboard-actions.js";
+
 export type TuiShellSession = {
   readonly sessionId: string;
   readonly state: string;
@@ -22,6 +24,7 @@ export type TuiShellHomeState = {
   readonly latestResearchSummary: string | null;
   readonly latestResearchTimestamp: string | null;
   readonly researchRunCount: number;
+  readonly recentResearchRuns?: readonly SessionCenterResearchRun[];
   readonly sessions: readonly TuiShellSession[];
   readonly bridgeLines?: readonly string[];
   readonly memoryLines?: readonly string[];
@@ -203,7 +206,6 @@ export function reduceShellEvent(state: TuiShellState, event: TuiShellEvent): Tu
       const timestamp = new Date().toISOString();
       return {
         ...state,
-        view: "work",
         activityEntries: [
           {
             id: `start-${event.actionId}`,
@@ -231,7 +233,7 @@ export function reduceShellEvent(state: TuiShellState, event: TuiShellEvent): Tu
       return {
         ...state,
         homeState: event.homeState,
-        view: event.entry.source === "new-research" ? "research" : "work",
+        view: event.entry.source === "new-research" ? "research" : state.view,
         outputLines: event.outputLines,
         activityEntries: [event.entry, ...state.activityEntries].slice(0, 20),
         traceEntries: appendTraceEntry(state.traceEntries, {
@@ -254,7 +256,6 @@ export function reduceShellEvent(state: TuiShellState, event: TuiShellEvent): Tu
       const timestamp = new Date().toISOString();
       return {
         ...state,
-        view: "work",
         outputLines: event.outputLines,
         activityEntries: [event.entry, ...state.activityEntries].slice(0, 20),
         traceEntries: appendTraceEntry(state.traceEntries, {
@@ -308,6 +309,14 @@ export function reduceShellEvent(state: TuiShellState, event: TuiShellEvent): Tu
     }
     case "worker.progressed": {
       const existing = state.workers.find((worker) => worker.id === event.worker.id);
+      if (
+        existing &&
+        existing.label === event.worker.label &&
+        existing.status === event.worker.status &&
+        existing.detail === event.worker.detail
+      ) {
+        return state;
+      }
       return {
         ...state,
         traceEntries: appendTraceEntry(state.traceEntries, {

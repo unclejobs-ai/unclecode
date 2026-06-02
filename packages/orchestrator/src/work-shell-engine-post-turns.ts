@@ -1,4 +1,5 @@
 import { createConversationTurnSummary } from "./work-shell-engine-turns.js";
+import { runRustCommandSync } from "./rust-command.js";
 
 export type WorkShellSyntheticTraceEvent = {
   readonly type: "bridge.published" | "memory.written";
@@ -44,6 +45,65 @@ export type WorkShellPostTurnSuccessEffectsResult = {
 
 export function isWorkShellAuthFailure(message: string): boolean {
   return /request failed with status 401/i.test(message);
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((line) => typeof line === "string");
+}
+
+function isSyntheticTraceEvent(value: unknown): value is WorkShellSyntheticTraceEvent {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (((value as { type?: unknown }).type === "bridge.published") ||
+      ((value as { type?: unknown }).type === "memory.written"))
+  );
+}
+
+export function resolveWorkShellPostTurnSuccessEffectsPayload(input: {
+  summary: string;
+  bridgeId: string;
+  bridgeLine: string;
+  currentBridgeLines: readonly string[];
+  memoryId: string;
+  memoryLines: readonly string[];
+}): WorkShellPostTurnSuccessEffectsResult {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "ux", "post-turn-success-result"],
+      process.cwd(),
+      JSON.stringify(input),
+    ),
+  ) as unknown;
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error("Rust post-turn success returned an invalid payload.");
+  }
+  const candidate = parsed as {
+    bridgeLines?: unknown;
+    memoryLines?: unknown;
+    bridgeSummary?: unknown;
+    memorySummary?: unknown;
+    bridgeTraceEvent?: unknown;
+    memoryTraceEvent?: unknown;
+  };
+  if (
+    !isStringArray(candidate.bridgeLines) ||
+    !isStringArray(candidate.memoryLines) ||
+    typeof candidate.bridgeSummary !== "string" ||
+    typeof candidate.memorySummary !== "string" ||
+    !isSyntheticTraceEvent(candidate.bridgeTraceEvent) ||
+    !isSyntheticTraceEvent(candidate.memoryTraceEvent)
+  ) {
+    throw new Error("Rust post-turn success returned an invalid payload.");
+  }
+  return {
+    bridgeLines: candidate.bridgeLines,
+    memoryLines: candidate.memoryLines,
+    bridgeSummary: candidate.bridgeSummary,
+    memorySummary: candidate.memorySummary,
+    bridgeTraceEvent: candidate.bridgeTraceEvent,
+    memoryTraceEvent: candidate.memoryTraceEvent,
+  };
 }
 
 export async function resolveWorkShellFailureAuthLabel(input: {
@@ -92,27 +152,12 @@ export async function runWorkShellPostTurnSuccessEffects(
     sessionId: input.sessionId,
   });
 
-  return {
-    bridgeLines: [bridge.line, ...input.currentBridgeLines].slice(0, 6),
+  return resolveWorkShellPostTurnSuccessEffectsPayload({
+    summary,
+    bridgeId: bridge.bridgeId,
+    bridgeLine: bridge.line,
+    currentBridgeLines: input.currentBridgeLines,
+    memoryId: memory.memoryId,
     memoryLines,
-    bridgeSummary: summary,
-    memorySummary: summary,
-    bridgeTraceEvent: {
-      type: "bridge.published",
-      level: "high-signal",
-      bridgeId: bridge.bridgeId,
-      scope: "project",
-      kind: "summary",
-      summary,
-      source: "work-shell",
-      target: "project-context",
-    },
-    memoryTraceEvent: {
-      type: "memory.written",
-      level: "high-signal",
-      memoryId: memory.memoryId,
-      scope: "session",
-      summary,
-    },
-  };
+  });
 }

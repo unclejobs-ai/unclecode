@@ -10,6 +10,38 @@ import {
 
 type SessionCenterResolvedState = TuiShellFocusState;
 
+function getPreferredActionIndexForView(view: TuiShellState["view"]): number | undefined {
+  const preferredActionId =
+    view === "work"
+      ? "work-session"
+      : view === "mcp"
+        ? "mcp-list"
+        : view === "research"
+          ? "new-research"
+          : undefined;
+  if (!preferredActionId) {
+    return undefined;
+  }
+
+  const actionIndex = SESSION_CENTER_ACTIONS.findIndex((action) => action.id === preferredActionId);
+  return actionIndex >= 0 ? actionIndex : undefined;
+}
+
+export function createSessionCenterFocusForView(
+  view: TuiShellState["view"],
+  state: SessionCenterFocusState,
+): SessionCenterResolvedState {
+  const preferredActionIndex = getPreferredActionIndexForView(view);
+  return {
+    column: view === "sessions" ? "sessions" : "actions",
+    sessionIndex: state.sessionIndex,
+    actionIndex: preferredActionIndex ?? state.actionIndex,
+    detailOpen: false,
+    shouldExit: false,
+    selectedCommand: undefined,
+  };
+}
+
 export function handleDashboardInput(
   input: string,
   key: {
@@ -108,7 +140,28 @@ export function handleSessionCenterInput(
     (action) => action.command,
   ),
   sessionCommands?: readonly string[],
+  options?: {
+    readonly visibleActionIndexes?: readonly number[];
+    readonly allowActionColumn?: boolean;
+  },
 ): SessionCenterResolvedState {
+  const allowActionColumn = options?.allowActionColumn ?? true;
+  const visibleActionIndexes = options?.visibleActionIndexes;
+  const hasVisibleActionIndexes = Boolean(visibleActionIndexes?.length);
+  const actionPosition = hasVisibleActionIndexes
+    ? Math.max(0, visibleActionIndexes!.indexOf(state.actionIndex))
+    : state.actionIndex;
+  const actionCount = hasVisibleActionIndexes
+    ? visibleActionIndexes!.length
+    : counts.actionCount;
+  const resolveActionIndex = (position: number): number =>
+    hasVisibleActionIndexes
+      ? visibleActionIndexes![position] ?? state.actionIndex
+      : position;
+  const normalizedActionIndex =
+    hasVisibleActionIndexes && !visibleActionIndexes!.includes(state.actionIndex)
+      ? visibleActionIndexes![0] ?? state.actionIndex
+      : state.actionIndex;
   const isSubmitInput =
     input === "\r" ||
     input === "\n" ||
@@ -137,13 +190,14 @@ export function handleSessionCenterInput(
     if (key.leftArrow || input === "h") {
       return { ...base, column: "sessions", detailOpen: false };
     }
-    if (key.rightArrow || input === "l") {
-      return { ...base, column: "actions", detailOpen: false };
+    if ((key.rightArrow || input === "l") && allowActionColumn) {
+      return { ...base, column: "actions", actionIndex: normalizedActionIndex, detailOpen: false };
     }
-    if (input === "\t") {
+    if (input === "\t" && allowActionColumn) {
       return {
         ...base,
         column: state.column === "sessions" ? "actions" : "sessions",
+        actionIndex: state.column === "sessions" ? normalizedActionIndex : base.actionIndex,
         detailOpen: false,
       };
     }
@@ -156,7 +210,7 @@ export function handleSessionCenterInput(
           }
         : {
             ...base,
-            actionIndex: Math.max(0, state.actionIndex - 1),
+            actionIndex: resolveActionIndex(Math.max(0, actionPosition - 1)),
             detailOpen: false,
           };
     }
@@ -172,10 +226,10 @@ export function handleSessionCenterInput(
           }
         : {
             ...base,
-            actionIndex: Math.min(
-              Math.max(0, counts.actionCount - 1),
-              state.actionIndex + 1,
-            ),
+            actionIndex: resolveActionIndex(Math.min(
+              Math.max(0, actionCount - 1),
+              actionPosition + 1,
+            )),
             detailOpen: false,
           };
     }
@@ -184,26 +238,29 @@ export function handleSessionCenterInput(
         state.column === "actions"
           ? actionCommands[state.actionIndex]
           : sessionCommands?.[state.sessionIndex];
-      return { ...base, shouldExit: true, selectedCommand };
+      return selectedCommand
+        ? { ...base, shouldExit: true, selectedCommand }
+        : base;
     }
     return base;
   }
   if (key.leftArrow || input === "h") {
     return { ...base, column: "sessions" };
   }
-  if (key.rightArrow || input === "l") {
-    return { ...base, column: "actions" };
+  if ((key.rightArrow || input === "l") && allowActionColumn) {
+    return { ...base, column: "actions", actionIndex: normalizedActionIndex };
   }
-  if (input === "\t") {
+  if (input === "\t" && allowActionColumn) {
     return {
       ...base,
       column: state.column === "sessions" ? "actions" : "sessions",
+      actionIndex: state.column === "sessions" ? normalizedActionIndex : base.actionIndex,
     };
   }
   if (key.upArrow || input === "k") {
     return state.column === "sessions"
       ? { ...base, sessionIndex: Math.max(0, state.sessionIndex - 1) }
-      : { ...base, actionIndex: Math.max(0, state.actionIndex - 1) };
+      : { ...base, actionIndex: resolveActionIndex(Math.max(0, actionPosition - 1)) };
   }
   if (key.downArrow || input === "j") {
     return state.column === "sessions"
@@ -216,10 +273,10 @@ export function handleSessionCenterInput(
         }
       : {
           ...base,
-          actionIndex: Math.min(
-            Math.max(0, counts.actionCount - 1),
-            state.actionIndex + 1,
-          ),
+          actionIndex: resolveActionIndex(Math.min(
+            Math.max(0, actionCount - 1),
+            actionPosition + 1,
+          )),
         };
   }
   if (key.return || isSubmitInput) {
@@ -230,7 +287,10 @@ export function handleSessionCenterInput(
         selectedCommand: actionCommands[state.actionIndex],
       };
     }
-    return { ...base, detailOpen: true };
+    const selectedCommand = sessionCommands?.[state.sessionIndex];
+    return selectedCommand
+      ? { ...base, shouldExit: true, selectedCommand }
+      : { ...base, detailOpen: true };
   }
   return base;
 }
@@ -268,6 +328,10 @@ export function getSessionCenterActionShortcut(
       return "auth-logout";
     case "r":
       return "new-research";
+    case "m":
+      return "mcp-list";
+    case "i":
+      return "mcp-inspect";
     case "d":
       return "doctor";
     default:
@@ -287,6 +351,10 @@ export function getImmediateActionShortcut(input: string): string | undefined {
       return "auth-logout";
     case "R":
       return "new-research";
+    case "M":
+      return "mcp-list";
+    case "I":
+      return "mcp-inspect";
     case "D":
       return "doctor";
     default:
@@ -316,6 +384,72 @@ export function shouldRenderEmbeddedWorkPaneFullscreen(
   hasEmbeddedWorkPane: boolean,
 ): boolean {
   return view === "work" && hasEmbeddedWorkPane;
+}
+
+export function shouldReturnToWorkOnEscape(
+  view: TuiShellState["view"],
+  key: { readonly escape?: boolean },
+  state: SessionCenterFocusState,
+  hasSelectedApproval: boolean,
+): boolean {
+  return view !== "work" && Boolean(key.escape) && !state.detailOpen && !hasSelectedApproval;
+}
+
+export function getSessionCenterEscapeHint(input: {
+  readonly view: TuiShellState["view"];
+  readonly detailOpen: boolean;
+  readonly hasSelectedApproval: boolean;
+  readonly hasEmbeddedWorkPane: boolean;
+}): "Esc cancel" | "Esc close" | "Esc sessions" | "Esc work" {
+  if (input.hasSelectedApproval) {
+    return "Esc cancel";
+  }
+  if (input.detailOpen) {
+    return "Esc close";
+  }
+  if (input.view === "work" && input.hasEmbeddedWorkPane) {
+    return "Esc sessions";
+  }
+  return "Esc work";
+}
+
+export function buildSessionCenterStatusLine(input: {
+  readonly view: TuiShellState["view"];
+  readonly savedSessionCount: number;
+  readonly mcpServerCount: number;
+  readonly researchRunCount: number;
+  readonly detailOpen: boolean;
+  readonly hasSelectedApproval: boolean;
+  readonly hasEmbeddedWorkPane: boolean;
+}): string {
+  const escapeHint = getSessionCenterEscapeHint(input);
+  if (input.view === "work") {
+    return `Work · live session · ${escapeHint} · Shift+Tab mode · / commands`;
+  }
+  if (input.view === "mcp") {
+    return `MCP · ${String(input.mcpServerCount)} server(s) · M list · I inspect · ${escapeHint}`;
+  }
+  if (input.view === "research") {
+    const primaryHint = input.detailOpen ? "Enter run" : "R prompt";
+    return `Research · ${String(input.researchRunCount)} run(s) · ${primaryHint} · ${escapeHint}`;
+  }
+  return `History · ${String(input.savedSessionCount)} saved · ↑↓ select · Enter resume · ${escapeHint}`;
+}
+
+export function shouldOpenResearchPromptLane(
+  view: TuiShellState["view"],
+  input: string,
+  key: { readonly return?: boolean },
+  state: SessionCenterFocusState,
+  hasSelectedApproval: boolean,
+): boolean {
+  return (
+    view === "research" &&
+    !state.detailOpen &&
+    state.column !== "actions" &&
+    !hasSelectedApproval &&
+    (input.toLowerCase() === "r" || Boolean(key.return))
+  );
 }
 
 export function resolveWorkPaneNavigationMode(input: {

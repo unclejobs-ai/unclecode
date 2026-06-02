@@ -1,4 +1,5 @@
 import { createSessionCenterDashboardRenderOptions } from "@unclecode/tui";
+import { runRustCommandPassthrough } from "@unclecode/orchestrator";
 import type {
   SessionCenterLaunchInput,
   SharedBootstrapDependencies,
@@ -13,6 +14,7 @@ import {
 import {
   launchWorkEntrypoint,
   loadEmbeddedWorkPane,
+  withWorkCwd,
 } from "./work-bootstrap.js";
 
 export async function launchSessionCenter(
@@ -35,20 +37,28 @@ export async function launchSessionCenter(
     runAction,
     runSession,
     loadEmbeddedWorkPane: () =>
-      loadEmbeddedWorkPane(
-        createEmbeddedWorkPaneLoadInput({
-          workspaceRoot,
-          ...(input.initialSelectedSessionId !== undefined
-            ? { initialSelectedSessionId: input.initialSelectedSessionId }
-            : {}),
-          ...(deps?.loadWorkModule ? { loadWorkModule: deps.loadWorkModule } : {}),
-        }),
-      ),
+      deps?.loadWorkModule
+        ? loadEmbeddedWorkPane(
+            createEmbeddedWorkPaneLoadInput({
+              workspaceRoot,
+              ...(input.initialSelectedSessionId !== undefined
+                ? { initialSelectedSessionId: input.initialSelectedSessionId }
+                : {}),
+              loadWorkModule: deps.loadWorkModule,
+            }),
+          )
+        : Promise.resolve(undefined),
     launchWorkSession: (forwardedArgs = []) =>
-      launchWorkEntrypoint(forwardedArgs, {
-        callerCwd: workspaceRoot,
-        ...(deps?.loadWorkModule ? { loadModule: deps.loadWorkModule } : {}),
-      }),
+      deps?.loadWorkModule
+        ? launchWorkEntrypoint(forwardedArgs, {
+            callerCwd: workspaceRoot,
+            loadModule: deps.loadWorkModule,
+          })
+        : runRustCommandPassthrough(
+            ["work", ...withWorkCwd(forwardedArgs, workspaceRoot)],
+            workspaceRoot,
+            env,
+          ).then(() => undefined),
   });
 
   await renderShell(

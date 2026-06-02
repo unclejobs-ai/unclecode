@@ -1,3 +1,5 @@
+import { runRustCommandSync } from "@unclecode/orchestrator";
+
 const WORK_SHELL_MODE_CYCLE = ["default", "yolo", "ultrawork", "analyze", "search"] as const;
 
 type WorkShellCycleMode = (typeof WORK_SHELL_MODE_CYCLE)[number];
@@ -7,6 +9,7 @@ export type WorkShellInputAction =
   | { readonly type: "exit" }
   | { readonly type: "complete-slash"; readonly value: string }
   | { readonly type: "move-slash-selection"; readonly direction: "previous" | "next" }
+  | { readonly type: "close-slash-picker" }
   | { readonly type: "cycle-mode"; readonly nextMode: WorkShellCycleMode }
   | { readonly type: "cancel-sensitive-input" }
   | { readonly type: "close-overlay" }
@@ -15,17 +18,9 @@ export type WorkShellInputAction =
 
 export type WorkShellSubmitAction =
   | { readonly type: "noop" }
+  | { readonly type: "replace-input"; readonly value: string }
   | { readonly type: "submit"; readonly line: string; readonly clearInput: true }
   | { readonly type: "submit-suggestion"; readonly line: string; readonly clearInput: true };
-
-function hasSlashSuggestions(input: string, slashSuggestionCount: number): boolean {
-  return input.trim().startsWith("/") && slashSuggestionCount > 0;
-}
-
-function getNextWorkShellMode(currentMode: string | undefined): WorkShellCycleMode {
-  const currentIndex = currentMode ? WORK_SHELL_MODE_CYCLE.indexOf(currentMode as WorkShellCycleMode) : -1;
-  return WORK_SHELL_MODE_CYCLE[(currentIndex + 1 + WORK_SHELL_MODE_CYCLE.length) % WORK_SHELL_MODE_CYCLE.length] ?? "default";
-}
 
 export function resolveWorkShellInputAction(input: {
   readonly value: string;
@@ -45,46 +40,15 @@ export function resolveWorkShellInputAction(input: {
   readonly currentMode?: string;
   readonly hasSensitiveInput?: boolean;
   readonly hasOverlayOpen?: boolean;
+  readonly hasSlashPicker?: boolean;
 }): WorkShellInputAction {
-  if (input.key.ctrl && input.value === "c") {
-    return { type: "exit" };
+  if (!input.key.ctrl && !input.key.tab && !input.key.upArrow && !input.key.downArrow && !input.key.escape) {
+    return { type: "none" };
   }
 
-  if (input.key.tab && input.key.shift && !input.isBusy && !hasSlashSuggestions(input.input, input.slashSuggestionCount)) {
-    return {
-      type: "cycle-mode",
-      nextMode: getNextWorkShellMode(input.currentMode),
-    };
-  }
-
-  if (input.key.tab && hasSlashSuggestions(input.input, input.slashSuggestionCount)) {
-    return {
-      type: "complete-slash",
-      value: `${input.selectedSlashCommand ?? input.input} `,
-    };
-  }
-
-  if (input.key.upArrow && hasSlashSuggestions(input.input, input.slashSuggestionCount)) {
-    return { type: "move-slash-selection", direction: "previous" };
-  }
-
-  if (input.key.downArrow && hasSlashSuggestions(input.input, input.slashSuggestionCount)) {
-    return { type: "move-slash-selection", direction: "next" };
-  }
-
-  if (input.key.escape && !input.isBusy) {
-    if (input.hasSensitiveInput) {
-      return { type: "cancel-sensitive-input" };
-    }
-    if (input.hasOverlayOpen) {
-      return { type: "close-overlay" };
-    }
-    return input.hasRequestSessionsView
-      ? { type: "open-sessions-view" }
-      : { type: "open-engine-sessions" };
-  }
-
-  return { type: "none" };
+  return JSON.parse(
+    runRustCommandSync(["rust", "ux", "input-action"], process.cwd(), JSON.stringify(input)),
+  ) as WorkShellInputAction;
 }
 
 export function resolveWorkShellSubmitAction(input: {
@@ -92,27 +56,9 @@ export function resolveWorkShellSubmitAction(input: {
   readonly isBusy: boolean;
   readonly shouldBlockSlashSubmit: boolean;
   readonly selectedSlashCommand?: string;
+  readonly activePanelTitle?: string;
 }): WorkShellSubmitAction {
-  const line = input.value.trim();
-  if (!line || input.isBusy) {
-    return { type: "noop" };
-  }
-
-  if (input.shouldBlockSlashSubmit) {
-    if (!input.selectedSlashCommand) {
-      return { type: "noop" };
-    }
-
-    return {
-      type: "submit-suggestion",
-      line: input.selectedSlashCommand,
-      clearInput: true,
-    };
-  }
-
-  return {
-    type: "submit",
-    line,
-    clearInput: true,
-  };
+  return JSON.parse(
+    runRustCommandSync(["rust", "ux", "submit-action"], process.cwd(), JSON.stringify(input)),
+  ) as WorkShellSubmitAction;
 }

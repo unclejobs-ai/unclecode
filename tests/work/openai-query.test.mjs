@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Worker } from "node:worker_threads";
 
 import { OpenAIProvider } from "@unclecode/orchestrator";
 
@@ -8,6 +9,32 @@ const UNSUPPORTED_REASONING = {
   source: "model-capability",
   support: { status: "unsupported", supportedEfforts: [] },
 };
+
+function waitForWorkerMessage(worker, type) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for worker message: ${type}`));
+    }, 5000);
+    const onMessage = (message) => {
+      if (message?.type === type) {
+        cleanup();
+        resolve(message);
+      }
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      worker.off("message", onMessage);
+      worker.off("error", onError);
+    };
+    worker.on("message", onMessage);
+    worker.on("error", onError);
+  });
+}
 
 test("OpenAIProvider.query returns plain content when model emits no tool calls", async () => {
   const provider = new OpenAIProvider({
@@ -192,7 +219,7 @@ test("OpenAIProvider.query throws on non-2xx response", async () => {
 
   await assert.rejects(
     () => provider.query([{ role: "user", content: "hi" }]),
-    /OpenAI request failed with status 500: boom/,
+    /OpenAI request failed with status 500[\s\S]*Route · openai · https:\/\/api\.openai\.com\/v1\/responses[\s\S]*Retry · attempt count unavailable; transient status[\s\S]*Response · boom/,
   );
 });
 
@@ -271,4 +298,113 @@ test("OpenAIProvider.query tolerates malformed tool_call arguments", async () =>
   assert.equal(result.actions.length, 1);
   assert.deepEqual(result.actions[0].input, {});
   assert.equal(result.actions[0].tool, "run_shell");
+});
+
+test("OpenAIProvider.query uses Rust one-shot chat query when fetch is not injected", async () => {
+  const originalBaseUrl = process.env.OPENAI_API_BASE_URL;
+  const originalNoProxy = process.env.NO_PROXY;
+  const worker = new Worker(`
+    const http = require("node:http");
+    const { parentPort } = require("node:worker_threads");
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.setEncoding("utf8");
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        parentPort.postMessage({
+          type: "request",
+          request: {
+            method: req.method,
+            url: req.url,
+            authorization: req.headers.authorization,
+            body: JSON.parse(body),
+          },
+        });
+        const responseBody = JSON.stringify({
+          choices: [{
+            message: {
+              content: "rust query",
+              tool_calls: [{
+                id: "call_rust",
+                function: {
+                  name: "run_shell",
+                  arguments: JSON.stringify({ command: "echo rust" }),
+                },
+              }],
+            },
+          }],
+          usage: { prompt_tokens: 1000000, completion_tokens: 1000000 },
+        });
+        res.writeHead(200, {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(responseBody),
+          connection: "close",
+        });
+        res.end(responseBody);
+      });
+    });
+    parentPort.on("message", (message) => {
+      if (message === "close") server.close(() => parentPort.postMessage({ type: "closed" }));
+    });
+    server.listen(0, "127.0.0.1", () => {
+      parentPort.postMessage({ type: "listening", port: server.address().port });
+    });
+  `, { eval: true });
+
+  try {
+    const port = await waitForWorkerMessage(worker, "listening").then((message) => message.port);
+    process.env.OPENAI_API_BASE_URL = `http://127.0.0.1:${port}/v1`;
+    process.env.NO_PROXY = [originalNoProxy, "127.0.0.1", "localhost"].filter(Boolean).join(",");
+    const provider = new OpenAIProvider({
+      apiKey: "sk-test-rust",
+      model: "gpt-4.1-mini",
+      cwd: process.cwd(),
+      reasoning: UNSUPPORTED_REASONING,
+    });
+
+    const requestPromise = waitForWorkerMessage(worker, "request").then((message) => message.request);
+    const result = await provider.query(
+      [{ role: "user", content: "run echo" }],
+      {
+        tools: [
+          {
+            name: "run_shell",
+            description: "Execute a shell command.",
+            input_schema: {
+              type: "object",
+              properties: { command: { type: "string" } },
+              required: ["command"],
+            },
+          },
+        ],
+      },
+    );
+    const observedRequest = await requestPromise;
+
+    assert.equal(result.content, "rust query");
+    assert.deepEqual(result.actions, [
+      { callId: "call_rust", tool: "run_shell", input: { command: "echo rust" } },
+    ]);
+    assert.equal(result.costUsd, 2.0);
+    assert.equal(observedRequest.method, "POST");
+    assert.equal(observedRequest.url, "/v1/chat/completions");
+    assert.equal(observedRequest.authorization, "Bearer sk-test-rust");
+    assert.equal(observedRequest.body.messages[0].role, "system");
+    assert.equal(observedRequest.body.messages[1].role, "user");
+    assert.equal(observedRequest.body.tools[0].function.name, "run_shell");
+  } finally {
+    if (originalBaseUrl === undefined) {
+      delete process.env.OPENAI_API_BASE_URL;
+    } else {
+      process.env.OPENAI_API_BASE_URL = originalBaseUrl;
+    }
+    if (originalNoProxy === undefined) {
+      delete process.env.NO_PROXY;
+    } else {
+      process.env.NO_PROXY = originalNoProxy;
+    }
+    worker.postMessage("close");
+    await waitForWorkerMessage(worker, "closed");
+    await worker.terminate();
+  }
 });

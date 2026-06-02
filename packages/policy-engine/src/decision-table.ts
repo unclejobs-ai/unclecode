@@ -169,7 +169,10 @@ export function applyRuntimeDecision(
     return createDecision("prompt", "runtime", "Remote runtime actions require review.", request);
   }
 
-  if (request.runtimeMode === "sandbox" && currentDecision.effect === "allow") {
+  if (
+    (request.runtimeMode === "sandbox" || request.runtimeMode === "openshell")
+    && currentDecision.effect === "allow"
+  ) {
     return createDecision("prompt", "runtime", "Sandbox runtime actions require review.", request);
   }
 

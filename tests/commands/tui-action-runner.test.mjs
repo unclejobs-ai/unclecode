@@ -137,6 +137,46 @@ test("runTuiSessionCenterAction can cycle and persist the next mode inline", asy
   }
 });
 
+test("runWorkShellInlineAction supports explicit mode set commands", async () => {
+  const cwd = makeTempWorkspace();
+
+  try {
+    const lines = await runWorkShellInlineAction({
+      args: ["mode", "set", "search"],
+      workspaceRoot: cwd,
+      env: process.env,
+    });
+
+    assert.match(lines.join("\n"), /Active mode saved: search/);
+
+    const homeState = await buildTuiHomeState({
+      workspaceRoot: cwd,
+      env: process.env,
+    });
+    assert.equal(homeState.modeLabel, "search");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("runTuiSessionCenterAction rejects unsupported explicit modes", async () => {
+  const cwd = makeTempWorkspace();
+
+  try {
+    const lines = await runTuiSessionCenterAction({
+      actionId: "mode-set",
+      workspaceRoot: cwd,
+      env: process.env,
+      prompt: "warpdrive",
+    });
+
+    assert.match(lines.join("\n"), /Unsupported mode: warpdrive/);
+    assert.match(lines.join("\n"), /Supported:/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("runTuiSessionCenterAction executes auth status inline", async () => {
   const cwd = makeTempWorkspace();
 
@@ -554,6 +594,48 @@ test("runTuiSessionCenterAction executes mcp list inline", async () => {
   }
 });
 
+test("runTuiSessionCenterAction inspects one MCP server without claiming health", async () => {
+  const cwd = makeTempWorkspace();
+  const fakeHome = path.join(cwd, "fake-home");
+
+  try {
+    mkdirSync(path.join(fakeHome, ".unclecode"), { recursive: true });
+    writeFileSync(
+      path.join(fakeHome, ".unclecode", "mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          memory: {
+            type: "stdio",
+            command: "node",
+            args: ["memory.js"],
+            env: { MEMORY_TOKEN: "redacted-in-report" },
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    const lines = await runTuiSessionCenterAction({
+      actionId: "mcp-inspect",
+      workspaceRoot: cwd,
+      env: process.env,
+      userHomeDir: fakeHome,
+      prompt: "memory",
+    });
+
+    const report = lines.join("\n");
+    assert.match(report, /MCP server inspect/);
+    assert.match(report, /Name: memory/);
+    assert.match(report, /Command: node/);
+    assert.match(report, /Args: memory\.js/);
+    assert.match(report, /Env keys: 1/);
+    assert.match(report, /Health: not checked by inspect/);
+    assert.doesNotMatch(report, /redacted-in-report/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("runTuiSessionCenterAction gives a short prompt hint for research without a prompt", async () => {
   const cwd = makeTempWorkspace();
 
@@ -604,6 +686,10 @@ test("runTuiSessionCenterAction can execute research when a prompt is provided",
     assert.equal(homeState.latestResearchSummary, homeState.sessions[0]?.taskSummary ?? null);
     assert.equal(homeState.researchRunCount, 1);
     assert.match(homeState.latestResearchTimestamp ?? "", /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(homeState.recentResearchRuns.length, 1);
+    assert.equal(homeState.recentResearchRuns[0]?.prompt, "summarize current workspace");
+    assert.equal(homeState.recentResearchRuns[0]?.status, "completed");
+    assert.match(homeState.recentResearchRuns[0]?.summary ?? "", /Prepared a local research bundle/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -728,6 +814,16 @@ process.stdin.on("data", (chunk) => {
       writeMessage({ jsonrpc: "2.0", id: payload.id, result: { protocolVersion: "2025-11-25", capabilities: { tools: {} }, serverInfo: { name: "fake-mmbridge", version: "0.0.0" } } });
       continue;
     }
+    if (payload.method === "tools/list") {
+      writeMessage({ jsonrpc: "2.0", id: payload.id, result: { tools: [
+        { name: "mmbridge_context_packet" },
+        { name: "mmbridge_review" },
+        { name: "mmbridge_gate" },
+        { name: "mmbridge_handoff" },
+        { name: "mmbridge_doctor" },
+      ] } });
+      continue;
+    }
     if (payload.method === "tools/call") {
       const name = payload.params?.name;
       const lines = {
@@ -752,7 +848,7 @@ process.stdin.on("data", (chunk) => {
             mmbridge: {
               type: "stdio",
               command: "node",
-              args: ["./fake-mmbridge-mcp.mjs"],
+              args: ["./fake-mmbridge-mcp.mjs", "--opaque=leaky-value"],
             },
           },
         },
@@ -786,6 +882,17 @@ process.stdin.on("data", (chunk) => {
     assert.match(handoffLines.join("\n"), /mmbridge handoff ready/);
     assert.match(handoffLines.join("\n"), /latest handoff ready/);
 
+    const healthLines = await runWorkShellInlineAction({
+      args: ["mmbridge", "health"],
+      workspaceRoot: cwd,
+      env: process.env,
+    });
+    assert.match(healthLines.join("\n"), /mmbridge health/);
+    assert.match(healthLines.join("\n"), /Reachable: yes/);
+    assert.match(healthLines.join("\n"), /Args: 2 configured \(hidden\)/);
+    assert.doesNotMatch(healthLines.join("\n"), /leaky-value/);
+    assert.match(healthLines.join("\n"), /Required tools: all present/);
+
     const doctorLines = await runWorkShellInlineAction({
       args: ["mmbridge", "doctor"],
       workspaceRoot: cwd,
@@ -793,6 +900,78 @@ process.stdin.on("data", (chunk) => {
     });
     assert.match(doctorLines.join("\n"), /mmbridge doctor finished/);
     assert.match(doctorLines.join("\n"), /adapters ready/);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+
+test("runWorkShellInlineAction hides mmbridge health args and diagnostics", async () => {
+  const cwd = makeTempWorkspace();
+
+  try {
+    writeFileSync(
+      path.join(cwd, "fake-mmbridge-mcp-health-error.mjs"),
+      `
+import process from "node:process";
+
+let buffer = Buffer.alloc(0);
+function writeMessage(payload) {
+  process.stdout.write(JSON.stringify(payload) + "\\n");
+}
+process.stderr.write("startup args " + process.argv.slice(2).join(" ") + " password=stderrvalue\\n");
+process.stdin.on("data", (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (true) {
+    const newlineIndex = buffer.indexOf(0x0a);
+    if (newlineIndex < 0) break;
+    const line = buffer.subarray(0, newlineIndex).toString("utf8").replace(/\\r$/, "");
+    buffer = buffer.subarray(newlineIndex + 1);
+    if (line.length === 0) continue;
+    let payload;
+    try { payload = JSON.parse(line); } catch { continue; }
+    if (payload.method === "initialize") {
+      writeMessage({ jsonrpc: "2.0", id: payload.id, error: { code: -32000, message: "api_key=hunter2value token=visibletoken" } });
+    }
+  }
+});
+`,
+      "utf8",
+    );
+    writeFileSync(
+      path.join(cwd, ".mcp.json"),
+      JSON.stringify(
+        {
+          mcpServers: {
+            mmbridge: {
+              type: "stdio",
+              command: "node",
+              args: ["./fake-mmbridge-mcp-health-error.mjs", "--opaque=health-leak-value"],
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const healthLines = await runWorkShellInlineAction({
+      args: ["mmbridge", "health"],
+      workspaceRoot: cwd,
+      env: process.env,
+    });
+    const report = healthLines.join("\n");
+
+    assert.match(report, /Reachable: no/);
+    assert.match(report, /Args: 2 configured \(hidden\)/);
+    assert.match(report, /Error: health check failed; diagnostics hidden/);
+    assert.doesNotMatch(report, /api_key/);
+    assert.doesNotMatch(report, /token/);
+    assert.doesNotMatch(report, /health-leak-value/);
+    assert.doesNotMatch(report, /hunter2value/);
+    assert.doesNotMatch(report, /visibletoken/);
+    assert.doesNotMatch(report, /stderrvalue/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

@@ -6,6 +6,11 @@
  */
 
 import type { PersonaId, MiniLoopMessage } from "./mini-loop.js";
+import type {
+  ExecutionPolicyCapability,
+  PolicyDecisionEffect,
+  PolicyDecisionSource,
+} from "./policy.js";
 
 export const TEAM_RUN_STATUSES = [
   "started",
@@ -24,7 +29,7 @@ export const TEAM_GATE_LEVELS = ["strict", "warn", "off"] as const;
 
 export type TeamGateLevel = (typeof TEAM_GATE_LEVELS)[number];
 
-export const TEAM_RUNTIME_MODES = ["local", "docker", "e2b"] as const;
+export const TEAM_RUNTIME_MODES = ["local", "docker", "e2b", "openshell"] as const;
 
 export type TeamRuntimeMode = (typeof TEAM_RUNTIME_MODES)[number];
 
@@ -107,6 +112,15 @@ export type TeamStepCheckpoint = {
   readonly action?: {
     readonly tool: string;
     readonly argHash: string;
+  };
+  readonly policy?: {
+    readonly capability: ExecutionPolicyCapability;
+    readonly effect: PolicyDecisionEffect;
+    readonly source: PolicyDecisionSource;
+    readonly reason: string;
+    readonly matchedRule: string;
+    readonly runtimeMode: string;
+    readonly toolName?: string;
   };
   readonly observationHash?: string;
   readonly costUsd?: number;

@@ -14,6 +14,7 @@ import {
 } from "../../apps/unclecode-cli/src/work-runtime-session.ts";
 import { loadWorkCliBootstrap } from "../../apps/unclecode-cli/src/work-runtime-bootstrap.ts";
 import { loadWorkShellDashboardProps } from "../../apps/unclecode-cli/src/work-runtime.ts";
+import { persistWorkShellSessionSnapshot } from "@unclecode/orchestrator";
 
 test("parseArgs extracts cwd/provider/model/reasoning/session/help/tools/prompt from work argv", () => {
   assert.deepEqual(
@@ -117,6 +118,7 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
       LLM_PROVIDER: "openai",
       OPENAI_MODEL: "gpt-5.4",
       HOME: fakeHome,
+      UNCLECODE_SESSION_STORE_ROOT: path.join(workspaceRoot, ".state"),
       OPENAI_OAUTH_CLIENT_ID: "",
     };
     delete process.env.OPENAI_API_KEY;
@@ -163,6 +165,7 @@ test("loadWorkShellDashboardProps keeps browser oauth unavailable when only reus
       LLM_PROVIDER: "openai",
       OPENAI_MODEL: "gpt-5.4",
       HOME: fakeHome,
+      UNCLECODE_SESSION_STORE_ROOT: path.join(workspaceRoot, ".state"),
       OPENAI_OAUTH_CLIENT_ID: "",
     };
     delete process.env.OPENAI_API_KEY;
@@ -202,6 +205,7 @@ test("loadWorkShellDashboardProps still opens the shell when saved oauth lacks m
       LLM_PROVIDER: "openai",
       OPENAI_MODEL: "gpt-5.4",
       UNCLECODE_OPENAI_CREDENTIALS_PATH: credentialsPath,
+      UNCLECODE_SESSION_STORE_ROOT: path.join(workspaceRoot, ".state"),
       HOME: originalEnv.HOME ?? workspaceRoot,
     };
     delete process.env.OPENAI_API_KEY;
@@ -213,6 +217,50 @@ test("loadWorkShellDashboardProps still opens the shell when saved oauth lacks m
     assert.equal(props.authLabel, "oauth-file");
     assert.ok(props.contextLines.some((line) => /model\.request scope/i.test(line)));
     assert.equal(typeof props.renderWorkPane, "function");
+  } finally {
+    process.env = originalEnv;
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("loadWorkCliBootstrap reuses resumed reasoning overrides unless the CLI overrides them", async () => {
+  const originalEnv = { ...process.env };
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-runtime-resume-reasoning-"));
+  const sessionStoreRoot = path.join(workspaceRoot, ".state");
+
+  try {
+    await persistWorkShellSessionSnapshot({
+      cwd: workspaceRoot,
+      env: { ...process.env, UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot },
+      sessionId: "work-session-77",
+      model: "gpt-5.4",
+      mode: "analyze",
+      state: "idle",
+      summary: "Chat: inspect repo",
+      reasoningEffort: "low",
+    });
+
+    process.env = {
+      ...originalEnv,
+      LLM_PROVIDER: "openai",
+      OPENAI_MODEL: "gpt-5.4",
+      HOME: originalEnv.HOME ?? workspaceRoot,
+      UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot,
+      OPENAI_API_KEY: "sk-test-123",
+    };
+    delete process.env.OPENAI_AUTH_TOKEN;
+
+    const resumed = await loadWorkCliBootstrap({
+      argv: ["--cwd", workspaceRoot, "--session-id", "work-session-77"],
+    });
+    assert.equal(resumed.options.reasoning.effort, "low");
+    assert.equal(resumed.options.reasoning.source, "override");
+
+    const overridden = await loadWorkCliBootstrap({
+      argv: ["--cwd", workspaceRoot, "--session-id", "work-session-77", "--reasoning", "high"],
+    });
+    assert.equal(overridden.options.reasoning.effort, "high");
+    assert.equal(overridden.options.reasoning.source, "override");
   } finally {
     process.env = originalEnv;
     rmSync(workspaceRoot, { recursive: true, force: true });

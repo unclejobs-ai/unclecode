@@ -1,8 +1,9 @@
-import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 type SessionListItem = {
   readonly sessionId: string;
@@ -14,42 +15,102 @@ type SessionListItem = {
   readonly pendingAction: string | null;
 };
 
+const modulePath = fileURLToPath(import.meta.url);
+
 function getSessionStoreRoot(env: NodeJS.ProcessEnv): string {
   return env.UNCLECODE_SESSION_STORE_ROOT?.trim() || path.join(homedir(), ".unclecode", "state");
 }
 
-function toOpaqueId(value: string, prefix: string): string {
-  const normalizedValue = value.normalize("NFC");
-  const digest = createHash("sha256").update(normalizedValue, "utf8").digest("hex").slice(0, 20);
-  return `${prefix}-${digest}`;
+function findWorkspaceRoot(start: string): string | undefined {
+  let cursor = path.resolve(start);
+  while (true) {
+    if (existsSync(path.join(cursor, "Cargo.toml")) && existsSync(path.join(cursor, "rust"))) {
+      return cursor;
+    }
+    const parent = path.dirname(cursor);
+    if (parent === cursor) {
+      return undefined;
+    }
+    cursor = parent;
+  }
 }
 
-function getProjectDir(rootDir: string, projectPath: string): string {
-  let canonicalProjectPath = projectPath;
-
-  try {
-    canonicalProjectPath = realpathSync(projectPath);
-  } catch {
-    canonicalProjectPath = projectPath;
+function resolveExplicitRustCommand(explicit: string): string {
+  if (path.isAbsolute(explicit)) {
+    return explicit;
   }
 
-  const normalizedProjectPath = path
-    .normalize(canonicalProjectPath)
-    .replace(/\\/g, "/")
-    .replace(/\/+$/g, "")
-    .normalize("NFC");
-  return path.join(rootDir, "projects", toOpaqueId(normalizedProjectPath || "/", "project"));
+  for (const start of [path.dirname(modulePath), process.cwd()]) {
+    const root = findWorkspaceRoot(start);
+    if (!root) {
+      continue;
+    }
+    const candidate = path.resolve(root, explicit);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return path.resolve(process.cwd(), explicit);
+}
+
+function findRustEntrypoint(): { command: string; argsPrefix: string[]; runCwd?: string } {
+  const explicit = process.env.UNCLECODE_RUST_BIN;
+  if (explicit) {
+    return { command: resolveExplicitRustCommand(explicit), argsPrefix: [] };
+  }
+
+  for (const start of [path.dirname(modulePath), process.cwd()]) {
+    let cursor = path.resolve(start);
+    while (true) {
+      for (const candidate of [
+        path.join(cursor, "target", "release", "unclecode"),
+        path.join(cursor, "target", "debug", "unclecode"),
+      ]) {
+        if (existsSync(candidate)) {
+          return { command: candidate, argsPrefix: [] };
+        }
+      }
+      if (existsSync(path.join(cursor, "Cargo.toml")) && existsSync(path.join(cursor, "rust"))) {
+        return {
+          command: "cargo",
+          argsPrefix: ["run", "--quiet", "--bin", "unclecode", "--"],
+          runCwd: cursor,
+        };
+      }
+      const parent = path.dirname(cursor);
+      if (parent === cursor) {
+        break;
+      }
+      cursor = parent;
+    }
+  }
+
+  return {
+    command: "cargo",
+    argsPrefix: ["run", "--quiet", "--bin", "unclecode", "--"],
+    runCwd: process.cwd(),
+  };
 }
 
 function getSessionPaths(input: { rootDir: string; projectPath: string; sessionId: string }) {
-  const projectDir = getProjectDir(input.rootDir, input.projectPath);
-  const sessionDir = path.join(projectDir, "sessions");
-  const sessionFileId = toOpaqueId(input.sessionId, "session");
-
-  return {
-    sessionDir,
-    checkpointPath: path.join(sessionDir, `${sessionFileId}.checkpoint.json`),
-  };
+  const rust = findRustEntrypoint();
+  const stdout = execFileSync(
+    rust.command,
+    [...rust.argsPrefix, "rust", "session", "paths", input.rootDir, input.projectPath, input.sessionId],
+    {
+      cwd: rust.runCwd ?? input.projectPath,
+      windowsHide: true,
+      maxBuffer: 8 * 1024 * 1024,
+      env: { ...process.env, UNCLECODE_WORK_CWD: input.projectPath },
+      encoding: "utf8",
+    },
+  );
+  const parsed = JSON.parse(stdout) as { sessionDir?: unknown; checkpointPath?: unknown };
+  if (typeof parsed.sessionDir !== "string" || typeof parsed.checkpointPath !== "string") {
+    throw new Error("Rust session paths returned invalid fast-session paths");
+  }
+  return { sessionDir: parsed.sessionDir, checkpointPath: parsed.checkpointPath };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

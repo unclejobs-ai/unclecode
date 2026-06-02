@@ -1,5 +1,6 @@
 import { useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { runRustCommandSync } from "@unclecode/orchestrator";
 
 import {
   createWorkShellDashboardHomePatch,
@@ -33,22 +34,39 @@ export function createEmptyWorkShellComposerPreview<Attachment = never>(): WorkS
   };
 }
 
-export function shouldUseSlowComposerPreview(value: string): boolean {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return false;
-  }
+type WorkShellComposerPreviewMode = {
+  readonly mode: "empty" | "fast" | "slow";
+  readonly prompt: string;
+  readonly transcriptText: string;
+};
 
-  return /(?:^|\s)@(?:"[^"\n]+"|\S+)/.test(trimmed) ||
-    /(?:^|\s|"|')(?:[^\s"']+\.(?:png|jpe?g|gif|webp|bmp))(?:$|\s|"|')/i.test(trimmed);
+function resolveComposerPreviewMode(value: string): WorkShellComposerPreviewMode {
+  const raw = runRustCommandSync(
+    ["rust", "ux", "composer-preview-mode"],
+    process.cwd(),
+    JSON.stringify({ value }),
+  );
+  const parsed = JSON.parse(raw) as Partial<WorkShellComposerPreviewMode>;
+  if (
+    (parsed.mode !== "empty" && parsed.mode !== "fast" && parsed.mode !== "slow") ||
+    typeof parsed.prompt !== "string" ||
+    typeof parsed.transcriptText !== "string"
+  ) {
+    throw new Error("Invalid Rust composer preview mode payload");
+  }
+  return parsed as WorkShellComposerPreviewMode;
+}
+
+export function shouldUseSlowComposerPreview(value: string): boolean {
+  return resolveComposerPreviewMode(value).mode === "slow";
 }
 
 export function createFastWorkShellComposerPreview<Attachment = never>(value: string): WorkShellComposerPreview<Attachment> {
-  const trimmed = value.trim();
+  const previewMode = resolveComposerPreviewMode(value);
   return {
-    prompt: trimmed,
+    prompt: previewMode.prompt,
     attachments: [],
-    transcriptText: trimmed,
+    transcriptText: previewMode.transcriptText,
   };
 }
 
@@ -144,6 +162,32 @@ export type WorkShellSlashSuggestion = {
   readonly description: string;
 };
 
+export function resolveWorkShellActiveSlashInput(input: {
+  readonly value: string;
+  readonly fallbackPanelTitle: string;
+}): string | undefined {
+  const trimmed = input.value.trim();
+  if (trimmed.startsWith("/")) {
+    return input.value;
+  }
+  if (input.fallbackPanelTitle === "Model picker") {
+    return trimmed.length === 0 ? "/model" : `/model ${trimmed}`;
+  }
+  if (input.fallbackPanelTitle === "Auth") {
+    return trimmed.length === 0 ? "/auth" : `/auth ${trimmed}`;
+  }
+  return undefined;
+}
+
+function getWorkShellPanelDismissKey(panel: WorkShellPanel): string {
+  return `${panel.title}\n${panel.lines.join("\n")}`;
+}
+
+const DISMISSED_SLASH_PICKER_PANEL: WorkShellPanel = {
+  title: "Context",
+  lines: ["Slash command closed.", "Type / for commands."],
+};
+
 export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly entries: readonly WorkShellEntry[];
   readonly model: string;
@@ -164,6 +208,7 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
 export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   extends WorkShellStateSource<State> {
   handleSubmit(line: string, attachments?: readonly unknown[]): Promise<void>;
+  setMode(mode: string): void | Promise<void>;
   openSessionsPanel(): Promise<void>;
   cancelSensitiveInput?(): void;
   closeOverlay?(): void;
@@ -201,6 +246,8 @@ export type AttachmentLifecycleTraceEvent =
 
 export function useWorkShellSlashState(input: {
   readonly value: string;
+  readonly activeSlashInput?: string | undefined;
+  readonly currentModel?: string;
   readonly authLabel?: string;
   readonly authLauncherLines?: readonly string[];
   readonly browserOAuthAvailable?: boolean;
@@ -208,26 +255,27 @@ export function useWorkShellSlashState(input: {
   readonly getSuggestions: (value: string) => readonly WorkShellSlashSuggestion[];
 }) {
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const slashInput = input.activeSlashInput;
 
   const suggestions = useMemo(
     () =>
-      input.value.trim().startsWith("/")
-        ? input.getSuggestions(input.value)
+      slashInput
+        ? input.getSuggestions(slashInput)
         : [],
-    [input.value, input.getSuggestions],
+    [slashInput, input.getSuggestions],
   );
 
   useEffect(() => {
     setSelectedIndex((current) =>
       clampWorkShellSlashSelection(current, suggestions.length),
     );
-  }, [input.value, suggestions.length]);
+  }, [slashInput, suggestions.length]);
 
   const selectedSuggestion = suggestions[selectedIndex];
   const activePanel = useMemo(
     () =>
       resolveWorkShellActivePanel({
-        input: input.value,
+        input: slashInput ?? input.value,
         suggestions,
         selectedIndex,
         ...(input.authLabel ? { authLabel: input.authLabel } : {}),
@@ -237,14 +285,17 @@ export function useWorkShellSlashState(input: {
         ...(input.authLauncherLines
           ? { authLauncherLines: input.authLauncherLines }
           : {}),
+        ...(input.currentModel ? { currentModel: input.currentModel } : {}),
         fallbackPanel: input.fallbackPanel,
       }),
     [
       input.authLabel,
       input.authLauncherLines,
       input.browserOAuthAvailable,
+      input.currentModel,
       input.fallbackPanel,
       input.value,
+      slashInput,
       selectedIndex,
       suggestions,
     ],
@@ -255,6 +306,7 @@ export function useWorkShellSlashState(input: {
     selectedIndex,
     setSelectedIndex,
     selectedSuggestion,
+    activeSlashInput: slashInput,
     activePanel,
   };
 }
@@ -264,6 +316,7 @@ export function useWorkShellInputController(input: {
   readonly replaceValue: (value: string) => void;
   readonly slashSuggestionCount: number;
   readonly selectedSlashCommand?: string;
+  readonly activeSlashInput?: string | undefined;
   readonly setSelectedSlashIndex: (value: number | ((current: number) => number)) => void;
   readonly isBusy: boolean;
   readonly currentMode: string;
@@ -275,14 +328,17 @@ export function useWorkShellInputController(input: {
   readonly handleSubmit: (line: string) => Promise<void>;
   readonly hasSensitiveInput?: boolean;
   readonly hasOverlayOpen?: boolean;
+  readonly activePanelTitle?: string;
+  readonly closeSlashPicker?: (() => void) | undefined;
   readonly cancelSensitiveInput?: (() => void) | undefined;
   readonly closeOverlay?: (() => void) | undefined;
 }): { readonly submit: (value: string) => Promise<void> } {
   useInput((value, key) => {
+    const slashInput = input.activeSlashInput;
     const action = resolveWorkShellInputAction({
       value,
       key,
-      input: input.value,
+      input: slashInput ?? input.value,
       slashSuggestionCount: input.slashSuggestionCount,
       ...(input.selectedSlashCommand
         ? { selectedSlashCommand: input.selectedSlashCommand }
@@ -292,6 +348,7 @@ export function useWorkShellInputController(input: {
       hasRequestSessionsView: Boolean(input.onRequestSessionsView),
       ...(input.hasSensitiveInput ? { hasSensitiveInput: input.hasSensitiveInput } : {}),
       ...(input.hasOverlayOpen ? { hasOverlayOpen: input.hasOverlayOpen } : {}),
+      ...(slashInput ? { hasSlashPicker: true } : {}),
     });
 
     switch (action.type) {
@@ -305,6 +362,10 @@ export function useWorkShellInputController(input: {
         input.setSelectedSlashIndex((current) =>
           cycleWorkShellSlashSelection(current, input.slashSuggestionCount, action.direction),
         );
+        return;
+      case "close-slash-picker":
+        input.replaceValue("");
+        input.closeSlashPicker?.();
         return;
       case "cycle-mode":
         void Promise.resolve(input.cycleMode(action.nextMode)).catch(() => undefined);
@@ -328,17 +389,30 @@ export function useWorkShellInputController(input: {
 
   const submit = useCallback(
     async (value: string) => {
-      const line = value.trim();
+      const typedLine = value.trim();
+      const submitValue =
+        input.activeSlashInput && (typedLine.length === 0 || !typedLine.startsWith("/"))
+          ? input.activeSlashInput
+          : value;
+      const line = submitValue.trim();
       const action = resolveWorkShellSubmitAction({
-        value,
+        value: submitValue,
         isBusy: input.isBusy,
         shouldBlockSlashSubmit: input.shouldBlockSlashSubmit(line),
+        ...(input.activePanelTitle
+          ? { activePanelTitle: input.activePanelTitle }
+          : {}),
         ...(input.selectedSlashCommand
           ? { selectedSlashCommand: input.selectedSlashCommand }
           : {}),
       });
 
       if (action.type === "noop") {
+        return;
+      }
+
+      if (action.type === "replace-input") {
+        input.replaceValue(action.value);
         return;
       }
 
@@ -352,6 +426,8 @@ export function useWorkShellInputController(input: {
       input.handleSubmit,
       input.isBusy,
       input.replaceValue,
+      input.activePanelTitle,
+      input.activeSlashInput,
       input.selectedSlashCommand,
       input.shouldBlockSlashSubmit,
     ],
@@ -391,19 +467,19 @@ export function useWorkShellPaneState<
   const addClipboardAttachment = useCallback(
     (attachment: Attachment): { readonly accepted: true } | ClipboardAttachmentRejection => {
       const startedAt = Date.now();
-      const violation = checkClipboardCapViolation(attachment, pendingClipboardAttachments);
-      if (violation) {
+      const capDecision = checkClipboardCapViolation(attachment, pendingClipboardAttachments);
+      if (!capDecision.accepted) {
         input.engine.recordTraceEvent?.({
           type: "attachment.dropped",
           level: "default",
           source: "clipboard",
           reason: "cap-exceeded",
-          byteEstimate: estimateAttachmentBytes(attachment),
+          byteEstimate: capDecision.byteEstimate,
           mimeType:
             (attachment as { readonly mimeType?: string }).mimeType ?? "application/octet-stream",
           startedAt,
         });
-        return violation;
+        return capDecision;
       }
       setPendingClipboardAttachments((current) => {
         if (current.some((existing) => existing.dataUrl === attachment.dataUrl)) {
@@ -417,7 +493,7 @@ export function useWorkShellPaneState<
         source: "clipboard",
         mimeType:
           (attachment as { readonly mimeType?: string }).mimeType ?? "application/octet-stream",
-        byteEstimate: estimateAttachmentBytes(attachment),
+        byteEstimate: capDecision.byteEstimate,
         startedAt,
       });
       return { accepted: true };
@@ -453,6 +529,11 @@ export function useWorkShellPaneState<
     setPendingClipboardAttachments((current) => (current.length === 0 ? current : []));
   }, []);
   const engineState = useWorkShellEngineState(input.engine);
+  const enginePanelKey = getWorkShellPanelDismissKey(engineState.panel);
+  const [dismissedSlashPickerPanelKey, setDismissedSlashPickerPanelKey] = useState<string | undefined>(undefined);
+  const fallbackPanel = dismissedSlashPickerPanelKey === enginePanelKey
+    ? DISMISSED_SLASH_PICKER_PANEL
+    : engineState.panel;
   const composerPreview = useWorkShellComposerPreview({
     value: inputValue,
     cwd: input.cwd,
@@ -473,9 +554,15 @@ export function useWorkShellPaneState<
     suggestions: slashSuggestions,
     setSelectedIndex: setSelectedSlashIndex,
     selectedSuggestion,
+    activeSlashInput,
     activePanel,
   } = useWorkShellSlashState({
     value: inputValue,
+    activeSlashInput: resolveWorkShellActiveSlashInput({
+      value: inputValue,
+      fallbackPanelTitle: fallbackPanel.title,
+    }),
+    currentModel: engineState.model,
     ...(engineState.authLabel ? { authLabel: engineState.authLabel } : {}),
     ...(input.browserOAuthAvailable !== undefined
       ? { browserOAuthAvailable: input.browserOAuthAvailable }
@@ -483,9 +570,16 @@ export function useWorkShellPaneState<
     ...(engineState.authLauncherLines
       ? { authLauncherLines: engineState.authLauncherLines }
       : {}),
-    fallbackPanel: engineState.panel,
+    fallbackPanel,
     getSuggestions: input.getSuggestions,
   });
+  const isStickySlashPicker =
+    activeSlashInput !== undefined && !inputValue.trim().startsWith("/");
+  useEffect(() => {
+    if (inputValue.trim().startsWith("/")) {
+      setDismissedSlashPickerPanelKey(undefined);
+    }
+  }, [inputValue]);
 
   const openEngineSessions = useCallback(() => {
     void input.engine.openSessionsPanel().catch(() => undefined);
@@ -502,7 +596,7 @@ export function useWorkShellPaneState<
 
   const cycleMode = useCallback(
     async (nextMode: string) => {
-      await input.engine.handleSubmit(`/mode set ${nextMode}`);
+      await input.engine.setMode(nextMode);
     },
     [input.engine],
   );
@@ -514,6 +608,7 @@ export function useWorkShellPaneState<
     ...(selectedSuggestion?.command
       ? { selectedSlashCommand: selectedSuggestion.command }
       : {}),
+    ...(activeSlashInput ? { activeSlashInput } : {}),
     setSelectedSlashIndex,
     isBusy: engineState.isBusy,
     currentMode: engineState.mode,
@@ -525,6 +620,10 @@ export function useWorkShellPaneState<
     handleSubmit,
     hasSensitiveInput: engineState.composerMode === "api-key-entry",
     hasOverlayOpen: engineState.panel.title === "Context expanded",
+    activePanelTitle: activePanel.title,
+    closeSlashPicker: isStickySlashPicker
+      ? () => setDismissedSlashPickerPanelKey(enginePanelKey)
+      : undefined,
     ...(input.engine.cancelSensitiveInput
       ? { cancelSensitiveInput: () => input.engine.cancelSensitiveInput?.() }
       : {}),
@@ -562,6 +661,10 @@ export type ClipboardAttachmentRejection = {
   readonly reason: string;
   readonly status: "no-image" | "unsupported" | "failed";
 };
+
+type ClipboardAttachmentCapDecision =
+  | { readonly accepted: true; readonly byteEstimate: number }
+  | (ClipboardAttachmentRejection & { readonly byteEstimate: number });
 
 /**
  * Estimate the decoded byte size of a data URL payload without allocating
@@ -601,24 +704,41 @@ function estimateAttachmentBytes(attachment: { readonly dataUrl: string }): numb
 function checkClipboardCapViolation<A extends { readonly dataUrl: string }>(
   attachment: A,
   current: readonly A[],
-): ClipboardAttachmentRejection | undefined {
-  if (current.length >= MAX_CLIPBOARD_ATTACHMENT_COUNT) {
+): ClipboardAttachmentCapDecision {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "ux", "clipboard-cap"],
+      process.cwd(),
+      JSON.stringify({ currentCount: current.length, dataUrl: attachment.dataUrl }),
+    ),
+  ) as unknown;
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    typeof (parsed as { accepted?: unknown }).accepted !== "boolean" ||
+    typeof (parsed as { byteEstimate?: unknown }).byteEstimate !== "number" ||
+    !Number.isSafeInteger((parsed as { byteEstimate: number }).byteEstimate)
+  ) {
+    throw new Error("Rust clipboard attachment cap returned an invalid payload.");
+  }
+  if ((parsed as { accepted: boolean }).accepted) {
     return {
-      accepted: false,
-      status: "failed",
-      reason: `clipboard attachment cap reached (${MAX_CLIPBOARD_ATTACHMENT_COUNT} images max — submit or clear before adding more)`,
+      accepted: true,
+      byteEstimate: (parsed as { byteEstimate: number }).byteEstimate,
     };
   }
-  const bytes = estimateDataUrlBytes(attachment.dataUrl);
-  if (bytes > MAX_CLIPBOARD_ATTACHMENT_BYTES) {
-    const mib = (bytes / (1024 * 1024)).toFixed(1);
-    return {
-      accepted: false,
-      status: "failed",
-      reason: `image too large (${mib} MiB — max ${MAX_CLIPBOARD_ATTACHMENT_BYTES / (1024 * 1024)} MiB per image)`,
-    };
+  if (
+    (parsed as { status?: unknown }).status !== "failed" ||
+    typeof (parsed as { reason?: unknown }).reason !== "string"
+  ) {
+    throw new Error("Rust clipboard attachment cap returned an invalid rejection.");
   }
-  return undefined;
+  return {
+    accepted: false,
+    status: "failed",
+    reason: (parsed as { reason: string }).reason,
+    byteEstimate: (parsed as { byteEstimate: number }).byteEstimate,
+  };
 }
 
 /**
@@ -630,16 +750,21 @@ function checkClipboardCapViolation<A extends { readonly dataUrl: string }>(
 export function dedupAttachmentsByDataUrl<A extends { readonly dataUrl: string }>(
   items: readonly A[],
 ): readonly A[] {
-  const seen = new Set<string>();
-  const out: A[] = [];
-  for (const item of items) {
-    if (seen.has(item.dataUrl)) {
-      continue;
-    }
-    seen.add(item.dataUrl);
-    out.push(item);
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "ux", "attachment-dedup"],
+      process.cwd(),
+      JSON.stringify(items),
+    ),
+  ) as unknown;
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !Array.isArray((parsed as { attachments?: unknown }).attachments)
+  ) {
+    throw new Error("Rust attachment dedup returned an invalid payload.");
   }
-  return out;
+  return (parsed as { attachments: A[] }).attachments;
 }
 
 export function useWorkShellComposerPreview<Attachment extends { readonly dataUrl: string }>(input: {
@@ -656,13 +781,19 @@ export function useWorkShellComposerPreview<Attachment extends { readonly dataUr
   );
 
   useEffect(() => {
-    if (!input.value.trim()) {
+    const previewMode = resolveComposerPreviewMode(input.value);
+
+    if (previewMode.mode === "empty") {
       setPreview(createEmptyWorkShellComposerPreview());
       return;
     }
 
-    if (!shouldUseSlowComposerPreview(input.value)) {
-      setPreview(createFastWorkShellComposerPreview(input.value));
+    if (previewMode.mode === "fast") {
+      setPreview({
+        prompt: previewMode.prompt,
+        attachments: [],
+        transcriptText: previewMode.transcriptText,
+      });
       return;
     }
 

@@ -19,8 +19,9 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+
+import { runRustCommandSync } from "./rust-command.js";
 
 const SNAP_DIR = "snapshots";
 const MANIFEST_NAME = "manifest.json";
@@ -73,7 +74,7 @@ export function captureSnapshot(input: SnapshotInput): SnapshotManifest {
     if (rel.startsWith("..") || isAbsolute(rel)) continue;
     if (!existsSync(absPath)) continue;
     const content = readFileSync(absPath);
-    const sha256 = createHash("sha256").update(content).digest("hex");
+    const sha256 = runRustCommandSync(["rust", "sha256"], input.workspaceRoot, content).trim();
     writeFileSync(blobPath(dir, sha256), content);
     entries.push({
       path: relative(input.workspaceRoot, absPath) || relPath,

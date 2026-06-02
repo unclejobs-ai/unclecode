@@ -93,6 +93,65 @@ test("runTeamMiniLoop drives the model + executor and publishes team_step events
   }
 });
 
+test("runTeamMiniLoop wires default non-local policy profile and records denial metadata", async () => {
+  const { dataRoot, binding } = makeBinding();
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-team-cwd-"));
+  const deniedEvents = [];
+  try {
+    const provider = fakeProvider([
+      {
+        content: "try shell",
+        actions: [
+          { callId: "c1", tool: "run_shell", input: { command: "echo should-not-run" } },
+        ],
+        costUsd: 0,
+      },
+      {
+        content: "blocked and done",
+        actions: [],
+        costUsd: 0,
+      },
+    ]);
+
+    const result = await runTeamMiniLoop({
+      workerId: "w1",
+      persona: "coder",
+      task: "try echo then submit",
+      binding,
+      provider,
+      cwd,
+      runtimeMode: "openshell",
+      onPolicyDenied(event) {
+        deniedEvents.push(event);
+      },
+    });
+
+    assert.equal(result.status, "submitted");
+    assert.equal(deniedEvents.length, 1);
+    assert.equal(deniedEvents[0].type, "policy.denied");
+    assert.equal(deniedEvents[0].capability, "shell.run");
+    assert.equal(deniedEvents[0].runtimeMode, "openshell");
+    assert.equal(deniedEvents[0].matchedRule, "team.openshell.default-deny.shell.run.default");
+
+    const checkpoints = readTeamCheckpoints(binding.runRoot);
+    const teamSteps = checkpoints.filter((cp) => cp.type === "team_step");
+    assert.equal(teamSteps.length, 1);
+    assert.equal(teamSteps[0].action?.tool, "run_shell");
+    assert.deepEqual(teamSteps[0].policy, {
+      capability: "shell.run",
+      effect: "deny",
+      source: "base",
+      reason: "Default deny for shell.run.",
+      matchedRule: "team.openshell.default-deny.shell.run.default",
+      runtimeMode: "openshell",
+      toolName: "run_shell",
+    });
+  } finally {
+    rmSync(dataRoot, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("runTeamMiniLoop exits limits_exceeded when step budget runs out", async () => {
   const { dataRoot, binding } = makeBinding();
   const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-team-cwd-"));
