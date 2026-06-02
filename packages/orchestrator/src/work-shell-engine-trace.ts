@@ -11,6 +11,16 @@ type WorkShellTraceEventDecision = {
   readonly traceEntry?: WorkShellChatEntry;
 };
 
+type AssistantDeltaTraceEvent = {
+  readonly type: "assistant.delta";
+  readonly delta: string;
+};
+
+function isAssistantDeltaTraceEvent(event: { readonly type: string }): event is AssistantDeltaTraceEvent {
+  return event.type === "assistant.delta" &&
+    typeof (event as { readonly delta?: unknown }).delta === "string";
+}
+
 function resolveWorkShellTraceEventDecision(input: {
   readonly event: { readonly type: string; readonly status?: string; readonly startedAt?: unknown };
   readonly line: string;
@@ -91,6 +101,16 @@ export function applyWorkShellTraceEvent<
   appendEntries: (...entries: readonly WorkShellChatEntry[]) => void;
   pushTraceLine: (line: string) => void;
 }): void {
+  if (isAssistantDeltaTraceEvent(input.event)) {
+    if (input.event.delta.length === 0) {
+      return;
+    }
+    input.setState({
+      streamingAssistantText: `${input.state.streamingAssistantText ?? ""}${input.event.delta}`,
+    });
+    return;
+  }
+
   const line = input.formatAgentTraceLine(input.event);
   const busyPatch = createTraceEventBusyPatch({
     state: input.state,

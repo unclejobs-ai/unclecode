@@ -280,6 +280,7 @@ export type WorkShellComposerMode = "default" | "api-key-entry";
 
 export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly entries: readonly WorkShellChatEntry[];
+  readonly streamingAssistantText?: string | undefined;
   readonly model: string;
   readonly mode: string;
   readonly reasoning: Reasoning;

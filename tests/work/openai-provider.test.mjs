@@ -543,10 +543,25 @@ test("OpenAIProvider uses the Codex backend for codex oauth runtime", async () =
       };
     },
   });
+  const traces = [];
+  provider.setTraceListener((event) => traces.push(event));
 
   const result = await provider.runTurn("say ok");
 
   assert.equal(result.text, "OK");
+  assert.deepEqual(
+    traces.filter((event) => event.type === "assistant.delta"),
+    [
+      {
+        type: "assistant.delta",
+        level: "default",
+        provider: "openai",
+        model: "gpt-5.4",
+        itemId: "msg_1",
+        delta: "OK",
+      },
+    ],
+  );
   assert.equal(capturedUrl, "https://chatgpt.com/backend-api/codex/responses");
   assert.equal(capturedBody.store, false);
   assert.equal(capturedBody.stream, true);

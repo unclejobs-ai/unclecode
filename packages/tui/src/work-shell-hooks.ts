@@ -190,6 +190,7 @@ const DISMISSED_SLASH_PICKER_PANEL: WorkShellPanel = {
 
 export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly entries: readonly WorkShellEntry[];
+  readonly streamingAssistantText?: string | undefined;
   readonly model: string;
   readonly mode: string;
   readonly reasoning: Reasoning;

@@ -16,6 +16,7 @@ export const EXECUTION_TRACE_EVENT_TYPES = [
   "bridge.published",
   "memory.written",
   "reasoning.delta",
+  "assistant.delta",
   "attachment.attached",
   "attachment.dropped",
   "policy.denied",
@@ -174,6 +175,15 @@ export type ReasoningDeltaTraceEvent = {
   readonly delta: string;
 };
 
+export type AssistantDeltaTraceEvent = {
+  readonly type: "assistant.delta";
+  readonly level: "default";
+  readonly provider: ProviderId | "unknown";
+  readonly model: string;
+  readonly itemId: string;
+  readonly delta: string;
+};
+
 /**
  * Source identifier for attachment lifecycle events. v1 only emits the
  * "clipboard" producer; future producers (drag-drop, file picker, MCP
@@ -237,6 +247,7 @@ export type ExecutionTraceEvent =
   | BridgePublishedTraceEvent
   | MemoryWrittenTraceEvent
   | ReasoningDeltaTraceEvent
+  | AssistantDeltaTraceEvent
   | AttachmentAttachedTraceEvent
   | AttachmentDroppedTraceEvent
   | PolicyDeniedTraceEvent;

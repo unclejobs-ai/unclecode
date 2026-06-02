@@ -341,6 +341,7 @@ export function resolvePromptTurnFinalizePatch<Reasoning extends WorkShellReason
     isBusy: false,
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
+    streamingAssistantText: undefined,
   };
 }
 
@@ -428,7 +429,10 @@ export async function executeWorkShellPromptTurn<
       lastTurnDurationMs,
     });
     input.appendEntries(...successPayload.entries);
-    input.setState(successPayload.patch);
+    input.setState({
+      ...successPayload.patch,
+      streamingAssistantText: undefined,
+    });
     input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.bridgeTraceEvent));
     input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.memoryTraceEvent));
     await input.persistSessionSnapshot("idle", input.promptTurn.sessionSummary).catch(() => undefined);
@@ -452,7 +456,10 @@ export async function executeWorkShellPromptTurn<
         : {}),
     });
     input.appendEntries(...failurePayload.entries);
-    input.setState(failurePayload.patch);
+    input.setState({
+      ...failurePayload.patch,
+      streamingAssistantText: undefined,
+    });
     await input.persistSessionSnapshot("requires_action", input.promptTurn.failureSummary).catch(() => undefined);
   } finally {
     input.setState(createPromptTurnFinalizePatch(input.state));

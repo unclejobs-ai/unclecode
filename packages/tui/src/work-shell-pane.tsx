@@ -79,6 +79,7 @@ export function WorkShellPane<
 
   const {
     entries,
+    streamingAssistantText,
     model,
     mode,
     reasoning,
@@ -131,6 +132,7 @@ export function WorkShellPane<
       mode={mode}
       authLabel={authDisplayLabel}
       entries={entries}
+      {...(streamingAssistantText ? { streamingAssistantText } : {})}
       isBusy={isBusy}
       {...(busyStatus ? { busyStatus } : {})}
       {...(currentTurnStartedAt !== undefined ? { currentTurnStartedAt } : {})}

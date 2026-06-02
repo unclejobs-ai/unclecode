@@ -706,6 +706,7 @@ function isLowSignalThinkingStatus(status: string): boolean {
 
 const WorkShellConversationBlock = React.memo(function WorkShellConversationBlock(props: {
   readonly entries: readonly WorkShellEntry[];
+  readonly streamingAssistantText?: string;
   readonly panelPlacement: WorkShellPanelPlacement;
   readonly isBusy: boolean;
   readonly busyStatus?: string;
@@ -722,13 +723,19 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
     panelPlacement: props.panelPlacement,
     ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
   });
+  const entries = props.streamingAssistantText
+    ? [
+        ...props.entries,
+        { role: "assistant", text: `${props.streamingAssistantText}▌` } as const,
+      ]
+    : props.entries;
 
   return (
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "68%" : undefined} paddingRight={props.panelPlacement === "side" ? 1 : 0}>
       <Box flexDirection="column">
-        {props.entries.length === 0 ? (
+        {entries.length === 0 ? (
           <Text color={W.textMuted}>{getWorkShellEmptyConversationHint()}</Text>
-        ) : props.entries.slice(-12).map((entry, index) => renderWorkShellEntryBlock({
+        ) : entries.slice(-12).map((entry, index) => renderWorkShellEntryBlock({
           entry,
           index,
           width: conversationWidth,
@@ -915,6 +922,7 @@ export function WorkShellView(props: {
   readonly mode: string;
   readonly authLabel: string;
   readonly entries: readonly WorkShellEntry[];
+  readonly streamingAssistantText?: string;
   readonly isBusy: boolean;
   readonly busyStatus?: string;
   readonly activePanel: WorkShellPanel;
@@ -942,6 +950,7 @@ export function WorkShellView(props: {
   const conversation = (
     <WorkShellConversationBlock
       entries={props.entries}
+      {...(props.streamingAssistantText ? { streamingAssistantText: props.streamingAssistantText } : {})}
       panelPlacement={panelPlacement}
       isBusy={props.isBusy}
       {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}

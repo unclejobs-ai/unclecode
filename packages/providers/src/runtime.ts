@@ -13,7 +13,7 @@ export type AgentTurnResult = {
 
 export type ProviderToolTraceEvent = Extract<
   ExecutionTraceEvent,
-  { type: "tool.started" | "tool.completed" | "reasoning.delta" }
+  { type: "tool.started" | "tool.completed" | "reasoning.delta" | "assistant.delta" }
 >;
 
 /**
@@ -1035,6 +1035,8 @@ function parseOpenAIResponsesMessage(
     throw new Error("Rust OpenAI Responses message parsing returned an invalid payload.");
   }
 
+  const assistantDeltaTraces = parseOpenAIResponsesAssistantDeltaTraces(sseText, model);
+
   return {
     responseId: typeof parsed.responseId === "string" ? parsed.responseId : null,
     message: parsed.message as {
@@ -1045,8 +1047,83 @@ function parseOpenAIResponsesMessage(
       }>;
     },
     actions: parseProviderActions(Array.isArray(parsed.actions) ? parsed.actions : []),
-    traces: parsed.traces.map((trace) => parseProviderTraceEvent(JSON.stringify(trace))),
+    traces: [
+      ...assistantDeltaTraces,
+      ...parsed.traces.map((trace) => parseProviderTraceEvent(JSON.stringify(trace))),
+    ],
   };
+}
+
+function parseOpenAIResponsesAssistantDeltaTraces(
+  sseText: string,
+  model: string,
+): ProviderToolTraceEvent[] {
+  const traces: ProviderToolTraceEvent[] = [];
+  let fallbackCounter = 0;
+
+  for (const payload of parseSseDataJsonPayloads(sseText)) {
+    if (payload.type !== "response.output_text.delta") {
+      continue;
+    }
+    const delta = typeof payload.delta === "string" ? payload.delta : "";
+    if (delta.length === 0) {
+      continue;
+    }
+    const itemId = typeof payload.item_id === "string" && payload.item_id.trim().length > 0
+      ? payload.item_id
+      : `msg_${++fallbackCounter}`;
+    traces.push({
+      type: "assistant.delta",
+      level: "default",
+      provider: "openai",
+      model,
+      itemId,
+      delta,
+    });
+  }
+
+  return traces;
+}
+
+function parseSseDataJsonPayloads(sseText: string): Record<string, unknown>[] {
+  const payloads: Record<string, unknown>[] = [];
+  let current: string[] = [];
+
+  const flush = () => {
+    if (current.length === 0) {
+      return;
+    }
+    const raw = current.join("\n").trim();
+    current = [];
+    if (raw.length === 0 || raw === "[DONE]") {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (isRecord(parsed)) {
+        payloads.push(parsed);
+      }
+    } catch {
+      // Ignore malformed stream chunks; the canonical Rust parser handles
+      // final response validation.
+    }
+  };
+
+  for (const rawLine of sseText.split(/\r?\n/)) {
+    if (rawLine.length === 0) {
+      flush();
+      continue;
+    }
+    const data = rawLine.startsWith("data:")
+      ? rawLine.slice("data:".length).trim()
+      : "";
+    if (data.length > 0) {
+      current.push(data);
+    }
+  }
+  flush();
+
+  return payloads;
 }
 
 function parseOpenAIChatResponse(raw: string, model?: string): RustOpenAIChatResponse {
@@ -1974,7 +2051,12 @@ function parseProviderTraceEvent(raw: string): ProviderToolTraceEvent {
   const parsed = JSON.parse(raw) as unknown;
   if (
     !isRecord(parsed)
-    || (parsed.type !== "tool.started" && parsed.type !== "tool.completed" && parsed.type !== "reasoning.delta")
+    || (
+      parsed.type !== "tool.started" &&
+      parsed.type !== "tool.completed" &&
+      parsed.type !== "reasoning.delta" &&
+      parsed.type !== "assistant.delta"
+    )
   ) {
     throw new Error("Rust provider trace returned an invalid payload.");
   }

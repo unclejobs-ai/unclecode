@@ -75,6 +75,7 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
   });
   return {
     entries: [...decision.entries],
+    streamingAssistantText: undefined,
     model: decision.model,
     mode: decision.mode,
     reasoning: decision.reasoning,

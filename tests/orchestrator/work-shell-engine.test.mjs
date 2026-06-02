@@ -1835,6 +1835,39 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
   assert.deepEqual(liveTraceLines, ["calling openai gpt-5.4"]);
 });
 
+test("assistant delta trace accumulates streaming assistant text without transcript noise", () => {
+  const patches = [];
+  const liveEntries = [];
+  const liveTraceLines = [];
+  applyWorkShellTraceEvent({
+    state: createState({ streamingAssistantText: "Hel" }),
+    event: {
+      type: "assistant.delta",
+      level: "default",
+      provider: "openai",
+      model: "gpt-5.4",
+      itemId: "msg_1",
+      delta: "lo",
+    },
+    formatAgentTraceLine: () => {
+      throw new Error("assistant delta should bypass trace line formatting");
+    },
+    setState: (patch) => {
+      patches.push(patch);
+    },
+    appendEntries: (...entries) => {
+      liveEntries.push(...entries);
+    },
+    pushTraceLine: (line) => {
+      liveTraceLines.push(line);
+    },
+  });
+
+  assert.deepEqual(patches, [{ streamingAssistantText: "Hello" }]);
+  assert.deepEqual(liveEntries, []);
+  assert.deepEqual(liveTraceLines, []);
+});
+
 test("work-shell snapshot and context loaders stay available through their helper seams", async () => {
   const snapshot = createWorkShellSessionSnapshotInput({
     cwd: "/repo",
