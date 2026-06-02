@@ -69,6 +69,43 @@ function waitForRequestCount(requests, count) {
   });
 }
 
+function waitForPredicate(predicate, label) {
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    const poll = () => {
+      if (predicate()) {
+        resolve();
+        return;
+      }
+      if (Date.now() - startedAt > 5000) {
+        reject(new Error(`Timed out waiting for ${label}`));
+        return;
+      }
+      setTimeout(poll, 10);
+    };
+    poll();
+  });
+}
+
+function createControlledTextStream() {
+  const encoder = new TextEncoder();
+  let controller;
+  const body = new ReadableStream({
+    start(streamController) {
+      controller = streamController;
+    },
+  });
+  return {
+    body,
+    push(text) {
+      controller.enqueue(encoder.encode(text));
+    },
+    close() {
+      controller.close();
+    },
+  };
+}
+
 test("loadConfig supports openai provider selection", async () => {
   const originalEnv = { ...process.env };
 
@@ -575,6 +612,149 @@ test("OpenAIProvider uses the Codex backend for codex oauth runtime", async () =
   assert.equal(capturedHeaders["ChatGPT-Account-Id"], "acct_123");
   assert.equal(capturedHeaders.originator, "codex_cli_rs");
   assert.match(capturedHeaders["x-client-request-id"], /^uc-rs-/);
+});
+
+test("OpenAIProvider emits Codex assistant deltas before the HTTP stream closes", async () => {
+  const stream = createControlledTextStream();
+  const traces = [];
+  let resolved = false;
+  const provider = new BaseOpenAIProvider({
+    apiKey: "header.eyJzY3AiOlsib3BlbmlkIl19.sig",
+    model: "gpt-5.4",
+    cwd: process.cwd(),
+    runtime: "codex",
+    reasoning: {
+      effort: "medium",
+      source: "mode-default",
+      support: { status: "supported", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high"] },
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      body: stream.body,
+    }),
+  });
+  provider.setTraceListener((event) => traces.push(event));
+
+  const resultPromise = provider.runTurn("say ok").then((result) => {
+    resolved = true;
+    return result;
+  });
+
+  stream.push('data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"O"}\n\n');
+  await waitForPredicate(
+    () => traces.some((event) => event.type === "assistant.delta" && event.delta === "O"),
+    "assistant delta",
+  );
+
+  assert.equal(resolved, false);
+
+  stream.push('data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"K"}\n\n');
+  stream.push(
+    'data: {"type":"response.output_item.done","item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"OK"}]}}\n\n',
+  );
+  stream.push('data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n');
+  stream.close();
+
+  const result = await resultPromise;
+  assert.equal(result.text, "OK");
+  assert.deepEqual(
+    traces.filter((event) => event.type === "assistant.delta").map((event) => event.delta),
+    ["O", "K"],
+  );
+});
+
+test("OpenAIProvider uses global fetch live stream for production Codex runtime", async () => {
+  const originalFetch = globalThis.fetch;
+  const stream = createControlledTextStream();
+  const requests = [];
+  const traces = [];
+
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), body: JSON.parse(String(init?.body ?? "{}")) });
+    return {
+      ok: true,
+      status: 200,
+      body: stream.body,
+    };
+  };
+
+  try {
+    const provider = new BaseOpenAIProvider({
+      apiKey: "header.eyJzY3AiOlsib3BlbmlkIl19.sig",
+      model: "gpt-5.4",
+      cwd: process.cwd(),
+      runtime: "codex",
+      openAIAccountId: "acct_123",
+      reasoning: {
+        effort: "medium",
+        source: "mode-default",
+        support: { status: "supported", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high"] },
+      },
+    });
+    provider.setTraceListener((event) => traces.push(event));
+
+    const resultPromise = provider.runTurn("say global ok");
+    stream.push('data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"live"}\n\n');
+    await waitForPredicate(
+      () => traces.some((event) => event.type === "assistant.delta" && event.delta === "live"),
+      "global fetch assistant delta",
+    );
+    stream.push(
+      'data: {"type":"response.output_item.done","item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"live"}]}}\n\n',
+    );
+    stream.close();
+
+    const result = await resultPromise;
+    assert.equal(result.text, "live");
+    assert.equal(requests[0].url, "https://chatgpt.com/backend-api/codex/responses");
+    assert.equal(requests[0].body.stream, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("OpenAIProvider streams Codex reasoning deltas without replaying buffered traces", async () => {
+  const stream = createControlledTextStream();
+  const traces = [];
+  const provider = new BaseOpenAIProvider({
+    apiKey: "header.eyJzY3AiOlsib3BlbmlkIl19.sig",
+    model: "gpt-5.4",
+    cwd: process.cwd(),
+    runtime: "codex",
+    reasoning: {
+      effort: "medium",
+      source: "mode-default",
+      support: { status: "supported", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high"] },
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      body: stream.body,
+    }),
+  });
+  provider.setTraceListener((event) => traces.push(event));
+
+  const resultPromise = provider.runTurn("think");
+  stream.push('data: {"type":"response.reasoning_summary_text.delta","item_id":"rsn_1","delta":"thinking"}\n\n');
+  await waitForPredicate(
+    () => traces.some((event) => event.type === "reasoning.delta" && event.delta === "thinking"),
+    "reasoning delta",
+  );
+  stream.push(
+    'data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rsn_1","summary":[],"content":[]}}\n\n',
+  );
+  stream.push(
+    'data: {"type":"response.output_item.done","item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"done"}]}}\n\n',
+  );
+  stream.close();
+
+  const result = await resultPromise;
+  assert.equal(result.text, "done");
+  assert.deepEqual(
+    traces.filter((event) => event.type === "reasoning.delta").map((event) => event.delta),
+    ["thinking"],
+  );
 });
 
 test("OpenAIProvider parses Codex Responses tool calls through Rust SSE records", async () => {

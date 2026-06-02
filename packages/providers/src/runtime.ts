@@ -301,6 +301,10 @@ type RustHttpResponse = {
   readonly attempts?: number;
 };
 
+type OpenAIResponsesHttpResponse = RustHttpResponse & {
+  readonly streamed: boolean;
+};
+
 type ProviderToolResultOutcome = {
   readonly toolName: string;
   readonly toolCallId: string;
@@ -487,25 +491,52 @@ export class OpenAIProvider implements LlmProvider {
       toolChoice: toolPolicy.toolChoice,
       reasoningEffort: resolveRuntimeReasoningEffort(this.reasoning),
     });
-    let response: RustHttpResponse;
-    if (this.fetchImpl) {
-      const requestSpec = buildOpenAIRequestSpec("codex", this.apiKey, this.openAIAccountId);
-      response = await this.postText(requestSpec.url, requestSpec.headers, body);
-    } else {
-      response = postOpenAIWithRust("codex", this.apiKey, body, this.openAIAccountId);
-    }
+    const response = await this.postCodexResponses(body);
 
     if (!response.ok) {
       throw new Error(buildProviderRequestError("openai", response.status, response.text, response.attempts));
     }
 
-    const parsed = parseOpenAIResponsesMessage(response.text, this.model);
+    const parsed = parseOpenAIResponsesMessage(response.text, this.model, {
+      includeStreamingTraces: !response.streamed,
+    });
     for (const trace of parsed.traces) {
       emitProviderTrace(this.traceListener, trace);
     }
     return {
       ...parsed.message,
       actions: parsed.actions,
+    };
+  }
+
+  private async postCodexResponses(body: string): Promise<OpenAIResponsesHttpResponse> {
+    const requestSpec = buildOpenAIRequestSpec("codex", this.apiKey, this.openAIAccountId);
+    const fetchImpl = this.fetchImpl ?? resolveGlobalFetchImpl();
+
+    if (fetchImpl) {
+      try {
+        return await postOpenAIResponsesWithLiveStream({
+          fetchImpl,
+          url: requestSpec.url,
+          headers: requestSpec.headers,
+          body,
+          model: this.model,
+          traceListener: this.traceListener,
+          maxAttempts: this.fetchImpl ? 1 : 3,
+        });
+      } catch (error) {
+        if (error instanceof OpenAIResponsesLiveStreamReadError) {
+          throw error;
+        }
+        if (this.fetchImpl) {
+          throw error;
+        }
+      }
+    }
+
+    return {
+      ...postOpenAIWithRust("codex", this.apiKey, body, this.openAIAccountId),
+      streamed: false,
     };
   }
 
@@ -1012,6 +1043,7 @@ export function createRuntimeProvider(args: CreateRuntimeProviderArgs): LlmProvi
 function parseOpenAIResponsesMessage(
   sseText: string,
   model: string,
+  options: { readonly includeStreamingTraces?: boolean } = {},
 ): {
   responseId: string | null;
   message: {
@@ -1035,7 +1067,13 @@ function parseOpenAIResponsesMessage(
     throw new Error("Rust OpenAI Responses message parsing returned an invalid payload.");
   }
 
-  const assistantDeltaTraces = parseOpenAIResponsesAssistantDeltaTraces(sseText, model);
+  const includeStreamingTraces = options.includeStreamingTraces !== false;
+  const assistantDeltaTraces = includeStreamingTraces
+    ? parseOpenAIResponsesAssistantDeltaTraces(sseText, model)
+    : [];
+  const rustTraces = parsed.traces
+    .map((trace) => parseProviderTraceEvent(JSON.stringify(trace)))
+    .filter((trace) => includeStreamingTraces || trace.type !== "reasoning.delta");
 
   return {
     responseId: typeof parsed.responseId === "string" ? parsed.responseId : null,
@@ -1049,7 +1087,7 @@ function parseOpenAIResponsesMessage(
     actions: parseProviderActions(Array.isArray(parsed.actions) ? parsed.actions : []),
     traces: [
       ...assistantDeltaTraces,
-      ...parsed.traces.map((trace) => parseProviderTraceEvent(JSON.stringify(trace))),
+      ...rustTraces,
     ],
   };
 }
@@ -1126,6 +1164,241 @@ function parseSseDataJsonPayloads(sseText: string): Record<string, unknown>[] {
   return payloads;
 }
 
+type OpenAIResponsesLivePostInput = {
+  readonly fetchImpl: OpenAIFetch;
+  readonly url: string;
+  readonly headers: Record<string, string>;
+  readonly body: string;
+  readonly model: string;
+  readonly traceListener?: ProviderTraceListener | undefined;
+  readonly maxAttempts: number;
+};
+
+async function postOpenAIResponsesWithLiveStream(
+  input: OpenAIResponsesLivePostInput,
+): Promise<OpenAIResponsesHttpResponse> {
+  const maxAttempts = Math.max(1, Math.floor(input.maxAttempts));
+  let lastError: string | undefined;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let readingStream = false;
+    try {
+      const response = await input.fetchImpl(input.url, {
+        method: "POST",
+        headers: input.headers,
+        body: input.body,
+      });
+      const status = typeof response.status === "number" ? response.status : response.ok ? 200 : 0;
+
+      if (!response.ok) {
+        const text = await readResponseText(response);
+        if (shouldRetryHttpStatus(status) && attempt < maxAttempts) {
+          await sleepBeforeRetry(125);
+          continue;
+        }
+        return { ok: false, status, text, attempts: attempt, streamed: false };
+      }
+
+      const traceEmitter = createOpenAIResponsesStreamingTraceEmitter(
+        input.model,
+        input.traceListener,
+      );
+      readingStream = true;
+      const streamResult = await readResponseStreamText(response, traceEmitter);
+      return {
+        ok: true,
+        status,
+        text: streamResult.text,
+        attempts: attempt,
+        streamed: streamResult.streamed,
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+      if (readingStream) {
+        throw new OpenAIResponsesLiveStreamReadError(lastError);
+      }
+      if (attempt < maxAttempts) {
+        await sleepBeforeRetry(125);
+        continue;
+      }
+    }
+  }
+
+  throw new Error(`HTTP POST failed after ${maxAttempts} attempts: ${lastError ?? "unknown transport error"}`);
+}
+
+class OpenAIResponsesLiveStreamReadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OpenAIResponsesLiveStreamReadError";
+  }
+}
+
+function createOpenAIResponsesStreamingTraceEmitter(
+  model: string,
+  listener?: ProviderTraceListener,
+): (payload: Record<string, unknown>) => void {
+  let fallbackCounter = 0;
+
+  return (payload) => {
+    const type = typeof payload.type === "string" ? payload.type : "";
+    const delta = typeof payload.delta === "string" ? payload.delta : "";
+    if (!delta) {
+      return;
+    }
+    const itemId = typeof payload.item_id === "string" && payload.item_id.trim()
+      ? payload.item_id
+      : `stream_${++fallbackCounter}`;
+
+    if (type === "response.output_text.delta") {
+      emitProviderTrace(listener, {
+        type: "assistant.delta",
+        level: "default",
+        provider: "openai",
+        model,
+        itemId,
+        delta,
+      });
+      return;
+    }
+
+    if (type === "response.reasoning_summary_text.delta" || type === "response.reasoning_text.delta") {
+      emitProviderTrace(listener, {
+        type: "reasoning.delta",
+        level: "default",
+        provider: "openai",
+        model,
+        kind: type === "response.reasoning_summary_text.delta" ? "summary" : "text",
+        itemId,
+        delta,
+      });
+    }
+  };
+}
+
+async function readResponseStreamText(
+  response: Response,
+  onPayload: (payload: Record<string, unknown>) => void,
+): Promise<{ readonly text: string; readonly streamed: boolean }> {
+  const reader = getResponseBodyReader(response);
+  if (!reader) {
+    return { text: await readResponseText(response), streamed: false };
+  }
+
+  const decoder = new TextDecoder();
+  const parser = createSseJsonStreamParser(onPayload);
+  let text = "";
+
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) {
+        break;
+      }
+      const chunk = decodeResponseChunk(decoder, result.value);
+      if (!chunk) {
+        continue;
+      }
+      text += chunk;
+      parser.push(chunk);
+    }
+    const tail = decoder.decode();
+    if (tail) {
+      text += tail;
+      parser.push(tail);
+    }
+    parser.finish();
+  } finally {
+    reader.releaseLock?.();
+  }
+
+  return { text, streamed: true };
+}
+
+type ResponseBodyReader = {
+  read(): Promise<ReadableStreamReadResult<Uint8Array>>;
+  releaseLock?: () => void;
+};
+
+function getResponseBodyReader(response: Response): ResponseBodyReader | undefined {
+  const body = (response as Response & {
+    body?: { getReader?: () => ResponseBodyReader };
+  }).body;
+  return typeof body?.getReader === "function" ? body.getReader() : undefined;
+}
+
+function decodeResponseChunk(
+  decoder: TextDecoder,
+  value: Uint8Array | undefined,
+): string {
+  if (value === undefined) {
+    return "";
+  }
+  return decoder.decode(value, { stream: true });
+}
+
+function createSseJsonStreamParser(onPayload: (payload: Record<string, unknown>) => void): {
+  readonly push: (chunk: string) => void;
+  readonly finish: () => void;
+} {
+  let pendingLine = "";
+  let currentDataLines: string[] = [];
+
+  const flush = () => {
+    if (currentDataLines.length === 0) {
+      return;
+    }
+    const raw = currentDataLines.join("\n").trim();
+    currentDataLines = [];
+    if (!raw || raw === "[DONE]") {
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (isRecord(parsed)) {
+        onPayload(parsed);
+      }
+    } catch {
+      // Ignore partial or malformed SSE records; the final Rust parser still
+      // validates the complete response before tool execution.
+    }
+  };
+
+  const processLine = (rawLine: string) => {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (line.length === 0) {
+      flush();
+      return;
+    }
+    if (line.startsWith("data:")) {
+      const data = line.slice("data:".length).trim();
+      if (data) {
+        currentDataLines.push(data);
+      }
+    }
+  };
+
+  return {
+    push(chunk: string) {
+      if (!chunk) {
+        return;
+      }
+      const lines = `${pendingLine}${chunk}`.split("\n");
+      pendingLine = lines.pop() ?? "";
+      for (const line of lines) {
+        processLine(line);
+      }
+    },
+    finish() {
+      if (pendingLine) {
+        processLine(pendingLine);
+        pendingLine = "";
+      }
+      flush();
+    },
+  };
+}
+
 function parseOpenAIChatResponse(raw: string, model?: string): RustOpenAIChatResponse {
   const stdout = runRustCommandSync(
     ["rust", "provider", "openai-chat-response-json", model ?? "-"],
@@ -1172,6 +1445,23 @@ async function readResponseText(response: Response): Promise<string> {
     return JSON.stringify(await responseWithJson.json());
   }
   return "";
+}
+
+function resolveGlobalFetchImpl(): OpenAIFetch | undefined {
+  return typeof globalThis.fetch === "function"
+    ? globalThis.fetch.bind(globalThis)
+    : undefined;
+}
+
+function shouldRetryHttpStatus(status: number): boolean {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+async function sleepBeforeRetry(delayMs: number): Promise<void> {
+  if (delayMs <= 0) {
+    return;
+  }
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 function postWithRustHttp(
