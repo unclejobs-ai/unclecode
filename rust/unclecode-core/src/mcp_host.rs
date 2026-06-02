@@ -3,12 +3,20 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::redaction::redact_secrets;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpHostRegistryEntry {
     pub name: String,
     pub transport: String,
     pub trust_tier: String,
     pub origin_label: String,
+    pub command: Option<String>,
+    pub args_count: usize,
+    pub env_keys_count: usize,
+    pub url: Option<String>,
+    pub headers_count: usize,
+    pub oauth_configured: bool,
 }
 
 pub fn load_mcp_host_registry(
@@ -42,6 +50,74 @@ pub fn format_mcp_host_registry(entries: &[McpHostRegistryEntry]) -> String {
     lines.join("\n")
 }
 
+pub fn format_mcp_host_inspect(entries: &[McpHostRegistryEntry], server_name: &str) -> String {
+    let server_name = server_name.trim();
+    if server_name.is_empty() {
+        return [
+            "MCP server inspect".to_string(),
+            "Select an MCP server first.".to_string(),
+            "Health: not checked by inspect.".to_string(),
+        ]
+        .join("\n");
+    }
+
+    let Some(entry) = entries.iter().find(|entry| entry.name == server_name) else {
+        let available = entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return [
+            "MCP server inspect".to_string(),
+            format!("Server not found: {server_name}"),
+            format!(
+                "Available: {}",
+                if available.is_empty() { "none" } else { &available }
+            ),
+        ]
+        .join("\n");
+    };
+
+    let mut lines = vec![
+        "MCP server inspect".to_string(),
+        format!("Name: {}", entry.name),
+        format!("Transport: {}", entry.transport),
+        format!("Scope: {}", entry.trust_tier),
+        format!("Trust: {}", entry.trust_tier),
+        format!("Origin: {}", entry.origin_label),
+        "Health: not checked by inspect.".to_string(),
+    ];
+
+    match entry.transport.as_str() {
+        "stdio" => {
+            lines.push(format!(
+                "Command: {}",
+                redact_secrets(entry.command.as_deref().unwrap_or("unknown"))
+            ));
+            lines.push(format!("Args: {} configured (hidden)", entry.args_count));
+            lines.push(format!("Env keys: {}", entry.env_keys_count));
+        }
+        _ if entry.url.is_some() => {
+            lines.push(format!(
+                "URL: {}",
+                redact_mcp_url(entry.url.as_deref().unwrap_or_default())
+            ));
+            lines.push(format!("Headers: {}", entry.headers_count));
+            lines.push(format!(
+                "OAuth: {}",
+                if entry.oauth_configured {
+                    "configured"
+                } else {
+                    "none"
+                }
+            ));
+        }
+        _ => lines.push(format!("Config: {}", entry.transport)),
+    }
+
+    lines.join("\n")
+}
+
 fn read_mcp_config_file(path: &Path, scope: &str) -> Result<Vec<McpHostRegistryEntry>, String> {
     let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,
@@ -61,16 +137,50 @@ fn read_mcp_config_file(path: &Path, scope: &str) -> Result<Vec<McpHostRegistryE
             if transport.is_empty() {
                 return None;
             }
-            let transport = transport.to_string();
-            let _ = normalize_stdio_paths(config_dir, config);
+            let stdio = normalize_stdio_paths(config_dir, config);
+            let args_count = config
+                .get("args")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            let env_keys_count = config
+                .get("env")
+                .and_then(Value::as_object)
+                .map_or(0, serde_json::Map::len);
+            let url = config
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let headers_count = config
+                .get("headers")
+                .and_then(Value::as_object)
+                .map_or(0, serde_json::Map::len);
+            let oauth_configured = config.get("oauth").is_some_and(|value| !value.is_null());
             Some(McpHostRegistryEntry {
                 name: name.to_string(),
-                transport,
+                transport: transport.to_string(),
                 trust_tier: trust_tier(scope).to_string(),
                 origin_label: origin_label(scope).to_string(),
+                command: stdio.map(|(command, _args)| command),
+                args_count,
+                env_keys_count,
+                url,
+                headers_count,
+                oauth_configured,
             })
         })
         .collect())
+}
+
+fn redact_mcp_url(url: &str) -> String {
+    let redacted = redact_secrets(url);
+    let cutoff = [redacted.find('?'), redacted.find('#')]
+        .into_iter()
+        .flatten()
+        .min();
+    match cutoff {
+        Some(index) => format!("{} (query hidden)", &redacted[..index]),
+        None => redacted,
+    }
 }
 
 fn normalize_stdio_paths(config_dir: &Path, config: &Value) -> Option<(String, Vec<String>)> {
@@ -147,6 +257,45 @@ mod tests {
         assert!(report.contains("memory | stdio | user | user config"));
         assert!(report.contains("repo | stdio | project | project config"));
         assert!(report.contains("shared | http | project | project config"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inspects_mcp_servers_without_exposing_args_env_or_url_query() {
+        let root = temp_root("mcp-inspect");
+        let fake_token = format!("ghp_{}", "1".repeat(36));
+        let config = serde_json::json!({
+            "mcpServers": {
+                "memory": {
+                    "type": "stdio",
+                    "command": "node",
+                    "args": ["memory.js", "--token", fake_token],
+                    "env": { "MEMORY_TOKEN": fake_token },
+                },
+                "remote": {
+                    "type": "http",
+                    "url": format!("https://example.test/mcp?token={fake_token}"),
+                    "headers": { "Authorization": "Bearer hidden" },
+                    "oauth": {},
+                },
+            },
+        });
+        fs::write(root.join(".mcp.json"), config.to_string()).unwrap();
+
+        let entries = load_mcp_host_registry(&root, None).unwrap();
+        let stdio_report = format_mcp_host_inspect(&entries, "memory");
+        assert!(stdio_report.contains("MCP server inspect"));
+        assert!(stdio_report.contains("Name: memory"));
+        assert!(stdio_report.contains("Args: 3 configured (hidden)"));
+        assert!(stdio_report.contains("Env keys: 1"));
+        assert!(!stdio_report.contains("memory.js"));
+        assert!(!stdio_report.contains("ghp_"));
+
+        let http_report = format_mcp_host_inspect(&entries, "remote");
+        assert!(http_report.contains("URL: https://example.test/mcp (query hidden)"));
+        assert!(http_report.contains("Headers: 1"));
+        assert!(http_report.contains("OAuth: configured"));
+        assert!(!http_report.contains("ghp_"));
         let _ = fs::remove_dir_all(root);
     }
 

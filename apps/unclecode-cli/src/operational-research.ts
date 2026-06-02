@@ -73,13 +73,13 @@ export function buildMcpInspectReport(input: {
   const configLines =
     config.type === "stdio"
       ? [
-          `Command: ${config.command}`,
+          `Command: ${redactMcpDisplayValue(config.command)}`,
           `Args: ${(config.args ?? []).length} configured (hidden)`,
           `Env keys: ${Object.keys(config.env ?? {}).length}`,
         ]
       : "url" in config
         ? [
-            `URL: ${config.url}`,
+            `URL: ${redactMcpUrl(config.url)}`,
             `Headers: ${"headers" in config ? Object.keys(config.headers ?? {}).length : 0}`,
             `OAuth: ${"oauth" in config && config.oauth ? "configured" : "none"}`,
           ]
@@ -95,6 +95,21 @@ export function buildMcpInspectReport(input: {
     "Health: not checked by inspect.",
     ...configLines,
   ].join("\n");
+}
+
+function redactMcpUrl(url: string): string {
+  const redacted = redactMcpDisplayValue(url);
+  const queryIndex = redacted.search(/[?#]/);
+  return queryIndex === -1
+    ? redacted
+    : `${redacted.slice(0, queryIndex)} (query hidden)`;
+}
+
+function redactMcpDisplayValue(value: string): string {
+  return value.replace(
+    /(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|AIza|npm_|hf_|sk-ant-api03-|sk-proj-|sk-svcacct-|sk-admin-)[A-Za-z0-9_\-.]+/g,
+    "[REDACTED]",
+  );
 }
 
 export async function runResearchPassData(input: {

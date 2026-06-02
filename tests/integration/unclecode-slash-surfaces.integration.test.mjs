@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -58,6 +58,22 @@ test("built unclecode cli maps /sessions to the sessions surface", () => {
 test("built unclecode cli maps /research status and /mcp list to their surfaces", () => {
   const cwd = makeTempWorkspace();
   try {
+    const fakeToken = `ghp_${"1".repeat(36)}`;
+    writeFileSync(
+      path.join(cwd, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          memory: {
+            type: "stdio",
+            command: "node",
+            args: ["memory.js", "--token", fakeToken],
+            env: { MEMORY_TOKEN: fakeToken },
+          },
+        },
+      }),
+      "utf8",
+    );
+
     const researchResult = spawnSync(
       "node",
       [builtCliEntrypoint, "/research status"],
@@ -79,6 +95,22 @@ test("built unclecode cli maps /research status and /mcp list to their surfaces"
     });
     assert.equal(mcpResult.status, 0, mcpResult.stderr);
     assert.match(mcpResult.stdout, /MCP servers/);
+
+    const inspectResult = spawnSync(
+      "node",
+      [builtCliEntrypoint, "/mcp inspect memory"],
+      {
+        cwd,
+        encoding: "utf8",
+      },
+    );
+    assert.equal(inspectResult.status, 0, inspectResult.stderr);
+    assert.match(inspectResult.stdout, /MCP server inspect/);
+    assert.match(inspectResult.stdout, /Name: memory/);
+    assert.match(inspectResult.stdout, /Args: 3 configured \(hidden\)/);
+    assert.match(inspectResult.stdout, /Env keys: 1/);
+    assert.doesNotMatch(inspectResult.stdout, /memory\.js/);
+    assert.doesNotMatch(inspectResult.stdout, /ghp_/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
