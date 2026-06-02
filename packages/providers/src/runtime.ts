@@ -1239,9 +1239,66 @@ function createOpenAIResponsesStreamingTraceEmitter(
   listener?: ProviderTraceListener,
 ): (payload: Record<string, unknown>) => void {
   let fallbackCounter = 0;
+  const pendingReasoningDeltas = new Map<string, {
+    readonly itemId: string;
+    readonly kind: "summary" | "text";
+    pending: string;
+  }>();
+
+  const emitReasoningDelta = (
+    itemId: string,
+    kind: "summary" | "text",
+    delta: string,
+    forceFlush = false,
+  ) => {
+    const key = `${kind}:${itemId}`;
+    const state = pendingReasoningDeltas.get(key) ?? { itemId, kind, pending: "" };
+    state.pending += delta;
+    const { safe, pending } = forceFlush
+      ? { safe: state.pending, pending: "" }
+      : splitReasoningDeltaForSecretBoundary(state.pending);
+    state.pending = pending;
+
+    if (safe) {
+      emitProviderTrace(
+        listener,
+        buildProviderReasoningDeltaTraceWithItemId("openai", model, kind, itemId, safe),
+      );
+    }
+
+    if (state.pending) {
+      pendingReasoningDeltas.set(key, state);
+    } else {
+      pendingReasoningDeltas.delete(key);
+    }
+  };
+
+  const flushReasoningItem = (itemId: string) => {
+    for (const [key, state] of pendingReasoningDeltas.entries()) {
+      if (state.itemId === itemId) {
+        emitReasoningDelta(state.itemId, state.kind, "", true);
+        pendingReasoningDeltas.delete(key);
+      }
+    }
+  };
+
+  const flushAllReasoningItems = () => {
+    for (const state of [...pendingReasoningDeltas.values()]) {
+      emitReasoningDelta(state.itemId, state.kind, "", true);
+    }
+  };
 
   return (payload) => {
     const type = typeof payload.type === "string" ? payload.type : "";
+    if (type === "response.output_item.done" && isRecord(payload.item) && typeof payload.item.id === "string") {
+      flushReasoningItem(payload.item.id);
+      return;
+    }
+    if (type === "response.completed") {
+      flushAllReasoningItems();
+      return;
+    }
+
     const delta = typeof payload.delta === "string" ? payload.delta : "";
     if (!delta) {
       return;
@@ -1263,17 +1320,60 @@ function createOpenAIResponsesStreamingTraceEmitter(
     }
 
     if (type === "response.reasoning_summary_text.delta" || type === "response.reasoning_text.delta") {
-      emitProviderTrace(listener, {
-        type: "reasoning.delta",
-        level: "default",
-        provider: "openai",
-        model,
-        kind: type === "response.reasoning_summary_text.delta" ? "summary" : "text",
+      emitReasoningDelta(
         itemId,
+        type === "response.reasoning_summary_text.delta" ? "summary" : "text",
         delta,
-      });
+      );
     }
   };
+}
+
+const STREAM_SECRET_PREFIXES = [
+  "ghp_",
+  "gho_",
+  "ghu_",
+  "ghs_",
+  "ghr_",
+  "github_pat_",
+  "glpat-",
+  "AIza",
+  "npm_",
+  "hf_",
+  "sk-ant-api03-",
+  "sk-proj-",
+  "sk-svcacct-",
+  "sk-admin-",
+] as const;
+
+function splitReasoningDeltaForSecretBoundary(delta: string): { readonly safe: string; readonly pending: string } {
+  let holdStart = delta.length;
+
+  for (const prefix of STREAM_SECRET_PREFIXES) {
+    for (let length = 1; length < prefix.length; length += 1) {
+      if (delta.endsWith(prefix.slice(0, length))) {
+        holdStart = Math.min(holdStart, delta.length - length);
+      }
+    }
+
+    let index = delta.indexOf(prefix);
+    while (index !== -1) {
+      const tail = delta.slice(index + prefix.length);
+      if (tail === "" || [...tail].every(isStreamSecretTokenChar)) {
+        holdStart = Math.min(holdStart, index);
+      }
+      index = delta.indexOf(prefix, index + 1);
+    }
+  }
+
+  return {
+    safe: delta.slice(0, holdStart),
+    pending: delta.slice(holdStart),
+  };
+}
+
+function isStreamSecretTokenChar(char: string): boolean {
+  return /[A-Za-z0-9_.-]/.test(char);
 }
 
 async function readResponseStreamText(
@@ -2146,6 +2246,22 @@ function buildProviderReasoningDeltaTrace(
 ): ProviderToolTraceEvent {
   const raw = runRustCommandSync(
     ["rust", "provider", "reasoning-delta", provider, model, kind],
+    process.cwd(),
+    process.env,
+    delta,
+  ).trim();
+  return parseProviderTraceEvent(raw);
+}
+
+function buildProviderReasoningDeltaTraceWithItemId(
+  provider: RuntimeProviderName,
+  model: string,
+  kind: "summary" | "text",
+  itemId: string,
+  delta: string,
+): ProviderToolTraceEvent {
+  const raw = runRustCommandSync(
+    ["rust", "provider", "reasoning-delta-record", provider, model, kind, itemId],
     process.cwd(),
     process.env,
     delta,

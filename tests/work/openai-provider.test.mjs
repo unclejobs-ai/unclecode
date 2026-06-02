@@ -736,10 +736,24 @@ test("OpenAIProvider streams Codex reasoning deltas without replaying buffered t
   provider.setTraceListener((event) => traces.push(event));
 
   const resultPromise = provider.runTurn("think");
-  stream.push('data: {"type":"response.reasoning_summary_text.delta","item_id":"rsn_1","delta":"thinking"}\n\n');
+  const fakeTokenTail = "1".repeat(36);
+  stream.push(
+    `data: ${JSON.stringify({
+      type: "response.reasoning_summary_text.delta",
+      item_id: "rsn_1",
+      delta: "thinking gh",
+    })}\n\n`,
+  );
   await waitForPredicate(
-    () => traces.some((event) => event.type === "reasoning.delta" && event.delta === "thinking"),
-    "reasoning delta",
+    () => traces.some((event) => event.type === "reasoning.delta" && event.delta === "thinking "),
+    "reasoning safe prefix",
+  );
+  stream.push(
+    `data: ${JSON.stringify({
+      type: "response.reasoning_summary_text.delta",
+      item_id: "rsn_1",
+      delta: `p_${fakeTokenTail}`,
+    })}\n\n`,
   );
   stream.push(
     'data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rsn_1","summary":[],"content":[]}}\n\n',
@@ -753,7 +767,11 @@ test("OpenAIProvider streams Codex reasoning deltas without replaying buffered t
   assert.equal(result.text, "done");
   assert.deepEqual(
     traces.filter((event) => event.type === "reasoning.delta").map((event) => event.delta),
-    ["thinking"],
+    ["thinking ", "[REDACTED]"],
+  );
+  assert.equal(
+    traces.some((event) => event.type === "reasoning.delta" && String(event.delta).includes("ghp_")),
+    false,
   );
 });
 
