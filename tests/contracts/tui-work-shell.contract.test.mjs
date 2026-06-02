@@ -31,6 +31,7 @@ import {
   formatToolTraceLine,
   formatWorkShellBusyStatusLine,
   formatWorkShellError,
+  formatWorkShellHeaderLine,
   formatWorkShellProviderTitle,
   formatWorkShellStatusLine,
   formatWorkShellThinkingLine,
@@ -152,6 +153,26 @@ test("formatWorkShellProviderTitle humanizes known providers for the unified wor
     formatWorkShellProviderTitle("anthropic"),
     "UncleCode · Anthropic",
   );
+});
+
+test("formatWorkShellHeaderLine renders one width-bounded row", () => {
+  const wide = formatWorkShellHeaderLine({
+    providerTitle: "UncleCode · OpenAI",
+    headerHint: "Ctrl+O sessions · Shift+Tab mode · / commands",
+    terminalColumns: 120,
+  });
+  assert.equal(getDisplayWidth(wide), 118);
+  assert.match(wide, /^UncleCode · OpenAI/);
+  assert.match(wide, /Ctrl\+O sessions/);
+  assert.doesNotMatch(wide, /\n/);
+
+  const narrow = formatWorkShellHeaderLine({
+    providerTitle: "UncleCode · OpenAI",
+    headerHint: "Ctrl+O sessions · Shift+Tab mode · / commands",
+    terminalColumns: 36,
+  });
+  assert.equal(getDisplayWidth(narrow), 34);
+  assert.doesNotMatch(narrow, /\n/);
 });
 
 test("getWorkShellEntryPresentation keeps user, assistant, tool, and system roles visually distinct", () => {

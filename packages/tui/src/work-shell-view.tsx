@@ -2,7 +2,7 @@ import { Box, Text } from "ink";
 import React from "react";
 import { runRustCommandSync } from "@unclecode/orchestrator";
 
-import { getDisplayWidth } from "./text-width.js";
+import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
 
 export type WorkShellEntryRole = "user" | "assistant" | "tool" | "system";
 
@@ -503,6 +503,34 @@ function padDisplayLine(value: string, width: number): string {
   return `${value}${" ".repeat(padding)}`;
 }
 
+export function formatWorkShellHeaderLine(input: {
+  readonly providerTitle: string;
+  readonly headerHint: string;
+  readonly terminalColumns?: number;
+}): string {
+  const width = Math.max(32, (input.terminalColumns ?? process.stdout.columns ?? 96) - 2);
+  const leftWidth = getDisplayWidth(input.providerTitle);
+  const rightWidth = getDisplayWidth(input.headerHint);
+  const minGap = 2;
+
+  if (leftWidth + minGap + rightWidth <= width) {
+    return padDisplayLine(
+      `${input.providerTitle}${" ".repeat(width - leftWidth - rightWidth)}${input.headerHint}`,
+      width,
+    );
+  }
+
+  const availableRightWidth = width - leftWidth - minGap;
+  if (availableRightWidth >= 12) {
+    return padDisplayLine(
+      `${input.providerTitle}${" ".repeat(minGap)}${truncateForDisplayWidth(input.headerHint, availableRightWidth)}`,
+      width,
+    );
+  }
+
+  return padDisplayLine(truncateForDisplayWidth(input.providerTitle, width), width);
+}
+
 export function formatWorkShellToolEntryLines(text: string, width: number): readonly string[] {
   const normalized = text.trimEnd();
   if (!normalized) {
@@ -825,12 +853,16 @@ const WorkShellAttachmentBlock = React.memo(function WorkShellAttachmentBlock(pr
 const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
   readonly provider: string;
   readonly headerHint?: string;
+  readonly terminalColumns?: number;
 }) {
+  const line = formatWorkShellHeaderLine({
+    providerTitle: formatWorkShellProviderTitle(props.provider),
+    headerHint: props.headerHint ?? "Ctrl+O sessions · Shift+Tab mode · / commands",
+    ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
+  });
+
   return (
-    <Box justifyContent="space-between">
-      <Text bold color={W.text}>{formatWorkShellProviderTitle(props.provider)}</Text>
-      <Text color={W.textMuted}>{props.headerHint ?? "Ctrl+O sessions · Shift+Tab mode · / commands"}</Text>
-    </Box>
+    <Text color={W.text}>{line}</Text>
   );
 });
 
@@ -1017,6 +1049,7 @@ export function WorkShellView(props: {
       <WorkShellHeaderBlock
         provider={props.provider}
         {...(props.headerHint ? { headerHint: props.headerHint } : {})}
+        {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
       />
       <WorkShellStatusBlock
         model={props.model}
