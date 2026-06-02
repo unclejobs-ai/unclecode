@@ -1221,11 +1221,13 @@ test("work-shell execution helpers assemble start, success, failure, finalize, a
     isBusy: false,
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
+    streamingAssistantText: undefined,
   });
   assert.deepEqual(resolvePromptTurnFinalizePatch(), {
     isBusy: false,
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
+    streamingAssistantText: undefined,
   });
 });
 
