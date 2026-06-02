@@ -53,8 +53,7 @@ pub fn run_top_level_research_command(args: &[OsString]) -> Result<u8, String> {
         }
     }
 
-    let cwd = env::current_dir()
-        .map_err(|error| format!("Failed to resolve current directory: {error}"))?;
+    let cwd = resolve_workspace_dir()?;
     let home_dir = env::var_os("HOME").map(PathBuf::from);
     let report = research_status_report(&cwd, home_dir.as_deref(), |key| env::var(key).ok())?;
     if json {
@@ -72,6 +71,15 @@ fn is_native_research_surface(args: &[OsString]) -> bool {
         Some("run") => true,
         _ => false,
     }
+}
+
+fn resolve_workspace_dir() -> Result<PathBuf, String> {
+    if let Some(value) = env::var_os("UNCLECODE_WORK_CWD") {
+        if !value.is_empty() {
+            return Ok(PathBuf::from(value));
+        }
+    }
+    env::current_dir().map_err(|error| format!("Failed to resolve current directory: {error}"))
 }
 
 fn run_research_run_command(args: &[OsString]) -> Result<u8, String> {
@@ -94,8 +102,7 @@ fn run_research_run_command(args: &[OsString]) -> Result<u8, String> {
         return Err(research_run_usage());
     }
 
-    let cwd = env::current_dir()
-        .map_err(|error| format!("Failed to resolve current directory: {error}"))?;
+    let cwd = resolve_workspace_dir()?;
     let home_dir = env::var_os("HOME").map(PathBuf::from);
     let report = research_run_report(&cwd, home_dir.as_deref(), |key| env::var(key).ok(), &prompt)?;
     if json {

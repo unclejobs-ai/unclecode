@@ -42,8 +42,8 @@ The launcher script at `scripts/run-mmbridge-mcp.mjs` prefers:
 
 This keeps local development stable without forcing a single brittle install path.
 
-Legacy Anthropic compatibility proxy code lives at `scripts/anthropic-compat-proxy.ts`;
-the runtime root no longer keeps generated `src/` compatibility artifacts.
+Legacy Anthropic compatibility proxy code is no longer shipped; the runtime
+root no longer keeps generated `src/` compatibility artifacts.
 
 ## Repository Layout
 

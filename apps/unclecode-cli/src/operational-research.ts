@@ -10,15 +10,24 @@ const RESEARCH_LATENCY_THRESHOLDS = {
 } as const;
 
 
-export function buildResearchStatusReport(input: {
+export async function buildResearchStatusReport(input: {
   readonly workspaceRoot: string;
   readonly env: NodeJS.ProcessEnv;
   readonly userHomeDir?: string;
 }): Promise<string> {
-  return runRustCommand(["research", "status"], input.workspaceRoot, undefined, {
-    ...input.env,
-    ...(input.userHomeDir ? { HOME: input.userHomeDir } : {}),
-  }).then((output) => output.trimEnd());
+  try {
+    const output = await runRustCommand(["research", "status"], input.workspaceRoot, undefined, {
+      ...input.env,
+      ...(input.userHomeDir ? { HOME: input.userHomeDir } : {}),
+    });
+    return output.trimEnd();
+  } catch {
+    return [
+      "Research status",
+      "Status: unavailable",
+      "Error: research status failed; diagnostics hidden",
+    ].join("\n");
+  }
 }
 
 export function buildMcpListReport(input: {
@@ -65,7 +74,7 @@ export function buildMcpInspectReport(input: {
     config.type === "stdio"
       ? [
           `Command: ${config.command}`,
-          `Args: ${(config.args ?? []).join(" ") || "none"}`,
+          `Args: ${(config.args ?? []).length} configured (hidden)`,
           `Env keys: ${Object.keys(config.env ?? {}).length}`,
         ]
       : "url" in config

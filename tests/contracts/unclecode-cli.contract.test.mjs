@@ -1252,24 +1252,16 @@ test("obsolete root utility compatibility surfaces are removed", () => {
   }
 });
 
-test("remaining root src residue is either removed or relocated out of the runtime root", () => {
-  const readmeSource = readFileSync(
-    path.join(workspaceRoot, "README.md"),
-    "utf8",
-  );
-
+test("legacy compatibility proxy is fully removed from both root and scripts", () => {
   assert.equal(existsSync(path.join(workspaceRoot, "src")), false);
-  assert.equal(existsSync(path.join(workspaceRoot, "src/types.ts")), false);
   assert.equal(
     existsSync(path.join(workspaceRoot, "src/anthropicCompatProxy.ts")),
     false,
   );
   assert.equal(
     existsSync(path.join(workspaceRoot, "scripts/anthropic-compat-proxy.ts")),
-    true,
+    false,
   );
-  assert.match(readmeSource, /scripts\/anthropic-compat-proxy\.ts/);
-  assert.doesNotMatch(readmeSource, /src\/anthropicCompatProxy\.ts/);
 });
 
 test("root compat sources no longer keep stale checked-in generated runtime/map artifacts", () => {

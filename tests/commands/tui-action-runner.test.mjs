@@ -627,9 +627,10 @@ test("runTuiSessionCenterAction inspects one MCP server without claiming health"
     assert.match(report, /MCP server inspect/);
     assert.match(report, /Name: memory/);
     assert.match(report, /Command: node/);
-    assert.match(report, /Args: memory\.js/);
+    assert.match(report, /Args: 1 configured \(hidden\)/);
     assert.match(report, /Env keys: 1/);
     assert.match(report, /Health: not checked by inspect/);
+    assert.doesNotMatch(report, /memory\.js/);
     assert.doesNotMatch(report, /redacted-in-report/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
