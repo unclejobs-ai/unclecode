@@ -91,7 +91,7 @@ fn resolve_verbose_trace_entry(trace_mode: &str, event: &Value, line: &str) -> O
     }
 
     match str_field(event, "type").unwrap_or_default() {
-        "tool.started" | "tool.completed" | "policy.denied" => Some(json!({
+        "policy.denied" => Some(json!({
             "role": "tool",
             "text": line,
         })),
@@ -161,6 +161,13 @@ mod tests {
             )
             .unwrap(),
             r#"{"busyStatusAction":"none","traceEntry":{"role":"tool","text":"✖ policy denied filesystem.write/write_file · openshell · denied"},"traceEntryRole":"tool"}"#
+        );
+        assert_eq!(
+            resolve_work_shell_trace_event_json(
+                r#"{"event":{"type":"tool.started"},"line":"→ read package.json","traceMode":"minimal"}"#,
+            )
+            .unwrap(),
+            r#"{"busyStatus":"→ read package.json","busyStatusAction":"set","traceEntryRole":"tool"}"#
         );
         assert_eq!(
             resolve_work_shell_trace_event_json(

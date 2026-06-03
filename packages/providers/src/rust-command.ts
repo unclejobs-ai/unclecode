@@ -8,6 +8,22 @@ const execFileAsync = promisify(execFile);
 const modulePath = fileURLToPath(import.meta.url);
 let cachedRustEntrypoint: { command: string; argsPrefix: string[]; runCwd?: string } | undefined;
 
+export type RunRustCommandOptions = {
+  readonly signal?: AbortSignal | undefined;
+};
+
+function killChildProcess(child: ReturnType<typeof spawn>): void {
+  if (process.platform !== "win32" && child.pid) {
+    try {
+      process.kill(-child.pid);
+      return;
+    } catch {
+      // Fall back to killing the direct child if process-group signalling is unavailable.
+    }
+  }
+  child.kill();
+}
+
 function findWorkspaceRoot(start: string): string | undefined {
   let cursor = path.resolve(start);
   while (true) {
@@ -93,19 +109,43 @@ export async function runRustCommand(
   cwd: string,
   stdin?: string,
   env: NodeJS.ProcessEnv = process.env,
+  options: RunRustCommandOptions = {},
 ): Promise<string> {
   const rust = findRustEntrypoint();
   const childEnv = { ...process.env, ...env, UNCLECODE_WORK_CWD: cwd };
   if (stdin !== undefined) {
     return await new Promise((resolvePromise, reject) => {
+      if (options.signal?.aborted) {
+        reject(createAbortError());
+        return;
+      }
       const child = spawn(rust.command, [...rust.argsPrefix, ...args], {
         cwd: rust.runCwd ?? cwd,
         windowsHide: true,
+        detached: process.platform !== "win32",
         env: childEnv,
         stdio: ["pipe", "pipe", "pipe"],
       });
+      let settled = false;
       let stdout = "";
       let stderr = "";
+      const settle = (kind: "resolve" | "reject", value: string | Error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        options.signal?.removeEventListener("abort", onAbort);
+        if (kind === "resolve") {
+          resolvePromise(String(value));
+          return;
+        }
+        reject(value);
+      };
+      const onAbort = () => {
+        killChildProcess(child);
+        settle("reject", createAbortError());
+      };
+      options.signal?.addEventListener("abort", onAbort, { once: true });
       child.stdout.setEncoding("utf8");
       child.stderr.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
@@ -114,13 +154,13 @@ export async function runRustCommand(
       child.stderr.on("data", (chunk: string) => {
         stderr += chunk;
       });
-      child.on("error", reject);
+      child.on("error", (error) => settle("reject", error));
       child.on("close", (code) => {
         if (code === 0) {
-          resolvePromise(stdout);
+          settle("resolve", stdout);
           return;
         }
-        reject(new Error(`${stdout}${stderr}`.trim() || `Rust command exited ${code}`));
+        settle("reject", new Error(`${stdout}${stderr}`.trim() || `Rust command exited ${code}`));
       });
       child.stdin.end(stdin);
     });
@@ -131,12 +171,22 @@ export async function runRustCommand(
       windowsHide: true,
       maxBuffer: 8 * 1024 * 1024,
       env: childEnv,
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     return result.stdout;
   } catch (error) {
+    if (options.signal?.aborted) {
+      throw createAbortError();
+    }
     const output = `${(error as { stdout?: string }).stdout ?? ""}${(error as { stderr?: string }).stderr ?? ""}`.trim();
     throw new Error(output || (error instanceof Error ? error.message : String(error)));
   }
+}
+
+function createAbortError(): Error {
+  const error = new Error("Operation aborted");
+  error.name = "AbortError";
+  return error;
 }
 
 export function runRustCommandSync(

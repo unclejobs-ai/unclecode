@@ -131,5 +131,7 @@ export function applyWorkShellTraceEvent<
   }
 
   input.appendEntries(traceEntry);
-  input.pushTraceLine(line);
+  if (line.trim().length > 0) {
+    input.pushTraceLine(line);
+  }
 }

@@ -11,6 +11,10 @@ export type AgentTurnResult = {
   text: string;
 };
 
+export type AgentTurnOptions = {
+  readonly signal?: AbortSignal | undefined;
+};
+
 export type CodingAgentTraceEvent<ToolTraceEvent extends { readonly type: string }> =
   | Extract<ExecutionTraceEvent, { type: "turn.started" | "provider.route" | "provider.calling" | "turn.completed" }>
   | ToolTraceEvent;
@@ -23,7 +27,7 @@ export interface CodingAgentProvider<
   clear(): void;
   setTraceListener(listener?: ((event: ToolTraceEvent) => void) | undefined): void;
   updateRuntimeSettings(settings: { reasoning?: Reasoning | undefined; model?: string | undefined }): void;
-  runTurn(prompt: string, attachments?: readonly Attachment[]): Promise<AgentTurnResult>;
+  runTurn(prompt: string, attachments?: readonly Attachment[], options?: AgentTurnOptions): Promise<AgentTurnResult>;
 }
 
 export interface TurnAgent<
@@ -34,7 +38,7 @@ export interface TurnAgent<
   clear(): void;
   setTraceListener(listener?: ((event: TraceEvent) => void) | undefined): void;
   updateRuntimeSettings(settings: { reasoning?: Reasoning | undefined; model?: string | undefined }): void;
-  runTurn(prompt: string, attachments?: readonly Attachment[]): Promise<AgentTurnResult>;
+  runTurn(prompt: string, attachments?: readonly Attachment[], options?: AgentTurnOptions): Promise<AgentTurnResult>;
 }
 
 export class CodingAgent<
@@ -73,13 +77,13 @@ export class CodingAgent<
     }
   }
 
-  async runTurn(prompt: string, attachments: readonly Attachment[] = []): Promise<AgentTurnResult> {
+  async runTurn(prompt: string, attachments: readonly Attachment[] = [], options: AgentTurnOptions = {}): Promise<AgentTurnResult> {
     const turnStartedAt = Date.now();
     this.emitTrace(this.buildTurnStartedTrace(prompt, turnStartedAt));
     this.emitTrace(this.buildProviderRouteTrace(turnStartedAt));
     this.emitTrace(this.buildProviderCallingTrace(turnStartedAt));
 
-    const result = await this.provider.runTurn(prompt, attachments);
+    const result = await this.provider.runTurn(prompt, attachments, options);
     const completedAt = Date.now();
     this.emitTrace(this.buildTurnCompletedTrace(result.text, turnStartedAt, completedAt));
     return result;

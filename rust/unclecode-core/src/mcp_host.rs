@@ -72,7 +72,11 @@ pub fn format_mcp_host_inspect(entries: &[McpHostRegistryEntry], server_name: &s
             format!("Server not found: {server_name}"),
             format!(
                 "Available: {}",
-                if available.is_empty() { "none" } else { &available }
+                if available.is_empty() {
+                    "none"
+                } else {
+                    &available
+                }
             ),
         ]
         .join("\n");
@@ -128,11 +132,18 @@ pub fn add_project_mcp_server(
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.')
     {
-        return Err("MCP server name may only contain letters, numbers, dot, underscore, and dash.".to_string());
+        return Err(
+            "MCP server name may only contain letters, numbers, dot, underscore, and dash."
+                .to_string(),
+        );
     }
 
     let mut config = read_project_mcp_config(workspace_root)?;
-    if config.get("mcpServers").and_then(Value::as_object).is_none() {
+    if config
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .is_none()
+    {
         config["mcpServers"] = json!({});
     }
     let server = if args.is_empty() {
@@ -169,7 +180,10 @@ fn read_project_mcp_config(workspace_root: &Path) -> Result<Value, String> {
             let parsed: Value = serde_json::from_str(&raw)
                 .map_err(|error| format!("Invalid {}: {error}", config_path.display()))?;
             if !parsed.is_object() {
-                return Err(format!("{} must contain a JSON object.", config_path.display()));
+                return Err(format!(
+                    "{} must contain a JSON object.",
+                    config_path.display()
+                ));
             }
             Ok(parsed)
         }

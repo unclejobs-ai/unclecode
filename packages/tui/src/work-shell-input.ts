@@ -12,6 +12,7 @@ export type WorkShellInputAction =
   | { readonly type: "close-slash-picker" }
   | { readonly type: "cycle-mode"; readonly nextMode: WorkShellCycleMode }
   | { readonly type: "cancel-sensitive-input" }
+  | { readonly type: "interrupt-turn" }
   | { readonly type: "close-overlay" }
   | { readonly type: "open-sessions-view" }
   | { readonly type: "open-engine-sessions" };

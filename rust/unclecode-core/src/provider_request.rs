@@ -62,21 +62,42 @@ pub fn build_openai_chat_request_body(
     tools_json: Option<&str>,
     reasoning_effort: Option<&str>,
 ) -> String {
+    let messages_json = repair_openai_chat_messages_for_wire(messages_json);
     let mut fields = vec![
         format!("\"model\":\"{}\"", json_escape(model)),
-        format!("\"messages\":{}", messages_json.trim()),
+        format!("\"messages\":{}", messages_json),
     ];
     if let Some(tools_json) = tools_json.map(str::trim).filter(|value| !value.is_empty()) {
         fields.push(format!("\"tools\":{tools_json}"));
     }
-    fields.push("\"tool_choice\":\"auto\"".to_string());
-    if let Some(effort) = normalize_reasoning_effort(reasoning_effort) {
+    if openai_chat_model_supports_tool_choice(model) {
+        fields.push("\"tool_choice\":\"auto\"".to_string());
+    }
+    if let Some(effort) = normalize_reasoning_effort(reasoning_effort)
+        .filter(|_| openai_chat_model_supports_reasoning(model))
+    {
         fields.push(format!(
             "\"reasoning\":{{\"effort\":\"{}\"}}",
             json_escape(effort)
         ));
     }
     format!("{{{}}}", fields.join(","))
+}
+
+pub fn repair_openai_chat_messages_for_wire(messages_json: &str) -> String {
+    if !openai_chat_messages_need_repair(messages_json) {
+        return messages_json.trim().to_string();
+    }
+
+    repair_openai_chat_messages_json(messages_json)
+        .unwrap_or_else(|_| messages_json.trim().to_string())
+}
+
+pub fn repair_openai_chat_messages_json(messages_json: &str) -> Result<String, String> {
+    let messages: Value = serde_json::from_str(messages_json)
+        .map_err(|error| format!("Invalid OpenAI messages JSON: {error}"))?;
+    serde_json::to_string(&repair_openai_chat_messages(&messages))
+        .map_err(|error| error.to_string())
 }
 
 pub fn build_openai_codex_request_body(
@@ -231,7 +252,11 @@ pub fn provider_query_messages_to_openai_json(
                     out.push(json!({ "role": "user", "content": content }));
                 }
                 "assistant" => {
-                    let tool_calls = provider_tool_calls(message.get("toolCalls"));
+                    let tool_calls = message
+                        .get("tool_calls")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_else(|| provider_tool_calls(message.get("toolCalls")));
                     let mut wire = json!({ "role": "assistant", "content": content });
                     if !tool_calls.is_empty() {
                         if let Some(object) = wire.as_object_mut() {
@@ -244,7 +269,11 @@ pub fn provider_query_messages_to_openai_json(
                     out.push(json!({
                         "role": "tool",
                         "content": content,
-                        "tool_call_id": message.get("callId").and_then(Value::as_str).unwrap_or("tool")
+                        "tool_call_id": message
+                            .get("callId")
+                            .or_else(|| message.get("tool_call_id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("tool")
                     }));
                 }
                 _ => {}
@@ -260,6 +289,183 @@ pub fn provider_query_messages_to_openai_json(
     }
 
     serde_json::to_string(&out).map_err(|error| error.to_string())
+}
+
+fn openai_chat_messages_need_repair(messages_json: &str) -> bool {
+    let Ok(messages) = serde_json::from_str::<Value>(messages_json) else {
+        return false;
+    };
+    let Some(messages) = messages.as_array() else {
+        return false;
+    };
+    let mut pending: Vec<String> = Vec::new();
+
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
+        if pending.is_empty() {
+            if role == "tool" {
+                return true;
+            }
+            pending = assistant_tool_call_ids(message);
+            continue;
+        }
+
+        if role == "tool" {
+            let Some(expected) = pending.first() else {
+                return true;
+            };
+            let actual = message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if actual != expected {
+                return true;
+            }
+            pending.remove(0);
+            continue;
+        }
+
+        return true;
+    }
+
+    !pending.is_empty()
+}
+
+fn repair_openai_chat_messages(messages: &Value) -> Vec<Value> {
+    let Some(messages) = messages.as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut pending: Vec<(String, String)> = Vec::new();
+
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
+        if pending.is_empty() {
+            if role == "tool" {
+                out.push(stale_tool_result_user_message(message));
+                continue;
+            }
+            out.push(message.clone());
+            pending = assistant_tool_calls_for_repair(message);
+            continue;
+        }
+
+        if role == "tool" {
+            let actual = message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Some(index) = pending.iter().position(|(call_id, _)| call_id == actual) {
+                for (missing_id, missing_name) in pending.drain(..index) {
+                    out.push(synthetic_tool_message(&missing_id, &missing_name));
+                }
+                pending.remove(0);
+                out.push(message.clone());
+            } else {
+                out.push(stale_tool_result_user_message(message));
+            }
+            continue;
+        }
+
+        flush_pending_tool_messages(&mut out, &mut pending);
+        out.push(message.clone());
+        pending = assistant_tool_calls_for_repair(message);
+    }
+
+    flush_pending_tool_messages(&mut out, &mut pending);
+    out
+}
+
+fn assistant_tool_call_ids(message: &Value) -> Vec<String> {
+    assistant_tool_calls_for_repair(message)
+        .into_iter()
+        .map(|(call_id, _)| call_id)
+        .collect()
+}
+
+fn assistant_tool_calls_for_repair(message: &Value) -> Vec<(String, String)> {
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return Vec::new();
+    }
+    message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(|calls| {
+            calls
+                .iter()
+                .enumerate()
+                .map(|(index, call)| {
+                    let function = call.get("function").unwrap_or(&Value::Null);
+                    let call_id = call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.trim().is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("call_missing_{index}"));
+                    let name = function
+                        .get("name")
+                        .or_else(|| call.get("name"))
+                        .and_then(Value::as_str)
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or("tool")
+                        .to_string();
+                    (call_id, name)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn flush_pending_tool_messages(out: &mut Vec<Value>, pending: &mut Vec<(String, String)>) {
+    for (call_id, name) in pending.drain(..) {
+        out.push(synthetic_tool_message(&call_id, &name));
+    }
+}
+
+fn synthetic_tool_message(call_id: &str, name: &str) -> Value {
+    json!({
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": format!("Tool call `{name}` was not executed; the user or runtime rejected or skipped it.")
+    })
+}
+
+fn stale_tool_result_user_message(message: &Value) -> Value {
+    let call_id = message
+        .get("tool_call_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let content = message_content_as_text(message.get("content"));
+    json!({
+        "role": "user",
+        "content": format!(
+            "<stale-tool-result id=\"{}\" is-error=\"true\">\n{}\n</stale-tool-result>",
+            xml_escape(call_id),
+            content
+        )
+    })
+}
+
+fn message_content_as_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(text)) => text.to_string(),
+        Some(value) => value.to_string(),
+        None => String::new(),
+    }
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 pub fn build_openai_user_message_json(
@@ -352,6 +558,19 @@ fn normalize_reasoning_effort(value: Option<&str>) -> Option<&str> {
         .filter(|value| !value.is_empty() && *value != "-")
 }
 
+fn openai_chat_model_supports_reasoning(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    !(normalized.contains("kimi")
+        || normalized.contains("moonshot")
+        || normalized.contains("deepseek")
+        || normalized.starts_with("glm-"))
+}
+
+fn openai_chat_model_supports_tool_choice(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    !(normalized.contains("deepseek") || normalized.contains("mistral"))
+}
+
 fn json_escape(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -422,6 +641,77 @@ mod tests {
             body,
             r#"{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"run","parameters":{}}}],"tool_choice":"auto","reasoning":{"effort":"high"}}"#
         );
+    }
+
+    #[test]
+    fn repairs_partial_openai_tool_results_for_strict_backends() {
+        let body = build_openai_chat_request_body(
+            "moonshotai/kimi-k2-instruct",
+            r#"[
+                {"role":"user","content":"run checks"},
+                {"role":"assistant","content":"","tool_calls":[
+                    {"id":"call-a","type":"function","function":{"name":"shell","arguments":"{\"cmd\":\"a\"}"}},
+                    {"id":"call-b","type":"function","function":{"name":"shell","arguments":"{\"cmd\":\"b\"}"}}
+                ]},
+                {"role":"tool","tool_call_id":"call-a","content":"ok"},
+                {"role":"user","content":"continue"}
+            ]"#,
+            None,
+            None,
+        );
+        let parsed: Value = serde_json::from_str(&body).unwrap();
+        let messages = parsed["messages"].as_array().unwrap();
+
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "call-a");
+        assert_eq!(messages[3]["role"], "tool");
+        assert_eq!(messages[3]["tool_call_id"], "call-b");
+        assert!(messages[3]["content"]
+            .as_str()
+            .unwrap()
+            .contains("was not executed"));
+        assert_eq!(messages[4]["role"], "user");
+        assert_eq!(messages[4]["content"], "continue");
+    }
+
+    #[test]
+    fn applies_reduced_compat_policy_to_chat_request_body() {
+        let kimi = build_openai_chat_request_body(
+            "moonshotai/kimi-k2-instruct",
+            r#"[{"role":"user","content":"hi"}]"#,
+            None,
+            Some("high"),
+        );
+        assert!(!kimi.contains(r#""reasoning""#));
+        assert!(kimi.contains(r#""tool_choice":"auto""#));
+
+        let deepseek = build_openai_chat_request_body(
+            "deepseek-r1:8b",
+            r#"[{"role":"user","content":"hi"}]"#,
+            None,
+            Some("high"),
+        );
+        assert!(!deepseek.contains(r#""reasoning""#));
+        assert!(!deepseek.contains(r#""tool_choice":"auto""#));
+    }
+
+    #[test]
+    fn downgrades_orphan_openai_tool_results_to_user_context() {
+        let repaired = repair_openai_chat_messages_json(
+            r#"[
+                {"role":"user","content":"hi"},
+                {"role":"tool","tool_call_id":"call-old","content":"late result"}
+            ]"#,
+        )
+        .unwrap();
+        let messages: Value = serde_json::from_str(&repaired).unwrap();
+        let messages = messages.as_array().unwrap();
+
+        assert_eq!(messages[1]["role"], "user");
+        assert!(messages[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("<stale-tool-result id=\"call-old\""));
     }
 
     #[test]

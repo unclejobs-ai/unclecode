@@ -213,6 +213,11 @@ export function createWorkShellCommandRegistry(extraEntries: readonly Registered
       metadata: builtinLocal("Show the latest local research status."),
     },
     {
+      command: "/cancel",
+      routeTo: ["cancel"],
+      metadata: builtinLocal("Interrupt the active turn and pause queued follow-ups.", ["/interrupt", "/stop"]),
+    },
+    {
       command: "/review",
       routeTo: ["prompt", "review"],
       metadata: builtinPrompt("Review the current changes, risks, and missing verification."),

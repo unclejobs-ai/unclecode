@@ -84,6 +84,7 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
   loadNamedSkill: (name: string, cwd: string) => Promise<WorkShellLoadedSkill>;
   toolLines: readonly string[];
   clearAgent: () => void;
+  interruptTurn: () => void;
   updateRuntimeSettings: (settings: {
     reasoning?: Reasoning | undefined;
     model?: string | undefined;
@@ -110,6 +111,9 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
     case "clear":
       input.clearAgent();
       input.setState(createClearBuiltinResult(input.line).patch);
+      return;
+    case "cancel":
+      input.interruptTurn();
       return;
     case "help": {
       const result = createHelpBuiltinResult(input.line, input.buildHelpPanel);

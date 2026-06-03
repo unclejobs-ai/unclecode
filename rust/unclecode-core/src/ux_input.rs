@@ -145,6 +145,9 @@ fn resolve_work_shell_input_action(input: &Value) -> Value {
     let has_slash_suggestions = has_slash_suggestions(composer_input, slash_suggestion_count);
 
     if bool_field(key, "ctrl") && value == "c" {
+        if bool_field(input, "isBusy") {
+            return json!({ "type": "interrupt-turn" });
+        }
         return json!({ "type": "exit" });
     }
 
@@ -190,6 +193,9 @@ fn resolve_work_shell_input_action(input: &Value) -> Value {
         }
         if bool_field(input, "hasOverlayOpen") {
             return json!({ "type": "close-overlay" });
+        }
+        if bool_field(input, "isBusy") {
+            return json!({ "type": "interrupt-turn" });
         }
         if bool_field(input, "hasRequestSessionsView") {
             return json!({ "type": "none" });
@@ -420,7 +426,14 @@ mod tests {
                 r#"{"value":"","key":{"escape":true},"input":"plain","slashSuggestionCount":0,"isBusy":true,"hasRequestSessionsView":true}"#
             )
             .unwrap(),
-            r#"{"type":"none"}"#
+            r#"{"type":"interrupt-turn"}"#
+        );
+        assert_eq!(
+            resolve_work_shell_input_action_json(
+                r#"{"value":"c","key":{"ctrl":true},"input":"plain","slashSuggestionCount":0,"isBusy":true,"hasRequestSessionsView":true}"#
+            )
+            .unwrap(),
+            r#"{"type":"interrupt-turn"}"#
         );
         assert_eq!(
             resolve_work_shell_input_action_json(

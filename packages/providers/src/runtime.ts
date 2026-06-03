@@ -4,7 +4,7 @@ import type {
   ModeReasoningEffort,
 } from "@unclecode/contracts";
 
-import { runRustCommandSync } from "./rust-command.js";
+import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 import type { ReasoningSupport } from "./types.js";
 
 export type AgentTurnResult = {
@@ -48,6 +48,10 @@ export function applyProviderAttachmentCaps(
 }
 
 export type ProviderTraceListener = (event: ProviderToolTraceEvent) => void;
+
+export type ProviderTurnOptions = {
+  readonly signal?: AbortSignal | undefined;
+};
 
 export type ProviderName = "anthropic" | "gemini" | "openai";
 type RuntimeProviderName = "anthropic" | "gemini" | "openai";
@@ -188,9 +192,14 @@ export type ToolResult = {
   content: string;
 };
 
+export type ToolHandlerOptions = {
+  readonly signal?: AbortSignal | undefined;
+};
+
 export type ToolHandler = (
   input: Record<string, unknown>,
   cwd: string,
+  options?: ToolHandlerOptions,
 ) => Promise<ToolResult>;
 
 export type ToolRuntime = {
@@ -237,6 +246,7 @@ export interface LlmProvider {
   runTurn(
     prompt: string,
     attachments?: readonly ProviderInputAttachment[],
+    options?: ProviderTurnOptions,
   ): Promise<AgentTurnResult>;
   /**
    * Stateless one-shot query for caller-managed message histories
@@ -409,7 +419,7 @@ export class OpenAIProvider implements LlmProvider {
     this.apiKey = apiKey.trim();
   }
 
-  private async requestOpenApiMessage(): Promise<{
+  private async requestOpenApiMessage(options: ProviderTurnOptions = {}): Promise<{
     content?: string | null;
     tool_calls?: Array<{
       id?: string;
@@ -418,12 +428,13 @@ export class OpenAIProvider implements LlmProvider {
     actions: RustProviderAction[];
   }> {
     if (!this.fetchImpl) {
-      const parsed = runOpenAIChatCompletionWithRust({
+      const parsed = await runOpenAIChatCompletionWithRustAsync({
         apiKey: this.apiKey,
         model: this.model,
         messages: this.messages,
         tools: this.toolRuntime.definitions,
         reasoningEffort: resolveRuntimeReasoningEffort(this.reasoning),
+        signal: options.signal,
       });
       if (parsed.reasoning.length > 0) {
         emitProviderTrace(
@@ -448,7 +459,7 @@ export class OpenAIProvider implements LlmProvider {
       includeTools: toolPolicy.includeTools,
       reasoningEffort: resolveRuntimeReasoningEffort(this.reasoning),
     });
-    const response = await this.postText(requestSpec.url, requestSpec.headers, body);
+    const response = await this.postText(requestSpec.url, requestSpec.headers, body, options.signal);
 
     if (!response.ok) {
       throw new Error(buildProviderRequestError("openai", response.status, response.text, response.attempts));
@@ -471,7 +482,7 @@ export class OpenAIProvider implements LlmProvider {
     };
   }
 
-  private async requestCodexMessage(): Promise<{
+  private async requestCodexMessage(options: ProviderTurnOptions = {}): Promise<{
     content?: string | null;
     tool_calls?: Array<{
       id?: string;
@@ -491,7 +502,7 @@ export class OpenAIProvider implements LlmProvider {
       toolChoice: toolPolicy.toolChoice,
       reasoningEffort: resolveRuntimeReasoningEffort(this.reasoning),
     });
-    const response = await this.postCodexResponses(body);
+    const response = await this.postCodexResponses(body, options.signal);
 
     if (!response.ok) {
       throw new Error(buildProviderRequestError("openai", response.status, response.text, response.attempts));
@@ -509,7 +520,7 @@ export class OpenAIProvider implements LlmProvider {
     };
   }
 
-  private async postCodexResponses(body: string): Promise<OpenAIResponsesHttpResponse> {
+  private async postCodexResponses(body: string, signal?: AbortSignal | undefined): Promise<OpenAIResponsesHttpResponse> {
     const requestSpec = buildOpenAIRequestSpec("codex", this.apiKey, this.openAIAccountId);
     const fetchImpl = this.fetchImpl ?? resolveGlobalFetchImpl();
 
@@ -523,6 +534,7 @@ export class OpenAIProvider implements LlmProvider {
           model: this.model,
           traceListener: this.traceListener,
           maxAttempts: this.fetchImpl ? 1 : 3,
+          ...(signal ? { signal } : {}),
         });
       } catch (error) {
         if (error instanceof OpenAIResponsesLiveStreamReadError) {
@@ -535,7 +547,7 @@ export class OpenAIProvider implements LlmProvider {
     }
 
     return {
-      ...postOpenAIWithRust("codex", this.apiKey, body, this.openAIAccountId),
+      ...(await postOpenAIWithRustAsync("codex", this.apiKey, body, this.openAIAccountId, signal)),
       streamed: false,
     };
   }
@@ -543,49 +555,62 @@ export class OpenAIProvider implements LlmProvider {
   async runTurn(
     prompt: string,
     attachments: readonly ProviderInputAttachment[] = [],
+    options: ProviderTurnOptions = {},
   ): Promise<AgentTurnResult> {
     const maxIterations = getProviderToolLoopMax();
+    const rollbackLength = this.messages.length;
     startProviderTurnState("openai", this.messages, prompt, attachments);
 
-    let assistantText = "";
+    try {
+      let assistantText = "";
 
-    for (let i = 0; i < maxIterations; i += 1) {
-      const message = this.runtime === "codex"
-        ? await this.requestCodexMessage()
-        : await this.requestOpenApiMessage();
-      assistantText = typeof message?.content === "string" ? message.content : "";
-      const toolCalls = message?.tool_calls ?? [];
-      const actions = message.actions;
+      for (let i = 0; i < maxIterations; i += 1) {
+        throwIfAborted(options.signal);
+        const message = this.runtime === "codex"
+          ? await this.requestCodexMessage(options)
+          : await this.requestOpenApiMessage(options);
+        throwIfAborted(options.signal);
+        assistantText = typeof message?.content === "string" ? message.content : "";
+        const toolCalls = message?.tool_calls ?? [];
+        const actions = message.actions;
 
-      const actionPlan = resolveProviderIterationActionPlan(i, actions.length, maxIterations, assistantText);
-      const toolResultOutcomes = actionPlan.shouldDispatchTools
-        ? await executeProviderToolDispatches(
-        "openai",
-        actions,
-        this.toolRuntime.handlers,
-        this.cwd,
-        this.traceListener,
-      )
-        : [];
+        const actionPlan = resolveProviderIterationActionPlan(i, actions.length, maxIterations, assistantText);
+        const toolResultOutcomes = actionPlan.shouldDispatchTools
+          ? await executeProviderToolDispatches(
+          "openai",
+          actions,
+          this.toolRuntime.handlers,
+          this.cwd,
+          this.traceListener,
+          options,
+        )
+          : [];
+        throwIfAborted(options.signal);
 
-      const turnStep = completeProviderTurnStep(
-        "openai",
-        i,
-        maxIterations,
-        assistantText,
-        assistantText,
-        actions.length,
-        this.messages,
-        [buildOpenAIAssistantMessage(assistantText, toolCalls)],
-        toolResultOutcomes,
-      );
-      assistantText = turnStep.assistantText;
-      if (turnStep.decision === "final" || turnStep.decision === "limit") {
-        return { text: turnStep.text };
+        const turnStep = completeProviderTurnStep(
+          "openai",
+          i,
+          maxIterations,
+          assistantText,
+          assistantText,
+          actions.length,
+          this.messages,
+          [buildOpenAIAssistantMessage(assistantText, toolCalls)],
+          toolResultOutcomes,
+        );
+        assistantText = turnStep.assistantText;
+        if (turnStep.decision === "final" || turnStep.decision === "limit") {
+          return { text: turnStep.text };
+        }
       }
-    }
 
-    return { text: resolveProviderLoopDecision(maxIterations - 1, 1, maxIterations, assistantText).text };
+      return { text: resolveProviderLoopDecision(maxIterations - 1, 1, maxIterations, assistantText).text };
+    } catch (error) {
+      if (isAbortError(error)) {
+        this.messages.splice(rollbackLength);
+      }
+      throw error;
+    }
   }
 
   async query(
@@ -634,14 +659,16 @@ export class OpenAIProvider implements LlmProvider {
     url: string,
     headers: Record<string, string>,
     body: string,
+    signal?: AbortSignal | undefined,
   ): Promise<RustHttpResponse> {
     if (!this.fetchImpl) {
-      return postWithRustHttp(url, headers, body);
+      return await postWithRustHttpAsync(url, headers, body, signal);
     }
     const response = await this.fetchImpl(url, {
       method: "POST",
       headers,
       body,
+      ...(signal ? { signal } : {}),
     });
     return {
       ok: response.ok,
@@ -699,54 +726,67 @@ export class AnthropicProvider implements LlmProvider {
   async runTurn(
     prompt: string,
     attachments: readonly ProviderInputAttachment[] = [],
+    options: ProviderTurnOptions = {},
   ): Promise<AgentTurnResult> {
     const maxIterations = getProviderToolLoopMax();
+    const rollbackLength = this.messages.length;
     startProviderTurnState("anthropic", this.messages, prompt, attachments);
 
-    let assistantText = "";
+    try {
+      let assistantText = "";
 
-    for (let i = 0; i < maxIterations; i += 1) {
-      const request = buildAnthropicMessagesRequest({
-        model: this.model,
-        system: this.systemPrompt,
-        messages: this.messages,
-        tools: this.toolRuntime.definitions,
-      });
-      const parsed = this.usesInjectedClient
-        ? parseAnthropicResponse(await this.requireInjectedClient().messages.create(request), this.model)
-        : parseAnthropicResponseText(await this.postMessagesWithRust(JSON.stringify(request)), this.model);
+      for (let i = 0; i < maxIterations; i += 1) {
+        throwIfAborted(options.signal);
+        const request = buildAnthropicMessagesRequest({
+          model: this.model,
+          system: this.systemPrompt,
+          messages: this.messages,
+          tools: this.toolRuntime.definitions,
+        });
+        const parsed = this.usesInjectedClient
+          ? parseAnthropicResponse(await this.requireInjectedClient().messages.create(request), this.model)
+          : parseAnthropicResponseText(await this.postMessagesWithRust(JSON.stringify(request), options.signal), this.model);
+        throwIfAborted(options.signal);
 
-      const actionPlan = resolveProviderIterationActionPlan(i, parsed.actions.length, maxIterations, parsed.content);
-      const toolResultOutcomes = actionPlan.shouldDispatchTools
-        ? await executeProviderToolDispatches(
-        "anthropic",
-        parsed.actions,
-        this.toolRuntime.handlers,
-        this.cwd,
-        this.traceListener,
-      )
-        : [];
+        const actionPlan = resolveProviderIterationActionPlan(i, parsed.actions.length, maxIterations, parsed.content);
+        const toolResultOutcomes = actionPlan.shouldDispatchTools
+          ? await executeProviderToolDispatches(
+          "anthropic",
+          parsed.actions,
+          this.toolRuntime.handlers,
+          this.cwd,
+          this.traceListener,
+          options,
+        )
+          : [];
+        throwIfAborted(options.signal);
 
-      const turnStep = completeProviderTurnStep(
-        "anthropic",
-        i,
-        maxIterations,
-        assistantText,
-        parsed.content,
-        parsed.actions.length,
-        this.messages,
-        [parsed.assistantMessage],
-        toolResultOutcomes,
-      );
-      assistantText = turnStep.assistantText;
-      if (turnStep.decision === "final" || turnStep.decision === "limit") {
-        return { text: turnStep.text };
+        const turnStep = completeProviderTurnStep(
+          "anthropic",
+          i,
+          maxIterations,
+          assistantText,
+          parsed.content,
+          parsed.actions.length,
+          this.messages,
+          [parsed.assistantMessage],
+          toolResultOutcomes,
+        );
+        assistantText = turnStep.assistantText;
+        if (turnStep.decision === "final" || turnStep.decision === "limit") {
+          return { text: turnStep.text };
+        }
       }
-    }
 
-    return {
-      text: resolveProviderLoopDecision(maxIterations - 1, 1, maxIterations, assistantText).text,
-    };
+      return {
+        text: resolveProviderLoopDecision(maxIterations - 1, 1, maxIterations, assistantText).text,
+      };
+    } catch (error) {
+      if (isAbortError(error)) {
+        this.messages.splice(rollbackLength);
+      }
+      throw error;
+    }
   }
 
   async query(
@@ -770,8 +810,8 @@ export class AnthropicProvider implements LlmProvider {
     return { content: parsed.content, actions: parsed.actions, costUsd: parsed.costUsd };
   }
 
-  private async postMessagesWithRust(body: string): Promise<string> {
-    const response = postAnthropicWithRust(this.apiKey, body);
+  private async postMessagesWithRust(body: string, signal?: AbortSignal | undefined): Promise<string> {
+    const response = await postAnthropicWithRustAsync(this.apiKey, body, signal);
     if (!response.ok) {
       throw new Error(buildProviderRequestError("anthropic", response.status, response.text, response.attempts));
     }
@@ -903,55 +943,68 @@ export class GeminiProvider implements LlmProvider {
   async runTurn(
     prompt: string,
     attachments: readonly ProviderInputAttachment[] = [],
+    options: ProviderTurnOptions = {},
   ): Promise<AgentTurnResult> {
     const maxIterations = getProviderToolLoopMax();
+    const rollbackLength = this.contents.length;
     startProviderTurnState("gemini", this.contents, prompt, attachments);
 
-    let assistantText = "";
+    try {
+      let assistantText = "";
 
-    for (let i = 0; i < maxIterations; i += 1) {
-      const request = buildGeminiGenerateContentRequest({
-        model: this.model,
-        systemInstruction: this.systemPrompt,
-        contents: this.contents,
-        functionDeclarations: buildGeminiFunctionDeclarations(this.toolRuntime.definitions),
-        includeTools: resolveProviderToolPolicy("gemini-live", this.toolRuntime.definitions).includeTools,
-      });
-      const parsed = this.usesInjectedClient
-        ? parseGeminiResponse(await this.requireInjectedClient().models.generateContent(request), this.model)
-        : parseGeminiResponseText(await this.postGenerateContentWithRust(this.model, JSON.stringify(request)), this.model);
+      for (let i = 0; i < maxIterations; i += 1) {
+        throwIfAborted(options.signal);
+        const request = buildGeminiGenerateContentRequest({
+          model: this.model,
+          systemInstruction: this.systemPrompt,
+          contents: this.contents,
+          functionDeclarations: buildGeminiFunctionDeclarations(this.toolRuntime.definitions),
+          includeTools: resolveProviderToolPolicy("gemini-live", this.toolRuntime.definitions).includeTools,
+        });
+        const parsed = this.usesInjectedClient
+          ? parseGeminiResponse(await this.requireInjectedClient().models.generateContent(request), this.model)
+          : parseGeminiResponseText(await this.postGenerateContentWithRust(this.model, JSON.stringify(request), options.signal), this.model);
+        throwIfAborted(options.signal);
 
-      const actionPlan = resolveProviderIterationActionPlan(i, parsed.actions.length, maxIterations, parsed.content);
-      const toolResultOutcomes = actionPlan.shouldDispatchTools
-        ? await executeProviderToolDispatches(
-        "gemini",
-        parsed.actions,
-        this.toolRuntime.handlers,
-        this.cwd,
-        this.traceListener,
-      )
-        : [];
+        const actionPlan = resolveProviderIterationActionPlan(i, parsed.actions.length, maxIterations, parsed.content);
+        const toolResultOutcomes = actionPlan.shouldDispatchTools
+          ? await executeProviderToolDispatches(
+          "gemini",
+          parsed.actions,
+          this.toolRuntime.handlers,
+          this.cwd,
+          this.traceListener,
+          options,
+        )
+          : [];
+        throwIfAborted(options.signal);
 
-      const turnStep = completeProviderTurnStep(
-        "gemini",
-        i,
-        maxIterations,
-        assistantText,
-        parsed.content,
-        parsed.actions.length,
-        this.contents,
-        [parsed.modelContent],
-        toolResultOutcomes,
-      );
-      assistantText = turnStep.assistantText;
-      if (turnStep.decision === "final" || turnStep.decision === "limit") {
-        return { text: turnStep.text };
+        const turnStep = completeProviderTurnStep(
+          "gemini",
+          i,
+          maxIterations,
+          assistantText,
+          parsed.content,
+          parsed.actions.length,
+          this.contents,
+          [parsed.modelContent],
+          toolResultOutcomes,
+        );
+        assistantText = turnStep.assistantText;
+        if (turnStep.decision === "final" || turnStep.decision === "limit") {
+          return { text: turnStep.text };
+        }
       }
-    }
 
-    return {
-      text: resolveProviderLoopDecision(maxIterations - 1, 1, maxIterations, assistantText).text,
-    };
+      return {
+        text: resolveProviderLoopDecision(maxIterations - 1, 1, maxIterations, assistantText).text,
+      };
+    } catch (error) {
+      if (isAbortError(error)) {
+        this.contents.splice(rollbackLength);
+      }
+      throw error;
+    }
   }
 
   async query(
@@ -978,8 +1031,8 @@ export class GeminiProvider implements LlmProvider {
     return { content: parsed.content, actions: parsed.actions, costUsd: parsed.costUsd };
   }
 
-  private async postGenerateContentWithRust(model: string, body: string): Promise<string> {
-    const response = postGeminiWithRust(this.apiKey, model, body);
+  private async postGenerateContentWithRust(model: string, body: string, signal?: AbortSignal | undefined): Promise<string> {
+    const response = await postGeminiWithRustAsync(this.apiKey, model, body, signal);
     if (!response.ok) {
       throw new Error(buildProviderRequestError("gemini", response.status, response.text, response.attempts));
     }
@@ -1172,6 +1225,7 @@ type OpenAIResponsesLivePostInput = {
   readonly model: string;
   readonly traceListener?: ProviderTraceListener | undefined;
   readonly maxAttempts: number;
+  readonly signal?: AbortSignal | undefined;
 };
 
 async function postOpenAIResponsesWithLiveStream(
@@ -1183,10 +1237,12 @@ async function postOpenAIResponsesWithLiveStream(
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     let readingStream = false;
     try {
+      throwIfAborted(input.signal);
       const response = await input.fetchImpl(input.url, {
         method: "POST",
         headers: input.headers,
         body: input.body,
+        ...(input.signal ? { signal: input.signal } : {}),
       });
       const status = typeof response.status === "number" ? response.status : response.ok ? 200 : 0;
 
@@ -1566,6 +1622,19 @@ async function sleepBeforeRetry(delayMs: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
+function throwIfAborted(signal?: AbortSignal | undefined): void {
+  if (!signal?.aborted) {
+    return;
+  }
+  const error = new Error("Operation aborted");
+  error.name = "AbortError";
+  throw error;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 function postWithRustHttp(
   url: string,
   headers: Record<string, string>,
@@ -1577,25 +1646,35 @@ function postWithRustHttp(
     process.env,
     `${JSON.stringify(headers)}\0${body}`,
   ).trim();
-  const parsed = JSON.parse(raw) as unknown;
-  if (!isRecord(parsed) || typeof parsed.ok !== "boolean" || typeof parsed.status !== "number") {
-    throw new Error("Rust HTTP transport returned an invalid response envelope.");
-  }
-  const text = typeof parsed.text === "string"
-    ? parsed.text
-    : typeof parsed.body === "string"
-      ? parsed.body
-      : "";
-  return {
-    ok: parsed.ok,
-    status: parsed.status,
-    text,
-    ...(typeof parsed.attempts === "number" ? { attempts: parsed.attempts } : {}),
-  };
+  return parseRustHttpResponse(raw, "Rust HTTP transport");
+}
+
+async function postWithRustHttpAsync(
+  url: string,
+  headers: Record<string, string>,
+  body: string,
+  signal?: AbortSignal | undefined,
+): Promise<RustHttpResponse> {
+  const raw = (await runRustCommand(
+    ["rust", "http", "post", url],
+    process.cwd(),
+    `${JSON.stringify(headers)}\0${body}`,
+    process.env,
+    { signal },
+  )).trim();
+  return parseRustHttpResponse(raw, "Rust HTTP transport");
 }
 
 function postAnthropicWithRust(apiKey: string, body: string): RustHttpResponse {
   return postProviderWithRust(["rust", "provider", "anthropic-post"], `${apiKey}\0${body}`, "Anthropic");
+}
+
+async function postAnthropicWithRustAsync(
+  apiKey: string,
+  body: string,
+  signal?: AbortSignal | undefined,
+): Promise<RustHttpResponse> {
+  return await postProviderWithRustAsync(["rust", "provider", "anthropic-post"], `${apiKey}\0${body}`, "Anthropic", signal);
 }
 
 function postOpenAIWithRust(
@@ -1611,15 +1690,52 @@ function postOpenAIWithRust(
   return postProviderWithRust(args, `${apiKey}\0${body}`, "OpenAI");
 }
 
+async function postOpenAIWithRustAsync(
+  runtime: "api" | "codex",
+  apiKey: string,
+  body: string,
+  accountId?: string | null,
+  signal?: AbortSignal | undefined,
+): Promise<RustHttpResponse> {
+  const args = ["rust", "provider", "openai-post", runtime];
+  if (runtime === "codex") {
+    args.push(accountId?.trim() ? accountId.trim() : "-");
+  }
+  return await postProviderWithRustAsync(args, `${apiKey}\0${body}`, "OpenAI", signal);
+}
+
 function postGeminiWithRust(apiKey: string, model: string, body: string): RustHttpResponse {
   return postProviderWithRust(["rust", "provider", "gemini-post", model], `${apiKey}\0${body}`, "Gemini");
 }
 
+async function postGeminiWithRustAsync(
+  apiKey: string,
+  model: string,
+  body: string,
+  signal?: AbortSignal | undefined,
+): Promise<RustHttpResponse> {
+  return await postProviderWithRustAsync(["rust", "provider", "gemini-post", model], `${apiKey}\0${body}`, "Gemini", signal);
+}
+
 function postProviderWithRust(args: readonly string[], stdin: string, providerName: string): RustHttpResponse {
   const raw = runRustCommandSync([...args], process.cwd(), process.env, stdin).trim();
+  return parseRustHttpResponse(raw, `Rust ${providerName} HTTP transport`);
+}
+
+async function postProviderWithRustAsync(
+  args: readonly string[],
+  stdin: string,
+  providerName: string,
+  signal?: AbortSignal | undefined,
+): Promise<RustHttpResponse> {
+  const raw = (await runRustCommand([...args], process.cwd(), stdin, process.env, { signal })).trim();
+  return parseRustHttpResponse(raw, `Rust ${providerName} HTTP transport`);
+}
+
+function parseRustHttpResponse(raw: string, transportName: string): RustHttpResponse {
   const parsed = JSON.parse(raw) as unknown;
   if (!isRecord(parsed) || typeof parsed.ok !== "boolean" || typeof parsed.status !== "number") {
-    throw new Error(`Rust ${providerName} HTTP transport returned an invalid response envelope.`);
+    throw new Error(`${transportName} returned an invalid response envelope.`);
   }
   const text = typeof parsed.text === "string"
     ? parsed.text
@@ -1707,6 +1823,44 @@ function runOpenAIChatCompletionWithRust(input: {
     process.env,
     `${input.apiKey}\0${JSON.stringify(input.messages)}\0${JSON.stringify(input.tools)}`,
   ).trim();
+  return parseOpenAIChatCompletionRustResult(raw);
+}
+
+async function runOpenAIChatCompletionWithRustAsync(input: {
+  readonly apiKey: string;
+  readonly model: string;
+  readonly messages: readonly OpenAIMessage[];
+  readonly tools: readonly ToolDefinition[];
+  readonly reasoningEffort?: string | undefined;
+  readonly signal?: AbortSignal | undefined;
+}): Promise<{
+  readonly content: string;
+  readonly reasoning: string;
+  readonly toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>;
+  readonly actions: RustProviderAction[];
+}> {
+  const raw = (await runRustCommand(
+    [
+      "rust",
+      "provider",
+      "openai-chat-complete",
+      input.model,
+      input.reasoningEffort ?? "-",
+    ],
+    process.cwd(),
+    `${input.apiKey}\0${JSON.stringify(input.messages)}\0${JSON.stringify(input.tools)}`,
+    process.env,
+    { signal: input.signal },
+  )).trim();
+  return parseOpenAIChatCompletionRustResult(raw);
+}
+
+function parseOpenAIChatCompletionRustResult(raw: string): {
+  readonly content: string;
+  readonly reasoning: string;
+  readonly toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>;
+  readonly actions: RustProviderAction[];
+} {
   const parsed = JSON.parse(raw) as unknown;
   if (!isRecord(parsed) || typeof parsed.content !== "string" || !Array.isArray(parsed.toolCalls)) {
     throw new Error("Rust OpenAI chat completion returned an invalid response envelope.");
@@ -2214,10 +2368,12 @@ async function executeProviderToolDispatches(
   handlers: Readonly<Record<string, ToolHandler>>,
   cwd: string,
   traceListener?: ProviderTraceListener,
+  options: ProviderTurnOptions = {},
 ): Promise<ProviderToolResultOutcome[]> {
   const dispatchPlan = buildProviderToolDispatchPlan(provider, actions, handlers);
   const outcomes: ProviderToolResultOutcome[] = [...dispatchPlan.outcomes];
   for (const action of dispatchPlan.dispatches) {
+    throwIfAborted(options.signal);
     const handler = handlers[action.tool];
     if (!handler) {
       throw new Error(`Rust dispatch plan selected missing handler: ${action.tool}`);
@@ -2226,11 +2382,15 @@ async function executeProviderToolDispatches(
     const started = buildProviderToolExecutionStart(provider, action.tool, action.callId, action.input);
     emitProviderTrace(traceListener, started.trace);
     try {
-      const result = await handler(action.input, cwd);
+      const result = await handler(action.input, cwd, { signal: options.signal });
+      throwIfAborted(options.signal);
       const execution = buildProviderToolExecutionFinishResult(provider, action.tool, action.callId, started.startedAt, result);
       emitProviderTrace(traceListener, execution.trace);
       outcomes.push(execution.outcome);
     } catch (error) {
+      if (isAbortError(error) || options.signal?.aborted) {
+        throw error;
+      }
       const message = error instanceof Error ? error.message : String(error);
       const execution = buildProviderToolExecutionFinish(provider, action.tool, action.callId, started.startedAt, true, message);
       emitProviderTrace(traceListener, execution.trace);

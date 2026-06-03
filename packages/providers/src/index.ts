@@ -6,6 +6,7 @@ import {
   getGenericModelRegistry,
   getOpenAIModelRegistry,
   getReasoningSupport,
+  resolveOpenAICompatPolicy,
   resolveProviderRoute,
 } from "./model-registry.js";
 import { resolveOpenAIAuth } from "./openai-auth.js";
@@ -27,6 +28,7 @@ import type { ModelRegistry, OpenAIAuthStatus, ReasoningSupport, ResolveOpenAIAu
 
 export * from "./runtime.js";
 export * from "./model-pricing.js";
+export type { OpenAICompatPolicy, ProviderRoute } from "./model-registry.js";
 export type { ProviderId };
 export type { ModelRegistry, OpenAIAuthStatus, ReasoningSupport, ResolveOpenAIAuthInput, ResolvedOpenAIAuth } from "./types.js";
 export { ProviderCapabilityMismatchError };
@@ -47,6 +49,7 @@ export function getProviderAdapter(providerId: ProviderId) {
 }
 export {
   detectProviderForModel,
+  resolveOpenAICompatPolicy,
   resolveProviderRoute,
   buildOpenAIAuthorizationUrl,
   completeOpenAIBrowserLogin,

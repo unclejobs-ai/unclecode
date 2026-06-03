@@ -7,6 +7,7 @@ export * from "./modes.js";
 export * from "./policy.js";
 export * from "./providers.js";
 export * from "./runtime.js";
+export * from "./rpc.js";
 export * from "./session.js";
 export * from "./trace.js";
 export * from "./tui.js";

@@ -334,6 +334,7 @@ test("work-shell command helpers classify builtins, local commands, and reusable
   assert.deepEqual(resolveWorkShellBuiltinCommand("/auth key"), { kind: "auth-key" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/queue"), { kind: "queue" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/queue clear"), { kind: "queue-clear" });
+  assert.deepEqual(resolveWorkShellBuiltinCommand("/cancel"), { kind: "cancel" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/harness"), { kind: "harness" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/skill analyze"), { kind: "skill", line: "/skill analyze", skillName: "analyze" });
   assert.equal(resolveWorkShellBuiltinCommand("hello"), undefined);
@@ -1785,8 +1786,8 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
       event: { type: "tool.started" },
       line: "Reading src/index.ts",
     }),
-    { role: "tool", text: "Reading src/index.ts" },
-    "tool.started shows in minimal mode as inline progress",
+    undefined,
+    "tool.started stays out of the default conversation transcript",
   );
   assert.equal(
     resolveVerboseTraceEntry({
@@ -2702,6 +2703,47 @@ test("WorkShellEngine keeps a lightweight busy status even outside verbose trace
   assert.match(engine.getState().busyStatus ?? "", /thinking/i);
   assert.equal(typeof engine.getState().currentTurnStartedAt, "number");
   assert.equal(engine.getState().traceLines.length, 0);
+});
+
+test("WorkShellEngine soft-interrupts a busy turn and ignores late assistant output", async () => {
+  let releaseTurn;
+  let turnSignal;
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt, _attachments, options) {
+        turnSignal = options?.signal;
+        await new Promise((resolve) => {
+          releaseTurn = resolve;
+        });
+        return { text: `late:${prompt}` };
+      },
+    },
+  });
+
+  await engine.initialize();
+  const turn = engine.handleSubmit("first");
+  for (let attempt = 0; attempt < 400 && !turnSignal; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  assert.equal(engine.getState().isBusy, true);
+  assert.equal(turnSignal?.aborted, false);
+  engine.interruptTurn();
+  assert.equal(engine.getState().isBusy, false);
+  assert.equal(turnSignal?.aborted, true);
+  assert.ok(engine.getState().entries.some((entry) => entry.text.startsWith("Turn interrupted.")));
+
+  releaseTurn();
+  await turn;
+
+  assert.equal(engine.getState().isBusy, false);
+  assert.equal(
+    engine.getState().entries.some((entry) => entry.text.includes("late:first")),
+    false,
+  );
 });
 
 test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {

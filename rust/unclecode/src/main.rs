@@ -74,9 +74,9 @@ use unclecode_core::model_builtin_command::resolve_model_builtin_command_json;
 use unclecode_core::model_command::resolve_model_command_json;
 use unclecode_core::model_pricing::{estimate_cost_usd, model_price};
 use unclecode_core::model_registry::{
-    detect_provider_for_model, openai_model_registry, openai_reasoning_support,
-    provider_capability_json, provider_label, provider_model_catalog, provider_route_json,
-    provider_runtime_decision_json, resolve_provider_route,
+    detect_provider_for_model, openai_compat_policy_json, openai_model_registry,
+    openai_reasoning_support, provider_capability_json, provider_label, provider_model_catalog,
+    provider_route_json, provider_runtime_decision_json, resolve_provider_route,
 };
 use unclecode_core::openai_query::{run_openai_chat_completion_json, run_openai_chat_query_json};
 use unclecode_core::orchestrator::{
@@ -114,8 +114,9 @@ use unclecode_core::provider_request::{
     tool_definitions_to_chat_tools_json, ProviderRequestSpec,
 };
 use unclecode_core::provider_response::{
-    openai_tool_calls_to_actions_json, parse_openai_chat_response_json_for_model,
-    parse_openai_chat_response_records, OpenAIChatResponseRecord,
+    is_openai_chat_stream_progress_chunk_json, openai_tool_calls_to_actions_json,
+    parse_openai_chat_response_json_for_model, parse_openai_chat_response_records,
+    OpenAIChatResponseRecord,
 };
 use unclecode_core::provider_state::{
     append_provider_tool_result_turn_json, append_provider_turn_state_json,
@@ -304,7 +305,11 @@ fn run_with_start(args: Vec<OsString>, started_at: Instant) -> Result<u8, String
         return cli_auth::run_top_level_auth_command(&auth_args);
     }
     if let Some(center_args) = cli_center::top_level_center_args(&args) {
-        if should_launch_full_center(&center_args, io::stdin().is_terminal(), io::stdout().is_terminal()) {
+        if should_launch_full_center(
+            &center_args,
+            io::stdin().is_terminal(),
+            io::stdout().is_terminal(),
+        ) {
             return launch_typescript_command_bridge("center", &center_args);
         }
         return cli_center::run_top_level_center_command(&center_args);
@@ -384,7 +389,7 @@ fn print_rust_native_help_string() -> String {
         (
             "Model & route",
             &[
-                "rust model <openai-registry|openai-reasoning|price|estimate-cost|detect-provider|provider-route|provider-runtime-json|capability|catalog|label>",
+                "rust model <openai-registry|openai-reasoning|openai-compat-policy-json|price|estimate-cost|detect-provider|provider-route|provider-runtime-json|capability|catalog|label>",
             ],
         ),
         (
@@ -471,16 +476,22 @@ fn should_launch_full_center(args: &[OsString], stdin_is_tty: bool, stdout_is_tt
     if !stdin_is_tty || !stdout_is_tty {
         return false;
     }
-    !args
-        .iter()
-        .any(|arg| matches!(arg.to_str(), Some("--help") | Some("-h") | Some("help") | Some("sessions") | Some("list")))
+    !args.iter().any(|arg| {
+        matches!(
+            arg.to_str(),
+            Some("--help") | Some("-h") | Some("help") | Some("sessions") | Some("list")
+        )
+    })
 }
 
 fn launch_typescript_tui_bridge(tui_args: &[OsString]) -> Result<u8, String> {
     launch_typescript_command_bridge("tui", tui_args)
 }
 
-fn launch_typescript_command_bridge(command: &str, command_args: &[OsString]) -> Result<u8, String> {
+fn launch_typescript_command_bridge(
+    command: &str,
+    command_args: &[OsString],
+) -> Result<u8, String> {
     let repo_root = find_repo_root()?;
     let entrypoint = repo_root.join(TS_ENTRYPOINT);
     if !entrypoint.exists() {
@@ -2403,6 +2414,14 @@ fn run_native_provider_command(args: &[OsString]) -> Result<u8, String> {
             println!("{}", parse_openai_chat_response_json_for_model(source, model)?);
             Ok(0)
         }
+        Some("openai-chat-stream-progress") => {
+            let mut chunk_json = String::new();
+            io::stdin()
+                .read_to_string(&mut chunk_json)
+                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            println!("{}", is_openai_chat_stream_progress_chunk_json(&chunk_json)?);
+            Ok(0)
+        }
         Some("request-error") => {
             let provider = parse_str_arg(args.get(1), "provider")?;
             let status = parse_u16_arg(args.get(2), "status")?;
@@ -3292,7 +3311,7 @@ fn run_native_provider_command(args: &[OsString]) -> Result<u8, String> {
             );
             Ok(0)
         }
-        _ => Err("Usage: unclecode rust provider <system-prompt|tool-policy|openai-request-spec|openai-request-spec-json|openai-post|openai-chat-body|openai-codex-body|reasoning-effort|app-reasoning|openai-chat-tools|openai-query-messages|openai-chat-response|openai-chat-response-json|openai-tool-actions|openai-chat-query|openai-chat-complete|request-error|loop-decision|iteration-action-plan|loop-limit|turn-step|complete-turn-step|tool-dispatch-plan|reset-state|runtime-settings|append-state|start-turn|attachment-caps|tool-result-turn-step|reasoning-delta|reasoning-delta-record|route-trace|turn-started-trace|calling-trace|turn-completed-trace|openai-responses-message|tool-trace-started|tool-trace-completed|tool-execution-start|tool-execution-result|tool-execution-finish|tool-execution-finish-result|tool-result|tool-result-container|tool-result-turn-entries|openai-user-message|openai-assistant-message|openai-tool-message|openai-responses-input|openai-responses-tools|gemini-request-spec|gemini-request-spec-json|gemini-post|gemini-query-messages|gemini-tools|gemini-user-content|gemini-function-response|gemini-response|gemini-generate-request|anthropic-request-spec|anthropic-request-spec-json|anthropic-post|anthropic-query-messages|anthropic-user-message|anthropic-tool-result|anthropic-response|anthropic-messages-request>".to_string()),
+        _ => Err("Usage: unclecode rust provider <system-prompt|tool-policy|openai-request-spec|openai-request-spec-json|openai-post|openai-chat-body|openai-codex-body|reasoning-effort|app-reasoning|openai-chat-tools|openai-query-messages|openai-chat-response|openai-chat-response-json|openai-chat-stream-progress|openai-tool-actions|openai-chat-query|openai-chat-complete|request-error|loop-decision|iteration-action-plan|loop-limit|turn-step|complete-turn-step|tool-dispatch-plan|reset-state|runtime-settings|append-state|start-turn|attachment-caps|tool-result-turn-step|reasoning-delta|reasoning-delta-record|route-trace|turn-started-trace|calling-trace|turn-completed-trace|openai-responses-message|tool-trace-started|tool-trace-completed|tool-execution-start|tool-execution-result|tool-execution-finish|tool-execution-finish-result|tool-result|tool-result-container|tool-result-turn-entries|openai-user-message|openai-assistant-message|openai-tool-message|openai-responses-input|openai-responses-tools|gemini-request-spec|gemini-request-spec-json|gemini-post|gemini-query-messages|gemini-tools|gemini-user-content|gemini-function-response|gemini-response|gemini-generate-request|anthropic-request-spec|anthropic-request-spec-json|anthropic-post|anthropic-query-messages|anthropic-user-message|anthropic-tool-result|anthropic-response|anthropic-messages-request>".to_string()),
     }
 }
 
@@ -3515,6 +3534,21 @@ fn run_native_model_command(args: &[OsString]) -> Result<u8, String> {
             println!("{}", provider_runtime_decision_json(&route)?);
             Ok(0)
         }
+        Some("openai-compat-policy-json") => {
+            let provider = args
+                .get(1)
+                .and_then(|arg| arg.to_str())
+                .ok_or("Usage: unclecode rust model openai-compat-policy-json <provider-id> <model-id> [endpoint-url]")?;
+            let model = args
+                .get(2)
+                .and_then(|arg| arg.to_str())
+                .ok_or("Usage: unclecode rust model openai-compat-policy-json <provider-id> <model-id> [endpoint-url]")?;
+            println!(
+                "{}",
+                openai_compat_policy_json(provider, model, args.get(3).and_then(|arg| arg.to_str()))?
+            );
+            Ok(0)
+        }
         Some("capability") => {
             let provider = args
                 .get(1)
@@ -3555,7 +3589,7 @@ fn run_native_model_command(args: &[OsString]) -> Result<u8, String> {
             }
             Ok(0)
         }
-        _ => Err("Usage: unclecode rust model <openai-registry|openai-reasoning <model-id>|price <model-id>|estimate-cost <model-id> <prompt-tokens> <completion-tokens>|detect-provider <model-id>|provider-route <provider-id|auto> [model-id]|provider-route-json <provider-id|auto> [model-id]|provider-runtime-json <provider-id|auto> [model-id]|capability <provider-id> <capability> [model-id]|label <provider-id>|catalog <provider-id>>".to_string()),
+        _ => Err("Usage: unclecode rust model <openai-registry|openai-reasoning <model-id>|price <model-id>|estimate-cost <model-id> <prompt-tokens> <completion-tokens>|detect-provider <model-id>|provider-route <provider-id|auto> [model-id]|provider-route-json <provider-id|auto> [model-id]|provider-runtime-json <provider-id|auto> [model-id]|openai-compat-policy-json <provider-id> <model-id> [endpoint-url]|capability <provider-id> <capability> [model-id]|label <provider-id>|catalog <provider-id>>".to_string()),
     }
 }
 

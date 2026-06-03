@@ -115,9 +115,9 @@ test("dashboard renders distinct Work, History, MCP, and Research pages", async 
 
   const history = await captureDashboardFrame("sessions");
   assert.match(history, /history/);
-  assert.match(history, /History detail/);
+  assert.match(history, /Conversation/);
   assert.match(history, /Review ESC flow/);
-  assert.match(history, /Enter resume/);
+  assert.match(history, /Enter · resume/);
   assert.doesNotMatch(history, /W\s+Work/);
   assert.doesNotMatch(history, /R\s+Research/);
   assert.doesNotMatch(history, /D\s+Doctor/);

@@ -192,6 +192,12 @@ const WORK_SHELL_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
         aliases: &[],
     },
     BuiltinSlashCommand {
+        command: "/cancel",
+        route: &["cancel"],
+        description: "Interrupt the active turn and pause queued follow-ups.",
+        aliases: &["/interrupt", "/stop"],
+    },
+    BuiltinSlashCommand {
         command: "/review",
         route: &["prompt", "review"],
         description: "Review the current changes, risks, and missing verification.",
@@ -466,6 +472,7 @@ fn work_shell_builtin_submit_command(line: &str) -> Option<Value> {
         "/skills" => Some(json!({ "kind": "skills" })),
         "/queue" => Some(json!({ "kind": "queue" })),
         "/queue clear" => Some(json!({ "kind": "queue-clear" })),
+        "/cancel" | "/interrupt" | "/stop" => Some(json!({ "kind": "cancel" })),
         "/harness" => Some(json!({ "kind": "harness" })),
         "/auth key" => Some(json!({ "kind": "auth-key" })),
         "/verbose" | "/v" => Some(json!({ "kind": "trace-mode", "traceMode": "verbose" })),
@@ -880,6 +887,13 @@ mod tests {
             }
         );
         assert_eq!(
+            route_work_shell_slash_command("/stop"),
+            SlashRoute {
+                kind: SlashRouteKind::Matched,
+                route: vec!["cancel".to_string()]
+            }
+        );
+        assert_eq!(
             route_work_shell_slash_command("/review auth flow"),
             SlashRoute {
                 kind: SlashRouteKind::Dynamic,
@@ -1038,8 +1052,7 @@ mod tests {
         assert_eq!(api_key["actionId"], "api-key-login");
 
         let mode_set = serde_json::from_str::<Value>(
-            &resolve_work_shell_inline_action_json(r#"{"args":["mode","set","search"]}"#)
-                .unwrap(),
+            &resolve_work_shell_inline_action_json(r#"{"args":["mode","set","search"]}"#).unwrap(),
         )
         .unwrap();
         assert_eq!(mode_set["actionId"], "mode-set");
@@ -1113,6 +1126,13 @@ mod tests {
             )
             .unwrap()["kind"],
             "queue-clear"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &work_shell_builtin_submit_command_json("/cancel").unwrap()
+            )
+            .unwrap()["kind"],
+            "cancel"
         );
 
         let trace = serde_json::from_str::<Value>(

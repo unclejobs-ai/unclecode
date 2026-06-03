@@ -143,7 +143,7 @@ function getDetailPaneTitle(view: TuiShellState["view"]): string {
     case "work":
       return "Work detail";
     case "sessions":
-      return "History detail";
+      return "Conversation";
   }
 }
 
@@ -1037,7 +1037,7 @@ export function Dashboard(props: DashboardProps) {
           <Box flexDirection="column" width={layout.detailWidth} paddingLeft={2}>
             <Box gap={1}>
               <StatusDot status="running" />
-              <Text bold color={C.text}>History detail</Text>
+              <Text bold color={C.text}>Conversation</Text>
             </Box>
             <Box marginTop={1}>
               <DetailPanel

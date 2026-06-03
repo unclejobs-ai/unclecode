@@ -37,7 +37,6 @@ const W = {
   userBody: "#e0f2fe",
   userBadgeText: "#082f49",
   userBadgeBg: "#38bdf8",
-  userSurface: "#2f3342",
   assistant: "#86efac",
   assistantBody: "#dcfce7",
   assistantBadgeText: "#052e16",
@@ -307,8 +306,9 @@ export function formatWorkShellUsageLine(input: {
     : input.lastTurnDurationMs === undefined
       ? "no reply yet"
       : `last reply ${formatCompactDuration(input.lastTurnDurationMs)}`;
+  const controls = input.isBusy ? "Ctrl+C/Esc interrupt · Enter queues" : "";
   const detail = input.isBusy ? normalizeBusyDetail(input.busyStatus ?? "") : "";
-  return [activity, usage, detail].filter((part) => part.length > 0).join(" · ");
+  return [activity, usage, controls, detail].filter((part) => part.length > 0).join(" · ");
 }
 
 function formatCompactDuration(durationMs: number): string {
@@ -503,6 +503,43 @@ function padDisplayLine(value: string, width: number): string {
   return `${value}${" ".repeat(padding)}`;
 }
 
+function prefixWrappedDisplayText(prefix: string, text: string, width: number): readonly string[] {
+  const prefixWidth = getDisplayWidth(prefix);
+  const contentWidth = Math.max(12, width - prefixWidth);
+  const lines = wrapDisplayText(text, contentWidth);
+  if (lines.length === 0) {
+    return [prefix.trimEnd()];
+  }
+  return lines.map((line, index) => `${index === 0 ? prefix : " ".repeat(prefixWidth)}${line}`);
+}
+
+export function formatWorkShellConversationEntryLines(input: {
+  readonly role: WorkShellEntryRole;
+  readonly text: string;
+  readonly width: number;
+}): readonly string[] {
+  const presentation = getWorkShellEntryPresentation(input.role);
+  const bodyText = input.role === "assistant"
+    ? normalizeMarkdownDisplayText(input.text)
+    : input.text;
+
+  if (input.role === "assistant") {
+    const bodyLines = wrapDisplayText(bodyText, Math.max(20, input.width - 2));
+    return [`${presentation.badge} ${presentation.label}`, ...bodyLines.map((line) => `  ${line}`)];
+  }
+
+  if (input.role === "tool") {
+    const bodyLines = formatWorkShellToolEntryLines(bodyText, input.width);
+    return [`${presentation.badge} ${presentation.label}`, ...bodyLines.map((line) => `  ${line}`)];
+  }
+
+  return prefixWrappedDisplayText(`${presentation.badge} ${presentation.label} · `, bodyText, input.width);
+}
+
+export function shouldShowWorkShellConversationEntry(entry: WorkShellEntry): boolean {
+  return entry.role !== "tool";
+}
+
 export function formatWorkShellHeaderLine(input: {
   readonly providerTitle: string;
   readonly headerHint: string;
@@ -591,31 +628,6 @@ function resolveWorkShellComposerDockLayout(input: {
   return parsed;
 }
 
-function renderSurfaceText(input: {
-  readonly text: string;
-  readonly width: number;
-  readonly backgroundColor: string;
-  readonly color: string;
-  readonly keyPrefix: string;
-  readonly paddingX?: number;
-}): React.ReactNode {
-  const paddingX = input.paddingX ?? 2;
-  const innerWidth = Math.max(8, input.width - paddingX * 2);
-  const leftPadding = " ".repeat(paddingX);
-  const rightPadding = " ".repeat(paddingX);
-  const lines = wrapDisplayText(input.text, innerWidth);
-
-  return lines.map((line, index) => (
-    <Text
-      key={`${input.keyPrefix}-${String(index)}`}
-      backgroundColor={input.backgroundColor}
-      color={input.color}
-    >
-      {leftPadding}{padDisplayLine(line, innerWidth)}{rightPadding}
-    </Text>
-  ));
-}
-
 function renderWorkShellEntryBlock(input: {
   readonly entry: WorkShellEntry;
   readonly index: number;
@@ -627,19 +639,28 @@ function renderWorkShellEntryBlock(input: {
     : input.entry.text;
 
   if (input.entry.role === "user") {
+    const lines = wrapDisplayText(bodyText, Math.max(20, input.width - 8));
+    const renderedLines = lines.length > 0 ? lines : [""];
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
         marginBottom={1}
+        paddingLeft={1}
         flexDirection="column"
       >
-        {renderSurfaceText({
-          text: bodyText,
-          width: input.width,
-          backgroundColor: W.userSurface,
-          color: presentation.bodyColor,
-          keyPrefix: `user-${String(input.index)}`,
-        })}
+        {renderedLines.map((line, lineIndex) => (
+          <Text key={`user-${String(input.index)}-${String(lineIndex)}`}>
+            {lineIndex === 0 ? (
+              <>
+                <Text bold color={presentation.labelColor}>{presentation.badge} {presentation.label}</Text>
+                <Text color={W.textDim}> · </Text>
+              </>
+            ) : (
+              <Text color={W.textDim}>{"        "}</Text>
+            )}
+            <Text color={presentation.bodyColor}>{line}</Text>
+          </Text>
+        ))}
       </Box>
     );
   }
@@ -652,7 +673,7 @@ function renderWorkShellEntryBlock(input: {
         paddingLeft={1}
         flexDirection="column"
       >
-        <Text bold color={W.assistantMuted}>{presentation.label}</Text>
+        <Text bold color={W.assistantMuted}>{presentation.badge} {presentation.label}</Text>
         <Box marginTop={1} paddingLeft={1} flexDirection="column">
           {wrapDisplayText(bodyText, Math.max(20, input.width - 4)).map((line, lineIndex) => (
             <Text key={`assistant-${String(input.index)}-${String(lineIndex)}`} color={presentation.bodyColor}>
@@ -697,77 +718,30 @@ function renderWorkShellEntryBlock(input: {
   );
 }
 
-function renderWorkShellThinkingBlock(input: {
-  readonly width: number;
-  readonly busyStatus?: string;
-  readonly reasoningLabel?: string;
-  readonly spinnerFrame: number;
-}): React.ReactNode {
-  const detailLines = getWorkShellThinkingDetailLines({
-    ...(input.busyStatus ? { busyStatus: input.busyStatus } : {}),
-    spinnerFrame: input.spinnerFrame,
-  });
-  if (detailLines.length === 0) {
-    return null;
-  }
-
-  return (
-    <Box marginBottom={1} paddingLeft={1} flexDirection="column">
-      <Text bold color={W.assistantMuted}>Thinking</Text>
-      <Box marginTop={1} paddingLeft={1} flexDirection="column">
-        {detailLines.flatMap((line, lineIndex) =>
-          wrapDisplayText(line, Math.max(20, input.width - 4)).map((wrappedLine, wrappedIndex) => (
-            <Text key={`thinking-${String(lineIndex)}-${String(wrappedIndex)}`} color={W.assistantMuted}>
-              {wrappedLine}
-            </Text>
-          )),
-        )}
-      </Box>
-    </Box>
-  );
-}
-
 export function getWorkShellThinkingDetailLines(input: {
   readonly busyStatus?: string;
   readonly spinnerFrame?: number;
-}): readonly string[] {
-  if (!input.busyStatus || isLowSignalThinkingStatus(input.busyStatus)) {
-    return [];
-  }
-
-  return [formatWorkShellBusyStatusLine(input.busyStatus, input.spinnerFrame ?? 0)];
-}
-
-function isLowSignalThinkingStatus(status: string): boolean {
-  const normalized = status.trim().replace(/^·\s*/, "").toLowerCase();
-  return normalized === "" || normalized === "thinking" || normalized === "thinking...";
+} = {}): readonly string[] {
+  void input;
+  return [];
 }
 
 const WorkShellConversationBlock = React.memo(function WorkShellConversationBlock(props: {
   readonly entries: readonly WorkShellEntry[];
   readonly streamingAssistantText?: string;
   readonly panelPlacement: WorkShellPanelPlacement;
-  readonly isBusy: boolean;
-  readonly busyStatus?: string;
-  readonly reasoningLabel?: string;
   readonly terminalColumns?: number;
 }) {
-  const [spinnerFrame, setSpinnerFrame] = React.useState(0);
-  React.useEffect(() => {
-    if (!props.isBusy) return;
-    const interval = setInterval(() => setSpinnerFrame((f) => f + 1), 100);
-    return () => clearInterval(interval);
-  }, [props.isBusy]);
   const conversationWidth = getWorkShellConversationWidth({
     panelPlacement: props.panelPlacement,
     ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
   });
   const entries = props.streamingAssistantText
     ? [
-        ...props.entries,
+        ...props.entries.filter(shouldShowWorkShellConversationEntry),
         { role: "assistant", text: `${props.streamingAssistantText}▌` } as const,
       ]
-    : props.entries;
+    : props.entries.filter(shouldShowWorkShellConversationEntry);
 
   return (
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "68%" : undefined} paddingRight={props.panelPlacement === "side" ? 1 : 0}>
@@ -779,12 +753,6 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
           index,
           width: conversationWidth,
         }))}
-        {props.isBusy ? renderWorkShellThinkingBlock({
-          width: conversationWidth,
-          ...(props.busyStatus ? { busyStatus: props.busyStatus } : {}),
-          ...(props.reasoningLabel ? { reasoningLabel: props.reasoningLabel } : {}),
-          spinnerFrame,
-        }) : null}
       </Box>
     </Box>
   );
@@ -857,7 +825,7 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
 }) {
   const line = formatWorkShellHeaderLine({
     providerTitle: formatWorkShellProviderTitle(props.provider),
-    headerHint: props.headerHint ?? "Ctrl+O sessions · Shift+Tab mode · / commands",
+    headerHint: props.headerHint ?? "Ctrl+C cancel/exit · Ctrl+O sessions · / commands",
     ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
   });
 
@@ -880,7 +848,6 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
 }) {
   const [nowMs, setNowMs] = React.useState(() => Date.now());
   const [spinnerFrame, setSpinnerFrame] = React.useState(0);
-  const spinner = WORK_SHELL_BUSY_SPINNER_FRAMES[((spinnerFrame % WORK_SHELL_BUSY_SPINNER_FRAMES.length) + WORK_SHELL_BUSY_SPINNER_FRAMES.length) % WORK_SHELL_BUSY_SPINNER_FRAMES.length];
   const thinkingLine = formatWorkShellThinkingLine(props.reasoningLabel);
   const statusLine = formatWorkShellStatusLine({
     model: props.model,
@@ -926,7 +893,7 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
         })}
       />
       <Box marginTop={1} paddingLeft={1} flexDirection="column">
-        <Text bold color={props.reasoningSupported ? W.user : W.warning}>{props.isBusy ? `${spinner} ${thinkingLine}` : thinkingLine}</Text>
+        <Text bold color={props.reasoningSupported ? W.user : W.warning}>{thinkingLine}</Text>
         <Text color={W.text}>{statusLine}</Text>
         <Text color={props.isBusy ? W.assistant : W.textMuted}>{usageLine}</Text>
       </Box>
@@ -1006,7 +973,9 @@ export function WorkShellView(props: {
   readonly terminalColumns?: number;
   readonly cwd?: string;
 }) {
-  const composerHint = props.composerHintOverride ?? getWorkShellComposerHint(props.inputValue, props.slashSuggestionCount);
+  const composerHint = props.composerHintOverride ?? (props.isBusy
+    ? "Enter queues follow-up · Ctrl+C/Esc interrupt · /queue"
+    : getWorkShellComposerHint(props.inputValue, props.slashSuggestionCount));
   const panelBorderColor = getWorkShellPanelBorderColor(props.inputValue, props.activePanel.title);
   const panelDisplayMode = getWorkShellPanelDisplayMode({
     panelTitle: props.activePanel.title,
@@ -1025,9 +994,6 @@ export function WorkShellView(props: {
       entries={props.entries}
       {...(props.streamingAssistantText ? { streamingAssistantText: props.streamingAssistantText } : {})}
       panelPlacement={panelPlacement}
-      isBusy={props.isBusy}
-      {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
-      {...(props.reasoningLabel ? { reasoningLabel: props.reasoningLabel } : {})}
       {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
     />
   );

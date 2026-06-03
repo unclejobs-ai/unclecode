@@ -74,11 +74,18 @@ fn resolve_busy_submit_value(line: &str, queued_count: usize) -> Value {
             "message": "Queue cleared. Active turn is still running.",
         });
     }
+    if matches!(line, "/cancel" | "/interrupt" | "/stop") {
+        return json!({
+            "action": "cancel_turn",
+            "line": line,
+            "message": "Interrupting active turn. Queued follow-ups are paused.",
+        });
+    }
     if line.starts_with('/') {
         return json!({
             "action": "reject_slash",
             "line": line,
-            "message": "Busy. Slash commands are not queued. Wait for this turn, or open /queue to inspect pending follow-ups.",
+            "message": "Busy. Slash commands are not queued. Wait for this turn, type /cancel to interrupt, or open /queue to inspect pending follow-ups.",
         });
     }
 
@@ -120,7 +127,18 @@ mod tests {
         assert_eq!(value["action"], "reject_slash");
         assert_eq!(
             value["message"],
-            "Busy. Slash commands are not queued. Wait for this turn, or open /queue to inspect pending follow-ups."
+            "Busy. Slash commands are not queued. Wait for this turn, type /cancel to interrupt, or open /queue to inspect pending follow-ups."
+        );
+    }
+
+    #[test]
+    fn cancels_busy_turn() {
+        let value = resolve_busy_submit_value("/cancel", 2);
+        assert_eq!(value["action"], "cancel_turn");
+        assert_eq!(value["line"], "/cancel");
+        assert_eq!(
+            value["message"],
+            "Interrupting active turn. Queued follow-ups are paused."
         );
     }
 

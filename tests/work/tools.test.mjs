@@ -23,6 +23,28 @@ test("run_shell executes a simple command on the current platform", async () => 
   }
 });
 
+test("run_shell aborts long-running Rust shell tools promptly", async () => {
+  const original = process.env.UNCLECODE_ALLOW_RUN_SHELL;
+  process.env.UNCLECODE_ALLOW_RUN_SHELL = "1";
+  const abortController = new AbortController();
+  const command = process.platform === "win32" ? "Start-Sleep -Seconds 10" : "sleep 10";
+  const startedAt = Date.now();
+
+  try {
+    const result = toolHandlers.run_shell({ command }, process.cwd(), { signal: abortController.signal });
+    setTimeout(() => abortController.abort(), 50);
+
+    await assert.rejects(result, { name: "AbortError" });
+    assert.ok(Date.now() - startedAt < 3000, "abort should not wait for the shell command to finish");
+  } finally {
+    if (original === undefined) {
+      delete process.env.UNCLECODE_ALLOW_RUN_SHELL;
+    } else {
+      process.env.UNCLECODE_ALLOW_RUN_SHELL = original;
+    }
+  }
+});
+
 test("run_shell is blocked by default without explicit opt-in", async () => {
   const original = process.env.UNCLECODE_ALLOW_RUN_SHELL;
 

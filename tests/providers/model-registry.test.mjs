@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ProviderCapabilityMismatchError,
   getProviderAdapter,
+  resolveOpenAICompatPolicy,
   resolveProviderRoute,
 } from "@unclecode/providers";
 
@@ -170,4 +171,24 @@ test("provider route metadata includes Rust proxy policy", () => {
       process.env.HTTPS_PROXY = originalHttpsProxy;
     }
   }
+});
+
+test("openai-compatible policy exposes provider-specific wire constraints", () => {
+  const kimi = resolveOpenAICompatPolicy(
+    "zai",
+    "moonshotai/kimi-k2-instruct",
+    "https://api.moonshot.ai/v1/chat/completions",
+  );
+  assert.equal(kimi.thinkingFormat, "zai");
+  assert.equal(kimi.requiresAssistantContentForToolCalls, true);
+  assert.equal(kimi.requiresReasoningContentForToolCalls, true);
+  assert.equal(kimi.supportsReasoningEffort, false);
+
+  const groq = resolveOpenAICompatPolicy("groq", "qwen/qwen3-32b");
+  assert.equal(groq.supportsReasoningEffort, true);
+  assert.equal(groq.thinkingFormat, "qwen");
+
+  const deepseek = resolveOpenAICompatPolicy("ollama", "deepseek-r1:8b");
+  assert.equal(deepseek.thinkingFormat, "deepseek");
+  assert.equal(deepseek.supportsToolChoice, false);
 });

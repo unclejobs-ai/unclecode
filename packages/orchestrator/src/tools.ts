@@ -15,14 +15,18 @@ export type ToolResult = {
   content: string;
 };
 
-export type ToolHandler = (input: Record<string, unknown>, cwd: string) => Promise<ToolResult>;
+export type ToolHandlerOptions = {
+  readonly signal?: AbortSignal | undefined;
+};
 
-async function runRustAci(args: readonly string[], cwd: string, stdin?: string): Promise<string> {
-  return await runRustCommand(["rust", "aci", ...args], cwd, stdin);
+export type ToolHandler = (input: Record<string, unknown>, cwd: string, options?: ToolHandlerOptions) => Promise<ToolResult>;
+
+async function runRustAci(args: readonly string[], cwd: string, stdin?: string, options: ToolHandlerOptions = {}): Promise<string> {
+  return await runRustCommand(["rust", "aci", ...args], cwd, stdin ?? (options.signal ? "" : undefined), process.env, options);
 }
 
-async function runRustShell(command: string, cwd: string): Promise<string> {
-  return await runRustCommand(["rust", "shell", "--", command], cwd);
+async function runRustShell(command: string, cwd: string, options: ToolHandlerOptions = {}): Promise<string> {
+  return await runRustCommand(["rust", "shell", "--", command], cwd, options.signal ? "" : undefined, process.env, options);
 }
 
 function normalizeRustPathError(error: unknown, requestedPath: string): never {
@@ -33,29 +37,29 @@ function normalizeRustPathError(error: unknown, requestedPath: string): never {
   throw error;
 }
 
-async function listFiles(input: Record<string, unknown>, cwd: string): Promise<ToolResult> {
+async function listFiles(input: Record<string, unknown>, cwd: string, options: ToolHandlerOptions = {}): Promise<ToolResult> {
   const target = typeof input.path === "string" ? input.path : ".";
   try {
-    const stdout = await runRustAci(["list", target], cwd);
+    const stdout = await runRustAci(["list", target], cwd, undefined, options);
     return { content: stdout.trim() || "(empty directory)" };
   } catch (error) {
     normalizeRustPathError(error, target);
   }
 }
 
-async function readFile(input: Record<string, unknown>, cwd: string): Promise<ToolResult> {
+async function readFile(input: Record<string, unknown>, cwd: string, options: ToolHandlerOptions = {}): Promise<ToolResult> {
   if (typeof input.path !== "string") {
     throw new Error("path is required");
   }
   try {
-    const content = await runRustAci(["read", input.path], cwd);
+    const content = await runRustAci(["read", input.path], cwd, undefined, options);
     return { content };
   } catch (error) {
     normalizeRustPathError(error, input.path);
   }
 }
 
-async function writeFile(input: Record<string, unknown>, cwd: string): Promise<ToolResult> {
+async function writeFile(input: Record<string, unknown>, cwd: string, options: ToolHandlerOptions = {}): Promise<ToolResult> {
   if (typeof input.path !== "string") {
     throw new Error("path is required");
   }
@@ -63,34 +67,34 @@ async function writeFile(input: Record<string, unknown>, cwd: string): Promise<T
     throw new Error("content is required");
   }
   try {
-    const stdout = await runRustAci(["write", input.path], cwd, input.content);
+    const stdout = await runRustAci(["write", input.path], cwd, input.content, options);
     return { content: stdout.trim() || `Wrote ${input.path}` };
   } catch (error) {
     normalizeRustPathError(error, input.path);
   }
 }
 
-async function searchText(input: Record<string, unknown>, cwd: string): Promise<ToolResult> {
+async function searchText(input: Record<string, unknown>, cwd: string, options: ToolHandlerOptions = {}): Promise<ToolResult> {
   if (typeof input.query !== "string" || input.query.length === 0) {
     throw new Error("query is required");
   }
   const target = typeof input.path === "string" ? input.path : ".";
   try {
-    const stdout = await runRustAci(["search", input.query, target], cwd);
+    const stdout = await runRustAci(["search", input.query, target], cwd, undefined, options);
     return { content: stdout.trim() || "(no matches)" };
   } catch (error) {
     normalizeRustPathError(error, target);
   }
 }
 
-async function runShell(input: Record<string, unknown>, cwd: string): Promise<ToolResult> {
+async function runShell(input: Record<string, unknown>, cwd: string, options: ToolHandlerOptions = {}): Promise<ToolResult> {
   if (typeof input.command !== "string" || input.command.length === 0) {
     throw new Error("command is required");
   }
   if (process.env.UNCLECODE_ALLOW_RUN_SHELL !== "1") {
     throw new Error("run_shell is disabled by default. Set UNCLECODE_ALLOW_RUN_SHELL=1 to enable it.");
   }
-  const stdout = await runRustShell(input.command, cwd);
+  const stdout = await runRustShell(input.command, cwd, options);
   const content = stdout.trim();
   return { content: content || "(command produced no output)" };
 }

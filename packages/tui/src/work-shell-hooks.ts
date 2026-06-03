@@ -211,6 +211,7 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   handleSubmit(line: string, attachments?: readonly unknown[]): Promise<void>;
   setMode(mode: string): void | Promise<void>;
   openSessionsPanel(): Promise<void>;
+  interruptTurn?(): void;
   cancelSensitiveInput?(): void;
   closeOverlay?(): void;
   // Optional because not every pane host wires trace plumbing — when
@@ -331,6 +332,7 @@ export function useWorkShellInputController(input: {
   readonly hasOverlayOpen?: boolean;
   readonly activePanelTitle?: string;
   readonly closeSlashPicker?: (() => void) | undefined;
+  readonly interruptTurn?: (() => void) | undefined;
   readonly cancelSensitiveInput?: (() => void) | undefined;
   readonly closeOverlay?: (() => void) | undefined;
 }): { readonly submit: (value: string) => Promise<void> } {
@@ -382,6 +384,9 @@ export function useWorkShellInputController(input: {
         return;
       case "cancel-sensitive-input":
         input.cancelSensitiveInput?.();
+        return;
+      case "interrupt-turn":
+        input.interruptTurn?.();
         return;
       case "close-overlay":
         input.closeOverlay?.();
@@ -636,6 +641,9 @@ export function useWorkShellPaneState<
       : undefined,
     ...(input.engine.cancelSensitiveInput
       ? { cancelSensitiveInput: () => input.engine.cancelSensitiveInput?.() }
+      : {}),
+    ...(input.engine.interruptTurn
+      ? { interruptTurn: () => input.engine.interruptTurn?.() }
       : {}),
     ...(input.engine.closeOverlay
       ? { closeOverlay: () => input.engine.closeOverlay?.() }

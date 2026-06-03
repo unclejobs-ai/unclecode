@@ -72,6 +72,7 @@ function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinComm
     "tools",
     "skills",
     "queue",
+    "cancel",
     "harness",
     "auth-key",
   ].includes(command.kind);

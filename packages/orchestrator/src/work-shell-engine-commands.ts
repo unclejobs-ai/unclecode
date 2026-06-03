@@ -18,6 +18,7 @@ export type ResolvedWorkShellBuiltinCommand =
   | { readonly kind: "skills" }
   | { readonly kind: "queue" }
   | { readonly kind: "queue-clear" }
+  | { readonly kind: "cancel" }
   | { readonly kind: "harness" }
   | { readonly kind: "auth-key" }
   | { readonly kind: "trace-mode"; readonly traceMode: "verbose" | "minimal" }
@@ -69,6 +70,7 @@ function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinComm
     "skills",
     "queue",
     "queue-clear",
+    "cancel",
     "harness",
     "auth-key",
   ].includes(command.kind);

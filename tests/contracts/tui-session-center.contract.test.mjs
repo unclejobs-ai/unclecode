@@ -307,9 +307,9 @@ test("buildHistoryContextSummaryLines separates resumable history from workspace
   });
 
   assert.deepEqual(lines, [
-    "History = saved conversations",
-    "History · idle",
-    "Enter opens Work with this saved context",
+    "Saved conversation",
+    "State · idle",
+    "Enter · resume with saved context",
     "Context · 2 sources",
   ]);
 });
@@ -431,7 +431,7 @@ test("dashboard shell renders History without duplicate action buttons", () => {
 
   assert.ok(sessionsBranch);
   assert.match(source, /allowActionColumn: shellState\.view !== "sessions"/);
-  assert.match(sessionsBranch, />History detail</);
+  assert.match(sessionsBranch, />Conversation</);
   assert.doesNotMatch(
     sessionsBranch,
     /ActionShortcutStrip|<ActionList|>Actions</,

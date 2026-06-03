@@ -51,6 +51,22 @@ export type ProviderRoute = {
     readonly noProxy: readonly string[];
   };
   readonly envKeys: readonly string[];
+  readonly compatPolicy: OpenAICompatPolicy;
+};
+
+export type OpenAICompatPolicy = {
+  readonly providerId: string;
+  readonly modelId: string;
+  readonly supportsReasoningEffort: boolean;
+  readonly supportsToolChoice: boolean;
+  readonly supportsStrictTools: boolean;
+  readonly toolStrictMode: "provider" | "disabled";
+  readonly maxTokensField: "max_tokens" | "max_completion_tokens";
+  readonly supportsMultipleSystemMessages: boolean;
+  readonly requiresToolResultName: boolean;
+  readonly requiresAssistantContentForToolCalls: boolean;
+  readonly requiresReasoningContentForToolCalls: boolean;
+  readonly thinkingFormat: "none" | "zai" | "qwen" | "deepseek";
 };
 
 export function resolveProviderRoute(providerId: ProviderId | "auto", modelId = ""): ProviderRoute {
@@ -86,7 +102,21 @@ export function resolveProviderRoute(providerId: ProviderId | "auto", modelId = 
     envKeys: Array.isArray(parsed.envKeys)
       ? parsed.envKeys.filter((key): key is string => typeof key === "string")
       : [],
+    compatPolicy: parseOpenAICompatPolicy(parsed.compatPolicy, provider),
   };
+}
+
+export function resolveOpenAICompatPolicy(
+  providerId: ProviderId,
+  modelId: string,
+  endpointUrl = "",
+): OpenAICompatPolicy {
+  const args = ["rust", "model", "openai-compat-policy-json", providerId, modelId];
+  if (endpointUrl.trim()) {
+    args.push(endpointUrl.trim());
+  }
+  const parsed = JSON.parse(runRustCommandSync(args, process.cwd()).trim()) as unknown;
+  return parseOpenAICompatPolicy(parsed, providerId);
 }
 
 export function getProviderModelCatalog(providerId: ProviderId, env: NodeJS.ProcessEnv = process.env): {
@@ -143,6 +173,32 @@ function isProviderId(value: string | undefined): value is ProviderId {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseOpenAICompatPolicy(value: unknown, fallbackProviderId: string): OpenAICompatPolicy {
+  const parsed = isRecord(value) ? value : {};
+  const toolStrictMode = parsed.toolStrictMode === "provider" ? "provider" : "disabled";
+  const maxTokensField = parsed.maxTokensField === "max_completion_tokens" ? "max_completion_tokens" : "max_tokens";
+  const thinkingFormat = parsed.thinkingFormat === "zai"
+    || parsed.thinkingFormat === "qwen"
+    || parsed.thinkingFormat === "deepseek"
+    ? parsed.thinkingFormat
+    : "none";
+
+  return {
+    providerId: typeof parsed.providerId === "string" ? parsed.providerId : fallbackProviderId,
+    modelId: typeof parsed.modelId === "string" ? parsed.modelId : "",
+    supportsReasoningEffort: parsed.supportsReasoningEffort === true,
+    supportsToolChoice: parsed.supportsToolChoice !== false,
+    supportsStrictTools: parsed.supportsStrictTools === true,
+    toolStrictMode,
+    maxTokensField,
+    supportsMultipleSystemMessages: parsed.supportsMultipleSystemMessages === true,
+    requiresToolResultName: parsed.requiresToolResultName === true,
+    requiresAssistantContentForToolCalls: parsed.requiresAssistantContentForToolCalls === true,
+    requiresReasoningContentForToolCalls: parsed.requiresReasoningContentForToolCalls === true,
+    thinkingFormat,
+  };
 }
 
 function parseRustModelRegistry(stdout: string): Pick<ModelRegistry, "defaultModel" | "models" | "reasoningByModel"> {

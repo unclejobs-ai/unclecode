@@ -320,10 +320,7 @@ fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShel
         .reasoning_effort
         .as_ref()
         .map(|reasoning_effort| {
-            format!(
-                ",\"reasoningEffort\":\"{}\"",
-                escape_json(reasoning_effort)
-            )
+            format!(",\"reasoningEffort\":\"{}\"", escape_json(reasoning_effort))
         })
         .unwrap_or_default();
     vec![
@@ -374,10 +371,7 @@ fn build_checkpoint_json(
         .reasoning_effort
         .as_ref()
         .map(|reasoning_effort| {
-            format!(
-                ",\"reasoningEffort\":\"{}\"",
-                escape_json(reasoning_effort)
-            )
+            format!(",\"reasoningEffort\":\"{}\"", escape_json(reasoning_effort))
         })
         .unwrap_or_default();
     format!(

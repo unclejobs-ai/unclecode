@@ -1,9 +1,11 @@
+use crate::provider_request::repair_openai_chat_messages_for_wire;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn openai_messages_to_responses_input_json(messages_json: &str) -> Result<String, String> {
-    let messages: Value = serde_json::from_str(messages_json)
+    let repaired_messages = repair_openai_chat_messages_for_wire(messages_json);
+    let messages: Value = serde_json::from_str(&repaired_messages)
         .map_err(|error| format!("Invalid OpenAI messages JSON: {error}"))?;
     let input = openai_messages_to_responses_input(&messages);
     serde_json::to_string(&input).map_err(|error| error.to_string())
@@ -277,6 +279,31 @@ mod tests {
             input,
             r#"[{"content":[{"text":"What is in this screenshot?","type":"input_text"},{"image_url":"data:image/png;base64,abc123","type":"input_image"}],"role":"user","type":"message"}]"#
         );
+    }
+
+    #[test]
+    fn repairs_chat_tool_adjacency_before_responses_conversion() {
+        let input = openai_messages_to_responses_input_json(
+            r#"[
+                {"role":"assistant","content":"","tool_calls":[
+                    {"id":"call-1","function":{"name":"read","arguments":"{}"}},
+                    {"id":"call-2","function":{"name":"write","arguments":"{}"}}
+                ]},
+                {"role":"tool","tool_call_id":"call-1","content":"read ok"},
+                {"role":"user","content":"next"}
+            ]"#,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&input).unwrap();
+        let items = parsed.as_array().unwrap();
+
+        assert_eq!(items[0]["type"], "function_call");
+        assert_eq!(items[1]["type"], "function_call");
+        assert_eq!(items[2]["type"], "function_call_output");
+        assert_eq!(items[2]["call_id"], "call-1");
+        assert_eq!(items[3]["type"], "function_call_output");
+        assert_eq!(items[3]["call_id"], "call-2");
+        assert_eq!(items[4]["role"], "user");
     }
 
     #[test]

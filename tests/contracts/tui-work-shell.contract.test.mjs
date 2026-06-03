@@ -30,6 +30,7 @@ import {
   formatRuntimeLabel,
   formatToolTraceLine,
   formatWorkShellBusyStatusLine,
+  formatWorkShellConversationEntryLines,
   formatWorkShellError,
   formatWorkShellHeaderLine,
   formatWorkShellProviderTitle,
@@ -60,6 +61,7 @@ import {
   resolveWorkShellActiveSlashInput,
   resolveWorkShellInputAction,
   resolveWorkShellSubmitAction,
+  shouldShowWorkShellConversationEntry,
   shouldUseSlowComposerPreview,
   sliceByDisplayWidth,
   truncateForDisplayWidth,
@@ -646,7 +648,18 @@ test("work-shell input decision helpers are exported from the shared tui package
       isBusy: true,
       hasRequestSessionsView: true,
     }),
-    { type: "none" },
+    { type: "interrupt-turn" },
+  );
+  assert.deepEqual(
+    resolveWorkShellInputAction({
+      value: "c",
+      key: { ctrl: true },
+      input: "plain text",
+      slashSuggestionCount: 0,
+      isBusy: true,
+      hasRequestSessionsView: true,
+    }),
+    { type: "interrupt-turn" },
   );
   assert.deepEqual(
     resolveWorkShellInputAction({
@@ -997,13 +1010,43 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
     ["✓ read 55ms {", '  "name": "web-app",', '  "private": true', "}"],
     "tool entries render as compact text lines, not padded surface rows",
   );
+  assert.deepEqual(
+    formatWorkShellConversationEntryLines({
+      role: "user",
+      text: "hi",
+      width: 72,
+    }),
+    ["› You · hi"],
+    "user entries render as compact transcript lines, not full-width input bars",
+  );
+  assert.deepEqual(
+    formatWorkShellConversationEntryLines({
+      role: "assistant",
+      text: "Hello. What do you need help with?",
+      width: 72,
+    }),
+    ["✦ UncleCode", "  Hello. What do you need help with?"],
+    "assistant entries keep a distinct label and readable body",
+  );
+  assert.equal(
+    shouldShowWorkShellConversationEntry({
+      role: "tool",
+      text: "→ read package.json",
+    }),
+    false,
+    "tool traces stay out of the default conversation transcript",
+  );
+  assert.equal(
+    shouldShowWorkShellConversationEntry({ role: "assistant", text: "Done" }),
+    true,
+  );
   assert.equal(
     formatRuntimeLabel({ node: "v22", platform: "darwin", arch: "arm64" }),
     "Node v22 · darwin/arm64",
   );
   assert.equal(
     formatWorkShellThinkingLine("medium (mode-default)"),
-    "Reasoning · Balanced thinking",
+    "Reasoning · Balanced",
   );
   assert.equal(
     formatWorkShellStatusLine({
@@ -1031,8 +1074,8 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       busyStatus: "thinking inspect repo",
       spinnerFrame: 0,
     }),
-    ["⠋ thinking inspect repo"],
-    "specific progress still appears inside the conversation pane",
+    [],
+    "specific progress is represented by the single busy status line, not duplicated inside the conversation pane",
   );
   assert.equal(
     formatWorkShellUsageLine({
@@ -1049,7 +1092,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       nowMs: 2480,
       lastTurnDurationMs: 1480,
     }),
-    "⠋ Working now · elapsed 1.5s · thinking inspect repo",
+    "⠋ Working now · elapsed 1.5s · Ctrl+C/Esc interrupt · Enter queues · thinking inspect repo",
   );
   assert.equal(
     normalizeMarkdownDisplayText("## Heading\n- `npm run check`\n- **Done**"),

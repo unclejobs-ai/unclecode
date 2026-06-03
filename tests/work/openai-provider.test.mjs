@@ -1064,6 +1064,90 @@ test("OpenAIProvider emits tool trace events for visible tool use", async () => 
   assert.match(traces[1]?.output ?? "", /hello trace/);
 });
 
+test("OpenAIProvider aborts in-flight tool handlers and rolls back turn state", async () => {
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-openai-abort-tool-"));
+  const abortController = new AbortController();
+  let handlerOptions;
+  let resolveHandlerStarted;
+  const handlerStarted = new Promise((resolve) => {
+    resolveHandlerStarted = resolve;
+  });
+
+  const provider = new BaseOpenAIProvider({
+    apiKey: "sk-test-123",
+    model: "gpt-5.4",
+    cwd: workspaceRoot,
+    reasoning: {
+      effort: "medium",
+      source: "mode-default",
+      support: { status: "supported", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high"] },
+    },
+    toolRuntime: {
+      definitions: [
+        {
+          name: "slow_tool",
+          description: "slow cancellable tool",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+      handlers: {
+        slow_tool: async (_input, _cwd, options) => {
+          handlerOptions = options;
+          resolveHandlerStarted();
+          if (options?.signal?.aborted) {
+            const error = new Error("Operation aborted");
+            error.name = "AbortError";
+            throw error;
+          }
+          await new Promise((_resolve, reject) => {
+            options?.signal?.addEventListener(
+              "abort",
+              () => {
+                const error = new Error("Operation aborted");
+                error.name = "AbortError";
+                reject(error);
+              },
+              { once: true },
+            );
+          });
+          return { content: "late" };
+        },
+      },
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return {
+          choices: [
+            {
+              message: {
+                content: "",
+                tool_calls: [
+                  {
+                    id: "call-slow",
+                    function: {
+                      name: "slow_tool",
+                      arguments: "{}",
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        };
+      },
+    }),
+  });
+
+  const turn = provider.runTurn("start slow tool", [], { signal: abortController.signal });
+  await handlerStarted;
+  assert.equal(handlerOptions?.signal, abortController.signal);
+
+  abortController.abort();
+  await assert.rejects(turn, { name: "AbortError" });
+  assert.deepEqual(provider.messages.map((message) => message.role), ["system"]);
+});
+
 test("OpenAIProvider defaults malformed tool arguments through Rust normalization", async () => {
   const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-openai-bad-args-"));
   const seenInputs = [];

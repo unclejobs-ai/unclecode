@@ -1317,7 +1317,7 @@ test("getConversationLayout gives answer blocks more room than lower-signal note
   assert.notEqual(userPresentation.label, assistantPresentation.label);
   assert.notEqual(userPresentation.labelBackgroundColor, assistantPresentation.labelBackgroundColor);
   assert.notEqual(userPresentation.bodyColor, assistantPresentation.bodyColor);
-  assert.equal(formatWorkShellThinkingLine("high (mode-default)"), "Thinking · Deep thinking");
+  assert.equal(formatWorkShellThinkingLine("high (mode-default)"), "Reasoning · Deep");
   assert.match(
     formatWorkShellStatusLine({
       model: "gpt-5.4",

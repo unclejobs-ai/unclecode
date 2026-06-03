@@ -32,7 +32,7 @@
     "test:tui": "node --conditions=source --import tsx --test tests/tui/*.test.mjs",
     "test:cli": "node --conditions=source --import tsx --test tests/cli/*.test.mjs",
     "test:commands": "node --conditions=source --import tsx --test tests/commands/*.test.mjs",
-    "test:work": "node --conditions=source --import tsx --test tests/work/*.test.mjs",
+    "test:work": "node --conditions=source --import tsx --test --test-concurrency=1 tests/work/*.test.mjs",
     "test:performance": "node --conditions=source --import tsx --test tests/performance/*.test.mjs",
     "test:integration": "npm run build --silent && node --test --test-concurrency=1 tests/integration/*.test.mjs",
     "test:integration:performance": "npm run build --silent && node --test tests/integration/unclecode-performance.integration.test.mjs",

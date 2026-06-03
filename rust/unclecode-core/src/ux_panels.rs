@@ -419,7 +419,7 @@ fn queue_panel(input: &Value) -> Value {
         } else {
             "Start a turn first; queued follow-ups run in order after it finishes.".to_string()
         },
-        "Slash commands are not queued while busy.".to_string(),
+        "Slash commands are not queued while busy; /cancel interrupts the active turn.".to_string(),
         "/queue clear drops queued follow-ups without stopping the active turn.".to_string(),
     ]);
 
@@ -734,14 +734,14 @@ fn help_panel() -> Value {
         "title": "Work-first shell",
         "lines": [
             "Composer is live.",
-            "Esc opens sessions.",
+            "Esc opens sessions when idle; Ctrl+C/Esc interrupts active work.",
             "Shift+Tab cycles mode.",
             "/ starts commands. Tab completes.",
             "/context, /reasoning, /model, /sessions, /reload",
             "/doctor, /auth status, /auth login, /auth key, /mcp list, /mode status",
             "/research <topic>, /research status, /review, /commit",
             "/mmbridge context, /mmbridge review, /mmbridge gate, /mmbridge handoff, /mmbridge doctor",
-            "/queue, /skills, /skill <name>, /memories, /harness, /clear, /help, /exit",
+            "/queue, /cancel, /skills, /skill <name>, /memories, /harness, /clear, /help, /exit",
             "/remember [session|project|user|agent] <text>",
             "AGENTS.md / CLAUDE.md load automatically."
         ]
@@ -798,6 +798,7 @@ fn status_activity_lines(input: &Value) -> Vec<String> {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "active turn".to_string());
         lines.push(format!("Now · {detail}"));
+        lines.push("Controls · Ctrl+C/Esc interrupt · Enter queues follow-up".to_string());
         if let (Some(started_at), Some(now_ms)) = (
             number_field(input, "currentTurnStartedAt"),
             number_field(input, "nowMs"),
@@ -1817,7 +1818,7 @@ mod tests {
         assert!(lines.iter().any(|line| line == "Steer"));
         assert!(lines
             .iter()
-            .any(|line| line == "Slash commands are not queued while busy."));
+            .any(|line| line == "Slash commands are not queued while busy; /cancel interrupts the active turn."));
         assert!(lines
             .iter()
             .any(|line| line

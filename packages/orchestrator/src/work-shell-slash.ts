@@ -78,6 +78,14 @@ export function getWorkShellSlashSuggestions(
       description: "Show the current shell queue and active work state.",
     },
     {
+      command: "/interrupt",
+      description: "Alias for /cancel.",
+    },
+    {
+      command: "/stop",
+      description: "Alias for /cancel.",
+    },
+    {
       command: "/skills",
       description: "List available workspace skills.",
     },

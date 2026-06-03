@@ -28,7 +28,7 @@ export interface OrchestratedWorkTurnAgent<
   setTraceListener(listener?: ((event: TraceEvent) => void) | undefined): void;
   updateRuntimeSettings(settings: { reasoning?: Reasoning | undefined; model?: string | undefined }): void;
   updateMode?(mode: string): void;
-  runTurn(prompt: string, attachments?: readonly Attachment[]): Promise<{ text: string }>;
+  runTurn(prompt: string, attachments?: readonly Attachment[], options?: { readonly signal?: AbortSignal | undefined }): Promise<{ text: string }>;
 }
 
 export function parseAgentPlanResponse(text: string): readonly PlannedWorkTask[] {
@@ -186,6 +186,7 @@ export class WorkAgent<
   private async planTasks(
     prompt: string,
     onTrace?: TurnOrchestratorTraceListener,
+    signal?: AbortSignal | undefined,
   ): Promise<{ readonly tasks: readonly PlannedWorkTask[]; readonly usedLlm: boolean }> {
     const staticTasks = buildComplexTasks(prompt);
     if (this.mode !== "yolo" && this.mode !== "ultrawork") {
@@ -205,7 +206,7 @@ export class WorkAgent<
         prompt,
         startedAt: plannerStartedAt,
       }));
-      const result = await this.directAgent.runTurn(planPrompt, []);
+      const result = await this.directAgent.runTurn(planPrompt, [], { signal });
       const parsed = parseAgentPlanResponse(result.text);
       if (parsed.length >= 2) {
         return { tasks: parsed, usedLlm: true };
@@ -244,20 +245,20 @@ export class WorkAgent<
     this.directAgent.updateMode?.(mode);
   }
 
-  async runTurn(prompt: string, attachments: readonly Attachment[] = []): Promise<{ text: string }> {
+  async runTurn(prompt: string, attachments: readonly Attachment[] = [], options: { readonly signal?: AbortSignal | undefined } = {}): Promise<{ text: string }> {
     if (attachments.length > 0) {
-      return this.directAgent.runTurn(prompt, attachments);
+      return this.directAgent.runTurn(prompt, attachments, options);
     }
 
     const orchestrator = createTurnOrchestrator<PlannedWorkTask, { id: string; summary: string }>({
-      runSimpleTurn: (simplePrompt) => this.directAgent.runTurn(simplePrompt, attachments),
-      runResearchTurn: (researchPrompt) => this.directAgent.runTurn(researchPrompt, attachments),
-      planComplexTurn: async (complexPrompt, options) => {
-        const { tasks, usedLlm } = await this.planTasks(complexPrompt, options?.onTrace);
+      runSimpleTurn: (simplePrompt) => this.directAgent.runTurn(simplePrompt, attachments, options),
+      runResearchTurn: (researchPrompt) => this.directAgent.runTurn(researchPrompt, attachments, options),
+      planComplexTurn: async (complexPrompt, planOptions) => {
+        const { tasks, usedLlm } = await this.planTasks(complexPrompt, planOptions?.onTrace, options.signal);
         return { tasks, usedLlm };
       },
       executeComplexTask: async (task) => {
-        const result = await this.directAgent.runTurn(task.prompt, []);
+        const result = await this.directAgent.runTurn(task.prompt, [], options);
         return { id: task.id, summary: result.text };
       },
       runGuardianReview: async ({ prompt: originalPrompt, tasks, results }) => {
@@ -274,7 +275,7 @@ export class WorkAgent<
           results,
           ...(executableChecks ? { executableChecks } : {}),
         });
-        const review = await this.directAgent.runTurn(reviewPrompt, []);
+        const review = await this.directAgent.runTurn(reviewPrompt, [], options);
         return {
           summary: executableChecks
             ? `${review.text}\n\nExecutable checks:\n${executableChecks}`
@@ -309,7 +310,7 @@ export class WorkAgent<
       ...(result.guardian ? { guardianSummary: result.guardian.summary } : {}),
     });
 
-    const synthesis = await this.directAgent.runTurn(synthesisPrompt, []);
+    const synthesis = await this.directAgent.runTurn(synthesisPrompt, [], options);
     const reviewerCompletedAt = Date.now();
     this.emitTrace(resolveAgentTraceEvent({
       kind: "synthesis-completed",

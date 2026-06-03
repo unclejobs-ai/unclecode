@@ -124,22 +124,72 @@ function isMissingEntrypoint(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
+export type RunRustCommandOptions = {
+  readonly signal?: AbortSignal | undefined;
+};
+
+function createAbortError(): Error {
+  const error = new Error("Operation aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function isAbortSignalError(error: unknown, signal?: AbortSignal | undefined): boolean {
+  return Boolean(signal?.aborted) || (error instanceof Error && error.name === "AbortError");
+}
+
+function killChildProcess(child: ReturnType<typeof spawn>): void {
+  if (process.platform !== "win32" && child.pid) {
+    try {
+      process.kill(-child.pid);
+      return;
+    } catch {
+      // Fall back to killing the direct child if process-group signalling is unavailable.
+    }
+  }
+  child.kill();
+}
+
 async function runRustCommandWithStdin(
   rust: RustEntrypoint,
   args: readonly string[],
   cwd: string,
   stdin: string,
   env: NodeJS.ProcessEnv,
+  options: RunRustCommandOptions = {},
 ): Promise<string> {
   return await new Promise((resolvePromise, reject) => {
+    if (options.signal?.aborted) {
+      reject(createAbortError());
+      return;
+    }
     const child = spawn(rust.command, [...rust.argsPrefix, ...args], {
       cwd: rust.runCwd ?? cwd,
       windowsHide: true,
+      detached: process.platform !== "win32",
       env,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    let settled = false;
     let stdout = "";
     let stderr = "";
+    const settle = (kind: "resolve" | "reject", value: string | Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      options.signal?.removeEventListener("abort", onAbort);
+      if (kind === "resolve") {
+        resolvePromise(String(value));
+        return;
+      }
+      reject(value);
+    };
+    const onAbort = () => {
+      killChildProcess(child);
+      settle("reject", createAbortError());
+    };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
@@ -148,13 +198,13 @@ async function runRustCommandWithStdin(
     child.stderr.on("data", (chunk: string) => {
       stderr += chunk;
     });
-    child.on("error", reject);
+    child.on("error", (error) => settle("reject", error));
     child.on("close", (code) => {
       if (code === 0) {
-        resolvePromise(stdout);
+        settle("resolve", stdout);
         return;
       }
-      reject(new Error(`${stdout}${stderr}`.trim() || `Rust command exited ${code}`));
+      settle("reject", new Error(`${stdout}${stderr}`.trim() || `Rust command exited ${code}`));
     });
     child.stdin.end(stdin);
   });
@@ -165,6 +215,7 @@ export async function runRustCommand(
   cwd: string,
   stdin?: string,
   env: NodeJS.ProcessEnv = process.env,
+  options: RunRustCommandOptions = {},
 ): Promise<string> {
   const rust = findRustEntrypoint();
   const finalArgs = [...rust.argsPrefix, ...args];
@@ -180,10 +231,14 @@ export async function runRustCommand(
           windowsHide: true,
           maxBuffer: 8 * 1024 * 1024,
           env: childEnv,
+          ...(options.signal ? { signal: options.signal } : {}),
         },
       );
       return result.stdout;
     } catch (error) {
+      if (isAbortSignalError(error, options.signal)) {
+        throw createAbortError();
+      }
       if (rust.fallback && isMissingEntrypoint(error)) {
         const fallbackResult = await execFileAsync(
           rust.fallback.command,
@@ -193,6 +248,7 @@ export async function runRustCommand(
             windowsHide: true,
             maxBuffer: 8 * 1024 * 1024,
             env: childEnv,
+            ...(options.signal ? { signal: options.signal } : {}),
           },
         );
         return fallbackResult.stdout;
@@ -203,10 +259,13 @@ export async function runRustCommand(
   }
 
   try {
-    return await runRustCommandWithStdin(rust, args, cwd, stdin, childEnv);
+    return await runRustCommandWithStdin(rust, args, cwd, stdin, childEnv, options);
   } catch (error) {
+    if (isAbortSignalError(error, options.signal)) {
+      throw createAbortError();
+    }
     if (rust.fallback && isMissingEntrypoint(error)) {
-      return await runRustCommandWithStdin(rust.fallback, args, cwd, stdin, childEnv);
+      return await runRustCommandWithStdin(rust.fallback, args, cwd, stdin, childEnv, options);
     }
     throw error;
   }

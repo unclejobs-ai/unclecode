@@ -425,11 +425,11 @@ export function buildHistoryContextSummaryLines(input: {
     input.memoryLines.length > 0,
   ].filter(Boolean).length;
   return [
-    "History = saved conversations",
-    `History · ${input.session.state}`,
+    "Saved conversation",
+    `State · ${input.session.state}`,
     input.session.pendingAction
       ? `Pending · ${input.session.pendingAction}`
-      : "Enter opens Work with this saved context",
+      : "Enter · resume with saved context",
     contextSourceCount > 0
       ? `Context · ${contextSourceCount} source${contextSourceCount > 1 ? "s" : ""}`
       : "Context · no workspace packet yet",

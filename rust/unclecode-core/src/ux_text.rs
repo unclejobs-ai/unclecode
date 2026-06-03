@@ -720,9 +720,17 @@ pub fn format_work_shell_footer_line(
     composer_hint: Option<&str>,
     width: Option<usize>,
 ) -> String {
-    let footer = [
+    let core_footer = [
         compact_work_shell_path(cwd, home),
         Some(format_work_shell_status_line(model, mode, auth_label)),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|item| !item.is_empty())
+    .collect::<Vec<_>>()
+    .join("  ·  ");
+    let full_footer = [
+        Some(core_footer.clone()),
         composer_hint
             .map(str::to_string)
             .filter(|value| !value.is_empty()),
@@ -732,6 +740,14 @@ pub fn format_work_shell_footer_line(
     .filter(|item| !item.is_empty())
     .collect::<Vec<_>>()
     .join("  ·  ");
+    let footer = match width {
+        Some(width)
+            if display_width(&full_footer) > width && display_width(&core_footer) <= width =>
+        {
+            core_footer
+        }
+        _ => full_footer,
+    };
     match width {
         Some(width) => truncate_display_width(&footer, width),
         None => footer,
@@ -1068,9 +1084,9 @@ fn humanize_work_shell_reasoning_label(reasoning_label: &str) -> String {
         .trim()
         .to_ascii_lowercase();
     match compact.as_str() {
-        "low" => "Light thinking".to_string(),
-        "medium" => "Balanced thinking".to_string(),
-        "high" => "Deep thinking".to_string(),
+        "low" => "Light".to_string(),
+        "medium" => "Balanced".to_string(),
+        "high" => "Deep".to_string(),
         "unsupported" => "Reasoning fixed".to_string(),
         _ => reasoning_label.to_string(),
     }
@@ -1419,7 +1435,7 @@ mod tests {
         );
         assert_eq!(
             format_work_shell_thinking_line("medium (mode-default)"),
-            "Reasoning · Balanced thinking"
+            "Reasoning · Balanced"
         );
         assert_eq!(
             format_work_shell_status_line("gpt-5.4", "default", "Browser OAuth · file"),
@@ -1466,6 +1482,18 @@ mod tests {
                 Some(20),
             ),
             "~/project/엉클코드…"
+        );
+        assert_eq!(
+            format_work_shell_footer_line(
+                Some("/Users/me/project/unclecode"),
+                Some("/Users/me"),
+                "gpt-5.4",
+                "yolo",
+                "Browser OAuth · file",
+                Some("Enter send · Shift+Enter newline · / commands"),
+                Some(72),
+            ),
+            "~/project/unclecode  ·  gpt-5.4 · YOLO mode · Saved OAuth"
         );
     }
 

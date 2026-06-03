@@ -124,6 +124,7 @@ type BusySubmitDecision =
   | { readonly action: "ignore" }
   | { readonly action: "show_queue"; readonly line: string }
   | { readonly action: "clear_queue"; readonly line: string; readonly message: string }
+  | { readonly action: "cancel_turn"; readonly line: string; readonly message: string }
   | { readonly action: "reject_slash"; readonly line: string; readonly message: string }
   | { readonly action: "queue"; readonly line: string; readonly displayIndex: number; readonly message: string };
 
@@ -137,6 +138,9 @@ function parseBusySubmitDecision(stdout: string): BusySubmitDecision {
   }
   if (parsed.action === "clear_queue" && typeof parsed.line === "string" && typeof parsed.message === "string") {
     return { action: "clear_queue", line: parsed.line, message: parsed.message };
+  }
+  if (parsed.action === "cancel_turn" && typeof parsed.line === "string" && typeof parsed.message === "string") {
+    return { action: "cancel_turn", line: parsed.line, message: parsed.message };
   }
   if (parsed.action === "reject_slash" && typeof parsed.line === "string" && typeof parsed.message === "string") {
     return { action: "reject_slash", line: parsed.line, message: parsed.message };
@@ -300,7 +304,7 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
 
 export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkShellReasoningConfig> {
   clear(): void;
-  runTurn(prompt: string, attachments?: readonly Attachment[]): Promise<{ text: string }>;
+  runTurn(prompt: string, attachments?: readonly Attachment[], options?: { readonly signal?: AbortSignal | undefined }): Promise<{ text: string }>;
   updateRuntimeSettings(settings: { reasoning?: Reasoning | undefined; model?: string | undefined }): void;
   updateMode?(mode: string): void;
   setTraceListener(listener?: ((event: TraceEvent) => void) | undefined): void;
@@ -513,6 +517,9 @@ export class WorkShellEngine<
   private currentContextSummaryLines: readonly string[];
   private lastSessionSummary = "Work shell ready.";
   private drainingQueue = false;
+  private activeTurnEpoch = 0;
+  private activeTurnAbortController: AbortController | undefined;
+  private skipNextQueueDrain = false;
   private state: WorkShellEngineState<Reasoning>;
 
   constructor(input: WorkShellEngineInput<Attachment, Reasoning, TraceEvent>) {
@@ -659,6 +666,42 @@ export class WorkShellEngine<
     this.setState({ panel });
   }
 
+  interruptTurn(): void {
+    if (!this.state.isBusy) {
+      this.appendEntries({ role: "system", text: "No active turn to interrupt." });
+      return;
+    }
+    this.skipNextQueueDrain = true;
+    this.activeTurnEpoch += 1;
+    this.activeTurnAbortController?.abort();
+    const lastTurnDurationMs = this.state.currentTurnStartedAt === undefined
+      ? undefined
+      : Math.max(0, Date.now() - this.state.currentTurnStartedAt);
+    this.appendEntries({
+      role: "system",
+      text: "Turn interrupted. Queued follow-ups are paused; use /queue or /queue clear.",
+    });
+    this.setState({
+      isBusy: false,
+      busyStatus: undefined,
+      currentTurnStartedAt: undefined,
+      streamingAssistantText: undefined,
+      ...(lastTurnDurationMs !== undefined ? { lastTurnDurationMs } : {}),
+    });
+  }
+
+  private startActiveTurnAbortController(): AbortController {
+    const abortController = new AbortController();
+    this.activeTurnAbortController = abortController;
+    return abortController;
+  }
+
+  private clearActiveTurnAbortController(abortController: AbortController): void {
+    if (this.activeTurnAbortController === abortController) {
+      this.activeTurnAbortController = undefined;
+    }
+  }
+
   /**
    * Record an attachment lifecycle trace event from the TUI side. The
    * pane fires this when a clipboard image is accepted, rejected by the
@@ -733,14 +776,25 @@ export class WorkShellEngine<
       return;
     }
 
-    await this.executeSubmitRoute(route, pendingAttachments);
+    const turnEpoch = route.kind === "chat" || route.kind === "prompt-command"
+      ? this.activeTurnEpoch + 1
+      : this.activeTurnEpoch;
+    this.activeTurnEpoch = turnEpoch;
+
+    await this.executeSubmitRoute(route, pendingAttachments, turnEpoch);
+    if (this.skipNextQueueDrain) {
+      this.skipNextQueueDrain = false;
+      return;
+    }
     await this.drainQueuedSubmits();
   }
 
   private async executeSubmitRoute(
     route: WorkShellSubmitRoute,
     pendingAttachments?: readonly Attachment[],
+    turnEpoch = this.activeTurnEpoch,
   ): Promise<void> {
+    const isCurrentTurn = () => turnEpoch === this.activeTurnEpoch;
     switch (route.kind) {
       case "secure-api-key-entry":
         await this.handleSecureApiKeyEntrySubmit(route.line);
@@ -748,61 +802,85 @@ export class WorkShellEngine<
       case "builtin":
         await this.handleBuiltinSubmit(route.line, route.command);
         break;
-      case "prompt-command":
-        await executeWorkShellPromptCommandSubmit({
-          transcriptText: route.line,
-          promptCommand: route.promptCommand,
-          state: this.state,
-          options: this.options,
-          sessionId: this.sessionId,
-          buildStatusPanel: this.buildStatusPanel,
-          autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
-          runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(prompt, attachments),
-          publishContextBridge: this.publishContextBridge,
-          writeScopedMemory: this.writeScopedMemory,
-          listScopedMemoryLines: this.listScopedMemoryLines,
-          refreshAuthState: this.refreshAuthState,
-          applyAuthIssueLines: (authIssueLines) => this.applyAuthIssueLines(authIssueLines),
-          formatWorkShellError: this.formatWorkShellError,
-          formatAgentTraceLine: this.formatAgentTraceLine,
-          appendEntries: (...entries) => this.appendEntries(...entries),
-          setState: (patch) => this.setState(patch),
-          pushTraceLine: (traceLine) => this.pushTraceLine(traceLine),
-          persistSessionSnapshot: (sessionState, summary) => this.persistSessionSnapshot(sessionState, summary),
-        });
+      case "prompt-command": {
+        const abortController = this.startActiveTurnAbortController();
+        try {
+          await executeWorkShellPromptCommandSubmit({
+            transcriptText: route.line,
+            promptCommand: route.promptCommand,
+            state: this.state,
+            options: this.options,
+            sessionId: this.sessionId,
+            buildStatusPanel: this.buildStatusPanel,
+            autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
+            runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(prompt, attachments, { signal: abortController.signal }),
+            publishContextBridge: this.publishContextBridge,
+            writeScopedMemory: this.writeScopedMemory,
+            listScopedMemoryLines: this.listScopedMemoryLines,
+            refreshAuthState: this.refreshAuthState,
+            applyAuthIssueLines: (authIssueLines) => this.applyAuthIssueLines(authIssueLines),
+            formatWorkShellError: this.formatWorkShellError,
+            formatAgentTraceLine: this.formatAgentTraceLine,
+            appendEntries: (...entries) => {
+              if (isCurrentTurn()) this.appendEntries(...entries);
+            },
+            setState: (patch) => {
+              if (isCurrentTurn()) this.setState(patch);
+            },
+            pushTraceLine: (traceLine) => {
+              if (isCurrentTurn()) this.pushTraceLine(traceLine);
+            },
+            persistSessionSnapshot: (sessionState, summary) => this.persistSessionSnapshot(sessionState, summary),
+          });
+        } finally {
+          this.clearActiveTurnAbortController(abortController);
+        }
         break;
+      }
       case "inline-command":
         await this.handleInlineCommandSubmit(route.line, route.slashCommand);
         break;
       case "local-command":
         await this.handleLocalCommandSubmit(route.line, route.localCommand);
         break;
-      case "chat":
-        await executeWorkShellChatSubmit({
-          line: route.line,
-          resolveComposerInput: this.resolveComposerInput,
-          ...(pendingAttachments && pendingAttachments.length > 0
-            ? { pendingAttachments }
-            : {}),
-          state: this.state,
-          options: this.options,
-          sessionId: this.sessionId,
-          buildStatusPanel: this.buildStatusPanel,
-          autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
-          runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(prompt, attachments),
-          publishContextBridge: this.publishContextBridge,
-          writeScopedMemory: this.writeScopedMemory,
-          listScopedMemoryLines: this.listScopedMemoryLines,
-          refreshAuthState: this.refreshAuthState,
-          applyAuthIssueLines: (authIssueLines) => this.applyAuthIssueLines(authIssueLines),
-          formatWorkShellError: this.formatWorkShellError,
-          formatAgentTraceLine: this.formatAgentTraceLine,
-          appendEntries: (...entries) => this.appendEntries(...entries),
-          setState: (patch) => this.setState(patch),
-          pushTraceLine: (traceLine) => this.pushTraceLine(traceLine),
-          persistSessionSnapshot: (sessionState, summary) => this.persistSessionSnapshot(sessionState, summary),
-        });
+      case "chat": {
+        const abortController = this.startActiveTurnAbortController();
+        try {
+          await executeWorkShellChatSubmit({
+            line: route.line,
+            resolveComposerInput: this.resolveComposerInput,
+            ...(pendingAttachments && pendingAttachments.length > 0
+              ? { pendingAttachments }
+              : {}),
+            state: this.state,
+            options: this.options,
+            sessionId: this.sessionId,
+            buildStatusPanel: this.buildStatusPanel,
+            autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
+            runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(prompt, attachments, { signal: abortController.signal }),
+            publishContextBridge: this.publishContextBridge,
+            writeScopedMemory: this.writeScopedMemory,
+            listScopedMemoryLines: this.listScopedMemoryLines,
+            refreshAuthState: this.refreshAuthState,
+            applyAuthIssueLines: (authIssueLines) => this.applyAuthIssueLines(authIssueLines),
+            formatWorkShellError: this.formatWorkShellError,
+            formatAgentTraceLine: this.formatAgentTraceLine,
+            appendEntries: (...entries) => {
+              if (isCurrentTurn()) this.appendEntries(...entries);
+            },
+            setState: (patch) => {
+              if (isCurrentTurn()) this.setState(patch);
+            },
+            pushTraceLine: (traceLine) => {
+              if (isCurrentTurn()) this.pushTraceLine(traceLine);
+            },
+            persistSessionSnapshot: (sessionState, summary) => this.persistSessionSnapshot(sessionState, summary),
+          });
+        } finally {
+          this.clearActiveTurnAbortController(abortController);
+        }
         break;
+      }
     }
   }
 
@@ -816,6 +894,9 @@ export class WorkShellEngine<
         return;
       case "clear_queue":
         await this.handleBuiltinSubmit(decision.line, { kind: "queue-clear" });
+        return;
+      case "cancel_turn":
+        this.interruptTurn();
         return;
       case "reject_slash":
         this.appendEntries({ role: "system", text: decision.message });
@@ -896,6 +977,7 @@ export class WorkShellEngine<
       loadNamedSkill: this.loadNamedSkill,
       toolLines: this.toolLines,
       clearAgent: () => this.agent.clear(),
+      interruptTurn: () => this.interruptTurn(),
       updateRuntimeSettings: (settings) => this.agent.updateRuntimeSettings(settings),
       onExit: this.onExit,
       openSessionsPanel: () => this.openSessionsPanel(),
