@@ -1,3 +1,4 @@
+import { useStdout } from "ink";
 import React from "react";
 
 import type { TuiShellHomeState } from "./shell-state.js";
@@ -43,10 +44,34 @@ export type WorkShellPaneProps<
   readonly isReasoningSupported: (reasoning: State["reasoning"]) => boolean;
 };
 
+const AUTO_PROMOTE_IMAGE_PROMPTS = new Set([
+  "Please inspect the attached image.",
+  "Please inspect the attached images.",
+]);
+const STANDALONE_IMAGE_PATH_PATTERN = /^(?:"(?:file:\/\/|\/|[A-Za-z]:[\\/]).+\.(?:png|jpe?g|gif|webp|bmp)"|'(?:file:\/\/|\/|[A-Za-z]:[\\/]).+\.(?:png|jpe?g|gif|webp|bmp)'|(?:file:\/\/|\/|[A-Za-z]:[\\/])(?:\\ |[^\s])+\.(?:png|jpe?g|gif|webp|bmp))$/i;
+
+export function resolveWorkShellPaneTerminalColumns(stdout: NodeJS.WriteStream): number {
+  return stdout.columns ?? process.stdout.columns ?? 96;
+}
+
+export function looksLikeStandaloneImagePathInput(value: string): boolean {
+  return STANDALONE_IMAGE_PATH_PATTERN.test(value.trim());
+}
+
+export function shouldAutoPromoteStandaloneImagePreview<Attachment extends WorkShellImageAttachment>(input: {
+  readonly inputValue: string;
+  readonly composerPreview: Pick<WorkShellComposerPreview<Attachment>, "prompt" | "attachments">;
+}): boolean {
+  return looksLikeStandaloneImagePathInput(input.inputValue)
+    && input.composerPreview.attachments.length > 0
+    && AUTO_PROMOTE_IMAGE_PROMPTS.has(input.composerPreview.prompt);
+}
+
 export function WorkShellPane<
   Attachment extends WorkShellImageAttachment,
   State extends WorkShellPaneRuntimeState,
 >(props: WorkShellPaneProps<Attachment, State>) {
+  const standaloneImageResolveRequestIdRef = React.useRef(0);
   const {
     inputValue,
     setInputValue,
@@ -77,6 +102,19 @@ export function WorkShellPane<
     shouldBlockSlashSubmit: props.shouldBlockSlashSubmit,
   });
 
+  const { stdout } = useStdout();
+  const [terminalColumns, setTerminalColumns] = React.useState(() => resolveWorkShellPaneTerminalColumns(stdout));
+  React.useEffect(() => {
+    const updateTerminalColumns = () => {
+      setTerminalColumns(resolveWorkShellPaneTerminalColumns(stdout));
+    };
+    updateTerminalColumns();
+    stdout.on("resize", updateTerminalColumns);
+    return () => {
+      stdout.off("resize", updateTerminalColumns);
+    };
+  }, [stdout]);
+
   const {
     entries,
     streamingAssistantText,
@@ -88,6 +126,7 @@ export function WorkShellPane<
     busyStatus,
     currentTurnStartedAt,
     lastTurnDurationMs,
+    contextIndicator,
   } = engineState;
   const isSecureApiKeyEntry = engineState.composerMode === "api-key-entry";
   // Most recent rejection reason from the clipboard capture or cap gate.
@@ -113,15 +152,57 @@ export function WorkShellPane<
     () => formatAuthLabelForDisplay(authLabel),
     [authLabel],
   );
-  const attachmentLines = React.useMemo(
-    () => composerPreview.attachments.length > 0
+  const attachmentLines = React.useMemo(() => {
+    const lines = composerPreview.attachments.length > 0
       ? [
           ...buildAttachmentPreviewLines(composerPreview.attachments),
           formatInlineImageSupportLine(),
         ]
-      : undefined,
-    [composerPreview.attachments],
-  );
+      : [];
+    if (lastClipboardError) {
+      lines.push(`⚠ ${lastClipboardError}`);
+    }
+    return lines.length > 0 ? lines : undefined;
+  }, [composerPreview.attachments, lastClipboardError]);
+
+  const handleComposerChange = React.useCallback((nextValue: string) => {
+    const requestId = standaloneImageResolveRequestIdRef.current + 1;
+    standaloneImageResolveRequestIdRef.current = requestId;
+
+    if (!looksLikeStandaloneImagePathInput(nextValue)) {
+      setInputValue(nextValue);
+      return;
+    }
+
+    setInputValue("");
+    void props.resolveComposerInput(nextValue, props.cwd)
+      .then((resolved) => {
+        if (standaloneImageResolveRequestIdRef.current !== requestId) {
+          return;
+        }
+        if (!shouldAutoPromoteStandaloneImagePreview({
+          inputValue: nextValue,
+          composerPreview: resolved,
+        })) {
+          setInputValue((current) => (current.length === 0 ? nextValue : current));
+          return;
+        }
+        for (const attachment of resolved.attachments) {
+          const outcome = addClipboardAttachment(attachment as Attachment);
+          if (outcome.accepted === false) {
+            setLastClipboardError(outcome.reason);
+            return;
+          }
+        }
+        setLastClipboardError(null);
+      })
+      .catch(() => {
+        if (standaloneImageResolveRequestIdRef.current !== requestId) {
+          return;
+        }
+        setInputValue((current) => (current.length === 0 ? nextValue : current));
+      });
+  }, [addClipboardAttachment, props.cwd, props.resolveComposerInput, setInputValue]);
 
   return (
     <WorkShellView
@@ -131,6 +212,7 @@ export function WorkShellPane<
       reasoningSupported={reasoningSupported}
       mode={mode}
       authLabel={authDisplayLabel}
+      {...(contextIndicator ? { contextIndicator } : {})}
       entries={entries}
       {...(streamingAssistantText ? { streamingAssistantText } : {})}
       isBusy={isBusy}
@@ -143,7 +225,7 @@ export function WorkShellPane<
       composer={
         <Composer
           value={inputValue}
-          onChange={setInputValue}
+          onChange={handleComposerChange}
           onSubmit={async (line) => {
             // Run the engine submit FIRST (it closes over the live pending
             // list, so attachments cross the engine boundary correctly).
@@ -168,14 +250,18 @@ export function WorkShellPane<
               // explanation instead of the pasted image silently
               // disappearing into the void.
               setLastClipboardError(outcome.reason);
+              return;
             }
+            setLastClipboardError(null);
           }}
           onClipboardImageError={(reason) => setLastClipboardError(reason)}
+          terminalColumns={terminalColumns}
           {...(isSecureApiKeyEntry ? { mask: "•" } : {})}
         />
       }
       inputValue={inputValue}
       slashSuggestionCount={slashSuggestionCount}
+      terminalColumns={terminalColumns}
       cwd={props.cwd}
       {...(isSecureApiKeyEntry
         ? { composerHintOverride: "Enter saves · Esc cancels" }

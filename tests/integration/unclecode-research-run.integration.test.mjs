@@ -60,7 +60,7 @@ function initializeGitRepo(cwd) {
   assert.equal(commitResult.status, 0, commitResult.stderr);
 }
 
-test("built unclecode cli can run a linear research pass and write an artifact", () => {
+test("built unclecode cli can draft a linear context brief and write an artifact", () => {
   const cwd = makeTempWorkspace();
   const sessionStoreRoot = path.join(cwd, ".state");
 
@@ -88,7 +88,7 @@ test("built unclecode cli can run a linear research pass and write an artifact",
     );
 
     assert.equal(runResult.status, 0, runResult.stderr);
-    assert.match(runResult.stdout, /Research completed/i);
+    assert.match(runResult.stdout, /Context brief completed/i);
     assert.match(runResult.stdout, /Session: research-/i);
     assert.match(runResult.stdout, /Artifact: .*research\.md/i);
 
@@ -101,7 +101,7 @@ test("built unclecode cli can run a linear research pass and write an artifact",
       `artifact should exist: ${artifactPath}`,
     );
     const artifactBody = readFileSync(artifactPath, "utf8");
-    assert.match(artifactBody, /# UncleCode Research Report/);
+    assert.match(artifactBody, /# UncleCode Context Brief/);
     assert.match(artifactBody, /Prompt: summarize current workspace/);
     assert.match(artifactBody, /## Findings/);
     assert.match(artifactBody, /## Recommended Next Steps/);
@@ -127,7 +127,7 @@ test("built unclecode cli can run a linear research pass and write an artifact",
     );
 
     assert.equal(statusResult.status, 0, statusResult.stderr);
-    assert.match(statusResult.stdout, /Research status/i);
+    assert.match(statusResult.stdout, /Context brief status/i);
     assert.match(statusResult.stdout, /Last run: research-/i);
     assert.match(statusResult.stdout, /State: idle/i);
   } finally {

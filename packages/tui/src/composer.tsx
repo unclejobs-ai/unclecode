@@ -232,9 +232,9 @@ function padComposerLine(value: string, width: number): string {
   return `${value}${" ".repeat(padding)}`;
 }
 
-function getComposerVisibleWidth(): number {
-  const terminalColumns = process.stdout.columns ?? COMPOSER_DEFAULT_VISIBLE_WIDTH + 10;
-  return Math.max(12, Math.min(COMPOSER_DEFAULT_VISIBLE_WIDTH, terminalColumns - 10));
+export function resolveComposerVisibleWidth(terminalColumns?: number): number {
+  const columns = terminalColumns ?? process.stdout.columns ?? COMPOSER_DEFAULT_VISIBLE_WIDTH + 10;
+  return Math.max(12, Math.min(COMPOSER_DEFAULT_VISIBLE_WIDTH, columns - 10));
 }
 
 /**
@@ -264,8 +264,12 @@ export function handleComposerClipboardPaste(input: {
   return "fallthrough";
 }
 
-function renderComposerLine(line: string, cursorColumn: number | undefined): React.ReactNode {
-  const visibleWidth = getComposerVisibleWidth();
+function renderComposerLine(
+  line: string,
+  cursorColumn: number | undefined,
+  terminalColumns?: number,
+): React.ReactNode {
+  const visibleWidth = resolveComposerVisibleWidth(terminalColumns);
   if (cursorColumn === undefined) {
     return <Text>{padComposerLine(line.length > 0 ? line : " ", visibleWidth)}</Text>;
   }
@@ -307,6 +311,7 @@ export function Composer(props: {
     | ((reason: string, status: "no-image" | "unsupported" | "failed") => void)
     | undefined;
   readonly mask?: string | undefined;
+  readonly terminalColumns?: number | undefined;
 }) {
   const [isPasting, setIsPasting] = useState(false);
   const [cursorOffset, setCursorOffset] = useState(props.value.length);
@@ -419,6 +424,7 @@ export function Composer(props: {
           {renderComposerLine(
             line,
             index === cursorPosition.lineIndex ? cursorPosition.columnIndex : undefined,
+            props.terminalColumns,
           )}
         </Box>
       ))}

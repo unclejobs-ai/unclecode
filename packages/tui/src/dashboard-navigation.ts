@@ -348,6 +348,7 @@ export function getSessionCenterActionShortcut(
       return "api-key-login";
     case "l":
       return "auth-logout";
+    case "n":
     case "r":
       return "new-research";
     case "s":
@@ -377,6 +378,7 @@ export function getImmediateActionShortcut(input: string): string | undefined {
       return "api-key-login";
     case "L":
       return "auth-logout";
+    case "N":
     case "R":
       return "new-research";
     case "S":
@@ -434,7 +436,7 @@ export function getSessionCenterEscapeHint(input: {
   readonly detailOpen: boolean;
   readonly hasSelectedApproval: boolean;
   readonly hasEmbeddedWorkPane: boolean;
-}): "Esc cancel" | "Esc close" | "Ctrl+O sessions" | "Esc work" {
+}): "Esc cancel" | "Esc close" | "Ctrl+O context" | "Esc work" {
   if (input.hasSelectedApproval) {
     return "Esc cancel";
   }
@@ -445,7 +447,7 @@ export function getSessionCenterEscapeHint(input: {
     return "Esc close";
   }
   if (input.view === "work" && input.hasEmbeddedWorkPane) {
-    return "Ctrl+O sessions";
+    return "Ctrl+O context";
   }
   return "Esc work";
 }
@@ -467,8 +469,8 @@ export function buildSessionCenterStatusLine(input: {
     return `MCP · ${String(input.mcpServerCount)} server(s) · A add · X remove · ${escapeHint}`;
   }
   if (input.view === "research") {
-    const primaryHint = input.detailOpen ? "Enter/Ctrl+R run" : "R prompt";
-    return `Research · ${String(input.researchRunCount)} run(s) · ${primaryHint} · ${escapeHint}`;
+    const primaryHint = input.detailOpen ? "Enter/Ctrl+R run" : "N new brief";
+    return `Briefs · ${String(input.researchRunCount)} saved · ${primaryHint} · ${escapeHint}`;
   }
   return `History · ${String(input.savedSessionCount)} saved · ↑↓ select · Enter resume · ${escapeHint}`;
 }
@@ -485,7 +487,7 @@ export function shouldOpenResearchPromptLane(
     !state.detailOpen &&
     state.column !== "actions" &&
     !hasSelectedApproval &&
-    (input.toLowerCase() === "r" || Boolean(key.return))
+    (input.toLowerCase() === "n" || input.toLowerCase() === "r" || Boolean(key.return))
   );
 }
 

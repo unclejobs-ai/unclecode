@@ -1,4 +1,7 @@
 import { runRustCommand } from "@unclecode/orchestrator";
+import { getSessionStoreRoot } from "@unclecode/session-store";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 
 export type WorkRuntimeAuthIssueInput = {
   authStatus?: Pick<RustOpenAIAuthStatus, "expiresAt">;
@@ -43,14 +46,23 @@ export async function loadResumedWorkSession(input: {
   initialTraceMode?: "minimal" | "verbose";
   reasoningEffort?: "low" | "medium" | "high";
   contextLine: string;
+  initialEntries: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[];
+  initialSessionSummary?: string;
 }> {
   const stdout = await runRustCommand(
-    ["rust", "session", "resume", input.sessionId],
+    ["rust", "session", "resume-json", input.sessionId],
     input.cwd,
     undefined,
     input.env ?? process.env,
   );
   const resumed = parseRustResumedWorkSession(stdout);
+
+  const initialEntries = resumed.initialEntries.length > 0
+    ? resumed.initialEntries
+    : await loadLegacySessionSummaryEntries({
+        sessionId: resumed.sessionId,
+        env: input.env ?? process.env,
+      });
 
   return {
     sessionId: resumed.sessionId,
@@ -61,7 +73,59 @@ export async function loadResumedWorkSession(input: {
       ? { reasoningEffort: resumed.reasoningEffort }
       : {}),
     contextLine: resumed.contextLine,
+    initialEntries,
+    ...(resumed.initialSessionSummary
+      ? { initialSessionSummary: resumed.initialSessionSummary }
+      : {}),
   };
+}
+
+async function loadLegacySessionSummaryEntries(input: {
+  sessionId: string;
+  env: NodeJS.ProcessEnv;
+}): Promise<readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[]> {
+  const memoryPath = path.join(
+    getSessionStoreRoot(input.env),
+    "memory",
+    "sessions",
+    `${input.sessionId}.jsonl`,
+  );
+  try {
+    const raw = await readFile(memoryPath, "utf8");
+    return raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as { summary?: unknown })
+      .map((record) => typeof record.summary === "string" ? parseLegacySessionSummary(record.summary) : [])
+      .flat()
+      .slice(-12);
+  } catch {
+    return [];
+  }
+}
+
+function parseLegacySessionSummary(summary: string): readonly {
+  readonly role: "system" | "user" | "assistant" | "tool";
+  readonly text: string;
+}[] {
+  const matched = /^Q:\s*(.*?)\s*·\s*A:\s*(.*)$/s.exec(summary);
+  if (!matched) {
+    return [];
+  }
+  const question = matched[1] ?? "";
+  const answer = matched[2] ?? "";
+  const entries = [] as {
+    readonly role: "system" | "user" | "assistant" | "tool";
+    readonly text: string;
+  }[];
+  if (question.trim().length > 0) {
+    entries.push({ role: "user", text: question.trim() });
+  }
+  if (answer.trim().length > 0) {
+    entries.push({ role: "assistant", text: answer.trim() });
+  }
+  return entries;
 }
 
 export async function resolveRustOpenAIAuthStatus(input: {
@@ -115,14 +179,33 @@ function parseRustResumedWorkSession(stdout: string): {
   readonly traceMode?: "minimal" | "verbose";
   readonly reasoningEffort?: "low" | "medium" | "high";
   readonly contextLine: string;
+  readonly initialEntries: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[];
+  readonly initialSessionSummary?: string;
 } {
-  const fields = parseRustKeyValueLines(stdout);
-  const sessionId = fields.get("sessionId");
+  const parsed = JSON.parse(stdout) as {
+    sessionId?: unknown;
+    traceMode?: unknown;
+    reasoningEffort?: unknown;
+    contextLine?: unknown;
+    initialEntries?: unknown;
+    initialSessionSummary?: unknown;
+  };
+  const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId : undefined;
   if (!sessionId) {
     throw new Error("Rust session resume returned no session id.");
   }
-  const traceMode = fields.get("traceMode");
-  const reasoningEffort = fields.get("reasoningEffort");
+  const traceMode = parsed.traceMode;
+  const reasoningEffort = parsed.reasoningEffort;
+  const initialEntries = Array.isArray(parsed.initialEntries)
+    ? parsed.initialEntries.filter((entry): entry is { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string } =>
+        Boolean(entry)
+        && typeof entry === "object"
+        && (((entry as { role?: unknown }).role === "system")
+          || ((entry as { role?: unknown }).role === "user")
+          || ((entry as { role?: unknown }).role === "assistant")
+          || ((entry as { role?: unknown }).role === "tool"))
+        && typeof (entry as { text?: unknown }).text === "string")
+    : [];
   return {
     sessionId,
     ...(traceMode === "minimal" || traceMode === "verbose" ? { traceMode } : {}),
@@ -131,7 +214,11 @@ function parseRustResumedWorkSession(stdout: string): {
     reasoningEffort === "high"
       ? { reasoningEffort }
       : {}),
-    contextLine: fields.get("contextLine") ?? `Resumed session: ${sessionId}`,
+    contextLine: typeof parsed.contextLine === "string" ? parsed.contextLine : `Resumed session: ${sessionId}`,
+    initialEntries,
+    ...(typeof parsed.initialSessionSummary === "string"
+      ? { initialSessionSummary: parsed.initialSessionSummary }
+      : {}),
   };
 }
 
@@ -139,8 +226,13 @@ function parseRustKeyValueLines(stdout: string): Map<string, string> {
   return new Map(
     stdout
       .split(/\r?\n/)
-      .map((line) => line.split("=", 2))
-      .filter((parts): parts is [string, string] => parts.length === 2),
+      .map((line) => {
+        const separatorIndex = line.indexOf("=");
+        return separatorIndex === -1
+          ? undefined
+          : [line.slice(0, separatorIndex), line.slice(separatorIndex + 1)] as const;
+      })
+      .filter((parts): parts is readonly [string, string] => parts !== undefined),
   );
 }
 

@@ -773,6 +773,7 @@ test("composer helpers support multiline editing without slow preview for plain 
 test("shouldBlockSlashSubmit guards partial slash commands from leaking to the model", () => {
   assert.equal(shouldBlockSlashSubmit("/auth"), true);
   assert.equal(shouldBlockSlashSubmit("/auth status"), false);
+  assert.equal(shouldBlockSlashSubmit("/context"), false);
   assert.equal(shouldBlockSlashSubmit("/model"), true);
   assert.equal(shouldBlockSlashSubmit("/model gpt-5.4"), false);
   assert.equal(shouldBlockSlashSubmit("explain /auth"), false);
@@ -1349,7 +1350,7 @@ test("createWorkShellDashboardProps maps work runtime state into unified Dashboa
     mcpServerCount: 1,
     mcpServers: [{ name: "memory", transport: "stdio", scope: "user", trustTier: "user", originLabel: "user config" }],
     latestResearchSessionId: "research-1",
-    latestResearchSummary: "Prepared a local research bundle",
+    latestResearchSummary: "Prepared a context brief",
     latestResearchTimestamp: "2026-04-05T12:00:00.000Z",
     researchRunCount: 1,
     sessions: [{ sessionId: "work-1", state: "idle", updatedAt: "2026-04-05T12:00:00.000Z", model: "gpt-5.4", taskSummary: "Review repo" }],

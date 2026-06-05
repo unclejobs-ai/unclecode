@@ -32,6 +32,7 @@ import type {
 } from "./work-shell-engine.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 import type { WorkShellSubmitRoute } from "./work-shell-engine-submit.js";
+import type { ContextPacketView } from "@unclecode/contracts";
 
 type WorkShellBuiltinCommand = Extract<
   WorkShellSubmitRoute,
@@ -92,6 +93,7 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
   onExit: () => void;
   openSessionsPanel: () => Promise<void>;
   reloadContextState: () => Promise<void>;
+  refreshContextPacket?: (() => Promise<ContextPacketView | undefined>) | undefined;
   queuedCount?: (() => number) | undefined;
   queuedItems?: (() => Promise<readonly { readonly id: number; readonly line: string }[]>) | undefined;
   clearQueuedItems?: (() => Promise<void>) | undefined;
@@ -122,10 +124,12 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
       return;
     }
     case "context": {
+      const contextPacket = await input.refreshContextPacket?.();
       const result = createContextBuiltinResult({
         line: input.line,
         contextSummaryLines: input.currentContextSummaryLines,
         state: input.state,
+        contextPacket: contextPacket ?? input.state.contextPacket,
         buildContextPanel: input.buildContextPanel,
       });
       input.appendEntries(...result.entries);

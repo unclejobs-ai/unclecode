@@ -29,6 +29,10 @@ import {
 } from "./work-shell-engine-submit.js";
 import { createWorkShellSessionSnapshotInput } from "./work-shell-engine-persistence.js";
 import {
+  composeWorkShellTurnPromptFromPacket,
+  formatWorkShellContextPacketIndicator,
+} from "./work-shell-context-packet.js";
+import {
   appendWorkShellEntries,
   createInitialWorkShellEngineState,
   createWorkShellTraceLinePatch,
@@ -36,6 +40,7 @@ import {
 } from "./work-shell-engine-state.js";
 import { applyWorkShellTraceEvent } from "./work-shell-engine-trace.js";
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
+import type { ContextPacketView } from "@unclecode/contracts";
 
 /**
  * Render a one-liner for an attachment lifecycle trace event through the Rust
@@ -275,6 +280,8 @@ export type WorkShellEngineOptions<Reasoning extends WorkShellReasoningConfig> =
   readonly cwd: string;
   readonly contextSummaryLines: readonly string[];
   readonly initialTraceMode?: WorkShellTraceMode | undefined;
+  readonly initialEntries?: readonly WorkShellChatEntry[] | undefined;
+  readonly initialSessionSummary?: string | undefined;
   readonly autoContinueOnPermissionStall?: boolean | undefined;
 };
 
@@ -300,6 +307,8 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly busyStatus?: string | undefined;
   readonly currentTurnStartedAt?: number | undefined;
   readonly lastTurnDurationMs?: number | undefined;
+  readonly contextPacket?: ContextPacketView | undefined;
+  readonly contextIndicator?: string | undefined;
 };
 
 export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkShellReasoningConfig> {
@@ -404,6 +413,14 @@ export type WorkShellEngineInput<
   listAvailableSkills?: (cwd: string) => Promise<readonly WorkShellSkillListItem[]>;
   loadNamedSkill?: (name: string, cwd: string) => Promise<WorkShellLoadedSkill>;
   reloadWorkspaceContext?: (cwd: string) => Promise<readonly string[]>;
+  resolveContextPacket?: ((input: {
+    readonly cwd: string;
+    readonly sessionId: string;
+    readonly contextSummaryLines: readonly string[];
+    readonly bridgeLines: readonly string[];
+    readonly memoryLines: readonly string[];
+    readonly traceLines: readonly string[];
+  }) => Promise<ContextPacketView>) | undefined;
   toolLines?: readonly string[];
   extractAuthLabel?: (lines: readonly string[]) => string | undefined;
   onExit: () => void;
@@ -507,6 +524,14 @@ export class WorkShellEngine<
   private readonly listAvailableSkills: (cwd: string) => Promise<readonly WorkShellSkillListItem[]>;
   private readonly loadNamedSkill: (name: string, cwd: string) => Promise<WorkShellLoadedSkill>;
   private readonly reloadWorkspaceContext?: ((cwd: string) => Promise<readonly string[]>) | undefined;
+  private readonly resolveContextPacket?: ((input: {
+    readonly cwd: string;
+    readonly sessionId: string;
+    readonly contextSummaryLines: readonly string[];
+    readonly bridgeLines: readonly string[];
+    readonly memoryLines: readonly string[];
+    readonly traceLines: readonly string[];
+  }) => Promise<ContextPacketView>) | undefined;
   private readonly toolLines: readonly string[];
   private readonly extractAuthLabel?: ((lines: readonly string[]) => string | undefined) | undefined;
   private readonly onExit: () => void;
@@ -515,7 +540,7 @@ export class WorkShellEngine<
   private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
   private queuedCountCache = 0;
   private currentContextSummaryLines: readonly string[];
-  private lastSessionSummary = "Work shell ready.";
+  private lastSessionSummary: string;
   private drainingQueue = false;
   private activeTurnEpoch = 0;
   private activeTurnAbortController: AbortController | undefined;
@@ -550,11 +575,13 @@ export class WorkShellEngine<
     this.listAvailableSkills = input.listAvailableSkills ?? (async () => []);
     this.loadNamedSkill = input.loadNamedSkill ?? (async (name) => ({ name, path: name, content: "", attempts: [] }));
     this.reloadWorkspaceContext = input.reloadWorkspaceContext;
+    this.resolveContextPacket = input.resolveContextPacket;
     this.toolLines = input.toolLines ?? [];
     this.extractAuthLabel = input.extractAuthLabel;
     this.onExit = input.onExit;
     this.sessionId = input.sessionId ?? `work-${randomUUID()}`;
     this.currentContextSummaryLines = input.options.contextSummaryLines;
+    this.lastSessionSummary = input.options.initialSessionSummary ?? "Work shell ready.";
     this.state = createInitialWorkShellEngineState({
       options: input.options,
       contextSummaryLines: this.currentContextSummaryLines,
@@ -599,6 +626,7 @@ export class WorkShellEngine<
       });
 
       this.setState(contextState);
+      await this.refreshContextPacket();
     } catch (error: unknown) {
       this.appendEntries({
         role: "system",
@@ -804,6 +832,15 @@ export class WorkShellEngine<
         break;
       case "prompt-command": {
         const abortController = this.startActiveTurnAbortController();
+        const contextPacket = await this.refreshContextPacket();
+        this.setState({
+          panel: this.buildContextPanel(
+            this.currentContextSummaryLines,
+            this.state.bridgeLines,
+            this.state.memoryLines,
+            this.state.traceLines,
+          ),
+        });
         try {
           await executeWorkShellPromptCommandSubmit({
             transcriptText: route.line,
@@ -813,7 +850,11 @@ export class WorkShellEngine<
             sessionId: this.sessionId,
             buildStatusPanel: this.buildStatusPanel,
             autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
-            runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(prompt, attachments, { signal: abortController.signal }),
+            runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(
+              contextPacket ? composeWorkShellTurnPromptFromPacket({ packet: contextPacket, userPrompt: prompt }) : prompt,
+              attachments,
+              { signal: abortController.signal },
+            ),
             publishContextBridge: this.publishContextBridge,
             writeScopedMemory: this.writeScopedMemory,
             listScopedMemoryLines: this.listScopedMemoryLines,
@@ -845,6 +886,15 @@ export class WorkShellEngine<
         break;
       case "chat": {
         const abortController = this.startActiveTurnAbortController();
+        const contextPacket = await this.refreshContextPacket();
+        this.setState({
+          panel: this.buildContextPanel(
+            this.currentContextSummaryLines,
+            this.state.bridgeLines,
+            this.state.memoryLines,
+            this.state.traceLines,
+          ),
+        });
         try {
           await executeWorkShellChatSubmit({
             line: route.line,
@@ -857,7 +907,11 @@ export class WorkShellEngine<
             sessionId: this.sessionId,
             buildStatusPanel: this.buildStatusPanel,
             autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
-            runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(prompt, attachments, { signal: abortController.signal }),
+            runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(
+              contextPacket ? composeWorkShellTurnPromptFromPacket({ packet: contextPacket, userPrompt: prompt }) : prompt,
+              attachments,
+              { signal: abortController.signal },
+            ),
             publishContextBridge: this.publishContextBridge,
             writeScopedMemory: this.writeScopedMemory,
             listScopedMemoryLines: this.listScopedMemoryLines,
@@ -982,6 +1036,7 @@ export class WorkShellEngine<
       onExit: this.onExit,
       openSessionsPanel: () => this.openSessionsPanel(),
       reloadContextState: () => this.reloadContextState(),
+      refreshContextPacket: () => this.refreshContextPacket(),
       queuedCount: () => this.queuedCountCache,
       queuedItems: () => this.listQueuedSubmits(),
       clearQueuedItems: () => this.clearQueuedSubmits(),
@@ -1064,6 +1119,7 @@ export class WorkShellEngine<
       summary,
       traceMode,
       reasoningEffort: overrideReasoningEffort,
+      entries: this.state.entries,
     }));
   }
 
@@ -1167,6 +1223,26 @@ export class WorkShellEngine<
       memoryLines: contextState.memoryLines,
       panel: contextState.panel,
     });
+    await this.refreshContextPacket();
+  }
+
+  private async refreshContextPacket(): Promise<ContextPacketView | undefined> {
+    if (!this.resolveContextPacket) {
+      return this.state.contextPacket;
+    }
+    const packet = await this.resolveContextPacket({
+      cwd: this.options.cwd,
+      sessionId: this.sessionId,
+      contextSummaryLines: this.currentContextSummaryLines,
+      bridgeLines: this.state.bridgeLines,
+      memoryLines: this.state.memoryLines,
+      traceLines: this.state.traceLines,
+    });
+    this.setState({
+      contextPacket: packet,
+      contextIndicator: formatWorkShellContextPacketIndicator(packet),
+    });
+    return packet;
   }
 
   private pushTraceLine(line: string, preservePanel = false): void {

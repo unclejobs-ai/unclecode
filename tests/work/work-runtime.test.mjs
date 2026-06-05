@@ -112,6 +112,31 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
       }),
       "utf8",
     );
+    const omoSessionDir = path.join(workspaceRoot, ".omo", "ulw-loop", "active-context");
+    mkdirSync(path.join(omoSessionDir, "evidence"), { recursive: true });
+    writeFileSync(
+      path.join(omoSessionDir, "goals.json"),
+      JSON.stringify({
+        activeGoalId: "G001-context",
+        goals: [
+          {
+            id: "G001-context",
+            title: "Ship context packet MVP",
+            status: "in_progress",
+            successCriteria: [
+              {
+                id: "C001",
+                scenario: "packet inspector uses sanitized OMO state",
+                status: "pending",
+              },
+            ],
+          },
+        ],
+      }),
+      "utf8",
+    );
+    writeFileSync(path.join(omoSessionDir, "ledger.jsonl"), "RAW_LEDGER_SENTINEL_DO_NOT_SHOW\n", "utf8");
+    writeFileSync(path.join(omoSessionDir, "evidence", "C001.txt"), "RAW_EVIDENCE_SENTINEL_DO_NOT_SHOW\n", "utf8");
 
     process.env = {
       ...originalEnv,
@@ -132,6 +157,21 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
     assert.equal(result.options.cwd, workspaceRoot);
     assert.equal(result.options.browserOAuthAvailable, false);
     assert.equal(typeof result.agent.runTurn, "function");
+    assert.equal(typeof result.options.resolveContextPacket, "function");
+
+    const packet = await result.options.resolveContextPacket({
+      cwd: workspaceRoot,
+      sessionId: "work-test",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      bridgeLines: ["bridge ready"],
+      memoryLines: ["memory ready"],
+      traceLines: ["trace ready"],
+    });
+
+    assert.ok(packet.included.some((item) => item.category === "omo" && /G001-context/.test(item.label)));
+    assert.ok(packet.excluded.some((item) => item.category === "omo" && /ledger\.jsonl/.test(item.label)));
+    assert.doesNotMatch(JSON.stringify(packet), /RAW_LEDGER_SENTINEL_DO_NOT_SHOW/);
+    assert.doesNotMatch(JSON.stringify(packet), /RAW_EVIDENCE_SENTINEL_DO_NOT_SHOW/);
   } finally {
     process.env = originalEnv;
     rmSync(workspaceRoot, { recursive: true, force: true });
@@ -238,6 +278,10 @@ test("loadWorkCliBootstrap reuses resumed reasoning overrides unless the CLI ove
       state: "idle",
       summary: "Chat: inspect repo",
       reasoningEffort: "low",
+      entries: [
+        { role: "user", text: "inspect repo" },
+        { role: "assistant", text: "repo inspected" },
+      ],
     });
 
     process.env = {
@@ -255,6 +299,11 @@ test("loadWorkCliBootstrap reuses resumed reasoning overrides unless the CLI ove
     });
     assert.equal(resumed.options.reasoning.effort, "low");
     assert.equal(resumed.options.reasoning.source, "override");
+    assert.deepEqual(resumed.options.initialEntries, [
+      { role: "user", text: "inspect repo" },
+      { role: "assistant", text: "repo inspected" },
+    ]);
+    assert.equal(resumed.options.initialSessionSummary, "Chat: inspect repo");
 
     const overridden = await loadWorkCliBootstrap({
       argv: ["--cwd", workspaceRoot, "--session-id", "work-session-77", "--reasoning", "high"],

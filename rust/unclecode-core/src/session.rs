@@ -3,9 +3,14 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::redaction::redact_secrets;
 use crate::session_listing::{parse_session_list_item, parse_session_resume_summary};
 pub use crate::session_listing::{SessionListItem, SessionResumeSummary};
 use crate::sha256::sha256_hex;
+use serde_json::{json, Value};
+
+const MAX_RESUME_ENTRIES: usize = 24;
+const MAX_RESUME_ENTRY_CHARS: usize = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEvent {
@@ -20,6 +25,12 @@ pub struct SessionLog {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkShellTranscriptEntry {
+    pub role: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkShellSessionSnapshot {
     pub session_id: String,
     pub project_path: String,
@@ -29,6 +40,7 @@ pub struct WorkShellSessionSnapshot {
     pub summary: String,
     pub trace_mode: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub entries: Vec<WorkShellTranscriptEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +56,8 @@ pub struct WorkShellResume {
     pub session_id: String,
     pub trace_mode: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub summary: String,
+    pub entries: Vec<WorkShellTranscriptEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -201,15 +215,57 @@ impl WorkShellSessionStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        let Some(parsed_session_id) = extract_json_string(&raw, "sessionId") else {
+        let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
             return Ok(None);
         };
+        let Some(parsed_session_id) = parsed
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return Ok(None);
+        };
+        let trace_mode = parsed
+            .get("metadata")
+            .and_then(|value| value.get("traceMode"))
+            .and_then(Value::as_str)
+            .filter(|value| *value == "minimal" || *value == "verbose")
+            .map(str::to_string);
+        let reasoning_effort = parsed
+            .get("metadata")
+            .and_then(|value| value.get("reasoningEffort"))
+            .and_then(Value::as_str)
+            .filter(|value| *value == "low" || *value == "medium" || *value == "high")
+            .map(str::to_string);
+        let summary = parsed
+            .get("taskSummary")
+            .and_then(|value| value.get("summary"))
+            .and_then(Value::as_str)
+            .unwrap_or("none")
+            .to_string();
+        let entries = parsed
+            .get("entries")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|entry| {
+                        let role = entry.get("role").and_then(Value::as_str)?;
+                        let text = entry.get("text").and_then(Value::as_str)?;
+                        Some(WorkShellTranscriptEntry {
+                            role: role.to_string(),
+                            text: text.to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         Ok(Some(WorkShellResume {
             session_id: parsed_session_id,
-            trace_mode: extract_json_string(&raw, "traceMode")
-                .filter(|value| value == "minimal" || value == "verbose"),
-            reasoning_effort: extract_json_string(&raw, "reasoningEffort")
-                .filter(|value| value == "low" || value == "medium" || value == "high"),
+            trace_mode,
+            reasoning_effort,
+            summary,
+            entries,
         }))
     }
 
@@ -226,6 +282,203 @@ impl WorkShellSessionStore {
         };
         Ok(parse_session_resume_summary(&raw, session_id))
     }
+}
+
+pub fn persist_work_shell_session_snapshot_json(
+    store: &WorkShellSessionStore,
+    project_path: &Path,
+    payload: &str,
+) -> Result<String, String> {
+    let parsed = serde_json::from_str::<Value>(payload)
+        .map_err(|error| format!("Invalid session persist JSON: {error}"))?;
+    let session_id = required_string_field(&parsed, "sessionId", SESSION_PERSIST_JSON_USAGE)?;
+    let model = required_string_field(&parsed, "model", SESSION_PERSIST_JSON_USAGE)?;
+    let mode = required_string_field(&parsed, "mode", SESSION_PERSIST_JSON_USAGE)?;
+    let state = required_string_field(&parsed, "state", SESSION_PERSIST_JSON_USAGE)?;
+    let summary = required_string_field(&parsed, "summary", SESSION_PERSIST_JSON_USAGE)?;
+    let trace_mode = parsed
+        .get("traceMode")
+        .and_then(Value::as_str)
+        .filter(|value| *value == "minimal" || *value == "verbose")
+        .map(str::to_string);
+    let reasoning_effort = parsed
+        .get("reasoningEffort")
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "low" | "medium" | "high"))
+        .map(str::to_string);
+    let entries = parsed
+        .get("entries")
+        .and_then(Value::as_array)
+        .map(|items| parse_transcript_entries(items))
+        .unwrap_or_default();
+
+    store
+        .persist_work_shell_snapshot(&WorkShellSessionSnapshot {
+            session_id: session_id.to_string(),
+            project_path: project_path.to_string_lossy().to_string(),
+            model: model.to_string(),
+            mode: mode.to_string(),
+            state: state.to_string(),
+            summary: summary.to_string(),
+            trace_mode,
+            reasoning_effort,
+            entries,
+        })
+        .map_err(|error| format!("Failed to persist session snapshot: {error}"))?;
+    Ok(session_id.to_string())
+}
+
+pub fn resume_work_shell_session_json(
+    store: &WorkShellSessionStore,
+    project_path: &Path,
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    let Some(resumed) = store
+        .resume_work_shell_session(project_path, session_id)
+        .map_err(|error| format!("Failed to resume session: {error}"))?
+    else {
+        return Ok(None);
+    };
+    serde_json::to_string(&json!({
+        "sessionId": resumed.session_id,
+        "traceMode": resumed.trace_mode,
+        "reasoningEffort": resumed.reasoning_effort,
+        "contextLine": format!("Resumed session: {session_id}"),
+        "initialSessionSummary": resumed.summary,
+        "initialEntries": resumed
+            .entries
+            .into_iter()
+            .map(|entry| json!({ "role": entry.role, "text": entry.text }))
+            .collect::<Vec<_>>(),
+    }))
+    .map(Some)
+    .map_err(|error| format!("Failed to serialize resumed session: {error}"))
+}
+
+const SESSION_PERSIST_JSON_USAGE: &str =
+    "Usage: unclecode rust session persist-json (stdin JSON must include sessionId, model, mode, state, summary)";
+
+fn required_string_field<'a>(
+    value: &'a Value,
+    field: &str,
+    usage: &'static str,
+) -> Result<&'a str, String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or(usage.to_string())
+}
+
+fn parse_transcript_entries(items: &[Value]) -> Vec<WorkShellTranscriptEntry> {
+    items
+        .iter()
+        .filter_map(|entry| {
+            let role = entry.get("role").and_then(Value::as_str)?;
+            if !is_resume_entry_role(role) {
+                return None;
+            }
+            let text = entry.get("text").and_then(Value::as_str)?;
+            Some(WorkShellTranscriptEntry {
+                role: role.to_string(),
+                text: minimize_resume_entry_text(text),
+            })
+        })
+        .collect()
+}
+
+fn is_resume_entry_role(role: &str) -> bool {
+    matches!(role, "user" | "assistant")
+}
+
+fn minimize_resume_entries(entries: &[WorkShellTranscriptEntry]) -> Vec<WorkShellTranscriptEntry> {
+    let slice = if entries.len() > MAX_RESUME_ENTRIES {
+        &entries[entries.len() - MAX_RESUME_ENTRIES..]
+    } else {
+        entries
+    };
+    slice
+        .iter()
+        .filter(|entry| is_resume_entry_role(&entry.role))
+        .map(|entry| WorkShellTranscriptEntry {
+            role: entry.role.clone(),
+            text: minimize_resume_entry_text(&entry.text),
+        })
+        .collect()
+}
+
+fn minimize_resume_entry_text(text: &str) -> String {
+    let redacted = redact_resume_secrets(&redact_secrets(text).replace('\0', "\u{FFFD}"));
+    let without_reference_bodies = strip_reference_body_lines(&redacted);
+    truncate_chars(&without_reference_bodies, MAX_RESUME_ENTRY_CHARS)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut iter = value.chars();
+    let truncated = iter.by_ref().take(max_chars).collect::<String>();
+    if iter.next().is_some() {
+        format!("{truncated}... [truncated]")
+    } else {
+        truncated
+    }
+}
+
+fn strip_reference_body_lines(value: &str) -> String {
+    let has_reference = value
+        .lines()
+        .any(|line| is_reference_summary_line(line.trim()));
+    if !has_reference {
+        return value.to_string();
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut seen_reference = false;
+    for raw_line in value.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if is_reference_summary_line(line) {
+            seen_reference = true;
+            if !lines
+                .iter()
+                .any(|existing: &String| existing.as_str() == line)
+            {
+                lines.push(line.to_string());
+            }
+            continue;
+        }
+        if !seen_reference {
+            lines.push(line.to_string());
+        }
+    }
+    lines.join("\n")
+}
+
+fn is_reference_summary_line(line: &str) -> bool {
+    line.starts_with("Referenced file:") || line.starts_with("Referenced directory:")
+}
+
+fn redact_resume_secrets(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(index) = rest.find("sk-") {
+        let (before, after_prefix) = rest.split_at(index);
+        out.push_str(before);
+        let token_len = after_prefix
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if token_len >= 8 {
+            out.push_str("[REDACTED]");
+            rest = &after_prefix[token_len..];
+        } else {
+            out.push_str("sk-");
+            rest = &after_prefix[3..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -362,33 +615,40 @@ fn build_checkpoint_json(
     event_count: usize,
     updated_at: &str,
 ) -> String {
-    let trace = snapshot
-        .trace_mode
-        .as_ref()
-        .map(|trace_mode| format!(",\"traceMode\":\"{}\"", escape_json(trace_mode)))
-        .unwrap_or_default();
-    let reasoning = snapshot
-        .reasoning_effort
-        .as_ref()
-        .map(|reasoning_effort| {
-            format!(",\"reasoningEffort\":\"{}\"", escape_json(reasoning_effort))
-        })
-        .unwrap_or_default();
-    format!(
-        "{{\"sessionId\":\"{}\",\"projectPath\":\"{}\",\"eventCount\":{},\"updatedAt\":\"{}\",\"state\":\"{}\",\"metadata\":{{\"model\":\"{}\",\"taskSummary\":\"{}\",\"isUltraworkMode\":{}{}{}}},\"taskSummary\":{{\"summary\":\"{}\",\"timestamp\":\"{}\"}},\"mode\":\"normal\"}}",
-        escape_json(&snapshot.session_id),
-        escape_json(&snapshot.project_path),
-        event_count,
-        escape_json(updated_at),
-        escape_json(&snapshot.state),
-        escape_json(&snapshot.model),
-        escape_json(&snapshot.summary),
-        if snapshot.mode == "ultrawork" { "true" } else { "false" },
-        trace,
-        reasoning,
-        escape_json(&snapshot.summary),
-        escape_json(updated_at)
-    )
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("model".to_string(), json!(snapshot.model));
+    metadata.insert("taskSummary".to_string(), json!(snapshot.summary));
+    metadata.insert(
+        "isUltraworkMode".to_string(),
+        json!(snapshot.mode == "ultrawork"),
+    );
+    if let Some(trace_mode) = &snapshot.trace_mode {
+        metadata.insert("traceMode".to_string(), json!(trace_mode));
+    }
+    if let Some(reasoning_effort) = &snapshot.reasoning_effort {
+        metadata.insert("reasoningEffort".to_string(), json!(reasoning_effort));
+    }
+
+    let entries = minimize_resume_entries(&snapshot.entries);
+
+    serde_json::to_string(&json!({
+        "sessionId": snapshot.session_id,
+        "projectPath": snapshot.project_path,
+        "eventCount": event_count,
+        "updatedAt": updated_at,
+        "state": snapshot.state,
+        "metadata": metadata,
+        "taskSummary": {
+            "summary": snapshot.summary,
+            "timestamp": updated_at,
+        },
+        "mode": "normal",
+        "entries": entries
+            .into_iter()
+            .map(|entry| json!({ "role": entry.role, "text": entry.text }))
+            .collect::<Vec<_>>(),
+    }))
+    .unwrap_or_else(|_| "{}".to_string())
 }
 
 fn parse_session_line(raw: &str) -> Option<SessionLine> {
@@ -494,6 +754,16 @@ mod tests {
                 summary: "Chat: inspect repo".to_string(),
                 trace_mode: Some("verbose".to_string()),
                 reasoning_effort: Some("high".to_string()),
+                entries: vec![
+                    WorkShellTranscriptEntry {
+                        role: "user".to_string(),
+                        text: "inspect repo".to_string(),
+                    },
+                    WorkShellTranscriptEntry {
+                        role: "assistant".to_string(),
+                        text: "repo inspected".to_string(),
+                    },
+                ],
             })
             .expect("persist snapshot");
 
@@ -507,6 +777,70 @@ mod tests {
             .expect("resumed");
         assert_eq!(resumed.session_id, "work-session-1");
         assert_eq!(resumed.trace_mode, Some("verbose".to_string()));
+        assert_eq!(resumed.summary, "Chat: inspect repo");
+        assert_eq!(resumed.entries.len(), 2);
+        assert_eq!(resumed.entries[0].text, "inspect repo");
+        assert_eq!(resumed.entries[1].text, "repo inspected");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn work_shell_snapshot_minimizes_resume_entries_on_disk() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-minimize-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let project = env::current_dir().expect("cwd");
+        let store = WorkShellSessionStore::new(&root);
+        let secret = format!("sk-proj-{}", "a".repeat(30));
+        let long_text = format!(
+            "ask with secret {secret} {}",
+            "x".repeat(MAX_RESUME_ENTRY_CHARS + 50)
+        );
+        let mut entries = vec![WorkShellTranscriptEntry {
+            role: "ignored".to_string(),
+            text: "should not persist".to_string(),
+        }];
+        for index in 0..30 {
+            entries.push(WorkShellTranscriptEntry {
+                role: "user".to_string(),
+                text: format!("{index}: {long_text}"),
+            });
+        }
+
+        store
+            .persist_work_shell_snapshot(&WorkShellSessionSnapshot {
+                session_id: "work-session-minimized".to_string(),
+                project_path: project.to_string_lossy().to_string(),
+                model: "gpt-5.4".to_string(),
+                mode: "analyze".to_string(),
+                state: "idle".to_string(),
+                summary: "Chat: minimize".to_string(),
+                trace_mode: Some("minimal".to_string()),
+                reasoning_effort: None,
+                entries,
+            })
+            .expect("persist snapshot");
+
+        let paths = session_paths(&root, &project, "work-session-minimized");
+        let checkpoint = fs::read_to_string(paths.checkpoint_path).expect("checkpoint");
+        assert!(!checkpoint.contains(&secret));
+        assert!(!checkpoint.contains("should not persist"));
+        assert!(checkpoint.contains("[REDACTED]"));
+        assert!(checkpoint.contains("[truncated]"));
+
+        let resumed = store
+            .resume_work_shell_session(&project, "work-session-minimized")
+            .expect("resume")
+            .expect("resumed");
+        assert_eq!(resumed.entries.len(), MAX_RESUME_ENTRIES);
+        assert!(resumed.entries.iter().all(|entry| entry.role == "user"));
+        assert!(resumed
+            .entries
+            .iter()
+            .all(|entry| entry.text.len() <= MAX_RESUME_ENTRY_CHARS + 16));
 
         let _ = fs::remove_dir_all(root);
     }

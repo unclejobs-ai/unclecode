@@ -20,6 +20,14 @@ export { detectHotspots, summarizeDiff } from "./hotspot.js";
 export { assertFreshContext, checkFreshness } from "./freshness.js";
 export { assembleContextPacket, estimateTokens, getTokenBudget } from "./context-packet.js";
 export { prepareResearchBundle } from "./research-bundle.js";
+export {
+  buildContextPacketPreviewLines,
+  createContextPacketView,
+  formatContextPacketIndicator,
+  formatContextPacketPromptPrefix,
+} from "./context-packet-view.js";
+export type { OmoContextExcludedItem, OmoContextIncludedItem, OmoContextSnapshot } from "./omo-context.js";
+export { loadOmoContextSnapshot } from "./omo-context.js";
 export type { WorkspaceGuidance, WorkspaceGuidanceSkill } from "./workspace-guidance.js";
 export {
   clearCachedWorkspaceGuidance,

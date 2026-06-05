@@ -30,6 +30,7 @@ export function createWorkShellPaneRuntime<
 >(
   input: CreateWorkShellEngineInput<Attachment, Reasoning, TraceEvent>,
 ): WorkShellPaneRuntime<Attachment, Reasoning, TraceEvent> {
+  const engine = createWorkShellEngine(input);
   const slashOptions = {
     workspaceRoot: input.options.cwd,
     ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
@@ -42,15 +43,20 @@ export function createWorkShellPaneRuntime<
           }
         : {}
     ),
-    currentModel: input.options.model,
   };
 
   return {
-    engine: createWorkShellEngine(input),
+    engine,
     browserOAuthAvailable: Boolean(input.browserOAuthAvailable),
     getSuggestions: (value) =>
-      getWorkShellSlashSuggestions(value, slashOptions),
+      getWorkShellSlashSuggestions(value, {
+        ...slashOptions,
+        currentModel: engine.getState().model,
+      }),
     shouldBlockSlashSubmit: (line) =>
-      shouldBlockSlashSubmit(line, slashOptions),
+      shouldBlockSlashSubmit(line, {
+        ...slashOptions,
+        currentModel: engine.getState().model,
+      }),
   };
 }

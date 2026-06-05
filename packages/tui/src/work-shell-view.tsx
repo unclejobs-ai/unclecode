@@ -1,6 +1,9 @@
 import { Box, Text } from "ink";
 import React from "react";
-import { runRustCommandSync } from "@unclecode/orchestrator";
+import {
+  runRustCommandSync,
+  sanitizeWorkShellAssistantText,
+} from "@unclecode/orchestrator";
 
 import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
 
@@ -28,24 +31,24 @@ export type WorkShellEntryPresentation = {
 };
 
 const W = {
-  text: "#e7e5e4",
-  textMuted: "#a8a29e",
-  textDim: "#78716c",
-  border: "#44403c",
-  borderStrong: "#57534e",
+  text: "#e5eef7",
+  textMuted: "#94a3b8",
+  textDim: "#64748b",
+  border: "#334155",
+  borderStrong: "#475569",
   user: "#7dd3fc",
-  userBody: "#e0f2fe",
+  userBody: "#e2e8f0",
   userBadgeText: "#082f49",
-  userBadgeBg: "#38bdf8",
-  assistant: "#86efac",
-  assistantBody: "#dcfce7",
-  assistantBadgeText: "#052e16",
-  assistantBadgeBg: "#4ade80",
-  assistantMuted: "#9ca3af",
-  tool: "#fbbf24",
-  toolSurface: "#18261d",
+  userBadgeBg: "#bae6fd",
+  assistant: "#5eead4",
+  assistantBody: "#f8fafc",
+  assistantBadgeText: "#042f2e",
+  assistantBadgeBg: "#99f6e4",
+  assistantMuted: "#99f6e4",
+  tool: "#bef264",
+  toolSurface: "#13231a",
   toolAccent: "#bef264",
-  toolMuted: "#8b978d",
+  toolMuted: "#8ea38a",
   warning: "#facc15",
 } as const;
 
@@ -113,6 +116,32 @@ export function getWorkShellPanelDisplayMode(input: {
   readonly terminalColumns?: number;
 }): WorkShellPanelDisplayMode {
   return resolveWorkShellPanelLayout(input).displayMode;
+}
+
+const WORK_SHELL_CONTEXT_OVERLAY_LINE_LIMIT = 12;
+
+export function formatWorkShellOverlayPanelLines(input: {
+  readonly panelTitle: string;
+  readonly lines: readonly string[];
+}): readonly string[] {
+  if (
+    input.panelTitle !== "Context expanded" ||
+    input.lines.length <= WORK_SHELL_CONTEXT_OVERLAY_LINE_LIMIT
+  ) {
+    return input.lines;
+  }
+  const visibleLines = input.lines.slice(0, WORK_SHELL_CONTEXT_OVERLAY_LINE_LIMIT);
+  return [
+    ...visibleLines,
+    `- ${input.lines.length - visibleLines.length} more context lines hidden; /context refreshes the packet inspector.`,
+  ];
+}
+
+export function shouldHideWorkShellOverlayForInput(input: {
+  readonly panelTitle: string;
+  readonly inputValue: string;
+}): boolean {
+  return input.panelTitle === "Context expanded" && input.inputValue.trim().length > 0;
 }
 
 export function getWorkShellPanelPlacement(input: {
@@ -271,6 +300,10 @@ export function normalizeMarkdownDisplayText(value: string): string {
   const normalized = runRustUxText("normalize-markdown", value);
   rustMarkdownDisplayCache.set(value, normalized);
   return normalized;
+}
+
+export function formatWorkShellAssistantDisplayText(value: string): string {
+  return sanitizeWorkShellAssistantText(value);
 }
 
 export function formatWorkShellStatusLine(input: {
@@ -520,7 +553,7 @@ export function formatWorkShellConversationEntryLines(input: {
 }): readonly string[] {
   const presentation = getWorkShellEntryPresentation(input.role);
   const bodyText = input.role === "assistant"
-    ? normalizeMarkdownDisplayText(input.text)
+    ? normalizeMarkdownDisplayText(formatWorkShellAssistantDisplayText(input.text))
     : input.text;
 
   if (input.role === "assistant") {
@@ -537,7 +570,10 @@ export function formatWorkShellConversationEntryLines(input: {
 }
 
 export function shouldShowWorkShellConversationEntry(entry: WorkShellEntry): boolean {
-  return entry.role !== "tool";
+  return entry.role !== "tool" && (
+    entry.role !== "assistant" ||
+    formatWorkShellAssistantDisplayText(entry.text).trim().length > 0
+  );
 }
 
 export function formatWorkShellHeaderLine(input: {
@@ -582,6 +618,7 @@ export function formatWorkShellFooterLine(input: {
   readonly reasoningLabel: string;
   readonly mode: string;
   readonly authLabel: string;
+  readonly contextIndicator?: string;
   readonly composerHint?: string;
   readonly width?: number;
 }): string {
@@ -635,12 +672,14 @@ function renderWorkShellEntryBlock(input: {
 }): React.ReactNode {
   const presentation = getWorkShellEntryPresentation(input.entry.role);
   const bodyText = input.entry.role === "assistant"
-    ? normalizeMarkdownDisplayText(input.entry.text)
+    ? normalizeMarkdownDisplayText(formatWorkShellAssistantDisplayText(input.entry.text))
     : input.entry.text;
 
   if (input.entry.role === "user") {
     const lines = wrapDisplayText(bodyText, Math.max(20, input.width - 8));
     const renderedLines = lines.length > 0 ? lines : [""];
+    const labelBackgroundColor = presentation.labelBackgroundColor ?? W.userBadgeBg;
+    const labelTextColor = presentation.labelTextColor ?? W.userBadgeText;
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
@@ -648,16 +687,15 @@ function renderWorkShellEntryBlock(input: {
         paddingLeft={1}
         flexDirection="column"
       >
+        <Text>
+          <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
+            {" "}{presentation.badge} {presentation.label}{" "}
+          </Text>
+          <Text color={W.textDim}>  next-call input</Text>
+        </Text>
         {renderedLines.map((line, lineIndex) => (
           <Text key={`user-${String(input.index)}-${String(lineIndex)}`}>
-            {lineIndex === 0 ? (
-              <>
-                <Text bold color={presentation.labelColor}>{presentation.badge} {presentation.label}</Text>
-                <Text color={W.textDim}> · </Text>
-              </>
-            ) : (
-              <Text color={W.textDim}>{"        "}</Text>
-            )}
+            <Text color={lineIndex === 0 ? presentation.railColor : W.textDim}>▌ </Text>
             <Text color={presentation.bodyColor}>{line}</Text>
           </Text>
         ))}
@@ -666,17 +704,27 @@ function renderWorkShellEntryBlock(input: {
   }
 
   if (input.entry.role === "assistant") {
+    const labelBackgroundColor = presentation.labelBackgroundColor ?? W.assistantBadgeBg;
+    const labelTextColor = presentation.labelTextColor ?? W.assistantBadgeText;
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
         marginBottom={1}
-        paddingLeft={1}
+        borderStyle="round"
+        borderColor={presentation.borderColor}
+        paddingX={1}
         flexDirection="column"
       >
-        <Text bold color={W.assistantMuted}>{presentation.badge} {presentation.label}</Text>
-        <Box marginTop={1} paddingLeft={1} flexDirection="column">
+        <Text>
+          <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
+            {" "}{presentation.badge} {presentation.label}{" "}
+          </Text>
+          <Text color={W.textDim}>  context-aware reply</Text>
+        </Text>
+        <Box marginTop={1} flexDirection="column">
           {wrapDisplayText(bodyText, Math.max(20, input.width - 4)).map((line, lineIndex) => (
             <Text key={`assistant-${String(input.index)}-${String(lineIndex)}`} color={presentation.bodyColor}>
+              <Text color={lineIndex === 0 ? presentation.railColor : W.textDim}>▌ </Text>
               {line}
             </Text>
           ))}
@@ -691,10 +739,10 @@ function renderWorkShellEntryBlock(input: {
       <Box
         key={`${input.entry.role}-${input.index}`}
         marginBottom={1}
-        paddingLeft={1}
+        paddingLeft={2}
         flexDirection="column"
       >
-        <Text bold color={W.toolAccent}>{presentation.label}</Text>
+        <Text bold color={W.toolAccent}>{presentation.badge} {presentation.label}</Text>
         <Box marginTop={lines.length > 0 ? 1 : 0} paddingLeft={1} flexDirection="column">
           {lines.map((line, lineIndex) => (
             <Text key={`tool-${String(input.index)}-${String(lineIndex)}`} color={W.text}>
@@ -825,12 +873,15 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
 }) {
   const line = formatWorkShellHeaderLine({
     providerTitle: formatWorkShellProviderTitle(props.provider),
-    headerHint: props.headerHint ?? "Ctrl+C cancel/exit · Ctrl+O sessions · / commands",
+    headerHint: props.headerHint ?? "context cockpit · Ctrl+O context · / commands",
     ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
   });
 
   return (
-    <Text color={W.text}>{line}</Text>
+    <Box flexDirection="column">
+      <Text color={W.text}>{line}</Text>
+      <Text color={W.border}>{"▔".repeat(Math.max(24, Math.min(72, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4)))}</Text>
+    </Box>
   );
 });
 
@@ -884,18 +935,15 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   }, [props.isBusy, props.currentTurnStartedAt]);
 
   return (
-    <Box marginTop={1} flexDirection="column">
-      <WorkShellSectionDivider
-        label="session"
-        accentColor={W.textMuted}
-        width={getWorkShellDividerWidth({
-          ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
-        })}
-      />
-      <Box marginTop={1} paddingLeft={1} flexDirection="column">
-        <Text bold color={props.reasoningSupported ? W.user : W.warning}>{thinkingLine}</Text>
-        <Text color={W.text}>{statusLine}</Text>
-        <Text color={props.isBusy ? W.assistant : W.textMuted}>{usageLine}</Text>
+    <Box marginTop={1} borderStyle="round" borderColor={props.isBusy ? W.assistant : W.border} paddingX={1} flexDirection="column">
+      <Text>
+        <Text color={W.assistant} bold>Context cockpit</Text>
+        <Text color={W.textDim}> · session state</Text>
+      </Text>
+      <Box marginTop={1} flexDirection="column">
+        <Text bold color={props.reasoningSupported ? W.user : W.warning}>◇ {thinkingLine}</Text>
+        <Text color={W.text}>◇ {statusLine}</Text>
+        <Text color={props.isBusy ? W.assistant : W.textMuted}>◈ {usageLine}</Text>
       </Box>
     </Box>
   );
@@ -910,6 +958,7 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   readonly reasoningLabel: string;
   readonly mode: string;
   readonly authLabel: string;
+  readonly contextIndicator?: string;
   readonly terminalColumns?: number;
   readonly attachmentCount?: number;
 }) {
@@ -920,6 +969,7 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
     reasoningLabel: props.reasoningLabel,
     mode: props.mode,
     authLabel: props.authLabel,
+    ...(props.contextIndicator ? { contextIndicator: props.contextIndicator } : {}),
     ...(props.composerHint ? { composerHint: props.composerHint } : {}),
     width: dockWidth,
   });
@@ -929,12 +979,12 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
     footerLine,
     ...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {}),
   });
-  const accent = dockLayout.accentColorRole === "user" ? W.user : W.borderStrong;
+  const accent = dockLayout.accentColorRole === "user" ? W.assistant : W.borderStrong;
   const badgeColor = dockLayout.attachmentBadgeColorRole === "warning" ? W.warning : W.textDim;
 
   return (
     <Box marginTop={1} flexDirection="column">
-      <Text color={accent}>{dockLayout.topDivider}</Text>
+      <Text color={accent}>▌ prompt deck <Text color={W.border}>{dockLayout.topDivider.slice(Math.min(14, dockLayout.topDivider.length))}</Text></Text>
       <Box minHeight={1} paddingLeft={1}>
         <Text backgroundColor={accent} color={W.text}>{" "}</Text>
         <Text color={W.textMuted}>{" "}</Text>
@@ -943,7 +993,7 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
           <Text color={badgeColor}> [{props.attachmentCount}/5]</Text>
         ) : null}
       </Box>
-      <Text color={W.border}>{dockLayout.bottomDivider}</Text>
+      <Text color={W.border}>▔{dockLayout.bottomDivider.slice(1)}</Text>
       <Text color={W.textDim}>{dockLayout.footerLine}</Text>
     </Box>
   );
@@ -956,6 +1006,7 @@ export function WorkShellView(props: {
   readonly reasoningSupported: boolean;
   readonly mode: string;
   readonly authLabel: string;
+  readonly contextIndicator?: string;
   readonly entries: readonly WorkShellEntry[];
   readonly streamingAssistantText?: string;
   readonly isBusy: boolean;
@@ -984,6 +1035,14 @@ export function WorkShellView(props: {
   });
   const panelPlacement = panelDisplayMode === "side" ? "side" : "bottom";
   const hasComposerInput = props.inputValue.trim().length > 0;
+  const overlayLines = formatWorkShellOverlayPanelLines({
+    panelTitle: props.activePanel.title,
+    lines: props.activePanel.lines,
+  });
+  const shouldSuppressOverlayForInput = shouldHideWorkShellOverlayForInput({
+    panelTitle: props.activePanel.title,
+    inputValue: props.inputValue,
+  });
   const shouldSuppressPassivePanel =
     panelDisplayMode === "bottom" &&
     props.activePanel.title === "Session status" &&
@@ -1048,6 +1107,7 @@ export function WorkShellView(props: {
         reasoningLabel={props.reasoningLabel}
         mode={props.mode}
         authLabel={props.authLabel}
+        {...(props.contextIndicator ? { contextIndicator: props.contextIndicator } : {})}
         {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
         {...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {})}
       />
@@ -1057,7 +1117,7 @@ export function WorkShellView(props: {
             {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
           />
         : null}
-      {panelDisplayMode === "overlay" ? (
+      {panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput ? (
         <Box marginTop={1} borderStyle="round" borderColor={panelBorderColor} paddingX={1} flexDirection="column">
           <WorkShellSectionDivider
             label={props.activePanel.title}
@@ -1069,7 +1129,7 @@ export function WorkShellView(props: {
           />
           <Text color={W.textMuted}>Esc closes · /context refreshes</Text>
           <Box marginTop={1} flexDirection="column">
-            {props.activePanel.lines.map((line, index) => renderWorkShellPanelLine(line, index))}
+            {overlayLines.map((line, index) => renderWorkShellPanelLine(line, index))}
           </Box>
         </Box>
       ) : panelDisplayMode === "bottom" && !shouldSuppressPassivePanel ? (

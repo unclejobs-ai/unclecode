@@ -1,8 +1,18 @@
+import { createHash } from "node:crypto";
+
 import { explainUncleCodeConfig } from "@unclecode/config-core";
 import {
   clearCachedWorkspaceGuidance,
+  createContextPacketView,
   loadCachedWorkspaceGuidance,
+  loadOmoContextSnapshot,
 } from "@unclecode/context-broker";
+import type {
+  ContextPacketSourceCategory,
+  ContextPacketView,
+  ContextPacketViewItem,
+  ContextPacketViewWarning,
+} from "@unclecode/contracts";
 import {
   clearExtensionRegistryCache,
   loadConfig,
@@ -96,6 +106,113 @@ async function buildWorkShellContextSummary(input: {
         : `Loaded extension: ${extension.name}`;
     }),
   ];
+}
+
+function estimateTokens(value: string): number {
+  return Math.ceil(value.length / 4);
+}
+
+function buildContextLineItems(input: {
+  readonly lines: readonly string[];
+  readonly category: ContextPacketSourceCategory;
+  readonly idPrefix: string;
+  readonly reason: string;
+}): readonly ContextPacketViewItem[] {
+  return input.lines.map((line, index) => ({
+    id: `${input.idPrefix}-${index + 1}`,
+    category: input.category,
+    label: line,
+    reason: input.reason,
+    preview: line,
+    tokenEstimate: estimateTokens(line),
+  }));
+}
+
+function createPacketId(input: {
+  readonly sessionId: string;
+  readonly included: readonly ContextPacketViewItem[];
+  readonly excluded: readonly ContextPacketViewItem[];
+  readonly warnings: readonly ContextPacketViewWarning[];
+}): string {
+  const hash = createHash("sha256")
+    .update(JSON.stringify(input))
+    .digest("hex")
+    .slice(0, 12);
+  return `packet-${hash}`;
+}
+
+function createWorkShellContextPacketResolver(): StartReplOptions["resolveContextPacket"] {
+  return async (input): Promise<ContextPacketView> => {
+    const omo = await loadOmoContextSnapshot(input.cwd);
+    const included: ContextPacketViewItem[] = [
+      ...buildContextLineItems({
+        lines: input.contextSummaryLines,
+        category: "workspace",
+        idPrefix: "workspace-context",
+        reason: "loaded workspace guidance",
+      }),
+      ...buildContextLineItems({
+        lines: input.bridgeLines,
+        category: "bridge",
+        idPrefix: "context-bridge",
+        reason: "project context bridge",
+      }),
+      ...buildContextLineItems({
+        lines: input.memoryLines,
+        category: "memory",
+        idPrefix: "context-memory",
+        reason: "scoped memory",
+      }),
+      ...buildContextLineItems({
+        lines: input.traceLines,
+        category: "runtime",
+        idPrefix: "runtime-trace",
+        reason: "live work-shell trace",
+      }),
+      ...omo.included.map((item): ContextPacketViewItem => ({
+        id: item.kind === "omo-goal"
+          ? `omo-goal-${item.sessionId}-${item.goalId}`
+          : `omo-criterion-${item.sessionId}-${item.goalId}-${item.criterionId}`,
+        category: "omo",
+        label: item.kind === "omo-goal"
+          ? `${item.goalId} · ${item.status}`
+          : `${item.goalId}/${item.criterionId} · ${item.status}`,
+        reason: item.kind === "omo-goal" ? "active OMO goal context" : "OMO success criterion context",
+        preview: item.summary,
+        tokenEstimate: estimateTokens(item.summary),
+      })),
+    ];
+    const excluded: ContextPacketViewItem[] = omo.excluded.map((item, index) => ({
+      id: `omo-excluded-${index + 1}`,
+      category: "omo",
+      label: item.path,
+      reason: item.reason,
+    }));
+    const warnings: ContextPacketViewWarning[] = omo.warnings.map((message, index) => ({
+      code: `omo.warning.${index + 1}`,
+      message,
+      severity: "warning",
+    }));
+    const id = createPacketId({
+      sessionId: input.sessionId,
+      included,
+      excluded,
+      warnings,
+    });
+
+    return createContextPacketView({
+      id,
+      generatedAt: new Date().toISOString(),
+      title: "Next model-call packet",
+      included,
+      excluded,
+      warnings,
+      preview: [
+        `Packet ${id} will prefix the next provider call.`,
+        "Included items are summarized context sources; raw OMO audit artifacts stay excluded.",
+      ],
+    });
+  };
 }
 
 export async function loadWorkCliBootstrap(
@@ -236,6 +353,12 @@ export async function loadWorkCliBootstrap(
       ...(resumedSession?.initialTraceMode
         ? { initialTraceMode: resumedSession.initialTraceMode }
         : {}),
+      ...(resumedSession?.initialEntries
+        ? { initialEntries: resumedSession.initialEntries }
+        : {}),
+      ...(resumedSession?.initialSessionSummary
+        ? { initialSessionSummary: resumedSession.initialSessionSummary }
+        : {}),
       reloadWorkspaceContext: async (workspaceRoot: string) =>
         buildWorkShellContextSummary({
           cwd: workspaceRoot,
@@ -246,6 +369,7 @@ export async function loadWorkCliBootstrap(
             : {}),
           forceRefresh: true,
         }),
+      resolveContextPacket: createWorkShellContextPacketResolver(),
       refreshHomeState,
       refreshAuthState,
       browserOAuthAvailable,

@@ -13,6 +13,7 @@ export type WorkShellInputAction =
   | { readonly type: "cycle-mode"; readonly nextMode: WorkShellCycleMode }
   | { readonly type: "cancel-sensitive-input" }
   | { readonly type: "interrupt-turn" }
+  | { readonly type: "clear-input" }
   | { readonly type: "close-overlay" }
   | { readonly type: "open-sessions-view" }
   | { readonly type: "open-engine-sessions" };
@@ -42,6 +43,7 @@ export function resolveWorkShellInputAction(input: {
   readonly hasSensitiveInput?: boolean;
   readonly hasOverlayOpen?: boolean;
   readonly hasSlashPicker?: boolean;
+  readonly escapeResetArmed?: boolean;
 }): WorkShellInputAction {
   if (!input.key.ctrl && !input.key.tab && !input.key.upArrow && !input.key.downArrow && !input.key.escape) {
     return { type: "none" };

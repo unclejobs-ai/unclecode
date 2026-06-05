@@ -1161,6 +1161,14 @@ test("obsolete root cli compatibility surfaces are removed after app/package sea
   assert.match(runtimeSource, /export async function startRepl\(/);
   assert.match(
     runtimeSource,
+    /createEmbeddedWorkPaneController<\s*TuiShellHomeState\s*>\(\{[\s\S]*loadSnapshot:[\s\S]*loadWorkShellDashboardProps\([\s\S]*withWorkSessionCwd\(forwardedArgs,\s*session\.options\.cwd\)/,
+  );
+  assert.match(
+    runtimeSource,
+    /renderEmbeddedWorkShellPaneDashboard\(\{[\s\S]*\.\.\.initialProps[\s\S]*\.\.\.\(embeddedWorkPane\s*\?\?\s*\{\}\)/,
+  );
+  assert.match(
+    runtimeSource,
     /export\s+const\s+resolveWorkShellInlineCommand\s*=|export\s+async\s+function\s+resolveWorkShellInlineCommand\(/,
   );
 });

@@ -139,6 +139,9 @@ export function createWorkShellEngine<
     ...(input.reloadWorkspaceContext
       ? { reloadWorkspaceContext: input.reloadWorkspaceContext }
       : {}),
+    ...(input.resolveContextPacket
+      ? { resolveContextPacket: input.resolveContextPacket }
+      : {}),
     ...(input.toolLines ? { toolLines: input.toolLines } : {}),
     ...(input.extractAuthLabel
       ? { extractAuthLabel: input.extractAuthLabel }

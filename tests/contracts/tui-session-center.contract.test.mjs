@@ -13,6 +13,7 @@ import {
   buildMcpInspectorLines,
   buildResearchInspectorLines,
   buildSessionCenterStatusLine,
+  buildWorkflowStatusSummary,
   createApprovalRequestForAction,
   createSessionCenterFocusForView,
   createSessionCenterModel,
@@ -179,7 +180,7 @@ test("formatSessionHeadline prefers task summaries over raw ids and recognizes s
       model: "research-local",
       taskSummary: null,
     }),
-    "Research session",
+    "Context brief session",
   );
 
   assert.equal(
@@ -686,7 +687,7 @@ test("isSessionCenterImplicitSubmitInput recognizes Ink empty Enter events", () 
   assert.equal(isSessionCenterImplicitSubmitInput("x", {}), false);
 });
 
-test("buildResearchInspectorLines shows the page-native research draft state", () => {
+test("buildResearchInspectorLines shows Context Brief purpose", () => {
   const closed = buildResearchInspectorLines({
     latestResearchSessionId: null,
     latestResearchSummary: null,
@@ -696,13 +697,20 @@ test("buildResearchInspectorLines shows the page-native research draft state", (
     researchDraft: "",
     isDraftOpen: false,
   });
-  assert.ok(closed.some((line) => line.text === "Press R to write a prompt"));
-  assert.ok(closed.some((line) => line.text === "Research = workspace brief"));
+  assert.ok(closed.some((line) => line.text === "Press N to draft a context brief"));
+  assert.ok(closed.some((line) => line.text === "Context Briefs shape the next packet"));
   assert.ok(
     closed.some(
       (line) =>
         line.text ===
-        "Use before Work to gather repo context without changing code.",
+        "Scans local code, session history, and OMO evidence into a reusable brief.",
+    ),
+  );
+  assert.ok(
+    closed.some(
+      (line) =>
+        line.text ===
+        "Use before Work to shape the next context packet without changing code.",
     ),
   );
 
@@ -716,7 +724,7 @@ test("buildResearchInspectorLines shows the page-native research draft state", (
         sessionId: "research-123",
         prompt: "audit MCP workflow",
         status: "completed",
-        summary: "Prepared a local research bundle",
+        summary: "Prepared a context brief",
         timestamp: "2026-06-01T00:00:00.000Z",
       },
     ],
@@ -724,16 +732,27 @@ test("buildResearchInspectorLines shows the page-native research draft state", (
     researchDraft: "audit MCP workflow",
     isDraftOpen: true,
   });
-  assert.ok(open.some((line) => line.text === "Research = workspace brief"));
+  assert.ok(open.some((line) => line.text === "Context Briefs shape the next packet"));
   assert.ok(open.some((line) => line.text === "Prompt draft"));
   assert.ok(open.some((line) => line.text === "audit MCP workflow"));
   assert.ok(
     open.some((line) => line.text === "Enter or Ctrl+R runs · Esc cancels"),
   );
-  assert.ok(open.some((line) => line.text === "Selected research"));
-  assert.ok(open.some((line) => line.text === "Recent research"));
+  assert.ok(open.some((line) => line.text === "Selected brief"));
+  assert.ok(open.some((line) => line.text === "Recent briefs"));
   assert.ok(open.some((line) => line.text === "done · audit MCP workflow"));
   assert.ok(open.some((line) => line.text === "unclecode resume research-123"));
+});
+
+test("buildWorkflowStatusSummary advertises context briefs instead of research", () => {
+  const summary = buildWorkflowStatusSummary({
+    approvals: [],
+    workers: [],
+    outputLines: [],
+  });
+
+  assert.equal(summary, "ready · W work · B auth · N brief");
+  assert.doesNotMatch(summary, /research/i);
 });
 
 test("buildMcpInspectorLines separates configured servers from unchecked health", () => {
@@ -881,12 +900,12 @@ test("getSessionCenterActionShortcut maps direct utility keys", () => {
   assert.equal(getSessionCenterActionShortcut("w"), "work-session");
   assert.equal(getSessionCenterActionShortcut("s"), "research-status");
   assert.equal(getSessionCenterActionShortcut("r"), "new-research");
+  assert.equal(getSessionCenterActionShortcut("n"), "new-research");
   assert.equal(getSessionCenterActionShortcut("d"), "doctor");
   assert.equal(getSessionCenterActionShortcut("m"), "mcp-list");
   assert.equal(getSessionCenterActionShortcut("i"), "mcp-inspect");
   assert.equal(getSessionCenterActionShortcut("a"), "mcp-add");
   assert.equal(getSessionCenterActionShortcut("x"), "mcp-remove");
-  assert.equal(getSessionCenterActionShortcut("n"), undefined);
   assert.equal(getSessionCenterActionShortcut("z"), undefined);
 });
 
@@ -907,7 +926,7 @@ test("getImmediateActionShortcut maps uppercase run-now hotkeys", () => {
   assert.equal(getImmediateActionShortcut("I"), "mcp-inspect");
   assert.equal(getImmediateActionShortcut("A"), "mcp-add");
   assert.equal(getImmediateActionShortcut("X"), "mcp-remove");
-  assert.equal(getImmediateActionShortcut("N"), undefined);
+  assert.equal(getImmediateActionShortcut("N"), "new-research");
   assert.equal(getImmediateActionShortcut("R"), "new-research");
 });
 
@@ -965,7 +984,7 @@ test("getSessionCenterEscapeHint describes the next visible Escape action", () =
       hasSelectedApproval: false,
       hasEmbeddedWorkPane: true,
     }),
-    "Ctrl+O sessions",
+    "Ctrl+O context",
   );
   assert.equal(
     getSessionCenterEscapeHint({
@@ -1040,7 +1059,7 @@ test("buildSessionCenterStatusLine gives each Escape screen tab an honest page s
       hasSelectedApproval: false,
       hasEmbeddedWorkPane: true,
     }),
-    "Research · 1 run(s) · Enter/Ctrl+R run · Esc cancel",
+    "Briefs · 1 saved · Enter/Ctrl+R run · Esc cancel",
   );
 });
 

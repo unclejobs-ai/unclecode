@@ -2,10 +2,12 @@ import {
   runWorkShellInlineCommand,
 } from "@unclecode/orchestrator";
 import {
+  createEmbeddedWorkPaneController,
   createManagedWorkShellDashboardProps,
   formatWorkShellError,
-  renderManagedWorkShellDashboard,
+  renderEmbeddedWorkShellPaneDashboard,
   type EmbeddedWorkDashboardSnapshot,
+  type TuiRenderOptions,
   type TuiShellHomeState,
 } from "@unclecode/tui";
 
@@ -45,9 +47,9 @@ export const resolveWorkShellInlineCommand = (
 
 export function createManagedDashboardProps(
   session: ManagedDashboardSession,
-): EmbeddedWorkDashboardSnapshot<TuiShellHomeState> {
+): TuiRenderOptions<TuiShellHomeState> {
   return createManagedWorkShellDashboardProps(
-    createManagedDashboardInput(session, {
+    createManagedDashboardInput(withDefaultWorkSessionLaunch(session), {
       resolveWorkShellInlineCommand,
       ...(process.env.HOME ? { userHomeDir: process.env.HOME } : {}),
     }),
@@ -57,30 +59,55 @@ export function createManagedDashboardProps(
 export function createWorkShellDashboardProps(
   agent: StartReplAgent,
   options: StartReplOptions,
-): EmbeddedWorkDashboardSnapshot<TuiShellHomeState> {
+): TuiRenderOptions<TuiShellHomeState> {
   return createManagedDashboardProps({ agent, options });
+}
+
+function withDefaultWorkSessionLaunch(
+  session: ManagedDashboardSession,
+): ManagedDashboardSession {
+  return {
+    agent: session.agent,
+    options: {
+      ...session.options,
+      launchWorkSession:
+        session.options.launchWorkSession ??
+        ((forwardedArgs: readonly string[] = []) => runWorkCli(forwardedArgs)),
+    },
+  };
+}
+
+function withWorkSessionCwd(
+  forwardedArgs: readonly string[],
+  cwd: string,
+): readonly string[] {
+  if (forwardedArgs.includes("--cwd")) {
+    return forwardedArgs;
+  }
+  return ["--cwd", cwd, ...forwardedArgs];
 }
 
 export async function startRepl(
   agent: StartReplAgent,
   options: StartReplOptions,
 ): Promise<void> {
-  const effectiveOptions: StartReplOptions = {
-    ...options,
-    launchWorkSession:
-      options.launchWorkSession ??
-      ((forwardedArgs: readonly string[] = []) => runWorkCli(forwardedArgs)),
-  };
+  const session = withDefaultWorkSessionLaunch({ agent, options });
+  const initialProps = createManagedDashboardProps(session);
+  const embeddedWorkPane = await createEmbeddedWorkPaneController<TuiShellHomeState>({
+    loadSnapshot: async (forwardedArgs = []) => {
+      if (forwardedArgs.length === 0) {
+        return initialProps;
+      }
+      return loadWorkShellDashboardProps(
+        withWorkSessionCwd(forwardedArgs, session.options.cwd),
+      );
+    },
+  });
 
-  await renderManagedWorkShellDashboard(
-    createManagedDashboardInput(
-      { agent, options: effectiveOptions },
-      {
-        resolveWorkShellInlineCommand,
-        ...(process.env.HOME ? { userHomeDir: process.env.HOME } : {}),
-      },
-    ),
-  );
+  await renderEmbeddedWorkShellPaneDashboard({
+    ...initialProps,
+    ...(embeddedWorkPane ?? {}),
+  });
 }
 
 export async function loadWorkShellDashboardProps(
@@ -141,10 +168,10 @@ export async function smokeWorkShellRuntime(
   lines.push("MCP inspect action connected");
 
   const researchLines = await props.runAction({ actionId: "research-status" });
-  if (!researchLines.some((line) => /Research status|Latest research/i.test(line))) {
-    throw new Error("Research status smoke did not return a status result.");
+  if (!researchLines.some((line) => /Context brief status|Latest context brief|Latest research/i.test(line))) {
+    throw new Error("Context brief status smoke did not return a status result.");
   }
-  lines.push("Research status action connected");
+  lines.push("Context brief status action connected");
 
   if (props.sessions?.[0]) {
     const resumeLines = await props.runSession(props.sessions[0].sessionId);

@@ -178,8 +178,8 @@ fn resolve_work_shell_input_action(input: &Value) -> Value {
     }
 
     if bool_field(key, "ctrl")
-        && str_field(input, "value") == Some("o")
         && bool_field(input, "hasRequestSessionsView")
+        && (str_field(input, "value") == Some("o") || str_field(input, "value") == Some("\u{000f}"))
     {
         return json!({ "type": "open-sessions-view" });
     }
@@ -196,6 +196,12 @@ fn resolve_work_shell_input_action(input: &Value) -> Value {
         }
         if bool_field(input, "isBusy") {
             return json!({ "type": "interrupt-turn" });
+        }
+        if !composer_input.trim().is_empty() {
+            if bool_field(input, "escapeResetArmed") {
+                return json!({ "type": "clear-input" });
+            }
+            return json!({ "type": "none" });
         }
         if bool_field(input, "hasRequestSessionsView") {
             return json!({ "type": "none" });
@@ -423,6 +429,13 @@ mod tests {
         );
         assert_eq!(
             resolve_work_shell_input_action_json(
+                r#"{"value":"","key":{"escape":true},"input":"plain","slashSuggestionCount":0,"isBusy":false,"hasRequestSessionsView":true,"escapeResetArmed":true}"#
+            )
+            .unwrap(),
+            r#"{"type":"clear-input"}"#
+        );
+        assert_eq!(
+            resolve_work_shell_input_action_json(
                 r#"{"value":"","key":{"escape":true},"input":"plain","slashSuggestionCount":0,"isBusy":true,"hasRequestSessionsView":true}"#
             )
             .unwrap(),
@@ -444,7 +457,21 @@ mod tests {
         );
         assert_eq!(
             resolve_work_shell_input_action_json(
+                r#"{"value":"o","key":{"ctrl":true},"input":"plain","slashSuggestionCount":0,"isBusy":false,"hasRequestSessionsView":false}"#
+            )
+            .unwrap(),
+            r#"{"type":"none"}"#
+        );
+        assert_eq!(
+            resolve_work_shell_input_action_json(
                 r#"{"value":"","key":{"escape":true},"input":"plain","slashSuggestionCount":0,"isBusy":false,"hasRequestSessionsView":false}"#
+            )
+            .unwrap(),
+            r#"{"type":"none"}"#
+        );
+        assert_eq!(
+            resolve_work_shell_input_action_json(
+                r#"{"value":"","key":{"escape":true},"input":"","slashSuggestionCount":0,"isBusy":false,"hasRequestSessionsView":false}"#
             )
             .unwrap(),
             r#"{"type":"open-engine-sessions"}"#

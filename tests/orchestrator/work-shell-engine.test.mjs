@@ -116,6 +116,7 @@ import {
   detectPermissionSeekingStall,
   finalizeWorkShellAssistantReply,
   resolveReadOnlyModeGuard,
+  sanitizeWorkShellAssistantText,
   stripPermissionSeekingStallOutro,
 } from "../../packages/orchestrator/src/work-shell-engine-turns.ts";
 
@@ -864,6 +865,45 @@ test("work-shell turn helpers build summaries and permission-stall continuations
       },
     }),
     "I continued automatically and completed the rest.",
+  );
+  const leakedPlanAndDuplicateGreeting = `[
+    {"id":"greet-user","summary":"Respond to the user greeting.","prompt":"Reply briefly to hi."},
+    {"id":"offer-help","summary":"Invite next task.","prompt":"Ask what they need next."}
+  ]Hi! What would you like help withHi! What can next? I help you with today?`;
+  assert.equal(
+    sanitizeWorkShellAssistantText(leakedPlanAndDuplicateGreeting),
+    "Hi! What would you like help with?",
+  );
+  const validJsonTaskAnswer = `[{"id":"task-1","summary":"Do thing","prompt":"Run this prompt"}]`;
+  assert.equal(
+    sanitizeWorkShellAssistantText(validJsonTaskAnswer),
+    validJsonTaskAnswer,
+    "valid assistant JSON answers must not be stripped as internal plans",
+  );
+  assert.equal(
+    sanitizeWorkShellAssistantText("Hello Alice. Hello Bob. This is a transcript example."),
+    "Hello Alice. Hello Bob. This is a transcript example.",
+    "valid repeated greeting words in user-requested prose must be preserved",
+  );
+  assert.equal(
+    await finalizeWorkShellAssistantReply({
+      prompt: "hi",
+      assistantText: leakedPlanAndDuplicateGreeting,
+      async runTurn() {
+        throw new Error("continuation should not run");
+      },
+    }),
+    "Hi! What would you like help with?",
+  );
+  assert.equal(
+    await finalizeWorkShellAssistantReply({
+      prompt: "return JSON tasks",
+      assistantText: validJsonTaskAnswer,
+      async runTurn() {
+        throw new Error("continuation should not run");
+      },
+    }),
+    validJsonTaskAnswer,
   );
 });
 
@@ -1927,6 +1967,10 @@ test("createInitialWorkShellEngineState derives the shell defaults from options"
       reasoning: supportedReasoning,
       cwd: "/repo",
       contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      initialEntries: [
+        { role: "user", text: "inspect repo" },
+        { role: "assistant", text: "repo inspected" },
+      ],
     },
     contextSummaryLines: ["Loaded guidance: AGENTS.md"],
     buildContextPanel,
@@ -1934,6 +1978,10 @@ test("createInitialWorkShellEngineState derives the shell defaults from options"
   assert.equal(defaultState.traceMode, "minimal");
   assert.equal(defaultState.composerMode, "default");
   assert.equal(defaultState.isBusy, false);
+  assert.deepEqual(defaultState.entries, [
+    { role: "user", text: "inspect repo" },
+    { role: "assistant", text: "repo inspected" },
+  ]);
 });
 
 test("work-shell state helpers append entries and update auth/busy transitions deterministically", () => {
@@ -2046,7 +2094,7 @@ test("work-shell state helpers keep expanded context open across trace rebuilds"
   assert.equal(minimal.panel.title, "Context expanded");
 });
 
-test("createWorkShellPaneRuntime builds shared engine and slash runtime helpers", () => {
+test("createWorkShellPaneRuntime builds shared engine and slash runtime helpers", async () => {
   const { input } = createEngineInput();
   const runtime = createWorkShellPaneRuntime({
     ...input,
@@ -2079,7 +2127,16 @@ test("createWorkShellPaneRuntime builds shared engine and slash runtime helpers"
   assert.ok(runtime.getSuggestions("/mmbridge").some((item) => item.command === "/mmbridge handoff"));
   assert.ok(runtime.getSuggestions("/mmbridge").some((item) => item.command === "/mmbridge health"));
   assert.ok(runtime.getSuggestions("/mmbridge").some((item) => item.command === "/mmbridge doctor"));
+  assert.ok(runtime.getSuggestions("/context").some((item) => item.command === "/context"));
   assert.equal(runtime.shouldBlockSlashSubmit("/auth"), true);
+  assert.equal(runtime.shouldBlockSlashSubmit("/context"), false);
+
+  await runtime.engine.handleSubmit("/model gpt-4.1-mini");
+  const modelSuggestions = runtime.getSuggestions("/model");
+  assert.equal(modelSuggestions[0]?.command, "/model gpt-4.1-mini");
+  assert.match(modelSuggestions[0]?.description ?? "", /Current/i);
+  assert.equal(runtime.shouldBlockSlashSubmit("/model"), true);
+  assert.equal(runtime.shouldBlockSlashSubmit("/model gpt-4.1-mini"), false);
 });
 
 test("createWorkShellEngine builds a real shared engine instance", () => {
@@ -2198,6 +2255,116 @@ test("WorkShellEngine opens /context as an overlay and can dismiss it", async ()
   engine.closeOverlay();
 
   assert.equal(engine.getState().panel.title, "Context");
+});
+
+test("WorkShellEngine binds chat prompts and /context inspector to the same injected context packet", async () => {
+  const prompts = [];
+  const packet = {
+    id: "packet-work-shell-1",
+    version: 1,
+    generatedAt: "2026-06-04T00:00:00.000Z",
+    title: "Next model-call packet",
+    included: [
+      {
+        id: "workspace-guidance",
+        category: "workspace",
+        label: "AGENTS.md",
+        reason: "repo instructions loaded",
+        preview: "Use <small> reversible diffs.",
+        tokenEstimate: 12,
+      },
+      {
+        id: "omo-goal",
+        category: "omo",
+        label: "G001 context MVP",
+        reason: "active ULW goal",
+        preview: "Deliver packet inspector.",
+        tokenEstimate: 18,
+      },
+    ],
+    excluded: [
+      {
+        id: "omo-ledger",
+        category: "omo",
+        label: ".omo/ulw-loop/session/ledger.jsonl",
+        reason: "raw OMO ledger is excluded from provider context",
+      },
+    ],
+    warnings: [
+      {
+        code: "omo.multiple-active",
+        message: "Multiple active OMO sessions detected.",
+        severity: "warning",
+      },
+    ],
+    preview: ["Packet packet-work-shell-1 will prefix the next provider call."],
+    sourceCounts: {
+      included: 2,
+      excluded: 1,
+      warnings: 1,
+    },
+    tokenEstimate: 30,
+  };
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        prompts.push(prompt);
+        return { text: "packet-bound response" };
+      },
+    },
+    resolveContextPacket: async () => packet,
+  });
+
+  await engine.initialize();
+  assert.equal(engine.getState().contextIndicator, "packet 2 in · 1 out · 1 warn");
+
+  await engine.handleSubmit("summarize repo");
+
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0] ?? "", /<unclecode_context_packet id="packet-work-shell-1" version="1">/);
+  assert.match(prompts[0] ?? "", /Included:\n- workspace: AGENTS\.md \(repo instructions loaded\) - Use &lt;small&gt; reversible diffs\./);
+  assert.match(prompts[0] ?? "", /- omo: G001 context MVP \(active ULW goal\) - Deliver packet inspector\./);
+  assert.match(prompts[0] ?? "", /Excluded raw artifacts:\n- 1 raw artifact withheld from provider context; inspect \/context for local-only details\./);
+  assert.doesNotMatch(prompts[0] ?? "", /\.omo\/ulw-loop\/session\/ledger\.jsonl/);
+  assert.match(prompts[0] ?? "", /Warnings:\n- 1 packet warning withheld from provider context; inspect \/context for local-only details\./);
+  assert.doesNotMatch(prompts[0] ?? "", /Multiple active OMO sessions/);
+  assert.match(prompts[0] ?? "", /User request:\nsummarize repo$/);
+  assert.equal(engine.getState().entries.find((entry) => entry.role === "user")?.text, "summarize repo");
+
+  await engine.handleSubmit("/context");
+
+  assert.equal(engine.getState().panel.title, "Context expanded");
+  assert.ok(engine.getState().panel.lines.includes("Packet packet-work-shell-1 · Next model-call packet"));
+  assert.ok(engine.getState().panel.lines.includes("Sources · 2 included · 1 excluded · 1 warning · ~30 tokens"));
+  assert.ok(engine.getState().panel.lines.includes("Included by source"));
+  assert.ok(engine.getState().panel.lines.includes("+ omo · 1 · G001 context MVP (active ULW goal) - Deliver packet inspector."));
+  assert.ok(engine.getState().panel.lines.includes("Excluded raw artifacts"));
+  assert.ok(engine.getState().panel.lines.includes("Preview · Packet packet-work-shell-1 will prefix the next provider call."));
+});
+
+test("WorkShellEngine collapses expanded context when a normal chat turn starts", async () => {
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn() {
+        return { text: "chat response" };
+      },
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  assert.equal(engine.getState().panel.title, "Context expanded");
+
+  await engine.handleSubmit("반갑다");
+
+  assert.equal(engine.getState().panel.title, "Context");
+  assert.ok(engine.getState().entries.some((entry) => entry.role === "assistant" && entry.text === "chat response"));
 });
 
 test("WorkShellEngine runs inline commands directly and updates auth label from results", async () => {
@@ -2565,7 +2732,7 @@ test("WorkShellEngine can execute /research topics through the inline action lan
     },
     async runInlineCommand(args) {
       calls.inline.push(args);
-      return ["Research completed", "Artifact: /tmp/research.md"];
+      return ["Context brief completed", "Artifact: /tmp/research.md"];
     },
   });
 
@@ -2574,7 +2741,7 @@ test("WorkShellEngine can execute /research topics through the inline action lan
 
   assert.deepEqual(calls.inline, [["research", "run", "current", "workspace"]]);
   assert.equal(engine.getState().panel.title, "research run current workspace");
-  assert.ok(engine.getState().entries.some((entry) => entry.text.includes("Research completed")));
+  assert.ok(engine.getState().entries.some((entry) => entry.text.includes("Context brief completed")));
 });
 
 test("WorkShellEngine shows memories and records /remember through the local command seam", async () => {

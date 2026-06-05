@@ -110,23 +110,23 @@ test("reduceShellEvent appends completed activity entries and refreshes home sta
     entry: {
       id: "research-1",
       source: "new-research",
-      title: "Research: summarize repo",
-      lines: ["Research completed", "Artifact: /tmp/research.md"],
+      title: "Brief: summarize repo",
+      lines: ["Context brief completed", "Artifact: /tmp/research.md"],
       tone: "success",
     },
-    outputLines: ["Research completed", "Artifact: /tmp/research.md"],
+    outputLines: ["Context brief completed", "Artifact: /tmp/research.md"],
     homeState: {
       ...baseHomeState,
       modeLabel: "analyze",
       sessionCount: 2,
-      latestResearchSummary: "Prepared a local research bundle",
+      latestResearchSummary: "Prepared a context brief",
       sessions: [
         {
           sessionId: "research-1",
           state: "idle",
           updatedAt: "2026-04-02T11:00:00.000Z",
           model: "research-local",
-          taskSummary: "Prepared a local research bundle",
+          taskSummary: "Prepared a context brief",
         },
         ...baseHomeState.sessions,
       ],
@@ -139,7 +139,7 @@ test("reduceShellEvent appends completed activity entries and refreshes home sta
   assert.equal(next.homeState.sessionCount, 2);
   assert.equal(next.homeState.modeLabel, "analyze");
   assert.equal(next.view, "research");
-  assert.deepEqual(next.outputLines, ["Research completed", "Artifact: /tmp/research.md"]);
+  assert.deepEqual(next.outputLines, ["Context brief completed", "Artifact: /tmp/research.md"]);
   assert.match(next.traceEntries[0]?.message ?? "", /completed/);
 });
 

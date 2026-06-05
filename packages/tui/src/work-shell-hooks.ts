@@ -157,6 +157,13 @@ export function useWorkShellDashboardHomeSync(input: {
   ]);
 }
 
+export function shouldReportWorkShellOverlayOpen(input: {
+  readonly panelTitle: string;
+  readonly inputValue: string;
+}): boolean {
+  return input.panelTitle === "Context expanded" && input.inputValue.trim().length === 0;
+}
+
 export type WorkShellSlashSuggestion = {
   readonly command: string;
   readonly description: string;
@@ -199,6 +206,7 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly busyStatus?: string | undefined;
   readonly currentTurnStartedAt?: number | undefined;
   readonly lastTurnDurationMs?: number | undefined;
+  readonly contextIndicator?: string | undefined;
   readonly bridgeLines: readonly string[];
   readonly memoryLines: readonly string[];
   readonly authLauncherLines?: readonly string[];
@@ -336,17 +344,24 @@ export function useWorkShellInputController(input: {
   readonly cancelSensitiveInput?: (() => void) | undefined;
   readonly closeOverlay?: (() => void) | undefined;
 }): { readonly submit: (value: string) => Promise<void> } {
+  const escapeResetArmedAtRef = useRef<number | undefined>(undefined);
   useInput((value, key) => {
     if (
       input.onRequestSessionsView &&
       (value === "\u000f" || (key.ctrl && value.toLowerCase() === "o"))
     ) {
+      escapeResetArmedAtRef.current = undefined;
       input.replaceValue("");
       input.onRequestSessionsView();
       return;
     }
 
     const slashInput = input.activeSlashInput;
+    const nowMs = Date.now();
+    const escapeResetArmedAt = escapeResetArmedAtRef.current;
+    const escapeResetArmed = key.escape
+      && escapeResetArmedAt !== undefined
+      && nowMs - escapeResetArmedAt <= 1200;
     const action = resolveWorkShellInputAction({
       value,
       key,
@@ -361,7 +376,16 @@ export function useWorkShellInputController(input: {
       ...(input.hasSensitiveInput ? { hasSensitiveInput: input.hasSensitiveInput } : {}),
       ...(input.hasOverlayOpen ? { hasOverlayOpen: input.hasOverlayOpen } : {}),
       ...(slashInput ? { hasSlashPicker: true } : {}),
+      ...(escapeResetArmed ? { escapeResetArmed } : {}),
     });
+    const canArmEscapeReset = key.escape
+      && action.type === "none"
+      && !input.isBusy
+      && !input.hasSensitiveInput
+      && !input.hasOverlayOpen
+      && !slashInput
+      && input.value.trim().length > 0;
+    escapeResetArmedAtRef.current = canArmEscapeReset ? nowMs : undefined;
 
     switch (action.type) {
       case "exit":
@@ -387,6 +411,9 @@ export function useWorkShellInputController(input: {
         return;
       case "interrupt-turn":
         input.interruptTurn?.();
+        return;
+      case "clear-input":
+        input.replaceValue("");
         return;
       case "close-overlay":
         input.closeOverlay?.();
@@ -634,7 +661,10 @@ export function useWorkShellPaneState<
     shouldBlockSlashSubmit: input.shouldBlockSlashSubmit,
     handleSubmit,
     hasSensitiveInput: engineState.composerMode === "api-key-entry",
-    hasOverlayOpen: engineState.panel.title === "Context expanded",
+    hasOverlayOpen: shouldReportWorkShellOverlayOpen({
+      panelTitle: engineState.panel.title,
+      inputValue,
+    }),
     activePanelTitle: activePanel.title,
     closeSlashPicker: isStickySlashPicker
       ? () => setDismissedSlashPickerPanelKey(enginePanelKey)

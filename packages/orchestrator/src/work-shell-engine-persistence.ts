@@ -1,4 +1,4 @@
-import type { WorkShellTraceMode } from "./work-shell-engine.js";
+import type { WorkShellChatEntry, WorkShellTraceMode } from "./work-shell-engine.js";
 
 export type WorkShellSessionSnapshotInput = {
   cwd: string;
@@ -9,6 +9,7 @@ export type WorkShellSessionSnapshotInput = {
   summary: string;
   traceMode: WorkShellTraceMode;
   reasoningEffort?: "low" | "medium" | "high" | undefined;
+  entries?: readonly WorkShellChatEntry[] | undefined;
 };
 
 export function createWorkShellSessionSnapshotInput(

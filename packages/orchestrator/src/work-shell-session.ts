@@ -25,21 +25,21 @@ export async function persistWorkShellSessionSnapshot(input: {
   readonly summary: string;
   readonly traceMode?: "minimal" | "verbose" | undefined;
   readonly reasoningEffort?: "low" | "medium" | "high" | undefined;
+  readonly entries?: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[] | undefined;
 }): Promise<void> {
   await runRustCommand(
-    [
-      "rust",
-      "session",
-      "persist",
-      input.sessionId,
-      input.model,
-      input.mode,
-      input.state,
-      input.traceMode ?? "-",
-      input.reasoningEffort ?? "-",
-    ],
+    ["rust", "session", "persist-json"],
     input.cwd,
-    input.summary,
+    JSON.stringify({
+      sessionId: input.sessionId,
+      model: input.model,
+      mode: input.mode,
+      state: input.state,
+      summary: input.summary,
+      traceMode: input.traceMode,
+      reasoningEffort: input.reasoningEffort,
+      entries: input.entries ?? [],
+    }),
     input.env ?? process.env,
   );
 }

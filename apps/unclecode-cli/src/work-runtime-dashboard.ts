@@ -6,7 +6,7 @@ import {
   publishContextBridge,
   writeScopedMemory,
 } from "@unclecode/context-broker";
-import type { ExecutionTraceEvent, ProviderId } from "@unclecode/contracts";
+import type { ContextPacketView, ExecutionTraceEvent, ProviderId } from "@unclecode/contracts";
 import {
   describeReasoning,
   listSessionLines,
@@ -19,6 +19,7 @@ import {
   type AppReasoningConfig,
   type CodingAgentTraceEvent,
   type OrchestratedWorkAgentTraceEvent,
+  type WorkShellChatEntry,
   type WorkShellReasoningConfig,
 } from "@unclecode/orchestrator";
 import type {
@@ -51,7 +52,17 @@ export type StartReplOptions = {
   homeState: TuiShellHomeState;
   sessionId?: string | undefined;
   initialTraceMode?: "minimal" | "verbose" | undefined;
+  initialEntries?: readonly WorkShellChatEntry[] | undefined;
+  initialSessionSummary?: string | undefined;
   reloadWorkspaceContext?: ((cwd: string) => Promise<readonly string[]>) | undefined;
+  resolveContextPacket?: ((input: {
+    readonly cwd: string;
+    readonly sessionId: string;
+    readonly contextSummaryLines: readonly string[];
+    readonly bridgeLines: readonly string[];
+    readonly memoryLines: readonly string[];
+    readonly traceLines: readonly string[];
+  }) => Promise<ContextPacketView>) | undefined;
   refreshHomeState?: (() => Promise<TuiShellHomeState>) | undefined;
   refreshAuthState?: (() => Promise<{ authLabel: string; authIssueLines?: readonly string[] }>) | undefined;
   runInlineCommand?: ((args: readonly string[]) => Promise<readonly string[]>) | undefined;
@@ -195,6 +206,9 @@ export function createManagedDashboardInput(
       ...(session.options.reloadWorkspaceContext
         ? { reloadWorkspaceContext: session.options.reloadWorkspaceContext }
         : {}),
+      ...(session.options.resolveContextPacket
+        ? { resolveContextPacket: session.options.resolveContextPacket }
+        : {}),
       publishContextBridge,
       writeScopedMemory,
       listAvailableSkills,
@@ -205,6 +219,12 @@ export function createManagedDashboardInput(
       extractAuthLabel,
       ...(session.options.sessionId
         ? { sessionId: session.options.sessionId }
+        : {}),
+      ...(session.options.initialEntries
+        ? { initialEntries: session.options.initialEntries }
+        : {}),
+      ...(session.options.initialSessionSummary
+        ? { initialSessionSummary: session.options.initialSessionSummary }
         : {}),
       ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
       browserOAuthAvailable: Boolean(session.options.browserOAuthAvailable),

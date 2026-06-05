@@ -682,7 +682,7 @@ test("runTuiSessionCenterAction gives a short prompt hint for research without a
       env: process.env,
     });
 
-    assert.deepEqual(lines, ["Type a research prompt. Enter or Ctrl+R runs it."]);
+    assert.deepEqual(lines, ["Type a context brief prompt. Enter or Ctrl+R runs it."]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -705,7 +705,7 @@ test("runTuiSessionCenterAction can execute research when a prompt is provided",
       prompt: "summarize current workspace",
     });
 
-    assert.match(lines.join("\n"), /Research completed/);
+    assert.match(lines.join("\n"), /Context brief completed/);
     assert.match(lines.join("\n"), /Artifact:/);
 
     const homeState = await buildTuiHomeState({
@@ -725,7 +725,7 @@ test("runTuiSessionCenterAction can execute research when a prompt is provided",
     assert.equal(homeState.recentResearchRuns.length, 1);
     assert.equal(homeState.recentResearchRuns[0]?.prompt, "summarize current workspace");
     assert.equal(homeState.recentResearchRuns[0]?.status, "completed");
-    assert.match(homeState.recentResearchRuns[0]?.summary ?? "", /Prepared a local research bundle/);
+    assert.match(homeState.recentResearchRuns[0]?.summary ?? "", /Prepared a context brief/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -747,7 +747,7 @@ test("runWorkShellInlineAction can execute research topics from slash arguments"
       },
     });
 
-    assert.match(lines.join("\n"), /Research completed/);
+    assert.match(lines.join("\n"), /Context brief completed/);
     assert.match(lines.join("\n"), /Artifact:/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
@@ -787,7 +787,7 @@ test("buildTuiHomeState reports MCP count and latest research summary", async ()
       userHomeDir: fakeHome,
       prompt: "summarize current workspace",
     });
-    assert.match(lines.join("\n"), /Research completed/);
+    assert.match(lines.join("\n"), /Context brief completed/);
 
     const homeState = await buildTuiHomeState({
       workspaceRoot: cwd,
@@ -803,7 +803,7 @@ test("buildTuiHomeState reports MCP count and latest research summary", async ()
     assert.equal(homeState.mcpServers[0]?.transport, "stdio");
     assert.equal(homeState.mcpServers[0]?.trustTier, "user");
     assert.equal(homeState.mcpServers[0]?.originLabel, "user config");
-    assert.match(homeState.latestResearchSummary ?? "", /Prepared a local research bundle/);
+    assert.match(homeState.latestResearchSummary ?? "", /Prepared a context brief/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

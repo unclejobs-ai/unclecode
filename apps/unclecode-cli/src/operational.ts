@@ -972,7 +972,7 @@ export async function runTuiSessionCenterAction(input: {
         });
       }
 
-      return ["Type a research prompt. Enter or Ctrl+R runs it."];
+      return ["Type a context brief prompt. Enter or Ctrl+R runs it."];
     default:
       return ["Unknown action."];
   }

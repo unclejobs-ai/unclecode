@@ -388,6 +388,48 @@ test("OpenAIProvider can return a plain text response without tools", async () =
   assert.equal(result.text, "hello from openai");
 });
 
+test("OpenAIProvider uses updated model for subsequent turns", async () => {
+  const capturedBodies = [];
+  const provider = new OpenAIProvider({
+    apiKey: "sk-test-123",
+    model: "gpt-5.4",
+    cwd: process.cwd(),
+    reasoning: {
+      effort: "medium",
+      source: "mode-default",
+      support: {
+        status: "supported",
+        defaultEffort: "medium",
+        supportedEfforts: ["low", "medium", "high"],
+      },
+    },
+    fetchImpl: async (_url, init) => {
+      capturedBodies.push(JSON.parse(String(init?.body ?? "{}")));
+      return {
+        ok: true,
+        async json() {
+          return { choices: [{ message: { content: "ok" } }] };
+        },
+      };
+    },
+  });
+
+  await provider.runTurn("first");
+  provider.updateRuntimeSettings({
+    model: "gpt-4.1-mini",
+    reasoning: {
+      effort: "unsupported",
+      source: "model-capability",
+      support: { status: "unsupported", supportedEfforts: [] },
+    },
+  });
+  await provider.runTurn("second");
+
+  assert.equal(capturedBodies[0]?.model, "gpt-5.4");
+  assert.equal(capturedBodies[1]?.model, "gpt-4.1-mini");
+  assert.equal(capturedBodies[1]?.reasoning, undefined);
+});
+
 test("OpenAIProvider.runTurn uses Rust chat completion when fetch is not injected", async () => {
   const originalBaseUrl = process.env.OPENAI_API_BASE_URL;
   const originalNoProxy = process.env.NO_PROXY;

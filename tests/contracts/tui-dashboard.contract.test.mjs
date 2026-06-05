@@ -18,6 +18,7 @@ import {
   resolveWorkPaneNavigationMode,
   shouldRenderEmbeddedWorkPaneFullscreen,
 } from "../../packages/tui/src/index.tsx";
+import { C } from "../../packages/tui/src/dashboard-primitives.tsx";
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(testDirectory, "../..");
@@ -63,6 +64,19 @@ test("DASHBOARD_ACTIONS includes all required CLI commands", () => {
     "config explain present",
   );
   assert.ok(commands.includes("unclecode --help"), "help present");
+});
+
+test("dashboard palette uses cool context-cockpit chrome instead of orange", () => {
+  const paletteValues = [
+    C.accent,
+    C.accentBright,
+    C.accentDim,
+    C.headerBg,
+    C.headerFg,
+  ].join(" ");
+
+  assert.doesNotMatch(paletteValues, /#fb923c|#fdba74|#fed7aa/i);
+  assert.match(paletteValues, /#5eead4|#7dd3fc|#99f6e4/i);
 });
 
 test("shouldRenderEmbeddedWorkPaneFullscreen gives the work pane the full screen when embedded", () => {

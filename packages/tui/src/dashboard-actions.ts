@@ -163,15 +163,15 @@ export const SESSION_CENTER_ACTIONS: readonly SessionCenterAction[] = [
   },
   {
     id: "new-research",
-    label: "R Research",
+    label: "N New brief",
     command: "unclecode research run",
-    description: "Build a local workspace context artifact you can resume or hand to Work.",
+    description: "Create a local workspace-context brief you can resume or hand to Work.",
   },
   {
     id: "research-status",
     label: "S Status",
     command: "unclecode research status",
-    description: "Show the latest local research artifact and resumable session.",
+    description: "Show the latest context brief artifact and resumable session.",
   },
   {
     id: "mcp-list",
@@ -255,7 +255,7 @@ export function formatSessionHeadline(session: SessionCenterSession): string {
     return summary;
   }
   if (session.sessionId.startsWith("research-")) {
-    return "Research session";
+    return "Context brief session";
   }
   if (session.sessionId.startsWith("work-")) {
     return "Work session";

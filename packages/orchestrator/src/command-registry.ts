@@ -104,7 +104,7 @@ export function createCliSlashCommandRegistry(extraEntries: readonly RegisteredS
     {
       command: "/research status",
       routeTo: ["research", "status"],
-      metadata: builtinLocal("Show research-mode status."),
+      metadata: builtinLocal("Show context-brief status."),
     },
     {
       command: "/mcp list",
@@ -151,6 +151,11 @@ export function createWorkShellCommandRegistry(extraEntries: readonly Registered
       command: "/reload",
       routeTo: ["reload"],
       metadata: builtinLocal("Reload workspace guidance, skills, and extension context."),
+    },
+    {
+      command: "/context",
+      routeTo: ["context"],
+      metadata: builtinLocal("Inspect the next model-call context packet."),
     },
     {
       command: "/model",
@@ -205,12 +210,12 @@ export function createWorkShellCommandRegistry(extraEntries: readonly Registered
     {
       command: "/research",
       routeTo: ["research", "run"],
-      metadata: builtinPrompt("Run a local research pass for the given topic or workspace question."),
+      metadata: builtinPrompt("Draft a local context brief for the given topic or workspace question."),
     },
     {
       command: "/research status",
       routeTo: ["research", "status"],
-      metadata: builtinLocal("Show the latest local research status."),
+      metadata: builtinLocal("Show the latest local context brief status."),
     },
     {
       command: "/cancel",

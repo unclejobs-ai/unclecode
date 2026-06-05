@@ -35,8 +35,8 @@ pub fn research_status_report(
         .find(|item| item.session_id.starts_with("research-"));
 
     let mut lines = vec![
-        "Research status".to_string(),
-        "Profile: research-default".to_string(),
+        "Context brief status".to_string(),
+        "Profile: context-brief-default".to_string(),
         format!("Configured servers: {}", server_names.len()),
     ];
     if let Some(session) = &latest_research {
@@ -49,14 +49,14 @@ pub fn research_status_report(
             ),
         ]);
     } else {
-        lines.push("No active research run".to_string());
+        lines.push("No active context brief".to_string());
     }
 
     let payload = json!({
         "command": "research.status",
         "workspaceRoot": workspace_root.to_string_lossy(),
         "profile": {
-            "profileName": "research-default",
+            "profileName": "context-brief-default",
             "serverNames": server_names,
         },
         "latestRun": latest_research.as_ref().map(|session| {
@@ -88,12 +88,13 @@ mod tests {
         let report = research_status_report(&root, Some(&home), |_| None).unwrap();
 
         let text = report.lines.join("\n");
-        assert!(text.contains("Research status"));
-        assert!(text.contains("Profile: research-default"));
+        assert!(text.contains("Context brief status"));
+        assert!(text.contains("Profile: context-brief-default"));
         assert!(text.contains("Configured servers: 0"));
-        assert!(text.contains("No active research run"));
+        assert!(text.contains("No active context brief"));
         let parsed: serde_json::Value = serde_json::from_str(&report.json).unwrap();
         assert_eq!(parsed["command"], "research.status");
+        assert_eq!(parsed["profile"]["profileName"], "context-brief-default");
         assert!(parsed["latestRun"].is_null());
         let _ = fs::remove_dir_all(root);
     }
@@ -119,6 +120,7 @@ mod tests {
                 summary: "Mapped local context".to_string(),
                 trace_mode: None,
                 reasoning_effort: None,
+                entries: vec![],
             })
             .unwrap();
 

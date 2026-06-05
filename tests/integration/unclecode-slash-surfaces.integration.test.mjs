@@ -87,7 +87,7 @@ test("built unclecode cli maps /research status and /mcp list to their surfaces"
       },
     );
     assert.equal(researchResult.status, 0, researchResult.stderr);
-    assert.match(researchResult.stdout, /Research status/);
+    assert.match(researchResult.stdout, /Context brief status/);
 
     const mcpResult = spawnSync("node", [builtCliEntrypoint, "/mcp list"], {
       cwd,

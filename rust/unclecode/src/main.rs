@@ -156,7 +156,8 @@ use unclecode_core::responses_input::{
 use unclecode_core::runtime::{run_command, run_shell_command, RuntimeCommand};
 use unclecode_core::sensitive_input_command::resolve_sensitive_input_cancel_result_json;
 use unclecode_core::session::{
-    session_paths, SessionLog, WorkShellSessionSnapshot, WorkShellSessionStore,
+    persist_work_shell_session_snapshot_json, resume_work_shell_session_json, session_paths,
+    SessionLog, WorkShellSessionSnapshot, WorkShellSessionStore,
 };
 use unclecode_core::sessions_command::resolve_sessions_command_json;
 use unclecode_core::sha256::{sha256_base64url_bytes, sha256_hex_bytes};
@@ -4164,8 +4165,20 @@ fn run_native_session_command(args: &[OsString]) -> Result<u8, String> {
                     summary,
                     trace_mode,
                     reasoning_effort,
+                    entries: vec![],
                 })
                 .map_err(|error| format!("Failed to persist session snapshot: {error}"))?;
+            println!("Persisted {session_id}");
+            Ok(0)
+        }
+        Some("persist-json") => {
+            let cwd = work_cwd()?;
+            let mut payload = String::new();
+            io::stdin()
+                .read_to_string(&mut payload)
+                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let store = WorkShellSessionStore::new(session_store_root());
+            let session_id = persist_work_shell_session_snapshot_json(&store, &cwd, &payload)?;
             println!("Persisted {session_id}");
             Ok(0)
         }
@@ -4214,7 +4227,21 @@ fn run_native_session_command(args: &[OsString]) -> Result<u8, String> {
             println!("contextLine=Resumed session: {session_id}");
             Ok(0)
         }
-        _ => Err("Usage: unclecode rust session <persist <session-id> <model> <mode> <state> <trace-mode|-> <reasoning-effort|->|list|resume <session-id>|paths <root-dir> <project-path> <session-id>>".to_string()),
+        Some("resume-json") => {
+            let cwd = work_cwd()?;
+            let session_id = args
+                .get(1)
+                .and_then(|arg| arg.to_str())
+                .ok_or("Usage: unclecode rust session resume-json <session-id>")?;
+            let store = WorkShellSessionStore::new(session_store_root());
+            let Some(json) = resume_work_shell_session_json(&store, &cwd, session_id)?
+            else {
+                return Err(format!("Session not found: {session_id}"));
+            };
+            println!("{json}");
+            Ok(0)
+        }
+        _ => Err("Usage: unclecode rust session <persist <session-id> <model> <mode> <state> <trace-mode|-> <reasoning-effort|->|persist-json|list|resume <session-id>|resume-json <session-id>|paths <root-dir> <project-path> <session-id>>".to_string()),
     }
 }
 

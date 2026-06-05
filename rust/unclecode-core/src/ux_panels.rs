@@ -1816,9 +1816,8 @@ mod tests {
             .iter()
             .any(|line| line == "Next · #1 · first queued follow-up"));
         assert!(lines.iter().any(|line| line == "Steer"));
-        assert!(lines
-            .iter()
-            .any(|line| line == "Slash commands are not queued while busy; /cancel interrupts the active turn."));
+        assert!(lines.iter().any(|line| line
+            == "Slash commands are not queued while busy; /cancel interrupts the active turn."));
         assert!(lines
             .iter()
             .any(|line| line

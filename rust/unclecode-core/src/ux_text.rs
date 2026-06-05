@@ -443,40 +443,40 @@ fn resolve_work_shell_entry_presentation(role: &str) -> Value {
     };
     let presentation = match role {
         "user" => json!({
-            "label": "You",
-            "badge": "›",
+            "label": "You · packet",
+            "badge": "◇",
             "labelColor": "#7dd3fc",
             "labelTextColor": "#082f49",
-            "labelBackgroundColor": "#38bdf8",
-            "railColor": "#7dd3fc",
-            "borderColor": "#7dd3fc",
-            "bodyColor": "#e0f2fe",
+            "labelBackgroundColor": "#bae6fd",
+            "railColor": "#5eead4",
+            "borderColor": "#334155",
+            "bodyColor": "#e2e8f0",
         }),
         "assistant" => json!({
-            "label": "UncleCode",
-            "badge": "✦",
-            "labelColor": "#86efac",
-            "labelTextColor": "#052e16",
-            "labelBackgroundColor": "#4ade80",
-            "railColor": "#86efac",
-            "borderColor": "#86efac",
-            "bodyColor": "#dcfce7",
+            "label": "UncleCode · context steward",
+            "badge": "◈",
+            "labelColor": "#5eead4",
+            "labelTextColor": "#042f2e",
+            "labelBackgroundColor": "#99f6e4",
+            "railColor": "#7dd3fc",
+            "borderColor": "#475569",
+            "bodyColor": "#f8fafc",
         }),
         "tool" => json!({
-            "label": "Step",
-            "badge": "→",
-            "labelColor": "#fbbf24",
-            "railColor": "#57534e",
-            "borderColor": "#57534e",
-            "bodyColor": "#e7e5e4",
+            "label": "Trace · execution",
+            "badge": "▸",
+            "labelColor": "#bef264",
+            "railColor": "#475569",
+            "borderColor": "#475569",
+            "bodyColor": "#f4f1ea",
         }),
         _ => json!({
-            "label": "Status",
+            "label": "System · state",
             "badge": "·",
-            "labelColor": "#a8a29e",
-            "railColor": "#44403c",
-            "borderColor": "#44403c",
-            "bodyColor": "#a8a29e",
+            "labelColor": "#94a3b8",
+            "railColor": "#334155",
+            "borderColor": "#334155",
+            "bodyColor": "#94a3b8",
         }),
     };
     json!({
@@ -592,7 +592,7 @@ pub fn format_runtime_label(node: &str, platform: &str, arch: &str) -> String {
 }
 
 pub fn work_shell_empty_conversation_hint() -> &'static str {
-    "Work = live coding chat. Type a task, /command, or @file context."
+    "Context cockpit ready. Type a task, /context, or @file; UncleCode shapes the next packet before it calls the model."
 }
 
 pub fn work_shell_composer_hint_json(input_json: &str) -> Result<String, String> {
@@ -643,7 +643,7 @@ pub fn format_work_shell_status_line_json(input_json: &str) -> Result<String, St
 
 pub fn format_work_shell_status_line(model: &str, mode: &str, auth_label: &str) -> String {
     format!(
-        "{model} · {} · {}",
+        "{model} · {} · {} · context cockpit",
         humanize_work_shell_mode_label(mode),
         compact_work_shell_auth_label(auth_label)
     )
@@ -706,6 +706,7 @@ pub fn format_work_shell_footer_line_json(input_json: &str) -> Result<String, St
         str_field(&input, "model").unwrap_or_default(),
         str_field(&input, "mode").unwrap_or_default(),
         str_field(&input, "authLabel").unwrap_or_default(),
+        str_field(&input, "contextIndicator"),
         str_field(&input, "composerHint"),
         number_field(&input, "width").map(|value| value.max(0) as usize),
     ))
@@ -717,20 +718,23 @@ pub fn format_work_shell_footer_line(
     model: &str,
     mode: &str,
     auth_label: &str,
+    context_indicator: Option<&str>,
     composer_hint: Option<&str>,
     width: Option<usize>,
 ) -> String {
-    let core_footer = [
-        compact_work_shell_path(cwd, home),
-        Some(format_work_shell_status_line(model, mode, auth_label)),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|item| !item.is_empty())
-    .collect::<Vec<_>>()
-    .join("  ·  ");
-    let full_footer = [
-        Some(core_footer.clone()),
+    let path = compact_work_shell_path(cwd, home);
+    let full_status_line = format_work_shell_status_line(model, mode, auth_label);
+    let full_core_footer = [path.clone(), Some(full_status_line.clone())]
+        .into_iter()
+        .flatten()
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>()
+        .join("  ·  ");
+    let full_preview_footer = [
+        Some(full_core_footer),
+        context_indicator
+            .map(str::to_string)
+            .filter(|value| !value.is_empty()),
         composer_hint
             .map(str::to_string)
             .filter(|value| !value.is_empty()),
@@ -740,7 +744,62 @@ pub fn format_work_shell_footer_line(
     .filter(|item| !item.is_empty())
     .collect::<Vec<_>>()
     .join("  ·  ");
+    let status_line = if width.is_some_and(|value| display_width(&full_preview_footer) > value) {
+        full_status_line.replace(" · context cockpit", " · cockpit")
+    } else {
+        full_status_line
+    };
+    let core_footer = [path, Some(status_line.clone())]
+        .into_iter()
+        .flatten()
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>()
+        .join("  ·  ");
+    let full_footer = [
+        Some(core_footer.clone()),
+        context_indicator
+            .map(str::to_string)
+            .filter(|value| !value.is_empty()),
+        composer_hint
+            .map(str::to_string)
+            .filter(|value| !value.is_empty()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|item| !item.is_empty())
+    .collect::<Vec<_>>()
+    .join("  ·  ");
+    let context_footer = [
+        Some(status_line),
+        context_indicator
+            .map(str::to_string)
+            .filter(|value| !value.is_empty()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|item| !item.is_empty())
+    .collect::<Vec<_>>()
+    .join("  ·  ");
+    let indicator_footer = context_indicator
+        .map(str::to_string)
+        .filter(|value| !value.is_empty());
     let footer = match width {
+        Some(width)
+            if display_width(&full_footer) > width
+                && indicator_footer.is_some()
+                && !context_footer.is_empty()
+                && display_width(&context_footer) <= width =>
+        {
+            context_footer
+        }
+        Some(width)
+            if display_width(&full_footer) > width
+                && indicator_footer
+                    .as_ref()
+                    .is_some_and(|value| display_width(value) <= width) =>
+        {
+            indicator_footer.unwrap_or_default()
+        }
         Some(width)
             if display_width(&full_footer) > width && display_width(&core_footer) <= width =>
         {
@@ -1431,7 +1490,7 @@ mod tests {
         assert_eq!(work_shell_composer_hint("/unknown", 0), "No matches");
         assert_eq!(
             work_shell_empty_conversation_hint(),
-            "Work = live coding chat. Type a task, /command, or @file context."
+            "Context cockpit ready. Type a task, /context, or @file; UncleCode shapes the next packet before it calls the model."
         );
         assert_eq!(
             format_work_shell_thinking_line("medium (mode-default)"),
@@ -1439,7 +1498,7 @@ mod tests {
         );
         assert_eq!(
             format_work_shell_status_line("gpt-5.4", "default", "Browser OAuth · file"),
-            "gpt-5.4 · Work mode · Saved OAuth"
+            "gpt-5.4 · Work mode · Saved OAuth · context cockpit"
         );
         assert_eq!(
             format_work_shell_usage_line(false, None, None, Some(1480), None),
@@ -1466,10 +1525,11 @@ mod tests {
                 "gpt-5.4",
                 "default",
                 "Browser OAuth · file",
+                None,
                 Some("Enter send · Shift+Enter newline"),
                 None,
             ),
-            "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth  ·  Enter send · Shift+Enter newline"
+            "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth · context cockpit  ·  Enter send · Shift+Enter newline"
         );
         assert_eq!(
             format_work_shell_footer_line(
@@ -1478,6 +1538,7 @@ mod tests {
                 "gpt-5.4",
                 "default",
                 "Browser OAuth · file",
+                None,
                 Some("하이"),
                 Some(20),
             ),
@@ -1490,10 +1551,24 @@ mod tests {
                 "gpt-5.4",
                 "yolo",
                 "Browser OAuth · file",
+                None,
                 Some("Enter send · Shift+Enter newline · / commands"),
                 Some(72),
             ),
-            "~/project/unclecode  ·  gpt-5.4 · YOLO mode · Saved OAuth"
+            "~/project/unclecode  ·  gpt-5.4 · YOLO mode · Saved OAuth · cockpit"
+        );
+        assert_eq!(
+            format_work_shell_footer_line(
+                Some("/Users/me/project/unclecode"),
+                Some("/Users/me"),
+                "gpt-5.4",
+                "default",
+                "Browser OAuth · file",
+                Some("packet 2 in · 1 out"),
+                None,
+                Some(120),
+            ),
+            "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth · context cockpit  ·  packet 2 in · 1 out"
         );
     }
 
@@ -1585,15 +1660,19 @@ mod tests {
     fn resolves_work_shell_entry_presentation() {
         assert_eq!(
             resolve_work_shell_entry_presentation_json("user").unwrap(),
-            r##"{"borderStyle":"round","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":0},"presentation":{"badge":"›","bodyColor":"#e0f2fe","borderColor":"#7dd3fc","label":"You","labelBackgroundColor":"#38bdf8","labelColor":"#7dd3fc","labelTextColor":"#082f49","railColor":"#7dd3fc"}}"##
+            r##"{"borderStyle":"round","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":0},"presentation":{"badge":"◇","bodyColor":"#e2e8f0","borderColor":"#334155","label":"You · packet","labelBackgroundColor":"#bae6fd","labelColor":"#7dd3fc","labelTextColor":"#082f49","railColor":"#5eead4"}}"##
         );
         assert_eq!(
             resolve_work_shell_entry_presentation_json("tool").unwrap(),
-            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":0,"paddingLeft":3},"presentation":{"badge":"→","bodyColor":"#e7e5e4","borderColor":"#57534e","label":"Step","labelColor":"#fbbf24","railColor":"#57534e"}}"##
+            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":0,"paddingLeft":3},"presentation":{"badge":"▸","bodyColor":"#f4f1ea","borderColor":"#475569","label":"Trace · execution","labelColor":"#bef264","railColor":"#475569"}}"##
+        );
+        assert_eq!(
+            resolve_work_shell_entry_presentation_json("assistant").unwrap(),
+            r##"{"borderStyle":"round","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":2},"presentation":{"badge":"◈","bodyColor":"#f8fafc","borderColor":"#475569","label":"UncleCode · context steward","labelBackgroundColor":"#99f6e4","labelColor":"#5eead4","labelTextColor":"#042f2e","railColor":"#7dd3fc"}}"##
         );
         assert_eq!(
             resolve_work_shell_entry_presentation_json("system").unwrap(),
-            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":0,"paddingLeft":3},"presentation":{"badge":"·","bodyColor":"#a8a29e","borderColor":"#44403c","label":"Status","labelColor":"#a8a29e","railColor":"#44403c"}}"##
+            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":0,"paddingLeft":3},"presentation":{"badge":"·","bodyColor":"#94a3b8","borderColor":"#334155","label":"System · state","labelColor":"#94a3b8","railColor":"#334155"}}"##
         );
     }
 

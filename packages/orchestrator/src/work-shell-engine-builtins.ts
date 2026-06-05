@@ -1,4 +1,5 @@
 import { runRustCommandSync } from "./rust-command.js";
+import { buildWorkShellContextPacketPreviewLines } from "./work-shell-context-packet.js";
 import type {
   WorkShellChatEntry,
   WorkShellEngineOptions,
@@ -10,6 +11,7 @@ import type {
   WorkShellTraceMode,
 } from "./work-shell-engine.js";
 import { describeReasoning, type WorkShellReasoningConfig } from "./reasoning.js";
+import type { ContextPacketView } from "@unclecode/contracts";
 
 export function createBuiltinTranscriptEntries(
   line: string,
@@ -271,6 +273,7 @@ export function createContextBuiltinResult<Reasoning extends WorkShellReasoningC
   line: string;
   contextSummaryLines: readonly string[];
   state: WorkShellEngineState<Reasoning>;
+  contextPacket?: ContextPacketView | undefined;
   buildContextPanel: (
     contextSummaryLines: readonly string[],
     bridgeLines: readonly string[],
@@ -298,6 +301,15 @@ export function createContextBuiltinResult<Reasoning extends WorkShellReasoningC
   ) as unknown;
   if (!isPanelBuiltinResult(parsed)) {
     throw new Error("Rust context command returned an invalid payload.");
+  }
+  if (input.contextPacket) {
+    return {
+      entries: parsed.entries,
+      panel: {
+        title: "Context expanded",
+        lines: buildWorkShellContextPacketPreviewLines(input.contextPacket),
+      },
+    };
   }
   return {
     entries: parsed.entries,

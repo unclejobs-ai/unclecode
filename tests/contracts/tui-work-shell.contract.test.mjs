@@ -31,8 +31,11 @@ import {
   formatToolTraceLine,
   formatWorkShellBusyStatusLine,
   formatWorkShellConversationEntryLines,
+  formatWorkShellAssistantDisplayText,
   formatWorkShellError,
+  formatWorkShellFooterLine,
   formatWorkShellHeaderLine,
+  formatWorkShellOverlayPanelLines,
   formatWorkShellProviderTitle,
   formatWorkShellStatusLine,
   formatWorkShellThinkingLine,
@@ -61,6 +64,8 @@ import {
   resolveWorkShellActiveSlashInput,
   resolveWorkShellInputAction,
   resolveWorkShellSubmitAction,
+  shouldReportWorkShellOverlayOpen,
+  shouldHideWorkShellOverlayForInput,
   shouldShowWorkShellConversationEntry,
   shouldUseSlowComposerPreview,
   sliceByDisplayWidth,
@@ -109,6 +114,8 @@ test("work-shell hotspot re-exports extracted helper owner seams instead of regr
   assert.match(viewSource, /export function formatWorkShellProviderTitle\(/);
   assert.match(viewSource, /export function getWorkShellEntryPresentation\(/);
   assert.match(viewSource, /function WorkShellSectionDivider\(/);
+  assert.match(viewSource, /Ctrl\+O context/);
+  assert.doesNotMatch(viewSource, /Ctrl\+O sessions/);
   assert.doesNotMatch(
     viewSource,
     /<Text bold color="white">Conversation<\/Text>/,
@@ -160,17 +167,18 @@ test("formatWorkShellProviderTitle humanizes known providers for the unified wor
 test("formatWorkShellHeaderLine renders one width-bounded row", () => {
   const wide = formatWorkShellHeaderLine({
     providerTitle: "UncleCode · OpenAI",
-    headerHint: "Ctrl+O sessions · Shift+Tab mode · / commands",
+    headerHint: "context cockpit · Ctrl+O context · / commands",
     terminalColumns: 120,
   });
   assert.equal(getDisplayWidth(wide), 118);
   assert.match(wide, /^UncleCode · OpenAI/);
-  assert.match(wide, /Ctrl\+O sessions/);
+  assert.match(wide, /context cockpit/);
+  assert.match(wide, /Ctrl\+O context/);
   assert.doesNotMatch(wide, /\n/);
 
   const narrow = formatWorkShellHeaderLine({
     providerTitle: "UncleCode · OpenAI",
-    headerHint: "Ctrl+O sessions · Shift+Tab mode · / commands",
+    headerHint: "context cockpit · Ctrl+O context · / commands",
     terminalColumns: 36,
   });
   assert.equal(getDisplayWidth(narrow), 34);
@@ -179,40 +187,40 @@ test("formatWorkShellHeaderLine renders one width-bounded row", () => {
 
 test("getWorkShellEntryPresentation keeps user, assistant, tool, and system roles visually distinct", () => {
   assert.deepEqual(getWorkShellEntryPresentation("user"), {
-    label: "You",
-    badge: "›",
+    label: "You · packet",
+    badge: "◇",
     labelColor: "#7dd3fc",
     labelTextColor: "#082f49",
-    labelBackgroundColor: "#38bdf8",
-    railColor: "#7dd3fc",
-    borderColor: "#7dd3fc",
-    bodyColor: "#e0f2fe",
+    labelBackgroundColor: "#bae6fd",
+    railColor: "#5eead4",
+    borderColor: "#334155",
+    bodyColor: "#e2e8f0",
   });
   assert.deepEqual(getWorkShellEntryPresentation("assistant"), {
-    label: "UncleCode",
-    badge: "✦",
-    labelColor: "#86efac",
-    labelTextColor: "#052e16",
-    labelBackgroundColor: "#4ade80",
-    railColor: "#86efac",
-    borderColor: "#86efac",
-    bodyColor: "#dcfce7",
+    label: "UncleCode · context steward",
+    badge: "◈",
+    labelColor: "#5eead4",
+    labelTextColor: "#042f2e",
+    labelBackgroundColor: "#99f6e4",
+    railColor: "#7dd3fc",
+    borderColor: "#475569",
+    bodyColor: "#f8fafc",
   });
   assert.deepEqual(getWorkShellEntryPresentation("tool"), {
-    label: "Step",
-    badge: "→",
-    labelColor: "#fbbf24",
-    railColor: "#57534e",
-    borderColor: "#57534e",
-    bodyColor: "#e7e5e4",
+    label: "Trace · execution",
+    badge: "▸",
+    labelColor: "#bef264",
+    railColor: "#475569",
+    borderColor: "#475569",
+    bodyColor: "#f4f1ea",
   });
   assert.deepEqual(getWorkShellEntryPresentation("system"), {
-    label: "Status",
+    label: "System · state",
     badge: "·",
-    labelColor: "#a8a29e",
-    railColor: "#44403c",
-    borderColor: "#44403c",
-    bodyColor: "#a8a29e",
+    labelColor: "#94a3b8",
+    railColor: "#334155",
+    borderColor: "#334155",
+    bodyColor: "#94a3b8",
   });
   assert.equal(getWorkShellEntryBorderStyle("user"), "round");
   assert.equal(getWorkShellEntryBorderStyle("assistant"), "round");
@@ -220,8 +228,59 @@ test("getWorkShellEntryPresentation keeps user, assistant, tool, and system role
   assert.equal(getWorkShellEntryBorderStyle("system"), "single");
   assert.equal(
     getWorkShellEmptyConversationHint(),
-    "Work = live coding chat. Type a task, /command, or @file context.",
+    "Context cockpit ready. Type a task, /context, or @file; UncleCode shapes the next packet before it calls the model.",
   );
+});
+
+test("refined non-orange context cockpit avoids loud orange chrome", () => {
+  const roles = ["user", "assistant", "tool", "system"];
+  const paletteValues = roles.flatMap((role) =>
+    Object.values(getWorkShellEntryPresentation(role)).filter(
+      (value) => typeof value === "string" && value.startsWith("#"),
+    ),
+  );
+
+  assert.doesNotMatch(paletteValues.join(" "), /#fb923c|#fdba74|#fed7aa/i);
+  assert.match(paletteValues.join(" "), /#7dd3fc|#5eead4|#99f6e4/i);
+
+  const renderedUser = formatWorkShellConversationEntryLines({
+    role: "user",
+    text: "/model gpt-5.5",
+    width: 80,
+  }).join("\n");
+  assert.match(renderedUser, /You · packet/);
+  assert.doesNotMatch(renderedUser, /packet intent/);
+});
+
+test("assistant transcript hides internal action plans and collapses duplicate greeting streams", () => {
+  const leakedPlanAndDuplicateGreeting = `[
+    {
+      "id": "greet-user",
+      "summary": "Respond to the user's greeting.",
+      "prompt": "Reply warmly and briefly to the user's message: \\"hi\\"."
+    },
+    {
+      "id": "offer-help",
+      "summary": "Invite the user to provide a task or question.",
+      "prompt": "Ask the user what they would like help with next, keeping the response concise."
+    }
+  ]Hi! What would you like help withHi! What can next? I help you with today?`;
+
+  const displayText = formatWorkShellAssistantDisplayText(
+    leakedPlanAndDuplicateGreeting,
+  );
+
+  assert.equal(displayText, "Hi! What would you like help with?");
+  assert.doesNotMatch(displayText, /"id"|"summary"|"prompt"|^\[/);
+
+  const rendered = formatWorkShellConversationEntryLines({
+    role: "assistant",
+    text: leakedPlanAndDuplicateGreeting,
+    width: 80,
+  }).join("\n");
+  assert.match(rendered, /UncleCode · context steward/);
+  assert.match(rendered, /Hi! What would you like help with\?/);
+  assert.doesNotMatch(rendered, /greet-user|offer-help|"prompt"|^\s*\[/m);
 });
 
 test("getWorkShellComposerHint keeps slash discovery guidance inside the shared work presenter seam", () => {
@@ -261,6 +320,66 @@ test("getWorkShellPanelPlacement keeps long-session panels near the composer by 
       terminalColumns: 180,
     }),
     "overlay",
+  );
+  assert.equal(
+    shouldHideWorkShellOverlayForInput({
+      panelTitle: "Context expanded",
+      inputValue: "plain text",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldHideWorkShellOverlayForInput({
+      panelTitle: "Context expanded",
+      inputValue: "",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldReportWorkShellOverlayOpen({
+      panelTitle: "Context expanded",
+      inputValue: "plain text",
+    }),
+    false,
+    "hidden context overlays must not steal Esc from composer input",
+  );
+  assert.equal(
+    shouldReportWorkShellOverlayOpen({
+      panelTitle: "Context expanded",
+      inputValue: "",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldReportWorkShellOverlayOpen({
+      panelTitle: "Model picker",
+      inputValue: "/model",
+    }),
+    false,
+  );
+  assert.deepEqual(
+    formatWorkShellOverlayPanelLines({
+      panelTitle: "Context expanded",
+      lines: Array.from(
+        { length: 14 },
+        (_, index) => `context line ${index + 1}`,
+      ),
+    }),
+    [
+      "context line 1",
+      "context line 2",
+      "context line 3",
+      "context line 4",
+      "context line 5",
+      "context line 6",
+      "context line 7",
+      "context line 8",
+      "context line 9",
+      "context line 10",
+      "context line 11",
+      "context line 12",
+      "- 2 more context lines hidden; /context refreshes the packet inspector.",
+    ],
   );
   assert.equal(
     getWorkShellPanelPlacement({
@@ -645,6 +764,18 @@ test("work-shell input decision helpers are exported from the shared tui package
       key: { escape: true },
       input: "plain text",
       slashSuggestionCount: 0,
+      isBusy: false,
+      hasRequestSessionsView: true,
+      escapeResetArmed: true,
+    }),
+    { type: "clear-input" },
+  );
+  assert.deepEqual(
+    resolveWorkShellInputAction({
+      value: "",
+      key: { escape: true },
+      input: "plain text",
+      slashSuggestionCount: 0,
       isBusy: true,
       hasRequestSessionsView: true,
     }),
@@ -674,6 +805,17 @@ test("work-shell input decision helpers are exported from the shared tui package
   );
   assert.deepEqual(
     resolveWorkShellInputAction({
+      value: "o",
+      key: { ctrl: true },
+      input: "plain text",
+      slashSuggestionCount: 0,
+      isBusy: false,
+      hasRequestSessionsView: false,
+    }),
+    { type: "none" },
+  );
+  assert.deepEqual(
+    resolveWorkShellInputAction({
       value: "",
       key: { escape: true },
       input: "plain text",
@@ -689,6 +831,17 @@ test("work-shell input decision helpers are exported from the shared tui package
       value: "",
       key: { escape: true },
       input: "plain text",
+      slashSuggestionCount: 0,
+      isBusy: false,
+      hasRequestSessionsView: false,
+    }),
+    { type: "none" },
+  );
+  assert.deepEqual(
+    resolveWorkShellInputAction({
+      value: "",
+      key: { escape: true },
+      input: "",
       slashSuggestionCount: 0,
       isBusy: false,
       hasRequestSessionsView: false,
@@ -1016,7 +1169,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       text: "hi",
       width: 72,
     }),
-    ["› You · hi"],
+    ["◇ You · packet · hi"],
     "user entries render as compact transcript lines, not full-width input bars",
   );
   assert.deepEqual(
@@ -1025,7 +1178,10 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       text: "Hello. What do you need help with?",
       width: 72,
     }),
-    ["✦ UncleCode", "  Hello. What do you need help with?"],
+    [
+      "◈ UncleCode · context steward",
+      "  Hello. What do you need help with?",
+    ],
     "assistant entries keep a distinct label and readable body",
   );
   assert.equal(
@@ -1055,7 +1211,31 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       mode: "default",
       authLabel: "Browser OAuth · file",
     }),
-    "gpt-5.4 · Work mode · Saved OAuth",
+    "gpt-5.4 · Work mode · Saved OAuth · context cockpit",
+  );
+  assert.equal(
+    formatWorkShellFooterLine({
+      cwd: `${process.env.HOME ?? "/Users/me"}/project/unclecode`,
+      model: "gpt-5.4",
+      reasoningLabel: "medium (mode-default)",
+      mode: "default",
+      authLabel: "Browser OAuth · file",
+      contextIndicator: "packet 2 in · 1 out",
+      width: 120,
+    }),
+    "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth · context cockpit  ·  packet 2 in · 1 out",
+  );
+  assert.match(
+    formatWorkShellFooterLine({
+      cwd: `${process.env.HOME ?? "/Users/me"}/project/unclecode`,
+      model: "gpt-5.4",
+      reasoningLabel: "medium (mode-default)",
+      mode: "default",
+      authLabel: "Browser OAuth · file",
+      contextIndicator: "packet 2 in · 1 out",
+      width: 72,
+    }),
+    /packet 2 in · 1 out$/,
   );
   assert.equal(
     formatWorkShellBusyStatusLine("· thinking inspect repo", 0),

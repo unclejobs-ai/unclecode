@@ -65,7 +65,7 @@ pub fn research_run_report(
 
     let executor_started_at = Instant::now();
     let summary = format!(
-        "Prepared a local research bundle for \"{}\" with {} changed files and {} MCP servers.",
+        "Prepared a context brief for \"{}\" with {} changed files and {} MCP servers.",
         prompt,
         bundle.changed_files.len(),
         connected_server_names.len()
@@ -106,6 +106,7 @@ pub fn research_run_report(
             summary: summary.clone(),
             trace_mode: None,
             reasoning_effort: None,
+            entries: vec![],
         })
         .map_err(|error| format!("Failed to persist research session: {error}"))?;
 
@@ -120,7 +121,7 @@ pub fn research_run_report(
     let total_ms = elapsed_ms(total_started_at);
     let artifact_path_text = artifact_path.to_string_lossy().to_string();
     let lines = vec![
-        "Research completed".to_string(),
+        "Context brief completed".to_string(),
         format!("Session: {session_id}"),
         format!("Summary: {summary}"),
         format!("Artifact: {artifact_path_text}"),
@@ -261,12 +262,12 @@ fn research_markdown(
         )
     };
     let next_changed = if bundle.changed_files.is_empty() {
-        "1. Introduce a concrete change set or target area so the next research pass can analyze a narrower scope."
+        "1. Introduce a concrete change set or target area so the next context brief can analyze a narrower scope."
     } else {
-        "1. Inspect the changed files above and decide whether the research should focus on one subsystem first."
+        "1. Inspect the changed files above and decide whether the next brief should focus on one subsystem first."
     };
     let next_hotspots = if bundle.hotspots.is_empty() {
-        "2. Run another research pass after a meaningful code change so hotspots and policy signals become more informative."
+        "2. Draft another context brief after a meaningful code change so hotspots and policy signals become more informative."
     } else {
         "2. Review the hotspot count and prioritize the densest area for the next implementation wave."
     };
@@ -277,7 +278,7 @@ fn research_markdown(
     };
 
     [
-        "# UncleCode Research Report".to_string(),
+        "# UncleCode Context Brief".to_string(),
         String::new(),
         format!("Prompt: {prompt}"),
         format!("Session: {session_id}"),
@@ -393,14 +394,14 @@ mod tests {
         )
         .unwrap();
         let text = report.lines.join("\n");
-        assert!(text.contains("Research completed"));
+        assert!(text.contains("Context brief completed"));
         assert!(text.contains("Session: research-"));
         let parsed: Value = serde_json::from_str(&report.json).unwrap();
         assert_eq!(parsed["command"], "research.run");
         assert_eq!(parsed["status"], "completed");
         let artifact_path = parsed["artifactPaths"][0].as_str().unwrap();
         let artifact = fs::read_to_string(artifact_path).unwrap();
-        assert!(artifact.contains("# UncleCode Research Report"));
+        assert!(artifact.contains("# UncleCode Context Brief"));
         assert!(artifact.contains("Prompt: summarize current workspace"));
         assert!(root.join(".unclecode/research-runs.jsonl").exists());
 

@@ -74,7 +74,7 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     ...(input.options.initialTraceMode !== undefined ? { initialTraceMode: input.options.initialTraceMode } : {}),
   });
   return {
-    entries: [...decision.entries],
+    entries: input.options.initialEntries ? [...input.options.initialEntries] : [...decision.entries],
     streamingAssistantText: undefined,
     model: decision.model,
     mode: decision.mode,
