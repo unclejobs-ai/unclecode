@@ -158,6 +158,15 @@ pub fn write_text_file(
     Ok(())
 }
 
+pub fn delete_text_file(
+    workspace_root: impl AsRef<Path>,
+    path: impl AsRef<Path>,
+) -> Result<(), AciError> {
+    let target = assert_within_workspace(workspace_root, path, ContainmentOptions::EXISTING)?;
+    fs::remove_file(target)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +225,23 @@ mod tests {
 
         assert_eq!(content, "hello from rust");
         let _ = std::fs::remove_file(root.join(relative));
+    }
+
+    #[test]
+    fn deletes_existing_file_inside_workspace() {
+        let root = workspace_root();
+        let relative = format!("target/unclecode-delete-test-{}.txt", std::process::id());
+
+        write_text_file(&root, &relative, "to be removed").expect("seed file");
+        delete_text_file(&root, &relative).expect("delete file");
+
+        assert!(!root.join(&relative).exists());
+        assert!(read_text_file(&root, &relative).is_err());
+    }
+
+    #[test]
+    fn delete_rejects_paths_outside_workspace() {
+        let root = workspace_root();
+        assert!(delete_text_file(&root, "../../../etc/hosts").is_err());
     }
 }

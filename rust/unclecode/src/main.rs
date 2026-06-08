@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 use unclecode_core::aci::{
-    list_files, read_text_file, view_text_file, view_text_file_json, write_text_file,
+    delete_text_file, list_files, read_text_file, view_text_file, view_text_file_json,
+    write_text_file,
 };
 use unclecode_core::aci_edit::{line_edit_json, lint_failure_message, restore_file};
 use unclecode_core::aci_patch::{apply_unified_patch_json, parse_unified_diff_json};
@@ -4377,6 +4378,12 @@ fn run_native_aci_command(args: &[OsString]) -> Result<u8, String> {
                 .map_err(|error| format!("Failed to read stdin: {error}"))?;
             write_text_file(&cwd, PathBuf::from(path), &content).map_err(|error| error.to_string())?;
             println!("Wrote {}", path.to_string_lossy());
+            Ok(0)
+        }
+        Some("delete") => {
+            let path = args.get(1).ok_or("Usage: unclecode rust aci delete <path>")?;
+            delete_text_file(&cwd, PathBuf::from(path)).map_err(|error| error.to_string())?;
+            println!("Deleted {}", path.to_string_lossy());
             Ok(0)
         }
         Some("edit-json") => {

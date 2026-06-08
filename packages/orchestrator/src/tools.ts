@@ -74,6 +74,18 @@ async function writeFile(input: Record<string, unknown>, cwd: string, options: T
   }
 }
 
+async function deleteFile(input: Record<string, unknown>, cwd: string, options: ToolHandlerOptions = {}): Promise<ToolResult> {
+  if (typeof input.path !== "string") {
+    throw new Error("path is required");
+  }
+  try {
+    const stdout = await runRustAci(["delete", input.path], cwd, undefined, options);
+    return { content: stdout.trim() || `Deleted ${input.path}` };
+  } catch (error) {
+    normalizeRustPathError(error, input.path);
+  }
+}
+
 async function searchText(input: Record<string, unknown>, cwd: string, options: ToolHandlerOptions = {}): Promise<ToolResult> {
   if (typeof input.query !== "string" || input.query.length === 0) {
     throw new Error("query is required");
@@ -134,6 +146,17 @@ export const toolDefinitions: ToolDefinition[] = [
     },
   },
   {
+    name: "delete_file",
+    description: "Delete a file inside the workspace.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Relative file path to delete." },
+      },
+      required: ["path"],
+    },
+  },
+  {
     name: "search_text",
     description: "Search for text using ripgrep in the workspace.",
     input_schema: {
@@ -162,6 +185,7 @@ export const toolHandlers: Record<string, ToolHandler> = {
   list_files: listFiles,
   read_file: readFile,
   write_file: writeFile,
+  delete_file: deleteFile,
   search_text: searchText,
   run_shell: runShell,
 };
