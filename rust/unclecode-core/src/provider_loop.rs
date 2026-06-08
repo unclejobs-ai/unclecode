@@ -1,7 +1,11 @@
 use serde_json::json;
 
 const DEFAULT_LIMIT_TEXT: &str = "Stopped after reaching the tool iteration limit.";
-pub const DEFAULT_PROVIDER_TOOL_LOOP_MAX: usize = 8;
+/// Tool-call iterations allowed per provider turn. Must be generous enough for a
+/// real agentic task (explore -> implement -> verify -> fix). The original 8 was
+/// far too low and caused multi-step requests to stop mid-work before producing
+/// or finishing files.
+pub const DEFAULT_PROVIDER_TOOL_LOOP_MAX: usize = 48;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderLoopDecision {
@@ -79,6 +83,13 @@ pub fn provider_loop_limit_json() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_loop_max_allows_multi_step_agentic_work() {
+        // Explore + implement + verify + fix needs many tool calls; a tiny cap
+        // (the original 8) stopped real tasks mid-work.
+        assert!(DEFAULT_PROVIDER_TOOL_LOOP_MAX >= 32);
+    }
 
     #[test]
     fn finalizes_when_no_tool_actions_remain() {
