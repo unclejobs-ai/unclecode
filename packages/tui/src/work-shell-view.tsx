@@ -70,8 +70,8 @@ function WorkShellSectionDivider(props: {
 }) {
   const width = props.width ?? getWorkShellDividerWidth();
   const labelContent = ` ${props.label} `;
-  const leftLength = Math.max(1, Math.floor((width - labelContent.length) / 2));
-  const rightLength = Math.max(1, width - labelContent.length - leftLength);
+  const leftLength = Math.max(1, Math.floor((width - getDisplayWidth(labelContent)) / 2));
+  const rightLength = Math.max(1, width - getDisplayWidth(labelContent) - leftLength);
   return (
     <Text color={W.border}>
       {"─".repeat(leftLength)}
@@ -486,7 +486,7 @@ function renderWorkShellPanelLine(line: string, index: number): React.ReactNode 
     return (
       <Text key={`${index}-${line}`}>
         <Text color={labelColor}>{classified.label}</Text>
-        <Text color={W.textDim}> · </Text>
+        <Text color={W.textMuted}> · </Text>
         <Text color={valueColor}>{classified.value}</Text>
       </Text>
     );
@@ -873,7 +873,7 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
 }) {
   const line = formatWorkShellHeaderLine({
     providerTitle: formatWorkShellProviderTitle(props.provider),
-    headerHint: props.headerHint ?? "work context · Ctrl+O context · / commands",
+    headerHint: props.headerHint ?? "work context · Ctrl+O sessions · / commands",
     ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
   });
 

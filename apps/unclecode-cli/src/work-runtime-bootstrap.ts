@@ -148,8 +148,10 @@ function buildContextSummaryItems(lines: readonly string[]): readonly ContextPac
   return lines.map((line, index) => {
     const workspaceGuidance = isWorkspaceGuidanceSummaryLine(line);
     const workspaceGuidanceSource = workspaceGuidance ? extractWorkspaceGuidanceSource(line) : undefined;
-    const label = workspaceGuidanceSource ?? line;
-    const preview = workspaceGuidanceSource ? WORKSPACE_GUIDANCE_SAFE_PREVIEW : line;
+    const label = workspaceGuidanceSource ? "Workspace guidance" : line;
+    const preview = workspaceGuidanceSource
+      ? `${workspaceGuidanceSource} — ${WORKSPACE_GUIDANCE_SAFE_PREVIEW}`
+      : line;
 
     return {
       id: workspaceGuidance
@@ -209,11 +211,6 @@ function createInitialHomeState(input: {
     sessionCount: 0,
     mcpServerCount: 0,
     mcpServers: [],
-    latestResearchSessionId: null,
-    latestResearchSummary: null,
-    latestResearchTimestamp: null,
-    researchRunCount: 0,
-    recentResearchRuns: [],
     bridgeLines: [],
     memoryLines: [],
   };
@@ -241,8 +238,9 @@ function buildOmoExcludedPacketItems(
     return excludedArtifacts.map((item, index) => ({
       id: `omo-excluded-${index + 1}`,
       category: "omo",
-      label: item.path,
+      label: "OMO session artifact",
       reason: item.reason,
+      preview: item.path,
     }));
   }
 
@@ -253,8 +251,9 @@ function buildOmoExcludedPacketItems(
     .map((item, index) => ({
       id: `omo-excluded-${index + 1}`,
       category: "omo",
-      label: item.path,
+      label: "OMO session artifact",
       reason: item.reason,
+      preview: item.path,
     }));
 
   if (otherArtifacts.length > items.length) {

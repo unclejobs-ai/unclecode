@@ -1,6 +1,8 @@
 import { Box, Text } from "ink";
 import React from "react";
 
+import { getDisplayWidth } from "./text-width.js";
+
 export const C = {
   bg: "#0f172a",
   surface: "#172033",
@@ -56,7 +58,7 @@ export function RoundedPanel(props: {
   const innerW = w - 2;
   const titleStr = props.title ?? "";
   const titleContent = titleStr.length > 0 ? ` ${titleStr} ` : "";
-  const rightPad = Math.max(0, innerW - titleContent.length);
+  const rightPad = Math.max(0, innerW - getDisplayWidth(titleContent));
 
   return (
     <Box flexDirection="column">
@@ -80,8 +82,8 @@ export function SectionDivider(props: { readonly label?: string; readonly width?
   const w = props.width ?? 72;
   const labelStr = props.label ?? "";
   const labelContent = labelStr.length > 0 ? ` ${labelStr} ` : "";
-  const leftLen = Math.floor((w - labelContent.length) / 2);
-  const rightLen = Math.max(0, w - labelContent.length - leftLen);
+  const leftLen = Math.floor((w - getDisplayWidth(labelContent)) / 2);
+  const rightLen = Math.max(0, w - getDisplayWidth(labelContent) - leftLen);
   return (
     <Text color={C.borderSubtle}>
       {B.h.repeat(leftLen)}{labelContent}{B.h.repeat(rightLen)}

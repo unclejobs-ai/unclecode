@@ -197,11 +197,11 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
         item.reason === "workspace guidance active",
     );
     const workspaceGuidanceItem = packet.included.find(
-      (item) => item.category === "workspace-guidance" && /AGENTS\.md/.test(item.label),
+      (item) => item.category === "workspace-guidance" && item.label === "Workspace guidance",
     );
 
     assert.ok(providerPromptItem, "packet includes system guidance metadata");
-    assert.ok(workspaceGuidanceItem, "packet includes workspace guidance summary");
+    assert.ok(workspaceGuidanceItem, "packet includes workspace guidance summary with safe label");
     assert.notEqual(providerPromptItem.id, workspaceGuidanceItem.id);
     assert.equal(
       packet.included.some((item) => item.category === "workspace" && /AGENTS\.md/.test(item.label)),
@@ -218,8 +218,26 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
       /Use workspace guidance sentinel text/,
       "context packet does not inline workspace guidance body text",
     );
+    // label must not expose the bare filename, but filename must be preserved in preview
+    assert.doesNotMatch(
+      workspaceGuidanceItem.label,
+      /AGENTS\.md/,
+      "workspace guidance label must not expose the raw guidance filename",
+    );
+    assert.match(
+      workspaceGuidanceItem.preview ?? "",
+      /AGENTS\.md/,
+      "workspace guidance filename is preserved in preview, not the headline label",
+    );
     assert.ok(packet.included.some((item) => item.category === "omo" && /G001-context/.test(item.label)));
-    assert.ok(packet.excluded.some((item) => item.category === "omo" && /ledger\.jsonl/.test(item.label)));
+    // OMO excluded label must not expose an absolute path; path is preserved in preview
+    const omoLedgerItem = packet.excluded.find((item) => item.category === "omo" && /ledger\.jsonl/.test(item.preview ?? ""));
+    assert.ok(omoLedgerItem, "OMO excluded item preserves ledger path in preview");
+    assert.doesNotMatch(
+      omoLedgerItem.label,
+      /\//,
+      "OMO excluded item label must not contain an absolute path (no forward-slash)",
+    );
     assert.doesNotMatch(JSON.stringify(packet), /RAW_LEDGER_SENTINEL_DO_NOT_SHOW/);
     assert.doesNotMatch(JSON.stringify(packet), /RAW_EVIDENCE_SENTINEL_DO_NOT_SHOW/);
   } finally {

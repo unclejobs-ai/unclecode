@@ -13,10 +13,6 @@ const baseHomeState = {
   sessionCount: 1,
   mcpServerCount: 0,
   mcpServers: [],
-  latestResearchSessionId: null,
-  latestResearchSummary: null,
-  latestResearchTimestamp: null,
-  researchRunCount: 0,
   sessions: [
     {
       sessionId: "session-alpha",

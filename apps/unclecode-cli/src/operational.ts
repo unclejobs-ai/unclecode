@@ -2,18 +2,12 @@ import { explainUncleCodeConfig } from "@unclecode/config-core";
 import {
   listProjectBridgeLines,
   listScopedMemoryLines,
-  prepareResearchBundle,
 } from "@unclecode/context-broker";
 import {
   MCP_HOST_SUPPORTED_TRANSPORTS,
-  type StartedMcpProfile,
-  createMcpHostController,
-  createMcpHostRegistry,
-  formatMcpHostRegistry,
-  getResearchMcpProfile,
   loadMcpHostRegistry,
 } from "@unclecode/mcp-host";
-import { createOrchestrator, loadExtensionConfigOverlays, loadExtensionManifestSummaries, runRustCommand, runRustCommandSync } from "@unclecode/orchestrator";
+import { loadExtensionConfigOverlays, loadExtensionManifestSummaries, runRustCommand, runRustCommandSync } from "@unclecode/orchestrator";
 import type { ModeProfileId } from "@unclecode/contracts";
 import { MODE_PROFILE_IDS, MODE_PROFILES } from "@unclecode/contracts";
 import {
@@ -38,8 +32,7 @@ import {
 } from "@unclecode/session-store";
 import { listTeamRuns } from "@unclecode/orchestrator";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -57,37 +50,6 @@ function isModeProfileId(value: string): value is ModeProfileId {
   return MODE_PROFILE_IDS.includes(value as ModeProfileId);
 }
 
-type ResearchRunListItem = {
-  readonly sessionId: string;
-  readonly prompt: string;
-  readonly status: "completed" | "failed" | "unknown";
-  readonly summary: string;
-  readonly timestamp: string | null;
-};
-
-function parseResearchLedgerLine(line: string): ResearchRunListItem | null {
-  try {
-    const parsed = JSON.parse(line) as unknown;
-    if (!isRecord(parsed) || typeof parsed.sessionId !== "string") {
-      return null;
-    }
-
-    const status =
-      parsed.status === "completed" || parsed.status === "failed"
-        ? parsed.status
-        : "unknown";
-
-    return {
-      sessionId: parsed.sessionId,
-      prompt: typeof parsed.prompt === "string" ? parsed.prompt : parsed.sessionId,
-      status,
-      summary: typeof parsed.summary === "string" ? parsed.summary : "",
-      timestamp: typeof parsed.timestamp === "string" ? parsed.timestamp : null,
-    };
-  } catch {
-    return null;
-  }
-}
 
 export function getProjectConfigPath(workspaceRoot: string): string {
   return path.join(workspaceRoot, ".unclecode", "config.json");
@@ -186,14 +148,6 @@ const DOCTOR_LATENCY_THRESHOLDS = {
 
 const RESUME_LATENCY_THRESHOLDS = {
   resumeMsBudget: 600,
-} as const;
-
-const RESEARCH_LATENCY_THRESHOLDS = {
-  firstEventMsBudget: 1_500,
-  totalMsBudget: 3_000,
-  bundleMsBudget: 1_500,
-  mcpStartMsBudget: 500,
-  executorMsBudget: 1_500,
 } as const;
 
 export async function buildDoctorReportData(input: {
@@ -412,11 +366,6 @@ export type TuiHomeState = {
     trustTier: string;
     originLabel: string;
   }[];
-  readonly latestResearchSessionId: string | null;
-  readonly latestResearchSummary: string | null;
-  readonly latestResearchTimestamp: string | null;
-  readonly researchRunCount: number;
-  readonly recentResearchRuns: readonly ResearchRunListItem[];
   readonly bridgeLines: readonly string[];
   readonly memoryLines: readonly string[];
 };
@@ -505,12 +454,6 @@ export async function buildTuiHomeState(input: {
     workspaceRoot: input.workspaceRoot,
     ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
   });
-  const latestResearch = sessions.find((session) => session.sessionId.startsWith("research-"));
-  const canonicalWorkspaceRoot = await realpath(input.workspaceRoot).catch(() => input.workspaceRoot);
-  const ledgerPath = path.join(canonicalWorkspaceRoot, ".unclecode", "research-runs.jsonl");
-  let researchRunCount = 0;
-  let latestResearchTimestamp: string | null = null;
-  let recentResearchRuns: readonly ResearchRunListItem[] = [];
   const [bridgeLines, memoryLines] = await Promise.all([
     listProjectBridgeLines(input.workspaceRoot, input.env),
     listScopedMemoryLines({
@@ -526,21 +469,6 @@ export async function buildTuiHomeState(input: {
     .slice(0, 2)
     .flatMap((extension) => extension.statusLines.slice(0, 2).map((line) => `Extension ${extension.name} · ${line}`));
 
-  try {
-    const ledger = await readFile(ledgerPath, "utf8");
-    const lines = ledger.split("\n").filter((line) => line.trim().length > 0);
-    researchRunCount = lines.length;
-    const parsedRuns = lines
-      .map((line) => parseResearchLedgerLine(line))
-      .filter((run): run is ResearchRunListItem => run !== null);
-    recentResearchRuns = parsedRuns.slice(-3).reverse();
-    latestResearchTimestamp = parsedRuns.at(-1)?.timestamp ?? null;
-  } catch {
-    researchRunCount = 0;
-    latestResearchTimestamp = null;
-    recentResearchRuns = [];
-  }
-
   return {
     modeLabel: explanation.activeMode.id,
     authLabel: authStatus.activeSource,
@@ -554,11 +482,6 @@ export async function buildTuiHomeState(input: {
       trustTier: entry.trustTier,
       originLabel: entry.originLabel,
     })),
-    latestResearchSessionId: latestResearch?.sessionId ?? null,
-    latestResearchSummary: latestResearch?.taskSummary ?? null,
-    latestResearchTimestamp,
-    researchRunCount,
-    recentResearchRuns,
     bridgeLines,
     memoryLines: [...extensionSummaryLines, ...memoryLines].slice(0, 6),
   };
@@ -1084,10 +1007,8 @@ import {
   buildMcpInspectReport,
   buildMcpListReport,
   buildResearchStatusReport,
-  createTuiActivityEntry,
   removeProjectMcpServer,
   runResearchPass,
-  runResearchPassData,
 } from "./operational-research.js";
 
 export {

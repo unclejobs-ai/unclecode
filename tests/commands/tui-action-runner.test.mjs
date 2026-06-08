@@ -720,14 +720,6 @@ test("runTuiSessionCenterAction can execute research when a prompt is provided",
 
     assert.ok(homeState.sessions.some((session) => session.sessionId.startsWith("research-")));
     assert.equal(homeState.sessionCount, 1);
-    assert.ok(homeState.latestResearchSessionId?.startsWith("research-"));
-    assert.equal(homeState.latestResearchSummary, homeState.sessions[0]?.taskSummary ?? null);
-    assert.equal(homeState.researchRunCount, 1);
-    assert.match(homeState.latestResearchTimestamp ?? "", /^\d{4}-\d{2}-\d{2}T/);
-    assert.equal(homeState.recentResearchRuns.length, 1);
-    assert.equal(homeState.recentResearchRuns[0]?.prompt, "summarize current workspace");
-    assert.equal(homeState.recentResearchRuns[0]?.status, "completed");
-    assert.match(homeState.recentResearchRuns[0]?.summary ?? "", /Refreshed Work context/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -805,7 +797,6 @@ test("buildTuiHomeState reports MCP count and latest research summary", async ()
     assert.equal(homeState.mcpServers[0]?.transport, "stdio");
     assert.equal(homeState.mcpServers[0]?.trustTier, "user");
     assert.equal(homeState.mcpServers[0]?.originLabel, "user config");
-    assert.match(homeState.latestResearchSummary ?? "", /Refreshed Work context/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

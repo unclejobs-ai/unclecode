@@ -114,8 +114,8 @@ test("work-shell hotspot re-exports extracted helper owner seams instead of regr
   assert.match(viewSource, /export function formatWorkShellProviderTitle\(/);
   assert.match(viewSource, /export function getWorkShellEntryPresentation\(/);
   assert.match(viewSource, /function WorkShellSectionDivider\(/);
-  assert.match(viewSource, /Ctrl\+O context/);
-  assert.doesNotMatch(viewSource, /Ctrl\+O sessions/);
+  assert.doesNotMatch(viewSource, /Ctrl\+O context/);
+  assert.match(viewSource, /Ctrl\+O sessions/);
   assert.doesNotMatch(
     viewSource,
     /<Text bold color="white">Conversation<\/Text>/,
@@ -1598,4 +1598,34 @@ test("work-shell-auth-panels.ts owns auth panel helpers as a dedicated module", 
     authPanelsSource,
     /export function buildDefaultAuthLauncherLines\(/,
   );
+});
+
+test("WorkShellSectionDivider uses getDisplayWidth for CJK-safe centering (not .length)", () => {
+  const viewSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-view.tsx"),
+    "utf8",
+  );
+  // The divider centering must use getDisplayWidth(labelContent), not labelContent.length,
+  // so that Korean/CJK double-width labels are centered correctly.
+  assert.match(
+    viewSource,
+    /Math\.floor\(\(width - getDisplayWidth\(labelContent\)\) \/ 2\)/,
+  );
+  assert.match(
+    viewSource,
+    /width - getDisplayWidth\(labelContent\) - leftLength/,
+  );
+  // Must NOT use raw .length for the centering computation
+  assert.doesNotMatch(viewSource, /width - labelContent\.length/);
+});
+
+test("WorkShellSectionDivider separator uses W.textMuted for WCAG-compliant contrast", () => {
+  const viewSource = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-view.tsx"),
+    "utf8",
+  );
+  // The ' · ' separator between label and value in fact rows must use textMuted (#94a3b8),
+  // not textDim (#64748b), to meet WCAG 2.18:1 contrast threshold.
+  assert.match(viewSource, /<Text color=\{W\.textMuted\}> · <\/Text>/);
+  assert.doesNotMatch(viewSource, /<Text color=\{W\.textDim\}> · <\/Text>/);
 });
