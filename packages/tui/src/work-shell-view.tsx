@@ -806,6 +806,52 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
   );
 });
 
+export function formatWorkShellLiveActivityLine(input: {
+  readonly isBusy: boolean;
+  readonly busyStatus?: string;
+  readonly spinnerFrame?: number;
+}): string | null {
+  if (!input.isBusy) {
+    return null;
+  }
+  const frames = WORK_SHELL_BUSY_SPINNER_FRAMES;
+  const spinner = frames[(((input.spinnerFrame ?? 0) % frames.length) + frames.length) % frames.length];
+  const detail = normalizeBusyDetail(input.busyStatus ?? "");
+  return `${spinner} ${detail.length > 0 ? detail : "Working…"}`;
+}
+
+// Inline "what I'm doing now" line rendered between the conversation and the
+// composer so mid-turn progress is visible where the user is looking, not only
+// in the top session-state panel.
+const WorkShellLiveActivity = React.memo(function WorkShellLiveActivity(props: {
+  readonly isBusy: boolean;
+  readonly busyStatus?: string;
+}) {
+  const [spinnerFrame, setSpinnerFrame] = React.useState(0);
+  React.useEffect(() => {
+    if (!props.isBusy) {
+      return;
+    }
+    const timer = setInterval(() => setSpinnerFrame((value) => value + 1), 90);
+    return () => clearInterval(timer);
+  }, [props.isBusy]);
+  const line = formatWorkShellLiveActivityLine({
+    isBusy: props.isBusy,
+    spinnerFrame,
+    ...(props.busyStatus ? { busyStatus: props.busyStatus } : {}),
+  });
+  if (line === null) {
+    return null;
+  }
+  const [spinner, ...rest] = line.split(" ");
+  return (
+    <Box marginTop={1}>
+      <Text color={W.assistant}>{spinner} </Text>
+      <Text color={W.textMuted}>{rest.join(" ")}</Text>
+    </Box>
+  );
+});
+
 const WorkShellPanelBlock = React.memo(function WorkShellPanelBlock(props: {
   readonly title: string;
   readonly lines: readonly string[];
@@ -1098,6 +1144,10 @@ export function WorkShellView(props: {
           {conversation}
         </Box>
       )}
+      <WorkShellLiveActivity
+        isBusy={props.isBusy}
+        {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
+      />
       <WorkShellComposerDock
         composer={props.composer}
         {...(composerHint ? { composerHint } : {})}
