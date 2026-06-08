@@ -443,7 +443,7 @@ fn resolve_work_shell_entry_presentation(role: &str) -> Value {
     };
     let presentation = match role {
         "user" => json!({
-            "label": "You · packet",
+            "label": "You",
             "badge": "◇",
             "labelColor": "#7dd3fc",
             "labelTextColor": "#082f49",
@@ -453,7 +453,7 @@ fn resolve_work_shell_entry_presentation(role: &str) -> Value {
             "bodyColor": "#e2e8f0",
         }),
         "assistant" => json!({
-            "label": "UncleCode · context steward",
+            "label": "UncleCode",
             "badge": "◈",
             "labelColor": "#5eead4",
             "labelTextColor": "#042f2e",
@@ -592,7 +592,7 @@ pub fn format_runtime_label(node: &str, platform: &str, arch: &str) -> String {
 }
 
 pub fn work_shell_empty_conversation_hint() -> &'static str {
-    "Context cockpit ready. Type a task, /context, or @file; UncleCode shapes the next packet before it calls the model."
+    "Work context ready. Type a task, /context, or @file; UncleCode carries only useful workspace context into the next answer."
 }
 
 pub fn work_shell_composer_hint_json(input_json: &str) -> Result<String, String> {
@@ -643,7 +643,7 @@ pub fn format_work_shell_status_line_json(input_json: &str) -> Result<String, St
 
 pub fn format_work_shell_status_line(model: &str, mode: &str, auth_label: &str) -> String {
     format!(
-        "{model} · {} · {} · context cockpit",
+        "{model} · {} · {} · work context",
         humanize_work_shell_mode_label(mode),
         compact_work_shell_auth_label(auth_label)
     )
@@ -745,7 +745,7 @@ pub fn format_work_shell_footer_line(
     .collect::<Vec<_>>()
     .join("  ·  ");
     let status_line = if width.is_some_and(|value| display_width(&full_preview_footer) > value) {
-        full_status_line.replace(" · context cockpit", " · cockpit")
+        full_status_line.replace(" · work context", " · context")
     } else {
         full_status_line
     };
@@ -1110,6 +1110,9 @@ pub fn normalize_markdown_display_text(value: &str) -> String {
             continue;
         }
         if in_fence {
+            output.push_str("  ");
+            output.push_str(line);
+            output.push('\n');
             continue;
         }
         let without_heading = strip_heading_prefix(line);
@@ -1413,10 +1416,10 @@ mod tests {
     }
 
     #[test]
-    fn strips_fenced_code_blocks() {
+    fn preserves_fenced_code_blocks_as_readable_terminal_lines() {
         assert_eq!(
             normalize_markdown_display_text("before\n```ts\nconst x = 1;\n```\nafter"),
-            "before\nafter"
+            "before\n  const x = 1;\nafter"
         );
     }
 
@@ -1490,7 +1493,7 @@ mod tests {
         assert_eq!(work_shell_composer_hint("/unknown", 0), "No matches");
         assert_eq!(
             work_shell_empty_conversation_hint(),
-            "Context cockpit ready. Type a task, /context, or @file; UncleCode shapes the next packet before it calls the model."
+            "Work context ready. Type a task, /context, or @file; UncleCode carries only useful workspace context into the next answer."
         );
         assert_eq!(
             format_work_shell_thinking_line("medium (mode-default)"),
@@ -1498,7 +1501,7 @@ mod tests {
         );
         assert_eq!(
             format_work_shell_status_line("gpt-5.4", "default", "Browser OAuth · file"),
-            "gpt-5.4 · Work mode · Saved OAuth · context cockpit"
+            "gpt-5.4 · Work mode · Saved OAuth · work context"
         );
         assert_eq!(
             format_work_shell_usage_line(false, None, None, Some(1480), None),
@@ -1529,7 +1532,7 @@ mod tests {
                 Some("Enter send · Shift+Enter newline"),
                 None,
             ),
-            "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth · context cockpit  ·  Enter send · Shift+Enter newline"
+            "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth · work context  ·  Enter send · Shift+Enter newline"
         );
         assert_eq!(
             format_work_shell_footer_line(
@@ -1555,7 +1558,7 @@ mod tests {
                 Some("Enter send · Shift+Enter newline · / commands"),
                 Some(72),
             ),
-            "~/project/unclecode  ·  gpt-5.4 · YOLO mode · Saved OAuth · cockpit"
+            "~/project/unclecode  ·  gpt-5.4 · YOLO mode · Saved OAuth · context"
         );
         assert_eq!(
             format_work_shell_footer_line(
@@ -1564,11 +1567,11 @@ mod tests {
                 "gpt-5.4",
                 "default",
                 "Browser OAuth · file",
-                Some("packet 2 in · 1 out"),
+                Some("context 2 ready · 1 held back"),
                 None,
                 Some(120),
             ),
-            "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth · context cockpit  ·  packet 2 in · 1 out"
+            "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth · work context  ·  context 2 ready · 1 held back"
         );
     }
 
@@ -1660,7 +1663,7 @@ mod tests {
     fn resolves_work_shell_entry_presentation() {
         assert_eq!(
             resolve_work_shell_entry_presentation_json("user").unwrap(),
-            r##"{"borderStyle":"round","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":0},"presentation":{"badge":"◇","bodyColor":"#e2e8f0","borderColor":"#334155","label":"You · packet","labelBackgroundColor":"#bae6fd","labelColor":"#7dd3fc","labelTextColor":"#082f49","railColor":"#5eead4"}}"##
+            r##"{"borderStyle":"round","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":0},"presentation":{"badge":"◇","bodyColor":"#e2e8f0","borderColor":"#334155","label":"You","labelBackgroundColor":"#bae6fd","labelColor":"#7dd3fc","labelTextColor":"#082f49","railColor":"#5eead4"}}"##
         );
         assert_eq!(
             resolve_work_shell_entry_presentation_json("tool").unwrap(),
@@ -1668,7 +1671,7 @@ mod tests {
         );
         assert_eq!(
             resolve_work_shell_entry_presentation_json("assistant").unwrap(),
-            r##"{"borderStyle":"round","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":2},"presentation":{"badge":"◈","bodyColor":"#f8fafc","borderColor":"#475569","label":"UncleCode · context steward","labelBackgroundColor":"#99f6e4","labelColor":"#5eead4","labelTextColor":"#042f2e","railColor":"#7dd3fc"}}"##
+            r##"{"borderStyle":"round","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":2},"presentation":{"badge":"◈","bodyColor":"#f8fafc","borderColor":"#475569","label":"UncleCode","labelBackgroundColor":"#99f6e4","labelColor":"#5eead4","labelTextColor":"#042f2e","railColor":"#7dd3fc"}}"##
         );
         assert_eq!(
             resolve_work_shell_entry_presentation_json("system").unwrap(),

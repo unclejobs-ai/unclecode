@@ -370,12 +370,12 @@ export function Dashboard(props: DashboardProps) {
   const syncHomeState = useCallback((homeState: Partial<TuiShellHomeState>) => {
     dispatch({ type: "home.updated", homeState });
   }, []);
-  const openSessionsView = () => {
+  const openContextView = () => {
     dispatch({
       type: "focus.changed",
-      focus: createSessionCenterFocusForView("sessions", centerState),
+      focus: createSessionCenterFocusForView("research", centerState),
     });
-    dispatch({ type: "view.changed", view: "sessions" });
+    dispatch({ type: "view.changed", view: "research" });
 
     if (!props.refreshHomeState) {
       return;
@@ -1054,7 +1054,7 @@ export function Dashboard(props: DashboardProps) {
 
   if (renderFullscreenWorkPane && props.renderWorkPane) {
     return props.renderWorkPane({
-      openSessions: openSessionsView,
+      openSessions: openContextView,
       syncHomeState,
     });
   }

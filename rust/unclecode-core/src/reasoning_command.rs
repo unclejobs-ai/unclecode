@@ -22,23 +22,25 @@ pub fn resolve_reasoning_command_json(input_json: &str) -> Result<String, String
             let effort = str_field(&mode_default_reasoning, "effort")
                 .unwrap_or("unsupported")
                 .to_string();
+            let label = humanize_reasoning_effort(&effort);
             (
                 mode_default_reasoning,
-                format!("Reasoning reset to {effort}."),
+                format!("Reasoning · {label} mode default restored."),
             )
         } else {
             let supported_efforts = supported_efforts(&current_reasoning);
             if supported_efforts.iter().any(|effort| effort == command) {
+                let label = humanize_reasoning_effort(command);
                 (
                     merge_reasoning_fields(&current_reasoning, command, "override"),
-                    format!("Reasoning set to {command}."),
+                    format!("Reasoning · {label} selected."),
                 )
             } else {
                 (
                     current_reasoning,
                     format!(
-                        "Unsupported reasoning value: {command}. Use one of {} or default.",
-                        supported_efforts.join(", ")
+                        "Reasoning value not available: {command}. Choose {}.",
+                        humanize_supported_efforts_with_default(&supported_efforts)
                     ),
                 )
             }
@@ -47,12 +49,13 @@ pub fn resolve_reasoning_command_json(input_json: &str) -> Result<String, String
         let effort = str_field(&current_reasoning, "effort")
             .unwrap_or("unsupported")
             .to_string();
+        let label = humanize_reasoning_effort(&effort);
         let supported_efforts = supported_efforts(&current_reasoning);
         (
             current_reasoning,
             format!(
-                "Reasoning is {effort}. Supported: {}.",
-                supported_efforts.join(", ")
+                "Reasoning · {label}. Choose {}.",
+                humanize_supported_efforts(&supported_efforts)
             ),
         )
     };
@@ -83,6 +86,51 @@ fn supported_efforts(reasoning: &Value) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+fn humanize_supported_efforts(efforts: &[String]) -> String {
+    let labels = efforts
+        .iter()
+        .map(|effort| humanize_reasoning_effort(effort))
+        .collect::<Vec<_>>();
+    match labels.as_slice() {
+        [] => "Mode default".to_string(),
+        [one] => one.to_string(),
+        [first, second] => format!("{first} or {second}"),
+        _ => {
+            let last = labels.last().cloned().unwrap_or_default();
+            let prefix = labels[..labels.len() - 1].join(", ");
+            format!("{prefix}, or {last}")
+        }
+    }
+}
+
+fn humanize_supported_efforts_with_default(efforts: &[String]) -> String {
+    let mut labels = efforts
+        .iter()
+        .map(|effort| humanize_reasoning_effort(effort).to_string())
+        .collect::<Vec<_>>();
+    labels.push("Mode default".to_string());
+    match labels.as_slice() {
+        [] => "Mode default".to_string(),
+        [one] => one.to_string(),
+        [first, second] => format!("{first} or {second}"),
+        _ => {
+            let last = labels.last().cloned().unwrap_or_default();
+            let prefix = labels[..labels.len() - 1].join(", ");
+            format!("{prefix}, or {last}")
+        }
+    }
+}
+
+fn humanize_reasoning_effort(effort: &str) -> &'static str {
+    match effort {
+        "low" => "Light",
+        "medium" => "Balanced",
+        "high" => "Deep",
+        "default" => "Mode default",
+        _ => "Reasoning fixed",
+    }
 }
 
 fn merge_reasoning_fields(base: &Value, effort: &str, source: &str) -> Value {
@@ -121,7 +169,7 @@ mod tests {
         assert_eq!(parsed["nextReasoning"]["effort"], "high");
         assert_eq!(
             parsed["message"],
-            "Reasoning is high. Supported: low, medium, high."
+            "Reasoning · Deep. Choose Light, Balanced, or Deep."
         );
     }
 
@@ -138,7 +186,7 @@ mod tests {
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["nextReasoning"]["effort"], "low");
         assert_eq!(parsed["nextReasoning"]["source"], "override");
-        assert_eq!(parsed["message"], "Reasoning set to low.");
+        assert_eq!(parsed["message"], "Reasoning · Light selected.");
 
         let result = resolve_reasoning_command_json(
             r#"{
@@ -151,7 +199,10 @@ mod tests {
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["nextReasoning"]["effort"], "medium");
         assert_eq!(parsed["nextReasoning"]["source"], "mode-default");
-        assert_eq!(parsed["message"], "Reasoning reset to medium.");
+        assert_eq!(
+            parsed["message"],
+            "Reasoning · Balanced mode default restored."
+        );
     }
 
     #[test]
@@ -168,7 +219,7 @@ mod tests {
         assert_eq!(parsed["nextReasoning"]["effort"], "high");
         assert_eq!(
             parsed["message"],
-            "Unsupported reasoning value: extreme. Use one of low, medium, high or default."
+            "Reasoning value not available: extreme. Choose Light, Balanced, Deep, or Mode default."
         );
 
         let result = resolve_reasoning_command_json(

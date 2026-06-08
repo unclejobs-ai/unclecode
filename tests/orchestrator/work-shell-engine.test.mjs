@@ -251,7 +251,7 @@ function createEngineInput(overrides = {}) {
         if (input === "/reasoning low") {
           return {
             nextReasoning: { ...reasoning, effort: "low", source: "override" },
-            message: "Reasoning set to low.",
+            message: "Reasoning · Light selected.",
           };
         }
         return { nextReasoning: modeDefault, message: "reset" };
@@ -636,10 +636,11 @@ test("work-shell builtin helpers resolve panels, transcript entries, and runtime
   assert.ok(status.panel.lines.includes("Elapsed · 1.5s"));
   assert.ok(status.panel.lines.some((line) => line.includes("Runtime · OpenAI")));
   assert.equal(traceMode.patch.traceMode, "minimal");
-  assert.deepEqual(reasoning.entries.at(-1), { role: "system", text: "Reasoning set to low." });
+  assert.deepEqual(reasoning.entries.at(-1), { role: "system", text: "Reasoning · Light selected." });
   assert.equal(reasoning.nextReasoning.effort, "low");
-  assert.equal(reasoning.panel.title, "Session status");
-  assert.ok(reasoning.panel.lines.some((line) => line.includes("Reasoning · low (override)")));
+  assert.equal(reasoning.panel.title, "Reasoning picker");
+  assert.ok(reasoning.panel.lines.some((line) => line.includes("Current · Light")));
+  assert.ok(reasoning.panel.lines.some((line) => line.includes("Deep · best for hard changes")));
   assert.equal(model?.nextModel, "gpt-4.1-mini");
   assert.equal(model?.shouldUpdateRuntime, true);
   assert.equal(createToolsBuiltinResult("/tools", ["tool-a"]).at(-1)?.text, "tool-a");
@@ -712,7 +713,7 @@ test("work-shell builtin runtime helper orchestrates stateful builtin transition
       assert.equal(input, "/reasoning low");
       return {
         nextReasoning: { ...reasoning, effort: "low", source: "override" },
-        message: "Reasoning set to low.",
+        message: "Reasoning · Light selected.",
       };
     },
     resolveModelCommand() {
@@ -810,7 +811,7 @@ test("work-shell builtin runtime helper orchestrates stateful builtin transition
   assert.equal(runtimeSettings.length, 1);
   assert.equal(runtimeSettings[0]?.reasoning?.effort, "low");
   assert.equal(statePatches[0]?.reasoning?.effort, "low");
-  assert.equal(statePatches[0]?.panel?.title, "Session status");
+  assert.equal(statePatches[0]?.panel?.title, "Reasoning picker");
   assert.equal(openedSessions, 1);
   assert.equal(reloadedContext, 0);
   assert.equal(exited, 0);
@@ -908,6 +909,50 @@ test("work-shell turn helpers build summaries and permission-stall continuations
   assert.equal(
     sanitizeWorkShellAssistantText(leakedPlanAndDuplicateGreeting),
     "Hi! What would you like help with?",
+  );
+  const duplicatedMultilingualAnswer = `핵심은 handoff_contexts로 좁히는 겁니다. ಈಗ 구체적으로 보면:
+
+\`\`\`sql
+create table handoff_contexts (
+  id text primary key
+);
+\`\`\`
+
+결론
+
+Runbook은 일반 메모리가 아니라 작업 인계 컨텍스트만 가져야 합니다.
+
+Yes — add a dedicated context table, but I’d name it handoff_contexts, not generic contexts.
+
+That keeps Runbook aligned with its boundary: a local-first AgentOps operational DB, not a general memory backend.`;
+  const cleanedDuplicatedAnswer = sanitizeWorkShellAssistantText(duplicatedMultilingualAnswer);
+  assert.match(cleanedDuplicatedAnswer, /핵심은 handoff_contexts/);
+  assert.match(cleanedDuplicatedAnswer, /```sql\ncreate table handoff_contexts/);
+  assert.doesNotMatch(cleanedDuplicatedAnswer, /ಈಗ|Yes — add a dedicated context table/);
+  const intentionalMultilingualAnswer =
+    "한국어와 Kannada 예시를 같이 보겠습니다.\n\nಇದು ಕನ್ನಡದಲ್ಲಿ ಬರೆಯಲಾದ 정상 문장입니다.";
+  assert.equal(
+    sanitizeWorkShellAssistantText(intentionalMultilingualAnswer),
+    intentionalMultilingualAnswer,
+    "intentional substantial multilingual prose must be preserved",
+  );
+  const codeFenceWithKannadaLiteral = `한국어 설명입니다. ಈಗ 불필요한 토큰입니다.
+
+\`\`\`js
+const label = "ಕೋಡ್";
+\`\`\``;
+  const cleanedCodeFenceWithKannadaLiteral = sanitizeWorkShellAssistantText(codeFenceWithKannadaLiteral);
+  assert.doesNotMatch(cleanedCodeFenceWithKannadaLiteral, /ಈಗ/);
+  assert.match(cleanedCodeFenceWithKannadaLiteral, /const label = "ಕೋಡ್";/);
+  const intentionalEnglishConclusion = `${"한국어 설명입니다. ".repeat(20)}
+
+Conclusion
+
+This English conclusion is intentional and contains useful details.`;
+  assert.match(
+    sanitizeWorkShellAssistantText(intentionalEnglishConclusion),
+    /This English conclusion is intentional/,
+    "intentional English conclusion sections must not be truncated",
   );
   const validJsonTaskAnswer = `[{"id":"task-1","summary":"Do thing","prompt":"Run this prompt"}]`;
   assert.equal(
@@ -2330,7 +2375,11 @@ test("WorkShellEngine applies /reasoning updates and syncs agent runtime setting
   assert.equal(engine.getState().reasoning.effort, "low");
   assert.equal(calls.runtimeSettings.length, 1);
   assert.equal(calls.runtimeSettings[0]?.reasoning?.effort, "low");
-  assert.equal(engine.getState().panel.title, "Session status");
+  assert.equal(engine.getState().panel.title, "Reasoning picker");
+  assert.ok(engine.getState().panel.lines.includes("Current · Light"));
+  assert.ok(
+    engine.getState().entries.some((entry) => entry.text === "Reasoning · Light selected."),
+  );
 });
 
 test("WorkShellEngine applies /model updates and syncs model plus reasoning runtime settings", async () => {
@@ -2447,7 +2496,7 @@ test("WorkShellEngine opens /context as an overlay and can dismiss it", async ()
   await engine.handleSubmit("/context");
 
   assert.equal(engine.getState().panel.title, "Context expanded");
-  assert.ok(engine.getState().entries.some((entry) => entry.text === "Context shown."));
+  assert.ok(engine.getState().entries.some((entry) => entry.text === "Context opened."));
 
   engine.closeOverlay();
 
@@ -2461,7 +2510,7 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
     id: "packet-work-shell-1",
     version: 1,
     generatedAt: "2026-06-04T00:00:00.000Z",
-    title: "Next model-call packet",
+    title: "Next answer context",
     included: [
       {
         id: "workspace-guidance",
@@ -2476,7 +2525,7 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
         category: "omo",
         label: "G001 context MVP",
         reason: "active ULW goal",
-        preview: "Deliver packet inspector.",
+        preview: "Deliver context view.",
         tokenEstimate: 18,
       },
     ],
@@ -2485,7 +2534,7 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
         id: "omo-ledger",
         category: "omo",
         label: ".omo/ulw-loop/session/ledger.jsonl",
-        reason: "raw OMO ledger is excluded from provider context",
+        reason: "raw OMO ledger stays local",
       },
     ],
     warnings: [
@@ -2495,7 +2544,7 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
         severity: "warning",
       },
     ],
-    preview: ["Packet packet-work-shell-1 will prefix the next provider call."],
+    preview: ["Context will be carried into the next answer."],
     sourceCounts: {
       included: 2,
       excluded: 1,
@@ -2526,14 +2575,14 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
   await engine.handleSubmit("summarize repo");
 
   assert.equal(packetCalls, 1);
-  assert.equal(engine.getState().contextIndicator, "packet 2 in · 1 out · 1 warn");
+  assert.equal(engine.getState().contextIndicator, "context 2 ready · 1 held back · 1 issue");
   assert.equal(prompts.length, 1);
   assert.match(prompts[0] ?? "", /<unclecode_context_packet id="packet-work-shell-1" version="1">/);
   assert.match(prompts[0] ?? "", /Included:\n- workspace: AGENTS\.md \(repo instructions loaded\) - Use &lt;small&gt; reversible diffs\./);
-  assert.match(prompts[0] ?? "", /- omo: G001 context MVP \(active ULW goal\) - Deliver packet inspector\./);
-  assert.match(prompts[0] ?? "", /Excluded raw artifacts:\n- 1 raw artifact withheld from provider context; inspect \/context for local-only details\./);
+  assert.match(prompts[0] ?? "", /- omo: G001 context MVP \(active ULW goal\) - Deliver context view\./);
+  assert.match(prompts[0] ?? "", /Excluded raw artifacts:\n- 1 raw artifact withheld from model-ready context; inspect \/context for local-only details\./);
   assert.doesNotMatch(prompts[0] ?? "", /\.omo\/ulw-loop\/session\/ledger\.jsonl/);
-  assert.match(prompts[0] ?? "", /Warnings:\n- 1 packet warning withheld from provider context; inspect \/context for local-only details\./);
+  assert.match(prompts[0] ?? "", /Warnings:\n- 1 context issue withheld from model-ready context; inspect \/context for local-only details\./);
   assert.doesNotMatch(prompts[0] ?? "", /Multiple active OMO sessions/);
   assert.match(prompts[0] ?? "", /User request:\nsummarize repo$/);
   assert.equal(engine.getState().entries.find((entry) => entry.role === "user")?.text, "summarize repo");
@@ -2542,12 +2591,24 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
 
   assert.equal(packetCalls, 2);
   assert.equal(engine.getState().panel.title, "Context expanded");
-  assert.ok(engine.getState().panel.lines.includes("Packet packet-work-shell-1 · Next model-call packet"));
-  assert.ok(engine.getState().panel.lines.includes("Sources · 2 included · 1 excluded · 1 warning · ~30 tokens"));
-  assert.ok(engine.getState().panel.lines.includes("Included by source"));
-  assert.ok(engine.getState().panel.lines.includes("+ omo · 1 · G001 context MVP (active ULW goal) - Deliver packet inspector."));
-  assert.ok(engine.getState().panel.lines.includes("Excluded raw artifacts"));
-  assert.ok(engine.getState().panel.lines.includes("Preview · Packet packet-work-shell-1 will prefix the next provider call."));
+  assert.ok(engine.getState().panel.lines.includes("Context · Next answer context"));
+  assert.ok(engine.getState().panel.lines.includes("Sources · 2 included · 1 held back · 1 warning · ~30 tokens"));
+  assert.ok(engine.getState().panel.lines.includes("Included in next answer"));
+  assert.ok(engine.getState().panel.lines.includes("+ omo · 1 · G001 context MVP (active ULW goal) - Deliver context view."));
+  assert.ok(engine.getState().panel.lines.includes("Held back locally"));
+  assert.ok(engine.getState().panel.lines.includes("Next answer · Context will be carried into the next answer."));
+  assert.equal(engine.getState().panel.lines.some((line) => /\bPacket\b|provider packet|Next model-call packet/.test(line)), false);
+});
+
+test("WorkShellEngine treats /con as the human context shortcut", async () => {
+  const { engine } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/con");
+
+  assert.equal(engine.getState().panel.title, "Context expanded");
+  assert.ok(engine.getState().entries.some((entry) => entry.text === "Context opened."));
+  assert.doesNotMatch(engine.getState().entries.map((entry) => entry.text).join("\n"), /Unsupported work-shell inline command|packet/i);
 });
 
 test("WorkShellEngine collapses expanded context when a normal chat turn starts", async () => {

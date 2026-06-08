@@ -25,7 +25,7 @@ export function createContextPacketView(input: CreateContextPacketViewInput): Co
     id: input.id,
     version: 1,
     generatedAt: input.generatedAt,
-    title: input.title ?? "Next model-call packet",
+    title: input.title ?? "Next answer context",
     included,
     excluded,
     warnings,
@@ -52,8 +52,18 @@ function formatPacketItemBody(item: ContextPacketViewItem): string {
   return `${item.label} (${item.reason})${previewSuffix}`;
 }
 
+function formatPacketCategory(category: ContextPacketViewItem["category"]): string {
+  if (category === "provider-system-prompt") {
+    return "system guidance";
+  }
+  if (category === "workspace-guidance") {
+    return "workspace guidance";
+  }
+  return category;
+}
+
 function formatPacketItem(item: ContextPacketViewItem): string {
-  return `- ${item.category}: ${formatPacketItemBody(item)}`;
+  return `- ${formatPacketCategory(item.category)}: ${formatPacketItemBody(item)}`;
 }
 
 function truncatePacketText(value: string, maxLength = 112): string {
@@ -86,10 +96,10 @@ function formatCategorySummaryLines(input: {
   }
   const visible = summaries
     .slice(0, input.visibleLimit)
-    .map((summary) => `${input.marker} ${summary.category} · ${summary.count} · ${truncatePacketText(formatPacketItemBody(summary.sample))}`);
+    .map((summary) => `${input.marker} ${formatPacketCategory(summary.sample.category)} · ${summary.count} · ${truncatePacketText(formatPacketItemBody(summary.sample))}`);
   const hiddenCount = Math.max(0, summaries.length - input.visibleLimit);
   return hiddenCount > 0 && input.includeHiddenGroupsLine
-    ? [...visible, `${input.marker} ${hiddenCount} more source groups hidden; provider packet still tracks full count.`]
+    ? [...visible, `${input.marker} ${hiddenCount} more source groups hidden; counts still tracked.`]
     : visible;
 }
 
@@ -99,7 +109,7 @@ function formatWarningCount(count: number): string {
 
 function formatSourceCountLine(packet: ContextPacketView): string {
   const tokenSuffix = packet.tokenEstimate > 0 ? ` · ~${packet.tokenEstimate} tokens` : "";
-  return `Sources · ${packet.sourceCounts.included} included · ${packet.sourceCounts.excluded} excluded · ${formatWarningCount(packet.sourceCounts.warnings)}${tokenSuffix}`;
+  return `Sources · ${packet.sourceCounts.included} included · ${packet.sourceCounts.excluded} held back · ${formatWarningCount(packet.sourceCounts.warnings)}${tokenSuffix}`;
 }
 
 function formatWarningsLine(warnings: readonly ContextPacketViewWarning[]): string {
@@ -113,21 +123,21 @@ function formatWarningsLine(warnings: readonly ContextPacketViewWarning[]): stri
 
 function formatPreviewLine(packet: ContextPacketView): string {
   const first = packet.preview[0]?.trim();
-  return `Preview · ${truncatePacketText(first && first.length > 0 ? first : "No provider-bound preview available.")}`;
+  return `Next answer · ${truncatePacketText(first && first.length > 0 ? first : "No model-ready context preview available.")}`;
 }
 
 export function buildContextPacketPreviewLines(packet: ContextPacketView): readonly string[] {
   return [
-    `Packet ${packet.id} · ${packet.title}`,
+    `Context · ${packet.title}`,
     formatSourceCountLine(packet),
-    "Provider · next model call receives included summaries; raw audit artifacts stay out.",
-    "Included by source",
+    "UncleCode · included summaries go to the model; raw audit artifacts stay local.",
+    "Included in next answer",
     ...formatCategorySummaryLines({ items: packet.included, marker: "+", visibleLimit: 3, includeHiddenGroupsLine: true }),
-    "Excluded raw artifacts",
+    "Held back locally",
     ...formatCategorySummaryLines({ items: packet.excluded, marker: "-", visibleLimit: 1 }),
     formatWarningsLine(packet.warnings),
     formatPreviewLine(packet),
-    "Controls · Esc close · /context refresh · Ctrl+O context center",
+    "Controls · Esc close · /context refresh · Ctrl+O context",
   ];
 }
 
@@ -156,7 +166,7 @@ function formatProviderWithheldSummary(count: number, noun: string): readonly st
   }
   const plural = count === 1 ? noun : `${noun}s`;
   return [
-    escapeXmlText(`- ${count} ${plural} withheld from provider context; inspect /context for local-only details.`),
+    escapeXmlText(`- ${count} ${plural} withheld from model-ready context; inspect /context for local-only details.`),
   ];
 }
 
@@ -168,12 +178,12 @@ export function formatContextPacketPromptPrefix(packet: ContextPacketView): stri
     "Excluded raw artifacts:",
     ...formatProviderWithheldSummary(packet.sourceCounts.excluded, "raw artifact"),
     "Warnings:",
-    ...formatProviderWithheldSummary(packet.sourceCounts.warnings, "packet warning"),
+    ...formatProviderWithheldSummary(packet.sourceCounts.warnings, "context issue"),
     "</unclecode_context_packet>",
   ].join("\n");
 }
 
 export function formatContextPacketIndicator(packet: ContextPacketView): string {
-  const base = `packet ${packet.sourceCounts.included} in · ${packet.sourceCounts.excluded} out`;
-  return packet.sourceCounts.warnings > 0 ? `${base} · ${packet.sourceCounts.warnings} warn` : base;
+  const base = `context ${packet.sourceCounts.included} ready · ${packet.sourceCounts.excluded} held back`;
+  return packet.sourceCounts.warnings > 0 ? `${base} · ${packet.sourceCounts.warnings} issue` : base;
 }

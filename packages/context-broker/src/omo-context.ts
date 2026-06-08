@@ -91,13 +91,13 @@ async function excludedArtifactPaths(sessionDir: string, sessionId: string): Pro
   if (await exists(ledgerPath)) {
     excluded.push({
       path: path.posix.join(".omo", "ulw-loop", sessionId, "ledger.jsonl"),
-      reason: "raw OMO ledger is excluded from provider context",
+      reason: "raw OMO ledger stays local",
     });
   }
   for (const evidencePath of await listEvidencePaths(sessionDir, sessionId)) {
     excluded.push({
       path: evidencePath,
-      reason: "raw OMO evidence transcript is excluded from provider context",
+      reason: "raw OMO evidence transcript stays local",
     });
   }
   return excluded;

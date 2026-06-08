@@ -84,7 +84,7 @@ function createWorkShellPaneEngine(overrides = {}) {
     memoryLines: [],
     panel: {
       title: "Session status",
-      lines: ["Context cockpit ready."],
+      lines: ["Work context ready."],
     },
     ...overrides,
   };
@@ -179,7 +179,7 @@ test("Work model picker closes after Enter submits the selected model option", a
   assert.equal(closeCount, 1);
 });
 
-test("Work Ctrl+O opens the context cockpit", async () => {
+test("Work Ctrl+O opens the work context", async () => {
   let openCount = 0;
   const { stdin, instance } = renderWithInput(
     React.createElement(WorkShellInputControllerHarness, {
@@ -254,7 +254,7 @@ test("Composer ignores repeated non-text control shortcuts", async () => {
   assert.deepEqual(submittedValues, []);
 });
 
-test("Work pane routes repeated Ctrl+O to context cockpit without submitting text", async () => {
+test("Work pane routes repeated Ctrl+O to work context without submitting text", async () => {
   const { engine, submittedLines } = createWorkShellPaneEngine();
   let openCount = 0;
   const { stdin, instance } = renderWithInput(

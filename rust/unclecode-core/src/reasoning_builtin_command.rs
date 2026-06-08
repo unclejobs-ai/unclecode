@@ -1,6 +1,4 @@
 use crate::reasoning_command::resolve_reasoning_command_json;
-use crate::status_command::build_status_panel_input;
-use crate::ux_panels::build_ux_panel_json;
 use serde_json::{json, Value};
 
 pub fn resolve_reasoning_builtin_command_json(input_json: &str) -> Result<String, String> {
@@ -30,17 +28,7 @@ pub fn resolve_reasoning_builtin_command_json(input_json: &str) -> Result<String
         .unwrap_or("Reasoning updated.")
         .to_string();
 
-    let mut panel_input = input.clone();
-    if let Some(object) = panel_input.as_object_mut() {
-        object.insert(
-            "reasoningLabel".to_string(),
-            Value::String(describe_reasoning(&next_reasoning)),
-        );
-    }
-    let panel_input = build_status_panel_input(&panel_input)?;
-    let panel =
-        serde_json::from_str::<Value>(&build_ux_panel_json("status", &panel_input.to_string())?)
-            .map_err(|error| format!("Invalid reasoning status panel JSON: {error}"))?;
+    let panel = build_reasoning_picker_panel(&next_reasoning);
 
     serde_json::to_string(&json!({
         "entries": [
@@ -53,24 +41,58 @@ pub fn resolve_reasoning_builtin_command_json(input_json: &str) -> Result<String
     .map_err(|error| error.to_string())
 }
 
-fn describe_reasoning(reasoning: &Value) -> String {
-    if reasoning
-        .get("support")
-        .and_then(|support| support.get("status"))
-        .and_then(Value::as_str)
-        == Some("unsupported")
-    {
-        return "unsupported".to_string();
-    }
+fn build_reasoning_picker_panel(reasoning: &Value) -> Value {
     let effort = reasoning
         .get("effort")
         .and_then(Value::as_str)
         .unwrap_or("unsupported");
-    let source = reasoning
-        .get("source")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    format!("{effort} ({source})")
+    let current = humanize_reasoning_effort(effort);
+    let supported = reasoning
+        .get("support")
+        .and_then(|support| support.get("supportedEfforts"))
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut lines = vec![
+        format!("Current · {current}"),
+        "Choose thinking depth".to_string(),
+    ];
+    for supported_effort in supported {
+        let marker = if supported_effort == effort {
+            "›"
+        } else {
+            " "
+        };
+        lines.push(format!(
+            "{marker} /reasoning {supported_effort}  {} · {}",
+            humanize_reasoning_effort(supported_effort),
+            reasoning_effort_description(supported_effort)
+        ));
+    }
+    lines.push("  /reasoning default  Mode default · follow the current work mode".to_string());
+    json!({
+        "title": "Reasoning picker",
+        "lines": lines,
+    })
+}
+
+fn humanize_reasoning_effort(effort: &str) -> &'static str {
+    match effort {
+        "low" => "Light",
+        "medium" => "Balanced",
+        "high" => "Deep",
+        "default" => "Mode default",
+        _ => "Reasoning fixed",
+    }
+}
+
+fn reasoning_effort_description(effort: &str) -> &'static str {
+    match effort {
+        "low" => "fast checks",
+        "medium" => "steady default",
+        "high" => "best for hard changes",
+        _ => "fixed for this model",
+    }
 }
 
 #[cfg(test)]
@@ -97,17 +119,14 @@ mod tests {
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["entries"][1]["text"], "Reasoning set to low.");
+        assert_eq!(parsed["entries"][1]["text"], "Reasoning · Light selected.");
         assert_eq!(parsed["nextReasoning"]["effort"], "low");
         assert_eq!(parsed["nextReasoning"]["source"], "override");
-        assert_eq!(parsed["panel"]["title"], "Session status");
+        assert_eq!(parsed["panel"]["title"], "Reasoning picker");
         assert!(parsed["panel"]["lines"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|line| line
-                .as_str()
-                .unwrap_or("")
-                .contains("Reasoning · low (override)")));
+            .any(|line| line.as_str().unwrap_or("").contains("Current · Light")));
     }
 }

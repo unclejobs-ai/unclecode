@@ -302,7 +302,7 @@ test("dashboard renders distinct Work, History, MCP, and Research pages", async 
   assert.match(work, /Ctrl\+O context/);
 
   const history = await captureDashboardFrame("sessions");
-  assert.match(history, /context cockpit/);
+  assert.match(history, /work context/);
   assert.match(history, /history/);
   assert.match(history, /Conversation/);
   assert.match(history, /Review ESC flow/);
@@ -452,7 +452,7 @@ test("embedded session center keeps numeric tabs and four shortcut actions worki
   assert.match(workShortcut.output, /Work composer/);
 });
 
-test("embedded work Ctrl+O opens History even when context refresh fails", async () => {
+test("embedded work Ctrl+O opens Context even when context refresh fails", async () => {
   const opened = await captureDashboardAfterInputs([], {
     props: {
       initialView: "work",
@@ -464,11 +464,11 @@ test("embedded work Ctrl+O opens History even when context refresh fails", async
     },
   });
 
-  assert.match(opened.output, /Conversation/);
-  assert.match(opened.output, /Review ESC flow/);
+  assert.match(opened.output, /Selected context/);
+  assert.match(opened.output, /Workspace context for Work/);
   assert.ok(
-    opened.output.lastIndexOf("Conversation") >
+    opened.output.lastIndexOf("Selected context") >
       opened.output.lastIndexOf("Work composer"),
-    "final frame should be History even if the background refresh rejects",
+    "final frame should be Context even if the background refresh rejects",
   );
 });

@@ -22,7 +22,7 @@ pub fn resolve_context_command_json(input_json: &str) -> Result<String, String> 
     serde_json::to_string(&json!({
         "entries": [
             { "role": "user", "text": line },
-            { "role": "system", "text": "Context shown." },
+            { "role": "system", "text": "Context opened." },
         ],
         "panel": panel,
     }))
@@ -88,7 +88,7 @@ mod tests {
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["entries"][1]["text"], "Context shown.");
+        assert_eq!(parsed["entries"][1]["text"], "Context opened.");
         assert_eq!(parsed["panel"]["title"], "Context expanded");
         assert!(parsed["panel"]["lines"]
             .as_array()

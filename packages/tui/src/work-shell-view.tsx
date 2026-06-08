@@ -133,7 +133,7 @@ export function formatWorkShellOverlayPanelLines(input: {
   const visibleLines = input.lines.slice(0, WORK_SHELL_CONTEXT_OVERLAY_LINE_LIMIT);
   return [
     ...visibleLines,
-    `- ${input.lines.length - visibleLines.length} more context lines hidden; /context refreshes the packet inspector.`,
+    `- ${input.lines.length - visibleLines.length} more context lines hidden; /context refreshes this view.`,
   ];
 }
 
@@ -691,7 +691,7 @@ function renderWorkShellEntryBlock(input: {
           <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
             {" "}{presentation.badge} {presentation.label}{" "}
           </Text>
-          <Text color={W.textDim}>  next-call input</Text>
+          <Text color={W.textDim}>  message</Text>
         </Text>
         {renderedLines.map((line, lineIndex) => (
           <Text key={`user-${String(input.index)}-${String(lineIndex)}`}>
@@ -719,7 +719,7 @@ function renderWorkShellEntryBlock(input: {
           <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
             {" "}{presentation.badge} {presentation.label}{" "}
           </Text>
-          <Text color={W.textDim}>  context-aware reply</Text>
+          <Text color={W.textDim}>  reply</Text>
         </Text>
         <Box marginTop={1} flexDirection="column">
           {wrapDisplayText(bodyText, Math.max(20, input.width - 4)).map((line, lineIndex) => (
@@ -873,7 +873,7 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
 }) {
   const line = formatWorkShellHeaderLine({
     providerTitle: formatWorkShellProviderTitle(props.provider),
-    headerHint: props.headerHint ?? "context cockpit · Ctrl+O context · / commands",
+    headerHint: props.headerHint ?? "work context · Ctrl+O context · / commands",
     ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
   });
 
@@ -937,7 +937,7 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   return (
     <Box marginTop={1} borderStyle="round" borderColor={props.isBusy ? W.assistant : W.border} paddingX={1} flexDirection="column">
       <Text>
-        <Text color={W.assistant} bold>Context cockpit</Text>
+        <Text color={W.assistant} bold>Work context</Text>
         <Text color={W.textDim}> · session state</Text>
       </Text>
       <Box marginTop={1} flexDirection="column">

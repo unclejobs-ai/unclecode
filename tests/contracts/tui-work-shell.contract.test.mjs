@@ -167,18 +167,18 @@ test("formatWorkShellProviderTitle humanizes known providers for the unified wor
 test("formatWorkShellHeaderLine renders one width-bounded row", () => {
   const wide = formatWorkShellHeaderLine({
     providerTitle: "UncleCode · OpenAI",
-    headerHint: "context cockpit · Ctrl+O context · / commands",
+    headerHint: "work context · Ctrl+O context · / commands",
     terminalColumns: 120,
   });
   assert.equal(getDisplayWidth(wide), 118);
   assert.match(wide, /^UncleCode · OpenAI/);
-  assert.match(wide, /context cockpit/);
+  assert.match(wide, /work context/);
   assert.match(wide, /Ctrl\+O context/);
   assert.doesNotMatch(wide, /\n/);
 
   const narrow = formatWorkShellHeaderLine({
     providerTitle: "UncleCode · OpenAI",
-    headerHint: "context cockpit · Ctrl+O context · / commands",
+    headerHint: "work context · Ctrl+O context · / commands",
     terminalColumns: 36,
   });
   assert.equal(getDisplayWidth(narrow), 34);
@@ -187,7 +187,7 @@ test("formatWorkShellHeaderLine renders one width-bounded row", () => {
 
 test("getWorkShellEntryPresentation keeps user, assistant, tool, and system roles visually distinct", () => {
   assert.deepEqual(getWorkShellEntryPresentation("user"), {
-    label: "You · packet",
+    label: "You",
     badge: "◇",
     labelColor: "#7dd3fc",
     labelTextColor: "#082f49",
@@ -197,7 +197,7 @@ test("getWorkShellEntryPresentation keeps user, assistant, tool, and system role
     bodyColor: "#e2e8f0",
   });
   assert.deepEqual(getWorkShellEntryPresentation("assistant"), {
-    label: "UncleCode · context steward",
+    label: "UncleCode",
     badge: "◈",
     labelColor: "#5eead4",
     labelTextColor: "#042f2e",
@@ -228,11 +228,11 @@ test("getWorkShellEntryPresentation keeps user, assistant, tool, and system role
   assert.equal(getWorkShellEntryBorderStyle("system"), "single");
   assert.equal(
     getWorkShellEmptyConversationHint(),
-    "Context cockpit ready. Type a task, /context, or @file; UncleCode shapes the next packet before it calls the model.",
+    "Work context ready. Type a task, /context, or @file; UncleCode carries only useful workspace context into the next answer.",
   );
 });
 
-test("refined non-orange context cockpit avoids loud orange chrome", () => {
+test("refined non-orange work context avoids loud orange chrome", () => {
   const roles = ["user", "assistant", "tool", "system"];
   const paletteValues = roles.flatMap((role) =>
     Object.values(getWorkShellEntryPresentation(role)).filter(
@@ -248,8 +248,8 @@ test("refined non-orange context cockpit avoids loud orange chrome", () => {
     text: "/model gpt-5.5",
     width: 80,
   }).join("\n");
-  assert.match(renderedUser, /You · packet/);
-  assert.doesNotMatch(renderedUser, /packet intent/);
+  assert.match(renderedUser, /You/);
+  assert.doesNotMatch(renderedUser, /packet|next-call/i);
 });
 
 test("assistant transcript hides internal action plans and collapses duplicate greeting streams", () => {
@@ -278,9 +278,37 @@ test("assistant transcript hides internal action plans and collapses duplicate g
     text: leakedPlanAndDuplicateGreeting,
     width: 80,
   }).join("\n");
-  assert.match(rendered, /UncleCode · context steward/);
+  assert.match(rendered, /UncleCode/);
+  assert.doesNotMatch(rendered, /context steward|context-aware reply/i);
   assert.match(rendered, /Hi! What would you like help with\?/);
   assert.doesNotMatch(rendered, /greet-user|offer-help|"prompt"|^\s*\[/m);
+});
+
+test("assistant display keeps code and removes obvious duplicate multilingual tails", () => {
+  const mixedDuplicate = `핵심은 handoff_contexts로 좁히는 겁니다. ಈಗ 구체적으로 보면:
+
+\`\`\`sql
+create table handoff_contexts (
+  id text primary key
+);
+\`\`\`
+
+결론
+
+Runbook은 일반 메모리가 아니라 작업 인계 컨텍스트만 가져야 합니다.
+
+Yes — add a dedicated context table, but I’d name it handoff_contexts, not generic contexts.
+
+That keeps Runbook aligned with its boundary: a local-first AgentOps operational DB, not a general memory backend.`;
+
+  const displayText = formatWorkShellAssistantDisplayText(mixedDuplicate);
+  const normalized = normalizeMarkdownDisplayText(displayText);
+
+  assert.match(displayText, /핵심은 handoff_contexts/);
+  assert.doesNotMatch(displayText, /ಈಗ/);
+  assert.doesNotMatch(displayText, /Yes — add a dedicated context table/);
+  assert.match(normalized, /create table handoff_contexts/);
+  assert.match(normalized, /id text primary key/);
 });
 
 test("getWorkShellComposerHint keeps slash discovery guidance inside the shared work presenter seam", () => {
@@ -378,7 +406,7 @@ test("getWorkShellPanelPlacement keeps long-session panels near the composer by 
       "context line 10",
       "context line 11",
       "context line 12",
-      "- 2 more context lines hidden; /context refreshes the packet inspector.",
+      "- 2 more context lines hidden; /context refreshes this view.",
     ],
   );
   assert.equal(
@@ -1185,7 +1213,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       text: "hi",
       width: 72,
     }),
-    ["◇ You · packet · hi"],
+    ["◇ You · hi"],
     "user entries render as compact transcript lines, not full-width input bars",
   );
   assert.deepEqual(
@@ -1194,7 +1222,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       text: "Hello. What do you need help with?",
       width: 72,
     }),
-    ["◈ UncleCode · context steward", "  Hello. What do you need help with?"],
+    ["◈ UncleCode", "  Hello. What do you need help with?"],
     "assistant entries keep a distinct label and readable body",
   );
   assert.equal(
@@ -1224,7 +1252,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       mode: "default",
       authLabel: "Browser OAuth · file",
     }),
-    "gpt-5.4 · Work mode · Saved OAuth · context cockpit",
+    "gpt-5.4 · Work mode · Saved OAuth · work context",
   );
   assert.equal(
     formatWorkShellFooterLine({
@@ -1233,10 +1261,10 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       reasoningLabel: "medium (mode-default)",
       mode: "default",
       authLabel: "Browser OAuth · file",
-      contextIndicator: "packet 2 in · 1 out",
+      contextIndicator: "context 2 ready · 1 held back",
       width: 120,
     }),
-    "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth · context cockpit  ·  packet 2 in · 1 out",
+    "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth · work context  ·  context 2 ready · 1 held back",
   );
   assert.match(
     formatWorkShellFooterLine({
@@ -1245,10 +1273,10 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       reasoningLabel: "medium (mode-default)",
       mode: "default",
       authLabel: "Browser OAuth · file",
-      contextIndicator: "packet 2 in · 1 out",
+      contextIndicator: "context 2 ready · 1 held back",
       width: 72,
     }),
-    /packet 2 in · 1 out$/,
+    /context 2 ready · 1 held back$/,
   );
   assert.equal(
     formatWorkShellBusyStatusLine("· thinking inspect repo", 0),

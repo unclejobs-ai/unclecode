@@ -48,23 +48,23 @@ const WORK_SHELL_EXTRA_SUGGESTION_ENTRIES = [
   },
   {
     command: "/reasoning",
-    description: "Show current reasoning effort and supported values.",
+    description: "Choose thinking depth for the next replies.",
   },
   {
     command: "/reasoning low",
-    description: "Use low reasoning effort for faster replies.",
+    description: "Light thinking for quick checks.",
   },
   {
     command: "/reasoning medium",
-    description: "Use balanced reasoning effort.",
+    description: "Balanced thinking for normal work.",
   },
   {
     command: "/reasoning high",
-    description: "Use high reasoning effort for harder tasks.",
+    description: "Deep thinking for hard changes.",
   },
   {
     command: "/reasoning default",
-    description: "Reset reasoning effort to the current mode default.",
+    description: "Follow the current work mode default.",
   },
 ];
 

@@ -85,7 +85,9 @@ export function stripPermissionSeekingStallOutro(text: string): string {
 export function sanitizeWorkShellAssistantText(value: string): string {
   const withoutInternalPlan = stripLeadingInternalActionPlan(value);
   const withoutExactDuplicate = collapseExactAdjacentDuplicateText(withoutInternalPlan);
-  return collapseRepeatedGreetingVariants(withoutExactDuplicate);
+  const withoutGreetingDuplicate = collapseRepeatedGreetingVariants(withoutExactDuplicate);
+  const withoutUnexpectedScript = removeUnexpectedIsolatedScriptTokens(withoutGreetingDuplicate);
+  return collapseDuplicatedKoreanEnglishTail(withoutUnexpectedScript);
 }
 
 function stripLeadingInternalActionPlan(value: string): string {
@@ -236,6 +238,72 @@ function scoreGreetingCandidate(candidate: string): number {
   if (/[.!?]$/.test(candidate)) score += 1;
   if (/next\?\s+i help/i.test(candidate)) score -= 4;
   return score;
+}
+
+function removeUnexpectedIsolatedScriptTokens(value: string): string {
+  return mapOutsideMarkdownCodeFences(value, (chunk) => {
+    if (!/[\uac00-\ud7a3]/u.test(chunk) || !/[\u0c80-\u0cff]/u.test(chunk)) {
+      return chunk;
+    }
+    const kannadaRuns = chunk.match(/[\u0c80-\u0cff]+/gu) ?? [];
+    const kannadaCharCount = kannadaRuns.reduce((count, run) => count + [...run].length, 0);
+    if (kannadaRuns.length > 2 || kannadaCharCount > 12 || kannadaRuns.some((run) => [...run].length > 8)) {
+      return chunk;
+    }
+    return chunk
+      .replace(/\s*[\u0c80-\u0cff]{1,8}\s*/gu, " ")
+      .replace(/\s+([:,.!?])/g, "$1")
+      .replace(/ {2,}/g, " ");
+  });
+}
+
+function collapseDuplicatedKoreanEnglishTail(value: string): string {
+  if (value.length < 120 || !/[\uac00-\ud7a3]/u.test(value)) {
+    return value;
+  }
+  const duplicateTailPattern =
+    /\n\s*(?:Yes\s*[—-]\s+add\b|Yes,\s+add\b|That keeps Runbook\b|Why not just use summaries\?|Recommended initial schema\b)/u;
+  const duplicateTailMatch = duplicateTailPattern.exec(value);
+  if (!duplicateTailMatch || duplicateTailMatch.index < Math.floor(value.length * 0.35)) {
+    return value;
+  }
+  const head = value.slice(0, duplicateTailMatch.index).trimEnd();
+  const tail = value.slice(duplicateTailMatch.index);
+  const asciiChars = [...tail].filter((character) => character.charCodeAt(0) <= 0x7f).length;
+  const asciiRatio = asciiChars / Math.max(1, [...tail].length);
+  if (asciiRatio < 0.8) {
+    return value;
+  }
+  return head;
+}
+
+function mapOutsideMarkdownCodeFences(value: string, transform: (chunk: string) => string): string {
+  const lines = value.match(/[^\n]*(?:\n|$)/g) ?? [];
+  let output = "";
+  let pending = "";
+  let inFence = false;
+  for (const line of lines) {
+    if (line.length === 0) {
+      continue;
+    }
+    const lineWithoutNewline = line.endsWith("\n") ? line.slice(0, -1) : line;
+    const isFenceLine = /^\s*```/.test(lineWithoutNewline);
+    if (isFenceLine) {
+      if (!inFence) {
+        output += transform(pending);
+        pending = "";
+      }
+      output += line;
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) {
+      output += line;
+    } else {
+      pending += line;
+    }
+  }
+  return output + transform(pending);
 }
 
 

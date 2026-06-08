@@ -9,11 +9,11 @@ import {
 } from "../../packages/context-broker/src/context-packet-view.ts";
 
 describe("context packet view", () => {
-  it("builds a deterministic next-call packet preview with source counts", () => {
+  it("builds a human next-answer context preview with source counts", () => {
     const packet = createContextPacketView({
       id: "packet-test-1",
       generatedAt: "2026-06-04T00:00:00.000Z",
-      title: "Next model-call packet",
+      title: "Next answer context",
       included: [
         {
           id: "workspace-guidance",
@@ -28,7 +28,7 @@ describe("context packet view", () => {
           category: "omo",
           label: "G001 context MVP",
           reason: "active ULW goal",
-          preview: "Implement packet inspector.",
+          preview: "Implement context view.",
           tokenEstimate: 18,
         },
       ],
@@ -37,7 +37,7 @@ describe("context packet view", () => {
           id: "omo-raw-ledger",
           category: "omo",
           label: ".omo/ulw-loop/session/ledger.jsonl",
-          reason: "raw audit ledger is excluded from provider context",
+          reason: "raw audit ledger stays local",
         },
       ],
       warnings: [
@@ -48,7 +48,7 @@ describe("context packet view", () => {
         },
       ],
       preview: [
-        "Packet packet-test-1 will prefix the next provider call.",
+        "Context will be carried into the next answer.",
         "Included summaries are safe; raw ledgers are excluded.",
       ],
     });
@@ -63,22 +63,23 @@ describe("context packet view", () => {
     assert.equal(packet.tokenEstimate, 30);
     assert.equal(packet.included[0].category, "workspace");
     assert.equal(packet.included[1].category, "omo");
-    assert.equal(packet.excluded[0].reason, "raw audit ledger is excluded from provider context");
+    assert.equal(packet.excluded[0].reason, "raw audit ledger stays local");
 
     const lines = buildContextPacketPreviewLines(packet);
     assert.deepEqual(lines.slice(0, 6), [
-      "Packet packet-test-1 · Next model-call packet",
-      "Sources · 2 included · 1 excluded · 1 warning · ~30 tokens",
-      "Provider · next model call receives included summaries; raw audit artifacts stay out.",
-      "Included by source",
+      "Context · Next answer context",
+      "Sources · 2 included · 1 held back · 1 warning · ~30 tokens",
+      "UncleCode · included summaries go to the model; raw audit artifacts stay local.",
+      "Included in next answer",
       "+ workspace · 1 · AGENTS.md (repo instructions loaded) - Prefer small reversible diffs.",
-      "+ omo · 1 · G001 context MVP (active ULW goal) - Implement packet inspector.",
+      "+ omo · 1 · G001 context MVP (active ULW goal) - Implement context view.",
     ]);
-    assert.ok(lines.includes("Excluded raw artifacts"));
-    assert.ok(lines.includes("- omo · 1 · .omo/ulw-loop/session/ledger.jsonl (raw audit ledger is excluded from provider context)"));
+    assert.ok(lines.includes("Held back locally"));
+    assert.ok(lines.includes("- omo · 1 · .omo/ulw-loop/session/ledger.jsonl (raw audit ledger stays local)"));
     assert.ok(lines.includes("Warnings · 1 · omo.multiple-active: Multiple active OMO sessions detected."));
-    assert.ok(lines.includes("Preview · Packet packet-test-1 will prefix the next provider call."));
-    assert.ok(lines.includes("Controls · Esc close · /context refresh · Ctrl+O context center"));
+    assert.ok(lines.includes("Next answer · Context will be carried into the next answer."));
+    assert.ok(lines.includes("Controls · Esc close · /context refresh · Ctrl+O context"));
+    assert.equal(lines.some((line) => /\bPacket\b|provider packet|Next model-call packet/.test(line)), false);
   });
 
   it("formats the provider-bound prompt prefix from the same packet id", () => {
@@ -118,9 +119,9 @@ describe("context packet view", () => {
       prefix,
       /Included:\n- workspace: AGENTS\.md \(repo instructions loaded\) - Prefer &lt;small&gt; reversible diffs &amp; packet summaries\./,
     );
-    assert.match(prefix, /Excluded raw artifacts:\n- 1 raw artifact withheld from provider context; inspect \/context for local-only details\./);
+    assert.match(prefix, /Excluded raw artifacts:\n- 1 raw artifact withheld from model-ready context; inspect \/context for local-only details\./);
     assert.doesNotMatch(prefix, /\.omo\/ulw-loop\/session\/evidence\/C001\.txt/);
-    assert.match(prefix, /Warnings:\n- 1 packet warning withheld from provider context; inspect \/context for local-only details\./);
+    assert.match(prefix, /Warnings:\n- 1 context issue withheld from model-ready context; inspect \/context for local-only details\./);
     assert.doesNotMatch(prefix, /local-session-a/);
     assert.match(prefix, /<\/unclecode_context_packet>$/);
   });
@@ -140,7 +141,7 @@ describe("context packet view", () => {
       preview: [],
     });
 
-    assert.equal(formatContextPacketIndicator(packet), "packet 2 in · 1 out");
+    assert.equal(formatContextPacketIndicator(packet), "context 2 ready · 1 held back");
   });
 
   it("keeps compact packet rows but counts grouped raw artifacts accurately", () => {
@@ -155,7 +156,7 @@ describe("context packet view", () => {
           id: "omo-evidence-summary",
           category: "omo",
           label: "64 raw OMO evidence transcripts",
-          reason: "raw OMO evidence transcripts are excluded from provider context",
+          reason: "raw OMO evidence transcripts stay local",
           sourceCount: 64,
         },
       ],
@@ -165,14 +166,14 @@ describe("context packet view", () => {
 
     assert.equal(packet.excluded.length, 1);
     assert.equal(packet.sourceCounts.excluded, 64);
-    assert.equal(formatContextPacketIndicator(packet), "packet 1 in · 64 out");
+    assert.equal(formatContextPacketIndicator(packet), "context 1 ready · 64 held back");
     assert.match(
       formatContextPacketPromptPrefix(packet),
-      /Excluded raw artifacts:\n- 64 raw artifacts withheld from provider context; inspect \/context for local-only details\./,
+      /Excluded raw artifacts:\n- 64 raw artifacts withheld from model-ready context; inspect \/context for local-only details\./,
     );
     assert.ok(
       buildContextPacketPreviewLines(packet).includes(
-        "- omo · 64 · 64 raw OMO evidence transcripts (raw OMO evidence transcripts are excluded from provider context)",
+        "- omo · 64 · 64 raw OMO evidence transcripts (raw OMO evidence transcripts stay local)",
       ),
     );
   });
@@ -191,7 +192,7 @@ describe("context packet view", () => {
         id: `excluded-${index + 1}`,
         category: "omo",
         label: `.omo/evidence/${index + 1}.txt`,
-        reason: "raw OMO evidence transcript is excluded from provider context",
+        reason: "raw OMO evidence transcript stays local",
       })),
       warnings: Array.from({ length: 7 }, (_, index) => ({
         code: `warning.${index + 1}`,
@@ -204,15 +205,15 @@ describe("context packet view", () => {
     const lines = buildContextPacketPreviewLines(packet);
 
     assert.deepEqual(lines.slice(0, 4), [
-      "Packet packet-bounded · Next model-call packet",
-      "Sources · 16 included · 12 excluded · 7 warnings",
-      "Provider · next model call receives included summaries; raw audit artifacts stay out.",
-      "Included by source",
+      "Context · Next answer context",
+      "Sources · 16 included · 12 held back · 7 warnings",
+      "UncleCode · included summaries go to the model; raw audit artifacts stay local.",
+      "Included in next answer",
     ]);
     assert.equal(lines.filter((line) => line.startsWith("+ bridge ·")).length, 1);
     assert.equal(lines.filter((line) => line.startsWith("- omo ·")).length, 1);
     assert.ok(lines.includes("Warnings · 7 · warning.1: warning 1 · 6 more"));
-    assert.ok(lines.includes("Preview · provider prefix preview"));
+    assert.ok(lines.includes("Next answer · provider prefix preview"));
     assert.equal(lines.length <= 12, true);
   });
 });

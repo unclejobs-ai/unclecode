@@ -148,7 +148,7 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
             successCriteria: [
               {
                 id: "C001",
-                scenario: "packet inspector uses sanitized OMO state",
+                scenario: "context view uses sanitized OMO state",
                 status: "pending",
               },
             ],
@@ -194,13 +194,13 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
     const providerPromptItem = packet.included.find(
       (item) =>
         item.category === "provider-system-prompt" &&
-        item.reason === "workspace guidance loaded into provider system prompt",
+        item.reason === "workspace guidance active",
     );
     const workspaceGuidanceItem = packet.included.find(
       (item) => item.category === "workspace-guidance" && /AGENTS\.md/.test(item.label),
     );
 
-    assert.ok(providerPromptItem, "packet includes provider system prompt metadata");
+    assert.ok(providerPromptItem, "packet includes system guidance metadata");
     assert.ok(workspaceGuidanceItem, "packet includes workspace guidance summary");
     assert.notEqual(providerPromptItem.id, workspaceGuidanceItem.id);
     assert.equal(
@@ -211,7 +211,7 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
     assert.doesNotMatch(
       JSON.stringify(providerPromptItem),
       /Use workspace guidance sentinel text/,
-      "provider system prompt metadata does not inline the guidance body",
+      "system guidance metadata does not inline the guidance body",
     );
     assert.doesNotMatch(
       JSON.stringify(packet),
@@ -272,7 +272,7 @@ test("loadWorkCliBootstrap represents configured provider prompt as metadata wit
       metadata.some(
         (item) =>
           item.category === "provider-system-prompt" &&
-          item.reason === "configured prompt loaded into provider system prompt",
+          item.reason === "prompt guidance active",
       ),
       "bootstrap exposes configured prompt metadata before first submit",
     );
@@ -292,9 +292,9 @@ test("loadWorkCliBootstrap represents configured provider prompt as metadata wit
       packet.included.some(
         (item) =>
           item.category === "provider-system-prompt" &&
-          item.reason === "configured prompt loaded into provider system prompt",
+          item.reason === "prompt guidance active",
       ),
-      "packet includes provider system prompt metadata",
+      "packet includes system guidance metadata",
     );
     assert.doesNotMatch(JSON.stringify(packet), /SECRET_PROMPT_SENTINEL_DO_NOT_SHOW/);
   } finally {
@@ -359,7 +359,7 @@ test("loadWorkCliBootstrap groups large OMO excluded artifact lists", async () =
     assert.equal(
       packet.sourceCounts.excluded,
       65,
-      "packet still reports the full raw artifact count withheld from provider context",
+      "context still reports the full raw artifact count withheld from model-ready context",
     );
     assert.ok(
       omoExcluded.some((item) => /64 raw OMO evidence transcripts/.test(item.label)),
@@ -367,7 +367,7 @@ test("loadWorkCliBootstrap groups large OMO excluded artifact lists", async () =
     );
     assert.match(
       formatContextPacketPromptPrefix(packet),
-      /Excluded raw artifacts:\n- 65 raw artifacts withheld from provider context; inspect \/context for local-only details\./,
+      /Excluded raw artifacts:\n- 65 raw artifacts withheld from model-ready context; inspect \/context for local-only details\./,
     );
     assert.doesNotMatch(JSON.stringify(packet), /RAW_EVIDENCE_SENTINEL_/);
   } finally {

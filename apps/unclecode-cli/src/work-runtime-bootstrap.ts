@@ -137,7 +137,7 @@ function isWorkspaceGuidanceSummaryLine(line: string): boolean {
 }
 
 const WORKSPACE_GUIDANCE_SAFE_PREVIEW =
-  "Workspace guidance is active; raw guidance text is kept out of the packet preview.";
+  "Workspace guidance is active; raw guidance text stays out of the context view.";
 
 function extractWorkspaceGuidanceSource(line: string): string | undefined {
   const sourceMatch = /^((?:AGENTS|CLAUDE|GEMINI|UNCLECODE)(?:\.local)?\.md|rules\/.+\.md):/i.exec(line);
@@ -180,8 +180,8 @@ function buildProviderSystemPromptMetadata(input: {
       id: "provider-system-prompt-configured",
       category: "provider-system-prompt",
       label: "Configured prompt",
-      reason: "configured prompt loaded into provider system prompt",
-      preview: "Configured prompt sections are active; raw prompt text is kept out of the packet preview.",
+      reason: "prompt guidance active",
+      preview: "Configured prompt sections are active; raw prompt text stays local.",
     });
   }
 
@@ -190,8 +190,8 @@ function buildProviderSystemPromptMetadata(input: {
       id: "provider-system-prompt-workspace-guidance",
       category: "provider-system-prompt",
       label: "Workspace guidance system prompt",
-      reason: "workspace guidance loaded into provider system prompt",
-      preview: `${formatCountLabel(input.guidanceSources.length, "guidance source", "guidance sources")} loaded into the provider system prompt.`,
+      reason: "workspace guidance active",
+      preview: `${formatCountLabel(input.guidanceSources.length, "guidance source", "guidance sources")} ready for the next answer.`,
     });
   }
 
@@ -263,7 +263,7 @@ function buildOmoExcludedPacketItems(
       id: "omo-excluded-other-summary",
       category: "omo",
       label: `${formatCountLabel(additionalArtifactCount, "additional raw OMO artifact", "additional raw OMO artifacts")}`,
-      reason: "raw OMO artifacts are excluded from provider context",
+      reason: "raw OMO artifacts stay local",
       sourceCount: additionalArtifactCount,
     });
   }
@@ -273,7 +273,7 @@ function buildOmoExcludedPacketItems(
       id: "omo-excluded-evidence-summary",
       category: "omo",
       label: `${formatCountLabel(evidenceArtifacts.length, "raw OMO evidence transcript", "raw OMO evidence transcripts")}`,
-      reason: "raw OMO evidence transcripts are excluded from provider context",
+      reason: "raw OMO evidence transcripts stay local",
       preview: "Detailed evidence paths stay local; use the OMO session evidence directory for full transcripts.",
       sourceCount: evidenceArtifacts.length,
     });
@@ -337,13 +337,13 @@ function createWorkShellContextPacketResolver(options: {
     return createContextPacketView({
       id,
       generatedAt: new Date().toISOString(),
-      title: "Next model-call packet",
+      title: "Next answer context",
       included,
       excluded,
       warnings,
       preview: [
-        `Packet ${id} will prefix the next provider call.`,
-        "Included items are summarized context sources; raw OMO audit artifacts stay excluded.",
+        "UncleCode will carry these summaries into the next answer.",
+        "Raw OMO audit artifacts stay local.",
       ],
     });
   };

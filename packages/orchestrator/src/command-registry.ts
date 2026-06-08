@@ -155,7 +155,7 @@ export function createWorkShellCommandRegistry(extraEntries: readonly Registered
     {
       command: "/context",
       routeTo: ["context"],
-      metadata: builtinLocal("Inspect the next model-call context packet."),
+      metadata: builtinLocal("Review the context UncleCode will carry into the next answer.", ["/con"]),
     },
     {
       command: "/model",

@@ -59,7 +59,7 @@ export function HeaderChrome(props: { readonly branch: string; readonly gitStatu
         <Text> </Text>
       )}
       <Text color={C.textMuted}> </Text>
-      <Text color={C.accentBright}>context cockpit</Text>
+      <Text color={C.accentBright}>work context</Text>
       <Text color={C.textMuted}>·</Text>
       <Text color={C.accentBright}> {props.branch}</Text>
       <Text color={C.textMuted}>·</Text>
@@ -441,7 +441,7 @@ export function buildHistoryContextSummaryLines(input: {
       : "Enter · resume with saved context",
     contextSourceCount > 0
       ? `Context · ${contextSourceCount} source${contextSourceCount > 1 ? "s" : ""}`
-      : "Context · no workspace packet yet",
+      : "Context · not loaded yet",
   ];
 }
 

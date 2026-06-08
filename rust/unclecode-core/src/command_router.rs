@@ -464,7 +464,7 @@ fn work_shell_builtin_submit_command(line: &str) -> Option<Value> {
         "/exit" => Some(json!({ "kind": "exit" })),
         "/clear" => Some(json!({ "kind": "clear" })),
         "/help" => Some(json!({ "kind": "help" })),
-        "/context" => Some(json!({ "kind": "context" })),
+        "/context" | "/con" => Some(json!({ "kind": "context" })),
         "/reload" => Some(json!({ "kind": "reload" })),
         "/status" => Some(json!({ "kind": "status" })),
         "/sessions" => Some(json!({ "kind": "sessions" })),
