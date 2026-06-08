@@ -1,6 +1,12 @@
 use serde_json::{json, Value};
 
 pub fn classify_work_intent(prompt: &str, mode: &str) -> &'static str {
+    // Greetings and short acknowledgements are conversation, not work — they
+    // must never be decomposed into a plan, even in full-autonomy modes where
+    // everything else is treated as complex.
+    if is_trivial_conversational_prompt(prompt) {
+        return "simple";
+    }
     if mode == "ultrawork" {
         return "complex";
     }
@@ -73,6 +79,28 @@ pub fn classify_work_intent(prompt: &str, mode: &str) -> &'static str {
     }
 
     "simple"
+}
+
+fn is_trivial_conversational_prompt(prompt: &str) -> bool {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lower = trimmed.to_lowercase();
+    const GREETINGS: &[&str] = &[
+        "hi", "hello", "hey", "yo", "sup", "thanks", "thank you", "ty", "ok", "okay",
+        "안녕", "하이", "헬로", "반갑", "고마", "고맙", "감사", "넵", "ㅇㅋ", "ㄱㅅ",
+    ];
+    GREETINGS.iter().any(|greeting| {
+        if greeting.is_ascii() {
+            lower == *greeting
+                || lower.starts_with(&format!("{greeting} "))
+                || lower.starts_with(&format!("{greeting}!"))
+                || lower.starts_with(&format!("{greeting},"))
+        } else {
+            lower.starts_with(greeting)
+        }
+    })
 }
 
 pub fn classify_work_intent_json(input_json: &str) -> Result<String, String> {
@@ -627,12 +655,25 @@ mod tests {
 
     #[test]
     fn classifies_modes_and_prompts() {
-        assert_eq!(classify_work_intent("hello", "ultrawork"), "complex");
+        // non-trivial work in ultrawork is complex
+        assert_eq!(classify_work_intent("look around the project", "ultrawork"), "complex");
         assert_eq!(classify_work_intent("explain auth", "search"), "research");
         assert_eq!(classify_work_intent("/help", "yolo"), "simple");
         assert_eq!(classify_work_intent("fix the login bug", "yolo"), "complex");
         assert_eq!(classify_work_intent("전체 점검해", "default"), "complex");
         assert_eq!(classify_work_intent("what is this?", "yolo"), "simple");
+    }
+
+    #[test]
+    fn greetings_are_simple_in_every_mode() {
+        for mode in ["yolo", "ultrawork", "default", "build"] {
+            assert_eq!(classify_work_intent("hi", mode), "simple", "hi in {mode}");
+            assert_eq!(classify_work_intent("hello", mode), "simple", "hello in {mode}");
+            assert_eq!(classify_work_intent("하이요", mode), "simple", "하이요 in {mode}");
+            assert_eq!(classify_work_intent("반갑다", mode), "simple", "반갑다 in {mode}");
+        }
+        // real tasks still classify as work even in full-autonomy modes
+        assert_eq!(classify_work_intent("create a landing page", "yolo"), "complex");
     }
 
     #[test]
