@@ -399,6 +399,8 @@ export async function executeWorkShellPromptTurn<
     state: "running" | "idle" | "requires_action",
     summary: string,
   ) => Promise<void>;
+  /** Optional agentops recorder callback. Called after every turn (success or failure). Non-blocking. */
+  recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
 }): Promise<void> {
   input.appendEntries({ role: "user", text: input.promptTurn.transcriptText });
   const turnStartedAt = Date.now();
@@ -439,6 +441,15 @@ export async function executeWorkShellPromptTurn<
     input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.bridgeTraceEvent));
     input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.memoryTraceEvent));
     await input.persistSessionSnapshot("idle", input.promptTurn.sessionSummary).catch(() => undefined);
+    try {
+      input.recordTurn?.({
+        prompt: input.promptTurn.prompt,
+        status: "completed",
+        summary: input.promptTurn.sessionSummary,
+      });
+    } catch {
+      /* non-blocking */
+    }
   } catch (error) {
     const failure = await resolvePromptTurnFailureResult({
       error,
@@ -464,6 +475,15 @@ export async function executeWorkShellPromptTurn<
       streamingAssistantText: undefined,
     });
     await input.persistSessionSnapshot("requires_action", input.promptTurn.failureSummary).catch(() => undefined);
+    try {
+      input.recordTurn?.({
+        prompt: input.promptTurn.prompt,
+        status: "failed",
+        summary: input.promptTurn.failureSummary,
+      });
+    } catch {
+      /* non-blocking */
+    }
   } finally {
     input.setState(createPromptTurnFinalizePatch(input.state));
   }

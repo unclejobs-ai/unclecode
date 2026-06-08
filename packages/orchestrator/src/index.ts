@@ -1,4 +1,5 @@
 import { BACKGROUND_TASK_TYPES } from "@unclecode/contracts";
+export * from "./agentops-recorder.js";
 
 export * from "./coding-agent.js";
 export * from "./mini-loop-agent.js";

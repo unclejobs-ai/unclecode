@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { explainUncleCodeConfig } from "@unclecode/config-core";
+import { createAgentOpsRecorder } from "@unclecode/orchestrator";
 import {
   clearCachedWorkspaceGuidance,
   createContextPacketView,
@@ -468,6 +469,12 @@ export async function loadWorkCliBootstrap(
     authLabel: config.authLabel,
   });
 
+  const recorder = createAgentOpsRecorder({
+    workspaceRoot: cwd,
+    command: "unclecode work",
+    ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
+  });
+
   return {
     agent,
     prompt: prompt ?? "",
@@ -551,6 +558,7 @@ export async function loadWorkCliBootstrap(
           prompt: raw,
           ...(userHomeDir ? { userHomeDir } : {}),
         }),
+      recordTurn: (turn) => recorder.recordTurn(turn),
     },
   };
 }

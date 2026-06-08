@@ -89,6 +89,8 @@ type PromptRuntimeInput<Attachment, Reasoning extends WorkShellReasoningConfig> 
     sessionState: "running" | "idle" | "requires_action",
     summary: string,
   ) => Promise<void>;
+  /** Optional agentops recorder callback. Non-blocking. */
+  recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
 };
 
 function createPromptRuntimeExecutionInput<Attachment, Reasoning extends WorkShellReasoningConfig>(input: {
@@ -138,6 +140,7 @@ function createPromptRuntimeExecutionInput<Attachment, Reasoning extends WorkShe
     setState: input.setState,
     pushTraceLine: input.pushTraceLine,
     persistSessionSnapshot: input.persistSessionSnapshot,
+    ...(input.recordTurn !== undefined ? { recordTurn: input.recordTurn } : {}),
   };
 }
 

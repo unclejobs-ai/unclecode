@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@unclecode/agentops-db": "file:../agentops-db",
     "@unclecode/config-core": "file:../config-core",
     "@unclecode/contracts": "file:../contracts",
     "@unclecode/providers": "file:../providers",

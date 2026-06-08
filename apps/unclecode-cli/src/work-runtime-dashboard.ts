@@ -77,6 +77,8 @@ export type StartReplOptions = {
   launchWorkSession?: TuiRenderOptions<TuiShellHomeState>["launchWorkSession"];
   saveApiKeyAuth?: ((raw: string) => Promise<readonly string[]>) | undefined;
   browserOAuthAvailable?: boolean | undefined;
+  /** Optional agentops recorder callback. Non-blocking. Fired after every prompt turn. */
+  recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
 };
 
 type StartReplTraceEvent =
@@ -234,6 +236,9 @@ export function createManagedDashboardInput(
         : {}),
       ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
       browserOAuthAvailable: Boolean(session.options.browserOAuthAvailable),
+      ...(session.options.recordTurn !== undefined
+        ? { recordTurn: session.options.recordTurn }
+        : {}),
     },
     getReasoningLabel: describeReasoning,
     isReasoningSupported: (reasoning: WorkShellReasoningConfig) =>

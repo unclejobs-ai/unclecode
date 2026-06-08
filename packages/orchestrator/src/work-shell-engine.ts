@@ -426,6 +426,8 @@ export type WorkShellEngineInput<
   extractAuthLabel?: (lines: readonly string[]) => string | undefined;
   onExit: () => void;
   sessionId?: string;
+  /** Optional agentops recorder callback. Non-blocking. Fired after every prompt turn. */
+  recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
 };
 
 export class WorkShellEngine<
@@ -537,6 +539,7 @@ export class WorkShellEngine<
   private readonly extractAuthLabel?: ((lines: readonly string[]) => string | undefined) | undefined;
   private readonly onExit: () => void;
   private readonly sessionId: string;
+  private readonly recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
   private readonly subscribers = new Set<(state: WorkShellEngineState<Reasoning>) => void>();
   private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
   private queuedCountCache = 0;
@@ -580,6 +583,7 @@ export class WorkShellEngine<
     this.toolLines = input.toolLines ?? [];
     this.extractAuthLabel = input.extractAuthLabel;
     this.onExit = input.onExit;
+    this.recordTurn = input.recordTurn;
     this.sessionId = input.sessionId ?? `work-${randomUUID()}`;
     this.currentContextSummaryLines = input.options.contextSummaryLines;
     this.lastSessionSummary = input.options.initialSessionSummary ?? "Work shell ready.";
@@ -872,6 +876,7 @@ export class WorkShellEngine<
               if (isCurrentTurn()) this.pushTraceLine(traceLine);
             },
             persistSessionSnapshot: (sessionState, summary) => this.persistSessionSnapshot(sessionState, summary),
+            ...(this.recordTurn !== undefined ? { recordTurn: this.recordTurn } : {}),
           });
         } finally {
           this.clearActiveTurnAbortController(abortController);
@@ -929,6 +934,7 @@ export class WorkShellEngine<
               if (isCurrentTurn()) this.pushTraceLine(traceLine);
             },
             persistSessionSnapshot: (sessionState, summary) => this.persistSessionSnapshot(sessionState, summary),
+            ...(this.recordTurn !== undefined ? { recordTurn: this.recordTurn } : {}),
           });
         } finally {
           this.clearActiveTurnAbortController(abortController);
