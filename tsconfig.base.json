@@ -16,6 +16,7 @@
     "baseUrl": ".",
     "paths": {
       "@unclecode/contracts": ["packages/contracts/src/index.ts"],
+      "@unclecode/agentops-db": ["packages/agentops-db/src/index.ts"],
       "@unclecode/config-core": ["packages/config-core/src/index.ts"],
       "@unclecode/context-broker": ["packages/context-broker/src/index.ts"],
       "@unclecode/policy-engine": ["packages/policy-engine/src/index.ts"],

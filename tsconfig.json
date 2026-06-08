@@ -1,6 +1,7 @@
 {
   "files": [],
   "references": [
+    { "path": "packages/agentops-db" },
     { "path": "packages/contracts" },
     { "path": "packages/config-core" },
     { "path": "packages/context-broker" },
