@@ -91,6 +91,7 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
     lastTurnDurationMs: undefined,
+    queuedCount: 0,
   };
 }
 

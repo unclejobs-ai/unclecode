@@ -216,6 +216,7 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly authLauncherLines?: readonly string[];
   readonly composerMode?: "default" | "api-key-entry";
   readonly panel: WorkShellPanel;
+  readonly queuedCount?: number | undefined;
 };
 
 export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>

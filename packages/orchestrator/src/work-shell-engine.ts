@@ -309,6 +309,7 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly lastTurnDurationMs?: number | undefined;
   readonly contextPacket?: ContextPacketView | undefined;
   readonly contextIndicator?: string | undefined;
+  readonly queuedCount: number;
 };
 
 export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkShellReasoningConfig> {
@@ -613,7 +614,7 @@ export class WorkShellEngine<
     });
 
     try {
-      this.queuedCountCache = await this.loadQueuedSubmitCount();
+      this.setQueuedCount(await this.loadQueuedSubmitCount());
       await this.persistSessionSnapshot("idle", this.lastSessionSummary).catch(() => undefined);
 
       const contextState = await loadInitialWorkShellLifecycleState({
@@ -956,7 +957,7 @@ export class WorkShellEngine<
         return;
       case "queue": {
         const item = await this.pushQueuedSubmit(decision.line);
-        this.queuedCountCache = decision.displayIndex;
+        this.setQueuedCount(decision.displayIndex);
         if (pendingAttachments && pendingAttachments.length > 0) {
           this.queuedAttachments.set(item.id, pendingAttachments);
         }
@@ -977,10 +978,10 @@ export class WorkShellEngine<
         const next = await this.popQueuedSubmit();
         const step = await this.resolveQueueDrainStepDecision(next);
         if (step.action === "empty") {
-          this.queuedCountCache = step.queuedCount;
+          this.setQueuedCount(step.queuedCount);
           break;
         }
-        this.queuedCountCache = step.queuedCount;
+        this.setQueuedCount(step.queuedCount);
         const pendingAttachments = this.queuedAttachments.get(step.item.id);
         this.queuedAttachments.delete(step.item.id);
         this.appendEntries({ role: "system", text: step.message });
@@ -1188,7 +1189,7 @@ export class WorkShellEngine<
 
   private async clearQueuedSubmits(): Promise<void> {
     await runRustCommand(["rust", "queue", "clear", this.sessionId], this.queueCommandCwd());
-    this.queuedCountCache = 0;
+    this.setQueuedCount(0);
     this.queuedAttachments.clear();
   }
 
@@ -1252,6 +1253,11 @@ export class WorkShellEngine<
       contextSummaryLines: this.currentContextSummaryLines,
       buildContextPanel: this.buildContextPanel,
     }));
+  }
+
+  private setQueuedCount(count: number): void {
+    this.queuedCountCache = count;
+    this.setState({ queuedCount: count });
   }
 
   private setState(patch: Partial<WorkShellEngineState<Reasoning>>): void {

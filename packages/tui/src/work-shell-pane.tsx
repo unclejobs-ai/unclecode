@@ -127,6 +127,7 @@ export function WorkShellPane<
     currentTurnStartedAt,
     lastTurnDurationMs,
     contextIndicator,
+    queuedCount,
   } = engineState;
   const isSecureApiKeyEntry = engineState.composerMode === "api-key-entry";
   // Most recent rejection reason from the clipboard capture or cap gate.
@@ -263,6 +264,7 @@ export function WorkShellPane<
       slashSuggestionCount={slashSuggestionCount}
       terminalColumns={terminalColumns}
       cwd={props.cwd}
+      {...(queuedCount !== undefined ? { queuedCount } : {})}
       {...(isSecureApiKeyEntry
         ? { composerHintOverride: "Enter saves · Esc cancels" }
         : {})}

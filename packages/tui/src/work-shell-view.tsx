@@ -1045,6 +1045,13 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   );
 });
 
+export function formatWorkShellQueueIndicator(queuedCount: number): string | null {
+  if (queuedCount <= 0) {
+    return null;
+  }
+  return `⋯ ${queuedCount} queued · /queue`;
+}
+
 export function WorkShellView(props: {
   readonly provider: string;
   readonly model: string;
@@ -1069,6 +1076,7 @@ export function WorkShellView(props: {
   readonly composerHintOverride?: string;
   readonly terminalColumns?: number;
   readonly cwd?: string;
+  readonly queuedCount?: number;
 }) {
   const composerHint = props.composerHintOverride ?? (props.isBusy
     ? "Enter queues follow-up · Ctrl+C/Esc interrupt · /queue"
@@ -1148,6 +1156,11 @@ export function WorkShellView(props: {
         isBusy={props.isBusy}
         {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
       />
+      {formatWorkShellQueueIndicator(props.queuedCount ?? 0) !== null ? (
+        <Box marginTop={1}>
+          <Text color={W.textMuted}>{formatWorkShellQueueIndicator(props.queuedCount ?? 0)}</Text>
+        </Box>
+      ) : null}
       <WorkShellComposerDock
         composer={props.composer}
         {...(composerHint ? { composerHint } : {})}
