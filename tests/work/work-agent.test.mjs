@@ -41,6 +41,38 @@ test("WorkAgent keeps simple turns on the direct single-call path", async () => 
   assert.equal(traces.filter((event) => event.type === "orchestrator.step").length, 0);
 });
 
+test("WorkAgent enables run_shell only in full-autonomy modes (yolo/ultrawork)", () => {
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    updateMode() {},
+    async runTurn() {
+      return { text: "" };
+    },
+  };
+  const prev = process.env.UNCLECODE_ALLOW_RUN_SHELL;
+  try {
+    delete process.env.UNCLECODE_ALLOW_RUN_SHELL;
+    new WorkAgent({ directAgent, mode: "default", reasoning: supportedReasoning, model: "gpt-5.4" });
+    assert.notEqual(process.env.UNCLECODE_ALLOW_RUN_SHELL, "1", "non-auto mode keeps the shell gate");
+
+    new WorkAgent({ directAgent, mode: "yolo", reasoning: supportedReasoning, model: "gpt-5.4" });
+    assert.equal(process.env.UNCLECODE_ALLOW_RUN_SHELL, "1", "yolo unlocks run_shell");
+
+    delete process.env.UNCLECODE_ALLOW_RUN_SHELL;
+    const planAgent = new WorkAgent({ directAgent, mode: "plan", reasoning: supportedReasoning, model: "gpt-5.4" });
+    planAgent.updateMode("ultrawork");
+    assert.equal(process.env.UNCLECODE_ALLOW_RUN_SHELL, "1", "switching to ultrawork unlocks run_shell");
+  } finally {
+    if (prev === undefined) {
+      delete process.env.UNCLECODE_ALLOW_RUN_SHELL;
+    } else {
+      process.env.UNCLECODE_ALLOW_RUN_SHELL = prev;
+    }
+  }
+});
+
 test("WorkAgent routes complex turns through the real orchestrator and synthesizes executor output", async () => {
   const calls = [];
   const traces = [];

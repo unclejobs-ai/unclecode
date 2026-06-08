@@ -177,6 +177,16 @@ export class WorkAgent<
     this.reasoning = input.reasoning;
     this.model = input.model;
     this.runExecutableGuardianChecks = input.runExecutableGuardianChecks;
+    this.applyAutoModeShellPermission();
+  }
+
+  // YOLO / ultrawork are explicit full-autonomy opt-ins, so the agent may run
+  // shell commands (open files, run builds, etc.) without the extra
+  // UNCLECODE_ALLOW_RUN_SHELL env gate. Other modes keep the default gate.
+  private applyAutoModeShellPermission(): void {
+    if (this.mode === "yolo" || this.mode === "ultrawork") {
+      process.env.UNCLECODE_ALLOW_RUN_SHELL = "1";
+    }
   }
 
   clear(): void {
@@ -242,6 +252,7 @@ export class WorkAgent<
 
   updateMode(mode: string): void {
     this.mode = mode;
+    this.applyAutoModeShellPermission();
     this.directAgent.updateMode?.(mode);
   }
 
