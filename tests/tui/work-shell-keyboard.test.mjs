@@ -71,6 +71,19 @@ function renderWithInput(element) {
   };
 }
 
+async function waitForCondition(predicate, timeoutMs = 5000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+function getLastWorkFrame(output) {
+  const finalFrameStart = output.lastIndexOf("UncleCode · OpenAI");
+  return finalFrameStart >= 0 ? output.slice(finalFrameStart) : output;
+}
+
 function createWorkShellPaneEngine(overrides = {}) {
   const submittedLines = [];
   let state = {
@@ -378,14 +391,14 @@ test("Work pane preserves split fast model command chunks before Enter", async (
   stdin.write("/model ");
   await new Promise((resolve) => setTimeout(resolve, 1));
   stdin.write("gpt-5.4\r");
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await waitForCondition(() => submittedLines.length === 1);
+  await new Promise((resolve) => setTimeout(resolve, 700));
   const output = getOutput();
   instance.unmount();
   instance.cleanup();
 
   assert.deepEqual(submittedLines, ["/model gpt-5.4"]);
   assert.doesNotMatch(output, /gpt-5\.4\/model/);
-  const finalFrameStart = output.lastIndexOf("UncleCode · OpenAI");
-  const finalFrame = finalFrameStart >= 0 ? output.slice(finalFrameStart) : output;
+  const finalFrame = getLastWorkFrame(output);
   assert.doesNotMatch(finalFrame, /Model picker/);
 });

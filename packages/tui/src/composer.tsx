@@ -392,14 +392,22 @@ export function Composer(props: {
     const currentValue = pendingLocalValueRef.current ?? props.value;
     const currentCursorOffset = cursorOffsetRef.current;
     const carriageReturnIndex = input.indexOf("\r");
-    if (!key.return && carriageReturnIndex >= 0) {
-      const textBeforeReturn = input.slice(0, carriageReturnIndex);
+    const textBeforeReturn =
+      carriageReturnIndex >= 0
+        ? input.slice(0, carriageReturnIndex)
+        : key.return
+          ? input
+          : undefined;
+    if (!key.shift && textBeforeReturn !== undefined) {
       const submittedValue = textBeforeReturn.length > 0
         ? `${currentValue.slice(0, currentCursorOffset)}${sanitizeComposerInput(textBeforeReturn)}${currentValue.slice(currentCursorOffset)}`
         : currentValue;
       cursorOffsetRef.current = submittedValue.length;
       setCursorOffset(submittedValue.length);
       pendingLocalValueRef.current = undefined;
+      if (submittedValue !== currentValue) {
+        props.onChange(submittedValue);
+      }
       if (suppressNextSubmitRef.current || isPasting) {
         return;
       }

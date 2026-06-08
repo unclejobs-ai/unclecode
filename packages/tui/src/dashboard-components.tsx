@@ -22,7 +22,7 @@ import {
 } from "./dashboard-primitives.js";
 import {
   buildResearchInspectorLines,
-  formatWorkContextDisplayText,
+  buildWorkContextResultPreviewLines,
 } from "./dashboard-research-lines.js";
 import { truncateForDisplayWidth } from "./text-width.js";
 import {
@@ -34,7 +34,10 @@ import {
   type TuiWorkerStatus,
 } from "./shell-state.js";
 
-export { buildResearchInspectorLines } from "./dashboard-research-lines.js";
+export {
+  buildResearchInspectorLines,
+  buildWorkContextResultPreviewLines,
+} from "./dashboard-research-lines.js";
 
 function truncateForPane(value: string, maxLength: number): string {
   return truncateForDisplayWidth(value, maxLength);
@@ -214,7 +217,7 @@ export function ResearchRunList(props: {
   readonly isActive: boolean;
 }) {
   if (props.runs.length === 0) {
-    return <Text color={C.textMuted}>Work has live context. Press N to focus it.</Text>;
+    return <Text color={C.textMuted}>Automatic context is on. N starts an optional focus scan.</Text>;
   }
 
   return (
@@ -719,9 +722,7 @@ export function DetailPanel(props: {
       researchDraft: props.researchDraft,
       isDraftOpen: props.shellState.focus.detailOpen,
     });
-    const resultPreviewLines = props.shellState.outputLines
-      .slice(0, 3)
-      .map(formatWorkContextDisplayText);
+    const resultPreviewLines = buildWorkContextResultPreviewLines(props.shellState.outputLines);
 
     return (
       <Box flexDirection="column">
@@ -732,7 +733,7 @@ export function DetailPanel(props: {
         ))}
         {resultPreviewLines.length > 0 ? (
           <Box flexDirection="column" marginTop={1}>
-            <Text color={C.textMuted}>Last action</Text>
+            <Text color={C.textMuted}>Context result</Text>
             {resultPreviewLines.map((line, index) => (
               <Text key={`${String(index)}-${line}`} color={index === 0 ? C.success : C.textMuted}>
                 {truncateForPane(line, 40)}
@@ -832,7 +833,7 @@ export function DetailPanel(props: {
         {props.selectedActionId === "new-research" ? (
           <Box flexDirection="column" marginTop={1}>
             <Text color={C.textMuted}>Focus</Text>
-            <Text color={C.warning}>{props.researchDraft.length > 0 ? formatSessionCenterDraftValue(props.selectedActionId, props.researchDraft) : "Describe what Work should inspect. Enter refreshes."}</Text>
+            <Text color={C.warning}>{props.researchDraft.length > 0 ? formatSessionCenterDraftValue(props.selectedActionId, props.researchDraft) : "Example: inspect auth flow risks"}</Text>
           </Box>
         ) : null}
         {props.selectedActionId === "api-key-login" ? (
@@ -852,7 +853,7 @@ export function DetailPanel(props: {
           <Text color={C.textMuted}>mode {props.model.modeLabel} · auth {props.model.authLabel}</Text>
         </Box>
         <Box marginTop={1}>
-          <Text color={C.textMuted}>{props.selectedActionId === "new-research" ? "Enter/Ctrl+R refresh" : "Enter/Ctrl+R run"} · {escapeHint}</Text>
+          <Text color={C.textMuted}>{props.selectedActionId === "new-research" ? "Enter run focus" : "Enter/Ctrl+R run"} · {escapeHint}</Text>
         </Box>
         <Box marginTop={1} flexDirection="column">
           <Text color={C.textMuted}>Workspace context</Text>

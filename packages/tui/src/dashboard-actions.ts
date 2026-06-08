@@ -163,9 +163,9 @@ export const SESSION_CENTER_ACTIONS: readonly SessionCenterAction[] = [
   },
   {
     id: "new-research",
-    label: "N Refresh",
+    label: "N Focus",
     command: "unclecode research run",
-    description: "Refresh local workspace context for the next Work prompt.",
+    description: "Optional: focus Work context on a specific task before the next prompt.",
   },
   {
     id: "research-status",

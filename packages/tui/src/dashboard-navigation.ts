@@ -441,7 +441,7 @@ export function getSessionCenterEscapeHint(input: {
     return "Esc cancel";
   }
   if (input.view === "research" && input.detailOpen) {
-    return "Esc cancel";
+    return "Esc close";
   }
   if (input.detailOpen) {
     return "Esc close";
@@ -469,8 +469,9 @@ export function buildSessionCenterStatusLine(input: {
     return `MCP · ${String(input.mcpServerCount)} server(s) · A add · X remove · ${escapeHint}`;
   }
   if (input.view === "research") {
-    const primaryHint = input.detailOpen ? "Enter/Ctrl+R refresh" : "N refresh";
-    return `Context · ${String(input.researchRunCount)} refreshes · ${primaryHint} · ${escapeHint}`;
+    return input.detailOpen
+      ? `Context · focus scan · Enter run · ${escapeHint}`
+      : `Context · automatic · N focus · ${escapeHint}`;
   }
   return `History · ${String(input.savedSessionCount)} saved · ↑↓ select · Enter resume · ${escapeHint}`;
 }

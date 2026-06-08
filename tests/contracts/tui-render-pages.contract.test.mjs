@@ -335,9 +335,9 @@ test("dashboard renders distinct Work, History, MCP, and Research pages", async 
   assert.match(research, /Work context/);
   assert.match(research, /Selected context/);
   assert.match(research, /audit workflow/);
-  assert.match(research, /Press N to refresh focused\s+context/);
-  assert.match(research, /Workspace context for Work/);
-  assert.match(research, /N\s+Refresh/);
+  assert.match(research, /N Focus starts an optional\s+scan/);
+  assert.match(research, /Work context is automatic/);
+  assert.match(research, /N\s+Focus/);
   assert.doesNotMatch(research, /\b4\s+Research\b/);
   assert.doesNotMatch(research, /R\s+Research/);
   assert.match(research, /S\s+Latest/);
@@ -353,8 +353,8 @@ test("dashboard keeps Research readable in a narrow terminal", async () => {
   const research = await captureDashboardFrame("research", 60);
   assert.match(research, /workspace context/);
   assert.match(research, /Work context/);
-  assert.match(research, /N\s+Refresh/);
-  assert.match(research, /Press N to refresh focused\s+context/);
+  assert.match(research, /N\s+Focus/);
+  assert.match(research, /optional\s+scan/);
   assert.doesNotMatch(research, /\b4\s+Research\b/);
   assert.doesNotMatch(research, /R\s+Research/);
   assert.doesNotMatch(research, /W\s+Work/);
@@ -404,7 +404,7 @@ test("session center number keys expose all four Ctrl+O sections", async () => {
 
   const research = await runDashboardInputScenario("4");
   assert.match(research.frame, /Work context/);
-  assert.match(research.frame, /Workspace context for Work/);
+  assert.match(research.frame, /Work context is automatic/);
   assert.doesNotMatch(research.frame, /Research = workspace brief/);
 });
 
@@ -429,7 +429,7 @@ test("embedded session center keeps numeric tabs and four shortcut actions worki
 
   const research = await captureDashboardAfterInputs(["4"]);
   assert.match(research.output, /Work context/);
-  assert.match(research.output, /Press N to refresh focused context/);
+  assert.match(research.output, /N Focus starts an optional scan/);
 
   const work = await captureDashboardAfterInputs(["1"]);
   assert.match(work.output, /Work composer/);
@@ -438,7 +438,7 @@ test("embedded session center keeps numeric tabs and four shortcut actions worki
   const researchShortcut = await captureDashboardAfterInputs(["n"]);
   assert.deepEqual(researchShortcut.calls, []);
   assert.match(researchShortcut.output, /Focus/);
-  assert.match(researchShortcut.output, /Enter\/Ctrl\+R refreshes/);
+  assert.match(researchShortcut.output, /Enter runs focus scan/);
 
   const mcpShortcut = await captureDashboardAfterInputs(["m"]);
   assert.match(mcpShortcut.output, /MCP detail/);
@@ -465,7 +465,7 @@ test("embedded work Ctrl+O opens Context even when context refresh fails", async
   });
 
   assert.match(opened.output, /Selected context/);
-  assert.match(opened.output, /Workspace context for Work/);
+  assert.match(opened.output, /Work context is automatic/);
   assert.ok(
     opened.output.lastIndexOf("Selected context") >
       opened.output.lastIndexOf("Work composer"),

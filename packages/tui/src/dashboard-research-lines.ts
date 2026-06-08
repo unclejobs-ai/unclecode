@@ -46,6 +46,19 @@ export function formatWorkContextDisplayText(value: string): string {
     .replace(/\bbrief\b/gi, "context");
 }
 
+export function buildWorkContextResultPreviewLines(lines: readonly string[]): readonly string[] {
+  return lines
+    .map(formatWorkContextDisplayText)
+    .filter((line) =>
+      /^Work context/i.test(line) ||
+      /^Refreshed Work context/i.test(line) ||
+      /^Saved local context snapshot/i.test(line) ||
+      /^Saved in Work history/i.test(line) ||
+      /^No saved Work context refresh/i.test(line)
+    )
+    .slice(0, 3);
+}
+
 function runStatusLabel(status: SessionCenterResearchRun["status"]): string {
   switch (status) {
     case "completed":
@@ -68,27 +81,27 @@ export function buildResearchInspectorLines(input: {
   readonly isDraftOpen: boolean;
 }): readonly DashboardInspectorLine[] {
   const lines: DashboardInspectorLine[] = [
-    { text: "Workspace context for Work", tone: "text" },
-    { text: "Work already uses live repo state.", tone: "muted" },
-    { text: "N refreshes a focused scan when a task needs sharper context.", tone: "muted" },
-    { text: `Refreshes · ${String(input.researchRunCount)}`, tone: "muted" },
+    { text: "Work context is automatic", tone: "text" },
+    { text: "Work already reads repo state, guidance, and recent work.", tone: "muted" },
+    { text: "Use a focus scan only when a task needs sharper context.", tone: "muted" },
+    { text: input.researchRunCount > 0 ? `Focused scans · ${String(input.researchRunCount)}` : "No focused scans yet", tone: "muted" },
   ];
 
   if (input.isDraftOpen) {
     lines.push(
-      { text: "Focus", tone: "muted" },
+      { text: "Focus topic", tone: "muted" },
       {
         text: input.researchDraft.length > 0
           ? formatSessionCenterDraftValue("new-research", input.researchDraft)
           : "Example: inspect auth flow risks",
         tone: "warning",
       },
-      { text: "Enter/Ctrl+R refreshes · Esc cancels", tone: "success" },
+      { text: "Enter runs focus scan · Esc closes", tone: "success" },
     );
   } else {
     lines.push(
-      { text: "Press N to refresh focused context", tone: "warning" },
-      { text: "Skip it when the normal Work prompt is enough.", tone: "muted" },
+      { text: "N Focus starts an optional scan", tone: "warning" },
+      { text: "Skip this screen when your prompt is enough.", tone: "muted" },
     );
   }
 

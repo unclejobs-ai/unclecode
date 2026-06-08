@@ -13,6 +13,7 @@ import {
   buildMcpInspectorLines,
   buildResearchInspectorLines,
   buildSessionCenterStatusLine,
+  buildWorkContextResultPreviewLines,
   buildWorkflowStatusSummary,
   createApprovalRequestForAction,
   createSessionCenterFocusForView,
@@ -698,22 +699,26 @@ test("buildResearchInspectorLines shows Work context refresh purpose", () => {
     isDraftOpen: false,
   });
   assert.ok(
-    closed.some((line) => line.text === "Press N to refresh focused context"),
+    closed.some((line) => line.text === "N Focus starts an optional scan"),
   );
-  assert.ok(closed.some((line) => line.text === "Workspace context for Work"));
+  assert.ok(closed.some((line) => line.text === "Work context is automatic"));
   assert.ok(
-    closed.some((line) => line.text === "Work already uses live repo state."),
+    closed.some(
+      (line) =>
+        line.text ===
+        "Work already reads repo state, guidance, and recent work.",
+    ),
   );
   assert.ok(
     closed.some(
       (line) =>
         line.text ===
-        "N refreshes a focused scan when a task needs sharper context.",
+        "Use a focus scan only when a task needs sharper context.",
     ),
   );
   assert.ok(
     closed.some(
-      (line) => line.text === "Skip it when the normal Work prompt is enough.",
+      (line) => line.text === "Skip this screen when your prompt is enough.",
     ),
   );
   assert.equal(
@@ -740,11 +745,11 @@ test("buildResearchInspectorLines shows Work context refresh purpose", () => {
     researchDraft: "audit MCP workflow",
     isDraftOpen: true,
   });
-  assert.ok(open.some((line) => line.text === "Workspace context for Work"));
-  assert.ok(open.some((line) => line.text === "Focus"));
+  assert.ok(open.some((line) => line.text === "Work context is automatic"));
+  assert.ok(open.some((line) => line.text === "Focus topic"));
   assert.ok(open.some((line) => line.text === "audit MCP workflow"));
   assert.ok(
-    open.some((line) => line.text === "Enter/Ctrl+R refreshes · Esc cancels"),
+    open.some((line) => line.text === "Enter runs focus scan · Esc closes"),
   );
   assert.ok(open.some((line) => line.text === "Selected context"));
   assert.ok(open.some((line) => line.text === "Recent context"));
@@ -760,6 +765,17 @@ test("buildResearchInspectorLines shows Work context refresh purpose", () => {
   assert.equal(
     open.some((line) => /research bundle|context brief/i.test(line.text)),
     false,
+  );
+});
+
+test("buildWorkContextResultPreviewLines hides unrelated command output", () => {
+  assert.deepEqual(
+    buildWorkContextResultPreviewLines([
+      "The module '/Users/parkeungje/project/unclecode/node_modules/better-sqlite3/build/Release/better_sqlite3.node' was compiled against a different Node.js version.",
+      'Prepared a local research bundle for "audit workflow".',
+      "Saved locally: /tmp/research.md",
+    ]),
+    ['Refreshed Work context for "audit workflow".'],
   );
 });
 
@@ -1030,7 +1046,7 @@ test("getSessionCenterEscapeHint describes the next visible Escape action", () =
       hasSelectedApproval: false,
       hasEmbeddedWorkPane: true,
     }),
-    "Esc cancel",
+    "Esc close",
   );
   assert.equal(
     getSessionCenterEscapeHint({
@@ -1078,7 +1094,7 @@ test("buildSessionCenterStatusLine gives each Escape screen tab an honest page s
       hasSelectedApproval: false,
       hasEmbeddedWorkPane: true,
     }),
-    "Context · 1 refreshes · Enter/Ctrl+R refresh · Esc cancel",
+    "Context · focus scan · Enter run · Esc close",
   );
 });
 

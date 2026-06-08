@@ -638,11 +638,12 @@ export function useWorkShellPaneState<
   useEffect(() => {
     if (inputValue.trim().startsWith("/")) {
       if (ignoreNextSlashDismissResetRef.current) {
-        ignoreNextSlashDismissResetRef.current = false;
         return;
       }
       setDismissedSlashPickerPanelKey(undefined);
       setDismissedSlashPickerPanelTitle(undefined);
+    } else {
+      ignoreNextSlashDismissResetRef.current = false;
     }
   }, [inputValue]);
 
