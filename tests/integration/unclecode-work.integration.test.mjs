@@ -74,7 +74,7 @@ test("built unclecode cli tui --smoke verifies runtime action wiring", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Work shell TUI smoke OK/);
   assert.match(result.stdout, /MCP inspect action connected/);
-  assert.match(result.stdout, /Context brief status action connected/);
+  assert.match(result.stdout, /Work context status action connected/);
   assert.match(result.stdout, /History resume action connected/);
 });
 

@@ -31,8 +31,8 @@ test("built unclecode cli reports that no research run is active yet", () => {
     );
 
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Context brief status/i);
-    assert.match(result.stdout, /No active context brief/i);
+    assert.match(result.stdout, /Work context status/i);
+    assert.match(result.stdout, /No Work context refresh yet/i);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

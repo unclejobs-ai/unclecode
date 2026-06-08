@@ -1350,7 +1350,7 @@ test("createWorkShellDashboardProps maps work runtime state into unified Dashboa
     mcpServerCount: 1,
     mcpServers: [{ name: "memory", transport: "stdio", scope: "user", trustTier: "user", originLabel: "user config" }],
     latestResearchSessionId: "research-1",
-    latestResearchSummary: "Prepared a context brief",
+    latestResearchSummary: "Refreshed Work context",
     latestResearchTimestamp: "2026-04-05T12:00:00.000Z",
     researchRunCount: 1,
     sessions: [{ sessionId: "work-1", state: "idle", updatedAt: "2026-04-05T12:00:00.000Z", model: "gpt-5.4", taskSummary: "Review repo" }],

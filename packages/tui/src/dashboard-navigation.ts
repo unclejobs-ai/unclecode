@@ -469,8 +469,8 @@ export function buildSessionCenterStatusLine(input: {
     return `MCP · ${String(input.mcpServerCount)} server(s) · A add · X remove · ${escapeHint}`;
   }
   if (input.view === "research") {
-    const primaryHint = input.detailOpen ? "Enter/Ctrl+R run" : "N new brief";
-    return `Briefs · ${String(input.researchRunCount)} saved · ${primaryHint} · ${escapeHint}`;
+    const primaryHint = input.detailOpen ? "Enter/Ctrl+R refresh" : "N refresh";
+    return `Context · ${String(input.researchRunCount)} refreshes · ${primaryHint} · ${escapeHint}`;
   }
   return `History · ${String(input.savedSessionCount)} saved · ↑↓ select · Enter resume · ${escapeHint}`;
 }

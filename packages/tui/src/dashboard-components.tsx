@@ -20,6 +20,10 @@ import {
   STATUS_DOT,
   StatusDot,
 } from "./dashboard-primitives.js";
+import {
+  buildResearchInspectorLines,
+  formatWorkContextDisplayText,
+} from "./dashboard-research-lines.js";
 import { truncateForDisplayWidth } from "./text-width.js";
 import {
   type TuiActivityEntry as TuiShellActivityEntry,
@@ -29,6 +33,8 @@ import {
   type TuiStepTraceEntry as TuiShellStepTraceEntry,
   type TuiWorkerStatus,
 } from "./shell-state.js";
+
+export { buildResearchInspectorLines } from "./dashboard-research-lines.js";
 
 function truncateForPane(value: string, maxLength: number): string {
   return truncateForDisplayWidth(value, maxLength);
@@ -107,7 +113,7 @@ export const VIEW_TABS = [
   { key: "1", label: "Work", view: "work" as const },
   { key: "2", label: "History", view: "sessions" as const },
   { key: "3", label: "MCP", view: "mcp" as const },
-  { key: "4", label: "Briefs", view: "research" as const },
+  { key: "4", label: "Context", view: "research" as const },
 ] as const;
 
 export function ViewTabs(props: { activeView: TuiShellState["view"] }) {
@@ -208,13 +214,14 @@ export function ResearchRunList(props: {
   readonly isActive: boolean;
 }) {
   if (props.runs.length === 0) {
-    return <Text color={C.textMuted}>No context briefs yet. Press N to start.</Text>;
+    return <Text color={C.textMuted}>Work has live context. Press N to focus it.</Text>;
   }
 
   return (
     <Box flexDirection="column" gap={0}>
       {props.runs.slice(0, 6).map((run, index) => {
         const isSelected = props.isActive && props.selectedIndex === index;
+        const statusLabel = run.status === "completed" ? "refreshed" : run.status;
         return (
           <Box key={run.sessionId} flexDirection="column">
             <Box gap={1}>
@@ -223,7 +230,7 @@ export function ResearchRunList(props: {
               <Text wrap="truncate-end" color={isSelected ? C.text : C.textSecondary} bold={isSelected}>{truncateForPane(run.prompt, 28)}</Text>
             </Box>
             <Box paddingLeft={3}>
-              <Text color={C.textFaint}>{truncateForPane(`${run.status} · ${run.timestamp ?? "no timestamp"}`, 28)}</Text>
+              <Text color={C.textFaint}>{truncateForPane(`${statusLabel} · ${run.timestamp ?? "saved"}`, 28)}</Text>
             </Box>
           </Box>
         );
@@ -255,7 +262,7 @@ export function formatWorkerDisplayLabel(worker: TuiWorkerStatus): string {
     .replace(/^browser$/i, "Browser login")
     .replace(/^key$/i, "API key login")
     .replace(/^logout$/i, "Sign out")
-    .replace(/^research$/i, "Context brief")
+    .replace(/^research$/i, "Context refresh")
     .replace(/^doctor$/i, "Doctor")
     .replace(/^resume$/i, "Resume session");
 }
@@ -283,7 +290,7 @@ export function buildWorkflowStatusSummary(input: {
   if (input.outputLines[0]) {
     return "ready · last result available";
   }
-  return "ready · W work · B auth · N brief";
+  return "ready · W work · B auth · N context";
 }
 
 export function ActionList(props: {
@@ -482,89 +489,6 @@ export function InspectorContext(props: {
       ))}
     </Box>
   );
-}
-
-export function buildResearchInspectorLines(input: {
-  readonly latestResearchSessionId: string | null;
-  readonly latestResearchSummary: string | null;
-  readonly latestResearchTimestamp: string | null;
-  readonly researchRunCount: number;
-  readonly recentResearchRuns?: readonly {
-    readonly sessionId: string;
-    readonly prompt: string;
-    readonly status: "completed" | "failed" | "unknown";
-    readonly summary: string;
-    readonly timestamp: string | null;
-  }[];
-  readonly selectedRunIndex?: number;
-  readonly researchDraft: string;
-  readonly isDraftOpen: boolean;
-}): readonly { readonly text: string; readonly tone: "muted" | "text" | "success" | "warning" }[] {
-  const lines: { text: string; tone: "muted" | "text" | "success" | "warning" }[] = [
-    { text: "Context Briefs shape the next packet", tone: "text" },
-    { text: "Scans local code, session history, and OMO evidence into a reusable brief.", tone: "muted" },
-    { text: "Use before Work to shape the next context packet without changing code.", tone: "muted" },
-    { text: `Briefs · ${String(input.researchRunCount)}`, tone: "muted" },
-  ];
-
-  if (input.isDraftOpen) {
-    lines.push(
-      { text: "Prompt draft", tone: "muted" },
-      {
-        text: input.researchDraft.length > 0
-          ? formatSessionCenterDraftValue("new-research", input.researchDraft)
-          : "Example: summarize auth flow risks",
-        tone: "warning",
-      },
-      { text: "Enter or Ctrl+R runs · Esc cancels", tone: "success" },
-    );
-  } else {
-    lines.push(
-      { text: "Press N to draft a context brief", tone: "warning" },
-      { text: "Creates .unclecode/research-artifacts/research.md", tone: "muted" },
-    );
-  }
-
-  if (input.latestResearchSessionId || input.latestResearchSummary) {
-    lines.push(
-      { text: "Latest result", tone: "muted" },
-      { text: input.latestResearchSummary ?? "No summary recorded.", tone: "text" },
-      { text: input.latestResearchTimestamp ?? input.latestResearchSessionId ?? "no timestamp", tone: "muted" },
-    );
-  }
-
-  if (input.recentResearchRuns && input.recentResearchRuns.length > 0) {
-    const selectedRun = input.selectedRunIndex !== undefined
-      ? input.recentResearchRuns[input.selectedRunIndex]
-      : undefined;
-    if (selectedRun) {
-      lines.push(
-        { text: "Selected brief", tone: "muted" },
-        { text: `${selectedRun.status} · ${selectedRun.prompt}`, tone: selectedRun.status === "failed" ? "warning" : "text" },
-        { text: selectedRun.timestamp ?? selectedRun.sessionId, tone: "muted" },
-      );
-    }
-    lines.push({ text: "Recent briefs", tone: "muted" });
-    for (const run of input.recentResearchRuns.slice(0, 2)) {
-      const statusLabel = run.status === "failed" ? "failed" : run.status === "completed" ? "done" : "unknown";
-      lines.push({
-        text: `${statusLabel} · ${run.prompt || run.sessionId}`,
-        tone: run.status === "failed" ? "warning" : "muted",
-      });
-      if (run.summary.trim().length > 0 && run.summary !== input.latestResearchSummary) {
-        lines.push({ text: run.summary, tone: "text" });
-      }
-    }
-  }
-
-  if (input.latestResearchSessionId) {
-    lines.push({
-      text: `unclecode resume ${input.latestResearchSessionId}`,
-      tone: "success",
-    });
-  }
-
-  return lines;
 }
 
 export function buildMcpInspectorLines(input: {
@@ -778,7 +702,7 @@ export function DetailPanel(props: {
           <Text color={C.textFaint}>·</Text>
           <KeyPill char="B" /><Text color={C.textMuted}>auth</Text>
           <Text color={C.textFaint}>·</Text>
-          <KeyPill char="N" /><Text color={C.textMuted}>brief</Text>
+          <KeyPill char="N" /><Text color={C.textMuted}>context</Text>
         </Box>
       </Box>
     );
@@ -795,7 +719,9 @@ export function DetailPanel(props: {
       researchDraft: props.researchDraft,
       isDraftOpen: props.shellState.focus.detailOpen,
     });
-    const resultPreviewLines = props.shellState.outputLines.slice(0, 3);
+    const resultPreviewLines = props.shellState.outputLines
+      .slice(0, 3)
+      .map(formatWorkContextDisplayText);
 
     return (
       <Box flexDirection="column">
@@ -905,8 +831,8 @@ export function DetailPanel(props: {
         ) : null}
         {props.selectedActionId === "new-research" ? (
           <Box flexDirection="column" marginTop={1}>
-            <Text color={C.textMuted}>Prompt</Text>
-            <Text color={C.warning}>{props.researchDraft.length > 0 ? formatSessionCenterDraftValue(props.selectedActionId, props.researchDraft) : "Type a context brief prompt. Enter or Ctrl+R runs."}</Text>
+            <Text color={C.textMuted}>Focus</Text>
+            <Text color={C.warning}>{props.researchDraft.length > 0 ? formatSessionCenterDraftValue(props.selectedActionId, props.researchDraft) : "Describe what Work should inspect. Enter refreshes."}</Text>
           </Box>
         ) : null}
         {props.selectedActionId === "api-key-login" ? (
@@ -926,7 +852,7 @@ export function DetailPanel(props: {
           <Text color={C.textMuted}>mode {props.model.modeLabel} · auth {props.model.authLabel}</Text>
         </Box>
         <Box marginTop={1}>
-          <Text color={C.textMuted}>Enter/Ctrl+R run · {escapeHint}</Text>
+          <Text color={C.textMuted}>{props.selectedActionId === "new-research" ? "Enter/Ctrl+R refresh" : "Enter/Ctrl+R run"} · {escapeHint}</Text>
         </Box>
         <Box marginTop={1} flexDirection="column">
           <Text color={C.textMuted}>Workspace context</Text>

@@ -6,6 +6,7 @@ import { resolvePromptSlashCommand } from "./work-shell-engine-commands.js";
 import { runRustCommandSync } from "./rust-command.js";
 import type { WorkShellComposerMode } from "./work-shell-engine.js";
 import type { WorkShellPromptCommand } from "./work-shell-engine-turns.js";
+import { listWorkShellSlashSuggestionEntries } from "./work-shell-slash.js";
 
 export type WorkShellSubmitRoute =
   | { readonly kind: "secure-api-key-entry"; readonly line: string }
@@ -56,10 +57,11 @@ function parseRustSubmitRoute(raw: string): WorkShellSubmitRoute | undefined {
 
 function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinCommand {
   if (!value || typeof value !== "object") return false;
-  const command = value as { kind?: unknown; traceMode?: unknown; line?: unknown; skillName?: unknown };
+  const command = value as { kind?: unknown; traceMode?: unknown; line?: unknown; skillName?: unknown; suggestion?: unknown };
   if (typeof command.kind !== "string") return false;
   if (command.kind === "trace-mode") return command.traceMode === "verbose" || command.traceMode === "minimal";
   if (command.kind === "reasoning" || command.kind === "model") return typeof command.line === "string";
+  if (command.kind === "unknown-slash") return typeof command.line === "string" && (command.suggestion === undefined || typeof command.suggestion === "string");
   if (command.kind === "skill") return typeof command.line === "string" && (command.skillName === undefined || typeof command.skillName === "string");
   return [
     "exit",
@@ -91,6 +93,65 @@ function isLocalCommand(value: unknown): value is ResolvedWorkShellLocalCommand 
   if (command.kind !== "remember") return false;
   if (typeof command.usageError === "string") return true;
   return ["session", "project", "user", "agent"].includes(String(command.scope)) && typeof command.summary === "string";
+}
+
+function levenshteinDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_value, index) => index);
+  for (let leftIndex = 0; leftIndex < left.length; leftIndex += 1) {
+    let diagonal = previous[0] ?? 0;
+    previous[0] = leftIndex + 1;
+    for (let rightIndex = 0; rightIndex < right.length; rightIndex += 1) {
+      const saved = previous[rightIndex + 1] ?? 0;
+      const cost = left[leftIndex] === right[rightIndex] ? 0 : 1;
+      const insertion = previous[rightIndex] ?? 0;
+      previous[rightIndex + 1] = Math.min(
+        (previous[rightIndex + 1] ?? 0) + 1,
+        insertion + 1,
+        diagonal + cost,
+      );
+      diagonal = saved;
+    }
+  }
+  return previous[right.length] ?? Math.max(left.length, right.length);
+}
+
+function listKnownSlashCommandNames(): readonly string[] {
+  const names = new Set<string>();
+  for (const entry of listWorkShellSlashSuggestionEntries()) {
+    const command = entry.command.trim().toLowerCase();
+    if (!command.startsWith("/")) {
+      continue;
+    }
+    names.add(command);
+    const rootCommand = command.split(/\s+/, 1)[0];
+    if (rootCommand) {
+      names.add(rootCommand);
+    }
+  }
+  return [...names].sort();
+}
+
+function suggestKnownSlashCommand(line: string): string | undefined {
+  const token = line.trim().split(/\s+/, 1)[0]?.toLowerCase();
+  if (!token || !token.startsWith("/")) {
+    return undefined;
+  }
+  const ranked = listKnownSlashCommandNames()
+    .map((command) => ({
+      command,
+      distance: levenshteinDistance(token, command),
+    }))
+    .sort((left, right) =>
+      left.distance - right.distance ||
+      right.command.length - left.command.length ||
+      left.command.localeCompare(right.command)
+    );
+  const best = ranked[0];
+  if (!best) {
+    return undefined;
+  }
+  const threshold = token.length <= 5 ? 2 : 3;
+  return best.distance <= threshold ? best.command : undefined;
 }
 
 export function resolveWorkShellSubmitRoute(input: {
@@ -125,5 +186,14 @@ export function resolveWorkShellSubmitRoute(input: {
     return { kind: "inline-command", line: route.line, slashCommand };
   }
 
-  return route;
+  const suggestion = suggestKnownSlashCommand(route.line);
+  return {
+    kind: "builtin",
+    line: route.line,
+    command: {
+      kind: "unknown-slash",
+      line: route.line,
+      ...(suggestion ? { suggestion } : {}),
+    },
+  };
 }

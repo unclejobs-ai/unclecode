@@ -173,6 +173,7 @@ function createEngineInput(overrides = {}) {
     inline: [],
     modeUpdates: [],
     secureAuth: [],
+    turns: [],
     refreshedAuth: 0,
     traceListener: undefined,
   };
@@ -191,6 +192,7 @@ function createEngineInput(overrides = {}) {
       calls.traceListener = listener;
     },
     async runTurn(prompt) {
+      calls.turns.push(prompt);
       return { text: `echo:${prompt}` };
     },
   };
@@ -479,6 +481,39 @@ test("work-shell submit route helper classifies secure, builtin, prompt, inline,
     kind: "inline-command",
     line: "/focus",
     slashCommand: ["doctor"],
+  });
+  assert.deepEqual(resolveWorkShellSubmitRoute({
+    value: "/modl",
+    isBusy: false,
+    composerMode: "default",
+    resolveWorkShellSlashCommand: () => undefined,
+    hasInlineCommandRunner: true,
+  }), {
+    kind: "builtin",
+    line: "/modl",
+    command: { kind: "unknown-slash", line: "/modl", suggestion: "/model" },
+  });
+  assert.deepEqual(resolveWorkShellSubmitRoute({
+    value: "/stpo",
+    isBusy: false,
+    composerMode: "default",
+    resolveWorkShellSlashCommand: () => undefined,
+    hasInlineCommandRunner: true,
+  }), {
+    kind: "builtin",
+    line: "/stpo",
+    command: { kind: "unknown-slash", line: "/stpo", suggestion: "/stop" },
+  });
+  assert.deepEqual(resolveWorkShellSubmitRoute({
+    value: "/mmbrige",
+    isBusy: false,
+    composerMode: "default",
+    resolveWorkShellSlashCommand: () => undefined,
+    hasInlineCommandRunner: true,
+  }), {
+    kind: "builtin",
+    line: "/mmbrige",
+    command: { kind: "unknown-slash", line: "/mmbrige", suggestion: "/mmbridge" },
   });
   assert.deepEqual(resolveWorkShellSubmitRoute({
     value: "finish cleanup",
@@ -1711,6 +1746,117 @@ test("work-shell operational helpers resolve secure auth entry, inline command r
   assert.deepEqual(appliedAuthIssues, ["Auth issue cleared."]);
 });
 
+function createNativeMemoryAbiError() {
+  return new Error(
+    "The module '/repo/node_modules/better-sqlite3/build/Release/better_sqlite3.node'\n" +
+    "was compiled against a different Node.js version using\n" +
+    "NODE_MODULE_VERSION 141. This version of Node.js requires\n" +
+    "NODE_MODULE_VERSION 127. Please try re-compiling or re-installing\n" +
+    "the module (for instance, using `npm rebuild` or `npm install`).",
+  );
+}
+
+test("work-shell success sequence keeps the assistant reply when post-turn memory storage fails", async () => {
+  const success = await runPromptTurnSuccessSequence({
+    prompt: "answer normally",
+    transcriptText: "answer normally",
+    turnStartedAt: Date.now() - 5,
+    async runAgentTurn() {
+      return { text: "Done." };
+    },
+    cwd: "/repo",
+    sessionId: "work-1",
+    currentBridgeLines: ["bridge-0"],
+    currentMemoryLines: ["memory-0"],
+    async publishContextBridge({ summary }) {
+      return { bridgeId: "bridge-1", line: `bridge ${summary}` };
+    },
+    async writeScopedMemory() {
+      throw createNativeMemoryAbiError();
+    },
+    async listScopedMemoryLines() {
+      throw new Error("memory lines should not be listed after write failure");
+    },
+  });
+
+  assert.equal(success.assistantText, "Done.");
+  assert.deepEqual(success.postTurnEffects.bridgeLines, [
+    "bridge Q: answer normally · A: Done.",
+    "bridge-0",
+  ]);
+  assert.deepEqual(success.postTurnEffects.memoryLines, ["memory-0"]);
+  assert.equal(success.postTurnEffects.memoryTraceEvent.type, "memory.written");
+  assert.equal(success.postTurnEffects.memoryTraceEvent.degraded, true);
+  assert.equal(success.postTurnEffects.memoryTraceEvent.errorClass, "native-module-version-mismatch");
+  assert.match(success.postTurnEffects.memorySummary, /unavailable/i);
+});
+
+test("work-shell prompt turn does not surface native post-turn memory errors in chat", async () => {
+  const entries = [];
+  const patches = [];
+  const traceLines = [];
+  const snapshots = [];
+  await executeWorkShellPromptTurn({
+    promptTurn: {
+      transcriptText: "hi",
+      prompt: "hi",
+      sessionSummary: "Chat: hi",
+      failureSummary: "Needs action: hi",
+    },
+    state: createState({
+      authLabel: "oauth-file",
+      bridgeLines: ["bridge-0"],
+      memoryLines: ["memory-0"],
+      model: "gpt-5.4",
+      reasoning: supportedReasoning,
+    }),
+    cwd: "/repo",
+    sessionId: "work-1",
+    async runAgentTurn() {
+      return { text: "반갑다." };
+    },
+    async publishContextBridge({ summary }) {
+      return { bridgeId: "bridge-2", line: `bridge ${summary}` };
+    },
+    async writeScopedMemory() {
+      throw createNativeMemoryAbiError();
+    },
+    async listScopedMemoryLines() {
+      throw new Error("memory lines should not be listed after write failure");
+    },
+    refreshAuthState: async () => ({ authLabel: "oauth-file", authIssueLines: [] }),
+    applyAuthIssueLines() {},
+    formatWorkShellError: (message) => `ERR:${message}`,
+    formatAgentTraceLine: (event) => `${event.type}:${String(event.summary ?? "")}:${String(event.errorClass ?? "")}`,
+    buildAuthFailureStatusPanel: (authLabel) => ({ title: "Status", lines: [`auth:${authLabel}`] }),
+    appendEntries: (...nextEntries) => {
+      entries.push(...nextEntries);
+    },
+    setState: (patch) => {
+      patches.push(patch);
+    },
+    pushTraceLine: (line) => {
+      traceLines.push(line);
+    },
+    persistSessionSnapshot: async (snapshotState, summary) => {
+      snapshots.push({ snapshotState, summary });
+    },
+  });
+
+  assert.deepEqual(entries.map((entry) => entry.role), ["user", "assistant"]);
+  assert.equal(entries.at(-1)?.text, "반갑다.");
+  assert.equal(entries.some((entry) => /better_sqlite3\.node|NODE_MODULE_VERSION/.test(entry.text)), false);
+  assert.equal(patches.some((patch) => patch.memoryLines?.includes("memory-0")), true);
+  assert.ok(traceLines.some((line) => /native-module-version-mismatch/.test(line)));
+  assert.deepEqual(
+    snapshots,
+    [
+      { snapshotState: "running", summary: "Chat: hi" },
+      { snapshotState: "idle", summary: "Chat: hi" },
+    ],
+  );
+});
+
 test("work-shell post-turn helpers persist summaries and auth recovery deterministically", async () => {
   const refreshedAuthIssues = [];
   const effects = await runWorkShellPostTurnSuccessEffects({
@@ -2203,6 +2349,57 @@ test("WorkShellEngine applies /model updates and syncs model plus reasoning runt
   assert.ok(engine.getState().panel.lines.includes("reasoning:unsupported"));
 });
 
+test("WorkShellEngine applies supported /model updates without losing reasoning overrides", async () => {
+  const { engine, calls } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/model gpt-5.5");
+
+  assert.equal(engine.getState().model, "gpt-5.5");
+  assert.equal(engine.getState().reasoning.effort, "high");
+  assert.equal(engine.getState().reasoning.source, "mode-default");
+  assert.equal(calls.runtimeSettings.length, 1);
+  assert.equal(calls.runtimeSettings[0]?.model, "gpt-5.5");
+  assert.equal(calls.runtimeSettings[0]?.reasoning?.effort, "high");
+  assert.equal(calls.turns.length, 0);
+});
+
+test("WorkShellEngine keeps malformed slash commands local", async () => {
+  const { engine, calls } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/modl");
+
+  assert.equal(calls.turns.length, 0);
+  assert.ok(
+    engine.getState().entries.some(
+      (entry) => entry.role === "system" && /Unknown command \/modl\. Did you mean \/model\?/.test(entry.text),
+    ),
+  );
+});
+
+test("WorkShellEngine does not echo malformed slash command arguments", async () => {
+  const { engine, calls } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/modl SECRET_ARGUMENT_DO_NOT_ECHO");
+
+  assert.equal(calls.turns.length, 0);
+  assert.doesNotMatch(
+    JSON.stringify(engine.getState().entries),
+    /SECRET_ARGUMENT_DO_NOT_ECHO/,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(engine.getState().panel),
+    /SECRET_ARGUMENT_DO_NOT_ECHO/,
+  );
+  assert.ok(
+    engine.getState().entries.some(
+      (entry) => entry.role === "system" && /Unknown command \/modl\. Did you mean \/model\?/.test(entry.text),
+    ),
+  );
+});
+
 test("WorkShellEngine opens sessions with immediate loading and visible failure states", async () => {
   let resolveSessions;
   const { engine } = createEngine({
@@ -2259,6 +2456,7 @@ test("WorkShellEngine opens /context as an overlay and can dismiss it", async ()
 
 test("WorkShellEngine binds chat prompts and /context inspector to the same injected context packet", async () => {
   const prompts = [];
+  let packetCalls = 0;
   const packet = {
     id: "packet-work-shell-1",
     version: 1,
@@ -2315,14 +2513,20 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
         return { text: "packet-bound response" };
       },
     },
-    resolveContextPacket: async () => packet,
+    resolveContextPacket: async () => {
+      packetCalls += 1;
+      return packet;
+    },
   });
 
   await engine.initialize();
-  assert.equal(engine.getState().contextIndicator, "packet 2 in · 1 out · 1 warn");
+  assert.equal(packetCalls, 0);
+  assert.equal(engine.getState().contextIndicator, undefined);
 
   await engine.handleSubmit("summarize repo");
 
+  assert.equal(packetCalls, 1);
+  assert.equal(engine.getState().contextIndicator, "packet 2 in · 1 out · 1 warn");
   assert.equal(prompts.length, 1);
   assert.match(prompts[0] ?? "", /<unclecode_context_packet id="packet-work-shell-1" version="1">/);
   assert.match(prompts[0] ?? "", /Included:\n- workspace: AGENTS\.md \(repo instructions loaded\) - Use &lt;small&gt; reversible diffs\./);
@@ -2336,6 +2540,7 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
 
   await engine.handleSubmit("/context");
 
+  assert.equal(packetCalls, 2);
   assert.equal(engine.getState().panel.title, "Context expanded");
   assert.ok(engine.getState().panel.lines.includes("Packet packet-work-shell-1 · Next model-call packet"));
   assert.ok(engine.getState().panel.lines.includes("Sources · 2 included · 1 excluded · 1 warning · ~30 tokens"));
@@ -2732,7 +2937,7 @@ test("WorkShellEngine can execute /research topics through the inline action lan
     },
     async runInlineCommand(args) {
       calls.inline.push(args);
-      return ["Context brief completed", "Artifact: /tmp/research.md"];
+      return ["Work context refreshed", "Saved locally: /tmp/research.md"];
     },
   });
 
@@ -2741,7 +2946,7 @@ test("WorkShellEngine can execute /research topics through the inline action lan
 
   assert.deepEqual(calls.inline, [["research", "run", "current", "workspace"]]);
   assert.equal(engine.getState().panel.title, "research run current workspace");
-  assert.ok(engine.getState().entries.some((entry) => entry.text.includes("Context brief completed")));
+  assert.ok(engine.getState().entries.some((entry) => entry.text.includes("Work context refreshed")));
 });
 
 test("WorkShellEngine shows memories and records /remember through the local command seam", async () => {

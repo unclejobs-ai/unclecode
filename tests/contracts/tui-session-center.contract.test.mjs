@@ -180,7 +180,7 @@ test("formatSessionHeadline prefers task summaries over raw ids and recognizes s
       model: "research-local",
       taskSummary: null,
     }),
-    "Context brief session",
+    "Work context snapshot",
   );
 
   assert.equal(
@@ -687,7 +687,7 @@ test("isSessionCenterImplicitSubmitInput recognizes Ink empty Enter events", () 
   assert.equal(isSessionCenterImplicitSubmitInput("x", {}), false);
 });
 
-test("buildResearchInspectorLines shows Context Brief purpose", () => {
+test("buildResearchInspectorLines shows Work context refresh purpose", () => {
   const closed = buildResearchInspectorLines({
     latestResearchSessionId: null,
     latestResearchSummary: null,
@@ -697,26 +697,34 @@ test("buildResearchInspectorLines shows Context Brief purpose", () => {
     researchDraft: "",
     isDraftOpen: false,
   });
-  assert.ok(closed.some((line) => line.text === "Press N to draft a context brief"));
-  assert.ok(closed.some((line) => line.text === "Context Briefs shape the next packet"));
   assert.ok(
-    closed.some(
-      (line) =>
-        line.text ===
-        "Scans local code, session history, and OMO evidence into a reusable brief.",
-    ),
+    closed.some((line) => line.text === "Press N to refresh focused context"),
+  );
+  assert.ok(closed.some((line) => line.text === "Workspace context for Work"));
+  assert.ok(
+    closed.some((line) => line.text === "Work already uses live repo state."),
   );
   assert.ok(
     closed.some(
       (line) =>
         line.text ===
-        "Use before Work to shape the next context packet without changing code.",
+        "N refreshes a focused scan when a task needs sharper context.",
     ),
+  );
+  assert.ok(
+    closed.some(
+      (line) => line.text === "Skip it when the normal Work prompt is enough.",
+    ),
+  );
+  assert.equal(
+    closed.some((line) => /research-artifacts\/research\.md/.test(line.text)),
+    false,
   );
 
   const open = buildResearchInspectorLines({
     latestResearchSessionId: "research-123",
-    latestResearchSummary: "Summarize current workspace",
+    latestResearchSummary:
+      'Prepared a local research bundle for "audit MCP workflow".',
     latestResearchTimestamp: "2026-06-01T00:00:00.000Z",
     researchRunCount: 2,
     recentResearchRuns: [
@@ -724,7 +732,7 @@ test("buildResearchInspectorLines shows Context Brief purpose", () => {
         sessionId: "research-123",
         prompt: "audit MCP workflow",
         status: "completed",
-        summary: "Prepared a context brief",
+        summary: 'Prepared a context brief for "audit MCP workflow".',
         timestamp: "2026-06-01T00:00:00.000Z",
       },
     ],
@@ -732,26 +740,37 @@ test("buildResearchInspectorLines shows Context Brief purpose", () => {
     researchDraft: "audit MCP workflow",
     isDraftOpen: true,
   });
-  assert.ok(open.some((line) => line.text === "Context Briefs shape the next packet"));
-  assert.ok(open.some((line) => line.text === "Prompt draft"));
+  assert.ok(open.some((line) => line.text === "Workspace context for Work"));
+  assert.ok(open.some((line) => line.text === "Focus"));
   assert.ok(open.some((line) => line.text === "audit MCP workflow"));
   assert.ok(
-    open.some((line) => line.text === "Enter or Ctrl+R runs · Esc cancels"),
+    open.some((line) => line.text === "Enter/Ctrl+R refreshes · Esc cancels"),
   );
-  assert.ok(open.some((line) => line.text === "Selected brief"));
-  assert.ok(open.some((line) => line.text === "Recent briefs"));
-  assert.ok(open.some((line) => line.text === "done · audit MCP workflow"));
-  assert.ok(open.some((line) => line.text === "unclecode resume research-123"));
+  assert.ok(open.some((line) => line.text === "Selected context"));
+  assert.ok(open.some((line) => line.text === "Recent context"));
+  assert.ok(
+    open.some((line) => line.text === "refreshed · audit MCP workflow"),
+  );
+  assert.ok(
+    open.some(
+      (line) =>
+        line.text === 'Refreshed Work context for "audit MCP workflow".',
+    ),
+  );
+  assert.equal(
+    open.some((line) => /research bundle|context brief/i.test(line.text)),
+    false,
+  );
 });
 
-test("buildWorkflowStatusSummary advertises context briefs instead of research", () => {
+test("buildWorkflowStatusSummary advertises context refresh instead of research", () => {
   const summary = buildWorkflowStatusSummary({
     approvals: [],
     workers: [],
     outputLines: [],
   });
 
-  assert.equal(summary, "ready · W work · B auth · N brief");
+  assert.equal(summary, "ready · W work · B auth · N context");
   assert.doesNotMatch(summary, /research/i);
 });
 
@@ -1059,7 +1078,7 @@ test("buildSessionCenterStatusLine gives each Escape screen tab an honest page s
       hasSelectedApproval: false,
       hasEmbeddedWorkPane: true,
     }),
-    "Briefs · 1 saved · Enter/Ctrl+R run · Esc cancel",
+    "Context · 1 refreshes · Enter/Ctrl+R refresh · Esc cancel",
   );
 });
 

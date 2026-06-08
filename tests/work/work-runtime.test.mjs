@@ -15,6 +15,7 @@ import {
 import { loadWorkCliBootstrap } from "../../apps/unclecode-cli/src/work-runtime-bootstrap.ts";
 import { loadWorkShellDashboardProps } from "../../apps/unclecode-cli/src/work-runtime.ts";
 import { persistWorkShellSessionSnapshot } from "@unclecode/orchestrator";
+import { formatContextPacketPromptPrefix } from "../../packages/context-broker/src/context-packet-view.ts";
 
 test("parseArgs extracts cwd/provider/model/reasoning/session/help/tools/prompt from work argv", () => {
   assert.deepEqual(
@@ -73,6 +74,22 @@ function buildScopedOutJwt() {
   return `${header}.${payload}.sig`;
 }
 
+function preserveRustToolchainEnv(originalEnv) {
+  const home = originalEnv.HOME;
+  return {
+    ...(originalEnv.CARGO_HOME
+      ? { CARGO_HOME: originalEnv.CARGO_HOME }
+      : home
+        ? { CARGO_HOME: path.join(home, ".cargo") }
+        : {}),
+    ...(originalEnv.RUSTUP_HOME
+      ? { RUSTUP_HOME: originalEnv.RUSTUP_HOME }
+      : home
+        ? { RUSTUP_HOME: path.join(home, ".rustup") }
+        : {}),
+  };
+}
+
 test("loadResumedWorkSession reports missing session ids honestly", async () => {
   const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-runtime-session-"));
   const fakeHome = path.join(workspaceRoot, "home");
@@ -98,6 +115,11 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
 
   try {
     mkdirSync(path.join(fakeHome, ".codex"), { recursive: true });
+    writeFileSync(
+      path.join(workspaceRoot, "AGENTS.md"),
+      "# Guidance\nUse workspace guidance sentinel text in the provider system prompt.\n",
+      "utf8",
+    );
     const futureExp = Math.floor(Date.now() / 1000) + 3600;
     const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
     const accessPayload = Buffer.from(JSON.stringify({ exp: futureExp, scp: ["openid", "profile", "offline_access", "api.connectors.read"] })).toString("base64url");
@@ -143,6 +165,7 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
       LLM_PROVIDER: "openai",
       OPENAI_MODEL: "gpt-5.4",
       HOME: fakeHome,
+      ...preserveRustToolchainEnv(originalEnv),
       UNCLECODE_SESSION_STORE_ROOT: path.join(workspaceRoot, ".state"),
       OPENAI_OAUTH_CLIENT_ID: "",
     };
@@ -162,16 +185,237 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
     const packet = await result.options.resolveContextPacket({
       cwd: workspaceRoot,
       sessionId: "work-test",
-      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      contextSummaryLines: result.options.contextSummaryLines,
       bridgeLines: ["bridge ready"],
       memoryLines: ["memory ready"],
       traceLines: ["trace ready"],
     });
 
+    const providerPromptItem = packet.included.find(
+      (item) =>
+        item.category === "provider-system-prompt" &&
+        item.reason === "workspace guidance loaded into provider system prompt",
+    );
+    const workspaceGuidanceItem = packet.included.find(
+      (item) => item.category === "workspace-guidance" && /AGENTS\.md/.test(item.label),
+    );
+
+    assert.ok(providerPromptItem, "packet includes provider system prompt metadata");
+    assert.ok(workspaceGuidanceItem, "packet includes workspace guidance summary");
+    assert.notEqual(providerPromptItem.id, workspaceGuidanceItem.id);
+    assert.equal(
+      packet.included.some((item) => item.category === "workspace" && /AGENTS\.md/.test(item.label)),
+      false,
+      "AGENTS.md guidance summary rows are not collapsed into generic workspace rows",
+    );
+    assert.doesNotMatch(
+      JSON.stringify(providerPromptItem),
+      /Use workspace guidance sentinel text/,
+      "provider system prompt metadata does not inline the guidance body",
+    );
+    assert.doesNotMatch(
+      JSON.stringify(packet),
+      /Use workspace guidance sentinel text/,
+      "context packet does not inline workspace guidance body text",
+    );
     assert.ok(packet.included.some((item) => item.category === "omo" && /G001-context/.test(item.label)));
     assert.ok(packet.excluded.some((item) => item.category === "omo" && /ledger\.jsonl/.test(item.label)));
     assert.doesNotMatch(JSON.stringify(packet), /RAW_LEDGER_SENTINEL_DO_NOT_SHOW/);
     assert.doesNotMatch(JSON.stringify(packet), /RAW_EVIDENCE_SENTINEL_DO_NOT_SHOW/);
+  } finally {
+    process.env = originalEnv;
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("loadWorkCliBootstrap represents configured provider prompt as metadata without raw prompt preview", async () => {
+  const originalEnv = { ...process.env };
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-runtime-prompt-metadata-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+
+  try {
+    mkdirSync(path.join(workspaceRoot, ".unclecode"), { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(
+      path.join(workspaceRoot, ".unclecode", "config.json"),
+      JSON.stringify({
+        prompt: {
+          sections: {
+            "project-secret": {
+              title: "Project Secret",
+              body: "SECRET_PROMPT_SENTINEL_DO_NOT_SHOW",
+            },
+          },
+        },
+      }),
+      "utf8",
+    );
+
+    process.env = {
+      ...originalEnv,
+      LLM_PROVIDER: "openai",
+      OPENAI_MODEL: "gpt-5.4",
+      HOME: fakeHome,
+      ...preserveRustToolchainEnv(originalEnv),
+      UNCLECODE_SESSION_STORE_ROOT: path.join(workspaceRoot, ".state"),
+      OPENAI_API_KEY: "sk-test-123",
+      OPENAI_OAUTH_CLIENT_ID: "",
+    };
+    delete process.env.OPENAI_AUTH_TOKEN;
+
+    const result = await loadWorkCliBootstrap({
+      argv: ["--cwd", workspaceRoot],
+    });
+
+    const metadata = result.options.contextPacketSourceMetadata ?? [];
+    assert.ok(
+      metadata.some(
+        (item) =>
+          item.category === "provider-system-prompt" &&
+          item.reason === "configured prompt loaded into provider system prompt",
+      ),
+      "bootstrap exposes configured prompt metadata before first submit",
+    );
+    assert.doesNotMatch(JSON.stringify(metadata), /SECRET_PROMPT_SENTINEL_DO_NOT_SHOW/);
+
+    const packet = await result.options.resolveContextPacket?.({
+      cwd: workspaceRoot,
+      sessionId: "work-test-prompt-metadata",
+      contextSummaryLines: result.options.contextSummaryLines,
+      bridgeLines: [],
+      memoryLines: [],
+      traceLines: [],
+    });
+
+    assert.ok(packet);
+    assert.ok(
+      packet.included.some(
+        (item) =>
+          item.category === "provider-system-prompt" &&
+          item.reason === "configured prompt loaded into provider system prompt",
+      ),
+      "packet includes provider system prompt metadata",
+    );
+    assert.doesNotMatch(JSON.stringify(packet), /SECRET_PROMPT_SENTINEL_DO_NOT_SHOW/);
+  } finally {
+    process.env = originalEnv;
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("loadWorkCliBootstrap groups large OMO excluded artifact lists", async () => {
+  const originalEnv = { ...process.env };
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-runtime-omo-bounded-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+  const omoSessionDir = path.join(workspaceRoot, ".omo", "ulw-loop", "large-session");
+
+  try {
+    mkdirSync(path.join(omoSessionDir, "evidence"), { recursive: true });
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(
+      path.join(omoSessionDir, "goals.json"),
+      JSON.stringify({ activeGoalId: null, goals: [] }),
+      "utf8",
+    );
+    writeFileSync(path.join(omoSessionDir, "ledger.jsonl"), "RAW_LEDGER_SENTINEL_DO_NOT_SHOW\n", "utf8");
+    for (let index = 0; index < 64; index += 1) {
+      writeFileSync(
+        path.join(omoSessionDir, "evidence", `C${String(index).padStart(3, "0")}.txt`),
+        `RAW_EVIDENCE_SENTINEL_${String(index)}_DO_NOT_SHOW\n`,
+        "utf8",
+      );
+    }
+
+    process.env = {
+      ...originalEnv,
+      LLM_PROVIDER: "openai",
+      OPENAI_MODEL: "gpt-5.4",
+      HOME: fakeHome,
+      ...preserveRustToolchainEnv(originalEnv),
+      UNCLECODE_SESSION_STORE_ROOT: path.join(workspaceRoot, ".state"),
+      OPENAI_API_KEY: "sk-test-123",
+      OPENAI_OAUTH_CLIENT_ID: "",
+    };
+    delete process.env.OPENAI_AUTH_TOKEN;
+
+    const result = await loadWorkCliBootstrap({
+      argv: ["--cwd", workspaceRoot],
+    });
+    const packet = await result.options.resolveContextPacket?.({
+      cwd: workspaceRoot,
+      sessionId: "work-test-omo-bounded",
+      contextSummaryLines: result.options.contextSummaryLines,
+      bridgeLines: [],
+      memoryLines: [],
+      traceLines: [],
+    });
+
+    assert.ok(packet);
+    const omoExcluded = packet.excluded.filter((item) => item.category === "omo");
+    assert.ok(
+      omoExcluded.length <= 8,
+      `expected bounded OMO excluded list, got ${String(omoExcluded.length)} items`,
+    );
+    assert.equal(
+      packet.sourceCounts.excluded,
+      65,
+      "packet still reports the full raw artifact count withheld from provider context",
+    );
+    assert.ok(
+      omoExcluded.some((item) => /64 raw OMO evidence transcripts/.test(item.label)),
+      "packet summarizes excluded OMO evidence counts instead of listing every path",
+    );
+    assert.match(
+      formatContextPacketPromptPrefix(packet),
+      /Excluded raw artifacts:\n- 65 raw artifacts withheld from provider context; inspect \/context for local-only details\./,
+    );
+    assert.doesNotMatch(JSON.stringify(packet), /RAW_EVIDENCE_SENTINEL_/);
+  } finally {
+    process.env = originalEnv;
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("loadWorkCliBootstrap defers full dashboard home hydration until refresh", async () => {
+  const originalEnv = { ...process.env };
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-runtime-lazy-home-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+  const sessionStoreRoot = path.join(workspaceRoot, ".state");
+
+  try {
+    await persistWorkShellSessionSnapshot({
+      cwd: workspaceRoot,
+      env: { ...process.env, UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot },
+      sessionId: "work-lazy-home",
+      model: "gpt-5.4",
+      mode: "default",
+      state: "idle",
+      summary: "Chat: cached history",
+    });
+
+    process.env = {
+      ...originalEnv,
+      LLM_PROVIDER: "openai",
+      OPENAI_MODEL: "gpt-5.4",
+      HOME: fakeHome,
+      ...preserveRustToolchainEnv(originalEnv),
+      UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot,
+      OPENAI_API_KEY: "sk-test-123",
+      OPENAI_OAUTH_CLIENT_ID: "",
+    };
+    delete process.env.OPENAI_AUTH_TOKEN;
+
+    const result = await loadWorkCliBootstrap({
+      argv: ["--cwd", workspaceRoot],
+    });
+
+    assert.equal(result.options.homeState.sessionCount, 0);
+    assert.deepEqual(result.options.homeState.sessions, []);
+    assert.equal(typeof result.options.refreshHomeState, "function");
+
+    const refreshed = await result.options.refreshHomeState?.();
+    assert.equal(refreshed?.sessionCount, 1);
+    assert.equal(refreshed?.sessions[0]?.sessionId, "work-lazy-home");
   } finally {
     process.env = originalEnv;
     rmSync(workspaceRoot, { recursive: true, force: true });
@@ -205,6 +449,7 @@ test("loadWorkShellDashboardProps keeps browser oauth unavailable when only reus
       LLM_PROVIDER: "openai",
       OPENAI_MODEL: "gpt-5.4",
       HOME: fakeHome,
+      ...preserveRustToolchainEnv(originalEnv),
       UNCLECODE_SESSION_STORE_ROOT: path.join(workspaceRoot, ".state"),
       OPENAI_OAUTH_CLIENT_ID: "",
     };

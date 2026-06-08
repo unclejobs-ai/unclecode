@@ -283,6 +283,19 @@ async function captureDashboardAfterInputs(inputs, options = {}) {
   return { output: stripAnsi(output), calls };
 }
 
+function OpenSessionsOnMount(props) {
+  React.useEffect(() => {
+    props.openSessions();
+  }, [props.openSessions]);
+
+  return React.createElement(
+    Box,
+    { flexDirection: "column" },
+    React.createElement(Text, null, "Work composer"),
+    React.createElement(Text, null, "Ctrl+O context"),
+  );
+}
+
 test("dashboard renders distinct Work, History, MCP, and Research pages", async () => {
   const work = await captureDashboardFrame("work");
   assert.match(work, /Work composer/);
@@ -318,16 +331,16 @@ test("dashboard renders distinct Work, History, MCP, and Research pages", async 
   assert.doesNotMatch(mcp, /L\s+Logout/);
 
   const research = await captureDashboardFrame("research");
-  assert.match(research, /Briefs/);
-  assert.match(research, /Context brief detail/);
-  assert.match(research, /Selected brief/);
+  assert.match(research, /Context/);
+  assert.match(research, /Work context/);
+  assert.match(research, /Selected context/);
   assert.match(research, /audit workflow/);
-  assert.match(research, /Press N to draft a context\s+brief/);
-  assert.match(research, /Context Briefs shape the next packet/);
-  assert.match(research, /N\s+New brief/);
+  assert.match(research, /Press N to refresh focused\s+context/);
+  assert.match(research, /Workspace context for Work/);
+  assert.match(research, /N\s+Refresh/);
   assert.doesNotMatch(research, /\b4\s+Research\b/);
   assert.doesNotMatch(research, /R\s+Research/);
-  assert.match(research, /S\s+Status/);
+  assert.match(research, /S\s+Latest/);
   assert.doesNotMatch(research, /W\s+Work/);
   assert.doesNotMatch(research, /M\s+MCP/);
   assert.doesNotMatch(research, /D\s+Doctor/);
@@ -338,10 +351,10 @@ test("dashboard renders distinct Work, History, MCP, and Research pages", async 
 
 test("dashboard keeps Research readable in a narrow terminal", async () => {
   const research = await captureDashboardFrame("research", 60);
-  assert.match(research, /context briefs/);
-  assert.match(research, /Context brief detail/);
-  assert.match(research, /N\s+New brief/);
-  assert.match(research, /Press N to draft a context\s+brief/);
+  assert.match(research, /workspace context/);
+  assert.match(research, /Work context/);
+  assert.match(research, /N\s+Refresh/);
+  assert.match(research, /Press N to refresh focused\s+context/);
   assert.doesNotMatch(research, /\b4\s+Research\b/);
   assert.doesNotMatch(research, /R\s+Research/);
   assert.doesNotMatch(research, /W\s+Work/);
@@ -364,7 +377,9 @@ test("History Enter resumes the selected conversation when no work-pane handoff 
 test("History Enter resumes the selected conversation through the embedded Work pane", async () => {
   const resumed = await captureDashboardAfterInputs(["\r"]);
 
-  assert.deepEqual(resumed.calls, [["openEmbeddedWorkSession", "--session-id work-1"]]);
+  assert.deepEqual(resumed.calls, [
+    ["openEmbeddedWorkSession", "--session-id work-1"],
+  ]);
   assert.match(resumed.output, /Resumed work-1/);
   assert.match(resumed.output, /Recovered saved conversation context/);
   assert.ok(
@@ -388,8 +403,8 @@ test("session center number keys expose all four Ctrl+O sections", async () => {
   assert.match(mcp.frame, /MCP = external tools and data servers/);
 
   const research = await runDashboardInputScenario("4");
-  assert.match(research.frame, /Context brief detail/);
-  assert.match(research.frame, /Context Briefs shape the next packet/);
+  assert.match(research.frame, /Work context/);
+  assert.match(research.frame, /Workspace context for Work/);
   assert.doesNotMatch(research.frame, /Research = workspace brief/);
 });
 
@@ -413,8 +428,8 @@ test("embedded session center keeps numeric tabs and four shortcut actions worki
   assert.match(mcp.output, /Selected server/);
 
   const research = await captureDashboardAfterInputs(["4"]);
-  assert.match(research.output, /Context brief detail/);
-  assert.match(research.output, /Press N to draft a context brief/);
+  assert.match(research.output, /Work context/);
+  assert.match(research.output, /Press N to refresh focused context/);
 
   const work = await captureDashboardAfterInputs(["1"]);
   assert.match(work.output, /Work composer/);
@@ -422,8 +437,8 @@ test("embedded session center keeps numeric tabs and four shortcut actions worki
 
   const researchShortcut = await captureDashboardAfterInputs(["n"]);
   assert.deepEqual(researchShortcut.calls, []);
-  assert.match(researchShortcut.output, /Prompt draft/);
-  assert.match(researchShortcut.output, /Enter or Ctrl\+R runs/);
+  assert.match(researchShortcut.output, /Focus/);
+  assert.match(researchShortcut.output, /Enter\/Ctrl\+R refreshes/);
 
   const mcpShortcut = await captureDashboardAfterInputs(["m"]);
   assert.match(mcpShortcut.output, /MCP detail/);
@@ -435,4 +450,25 @@ test("embedded session center keeps numeric tabs and four shortcut actions worki
 
   const workShortcut = await captureDashboardAfterInputs(["w"]);
   assert.match(workShortcut.output, /Work composer/);
+});
+
+test("embedded work Ctrl+O opens History even when context refresh fails", async () => {
+  const opened = await captureDashboardAfterInputs([], {
+    props: {
+      initialView: "work",
+      refreshHomeState: async () => {
+        throw new Error("refresh unavailable");
+      },
+      renderWorkPane: ({ openSessions }) =>
+        React.createElement(OpenSessionsOnMount, { openSessions }),
+    },
+  });
+
+  assert.match(opened.output, /Conversation/);
+  assert.match(opened.output, /Review ESC flow/);
+  assert.ok(
+    opened.output.lastIndexOf("Conversation") >
+      opened.output.lastIndexOf("Work composer"),
+    "final frame should be History even if the background refresh rejects",
+  );
 });

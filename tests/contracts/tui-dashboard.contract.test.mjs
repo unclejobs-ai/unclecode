@@ -8,6 +8,7 @@ import {
   buildEmbeddedWorkSessionUpdate,
   parseSelectedSessionIdFromArgs,
 } from "@unclecode/contracts";
+import { C } from "../../packages/tui/src/dashboard-primitives.tsx";
 import {
   DASHBOARD_ACTIONS,
   createEmbeddedWorkPaneController,
@@ -18,7 +19,6 @@ import {
   resolveWorkPaneNavigationMode,
   shouldRenderEmbeddedWorkPaneFullscreen,
 } from "../../packages/tui/src/index.tsx";
-import { C } from "../../packages/tui/src/dashboard-primitives.tsx";
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(testDirectory, "../..");

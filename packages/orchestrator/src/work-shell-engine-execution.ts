@@ -19,6 +19,7 @@ export async function runPromptTurnSuccessSequence<Attachment>(input: {
   cwd: string;
   sessionId: string;
   currentBridgeLines: readonly string[];
+  currentMemoryLines?: readonly string[] | undefined;
   publishContextBridge: (input: {
     cwd: string;
     summary: string;
@@ -64,6 +65,7 @@ export async function runPromptTurnSuccessSequence<Attachment>(input: {
     assistantText,
     sessionId: input.sessionId,
     currentBridgeLines: input.currentBridgeLines,
+    currentMemoryLines: input.currentMemoryLines,
     publishContextBridge: input.publishContextBridge,
     writeScopedMemory: input.writeScopedMemory,
     listScopedMemoryLines: input.listScopedMemoryLines,
@@ -418,6 +420,7 @@ export async function executeWorkShellPromptTurn<
       cwd: input.cwd,
       sessionId: input.sessionId,
       currentBridgeLines: input.state.bridgeLines,
+      currentMemoryLines: input.state.memoryLines,
       publishContextBridge: input.publishContextBridge,
       writeScopedMemory: input.writeScopedMemory,
       listScopedMemoryLines: input.listScopedMemoryLines,

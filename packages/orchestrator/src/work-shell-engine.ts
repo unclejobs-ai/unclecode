@@ -626,7 +626,6 @@ export class WorkShellEngine<
       });
 
       this.setState(contextState);
-      await this.refreshContextPacket();
     } catch (error: unknown) {
       this.appendEntries({
         role: "system",

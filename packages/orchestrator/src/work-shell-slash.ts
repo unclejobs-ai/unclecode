@@ -17,6 +17,73 @@ function getWorkShellCommandRegistry(
   return createWorkShellCommandRegistry(loadExtensionSlashCommands(options));
 }
 
+const WORK_SHELL_EXTRA_SUGGESTION_ENTRIES = [
+  {
+    command: "/auth key",
+    description: "Open secure API key entry in this shell.",
+  },
+  {
+    command: "/queue",
+    description: "Show the current shell queue and active work state.",
+  },
+  {
+    command: "/interrupt",
+    description: "Alias for /cancel.",
+  },
+  {
+    command: "/stop",
+    description: "Alias for /cancel.",
+  },
+  {
+    command: "/skills",
+    description: "List available workspace skills.",
+  },
+  {
+    command: "/tools",
+    description: "List available local tools.",
+  },
+  {
+    command: "/harness",
+    description: "Show agent runtime harness and mode configuration.",
+  },
+  {
+    command: "/reasoning",
+    description: "Show current reasoning effort and supported values.",
+  },
+  {
+    command: "/reasoning low",
+    description: "Use low reasoning effort for faster replies.",
+  },
+  {
+    command: "/reasoning medium",
+    description: "Use balanced reasoning effort.",
+  },
+  {
+    command: "/reasoning high",
+    description: "Use high reasoning effort for harder tasks.",
+  },
+  {
+    command: "/reasoning default",
+    description: "Reset reasoning effort to the current mode default.",
+  },
+];
+
+export function listWorkShellSlashSuggestionEntries(
+  options?: WorkShellSlashOptions,
+): readonly { readonly command: string; readonly description: string }[] {
+  const registry = getWorkShellCommandRegistry(options);
+  return [
+    ...registry.list().flatMap((entry) => [
+      { command: entry.command, description: entry.metadata.description },
+      ...(entry.metadata.aliases ?? []).map((alias) => ({
+        command: alias,
+        description: `Alias for ${entry.command}.`,
+      })),
+    ]),
+    ...WORK_SHELL_EXTRA_SUGGESTION_ENTRIES,
+  ];
+}
+
 export function resolveWorkShellSlashCommand(
   input: string,
   options?: WorkShellSlashOptions,
@@ -67,62 +134,7 @@ export function getWorkShellSlashSuggestions(
     return [];
   }
 
-  const registry = getWorkShellCommandRegistry(options);
-  const extraEntries = [
-    {
-      command: "/auth key",
-      description: "Open secure API key entry in this shell.",
-    },
-    {
-      command: "/queue",
-      description: "Show the current shell queue and active work state.",
-    },
-    {
-      command: "/interrupt",
-      description: "Alias for /cancel.",
-    },
-    {
-      command: "/stop",
-      description: "Alias for /cancel.",
-    },
-    {
-      command: "/skills",
-      description: "List available workspace skills.",
-    },
-    {
-      command: "/tools",
-      description: "List available local tools.",
-    },
-    {
-      command: "/harness",
-      description: "Show agent runtime harness and mode configuration.",
-    },
-    {
-      command: "/reasoning",
-      description: "Show current reasoning effort and supported values.",
-    },
-    {
-      command: "/reasoning low",
-      description: "Use low reasoning effort for faster replies.",
-    },
-    {
-      command: "/reasoning medium",
-      description: "Use balanced reasoning effort.",
-    },
-    {
-      command: "/reasoning high",
-      description: "Use high reasoning effort for harder tasks.",
-    },
-    {
-      command: "/reasoning default",
-      description: "Reset reasoning effort to the current mode default.",
-    },
-  ];
-
-  const entries = [
-    ...registry.list().map((entry) => ({ command: entry.command, description: entry.metadata.description })),
-    ...extraEntries,
-  ];
+  const entries = listWorkShellSlashSuggestionEntries(options);
   if (normalized === "/model" || normalized.startsWith("/model ")) {
     return getModelSuggestions(normalized, options);
   }

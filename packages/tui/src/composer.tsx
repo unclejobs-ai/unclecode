@@ -4,9 +4,9 @@ import {
   type ClipboardImageResult,
 } from "@unclecode/orchestrator";
 import { Box, Text, useInput } from "ink";
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
-import { getDisplayWidth } from "./text-width.js";
+import { getDisplayWidth, segmentDisplayGraphemes } from "./text-width.js";
 
 // `ClipboardImageResult` is re-exported only because it is part of
 // `handleComposerClipboardPaste`'s public signature (an internal test seam).
@@ -16,10 +16,13 @@ export type { ClipboardImageResult };
 const COMPOSER_PASTE_THRESHOLD = 48;
 const PASTE_SETTLE_MS = 120;
 const BRACKETED_PASTE_ARTIFACT_PATTERN = /(?:\u001b\[(?:200|201|990)~|\[(?:200|201|990)~)/g;
+const NON_TEXT_CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const COMPOSER_DEFAULT_VISIBLE_WIDTH = 72;
 
 export function sanitizeComposerInput(value: string): string {
-  return value.replace(BRACKETED_PASTE_ARTIFACT_PATTERN, "");
+  return value
+    .replace(BRACKETED_PASTE_ARTIFACT_PATTERN, "")
+    .replace(NON_TEXT_CONTROL_PATTERN, "");
 }
 
 export function shouldTreatComposerChangeAsPaste(
@@ -126,8 +129,8 @@ export function applyComposerEdit(input: {
 function composerCharacterBoundaries(value: string): number[] {
   const boundaries = [0];
   let offset = 0;
-  for (const char of value) {
-    offset += char.length;
+  for (const grapheme of segmentDisplayGraphemes(value)) {
+    offset += grapheme.length;
     boundaries.push(offset);
   }
   return boundaries;
@@ -187,7 +190,7 @@ function maskComposerValue(value: string, mask?: string): string {
     return value;
   }
 
-  return Array.from(value, (char) => (char === "\n" ? "\n" : mask)).join("");
+  return segmentDisplayGraphemes(value).map((grapheme) => (grapheme === "\n" ? "\n" : mask)).join("");
 }
 
 function getCursorPosition(value: string, cursorOffset: number): {
@@ -211,18 +214,18 @@ function splitLineAtDisplayColumn(line: string, displayColumn: number): {
 } {
   let width = 0;
   let beforeEnd = 0;
-  for (const char of line) {
-    const charWidth = getDisplayWidth(char);
+  for (const grapheme of segmentDisplayGraphemes(line)) {
+    const charWidth = getDisplayWidth(grapheme);
     if (width >= displayColumn) {
-      const cursorEnd = beforeEnd + char.length;
+      const cursorEnd = beforeEnd + grapheme.length;
       return {
         before: line.slice(0, beforeEnd),
-        atCursor: char,
+        atCursor: grapheme,
         after: line.slice(cursorEnd),
       };
     }
     width += charWidth;
-    beforeEnd += char.length;
+    beforeEnd += grapheme.length;
   }
   return { before: line, atCursor: "", after: "" };
 }
@@ -315,6 +318,7 @@ export function Composer(props: {
 }) {
   const [isPasting, setIsPasting] = useState(false);
   const [cursorOffset, setCursorOffset] = useState(props.value.length);
+  const cursorOffsetRef = useRef(props.value.length);
   const pendingLocalValueRef = useRef<string | undefined>(undefined);
   const pasteTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const suppressNextSubmitRef = useRef(false);
@@ -324,13 +328,13 @@ export function Composer(props: {
   }, [isPasting, props.onIsPastingChange]);
 
   useEffect(() => {
-    setCursorOffset((current) =>
-      resolveComposerCursorOffsetAfterValueChange({
-        nextValue: props.value,
-        currentCursorOffset: current,
-        pendingLocalValue: pendingLocalValueRef.current,
-      }),
-    );
+    const nextCursorOffset = resolveComposerCursorOffsetAfterValueChange({
+      nextValue: props.value,
+      currentCursorOffset: cursorOffsetRef.current,
+      pendingLocalValue: pendingLocalValueRef.current,
+    });
+    cursorOffsetRef.current = nextCursorOffset;
+    setCursorOffset(nextCursorOffset);
     if (pendingLocalValueRef.current === props.value) {
       pendingLocalValueRef.current = undefined;
     }
@@ -370,11 +374,6 @@ export function Composer(props: {
       return;
     }
 
-    // Ctrl+V: try to capture an image from the OS clipboard. On success the
-    // attachment is routed to the parent via onClipboardImage; on any other
-    // status (no-image, unsupported, failed) we fall through to default
-    // text-paste handling so terminals still pasting text via Ctrl+V keep
-    // working unchanged.
     if (key.ctrl && input === "v") {
       const outcome = handleComposerClipboardPaste({
         capture: defaultCaptureClipboardImage,
@@ -386,14 +385,37 @@ export function Composer(props: {
       }
     }
 
+    if (key.ctrl) {
+      return;
+    }
+
+    const currentValue = pendingLocalValueRef.current ?? props.value;
+    const currentCursorOffset = cursorOffsetRef.current;
+    const carriageReturnIndex = input.indexOf("\r");
+    if (!key.return && carriageReturnIndex >= 0) {
+      const textBeforeReturn = input.slice(0, carriageReturnIndex);
+      const submittedValue = textBeforeReturn.length > 0
+        ? `${currentValue.slice(0, currentCursorOffset)}${sanitizeComposerInput(textBeforeReturn)}${currentValue.slice(currentCursorOffset)}`
+        : currentValue;
+      cursorOffsetRef.current = submittedValue.length;
+      setCursorOffset(submittedValue.length);
+      pendingLocalValueRef.current = undefined;
+      if (suppressNextSubmitRef.current || isPasting) {
+        return;
+      }
+      void Promise.resolve(props.onSubmit(sanitizeComposerInput(submittedValue))).catch(() => undefined);
+      return;
+    }
+
     const result = applyComposerEdit({
-      value: props.value,
-      cursorOffset,
+      value: currentValue,
+      cursorOffset: currentCursorOffset,
       input,
       key,
       allowLineBreaks: props.mask === undefined,
     });
 
+    cursorOffsetRef.current = result.nextCursorOffset;
     setCursorOffset(result.nextCursorOffset);
 
     if (result.submitted) {
@@ -404,8 +426,8 @@ export function Composer(props: {
       return;
     }
 
-    if (result.nextValue !== props.value) {
-      if (shouldTreatComposerChangeAsPaste(props.value, result.nextValue)) {
+    if (result.nextValue !== currentValue) {
+      if (shouldTreatComposerChangeAsPaste(currentValue, result.nextValue)) {
         armPasteWindow(result.nextValue);
       }
       pendingLocalValueRef.current = result.nextValue;

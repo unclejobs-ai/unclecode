@@ -172,10 +172,14 @@ export type WorkShellSlashSuggestion = {
 export function resolveWorkShellActiveSlashInput(input: {
   readonly value: string;
   readonly fallbackPanelTitle: string;
+  readonly fallbackPanelDismissed?: boolean | undefined;
 }): string | undefined {
   const trimmed = input.value.trim();
   if (trimmed.startsWith("/")) {
     return input.value;
+  }
+  if (input.fallbackPanelDismissed) {
+    return undefined;
   }
   if (input.fallbackPanelTitle === "Model picker") {
     return trimmed.length === 0 ? "/model" : `/model ${trimmed}`;
@@ -339,20 +343,24 @@ export function useWorkShellInputController(input: {
   readonly hasSensitiveInput?: boolean;
   readonly hasOverlayOpen?: boolean;
   readonly activePanelTitle?: string;
-  readonly closeSlashPicker?: (() => void) | undefined;
+  readonly closeSlashPicker?: ((panelTitle?: string) => void) | undefined;
   readonly interruptTurn?: (() => void) | undefined;
   readonly cancelSensitiveInput?: (() => void) | undefined;
   readonly closeOverlay?: (() => void) | undefined;
 }): { readonly submit: (value: string) => Promise<void> } {
   const escapeResetArmedAtRef = useRef<number | undefined>(undefined);
   useInput((value, key) => {
+    const ctrlOCount = value.split("\u000f").length - 1;
     if (
       input.onRequestSessionsView &&
-      (value === "\u000f" || (key.ctrl && value.toLowerCase() === "o"))
+      (ctrlOCount > 0 || (key.ctrl && value.toLowerCase() === "o"))
     ) {
       escapeResetArmedAtRef.current = undefined;
       input.replaceValue("");
-      input.onRequestSessionsView();
+      const requestCount = Math.max(1, ctrlOCount);
+      for (let index = 0; index < requestCount; index += 1) {
+        input.onRequestSessionsView();
+      }
       return;
     }
 
@@ -463,6 +471,9 @@ export function useWorkShellInputController(input: {
       }
 
       await input.handleSubmit(action.line);
+      if (input.activePanelTitle === "Model picker" || action.line.trim().startsWith("/model ")) {
+        input.closeSlashPicker?.("Model picker");
+      }
     },
     [
       input.handleSubmit,
@@ -470,6 +481,7 @@ export function useWorkShellInputController(input: {
       input.replaceValue,
       input.activePanelTitle,
       input.activeSlashInput,
+      input.closeSlashPicker,
       input.selectedSlashCommand,
       input.shouldBlockSlashSubmit,
     ],
@@ -572,8 +584,13 @@ export function useWorkShellPaneState<
   }, []);
   const engineState = useWorkShellEngineState(input.engine);
   const enginePanelKey = getWorkShellPanelDismissKey(engineState.panel);
+  const ignoreNextSlashDismissResetRef = useRef(false);
+  const [dismissedSlashPickerPanelTitle, setDismissedSlashPickerPanelTitle] = useState<string | undefined>(undefined);
   const [dismissedSlashPickerPanelKey, setDismissedSlashPickerPanelKey] = useState<string | undefined>(undefined);
-  const fallbackPanel = dismissedSlashPickerPanelKey === enginePanelKey
+  const isFallbackPanelDismissed =
+    dismissedSlashPickerPanelKey === enginePanelKey ||
+    dismissedSlashPickerPanelTitle === engineState.panel.title;
+  const fallbackPanel = isFallbackPanelDismissed
     ? DISMISSED_SLASH_PICKER_PANEL
     : engineState.panel;
   const composerPreview = useWorkShellComposerPreview({
@@ -603,6 +620,7 @@ export function useWorkShellPaneState<
     activeSlashInput: resolveWorkShellActiveSlashInput({
       value: inputValue,
       fallbackPanelTitle: fallbackPanel.title,
+      fallbackPanelDismissed: isFallbackPanelDismissed,
     }),
     currentModel: engineState.model,
     ...(engineState.authLabel ? { authLabel: engineState.authLabel } : {}),
@@ -619,7 +637,12 @@ export function useWorkShellPaneState<
     activeSlashInput !== undefined && !inputValue.trim().startsWith("/");
   useEffect(() => {
     if (inputValue.trim().startsWith("/")) {
+      if (ignoreNextSlashDismissResetRef.current) {
+        ignoreNextSlashDismissResetRef.current = false;
+        return;
+      }
       setDismissedSlashPickerPanelKey(undefined);
+      setDismissedSlashPickerPanelTitle(undefined);
     }
   }, [inputValue]);
 
@@ -666,9 +689,18 @@ export function useWorkShellPaneState<
       inputValue,
     }),
     activePanelTitle: activePanel.title,
-    closeSlashPicker: isStickySlashPicker
-      ? () => setDismissedSlashPickerPanelKey(enginePanelKey)
-      : undefined,
+    closeSlashPicker: (panelTitle) => {
+      if (isStickySlashPicker) {
+        setDismissedSlashPickerPanelKey(enginePanelKey);
+      }
+      const dismissedPanelTitle = panelTitle ?? activePanel.title;
+      if (dismissedPanelTitle === "Model picker") {
+        if (panelTitle === "Model picker") {
+          ignoreNextSlashDismissResetRef.current = true;
+        }
+        setDismissedSlashPickerPanelTitle(dismissedPanelTitle);
+      }
+    },
     ...(input.engine.cancelSensitiveInput
       ? { cancelSensitiveInput: () => input.engine.cancelSensitiveInput?.() }
       : {}),

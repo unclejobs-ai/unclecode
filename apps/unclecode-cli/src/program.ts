@@ -795,19 +795,19 @@ function registerModeCommands(program: Command): void {
 }
 
 function registerResearchCommands(program: Command): void {
-  const researchCommand = program.command("research").description("Inspect and draft context-brief flows");
+  const researchCommand = program.command("research").description("Refresh and inspect saved Work context");
 
   researchCommand
     .command("status")
-    .description("Show the current context brief status")
+    .description("Show the current Work context status")
     .action(async () => {
       await handleResearchStatusCommand();
     });
 
   researchCommand
     .command("run <prompt...>")
-    .description("Draft a linear local context brief and write an artifact")
-    .option("--json", "Print machine-readable context brief output with latency counters and thresholds")
+    .description("Refresh local Work context for a prompt")
+    .option("--json", "Print machine-readable Work context output with latency counters and thresholds")
     .action(async (promptParts: string[], options: ResearchRunCommandOptions) => {
       await handleResearchRunCommand(promptParts, options);
     });

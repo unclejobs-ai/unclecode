@@ -21,6 +21,7 @@ export type ResolvedWorkShellBuiltinCommand =
   | { readonly kind: "cancel" }
   | { readonly kind: "harness" }
   | { readonly kind: "auth-key" }
+  | { readonly kind: "unknown-slash"; readonly line: string; readonly suggestion?: string }
   | { readonly kind: "trace-mode"; readonly traceMode: "verbose" | "minimal" }
   | { readonly kind: "reasoning"; readonly line: string }
   | { readonly kind: "model"; readonly line: string }
@@ -45,7 +46,7 @@ function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinComm
   if (!value || typeof value !== "object") {
     return false;
   }
-  const command = value as { kind?: unknown; traceMode?: unknown; line?: unknown; skillName?: unknown };
+  const command = value as { kind?: unknown; traceMode?: unknown; line?: unknown; skillName?: unknown; suggestion?: unknown };
   if (typeof command.kind !== "string") {
     return false;
   }
@@ -54,6 +55,9 @@ function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinComm
   }
   if (command.kind === "reasoning" || command.kind === "model") {
     return typeof command.line === "string";
+  }
+  if (command.kind === "unknown-slash") {
+    return typeof command.line === "string" && (command.suggestion === undefined || typeof command.suggestion === "string");
   }
   if (command.kind === "skill") {
     return typeof command.line === "string" && (command.skillName === undefined || typeof command.skillName === "string");

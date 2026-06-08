@@ -6,7 +6,12 @@ import {
   publishContextBridge,
   writeScopedMemory,
 } from "@unclecode/context-broker";
-import type { ContextPacketView, ExecutionTraceEvent, ProviderId } from "@unclecode/contracts";
+import type {
+  ContextPacketView,
+  ContextPacketViewItem,
+  ExecutionTraceEvent,
+  ProviderId,
+} from "@unclecode/contracts";
 import {
   describeReasoning,
   listSessionLines,
@@ -49,6 +54,7 @@ export type StartReplOptions = {
   reasoning: AppReasoningConfig;
   cwd: string;
   contextSummaryLines: readonly string[];
+  contextPacketSourceMetadata?: readonly ContextPacketViewItem[] | undefined;
   homeState: TuiShellHomeState;
   sessionId?: string | undefined;
   initialTraceMode?: "minimal" | "verbose" | undefined;

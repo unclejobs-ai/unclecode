@@ -12,6 +12,7 @@ export type WorkShellPostTurnSuccessEffectsInput = {
   assistantText: string;
   sessionId: string;
   currentBridgeLines: readonly string[];
+  currentMemoryLines?: readonly string[] | undefined;
   publishContextBridge: (input: {
     cwd: string;
     summary: string;
@@ -106,6 +107,31 @@ export function resolveWorkShellPostTurnSuccessEffectsPayload(input: {
   };
 }
 
+function classifyWorkShellPostTurnStorageError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    /better_sqlite3\.node/i.test(message) ||
+    /NODE_MODULE_VERSION/i.test(message) ||
+    /compiled against a different Node\.js version/i.test(message)
+  ) {
+    return "native-module-version-mismatch";
+  }
+  return "context-storage-unavailable";
+}
+
+function createDegradedPostTurnTraceEvent(
+  type: WorkShellSyntheticTraceEvent["type"],
+  summary: string,
+  error: unknown,
+): WorkShellSyntheticTraceEvent {
+  return {
+    type,
+    summary,
+    degraded: true,
+    errorClass: classifyWorkShellPostTurnStorageError(error),
+  };
+}
+
 export async function resolveWorkShellFailureAuthLabel(input: {
   message: string;
   currentAuthLabel: string;
@@ -132,32 +158,73 @@ export async function runWorkShellPostTurnSuccessEffects(
     transcriptText: input.transcriptText,
     assistantText: input.assistantText,
   });
-  const bridge = await input.publishContextBridge({
-    cwd: input.cwd,
-    summary,
-    source: "work-shell",
-    target: "project-context",
-    kind: "summary",
-  });
-  const memory = await input.writeScopedMemory({
-    scope: "session",
-    cwd: input.cwd,
-    summary,
-    sessionId: input.sessionId,
-    agentId: "work-shell",
-  });
-  const memoryLines = await input.listScopedMemoryLines({
-    scope: "session",
-    cwd: input.cwd,
-    sessionId: input.sessionId,
-  });
+  let bridgeId: string | undefined;
+  let bridgeLine: string | undefined;
+  let bridgeSummary = summary;
+  let bridgeTraceEvent: WorkShellSyntheticTraceEvent = { type: "bridge.published", summary };
+  try {
+    const bridge = await input.publishContextBridge({
+      cwd: input.cwd,
+      summary,
+      source: "work-shell",
+      target: "project-context",
+      kind: "summary",
+    });
+    bridgeId = bridge.bridgeId;
+    bridgeLine = bridge.line;
+  } catch (error) {
+    bridgeSummary = "Context bridge unavailable; reply kept.";
+    bridgeTraceEvent = createDegradedPostTurnTraceEvent(
+      "bridge.published",
+      bridgeSummary,
+      error,
+    );
+  }
 
-  return resolveWorkShellPostTurnSuccessEffectsPayload({
-    summary,
-    bridgeId: bridge.bridgeId,
-    bridgeLine: bridge.line,
-    currentBridgeLines: input.currentBridgeLines,
-    memoryId: memory.memoryId,
+  let memoryId: string | undefined;
+  let memoryLines = input.currentMemoryLines ?? [];
+  let memorySummary = summary;
+  let memoryTraceEvent: WorkShellSyntheticTraceEvent = { type: "memory.written", summary };
+  try {
+    const memory = await input.writeScopedMemory({
+      scope: "session",
+      cwd: input.cwd,
+      summary,
+      sessionId: input.sessionId,
+      agentId: "work-shell",
+    });
+    memoryId = memory.memoryId;
+    memoryLines = await input.listScopedMemoryLines({
+      scope: "session",
+      cwd: input.cwd,
+      sessionId: input.sessionId,
+    });
+  } catch (error) {
+    memorySummary = "Context memory unavailable; reply kept.";
+    memoryTraceEvent = createDegradedPostTurnTraceEvent(
+      "memory.written",
+      memorySummary,
+      error,
+    );
+  }
+
+  if (bridgeId && bridgeLine && memoryId) {
+    return resolveWorkShellPostTurnSuccessEffectsPayload({
+      summary,
+      bridgeId,
+      bridgeLine,
+      currentBridgeLines: input.currentBridgeLines,
+      memoryId,
+      memoryLines,
+    });
+  }
+
+  return {
+    bridgeLines: (bridgeLine ? [bridgeLine, ...input.currentBridgeLines] : input.currentBridgeLines).slice(0, 6),
     memoryLines,
-  });
+    bridgeSummary,
+    memorySummary,
+    bridgeTraceEvent,
+    memoryTraceEvent,
+  };
 }

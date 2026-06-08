@@ -128,6 +128,97 @@ function buildContextLineItems(input: {
   }));
 }
 
+function isWorkspaceGuidanceSummaryLine(line: string): boolean {
+  return (
+    /^(Loaded guidance|Deduped duplicate guidance|Conflict|Loaded skills):/i.test(line) ||
+    /^(?:AGENTS|CLAUDE|GEMINI|UNCLECODE)(?:\.local)?\.md:/i.test(line) ||
+    /^rules\/.+\.md:/i.test(line)
+  );
+}
+
+const WORKSPACE_GUIDANCE_SAFE_PREVIEW =
+  "Workspace guidance is active; raw guidance text is kept out of the packet preview.";
+
+function extractWorkspaceGuidanceSource(line: string): string | undefined {
+  const sourceMatch = /^((?:AGENTS|CLAUDE|GEMINI|UNCLECODE)(?:\.local)?\.md|rules\/.+\.md):/i.exec(line);
+  return sourceMatch?.[1];
+}
+
+function buildContextSummaryItems(lines: readonly string[]): readonly ContextPacketViewItem[] {
+  return lines.map((line, index) => {
+    const workspaceGuidance = isWorkspaceGuidanceSummaryLine(line);
+    const workspaceGuidanceSource = workspaceGuidance ? extractWorkspaceGuidanceSource(line) : undefined;
+    const label = workspaceGuidanceSource ?? line;
+    const preview = workspaceGuidanceSource ? WORKSPACE_GUIDANCE_SAFE_PREVIEW : line;
+
+    return {
+      id: workspaceGuidance
+        ? `workspace-guidance-${index + 1}`
+        : `workspace-context-${index + 1}`,
+      category: workspaceGuidance ? "workspace-guidance" : "workspace",
+      label,
+      reason: workspaceGuidance ? "workspace guidance summary" : "loaded workspace context",
+      preview,
+      tokenEstimate: estimateTokens(`${label} ${preview}`),
+    };
+  });
+}
+
+function formatCountLabel(count: number, singular: string, plural: string): string {
+  return count === 1 ? `1 ${singular}` : `${count} ${plural}`;
+}
+
+function buildProviderSystemPromptMetadata(input: {
+  readonly configuredPrompt: string;
+  readonly guidanceSystemPrompt: string;
+  readonly guidanceSources: readonly string[];
+}): readonly ContextPacketViewItem[] {
+  const items: ContextPacketViewItem[] = [];
+
+  if (input.configuredPrompt.trim().length > 0) {
+    items.push({
+      id: "provider-system-prompt-configured",
+      category: "provider-system-prompt",
+      label: "Configured prompt",
+      reason: "configured prompt loaded into provider system prompt",
+      preview: "Configured prompt sections are active; raw prompt text is kept out of the packet preview.",
+    });
+  }
+
+  if (input.guidanceSystemPrompt.trim().length > 0) {
+    items.push({
+      id: "provider-system-prompt-workspace-guidance",
+      category: "provider-system-prompt",
+      label: "Workspace guidance system prompt",
+      reason: "workspace guidance loaded into provider system prompt",
+      preview: `${formatCountLabel(input.guidanceSources.length, "guidance source", "guidance sources")} loaded into the provider system prompt.`,
+    });
+  }
+
+  return items;
+}
+
+function createInitialHomeState(input: {
+  readonly modeLabel: string;
+  readonly authLabel: string;
+}): StartReplOptions["homeState"] {
+  return {
+    modeLabel: input.modeLabel,
+    authLabel: input.authLabel,
+    sessions: [],
+    sessionCount: 0,
+    mcpServerCount: 0,
+    mcpServers: [],
+    latestResearchSessionId: null,
+    latestResearchSummary: null,
+    latestResearchTimestamp: null,
+    researchRunCount: 0,
+    recentResearchRuns: [],
+    bridgeLines: [],
+    memoryLines: [],
+  };
+}
+
 function createPacketId(input: {
   readonly sessionId: string;
   readonly included: readonly ContextPacketViewItem[];
@@ -141,16 +232,64 @@ function createPacketId(input: {
   return `packet-${hash}`;
 }
 
-function createWorkShellContextPacketResolver(): StartReplOptions["resolveContextPacket"] {
+const OMO_EXCLUDED_DETAIL_LIMIT = 6;
+
+function buildOmoExcludedPacketItems(
+  excludedArtifacts: readonly { readonly path: string; readonly reason: string }[],
+): readonly ContextPacketViewItem[] {
+  if (excludedArtifacts.length <= OMO_EXCLUDED_DETAIL_LIMIT) {
+    return excludedArtifacts.map((item, index) => ({
+      id: `omo-excluded-${index + 1}`,
+      category: "omo",
+      label: item.path,
+      reason: item.reason,
+    }));
+  }
+
+  const evidenceArtifacts = excludedArtifacts.filter((item) => /evidence/i.test(item.reason));
+  const otherArtifacts = excludedArtifacts.filter((item) => !/evidence/i.test(item.reason));
+  const items: ContextPacketViewItem[] = otherArtifacts
+    .slice(0, OMO_EXCLUDED_DETAIL_LIMIT - 1)
+    .map((item, index) => ({
+      id: `omo-excluded-${index + 1}`,
+      category: "omo",
+      label: item.path,
+      reason: item.reason,
+    }));
+
+  if (otherArtifacts.length > items.length) {
+    const additionalArtifactCount = otherArtifacts.length - items.length;
+    items.push({
+      id: "omo-excluded-other-summary",
+      category: "omo",
+      label: `${formatCountLabel(additionalArtifactCount, "additional raw OMO artifact", "additional raw OMO artifacts")}`,
+      reason: "raw OMO artifacts are excluded from provider context",
+      sourceCount: additionalArtifactCount,
+    });
+  }
+
+  if (evidenceArtifacts.length > 0) {
+    items.push({
+      id: "omo-excluded-evidence-summary",
+      category: "omo",
+      label: `${formatCountLabel(evidenceArtifacts.length, "raw OMO evidence transcript", "raw OMO evidence transcripts")}`,
+      reason: "raw OMO evidence transcripts are excluded from provider context",
+      preview: "Detailed evidence paths stay local; use the OMO session evidence directory for full transcripts.",
+      sourceCount: evidenceArtifacts.length,
+    });
+  }
+
+  return items;
+}
+
+function createWorkShellContextPacketResolver(options: {
+  readonly sourceMetadata: readonly ContextPacketViewItem[];
+}): StartReplOptions["resolveContextPacket"] {
   return async (input): Promise<ContextPacketView> => {
     const omo = await loadOmoContextSnapshot(input.cwd);
     const included: ContextPacketViewItem[] = [
-      ...buildContextLineItems({
-        lines: input.contextSummaryLines,
-        category: "workspace",
-        idPrefix: "workspace-context",
-        reason: "loaded workspace guidance",
-      }),
+      ...options.sourceMetadata,
+      ...buildContextSummaryItems(input.contextSummaryLines),
       ...buildContextLineItems({
         lines: input.bridgeLines,
         category: "bridge",
@@ -182,12 +321,7 @@ function createWorkShellContextPacketResolver(): StartReplOptions["resolveContex
         tokenEstimate: estimateTokens(item.summary),
       })),
     ];
-    const excluded: ContextPacketViewItem[] = omo.excluded.map((item, index) => ({
-      id: `omo-excluded-${index + 1}`,
-      category: "omo",
-      label: item.path,
-      reason: item.reason,
-    }));
+    const excluded = buildOmoExcludedPacketItems(omo.excluded);
     const warnings: ContextPacketViewWarning[] = omo.warnings.map((message, index) => ({
       code: `omo.warning.${index + 1}`,
       message,
@@ -258,6 +392,11 @@ export async function loadWorkCliBootstrap(
   ]
     .filter((value) => value.trim().length > 0)
     .join("\n\n");
+  const contextPacketSourceMetadata = buildProviderSystemPromptMetadata({
+    configuredPrompt: configExplanation.prompt.rendered,
+    guidanceSystemPrompt: guidance.systemPromptAppendix,
+    guidanceSources: guidance.sources,
+  });
   const directAgent = await createRuntimeCodingAgent({
     provider: resolveRuntimeProvider(config.provider),
     apiKey: config.apiKey,
@@ -325,7 +464,10 @@ export async function loadWorkCliBootstrap(
       env,
       ...(userHomeDir ? { userHomeDir } : {}),
     });
-  const homeState = await refreshHomeState();
+  const homeState = createInitialHomeState({
+    modeLabel: config.mode,
+    authLabel: config.authLabel,
+  });
 
   return {
     agent,
@@ -348,6 +490,7 @@ export async function loadWorkCliBootstrap(
             : {}),
         })),
       ],
+      contextPacketSourceMetadata,
       homeState,
       ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
       ...(resumedSession?.initialTraceMode
@@ -369,7 +512,9 @@ export async function loadWorkCliBootstrap(
             : {}),
           forceRefresh: true,
         }),
-      resolveContextPacket: createWorkShellContextPacketResolver(),
+      resolveContextPacket: createWorkShellContextPacketResolver({
+        sourceMetadata: contextPacketSourceMetadata,
+      }),
       refreshHomeState,
       refreshAuthState,
       browserOAuthAvailable,

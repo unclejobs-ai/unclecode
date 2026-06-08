@@ -37,10 +37,52 @@ function getCodePointWidth(char: string): number {
   return isWideCodePoint(codePoint) ? 2 : 1;
 }
 
+type GraphemeSegmenter = {
+  segment(value: string): Iterable<{ readonly segment: string }>;
+};
+
+function createGraphemeSegmenter(): GraphemeSegmenter | undefined {
+  const Segmenter = (Intl as unknown as {
+    Segmenter?: new (
+      locale?: string,
+      options?: { readonly granularity: "grapheme" },
+    ) => GraphemeSegmenter;
+  }).Segmenter;
+  return Segmenter ? new Segmenter(undefined, { granularity: "grapheme" }) : undefined;
+}
+
+const graphemeSegmenter = createGraphemeSegmenter();
+
+export function segmentDisplayGraphemes(value: string): readonly string[] {
+  if (value.length === 0) return [];
+  if (!graphemeSegmenter) return Array.from(value);
+  return Array.from(graphemeSegmenter.segment(value), (item) => item.segment);
+}
+
+function getGraphemeWidth(grapheme: string): number {
+  let width = 0;
+  let hasWideCodePoint = false;
+  let visibleCodePointCount = 0;
+  for (const char of grapheme) {
+    const charWidth = getCodePointWidth(char);
+    if (charWidth > 0) {
+      visibleCodePointCount += 1;
+    }
+    if (charWidth >= 2) {
+      hasWideCodePoint = true;
+    }
+    width += charWidth;
+  }
+  if (hasWideCodePoint && visibleCodePointCount > 1) {
+    return 2;
+  }
+  return width;
+}
+
 export function getDisplayWidth(value: string): number {
   let width = 0;
-  for (const char of value) {
-    width += getCodePointWidth(char);
+  for (const grapheme of segmentDisplayGraphemes(value)) {
+    width += getGraphemeWidth(grapheme);
   }
   return width;
 }
@@ -50,12 +92,12 @@ export function sliceByDisplayWidth(value: string, maxWidth: number): string {
 
   let width = 0;
   let output = "";
-  for (const char of value) {
-    const nextWidth = getCodePointWidth(char);
+  for (const grapheme of segmentDisplayGraphemes(value)) {
+    const nextWidth = getGraphemeWidth(grapheme);
     if (width + nextWidth > maxWidth) {
       break;
     }
-    output += char;
+    output += grapheme;
     width += nextWidth;
   }
   return output;

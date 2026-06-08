@@ -65,7 +65,7 @@ pub fn research_run_report(
 
     let executor_started_at = Instant::now();
     let summary = format!(
-        "Prepared a context brief for \"{}\" with {} changed files and {} MCP servers.",
+        "Refreshed Work context for \"{}\" with {} changed files and {} MCP servers.",
         prompt,
         bundle.changed_files.len(),
         connected_server_names.len()
@@ -82,7 +82,6 @@ pub fn research_run_report(
         &artifact_path,
         research_markdown(
             prompt,
-            &session_id,
             &bundle,
             &connected_server_names,
             &summary,
@@ -121,10 +120,9 @@ pub fn research_run_report(
     let total_ms = elapsed_ms(total_started_at);
     let artifact_path_text = artifact_path.to_string_lossy().to_string();
     let lines = vec![
-        "Context brief completed".to_string(),
-        format!("Session: {session_id}"),
+        "Work context refreshed".to_string(),
+        format!("Focus: {prompt}"),
         format!("Summary: {summary}"),
-        format!("Artifact: {artifact_path_text}"),
     ];
     let report = json!({
         "command": "research.run",
@@ -220,7 +218,6 @@ fn prepare_local_research_bundle(
 
 fn research_markdown(
     prompt: &str,
-    session_id: &str,
     bundle: &LocalResearchBundle,
     connected_server_names: &[String],
     summary: &str,
@@ -262,14 +259,14 @@ fn research_markdown(
         )
     };
     let next_changed = if bundle.changed_files.is_empty() {
-        "1. Introduce a concrete change set or target area so the next context brief can analyze a narrower scope."
+        "1. Give Work a narrower target when the workspace has no changed files."
     } else {
-        "1. Inspect the changed files above and decide whether the next brief should focus on one subsystem first."
+        "1. Start Work from the changed files above before widening scope."
     };
     let next_hotspots = if bundle.hotspots.is_empty() {
-        "2. Draft another context brief after a meaningful code change so hotspots and policy signals become more informative."
+        "2. Refresh context again after a meaningful code change."
     } else {
-        "2. Review the hotspot count and prioritize the densest area for the next implementation wave."
+        "2. Prioritize the hotspot count when choosing the next file."
     };
     let next_mcp = if connected_server_names.is_empty() {
         "3. Configure MCP servers if you need external tools or richer context for the next run."
@@ -278,11 +275,10 @@ fn research_markdown(
     };
 
     [
-        "# UncleCode Context Brief".to_string(),
+        "# UncleCode Work Context".to_string(),
         String::new(),
-        format!("Prompt: {prompt}"),
-        format!("Session: {session_id}"),
-        format!("Packet: {}", bundle.packet_id),
+        format!("Focus: {prompt}"),
+        format!("Context id: {}", bundle.packet_id),
         format!("Changed files: {}", bundle.changed_files.len()),
         format!("Hotspots: {}", bundle.hotspots.len()),
         format!("Policy signals: {policy}"),
@@ -294,7 +290,7 @@ fn research_markdown(
         policy_line,
         mcp_line,
         String::new(),
-        "## Recommended Next Steps".to_string(),
+        "## Next Work Handoff".to_string(),
         next_changed.to_string(),
         next_hotspots.to_string(),
         next_mcp.to_string(),
@@ -394,15 +390,15 @@ mod tests {
         )
         .unwrap();
         let text = report.lines.join("\n");
-        assert!(text.contains("Context brief completed"));
-        assert!(text.contains("Session: research-"));
+        assert!(text.contains("Work context refreshed"));
+        assert!(text.contains("Focus: summarize current workspace"));
         let parsed: Value = serde_json::from_str(&report.json).unwrap();
         assert_eq!(parsed["command"], "research.run");
         assert_eq!(parsed["status"], "completed");
         let artifact_path = parsed["artifactPaths"][0].as_str().unwrap();
         let artifact = fs::read_to_string(artifact_path).unwrap();
-        assert!(artifact.contains("# UncleCode Context Brief"));
-        assert!(artifact.contains("Prompt: summarize current workspace"));
+        assert!(artifact.contains("# UncleCode Work Context"));
+        assert!(artifact.contains("Focus: summarize current workspace"));
         assert!(root.join(".unclecode/research-runs.jsonl").exists());
 
         let status = research_status_report(&root, None, |key| {
@@ -411,7 +407,7 @@ mod tests {
         })
         .unwrap();
         let status_text = status.lines.join("\n");
-        assert!(status_text.contains("Last run: research-"));
+        assert!(status_text.contains("Last refresh: research-"));
         assert!(status_text.contains("State: idle"));
         let _ = fs::remove_dir_all(root);
     }

@@ -25,9 +25,9 @@ export async function buildResearchStatusReport(input: {
     return output.trimEnd();
   } catch {
     return [
-      "Context brief status",
+      "Work context status",
       "Status: unavailable",
-      "Error: context brief status failed; diagnostics hidden",
+      "Error: Work context status failed; diagnostics hidden",
     ].join("\n");
   }
 }
@@ -270,10 +270,9 @@ export async function runResearchPassData(input: {
     throw new Error("Rust research run returned an invalid payload.");
   }
   const lines = [
-    report.status === "completed" ? "Context brief completed" : "Context brief failed",
-    `Session: ${report.sessionId}`,
+    report.status === "completed" ? "Work context refreshed" : "Work context refresh failed",
+    `Focus: ${report.prompt}`,
     `Summary: ${report.summary}`,
-    ...report.artifactPaths.map((artifactPath) => `Artifact: ${artifactPath}`),
   ] as const;
 
   return {
@@ -305,7 +304,7 @@ export function createTuiActivityEntry(input: {
     "browser-login": "Browser Login",
     "device-login": "Device Login",
     "mcp-list": "MCP List",
-    "new-research": "New brief",
+    "new-research": "Context refresh",
   };
 
   return {

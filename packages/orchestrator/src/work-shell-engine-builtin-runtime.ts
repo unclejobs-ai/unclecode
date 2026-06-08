@@ -324,6 +324,26 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
       });
       return;
     }
+    case "unknown-slash": {
+      const suggestion = input.builtinCommand.suggestion;
+      const commandToken = input.builtinCommand.line.trim().split(/\s+/, 1)[0] ?? input.builtinCommand.line;
+      const message = suggestion
+        ? `Unknown command ${commandToken}. Did you mean ${suggestion}?`
+        : `Unknown command ${commandToken}. Type / for commands.`;
+      input.appendEntries(
+        { role: "user", text: commandToken },
+        { role: "system", text: message },
+      );
+      input.setState({
+        panel: {
+          title: "Command",
+          lines: suggestion
+            ? [message, `Run ${suggestion} or type / for commands.`]
+            : [message],
+        },
+      });
+      return;
+    }
     case "skills": {
       const skills = await input.listAvailableSkills(input.options.cwd);
       const result = createSkillsBuiltinResult(input.line, skills);

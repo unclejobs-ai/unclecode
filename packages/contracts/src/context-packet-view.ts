@@ -1,5 +1,7 @@
 export type ContextPacketSourceCategory =
   | "workspace"
+  | "workspace-guidance"
+  | "provider-system-prompt"
   | "omo"
   | "memory"
   | "bridge"
@@ -15,6 +17,7 @@ export type ContextPacketViewItem = {
   readonly reason: string;
   readonly preview?: string | undefined;
   readonly tokenEstimate?: number | undefined;
+  readonly sourceCount?: number | undefined;
 };
 
 export type ContextPacketWarningSeverity = "info" | "warning" | "error";

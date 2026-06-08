@@ -24,15 +24,20 @@ function truncatePacketText(value: string, maxLength = 112): string {
   return value.length <= maxLength ? value : `${value.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
+function getItemSourceCount(item: ContextPacketViewItem): number {
+  return Math.max(1, Math.trunc(item.sourceCount ?? 1));
+}
+
 function summarizeItemsByCategory(items: readonly ContextPacketViewItem[]): readonly PacketSourceSummary[] {
   const summaries = new Map<string, PacketSourceSummary>();
   for (const item of items) {
+    const sourceCount = getItemSourceCount(item);
     const existing = summaries.get(item.category);
     if (existing) {
-      existing.count += 1;
+      existing.count += sourceCount;
       continue;
     }
-    summaries.set(item.category, { category: item.category, count: 1, order: summaries.size, sample: item });
+    summaries.set(item.category, { category: item.category, count: sourceCount, order: summaries.size, sample: item });
   }
   return [...summaries.values()].sort((left, right) => right.count - left.count || left.order - right.order);
 }

@@ -117,7 +117,7 @@ function getSessionCenterSectionLabel(view: TuiShellState["view"]): string {
     case "mcp":
       return "mcp config";
     case "research":
-      return "context briefs";
+      return "workspace context";
   }
 }
 
@@ -126,7 +126,7 @@ function getPrimaryPaneTitle(view: TuiShellState["view"]): string {
     case "mcp":
       return "Servers";
     case "research":
-      return "Briefs";
+      return "Context";
     case "work":
       return "Sessions";
     case "sessions":
@@ -139,7 +139,7 @@ function getDetailPaneTitle(view: TuiShellState["view"]): string {
     case "mcp":
       return "MCP detail";
     case "research":
-      return "Context brief detail";
+      return "Work context";
     case "work":
       return "Work detail";
     case "sessions":
@@ -371,15 +371,21 @@ export function Dashboard(props: DashboardProps) {
     dispatch({ type: "home.updated", homeState });
   }, []);
   const openSessionsView = () => {
-    void (async () => {
-      const refreshedHomeState = props.refreshHomeState ? await props.refreshHomeState() : shellState.homeState;
-      dispatch({ type: "home.updated", homeState: refreshedHomeState });
-      dispatch({
-        type: "focus.changed",
-        focus: createSessionCenterFocusForView("sessions", centerState),
-      });
-      dispatch({ type: "view.changed", view: "sessions" });
-    })().catch(() => undefined);
+    dispatch({
+      type: "focus.changed",
+      focus: createSessionCenterFocusForView("sessions", centerState),
+    });
+    dispatch({ type: "view.changed", view: "sessions" });
+
+    if (!props.refreshHomeState) {
+      return;
+    }
+
+    void props.refreshHomeState()
+      .then((refreshedHomeState) => {
+        dispatch({ type: "home.updated", homeState: refreshedHomeState });
+      })
+      .catch(() => undefined);
   };
   const renderFullscreenWorkPane = shouldRenderEmbeddedWorkPaneFullscreen(shellState.view, Boolean(props.renderWorkPane));
 
@@ -435,7 +441,7 @@ export function Dashboard(props: DashboardProps) {
             id: researchAction.id,
             label: researchAction.label,
             status: "running",
-            detail: prettifyWorkerDetail("writing artifact"),
+            detail: prettifyWorkerDetail("saving context"),
           },
         });
         const refreshedHomeState = props.refreshHomeState
@@ -446,7 +452,7 @@ export function Dashboard(props: DashboardProps) {
           entry: {
             id: `${researchAction.id}-${Date.now()}`,
             source: researchAction.id,
-            title: `Brief: ${prompt}`,
+            title: `Context: ${prompt}`,
             timestamp: new Date().toISOString(),
             lines,
             tone: lines.some((line) => /failed/i.test(line)) ? "warning" : "success",
@@ -473,7 +479,7 @@ export function Dashboard(props: DashboardProps) {
           entry: {
             id: `${researchAction.id}-error-${Date.now()}`,
             source: researchAction.id,
-            title: `Brief: ${prompt}`,
+            title: `Context: ${prompt}`,
             timestamp: new Date().toISOString(),
             lines: [message],
             tone: "warning",
@@ -869,7 +875,7 @@ export function Dashboard(props: DashboardProps) {
               const refreshedHomeState = props.refreshHomeState ? await props.refreshHomeState() : shellState.homeState;
               dispatch({
                 type: "action.completed",
-                entry: { id: `${promptAction.id}-${Date.now()}`, source: promptAction.id, title: promptAction.id === "new-research" ? `Brief: ${prompt}` : promptAction.label, timestamp: new Date().toISOString(), lines, tone: lines.some((line) => /failed|error/i.test(line)) ? "warning" : "success" },
+                entry: { id: `${promptAction.id}-${Date.now()}`, source: promptAction.id, title: promptAction.id === "new-research" ? `Context: ${prompt}` : promptAction.label, timestamp: new Date().toISOString(), lines, tone: lines.some((line) => /failed|error/i.test(line)) ? "warning" : "success" },
                 outputLines: lines,
                 homeState: refreshedHomeState,
               });
@@ -878,7 +884,7 @@ export function Dashboard(props: DashboardProps) {
               const message = error instanceof Error ? error.message : String(error);
               dispatch({
                 type: "action.failed",
-                entry: { id: `${promptAction.id}-error-${Date.now()}`, source: promptAction.id, title: promptAction.id === "new-research" ? `Brief: ${prompt}` : promptAction.label, timestamp: new Date().toISOString(), lines: [message], tone: "warning" },
+                entry: { id: `${promptAction.id}-error-${Date.now()}`, source: promptAction.id, title: promptAction.id === "new-research" ? `Context: ${prompt}` : promptAction.label, timestamp: new Date().toISOString(), lines: [message], tone: "warning" },
                 outputLines: [message],
               });
             }
@@ -903,11 +909,11 @@ export function Dashboard(props: DashboardProps) {
               prompt: draftResult.value,
               onProgress: (line) => dispatch({ type: "worker.progressed", worker: { id: promptAction.id, label: promptAction.label, status: "running", detail: prettifyWorkerDetail(line) } }),
             });
-            dispatch({ type: "worker.progressed", worker: { id: promptAction.id, label: promptAction.label, status: "running", detail: prettifyWorkerDetail(promptAction.id === "new-research" ? "writing artifact" : promptAction.id === "mcp-add" ? "refreshing MCP list" : "refreshing auth") } });
+            dispatch({ type: "worker.progressed", worker: { id: promptAction.id, label: promptAction.label, status: "running", detail: prettifyWorkerDetail(promptAction.id === "new-research" ? "saving context" : promptAction.id === "mcp-add" ? "refreshing MCP list" : "refreshing auth") } });
             const refreshedHomeState = props.refreshHomeState ? await props.refreshHomeState() : shellState.homeState;
             dispatch({
               type: "action.completed",
-              entry: { id: `${promptAction.id}-${Date.now()}`, source: promptAction.id, title: promptAction.id === "new-research" ? `Brief: ${draftResult.value}` : promptAction.label, timestamp: new Date().toISOString(), lines, tone: lines.some((line) => /failed|error/i.test(line)) ? "warning" : "success" },
+              entry: { id: `${promptAction.id}-${Date.now()}`, source: promptAction.id, title: promptAction.id === "new-research" ? `Context: ${draftResult.value}` : promptAction.label, timestamp: new Date().toISOString(), lines, tone: lines.some((line) => /failed|error/i.test(line)) ? "warning" : "success" },
               outputLines: lines,
               homeState: refreshedHomeState,
             });
@@ -916,7 +922,7 @@ export function Dashboard(props: DashboardProps) {
             const message = error instanceof Error ? error.message : String(error);
             dispatch({
               type: "action.failed",
-              entry: { id: `${promptAction.id}-error-${Date.now()}`, source: promptAction.id, title: promptAction.id === "new-research" ? `Brief: ${draftResult.value}` : promptAction.label, timestamp: new Date().toISOString(), lines: [message], tone: "warning" },
+              entry: { id: `${promptAction.id}-error-${Date.now()}`, source: promptAction.id, title: promptAction.id === "new-research" ? `Context: ${draftResult.value}` : promptAction.label, timestamp: new Date().toISOString(), lines: [message], tone: "warning" },
               outputLines: [message],
             });
           }

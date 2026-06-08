@@ -13,6 +13,10 @@ function cloneWarnings(warnings: readonly ContextPacketViewWarning[]): readonly 
   return warnings.map((warning) => ({ ...warning }));
 }
 
+function getItemSourceCount(item: ContextPacketViewItem): number {
+  return Math.max(1, Math.trunc(item.sourceCount ?? 1));
+}
+
 export function createContextPacketView(input: CreateContextPacketViewInput): ContextPacketView {
   const included = cloneItems(input.included);
   const excluded = cloneItems(input.excluded);
@@ -27,8 +31,8 @@ export function createContextPacketView(input: CreateContextPacketViewInput): Co
     warnings,
     preview: [...input.preview],
     sourceCounts: {
-      included: included.length,
-      excluded: excluded.length,
+      included: included.reduce((total, item) => total + getItemSourceCount(item), 0),
+      excluded: excluded.reduce((total, item) => total + getItemSourceCount(item), 0),
       warnings: warnings.length,
     },
     tokenEstimate: included.reduce((total, item) => total + Math.max(0, item.tokenEstimate ?? 0), 0),
@@ -59,12 +63,13 @@ function truncatePacketText(value: string, maxLength = 112): string {
 function summarizeItemsByCategory(items: readonly ContextPacketViewItem[]): readonly PacketSourceSummary[] {
   const summaries = new Map<string, PacketSourceSummary>();
   for (const item of items) {
+    const sourceCount = getItemSourceCount(item);
     const existing = summaries.get(item.category);
     if (existing) {
-      existing.count += 1;
+      existing.count += sourceCount;
       continue;
     }
-    summaries.set(item.category, { category: item.category, count: 1, order: summaries.size, sample: item });
+    summaries.set(item.category, { category: item.category, count: sourceCount, order: summaries.size, sample: item });
   }
   return [...summaries.values()].sort((left, right) => right.count - left.count || left.order - right.order);
 }

@@ -143,6 +143,40 @@ describe("context packet view", () => {
     assert.equal(formatContextPacketIndicator(packet), "packet 2 in · 1 out");
   });
 
+  it("keeps compact packet rows but counts grouped raw artifacts accurately", () => {
+    const packet = createContextPacketView({
+      id: "packet-grouped-excluded",
+      generatedAt: "2026-06-04T00:00:00.000Z",
+      included: [
+        { id: "workspace", category: "workspace", label: "AGENTS.md", reason: "loaded" },
+      ],
+      excluded: [
+        {
+          id: "omo-evidence-summary",
+          category: "omo",
+          label: "64 raw OMO evidence transcripts",
+          reason: "raw OMO evidence transcripts are excluded from provider context",
+          sourceCount: 64,
+        },
+      ],
+      warnings: [],
+      preview: [],
+    });
+
+    assert.equal(packet.excluded.length, 1);
+    assert.equal(packet.sourceCounts.excluded, 64);
+    assert.equal(formatContextPacketIndicator(packet), "packet 1 in · 64 out");
+    assert.match(
+      formatContextPacketPromptPrefix(packet),
+      /Excluded raw artifacts:\n- 64 raw artifacts withheld from provider context; inspect \/context for local-only details\./,
+    );
+    assert.ok(
+      buildContextPacketPreviewLines(packet).includes(
+        "- omo · 64 · 64 raw OMO evidence transcripts (raw OMO evidence transcripts are excluded from provider context)",
+      ),
+    );
+  });
+
   it("bounds inspector preview lines so /context does not flood the TUI", () => {
     const packet = createContextPacketView({
       id: "packet-bounded",

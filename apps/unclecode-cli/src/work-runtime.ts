@@ -118,7 +118,16 @@ export async function loadWorkShellDashboardProps(
     throw new Error("Cannot build work-shell dashboard props for prompt mode.");
   }
 
-  return createManagedDashboardProps(session);
+  const homeState = session.options.refreshHomeState
+    ? await session.options.refreshHomeState()
+    : session.options.homeState;
+  return createManagedDashboardProps({
+    ...session,
+    options: {
+      ...session.options,
+      homeState,
+    },
+  });
 }
 
 export async function smokeWorkShellRuntime(
@@ -168,10 +177,10 @@ export async function smokeWorkShellRuntime(
   lines.push("MCP inspect action connected");
 
   const researchLines = await props.runAction({ actionId: "research-status" });
-  if (!researchLines.some((line) => /Context brief status|Latest context brief|Latest research/i.test(line))) {
-    throw new Error("Context brief status smoke did not return a status result.");
+  if (!researchLines.some((line) => /Work context status|Context brief status|Latest context/i.test(line))) {
+    throw new Error("Work context status smoke did not return a status result.");
   }
-  lines.push("Context brief status action connected");
+  lines.push("Work context status action connected");
 
   if (props.sessions?.[0]) {
     const resumeLines = await props.runSession(props.sessions[0].sessionId);

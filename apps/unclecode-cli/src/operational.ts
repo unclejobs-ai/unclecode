@@ -972,7 +972,7 @@ export async function runTuiSessionCenterAction(input: {
         });
       }
 
-      return ["Type a context brief prompt. Enter or Ctrl+R runs it."];
+      return ["Describe what Work should inspect. Enter or Ctrl+R refreshes context."];
     default:
       return ["Unknown action."];
   }

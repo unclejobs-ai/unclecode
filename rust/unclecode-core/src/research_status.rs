@@ -35,28 +35,28 @@ pub fn research_status_report(
         .find(|item| item.session_id.starts_with("research-"));
 
     let mut lines = vec![
-        "Context brief status".to_string(),
-        "Profile: context-brief-default".to_string(),
+        "Work context status".to_string(),
+        "Profile: work-context-local".to_string(),
         format!("Configured servers: {}", server_names.len()),
     ];
     if let Some(session) = &latest_research {
         lines.extend([
-            format!("Last run: {}", session.session_id),
+            format!("Last refresh: {}", session.session_id),
             format!("State: {}", session.state),
             format!(
                 "Summary: {}",
-                session.task_summary.as_deref().unwrap_or("none")
+                format_work_context_summary(session.task_summary.as_deref().unwrap_or("none"))
             ),
         ]);
     } else {
-        lines.push("No active context brief".to_string());
+        lines.push("No Work context refresh yet".to_string());
     }
 
     let payload = json!({
         "command": "research.status",
         "workspaceRoot": workspace_root.to_string_lossy(),
         "profile": {
-            "profileName": "context-brief-default",
+            "profileName": "work-context-local",
             "serverNames": server_names,
         },
         "latestRun": latest_research.as_ref().map(|session| {
@@ -74,6 +74,18 @@ pub fn research_status_report(
     Ok(ResearchStatusReport { lines, json })
 }
 
+fn format_work_context_summary(summary: &str) -> String {
+    summary
+        .replace(
+            "Prepared a local research bundle for",
+            "Refreshed Work context for",
+        )
+        .replace("Prepared a context brief for", "Refreshed Work context for")
+        .replace("Prepared a context brief", "Refreshed Work context")
+        .replace("research bundle", "Work context")
+        .replace("context brief", "Work context")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,13 +100,13 @@ mod tests {
         let report = research_status_report(&root, Some(&home), |_| None).unwrap();
 
         let text = report.lines.join("\n");
-        assert!(text.contains("Context brief status"));
-        assert!(text.contains("Profile: context-brief-default"));
+        assert!(text.contains("Work context status"));
+        assert!(text.contains("Profile: work-context-local"));
         assert!(text.contains("Configured servers: 0"));
-        assert!(text.contains("No active context brief"));
+        assert!(text.contains("No Work context refresh yet"));
         let parsed: serde_json::Value = serde_json::from_str(&report.json).unwrap();
         assert_eq!(parsed["command"], "research.status");
-        assert_eq!(parsed["profile"]["profileName"], "context-brief-default");
+        assert_eq!(parsed["profile"]["profileName"], "work-context-local");
         assert!(parsed["latestRun"].is_null());
         let _ = fs::remove_dir_all(root);
     }
@@ -132,12 +144,45 @@ mod tests {
 
         let text = report.lines.join("\n");
         assert!(text.contains("Configured servers: 1"));
-        assert!(text.contains("Last run: research-alpha"));
+        assert!(text.contains("Last refresh: research-alpha"));
         assert!(text.contains("State: idle"));
         assert!(text.contains("Summary: Mapped local context"));
         let parsed: serde_json::Value = serde_json::from_str(&report.json).unwrap();
         assert_eq!(parsed["latestRun"]["sessionId"], "research-alpha");
         assert_eq!(parsed["profile"]["serverNames"][0], "memory");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hides_legacy_research_words_in_human_status_summary() {
+        let root = temp_root("research-status-legacy-summary");
+        let home = root.join("home");
+        let session_root = root.join(".state");
+        fs::create_dir_all(&home).unwrap();
+        WorkShellSessionStore::new(&session_root)
+            .persist_work_shell_snapshot(&WorkShellSessionSnapshot {
+                session_id: "research-legacy".to_string(),
+                project_path: root.to_string_lossy().to_string(),
+                model: "research-local".to_string(),
+                mode: "normal".to_string(),
+                state: "idle".to_string(),
+                summary: "Prepared a local research bundle for \"audit workflow\".".to_string(),
+                trace_mode: None,
+                reasoning_effort: None,
+                entries: vec![],
+            })
+            .unwrap();
+
+        let report = research_status_report(&root, Some(&home), |key| {
+            (key == "UNCLECODE_SESSION_STORE_ROOT")
+                .then(|| session_root.to_string_lossy().to_string())
+        })
+        .unwrap();
+
+        let text = report.lines.join("\n");
+        assert!(text.contains("Summary: Refreshed Work context for \"audit workflow\"."));
+        assert!(!text.contains("research bundle"));
+        assert!(!text.contains("context brief"));
         let _ = fs::remove_dir_all(root);
     }
 

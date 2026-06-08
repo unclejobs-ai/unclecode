@@ -60,7 +60,7 @@ function initializeGitRepo(cwd) {
   assert.equal(commitResult.status, 0, commitResult.stderr);
 }
 
-test("built unclecode cli can draft a linear context brief and write an artifact", () => {
+test("built unclecode cli refreshes Work context and keeps artifact paths in JSON", () => {
   const cwd = makeTempWorkspace();
   const sessionStoreRoot = path.join(cwd, ".state");
 
@@ -88,23 +88,50 @@ test("built unclecode cli can draft a linear context brief and write an artifact
     );
 
     assert.equal(runResult.status, 0, runResult.stderr);
-    assert.match(runResult.stdout, /Context brief completed/i);
-    assert.match(runResult.stdout, /Session: research-/i);
-    assert.match(runResult.stdout, /Artifact: .*research\.md/i);
+    assert.match(runResult.stdout, /Work context refreshed/i);
+    assert.match(runResult.stdout, /Focus: summarize current workspace/i);
+    assert.doesNotMatch(runResult.stdout, /Session: research-/i);
+    assert.doesNotMatch(runResult.stdout, /Artifact:/i);
+    assert.doesNotMatch(runResult.stdout, /Saved locally: .*research\.md/i);
 
-    const artifactMatch = runResult.stdout.match(/Artifact: (.*research\.md)/);
-    assert.ok(artifactMatch, "artifact path should be printed");
-    const artifactPath = artifactMatch[1];
+    const jsonResult = spawnSync(
+      "node",
+      [
+        builtCliEntrypoint,
+        "research",
+        "run",
+        "--json",
+        "summarize",
+        "current",
+        "workspace",
+      ],
+      {
+        cwd,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot,
+        },
+      },
+    );
+
+    assert.equal(jsonResult.status, 0, jsonResult.stderr);
+    const jsonPayload = JSON.parse(jsonResult.stdout);
+    assert.equal(jsonPayload.command, "research.run");
+    assert.equal(jsonPayload.status, "completed");
+    assert.match(jsonPayload.sessionId, /^research-/);
+    assert.deepEqual(jsonPayload.artifactPaths.length, 1);
+    const artifactPath = jsonPayload.artifactPaths[0];
 
     assert.ok(
       existsSync(artifactPath),
       `artifact should exist: ${artifactPath}`,
     );
     const artifactBody = readFileSync(artifactPath, "utf8");
-    assert.match(artifactBody, /# UncleCode Context Brief/);
-    assert.match(artifactBody, /Prompt: summarize current workspace/);
+    assert.match(artifactBody, /# UncleCode Work Context/);
+    assert.match(artifactBody, /Focus: summarize current workspace/);
     assert.match(artifactBody, /## Findings/);
-    assert.match(artifactBody, /## Recommended Next Steps/);
+    assert.match(artifactBody, /## Next Work Handoff/);
 
     const ledgerPath = path.join(cwd, ".unclecode", "research-runs.jsonl");
     assert.ok(existsSync(ledgerPath), `ledger should exist: ${ledgerPath}`);
@@ -127,8 +154,8 @@ test("built unclecode cli can draft a linear context brief and write an artifact
     );
 
     assert.equal(statusResult.status, 0, statusResult.stderr);
-    assert.match(statusResult.stdout, /Context brief status/i);
-    assert.match(statusResult.stdout, /Last run: research-/i);
+    assert.match(statusResult.stdout, /Work context status/i);
+    assert.match(statusResult.stdout, /Last refresh: research-/i);
     assert.match(statusResult.stdout, /State: idle/i);
   } finally {
     rmSync(cwd, { recursive: true, force: true });

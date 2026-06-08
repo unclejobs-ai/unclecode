@@ -29,9 +29,9 @@ import {
   formatInlineImageSupportLine,
   formatRuntimeLabel,
   formatToolTraceLine,
+  formatWorkShellAssistantDisplayText,
   formatWorkShellBusyStatusLine,
   formatWorkShellConversationEntryLines,
-  formatWorkShellAssistantDisplayText,
   formatWorkShellError,
   formatWorkShellFooterLine,
   formatWorkShellHeaderLine,
@@ -64,8 +64,8 @@ import {
   resolveWorkShellActiveSlashInput,
   resolveWorkShellInputAction,
   resolveWorkShellSubmitAction,
-  shouldReportWorkShellOverlayOpen,
   shouldHideWorkShellOverlayForInput,
+  shouldReportWorkShellOverlayOpen,
   shouldShowWorkShellConversationEntry,
   shouldUseSlowComposerPreview,
   sliceByDisplayWidth,
@@ -677,6 +677,22 @@ test("work-shell input decision helpers are exported from the shared tui package
     resolveWorkShellActiveSlashInput({
       value: "",
       fallbackPanelTitle: "Model picker",
+      fallbackPanelDismissed: true,
+    }),
+    undefined,
+  );
+  assert.equal(
+    resolveWorkShellActiveSlashInput({
+      value: "/model",
+      fallbackPanelTitle: "Model picker",
+      fallbackPanelDismissed: true,
+    }),
+    "/model",
+  );
+  assert.equal(
+    resolveWorkShellActiveSlashInput({
+      value: "",
+      fallbackPanelTitle: "Model picker",
     }),
     "/model",
   );
@@ -1178,10 +1194,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       text: "Hello. What do you need help with?",
       width: 72,
     }),
-    [
-      "◈ UncleCode · context steward",
-      "  Hello. What do you need help with?",
-    ],
+    ["◈ UncleCode · context steward", "  Hello. What do you need help with?"],
     "assistant entries keep a distinct label and readable body",
   );
   assert.equal(
@@ -1379,6 +1392,36 @@ test("applyComposerEdit handles Hangul input and cursor positioning correctly", 
   assert.equal(result3.nextCursorOffset, 2);
 });
 
+test("applyComposerEdit keeps decomposed Hangul composition on grapheme boundaries", () => {
+  const decomposedHangul = "한";
+
+  assert.deepEqual(
+    applyComposerEdit({
+      value: decomposedHangul,
+      cursorOffset: decomposedHangul.length,
+      input: "",
+      key: { backspace: true },
+      allowLineBreaks: false,
+    }),
+    { nextValue: "", nextCursorOffset: 0, submitted: false },
+  );
+
+  assert.deepEqual(
+    applyComposerEdit({
+      value: `${decomposedHangul}글`,
+      cursorOffset: decomposedHangul.length,
+      input: "",
+      key: { leftArrow: true },
+      allowLineBreaks: false,
+    }),
+    {
+      nextValue: `${decomposedHangul}글`,
+      nextCursorOffset: 0,
+      submitted: false,
+    },
+  );
+});
+
 test("applyComposerEdit inserts mixed-width characters at cursor", () => {
   const result = applyComposerEdit({
     value: "한a",
@@ -1492,6 +1535,7 @@ test("resolveComposerCursorOffsetAfterValueChange moves external replacements to
 
 test("getDisplayWidth counts CJK characters as 2 columns", () => {
   assert.equal(getDisplayWidth("한글"), 4);
+  assert.equal(getDisplayWidth("한"), 2);
   assert.equal(getDisplayWidth("abc"), 3);
   assert.equal(getDisplayWidth("한a글"), 5);
   assert.equal(getDisplayWidth("🙂"), 2);

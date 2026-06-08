@@ -65,7 +65,7 @@ const CLI_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand {
         command: "/research status",
         route: &["research", "status"],
-        description: "Show context-brief status.",
+        description: "Show Work context status.",
         aliases: &[],
     },
     BuiltinSlashCommand {
@@ -182,13 +182,13 @@ const WORK_SHELL_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand {
         command: "/research",
         route: &["research", "run"],
-        description: "Draft a local context brief for the given topic or workspace question.",
+        description: "Refresh local Work context for the given topic or workspace question.",
         aliases: &[],
     },
     BuiltinSlashCommand {
         command: "/research status",
         route: &["research", "status"],
-        description: "Show the latest local context brief status.",
+        description: "Show the latest local Work context status.",
         aliases: &[],
     },
     BuiltinSlashCommand {
