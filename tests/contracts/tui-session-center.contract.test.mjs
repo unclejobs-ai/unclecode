@@ -138,6 +138,22 @@ test("getVisibleSessionCenterActionsForView hides global auth repair actions fro
   );
 });
 
+test("getVisibleSessionCenterActionsForView tolerates a stale/unknown view without crashing", () => {
+  const model = createSessionCenterModel({
+    workspaceRoot: "/Users/parkeungje/project/unclecode",
+    modeLabel: "default",
+    authLabel: "oauth-file",
+    sessions: [],
+  });
+
+  // A view persisted before a tab was removed (e.g. the deleted "research"
+  // view) must degrade to no actions, never crash the whole TUI.
+  assert.deepEqual(
+    getVisibleSessionCenterActionsForView("research", model.utilityActions),
+    [],
+  );
+});
+
 test("formatSessionCenterDraftValue masks api-key drafts but leaves other drafts visible", () => {
   assert.equal(
     formatSessionCenterDraftValue(

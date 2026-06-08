@@ -193,7 +193,9 @@ export function getVisibleSessionCenterActionsForView(
   view: SessionCenterActionView,
   actions: readonly SessionCenterAction[],
 ): readonly SessionCenterAction[] {
-  const ids = VISIBLE_SESSION_CENTER_ACTION_IDS_BY_VIEW[view];
+  // Tolerate a stale/unknown view (e.g. a removed tab still referenced by a
+  // pre-rebuild client or persisted state) instead of crashing the whole TUI.
+  const ids = VISIBLE_SESSION_CENTER_ACTION_IDS_BY_VIEW[view] ?? [];
   return ids
     .map((id) => actions.find((action) => action.id === id))
     .filter((action): action is SessionCenterAction => Boolean(action));
