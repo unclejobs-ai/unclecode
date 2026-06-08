@@ -9,7 +9,6 @@ import {
   formatSessionHeadline,
   type SessionCenterAction,
   type SessionCenterModel,
-  type SessionCenterResearchRun,
   type SessionCenterSession,
   getWorkspaceDisplayName,
 } from "./dashboard-actions.js";
@@ -20,10 +19,6 @@ import {
   STATUS_DOT,
   StatusDot,
 } from "./dashboard-primitives.js";
-import {
-  buildResearchInspectorLines,
-  buildWorkContextResultPreviewLines,
-} from "./dashboard-research-lines.js";
 import { truncateForDisplayWidth } from "./text-width.js";
 import {
   type TuiActivityEntry as TuiShellActivityEntry,
@@ -33,11 +28,6 @@ import {
   type TuiStepTraceEntry as TuiShellStepTraceEntry,
   type TuiWorkerStatus,
 } from "./shell-state.js";
-
-export {
-  buildResearchInspectorLines,
-  buildWorkContextResultPreviewLines,
-} from "./dashboard-research-lines.js";
 
 function truncateForPane(value: string, maxLength: number): string {
   return truncateForDisplayWidth(value, maxLength);
@@ -116,7 +106,6 @@ export const VIEW_TABS = [
   { key: "1", label: "Work", view: "work" as const },
   { key: "2", label: "History", view: "sessions" as const },
   { key: "3", label: "MCP", view: "mcp" as const },
-  { key: "4", label: "Context", view: "research" as const },
 ] as const;
 
 export function ViewTabs(props: { activeView: TuiShellState["view"] }) {
@@ -211,37 +200,6 @@ export function McpServerList(props: {
   );
 }
 
-export function ResearchRunList(props: {
-  readonly runs: readonly SessionCenterResearchRun[];
-  readonly selectedIndex: number;
-  readonly isActive: boolean;
-}) {
-  if (props.runs.length === 0) {
-    return <Text color={C.textMuted}>Automatic context is on. N starts an optional focus scan.</Text>;
-  }
-
-  return (
-    <Box flexDirection="column" gap={0}>
-      {props.runs.slice(0, 6).map((run, index) => {
-        const isSelected = props.isActive && props.selectedIndex === index;
-        const statusLabel = run.status === "completed" ? "refreshed" : run.status;
-        return (
-          <Box key={run.sessionId} flexDirection="column">
-            <Box gap={1}>
-              <Text color={isSelected ? C.accentBright : C.bg}>{isSelected ? "❯" : " "}</Text>
-              <Text color={run.status === "failed" ? C.warning : C.success}>●</Text>
-              <Text wrap="truncate-end" color={isSelected ? C.text : C.textSecondary} bold={isSelected}>{truncateForPane(run.prompt, 28)}</Text>
-            </Box>
-            <Box paddingLeft={3}>
-              <Text color={C.textFaint}>{truncateForPane(`${statusLabel} · ${run.timestamp ?? "saved"}`, 28)}</Text>
-            </Box>
-          </Box>
-        );
-      })}
-    </Box>
-  );
-}
-
 export function stripSessionCenterShortcutLabel(label: string): string {
   return label.replace(/^[A-Z]\s+/, "").trim();
 }
@@ -293,7 +251,7 @@ export function buildWorkflowStatusSummary(input: {
   if (input.outputLines[0]) {
     return "ready · last result available";
   }
-  return "ready · W work · B auth · N context";
+  return "ready · W work · B auth · D doctor";
 }
 
 export function ActionList(props: {
@@ -573,7 +531,7 @@ export function DetailPanel(props: {
   readonly view: TuiShellState["view"];
   readonly shellState: TuiShellState;
   readonly model: SessionCenterModel;
-  readonly researchDraft: string;
+  readonly promptDraft: string;
   readonly primarySelectionIndex: number;
   readonly contextLines: readonly string[];
   readonly bridgeLines: readonly string[];
@@ -711,40 +669,6 @@ export function DetailPanel(props: {
     );
   }
 
-  if (props.view === "research") {
-    const researchLines = buildResearchInspectorLines({
-      latestResearchSessionId: props.model.latestResearchSessionId,
-      latestResearchSummary: props.model.latestResearchSummary,
-      latestResearchTimestamp: props.model.latestResearchTimestamp,
-      researchRunCount: props.model.researchRunCount,
-      recentResearchRuns: props.model.recentResearchRuns,
-      selectedRunIndex: props.primarySelectionIndex,
-      researchDraft: props.researchDraft,
-      isDraftOpen: props.shellState.focus.detailOpen,
-    });
-    const resultPreviewLines = buildWorkContextResultPreviewLines(props.shellState.outputLines);
-
-    return (
-      <Box flexDirection="column">
-        {researchLines.map((line, index) => (
-          <Text key={`${String(index)}-${line.text}`} color={researchLineColor(line.tone)}>
-            {truncateForPane(line.text, 40)}
-          </Text>
-        ))}
-        {resultPreviewLines.length > 0 ? (
-          <Box flexDirection="column" marginTop={1}>
-            <Text color={C.textMuted}>Context result</Text>
-            {resultPreviewLines.map((line, index) => (
-              <Text key={`${String(index)}-${line}`} color={index === 0 ? C.success : C.textMuted}>
-                {truncateForPane(line, 40)}
-              </Text>
-            ))}
-          </Box>
-        ) : null}
-      </Box>
-    );
-  }
-
   if (props.view === "mcp") {
     const mcpLines = buildMcpInspectorLines({
       mcpServerCount: props.model.mcpServerCount,
@@ -830,22 +754,16 @@ export function DetailPanel(props: {
             <Text color={C.textMuted}>Press Enter to review before running.</Text>
           </Box>
         ) : null}
-        {props.selectedActionId === "new-research" ? (
-          <Box flexDirection="column" marginTop={1}>
-            <Text color={C.textMuted}>Focus</Text>
-            <Text color={C.warning}>{props.researchDraft.length > 0 ? formatSessionCenterDraftValue(props.selectedActionId, props.researchDraft) : "Example: inspect auth flow risks"}</Text>
-          </Box>
-        ) : null}
         {props.selectedActionId === "api-key-login" ? (
           <Box flexDirection="column" marginTop={1}>
             <Text color={C.textMuted}>API key</Text>
-            <Text color={C.warning}>{props.researchDraft.length > 0 ? formatSessionCenterDraftValue(props.selectedActionId, props.researchDraft) : "Paste an OpenAI API key and press Enter"}</Text>
+            <Text color={C.warning}>{props.promptDraft.length > 0 ? formatSessionCenterDraftValue(props.selectedActionId, props.promptDraft) : "Paste an OpenAI API key and press Enter"}</Text>
           </Box>
         ) : null}
         {props.selectedActionId === "mcp-add" ? (
           <Box flexDirection="column" marginTop={1}>
             <Text color={C.textMuted}>Add server</Text>
-            <Text color={C.warning}>{props.researchDraft.length > 0 ? props.researchDraft : "name command [args...]"}</Text>
+            <Text color={C.warning}>{props.promptDraft.length > 0 ? props.promptDraft : "name command [args...]"}</Text>
             <Text color={C.textMuted}>Example: memory node ./memory-server.js</Text>
           </Box>
         ) : null}
@@ -853,7 +771,7 @@ export function DetailPanel(props: {
           <Text color={C.textMuted}>mode {props.model.modeLabel} · auth {props.model.authLabel}</Text>
         </Box>
         <Box marginTop={1}>
-          <Text color={C.textMuted}>{props.selectedActionId === "new-research" ? "Enter run focus" : "Enter/Ctrl+R run"} · {escapeHint}</Text>
+          <Text color={C.textMuted}>Enter/Ctrl+R run · {escapeHint}</Text>
         </Box>
         <Box marginTop={1} flexDirection="column">
           <Text color={C.textMuted}>Workspace context</Text>

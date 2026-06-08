@@ -938,10 +938,6 @@ test("launchSessionCenter reuses the interactive bootstrap for work handoff", as
         sessionCount: 0,
         mcpServerCount: 0,
         mcpServers: [],
-        latestResearchSessionId: null,
-        latestResearchSummary: null,
-        latestResearchTimestamp: null,
-        researchRunCount: 0,
         sessions: [],
         bridgeLines: [],
         memoryLines: [],
@@ -995,10 +991,6 @@ test("launchSessionCenter opens work view immediately for embedded work-session 
         sessionCount: 1,
         mcpServerCount: 0,
         mcpServers: [],
-        latestResearchSessionId: null,
-        latestResearchSummary: null,
-        latestResearchTimestamp: null,
-        researchRunCount: 0,
         sessions: [
           {
             sessionId: "work-session-9",

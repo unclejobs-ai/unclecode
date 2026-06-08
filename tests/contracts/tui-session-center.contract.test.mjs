@@ -11,9 +11,7 @@ import {
   buildInspectorContextLines,
   buildInspectorContextSnapshotLines,
   buildMcpInspectorLines,
-  buildResearchInspectorLines,
   buildSessionCenterStatusLine,
-  buildWorkContextResultPreviewLines,
   buildWorkflowStatusSummary,
   createApprovalRequestForAction,
   createSessionCenterFocusForView,
@@ -30,7 +28,6 @@ import {
   handleSessionCenterInput,
   isSessionCenterImplicitSubmitInput,
   shouldCaptureDashboardInput,
-  shouldOpenResearchPromptLane,
   shouldReturnToWorkOnEscape,
   truncateForPane,
 } from "../../packages/tui/src/index.tsx";
@@ -68,9 +65,6 @@ test("createSessionCenterModel prioritizes recent sessions over generic actions"
   assert.equal(model.primarySessions.length, 2);
   assert.equal(model.primarySessions[0].sessionId, "research-123");
   assert.ok(
-    model.utilityActions.some((action) => action.id === "new-research"),
-  );
-  assert.ok(
     model.utilityActions.some((action) => action.id === "browser-login"),
   );
   assert.ok(
@@ -106,14 +100,20 @@ test("createSessionCenterModel prioritizes recent sessions over generic actions"
     true,
   );
   assert.equal(
+    model.utilityActions.some((action) => action.id === "new-research"),
+    false,
+    "new-research action must be removed from the session center",
+  );
+  assert.equal(
     model.utilityActions.some((action) => action.id === "research-status"),
-    true,
+    false,
+    "research-status action must be removed from the session center",
   );
   assert.equal(
     model.utilityActions.some((action) => action.id === "mode-cycle"),
     false,
   );
-  assert.equal(model.utilityActions.length, 11);
+  assert.equal(model.utilityActions.length, 9);
 });
 
 test("getVisibleSessionCenterActionsForView hides global auth repair actions from contextual pages", () => {
@@ -128,19 +128,13 @@ test("getVisibleSessionCenterActionsForView hides global auth repair actions fro
     getVisibleSessionCenterActionsForView("sessions", model.utilityActions).map(
       (action) => action.id,
     ),
-    ["work-session", "new-research", "doctor"],
+    ["work-session", "doctor"],
   );
   assert.deepEqual(
     getVisibleSessionCenterActionsForView("mcp", model.utilityActions).map(
       (action) => action.id,
     ),
     ["mcp-add", "mcp-remove", "mcp-list", "mcp-inspect"],
-  );
-  assert.deepEqual(
-    getVisibleSessionCenterActionsForView("research", model.utilityActions).map(
-      (action) => action.id,
-    ),
-    ["new-research", "research-status"],
   );
 });
 
@@ -153,11 +147,8 @@ test("formatSessionCenterDraftValue masks api-key drafts but leaves other drafts
     "[REDACTED] --org org_demo --project proj_demo",
   );
   assert.equal(
-    formatSessionCenterDraftValue(
-      "new-research",
-      "Summarize current workspace",
-    ),
-    "Summarize current workspace",
+    formatSessionCenterDraftValue("mcp-add", "my-server stdio npx my-server"),
+    "my-server stdio npx my-server",
   );
 });
 
@@ -445,14 +436,12 @@ test("handleSessionCenterInput navigates visible action indexes without losing g
     "",
     { downArrow: true },
     { column: "actions", sessionIndex: 0, actionIndex: 0, detailOpen: false },
-    { sessionCount: 1, actionCount: 11 },
+    { sessionCount: 1, actionCount: 9 },
     [
       "unclecode work",
       "unclecode auth login --browser",
       "unclecode auth login --api-key-stdin",
       "unclecode auth logout",
-      "unclecode research run",
-      "unclecode research status",
       "unclecode mcp list",
       "unclecode mcp add <name> <command> [args...]",
       "unclecode mcp remove <server>",
@@ -460,7 +449,7 @@ test("handleSessionCenterInput navigates visible action indexes without losing g
       "unclecode doctor",
     ],
     undefined,
-    { visibleActionIndexes: [0, 4, 10] },
+    { visibleActionIndexes: [0, 4, 8] },
   );
 
   assert.equal(selected.actionIndex, 4);
@@ -469,14 +458,12 @@ test("handleSessionCenterInput navigates visible action indexes without losing g
     "",
     { return: true },
     selected,
-    { sessionCount: 1, actionCount: 11 },
+    { sessionCount: 1, actionCount: 9 },
     [
       "unclecode work",
       "unclecode auth login --browser",
       "unclecode auth login --api-key-stdin",
       "unclecode auth logout",
-      "unclecode research run",
-      "unclecode research status",
       "unclecode mcp list",
       "unclecode mcp add <name> <command> [args...]",
       "unclecode mcp remove <server>",
@@ -484,10 +471,10 @@ test("handleSessionCenterInput navigates visible action indexes without losing g
       "unclecode doctor",
     ],
     undefined,
-    { visibleActionIndexes: [0, 4, 10] },
+    { visibleActionIndexes: [0, 4, 8] },
   );
 
-  assert.equal(submitted.selectedCommand, "unclecode research run");
+  assert.equal(submitted.selectedCommand, "unclecode mcp list");
 });
 
 test("handleSessionCenterInput resumes the selected history item on one Enter", () => {
@@ -533,30 +520,12 @@ test("createSessionCenterFocusForView resets hidden detail state on tab switches
     {
       column: "actions",
       sessionIndex: 1,
-      actionIndex: 7,
+      actionIndex: 5,
       detailOpen: false,
       shouldExit: false,
       selectedCommand: undefined,
     },
-    "MCP tab focuses the MCP add action instead of inheriting stale action focus",
-  );
-
-  assert.deepEqual(
-    createSessionCenterFocusForView("research", {
-      column: "sessions",
-      sessionIndex: 1,
-      actionIndex: 0,
-      detailOpen: true,
-    }),
-    {
-      column: "actions",
-      sessionIndex: 1,
-      actionIndex: 4,
-      detailOpen: false,
-      shouldExit: false,
-      selectedCommand: undefined,
-    },
-    "Research tab focuses the research action instead of inheriting stale action focus",
+    "MCP tab focuses the MCP add action (index 5 after research removal) instead of inheriting stale action focus",
   );
 
   assert.deepEqual(
@@ -625,14 +594,12 @@ test("handleSessionCenterInput does not exit detail mode without a contextual co
     "",
     { return: true },
     { column: "sessions", sessionIndex: 0, actionIndex: 5, detailOpen: true },
-    { sessionCount: 1, actionCount: 11 },
+    { sessionCount: 1, actionCount: 9 },
     [
       "unclecode work",
       "unclecode auth login --browser",
       "unclecode auth login --api-key-stdin",
       "unclecode auth logout",
-      "unclecode research run",
-      "unclecode research status",
       "unclecode mcp list",
       "unclecode mcp add <name> <command> [args...]",
       "unclecode mcp remove <server>",
@@ -640,7 +607,7 @@ test("handleSessionCenterInput does not exit detail mode without a contextual co
       "unclecode doctor",
     ],
     undefined,
-    { visibleActionIndexes: [7, 8, 6, 9] },
+    { visibleActionIndexes: [5, 6, 4, 7] },
   );
 
   assert.equal(result.shouldExit, false);
@@ -688,106 +655,21 @@ test("isSessionCenterImplicitSubmitInput recognizes Ink empty Enter events", () 
   assert.equal(isSessionCenterImplicitSubmitInput("x", {}), false);
 });
 
-test("buildResearchInspectorLines shows Work context refresh purpose", () => {
-  const closed = buildResearchInspectorLines({
-    latestResearchSessionId: null,
-    latestResearchSummary: null,
-    latestResearchTimestamp: null,
-    researchRunCount: 0,
-    recentResearchRuns: [],
-    researchDraft: "",
-    isDraftOpen: false,
-  });
-  assert.ok(
-    closed.some((line) => line.text === "N Focus starts an optional scan"),
-  );
-  assert.ok(closed.some((line) => line.text === "Work context is automatic"));
-  assert.ok(
-    closed.some(
-      (line) =>
-        line.text ===
-        "Work already reads repo state, guidance, and recent work.",
-    ),
-  );
-  assert.ok(
-    closed.some(
-      (line) =>
-        line.text ===
-        "Use a focus scan only when a task needs sharper context.",
-    ),
-  );
-  assert.ok(
-    closed.some(
-      (line) => line.text === "Skip this screen when your prompt is enough.",
-    ),
-  );
-  assert.equal(
-    closed.some((line) => /research-artifacts\/research\.md/.test(line.text)),
-    false,
-  );
-
-  const open = buildResearchInspectorLines({
-    latestResearchSessionId: "research-123",
-    latestResearchSummary:
-      'Prepared a local research bundle for "audit MCP workflow".',
-    latestResearchTimestamp: "2026-06-01T00:00:00.000Z",
-    researchRunCount: 2,
-    recentResearchRuns: [
-      {
-        sessionId: "research-123",
-        prompt: "audit MCP workflow",
-        status: "completed",
-        summary: 'Prepared a context brief for "audit MCP workflow".',
-        timestamp: "2026-06-01T00:00:00.000Z",
-      },
-    ],
-    selectedRunIndex: 0,
-    researchDraft: "audit MCP workflow",
-    isDraftOpen: true,
-  });
-  assert.ok(open.some((line) => line.text === "Work context is automatic"));
-  assert.ok(open.some((line) => line.text === "Focus topic"));
-  assert.ok(open.some((line) => line.text === "audit MCP workflow"));
-  assert.ok(
-    open.some((line) => line.text === "Enter runs focus scan · Esc closes"),
-  );
-  assert.ok(open.some((line) => line.text === "Selected context"));
-  assert.ok(open.some((line) => line.text === "Recent context"));
-  assert.ok(
-    open.some((line) => line.text === "refreshed · audit MCP workflow"),
-  );
-  assert.ok(
-    open.some(
-      (line) =>
-        line.text === 'Refreshed Work context for "audit MCP workflow".',
-    ),
-  );
-  assert.equal(
-    open.some((line) => /research bundle|context brief/i.test(line.text)),
-    false,
-  );
-});
-
-test("buildWorkContextResultPreviewLines hides unrelated command output", () => {
-  assert.deepEqual(
-    buildWorkContextResultPreviewLines([
-      "The module '/Users/parkeungje/project/unclecode/node_modules/better-sqlite3/build/Release/better_sqlite3.node' was compiled against a different Node.js version.",
-      'Prepared a local research bundle for "audit workflow".',
-      "Saved locally: /tmp/research.md",
-    ]),
-    ['Refreshed Work context for "audit workflow".'],
-  );
-});
-
-test("buildWorkflowStatusSummary advertises context refresh instead of research", () => {
+test("buildWorkflowStatusSummary shows work and auth shortcuts without context shortcut", () => {
   const summary = buildWorkflowStatusSummary({
     approvals: [],
     workers: [],
     outputLines: [],
   });
 
-  assert.equal(summary, "ready · W work · B auth · N context");
+  assert.doesNotMatch(
+    summary,
+    /N context/i,
+    "N context shortcut must be removed with research tab",
+  );
   assert.doesNotMatch(summary, /research/i);
+  assert.match(summary, /W work/);
+  assert.match(summary, /B auth/);
 });
 
 test("buildMcpInspectorLines separates configured servers from unchecked health", () => {
@@ -933,9 +815,21 @@ test("getSessionCenterActionShortcut maps direct utility keys", () => {
   assert.equal(getSessionCenterActionShortcut("b"), "browser-login");
   assert.equal(getSessionCenterActionShortcut("v"), undefined);
   assert.equal(getSessionCenterActionShortcut("w"), "work-session");
-  assert.equal(getSessionCenterActionShortcut("s"), "research-status");
-  assert.equal(getSessionCenterActionShortcut("r"), "new-research");
-  assert.equal(getSessionCenterActionShortcut("n"), "new-research");
+  assert.equal(
+    getSessionCenterActionShortcut("s"),
+    undefined,
+    "s must no longer map to research-status",
+  );
+  assert.equal(
+    getSessionCenterActionShortcut("r"),
+    undefined,
+    "r must no longer map to new-research",
+  );
+  assert.equal(
+    getSessionCenterActionShortcut("n"),
+    undefined,
+    "n must no longer map to new-research",
+  );
   assert.equal(getSessionCenterActionShortcut("d"), "doctor");
   assert.equal(getSessionCenterActionShortcut("m"), "mcp-list");
   assert.equal(getSessionCenterActionShortcut("i"), "mcp-inspect");
@@ -948,27 +842,43 @@ test("getSessionCenterViewShortcut maps numeric tab keys to unified shell tabs",
   assert.equal(getSessionCenterViewShortcut("1"), "work");
   assert.equal(getSessionCenterViewShortcut("2"), "sessions");
   assert.equal(getSessionCenterViewShortcut("3"), "mcp");
-  assert.equal(getSessionCenterViewShortcut("4"), "research");
+  assert.equal(
+    getSessionCenterViewShortcut("4"),
+    undefined,
+    "key 4 must no longer map to the removed research view",
+  );
   assert.equal(getSessionCenterViewShortcut("9"), undefined);
 });
 
 test("getImmediateActionShortcut maps uppercase run-now hotkeys", () => {
   assert.equal(getImmediateActionShortcut("W"), "work-session");
   assert.equal(getImmediateActionShortcut("B"), "browser-login");
-  assert.equal(getImmediateActionShortcut("S"), "research-status");
+  assert.equal(
+    getImmediateActionShortcut("S"),
+    undefined,
+    "S must no longer map to research-status",
+  );
   assert.equal(getImmediateActionShortcut("D"), "doctor");
   assert.equal(getImmediateActionShortcut("M"), "mcp-list");
   assert.equal(getImmediateActionShortcut("I"), "mcp-inspect");
   assert.equal(getImmediateActionShortcut("A"), "mcp-add");
   assert.equal(getImmediateActionShortcut("X"), "mcp-remove");
-  assert.equal(getImmediateActionShortcut("N"), "new-research");
-  assert.equal(getImmediateActionShortcut("R"), "new-research");
+  assert.equal(
+    getImmediateActionShortcut("N"),
+    undefined,
+    "N must no longer map to new-research",
+  );
+  assert.equal(
+    getImmediateActionShortcut("R"),
+    undefined,
+    "R must no longer map to new-research",
+  );
 });
 
 test("shouldCaptureDashboardInput yields to embedded work pane input while the Work tab is active", () => {
   assert.equal(shouldCaptureDashboardInput("work", true), false);
   assert.equal(shouldCaptureDashboardInput("sessions", true), true);
-  assert.equal(shouldCaptureDashboardInput("research", true), true);
+  assert.equal(shouldCaptureDashboardInput("mcp", true), true);
   assert.equal(shouldCaptureDashboardInput("work", false), true);
 });
 
@@ -990,23 +900,19 @@ test("shouldReturnToWorkOnEscape applies to every non-work top-level tab only", 
     true,
   );
   assert.equal(
-    shouldReturnToWorkOnEscape("research", { escape: true }, topLevel, false),
-    true,
-  );
-  assert.equal(
     shouldReturnToWorkOnEscape("work", { escape: true }, topLevel, false),
     false,
   );
   assert.equal(
-    shouldReturnToWorkOnEscape("research", { escape: false }, topLevel, false),
+    shouldReturnToWorkOnEscape("mcp", { escape: false }, topLevel, false),
     false,
   );
   assert.equal(
-    shouldReturnToWorkOnEscape("research", { escape: true }, detailOpen, false),
+    shouldReturnToWorkOnEscape("sessions", { escape: true }, detailOpen, false),
     false,
   );
   assert.equal(
-    shouldReturnToWorkOnEscape("research", { escape: true }, topLevel, true),
+    shouldReturnToWorkOnEscape("sessions", { escape: true }, topLevel, true),
     false,
   );
 });
@@ -1041,15 +947,6 @@ test("getSessionCenterEscapeHint describes the next visible Escape action", () =
   );
   assert.equal(
     getSessionCenterEscapeHint({
-      view: "research",
-      detailOpen: true,
-      hasSelectedApproval: false,
-      hasEmbeddedWorkPane: true,
-    }),
-    "Esc close",
-  );
-  assert.equal(
-    getSessionCenterEscapeHint({
       view: "mcp",
       detailOpen: false,
       hasSelectedApproval: true,
@@ -1065,7 +962,6 @@ test("buildSessionCenterStatusLine gives each Escape screen tab an honest page s
       view: "sessions",
       savedSessionCount: 3,
       mcpServerCount: 2,
-      researchRunCount: 1,
       detailOpen: false,
       hasSelectedApproval: false,
       hasEmbeddedWorkPane: true,
@@ -1077,91 +973,12 @@ test("buildSessionCenterStatusLine gives each Escape screen tab an honest page s
       view: "mcp",
       savedSessionCount: 3,
       mcpServerCount: 2,
-      researchRunCount: 1,
       detailOpen: false,
       hasSelectedApproval: false,
       hasEmbeddedWorkPane: true,
     }),
     "MCP · 2 server(s) · A add · X remove · Esc work",
   );
-  assert.equal(
-    buildSessionCenterStatusLine({
-      view: "research",
-      savedSessionCount: 3,
-      mcpServerCount: 2,
-      researchRunCount: 1,
-      detailOpen: true,
-      hasSelectedApproval: false,
-      hasEmbeddedWorkPane: true,
-    }),
-    "Context · focus scan · Enter run · Esc close",
-  );
-});
-
-test("shouldOpenResearchPromptLane makes Research prompt page-native", () => {
-  const topLevel = {
-    column: "sessions",
-    sessionIndex: 0,
-    actionIndex: 4,
-    detailOpen: false,
-  };
-  const detailOpen = { ...topLevel, detailOpen: true };
-  const actionColumn = { ...topLevel, column: "actions" };
-
-  assert.equal(
-    shouldOpenResearchPromptLane("research", "r", {}, topLevel, false),
-    true,
-  );
-  assert.equal(
-    shouldOpenResearchPromptLane("research", "R", {}, topLevel, false),
-    true,
-  );
-  assert.equal(
-    shouldOpenResearchPromptLane(
-      "research",
-      "",
-      { return: true },
-      topLevel,
-      false,
-    ),
-    true,
-  );
-  assert.equal(
-    shouldOpenResearchPromptLane("sessions", "r", {}, topLevel, false),
-    false,
-  );
-  assert.equal(
-    shouldOpenResearchPromptLane("research", "r", {}, detailOpen, false),
-    false,
-  );
-  assert.equal(
-    shouldOpenResearchPromptLane("research", "r", {}, topLevel, true),
-    false,
-  );
-  assert.equal(
-    shouldOpenResearchPromptLane(
-      "research",
-      "",
-      { return: true },
-      actionColumn,
-      false,
-    ),
-    false,
-  );
-});
-
-test("dashboard shell does not let the Research page prompt hijack action Enter", () => {
-  const source = readFileSync(
-    path.join(workspaceRoot, "packages/tui/src/dashboard-shell.tsx"),
-    "utf8",
-  );
-  const promptBranch = source.match(
-    /if \(\s*[\s\S]{0,120}shouldOpenResearchPromptLane\([\s\S]*?\)\s*\) \{/,
-  )?.[0];
-
-  assert.ok(promptBranch);
-  assert.match(promptBranch, /centerState\.column === "sessions"/);
-  assert.doesNotMatch(promptBranch, /selectedAction\?\.id === "new-research"/);
 });
 
 test("dashboard shell keeps normal action runs out of prompt detail mode", () => {

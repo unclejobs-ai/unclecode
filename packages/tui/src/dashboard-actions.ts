@@ -27,14 +27,6 @@ export type SessionCenterSession = {
   readonly worktreeBranch?: string | null;
 };
 
-export type SessionCenterResearchRun = {
-  readonly sessionId: string;
-  readonly prompt: string;
-  readonly status: "completed" | "failed" | "unknown";
-  readonly summary: string;
-  readonly timestamp: string | null;
-};
-
 export type SessionCenterAction = {
   readonly id: string;
   readonly label: string;
@@ -42,7 +34,7 @@ export type SessionCenterAction = {
   readonly description: string;
 };
 
-export type SessionCenterActionView = "work" | "sessions" | "mcp" | "research";
+export type SessionCenterActionView = "work" | "sessions" | "mcp";
 
 export type SessionCenterModel = {
   readonly title: string;
@@ -58,11 +50,6 @@ export type SessionCenterModel = {
     trustTier: string;
     originLabel: string;
   }[];
-  readonly latestResearchSessionId: string | null;
-  readonly latestResearchSummary: string | null;
-  readonly latestResearchTimestamp: string | null;
-  readonly researchRunCount: number;
-  readonly recentResearchRuns: readonly SessionCenterResearchRun[];
   readonly primarySessions: readonly SessionCenterSession[];
   readonly utilityActions: readonly SessionCenterAction[];
   readonly emptyState: string;
@@ -162,18 +149,6 @@ export const SESSION_CENTER_ACTIONS: readonly SessionCenterAction[] = [
     description: "Clear locally stored UncleCode auth credentials.",
   },
   {
-    id: "new-research",
-    label: "N Focus",
-    command: "unclecode research run",
-    description: "Optional: focus Work context on a specific task before the next prompt.",
-  },
-  {
-    id: "research-status",
-    label: "S Latest",
-    command: "unclecode research status",
-    description: "Show the latest saved Work context refresh.",
-  },
-  {
     id: "mcp-list",
     label: "M MCP",
     command: "unclecode mcp list",
@@ -209,10 +184,9 @@ const VISIBLE_SESSION_CENTER_ACTION_IDS_BY_VIEW: Record<
   SessionCenterActionView,
   readonly string[]
 > = {
-  work: ["work-session", "new-research", "mcp-list", "doctor"],
-  sessions: ["work-session", "new-research", "doctor"],
+  work: ["work-session", "mcp-list", "doctor"],
+  sessions: ["work-session", "doctor"],
   mcp: ["mcp-add", "mcp-remove", "mcp-list", "mcp-inspect"],
-  research: ["new-research", "research-status"],
 } as const;
 
 export function getVisibleSessionCenterActionsForView(
@@ -276,11 +250,6 @@ export function createSessionCenterModel(input: {
     trustTier: string;
     originLabel: string;
   }[];
-  latestResearchSessionId?: string | null;
-  latestResearchSummary?: string | null;
-  latestResearchTimestamp?: string | null;
-  researchRunCount?: number;
-  recentResearchRuns?: readonly SessionCenterResearchRun[];
   sessions: readonly SessionCenterSession[];
 }): SessionCenterModel {
   return {
@@ -292,11 +261,6 @@ export function createSessionCenterModel(input: {
     sessionCount: input.sessionCount ?? input.sessions.length,
     mcpServerCount: input.mcpServerCount ?? 0,
     mcpServers: input.mcpServers ?? [],
-    latestResearchSessionId: input.latestResearchSessionId ?? null,
-    latestResearchSummary: input.latestResearchSummary ?? null,
-    latestResearchTimestamp: input.latestResearchTimestamp ?? null,
-    researchRunCount: input.researchRunCount ?? 0,
-    recentResearchRuns: input.recentResearchRuns ?? [],
     primarySessions: input.sessions.slice(0, 6),
     utilityActions: SESSION_CENTER_ACTIONS,
     emptyState:

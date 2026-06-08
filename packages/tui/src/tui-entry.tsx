@@ -37,21 +37,6 @@ export function createDashboardElement(
         ? { mcpServerCount: props.mcpServerCount }
         : {})}
       {...(props.mcpServers ? { mcpServers: props.mcpServers } : {})}
-      {...(props.latestResearchSessionId !== undefined
-        ? { latestResearchSessionId: props.latestResearchSessionId }
-        : {})}
-      {...(props.latestResearchSummary !== undefined
-        ? { latestResearchSummary: props.latestResearchSummary }
-        : {})}
-      {...(props.latestResearchTimestamp !== undefined
-        ? { latestResearchTimestamp: props.latestResearchTimestamp }
-        : {})}
-      {...(props.researchRunCount !== undefined
-        ? { researchRunCount: props.researchRunCount }
-        : {})}
-      {...(props.recentResearchRuns !== undefined
-        ? { recentResearchRuns: props.recentResearchRuns }
-        : {})}
       {...(props.initialSelectedSessionId
         ? { initialSelectedSessionId: props.initialSelectedSessionId }
         : {})}

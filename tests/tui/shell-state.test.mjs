@@ -11,7 +11,7 @@ const baseHomeState = {
   authLabel: "none",
   sessionCount: 1,
   mcpServerCount: 0,
-  latestResearchSummary: null,
+  mcpServers: [],
   sessions: [
     {
       sessionId: "session-alpha",
@@ -119,7 +119,6 @@ test("reduceShellEvent appends completed activity entries and refreshes home sta
       ...baseHomeState,
       modeLabel: "analyze",
       sessionCount: 2,
-      latestResearchSummary: "Refreshed Work context",
       sessions: [
         {
           sessionId: "research-1",
@@ -138,7 +137,7 @@ test("reduceShellEvent appends completed activity entries and refreshes home sta
   assert.equal(next.activityEntries[0]?.id, "research-1");
   assert.equal(next.homeState.sessionCount, 2);
   assert.equal(next.homeState.modeLabel, "analyze");
-  assert.equal(next.view, "research");
+  assert.equal(next.view, "work");
   assert.deepEqual(next.outputLines, ["Work context refreshed", "Saved locally: /tmp/research.md"]);
   assert.match(next.traceEntries[0]?.message ?? "", /completed/);
 });

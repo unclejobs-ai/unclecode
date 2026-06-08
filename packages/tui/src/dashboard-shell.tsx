@@ -34,7 +34,6 @@ import {
   handleSessionCenterInput,
   resolveWorkPaneNavigationMode,
   shouldCaptureDashboardInput,
-  shouldOpenResearchPromptLane,
   shouldRenderEmbeddedWorkPaneFullscreen,
   shouldReturnToWorkOnEscape,
 } from "./dashboard-navigation.js";
@@ -42,7 +41,6 @@ import { truncateForDisplayWidth } from "./text-width.js";
 import {
   createInitialShellState,
   reduceShellEvent,
-  type TuiShellFocusState,
   type TuiShellHomeState,
   type TuiShellState,
 } from "./shell-state.js";
@@ -88,11 +86,9 @@ import {
   HeaderChrome,
   McpServerList,
   prettifyWorkerDetail,
-  ResearchRunList,
   type SessionCenterResolvedState,
   SessionList,
   StatusBar,
-  VIEW_TABS,
   ViewTabs,
 } from "./dashboard-components.js";
 
@@ -116,8 +112,6 @@ function getSessionCenterSectionLabel(view: TuiShellState["view"]): string {
       return "history";
     case "mcp":
       return "mcp config";
-    case "research":
-      return "workspace context";
   }
 }
 
@@ -125,8 +119,6 @@ function getPrimaryPaneTitle(view: TuiShellState["view"]): string {
   switch (view) {
     case "mcp":
       return "Servers";
-    case "research":
-      return "Context";
     case "work":
       return "Sessions";
     case "sessions":
@@ -138,8 +130,6 @@ function getDetailPaneTitle(view: TuiShellState["view"]): string {
   switch (view) {
     case "mcp":
       return "MCP detail";
-    case "research":
-      return "Work context";
     case "work":
       return "Work detail";
     case "sessions":
@@ -182,7 +172,7 @@ function getDashboardLayout(columns: number): {
 }
 
 function isPromptActionId(actionId: string | undefined): boolean {
-  return actionId === "new-research" || actionId === "api-key-login" || actionId === "mcp-add";
+  return actionId === "api-key-login" || actionId === "mcp-add";
 }
 
 export type DashboardProps = TuiRenderOptions<TuiShellHomeState> & {
@@ -204,11 +194,6 @@ export function Dashboard(props: DashboardProps) {
     sessionCount: props.sessionCount ?? props.sessions?.length ?? 0,
     mcpServerCount: props.mcpServerCount ?? 0,
     mcpServers: props.mcpServers ?? [],
-    latestResearchSessionId: props.latestResearchSessionId ?? null,
-    latestResearchSummary: props.latestResearchSummary ?? null,
-    latestResearchTimestamp: props.latestResearchTimestamp ?? null,
-    researchRunCount: props.researchRunCount ?? 0,
-    recentResearchRuns: props.recentResearchRuns ?? [],
     sessions: props.sessions ?? [],
     bridgeLines: props.bridgeLines ?? [],
     memoryLines: props.memoryLines ?? [],
@@ -236,11 +221,6 @@ export function Dashboard(props: DashboardProps) {
     sessionCount: shellState.homeState.sessionCount,
     mcpServerCount: shellState.homeState.mcpServerCount,
     mcpServers: shellState.homeState.mcpServers,
-    latestResearchSessionId: shellState.homeState.latestResearchSessionId,
-    latestResearchSummary: shellState.homeState.latestResearchSummary,
-    latestResearchTimestamp: shellState.homeState.latestResearchTimestamp,
-    researchRunCount: shellState.homeState.researchRunCount,
-    recentResearchRuns: shellState.homeState.recentResearchRuns ?? [],
     sessions: shellState.homeState.sessions,
   });
   const centerState = shellState.focus as SessionCenterResolvedState;
@@ -264,18 +244,11 @@ export function Dashboard(props: DashboardProps) {
 
   const selectedSession = model.primarySessions[centerState.sessionIndex];
   const selectedAction = model.utilityActions[centerState.actionIndex];
-  const researchActionIndex = model.utilityActions.findIndex(
-    (action) => action.id === "new-research",
-  );
-  const researchAction =
-    researchActionIndex >= 0 ? model.utilityActions[researchActionIndex] : undefined;
   const sessionCommands = model.primarySessions.map((session) => `unclecode resume ${session.sessionId}`);
   const primaryItemCount =
     shellState.view === "mcp"
       ? model.mcpServers.length
-      : shellState.view === "research"
-        ? model.recentResearchRuns.length
-        : model.primarySessions.length;
+      : model.primarySessions.length;
   const openWorkPane = (forwardedArgs: readonly string[] = []): boolean => {
     const navigationMode = resolveWorkPaneNavigationMode({
       forwardedArgs,
@@ -359,7 +332,6 @@ export function Dashboard(props: DashboardProps) {
     view: shellState.view,
     savedSessionCount: model.primarySessions.length,
     mcpServerCount: model.mcpServerCount,
-    researchRunCount: model.researchRunCount,
     detailOpen: centerState.detailOpen,
     hasSelectedApproval: Boolean(selectedApproval),
     hasEmbeddedWorkPane: Boolean(props.renderWorkPane),
@@ -373,9 +345,9 @@ export function Dashboard(props: DashboardProps) {
   const openContextView = () => {
     dispatch({
       type: "focus.changed",
-      focus: createSessionCenterFocusForView("research", centerState),
+      focus: createSessionCenterFocusForView("sessions", centerState),
     });
-    dispatch({ type: "view.changed", view: "research" });
+    dispatch({ type: "view.changed", view: "sessions" });
 
     if (!props.refreshHomeState) {
       return;
@@ -388,107 +360,6 @@ export function Dashboard(props: DashboardProps) {
       .catch(() => undefined);
   };
   const renderFullscreenWorkPane = shouldRenderEmbeddedWorkPaneFullscreen(shellState.view, Boolean(props.renderWorkPane));
-
-  const openResearchPromptLane = () => {
-    dispatch({
-      type: "focus.changed",
-      focus: {
-        ...centerState,
-        column: "sessions",
-        ...(researchActionIndex >= 0 ? { actionIndex: researchActionIndex } : {}),
-        detailOpen: true,
-        shouldExit: false,
-        selectedCommand: undefined,
-      },
-    });
-  };
-
-  const runResearchPrompt = (prompt: string) => {
-    const runAction = props.runAction;
-    if (!runAction || !researchAction) {
-      return;
-    }
-
-    void (async () => {
-      dispatch({ type: "action.started", actionId: researchAction.id });
-      dispatch({
-        type: "worker.progressed",
-        worker: {
-          id: researchAction.id,
-          label: researchAction.label,
-          status: "running",
-          detail: prettifyWorkerDetail("assembling context"),
-        },
-      });
-      try {
-        const lines = await runAction({
-          actionId: researchAction.id,
-          prompt,
-          onProgress: (line) =>
-            dispatch({
-              type: "worker.progressed",
-              worker: {
-                id: researchAction.id,
-                label: researchAction.label,
-                status: "running",
-                detail: prettifyWorkerDetail(line),
-              },
-            }),
-        });
-        dispatch({
-          type: "worker.progressed",
-          worker: {
-            id: researchAction.id,
-            label: researchAction.label,
-            status: "running",
-            detail: prettifyWorkerDetail("saving context"),
-          },
-        });
-        const refreshedHomeState = props.refreshHomeState
-          ? await props.refreshHomeState()
-          : shellState.homeState;
-        dispatch({
-          type: "action.completed",
-          entry: {
-            id: `${researchAction.id}-${Date.now()}`,
-            source: researchAction.id,
-            title: `Context: ${prompt}`,
-            timestamp: new Date().toISOString(),
-            lines,
-            tone: lines.some((line) => /failed/i.test(line)) ? "warning" : "success",
-          },
-          outputLines: lines,
-          homeState: refreshedHomeState,
-        });
-        setResearchDraft("");
-        dispatch({
-          type: "focus.changed",
-          focus: {
-            ...centerState,
-            column: "sessions",
-            ...(researchActionIndex >= 0 ? { actionIndex: researchActionIndex } : {}),
-            detailOpen: false,
-            shouldExit: false,
-            selectedCommand: undefined,
-          },
-        });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        dispatch({
-          type: "action.failed",
-          entry: {
-            id: `${researchAction.id}-error-${Date.now()}`,
-            source: researchAction.id,
-            title: `Context: ${prompt}`,
-            timestamp: new Date().toISOString(),
-            lines: [message],
-            tone: "warning",
-          },
-          outputLines: [message],
-        });
-      }
-    })().catch(() => undefined);
-  };
 
   const getSelectedMcpServerName = () =>
     shellState.view === "mcp" ? model.mcpServers[centerState.sessionIndex]?.name : undefined;
@@ -626,22 +497,6 @@ export function Dashboard(props: DashboardProps) {
         openWorkPane();
         return;
       }
-      if (shortcut === "r") {
-        dispatch({
-          type: "focus.changed",
-          focus: {
-            ...createSessionCenterFocusForView("research", centerState),
-            detailOpen: true,
-          },
-        });
-        dispatch({ type: "view.changed", view: "research" });
-        return;
-      }
-      if (shortcut === "n") {
-        openResearchPromptLane();
-        dispatch({ type: "view.changed", view: "research" });
-        return;
-      }
       if (shortcut === "m") {
         dispatch({
           type: "focus.changed",
@@ -712,57 +567,6 @@ export function Dashboard(props: DashboardProps) {
 
     if (shouldReturnToWorkOnEscape(shellState.view, key, centerState, Boolean(selectedApproval))) {
       dispatch({ type: "view.changed", view: "work" });
-      return;
-    }
-
-    if (
-      shellState.view === "research" &&
-      centerState.detailOpen &&
-      !selectedApproval &&
-      (centerState.column === "sessions" || selectedAction?.id === "new-research")
-    ) {
-      if (key.escape) {
-        setResearchDraft("");
-        dispatch({
-          type: "focus.changed",
-          focus: {
-            ...centerState,
-            detailOpen: false,
-            shouldExit: false,
-            selectedCommand: undefined,
-          },
-        });
-        return;
-      }
-      if ((key.ctrl && input.toLowerCase() === "r") || input === "\u0012") {
-        const prompt = researchDraft.trim();
-        if (prompt.length > 0) {
-          runResearchPrompt(prompt);
-        }
-        return;
-      }
-
-      const draftResult = handleResearchDraftInput(researchDraft, input, {
-        return: key.return || isSessionCenterImplicitSubmitInput(input, key),
-        backspace: key.backspace,
-        delete: key.delete,
-      });
-      if (draftResult.submitted) {
-        runResearchPrompt(draftResult.value);
-        return;
-      }
-
-      if (!key.return) {
-        setResearchDraft(draftResult.value);
-      }
-      return;
-    }
-
-    if (
-      centerState.column === "sessions" &&
-      shouldOpenResearchPromptLane(shellState.view, input, key, centerState, Boolean(selectedApproval))
-    ) {
-      openResearchPromptLane();
       return;
     }
 
@@ -865,7 +669,7 @@ export function Dashboard(props: DashboardProps) {
           }
           void (async () => {
             dispatch({ type: "action.started", actionId: promptAction.id });
-            dispatch({ type: "worker.progressed", worker: { id: promptAction.id, label: promptAction.label, status: "running", detail: prettifyWorkerDetail(promptAction.id === "new-research" ? "assembling context" : promptAction.id === "mcp-add" ? "writing project MCP config" : "saving auth") } });
+            dispatch({ type: "worker.progressed", worker: { id: promptAction.id, label: promptAction.label, status: "running", detail: prettifyWorkerDetail(promptAction.id === "mcp-add" ? "writing project MCP config" : "saving auth") } });
             try {
               const lines = await props.runAction?.({
                 actionId: promptAction.id,
@@ -875,7 +679,7 @@ export function Dashboard(props: DashboardProps) {
               const refreshedHomeState = props.refreshHomeState ? await props.refreshHomeState() : shellState.homeState;
               dispatch({
                 type: "action.completed",
-                entry: { id: `${promptAction.id}-${Date.now()}`, source: promptAction.id, title: promptAction.id === "new-research" ? `Context: ${prompt}` : promptAction.label, timestamp: new Date().toISOString(), lines, tone: lines.some((line) => /failed|error/i.test(line)) ? "warning" : "success" },
+                entry: { id: `${promptAction.id}-${Date.now()}`, source: promptAction.id, title: promptAction.label, timestamp: new Date().toISOString(), lines, tone: lines.some((line) => /failed|error/i.test(line)) ? "warning" : "success" },
                 outputLines: lines,
                 homeState: refreshedHomeState,
               });
@@ -884,7 +688,7 @@ export function Dashboard(props: DashboardProps) {
               const message = error instanceof Error ? error.message : String(error);
               dispatch({
                 type: "action.failed",
-                entry: { id: `${promptAction.id}-error-${Date.now()}`, source: promptAction.id, title: promptAction.id === "new-research" ? `Context: ${prompt}` : promptAction.label, timestamp: new Date().toISOString(), lines: [message], tone: "warning" },
+                entry: { id: `${promptAction.id}-error-${Date.now()}`, source: promptAction.id, title: promptAction.label, timestamp: new Date().toISOString(), lines: [message], tone: "warning" },
                 outputLines: [message],
               });
             }
@@ -902,18 +706,18 @@ export function Dashboard(props: DashboardProps) {
       if (draftResult.submitted && runAction) {
         void (async () => {
           dispatch({ type: "action.started", actionId: promptAction.id });
-          dispatch({ type: "worker.progressed", worker: { id: promptAction.id, label: promptAction.label, status: "running", detail: prettifyWorkerDetail(promptAction.id === "new-research" ? "assembling context" : promptAction.id === "mcp-add" ? "writing project MCP config" : "saving auth") } });
+          dispatch({ type: "worker.progressed", worker: { id: promptAction.id, label: promptAction.label, status: "running", detail: prettifyWorkerDetail(promptAction.id === "mcp-add" ? "writing project MCP config" : "saving auth") } });
           try {
             const lines = await runAction({
               actionId: promptAction.id,
               prompt: draftResult.value,
               onProgress: (line) => dispatch({ type: "worker.progressed", worker: { id: promptAction.id, label: promptAction.label, status: "running", detail: prettifyWorkerDetail(line) } }),
             });
-            dispatch({ type: "worker.progressed", worker: { id: promptAction.id, label: promptAction.label, status: "running", detail: prettifyWorkerDetail(promptAction.id === "new-research" ? "saving context" : promptAction.id === "mcp-add" ? "refreshing MCP list" : "refreshing auth") } });
+            dispatch({ type: "worker.progressed", worker: { id: promptAction.id, label: promptAction.label, status: "running", detail: prettifyWorkerDetail(promptAction.id === "mcp-add" ? "refreshing MCP list" : "refreshing auth") } });
             const refreshedHomeState = props.refreshHomeState ? await props.refreshHomeState() : shellState.homeState;
             dispatch({
               type: "action.completed",
-              entry: { id: `${promptAction.id}-${Date.now()}`, source: promptAction.id, title: promptAction.id === "new-research" ? `Context: ${draftResult.value}` : promptAction.label, timestamp: new Date().toISOString(), lines, tone: lines.some((line) => /failed|error/i.test(line)) ? "warning" : "success" },
+              entry: { id: `${promptAction.id}-${Date.now()}`, source: promptAction.id, title: promptAction.label, timestamp: new Date().toISOString(), lines, tone: lines.some((line) => /failed|error/i.test(line)) ? "warning" : "success" },
               outputLines: lines,
               homeState: refreshedHomeState,
             });
@@ -922,7 +726,7 @@ export function Dashboard(props: DashboardProps) {
             const message = error instanceof Error ? error.message : String(error);
             dispatch({
               type: "action.failed",
-              entry: { id: `${promptAction.id}-error-${Date.now()}`, source: promptAction.id, title: promptAction.id === "new-research" ? `Context: ${draftResult.value}` : promptAction.label, timestamp: new Date().toISOString(), lines: [message], tone: "warning" },
+              entry: { id: `${promptAction.id}-error-${Date.now()}`, source: promptAction.id, title: promptAction.label, timestamp: new Date().toISOString(), lines: [message], tone: "warning" },
               outputLines: [message],
             });
           }
@@ -1096,7 +900,7 @@ export function Dashboard(props: DashboardProps) {
                 view={shellState.view}
                 shellState={shellState}
                 model={model}
-                researchDraft={researchDraft}
+                promptDraft={researchDraft}
                 primarySelectionIndex={centerState.sessionIndex}
                 contextLines={contextLines}
                 bridgeLines={shellState.homeState.bridgeLines ?? props.bridgeLines ?? []}
@@ -1127,8 +931,6 @@ export function Dashboard(props: DashboardProps) {
               <Box marginTop={1}>
                 {shellState.view === "mcp" ? (
                   <McpServerList servers={model.mcpServers} selectedIndex={centerState.sessionIndex} isActive={centerState.column === "sessions"} />
-                ) : shellState.view === "research" ? (
-                  <ResearchRunList runs={model.recentResearchRuns} selectedIndex={centerState.sessionIndex} isActive={centerState.column === "sessions"} />
                 ) : (
                   <SessionList sessions={model.primarySessions} selectedIndex={centerState.sessionIndex} isActive={centerState.column === "sessions"} emptyState={model.emptyState} />
                 )}
@@ -1161,7 +963,7 @@ export function Dashboard(props: DashboardProps) {
                   view={shellState.view}
                   shellState={shellState}
                   model={model}
-                  researchDraft={researchDraft}
+                  promptDraft={researchDraft}
                   primarySelectionIndex={centerState.sessionIndex}
                   contextLines={contextLines}
                   bridgeLines={shellState.homeState.bridgeLines ?? props.bridgeLines ?? []}

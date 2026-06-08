@@ -6,7 +6,6 @@ import {
 } from "@unclecode/contracts";
 
 import type {
-  SessionCenterResearchRun,
   SessionCenterSession,
 } from "./dashboard-actions.js";
 import type { TuiShellHomeState, TuiShellState } from "./shell-state.js";
@@ -23,11 +22,6 @@ export type TuiDashboardHomeState = {
     trustTier: string;
     originLabel: string;
   }[];
-  readonly latestResearchSessionId: string | null;
-  readonly latestResearchSummary: string | null;
-  readonly latestResearchTimestamp: string | null;
-  readonly researchRunCount: number;
-  readonly recentResearchRuns?: readonly SessionCenterResearchRun[];
   readonly sessions: readonly SessionCenterSession[];
   readonly bridgeLines?: readonly string[];
   readonly memoryLines?: readonly string[];
@@ -42,11 +36,6 @@ export type TuiRenderOptions<
   readonly sessionCount?: number;
   readonly mcpServerCount?: number;
   readonly mcpServers?: readonly { name: string; transport: string; scope: string; trustTier: string; originLabel: string }[];
-  readonly latestResearchSessionId?: string | null;
-  readonly latestResearchSummary?: string | null;
-  readonly latestResearchTimestamp?: string | null;
-  readonly researchRunCount?: number;
-  readonly recentResearchRuns?: readonly SessionCenterResearchRun[];
   readonly initialSelectedSessionId?: string | undefined;
   readonly initialView?: TuiShellState["view"] | undefined;
   readonly renderWorkPane?: ((controls: {
@@ -73,11 +62,6 @@ export type EmbeddedWorkDashboardSnapshot<
   | "sessionCount"
   | "mcpServerCount"
   | "mcpServers"
-  | "latestResearchSessionId"
-  | "latestResearchSummary"
-  | "latestResearchTimestamp"
-  | "researchRunCount"
-  | "recentResearchRuns"
   | "sessions"
   | "contextLines"
   | "bridgeLines"
@@ -105,21 +89,6 @@ export function extractEmbeddedHomeStatePatch<
       ? { mcpServerCount: props.mcpServerCount }
       : {}),
     ...(props.mcpServers !== undefined ? { mcpServers: props.mcpServers } : {}),
-    ...(props.latestResearchSessionId !== undefined
-      ? { latestResearchSessionId: props.latestResearchSessionId }
-      : {}),
-    ...(props.latestResearchSummary !== undefined
-      ? { latestResearchSummary: props.latestResearchSummary }
-      : {}),
-    ...(props.latestResearchTimestamp !== undefined
-      ? { latestResearchTimestamp: props.latestResearchTimestamp }
-      : {}),
-    ...(props.researchRunCount !== undefined
-      ? { researchRunCount: props.researchRunCount }
-      : {}),
-    ...(props.recentResearchRuns !== undefined
-      ? { recentResearchRuns: props.recentResearchRuns }
-      : {}),
     ...(props.sessions !== undefined ? { sessions: props.sessions } : {}),
     ...(props.bridgeLines !== undefined ? { bridgeLines: props.bridgeLines } : {}),
     ...(props.memoryLines !== undefined ? { memoryLines: props.memoryLines } : {}),
@@ -151,21 +120,6 @@ export function buildEmbeddedWorkPaneRenderOptions<
       : {}),
     ...(input.homeStatePatch.mcpServers !== undefined
       ? { mcpServers: input.homeStatePatch.mcpServers }
-      : {}),
-    ...(input.homeStatePatch.latestResearchSessionId !== undefined
-      ? { latestResearchSessionId: input.homeStatePatch.latestResearchSessionId }
-      : {}),
-    ...(input.homeStatePatch.latestResearchSummary !== undefined
-      ? { latestResearchSummary: input.homeStatePatch.latestResearchSummary }
-      : {}),
-    ...(input.homeStatePatch.latestResearchTimestamp !== undefined
-      ? { latestResearchTimestamp: input.homeStatePatch.latestResearchTimestamp }
-      : {}),
-    ...(input.homeStatePatch.researchRunCount !== undefined
-      ? { researchRunCount: input.homeStatePatch.researchRunCount }
-      : {}),
-    ...(input.homeStatePatch.recentResearchRuns !== undefined
-      ? { recentResearchRuns: input.homeStatePatch.recentResearchRuns }
       : {}),
     ...(input.homeStatePatch.sessions !== undefined
       ? { sessions: input.homeStatePatch.sessions }
@@ -265,22 +219,6 @@ export function createSessionCenterDashboardRenderOptions<
       input.embeddedWorkPane?.mcpServerCount ??
       input.homeState.mcpServerCount,
     mcpServers: input.embeddedWorkPane?.mcpServers ?? input.homeState.mcpServers,
-    latestResearchSessionId:
-      input.embeddedWorkPane?.latestResearchSessionId ??
-      input.homeState.latestResearchSessionId,
-    latestResearchSummary:
-      input.embeddedWorkPane?.latestResearchSummary ??
-      input.homeState.latestResearchSummary,
-    latestResearchTimestamp:
-      input.embeddedWorkPane?.latestResearchTimestamp ??
-      input.homeState.latestResearchTimestamp,
-    researchRunCount:
-      input.embeddedWorkPane?.researchRunCount ??
-      input.homeState.researchRunCount,
-    recentResearchRuns:
-      input.embeddedWorkPane?.recentResearchRuns ??
-      input.homeState.recentResearchRuns ??
-      [],
     ...(input.initialSelectedSessionId
       ? { initialSelectedSessionId: input.initialSelectedSessionId }
       : {}),

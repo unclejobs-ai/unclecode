@@ -16,9 +16,7 @@ function getPreferredActionIndexForView(view: TuiShellState["view"]): number | u
       ? "work-session"
       : view === "mcp"
         ? "mcp-add"
-        : view === "research"
-          ? "new-research"
-          : undefined;
+        : undefined;
   if (!preferredActionId) {
     return undefined;
   }
@@ -348,11 +346,6 @@ export function getSessionCenterActionShortcut(
       return "api-key-login";
     case "l":
       return "auth-logout";
-    case "n":
-    case "r":
-      return "new-research";
-    case "s":
-      return "research-status";
     case "a":
       return "mcp-add";
     case "x":
@@ -378,11 +371,6 @@ export function getImmediateActionShortcut(input: string): string | undefined {
       return "api-key-login";
     case "L":
       return "auth-logout";
-    case "N":
-    case "R":
-      return "new-research";
-    case "S":
-      return "research-status";
     case "A":
       return "mcp-add";
     case "X":
@@ -408,8 +396,6 @@ export function getSessionCenterViewShortcut(
       return "sessions";
     case "3":
       return "mcp";
-    case "4":
-      return "research";
     default:
       return undefined;
   }
@@ -440,9 +426,6 @@ export function getSessionCenterEscapeHint(input: {
   if (input.hasSelectedApproval) {
     return "Esc cancel";
   }
-  if (input.view === "research" && input.detailOpen) {
-    return "Esc close";
-  }
   if (input.detailOpen) {
     return "Esc close";
   }
@@ -456,7 +439,6 @@ export function buildSessionCenterStatusLine(input: {
   readonly view: TuiShellState["view"];
   readonly savedSessionCount: number;
   readonly mcpServerCount: number;
-  readonly researchRunCount: number;
   readonly detailOpen: boolean;
   readonly hasSelectedApproval: boolean;
   readonly hasEmbeddedWorkPane: boolean;
@@ -468,28 +450,7 @@ export function buildSessionCenterStatusLine(input: {
   if (input.view === "mcp") {
     return `MCP · ${String(input.mcpServerCount)} server(s) · A add · X remove · ${escapeHint}`;
   }
-  if (input.view === "research") {
-    return input.detailOpen
-      ? `Context · focus scan · Enter run · ${escapeHint}`
-      : `Context · automatic · N focus · ${escapeHint}`;
-  }
   return `History · ${String(input.savedSessionCount)} saved · ↑↓ select · Enter resume · ${escapeHint}`;
-}
-
-export function shouldOpenResearchPromptLane(
-  view: TuiShellState["view"],
-  input: string,
-  key: { readonly return?: boolean },
-  state: SessionCenterFocusState,
-  hasSelectedApproval: boolean,
-): boolean {
-  return (
-    view === "research" &&
-    !state.detailOpen &&
-    state.column !== "actions" &&
-    !hasSelectedApproval &&
-    (input.toLowerCase() === "n" || input.toLowerCase() === "r" || Boolean(key.return))
-  );
 }
 
 export function resolveWorkPaneNavigationMode(input: {

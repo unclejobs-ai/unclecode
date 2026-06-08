@@ -1,5 +1,3 @@
-import type { SessionCenterResearchRun } from "./dashboard-actions.js";
-
 export type TuiShellSession = {
   readonly sessionId: string;
   readonly state: string;
@@ -20,11 +18,6 @@ export type TuiShellHomeState = {
     trustTier: string;
     originLabel: string;
   }[];
-  readonly latestResearchSessionId: string | null;
-  readonly latestResearchSummary: string | null;
-  readonly latestResearchTimestamp: string | null;
-  readonly researchRunCount: number;
-  readonly recentResearchRuns?: readonly SessionCenterResearchRun[];
   readonly sessions: readonly TuiShellSession[];
   readonly bridgeLines?: readonly string[];
   readonly memoryLines?: readonly string[];
@@ -72,7 +65,7 @@ export type TuiApprovalRequest = {
 
 export type TuiShellState = {
   readonly homeState: TuiShellHomeState;
-  readonly view: "work" | "sessions" | "mcp" | "research";
+  readonly view: "work" | "sessions" | "mcp";
   readonly focus: TuiShellFocusState;
   readonly outputLines: readonly string[];
   readonly activityEntries: readonly TuiActivityEntry[];
@@ -233,7 +226,7 @@ export function reduceShellEvent(state: TuiShellState, event: TuiShellEvent): Tu
       return {
         ...state,
         homeState: event.homeState,
-        view: event.entry.source === "new-research" ? "research" : state.view,
+        view: state.view,
         outputLines: event.outputLines,
         activityEntries: [event.entry, ...state.activityEntries].slice(0, 20),
         traceEntries: appendTraceEntry(state.traceEntries, {
