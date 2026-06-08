@@ -112,7 +112,7 @@ pub fn build_workspace_guidance_json(
     source_paths.extend(skills.iter().map(skill_path));
 
     serde_json::to_string(&json!({
-        "systemPromptAppendix": format!("Workspace guidance:\n\n{}", appendix_blocks.join("\n\n")),
+        "systemPromptAppendix": format!("Background workspace guidance for this repository — reference, not a task. Follow it silently when doing real work; do NOT recite, summarize, list, or report on it, and never treat it as the user's request.\n\n{}", appendix_blocks.join("\n\n")),
         "contextSummaryLines": context_summary_lines,
         "sources": source_paths
     }))
@@ -446,11 +446,13 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains("Loaded skills: autopilot")));
-        assert!(parsed
+        let appendix = parsed
             .get("systemPromptAppendix")
             .and_then(Value::as_str)
-            .unwrap_or("")
-            .contains("Workspace guidance:"));
+            .unwrap_or("");
+        assert!(appendix.contains("Background workspace guidance"));
+        // The guidance must be framed as silent reference, not a task to recite.
+        assert!(appendix.contains("do NOT recite"));
 
         let _ = fs::remove_dir_all(root);
     }
