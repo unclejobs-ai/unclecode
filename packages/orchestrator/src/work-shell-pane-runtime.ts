@@ -44,19 +44,20 @@ export function createWorkShellPaneRuntime<
         : {}
     ),
   };
+  const slashOptionsWithCurrentModel = () => ({
+    ...slashOptions,
+    currentModel: engine.getState().model,
+  });
+
+  getWorkShellSlashSuggestions("/", slashOptionsWithCurrentModel());
+  getWorkShellSlashSuggestions("/model", slashOptionsWithCurrentModel());
 
   return {
     engine,
     browserOAuthAvailable: Boolean(input.browserOAuthAvailable),
     getSuggestions: (value) =>
-      getWorkShellSlashSuggestions(value, {
-        ...slashOptions,
-        currentModel: engine.getState().model,
-      }),
+      getWorkShellSlashSuggestions(value, slashOptionsWithCurrentModel()),
     shouldBlockSlashSubmit: (line) =>
-      shouldBlockSlashSubmit(line, {
-        ...slashOptions,
-        currentModel: engine.getState().model,
-      }),
+      shouldBlockSlashSubmit(line, slashOptionsWithCurrentModel()),
   };
 }

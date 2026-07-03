@@ -435,6 +435,17 @@ test("work-shell submit route helper classifies secure, builtin, prompt, inline,
     command: { kind: "help" },
   });
   assert.deepEqual(resolveWorkShellSubmitRoute({
+    value: "/queue clear",
+    isBusy: false,
+    composerMode: "default",
+    resolveWorkShellSlashCommand: () => undefined,
+    hasInlineCommandRunner: true,
+  }), {
+    kind: "builtin",
+    line: "/queue clear",
+    command: { kind: "queue-clear" },
+  });
+  assert.deepEqual(resolveWorkShellSubmitRoute({
     value: "/review auth flow",
     isBusy: false,
     composerMode: "default",
@@ -638,9 +649,8 @@ test("work-shell builtin helpers resolve panels, transcript entries, and runtime
   assert.equal(traceMode.patch.traceMode, "minimal");
   assert.deepEqual(reasoning.entries.at(-1), { role: "system", text: "Reasoning · Light selected." });
   assert.equal(reasoning.nextReasoning.effort, "low");
-  assert.equal(reasoning.panel.title, "Reasoning picker");
-  assert.ok(reasoning.panel.lines.some((line) => line.includes("Current · Light")));
-  assert.ok(reasoning.panel.lines.some((line) => line.includes("Deep · best for hard changes")));
+  assert.equal(reasoning.panel.title, "Status");
+  assert.deepEqual(reasoning.panel.lines, ["low", "api-key-env"]);
   assert.equal(model?.nextModel, "gpt-4.1-mini");
   assert.equal(model?.shouldUpdateRuntime, true);
   assert.equal(createToolsBuiltinResult("/tools", ["tool-a"]).at(-1)?.text, "tool-a");
@@ -811,7 +821,8 @@ test("work-shell builtin runtime helper orchestrates stateful builtin transition
   assert.equal(runtimeSettings.length, 1);
   assert.equal(runtimeSettings[0]?.reasoning?.effort, "low");
   assert.equal(statePatches[0]?.reasoning?.effort, "low");
-  assert.equal(statePatches[0]?.panel?.title, "Reasoning picker");
+  assert.equal(statePatches[0]?.panel?.title, "Status");
+  assert.ok(statePatches[0]?.panel?.lines.includes("low"));
   assert.equal(openedSessions, 1);
   assert.equal(reloadedContext, 0);
   assert.equal(exited, 0);
@@ -2375,8 +2386,8 @@ test("WorkShellEngine applies /reasoning updates and syncs agent runtime setting
   assert.equal(engine.getState().reasoning.effort, "low");
   assert.equal(calls.runtimeSettings.length, 1);
   assert.equal(calls.runtimeSettings[0]?.reasoning?.effort, "low");
-  assert.equal(engine.getState().panel.title, "Reasoning picker");
-  assert.ok(engine.getState().panel.lines.includes("Current · Light"));
+  assert.equal(engine.getState().panel.title, "Status");
+  assert.ok(engine.getState().panel.lines.includes("reasoning:low"));
   assert.ok(
     engine.getState().entries.some((entry) => entry.text === "Reasoning · Light selected."),
   );
@@ -2598,6 +2609,49 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
   assert.ok(engine.getState().panel.lines.includes("Held back locally"));
   assert.ok(engine.getState().panel.lines.includes("Next answer · Context will be carried into the next answer."));
   assert.equal(engine.getState().panel.lines.some((line) => /\bPacket\b|provider packet|Next model-call packet/.test(line)), false);
+});
+
+test("WorkShellEngine shows a busy spinner state while resolving composer context", async () => {
+  let releaseComposer;
+  let agentCalled = false;
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        agentCalled = true;
+        return { text: `reply:${prompt}` };
+      },
+    },
+    resolveComposerInput: async (value) => new Promise((resolve) => {
+      releaseComposer = () => resolve({
+        prompt: value.trim(),
+        attachments: [],
+        transcriptText: value.trim(),
+      });
+    }),
+  });
+
+  await engine.initialize();
+  const submit = engine.handleSubmit("제대로 되는거 맞냐");
+  for (let attempt = 0; attempt < 100 && !engine.getState().isBusy; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  assert.equal(engine.getState().isBusy, true);
+  assert.equal(engine.getState().busyStatus, "preparing context");
+  assert.equal(agentCalled, false);
+  for (let attempt = 0; attempt < 100 && typeof releaseComposer !== "function"; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.equal(typeof releaseComposer, "function");
+
+  releaseComposer();
+  await submit;
+
+  assert.equal(agentCalled, true);
+  assert.equal(engine.getState().isBusy, false);
 });
 
 test("WorkShellEngine treats /con as the human context shortcut", async () => {
@@ -3179,6 +3233,102 @@ test("WorkShellEngine soft-interrupts a busy turn and ignores late assistant out
   );
 });
 
+test("WorkShellEngine persists an interrupted turn as idle and ignores late failure snapshots", async () => {
+  let releaseTurn;
+  let turnSignal;
+  const { engine, calls } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(_prompt, _attachments, options) {
+        turnSignal = options?.signal;
+        await new Promise((resolve) => {
+          releaseTurn = resolve;
+        });
+        throw new Error("late failure after interrupt");
+      },
+    },
+  });
+
+  await engine.initialize();
+  const turn = engine.handleSubmit("first");
+  for (let attempt = 0; attempt < 400 && !turnSignal; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  engine.interruptTurn();
+  for (let attempt = 0; attempt < 400 && calls.snapshots.at(-1)?.summary !== "Turn interrupted."; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  assert.equal(calls.snapshots.at(-1)?.state, "idle");
+  assert.equal(calls.snapshots.at(-1)?.summary, "Turn interrupted.");
+
+  releaseTurn();
+  await turn;
+
+  assert.equal(
+    calls.snapshots.some((snapshot) => snapshot.state === "requires_action" && /first/.test(snapshot.summary)),
+    false,
+  );
+});
+
+test("WorkShellEngine keeps interrupted queued follow-ups paused across a new turn", async () => {
+  let releaseFirst;
+  let releaseThird;
+  const prompts = [];
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        prompts.push(prompt);
+        if (prompt === "first") {
+          await new Promise((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        if (prompt === "third") {
+          await new Promise((resolve) => {
+            releaseThird = resolve;
+          });
+        }
+        return { text: `reply:${prompt}` };
+      },
+    },
+  });
+
+  await engine.initialize();
+  const firstTurn = engine.handleSubmit("first");
+  while (!engine.getState().isBusy || typeof releaseFirst !== "function") {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  await engine.handleSubmit("second");
+  engine.interruptTurn();
+  assert.equal(engine.getState().queuePaused, true);
+  const thirdTurn = engine.handleSubmit("third");
+  while (typeof releaseThird !== "function") {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  releaseThird();
+  await thirdTurn;
+
+  assert.deepEqual(prompts, ["first", "third"]);
+  await engine.handleSubmit("/queue");
+  assert.ok(engine.getState().panel?.lines.some((line) => line === "Next · #1 · second"));
+
+  releaseFirst();
+  await firstTurn;
+
+  assert.deepEqual(prompts, ["first", "third"]);
+  await engine.handleSubmit("/queue clear");
+  assert.equal(engine.getState().queuePaused, false);
+});
+
 test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
   let releaseFirst;
   const prompts = [];
@@ -3219,6 +3369,71 @@ test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
   await firstTurn;
 
   assert.deepEqual(prompts, ["first", "second"]);
+  assert.ok(engine.getState().entries.some((entry) => /Running queued follow-up #1: second/.test(entry.text)));
+});
+
+test("WorkShellEngine binds queued follow-up chat to a fresh context packet", async () => {
+  let releaseFirst;
+  let packetCalls = 0;
+  const prompts = [];
+  const makePacket = (id) => ({
+    id,
+    version: 1,
+    generatedAt: "2026-06-04T00:00:00.000Z",
+    title: "Next answer context",
+    included: [{
+      id: "workspace-guidance",
+      category: "workspace",
+      label: "AGENTS.md",
+      reason: "repo instructions loaded",
+      preview: "Keep diffs small.",
+      tokenEstimate: 8,
+    }],
+    excluded: [],
+    warnings: [],
+    preview: ["Context will be carried into the next answer."],
+    sourceCounts: { included: 1, excluded: 0, warnings: 0 },
+    tokenEstimate: 8,
+  });
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        prompts.push(prompt);
+        if (/User request:\nfirst$/.test(prompt)) {
+          await new Promise((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        return { text: `reply:${prompt.match(/User request:\n([\s\S]*)$/)?.[1] ?? prompt}` };
+      },
+    },
+    resolveContextPacket: async () => {
+      packetCalls += 1;
+      return makePacket(`packet-${packetCalls}`);
+    },
+  });
+
+  await engine.initialize();
+  const firstTurn = engine.handleSubmit("first");
+  while (!engine.getState().isBusy || typeof releaseFirst !== "function") {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  await engine.handleSubmit("second");
+  assert.ok(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)));
+
+  releaseFirst();
+  await firstTurn;
+
+  assert.equal(packetCalls, 2);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[0] ?? "", /<unclecode_context_packet id="packet-1" version="1">/);
+  assert.match(prompts[0] ?? "", /User request:\nfirst$/);
+  assert.match(prompts[1] ?? "", /<unclecode_context_packet id="packet-2" version="1">/);
+  assert.match(prompts[1] ?? "", /User request:\nsecond$/);
   assert.ok(engine.getState().entries.some((entry) => /Running queued follow-up #1: second/.test(entry.text)));
 });
 

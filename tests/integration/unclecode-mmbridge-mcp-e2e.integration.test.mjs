@@ -11,6 +11,10 @@ const mmbridgeMcpDist = path.resolve(
   workspaceRoot,
   "../mmbridge/packages/mcp/dist/index.js",
 );
+const mmbridgeMcpSdkPackage = path.resolve(
+  workspaceRoot,
+  "../mmbridge/packages/mcp/node_modules/@modelcontextprotocol/sdk/package.json",
+);
 const localLauncher = path.resolve(
   workspaceRoot,
   "scripts/run-mmbridge-mcp.mjs",
@@ -144,12 +148,16 @@ async function callMmbridgeTool({ toolName, args }) {
 }
 
 const hasMmbridgeBuild = fileExists(mmbridgeMcpDist);
+const hasMmbridgeRuntimeDeps = fileExists(mmbridgeMcpSdkPackage);
 
 test(
   "host drives real tools/call mmbridge_doctor via project-local stdio MCP",
   {
     skip:
-      !hasMmbridgeBuild && "mmbridge MCP dist not found; build mmbridge first",
+      (!hasMmbridgeBuild &&
+        "mmbridge MCP dist not found; build mmbridge first") ||
+      (!hasMmbridgeRuntimeDeps &&
+        "mmbridge MCP runtime dependencies not installed; run pnpm install in ../mmbridge"),
     timeout: 30_000,
   },
   async () => {

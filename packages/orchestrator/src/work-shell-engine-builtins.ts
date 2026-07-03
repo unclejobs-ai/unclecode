@@ -478,7 +478,6 @@ export function resolveReasoningBuiltinResult<Reasoning extends WorkShellReasoni
   readonly nextReasoning: Reasoning;
   readonly panel: WorkShellPanel;
 } {
-  void input.buildStatusPanel;
   const parsed = JSON.parse(
     runRustCommandSync(
       ["rust", "ux", "reasoning-builtin-command"],
@@ -502,11 +501,26 @@ export function resolveReasoningBuiltinResult<Reasoning extends WorkShellReasoni
   if (!isReasoningBuiltinResult(parsed)) {
     throw new Error("Rust reasoning builtin command returned an invalid payload.");
   }
+  const nextReasoning = parsed.nextReasoning as Reasoning;
+  const panel = shouldUseStatusPanelForReasoningCommand(input)
+    ? input.buildStatusPanel(nextReasoning, input.authLabel, input.statusContext)
+    : parsed.panel;
   return {
     entries: parsed.entries,
-    nextReasoning: parsed.nextReasoning as Reasoning,
-    panel: parsed.panel,
+    nextReasoning,
+    panel,
   };
+}
+
+function shouldUseStatusPanelForReasoningCommand<Reasoning extends WorkShellReasoningConfig>(input: {
+  readonly line: string;
+  readonly currentReasoning: Reasoning;
+}): boolean {
+  const command = input.line.trim().split(/\s+/)[1];
+  if (!command || input.currentReasoning.support.status !== "supported") {
+    return false;
+  }
+  return command === "default" || input.currentReasoning.support.supportedEfforts.includes(command);
 }
 
 function isReasoningBuiltinResult(value: unknown): value is {

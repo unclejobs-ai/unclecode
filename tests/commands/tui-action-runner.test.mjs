@@ -347,7 +347,7 @@ test("runTuiSessionCenterAction completes browser login inline and writes creden
   }
 });
 
-test("runTuiSessionCenterAction falls back to device oauth when reusable codex client context exists", async () => {
+test("runTuiSessionCenterAction keeps browser oauth from falling back to codex device oauth", async () => {
   const cwd = makeTempWorkspace();
   const fakeHome = path.join(cwd, "home");
 
@@ -360,7 +360,6 @@ test("runTuiSessionCenterAction falls back to device oauth when reusable codex c
       "utf8",
     );
 
-    const credentialsPath = path.join(cwd, "openai.json");
     const lines = await runTuiSessionCenterAction({
       actionId: "browser-login",
       workspaceRoot: cwd,
@@ -368,76 +367,39 @@ test("runTuiSessionCenterAction falls back to device oauth when reusable codex c
         ...process.env,
         HOME: fakeHome,
         OPENAI_OAUTH_CLIENT_ID: "",
-        UNCLECODE_OPENAI_CREDENTIALS_PATH: credentialsPath,
       },
-      openExternalUrl: async () => undefined,
-      fetch: async (url, init) => {
-        if (/\/api\/accounts\/deviceauth\/usercode$/.test(String(url))) {
-          const parsed = JSON.parse(String(init?.body ?? "{}"));
-          assert.equal(parsed.client_id, "client-derived-123");
-          return {
-            ok: true,
-            async json() {
-              return {
-                device_auth_id: "device-auth-1",
-                user_code: "ABCD-EFGH",
-                interval: 0,
-              };
-            },
-          };
-        }
-
-        if (/\/api\/accounts\/deviceauth\/token$/.test(String(url))) {
-          const parsed = JSON.parse(String(init?.body ?? "{}"));
-          assert.equal(parsed.device_auth_id, "device-auth-1");
-          assert.equal(parsed.user_code, "ABCD-EFGH");
-          return {
-            ok: true,
-            async json() {
-              return {
-                authorization_code: "oauth-code-1",
-                code_verifier: "oauth-verifier-1",
-              };
-            },
-          };
-        }
-
-        assert.match(String(url), /\/oauth\/token$/);
-        const parsed = new URLSearchParams(String(init?.body ?? ""));
-        assert.equal(parsed.get("client_id"), "client-derived-123");
-        assert.equal(parsed.get("code"), "oauth-code-1");
-        assert.equal(parsed.get("code_verifier"), "oauth-verifier-1");
-        return {
-          ok: true,
-          async json() {
-            return {
-              access_token: "at_device",
-              refresh_token: "rt_device",
-            };
-          },
-        };
+      fetch: async () => {
+        throw new Error("browser-login must not start Codex device OAuth");
       },
     });
 
-    assert.equal(lines[0], "OAuth login complete.");
-    assert.equal(lines[1], "Auth: oauth-file");
-    assert.match(lines.join("\n"), /ABCD-EFGH/);
-    assert.match(lines.join("\n"), /auth\.openai\.com\/codex\/device/);
+    assert.deepEqual(lines, [
+      "Browser OAuth needs OPENAI_OAUTH_CLIENT_ID for API-ready OAuth.",
+      "Use Device login only for Codex device OAuth; it may not be API-ready for model calls.",
+      "Reliable fallback: unclecode auth login --api-key-stdin.",
+    ]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
 });
 
-test("runTuiSessionCenterAction reports existing oauth auth when browser client id is absent", async () => {
+test("runTuiSessionCenterAction reports oauth recovery when browser client id is absent", async () => {
   const cwd = makeTempWorkspace();
   const credentialsPath = path.join(cwd, "openai.json");
+  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(
+    JSON.stringify({
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      scp: ["openid", "profile", "offline_access"],
+    }),
+  ).toString("base64url");
 
   try {
     writeFileSync(
       credentialsPath,
       JSON.stringify({
         authType: "oauth",
-        accessToken: "header.payload.sig",
+        accessToken: `${header}.${payload}.sig`,
         refreshToken: "rt_existing",
       }),
       "utf8",
@@ -455,9 +417,8 @@ test("runTuiSessionCenterAction reports existing oauth auth when browser client 
     });
 
     assert.deepEqual(lines, [
-      "Saved auth found.",
-      "Auth: oauth-file",
-      "Use `unclecode auth status` to inspect it. The next model request will verify provider access.",
+      "Saved OAuth lacks model.request scope.",
+      "Use API key login now, or set OPENAI_OAUTH_CLIENT_ID for proper browser OAuth.",
     ]);
   } finally {
     rmSync(cwd, { recursive: true, force: true });

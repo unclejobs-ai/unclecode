@@ -37,6 +37,7 @@ type ExtensionManifestPayload = {
 };
 
 const manifestCache = new Map<string, ExtensionManifestPayload>();
+let extensionRegistryCacheGeneration = 0;
 
 function getManifestCacheKey(input: {
   readonly workspaceRoot?: string;
@@ -51,12 +52,17 @@ export function clearExtensionRegistryCache(input?: {
   readonly workspaceRoot?: string;
   readonly userHomeDir?: string;
 }): void {
+  extensionRegistryCacheGeneration += 1;
   if (!input?.workspaceRoot && !input?.userHomeDir) {
     manifestCache.clear();
     return;
   }
 
   manifestCache.delete(getManifestCacheKey(input));
+}
+
+export function getExtensionRegistryCacheGeneration(): number {
+  return extensionRegistryCacheGeneration;
 }
 
 function loadExtensionManifestPayload(input: {

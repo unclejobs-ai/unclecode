@@ -35,6 +35,7 @@ import {
 import {
   appendWorkShellEntries,
   createInitialWorkShellEngineState,
+  createWorkShellBusyStatePatch,
   createWorkShellTraceLinePatch,
   resolveModeDefaultReasoning,
 } from "./work-shell-engine-state.js";
@@ -310,6 +311,7 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly contextPacket?: ContextPacketView | undefined;
   readonly contextIndicator?: string | undefined;
   readonly queuedCount: number;
+  readonly queuePaused: boolean;
 };
 
 export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkShellReasoningConfig> {
@@ -542,13 +544,14 @@ export class WorkShellEngine<
   private readonly recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
   private readonly subscribers = new Set<(state: WorkShellEngineState<Reasoning>) => void>();
   private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
+  private readonly queueDrainSkipTurnEpochs = new Set<number>();
   private queuedCountCache = 0;
   private currentContextSummaryLines: readonly string[];
   private lastSessionSummary: string;
   private drainingQueue = false;
   private activeTurnEpoch = 0;
   private activeTurnAbortController: AbortController | undefined;
-  private skipNextQueueDrain = false;
+  private queueAutoDrainPaused = false;
   private state: WorkShellEngineState<Reasoning>;
 
   constructor(input: WorkShellEngineInput<Attachment, Reasoning, TraceEvent>) {
@@ -703,8 +706,11 @@ export class WorkShellEngine<
       this.appendEntries({ role: "system", text: "No active turn to interrupt." });
       return;
     }
-    this.skipNextQueueDrain = true;
-    this.activeTurnEpoch += 1;
+    const interruptedTurnEpoch = this.activeTurnEpoch;
+    const interruptedIdleEpoch = interruptedTurnEpoch + 1;
+    this.queueDrainSkipTurnEpochs.add(interruptedTurnEpoch);
+    this.queueAutoDrainPaused = this.queuedCountCache > 0;
+    this.activeTurnEpoch = interruptedIdleEpoch;
     this.activeTurnAbortController?.abort();
     const lastTurnDurationMs = this.state.currentTurnStartedAt === undefined
       ? undefined
@@ -718,14 +724,35 @@ export class WorkShellEngine<
       busyStatus: undefined,
       currentTurnStartedAt: undefined,
       streamingAssistantText: undefined,
+      queuePaused: this.queueAutoDrainPaused,
       ...(lastTurnDurationMs !== undefined ? { lastTurnDurationMs } : {}),
     });
+    void this.persistSessionSnapshotForEpoch(interruptedIdleEpoch, "idle", "Turn interrupted.").catch(() => undefined);
   }
 
   private startActiveTurnAbortController(): AbortController {
     const abortController = new AbortController();
     this.activeTurnAbortController = abortController;
     return abortController;
+  }
+
+  private beginSubmitPreparation(): void {
+    this.setState(createWorkShellBusyStatePatch({
+      state: this.state,
+      isBusy: true,
+      busyStatus: "preparing context",
+      currentTurnStartedAt: Date.now(),
+    }));
+  }
+
+  private clearSubmitPreparationIfStillPending(isCurrentTurn: () => boolean): void {
+    if (isCurrentTurn() && this.state.isBusy && this.state.busyStatus === "preparing context") {
+      this.setState({
+        isBusy: false,
+        busyStatus: undefined,
+        currentTurnStartedAt: undefined,
+      });
+    }
   }
 
   private clearActiveTurnAbortController(abortController: AbortController): void {
@@ -814,8 +841,7 @@ export class WorkShellEngine<
     this.activeTurnEpoch = turnEpoch;
 
     await this.executeSubmitRoute(route, pendingAttachments, turnEpoch);
-    if (this.skipNextQueueDrain) {
-      this.skipNextQueueDrain = false;
+    if (this.shouldSkipQueueDrainAfterTurn(turnEpoch)) {
       return;
     }
     await this.drainQueuedSubmits();
@@ -836,16 +862,20 @@ export class WorkShellEngine<
         break;
       case "prompt-command": {
         const abortController = this.startActiveTurnAbortController();
-        const contextPacket = await this.refreshContextPacket();
-        this.setState({
-          panel: this.buildContextPanel(
-            this.currentContextSummaryLines,
-            this.state.bridgeLines,
-            this.state.memoryLines,
-            this.state.traceLines,
-          ),
-        });
+        this.beginSubmitPreparation();
         try {
+          const contextPacket = await this.refreshContextPacket();
+          if (!isCurrentTurn()) {
+            return;
+          }
+          this.setState({
+            panel: this.buildContextPanel(
+              this.currentContextSummaryLines,
+              this.state.bridgeLines,
+              this.state.memoryLines,
+              this.state.traceLines,
+            ),
+          });
           await executeWorkShellPromptCommandSubmit({
             transcriptText: route.line,
             promptCommand: route.promptCommand,
@@ -875,11 +905,16 @@ export class WorkShellEngine<
             pushTraceLine: (traceLine) => {
               if (isCurrentTurn()) this.pushTraceLine(traceLine);
             },
-            persistSessionSnapshot: (sessionState, summary) => this.persistSessionSnapshot(sessionState, summary),
-            ...(this.recordTurn !== undefined ? { recordTurn: this.recordTurn } : {}),
+            persistSessionSnapshot: (sessionState, summary) => this.persistSessionSnapshotForEpoch(turnEpoch, sessionState, summary),
+            ...(this.recordTurn !== undefined
+              ? { recordTurn: (turn) => {
+                if (isCurrentTurn()) this.recordTurn?.(turn);
+              } }
+              : {}),
           });
         } finally {
           this.clearActiveTurnAbortController(abortController);
+          this.clearSubmitPreparationIfStillPending(isCurrentTurn);
         }
         break;
       }
@@ -891,16 +926,20 @@ export class WorkShellEngine<
         break;
       case "chat": {
         const abortController = this.startActiveTurnAbortController();
-        const contextPacket = await this.refreshContextPacket();
-        this.setState({
-          panel: this.buildContextPanel(
-            this.currentContextSummaryLines,
-            this.state.bridgeLines,
-            this.state.memoryLines,
-            this.state.traceLines,
-          ),
-        });
+        this.beginSubmitPreparation();
         try {
+          const contextPacket = await this.refreshContextPacket();
+          if (!isCurrentTurn()) {
+            return;
+          }
+          this.setState({
+            panel: this.buildContextPanel(
+              this.currentContextSummaryLines,
+              this.state.bridgeLines,
+              this.state.memoryLines,
+              this.state.traceLines,
+            ),
+          });
           await executeWorkShellChatSubmit({
             line: route.line,
             resolveComposerInput: this.resolveComposerInput,
@@ -933,11 +972,16 @@ export class WorkShellEngine<
             pushTraceLine: (traceLine) => {
               if (isCurrentTurn()) this.pushTraceLine(traceLine);
             },
-            persistSessionSnapshot: (sessionState, summary) => this.persistSessionSnapshot(sessionState, summary),
-            ...(this.recordTurn !== undefined ? { recordTurn: this.recordTurn } : {}),
+            persistSessionSnapshot: (sessionState, summary) => this.persistSessionSnapshotForEpoch(turnEpoch, sessionState, summary),
+            ...(this.recordTurn !== undefined
+              ? { recordTurn: (turn) => {
+                if (isCurrentTurn()) this.recordTurn?.(turn);
+              } }
+              : {}),
           });
         } finally {
           this.clearActiveTurnAbortController(abortController);
+          this.clearSubmitPreparationIfStillPending(isCurrentTurn);
         }
         break;
       }
@@ -996,6 +1040,11 @@ export class WorkShellEngine<
     } finally {
       this.drainingQueue = false;
     }
+  }
+
+  private shouldSkipQueueDrainAfterTurn(turnEpoch: number): boolean {
+    const wasInterruptedTurn = this.queueDrainSkipTurnEpochs.delete(turnEpoch);
+    return wasInterruptedTurn || this.queueAutoDrainPaused;
   }
 
   private async handleSecureApiKeyEntrySubmit(line: string): Promise<void> {
@@ -1129,6 +1178,18 @@ export class WorkShellEngine<
     }));
   }
 
+  private async persistSessionSnapshotForEpoch(
+    turnEpoch: number,
+    state: "running" | "idle" | "requires_action",
+    summary: string,
+    traceMode = this.state.traceMode,
+  ): Promise<void> {
+    if (turnEpoch !== this.activeTurnEpoch) {
+      return;
+    }
+    await this.persistSessionSnapshot(state, summary, traceMode);
+  }
+
   private async pushQueuedSubmit(line: string): Promise<{ readonly id: number; readonly line: string }> {
     const stdout = await runRustCommand(["rust", "queue", "push-json", this.sessionId, line], this.queueCommandCwd());
     const item = parseQueuedSubmit(stdout);
@@ -1197,6 +1258,9 @@ export class WorkShellEngine<
     await runRustCommand(["rust", "queue", "clear", this.sessionId], this.queueCommandCwd());
     this.setQueuedCount(0);
     this.queuedAttachments.clear();
+    this.queueAutoDrainPaused = false;
+    this.queueDrainSkipTurnEpochs.clear();
+    this.setState({ queuePaused: false });
   }
 
   private async loadQueuedSubmitCount(): Promise<number> {

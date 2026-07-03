@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   clearExtensionRegistryCache,
+  getWorkShellSlashSuggestions,
   loadExtensionConfigOverlays,
   loadExtensionManifestSummaries,
   loadExtensionSlashCommands,
@@ -85,4 +86,41 @@ test("clearExtensionRegistryCache lets /reload pick up changed extension summari
   clearExtensionRegistryCache({ workspaceRoot: cwd });
   const refreshed = loadExtensionManifestSummaries({ workspaceRoot: cwd });
   assert.deepEqual(refreshed[0]?.statusLines, ["v2"]);
+});
+
+test("clearExtensionRegistryCache refreshes cached extension slash suggestions", () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-extension-slash-cache-"));
+  writeManifest(cwd, "focus.json", {
+    name: "focus-tools",
+    commands: [
+      {
+        command: "/focus",
+        routeTo: ["doctor"],
+        description: "Run doctor from a plugin command.",
+      },
+    ],
+  });
+
+  const first = getWorkShellSlashSuggestions("/focus", { workspaceRoot: cwd }).map((item) => item.command);
+  assert.ok(first.includes("/focus"));
+
+  writeManifest(cwd, "focus.json", {
+    name: "focus-tools",
+    commands: [
+      {
+        command: "/focus2",
+        routeTo: ["doctor"],
+        description: "Run refreshed doctor command.",
+      },
+    ],
+  });
+
+  const staleBeforeReload = getWorkShellSlashSuggestions("/focus", { workspaceRoot: cwd }).map((item) => item.command);
+  assert.ok(staleBeforeReload.includes("/focus"));
+  assert.ok(!staleBeforeReload.includes("/focus2"));
+
+  clearExtensionRegistryCache({ workspaceRoot: cwd });
+  const refreshed = getWorkShellSlashSuggestions("/focus", { workspaceRoot: cwd }).map((item) => item.command);
+  assert.ok(!refreshed.includes("/focus"));
+  assert.ok(refreshed.includes("/focus2"));
 });

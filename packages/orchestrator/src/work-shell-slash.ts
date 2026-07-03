@@ -1,7 +1,7 @@
 import { type ProviderId } from "@unclecode/providers";
 
 import { createWorkShellCommandRegistry } from "./command-registry.js";
-import { loadExtensionSlashCommands } from "./extension-registry.js";
+import { getExtensionRegistryCacheGeneration, loadExtensionSlashCommands } from "./extension-registry.js";
 import { runRustCommandSync } from "./rust-command.js";
 
 type WorkShellSlashOptions = {
@@ -10,6 +10,22 @@ type WorkShellSlashOptions = {
   readonly provider?: ProviderId;
   readonly currentModel?: string;
 };
+
+type WorkShellSlashSuggestion = {
+  readonly command: string;
+  readonly description: string;
+};
+
+const WORK_SHELL_MODE_PROFILE_IDS = [
+  "default",
+  "ultrawork",
+  "search",
+  "analyze",
+  "yolo",
+  "plan",
+  "build",
+] as const;
+const workShellSuggestionEntriesCache = new Map<string, readonly WorkShellSlashSuggestion[]>();
 
 function getWorkShellCommandRegistry(
   options?: WorkShellSlashOptions,
@@ -67,12 +83,22 @@ const WORK_SHELL_EXTRA_SUGGESTION_ENTRIES = [
     description: "Follow the current work mode default.",
   },
 ];
+const workShellModelSuggestionCache = new Map<string, readonly WorkShellSlashSuggestion[]>();
 
 export function listWorkShellSlashSuggestionEntries(
   options?: WorkShellSlashOptions,
-): readonly { readonly command: string; readonly description: string }[] {
+): readonly WorkShellSlashSuggestion[] {
+  const cacheKey = JSON.stringify({
+    workspaceRoot: options?.workspaceRoot ?? process.cwd(),
+    userHomeDir: options?.userHomeDir ?? "",
+    extensionRegistryCacheGeneration: getExtensionRegistryCacheGeneration(),
+  });
+  const cached = workShellSuggestionEntriesCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
   const registry = getWorkShellCommandRegistry(options);
-  return [
+  const entries = [
     ...registry.list().flatMap((entry) => [
       { command: entry.command, description: entry.metadata.description },
       ...(entry.metadata.aliases ?? []).map((alias) => ({
@@ -82,6 +108,8 @@ export function listWorkShellSlashSuggestionEntries(
     ]),
     ...WORK_SHELL_EXTRA_SUGGESTION_ENTRIES,
   ];
+  workShellSuggestionEntriesCache.set(cacheKey, entries);
+  return entries;
 }
 
 export function resolveWorkShellSlashCommand(
@@ -128,7 +156,7 @@ function resolveWorkShellSlashCommandWithRust(
 export function getWorkShellSlashSuggestions(
   input: string,
   options?: WorkShellSlashOptions,
-): readonly { readonly command: string; readonly description: string }[] {
+): readonly WorkShellSlashSuggestion[] {
   const normalized = input.trim().replace(/\s+/g, " ").toLowerCase();
   if (!normalized.startsWith("/")) {
     return [];
@@ -168,37 +196,130 @@ export function shouldBlockSlashSubmit(
 function getModelSuggestions(
   normalized: string,
   options?: WorkShellSlashOptions,
-): readonly { readonly command: string; readonly description: string }[] {
+): readonly WorkShellSlashSuggestion[] {
   const provider = options?.provider ?? "openai";
   const currentModel = options?.currentModel ?? "gpt-5.5";
+  const cacheKey = JSON.stringify({
+    workspaceRoot: options?.workspaceRoot ?? process.cwd(),
+    provider,
+    currentModel,
+  });
+  const cached = workShellModelSuggestionCache.get(cacheKey);
+  if (cached !== undefined) {
+    return filterModelSuggestions(cached, normalized);
+  }
   const parsed = JSON.parse(
     runRustCommandSync(
-      ["rust", "ux", "model-suggestions", provider, currentModel, normalized],
+      ["rust", "ux", "model-suggestions", provider, currentModel, "/model"],
       options?.workspaceRoot ?? process.cwd(),
     ),
   ) as unknown;
   if (!Array.isArray(parsed) || !parsed.every(isSlashSuggestion)) {
-    return [{ command: `/model ${currentModel}`, description: "Current model" }];
+    const fallback = [{ command: `/model ${currentModel}`, description: "Current model" }];
+    workShellModelSuggestionCache.set(cacheKey, fallback);
+    return filterModelSuggestions(fallback, normalized);
   }
-  return parsed;
+  workShellModelSuggestionCache.set(cacheKey, parsed);
+  return filterModelSuggestions(parsed, normalized);
+}
+
+function filterModelSuggestions(
+  suggestions: readonly WorkShellSlashSuggestion[],
+  normalized: string,
+): readonly WorkShellSlashSuggestion[] {
+  const query = normalized.slice("/model".length).trim().toLowerCase();
+  if (query.length === 0) {
+    return suggestions;
+  }
+  return suggestions.filter((suggestion) => {
+    const command = suggestion.command.toLowerCase();
+    const modelId = command.slice("/model".length).trim();
+    return modelId.startsWith(query);
+  });
 }
 
 function getSlashSuggestions(
   normalized: string,
-  entries: readonly { readonly command: string; readonly description: string }[],
+  entries: readonly WorkShellSlashSuggestion[],
   options?: WorkShellSlashOptions,
-): readonly { readonly command: string; readonly description: string }[] {
-  const parsed = JSON.parse(
-    runRustCommandSync(
-      ["rust", "ux", "slash-suggestions", normalized],
-      options?.workspaceRoot ?? process.cwd(),
-      JSON.stringify(entries),
-    ),
-  ) as unknown;
-  if (!Array.isArray(parsed) || !parsed.every(isSlashSuggestion)) {
+): readonly WorkShellSlashSuggestion[] {
+  void options;
+  if (!normalized.startsWith("/")) {
     return [];
   }
-  return parsed;
+  if (normalized === "/auth" || normalized.startsWith("/auth ")) {
+    return dedupeSlashSuggestions(
+      entries
+        .filter((entry) => entry.command.startsWith("/auth") || entry.command === "/browser")
+        .sort((left, right) =>
+          authSuggestionOrder(left.command) - authSuggestionOrder(right.command) ||
+          left.command.localeCompare(right.command)),
+    );
+  }
+  if (normalized === "/mode" || normalized.startsWith("/mode ")) {
+    return [
+      ...entries.filter((entry) => entry.command === "/mode status"),
+      ...WORK_SHELL_MODE_PROFILE_IDS.map((mode) => ({
+        command: `/mode set ${mode}`,
+        description: mode === "yolo" ? "Switch to YOLO mode." : `Switch to ${mode} mode.`,
+      })),
+    ].filter((entry) => entry.command.toLowerCase().startsWith(normalized));
+  }
+  const tokens = normalized.split(" ").filter((token) => token.length > 0);
+  return dedupeSlashSuggestions(
+    entries
+      .map((entry) => {
+        const command = entry.command.toLowerCase();
+        if (command.startsWith(normalized)) {
+          return { score: 0, entry };
+        }
+        if (command.includes(normalized)) {
+          return { score: 1, entry };
+        }
+        if (tokens.every((token) => command.includes(token))) {
+          return { score: 2, entry };
+        }
+        return undefined;
+      })
+      .filter((item): item is { readonly score: number; readonly entry: WorkShellSlashSuggestion } => item !== undefined)
+      .sort((left, right) =>
+        left.score - right.score ||
+        left.entry.command.length - right.entry.command.length ||
+        left.entry.command.localeCompare(right.entry.command))
+      .map((item) => item.entry),
+  );
+}
+
+function dedupeSlashSuggestions(entries: readonly WorkShellSlashSuggestion[]): readonly WorkShellSlashSuggestion[] {
+  const seen = new Set<string>();
+  const deduped: WorkShellSlashSuggestion[] = [];
+  for (const entry of entries) {
+    if (seen.has(entry.command)) {
+      continue;
+    }
+    seen.add(entry.command);
+    deduped.push(entry);
+  }
+  return deduped;
+}
+
+function authSuggestionOrder(command: string): number {
+  switch (command) {
+    case "/auth status":
+      return 0;
+    case "/auth login":
+      return 1;
+    case "/auth key":
+      return 2;
+    case "/auth logout":
+      return 3;
+    case "/auth browser":
+      return 4;
+    case "/browser":
+      return 5;
+    default:
+      return 99;
+  }
 }
 
 function isSlashSuggestion(value: unknown): value is { readonly command: string; readonly description: string } {

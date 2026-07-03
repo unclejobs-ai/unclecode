@@ -74,6 +74,7 @@ function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinComm
     "tools",
     "skills",
     "queue",
+    "queue-clear",
     "cancel",
     "harness",
     "auth-key",
