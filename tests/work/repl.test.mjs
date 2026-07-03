@@ -423,7 +423,7 @@ test("formatWorkShellError collapses raw provider failures into operator guidanc
   );
   assert.equal(
     formatWorkShellError("OpenAI request failed with status 401: {\"error\":{\"code\":\"missing_scope\",\"message\":\"Missing scopes: model.request\"}}"),
-    "OpenAI OAuth lacks model.request scope. Use API key login or proper browser OAuth.",
+    "OpenAI OAuth lacks model.request scope for API calls. Use `unclecode auth login --api-key-stdin`, set OPENAI_API_KEY, or use browser OAuth with OPENAI_OAUTH_CLIENT_ID.",
   );
   assert.equal(
     formatWorkShellError([
@@ -1137,6 +1137,32 @@ test("buildSlashSuggestionPanel normalizes remembered already-signed-in auth gui
   ]);
 });
 
+test("buildSlashSuggestionPanel marks non-api-ready oauth distinctly", () => {
+  const panel = buildSlashSuggestionPanel(
+    "/auth",
+    [
+      { command: "/auth status", description: "Show auth source." },
+      { command: "/auth login", description: "Sign in with browser OAuth." },
+      { command: "/auth key", description: "Paste an OpenAI API key." },
+    ],
+    0,
+    "oauth-file-api-blocked",
+    false,
+  );
+
+  assert.deepEqual(panel.lines.slice(0, 9), [
+    "Current",
+    "Auth · OAuth file · API blocked",
+    "Route · Device OAuth",
+    "Saved OAuth is not API-ready. Browser login needs OPENAI_OAUTH_CLIENT_ID.",
+    "Browser OAuth unavailable in this shell.",
+    "",
+    "Next",
+    "/auth status inspects recovery.",
+    "/auth key opens secure API key entry.",
+  ]);
+});
+
 test("refineInlineCommandPanelLines explains browser oauth failure relative to current auth", () => {
   assert.deepEqual(
     refineInlineCommandPanelLines({
@@ -1317,7 +1343,9 @@ test("getConversationLayout gives answer blocks more room than lower-signal note
   const assistantPresentation = getWorkShellEntryPresentation("assistant");
   assert.notEqual(userPresentation.label, assistantPresentation.label);
   assert.notEqual(userPresentation.labelBackgroundColor, assistantPresentation.labelBackgroundColor);
-  assert.notEqual(userPresentation.bodyColor, assistantPresentation.bodyColor);
+  assert.notEqual(userPresentation.railColor, assistantPresentation.railColor);
+  assert.equal(userPresentation.bodyColor, "#0f172a");
+  assert.equal(assistantPresentation.bodyColor, "#0f172a");
   assert.equal(formatWorkShellThinkingLine("high (mode-default)"), "Reasoning · Deep");
   assert.match(
     formatWorkShellStatusLine({
@@ -1338,7 +1366,7 @@ test("getConversationLayout gives answer blocks more room than lower-signal note
       composerHint: "Enter send",
       width: 96,
     }),
-    /gpt-5\.4 · YOLO mode · Saved OAuth/,
+    /gpt-5\.4 · Balanced · YOLO mode · Saved OAuth/,
   );
 });
 

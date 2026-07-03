@@ -65,6 +65,17 @@ test("deriveAuthIssueLines maps saved oauth states into actionable operator guid
     deriveAuthIssueLines({ authIssueMessage: "manual override" }),
     ["manual override"],
   );
+  assert.deepEqual(
+    deriveAuthIssueLines({
+      authStatus: {
+        authType: "oauth",
+        runtime: "codex",
+        expiresAt: null,
+        apiReady: false,
+      },
+    }),
+    ["Auth issue: saved Codex OAuth is not API-ready for OpenAI API tool calling. Use /auth key, OPENAI_API_KEY, or browser OAuth with OPENAI_OAUTH_CLIENT_ID."],
+  );
 });
 
 function buildScopedOutJwt() {
@@ -478,7 +489,7 @@ test("loadWorkShellDashboardProps keeps browser oauth unavailable when only reus
     const element = props.renderWorkPane({ openSessions() {}, syncHomeState() {} });
     const pane = element.props.buildPane({ onExit() {} });
 
-    assert.equal(props.authLabel, "oauth-file");
+    assert.equal(props.authLabel, "oauth-file-api-blocked");
     assert.equal(pane.browserOAuthAvailable, false);
   } finally {
     process.env = originalEnv;
@@ -517,7 +528,7 @@ test("loadWorkShellDashboardProps still opens the shell when saved oauth lacks m
     const props = await loadWorkShellDashboardProps(["--cwd", workspaceRoot]);
 
     assert.equal(props.workspaceRoot, workspaceRoot);
-    assert.equal(props.authLabel, "oauth-file");
+    assert.equal(props.authLabel, "oauth-file-api-blocked");
     assert.ok(props.contextLines.some((line) => /model\.request scope/i.test(line)));
     assert.equal(typeof props.renderWorkPane, "function");
   } finally {

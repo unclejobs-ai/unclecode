@@ -38,7 +38,7 @@ export async function buildFastSetupReport(input: {
     "Next steps:",
     authReady
       ? "1. Auth is ready. You can continue with `unclecode doctor` or `unclecode`."
-      : "1. Set OPENAI_API_KEY, save credentials with `unclecode auth login --api-key-stdin [--org <id>] [--project <id>]`, reuse an existing `~/.codex/auth.json`, or run `unclecode auth login --browser` with OPENAI_OAUTH_CLIENT_ID.",
+      : "1. Set OPENAI_API_KEY, save API-key credentials with `unclecode auth login --api-key-stdin [--org <id>] [--project <id>]`, or run `OPENAI_OAUTH_CLIENT_ID=<client-id> unclecode auth login --browser` for API-ready OAuth. Existing Codex auth (`~/.codex/auth.json`) may be detected for sign-in, but it is not proof of OpenAI API readiness.",
     "2. Run `unclecode doctor` to verify auth, runtime, session-store, and MCP readiness.",
     "3. Run `unclecode mode status` to confirm the active operating profile before starting work.",
   ].join("\n");

@@ -41,6 +41,7 @@ import {
   loadResumedWorkSession,
   resolveRustOpenAIAuth,
   resolveRustOpenAIAuthStatus,
+  type RustOpenAIAuthStatus,
 } from "./work-runtime-session.js";
 import { runWorkspaceGuardianChecks } from "./guardian-checks.js";
 import { createRuntimeCodingAgent } from "./runtime-coding-agent.js";
@@ -71,6 +72,20 @@ async function runInlineCommand(input: {
     ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
     ...(input.onProgress ? { onProgress: input.onProgress } : {}),
   });
+}
+
+function workShellAuthLabelForStatus(
+  authLabel: string,
+  authStatus: RustOpenAIAuthStatus | undefined,
+): string {
+  if (
+    authStatus?.authType === "oauth"
+    && authStatus.apiReady === false
+    && authStatus.activeSource.startsWith("oauth-")
+  ) {
+    return `${authStatus.activeSource}-api-blocked`;
+  }
+  return authLabel;
 }
 
 async function buildWorkShellContextSummary(input: {
@@ -437,7 +452,7 @@ export async function loadWorkCliBootstrap(
 
     directAgent.refreshAuthToken(resolved.status === "ok" ? resolved.bearerToken : "");
     return {
-      authLabel: status.activeSource,
+      authLabel: workShellAuthLabelForStatus(status.activeSource, status),
       authIssueLines: deriveAuthIssueLines({
         ...(status ? { authStatus: status } : {}),
         ...(config.authIssueMessage
@@ -457,6 +472,7 @@ export async function loadWorkCliBootstrap(
     ...(authStatus ? { authStatus } : {}),
     ...(config.authIssueMessage ? { authIssueMessage: config.authIssueMessage } : {}),
   });
+  const authLabel = workShellAuthLabelForStatus(config.authLabel, authStatus);
 
   const refreshHomeState = () =>
     buildTuiHomeState({
@@ -466,7 +482,7 @@ export async function loadWorkCliBootstrap(
     });
   const homeState = createInitialHomeState({
     modeLabel: config.mode,
-    authLabel: config.authLabel,
+    authLabel,
   });
 
   const recorder = createAgentOpsRecorder({
@@ -482,7 +498,7 @@ export async function loadWorkCliBootstrap(
       provider: resolveRuntimeProvider(config.provider),
       model: config.model,
       mode: config.mode,
-      authLabel: config.authLabel,
+      authLabel,
       reasoning: config.reasoning,
       cwd,
       contextSummaryLines: [

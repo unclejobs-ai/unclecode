@@ -4,15 +4,17 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 export type WorkRuntimeAuthIssueInput = {
-  authStatus?: Pick<RustOpenAIAuthStatus, "expiresAt">;
+  authStatus?: Pick<RustOpenAIAuthStatus, "authType" | "runtime" | "expiresAt" | "apiReady">;
   authIssueMessage?: string | undefined;
 };
 
 export type RustOpenAIAuthStatus = {
   readonly activeSource: string;
   readonly authType: string;
+  readonly runtime: "api" | "codex" | null;
   readonly expiresAt: string | null;
   readonly isExpired: boolean;
+  readonly apiReady: boolean;
 };
 
 export type RustResolvedOpenAIAuth = {
@@ -28,13 +30,18 @@ export type RustResolvedOpenAIAuth = {
 };
 
 export function deriveAuthIssueLines(input: WorkRuntimeAuthIssueInput): readonly string[] {
-  return input.authStatus?.expiresAt === "insufficient-scope"
-    ? ["Auth issue: saved OAuth lacks model.request scope. Use /auth key, OPENAI_API_KEY, or browser OAuth with OPENAI_OAUTH_CLIENT_ID."]
-    : input.authStatus?.expiresAt === "refresh-required"
-      ? ["Auth issue: saved OAuth needs refresh. Use /auth login or /auth logout before asking the model to work."]
-      : input.authIssueMessage
-        ? [input.authIssueMessage]
-        : [];
+  if (input.authStatus?.expiresAt === "insufficient-scope") {
+    return ["Auth issue: saved OAuth lacks model.request scope. Use /auth key, OPENAI_API_KEY, or browser OAuth with OPENAI_OAUTH_CLIENT_ID."];
+  }
+  if (input.authStatus?.expiresAt === "refresh-required") {
+    return ["Auth issue: saved OAuth needs refresh. Use /auth login or /auth logout before asking the model to work."];
+  }
+  if (input.authStatus?.authType === "oauth" && input.authStatus.apiReady === false) {
+    return input.authStatus.runtime === "codex"
+      ? ["Auth issue: saved Codex OAuth is not API-ready for OpenAI API tool calling. Use /auth key, OPENAI_API_KEY, or browser OAuth with OPENAI_OAUTH_CLIENT_ID."]
+      : ["Auth issue: saved OAuth is not API-ready for OpenAI API tool calling. Use /auth key, OPENAI_API_KEY, or browser OAuth with OPENAI_OAUTH_CLIENT_ID."];
+  }
+  return input.authIssueMessage ? [input.authIssueMessage] : [];
 }
 
 export async function loadResumedWorkSession(input: {
@@ -142,8 +149,10 @@ export async function resolveRustOpenAIAuthStatus(input: {
   return {
     activeSource: fields.get("activeSource") ?? "none",
     authType: fields.get("authType") ?? "none",
+    runtime: normalizeRuntime(fields.get("runtime")),
     expiresAt: normalizeAuthExpiry(fields.get("expiresAt")),
     isExpired: fields.get("expired") === "yes",
+    apiReady: fields.get("apiReady") === "yes",
   };
 }
 

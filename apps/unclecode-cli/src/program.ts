@@ -191,9 +191,7 @@ async function resolveAuthLoginRuntimeContext(options: AuthLoginCommandOptions):
   const browserClientId = process.env.OPENAI_OAUTH_CLIENT_ID?.trim();
   const reusableClientId = await resolveReusableOpenAIOAuthClientId({ env: process.env });
   const deviceClientId = reusableClientId ?? browserClientId;
-  const shouldUseDevice = Boolean(
-    options.device || (!options.browser && !options.print && !browserClientId && deviceClientId),
-  );
+  const shouldUseDevice = Boolean(options.device);
   const redirectUri =
     process.env.OPENAI_OAUTH_REDIRECT_URI?.trim() || "http://localhost:7777/callback";
   const baseUrl = process.env.OPENAI_OAUTH_BASE_URL?.trim();
@@ -239,7 +237,7 @@ async function handleApiKeyStdinLogin(input: ApiKeyStdinLoginInput): Promise<boo
 
 async function handleSavedAuthLogin(): Promise<boolean> {
   const status = await resolveOpenAIAuthStatus({ env: process.env });
-  if (status.activeSource !== "none" && !status.isExpired) {
+  if (status.activeSource !== "none" && !status.isExpired && status.apiReady) {
     process.stdout.write("Saved auth found.\n");
     process.stdout.write(`Auth: ${status.activeSource}\n`);
     process.stdout.write("Use `unclecode auth status` to inspect it. The next model request will verify provider access.\n");
@@ -248,6 +246,10 @@ async function handleSavedAuthLogin(): Promise<boolean> {
 
   if (status.activeSource !== "none" && status.expiresAt === "insufficient-scope") {
     throw new Error("Saved OAuth was found but it lacks model.request scope for UncleCode API calls. Use unclecode auth login --api-key-stdin, OPENAI_API_KEY, or browser OAuth with OPENAI_OAUTH_CLIENT_ID.");
+  }
+
+  if (status.activeSource !== "none" && status.authType === "oauth" && !status.apiReady) {
+    throw new Error(`Saved OAuth was found at ${status.activeSource} but it is not API-ready for OpenAI API tool calling (runtime: ${status.runtime ?? "none"}). Use \`OPENAI_OAUTH_CLIENT_ID=<client-id> unclecode auth login --browser\` or \`unclecode auth login --api-key-stdin\`.`);
   }
 
   return false;
@@ -265,7 +267,7 @@ function selectAuthLoginMethod(options: AuthLoginCommandOptions, runtimeContext:
   if ((options.browser || options.print) && !runtimeContext.browserClientId) {
     return {
       method: "browser",
-      error: "Browser OAuth needs OPENAI_OAUTH_CLIENT_ID. Reused Codex auth can start device OAuth instead. Run `unclecode auth login --device`.",
+      error: "Browser OAuth needs OPENAI_OAUTH_CLIENT_ID for API-ready OAuth. Reused Codex auth can start device OAuth with `unclecode auth login --device`, but that may not be API-ready for model calls. Use `unclecode auth login --api-key-stdin` as the reliable fallback.",
     };
   }
 
@@ -311,7 +313,7 @@ async function runDeviceAuthLogin(input: DeviceAuthLoginInput): Promise<void> {
 async function runBrowserAuthLogin(input: BrowserAuthLoginInput): Promise<void> {
   const browserPkceClientId = input.runtimeContext.browserClientId;
   if (!browserPkceClientId) {
-    throw new Error("Browser OAuth needs OPENAI_OAUTH_CLIENT_ID. Reused Codex auth can start device OAuth instead. Run `unclecode auth login --device`.");
+    throw new Error("Browser OAuth needs OPENAI_OAUTH_CLIENT_ID for API-ready OAuth. Reused Codex auth can start device OAuth with `unclecode auth login --device`, but that may not be API-ready for model calls. Use `unclecode auth login --api-key-stdin` as the reliable fallback.");
   }
 
   const pkce = createOpenAIPkcePair();
@@ -734,7 +736,7 @@ function registerAuthCommands(program: Command): void {
         if (await handleSavedAuthLogin()) {
           return;
         }
-        throw new Error("OPENAI_OAUTH_CLIENT_ID is required for OAuth login. Existing ~/.codex/auth.json is reused automatically when present.");
+        throw new Error("OPENAI_OAUTH_CLIENT_ID is required for API-ready OAuth login. Use `unclecode auth login --device` only for Codex device OAuth; it may not be API-ready for model calls. Reliable fallback: `unclecode auth login --api-key-stdin`.");
       }
 
       const methodSelection = selectAuthLoginMethod(options, runtimeContext);
@@ -746,7 +748,7 @@ function registerAuthCommands(program: Command): void {
         if (await handleSavedAuthLogin()) {
           return;
         }
-        throw new Error("OPENAI_OAUTH_CLIENT_ID is required for OAuth login. Existing ~/.codex/auth.json is reused automatically when present.");
+        throw new Error("OPENAI_OAUTH_CLIENT_ID is required for API-ready OAuth login. Use `unclecode auth login --device` only for Codex device OAuth; it may not be API-ready for model calls. Reliable fallback: `unclecode auth login --api-key-stdin`.");
       }
 
       if (methodSelection.method === "api-key-stdin") {

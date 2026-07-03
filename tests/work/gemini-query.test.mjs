@@ -239,6 +239,9 @@ test("GeminiProvider.query uses Rust HTTP transport when no SDK client is inject
     assert.equal(observedRequest.method, "POST");
     assert.equal(observedRequest.url, "/v1beta/models/gemini-3.1-flash:generateContent");
     assert.equal(observedRequest.apiKey, "g-test");
+    assert.equal(observedRequest.body.model, undefined);
+    assert.equal(observedRequest.body.config, undefined);
+    assert.equal(typeof observedRequest.body.systemInstruction.parts[0].text, "string");
     assert.equal(observedRequest.body.contents[0].parts[0].text, "hi");
   } finally {
     if (originalBaseUrl === undefined) {
@@ -426,6 +429,14 @@ test("GeminiProvider.runTurn uses Rust HTTP transport for live tool loop when no
     assert.equal(firstRequest.method, "POST");
     assert.equal(firstRequest.url, "/v1beta/models/gemini-3.1-flash:generateContent");
     assert.equal(firstRequest.apiKey, "g-test");
+    assert.equal(firstRequest.body.model, undefined);
+    assert.equal(firstRequest.body.config, undefined);
+    assert.equal(firstRequest.body.toolConfig.functionCallingConfig.mode, "AUTO");
+    assert.equal(firstRequest.body.tools[0].functionDeclarations[0].parametersJsonSchema, undefined);
+    assert.equal(
+      firstRequest.body.tools[0].functionDeclarations[0].parameters.properties.command.type,
+      "string",
+    );
     assert.equal(firstRequest.body.contents[0].parts[0].text, "use tool");
     assert.equal(secondRequest.body.contents[1].parts[0].functionCall.name, "run_shell");
     assert.equal(secondRequest.body.contents[2].parts[0].functionResponse.response.content, "ok");

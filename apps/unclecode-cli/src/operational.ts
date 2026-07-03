@@ -20,6 +20,7 @@ import {
   requestOpenAIDeviceAuthorization,
   resolveOpenAIAuthStatus,
   resolveReusableOpenAIOAuthClientId,
+  type OpenAIAuthStatus,
 } from "@unclecode/providers";
 import { createRuntimeBroker } from "@unclecode/runtime-broker";
 import {
@@ -328,7 +329,7 @@ export async function buildSetupReport(input: {
     "Next steps:",
     authReady
       ? "1. Auth is ready. You can continue with `unclecode doctor` or `unclecode`."
-      : "1. Set OPENAI_API_KEY, save credentials with `unclecode auth login --api-key-stdin [--org <id>] [--project <id>]`, reuse an existing `~/.codex/auth.json`, or run `unclecode auth login --browser` with OPENAI_OAUTH_CLIENT_ID.",
+      : "1. Set OPENAI_API_KEY, save API-key credentials with `unclecode auth login --api-key-stdin [--org <id>] [--project <id>]`, or run `OPENAI_OAUTH_CLIENT_ID=<client-id> unclecode auth login --browser` for API-ready OAuth. Existing Codex auth (`~/.codex/auth.json`) may be detected for sign-in, but it is not proof of OpenAI API readiness.",
     "2. Run `unclecode doctor` to verify auth, runtime, session-store, and MCP readiness.",
     "3. Run `unclecode mode status` to confirm the active operating profile before starting work.",
   ].join("\n");
@@ -369,6 +370,17 @@ export type TuiHomeState = {
   readonly bridgeLines: readonly string[];
   readonly memoryLines: readonly string[];
 };
+
+function workShellAuthLabelFromOpenAIStatus(status: OpenAIAuthStatus): string {
+  if (
+    status.authType === "oauth"
+    && status.apiReady === false
+    && status.activeSource.startsWith("oauth-")
+  ) {
+    return `${status.activeSource}-api-blocked`;
+  }
+  return status.activeSource;
+}
 
 async function readCheckpointFile(pathToFile: string): Promise<SessionListItem | null> {
   try {
@@ -471,7 +483,7 @@ export async function buildTuiHomeState(input: {
 
   return {
     modeLabel: explanation.activeMode.id,
-    authLabel: authStatus.activeSource,
+    authLabel: workShellAuthLabelFromOpenAIStatus(authStatus),
     sessions,
     sessionCount: sessions.length,
     mcpServerCount: registry.entries.length,
@@ -631,11 +643,9 @@ export async function runTuiSessionCenterAction(input: {
     }
     case "browser-login": {
       const browserClientId = input.env.OPENAI_OAUTH_CLIENT_ID?.trim();
-      const reusableClientId = await resolveReusableOpenAIOAuthClientId({ env: input.env });
-      const clientId = browserClientId || reusableClientId;
-      if (!clientId) {
+      if (!browserClientId) {
         const status = await resolveOpenAIAuthStatus({ env: input.env });
-        if (status.activeSource !== "none" && !status.isExpired) {
+        if (status.activeSource !== "none" && !status.isExpired && status.apiReady) {
           return [
             "Saved auth found.",
             `Auth: ${status.activeSource}`,
@@ -648,42 +658,22 @@ export async function runTuiSessionCenterAction(input: {
             "Use API key login now, or set OPENAI_OAUTH_CLIENT_ID for proper browser OAuth.",
           ];
         }
-        return ["OPENAI_OAUTH_CLIENT_ID is required for browser login."];
+        if (status.activeSource !== "none" && status.authType === "oauth" && !status.apiReady) {
+          return [
+            "Saved OAuth is not API-ready for model calls.",
+            "Use API key login now, or set OPENAI_OAUTH_CLIENT_ID for API-ready browser OAuth.",
+          ];
+        }
+        return [
+          "Browser OAuth needs OPENAI_OAUTH_CLIENT_ID for API-ready OAuth.",
+          "Use Device login only for Codex device OAuth; it may not be API-ready for model calls.",
+          "Reliable fallback: unclecode auth login --api-key-stdin.",
+        ];
       }
 
       const baseUrl = input.env.OPENAI_OAUTH_BASE_URL?.trim();
       const credentialsPath = getOpenAICredentialsPath(input.env);
-      if (!browserClientId && reusableClientId) {
-        const deviceClientId = reusableClientId;
-        let deviceUserCode = "";
-        let verificationUri = "";
-
-        await completeOpenAICodexDeviceLogin({
-          clientId: deviceClientId,
-          credentialsPath,
-          ...(baseUrl ? { baseUrl } : {}),
-          ...(input.fetch ? { fetch: input.fetch } : {}),
-          onDeviceCode: async (info) => {
-            deviceUserCode = info.userCode;
-            verificationUri = info.verificationUri;
-            input.onProgress?.("Opening browser…");
-            await Promise.resolve((input.openExternalUrl ?? openExternalUrl)(info.verificationUri)).catch(() => undefined);
-            input.onProgress?.(`Enter code: ${info.userCode}`);
-            input.onProgress?.("Waiting for device approval…");
-          },
-        });
-        input.onProgress?.("Auth ready.");
-
-        return [
-          "OAuth login complete.",
-          "Auth: oauth-file",
-          "Route: device-oauth",
-          ...(deviceUserCode ? [`Code used: ${deviceUserCode}`] : []),
-          ...(verificationUri ? [`Opened: ${verificationUri}`] : []),
-        ];
-      }
-
-      const browserPkceClientId = browserClientId!;
+      const browserPkceClientId = browserClientId;
       const redirectUri = input.env.OPENAI_OAUTH_REDIRECT_URI?.trim() || "http://localhost:7777/callback";
       const pkce = createOpenAIPkcePair();
       const url = buildOpenAIAuthorizationUrl({
