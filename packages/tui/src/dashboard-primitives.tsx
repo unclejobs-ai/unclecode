@@ -4,30 +4,30 @@ import React from "react";
 import { getDisplayWidth } from "./text-width.js";
 
 export const C = {
-  bg: "#0f172a",
-  surface: "#172033",
-  border: "#41516b",
-  borderActive: "#7dd3fc",
-  borderSubtle: "#26364d",
-  text: "#e5eef7",
-  textSecondary: "#c7d2e1",
-  textMuted: "#94a3b8",
-  textFaint: "#64748b",
-  accent: "#5eead4",
-  accentBright: "#7dd3fc",
-  accentDim: "#99f6e4",
-  warning: "#facc15",
-  error: "#f87171",
-  info: "#7dd3fc",
-  success: "#86efac",
-  statusBg: "#102823",
-  statusBgWarning: "#3d2a12",
-  statusBgError: "#3b1d22",
-  tagBg: "#172033",
-  pillBg: "#0f172a",
-  pillFg: "#e5eef7",
-  headerBg: "#0e7490",
-  headerFg: "#ecfeff",
+  bg: "#ffffff",
+  surface: "#f8fafc",
+  border: "#334155",
+  borderActive: "#075985",
+  borderSubtle: "#475569",
+  text: "#0f172a",
+  textSecondary: "#1e293b",
+  textMuted: "#334155",
+  textFaint: "#475569",
+  accent: "#115e59",
+  accentBright: "#075985",
+  accentDim: "#115e59",
+  warning: "#713f12",
+  error: "#991b1b",
+  info: "#075985",
+  success: "#166534",
+  statusBg: "#dcfce7",
+  statusBgWarning: "#fef3c7",
+  statusBgError: "#fee2e2",
+  tagBg: "#e2e8f0",
+  pillBg: "#dbeafe",
+  pillFg: "#082f49",
+  headerBg: "#bae6fd",
+  headerFg: "#082f49",
 } as const;
 
 export const B = {
@@ -58,12 +58,15 @@ export function RoundedPanel(props: {
   const innerW = w - 2;
   const titleStr = props.title ?? "";
   const titleContent = titleStr.length > 0 ? ` ${titleStr} ` : "";
-  const rightPad = Math.max(0, innerW - getDisplayWidth(titleContent));
+  const titleWidth = getDisplayWidth(titleContent);
+  const rightPad = titleStr.length > 0
+    ? Math.max(0, innerW - 1 - titleWidth)
+    : innerW;
 
   return (
     <Box flexDirection="column">
       <Text color={borderColor}>
-        {B.tl}{B.h}{titleContent}{B.h.repeat(rightPad)}{B.tr}
+        {B.tl}{titleStr.length > 0 ? B.h : ""}{titleContent}{B.h.repeat(rightPad)}{B.tr}
       </Text>
       <Box flexDirection="column" paddingLeft={1} paddingRight={1}>
         {props.children}
@@ -101,7 +104,7 @@ export function StatusBadge(props: {
   readonly status: "running" | "queued" | "completed" | "idle";
 }) {
   const colorMap = {
-    running: { fg: C.surface, bg: C.success },
+    running: { fg: C.success, bg: C.statusBg },
     queued: { fg: C.textMuted, bg: C.tagBg },
     completed: { fg: C.accent, bg: C.statusBg },
     idle: { fg: C.textMuted, bg: C.tagBg },

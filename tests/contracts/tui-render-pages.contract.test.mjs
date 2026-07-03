@@ -5,7 +5,17 @@ import test from "node:test";
 import { Box, Text, render } from "ink";
 import React from "react";
 
-import { createDashboardElement } from "../../packages/tui/src/index.tsx";
+import {
+  DetailPanel,
+  McpServerList,
+  SessionList,
+  createDashboardElement,
+  createSessionCenterModel,
+} from "../../packages/tui/src/index.tsx";
+import {
+  applyShellEvents,
+  createInitialShellState,
+} from "../../packages/tui/src/shell-state.ts";
 
 const ANSI_SEQUENCE_PATTERN = String.raw`\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))`;
 
@@ -22,6 +32,40 @@ function createInkInput() {
   input.ref = () => input;
   input.unref = () => input;
   return input;
+}
+
+async function captureInkElement(element, columns = 120) {
+  const stdout = new PassThrough();
+  stdout.columns = columns;
+  stdout.rows = 40;
+  stdout.isTTY = true;
+  let output = "";
+  stdout.on("data", (chunk) => {
+    output += chunk.toString();
+  });
+
+  const stderr = new Writable({
+    write(chunk, _encoding, callback) {
+      output += `\nSTDERR:${chunk.toString()}`;
+      callback();
+    },
+  });
+  stderr.columns = columns;
+  stderr.rows = 40;
+  stderr.isTTY = true;
+
+  const instance = render(element, {
+    stdout,
+    stdin: createInkInput(),
+    stderr,
+    debug: true,
+    patchConsole: false,
+    exitOnCtrlC: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  instance.unmount();
+  instance.cleanup();
+  return stripAnsi(output);
 }
 
 async function captureDashboardFrame(initialView, columns = 120) {
@@ -94,6 +138,75 @@ async function captureDashboardFrame(initialView, columns = 120) {
   instance.cleanup();
   return stripAnsi(output);
 }
+
+test("dashboard trace copy frames agent progress as activity, not raw steps", async () => {
+  const homeState = {
+    modeLabel: "default",
+    authLabel: "api-key-env",
+    sessionCount: 0,
+    mcpServerCount: 0,
+    mcpServers: [],
+    sessions: [],
+  };
+  const shellState = applyShellEvents(
+    createInitialShellState(homeState, { initialView: "work" }),
+    [{ type: "action.started", actionId: "doctor" }],
+  );
+  const model = createSessionCenterModel({
+    workspaceRoot: process.cwd(),
+    ...homeState,
+  });
+  const frame = await captureInkElement(
+    React.createElement(DetailPanel, {
+      selectedSession: undefined,
+      selectedAction: undefined,
+      selectedApproval: undefined,
+      selectedActionId: undefined,
+      view: "work",
+      shellState,
+      model,
+      promptDraft: "",
+      primarySelectionIndex: 0,
+      contextLines: [],
+      bridgeLines: [],
+      memoryLines: [],
+    }),
+  );
+
+  assert.match(frame, /Run activity/);
+  assert.doesNotMatch(frame, /\bSteps\b/);
+});
+
+test("dashboard empty states are structured and name a next action", async () => {
+  const historyEmpty = await captureInkElement(
+    React.createElement(SessionList, {
+      sessions: [],
+      selectedIndex: 0,
+      isActive: true,
+      emptyState: "No saved sessions yet.",
+    }),
+  );
+  const mcpEmpty = await captureInkElement(
+    React.createElement(McpServerList, {
+      servers: [],
+      selectedIndex: 0,
+      isActive: true,
+    }),
+  );
+
+  assert.match(historyEmpty, /No saved sessions yet/);
+  assert.match(historyEmpty, /W\s+start work/);
+  assert.ok(
+    historyEmpty.trim().split(/\n/).length >= 2,
+    "history empty state should not collapse to one bare sentence",
+  );
+  assert.match(mcpEmpty, /No MCP servers configured/);
+  assert.match(mcpEmpty, /M\s+inspect setup/);
+  assert.ok(
+    mcpEmpty.trim().split(/\n/).length >= 2,
+    "MCP empty state should not collapse to one bare sentence",
+  );
+});
 
 async function runDashboardInputScenario(inputValue, options = {}) {
   const stdout = new PassThrough();

@@ -41,20 +41,50 @@ type WorkShellComposerPreviewMode = {
 };
 
 function resolveComposerPreviewMode(value: string): WorkShellComposerPreviewMode {
-  const raw = runRustCommandSync(
-    ["rust", "ux", "composer-preview-mode"],
-    process.cwd(),
-    JSON.stringify({ value }),
-  );
-  const parsed = JSON.parse(raw) as Partial<WorkShellComposerPreviewMode>;
-  if (
-    (parsed.mode !== "empty" && parsed.mode !== "fast" && parsed.mode !== "slow") ||
-    typeof parsed.prompt !== "string" ||
-    typeof parsed.transcriptText !== "string"
-  ) {
-    throw new Error("Invalid Rust composer preview mode payload");
+  const prompt = value.trim();
+  if (prompt.length === 0) {
+    return {
+      mode: "empty",
+      prompt: "",
+      transcriptText: "",
+    };
   }
-  return parsed as WorkShellComposerPreviewMode;
+
+  return {
+    mode: hasComposerFileReferenceToken(prompt) || hasComposerImagePathToken(prompt)
+      ? "slow"
+      : "fast",
+    prompt,
+    transcriptText: prompt,
+  };
+}
+
+function hasComposerFileReferenceToken(value: string): boolean {
+  for (const match of value.matchAll(/@/g)) {
+    const index = match.index ?? 0;
+    if (index > 0 && !/\s/u.test(value[index - 1] ?? "")) {
+      continue;
+    }
+    const rest = value.slice(index + 1);
+    if (rest.startsWith("\"")) {
+      const endQuoteIndex = rest.indexOf("\"", 1);
+      if (endQuoteIndex > 1 && !rest.slice(1, endQuoteIndex).includes("\n")) {
+        return true;
+      }
+      continue;
+    }
+    if (rest.length > 0 && !/^\s/u.test(rest)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasComposerImagePathToken(value: string): boolean {
+  return value
+    .split(/[\s"']+/u)
+    .filter((token) => token.length > 0)
+    .some((token) => /\.(?:png|jpe?g|gif|webp|bmp)$/iu.test(token));
 }
 
 export function shouldUseSlowComposerPreview(value: string): boolean {
@@ -217,6 +247,7 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly composerMode?: "default" | "api-key-entry";
   readonly panel: WorkShellPanel;
   readonly queuedCount?: number | undefined;
+  readonly queuePaused?: boolean | undefined;
 };
 
 export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>

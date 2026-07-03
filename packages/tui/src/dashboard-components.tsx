@@ -33,6 +33,24 @@ function truncateForPane(value: string, maxLength: number): string {
   return truncateForDisplayWidth(value, maxLength);
 }
 
+function EmptyStateBlock(props: {
+  readonly title: string;
+  readonly detail: string;
+  readonly actionKey?: string;
+  readonly actionLabel: string;
+}) {
+  return (
+    <Box flexDirection="column">
+      <Text color={C.text} bold>{props.title}</Text>
+      <Text color={C.textMuted}>{truncateForPane(props.detail, 36)}</Text>
+      <Box marginTop={1} gap={1}>
+        {props.actionKey ? <KeyPill char={props.actionKey} /> : null}
+        <Text color={C.success}>{props.actionLabel}</Text>
+      </Box>
+    </Box>
+  );
+}
+
 export type SessionCenterResolvedState = TuiShellFocusState;
 
 export function HeaderChrome(props: { readonly branch: string; readonly gitStatus: string; readonly workspacePath: string }) {
@@ -117,7 +135,7 @@ export function ViewTabs(props: { activeView: TuiShellState["view"] }) {
           <Box key={tab.view}>
             {isActive ? (
               <>
-                <Text backgroundColor={C.accent} color={C.pillFg} bold>{" "}{tab.key}{" "}</Text>
+                <Text backgroundColor={C.headerBg} color={C.headerFg} bold>{" "}{tab.key}{" "}</Text>
                 <Text color={C.text} bold>{" "}{tab.label}</Text>
               </>
             ) : (
@@ -138,8 +156,20 @@ export function SessionList(props: {
   readonly selectedIndex: number;
   readonly isActive: boolean;
   readonly emptyState: string;
+  readonly emptyStateDetail?: string;
+  readonly emptyStateActionKey?: string;
+  readonly emptyStateActionLabel?: string;
 }) {
-  if (props.sessions.length === 0) return <Text color={C.textMuted}>{props.emptyState}</Text>;
+  if (props.sessions.length === 0) {
+    return (
+      <EmptyStateBlock
+        title={props.emptyState}
+        detail={props.emptyStateDetail ?? "Start a Work session and saved conversations will appear here."}
+        actionKey={props.emptyStateActionKey ?? "W"}
+        actionLabel={props.emptyStateActionLabel ?? "start work"}
+      />
+    );
+  }
   return (
     <Box flexDirection="column" gap={0}>
       {props.sessions.map((session, index) => {
@@ -176,7 +206,14 @@ export function McpServerList(props: {
   readonly isActive: boolean;
 }) {
   if (props.servers.length === 0) {
-    return <Text color={C.textMuted}>No MCP servers. Press M to inspect setup.</Text>;
+    return (
+      <EmptyStateBlock
+        title="No MCP servers configured."
+        detail="Add .mcp.json here or ~/.unclecode/mcp.json."
+        actionKey="M"
+        actionLabel="inspect setup"
+      />
+    );
   }
 
   return (
@@ -274,7 +311,7 @@ export function ActionList(props: {
           <Box key={action.id} gap={1}>
             <Text color={isSelected ? C.accentBright : C.bg}>{isSelected ? "❯" : " "}</Text>
             {shortcutKey ? (
-              <Text backgroundColor={isSelected ? C.accent : C.pillBg} color={isSelected ? C.pillFg : C.pillFg}>{" "}{shortcutKey}{" "}</Text>
+              <Text backgroundColor={isSelected ? C.headerBg : C.pillBg} color={isSelected ? C.headerFg : C.pillFg}>{" "}{shortcutKey}{" "}</Text>
             ) : (
               <Text color={C.textFaint}>·</Text>
             )}
@@ -304,7 +341,7 @@ export function ActionShortcutStrip(props: {
         const shortcutKey = action.label.match(/^[A-Z]/)?.[0] ?? "·";
         return (
           <Box key={action.id}>
-            <Text backgroundColor={isSelected ? C.accent : C.pillBg} color={C.pillFg} bold>{" "}{shortcutKey}{" "}</Text>
+            <Text backgroundColor={isSelected ? C.headerBg : C.pillBg} color={isSelected ? C.headerFg : C.pillFg} bold>{" "}{shortcutKey}{" "}</Text>
             <Text color={isSelected ? C.text : C.textMuted}>{truncateForPane(keyLabel, 9)}</Text>
           </Box>
         );
@@ -629,7 +666,7 @@ export function DetailPanel(props: {
         {/* Live trace */}
         {traceEntries.length > 0 ? (
           <Box flexDirection="column" marginBottom={1}>
-            <Text bold color={C.text}>Steps</Text>
+            <Text bold color={C.text}>Run activity</Text>
             {traceEntries.slice(0, 4).map((entry) => {
               const color = entry.kind === "approval" ? C.warning : entry.kind === "result" ? C.success : entry.level === "low-signal" ? C.textMuted : C.info;
               return (
@@ -663,7 +700,7 @@ export function DetailPanel(props: {
           <Text color={C.textFaint}>·</Text>
           <KeyPill char="B" /><Text color={C.textMuted}>auth</Text>
           <Text color={C.textFaint}>·</Text>
-          <KeyPill char="N" /><Text color={C.textMuted}>context</Text>
+          <KeyPill char="N" /><Text color={C.textMuted}>ctx</Text>
         </Box>
       </Box>
     );

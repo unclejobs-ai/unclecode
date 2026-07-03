@@ -30,3 +30,7 @@ test("formatWorkShellQueueIndicator renders the correct count for multiple items
 test("formatWorkShellQueueIndicator indicator string matches expected format", () => {
   assert.equal(formatWorkShellQueueIndicator(2), "⋯ 2 queued · /queue");
 });
+
+test("formatWorkShellQueueIndicator marks interrupted queues as paused", () => {
+  assert.equal(formatWorkShellQueueIndicator(2, true), "⋯ 2 queued · paused · /queue clear");
+});

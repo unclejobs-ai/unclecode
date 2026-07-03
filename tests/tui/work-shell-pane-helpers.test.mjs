@@ -22,7 +22,7 @@ test("resolveWorkShellPaneTerminalColumns prefers the live stdout width", () => 
 
 
 test("resolveComposerVisibleWidth tracks explicit terminal width changes", () => {
-  assert.equal(resolveComposerVisibleWidth(143), 72);
+  assert.equal(resolveComposerVisibleWidth(143), 133);
   assert.equal(resolveComposerVisibleWidth(48), 38);
   assert.equal(resolveComposerVisibleWidth(18), 12);
 });

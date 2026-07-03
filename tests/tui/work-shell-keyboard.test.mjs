@@ -267,6 +267,38 @@ test("Composer ignores repeated non-text control shortcuts", async () => {
   assert.deepEqual(submittedValues, []);
 });
 
+test("Composer does not append new typing to a just-submitted stale parent value", async () => {
+  const changedValues = [];
+  const submittedValues = [];
+
+  function StickyComposerHarness() {
+    const [value, setValue] = React.useState("");
+    return React.createElement(Composer, {
+      value,
+      onChange: (nextValue) => {
+        changedValues.push(nextValue);
+        setValue(nextValue);
+      },
+      onSubmit: (submittedValue) => {
+        submittedValues.push(submittedValue);
+      },
+    });
+  }
+
+  const { stdin, instance } = renderWithInput(React.createElement(StickyComposerHarness));
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  stdin.write("first\r");
+  await waitForCondition(() => submittedValues.length === 1);
+  stdin.write("second\r");
+  await waitForCondition(() => submittedValues.length === 2);
+  instance.unmount();
+  instance.cleanup();
+
+  assert.deepEqual(submittedValues, ["first", "second"]);
+  assert.equal(changedValues.includes("firstsecond"), false);
+});
+
 test("Work pane routes repeated Ctrl+O to work context without submitting text", async () => {
   const { engine, submittedLines } = createWorkShellPaneEngine();
   let openCount = 0;

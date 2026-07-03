@@ -53,6 +53,9 @@ export type SessionCenterModel = {
   readonly primarySessions: readonly SessionCenterSession[];
   readonly utilityActions: readonly SessionCenterAction[];
   readonly emptyState: string;
+  readonly emptyStateDetail: string;
+  readonly emptyStateActionKey: string;
+  readonly emptyStateActionLabel: string;
 };
 
 export type TuiActivityEntry = {
@@ -265,8 +268,10 @@ export function createSessionCenterModel(input: {
     mcpServers: input.mcpServers ?? [],
     primarySessions: input.sessions.slice(0, 6),
     utilityActions: SESSION_CENTER_ACTIONS,
-    emptyState:
-      "No saved sessions yet. Press W to start work.",
+    emptyState: "No saved sessions yet.",
+    emptyStateDetail: "Start a Work session and saved conversations will appear here.",
+    emptyStateActionKey: "W",
+    emptyStateActionLabel: "start work",
   };
 }
 

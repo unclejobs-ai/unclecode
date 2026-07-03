@@ -332,7 +332,10 @@ test("createSessionCenterModel exposes an empty-state CTA when no sessions exist
   });
 
   assert.equal(model.primarySessions.length, 0);
-  assert.match(model.emptyState, /Press W to start work/i);
+  assert.equal(model.emptyState, "No saved sessions yet.");
+  assert.match(model.emptyStateDetail, /saved conversations/i);
+  assert.equal(model.emptyStateActionKey, "W");
+  assert.equal(model.emptyStateActionLabel, "start work");
 });
 
 test("handleSessionCenterInput navigates sessions and utility actions", () => {

@@ -104,7 +104,11 @@ export function buildContextPanel(
 }
 
 export function clampWorkShellSlashSelection(selectedIndex: number, suggestionCount: number): number {
-  return resolveRustSlashSelection({ selectedIndex, suggestionCount });
+  const count = Math.max(0, suggestionCount);
+  if (count === 0) {
+    return 0;
+  }
+  return Math.min(Math.max(0, selectedIndex), count - 1);
 }
 
 export function cycleWorkShellSlashSelection(
@@ -112,30 +116,199 @@ export function cycleWorkShellSlashSelection(
   suggestionCount: number,
   direction: "next" | "previous",
 ): number {
-  return resolveRustSlashSelection({ selectedIndex, suggestionCount, direction });
+  const count = Math.max(0, suggestionCount);
+  if (count === 0) {
+    return 0;
+  }
+  const clamped = clampWorkShellSlashSelection(selectedIndex, count);
+  if (direction === "previous") {
+    return clamped <= 0 ? count - 1 : clamped - 1;
+  }
+  return (clamped + 1) % count;
 }
 
-function resolveRustSlashSelection(input: {
-  readonly selectedIndex: number;
-  readonly suggestionCount: number;
-  readonly direction?: "next" | "previous";
-}): number {
-  const parsed = JSON.parse(
-    runRustCommandSync(
-      ["rust", "ux", "slash-selection"],
-      process.cwd(),
-      JSON.stringify(input),
-    ),
-  ) as unknown;
-  if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    typeof (parsed as { selectedIndex?: unknown }).selectedIndex !== "number" ||
-    !Number.isSafeInteger((parsed as { selectedIndex: number }).selectedIndex)
-  ) {
-    throw new Error("Rust slash selection returned an invalid payload.");
+function isWorkShellSuggestion(value: unknown): value is {
+  readonly command: string;
+  readonly description: string;
+} {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { readonly command?: unknown }).command === "string" &&
+    typeof (value as { readonly description?: unknown }).description === "string"
+  );
+}
+
+function visibleSlashSuggestions(
+  suggestions: readonly { readonly command: string; readonly description: string }[],
+): readonly { readonly command: string; readonly description: string }[] {
+  return suggestions
+    .filter(isWorkShellSuggestion)
+    .map((suggestion) => ({
+      command: suggestion.command.trim(),
+      description: suggestion.description.trim(),
+    }))
+    .filter((suggestion) => suggestion.command.length > 0)
+    .slice(0, 6);
+}
+
+function buildCommandsPanel(
+  input: string,
+  suggestions: readonly { readonly command: string; readonly description: string }[],
+  selectedIndex: number,
+): WorkShellPanel {
+  const inputText = input.trim() || "/";
+  const visible = visibleSlashSuggestions(suggestions);
+  const selected = clampWorkShellSlashSelection(selectedIndex, visible.length);
+  if (visible.length === 0) {
+    return {
+      title: "Commands",
+      lines: [
+        `No matches for ${inputText}.`,
+        "",
+        "Try /model, /auth, /queue, or /context.",
+      ],
+    };
   }
-  return (parsed as { selectedIndex: number }).selectedIndex;
+  return {
+    title: "Commands",
+    lines: [
+      `${inputText} matches`,
+      "",
+      ...visible.map((suggestion, index) =>
+        `${index === selected ? "›" : " "} ${suggestion.command}  ${suggestion.description}`),
+      "",
+      "↑↓ move · Enter run",
+    ],
+  };
+}
+
+type ModelPickerCurrent = {
+  readonly reasoning: string;
+  readonly support?: string | undefined;
+};
+
+function stripCaseInsensitivePrefix(value: string, prefix: string): string | undefined {
+  return value.slice(0, prefix.length).toLowerCase() === prefix.toLowerCase()
+    ? value.slice(prefix.length)
+    : undefined;
+}
+
+function normalizeModelSuggestionDescription(description: string): string {
+  const lower = description.toLowerCase();
+  if (lower.includes("reasoning unsupported") || lower.includes("reasoning unavailable")) {
+    return "Reasoning unavailable";
+  }
+  return description.trim();
+}
+
+function parseCurrentModelDescription(description: string): ModelPickerCurrent {
+  const normalized = normalizeModelSuggestionDescription(description);
+  if (normalized.toLowerCase() === "reasoning unavailable") {
+    return { reasoning: "unavailable" };
+  }
+  const current = stripCaseInsensitivePrefix(normalized, "Current · ") ?? normalized;
+  const [reasoningPart = "", support] = current.split(" · supports ", 2);
+  const reasoning = (
+    stripCaseInsensitivePrefix(reasoningPart, "reasoning default ") ??
+    stripCaseInsensitivePrefix(reasoningPart, "default ")
+  );
+  return {
+    reasoning: reasoning === undefined
+      ? reasoningPart.trim()
+      : `default ${reasoning.trim()}`,
+    ...(support ? { support } : {}),
+  };
+}
+
+function compactModelSuggestionDescription(description: string): string {
+  const normalized = normalizeModelSuggestionDescription(description);
+  if (normalized.toLowerCase() === "reasoning unavailable") {
+    return "reasoning unavailable";
+  }
+  const stripped =
+    stripCaseInsensitivePrefix(normalized, "Current · ") ??
+    stripCaseInsensitivePrefix(normalized, "Default · ") ??
+    stripCaseInsensitivePrefix(normalized, "Available · ") ??
+    normalized;
+  const active = stripCaseInsensitivePrefix(normalized, "Current · ") !== undefined;
+  const [reasoningPart = ""] = stripped.split(" · supports ", 1);
+  const effort = (
+    stripCaseInsensitivePrefix(reasoningPart, "reasoning default ") ??
+    stripCaseInsensitivePrefix(reasoningPart, "default ") ??
+    stripCaseInsensitivePrefix(reasoningPart, "reasoning ") ??
+    reasoningPart
+  ).trim();
+  return active ? `active · reasoning ${effort}` : `reasoning ${effort}`;
+}
+
+function buildModelPickerPanel(
+  input: string,
+  suggestions: readonly { readonly command: string; readonly description: string }[],
+  selectedIndex: number,
+  currentModel?: string,
+): WorkShellPanel {
+  const inputText = input.trim() || "/model";
+  const modelFilter = inputText.startsWith("/model")
+    ? inputText.slice("/model".length).trim() || undefined
+    : undefined;
+  const visible = visibleSlashSuggestions(suggestions);
+  const selected = clampWorkShellSlashSelection(selectedIndex, visible.length);
+  const selectedCommand = visible[selected]?.command ?? "";
+  const modelEntries = visible
+    .filter((suggestion) =>
+      suggestion.command.startsWith("/model ") && suggestion.command !== "/model list")
+    .slice(0, 6);
+  const selectedModelCommand = selectedCommand === "/model"
+    ? modelEntries[0]?.command ?? ""
+    : selectedCommand;
+  const currentEntry =
+    modelEntries.find((suggestion) => suggestion.description.toLowerCase().includes("current")) ??
+    modelEntries[0];
+  const resolvedCurrentModel =
+    currentModel?.trim() ||
+    currentEntry?.command.trim().replace(/^\/model\s+/, "") ||
+    "unknown";
+  const currentMeta = currentEntry
+    ? parseCurrentModelDescription(currentEntry.description)
+    : { reasoning: "unknown" };
+
+  if (modelEntries.length === 0) {
+    return {
+      title: "Model picker",
+      lines: [
+        ...(currentModel ? ["Current model", `Model · ${currentModel}`, ""] : []),
+        "Filter",
+        modelFilter ? `Query · ${modelFilter}` : "Query · /model",
+        "",
+        modelFilter
+          ? `No model id matches ${modelFilter}. Current model unchanged.`
+          : "No exact model match.",
+        "/model list shows the catalog.",
+        "",
+        "Controls",
+        "Backspace edit · Enter keeps current · Esc close",
+      ],
+    };
+  }
+
+  return {
+    title: "Model picker",
+    lines: [
+      "Current model",
+      `Model · ${resolvedCurrentModel}`,
+      `Thinking · ${currentMeta.reasoning}`,
+      ...(currentMeta.support ? [`Supports · ${currentMeta.support}`] : []),
+      ...(modelFilter ? [`Filter · ${modelFilter}`] : []),
+      "",
+      "Pick model",
+      ...modelEntries.map((suggestion) =>
+        `${selectedModelCommand === suggestion.command ? "›" : " "} ${suggestion.command}  ${compactModelSuggestionDescription(suggestion.description)}`),
+      "",
+      "Controls",
+      "↑↓ choose · Enter switch · type to filter · Esc close",
+    ],
+  };
 }
 
 export function buildSlashSuggestionPanel(
@@ -168,29 +341,10 @@ export function buildSlashSuggestionPanel(
   }
 
   if (input.trim().startsWith("/model")) {
-    return parseRustPanel(
-      runRustCommandSync(
-        ["rust", "ux", "panel", "model-picker"],
-        process.cwd(),
-        JSON.stringify({
-          input: input.trim(),
-          suggestions: visible,
-          selectedIndex: selected,
-          ...(currentModel ? { currentModel } : {}),
-        }),
-      ),
-      "Model picker",
-    );
+    return buildModelPickerPanel(input, visible, selected, currentModel);
   }
 
-  return parseRustPanel(
-    runRustCommandSync(
-      ["rust", "ux", "panel", "commands"],
-      process.cwd(),
-      JSON.stringify({ input: input.trim(), suggestions: visible, selectedIndex: selected }),
-    ),
-    "Commands",
-  );
+  return buildCommandsPanel(input, visible, selected);
 }
 
 export function resolveWorkShellActivePanel(input: {

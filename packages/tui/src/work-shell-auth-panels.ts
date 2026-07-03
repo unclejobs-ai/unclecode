@@ -1,4 +1,6 @@
 import { runRustCommandSync } from "@unclecode/orchestrator";
+
+import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
 import type { WorkShellPanel } from "./work-shell-view.js";
 
 export function formatAuthLabelForDisplay(authLabel: string): string {
@@ -147,5 +149,8 @@ export function compactContextValue(label: string, value: string): string {
     .replace(/^AGENTS\.md:\s*/i, "AGENTS: ")
     .replace(/^CLAUDE\.md:\s*/i, "CLAUDE: ");
   const limit = label === "Issue" ? 35 : 36;
-  return normalized.length > limit ? `${normalized.slice(0, limit - 3)}...` : normalized;
+  if (getDisplayWidth(normalized) <= limit) {
+    return normalized;
+  }
+  return truncateForDisplayWidth(normalized, limit);
 }

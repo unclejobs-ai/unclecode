@@ -25,6 +25,7 @@ import {
   extractAuthLabel,
   formatAgentTraceLine,
   formatAttachmentBadgeLine,
+  formatAttachmentErrorLine,
   formatAuthLabelForDisplay,
   formatInlineImageSupportLine,
   formatRuntimeLabel,
@@ -185,42 +186,53 @@ test("formatWorkShellHeaderLine renders one width-bounded row", () => {
   assert.doesNotMatch(narrow, /\n/);
 });
 
+test("formatWorkShellHeaderLine keeps Korean hints within the row width", () => {
+  const line = formatWorkShellHeaderLine({
+    providerTitle: "UncleCode · Gemini",
+    headerHint: "작업 컨텍스트 · Ctrl+O 세션 · / 명령",
+    terminalColumns: 72,
+  });
+  assert.equal(getDisplayWidth(line), 70);
+  assert.match(line, /UncleCode · Gemini/);
+  assert.doesNotMatch(line, /\n/);
+});
+
 test("getWorkShellEntryPresentation keeps user, assistant, tool, and system roles visually distinct", () => {
   assert.deepEqual(getWorkShellEntryPresentation("user"), {
     label: "You",
     badge: "◇",
-    labelColor: "#7dd3fc",
+    labelColor: "#075985",
     labelTextColor: "#082f49",
-    labelBackgroundColor: "#bae6fd",
-    railColor: "#5eead4",
+    labelBackgroundColor: "#bfdbfe",
+    railColor: "#115e59",
     borderColor: "#334155",
-    bodyColor: "#e2e8f0",
+    bodyColor: "#0f172a",
   });
   assert.deepEqual(getWorkShellEntryPresentation("assistant"), {
     label: "UncleCode",
     badge: "◈",
-    labelColor: "#5eead4",
+    labelColor: "#115e59",
     labelTextColor: "#042f2e",
-    labelBackgroundColor: "#99f6e4",
-    railColor: "#7dd3fc",
-    borderColor: "#475569",
-    bodyColor: "#f8fafc",
+    labelBackgroundColor: "#ccfbf1",
+    railColor: "#075985",
+    borderColor: "#1e293b",
+    bodyColor: "#0f172a",
   });
   assert.deepEqual(getWorkShellEntryPresentation("tool"), {
     label: "Trace · execution",
     badge: "▸",
-    labelColor: "#bef264",
-    railColor: "#475569",
-    borderColor: "#475569",
-    bodyColor: "#f4f1ea",
+    labelColor: "#365314",
+    railColor: "#334155",
+    borderColor: "#1e293b",
+    bodyColor: "#0f172a",
   });
   assert.deepEqual(getWorkShellEntryPresentation("system"), {
     label: "System · state",
     badge: "·",
-    labelColor: "#94a3b8",
+    labelColor: "#334155",
     railColor: "#334155",
     borderColor: "#334155",
-    bodyColor: "#94a3b8",
+    bodyColor: "#334155",
   });
   assert.equal(getWorkShellEntryBorderStyle("user"), "round");
   assert.equal(getWorkShellEntryBorderStyle("assistant"), "round");
@@ -241,7 +253,7 @@ test("refined non-orange work context avoids loud orange chrome", () => {
   );
 
   assert.doesNotMatch(paletteValues.join(" "), /#fb923c|#fdba74|#fed7aa/i);
-  assert.match(paletteValues.join(" "), /#7dd3fc|#5eead4|#99f6e4/i);
+  assert.match(paletteValues.join(" "), /#075985|#115e59|#365314/i);
 
   const renderedUser = formatWorkShellConversationEntryLines({
     role: "user",
@@ -250,6 +262,39 @@ test("refined non-orange work context avoids loud orange chrome", () => {
   }).join("\n");
   assert.match(renderedUser, /You/);
   assert.doesNotMatch(renderedUser, /packet|next-call/i);
+});
+
+test("work shell palette stays readable on light terminal backgrounds", () => {
+  const roles = ["user", "assistant", "tool", "system"];
+  const foregroundFields = [
+    "labelColor",
+    "labelTextColor",
+    "railColor",
+    "borderColor",
+    "bodyColor",
+  ];
+
+  for (const role of roles) {
+    const presentation = getWorkShellEntryPresentation(role);
+    for (const field of foregroundFields) {
+      const color = presentation[field];
+      if (typeof color === "string") {
+        assert.ok(
+          contrastRatio(color, "#ffffff") >= 7,
+          `${role}.${field} ${color} should be strongly readable on a white terminal background`,
+        );
+      }
+    }
+    if (presentation.labelBackgroundColor && presentation.labelTextColor) {
+      assert.ok(
+        contrastRatio(
+          presentation.labelTextColor,
+          presentation.labelBackgroundColor,
+        ) >= 4.5,
+        `${role} badge text should be readable on its badge background`,
+      );
+    }
+  }
 });
 
 test("assistant transcript hides internal action plans and collapses duplicate greeting streams", () => {
@@ -547,15 +592,16 @@ test("work-shell dashboard sync helpers are exported from the shared tui package
   );
 });
 
-test("work-shell slash selection navigation is delegated to Rust", () => {
+test("work-shell slash selection navigation stays local for responsive picker movement", () => {
   const source = readFileSync(
     path.join(workspaceRoot, "packages/tui/src/work-shell-panels.ts"),
     "utf8",
   );
 
-  assert.match(source, /"rust",\s*"ux",\s*"slash-selection"/);
-  assert.doesNotMatch(source, /selectedIndex\s*<=\s*0/);
-  assert.doesNotMatch(source, /suggestionCount\s*-\s*1/);
+  assert.equal(clampWorkShellSlashSelection(8, 3), 2);
+  assert.equal(cycleWorkShellSlashSelection(0, 3, "previous"), 2);
+  assert.equal(cycleWorkShellSlashSelection(2, 3, "next"), 0);
+  assert.doesNotMatch(source, /"rust",\s*"ux",\s*"slash-selection"/);
 });
 
 test("work-shell clipboard attachment cap decisions are delegated to Rust", () => {
@@ -580,27 +626,56 @@ test("work-shell attachment dedup decisions are delegated to Rust", () => {
   assert.doesNotMatch(source, /seen\.has/);
 });
 
-test("work-shell composer preview mode decisions are delegated to Rust", () => {
+test("work-shell composer preview mode decisions stay local for keystroke latency", () => {
   const source = readFileSync(
     path.join(workspaceRoot, "packages/tui/src/work-shell-hooks.ts"),
     "utf8",
   );
 
-  assert.match(source, /"rust",\s*"ux",\s*"composer-preview-mode"/);
-  assert.equal(source.includes("jpe?g"), false);
-  assert.equal(source.includes("(?:^|\\s)@"), false);
+  assert.equal(shouldUseSlowComposerPreview("plain text"), false);
+  assert.equal(shouldUseSlowComposerPreview("@README.md 요약"), true);
+  assert.equal(shouldUseSlowComposerPreview("attach screenshot.PNG"), true);
+  assert.doesNotMatch(source, /"rust",\s*"ux",\s*"composer-preview-mode"/);
 });
 
-test("work-shell composer dock chrome decisions are delegated to Rust", () => {
+test("work-shell composer dock chrome decisions stay local for keystroke latency", () => {
   const source = readFileSync(
     path.join(workspaceRoot, "packages/tui/src/work-shell-view.tsx"),
     "utf8",
   );
 
-  assert.match(source, /"rust",\s*"ux",\s*"text",\s*"composer-dock-layout"/);
-  assert.equal(source.includes('inputValue.trim().startsWith("/")'), false);
-  assert.equal(source.includes("attachmentCount >= 5"), false);
-  assert.equal(source.includes('replace(/ /g, "─")'), false);
+  assert.doesNotMatch(
+    source,
+    /"rust",\s*"ux",\s*"text",\s*"composer-dock-layout"/,
+  );
+  assert.match(source, /input\.inputValue\.trimStart\(\)\.startsWith\("\/"\)/);
+  assert.match(
+    source,
+    /input\.attachmentCount !== undefined && input\.attachmentCount >= 5/,
+  );
+});
+
+test("work-shell slash render chrome avoids sync Rust helpers on first picker paint", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-view.tsx"),
+    "utf8",
+  );
+
+  assert.doesNotMatch(source, /"panel-line-class"/);
+  assert.doesNotMatch(source, /"panel-layout"/);
+  assert.doesNotMatch(source, /"footer-line"/);
+});
+
+test("work-shell pane runtime prewarms slash suggestions before the first slash keypress", () => {
+  const source = readFileSync(
+    path.join(
+      workspaceRoot,
+      "packages/orchestrator/src/work-shell-pane-runtime.ts",
+    ),
+    "utf8",
+  );
+
+  assert.match(source, /getWorkShellSlashSuggestions\("\/"/);
 });
 
 test("work-shell auth label display is delegated to Rust", () => {
@@ -679,7 +754,7 @@ test("work-shell browser auth failure copy is delegated to Rust", () => {
   );
 });
 
-test("work-shell no-match slash copy is delegated to Rust", () => {
+test("work-shell no-match slash copy is local because it renders on each slash keypress", () => {
   const source = readFileSync(
     path.join(workspaceRoot, "packages/tui/src/work-shell-panels.ts"),
     "utf8",
@@ -687,7 +762,12 @@ test("work-shell no-match slash copy is delegated to Rust", () => {
 
   assert.equal(source.includes("No slash yet."), false);
   assert.equal(source.includes("Try /model, /auth, /doctor, /context."), false);
-  assert.equal(source.includes("No matches for"), false);
+  assert.equal(source.includes("No matches for"), true);
+  assert.deepEqual(buildSlashSuggestionPanel("/zz", [], 0).lines, [
+    "No matches for /zz.",
+    "",
+    "Try /model, /auth, /queue, or /context.",
+  ]);
 });
 
 test("work-shell runtime labels are delegated to Rust", () => {
@@ -1066,6 +1146,10 @@ test("embedded work-shell dashboard helper maps dashboard props through the shar
 
 test("work-shell panel helpers are exported from the shared tui package seam", () => {
   assert.equal(formatAuthLabelForDisplay("oauth-file"), "Browser OAuth · file");
+  assert.equal(
+    formatAuthLabelForDisplay("oauth-file-api-blocked"),
+    "OAuth file · API blocked",
+  );
   assert.deepEqual(parseWorkShellPanelFactLine("Model · gpt-5.4"), {
     label: "Model",
     value: "gpt-5.4",
@@ -1260,7 +1344,18 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       contextIndicator: "context 2 ready · 1 held back",
       width: 120,
     }),
-    "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth · work context  ·  context 2 ready · 1 held back",
+    "~/project/unclecode  ·  gpt-5.4 · Balanced · Work mode · Saved OAuth  ·  context 2 ready · 1 held back",
+  );
+  assert.match(
+    formatWorkShellFooterLine({
+      cwd: `${process.env.HOME ?? "/Users/me"}/project/unclecode`,
+      model: "gpt-5.4",
+      reasoningLabel: "high (override)",
+      mode: "yolo",
+      authLabel: "Browser OAuth · file",
+      width: 72,
+    }),
+    /gpt-5\.4 · Deep · YOLO mode · Saved OAuth/,
   );
   assert.match(
     formatWorkShellFooterLine({
@@ -1343,6 +1438,14 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
     ]),
     ["Attachments 1 · shot.png", "1. shot.png · image/png"],
   );
+  assert.equal(
+    formatAttachmentErrorLine("Clipboard capture failed"),
+    "Warning · Clipboard capture failed",
+  );
+  assert.equal(
+    formatAttachmentErrorLine("   "),
+    "Warning · Attachment could not be added.",
+  );
   assert.match(
     buildTerminalInlineImageSequence(
       {
@@ -1414,6 +1517,38 @@ test("applyComposerEdit handles Hangul input and cursor positioning correctly", 
     "backspace deletes one character at cursor",
   );
   assert.equal(result3.nextCursorOffset, 2);
+});
+
+test("applyComposerEdit replaces overlapping Hangul composition updates instead of duplicating them", () => {
+  assert.deepEqual(
+    applyComposerEdit({
+      value: "제대로 되는거 맞냐",
+      cursorOffset: "제대로 되는거 맞냐".length,
+      input: "제대로 되는거 맞나",
+      key: {},
+      allowLineBreaks: false,
+    }),
+    {
+      nextValue: "제대로 되는거 맞나",
+      nextCursorOffset: "제대로 되는거 맞나".length,
+      submitted: false,
+    },
+  );
+
+  assert.deepEqual(
+    applyComposerEdit({
+      value: "ㅎ",
+      cursorOffset: "ㅎ".length,
+      input: "하",
+      key: {},
+      allowLineBreaks: false,
+    }),
+    {
+      nextValue: "하",
+      nextCursorOffset: "하".length,
+      submitted: false,
+    },
+  );
 });
 
 test("applyComposerEdit keeps decomposed Hangul composition on grapheme boundaries", () => {
@@ -1619,13 +1754,44 @@ test("WorkShellSectionDivider uses getDisplayWidth for CJK-safe centering (not .
   assert.doesNotMatch(viewSource, /width - labelContent\.length/);
 });
 
-test("WorkShellSectionDivider separator uses W.textMuted for WCAG-compliant contrast", () => {
+test("WorkShell fact separators use readable foreground props", () => {
   const viewSource = readFileSync(
     path.join(workspaceRoot, "packages/tui/src/work-shell-view.tsx"),
     "utf8",
   );
-  // The ' · ' separator between label and value in fact rows must use textMuted (#94a3b8),
-  // not textDim (#64748b), to meet WCAG 2.18:1 contrast threshold.
-  assert.match(viewSource, /<Text color=\{W\.textMuted\}> · <\/Text>/);
+  // The ' · ' separator between label and value in fact rows must pass through
+  // the explicit readable foreground resolver, not the dim role, so light Codex terminals
+  // do not wash out the text.
+  assert.match(
+    viewSource,
+    /<Text \{\.\.\.readableTextColorProps\(W\.textMuted\)\}> · <\/Text>/,
+  );
   assert.doesNotMatch(viewSource, /<Text color=\{W\.textDim\}> · <\/Text>/);
 });
+
+function contrastRatio(left, right) {
+  const lighter = Math.max(relativeLuminance(left), relativeLuminance(right));
+  const darker = Math.min(relativeLuminance(left), relativeLuminance(right));
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function relativeLuminance(hexColor) {
+  const [red, green, blue] = parseHexColor(hexColor).map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.03928
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+function parseHexColor(hexColor) {
+  const match = /^#([0-9a-f]{6})$/i.exec(hexColor);
+  assert.ok(match, `${hexColor} should be a 6-digit hex color`);
+  const value = match[1];
+  return [
+    Number.parseInt(value.slice(0, 2), 16),
+    Number.parseInt(value.slice(2, 4), 16),
+    Number.parseInt(value.slice(4, 6), 16),
+  ];
+}

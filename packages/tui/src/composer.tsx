@@ -17,7 +17,10 @@ const COMPOSER_PASTE_THRESHOLD = 48;
 const PASTE_SETTLE_MS = 120;
 const BRACKETED_PASTE_ARTIFACT_PATTERN = /(?:\u001b\[(?:200|201|990)~|\[(?:200|201|990)~)/g;
 const NON_TEXT_CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+const HANGUL_PATTERN = /[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/u;
+const HANGUL_JAMO_PATTERN = /^[\u1100-\u11ff\u3130-\u318f]+$/u;
 const COMPOSER_DEFAULT_VISIBLE_WIDTH = 72;
+const COMPOSER_CURSOR_GLYPH = "▏";
 
 export function sanitizeComposerInput(value: string): string {
   return value
@@ -39,6 +42,69 @@ export function shouldTreatComposerChangeAsPaste(
   }
 
   return nextValue.includes("\n") && !previousValue.includes("\n");
+}
+
+function commonPrefixOffset(left: string, right: string): number {
+  let offset = 0;
+  const maxOffset = Math.min(left.length, right.length);
+  while (offset < maxOffset) {
+    const leftCodePoint = left.codePointAt(offset);
+    const rightCodePoint = right.codePointAt(offset);
+    if (leftCodePoint === undefined || leftCodePoint !== rightCodePoint) {
+      break;
+    }
+    offset += leftCodePoint > 0xffff ? 2 : 1;
+  }
+  return offset;
+}
+
+function trailingComposerGrapheme(value: string): string {
+  return segmentDisplayGraphemes(value).at(-1) ?? "";
+}
+
+function resolveHangulCompositionReplacement(input: {
+  readonly value: string;
+  readonly cursorOffset: number;
+  readonly sanitizedInput: string;
+}): {
+  readonly nextValue: string;
+  readonly nextCursorOffset: number;
+} | undefined {
+  if (
+    input.cursorOffset !== input.value.length ||
+    input.value.length === 0 ||
+    input.sanitizedInput.length === 0 ||
+    input.sanitizedInput.includes("\n") ||
+    !HANGUL_PATTERN.test(input.value) ||
+    !HANGUL_PATTERN.test(input.sanitizedInput)
+  ) {
+    return undefined;
+  }
+
+  const trailing = trailingComposerGrapheme(input.value);
+  if (HANGUL_JAMO_PATTERN.test(trailing)) {
+    const nextValue = `${input.value.slice(0, input.value.length - trailing.length)}${input.sanitizedInput}`;
+    return {
+      nextValue,
+      nextCursorOffset: nextValue.length,
+    };
+  }
+
+  if (input.sanitizedInput.length <= 1) {
+    return undefined;
+  }
+
+  const prefixOffset = commonPrefixOffset(input.value, input.sanitizedInput);
+  const shorterLength = Math.min(input.value.length, input.sanitizedInput.length);
+  const minimumOverlap = Math.max(2, Math.floor(shorterLength * 0.6));
+  if (prefixOffset >= shorterLength || prefixOffset >= minimumOverlap) {
+    return {
+      nextValue: input.sanitizedInput,
+      nextCursorOffset: input.sanitizedInput.length,
+    };
+  }
+
+  return undefined;
 }
 
 export function applyComposerEdit(input: {
@@ -115,6 +181,18 @@ export function applyComposerEdit(input: {
     return {
       nextValue: input.value,
       nextCursorOffset: cursorOffset,
+      submitted: false,
+    };
+  }
+
+  const compositionReplacement = resolveHangulCompositionReplacement({
+    value: input.value,
+    cursorOffset,
+    sanitizedInput,
+  });
+  if (compositionReplacement) {
+    return {
+      ...compositionReplacement,
       submitted: false,
     };
   }
@@ -237,7 +315,7 @@ function padComposerLine(value: string, width: number): string {
 
 export function resolveComposerVisibleWidth(terminalColumns?: number): number {
   const columns = terminalColumns ?? process.stdout.columns ?? COMPOSER_DEFAULT_VISIBLE_WIDTH + 10;
-  return Math.max(12, Math.min(COMPOSER_DEFAULT_VISIBLE_WIDTH, columns - 10));
+  return Math.max(12, columns - 10);
 }
 
 /**
@@ -278,23 +356,25 @@ function renderComposerLine(
   }
 
   const lineWidth = getDisplayWidth(line);
+  const cursorWidth = getDisplayWidth(COMPOSER_CURSOR_GLYPH);
   if (cursorColumn >= lineWidth) {
-    const paddingWidth = Math.max(0, visibleWidth - lineWidth - 1);
+    const paddingWidth = Math.max(0, visibleWidth - lineWidth - cursorWidth);
     return (
       <Text>
         {line}
-        <Text inverse> </Text>
+        {COMPOSER_CURSOR_GLYPH}
         {" ".repeat(paddingWidth)}
       </Text>
     );
   }
 
   const { before, atCursor, after } = splitLineAtDisplayColumn(line, cursorColumn);
-  const renderedWidth = getDisplayWidth(`${before}${atCursor}${after}`);
+  const renderedWidth = getDisplayWidth(`${before}${atCursor}${after}`) + cursorWidth;
   return (
     <Text>
       {before}
-      <Text inverse>{atCursor}</Text>
+      {COMPOSER_CURSOR_GLYPH}
+      {atCursor}
       {after}
       {" ".repeat(Math.max(0, visibleWidth - renderedWidth))}
     </Text>
@@ -361,6 +441,11 @@ export function Composer(props: {
       setIsPasting(false);
     }, PASTE_SETTLE_MS);
   };
+  const resetLocalValueAfterSubmit = (): void => {
+    pendingLocalValueRef.current = "";
+    cursorOffsetRef.current = 0;
+    setCursorOffset(0);
+  };
 
   useInput((input, key) => {
     if (
@@ -402,15 +487,16 @@ export function Composer(props: {
       const submittedValue = textBeforeReturn.length > 0
         ? `${currentValue.slice(0, currentCursorOffset)}${sanitizeComposerInput(textBeforeReturn)}${currentValue.slice(currentCursorOffset)}`
         : currentValue;
-      cursorOffsetRef.current = submittedValue.length;
-      setCursorOffset(submittedValue.length);
-      pendingLocalValueRef.current = undefined;
-      if (submittedValue !== currentValue) {
-        props.onChange(submittedValue);
-      }
       if (suppressNextSubmitRef.current || isPasting) {
+        cursorOffsetRef.current = submittedValue.length;
+        setCursorOffset(submittedValue.length);
+        pendingLocalValueRef.current = submittedValue;
+        if (submittedValue !== currentValue) {
+          props.onChange(submittedValue);
+        }
         return;
       }
+      resetLocalValueAfterSubmit();
       void Promise.resolve(props.onSubmit(sanitizeComposerInput(submittedValue))).catch(() => undefined);
       return;
     }
@@ -430,6 +516,7 @@ export function Composer(props: {
       if (suppressNextSubmitRef.current || isPasting) {
         return;
       }
+      resetLocalValueAfterSubmit();
       void Promise.resolve(props.onSubmit(sanitizeComposerInput(result.nextValue))).catch(() => undefined);
       return;
     }

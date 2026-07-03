@@ -59,6 +59,10 @@ export function formatInlineImageSupportLine(env: NodeJS.ProcessEnv = process.en
   return line;
 }
 
+export function formatAttachmentErrorLine(reason: string): string {
+  return `Warning · ${reason.trim() || "Attachment could not be added."}`;
+}
+
 export function buildTerminalInlineImageSequence(
   attachment: WorkShellImageAttachment,
   env: NodeJS.ProcessEnv = process.env,

@@ -38,6 +38,8 @@ test("RoundedPanel: CJK title produces same top-border display width as empty ti
   const cjkChildren = cjkEl.props.children;
   const cjkTop = renderText(cjkChildren[0]);
 
+  assert.equal(getDisplayWidth(emptyTop), W, `empty top border should match panel width ${W}`);
+  assert.equal(getDisplayWidth(cjkTop), W, `CJK top border should match panel width ${W}`);
   assert.equal(
     getDisplayWidth(cjkTop),
     getDisplayWidth(emptyTop),

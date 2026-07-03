@@ -5,6 +5,7 @@ import type { TuiShellHomeState } from "./shell-state.js";
 import { Composer } from "./composer.js";
 import {
   buildAttachmentPreviewLines,
+  formatAttachmentErrorLine,
   formatInlineImageSupportLine,
   type WorkShellImageAttachment,
 } from "./work-shell-attachments.js";
@@ -128,6 +129,7 @@ export function WorkShellPane<
     lastTurnDurationMs,
     contextIndicator,
     queuedCount,
+    queuePaused,
   } = engineState;
   const isSecureApiKeyEntry = engineState.composerMode === "api-key-entry";
   // Most recent rejection reason from the clipboard capture or cap gate.
@@ -161,7 +163,7 @@ export function WorkShellPane<
         ]
       : [];
     if (lastClipboardError) {
-      lines.push(`⚠ ${lastClipboardError}`);
+      lines.push(formatAttachmentErrorLine(lastClipboardError));
     }
     return lines.length > 0 ? lines : undefined;
   }, [composerPreview.attachments, lastClipboardError]);
@@ -265,6 +267,7 @@ export function WorkShellPane<
       terminalColumns={terminalColumns}
       cwd={props.cwd}
       {...(queuedCount !== undefined ? { queuedCount } : {})}
+      {...(queuePaused !== undefined ? { queuePaused } : {})}
       {...(isSecureApiKeyEntry
         ? { composerHintOverride: "Enter saves · Esc cancels" }
         : {})}

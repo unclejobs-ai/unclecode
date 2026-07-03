@@ -932,7 +932,15 @@ export function Dashboard(props: DashboardProps) {
                 {shellState.view === "mcp" ? (
                   <McpServerList servers={model.mcpServers} selectedIndex={centerState.sessionIndex} isActive={centerState.column === "sessions"} />
                 ) : (
-                  <SessionList sessions={model.primarySessions} selectedIndex={centerState.sessionIndex} isActive={centerState.column === "sessions"} emptyState={model.emptyState} />
+                  <SessionList
+                    sessions={model.primarySessions}
+                    selectedIndex={centerState.sessionIndex}
+                    isActive={centerState.column === "sessions"}
+                    emptyState={model.emptyState}
+                    emptyStateDetail={model.emptyStateDetail}
+                    emptyStateActionKey={model.emptyStateActionKey}
+                    emptyStateActionLabel={model.emptyStateActionLabel}
+                  />
                 )}
               </Box>
             </Box>

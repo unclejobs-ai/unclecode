@@ -6,6 +6,18 @@ import {
 } from "@unclecode/orchestrator";
 
 import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
+import {
+  classifyWorkShellPanelLineFast,
+  formatWorkShellFooterLineFast,
+  resolveWorkShellPanelLayoutFast,
+  type WorkShellPanelAnchor,
+  type WorkShellPanelDisplayMode,
+  type WorkShellPanelLayout,
+  type WorkShellPanelLineClass,
+  type WorkShellPanelPlacement,
+} from "./work-shell-view-fast-paths.js";
+
+export type { WorkShellPanelDisplayMode } from "./work-shell-view-fast-paths.js";
 
 export type WorkShellEntryRole = "user" | "assistant" | "tool" | "system";
 
@@ -31,26 +43,61 @@ export type WorkShellEntryPresentation = {
 };
 
 const W = {
-  text: "#e5eef7",
-  textMuted: "#94a3b8",
-  textDim: "#64748b",
+  text: "#0f172a",
+  textMuted: "#334155",
+  textDim: "#475569",
   border: "#334155",
-  borderStrong: "#475569",
-  user: "#7dd3fc",
-  userBody: "#e2e8f0",
+  borderStrong: "#1e293b",
+  user: "#075985",
+  userBody: "#0f172a",
   userBadgeText: "#082f49",
-  userBadgeBg: "#bae6fd",
-  assistant: "#5eead4",
-  assistantBody: "#f8fafc",
+  userBadgeBg: "#bfdbfe",
+  assistant: "#115e59",
+  assistantBody: "#0f172a",
   assistantBadgeText: "#042f2e",
-  assistantBadgeBg: "#99f6e4",
-  assistantMuted: "#99f6e4",
-  tool: "#bef264",
-  toolSurface: "#13231a",
-  toolAccent: "#bef264",
-  toolMuted: "#8ea38a",
-  warning: "#facc15",
+  assistantBadgeBg: "#ccfbf1",
+  assistantMuted: "#115e59",
+  tool: "#365314",
+  toolSurface: "#ecfccb",
+  toolAccent: "#365314",
+  toolMuted: "#334155",
+  warning: "#713f12",
 } as const;
+
+const WORK_SHELL_LEGACY_LIGHT_TEXT_COLORS = new Set([
+  "#e2e8f0",
+  "#e5eef7",
+  "#f4f1ea",
+  "#f8fafc",
+]);
+
+export function resolveReadableWorkShellTextColor(color: string | undefined): string | undefined {
+  if (!color) {
+    return undefined;
+  }
+  return WORK_SHELL_LEGACY_LIGHT_TEXT_COLORS.has(color.toLowerCase()) ? W.text : color;
+}
+
+function readableTextColorProps(color: string | undefined): { readonly color?: string } {
+  const resolved = resolveReadableWorkShellTextColor(color);
+  return resolved ? { color: resolved } : {};
+}
+
+export function shouldUseCompactAssistantSurface(input: {
+  readonly text: string;
+  readonly width: number;
+}): boolean {
+  const normalized = normalizeMarkdownDisplayText(formatWorkShellAssistantDisplayText(input.text));
+  const lines = wrapDisplayText(normalized, Math.max(20, input.width - 8));
+  return lines.length <= 2 && getDisplayWidth(normalized) <= Math.max(24, input.width - 12);
+}
+
+function WorkShellReadableText(props: {
+  readonly color: string | undefined;
+  readonly children: React.ReactNode;
+}) {
+  return <Text {...readableTextColorProps(props.color)}>{props.children}</Text>;
+}
 
 function getWorkShellDividerWidth(input: {
   readonly terminalColumns?: number;
@@ -75,7 +122,7 @@ function WorkShellSectionDivider(props: {
   return (
     <Text color={W.border}>
       {"─".repeat(leftLength)}
-      <Text color={props.accentColor ?? W.textMuted}>{labelContent}</Text>
+      <Text {...readableTextColorProps(props.accentColor ?? W.textMuted)}>{labelContent}</Text>
       {"─".repeat(rightLength)}
     </Text>
   );
@@ -144,6 +191,32 @@ export function shouldHideWorkShellOverlayForInput(input: {
   return input.panelTitle === "Context expanded" && input.inputValue.trim().length > 0;
 }
 
+export function shouldSuppressWorkShellPassivePanel(input: {
+  readonly panelDisplayMode: WorkShellPanelDisplayMode;
+  readonly panelTitle: string;
+  readonly inputValue: string;
+  readonly isBusy: boolean;
+  readonly latestSystemText?: string | undefined;
+}): boolean {
+  if (input.panelDisplayMode !== "bottom") {
+    return false;
+  }
+  const hasComposerInput = input.inputValue.trim().length > 0;
+  if (input.panelTitle === "Session status") {
+    return hasComposerInput || !input.isBusy;
+  }
+  return (
+    input.panelTitle === "Reasoning picker" &&
+    !input.isBusy &&
+    !hasComposerInput &&
+    isCompletedReasoningSelectionLine(input.latestSystemText ?? "")
+  );
+}
+
+function isCompletedReasoningSelectionLine(value: string): boolean {
+  return /^Reasoning · .+ (?:selected|mode default restored)\.$/.test(value);
+}
+
 export function getWorkShellPanelPlacement(input: {
   readonly panelTitle: string;
   readonly inputValue: string;
@@ -176,21 +249,29 @@ export function getWorkShellAttachmentMinHeight(): 4 {
   return resolveWorkShellAttachmentLayout().attachmentMinHeight;
 }
 
-export function getWorkShellAttachmentLineColor(index: number): string {
+export function getWorkShellAttachmentLineColor(index: number): string | undefined {
   const role = resolveWorkShellAttachmentLayout(index).attachmentLineColorRole;
   if (role === "user") return W.user;
-  if (role === "text") return W.text;
-  return W.textMuted;
+  if (role === "text") return resolveReadableWorkShellTextColor(W.text);
+  return resolveReadableWorkShellTextColor(W.textMuted);
 }
 
 export function getWorkShellComposerHint(inputValue: string, slashSuggestionCount: number): string | undefined {
-  const raw = runRustCommandSync(
-    ["rust", "ux", "text", "composer-hint"],
-    process.cwd(),
-    JSON.stringify({ inputValue, slashSuggestionCount }),
-  );
-  const parsed = JSON.parse(raw) as { hint?: string | null };
-  return parsed.hint ?? undefined;
+  const trimmed = inputValue.trim();
+  if (trimmed.startsWith("/")) {
+    if (trimmed.startsWith("/model")) {
+      return slashSuggestionCount > 0
+        ? "↑↓ choose · Enter switch · type to filter · Esc cancel"
+        : "No exact model match";
+    }
+    return slashSuggestionCount > 0
+      ? "↑↓ select · Enter run · Esc cancel"
+      : "No matches";
+  }
+  if (trimmed.length === 0) {
+    return "Enter send · Shift+Enter newline · / commands";
+  }
+  return "Enter send · Shift+Enter newline";
 }
 
 const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
@@ -198,26 +279,11 @@ const rustBusyStatusCache = new Map<string, string>();
 const rustMarkdownDisplayCache = new Map<string, string>();
 const rustThinkingLineCache = new Map<string, string>();
 const rustStatusLineCache = new Map<string, string>();
-const rustFooterLineCache = new Map<string, string>();
 const rustWrapDisplayCache = new Map<string, readonly string[]>();
-const rustPanelLineClassCache = new Map<string, WorkShellPanelLineClass>();
-const rustPanelLayoutCache = new Map<string, WorkShellPanelLayout>();
 const rustEntryPresentationCache = new Map<WorkShellEntryRole, WorkShellEntryRolePresentationContract>();
 const rustAttachmentLayoutCache = new Map<number, WorkShellAttachmentLayout>();
 const rustViewportLayoutCache = new Map<string, WorkShellViewportLayout>();
 const rustComposerDockLayoutCache = new Map<string, WorkShellComposerDockLayout>();
-
-type WorkShellPanelDisplayMode = "hidden" | "overlay" | "side" | "bottom";
-type WorkShellPanelPlacement = "side" | "bottom";
-type WorkShellPanelAnchor = "with-conversation" | "after-composer";
-
-type WorkShellPanelLayout = {
-  readonly borderColorRole: "user" | "assistant" | "borderStrong" | "border";
-  readonly displayMode: WorkShellPanelDisplayMode;
-  readonly placement: WorkShellPanelPlacement;
-  readonly anchor: WorkShellPanelAnchor;
-  readonly bottomDrawerMinHeight: number;
-};
 
 type WorkShellEntryRolePresentationContract = {
   readonly presentation: WorkShellEntryPresentation;
@@ -248,24 +314,6 @@ type WorkShellComposerDockLayout = {
   readonly bottomDivider: string;
   readonly footerLine: string;
 };
-
-type WorkShellPanelLineClass =
-  | { readonly kind: "blank"; readonly trimmed: string }
-  | { readonly kind: "section"; readonly trimmed: string }
-  | { readonly kind: "tree"; readonly branch: string; readonly label: string; readonly spacing: string; readonly value: string }
-  | {
-    readonly kind: "suggestion";
-    readonly marker: string;
-    readonly command: string;
-    readonly spacing: string;
-    readonly description: string;
-    readonly isSelected: boolean;
-    readonly isWarning: boolean;
-  }
-  | { readonly kind: "selected-command" | "command" | "signed-in" | "not-signed-in" | "warning" | "tip" | "hint-warning" | "match-summary"; readonly trimmed: string }
-  | { readonly kind: "fact"; readonly label: string; readonly value: string; readonly isWarning: boolean }
-  | { readonly kind: "indent"; readonly line: string; readonly trimmed: string }
-  | { readonly kind: "text"; readonly line: string; readonly trimmed: string };
 
 function runRustUxText(operation: "busy-status" | "normalize-markdown", value: string): string {
   return runRustCommandSync(["rust", "ux", "text", operation], process.cwd(), value).trimEnd();
@@ -373,14 +421,7 @@ export function isWorkShellWarningLine(line: string): boolean {
 }
 
 function classifyWorkShellPanelLine(line: string): WorkShellPanelLineClass {
-  const cached = rustPanelLineClassCache.get(line);
-  if (cached !== undefined) {
-    return cached;
-  }
-  const raw = runRustCommandSync(["rust", "ux", "text", "panel-line-class"], process.cwd(), line);
-  const parsed = JSON.parse(raw) as WorkShellPanelLineClass;
-  rustPanelLineClassCache.set(line, parsed);
-  return parsed;
+  return classifyWorkShellPanelLineFast(line);
 }
 
 function resolveWorkShellPanelLayout(input: {
@@ -389,15 +430,7 @@ function resolveWorkShellPanelLayout(input: {
   readonly terminalColumns?: number;
   readonly displayMode?: WorkShellPanelDisplayMode;
 }): WorkShellPanelLayout {
-  const key = JSON.stringify(input);
-  const cached = rustPanelLayoutCache.get(key);
-  if (cached !== undefined) {
-    return cached;
-  }
-  const raw = runRustCommandSync(["rust", "ux", "text", "panel-layout"], process.cwd(), key);
-  const parsed = JSON.parse(raw) as WorkShellPanelLayout;
-  rustPanelLayoutCache.set(key, parsed);
-  return parsed;
+  return resolveWorkShellPanelLayoutFast(input);
 }
 
 function resolveWorkShellEntryPresentation(role: WorkShellEntryRole): WorkShellEntryRolePresentationContract {
@@ -452,25 +485,25 @@ function renderWorkShellPanelLine(line: string, index: number): React.ReactNode 
   if (classified.kind === "section") {
     return (
       <Box key={`${index}-${line}`} marginTop={index === 0 ? 0 : 1}>
-        <Text bold color={W.textMuted}>{classified.trimmed}</Text>
+        <Text bold {...readableTextColorProps(W.textMuted)}>{classified.trimmed}</Text>
       </Box>
     );
   }
   if (classified.kind === "tree") {
     return (
-      <Text key={`${index}-${line}`} color={W.textMuted}>
+      <Text key={`${index}-${line}`} {...readableTextColorProps(W.textMuted)}>
         {classified.branch} <Text color={W.user}>{classified.label}</Text>
         {classified.spacing}
-        <Text color={W.text}>{classified.value}</Text>
+        <Text {...readableTextColorProps(W.text)}>{classified.value}</Text>
       </Text>
     );
   }
   if (classified.kind === "suggestion") {
     return (
       <Text key={`${index}-${line}`}>
-      <Text color={classified.isSelected ? W.user : W.textMuted}>{classified.marker}</Text>
+      <Text {...(classified.isSelected ? { color: W.user } : readableTextColorProps(W.textMuted))}>{classified.marker}</Text>
       <Text color={classified.isSelected ? W.user : W.user}> {classified.command}</Text>
-      <Text color={classified.isWarning ? W.warning : classified.isSelected ? W.text : W.textMuted}>{classified.spacing}{classified.description}</Text>
+      <Text {...(classified.isWarning ? { color: W.warning } : readableTextColorProps(classified.isSelected ? W.text : W.textMuted))}>{classified.spacing}{classified.description}</Text>
 </Text>
     );
   }
@@ -481,13 +514,13 @@ function renderWorkShellPanelLine(line: string, index: number): React.ReactNode 
     return <Text key={`${index}-${line}`} color={W.user}>{classified.trimmed}</Text>;
   }
   if (classified.kind === "fact") {
-    const labelColor = classified.label === "Warning" ? W.warning : W.textMuted;
-    const valueColor = classified.isWarning ? W.warning : W.text;
+    const labelColorProps = classified.label === "Warning" ? { color: W.warning } : readableTextColorProps(W.textMuted);
+    const valueColorProps = classified.isWarning ? { color: W.warning } : readableTextColorProps(W.text);
     return (
       <Text key={`${index}-${line}`}>
-        <Text color={labelColor}>{classified.label}</Text>
-        <Text color={W.textMuted}> · </Text>
-        <Text color={valueColor}>{classified.value}</Text>
+        <Text {...labelColorProps}>{classified.label}</Text>
+        <Text {...readableTextColorProps(W.textMuted)}> · </Text>
+        <Text {...valueColorProps}>{classified.value}</Text>
       </Text>
     );
   }
@@ -501,21 +534,29 @@ function renderWorkShellPanelLine(line: string, index: number): React.ReactNode 
     return <Text key={`${index}-${line}`} color={W.warning}>{classified.trimmed}</Text>;
   }
   if (classified.kind === "tip") {
-    return <Text key={`${index}-${line}`} color={W.textDim}>{classified.trimmed}</Text>;
+    return <Text key={`${index}-${line}`} {...readableTextColorProps(W.textDim)}>{classified.trimmed}</Text>;
   }
   if (classified.kind === "hint-warning") {
     return <Text key={`${index}-${line}`} color={W.warning}>{classified.trimmed}</Text>;
   }
   if (classified.kind === "match-summary") {
-    return <Text key={`${index}-${line}`} color={W.textDim}>{classified.trimmed}</Text>;
+    return <Text key={`${index}-${line}`} {...readableTextColorProps(W.textDim)}>{classified.trimmed}</Text>;
   }
   if (classified.kind === "indent") {
-    return <Text key={`${index}-${line}`} color={W.textMuted}>{classified.line}</Text>;
+    return <Text key={`${index}-${line}`} {...readableTextColorProps(W.textMuted)}>{classified.line}</Text>;
   }
   if (classified.kind === "text") {
-    return <Text key={`${index}-${line}`} color={W.text}>{classified.line}</Text>;
+    return <Text key={`${index}-${line}`} {...readableTextColorProps(W.text)}>{classified.line}</Text>;
   }
-  return <Text key={`${index}-${line}`} color={W.text}>{line}</Text>;
+  return <Text key={`${index}-${line}`} {...readableTextColorProps(W.text)}>{line}</Text>;
+}
+
+export function formatWorkShellPanelEmptyLines(panelTitle: string): readonly string[] {
+  const title = panelTitle.trim();
+  return [
+    title.length > 0 ? `No details in ${title} yet.` : "No panel details yet.",
+    "Keep typing, or use / for commands.",
+  ];
 }
 
 function getWorkShellConversationWidth(input: {
@@ -529,6 +570,16 @@ function getWorkShellDockWidth(terminalColumns?: number): number {
   return resolveWorkShellViewportLayout(
     terminalColumns === undefined ? {} : { terminalColumns },
   ).dockWidth;
+}
+
+function getLatestWorkShellSystemText(entries: readonly WorkShellEntry[]): string | undefined {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.role === "system") {
+      return entry.text;
+    }
+  }
+  return undefined;
 }
 
 function padDisplayLine(value: string, width: number): string {
@@ -622,18 +673,10 @@ export function formatWorkShellFooterLine(input: {
   readonly composerHint?: string;
   readonly width?: number;
 }): string {
-  const payload = {
+  return formatWorkShellFooterLineFast({
     ...input,
-    home: process.env.HOME,
-  };
-  const key = JSON.stringify(payload);
-  const cached = rustFooterLineCache.get(key);
-  if (cached !== undefined) {
-    return cached;
-  }
-  const line = runRustCommandSync(["rust", "ux", "text", "footer-line"], process.cwd(), key).trimEnd();
-  rustFooterLineCache.set(key, line);
-  return line;
+    ...(process.env.HOME ? { home: process.env.HOME } : {}),
+  });
 }
 
 function wrapDisplayText(value: string, width: number): string[] {
@@ -659,10 +702,18 @@ function resolveWorkShellComposerDockLayout(input: {
   if (cached !== undefined) {
     return cached;
   }
-  const raw = runRustCommandSync(["rust", "ux", "text", "composer-dock-layout"], process.cwd(), key);
-  const parsed = JSON.parse(raw) as WorkShellComposerDockLayout;
-  rustComposerDockLayoutCache.set(key, parsed);
-  return parsed;
+  const divider = "─".repeat(input.dockWidth);
+  const layout: WorkShellComposerDockLayout = {
+    accentColorRole: input.inputValue.trimStart().startsWith("/") ? "user" : "borderStrong",
+    attachmentBadgeColorRole: input.attachmentCount !== undefined && input.attachmentCount >= 5
+      ? "warning"
+      : "textDim",
+    topDivider: divider,
+    bottomDivider: divider,
+    footerLine: padDisplayLine(input.footerLine, input.dockWidth),
+  };
+  rustComposerDockLayoutCache.set(key, layout);
+  return layout;
 }
 
 function renderWorkShellEntryBlock(input: {
@@ -691,12 +742,12 @@ function renderWorkShellEntryBlock(input: {
           <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
             {" "}{presentation.badge} {presentation.label}{" "}
           </Text>
-          <Text color={W.textDim}>  message</Text>
+          <Text {...readableTextColorProps(W.textDim)}>  message</Text>
         </Text>
         {renderedLines.map((line, lineIndex) => (
           <Text key={`user-${String(input.index)}-${String(lineIndex)}`}>
-            <Text color={lineIndex === 0 ? presentation.railColor : W.textDim}>▌ </Text>
-            <Text color={presentation.bodyColor}>{line}</Text>
+            <Text {...(lineIndex === 0 ? { color: presentation.railColor } : readableTextColorProps(W.textDim))}>▌ </Text>
+            <WorkShellReadableText color={presentation.bodyColor}>{line}</WorkShellReadableText>
           </Text>
         ))}
       </Box>
@@ -704,8 +755,32 @@ function renderWorkShellEntryBlock(input: {
   }
 
   if (input.entry.role === "assistant") {
+    const lines = wrapDisplayText(bodyText, Math.max(20, input.width - 8));
     const labelBackgroundColor = presentation.labelBackgroundColor ?? W.assistantBadgeBg;
     const labelTextColor = presentation.labelTextColor ?? W.assistantBadgeText;
+    if (shouldUseCompactAssistantSurface({ text: input.entry.text, width: input.width })) {
+      return (
+        <Box
+          key={`${input.entry.role}-${input.index}`}
+          marginBottom={1}
+          paddingLeft={1}
+          flexDirection="column"
+        >
+          <Text>
+            <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
+              {" "}{presentation.badge} {presentation.label}{" "}
+            </Text>
+            <Text {...readableTextColorProps(W.textDim)}>  reply</Text>
+          </Text>
+          {lines.map((line, lineIndex) => (
+            <Text key={`assistant-${String(input.index)}-${String(lineIndex)}`}>
+              <Text {...(lineIndex === 0 ? { color: presentation.railColor } : readableTextColorProps(W.textDim))}>▌ </Text>
+              <WorkShellReadableText color={presentation.bodyColor}>{line}</WorkShellReadableText>
+            </Text>
+          ))}
+        </Box>
+      );
+    }
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
@@ -719,13 +794,13 @@ function renderWorkShellEntryBlock(input: {
           <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
             {" "}{presentation.badge} {presentation.label}{" "}
           </Text>
-          <Text color={W.textDim}>  reply</Text>
+          <Text {...readableTextColorProps(W.textDim)}>  reply</Text>
         </Text>
         <Box marginTop={1} flexDirection="column">
           {wrapDisplayText(bodyText, Math.max(20, input.width - 4)).map((line, lineIndex) => (
-            <Text key={`assistant-${String(input.index)}-${String(lineIndex)}`} color={presentation.bodyColor}>
-              <Text color={lineIndex === 0 ? presentation.railColor : W.textDim}>▌ </Text>
-              {line}
+            <Text key={`assistant-${String(input.index)}-${String(lineIndex)}`}>
+              <Text {...(lineIndex === 0 ? { color: presentation.railColor } : readableTextColorProps(W.textDim))}>▌ </Text>
+              <WorkShellReadableText color={presentation.bodyColor}>{line}</WorkShellReadableText>
             </Text>
           ))}
         </Box>
@@ -745,7 +820,7 @@ function renderWorkShellEntryBlock(input: {
         <Text bold color={W.toolAccent}>{presentation.badge} {presentation.label}</Text>
         <Box marginTop={lines.length > 0 ? 1 : 0} paddingLeft={1} flexDirection="column">
           {lines.map((line, lineIndex) => (
-            <Text key={`tool-${String(input.index)}-${String(lineIndex)}`} color={W.text}>
+            <Text key={`tool-${String(input.index)}-${String(lineIndex)}`} {...readableTextColorProps(W.text)}>
               {line}
             </Text>
           ))}
@@ -761,7 +836,34 @@ function renderWorkShellEntryBlock(input: {
       paddingLeft={3}
       flexDirection="column"
     >
-      <Text color={presentation.bodyColor}>{bodyText}</Text>
+      <WorkShellReadableText color={presentation.bodyColor}>{bodyText}</WorkShellReadableText>
+    </Box>
+  );
+}
+
+function renderWorkShellEmptyConversation(): React.ReactNode {
+  const actions = [
+    ["Start", "Type the task in plain language."],
+    ["Inspect", "Use /context before a risky edit."],
+    ["Recover", "Use Ctrl+O for saved sessions."],
+  ] as const;
+  return (
+    <Box borderStyle="round" borderColor={W.borderStrong} paddingX={1} flexDirection="column">
+      <Text>
+        <Text color={W.assistant}>◇ </Text>
+        <Text bold {...readableTextColorProps(W.text)}>Ready for the next move</Text>
+      </Text>
+      <Box marginTop={1} flexDirection="column">
+        <Text {...readableTextColorProps(W.textMuted)}>{getWorkShellEmptyConversationHint()}</Text>
+        <Box marginTop={1} flexDirection="column">
+          {actions.map(([label, detail]) => (
+            <Text key={label}>
+              <Text color={W.user}>{label}</Text>
+              <Text {...readableTextColorProps(W.textMuted)}> · {detail}</Text>
+            </Text>
+          ))}
+        </Box>
+      </Box>
     </Box>
   );
 }
@@ -777,6 +879,7 @@ export function getWorkShellThinkingDetailLines(input: {
 const WorkShellConversationBlock = React.memo(function WorkShellConversationBlock(props: {
   readonly entries: readonly WorkShellEntry[];
   readonly streamingAssistantText?: string;
+  readonly isBusy: boolean;
   readonly panelPlacement: WorkShellPanelPlacement;
   readonly terminalColumns?: number;
 }) {
@@ -795,7 +898,7 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "68%" : undefined} paddingRight={props.panelPlacement === "side" ? 1 : 0}>
       <Box flexDirection="column">
         {entries.length === 0 ? (
-          <Text color={W.textMuted}>{getWorkShellEmptyConversationHint()}</Text>
+          props.isBusy ? null : renderWorkShellEmptyConversation()
         ) : entries.slice(-12).map((entry, index) => renderWorkShellEntryBlock({
           entry,
           index,
@@ -819,38 +922,6 @@ export function formatWorkShellLiveActivityLine(input: {
   const detail = normalizeBusyDetail(input.busyStatus ?? "");
   return `${spinner} ${detail.length > 0 ? detail : "Working…"}`;
 }
-
-// Inline "what I'm doing now" line rendered between the conversation and the
-// composer so mid-turn progress is visible where the user is looking, not only
-// in the top session-state panel.
-const WorkShellLiveActivity = React.memo(function WorkShellLiveActivity(props: {
-  readonly isBusy: boolean;
-  readonly busyStatus?: string;
-}) {
-  const [spinnerFrame, setSpinnerFrame] = React.useState(0);
-  React.useEffect(() => {
-    if (!props.isBusy) {
-      return;
-    }
-    const timer = setInterval(() => setSpinnerFrame((value) => value + 1), 90);
-    return () => clearInterval(timer);
-  }, [props.isBusy]);
-  const line = formatWorkShellLiveActivityLine({
-    isBusy: props.isBusy,
-    spinnerFrame,
-    ...(props.busyStatus ? { busyStatus: props.busyStatus } : {}),
-  });
-  if (line === null) {
-    return null;
-  }
-  const [spinner, ...rest] = line.split(" ");
-  return (
-    <Box marginTop={1}>
-      <Text color={W.assistant}>{spinner} </Text>
-      <Text color={W.textMuted}>{rest.join(" ")}</Text>
-    </Box>
-  );
-});
 
 const WorkShellPanelBlock = React.memo(function WorkShellPanelBlock(props: {
   readonly title: string;
@@ -880,7 +951,8 @@ const WorkShellPanelBlock = React.memo(function WorkShellPanelBlock(props: {
         paddingLeft={1}
         minHeight={getWorkShellBottomDrawerMinHeight(props.panelDisplayMode, props.title, props.inputValue)}
       >
-        {props.lines.map((line, index) => renderWorkShellPanelLine(line, index))}
+        {(props.lines.length > 0 ? props.lines : formatWorkShellPanelEmptyLines(props.title))
+          .map((line, index) => renderWorkShellPanelLine(line, index))}
       </Box>
     </Box>
   );
@@ -905,7 +977,7 @@ const WorkShellAttachmentBlock = React.memo(function WorkShellAttachmentBlock(pr
       />
       <Box marginTop={1} flexDirection="column" paddingLeft={1} minHeight={getWorkShellAttachmentMinHeight()}>
         {props.attachmentLines.map((line, index) => (
-          <Text key={`${index}-${line}`} color={getWorkShellAttachmentLineColor(index)}>{line}</Text>
+          <Text key={`${index}-${line}`} {...readableTextColorProps(getWorkShellAttachmentLineColor(index))}>{line}</Text>
         ))}
       </Box>
     </Box>
@@ -925,7 +997,7 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
 
   return (
     <Box flexDirection="column">
-      <Text color={W.text}>{line}</Text>
+      <Text {...readableTextColorProps(W.text)}>{line}</Text>
       <Text color={W.border}>{"▔".repeat(Math.max(24, Math.min(72, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4)))}</Text>
     </Box>
   );
@@ -934,7 +1006,6 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
 const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   readonly model: string;
   readonly reasoningLabel: string;
-  readonly reasoningSupported: boolean;
   readonly mode: string;
   readonly authLabel: string;
   readonly isBusy: boolean;
@@ -945,7 +1016,6 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
 }) {
   const [nowMs, setNowMs] = React.useState(() => Date.now());
   const [spinnerFrame, setSpinnerFrame] = React.useState(0);
-  const thinkingLine = formatWorkShellThinkingLine(props.reasoningLabel);
   const statusLine = formatWorkShellStatusLine({
     model: props.model,
     reasoningLabel: props.reasoningLabel,
@@ -973,7 +1043,7 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
     const interval = setInterval(() => {
       setNowMs(Date.now());
       setSpinnerFrame((frame) => frame + 1);
-    }, 120);
+    }, 1000);
 
     return () => {
       clearInterval(interval);
@@ -981,16 +1051,13 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   }, [props.isBusy, props.currentTurnStartedAt]);
 
   return (
-    <Box marginTop={1} borderStyle="round" borderColor={props.isBusy ? W.assistant : W.border} paddingX={1} flexDirection="column">
+    <Box marginTop={1} paddingLeft={1}>
       <Text>
-        <Text color={W.assistant} bold>Work context</Text>
-        <Text color={W.textDim}> · session state</Text>
+        <Text color={W.assistant}>{props.isBusy ? "◈ " : "◇ "}</Text>
+        <Text {...readableTextColorProps(W.text)}>{statusLine}</Text>
+        <Text {...readableTextColorProps(W.textMuted)}> · </Text>
+        <Text {...(props.isBusy ? { color: W.assistant } : readableTextColorProps(W.textMuted))}>{usageLine}</Text>
       </Text>
-      <Box marginTop={1} flexDirection="column">
-        <Text bold color={props.reasoningSupported ? W.user : W.warning}>◇ {thinkingLine}</Text>
-        <Text color={W.text}>◇ {statusLine}</Text>
-        <Text color={props.isBusy ? W.assistant : W.textMuted}>◈ {usageLine}</Text>
-      </Box>
     </Box>
   );
 });
@@ -1026,28 +1093,31 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
     ...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {}),
   });
   const accent = dockLayout.accentColorRole === "user" ? W.assistant : W.borderStrong;
-  const badgeColor = dockLayout.attachmentBadgeColorRole === "warning" ? W.warning : W.textDim;
+  const badgeColorProps = dockLayout.attachmentBadgeColorRole === "warning" ? { color: W.warning } : readableTextColorProps(W.textDim);
 
   return (
     <Box marginTop={1} flexDirection="column">
       <Text color={accent}>▌ prompt deck <Text color={W.border}>{dockLayout.topDivider.slice(Math.min(14, dockLayout.topDivider.length))}</Text></Text>
       <Box minHeight={1} paddingLeft={1}>
-        <Text backgroundColor={accent} color={W.text}>{" "}</Text>
-        <Text color={W.textMuted}>{" "}</Text>
+        <Text backgroundColor={accent} {...readableTextColorProps(W.text)}>{" "}</Text>
+        <Text {...readableTextColorProps(W.textMuted)}>{" "}</Text>
         {props.composer}
         {props.attachmentCount !== undefined ? (
-          <Text color={badgeColor}> [{props.attachmentCount}/5]</Text>
+          <Text {...badgeColorProps}> [{props.attachmentCount}/5]</Text>
         ) : null}
       </Box>
       <Text color={W.border}>▔{dockLayout.bottomDivider.slice(1)}</Text>
-      <Text color={W.textDim}>{dockLayout.footerLine}</Text>
+      <Text {...readableTextColorProps(W.textDim)}>{dockLayout.footerLine}</Text>
     </Box>
   );
 });
 
-export function formatWorkShellQueueIndicator(queuedCount: number): string | null {
+export function formatWorkShellQueueIndicator(queuedCount: number, queuePaused = false): string | null {
   if (queuedCount <= 0) {
     return null;
+  }
+  if (queuePaused) {
+    return `⋯ ${queuedCount} queued · paused · /queue clear`;
   }
   return `⋯ ${queuedCount} queued · /queue`;
 }
@@ -1077,9 +1147,12 @@ export function WorkShellView(props: {
   readonly terminalColumns?: number;
   readonly cwd?: string;
   readonly queuedCount?: number;
+  readonly queuePaused?: boolean;
 }) {
   const composerHint = props.composerHintOverride ?? (props.isBusy
     ? "Enter queues follow-up · Ctrl+C/Esc interrupt · /queue"
+    : props.queuePaused && (props.queuedCount ?? 0) > 0
+      ? "Queue paused after interrupt · /queue shows · /queue clear drops"
     : getWorkShellComposerHint(props.inputValue, props.slashSuggestionCount));
   const panelBorderColor = getWorkShellPanelBorderColor(props.inputValue, props.activePanel.title);
   const panelDisplayMode = getWorkShellPanelDisplayMode({
@@ -1088,7 +1161,6 @@ export function WorkShellView(props: {
     ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
   });
   const panelPlacement = panelDisplayMode === "side" ? "side" : "bottom";
-  const hasComposerInput = props.inputValue.trim().length > 0;
   const overlayLines = formatWorkShellOverlayPanelLines({
     panelTitle: props.activePanel.title,
     lines: props.activePanel.lines,
@@ -1097,15 +1169,20 @@ export function WorkShellView(props: {
     panelTitle: props.activePanel.title,
     inputValue: props.inputValue,
   });
-  const shouldSuppressPassivePanel =
-    panelDisplayMode === "bottom" &&
-    props.activePanel.title === "Session status" &&
-    (hasComposerInput || !props.isBusy);
+  const shouldSuppressPassivePanel = shouldSuppressWorkShellPassivePanel({
+    panelDisplayMode,
+    panelTitle: props.activePanel.title,
+    inputValue: props.inputValue,
+    isBusy: props.isBusy,
+    latestSystemText: getLatestWorkShellSystemText(props.entries),
+  });
+  const queueIndicator = formatWorkShellQueueIndicator(props.queuedCount ?? 0, props.queuePaused ?? false);
 
   const conversation = (
     <WorkShellConversationBlock
       entries={props.entries}
       {...(props.streamingAssistantText ? { streamingAssistantText: props.streamingAssistantText } : {})}
+      isBusy={props.isBusy}
       panelPlacement={panelPlacement}
       {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
     />
@@ -1133,7 +1210,6 @@ export function WorkShellView(props: {
       <WorkShellStatusBlock
         model={props.model}
         reasoningLabel={props.reasoningLabel}
-        reasoningSupported={props.reasoningSupported}
         mode={props.mode}
         authLabel={props.authLabel}
         isBusy={props.isBusy}
@@ -1152,13 +1228,9 @@ export function WorkShellView(props: {
           {conversation}
         </Box>
       )}
-      <WorkShellLiveActivity
-        isBusy={props.isBusy}
-        {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
-      />
-      {formatWorkShellQueueIndicator(props.queuedCount ?? 0) !== null ? (
+      {queueIndicator !== null ? (
         <Box marginTop={1}>
-          <Text color={W.textMuted}>{formatWorkShellQueueIndicator(props.queuedCount ?? 0)}</Text>
+          <Text {...readableTextColorProps(props.queuePaused ? W.warning : W.textMuted)}>{queueIndicator}</Text>
         </Box>
       ) : null}
       <WorkShellComposerDock
@@ -1190,7 +1262,7 @@ export function WorkShellView(props: {
               reservedColumns: 8,
             })}
           />
-          <Text color={W.textMuted}>Esc closes · /context refreshes</Text>
+          <Text {...readableTextColorProps(W.textMuted)}>Esc closes · /context refreshes</Text>
           <Box marginTop={1} flexDirection="column">
             {overlayLines.map((line, index) => renderWorkShellPanelLine(line, index))}
           </Box>

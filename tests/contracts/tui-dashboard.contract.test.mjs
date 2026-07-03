@@ -66,7 +66,7 @@ test("DASHBOARD_ACTIONS includes all required CLI commands", () => {
   assert.ok(commands.includes("unclecode --help"), "help present");
 });
 
-test("dashboard palette uses cool context-cockpit chrome instead of orange", () => {
+test("dashboard palette uses readable cool context-cockpit chrome instead of orange", () => {
   const paletteValues = [
     C.accent,
     C.accentBright,
@@ -76,7 +76,41 @@ test("dashboard palette uses cool context-cockpit chrome instead of orange", () 
   ].join(" ");
 
   assert.doesNotMatch(paletteValues, /#fb923c|#fdba74|#fed7aa/i);
-  assert.match(paletteValues, /#5eead4|#7dd3fc|#99f6e4/i);
+  assert.match(paletteValues, /#115e59|#075985|#bae6fd/i);
+});
+
+test("dashboard palette foregrounds stay readable on a light terminal", () => {
+  const lightTerminalForegrounds = [
+    C.border,
+    C.borderActive,
+    C.borderSubtle,
+    C.text,
+    C.textSecondary,
+    C.textMuted,
+    C.textFaint,
+    C.accent,
+    C.accentBright,
+    C.accentDim,
+    C.warning,
+    C.error,
+    C.info,
+    C.success,
+  ];
+
+  for (const color of lightTerminalForegrounds) {
+    assert.ok(
+      contrastRatio(color, "#ffffff") >= 7,
+      `${color} should be strongly readable on a white terminal background`,
+    );
+  }
+
+  assert.ok(contrastRatio(C.headerFg, C.headerBg) >= 4.5);
+  assert.ok(contrastRatio(C.pillFg, C.pillBg) >= 4.5);
+  assert.ok(contrastRatio(C.pillFg, "#ffffff") >= 7);
+  assert.ok(contrastRatio(C.headerFg, "#ffffff") >= 7);
+  assert.ok(contrastRatio(C.success, C.statusBg) >= 4.5);
+  assert.ok(contrastRatio(C.textMuted, C.tagBg) >= 4.5);
+  assert.ok(contrastRatio(C.accent, C.statusBg) >= 4.5);
 });
 
 test("shouldRenderEmbeddedWorkPaneFullscreen gives the work pane the full screen when embedded", () => {
@@ -821,3 +855,30 @@ test("new TUI dashboard owner seams exist as dedicated modules", () => {
   assert.match(tuiSource, /export \* from "\.\/dashboard-components\.js"/);
   assert.match(tuiSource, /export \* from "\.\/dashboard-model\.js"/);
 });
+
+function contrastRatio(left, right) {
+  const lighter = Math.max(relativeLuminance(left), relativeLuminance(right));
+  const darker = Math.min(relativeLuminance(left), relativeLuminance(right));
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function relativeLuminance(hexColor) {
+  const [red, green, blue] = parseHexColor(hexColor).map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.03928
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+function parseHexColor(hexColor) {
+  const match = /^#([0-9a-f]{6})$/i.exec(hexColor);
+  assert.ok(match, `${hexColor} should be a 6-digit hex color`);
+  const value = match[1];
+  return [
+    Number.parseInt(value.slice(0, 2), 16),
+    Number.parseInt(value.slice(2, 4), 16),
+    Number.parseInt(value.slice(4, 6), 16),
+  ];
+}
