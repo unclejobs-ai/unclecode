@@ -12,6 +12,7 @@ test("resolveOpenAIAuthStatus exposes source, context, and expiry without secret
   });
 
   assert.equal(status.activeSource, "api-key-env");
+  assert.equal(status.apiReady, true);
   assert.equal(status.organizationId, "org_123");
   assert.equal(status.projectId, "proj_456");
 });
@@ -52,15 +53,34 @@ test("formatOpenAIAuthStatus redacts secrets from rendered output", () => {
     providerId: "openai",
     activeSource: "api-key-env",
     authType: "api-key",
+    runtime: null,
     organizationId: "org_123",
     projectId: "proj_456",
     expiresAt: null,
     isExpired: false,
+    apiReady: true,
   });
 
   assert.match(rendered, /api-key-env/);
   assert.match(rendered, /org_123/);
   assert.doesNotMatch(rendered, /sk-test-123/);
+});
+
+test("formatOpenAIAuthStatus exposes runtime and API readiness", () => {
+  const rendered = formatOpenAIAuthStatus({
+    providerId: "openai",
+    activeSource: "oauth-file",
+    authType: "oauth",
+    runtime: "codex",
+    organizationId: null,
+    projectId: null,
+    expiresAt: null,
+    isExpired: false,
+    apiReady: false,
+  });
+
+  assert.match(rendered, /runtime: codex/);
+  assert.match(rendered, /api ready: no/);
 });
 
 test("resolveOpenAIAuthStatus reports insufficient-scope oauth honestly", async () => {
@@ -86,6 +106,7 @@ test("resolveOpenAIAuthStatus reports insufficient-scope oauth honestly", async 
     assert.equal(status.authType, "oauth");
     assert.equal(status.expiresAt, "insufficient-scope");
     assert.equal(status.isExpired, true);
+    assert.equal(status.apiReady, false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -113,8 +134,10 @@ test("resolveOpenAIAuthStatus accepts codex oauth files without model.request sc
 
     assert.equal(status.activeSource, "oauth-file");
     assert.equal(status.authType, "oauth");
+    assert.equal(status.runtime, "codex");
     assert.equal(status.expiresAt, null);
     assert.equal(status.isExpired, false);
+    assert.equal(status.apiReady, false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }
@@ -141,8 +164,10 @@ test("resolveOpenAIAuthStatus accepts stored codex runtime oauth without model.r
 
     assert.equal(status.activeSource, "oauth-file");
     assert.equal(status.authType, "oauth");
+    assert.equal(status.runtime, "codex");
     assert.equal(status.expiresAt, null);
     assert.equal(status.isExpired, false);
+    assert.equal(status.apiReady, false);
   } finally {
     rmSync(rootDir, { recursive: true, force: true });
   }

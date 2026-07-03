@@ -28,11 +28,13 @@ export type ResolveOpenAIAuthInput = {
 };
 export type OpenAIAuthStatus = {
     readonly providerId: "openai";
-    readonly activeSource: "api-key-env" | "oauth-file" | "none";
+    readonly activeSource: "api-key-env" | "api-key-file" | "oauth-env" | "oauth-file" | "none";
     readonly authType: "api-key" | "oauth" | "none";
+    readonly runtime: "api" | "codex" | null;
     readonly organizationId: string | null;
     readonly projectId: string | null;
     readonly expiresAt: string | null;
     readonly isExpired: boolean;
+    readonly apiReady: boolean;
 };
 //# sourceMappingURL=types.d.ts.map

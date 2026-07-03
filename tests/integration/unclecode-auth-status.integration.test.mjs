@@ -231,6 +231,57 @@ test("built unclecode cli can reuse Codex auth.json as oauth-file auth", () => {
     assert.match(statusResult.stdout, /source: oauth-file/);
     assert.match(statusResult.stdout, /auth: oauth/);
     assert.match(statusResult.stdout, /expired: no/);
+
+    const doctorResult = spawnSync("node", [builtCliEntrypoint, "doctor"], {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: tempDir,
+        UNCLECODE_SESSION_STORE_ROOT: path.join(tempDir, ".state"),
+      },
+    });
+
+    assert.equal(doctorResult.status, 0, doctorResult.stderr);
+    assert.match(
+      doctorResult.stdout,
+      /Auth\s+WARN\s+oauth-file \(oauth, codex runtime\)/,
+    );
+    assert.match(doctorResult.stdout, /API calls blocked/);
+    assert.match(doctorResult.stdout, /unclecode auth login --api-key-stdin/);
+
+    const doctorJsonResult = spawnSync(
+      "node",
+      [builtCliEntrypoint, "doctor", "--json"],
+      {
+        cwd: workspaceRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: tempDir,
+          UNCLECODE_SESSION_STORE_ROOT: path.join(tempDir, ".state-json"),
+        },
+      },
+    );
+
+    assert.equal(doctorJsonResult.status, 0, doctorJsonResult.stderr);
+    const doctorPayload = JSON.parse(doctorJsonResult.stdout);
+    assert.equal(doctorPayload.auth.source, "oauth-file");
+    assert.equal(doctorPayload.auth.type, "oauth");
+    assert.equal(doctorPayload.auth.runtime, "codex");
+    assert.equal(doctorPayload.auth.expired, false);
+    assert.equal(doctorPayload.auth.apiReady, false);
+    assert.equal(
+      doctorPayload.auth.recovery.reason,
+      "openai-oauth-codex-runtime-not-api-ready",
+    );
+    assert.deepEqual(doctorPayload.auth.recovery.commands, [
+      "OPENAI_OAUTH_CLIENT_ID=<client-id> unclecode auth login --browser",
+      "unclecode auth login --api-key-stdin",
+      "OPENAI_API_KEY=<key> npm run qa:live",
+      "npm run qa:live",
+    ]);
+    assert.equal(doctorPayload.auth.recovery.verify, "npm run qa:live");
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }

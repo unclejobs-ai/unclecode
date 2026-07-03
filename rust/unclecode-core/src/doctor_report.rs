@@ -1,4 +1,7 @@
-use crate::auth::resolve_openai_auth_status;
+use crate::auth::{
+    openai_auth_status_recovery, openai_auth_supports_api_calls, resolve_openai_auth_status,
+    OpenAIAuthStatus,
+};
 use crate::mcp_host::load_mcp_host_registry;
 use crate::mode::{resolve_mode_status, user_config_path};
 use crate::setup_report::session_store_root_from_env;
@@ -63,14 +66,19 @@ pub fn doctor_report(
     let mcp_entries = load_mcp_host_registry(workspace_root, home_dir)?;
     let mcp_ms = mcp_started.elapsed().as_millis();
 
-    let auth_label = format!("{} ({})", auth_status.active_source, auth_status.auth_type);
+    let auth_label = format_auth_label(&auth_status);
     let mode_label = format!("{} ({})", mode_status.profile.id, mode_status.source_label);
     let runtime_label = "local available".to_string();
-    let auth_verdict = if auth_status.active_source == "none" || auth_status.is_expired {
-        "WARN"
-    } else {
-        "PASS"
-    };
+    let auth_api_ready = openai_auth_supports_api_calls(&auth_status);
+    let auth_recovery = openai_auth_status_recovery(&auth_status).map(|recovery| {
+        json!({
+            "reason": recovery.reason,
+            "preferredFix": recovery.preferred_fix,
+            "commands": recovery.commands,
+            "verify": recovery.verify,
+        })
+    });
+    let auth_verdict = if auth_api_ready { "PASS" } else { "WARN" };
     let runtime_verdict = "PASS";
     let mcp_label = format!(
         "{} servers; transports {}",
@@ -120,6 +128,18 @@ pub fn doctor_report(
             "sessionStore": session_store_root.to_string_lossy(),
             "mcpHost": mcp_label
         },
+        "auth": {
+            "provider": "openai",
+            "source": auth_status.active_source,
+            "type": auth_status.auth_type,
+            "organizationId": auth_status.organization_id,
+            "projectId": auth_status.project_id,
+            "runtime": auth_status.runtime,
+            "expiresAt": auth_status.expires_at,
+            "expired": auth_status.is_expired,
+            "apiReady": auth_api_ready,
+            "recovery": auth_recovery
+        },
         "metrics": {
             "configMs": config_ms,
             "authMs": auth_ms,
@@ -140,6 +160,31 @@ pub fn doctor_report(
     let json = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
 
     Ok(DoctorReport { lines, json })
+}
+
+fn format_auth_label(status: &OpenAIAuthStatus) -> String {
+    let base = match status.runtime.as_deref() {
+        Some(runtime) => format!(
+            "{} ({}, {runtime} runtime)",
+            status.active_source, status.auth_type
+        ),
+        None => format!("{} ({})", status.active_source, status.auth_type),
+    };
+    if openai_auth_supports_api_calls(status) {
+        return base;
+    }
+    match (status.auth_type.as_str(), status.runtime.as_deref(), status.expires_at.as_deref()) {
+        ("oauth", Some("codex"), _) => format!(
+            "{base}; API calls blocked, use `unclecode auth login --api-key-stdin` or API-capable browser OAuth"
+        ),
+        ("oauth", _, Some("insufficient-scope")) => format!(
+            "{base}; missing model.request scope, use `unclecode auth login --api-key-stdin` or API-capable browser OAuth"
+        ),
+        ("oauth", _, Some("refresh-required")) => {
+            format!("{base}; refresh required, run `unclecode auth login --browser`")
+        }
+        _ => base,
+    }
 }
 
 fn summarize_team_runs(
@@ -203,6 +248,42 @@ mod tests {
             .lines
             .join("\n")
             .contains("Auth           WARN  none"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn warns_when_only_codex_oauth_is_available_for_api_work() {
+        let root = temp_root("doctor-codex-oauth");
+        let home = root.join("home");
+        let codex_dir = home.join(".codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        fs::write(
+            codex_dir.join("auth.json"),
+            r#"{"tokens":{"access_token":"not-a-jwt","refresh_token":"rt-test"}}"#,
+        )
+        .unwrap();
+
+        let report = doctor_report(&root, Some(&home), false, |key| match key {
+            "HOME" => Some(home.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .unwrap();
+
+        let text = report.lines.join("\n");
+        assert!(text
+            .contains("Auth           WARN  oauth-file (oauth, codex runtime); API calls blocked"));
+        assert!(text.contains("unclecode auth login --api-key-stdin"));
+        let parsed: serde_json::Value = serde_json::from_str(&report.json).unwrap();
+        assert_eq!(parsed["verdicts"]["auth"], "WARN");
+        assert_eq!(
+            parsed["auth"]["recovery"]["reason"],
+            "openai-oauth-codex-runtime-not-api-ready"
+        );
+        assert_eq!(
+            parsed["auth"]["recovery"]["commands"][0],
+            "OPENAI_OAUTH_CLIENT_ID=<client-id> unclecode auth login --browser"
+        );
+        assert_eq!(parsed["auth"]["recovery"]["verify"], "npm run qa:live");
         let _ = fs::remove_dir_all(root);
     }
 

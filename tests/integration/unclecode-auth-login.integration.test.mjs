@@ -204,7 +204,7 @@ test("built unclecode cli prints a browser oauth URL in print mode", () => {
   assert.match(result.stdout, /api\.model\.read/);
 });
 
-test("built unclecode cli auth login reports existing Codex oauth when client id is absent", () => {
+test("built unclecode cli auth login refuses Codex oauth when browser client id is absent", () => {
   const tempDir = mkdtempSync(
     path.join(tmpdir(), "unclecode-browser-login-codex-"),
   );
@@ -242,13 +242,13 @@ test("built unclecode cli auth login reports existing Codex oauth when client id
       },
     );
 
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /^Saved auth found\.$/m);
-    assert.match(result.stdout, /^Auth: oauth-file$/m);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /not API-ready for OpenAI API tool calling/i);
     assert.match(
-      result.stdout,
-      /next model request will verify provider access/i,
+      result.stderr,
+      /OPENAI_OAUTH_CLIENT_ID=<client-id> unclecode auth login --browser/i,
     );
+    assert.match(result.stderr, /auth login --api-key-stdin/i);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
@@ -305,7 +305,53 @@ test("built unclecode cli auth login --browser --print refuses codex-derived bro
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /Browser OAuth needs OPENAI_OAUTH_CLIENT_ID/i);
+    assert.match(result.stderr, /API-ready OAuth/i);
     assert.match(result.stderr, /auth login --device/i);
+    assert.match(result.stderr, /not be API-ready for model calls/i);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("built unclecode cli auth login requires explicit device flag for codex-derived device oauth", () => {
+  const tempDir = mkdtempSync(
+    path.join(tmpdir(), "unclecode-plain-login-codex-"),
+  );
+  const codexDir = path.join(tempDir, ".codex");
+  const header = Buffer.from(
+    JSON.stringify({ alg: "none", typ: "JWT" }),
+  ).toString("base64url");
+  const idPayload = Buffer.from(
+    JSON.stringify({ aud: ["app_client_plain_device"] }),
+  ).toString("base64url");
+  const idToken = `${header}.${idPayload}.sig`;
+
+  try {
+    mkdirSync(codexDir, { recursive: true });
+    writeFileSync(
+      path.join(codexDir, "auth.json"),
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        tokens: { id_token: idToken },
+      }),
+      "utf8",
+    );
+
+    const result = spawnSync("node", [builtCliEntrypoint, "auth", "login"], {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: tempDir,
+        OPENAI_OAUTH_CLIENT_ID: "",
+        OPENAI_OAUTH_BASE_URL: "http://127.0.0.1:9",
+      },
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /auth login --device/i);
+    assert.match(result.stderr, /may not be API-ready for model calls/i);
+    assert.doesNotMatch(result.stderr, /ECONNREFUSED|fetch failed/i);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }

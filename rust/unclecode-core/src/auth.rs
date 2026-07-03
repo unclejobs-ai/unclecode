@@ -9,8 +9,17 @@ pub struct OpenAIAuthStatus {
     pub auth_type: String,
     pub organization_id: Option<String>,
     pub project_id: Option<String>,
+    pub runtime: Option<String>,
     pub expires_at: Option<String>,
     pub is_expired: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAIAuthRecovery {
+    pub reason: &'static str,
+    pub preferred_fix: &'static str,
+    pub commands: [&'static str; 4],
+    pub verify: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -388,6 +397,7 @@ pub fn clear_openai_credentials(path: PathBuf) -> io::Result<()> {
 
 pub fn resolve_openai_auth_status(env_get: impl Fn(&str) -> Option<String>) -> OpenAIAuthStatus {
     let resolved = resolve_openai_auth(env_get);
+    let auth_type = resolved.auth_type.clone();
     OpenAIAuthStatus {
         active_source: match resolved.source.as_str() {
             "env-openai-auth-token" => "oauth-env".to_string(),
@@ -399,9 +409,10 @@ pub fn resolve_openai_auth_status(env_get: impl Fn(&str) -> Option<String>) -> O
             "unclecode-auth-file" | "codex-auth-file" => "oauth-file".to_string(),
             _ => "none".to_string(),
         },
-        auth_type: resolved.auth_type,
+        auth_type,
         organization_id: resolved.organization_id,
         project_id: resolved.project_id,
+        runtime: resolved.runtime,
         expires_at: match resolved.reason.as_deref() {
             Some("auth-refresh-required") => Some("refresh-required".to_string()),
             Some("auth-insufficient-scope") => Some("insufficient-scope".to_string()),
@@ -409,6 +420,47 @@ pub fn resolve_openai_auth_status(env_get: impl Fn(&str) -> Option<String>) -> O
         },
         is_expired: resolved.status != "ok",
     }
+}
+
+pub fn openai_auth_supports_api_calls(status: &OpenAIAuthStatus) -> bool {
+    status.active_source != "none"
+        && !status.is_expired
+        && !(status.auth_type == "oauth" && status.runtime.as_deref() == Some("codex"))
+}
+
+pub fn openai_auth_status_recovery(status: &OpenAIAuthStatus) -> Option<OpenAIAuthRecovery> {
+    if openai_auth_supports_api_calls(status) {
+        return None;
+    }
+
+    Some(OpenAIAuthRecovery {
+        reason: openai_auth_recovery_reason(status),
+        preferred_fix:
+            "Run browser OAuth with an API-capable OpenAI OAuth client, or use API key login. Codex device OAuth can sign in but is not API-ready for OpenAI API calls.",
+        commands: [
+            "OPENAI_OAUTH_CLIENT_ID=<client-id> unclecode auth login --browser",
+            "unclecode auth login --api-key-stdin",
+            "OPENAI_API_KEY=<key> npm run qa:live",
+            "npm run qa:live",
+        ],
+        verify: "npm run qa:live",
+    })
+}
+
+fn openai_auth_recovery_reason(status: &OpenAIAuthStatus) -> &'static str {
+    if status.active_source == "none" {
+        return "openai-auth-missing";
+    }
+    if status.is_expired {
+        return "openai-auth-needs-refresh";
+    }
+    if status.auth_type == "oauth" && status.runtime.as_deref() == Some("codex") {
+        return "openai-oauth-codex-runtime-not-api-ready";
+    }
+    if status.auth_type == "oauth" {
+        return "openai-oauth-insufficient-scope";
+    }
+    "openai-auth-not-api-ready"
 }
 
 pub fn resolve_openai_auth(env_get: impl Fn(&str) -> Option<String>) -> ResolvedOpenAIAuth {
@@ -997,6 +1049,33 @@ mod tests {
         });
         assert_eq!(status.active_source, "api-key-env");
         assert!(!status.is_expired);
+        assert!(openai_auth_supports_api_calls(&status));
+    }
+
+    #[test]
+    fn codex_oauth_file_is_not_openai_api_ready() {
+        let root = std::env::temp_dir().join(format!(
+            "unclecode-codex-oauth-runtime-{}",
+            std::process::id()
+        ));
+        let codex_dir = root.join(".codex");
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+        fs::write(
+            codex_dir.join("auth.json"),
+            r#"{"tokens":{"access_token":"not-a-jwt","refresh_token":"rt-test"}}"#,
+        )
+        .expect("write codex auth");
+
+        let status = resolve_openai_auth_status(|key| match key {
+            "HOME" => Some(root.to_string_lossy().to_string()),
+            _ => None,
+        });
+
+        assert_eq!(status.active_source, "oauth-file");
+        assert_eq!(status.auth_type, "oauth");
+        assert_eq!(status.runtime.as_deref(), Some("codex"));
+        assert!(!openai_auth_supports_api_calls(&status));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

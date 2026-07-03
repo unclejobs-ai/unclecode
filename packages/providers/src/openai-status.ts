@@ -12,10 +12,12 @@ export async function resolveOpenAIAuthStatus(options: {
     providerId: "openai",
     activeSource: normalizeAuthSource(fields.get("activeSource")),
     authType: normalizeAuthType(fields.get("authType")),
+    runtime: normalizeRuntime(fields.get("runtime")),
     organizationId: normalizeOptionalField(fields.get("organizationId")),
     projectId: normalizeOptionalField(fields.get("projectId")),
     expiresAt: normalizeOptionalField(fields.get("expiresAt")),
     isExpired: fields.get("expired") === "yes",
+    apiReady: fields.get("apiReady") === "yes",
   };
 }
 
@@ -41,6 +43,10 @@ function normalizeAuthType(value: string | undefined): OpenAIAuthStatus["authTyp
   return value === "api-key" || value === "oauth" ? value : "none";
 }
 
+function normalizeRuntime(value: string | undefined): OpenAIAuthStatus["runtime"] {
+  return value === "api" || value === "codex" ? value : null;
+}
+
 function normalizeOptionalField(value: string | undefined): string | null {
   return value && value !== "none" ? value : null;
 }
@@ -52,7 +58,9 @@ export function formatOpenAIAuthStatus(status: OpenAIAuthStatus): string {
     `auth: ${status.authType}`,
     `organization: ${status.organizationId ?? "none"}`,
     `project: ${status.projectId ?? "none"}`,
+    `runtime: ${status.runtime ?? "none"}`,
     `expiresAt: ${status.expiresAt ?? "none"}`,
     `expired: ${status.isExpired ? "yes" : "no"}`,
+    `api ready: ${status.apiReady ? "yes" : "no"}`,
   ].join("\n");
 }

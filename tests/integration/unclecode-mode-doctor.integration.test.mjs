@@ -136,6 +136,12 @@ test("built unclecode cli setup prints actionable readiness guidance", () => {
     assert.match(result.stdout, /unclecode auth login --browser/i);
     assert.match(result.stdout, /unclecode auth login --api-key/i);
     assert.match(result.stdout, /OPENAI_API_KEY/i);
+    assert.match(result.stdout, /API-ready OAuth/i);
+    assert.match(result.stdout, /Codex auth/i);
+    assert.doesNotMatch(
+      result.stdout,
+      /reuse an existing `~\/\.codex\/auth\.json`/i,
+    );
     assert.match(result.stdout, /Session store:/i);
     assert.match(result.stdout, /Next steps:/i);
   } finally {

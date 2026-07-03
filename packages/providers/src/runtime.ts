@@ -963,7 +963,7 @@ export class GeminiProvider implements LlmProvider {
         });
         const parsed = this.usesInjectedClient
           ? parseGeminiResponse(await this.requireInjectedClient().models.generateContent(request), this.model)
-          : parseGeminiResponseText(await this.postGenerateContentWithRust(this.model, JSON.stringify(request), options.signal), this.model);
+          : parseGeminiResponseText(await this.postGenerateContentWithRust(this.model, request, options.signal), this.model);
         throwIfAborted(options.signal);
 
         const actionPlan = resolveProviderIterationActionPlan(i, parsed.actions.length, maxIterations, parsed.content);
@@ -1026,12 +1026,17 @@ export class GeminiProvider implements LlmProvider {
     });
     const parsed = this.usesInjectedClient
       ? parseGeminiResponse(await this.requireInjectedClient().models.generateContent(request), model)
-      : parseGeminiResponseText(await this.postGenerateContentWithRust(model, JSON.stringify(request)), model);
+      : parseGeminiResponseText(await this.postGenerateContentWithRust(model, request), model);
 
     return { content: parsed.content, actions: parsed.actions, costUsd: parsed.costUsd };
   }
 
-  private async postGenerateContentWithRust(model: string, body: string, signal?: AbortSignal | undefined): Promise<string> {
+  private async postGenerateContentWithRust(
+    model: string,
+    request: GeminiGenerateContentRequest,
+    signal?: AbortSignal | undefined,
+  ): Promise<string> {
+    const body = JSON.stringify(buildGeminiRestGenerateContentRequest(request));
     const response = await postGeminiWithRustAsync(this.apiKey, model, body, signal);
     if (!response.ok) {
       throw new Error(buildProviderRequestError("gemini", response.status, response.text, response.attempts));
@@ -2106,6 +2111,88 @@ function buildGeminiGenerateContentRequest(input: {
     throw new Error("Rust Gemini request envelope conversion returned an invalid payload.");
   }
   return parsed as GeminiGenerateContentRequest;
+}
+
+function buildGeminiRestGenerateContentRequest(
+  request: GeminiGenerateContentRequest,
+): GeminiGenerateContentRequest {
+  const contents = request.contents;
+  const config = request.config;
+  if (!Array.isArray(contents) || !isRecord(config)) {
+    throw new Error("Gemini SDK request envelope cannot be converted to REST JSON.");
+  }
+
+  const rest: Record<string, unknown> = { contents };
+  const generationConfig: Record<string, unknown> = {};
+  let toolConfig: unknown;
+  for (const [key, value] of Object.entries(config)) {
+    if (value === undefined) {
+      continue;
+    }
+    if (key === "systemInstruction") {
+      rest.systemInstruction = normalizeGeminiRestSystemInstruction(value);
+      continue;
+    }
+    if (key === "tools") {
+      if (Array.isArray(value) && value.length > 0) {
+        rest.tools = value.map(normalizeGeminiRestTool);
+      }
+      continue;
+    }
+    if (key === "toolConfig") {
+      toolConfig = value;
+      continue;
+    }
+    if (["safetySettings", "cachedContent", "serviceTier", "store"].includes(key)) {
+      rest[key] = value;
+      continue;
+    }
+    generationConfig[key] = value;
+  }
+  if (Object.keys(generationConfig).length > 0) {
+    rest.generationConfig = generationConfig;
+  }
+  if (rest.tools !== undefined && toolConfig !== undefined) {
+    rest.toolConfig = toolConfig;
+  }
+  return rest as GeminiGenerateContentRequest;
+}
+
+function normalizeGeminiRestSystemInstruction(value: unknown): unknown {
+  if (typeof value !== "string") {
+    return value;
+  }
+  return { parts: [{ text: value }] };
+}
+
+function normalizeGeminiRestTool(tool: unknown): unknown {
+  if (!isRecord(tool)) {
+    return tool;
+  }
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(tool)) {
+    normalized[key] = key === "functionDeclarations" && Array.isArray(value)
+      ? value.map(normalizeGeminiRestFunctionDeclaration)
+      : value;
+  }
+  return normalized;
+}
+
+function normalizeGeminiRestFunctionDeclaration(declaration: unknown): unknown {
+  if (!isRecord(declaration)) {
+    return declaration;
+  }
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(declaration)) {
+    if (key === "parametersJsonSchema") {
+      if (declaration.parameters === undefined) {
+        normalized.parameters = value;
+      }
+      continue;
+    }
+    normalized[key] = value;
+  }
+  return normalized;
 }
 
 function parseGeminiResponse(response: unknown, model?: string): RustGeminiResponse {

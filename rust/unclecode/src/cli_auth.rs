@@ -7,16 +7,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::cli_auth_saved::{saved_auth_login_decision, SavedAuthLoginDecision};
+use serde_json::json;
 use unclecode_core::auth::{
     build_openai_auth_request_spec, build_openai_authorization_code_token_body,
     build_openai_authorization_url, build_openai_codex_device_authorization_body,
     build_openai_codex_device_token_body, build_openai_device_authorization_body,
     build_openai_device_token_body, clear_openai_credentials, inspect_openai_oauth_token,
-    openai_credentials_path, parse_openai_callback_code,
-    parse_openai_codex_device_authorization_response, parse_openai_codex_device_token_response,
-    parse_openai_device_authorization_response, parse_openai_oauth_token_response,
-    resolve_openai_auth_status, resolve_reusable_openai_oauth_client_id,
-    write_openai_api_key_credentials, write_openai_oauth_credentials, StoredApiKeyCredential,
+    openai_auth_status_recovery, openai_auth_supports_api_calls, openai_credentials_path,
+    parse_openai_callback_code, parse_openai_codex_device_authorization_response,
+    parse_openai_codex_device_token_response, parse_openai_device_authorization_response,
+    parse_openai_oauth_token_response, resolve_openai_auth_status,
+    resolve_reusable_openai_oauth_client_id, write_openai_api_key_credentials,
+    write_openai_oauth_credentials, OpenAIAuthStatus, StoredApiKeyCredential,
     StoredOAuthCredential,
 };
 use unclecode_core::http_transport::{post_json_with_headers, HttpTransportResponse};
@@ -58,7 +61,13 @@ pub fn run_top_level_auth_command(args: &[OsString]) -> Result<u8, String> {
         }
         Some("login") => run_login_command(&args[1..]),
         Some("status") => {
-            print_openai_auth_status();
+            if args.get(1).and_then(|arg| arg.to_str()) == Some("--help")
+                || args.get(1).and_then(|arg| arg.to_str()) == Some("-h")
+            {
+                println!("Usage: unclecode auth status [--json]");
+                return Ok(0);
+            }
+            print_openai_auth_status(parse_auth_status_args(&args[1..])?)?;
             Ok(0)
         }
         Some("logout") => {
@@ -148,13 +157,13 @@ fn run_login_command(args: &[OsString]) -> Result<u8, String> {
     let reusable_client_id = resolve_reusable_openai_oauth_client_id(|key| env::var(key).ok());
     let has_explicit_method = api_key_stdin || print_url || browser || device;
 
-    if !has_explicit_method && handle_saved_auth_login()? {
+    if !has_explicit_method && handle_saved_auth_login(browser_client_id.is_some())? {
         return Ok(0);
     }
 
     if print_url && !device {
         let client_id = browser_client_id.as_deref().ok_or_else(|| {
-            "Browser OAuth needs OPENAI_OAUTH_CLIENT_ID. Reused Codex auth can start device OAuth instead. Run `unclecode auth login --device`.".to_string()
+            "Browser OAuth needs OPENAI_OAUTH_CLIENT_ID for API-ready OAuth. Reused Codex auth can start device OAuth with `unclecode auth login --device`, but that may not be API-ready for model calls. Use `unclecode auth login --api-key-stdin` as the reliable fallback.".to_string()
         })?;
         return print_browser_oauth_url_with_client(client_id);
     }
@@ -177,11 +186,11 @@ fn run_login_command(args: &[OsString]) -> Result<u8, String> {
     if let Some(client_id) = browser_client_id.as_deref() {
         return login_with_browser_oauth_with_client(client_id);
     }
-    if let Some(client_id) = reusable_client_id.as_deref() {
-        return login_with_codex_device_oauth(client_id);
+    if reusable_client_id.is_some() {
+        return Err("OPENAI_OAUTH_CLIENT_ID is required for API-ready OAuth login. Use `unclecode auth login --device` only for Codex device OAuth; it may not be API-ready for model calls. Reliable fallback: `unclecode auth login --api-key-stdin`.".to_string());
     }
 
-    Err("OPENAI_OAUTH_CLIENT_ID is required for OAuth login. Existing ~/.codex/auth.json is reused automatically when present.".to_string())
+    Err("OPENAI_OAUTH_CLIENT_ID is required for API-ready OAuth login. Use `unclecode auth login --device` only for Codex device OAuth; it may not be API-ready for model calls. Reliable fallback: `unclecode auth login --api-key-stdin`.".to_string())
 }
 
 fn login_with_api_key_stdin(
@@ -405,7 +414,7 @@ fn browser_oauth_client_id() -> Result<String, String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "Browser OAuth needs OPENAI_OAUTH_CLIENT_ID. Reused Codex auth can start device OAuth instead. Run `unclecode auth login --device`.".to_string())
+        .ok_or_else(|| "Browser OAuth needs OPENAI_OAUTH_CLIENT_ID for API-ready OAuth. Reused Codex auth can start device OAuth with `unclecode auth login --device`, but that may not be API-ready for model calls. Use `unclecode auth login --api-key-stdin` as the reliable fallback.".to_string())
 }
 
 fn browser_oauth_redirect_uri() -> String {
@@ -606,19 +615,17 @@ fn next_flag_value<'a>(args: &'a [OsString], index: usize, flag: &str) -> Result
         .ok_or_else(|| format!("{flag} expects a value"))
 }
 
-fn handle_saved_auth_login() -> Result<bool, String> {
+fn handle_saved_auth_login(can_start_api_oauth: bool) -> Result<bool, String> {
     let status = resolve_openai_auth_status(|key| env::var(key).ok());
-    if status.active_source != "none" && !status.is_expired {
-        println!("Saved auth found.");
-        println!("Auth: {}", status.active_source);
-        println!("Use `unclecode auth status` to inspect it. The next model request will verify provider access.");
-        return Ok(true);
+    match saved_auth_login_decision(&status, can_start_api_oauth)? {
+        SavedAuthLoginDecision::UseSaved => {
+            println!("Saved auth found.");
+            println!("Auth: {}", status.active_source);
+            println!("Use `unclecode auth status` to inspect it. The next model request will verify provider access.");
+            Ok(true)
+        }
+        SavedAuthLoginDecision::ContinueLogin => Ok(false),
     }
-    if status.active_source != "none" && status.expires_at.as_deref() == Some("insufficient-scope")
-    {
-        return Err("Saved OAuth was found but it lacks model.request scope for UncleCode API calls. Use unclecode auth login --api-key-stdin, OPENAI_API_KEY, or browser OAuth with OPENAI_OAUTH_CLIENT_ID.".to_string());
-    }
-    Ok(false)
 }
 
 fn env_trimmed(key: &str) -> Option<String> {
@@ -628,24 +635,82 @@ fn env_trimmed(key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn print_openai_auth_status() {
+fn parse_auth_status_args(args: &[OsString]) -> Result<bool, String> {
+    match args {
+        [] => Ok(false),
+        [arg] if arg.to_str() == Some("--json") => Ok(true),
+        _ => Err("Usage: unclecode auth status [--json]".to_string()),
+    }
+}
+
+fn print_openai_auth_status(json_output: bool) -> Result<(), String> {
     let status = resolve_openai_auth_status(|key| env::var(key).ok());
+    if json_output {
+        let payload = openai_auth_status_json(&status);
+        println!(
+            "{}",
+            serde_json::to_string(&payload)
+                .map_err(|error| format!("Failed to encode auth status JSON: {error}"))?
+        );
+        return Ok(());
+    }
     println!("provider: openai");
     println!("source: {}", status.active_source);
     println!("auth: {}", status.auth_type);
     println!(
         "organization: {}",
-        status.organization_id.unwrap_or_else(|| "none".to_string())
+        status.organization_id.as_deref().unwrap_or("none")
     );
     println!(
         "project: {}",
-        status.project_id.unwrap_or_else(|| "none".to_string())
+        status.project_id.as_deref().unwrap_or("none")
     );
+    println!("runtime: {}", status.runtime.as_deref().unwrap_or("none"));
     println!(
         "expiresAt: {}",
-        status.expires_at.unwrap_or_else(|| "none".to_string())
+        status.expires_at.as_deref().unwrap_or("none")
     );
     println!("expired: {}", if status.is_expired { "yes" } else { "no" });
+    println!(
+        "api ready: {}",
+        if openai_auth_supports_api_calls(&status) {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    if let Some(recovery) = openai_auth_status_recovery(&status) {
+        println!("recovery: {}", recovery.reason);
+        println!("preferred fix: {}", recovery.preferred_fix);
+        for command in recovery.commands {
+            println!("next: {command}");
+        }
+        println!("verify: {}", recovery.verify);
+    }
+    Ok(())
+}
+
+pub(crate) fn openai_auth_status_json(status: &OpenAIAuthStatus) -> serde_json::Value {
+    let recovery = openai_auth_status_recovery(status).map(|recovery| {
+        json!({
+            "reason": recovery.reason,
+            "preferredFix": recovery.preferred_fix,
+            "commands": recovery.commands,
+            "verify": recovery.verify,
+        })
+    });
+    json!({
+        "provider": "openai",
+        "source": status.active_source,
+        "type": status.auth_type,
+        "organizationId": status.organization_id,
+        "projectId": status.project_id,
+        "runtime": status.runtime,
+        "expiresAt": status.expires_at,
+        "expired": status.is_expired,
+        "apiReady": openai_auth_supports_api_calls(status),
+        "recovery": recovery,
+    })
 }
 
 fn clear_local_openai_credentials() -> Result<(), String> {
@@ -680,7 +745,7 @@ fn print_auth_login_help() {
 }
 
 fn auth_usage() -> String {
-    "Usage: unclecode auth <login|status|logout>".to_string()
+    "Usage: unclecode auth <login|status [--json]|logout>".to_string()
 }
 
 fn auth_login_usage() -> String {
