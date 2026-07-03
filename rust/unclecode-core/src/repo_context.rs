@@ -8,6 +8,7 @@ use std::process::Command;
 
 const EXCLUDED_SEGMENTS: &[&str] = &[".git", "node_modules", "dist", "build"];
 const ZERO_SHA: &str = "0000000000000000000000000000000000000000";
+const REPO_MAP_HISTORY_SCAN_LIMIT: &str = "200";
 
 #[derive(Debug, Clone, PartialEq)]
 struct RepoMapEntry {
@@ -41,11 +42,27 @@ pub fn build_repo_map_json(root_dir: &Path) -> Result<String, String> {
         (
             run_git(
                 root_dir,
-                &["log", "--format=%cI", "--name-only", "--no-renames", "--"],
+                &[
+                    "log",
+                    "--max-count",
+                    REPO_MAP_HISTORY_SCAN_LIMIT,
+                    "--format=%cI",
+                    "--name-only",
+                    "--no-renames",
+                    "--",
+                ],
             )?,
             run_git(
                 root_dir,
-                &["log", "--oneline", "--name-only", "--no-renames", "--"],
+                &[
+                    "log",
+                    "--max-count",
+                    REPO_MAP_HISTORY_SCAN_LIMIT,
+                    "--oneline",
+                    "--name-only",
+                    "--no-renames",
+                    "--",
+                ],
             )?,
         )
     };

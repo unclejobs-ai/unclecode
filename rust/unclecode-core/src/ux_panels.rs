@@ -1151,6 +1151,8 @@ fn preferred_auth_route(
 
 fn format_auth_label_for_display(auth_label: &str) -> String {
     match auth_label {
+        "oauth-file-api-blocked" => "OAuth file · API blocked".to_string(),
+        "oauth-env-api-blocked" => "OAuth env · API blocked".to_string(),
         "oauth-file" => "Browser OAuth · file".to_string(),
         "oauth-env" => "Browser OAuth · env".to_string(),
         "api-key-file" => "API key · file".to_string(),
@@ -1184,6 +1186,14 @@ fn format_auth_status_blurb(auth_label: Option<&str>, browser_oauth_available: b
         };
     }
     if auth_label.starts_with("oauth-") {
+        if auth_label.ends_with("-api-blocked") {
+            return if browser_oauth_available {
+                "Saved OAuth is not API-ready for model calls.".to_string()
+            } else {
+                "Saved OAuth is not API-ready. Browser login needs OPENAI_OAUTH_CLIENT_ID."
+                    .to_string()
+            };
+        }
         return if browser_oauth_available {
             "Saved browser OAuth found.".to_string()
         } else {
@@ -1231,6 +1241,20 @@ fn build_auth_launcher_next_lines(
         };
     }
     if auth_label.starts_with("oauth-") {
+        if auth_label.ends_with("-api-blocked") {
+            return if browser_oauth_available {
+                vec![
+                    "/auth status inspects recovery.".to_string(),
+                    "/auth login starts API-ready OAuth.".to_string(),
+                    "/auth key opens secure API key entry.".to_string(),
+                ]
+            } else {
+                vec![
+                    "/auth status inspects recovery.".to_string(),
+                    "/auth key opens secure API key entry.".to_string(),
+                ]
+            };
+        }
         return vec![
             "/auth status inspects auth.".to_string(),
             "/auth logout switches auth.".to_string(),
@@ -2273,6 +2297,34 @@ mod tests {
                 json!("/auth logout switches auth."),
                 json!(""),
                 json!("Routes"),
+            ]
+        );
+    }
+
+    #[test]
+    fn auth_launcher_lines_mark_api_blocked_oauth() {
+        let out = resolve_auth_launcher_lines_json(
+            &json!({
+                "mode": "default",
+                "authLabel": "oauth-file-api-blocked",
+                "browserOAuthAvailable": false
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            parsed.get("lines").and_then(Value::as_array).unwrap(),
+            &vec![
+                json!("Current"),
+                json!("Auth · OAuth file · API blocked"),
+                json!("Route · Device OAuth"),
+                json!("Saved OAuth is not API-ready. Browser login needs OPENAI_OAUTH_CLIENT_ID."),
+                json!("Browser OAuth unavailable in this shell."),
+                json!(""),
+                json!("Next"),
+                json!("/auth status inspects recovery."),
+                json!("/auth key opens secure API key entry."),
             ]
         );
     }

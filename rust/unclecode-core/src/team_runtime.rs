@@ -710,18 +710,20 @@ fn list_team_run_refs(data_root: &Path) -> Result<Vec<TeamRunRef>, String> {
             continue;
         };
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !is_team_run_dir_name(&name) {
-            continue;
-        }
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
-        if file_type.is_dir() {
-            runs.push(TeamRunRef {
-                run_id: name,
-                run_root: team_runs_root.join(entry.file_name()),
-            });
+        if !file_type.is_dir() {
+            continue;
         }
+        let run_root = team_runs_root.join(entry.file_name());
+        if !is_team_run_dir_name(&name) && !run_root.join("manifest.json").is_file() {
+            continue;
+        }
+        runs.push(TeamRunRef {
+            run_id: name,
+            run_root,
+        });
     }
     runs.sort_by(|left, right| left.run_id.cmp(&right.run_id));
     Ok(runs)
@@ -1892,6 +1894,39 @@ mod tests {
         let status = format_team_run_status(&root, Some("tr_record")).unwrap();
         assert!(status.contains("Status:    accepted"));
         assert!(status.contains("Steps:     2"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn records_team_run_with_custom_record_id() {
+        let root = std::env::temp_dir().join(format!(
+            "unclecode-team-run-custom-record-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+
+        let result = start_team_run_record(TeamRunRecordRequest {
+            data_root: root.clone(),
+            run_id: Some("smoke-transparent-context".to_string()),
+            objective: "record native queue run".to_string(),
+            persona: "coder".to_string(),
+            lanes_spec: "hermes::agent=codex".to_string(),
+            gate: "warn".to_string(),
+            runtime: "local".to_string(),
+            workspace_root: PathBuf::from("/tmp/repo"),
+            created_by: "test".to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(result.run_id, "smoke-transparent-context");
+
+        let status = format_team_run_status(&root, Some("smoke-transparent-context")).unwrap();
+        assert!(status.contains("Status:    started"));
+
+        let inspect = format_team_run_inspect(&root, "smoke-transparent-context", true).unwrap();
+        assert!(inspect.ok);
+        assert!(inspect.output.contains("Chain: VERIFIED (1 entries)"));
 
         let _ = fs::remove_dir_all(&root);
     }

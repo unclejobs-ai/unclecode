@@ -1,4 +1,4 @@
-use crate::auth::resolve_openai_auth_status;
+use crate::auth::{openai_auth_supports_api_calls, resolve_openai_auth_status};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -14,7 +14,7 @@ pub fn setup_report_text(
         )
     })?;
     let auth_status = resolve_openai_auth_status(env_get);
-    let auth_ready = auth_status.active_source != "none" && !auth_status.is_expired;
+    let auth_ready = openai_auth_supports_api_calls(&auth_status);
     Ok([
         "Setup guide".to_string(),
         format!("Workspace: {}", workspace_root.display()),
@@ -37,7 +37,7 @@ pub fn setup_report_text(
             "1. Auth is ready. You can continue with `unclecode doctor` or `unclecode`."
                 .to_string()
         } else {
-            "1. Set OPENAI_API_KEY, save credentials with `unclecode auth login --api-key-stdin [--org <id>] [--project <id>]`, reuse an existing `~/.codex/auth.json`, or run `unclecode auth login --browser` with OPENAI_OAUTH_CLIENT_ID.".to_string()
+            "1. Set OPENAI_API_KEY, save API-key credentials with `unclecode auth login --api-key-stdin [--org <id>] [--project <id>]`, or run `OPENAI_OAUTH_CLIENT_ID=<client-id> unclecode auth login --browser` for API-ready OAuth. Existing Codex auth (`~/.codex/auth.json`) may be detected for sign-in, but it is not proof of OpenAI API readiness.".to_string()
         },
         "2. Run `unclecode doctor` to verify auth, runtime, session-store, and MCP readiness."
             .to_string(),
@@ -78,6 +78,9 @@ mod tests {
         assert!(report.contains("Runtime: local available"));
         assert!(report.contains("unclecode auth login --browser"));
         assert!(report.contains("OPENAI_API_KEY"));
+        assert!(report.contains("API-ready OAuth"));
+        assert!(report.contains("Codex auth"));
+        assert!(!report.contains("reuse an existing `~/.codex/auth.json`"));
         assert!(session_root.exists());
         let _ = fs::remove_dir_all(root);
     }

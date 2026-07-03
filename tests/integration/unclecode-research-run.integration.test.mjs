@@ -120,6 +120,8 @@ test("built unclecode cli refreshes Work context and keeps artifact paths in JSO
     assert.equal(jsonPayload.command, "research.run");
     assert.equal(jsonPayload.status, "completed");
     assert.match(jsonPayload.sessionId, /^research-/);
+    assert.match(jsonPayload.summary, /context files/);
+    assert.doesNotMatch(jsonPayload.summary, /changed files/);
     assert.deepEqual(jsonPayload.artifactPaths.length, 1);
     const artifactPath = jsonPayload.artifactPaths[0];
 
@@ -130,6 +132,8 @@ test("built unclecode cli refreshes Work context and keeps artifact paths in JSO
     const artifactBody = readFileSync(artifactPath, "utf8");
     assert.match(artifactBody, /# UncleCode Work Context/);
     assert.match(artifactBody, /Focus: summarize current workspace/);
+    assert.match(artifactBody, /Context files:/);
+    assert.doesNotMatch(artifactBody, /Changed files:/);
     assert.match(artifactBody, /## Findings/);
     assert.match(artifactBody, /## Next Work Handoff/);
 

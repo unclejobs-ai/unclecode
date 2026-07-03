@@ -63,7 +63,7 @@ pub fn research_status_report(
             json!({
                 "sessionId": session.session_id,
                 "state": session.state,
-                "summary": session.task_summary.as_deref().unwrap_or("none"),
+                "summary": format_work_context_summary(session.task_summary.as_deref().unwrap_or("none")),
                 "updatedAt": session.updated_at,
             })
         }),
@@ -84,11 +84,14 @@ fn format_work_context_summary(summary: &str) -> String {
         .replace("Prepared a context brief", "Refreshed Work context")
         .replace("research bundle", "Work context")
         .replace("context brief", "Work context")
+        .replace("changed files", "context files")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::research_run::research_run_report;
+    use crate::session::session_paths;
     use crate::session::WorkShellSessionSnapshot;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -166,7 +169,9 @@ mod tests {
                 model: "research-local".to_string(),
                 mode: "normal".to_string(),
                 state: "idle".to_string(),
-                summary: "Prepared a local research bundle for \"audit workflow\".".to_string(),
+                summary:
+                    "Prepared a local research bundle for \"audit workflow\" with 12 changed files."
+                        .to_string(),
                 trace_mode: None,
                 reasoning_effort: None,
                 entries: vec![],
@@ -180,9 +185,69 @@ mod tests {
         .unwrap();
 
         let text = report.lines.join("\n");
-        assert!(text.contains("Summary: Refreshed Work context for \"audit workflow\"."));
+        assert!(text.contains(
+            "Summary: Refreshed Work context for \"audit workflow\" with 12 context files."
+        ));
         assert!(!text.contains("research bundle"));
         assert!(!text.contains("context brief"));
+        assert!(!text.contains("changed files"));
+        let parsed: serde_json::Value = serde_json::from_str(&report.json).unwrap();
+        assert_eq!(
+            parsed["latestRun"]["summary"],
+            "Refreshed Work context for \"audit workflow\" with 12 context files."
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reports_new_research_run_after_legacy_iso_checkpoint() {
+        let root = temp_root("research-status-freshness");
+        let home = root.join("home");
+        let session_root = root.join(".state");
+        fs::create_dir_all(&home).unwrap();
+
+        let legacy_paths = session_paths(&session_root, &root, "research-legacy-iso");
+        fs::create_dir_all(&legacy_paths.session_dir).unwrap();
+        fs::write(
+            legacy_paths.checkpoint_path,
+            serde_json::to_string(&serde_json::json!({
+                "sessionId": "research-legacy-iso",
+                "projectPath": root.to_string_lossy(),
+                "eventCount": 1,
+                "updatedAt": "2026-04-03T13:39:44.266Z",
+                "state": "idle",
+                "metadata": {
+                    "model": "research-local",
+                    "taskSummary": "Legacy context"
+                },
+                "taskSummary": {
+                    "summary": "Legacy context",
+                    "timestamp": "2026-04-03T13:39:44.266Z"
+                },
+                "mode": "normal",
+                "entries": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let env_get = |key: &str| {
+            (key == "UNCLECODE_SESSION_STORE_ROOT")
+                .then(|| session_root.to_string_lossy().to_string())
+        };
+        let run = research_run_report(&root, Some(&home), env_get, "fresh runtime repro").unwrap();
+        let run_payload: serde_json::Value = serde_json::from_str(&run.json).unwrap();
+        let report = research_status_report(&root, Some(&home), env_get).unwrap();
+        let status_payload: serde_json::Value = serde_json::from_str(&report.json).unwrap();
+
+        assert_eq!(
+            status_payload["latestRun"]["sessionId"],
+            run_payload["sessionId"]
+        );
+        assert_ne!(
+            status_payload["latestRun"]["sessionId"],
+            "research-legacy-iso"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

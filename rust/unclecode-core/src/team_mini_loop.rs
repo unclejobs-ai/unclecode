@@ -6,8 +6,8 @@ use crate::anthropic_request::{
     parse_anthropic_response_json_for_model, provider_query_messages_to_anthropic_json,
 };
 use crate::gemini_request::{
-    build_gemini_generate_content_request_json,
-    build_gemini_generate_content_request_spec_with_base, parse_gemini_response_json_for_model,
+    build_gemini_generate_content_request_spec_with_base,
+    build_gemini_generate_content_rest_request_json, parse_gemini_response_json_for_model,
     provider_query_messages_to_gemini_json, tool_definitions_to_gemini_function_declarations_json,
 };
 use crate::http_transport::post_json_with_headers;
@@ -307,8 +307,7 @@ fn query_gemini(
         .to_string();
     let declarations = tool_definitions_to_gemini_function_declarations_json(tools_json)?;
     let include_tools = has_array_items(&declarations);
-    let body = build_gemini_generate_content_request_json(
-        model,
+    let body = build_gemini_generate_content_rest_request_json(
         system_instruction,
         &contents,
         &declarations,

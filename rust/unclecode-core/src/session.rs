@@ -7,6 +7,7 @@ use crate::redaction::redact_secrets;
 use crate::session_listing::{parse_session_list_item, parse_session_resume_summary};
 pub use crate::session_listing::{SessionListItem, SessionResumeSummary};
 use crate::sha256::sha256_hex;
+use crate::time_iso::{unix_millis_to_iso, utc_now_iso};
 use serde_json::{json, Value};
 
 const MAX_RESUME_ENTRIES: usize = 24;
@@ -173,7 +174,7 @@ impl WorkShellSessionStore {
                 sessions.push(line);
             }
         }
-        sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        sessions.sort_by(|left, right| compare_updated_desc(&left.updated_at, &right.updated_at));
         sessions.truncate(6);
         Ok(sessions)
     }
@@ -200,7 +201,7 @@ impl WorkShellSessionStore {
                 sessions.push(item);
             }
         }
-        sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        sessions.sort_by(|left, right| compare_updated_desc(&left.updated_at, &right.updated_at));
         Ok(sessions)
     }
 
@@ -517,7 +518,23 @@ fn now_ms() -> u128 {
 }
 
 fn now_timestamp() -> String {
-    format!("{:013}", now_ms())
+    utc_now_iso()
+}
+
+fn compare_updated_desc(left: &str, right: &str) -> std::cmp::Ordering {
+    timestamp_sort_key(right)
+        .cmp(&timestamp_sort_key(left))
+        .then_with(|| right.cmp(left))
+}
+
+fn timestamp_sort_key(value: &str) -> String {
+    if value.len() >= 13 && value.chars().all(|ch| ch.is_ascii_digit()) {
+        return value
+            .parse::<u128>()
+            .map(unix_millis_to_iso)
+            .unwrap_or_else(|_| value.to_string());
+    }
+    value.to_string()
 }
 
 pub fn session_paths(root_dir: &Path, project_path: &Path, session_id: &str) -> SessionPaths {
@@ -770,6 +787,7 @@ mod tests {
         let lines = store.list_session_lines(&project).expect("list sessions");
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].session_id, "work-session-1");
+        assert!(lines[0].updated_at.contains('T'));
         assert_eq!(lines[0].summary, "Chat: inspect repo");
         let resumed = store
             .resume_work_shell_session(&project, "work-session-1")
@@ -783,6 +801,70 @@ mod tests {
         assert_eq!(resumed.entries[1].text, "repo inspected");
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn session_listing_orders_legacy_epoch_millis_after_older_iso() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-mixed-timestamp-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let project = env::current_dir().expect("cwd");
+        let store = WorkShellSessionStore::new(&root);
+        write_checkpoint(
+            &root,
+            &project,
+            "work-old-iso",
+            "2026-04-03T13:39:44.266Z",
+            "Old ISO",
+        );
+        write_checkpoint(
+            &root,
+            &project,
+            "work-new-epoch",
+            "1782407659276",
+            "New epoch",
+        );
+
+        let sessions = store.list_session_items(&project).expect("sessions");
+
+        assert_eq!(sessions[0].session_id, "work-new-epoch");
+        assert_eq!(sessions[1].session_id, "work-old-iso");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn write_checkpoint(
+        root: &Path,
+        project: &Path,
+        session_id: &str,
+        updated_at: &str,
+        summary: &str,
+    ) {
+        let paths = session_paths(root, project, session_id);
+        fs::create_dir_all(&paths.session_dir).expect("session dir");
+        fs::write(
+            paths.checkpoint_path,
+            serde_json::to_string(&json!({
+                "sessionId": session_id,
+                "projectPath": project.to_string_lossy(),
+                "eventCount": 1,
+                "updatedAt": updated_at,
+                "state": "idle",
+                "metadata": {
+                    "model": "gpt-5.4",
+                    "taskSummary": summary
+                },
+                "taskSummary": {
+                    "summary": summary,
+                    "timestamp": updated_at
+                },
+                "mode": "normal",
+                "entries": []
+            }))
+            .expect("checkpoint json"),
+        )
+        .expect("checkpoint write");
     }
 
     #[test]

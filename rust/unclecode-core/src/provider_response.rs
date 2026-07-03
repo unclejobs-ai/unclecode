@@ -42,7 +42,7 @@ pub fn parse_openai_chat_response_records_for_model(
 
     let mut records = Vec::new();
     if let Some(content) = message.get("content").and_then(Value::as_str) {
-        records.push(OpenAIChatResponseRecord::Content(content.to_string()));
+        push_openai_content_records(&mut records, content, model);
     }
     if let Some(reasoning) = message.get("reasoning_content").and_then(Value::as_str) {
         if !reasoning.is_empty() {
@@ -85,6 +85,32 @@ pub fn parse_openai_chat_response_records_for_model(
     });
 
     Ok(records)
+}
+
+fn push_openai_content_records(
+    records: &mut Vec<OpenAIChatResponseRecord>,
+    content: &str,
+    model: Option<&str>,
+) {
+    let cleaned = strip_deepseek_chat_template_tokens(content);
+    if !model_may_leak_kimi_tool_calls(model) {
+        records.push(OpenAIChatResponseRecord::Content(cleaned));
+        return;
+    }
+
+    let (visible, healed_tool_calls) = heal_kimi_tool_calls_from_content(&cleaned);
+    if !visible.is_empty() {
+        records.push(OpenAIChatResponseRecord::Content(visible));
+    }
+    records.extend(
+        healed_tool_calls
+            .into_iter()
+            .map(|call| OpenAIChatResponseRecord::ToolCall {
+                id: call.id,
+                name: call.name,
+                arguments_json: call.arguments_json,
+            }),
+    );
 }
 
 pub fn is_openai_chat_stream_progress_chunk_json(chunk_json: &str) -> Result<String, String> {
@@ -569,6 +595,30 @@ data: [DONE]
             r#"{"city":"Seoul"}"#
         );
         assert_eq!(parsed["actions"][0]["tool"], "weather");
+    }
+
+    #[test]
+    fn heals_kimi_chat_template_tool_calls_from_json_content() {
+        let parsed = parse_openai_chat_response_json_for_model(
+            r#"{
+                "choices":[{"message":{
+                    "content":"<|tool_calls_section_begin|><|tool_call_begin|>run_shell<|tool_call_argument_begin|>{\"command\":\"printf ok\"}<|tool_call_end|><|tool_calls_section_end|>"
+                }}],
+                "usage":{"prompt_tokens":3,"completion_tokens":4}
+            }"#,
+            Some("moonshotai/kimi-k2-instruct"),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&parsed).unwrap();
+
+        assert_eq!(parsed["content"], "");
+        assert_eq!(parsed["toolCalls"][0]["name"], "run_shell");
+        assert_eq!(
+            parsed["toolCalls"][0]["argumentsJson"],
+            r#"{"command":"printf ok"}"#
+        );
+        assert_eq!(parsed["actions"][0]["tool"], "run_shell");
+        assert_eq!(parsed["actions"][0]["input"]["command"], "printf ok");
     }
 
     #[test]

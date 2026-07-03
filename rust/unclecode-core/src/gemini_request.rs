@@ -1,7 +1,7 @@
 use crate::json_args::normalize_json_object_argument;
 use crate::model_pricing::estimate_cost_usd;
 use crate::provider_attachments::cap_provider_attachments_values;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeminiRequestSpec {
@@ -43,6 +43,7 @@ pub fn provider_query_messages_to_gemini_json(
         .map_err(|error| format!("Invalid provider query messages JSON: {error}"))?;
     let mut system_instruction = default_system_prompt.to_string();
     let mut contents = Vec::new();
+    let mut pending_tool_names: Vec<(String, String)> = Vec::new();
 
     if let Some(messages) = messages.as_array() {
         for message in messages {
@@ -75,10 +76,14 @@ pub fn provider_query_messages_to_gemini_json(
                             let args: Value =
                                 serde_json::from_str(normalize_json_object_argument(args_json))
                                     .unwrap_or_else(|_| json!({}));
+                            let call_id =
+                                call.get("callId").and_then(Value::as_str).unwrap_or("tool");
+                            let name = call.get("name").and_then(Value::as_str).unwrap_or("tool");
+                            pending_tool_names.push((call_id.to_string(), name.to_string()));
                             parts.push(json!({
                                 "functionCall": {
-                                    "id": call.get("callId").and_then(Value::as_str).unwrap_or("tool"),
-                                    "name": call.get("name").and_then(Value::as_str).unwrap_or("tool"),
+                                    "id": call_id,
+                                    "name": name,
                                     "args": args
                                 }
                             }));
@@ -97,12 +102,17 @@ pub fn provider_query_messages_to_gemini_json(
                         .get("callId")
                         .and_then(Value::as_str)
                         .unwrap_or("tool");
+                    let response_name = pending_tool_names
+                        .iter()
+                        .position(|(pending_call_id, _)| pending_call_id == call_id)
+                        .map(|index| pending_tool_names.remove(index).1)
+                        .unwrap_or_else(|| call_id.to_string());
                     contents.push(json!({
                         "role": "user",
                         "parts": [{
                             "functionResponse": {
                                 "id": call_id,
-                                "name": call_id,
+                                "name": response_name,
                                 "response": { "output": content }
                             }
                         }]
@@ -332,6 +342,77 @@ pub fn build_gemini_generate_content_request_json(
     .map_err(|error| error.to_string())
 }
 
+pub fn build_gemini_generate_content_rest_request_json(
+    system_instruction: &str,
+    contents_json: &str,
+    function_declarations_json: &str,
+    include_tools: bool,
+) -> Result<String, String> {
+    let contents: Value = serde_json::from_str(contents_json)
+        .map_err(|error| format!("Invalid Gemini contents JSON: {error}"))?;
+    let function_declarations: Value = serde_json::from_str(function_declarations_json)
+        .map_err(|error| format!("Invalid Gemini function declarations JSON: {error}"))?;
+
+    let mut body = Map::new();
+    body.insert("contents".to_string(), contents);
+    if !system_instruction.trim().is_empty() {
+        body.insert(
+            "systemInstruction".to_string(),
+            json!({ "parts": [{ "text": system_instruction }] }),
+        );
+    }
+    if include_tools {
+        let declarations = gemini_function_declarations_for_rest(&function_declarations);
+        if declarations
+            .as_array()
+            .is_some_and(|values| !values.is_empty())
+        {
+            body.insert(
+                "tools".to_string(),
+                json!([{ "functionDeclarations": declarations }]),
+            );
+            body.insert(
+                "toolConfig".to_string(),
+                json!({
+                    "functionCallingConfig": {
+                        "mode": "AUTO"
+                    }
+                }),
+            );
+        }
+    }
+
+    serde_json::to_string(&Value::Object(body)).map_err(|error| error.to_string())
+}
+
+fn gemini_function_declarations_for_rest(function_declarations: &Value) -> Value {
+    let declarations = function_declarations
+        .as_array()
+        .map(|values| {
+            values
+                .iter()
+                .map(|declaration| {
+                    let Some(object) = declaration.as_object() else {
+                        return declaration.clone();
+                    };
+                    let mut normalized = Map::new();
+                    for (key, value) in object {
+                        if key == "parametersJsonSchema" {
+                            if !object.contains_key("parameters") {
+                                normalized.insert("parameters".to_string(), value.clone());
+                            }
+                            continue;
+                        }
+                        normalized.insert(key.clone(), value.clone());
+                    }
+                    Value::Object(normalized)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Value::Array(declarations)
+}
+
 fn percent_encode_path_segment(value: &str) -> String {
     value
         .bytes()
@@ -363,7 +444,7 @@ mod tests {
 
         assert_eq!(
             output,
-            r#"{"contents":[{"parts":[{"text":"run shell"}],"role":"user"},{"parts":[{"functionCall":{"args":{"command":"echo hi"},"id":"fc_1","name":"run_shell"}}],"role":"model"},{"parts":[{"functionResponse":{"id":"fc_1","name":"fc_1","response":{"output":"hi"}}}],"role":"user"}],"systemInstruction":"worker"}"#
+            r#"{"contents":[{"parts":[{"text":"run shell"}],"role":"user"},{"parts":[{"functionCall":{"args":{"command":"echo hi"},"id":"fc_1","name":"run_shell"}}],"role":"model"},{"parts":[{"functionResponse":{"id":"fc_1","name":"run_shell","response":{"output":"hi"}}}],"role":"user"}],"systemInstruction":"worker"}"#
         );
     }
 
@@ -482,6 +563,34 @@ mod tests {
         assert_eq!(
             output,
             r#"{"config":{"systemInstruction":"system","toolConfig":{"functionCallingConfig":{"mode":"AUTO"}},"tools":[{"functionDeclarations":[{"name":"run_shell"}]}]},"contents":[{"parts":[{"text":"hi"}],"role":"user"}],"model":"gemini-3.1-flash"}"#
+        );
+    }
+
+    #[test]
+    fn builds_gemini_generate_content_rest_request() {
+        let output = build_gemini_generate_content_rest_request_json(
+            "system",
+            r#"[{"role":"user","parts":[{"text":"hi"}]}]"#,
+            r#"[{"name":"run_shell","parametersJsonSchema":{"type":"object","properties":{"command":{"type":"string"}}}}]"#,
+            true,
+        )
+        .unwrap();
+
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert!(parsed.get("model").is_none());
+        assert!(parsed.get("config").is_none());
+        assert_eq!(parsed["systemInstruction"]["parts"][0]["text"], "system");
+        assert_eq!(
+            parsed["tools"][0]["functionDeclarations"][0]["parameters"]["properties"]["command"]
+                ["type"],
+            "string"
+        );
+        assert!(parsed["tools"][0]["functionDeclarations"][0]
+            .get("parametersJsonSchema")
+            .is_none());
+        assert_eq!(
+            parsed["toolConfig"]["functionCallingConfig"]["mode"],
+            "AUTO"
         );
     }
 }

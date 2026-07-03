@@ -12,6 +12,11 @@ pub fn utc_now_iso() -> String {
     unix_seconds_to_iso(seconds)
 }
 
+pub fn unix_millis_to_iso(milliseconds: u128) -> String {
+    let seconds = i64::try_from(milliseconds / 1_000).unwrap_or(i64::MAX);
+    unix_seconds_to_iso(seconds)
+}
+
 fn unix_seconds_to_iso(seconds: i64) -> String {
     let days = seconds.div_euclid(86_400);
     let second_of_day = seconds.rem_euclid(86_400);
@@ -50,5 +55,10 @@ mod tests {
     #[test]
     fn formats_unix_epoch_as_iso() {
         assert_eq!(unix_seconds_to_iso(0), "1970-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn formats_unix_millis_as_iso() {
+        assert_eq!(unix_millis_to_iso(0), "1970-01-01T00:00:00.000Z");
     }
 }

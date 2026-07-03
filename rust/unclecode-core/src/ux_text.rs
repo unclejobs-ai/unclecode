@@ -445,38 +445,38 @@ fn resolve_work_shell_entry_presentation(role: &str) -> Value {
         "user" => json!({
             "label": "You",
             "badge": "◇",
-            "labelColor": "#7dd3fc",
+            "labelColor": "#075985",
             "labelTextColor": "#082f49",
-            "labelBackgroundColor": "#bae6fd",
-            "railColor": "#5eead4",
+            "labelBackgroundColor": "#bfdbfe",
+            "railColor": "#115e59",
             "borderColor": "#334155",
-            "bodyColor": "#e2e8f0",
+            "bodyColor": "#0f172a",
         }),
         "assistant" => json!({
             "label": "UncleCode",
             "badge": "◈",
-            "labelColor": "#5eead4",
+            "labelColor": "#115e59",
             "labelTextColor": "#042f2e",
-            "labelBackgroundColor": "#99f6e4",
-            "railColor": "#7dd3fc",
-            "borderColor": "#475569",
-            "bodyColor": "#f8fafc",
+            "labelBackgroundColor": "#ccfbf1",
+            "railColor": "#075985",
+            "borderColor": "#1e293b",
+            "bodyColor": "#0f172a",
         }),
         "tool" => json!({
             "label": "Trace · execution",
             "badge": "▸",
-            "labelColor": "#bef264",
-            "railColor": "#475569",
-            "borderColor": "#475569",
-            "bodyColor": "#f4f1ea",
+            "labelColor": "#365314",
+            "railColor": "#334155",
+            "borderColor": "#1e293b",
+            "bodyColor": "#0f172a",
         }),
         _ => json!({
             "label": "System · state",
             "badge": "·",
-            "labelColor": "#94a3b8",
+            "labelColor": "#334155",
             "railColor": "#334155",
             "borderColor": "#334155",
-            "bodyColor": "#94a3b8",
+            "bodyColor": "#334155",
         }),
     };
     json!({
@@ -531,22 +531,23 @@ pub fn format_work_shell_error_message(message: &str) -> String {
     if provider_status_failure && has_route {
         if has_model_request_scope_error(message) {
             return format!(
-                "OpenAI OAuth lacks model.request scope. Use API key login or proper browser OAuth.\n{message}"
+                "OpenAI OAuth lacks model.request scope for API calls. Use `unclecode auth login --api-key-stdin`, set OPENAI_API_KEY, or use browser OAuth with OPENAI_OAUTH_CLIENT_ID.\n{message}"
             );
         }
-        if message.starts_with("OpenAI request failed") && is_auth_failure(message) {
+        if let Some(provider) = provider_auth_failure_label(message) {
             return format!(
-                "OpenAI rejected current auth (401/403). Run /auth status, /auth login, or /auth logout.\n{message}"
+                "{}\n{message}",
+                provider_auth_failure_message(provider, false)
             );
         }
         return message.to_string();
     }
     if has_model_request_scope_error(message) {
-        return "OpenAI OAuth lacks model.request scope. Use API key login or proper browser OAuth."
+        return "OpenAI OAuth lacks model.request scope for API calls. Use `unclecode auth login --api-key-stdin`, set OPENAI_API_KEY, or use browser OAuth with OPENAI_OAUTH_CLIENT_ID."
             .to_string();
     }
-    if is_auth_failure(message) {
-        return "OpenAI rejected current auth (401/403). Saved auth may be stale. Run /auth status, /auth login, or /auth logout.".to_string();
+    if let Some(provider) = provider_auth_failure_label(message) {
+        return provider_auth_failure_message(provider, true);
     }
     if is_missing_oauth_client_id(message) {
         return "Browser OAuth unavailable. Set OPENAI_OAUTH_CLIENT_ID.".to_string();
@@ -1044,10 +1045,10 @@ fn summarize_failure_summary(summary: &str) -> String {
         .map(str::trim)
         .unwrap_or(summary);
     if has_model_request_scope_error(stripped) {
-        return "OpenAI OAuth lacks model.request scope. Use API key login or proper browser OAuth.".to_string();
+        return "OpenAI OAuth lacks model.request scope for API calls. Use `unclecode auth login --api-key-stdin`, set OPENAI_API_KEY, or use browser OAuth with OPENAI_OAUTH_CLIENT_ID.".to_string();
     }
-    if is_openai_auth_failure(stripped) {
-        return "OpenAI rejected current auth (401/403). Run /auth status, /auth login, or /auth logout.".to_string();
+    if let Some(provider) = provider_auth_failure_label(stripped) {
+        return provider_auth_failure_message(provider, false);
     }
     summarize_text(stripped)
 }
@@ -1062,14 +1063,33 @@ fn has_model_request_scope_error(message: &str) -> bool {
     message.contains("missing_scope") || message.contains("model.request")
 }
 
-fn is_auth_failure(message: &str) -> bool {
-    message.contains("request failed with status 401")
-        || message.contains("request failed with status 403")
+fn provider_auth_failure_label(message: &str) -> Option<&'static str> {
+    ["OpenAI", "Anthropic", "Gemini"]
+        .into_iter()
+        .find(|provider| {
+            message.contains(&format!("{provider} request failed with status 401"))
+                || message.contains(&format!("{provider} request failed with status 403"))
+        })
 }
 
-fn is_openai_auth_failure(message: &str) -> bool {
-    message.contains("OpenAI request failed with status 401")
-        || message.contains("OpenAI request failed with status 403")
+fn provider_auth_failure_message(provider: &str, saved_hint: bool) -> String {
+    match provider {
+        "OpenAI" if saved_hint => {
+            "OpenAI rejected current auth (401/403). Saved auth may be stale. Run /auth status, /auth login, or /auth logout.".to_string()
+        }
+        "OpenAI" => {
+            "OpenAI rejected current auth (401/403). Run /auth status, /auth login, or /auth logout.".to_string()
+        }
+        "Anthropic" => {
+            "Anthropic rejected current auth (401/403). Check ANTHROPIC_API_KEY or the provider account.".to_string()
+        }
+        "Gemini" => {
+            "Gemini rejected current auth (401/403). Check GEMINI_API_KEY or the provider account.".to_string()
+        }
+        other => {
+            format!("{other} rejected current auth (401/403). Check the provider API key or account.")
+        }
+    }
 }
 
 fn is_missing_oauth_client_id(message: &str) -> bool {
@@ -1156,6 +1176,8 @@ fn humanize_work_shell_reasoning_label(reasoning_label: &str) -> String {
 
 fn compact_work_shell_auth_label(auth_label: &str) -> String {
     match auth_label {
+        "OAuth file · API blocked" => "OAuth blocked".to_string(),
+        "OAuth env · API blocked" => "OAuth blocked".to_string(),
         "Browser OAuth · file" => "Saved OAuth".to_string(),
         "Browser OAuth · env" => "OAuth env".to_string(),
         "API key · file" => "Saved API key".to_string(),
@@ -1442,7 +1464,15 @@ mod tests {
             format_work_shell_error_message(
                 r#"OpenAI request failed with status 401: {"error":{"code":"missing_scope","message":"Missing scopes: model.request"}}"#,
             ),
-            "OpenAI OAuth lacks model.request scope. Use API key login or proper browser OAuth."
+            "OpenAI OAuth lacks model.request scope for API calls. Use `unclecode auth login --api-key-stdin`, set OPENAI_API_KEY, or use browser OAuth with OPENAI_OAUTH_CLIENT_ID."
+        );
+        assert_eq!(
+            format_work_shell_error_message("Anthropic request failed with status 401"),
+            "Anthropic rejected current auth (401/403). Check ANTHROPIC_API_KEY or the provider account."
+        );
+        assert_eq!(
+            format_work_shell_error_message("Gemini request failed with status 403"),
+            "Gemini rejected current auth (401/403). Check GEMINI_API_KEY or the provider account."
         );
         let routed = [
             "OpenAI request failed with status 401",
@@ -1502,6 +1532,10 @@ mod tests {
         assert_eq!(
             format_work_shell_status_line("gpt-5.4", "default", "Browser OAuth · file"),
             "gpt-5.4 · Work mode · Saved OAuth · work context"
+        );
+        assert_eq!(
+            format_work_shell_status_line("gpt-5.4", "default", "OAuth file · API blocked"),
+            "gpt-5.4 · Work mode · OAuth blocked · work context"
         );
         assert_eq!(
             format_work_shell_usage_line(false, None, None, Some(1480), None),
@@ -1663,19 +1697,19 @@ mod tests {
     fn resolves_work_shell_entry_presentation() {
         assert_eq!(
             resolve_work_shell_entry_presentation_json("user").unwrap(),
-            r##"{"borderStyle":"round","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":0},"presentation":{"badge":"◇","bodyColor":"#e2e8f0","borderColor":"#334155","label":"You","labelBackgroundColor":"#bae6fd","labelColor":"#7dd3fc","labelTextColor":"#082f49","railColor":"#5eead4"}}"##
+            r##"{"borderStyle":"round","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":0},"presentation":{"badge":"◇","bodyColor":"#0f172a","borderColor":"#334155","label":"You","labelBackgroundColor":"#bfdbfe","labelColor":"#075985","labelTextColor":"#082f49","railColor":"#115e59"}}"##
         );
         assert_eq!(
             resolve_work_shell_entry_presentation_json("tool").unwrap(),
-            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":0,"paddingLeft":3},"presentation":{"badge":"▸","bodyColor":"#f4f1ea","borderColor":"#475569","label":"Trace · execution","labelColor":"#bef264","railColor":"#475569"}}"##
+            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":0,"paddingLeft":3},"presentation":{"badge":"▸","bodyColor":"#0f172a","borderColor":"#1e293b","label":"Trace · execution","labelColor":"#365314","railColor":"#334155"}}"##
         );
         assert_eq!(
             resolve_work_shell_entry_presentation_json("assistant").unwrap(),
-            r##"{"borderStyle":"round","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":2},"presentation":{"badge":"◈","bodyColor":"#f8fafc","borderColor":"#475569","label":"UncleCode","labelBackgroundColor":"#99f6e4","labelColor":"#5eead4","labelTextColor":"#042f2e","railColor":"#7dd3fc"}}"##
+            r##"{"borderStyle":"round","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":2},"presentation":{"badge":"◈","bodyColor":"#0f172a","borderColor":"#1e293b","label":"UncleCode","labelBackgroundColor":"#ccfbf1","labelColor":"#115e59","labelTextColor":"#042f2e","railColor":"#075985"}}"##
         );
         assert_eq!(
             resolve_work_shell_entry_presentation_json("system").unwrap(),
-            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":0,"paddingLeft":3},"presentation":{"badge":"·","bodyColor":"#94a3b8","borderColor":"#334155","label":"System · state","labelColor":"#94a3b8","railColor":"#334155"}}"##
+            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":0,"paddingLeft":3},"presentation":{"badge":"·","bodyColor":"#334155","borderColor":"#334155","label":"System · state","labelColor":"#334155","railColor":"#334155"}}"##
         );
     }
 

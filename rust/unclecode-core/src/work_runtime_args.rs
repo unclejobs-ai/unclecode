@@ -213,7 +213,6 @@ fn resolve_work_entrypoint_paths(cli_source_dir: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     candidates
         .into_iter()
-        .filter(|path| path.exists())
         .filter_map(|path| {
             let path = normalize_path(&path).to_string_lossy().into_owned();
             if seen.insert(path.clone()) {

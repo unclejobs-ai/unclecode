@@ -37,3 +37,30 @@ test("built unclecode cli reports that no research run is active yet", () => {
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("built unclecode work repl exposes context status commands", () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-work-context-repl-"));
+
+  try {
+    const result = spawnSync("node", [builtCliEntrypoint, "work"], {
+      cwd,
+      input: "/context\n/research status\n/exit\n",
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        UNCLECODE_SESSION_STORE_ROOT: path.join(cwd, ".state"),
+      },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /UncleCode ·/);
+    assert.match(result.stdout, /Work context status/);
+    assert.match(result.stdout, /No Work context refresh yet/);
+    assert.doesNotMatch(
+      result.stdout,
+      /Unknown command: \/(context|research status)/,
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});

@@ -1,26 +1,24 @@
 use serde_json::{json, Value};
 
 pub fn classify_work_intent(prompt: &str, mode: &str) -> &'static str {
-    // Greetings and short acknowledgements are conversation, not work — they
-    // must never be decomposed into a plan, even in full-autonomy modes where
-    // everything else is treated as complex.
-    if is_trivial_conversational_prompt(prompt) {
-        return "simple";
-    }
+    let routing_prompt = extract_routing_prompt(prompt);
     if mode == "ultrawork" {
         return "complex";
+    }
+    if is_trivial_conversational_prompt(routing_prompt) {
+        return "simple";
     }
 
     if mode == "search" || mode == "analyze" {
         return "research";
     }
 
-    if prompt.starts_with('/') {
+    if routing_prompt.starts_with('/') {
         return "simple";
     }
 
-    let file_path_count = extract_file_paths(prompt).len();
-    let lower_prompt = prompt.to_lowercase();
+    let file_path_count = extract_file_paths(routing_prompt).len();
+    let lower_prompt = routing_prompt.to_lowercase();
 
     let complex_keyword = [
         "refactor",
@@ -43,7 +41,7 @@ pub fn classify_work_intent(prompt: &str, mode: &str) -> &'static str {
             "재설계",
         ]
         .iter()
-        .any(|keyword| prompt.contains(keyword));
+        .any(|keyword| routing_prompt.contains(keyword));
 
     if file_path_count >= 3 || complex_keyword {
         return "complex";
@@ -72,13 +70,34 @@ pub fn classify_work_intent(prompt: &str, mode: &str) -> &'static str {
             "빌드",
         ]
         .iter()
-        .any(|keyword| prompt.contains(keyword));
+        .any(|keyword| routing_prompt.contains(keyword));
 
     if mode == "yolo" && (file_path_count >= 2 || yolo_complex_keyword) {
         return "complex";
     }
 
     "simple"
+}
+
+fn extract_routing_prompt(prompt: &str) -> &str {
+    let trimmed = prompt.trim();
+    const CONTEXT_END: &str = "</unclecode_context_packet>";
+    const USER_REQUEST: &str = "User request:";
+
+    if let Some(context_end) = trimmed.rfind(CONTEXT_END) {
+        let after_context = trimmed[context_end + CONTEXT_END.len()..].trim();
+        if let Some(user_request_start) = after_context.find(USER_REQUEST) {
+            let user_request = after_context[user_request_start + USER_REQUEST.len()..].trim();
+            if !user_request.is_empty() {
+                return user_request;
+            }
+        }
+        if !after_context.is_empty() {
+            return after_context;
+        }
+    }
+
+    trimmed
 }
 
 fn is_trivial_conversational_prompt(prompt: &str) -> bool {
@@ -88,8 +107,26 @@ fn is_trivial_conversational_prompt(prompt: &str) -> bool {
     }
     let lower = trimmed.to_lowercase();
     const GREETINGS: &[&str] = &[
-        "hi", "hello", "hey", "yo", "sup", "thanks", "thank you", "ty", "ok", "okay",
-        "안녕", "하이", "헬로", "반갑", "고마", "고맙", "감사", "넵", "ㅇㅋ", "ㄱㅅ",
+        "hi",
+        "hello",
+        "hey",
+        "yo",
+        "sup",
+        "thanks",
+        "thank you",
+        "ty",
+        "ok",
+        "okay",
+        "안녕",
+        "하이",
+        "헬로",
+        "반갑",
+        "고마",
+        "고맙",
+        "감사",
+        "넵",
+        "ㅇㅋ",
+        "ㄱㅅ",
     ];
     GREETINGS.iter().any(|greeting| {
         if greeting.is_ascii() {
@@ -133,7 +170,8 @@ pub fn resolve_worker_budget_json(mode: &str) -> Result<String, String> {
 }
 
 pub fn build_complex_tasks_json(prompt: &str) -> Result<String, String> {
-    let file_paths = extract_file_paths(prompt);
+    let routing_prompt = extract_routing_prompt(prompt);
+    let file_paths = extract_file_paths(routing_prompt);
     let tasks: Vec<Value> = if file_paths.is_empty() {
         vec![
             json!({
@@ -656,7 +694,10 @@ mod tests {
     #[test]
     fn classifies_modes_and_prompts() {
         // non-trivial work in ultrawork is complex
-        assert_eq!(classify_work_intent("look around the project", "ultrawork"), "complex");
+        assert_eq!(
+            classify_work_intent("look around the project", "ultrawork"),
+            "complex"
+        );
         assert_eq!(classify_work_intent("explain auth", "search"), "research");
         assert_eq!(classify_work_intent("/help", "yolo"), "simple");
         assert_eq!(classify_work_intent("fix the login bug", "yolo"), "complex");
@@ -665,15 +706,61 @@ mod tests {
     }
 
     #[test]
-    fn greetings_are_simple_in_every_mode() {
-        for mode in ["yolo", "ultrawork", "default", "build"] {
+    fn greetings_are_simple_outside_ultrawork() {
+        for mode in ["yolo", "default", "build"] {
             assert_eq!(classify_work_intent("hi", mode), "simple", "hi in {mode}");
-            assert_eq!(classify_work_intent("hello", mode), "simple", "hello in {mode}");
-            assert_eq!(classify_work_intent("하이요", mode), "simple", "하이요 in {mode}");
-            assert_eq!(classify_work_intent("반갑다", mode), "simple", "반갑다 in {mode}");
+            assert_eq!(
+                classify_work_intent("hello", mode),
+                "simple",
+                "hello in {mode}"
+            );
+            assert_eq!(
+                classify_work_intent("하이요", mode),
+                "simple",
+                "하이요 in {mode}"
+            );
+            assert_eq!(
+                classify_work_intent("반갑다", mode),
+                "simple",
+                "반갑다 in {mode}"
+            );
         }
+        assert_eq!(classify_work_intent("hi", "ultrawork"), "complex");
         // real tasks still classify as work even in full-autonomy modes
-        assert_eq!(classify_work_intent("create a landing page", "yolo"), "complex");
+        assert_eq!(
+            classify_work_intent("create a landing page", "yolo"),
+            "complex"
+        );
+    }
+
+    #[test]
+    fn context_packet_metadata_does_not_force_complex_routing() {
+        let prompt = r#"<unclecode_context_packet id="packet-1" version="1">
+Included:
+- workspace guidance: Loaded guidance: CLAUDE.md, AGENTS.md, UNCLECODE.md, rules/modular-code-enforcement.md
+Excluded raw artifacts:
+- 99 raw artifacts withheld from model-ready context.
+</unclecode_context_packet>
+
+User request:
+Say hello from full-screen TUI QA."#;
+
+        assert_eq!(classify_work_intent(prompt, "default"), "simple");
+    }
+
+    #[test]
+    fn yolo_greeting_with_context_packet_stays_simple() {
+        let prompt = r#"<unclecode_context_packet id="packet-1" version="1">
+Included:
+- workspace guidance: Loaded guidance: CLAUDE.md, AGENTS.md, UNCLECODE.md, rules/modular-code-enforcement.md
+Excluded raw artifacts:
+- 99 raw artifacts withheld from model-ready context.
+</unclecode_context_packet>
+
+User request:
+hi"#;
+
+        assert_eq!(classify_work_intent(prompt, "yolo"), "simple");
     }
 
     #[test]
@@ -699,6 +786,24 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Original request: check packages/a.ts"));
+    }
+
+    #[test]
+    fn complex_tasks_ignore_context_packet_file_metadata() {
+        let output = build_complex_tasks_json(
+            r#"<unclecode_context_packet id="packet-1" version="1">
+Included:
+- workspace guidance: Loaded guidance: CLAUDE.md, AGENTS.md, UNCLECODE.md, rules/modular-code-enforcement.md
+</unclecode_context_packet>
+
+User request:
+check packages/a.ts and rust/src/lib.rs please"#,
+        )
+        .unwrap();
+        let tasks: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(tasks.as_array().unwrap().len(), 2);
+        assert_eq!(tasks[0]["summary"], "Inspect packages/a.ts");
+        assert_eq!(tasks[1]["summary"], "Inspect rust/src/lib.rs");
     }
 
     #[test]

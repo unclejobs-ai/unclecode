@@ -1,14 +1,14 @@
-use crate::context_packet::build_context_selection_json;
 use crate::mcp_host::load_mcp_host_registry;
-use crate::repo_context::build_repo_map_json;
 use crate::session::{session_paths, WorkShellSessionSnapshot, WorkShellSessionStore};
 use crate::setup_report::session_store_root_from_env;
 use crate::sha256::sha256_hex;
 use crate::time_iso::utc_now_iso;
 use serde_json::{json, Value};
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
+use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const RESEARCH_LATENCY_THRESHOLDS: ResearchLatencyThresholds = ResearchLatencyThresholds {
@@ -18,6 +18,7 @@ const RESEARCH_LATENCY_THRESHOLDS: ResearchLatencyThresholds = ResearchLatencyTh
     mcp_start_ms_budget: 500,
     executor_ms_budget: 1_500,
 };
+const HOTSPOT_HISTORY_SCAN_LIMIT: &str = "20";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResearchRunReport {
@@ -65,9 +66,9 @@ pub fn research_run_report(
 
     let executor_started_at = Instant::now();
     let summary = format!(
-        "Refreshed Work context for \"{}\" with {} changed files and {} MCP servers.",
+        "Refreshed Work context for \"{}\" with {} context files and {} MCP servers.",
         prompt,
-        bundle.changed_files.len(),
+        bundle.context_files.len(),
         connected_server_names.len()
     );
     let paths = session_paths(&session_root, workspace_root, &session_id);
@@ -80,12 +81,7 @@ pub fn research_run_report(
     let artifact_path = paths.research_artifacts_dir.join("research.md");
     fs::write(
         &artifact_path,
-        research_markdown(
-            prompt,
-            &bundle,
-            &connected_server_names,
-            &summary,
-        ),
+        research_markdown(prompt, &bundle, &connected_server_names, &summary),
     )
     .map_err(|error| {
         format!(
@@ -154,7 +150,7 @@ pub fn research_run_report(
 #[derive(Debug, Clone, PartialEq)]
 struct LocalResearchBundle {
     packet_id: String,
-    changed_files: Vec<String>,
+    context_files: Vec<String>,
     hotspots: Vec<Value>,
     policy_signals: Vec<String>,
 }
@@ -164,56 +160,173 @@ fn prepare_local_research_bundle(
     session_id: &str,
     prompt: &str,
 ) -> Result<LocalResearchBundle, String> {
-    let repo_map = build_repo_map_json(workspace_root).unwrap_or_else(|_| {
-        json!({
-            "rootDir": workspace_root.to_string_lossy(),
-            "generatedAt": utc_now_iso(),
-            "gitHeadSha": "0000000000000000000000000000000000000000",
-            "entries": [],
-            "totalFiles": 0,
-            "totalLines": 0
-        })
-        .to_string()
+    let context_files = collect_worktree_context_files(workspace_root).unwrap_or_default();
+    let hotspots = collect_recent_hotspots(workspace_root).unwrap_or_default();
+    let hotspot_paths = hotspots
+        .iter()
+        .filter_map(|entry| entry.get("path").and_then(Value::as_str));
+    let signal_paths = context_files
+        .iter()
+        .map(String::as_str)
+        .chain(hotspot_paths)
+        .collect::<Vec<_>>();
+    let policy_signals = derive_policy_signals(&signal_paths);
+    let packet_source = json!({
+        "contextFiles": context_files,
+        "hotspots": hotspots,
+        "policySignals": policy_signals,
     });
-    let selection_json = build_context_selection_json(workspace_root, "search", None, &repo_map)
-        .unwrap_or_else(|_| {
-            json!({
-                "hotspots": [],
-                "changedFiles": [],
-                "candidatePaths": [],
-                "policySignals": [],
-                "includedContents": [],
-                "tokenEstimate": 0,
-                "tokenBudget": {
-                    "maxTokens": 100000,
-                    "reservedForTools": 5000,
-                    "reservedForSystem": 5000
-                }
-            })
-            .to_string()
-        });
-    let selection: Value = serde_json::from_str(&selection_json)
-        .map_err(|error| format!("Invalid local research context selection: {error}"))?;
-    let changed_files = string_array(&selection, "changedFiles");
-    let hotspots = selection
+    let packet_id = format!(
+        "packet-{}",
+        &sha256_hex(&format!("{session_id}\n{prompt}\n{}", packet_source))[..20]
+    );
+    let context_files = string_array(&packet_source, "contextFiles");
+    let hotspots = packet_source
         .get("hotspots")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let policy_signals = string_array(&selection, "policySignals");
-    let packet_id = format!(
-        "packet-{}",
-        &sha256_hex(&format!(
-            "{session_id}\n{prompt}\n{repo_map}\n{selection_json}"
-        ))[..20]
-    );
+    let policy_signals = string_array(&packet_source, "policySignals");
 
     Ok(LocalResearchBundle {
         packet_id,
-        changed_files,
+        context_files,
         hotspots,
         policy_signals,
     })
+}
+
+fn collect_worktree_context_files(workspace_root: &Path) -> Result<Vec<String>, String> {
+    let output = run_git(
+        workspace_root,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    )?;
+    Ok(parse_status_paths(&output)
+        .into_iter()
+        .filter(|file_path| !is_excluded_path(file_path))
+        .collect())
+}
+
+fn collect_recent_hotspots(workspace_root: &Path) -> Result<Vec<Value>, String> {
+    let output = run_git(
+        workspace_root,
+        &[
+            "log",
+            "--max-count",
+            HOTSPOT_HISTORY_SCAN_LIMIT,
+            "--name-only",
+            "--pretty=format:",
+            "--no-renames",
+            "--",
+        ],
+    )?;
+    let mut frequencies = HashMap::<String, usize>::new();
+    for file_path in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if is_excluded_path(file_path) {
+            continue;
+        }
+        *frequencies.entry(file_path.to_string()).or_insert(0) += 1;
+    }
+    let max_frequency = frequencies.values().copied().max().unwrap_or(0);
+    let mut entries = frequencies.into_iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    Ok(entries
+        .into_iter()
+        .take(10)
+        .map(|(path, frequency)| {
+            let hotspot_score = if max_frequency == 0 {
+                0.0
+            } else {
+                frequency as f64 / max_frequency as f64
+            };
+            json!({
+                "path": path,
+                "changeFrequency": frequency,
+                "hotspotScore": hotspot_score,
+            })
+        })
+        .collect())
+}
+
+fn run_git(root_dir: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root_dir)
+        .output()
+        .map_err(|error| format!("Failed to run git {}: {error}", args.join(" ")))?;
+    if output.status.success() {
+        return String::from_utf8(output.stdout)
+            .map_err(|error| format!("git {} returned non-utf8 stdout: {error}", args.join(" ")));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if stderr.is_empty() {
+        format!("Git command failed: git {}", args.join(" "))
+    } else {
+        format!("Git command failed: git {}: {stderr}", args.join(" "))
+    })
+}
+
+fn parse_status_paths(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| line.len() >= 4)
+        .map(|line| line[3..].to_string())
+        .map(|path| {
+            path.split(" -> ")
+                .last()
+                .map(ToString::to_string)
+                .unwrap_or(path)
+        })
+        .collect()
+}
+
+fn is_excluded_path(file_path: &str) -> bool {
+    file_path
+        .split('/')
+        .any(|segment| matches!(segment, ".git" | "node_modules" | "dist" | "build"))
+}
+
+fn derive_policy_signals(file_paths: &[&str]) -> Vec<String> {
+    let mut signals = BTreeSet::new();
+    for file_path in file_paths {
+        let normalized = file_path.to_lowercase();
+        if normalized.ends_with("package.json") || normalized.ends_with("package-lock.json") {
+            signals.insert("dependency-manifest-change");
+        }
+        if normalized.contains("auth")
+            || normalized.contains("provider")
+            || normalized.contains("oauth")
+        {
+            signals.insert("provider-auth-surface");
+        }
+        if normalized.contains("runtime")
+            || normalized.contains("sandbox")
+            || normalized.contains("docker")
+        {
+            signals.insert("runtime-surface");
+        }
+        if normalized.contains("mcp") {
+            signals.insert("mcp-surface");
+        }
+        if normalized.contains("policy") || normalized.contains("approval") {
+            signals.insert("policy-surface");
+        }
+        if normalized.contains("secret")
+            || normalized.contains("credential")
+            || normalized.contains("token")
+            || normalized.contains("key")
+            || normalized.contains(".env")
+        {
+            signals.insert("secret-surface");
+        }
+    }
+    signals.into_iter().map(ToString::to_string).collect()
 }
 
 fn research_markdown(
@@ -232,12 +345,12 @@ fn research_markdown(
     } else {
         connected_server_names.join(", ")
     };
-    let changed_files_line = if bundle.changed_files.is_empty() {
-        "- No changed files observed in the current packet.".to_string()
+    let context_files_line = if bundle.context_files.is_empty() {
+        "- No context files selected for the current packet.".to_string()
     } else {
         format!(
-            "- Changed files observed: {}",
-            bundle.changed_files.join(", ")
+            "- Context files selected: {}",
+            bundle.context_files.join(", ")
         )
     };
     let hotspots_line = if bundle.hotspots.is_empty() {
@@ -258,10 +371,10 @@ fn research_markdown(
             connected_server_names.join(", ")
         )
     };
-    let next_changed = if bundle.changed_files.is_empty() {
-        "1. Give Work a narrower target when the workspace has no changed files."
+    let next_context = if bundle.context_files.is_empty() {
+        "1. Give Work a narrower target when no context files were selected."
     } else {
-        "1. Start Work from the changed files above before widening scope."
+        "1. Start Work from the selected context files above before widening scope."
     };
     let next_hotspots = if bundle.hotspots.is_empty() {
         "2. Refresh context again after a meaningful code change."
@@ -279,19 +392,19 @@ fn research_markdown(
         String::new(),
         format!("Focus: {prompt}"),
         format!("Context id: {}", bundle.packet_id),
-        format!("Changed files: {}", bundle.changed_files.len()),
+        format!("Context files: {}", bundle.context_files.len()),
         format!("Hotspots: {}", bundle.hotspots.len()),
         format!("Policy signals: {policy}"),
         format!("MCP servers: {mcp_servers}"),
         String::new(),
         "## Findings".to_string(),
-        changed_files_line,
+        context_files_line,
         hotspots_line,
         policy_line,
         mcp_line,
         String::new(),
         "## Next Work Handoff".to_string(),
-        next_changed.to_string(),
+        next_context.to_string(),
         next_hotspots.to_string(),
         next_mcp.to_string(),
         String::new(),
@@ -378,6 +491,7 @@ mod tests {
         let root = temp_root("research-run");
         let session_root = root.join(".state");
         init_git_repo(&root);
+        fs::write(root.join("notes.md"), "local context note\n").unwrap();
 
         let report = research_run_report(
             &root,
@@ -392,13 +506,22 @@ mod tests {
         let text = report.lines.join("\n");
         assert!(text.contains("Work context refreshed"));
         assert!(text.contains("Focus: summarize current workspace"));
+        assert!(text.contains("context files"));
+        assert!(!text.contains("changed files"));
         let parsed: Value = serde_json::from_str(&report.json).unwrap();
         assert_eq!(parsed["command"], "research.run");
         assert_eq!(parsed["status"], "completed");
+        assert!(parsed["summary"]
+            .as_str()
+            .unwrap()
+            .contains("context files"));
         let artifact_path = parsed["artifactPaths"][0].as_str().unwrap();
         let artifact = fs::read_to_string(artifact_path).unwrap();
         assert!(artifact.contains("# UncleCode Work Context"));
         assert!(artifact.contains("Focus: summarize current workspace"));
+        assert!(artifact.contains("notes.md"));
+        assert!(artifact.contains("Context files:"));
+        assert!(!artifact.contains("Changed files:"));
         assert!(root.join(".unclecode/research-runs.jsonl").exists());
 
         let status = research_status_report(&root, None, |key| {
