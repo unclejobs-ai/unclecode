@@ -639,17 +639,35 @@ fn sdk_default_model(runtime: &str) -> &'static str {
 }
 
 fn sdk_base_url(runtime: &str) -> String {
-    let (env_name, default_url) = match runtime {
-        "openai" => ("OPENAI_BASE_URL", OPENAI_DEFAULT_BASE_URL),
-        "anthropic" => ("ANTHROPIC_BASE_URL", ANTHROPIC_DEFAULT_BASE_URL),
-        "gemini" => ("GEMINI_BASE_URL", GEMINI_DEFAULT_BASE_URL),
-        _ => ("OPENAI_BASE_URL", OPENAI_DEFAULT_BASE_URL),
+    let (env_names, default_url): (&[&str], &str) = match runtime {
+        "openai" => (
+            &["OPENAI_BASE_URL", "OPENAI_API_BASE_URL"],
+            OPENAI_DEFAULT_BASE_URL,
+        ),
+        "anthropic" => (
+            &["ANTHROPIC_BASE_URL", "ANTHROPIC_API_BASE_URL"],
+            ANTHROPIC_DEFAULT_BASE_URL,
+        ),
+        "gemini" => (
+            &["GEMINI_BASE_URL", "GEMINI_API_BASE_URL"],
+            GEMINI_DEFAULT_BASE_URL,
+        ),
+        _ => (
+            &["OPENAI_BASE_URL", "OPENAI_API_BASE_URL"],
+            OPENAI_DEFAULT_BASE_URL,
+        ),
     };
-    env::var(env_name)
-        .ok()
+    env_var_any(env_names)
         .map(|value| value.trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default_url.to_string())
+}
+
+fn env_var_any(keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| env::var(key).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn run_cursor_worker(spec: &TeamWorkerSpec) -> Result<(bool, String), String> {

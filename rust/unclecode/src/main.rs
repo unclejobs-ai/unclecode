@@ -22,7 +22,7 @@ use unclecode_core::auth::{
     build_openai_authorization_url, build_openai_codex_device_authorization_body,
     build_openai_codex_device_token_body, build_openai_device_authorization_body,
     build_openai_device_token_body, clear_openai_credentials, inspect_openai_oauth_token,
-    openai_credentials_path, parse_openai_callback_code,
+    openai_auth_supports_api_calls, openai_credentials_path, parse_openai_callback_code,
     parse_openai_codex_device_authorization_response, parse_openai_codex_device_token_response,
     parse_openai_device_authorization_response, parse_openai_oauth_token_response,
     read_openai_credentials_file, resolve_openai_auth, resolve_openai_auth_status,
@@ -220,6 +220,7 @@ use unclecode_core::work_shell_state::{
 use unclecode_core::work_shell_trace::resolve_work_shell_trace_event_json;
 
 mod cli_auth;
+mod cli_auth_saved;
 mod cli_center;
 mod cli_config;
 mod cli_doctor;
@@ -236,6 +237,7 @@ mod cli_team;
 mod cli_work;
 
 const TS_ENTRYPOINT: &str = "apps/unclecode-cli/dist/index.js";
+const NODE_NO_EXPERIMENTAL_WARNING: &str = "--no-warnings=ExperimentalWarning";
 
 fn main() -> ExitCode {
     let started_at = Instant::now();
@@ -506,11 +508,34 @@ fn launch_typescript_command_bridge(
         .args(command_args)
         .current_dir(work_cwd()?)
         .envs(env::vars_os())
+        .env(
+            "NODE_OPTIONS",
+            node_options_with_experimental_warning_suppressed(env::var_os("NODE_OPTIONS")),
+        )
         .env("UNCLECODE_FORCE_TS_TUI", "1")
         .status()
         .map_err(|error| format!("Failed to launch UncleCode full-screen TUI: {error}"))?;
 
     Ok(status.code().unwrap_or(1).clamp(0, 255) as u8)
+}
+
+fn node_options_with_experimental_warning_suppressed(existing: Option<OsString>) -> OsString {
+    let Some(existing) = existing else {
+        return OsString::from(NODE_NO_EXPERIMENTAL_WARNING);
+    };
+    let existing_text = existing.to_string_lossy();
+    if existing_text
+        .split_whitespace()
+        .any(|option| option == "--no-warnings" || option == NODE_NO_EXPERIMENTAL_WARNING)
+    {
+        return existing;
+    }
+    let mut combined = existing;
+    if !combined.is_empty() {
+        combined.push(" ");
+    }
+    combined.push(NODE_NO_EXPERIMENTAL_WARNING);
+    combined
 }
 
 fn run_native_rust_command(args: &[OsString], started_at: Instant) -> Result<u8, String> {
@@ -3599,22 +3624,51 @@ fn run_native_auth_command(args: &[OsString]) -> Result<u8, String> {
     match args.first().and_then(|arg| arg.to_str()) {
         Some("status") => {
             let status = resolve_openai_auth_status(|key| env::var(key).ok());
+            let json_output = match args.get(1).and_then(|arg| arg.to_str()) {
+                None => false,
+                Some("--json") => true,
+                Some("--help") | Some("-h") => {
+                    println!("Usage: unclecode rust auth status [--json]");
+                    return Ok(0);
+                }
+                Some(_) => return Err("Usage: unclecode rust auth status [--json]".to_string()),
+            };
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string(&cli_auth::openai_auth_status_json(&status))
+                        .map_err(|error| format!("Failed to encode auth status JSON: {error}"))?
+                );
+                return Ok(0);
+            }
             println!("provider=openai");
             println!("activeSource={}", status.active_source);
             println!("authType={}", status.auth_type);
             println!(
                 "organizationId={}",
-                status.organization_id.unwrap_or_else(|| "none".to_string())
+                status.organization_id.as_deref().unwrap_or("none")
             );
             println!(
                 "projectId={}",
-                status.project_id.unwrap_or_else(|| "none".to_string())
+                status.project_id.as_deref().unwrap_or("none")
+            );
+            println!(
+                "runtime={}",
+                status.runtime.as_deref().unwrap_or("none")
             );
             println!(
                 "expiresAt={}",
-                status.expires_at.unwrap_or_else(|| "none".to_string())
+                status.expires_at.as_deref().unwrap_or("none")
             );
             println!("expired={}", if status.is_expired { "yes" } else { "no" });
+            println!(
+                "apiReady={}",
+                if openai_auth_supports_api_calls(&status) {
+                    "yes"
+                } else {
+                    "no"
+                }
+            );
             Ok(0)
         }
         Some("resolve") => {
@@ -4743,6 +4797,32 @@ mod tests {
             true,
             true
         ));
+    }
+
+    #[test]
+    fn full_screen_tui_node_options_suppress_experimental_warnings() {
+        assert_eq!(
+            node_options_with_experimental_warning_suppressed(None),
+            OsString::from(NODE_NO_EXPERIMENTAL_WARNING)
+        );
+        assert_eq!(
+            node_options_with_experimental_warning_suppressed(Some(OsString::from(
+                "--max-old-space-size=4096"
+            ))),
+            OsString::from("--max-old-space-size=4096 --no-warnings=ExperimentalWarning")
+        );
+        assert_eq!(
+            node_options_with_experimental_warning_suppressed(Some(OsString::from(
+                "--no-warnings"
+            ))),
+            OsString::from("--no-warnings")
+        );
+        assert_eq!(
+            node_options_with_experimental_warning_suppressed(Some(OsString::from(
+                NODE_NO_EXPERIMENTAL_WARNING
+            ))),
+            OsString::from(NODE_NO_EXPERIMENTAL_WARNING)
+        );
     }
 
     #[test]

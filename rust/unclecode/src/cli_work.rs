@@ -5,12 +5,16 @@ use std::io::{self, BufRead, Write};
 use std::path::{Component, Path, PathBuf};
 
 use unclecode_core::app_reasoning::resolve_app_reasoning_effort;
-use unclecode_core::auth::{resolve_openai_auth, resolve_openai_auth_status};
+use unclecode_core::auth::{
+    openai_auth_supports_api_calls, resolve_openai_auth, resolve_openai_auth_status,
+};
 use unclecode_core::context_guidance::build_workspace_guidance_json;
 use unclecode_core::context_skills::discover_skill_metadata_json;
 use unclecode_core::model_registry::{detect_provider_for_model, provider_label};
 use unclecode_core::provider_prompt::build_provider_system_prompt;
 use unclecode_core::queue::WorkQueue;
+use unclecode_core::research_run::research_run_report;
+use unclecode_core::research_status::research_status_report;
 use unclecode_core::team_mini_loop::{run_provider_mini_loop, ProviderMiniLoopRequest};
 use unclecode_core::ux_text::format_work_shell_error_message;
 
@@ -260,9 +264,7 @@ fn print_interactive_banner(config: &WorkRuntimeConfig, session_id: Option<&str>
     if let Some(session_id) = session_id.filter(|value| !value.trim().is_empty()) {
         println!("session · {session_id}");
     }
-    println!(
-        "Commands: /help /status /auth status /model [id] /provider <name> /tools /queue [text] /drain /exit"
-    );
+    println!("Commands: /help /status /context /research status /auth status /model [id] /tools /queue [text] /drain /exit");
 }
 
 fn handle_interactive_command(
@@ -283,12 +285,25 @@ fn handle_interactive_command(
         print_status(config, queue);
         return Ok(true);
     }
+    if line == "/context" || line == "/research status" {
+        print_research_status(&config.cwd)?;
+        return Ok(true);
+    }
+    if let Some(rest) = line.strip_prefix("/research ") {
+        let prompt = rest.trim();
+        if prompt.is_empty() {
+            print_research_status(&config.cwd)?;
+        } else {
+            print_research_run(&config.cwd, prompt)?;
+        }
+        return Ok(true);
+    }
     if line == "/auth" || line == "/auth status" {
         print_auth_status();
         return Ok(true);
     }
     if line.starts_with("/auth ") {
-        println!("Auth changes run from the shell. Type /exit, then run `unclecode auth login --device` or `unclecode auth logout`.");
+        println!("Auth changes run from the shell. Type /exit, then run `OPENAI_OAUTH_CLIENT_ID=<client-id> unclecode auth login --browser`, `unclecode auth login --api-key-stdin`, or `unclecode auth logout`.");
         return Ok(true);
     }
     if let Some(rest) = line.strip_prefix("/model") {
@@ -322,7 +337,7 @@ fn handle_shell_reentry(line: &str) -> bool {
     if line == "unclecode auth status" {
         println!("Use /auth status here.");
     } else if line.starts_with("unclecode auth ") {
-        println!("Auth login/logout changes run from the shell after /exit.");
+        println!("Auth login/logout changes run from the shell after /exit. For API-ready OAuth, use OPENAI_OAUTH_CLIENT_ID with `unclecode auth login --browser`; API key login also works.");
     } else if line != "unclecode" {
         println!("To run that shell command, leave this session first with /exit.");
     }
@@ -474,6 +489,9 @@ fn resolve_api_key(provider: &str, cwd: &Path) -> Result<String, String> {
         "openai" => {
             let auth = resolve_openai_auth(|key| env_value(key, cwd));
             if auth.status == "ok" {
+                if auth.auth_type == "oauth" && auth.runtime.as_deref() == Some("codex") {
+                    return Err("OpenAI OAuth is present but missing model.request scope for API calls. Use unclecode auth login --api-key-stdin, OPENAI_API_KEY, or browser OAuth with OPENAI_OAUTH_CLIENT_ID.".to_string());
+                }
                 return auth
                     .bearer_token
                     .filter(|value| !value.trim().is_empty())
@@ -494,12 +512,21 @@ fn resolve_api_key(provider: &str, cwd: &Path) -> Result<String, String> {
 }
 
 fn resolve_base_url(provider: &str, cwd: &Path) -> String {
-    let (env_name, default_url) = match provider {
-        "anthropic" => ("ANTHROPIC_BASE_URL", ANTHROPIC_DEFAULT_BASE_URL),
-        "gemini" => ("GEMINI_BASE_URL", GEMINI_DEFAULT_BASE_URL),
-        _ => ("OPENAI_BASE_URL", OPENAI_DEFAULT_BASE_URL),
+    let (env_names, default_url): (&[&str], &str) = match provider {
+        "anthropic" => (
+            &["ANTHROPIC_BASE_URL", "ANTHROPIC_API_BASE_URL"],
+            ANTHROPIC_DEFAULT_BASE_URL,
+        ),
+        "gemini" => (
+            &["GEMINI_BASE_URL", "GEMINI_API_BASE_URL"],
+            GEMINI_DEFAULT_BASE_URL,
+        ),
+        _ => (
+            &["OPENAI_BASE_URL", "OPENAI_API_BASE_URL"],
+            OPENAI_DEFAULT_BASE_URL,
+        ),
     };
-    env_value(env_name, cwd)
+    env_value_any(env_names, cwd)
         .map(|value| value.trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default_url.to_string())
@@ -524,6 +551,10 @@ fn env_value(key: &str, cwd: &Path) -> Option<String> {
         .filter(|value| !value.is_empty())
         .or_else(|| dotenv_value(key, Path::new(".")))
         .or_else(|| dotenv_value(key, cwd))
+}
+
+fn env_value_any(keys: &[&str], cwd: &Path) -> Option<String> {
+    keys.iter().find_map(|key| env_value(key, cwd))
 }
 
 fn dotenv_value(key: &str, cwd: &Path) -> Option<String> {
@@ -643,6 +674,9 @@ fn print_work_help() {
 fn print_interactive_help() {
     println!("/help             Show commands");
     println!("/status           Show provider, model, cwd, queue, and shell-tool state");
+    println!("/context          Show latest Work context status");
+    println!("/research status  Show latest Work context status");
+    println!("/research <topic> Refresh local Work context for a topic");
     println!("/auth status      Show OpenAI auth source, type, expiry, and scope state");
     println!("/model            Show current model");
     println!("/model <id>       Switch model and auto-route provider by model family");
@@ -680,6 +714,20 @@ fn print_status(config: &WorkRuntimeConfig, queue: &WorkQueue) {
     );
 }
 
+fn print_research_status(cwd: &Path) -> Result<(), String> {
+    let home_dir = env::var_os("HOME").map(PathBuf::from);
+    let report = research_status_report(cwd, home_dir.as_deref(), |key| env::var(key).ok())?;
+    println!("{}", report.lines.join("\n"));
+    Ok(())
+}
+
+fn print_research_run(cwd: &Path, prompt: &str) -> Result<(), String> {
+    let home_dir = env::var_os("HOME").map(PathBuf::from);
+    let report = research_run_report(cwd, home_dir.as_deref(), |key| env::var(key).ok(), prompt)?;
+    println!("{}", report.lines.join("\n"));
+    Ok(())
+}
+
 fn print_auth_status() {
     let status = resolve_openai_auth_status(|key| env_value(key, Path::new(".")));
     println!("auth provider: openai");
@@ -687,18 +735,26 @@ fn print_auth_status() {
     println!("auth type: {}", status.auth_type);
     println!(
         "organization: {}",
-        status.organization_id.unwrap_or_else(|| "none".to_string())
+        status.organization_id.as_deref().unwrap_or("none")
     );
     println!(
         "project: {}",
-        status.project_id.unwrap_or_else(|| "none".to_string())
+        status.project_id.as_deref().unwrap_or("none")
     );
+    println!("runtime: {}", status.runtime.as_deref().unwrap_or("none"));
     println!(
         "expiresAt: {}",
         status.expires_at.as_deref().unwrap_or("none")
     );
-    println!("expired: {}", if status.is_expired { "yes" } else { "no" });
-    if status.expires_at.as_deref() == Some("insufficient-scope") {
+    println!(
+        "api ready: {}",
+        if openai_auth_supports_api_calls(&status) {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    if !openai_auth_supports_api_calls(&status) {
         println!("fix: /exit then run `unclecode auth login --api-key-stdin`, set OPENAI_API_KEY, or use browser OAuth with OPENAI_OAUTH_CLIENT_ID.");
     }
 }

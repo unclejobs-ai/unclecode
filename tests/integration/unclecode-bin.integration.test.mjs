@@ -73,6 +73,14 @@ function delay(ms) {
   });
 }
 
+function buildUnsignedJwt(payload) {
+  const header = Buffer.from(
+    JSON.stringify({ alg: "none", typ: "JWT" }),
+  ).toString("base64url");
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${header}.${body}.sig`;
+}
+
 async function fetchWithRetry(url) {
   let lastError;
   for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -261,7 +269,7 @@ test("root bin work session treats nested unclecode as REPL guidance, not a prom
     assert.equal(typeof address, "object");
     const result = await runNodeAsync([binEntrypoint, "work"], {
       cwd: tempDir,
-      input: "unclecode\nunclecode auth status\n/exit\n",
+      input: "unclecode\nunclecode auth status\n/auth login\n/exit\n",
       env: {
         ...process.env,
         HOME: tempDir,
@@ -274,6 +282,11 @@ test("root bin work session treats nested unclecode as REPL guidance, not a prom
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Already inside UncleCode/);
     assert.match(result.stdout, /Use \/auth status here/);
+    assert.match(
+      result.stdout,
+      /OPENAI_OAUTH_CLIENT_ID=<client-id> unclecode auth login --browser/,
+    );
+    assert.match(result.stdout, /unclecode auth login --api-key-stdin/);
     assert.equal(requests.length, 0);
   } finally {
     await closeServer(server);
@@ -476,6 +489,124 @@ test("root bin wrapper handles auth status on the Rust path", () => {
   assert.match(result.stdout, /organization: org_bin/);
   assert.match(result.stdout, /project: proj_bin/);
   assert.doesNotMatch(result.stdout, /sk-bin-test/);
+});
+
+test("root bin wrapper handles auth status json on the Rust path", () => {
+  const result = spawnSync(
+    "node",
+    [binEntrypoint, "auth", "status", "--json"],
+    {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        OPENAI_API_KEY: "sk-bin-json-test",
+        OPENAI_AUTH_TOKEN: "",
+        OPENAI_ORG_ID: "org_bin_json",
+        OPENAI_PROJECT_ID: "proj_bin_json",
+      },
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(result.stdout);
+  assert.deepEqual(payload, {
+    provider: "openai",
+    source: "api-key-env",
+    type: "api-key",
+    organizationId: "org_bin_json",
+    projectId: "proj_bin_json",
+    runtime: null,
+    expiresAt: null,
+    expired: false,
+    apiReady: true,
+    recovery: null,
+  });
+  assert.doesNotMatch(result.stdout, /sk-bin-json-test/);
+});
+
+test("root bin wrapper reports actionable recovery for Codex OAuth auth status", () => {
+  const tempDir = mkdtempSync(
+    path.join(tmpdir(), "unclecode-bin-auth-status-codex-"),
+  );
+  const codexDir = path.join(tempDir, ".codex");
+  const token = buildUnsignedJwt({
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    aud: ["codex_client_saved"],
+  });
+
+  try {
+    mkdirSync(codexDir, { recursive: true });
+    writeFileSync(
+      path.join(codexDir, "auth.json"),
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        tokens: { access_token: token, refresh_token: "rt-bin-status" },
+      }),
+      "utf8",
+    );
+
+    const humanResult = spawnSync("node", [binEntrypoint, "auth", "status"], {
+      cwd: workspaceRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: tempDir,
+        OPENAI_API_KEY: "",
+        OPENAI_AUTH_TOKEN: "",
+      },
+    });
+
+    assert.equal(humanResult.status, 0, humanResult.stderr);
+    assert.match(humanResult.stdout, /runtime: codex/);
+    assert.match(humanResult.stdout, /api ready: no/);
+    assert.match(
+      humanResult.stdout,
+      /recovery: openai-oauth-codex-runtime-not-api-ready/,
+    );
+    assert.match(
+      humanResult.stdout,
+      /next: OPENAI_OAUTH_CLIENT_ID=<client-id> unclecode auth login --browser/,
+    );
+    assert.match(
+      humanResult.stdout,
+      /next: unclecode auth login --api-key-stdin/,
+    );
+    assert.match(humanResult.stdout, /verify: npm run qa:live/);
+
+    const jsonResult = spawnSync(
+      "node",
+      [binEntrypoint, "auth", "status", "--json"],
+      {
+        cwd: workspaceRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: tempDir,
+          OPENAI_API_KEY: "",
+          OPENAI_AUTH_TOKEN: "",
+        },
+      },
+    );
+
+    assert.equal(jsonResult.status, 0, jsonResult.stderr);
+    const payload = JSON.parse(jsonResult.stdout);
+    assert.equal(payload.apiReady, false);
+    assert.equal(payload.runtime, "codex");
+    assert.equal(
+      payload.recovery.reason,
+      "openai-oauth-codex-runtime-not-api-ready",
+    );
+    assert.deepEqual(payload.recovery.commands, [
+      "OPENAI_OAUTH_CLIENT_ID=<client-id> unclecode auth login --browser",
+      "unclecode auth login --api-key-stdin",
+      "OPENAI_API_KEY=<key> npm run qa:live",
+      "npm run qa:live",
+    ]);
+    assert.equal(payload.recovery.verify, "npm run qa:live");
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("root bin wrapper handles slash auth status on the Rust path", () => {
@@ -725,7 +856,7 @@ test("root bin wrapper completes device OAuth on the Rust path", async () => {
   }
 });
 
-test("root bin wrapper reports existing Codex auth on default Rust login path", () => {
+test("root bin wrapper reports API-ready recovery for existing Codex auth on default Rust login path", () => {
   const tempDir = mkdtempSync(
     path.join(tmpdir(), "unclecode-bin-auth-login-codex-"),
   );
@@ -761,9 +892,59 @@ test("root bin wrapper reports existing Codex auth on default Rust login path", 
       },
     });
 
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Saved auth found\./);
-    assert.match(result.stdout, /Auth: oauth-file/);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /not API-ready for OpenAI API tool calling/);
+    assert.match(
+      result.stderr,
+      /OPENAI_OAUTH_CLIENT_ID=<client-id> unclecode auth login --browser/,
+    );
+    assert.match(result.stderr, /unclecode auth login --api-key-stdin/);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("root bin wrapper requires explicit device flag for Codex-derived device OAuth", () => {
+  const tempDir = mkdtempSync(
+    path.join(tmpdir(), "unclecode-bin-auth-codex-plain-device-"),
+  );
+  const codexDir = path.join(tempDir, ".codex");
+  const idPayload = Buffer.from(
+    JSON.stringify({ aud: ["app_client_plain_device_bin"] }),
+  ).toString("base64url");
+  const idToken = `x.${idPayload}.y`;
+
+  try {
+    mkdirSync(codexDir, { recursive: true });
+    writeFileSync(
+      path.join(codexDir, "auth.json"),
+      JSON.stringify({
+        auth_mode: "chatgpt",
+        tokens: { id_token: idToken },
+      }),
+      "utf8",
+    );
+
+    const result = spawnSync("node", [binEntrypoint, "auth", "login"], {
+      cwd: tempDir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: tempDir,
+        OPENAI_API_KEY: "",
+        OPENAI_AUTH_TOKEN: "",
+        OPENAI_OAUTH_CLIENT_ID: "",
+        OPENAI_OAUTH_BASE_URL: "http://127.0.0.1:9",
+      },
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /auth login --device/i);
+    assert.match(result.stderr, /may not be API-ready for model calls/i);
+    assert.doesNotMatch(
+      result.stderr,
+      /ECONNREFUSED|fetch failed|HTTP POST failed/i,
+    );
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
@@ -1780,7 +1961,12 @@ process.stdout.write(JSON.stringify({ status: "finished", result: "native cursor
       "/v1beta/models/gemini-2.5-pro:generateContent",
     );
     assert.equal(geminiRequests[0].apiKey, "gemini-test-key");
-    assert.equal(JSON.parse(geminiRequests[0].body).model, "gemini-2.5-pro");
+    const geminiBody = JSON.parse(geminiRequests[0].body);
+    assert.equal(Object.hasOwn(geminiBody, "model"), false);
+    assert.equal(
+      geminiBody.contents[0].parts[0].text,
+      "dispatch native gemini mini loop",
+    );
 
     const glmRequests = [];
     glmServer = createServer((req, res) => {
