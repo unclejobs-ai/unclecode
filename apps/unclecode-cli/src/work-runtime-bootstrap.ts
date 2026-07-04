@@ -3,8 +3,9 @@ import { createHash } from "node:crypto";
 import { explainUncleCodeConfig } from "@unclecode/config-core";
 import { createAgentOpsRecorder } from "@unclecode/orchestrator";
 import {
+  augmentContextPacketViewInput,
   clearCachedWorkspaceGuidance,
-  createContextPacketView,
+  ingestWorkspaceBootstrapContext,
   loadCachedWorkspaceGuidance,
   loadOmoContextSnapshot,
 } from "@unclecode/context-broker";
@@ -293,6 +294,8 @@ function buildOmoExcludedPacketItems(
 
 function createWorkShellContextPacketResolver(options: {
   readonly sourceMetadata: readonly ContextPacketViewItem[];
+  readonly bootstrapPacketItems?: readonly ContextPacketViewItem[];
+  readonly bootstrapPacketWarnings?: readonly ContextPacketViewWarning[];
 }): StartReplOptions["resolveContextPacket"] {
   return async (input): Promise<ContextPacketView> => {
     const omo = await loadOmoContextSnapshot(input.cwd);
@@ -331,11 +334,14 @@ function createWorkShellContextPacketResolver(options: {
       })),
     ];
     const excluded = buildOmoExcludedPacketItems(omo.excluded);
-    const warnings: ContextPacketViewWarning[] = omo.warnings.map((message, index) => ({
-      code: `omo.warning.${index + 1}`,
-      message,
-      severity: "warning",
-    }));
+    const warnings: ContextPacketViewWarning[] = [
+      ...omo.warnings.map((message, index) => ({
+        code: `omo.warning.${index + 1}`,
+        message,
+        severity: "warning" as const,
+      })),
+      ...(options.bootstrapPacketWarnings ?? []),
+    ];
     const id = createPacketId({
       sessionId: input.sessionId,
       included,
@@ -343,17 +349,19 @@ function createWorkShellContextPacketResolver(options: {
       warnings,
     });
 
-    return createContextPacketView({
-      id,
-      generatedAt: new Date().toISOString(),
-      title: "Next answer context",
-      included,
-      excluded,
-      warnings,
-      preview: [
-        "UncleCode will carry these summaries into the next answer.",
-        "Raw OMO audit artifacts stay local.",
-      ],
+    return augmentContextPacketViewInput({
+      base: {
+        id,
+        generatedAt: new Date().toISOString(),
+        title: "Next answer context",
+        included: [...included, ...(options.bootstrapPacketItems ?? [])],
+        excluded,
+        warnings,
+        preview: [
+          "UncleCode will carry these summaries into the next answer.",
+          "Raw OMO audit artifacts stay local.",
+        ],
+      },
     });
   };
 }
@@ -484,6 +492,12 @@ export async function loadWorkCliBootstrap(
     command: "unclecode work",
     ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
   });
+  const bootstrapContext = await ingestWorkspaceBootstrapContext({
+    cwd,
+    env,
+    ...(userHomeDir ? { userHomeDir } : {}),
+    ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
+  });
 
   return {
     agent,
@@ -497,6 +511,7 @@ export async function loadWorkCliBootstrap(
       cwd,
       contextSummaryLines: [
         ...authIssueLines,
+        ...bootstrapContext.summaryLines,
         ...(await buildWorkShellContextSummary({
           cwd,
           env,
@@ -518,18 +533,30 @@ export async function loadWorkCliBootstrap(
       ...(resumedSession?.initialSessionSummary
         ? { initialSessionSummary: resumedSession.initialSessionSummary }
         : {}),
-      reloadWorkspaceContext: async (workspaceRoot: string) =>
-        buildWorkShellContextSummary({
+      reloadWorkspaceContext: async (workspaceRoot: string) => {
+        const refreshedBootstrap = await ingestWorkspaceBootstrapContext({
           cwd: workspaceRoot,
           env,
           ...(userHomeDir ? { userHomeDir } : {}),
-          ...(resumedSession?.contextLine
-            ? { resumedContextLine: resumedSession.contextLine }
-            : {}),
-          forceRefresh: true,
-        }),
+          ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
+        });
+        return [
+          ...refreshedBootstrap.summaryLines,
+          ...(await buildWorkShellContextSummary({
+            cwd: workspaceRoot,
+            env,
+            ...(userHomeDir ? { userHomeDir } : {}),
+            ...(resumedSession?.contextLine
+              ? { resumedContextLine: resumedSession.contextLine }
+              : {}),
+            forceRefresh: true,
+          })),
+        ];
+      },
       resolveContextPacket: createWorkShellContextPacketResolver({
         sourceMetadata: contextPacketSourceMetadata,
+        bootstrapPacketItems: bootstrapContext.packetItems,
+        bootstrapPacketWarnings: bootstrapContext.packetWarnings,
       }),
       refreshHomeState,
       refreshAuthState,
