@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
-import { parseScopedMemoryId, type ScopedMemoryEntry } from "./memory-transparency.js";
+import { parseScopedMemoryId, formatScopedMemoryTransparencyLines, type ScopedMemoryEntry } from "./memory-transparency.js";
 
 export type MemoryScope = "session" | "project" | "user" | "agent";
 
@@ -206,5 +206,5 @@ export async function listScopedMemoryLines(input: {
   agentId?: string;
 }): Promise<readonly string[]> {
   const entries = await listScopedMemoryEntries(input);
-  return entries.map((entry) => entry.summary);
+  return formatScopedMemoryTransparencyLines(entries);
 }

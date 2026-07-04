@@ -9,6 +9,30 @@ import type { WorkShellPanel } from "./work-shell-engine.js";
 
 type PrefetchScopedMemory = typeof prefetchScopedMemory;
 
+function formatMemoryLinesFromSummaries(input: {
+  readonly scope: "session" | "project" | "user" | "agent";
+  readonly summaries: readonly string[];
+}): readonly string[] {
+  return formatScopedMemoryTransparencyLines(
+    input.summaries.map((summary, index) => ({
+      scope: input.scope,
+      memoryId: `memory:${input.scope}:1970-01-01T00:00:00.000Z:test${String(index + 1).padStart(4, "0")}`,
+      summary,
+      timestamp: "1970-01-01T00:00:00.000Z",
+    })),
+  );
+}
+
+function normalizeScopedMemoryLines(input: {
+  readonly scope: "session" | "project" | "user" | "agent";
+  readonly lines: readonly string[];
+}): readonly string[] {
+  if (input.lines.some((line) => line.includes(" · cite memory:"))) {
+    return input.lines;
+  }
+  return formatMemoryLinesFromSummaries({ scope: input.scope, summaries: input.lines });
+}
+
 async function resolveWorkShellMemoryLines(input: {
   cwd: string;
   sessionId: string;
@@ -42,14 +66,7 @@ async function resolveWorkShellMemoryLines(input: {
     sessionId: input.sessionId,
   });
 
-  return formatScopedMemoryTransparencyLines(
-    summaries.map((summary, index) => ({
-      scope: "session",
-      memoryId: `memory:session:1970-01-01T00:00:00.000Z:test${String(index + 1).padStart(4, "0")}`,
-      summary,
-      timestamp: "1970-01-01T00:00:00.000Z",
-    })),
-  );
+  return normalizeScopedMemoryLines({ scope: "session", lines: summaries });
 }
 
 type BuildContextPanel = (

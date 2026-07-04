@@ -2627,8 +2627,8 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
   assert.equal(engine.getState().panel.title, "Context expanded");
   assert.ok(engine.getState().panel.lines.includes("Sources · 2 included · 1 held back · 1 warning · ~30 tokens"));
   assert.ok(engine.getState().panel.lines.includes("Included in next answer"));
-  assert.ok(engine.getState().panel.lines.some((line) => /workspace guidance · 1 · AGENTS\.md/.test(line)));
-  assert.ok(engine.getState().panel.lines.some((line) => /omo · 1 · G001 context MVP/.test(line)));
+  assert.ok(engine.getState().panel.lines.some((line) => /workspace · 1 · Use <small> reversible diffs\./.test(line)));
+  assert.ok(engine.getState().panel.lines.some((line) => /omo · 1 · Deliver context view\./.test(line)));
   assert.ok(engine.getState().panel.lines.includes("Held back locally"));
   assert.ok(engine.getState().panel.lines.includes("Next answer · Context will be carried into the next answer."));
   assert.equal(engine.getState().panel.lines.some((line) => /\bPacket\b|provider packet|Next model-call packet/.test(line)), false);
