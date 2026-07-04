@@ -1,5 +1,5 @@
 import type { WorkShellPanel } from "./work-shell-view.js";
-import { runRustCommandSync } from "@unclecode/orchestrator";
+import { resolveWorkShellSlashArgHint, runRustCommandSync } from "@unclecode/orchestrator";
 import {
   formatAuthLabelForDisplay,
   isAuthStatusInlineCommand,
@@ -166,19 +166,26 @@ function buildCommandsPanel(
       lines: [
         `No matches for ${inputText}.`,
         "",
-        "Try /model, /auth, /queue, or /context.",
+        "Try /model <id>, /auth status, /queue, or /context.",
       ],
     };
   }
+  const selectedCommand = visible[selected]?.command;
+  const selectedArgHint = selectedCommand ? resolveWorkShellSlashArgHint(selectedCommand) : undefined;
   return {
     title: "Commands",
     lines: [
       `${inputText} matches`,
       "",
-      ...visible.map((suggestion, index) =>
-        `${index === selected ? "›" : " "} ${suggestion.command}  ${suggestion.description}`),
+      ...visible.map((suggestion, index) => {
+        const argHint = index === selected ? resolveWorkShellSlashArgHint(suggestion.command) : undefined;
+        const suffix = argHint ? ` · args: ${argHint}` : "";
+        return `${index === selected ? "›" : " "} ${suggestion.command}  ${suggestion.description}${suffix}`;
+      }),
       "",
-      "↑↓ move · Enter run",
+      selectedArgHint
+        ? `↑↓ move · Enter run · args: ${selectedArgHint}`
+        : "↑↓ move · Enter run",
     ],
   };
 }

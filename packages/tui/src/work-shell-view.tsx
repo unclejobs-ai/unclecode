@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import React from "react";
 import {
+  resolveWorkShellSlashArgHint,
   runRustCommandSync,
   sanitizeWorkShellAssistantText,
 } from "@unclecode/orchestrator";
@@ -262,17 +263,25 @@ export function getWorkShellAttachmentLineColor(index: number): string | undefin
   return resolveReadableWorkShellTextColor(W.textMuted);
 }
 
-export function getWorkShellComposerHint(inputValue: string, slashSuggestionCount: number): string | undefined {
+export function getWorkShellComposerHint(
+  inputValue: string,
+  slashSuggestionCount: number,
+  selectedSlashCommand?: string,
+): string | undefined {
   const trimmed = inputValue.trim();
   if (trimmed.startsWith("/")) {
+    const argHint = selectedSlashCommand
+      ? resolveWorkShellSlashArgHint(selectedSlashCommand)
+      : undefined;
+    const argSuffix = argHint ? ` · args: ${argHint}` : "";
     if (trimmed.startsWith("/model")) {
       return slashSuggestionCount > 0
-        ? "↑↓ choose · Enter switch · type to filter · Esc cancel"
-        : "No exact model match";
+        ? `↑↓ choose · Enter switch · type to filter · Esc cancel${argSuffix}`
+        : "No exact model match · type to filter";
     }
     return slashSuggestionCount > 0
-      ? "↑↓ select · Enter run · Esc cancel"
-      : "No matches";
+      ? `↑↓ select · Enter run · Esc cancel${argSuffix}`
+      : "No matches · try /model, /auth, /context, /queue";
   }
   if (trimmed.length === 0) {
     return "Enter send · Shift+Enter newline · / commands";
@@ -1182,6 +1191,7 @@ export function WorkShellView(props: {
   readonly composer: React.ReactNode;
   readonly inputValue: string;
   readonly slashSuggestionCount: number;
+  readonly selectedSlashCommand?: string;
   readonly headerHint?: string;
   readonly composerHintOverride?: string;
   readonly terminalColumns?: number;
@@ -1193,7 +1203,11 @@ export function WorkShellView(props: {
     ? "Enter queues follow-up · Ctrl+C/Esc interrupt · /queue"
     : props.queuePaused && (props.queuedCount ?? 0) > 0
       ? "Queue paused after interrupt · /queue shows · /queue clear drops"
-    : getWorkShellComposerHint(props.inputValue, props.slashSuggestionCount));
+    : getWorkShellComposerHint(
+      props.inputValue,
+      props.slashSuggestionCount,
+      props.selectedSlashCommand,
+    ));
   const panelBorderColor = getWorkShellPanelBorderColor(props.inputValue, props.activePanel.title);
   const panelDisplayMode = getWorkShellPanelDisplayMode({
     panelTitle: props.activePanel.title,

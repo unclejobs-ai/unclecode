@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getDisplayWidth, wrapDisplayTextFast } from "../../packages/tui/src/text-width.ts";
+import { getDisplayWidth, truncateForDisplayWidth, wrapDisplayTextFast } from "../../packages/tui/src/text-width.ts";
 
 test("wrapDisplayTextFast wraps at word boundaries", () => {
   assert.deepEqual(wrapDisplayTextFast("abc def", 4), ["abc", "def"]);
@@ -23,4 +23,11 @@ test("wrapDisplayTextFast splits unbroken words by grapheme", () => {
 
 test("wrapDisplayTextFast preserves explicit newlines", () => {
   assert.deepEqual(wrapDisplayTextFast("one\n\ntwo", 6), ["one", "", "two"]);
+});
+
+test("truncateForDisplayWidth avoids splitting Hangul and emoji graphemes", () => {
+  assert.equal(truncateForDisplayWidth("한글응답", 4), "한글");
+  assert.equal(getDisplayWidth(truncateForDisplayWidth("한글응답", 4)), 4);
+  assert.equal(truncateForDisplayWidth("🙂테스트", 3), "🙂");
+  assert.equal(getDisplayWidth(truncateForDisplayWidth("🙂테스트", 3)), 2);
 });

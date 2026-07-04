@@ -752,6 +752,7 @@ export function useWorkShellPaneState<
     composerPreview,
     activePanel,
     slashSuggestionCount: slashSuggestions.length,
+    selectedSlashCommand: selectedSuggestion?.command,
     submit,
     addClipboardAttachment,
     clearClipboardAttachments,

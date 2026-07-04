@@ -33,6 +33,15 @@ function getWorkShellCommandRegistry(
   return createWorkShellCommandRegistry(loadExtensionSlashCommands(options));
 }
 
+const WORK_SHELL_QUICK_PICK_COMMANDS = [
+  "/context",
+  "/model",
+  "/auth status",
+  "/queue",
+  "/mode status",
+  "/help",
+] as const;
+
 const WORK_SHELL_EXTRA_SUGGESTION_ENTRIES = [
   {
     command: "/auth key",
@@ -153,6 +162,30 @@ function resolveWorkShellSlashCommandWithRust(
   };
 }
 
+export function resolveWorkShellSlashArgHint(command: string): string | undefined {
+  const normalized = command.trim().replace(/\s+/g, " ").toLowerCase();
+  if (normalized === "/model" || (normalized.startsWith("/model ") && normalized.slice("/model ".length).trim().length === 0)) {
+    return "<model-id>";
+  }
+  if (normalized === "/mode") {
+    return "status · set <profile>";
+  }
+  if (normalized === "/mode set" || normalized.startsWith("/mode set ")) {
+    const profile = normalized.slice("/mode set".length).trim();
+    return profile.length > 0 ? undefined : "default | ultrawork | search | analyze | yolo | plan | build";
+  }
+  if (normalized === "/reasoning" || (normalized.startsWith("/reasoning ") && normalized.split(" ").length === 1)) {
+    return "low · medium · high · default";
+  }
+  if (normalized === "/mmbridge" || (normalized.startsWith("/mmbridge ") && normalized.split(" ").length === 1)) {
+    return "context · review · gate · handoff · health · doctor";
+  }
+  if (normalized === "/auth" || (normalized.startsWith("/auth ") && normalized.split(" ").length === 1)) {
+    return "status · login · key · logout · browser";
+  }
+  return undefined;
+}
+
 export function getWorkShellSlashSuggestions(
   input: string,
   options?: WorkShellSlashOptions,
@@ -242,6 +275,14 @@ function getSlashSuggestions(
   normalized: string,
   entries: readonly WorkShellSlashSuggestion[],
 ): readonly WorkShellSlashSuggestion[] {
+  if (normalized === "/") {
+    return dedupeSlashSuggestions(
+      WORK_SHELL_QUICK_PICK_COMMANDS.flatMap((command) => {
+        const match = entries.find((entry) => entry.command.toLowerCase() === command);
+        return match ? [match] : [];
+      }),
+    );
+  }
   if (normalized === "/auth" || normalized.startsWith("/auth ")) {
     return dedupeSlashSuggestions(
       entries

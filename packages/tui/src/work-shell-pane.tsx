@@ -80,6 +80,7 @@ export function WorkShellPane<
     composerPreview,
     activePanel,
     slashSuggestionCount,
+    selectedSlashCommand,
     submit,
     addClipboardAttachment,
     clearClipboardAttachments,
@@ -264,6 +265,7 @@ export function WorkShellPane<
       }
       inputValue={inputValue}
       slashSuggestionCount={slashSuggestionCount}
+      {...(selectedSlashCommand ? { selectedSlashCommand } : {})}
       terminalColumns={terminalColumns}
       cwd={props.cwd}
       {...(queuedCount !== undefined ? { queuedCount } : {})}

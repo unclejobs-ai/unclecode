@@ -361,7 +361,14 @@ test("getWorkShellComposerHint keeps slash discovery guidance inside the shared 
     getWorkShellComposerHint("/auth", 2),
     "↑↓ select · Enter run · Esc cancel",
   );
-  assert.equal(getWorkShellComposerHint("/unknown", 0), "No matches");
+  assert.equal(
+    getWorkShellComposerHint("/model", 3, "/model"),
+    "↑↓ choose · Enter switch · type to filter · Esc cancel · args: <model-id>",
+  );
+  assert.equal(
+    getWorkShellComposerHint("/unknown", 0),
+    "No matches · try /model, /auth, /context, /queue",
+  );
   assert.equal(
     getWorkShellComposerHint("", 0),
     "Enter send · Shift+Enter newline · / commands",
@@ -780,7 +787,7 @@ test("work-shell no-match slash copy is local because it renders on each slash k
   assert.deepEqual(buildSlashSuggestionPanel("/zz", [], 0).lines, [
     "No matches for /zz.",
     "",
-    "Try /model, /auth, /queue, or /context.",
+    "Try /model <id>, /auth status, /queue, or /context.",
   ]);
 });
 

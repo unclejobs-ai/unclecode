@@ -17,6 +17,7 @@ import {
   resolveComposerInput,
   resolveModelCommand,
   resolveReasoningCommand,
+  resolveWorkShellSlashArgHint,
   resolveWorkShellSlashCommand,
   shouldBlockSlashSubmit,
 } from "@unclecode/orchestrator";
@@ -726,6 +727,21 @@ test("getWorkShellSlashSuggestions surfaces command matches for slash-first inpu
   assert.ok(suggestions.some((item) => item.command === "/auth logout"));
   assert.ok(queueSuggestions.some((item) => item.command === "/queue"));
   assert.ok(skillSuggestions.some((item) => item.command === "/skills"));
+});
+
+test("getWorkShellSlashSuggestions surfaces quick picks for bare slash", () => {
+  const commands = getWorkShellSlashSuggestions("/").map((item) => item.command);
+
+  assert.ok(commands.includes("/context"));
+  assert.ok(commands.includes("/model"));
+  assert.ok(commands.includes("/queue"));
+  assert.ok(commands.includes("/auth status"));
+});
+
+test("resolveWorkShellSlashArgHint documents argument placeholders", () => {
+  assert.equal(resolveWorkShellSlashArgHint("/model"), "<model-id>");
+  assert.match(resolveWorkShellSlashArgHint("/mode") ?? "", /set/i);
+  assert.match(resolveWorkShellSlashArgHint("/reasoning") ?? "", /medium/i);
 });
 
 test("getWorkShellSlashSuggestions keeps /auth launcher status-first", () => {
