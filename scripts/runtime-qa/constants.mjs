@@ -23,6 +23,14 @@ export const openAIToolCallPromptText = "Run the OpenAI local tool-call smoke.";
 export const openAIToolCallId = "call_runtime_openai_1";
 export const openAIToolCallShellOutput = "OPENAI_TOOL_CALL_SMOKE_OK";
 export const openAIToolCallFinalResponseText = "OPENAI_TOOL_CALL_FINAL_OK";
+export const openAIStreamPromptText = "Stream the OpenAI runtime QA reply.";
+export const openAIStreamChunkTexts = [
+  "OPENAI_STREAM_FIRST_TOKEN keeps painting while ",
+  "the turn is still running and ",
+  "closes with OPENAI_STREAM_FINAL_OK",
+];
+export const openAIStreamPartialMarkerText = "OPENAI_STREAM_FIRST_TOKEN";
+export const openAIStreamFinalMarkerText = "OPENAI_STREAM_FINAL_OK";
 export const anthropicToolCallPromptText = "Run the Anthropic local tool-use smoke.";
 export const anthropicToolCallId = "tu_runtime_anthropic_1";
 export const anthropicToolCallShellOutput = "ANTHROPIC_TOOL_CALL_SMOKE_OK";

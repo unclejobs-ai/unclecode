@@ -588,6 +588,201 @@ test("OpenAIProvider includes supported reasoning effort in request payloads", a
   assert.deepEqual(capturedBody.reasoning, { effort: "high" });
 });
 
+test("OpenAIProvider requests chat completions with stream:true and emits live assistant deltas", async () => {
+  const stream = createControlledTextStream();
+  const traces = [];
+  const requests = [];
+  let resolved = false;
+  const provider = new BaseOpenAIProvider({
+    apiKey: "sk-test-123",
+    model: "gpt-4.1-mini",
+    cwd: process.cwd(),
+    reasoning: {
+      effort: "unsupported",
+      source: "model-capability",
+      support: { status: "unsupported", supportedEfforts: [] },
+    },
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), body: JSON.parse(String(init?.body ?? "{}")) });
+      return {
+        ok: true,
+        status: 200,
+        body: stream.body,
+      };
+    },
+  });
+  provider.setTraceListener((event) => traces.push(event));
+
+  const resultPromise = provider.runTurn("stream please").then((result) => {
+    resolved = true;
+    return result;
+  });
+
+  stream.push('data: {"id":"chatcmpl-live","choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n');
+  stream.push('data: {"id":"chatcmpl-live","choices":[{"index":0,"delta":{"content":"Hel"}}]}\n\n');
+  await waitForPredicate(
+    () => traces.some((event) => event.type === "assistant.delta" && event.delta === "Hel"),
+    "chat assistant delta",
+  );
+
+  assert.equal(resolved, false, "turn must still be in flight while deltas stream");
+
+  stream.push('data: {"id":"chatcmpl-live","choices":[{"index":0,"delta":{"content":"lo"}}]}\n\n');
+  stream.push('data: {"id":"chatcmpl-live","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}\n\n');
+  stream.push("data: [DONE]\n\n");
+  stream.close();
+
+  const result = await resultPromise;
+  assert.equal(result.text, "Hello");
+  assert.equal(requests[0].url, "https://api.openai.com/v1/chat/completions");
+  assert.equal(requests[0].body.stream, true);
+  assert.deepEqual(
+    traces
+      .filter((event) => event.type === "assistant.delta")
+      .map((event) => ({ itemId: event.itemId, delta: event.delta })),
+    [
+      { itemId: "chatcmpl-live", delta: "Hel" },
+      { itemId: "chatcmpl-live", delta: "lo" },
+    ],
+  );
+});
+
+test("OpenAIProvider live chat stream honours OPENAI_API_BASE_URL override", async () => {
+  const originalBaseUrl = process.env.OPENAI_API_BASE_URL;
+  const requests = [];
+
+  try {
+    process.env.OPENAI_API_BASE_URL = "https://compat.example.test/v1x/";
+    const provider = new BaseOpenAIProvider({
+      apiKey: "sk-test-123",
+      model: "gpt-4.1-mini",
+      cwd: process.cwd(),
+      reasoning: {
+        effort: "unsupported",
+        source: "model-capability",
+        support: { status: "unsupported", supportedEfforts: [] },
+      },
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), body: JSON.parse(String(init?.body ?? "{}")) });
+        return {
+          ok: true,
+          async json() {
+            return { choices: [{ message: { content: "compat ok" } }] };
+          },
+        };
+      },
+    });
+
+    const result = await provider.runTurn("hello");
+    assert.equal(result.text, "compat ok");
+    assert.equal(requests[0].url, "https://compat.example.test/v1x/chat/completions");
+    assert.equal(requests[0].body.stream, true);
+  } finally {
+    if (originalBaseUrl === undefined) {
+      delete process.env.OPENAI_API_BASE_URL;
+    } else {
+      process.env.OPENAI_API_BASE_URL = originalBaseUrl;
+    }
+  }
+});
+
+test("OpenAIProvider assembles streamed chat tool-call deltas through Rust SSE records", async () => {
+  const seenInputs = [];
+  let callCount = 0;
+  const provider = new BaseOpenAIProvider({
+    apiKey: "sk-test-123",
+    model: "gpt-4.1-mini",
+    cwd: process.cwd(),
+    reasoning: {
+      effort: "unsupported",
+      source: "model-capability",
+      support: { status: "unsupported", supportedEfforts: [] },
+    },
+    toolRuntime: {
+      definitions: [
+        {
+          name: "capture_args",
+          description: "capture args",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+      handlers: {
+        capture_args: async (input) => {
+          seenInputs.push(input);
+          return { content: "tool-ok" };
+        },
+      },
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      async text() {
+        callCount += 1;
+        if (callCount === 1) {
+          return [
+            'data: {"id":"chatcmpl-tools","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_stream_qa","function":{"name":"capture_args","arguments":""}}]}}]}',
+            "",
+            'data: {"id":"chatcmpl-tools","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"command\\":\\"echo str"}}]}}]}',
+            "",
+            'data: {"id":"chatcmpl-tools","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"eam\\"}"}}]}}]}',
+            "",
+            "data: [DONE]",
+            "",
+          ].join("\n");
+        }
+        return [
+          'data: {"id":"chatcmpl-tools","choices":[{"index":0,"delta":{"content":"streamed done"}}]}',
+          "",
+          "data: [DONE]",
+          "",
+        ].join("\n");
+      },
+    }),
+  });
+
+  const result = await provider.runTurn("use the tool");
+
+  assert.equal(result.text, "streamed done");
+  assert.deepEqual(seenInputs, [{ command: "echo stream" }]);
+});
+
+test("OpenAIProvider emits live chat reasoning deltas without replaying buffered traces", async () => {
+  const stream = createControlledTextStream();
+  const traces = [];
+  const provider = new BaseOpenAIProvider({
+    apiKey: "sk-test-123",
+    model: "gpt-5.4",
+    cwd: process.cwd(),
+    reasoning: {
+      effort: "medium",
+      source: "mode-default",
+      support: { status: "supported", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high"] },
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      body: stream.body,
+    }),
+  });
+  provider.setTraceListener((event) => traces.push(event));
+
+  const resultPromise = provider.runTurn("think");
+  stream.push('data: {"id":"chatcmpl-rsn","choices":[{"index":0,"delta":{"reasoning_content":"keep planning. "}}]}\n\n');
+  await waitForPredicate(
+    () => traces.some((event) => event.type === "reasoning.delta" && event.delta === "keep planning. "),
+    "chat reasoning delta",
+  );
+  stream.push('data: {"id":"chatcmpl-rsn","choices":[{"index":0,"delta":{"content":"done"}}]}\n\n');
+  stream.push("data: [DONE]\n\n");
+  stream.close();
+
+  const result = await resultPromise;
+  assert.equal(result.text, "done");
+  assert.deepEqual(
+    traces.filter((event) => event.type === "reasoning.delta").map((event) => event.delta),
+    ["keep planning. "],
+  );
+});
+
 test("OpenAIProvider uses the Codex backend for codex oauth runtime", async () => {
   let capturedUrl;
   let capturedHeaders;

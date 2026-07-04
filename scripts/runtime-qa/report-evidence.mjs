@@ -21,6 +21,12 @@ export function buildRuntimeEvidence(report) {
       queueDrain: report.realUseTuiStress?.queueDrainVerified === true,
       resize: report.realUseTuiStress?.resizeVerified === true,
       idleStable: report.realUseTuiStress?.idleStableVerified === true,
+      openAIStreaming: {
+        streamRequestObserved: report.realUseTuiStress?.openAIStreaming?.streamRequestObserved === true,
+        partialTextVisible: report.realUseTuiStress?.openAIStreaming?.partialTextVisible === true,
+        streamingCursorVisible: report.realUseTuiStress?.openAIStreaming?.streamingCursorVisible === true,
+        finalTextVisible: report.realUseTuiStress?.openAIStreaming?.finalTextVisible === true,
+      },
       latencyOk:
         report.realUseTuiStress?.latencyWithinBudget === true &&
         report.slashLatencyTuiSmoke?.latencyWithinBudget === true,

@@ -427,7 +427,49 @@ export class OpenAIProvider implements LlmProvider {
     }>;
     actions: RustProviderAction[];
   }> {
-    if (!this.fetchImpl) {
+    // Live streaming needs a fetch transport. When an explicit proxy is
+    // configured we stay on the proxy-aware Rust transport instead, because
+    // Node's fetch does not honour HTTP(S)_PROXY. Injected fetch (tests)
+    // always wins so fixtures stay deterministic.
+    const fetchImpl = this.fetchImpl
+      ?? (hasExplicitProxyConfig() ? undefined : resolveGlobalFetchImpl());
+    let response: OpenAIResponsesHttpResponse | undefined;
+    if (fetchImpl) {
+      const requestSpec = buildOpenAIRequestSpec("api", this.apiKey);
+      const toolsJson = buildOpenAIChatTools(this.toolRuntime.definitions);
+      const toolPolicy = resolveProviderToolPolicy("openai-chat-live", this.toolRuntime.definitions);
+      const body = buildOpenAIChatBody({
+        model: this.model,
+        messagesJson: JSON.stringify(this.messages),
+        toolsJson,
+        includeTools: toolPolicy.includeTools,
+        reasoningEffort: resolveRuntimeReasoningEffort(this.reasoning),
+      });
+      try {
+        response = await postOpenAIChatWithLiveStream({
+          fetchImpl,
+          url: resolveOpenAIChatUrl(requestSpec.url),
+          headers: requestSpec.headers,
+          body: enableOpenAIChatStreamBody(body),
+          model: this.model,
+          traceListener: this.traceListener,
+          maxAttempts: this.fetchImpl ? 1 : 3,
+          ...(options.signal ? { signal: options.signal } : {}),
+        });
+      } catch (error) {
+        if (
+          this.fetchImpl
+          || isAbortError(error)
+          || error instanceof OpenAIChatLiveStreamReadError
+        ) {
+          throw error;
+        }
+        // Transport failed before any stream output was consumed; retry
+        // once through the Rust transport so chat turns keep working.
+      }
+    }
+
+    if (!response) {
       const parsed = await runOpenAIChatCompletionWithRustAsync({
         apiKey: this.apiKey,
         model: this.model,
@@ -449,24 +491,15 @@ export class OpenAIProvider implements LlmProvider {
       };
     }
 
-    const requestSpec = buildOpenAIRequestSpec("api", this.apiKey);
-    const toolsJson = buildOpenAIChatTools(this.toolRuntime.definitions);
-    const toolPolicy = resolveProviderToolPolicy("openai-chat-live", this.toolRuntime.definitions);
-    const body = buildOpenAIChatBody({
-      model: this.model,
-      messagesJson: JSON.stringify(this.messages),
-      toolsJson,
-      includeTools: toolPolicy.includeTools,
-      reasoningEffort: resolveRuntimeReasoningEffort(this.reasoning),
-    });
-    const response = await this.postText(requestSpec.url, requestSpec.headers, body, options.signal);
-
     if (!response.ok) {
       throw new Error(buildProviderRequestError("openai", response.status, response.text, response.attempts));
     }
 
     const parsed = parseOpenAIChatResponse(response.text, this.model);
-    if (parsed.reasoning.length > 0) {
+    // When the response was consumed as a live stream, reasoning deltas were
+    // already emitted incrementally — re-emitting the aggregate would
+    // duplicate the trace.
+    if (!response.streamed && parsed.reasoning.length > 0) {
       emitProviderTrace(
         this.traceListener,
         buildProviderReasoningDeltaTrace("openai", this.model, "text", parsed.reasoning),
@@ -1293,6 +1326,201 @@ class OpenAIResponsesLiveStreamReadError extends Error {
     super(message);
     this.name = "OpenAIResponsesLiveStreamReadError";
   }
+}
+
+class OpenAIChatLiveStreamReadError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OpenAIChatLiveStreamReadError";
+  }
+}
+
+function hasExplicitProxyConfig(): boolean {
+  return [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+  ].some((key) => Boolean(process.env[key]?.trim()));
+}
+
+/**
+ * Mirror of the Rust chat transport's OPENAI_API_BASE_URL override so the
+ * live-stream fetch path targets the same endpoint as the Rust fallback
+ * (local QA fake servers and OpenAI-compatible backends).
+ */
+function resolveOpenAIChatUrl(specUrl: string): string {
+  const base = process.env.OPENAI_API_BASE_URL?.trim();
+  if (!base) {
+    return specUrl;
+  }
+  return `${base.replace(/\/+$/, "")}/chat/completions`;
+}
+
+function enableOpenAIChatStreamBody(body: string): string {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (!isRecord(parsed)) {
+      return body;
+    }
+    return JSON.stringify({ ...parsed, stream: true });
+  } catch {
+    return body;
+  }
+}
+
+type OpenAIChatLivePostInput = {
+  readonly fetchImpl: OpenAIFetch;
+  readonly url: string;
+  readonly headers: Record<string, string>;
+  readonly body: string;
+  readonly model: string;
+  readonly traceListener?: ProviderTraceListener | undefined;
+  readonly maxAttempts: number;
+  readonly signal?: AbortSignal | undefined;
+};
+
+async function postOpenAIChatWithLiveStream(
+  input: OpenAIChatLivePostInput,
+): Promise<OpenAIResponsesHttpResponse> {
+  const maxAttempts = Math.max(1, Math.floor(input.maxAttempts));
+  let lastError: string | undefined;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let readingStream = false;
+    try {
+      throwIfAborted(input.signal);
+      const response = await input.fetchImpl(input.url, {
+        method: "POST",
+        headers: input.headers,
+        body: input.body,
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
+      const status = typeof response.status === "number" ? response.status : response.ok ? 200 : 0;
+
+      if (!response.ok) {
+        const text = await readResponseText(response);
+        if (shouldRetryHttpStatus(status) && attempt < maxAttempts) {
+          await sleepBeforeRetry(125);
+          continue;
+        }
+        return { ok: false, status, text, attempts: attempt, streamed: false };
+      }
+
+      const traceEmitter = createOpenAIChatStreamingTraceEmitter(
+        input.model,
+        input.traceListener,
+      );
+      readingStream = true;
+      const streamResult = await readResponseStreamText(response, traceEmitter.onPayload);
+      traceEmitter.flush();
+      return {
+        ok: true,
+        status,
+        text: streamResult.text,
+        attempts: attempt,
+        // OpenAI-compatible backends may ignore `stream:true` and answer
+        // with plain JSON; only report a streamed response when the payload
+        // is actually SSE so buffered reasoning still gets emitted once.
+        streamed: streamResult.streamed && streamResult.text.trimStart().startsWith("data:"),
+      };
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw error;
+      }
+      lastError = error instanceof Error ? error.message : String(error);
+      if (readingStream) {
+        // Deltas may already be on screen; retrying would duplicate them.
+        throw new OpenAIChatLiveStreamReadError(lastError);
+      }
+      if (attempt < maxAttempts) {
+        await sleepBeforeRetry(125);
+        continue;
+      }
+    }
+  }
+
+  throw new Error(`HTTP POST failed after ${maxAttempts} attempts: ${lastError ?? "unknown transport error"}`);
+}
+
+/**
+ * Emit live traces for OpenAI chat-completions SSE chunks. Assistant
+ * content deltas flow straight through; reasoning deltas share the same
+ * secret-boundary hold-back buffer the Codex Responses stream uses.
+ */
+function createOpenAIChatStreamingTraceEmitter(
+  model: string,
+  listener?: ProviderTraceListener,
+): {
+  readonly onPayload: (payload: Record<string, unknown>) => void;
+  readonly flush: () => void;
+} {
+  let fallbackCounter = 0;
+  let reasoningItemId = "";
+  let pendingReasoning = "";
+
+  const emitReasoning = (delta: string, forceFlush = false) => {
+    pendingReasoning += delta;
+    const { safe, pending } = forceFlush
+      ? { safe: pendingReasoning, pending: "" }
+      : splitReasoningDeltaForSecretBoundary(pendingReasoning);
+    pendingReasoning = pending;
+    if (safe) {
+      emitProviderTrace(
+        listener,
+        buildProviderReasoningDeltaTraceWithItemId(
+          "openai",
+          model,
+          "text",
+          reasoningItemId || "chat_reasoning",
+          safe,
+        ),
+      );
+    }
+  };
+
+  return {
+    onPayload(payload) {
+      if (!listener) {
+        return;
+      }
+      const chunkId = typeof payload.id === "string" && payload.id.trim() ? payload.id : "";
+      const choices = Array.isArray(payload.choices) ? payload.choices : [];
+      for (const choice of choices) {
+        if (!isRecord(choice)) {
+          continue;
+        }
+        const delta = isRecord(choice.delta) ? choice.delta : {};
+        const content = typeof delta.content === "string" ? delta.content : "";
+        if (content) {
+          emitProviderTrace(listener, {
+            type: "assistant.delta",
+            level: "default",
+            provider: "openai",
+            model,
+            itemId: chunkId || `chat_stream_${++fallbackCounter}`,
+            delta: content,
+          });
+        }
+        const reasoningDelta = typeof delta.reasoning_content === "string"
+          ? delta.reasoning_content
+          : typeof delta.reasoning === "string"
+            ? delta.reasoning
+            : "";
+        if (reasoningDelta) {
+          reasoningItemId = chunkId || reasoningItemId;
+          emitReasoning(reasoningDelta);
+        }
+      }
+    },
+    flush() {
+      if (pendingReasoning) {
+        emitReasoning("", true);
+      }
+    },
+  };
 }
 
 function createOpenAIResponsesStreamingTraceEmitter(
