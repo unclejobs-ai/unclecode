@@ -163,7 +163,6 @@ fn resolve_work_shell_initial_state(input: &Value) -> Value {
     let trace_mode = match initial_trace_mode {
         Some("verbose") => "verbose",
         Some("minimal") => "minimal",
-        _ if mode == "ultrawork" => "verbose",
         _ => "minimal",
     };
 
@@ -403,7 +402,7 @@ mod tests {
                 r#"{"model":"gpt-5.4","mode":"ultrawork","reasoning":{"effort":"high"},"authLabel":"oauth-file"}"#,
             )
             .unwrap(),
-            r#"{"authLabel":"oauth-file","authLauncherLines":[],"bridgeLines":[],"busyStatusAction":"clear","composerMode":"default","currentTurnStartedAtAction":"clear","entries":[],"isBusy":false,"lastTurnDurationMsAction":"clear","memoryLines":[],"mode":"ultrawork","model":"gpt-5.4","reasoning":{"effort":"high"},"traceLines":[],"traceMode":"verbose"}"#
+            r#"{"authLabel":"oauth-file","authLauncherLines":[],"bridgeLines":[],"busyStatusAction":"clear","composerMode":"default","currentTurnStartedAtAction":"clear","entries":[],"isBusy":false,"lastTurnDurationMsAction":"clear","memoryLines":[],"mode":"ultrawork","model":"gpt-5.4","reasoning":{"effort":"high"},"traceLines":[],"traceMode":"minimal"}"#
         );
         assert_eq!(
             resolve_work_shell_initial_state_json(

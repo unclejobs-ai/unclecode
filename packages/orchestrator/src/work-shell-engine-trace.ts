@@ -121,6 +121,10 @@ export function applyWorkShellTraceEvent<
     input.setState(busyPatch);
   }
 
+  if (line.trim().length > 0 && input.state.traceMode === "verbose") {
+    input.pushTraceLine(line);
+  }
+
   const traceEntry = resolveVerboseTraceEntry({
     traceMode: input.state.traceMode,
     event: input.event,
@@ -131,7 +135,4 @@ export function applyWorkShellTraceEvent<
   }
 
   input.appendEntries(traceEntry);
-  if (line.trim().length > 0) {
-    input.pushTraceLine(line);
-  }
 }

@@ -79,15 +79,9 @@ fn extract_current_turn_started_at(event: &Value) -> Option<i64> {
 }
 
 fn resolve_verbose_trace_entry(trace_mode: &str, event: &Value, line: &str) -> Option<Value> {
+    let _ = trace_mode;
     if line.is_empty() {
         return None;
-    }
-
-    if trace_mode == "verbose" {
-        return Some(json!({
-            "role": resolve_trace_entry_role(event),
-            "text": line,
-        }));
     }
 
     match str_field(event, "type").unwrap_or_default() {
@@ -121,7 +115,7 @@ mod tests {
                 r#"{"event":{"type":"turn.completed"},"line":"done 123","traceMode":"verbose"}"#,
             )
             .unwrap(),
-            r#"{"busyStatusAction":"clear","traceEntry":{"role":"system","text":"done 123"},"traceEntryRole":"system"}"#
+            r#"{"busyStatusAction":"clear","traceEntryRole":"system"}"#
         );
         assert_eq!(
             resolve_work_shell_trace_event_json(
@@ -139,7 +133,7 @@ mod tests {
                 r#"{"event":{"type":"provider.calling"},"line":"calling openai gpt-5.4","traceMode":"verbose"}"#,
             )
             .unwrap(),
-            r#"{"busyStatus":"calling openai gpt-5.4","busyStatusAction":"set","traceEntry":{"role":"tool","text":"calling openai gpt-5.4"},"traceEntryRole":"tool"}"#
+            r#"{"busyStatus":"calling openai gpt-5.4","busyStatusAction":"set","traceEntryRole":"tool"}"#
         );
         assert_eq!(
             resolve_work_shell_trace_event_json(
