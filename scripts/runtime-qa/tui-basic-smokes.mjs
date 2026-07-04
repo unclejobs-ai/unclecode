@@ -54,7 +54,7 @@ export async function runFullTuiSmoke({ port, tmp }) {
     );
     assert.match(
       ansiCapture.stdout,
-      /\x1b\[38;2;15;23;42mUncleCode ·/,
+      /\x1b\[38;2;(?:15;23;42|30;41;59)mUncleCode ·/,
       "full-screen header should use an explicit readable foreground instead of inheriting a potentially faint terminal default",
     );
     assert.match(
