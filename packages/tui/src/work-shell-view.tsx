@@ -281,6 +281,7 @@ export function getWorkShellComposerHint(inputValue: string, slashSuggestionCoun
 }
 
 const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const WORK_SHELL_SPINNER_INTERVAL_MS = 100;
 const STREAMING_CURSOR = "▌";
 const RUST_TEXT_CACHE_MAX_ENTRIES = 512;
 const rustBusyStatusCache = new Map<string, string>();
@@ -759,7 +760,6 @@ function renderWorkShellEntryBlock(input: {
           <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
             {" "}{presentation.badge} {presentation.label}{" "}
           </Text>
-          <Text {...readableTextColorProps(W.textDim)}>  message</Text>
         </Text>
         {renderedLines.map((line, lineIndex) => (
           <Text key={`user-${String(input.index)}-${String(lineIndex)}`}>
@@ -796,7 +796,6 @@ function renderWorkShellEntryBlock(input: {
             <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
               {" "}{presentation.badge} {presentation.label}{" "}
             </Text>
-            <Text {...readableTextColorProps(W.textDim)}>  reply</Text>
           </Text>
           {lines.map((line, lineIndex) => (
             <Text key={`assistant-${String(input.index)}-${String(lineIndex)}`}>
@@ -820,7 +819,6 @@ function renderWorkShellEntryBlock(input: {
           <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
             {" "}{presentation.badge} {presentation.label}{" "}
           </Text>
-          <Text {...readableTextColorProps(W.textDim)}>  reply</Text>
         </Text>
         <Box marginTop={1} flexDirection="column">
           {wrapDisplayText(bodyText, Math.max(20, input.width - 4)).map((line, lineIndex) => (
@@ -851,6 +849,22 @@ function renderWorkShellEntryBlock(input: {
             </Text>
           ))}
         </Box>
+      </Box>
+    );
+  }
+
+  if (input.entry.role === "system") {
+    return (
+      <Box
+        key={`${input.entry.role}-${input.index}`}
+        marginBottom={0}
+        paddingLeft={2}
+        flexDirection="column"
+      >
+        <Text {...readableTextColorProps(presentation.bodyColor ?? W.textMuted)}>
+          <Text color={W.textDim}>{presentation.badge} </Text>
+          {bodyText}
+        </Text>
       </Box>
     );
   }
@@ -1069,7 +1083,7 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
     const interval = setInterval(() => {
       setNowMs(Date.now());
       setSpinnerFrame((frame) => frame + 1);
-    }, 1000);
+    }, WORK_SHELL_SPINNER_INTERVAL_MS);
 
     return () => {
       clearInterval(interval);

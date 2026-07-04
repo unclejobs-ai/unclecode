@@ -184,6 +184,10 @@ test("dashboard empty states are structured and name a next action", async () =>
       selectedIndex: 0,
       isActive: true,
       emptyState: "No saved sessions yet.",
+      emptyStateDetail:
+        "Start a Work session and saved conversations will appear here.",
+      emptyStateActionKey: "W",
+      emptyStateActionLabel: "start work",
     }),
   );
   const mcpEmpty = await captureInkElement(

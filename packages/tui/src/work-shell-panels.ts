@@ -361,6 +361,13 @@ export function resolveWorkShellActivePanel(input: {
     return input.fallbackPanel;
   }
 
+  // Context expanded is an overlay panel from the engine. While the composer
+  // still holds "/context" for a frame after submit, the slash picker must not
+  // override it or the overlay never paints (runtime QA context contrast).
+  if (input.fallbackPanel.title === "Context expanded") {
+    return input.fallbackPanel;
+  }
+
   return buildSlashSuggestionPanel(
     input.input,
     input.suggestions,

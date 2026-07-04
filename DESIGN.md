@@ -110,12 +110,14 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Conversation entry
 
-- Structure: role badge, optional rail, wrapped body.
+- Structure: role badge and wrapped body; rail color carries role identity.
 - Variants: user, assistant compact, assistant expanded, system, tool diagnostics.
 - Spacing: one row between entries; compact assistant replies avoid heavy cards.
 - States: default, streaming assistant, filtered tool trace.
 - Accessibility: role labels are textual; color is not the only role signal.
 - Motion: streaming cursor only when assistant text is live.
+- Badge copy: do not append redundant `message` / `reply` suffixes beside role badges.
+- System feedback: muted body (`text-muted`), dim glyph prefix, no standalone unstyled float.
 
 ### Empty conversation
 
@@ -134,6 +136,7 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 - States: loading, empty, warning, error, no-match, selected command.
 - Accessibility: fact lines use labels and values, not color alone.
 - Motion: none.
+- Context expanded: lead with the `Sources · …` fact line; group rows use `label · count · one-line summary` with 64-char truncation; hidden-group notices stay on one trailing line per section.
 
 ### Composer dock
 
@@ -159,7 +162,7 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 | Type | Duration | Easing | Usage |
 | --- | --- | --- | --- |
-| Terminal spinner | 1000ms frame step | discrete | Busy status only |
+| Terminal spinner | 100ms frame step | discrete | Busy status only |
 | Keyboard feedback | immediate | none | Input, selection, interrupt |
 | Panel transition | immediate | none | TUI panel swap |
 

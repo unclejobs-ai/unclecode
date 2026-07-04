@@ -10,11 +10,7 @@ type PacketSourceSummary = {
   readonly sample: ContextPacketViewItem;
 };
 
-function formatPacketItemBody(item: ContextPacketViewItem): string {
-  const preview = item.preview?.trim();
-  const previewSuffix = preview && preview !== item.label ? ` - ${preview}` : "";
-  return `${item.label} (${item.reason})${previewSuffix}`;
-}
+const GROUP_SUMMARY_MAX_LENGTH = 64;
 
 function formatPacketCategory(category: ContextPacketViewItem["category"]): string {
   if (category === "provider-system-prompt") {
@@ -26,12 +22,21 @@ function formatPacketCategory(category: ContextPacketViewItem["category"]): stri
   return category;
 }
 
-function formatPacketItem(item: ContextPacketViewItem): string {
-  return `- ${formatPacketCategory(item.category)}: ${formatPacketItemBody(item)}`;
+function truncatePacketText(value: string, maxLength = GROUP_SUMMARY_MAX_LENGTH): string {
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  return normalized.length <= maxLength
+    ? normalized
+    : `${normalized.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
-function truncatePacketText(value: string, maxLength = 112): string {
-  return value.length <= maxLength ? value : `${value.slice(0, Math.max(0, maxLength - 3))}...`;
+function formatCompactGroupSummary(item: ContextPacketViewItem): string {
+  const preview = item.preview?.trim();
+  const label = item.label.trim();
+  if (preview && preview.length > 0 && preview !== label) {
+    return truncatePacketText(preview);
+  }
+  const reason = item.reason.trim();
+  return truncatePacketText(reason.length > 0 ? `${label} — ${reason}` : label);
 }
 
 function getItemSourceCount(item: ContextPacketViewItem): number {
@@ -54,20 +59,20 @@ function summarizeItemsByCategory(items: readonly ContextPacketViewItem[]): read
 
 function formatCategorySummaryLines(input: {
   readonly items: readonly ContextPacketViewItem[];
-  readonly marker: "+" | "-";
   readonly visibleLimit: number;
   readonly includeHiddenGroupsLine?: boolean;
 }): readonly string[] {
   const summaries = summarizeItemsByCategory(input.items);
   if (summaries.length === 0) {
-    return ["- none"];
+    return ["  none"];
   }
   const visible = summaries
     .slice(0, input.visibleLimit)
-    .map((summary) => `${input.marker} ${formatPacketCategory(summary.sample.category)} · ${summary.count} · ${truncatePacketText(formatPacketItemBody(summary.sample))}`);
+    .map((summary) =>
+      `  ${formatPacketCategory(summary.sample.category)} · ${summary.count} · ${formatCompactGroupSummary(summary.sample)}`);
   const hiddenCount = Math.max(0, summaries.length - input.visibleLimit);
   return hiddenCount > 0 && input.includeHiddenGroupsLine
-    ? [...visible, `${input.marker} ${hiddenCount} more source groups hidden; counts still tracked.`]
+    ? [...visible, `  +${hiddenCount} more source groups (counts still tracked)`]
     : visible;
 }
 
@@ -86,12 +91,16 @@ function formatWarningsLine(warnings: ContextPacketView["warnings"]): string {
     return "Warnings · none";
   }
   const hiddenSuffix = warnings.length > 1 ? ` · ${warnings.length - 1} more` : "";
-  return `Warnings · ${warnings.length} · ${truncatePacketText(`${first.code}: ${first.message}`, 96)}${hiddenSuffix}`;
+  return `Warnings · ${warnings.length} · ${truncatePacketText(`${first.code}: ${first.message}`, 72)}${hiddenSuffix}`;
 }
 
 function formatPreviewLine(packet: ContextPacketView): string {
   const first = packet.preview[0]?.trim();
   return `Next answer · ${truncatePacketText(first && first.length > 0 ? first : "No model-ready context preview available.")}`;
+}
+
+function formatPacketItem(item: ContextPacketViewItem): string {
+  return `- ${formatPacketCategory(item.category)}: ${item.label} (${item.reason})${item.preview?.trim() && item.preview.trim() !== item.label ? ` - ${item.preview.trim()}` : ""}`;
 }
 
 function escapeXmlAttribute(value: string): string {
@@ -125,16 +134,13 @@ function formatProviderWithheldSummary(count: number, noun: string): readonly st
 
 export function buildWorkShellContextPacketPreviewLines(packet: ContextPacketView): readonly string[] {
   return [
-    `Context · ${packet.title}`,
     formatSourceCountLine(packet),
-    "UncleCode · included summaries go to the model; raw audit artifacts stay local.",
     "Included in next answer",
-    ...formatCategorySummaryLines({ items: packet.included, marker: "+", visibleLimit: 3, includeHiddenGroupsLine: true }),
+    ...formatCategorySummaryLines({ items: packet.included, visibleLimit: 4, includeHiddenGroupsLine: true }),
     "Held back locally",
-    ...formatCategorySummaryLines({ items: packet.excluded, marker: "-", visibleLimit: 1 }),
+    ...formatCategorySummaryLines({ items: packet.excluded, visibleLimit: 2 }),
     formatWarningsLine(packet.warnings),
     formatPreviewLine(packet),
-    "Controls · Esc close · /context refresh · Ctrl+O context",
   ];
 }
 

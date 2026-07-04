@@ -505,6 +505,20 @@ test("work-shell slash selection helpers are exported from the shared tui packag
   assert.equal(cycleWorkShellSlashSelection(1, 2, "next"), 0);
   assert.equal(
     resolveWorkShellActivePanel({
+      input: "/context",
+      suggestions: [
+        { command: "/context", description: "Show next-answer context." },
+      ],
+      selectedIndex: 0,
+      fallbackPanel: {
+        title: "Context expanded",
+        lines: ["Sources · 2 included · 1 held back · 0 warnings"],
+      },
+    }).title,
+    "Context expanded",
+  );
+  assert.equal(
+    resolveWorkShellActivePanel({
       input: "/auth",
       suggestions: [
         { command: "/auth status", description: "Show auth source." },
