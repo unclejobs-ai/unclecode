@@ -97,11 +97,8 @@ function appendLine(value, line) {
   return value ? `${value}\n${line}` : line;
 }
 
-function normalizeTimedOutCode(code, signal) {
-  if (code && code !== 0) {
-    return code;
-  }
-  return signal ? 1 : 1;
+function normalizeTimedOutCode(code, _signal) {
+  return code || 1;
 }
 
 function formatSpawnError(error) {

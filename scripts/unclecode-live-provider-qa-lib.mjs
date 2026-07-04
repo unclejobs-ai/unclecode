@@ -1,7 +1,7 @@
 import path from "node:path";
-import { hasExpectedReplyLine } from "./live-provider-qa/tool-smoke.mjs";
+import { hasExpectedReplyLine, isCredentialBlockedText } from "./live-provider-qa/tool-smoke.mjs";
 
-export { buildLiveToolSmoke, classifyLiveToolSmokeResult } from "./live-provider-qa/tool-smoke.mjs";
+export { buildLiveToolSmoke, classifyLiveToolSmokeResult, isCredentialBlockedText } from "./live-provider-qa/tool-smoke.mjs";
 
 export function classifyLiveProviderPreflight({ provider, authStatus, doctorAuth }) {
   if (provider !== "openai") {
@@ -78,7 +78,7 @@ export function buildCredentialRecovery({ provider, status, authStatus, doctorAu
   };
 }
 
-function isOpenAICredentialBlockedReason(reason) {
+export function isOpenAICredentialBlockedReason(reason) {
   return [
     "openai-oauth-codex-runtime-not-api-ready",
     "openai-oauth-insufficient-scope",
@@ -237,18 +237,6 @@ function classifyOpenAIRecoveryReason(summary, text) {
 
 function combineCommandText(authStatus, work) {
   return `${authStatus?.stdout ?? ""}\n${authStatus?.stderr ?? ""}\n${work.stdout}\n${work.stderr}`;
-}
-
-function isCredentialBlockedText(text) {
-  return (
-    /api ready:\s*no/i.test(text) ||
-    /lacks model\.request/i.test(text) ||
-    /missing scope|insufficient.scope/i.test(text) ||
-    /api key not valid/i.test(text) ||
-    /rejected current auth/i.test(text) ||
-    /required when LLM_PROVIDER/i.test(text) ||
-    /auth needs refresh/i.test(text)
-  );
 }
 
 function normalizeAuthKey(key) {

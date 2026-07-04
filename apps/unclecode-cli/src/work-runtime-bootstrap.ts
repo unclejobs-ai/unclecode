@@ -41,6 +41,7 @@ import {
   loadResumedWorkSession,
   resolveRustOpenAIAuth,
   resolveRustOpenAIAuthStatus,
+  workShellAuthLabelWithApiBlocked,
   type RustOpenAIAuthStatus,
 } from "./work-runtime-session.js";
 import { runWorkspaceGuardianChecks } from "./guardian-checks.js";
@@ -78,14 +79,7 @@ function workShellAuthLabelForStatus(
   authLabel: string,
   authStatus: RustOpenAIAuthStatus | undefined,
 ): string {
-  if (
-    authStatus?.authType === "oauth"
-    && authStatus.apiReady === false
-    && authStatus.activeSource.startsWith("oauth-")
-  ) {
-    return `${authStatus.activeSource}-api-blocked`;
-  }
-  return authLabel;
+  return workShellAuthLabelWithApiBlocked(authLabel, authStatus);
 }
 
 async function buildWorkShellContextSummary(input: {

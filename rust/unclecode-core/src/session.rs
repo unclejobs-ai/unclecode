@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -174,7 +175,12 @@ impl WorkShellSessionStore {
                 sessions.push(line);
             }
         }
-        sessions.sort_by(|left, right| compare_updated_desc(&left.updated_at, &right.updated_at));
+        sessions.sort_by_cached_key(|session| {
+            (
+                Reverse(timestamp_sort_key(&session.updated_at)),
+                Reverse(session.updated_at.clone()),
+            )
+        });
         sessions.truncate(6);
         Ok(sessions)
     }
@@ -201,7 +207,12 @@ impl WorkShellSessionStore {
                 sessions.push(item);
             }
         }
-        sessions.sort_by(|left, right| compare_updated_desc(&left.updated_at, &right.updated_at));
+        sessions.sort_by_cached_key(|session| {
+            (
+                Reverse(timestamp_sort_key(&session.updated_at)),
+                Reverse(session.updated_at.clone()),
+            )
+        });
         Ok(sessions)
     }
 
@@ -519,12 +530,6 @@ fn now_ms() -> u128 {
 
 fn now_timestamp() -> String {
     utc_now_iso()
-}
-
-fn compare_updated_desc(left: &str, right: &str) -> std::cmp::Ordering {
-    timestamp_sort_key(right)
-        .cmp(&timestamp_sort_key(left))
-        .then_with(|| right.cmp(left))
 }
 
 fn timestamp_sort_key(value: &str) -> String {

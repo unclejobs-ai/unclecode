@@ -397,7 +397,6 @@ pub fn clear_openai_credentials(path: PathBuf) -> io::Result<()> {
 
 pub fn resolve_openai_auth_status(env_get: impl Fn(&str) -> Option<String>) -> OpenAIAuthStatus {
     let resolved = resolve_openai_auth(env_get);
-    let auth_type = resolved.auth_type.clone();
     OpenAIAuthStatus {
         active_source: match resolved.source.as_str() {
             "env-openai-auth-token" => "oauth-env".to_string(),
@@ -409,7 +408,7 @@ pub fn resolve_openai_auth_status(env_get: impl Fn(&str) -> Option<String>) -> O
             "unclecode-auth-file" | "codex-auth-file" => "oauth-file".to_string(),
             _ => "none".to_string(),
         },
-        auth_type,
+        auth_type: resolved.auth_type,
         organization_id: resolved.organization_id,
         project_id: resolved.project_id,
         runtime: resolved.runtime,

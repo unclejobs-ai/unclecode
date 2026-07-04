@@ -17,6 +17,20 @@ export type RustOpenAIAuthStatus = {
   readonly apiReady: boolean;
 };
 
+export function workShellAuthLabelWithApiBlocked(
+  authLabel: string,
+  authStatus?: Pick<RustOpenAIAuthStatus, "authType" | "apiReady" | "activeSource"> | undefined,
+): string {
+  if (
+    authStatus?.authType === "oauth"
+    && authStatus.apiReady === false
+    && authStatus.activeSource.startsWith("oauth-")
+  ) {
+    return `${authStatus.activeSource}-api-blocked`;
+  }
+  return authLabel;
+}
+
 export type RustResolvedOpenAIAuth = {
   readonly status: "ok" | "missing" | "expired";
   readonly authType: "api-key" | "oauth" | "none";

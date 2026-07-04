@@ -75,11 +75,8 @@ function readProcessRows() {
       .map((line) => line.trim().split(/\s+/).map(Number))
       .filter(([pid, ppid, pgid]) => Number.isInteger(pid) && Number.isInteger(ppid) && Number.isInteger(pgid))
       .map(([pid, ppid, pgid]) => ({ pid, ppid, pgid }));
-  } catch (error) {
-    if (error instanceof Error) {
-      return [];
-    }
-    throw error;
+  } catch {
+    return [];
   }
 }
 
@@ -101,11 +98,8 @@ function readImmediateChildPids(rootPid) {
       .split(/\r?\n/)
       .map(Number)
       .filter((pid) => Number.isInteger(pid));
-  } catch (error) {
-    if (error instanceof Error) {
-      return [];
-    }
-    throw error;
+  } catch {
+    return [];
   }
 }
 

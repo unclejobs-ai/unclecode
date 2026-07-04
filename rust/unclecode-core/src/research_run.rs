@@ -172,21 +172,14 @@ fn prepare_local_research_bundle(
         .collect::<Vec<_>>();
     let policy_signals = derive_policy_signals(&signal_paths);
     let packet_source = json!({
-        "contextFiles": context_files,
-        "hotspots": hotspots,
-        "policySignals": policy_signals,
+        "contextFiles": &context_files,
+        "hotspots": &hotspots,
+        "policySignals": &policy_signals,
     });
     let packet_id = format!(
         "packet-{}",
         &sha256_hex(&format!("{session_id}\n{prompt}\n{}", packet_source))[..20]
     );
-    let context_files = string_array(&packet_source, "contextFiles");
-    let hotspots = packet_source
-        .get("hotspots")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let policy_signals = string_array(&packet_source, "policySignals");
 
     Ok(LocalResearchBundle {
         packet_id,
@@ -459,20 +452,6 @@ fn new_research_session_id(workspace_root: &Path, prompt: &str) -> String {
         nanos
     );
     format!("research-{}", &sha256_hex(&seed)[..32])
-}
-
-fn string_array(input: &Value, key: &str) -> Vec<String> {
-    input
-        .get(key)
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(ToString::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn elapsed_ms(started_at: Instant) -> u128 {

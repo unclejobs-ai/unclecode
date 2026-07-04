@@ -167,7 +167,7 @@ export function getWorkShellSlashSuggestions(
     return getModelSuggestions(normalized, options);
   }
 
-  return getSlashSuggestions(normalized, entries, options);
+  return getSlashSuggestions(normalized, entries);
 }
 
 export function shouldBlockSlashSubmit(
@@ -241,12 +241,7 @@ function filterModelSuggestions(
 function getSlashSuggestions(
   normalized: string,
   entries: readonly WorkShellSlashSuggestion[],
-  options?: WorkShellSlashOptions,
 ): readonly WorkShellSlashSuggestion[] {
-  void options;
-  if (!normalized.startsWith("/")) {
-    return [];
-  }
   if (normalized === "/auth" || normalized.startsWith("/auth ")) {
     return dedupeSlashSuggestions(
       entries

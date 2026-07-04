@@ -186,10 +186,6 @@ fn run_login_command(args: &[OsString]) -> Result<u8, String> {
     if let Some(client_id) = browser_client_id.as_deref() {
         return login_with_browser_oauth_with_client(client_id);
     }
-    if reusable_client_id.is_some() {
-        return Err("OPENAI_OAUTH_CLIENT_ID is required for API-ready OAuth login. Use `unclecode auth login --device` only for Codex device OAuth; it may not be API-ready for model calls. Reliable fallback: `unclecode auth login --api-key-stdin`.".to_string());
-    }
-
     Err("OPENAI_OAUTH_CLIENT_ID is required for API-ready OAuth login. Use `unclecode auth login --device` only for Codex device OAuth; it may not be API-ready for model calls. Reliable fallback: `unclecode auth login --api-key-stdin`.".to_string())
 }
 

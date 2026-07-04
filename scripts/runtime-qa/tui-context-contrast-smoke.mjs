@@ -3,10 +3,8 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { repoRoot } from "./constants.mjs";
-import { run, shellQuote } from "./cli-helpers.mjs";
+import { assertReadableForegroundEscapes, run, shellQuote, TRUECOLOR_FOREGROUND_PATTERN } from "./cli-helpers.mjs";
 import { calculatePaneWidth, runTmux, submitLine, waitForPane } from "./tmux-helpers.mjs";
-
-const TRUECOLOR_FOREGROUND_PATTERN = /\x1b\[38;2;(\d+);(\d+);(\d+)m/g;
 
 export async function runContextContrastTuiSmoke({ tmp }) {
   const tmux = await run("sh", ["-lc", "command -v tmux"], process.env);
@@ -48,6 +46,7 @@ export async function runContextContrastTuiSmoke({ tmp }) {
     assertReadableForegroundEscapes(
       ansiCapture.stdout,
       "/context expanded overlay should not paint low-contrast text on a light terminal",
+      { requireNonEmpty: true },
     );
 
     const width = calculatePaneWidth(pane, 140);
@@ -64,19 +63,6 @@ export async function runContextContrastTuiSmoke({ tmp }) {
   }
 }
 
-function assertReadableForegroundEscapes(ansiText, message) {
-  const foregroundColors = [...ansiText.matchAll(TRUECOLOR_FOREGROUND_PATTERN)].map((match) => ({
-    red: Number.parseInt(match[1], 10),
-    green: Number.parseInt(match[2], 10),
-    blue: Number.parseInt(match[3], 10),
-  }));
-  assert.ok(foregroundColors.length > 0, "context overlay should emit explicit truecolor foregrounds");
-  const lowContrastColors = foregroundColors
-    .filter((color) => contrastRatio(color, { red: 255, green: 255, blue: 255 }) < 7)
-    .map((color) => `${color.red};${color.green};${color.blue}`);
-  assert.deepEqual([...new Set(lowContrastColors)], [], message);
-}
-
 function uniqueForegroundColors(ansiText) {
   return [
     ...new Set(
@@ -84,18 +70,4 @@ function uniqueForegroundColors(ansiText) {
         .map((match) => `${match[1]};${match[2]};${match[3]}`),
     ),
   ];
-}
-
-function contrastRatio(left, right) {
-  const lighter = Math.max(relativeLuminance(left), relativeLuminance(right));
-  const darker = Math.min(relativeLuminance(left), relativeLuminance(right));
-  return (lighter + 0.05) / (darker + 0.05);
-}
-
-function relativeLuminance(color) {
-  const [red, green, blue] = [color.red, color.green, color.blue].map((channel) => {
-    const normalized = channel / 255;
-    return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
 }

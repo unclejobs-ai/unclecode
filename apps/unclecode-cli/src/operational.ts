@@ -38,6 +38,8 @@ import { createServer } from "node:http";
 import { homedir } from "node:os";
 import path from "node:path";
 
+import { workShellAuthLabelWithApiBlocked } from "./work-runtime-session.js";
+
 type PersistedProjectConfig = {
   readonly mode?: ModeProfileId;
   readonly [key: string]: unknown;
@@ -372,14 +374,7 @@ export type TuiHomeState = {
 };
 
 function workShellAuthLabelFromOpenAIStatus(status: OpenAIAuthStatus): string {
-  if (
-    status.authType === "oauth"
-    && status.apiReady === false
-    && status.activeSource.startsWith("oauth-")
-  ) {
-    return `${status.activeSource}-api-blocked`;
-  }
-  return status.activeSource;
+  return workShellAuthLabelWithApiBlocked(status.activeSource, status);
 }
 
 async function readCheckpointFile(pathToFile: string): Promise<SessionListItem | null> {

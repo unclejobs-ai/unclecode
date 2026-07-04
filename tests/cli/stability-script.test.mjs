@@ -4,6 +4,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { escapeRegExp } from "../../scripts/runtime-qa/cli-helpers.mjs";
+
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(testDirectory, "../..");
 
@@ -306,8 +308,4 @@ function assertPureLocAtMost(filePath, limit) {
     pureLines.length <= limit,
     `${path.relative(workspaceRoot, filePath)} has ${pureLines.length} pure LOC; limit is ${limit}`,
   );
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

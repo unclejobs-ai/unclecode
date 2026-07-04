@@ -68,7 +68,7 @@ function stripAnsi(value) {
   return value.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "");
 }
 
-function isCredentialBlockedText(text) {
+export function isCredentialBlockedText(text) {
   return (
     /api ready:\s*no/i.test(text) ||
     /lacks model\.request/i.test(text) ||

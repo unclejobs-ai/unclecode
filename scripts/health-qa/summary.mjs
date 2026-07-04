@@ -3,6 +3,7 @@ import {
   hasRuntimeEvidenceContract,
   summarizeRuntimeEvidence,
 } from "../runtime-qa/report-evidence.mjs";
+import { isOpenAICredentialBlockedReason } from "../unclecode-live-provider-qa-lib.mjs";
 
 export function summarizeFirstLine(result) {
   return firstNonEmptyLine(result.stdout) ?? firstNonEmptyLine(result.stderr) ?? "";
@@ -170,10 +171,8 @@ function hasLiveToolRunProof(toolCallSmoke) {
     isNonEmptyString(runId) &&
     isNonEmptyString(expectedText) &&
     expectedText === `UNCLECODE_LIVE_TOOL_QA_OK_${runId}` &&
-    expectedText.endsWith(runId) &&
     isNonEmptyString(markerPath) &&
-    markerPath.endsWith(`live-tool-call-marker-${runId}.txt`) &&
-    markerPath.includes(runId)
+    markerPath.endsWith(`live-tool-call-marker-${runId}.txt`)
   );
 }
 
@@ -199,16 +198,6 @@ function isBlockedBeforeToolSmoke(report) {
 
 function isBlockedDuringToolSmoke(report) {
   return report.textSmoke?.status === "pass" && report.toolCallSmoke?.status === "blocked";
-}
-
-function isOpenAICredentialBlockedReason(reason) {
-  return [
-    "openai-oauth-codex-runtime-not-api-ready",
-    "openai-oauth-insufficient-scope",
-    "openai-auth-rejected",
-    "openai-auth-needs-refresh",
-    "openai-credentials-blocked",
-  ].includes(reason);
 }
 
 function firstNonEmptyLine(value) {
