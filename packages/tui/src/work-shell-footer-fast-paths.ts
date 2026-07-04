@@ -24,23 +24,17 @@ export function formatWorkShellFooterLineFast(input: {
     { includeContext: !hasContextIndicator },
   );
   const fullCoreFooter = joinFooterParts([compactPath, fullStatusLine]);
-  const fullPreviewFooter = joinFooterParts([
-    fullCoreFooter,
-    input.contextIndicator,
-    input.composerHint,
-  ]);
-  const statusLine = input.width !== undefined && getDisplayWidth(fullPreviewFooter) > input.width
+  const statusLine = input.width !== undefined && getDisplayWidth(fullCoreFooter) > input.width
     ? fullStatusLine.replace(" · work context", " · context")
     : fullStatusLine;
   const coreFooter = joinFooterParts([compactPath, statusLine]);
   const fullFooter = joinFooterParts([
     coreFooter,
     input.contextIndicator,
-    input.composerHint,
   ]);
   // Overflow fallbacks keep cwd anchored first (footer contract shared with
-  // the Rust footer path): drop the composer hint, then the reasoning fact,
-  // then the context indicator — never the cwd.
+  // the Rust footer path): drop the reasoning fact, then the context
+  // indicator — never the cwd. Composer hints live above the prompt deck.
   const cwdContextFooter = joinFooterParts([
     compactPath,
     statusLine,

@@ -289,8 +289,33 @@ export function getWorkShellComposerHint(
   return "Enter send · Shift+Enter newline";
 }
 
+export function resolveWorkShellComposerHint(input: {
+  readonly composerHintOverride?: string;
+  readonly isBusy: boolean;
+  readonly queuePaused?: boolean;
+  readonly queuedCount?: number;
+  readonly inputValue: string;
+  readonly slashSuggestionCount: number;
+  readonly selectedSlashCommand?: string;
+}): string | undefined {
+  if (input.composerHintOverride) {
+    return input.composerHintOverride;
+  }
+  if (input.isBusy) {
+    return "Enter queues follow-up · Ctrl+C/Esc interrupt · /queue";
+  }
+  if (input.queuePaused && (input.queuedCount ?? 0) > 0) {
+    return "Queue paused after interrupt · /queue shows · /queue clear drops";
+  }
+  return getWorkShellComposerHint(
+    input.inputValue,
+    input.slashSuggestionCount,
+    input.selectedSlashCommand,
+  );
+}
+
 const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
-const WORK_SHELL_SPINNER_INTERVAL_MS = 100;
+export const WORK_SHELL_SPINNER_INTERVAL_MS = 100;
 const STREAMING_CURSOR = "▌";
 const RUST_TEXT_CACHE_MAX_ENTRIES = 512;
 const rustBusyStatusCache = new Map<string, string>();
@@ -342,7 +367,7 @@ type WorkShellViewportLayout = {
 };
 
 type WorkShellComposerDockLayout = {
-  readonly accentColorRole: "user" | "borderStrong";
+  readonly accentColorRole: "user" | "assistant" | "borderStrong" | "warning";
   readonly attachmentBadgeColorRole: "warning" | "textDim";
   readonly topDivider: string;
   readonly bottomDivider: string;
@@ -725,15 +750,36 @@ function wrapDisplayText(value: string, width: number): string[] {
   return parsed;
 }
 
+function resolveWorkShellComposerDockAccentRole(input: {
+  readonly inputValue: string;
+  readonly isBusy?: boolean;
+  readonly queuePaused?: boolean;
+  readonly queuedCount?: number;
+}): WorkShellComposerDockLayout["accentColorRole"] {
+  if (input.inputValue.trimStart().startsWith("/")) {
+    return "user";
+  }
+  if (input.queuePaused && (input.queuedCount ?? 0) > 0) {
+    return "warning";
+  }
+  if (input.isBusy || (input.queuedCount ?? 0) > 0) {
+    return "assistant";
+  }
+  return "borderStrong";
+}
+
 function resolveWorkShellComposerDockLayout(input: {
   readonly inputValue: string;
   readonly dockWidth: number;
   readonly footerLine: string;
   readonly attachmentCount?: number;
+  readonly isBusy?: boolean;
+  readonly queuePaused?: boolean;
+  readonly queuedCount?: number;
 }): WorkShellComposerDockLayout {
   const divider = "─".repeat(input.dockWidth);
   return {
-    accentColorRole: input.inputValue.trimStart().startsWith("/") ? "user" : "borderStrong",
+    accentColorRole: resolveWorkShellComposerDockAccentRole(input),
     attachmentBadgeColorRole: input.attachmentCount !== undefined && input.attachmentCount >= 5
       ? "warning"
       : "textDim",
@@ -1123,6 +1169,9 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   readonly contextIndicator?: string;
   readonly terminalColumns?: number;
   readonly attachmentCount?: number;
+  readonly isBusy?: boolean;
+  readonly queuePaused?: boolean;
+  readonly queuedCount?: number;
 }) {
   const dockWidth = getWorkShellDockWidth(props.terminalColumns);
   const footerLine = formatWorkShellFooterLine({
@@ -1132,7 +1181,6 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
     mode: props.mode,
     authLabel: props.authLabel,
     ...(props.contextIndicator ? { contextIndicator: props.contextIndicator } : {}),
-    ...(props.composerHint ? { composerHint: props.composerHint } : {}),
     width: dockWidth,
   });
   const dockLayout = resolveWorkShellComposerDockLayout({
@@ -1140,12 +1188,27 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
     dockWidth,
     footerLine,
     ...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {}),
+    ...(props.isBusy ? { isBusy: true } : {}),
+    ...(props.queuePaused ? { queuePaused: true } : {}),
+    ...(props.queuedCount !== undefined ? { queuedCount: props.queuedCount } : {}),
   });
-  const accent = dockLayout.accentColorRole === "user" ? W.assistant : W.borderStrong;
+  const accent = dockLayout.accentColorRole === "user" || dockLayout.accentColorRole === "assistant"
+    ? W.assistant
+    : dockLayout.accentColorRole === "warning"
+      ? W.warning
+      : W.borderStrong;
   const badgeColorProps = dockLayout.attachmentBadgeColorRole === "warning" ? { color: W.warning } : readableTextColorProps(W.textDim);
+  const hintColorProps = dockLayout.accentColorRole === "warning"
+    ? { color: W.warning }
+    : dockLayout.accentColorRole === "assistant"
+      ? { color: W.assistant }
+      : readableTextColorProps(W.textMuted);
 
   return (
     <Box marginTop={1} flexDirection="column">
+      {props.composerHint ? (
+        <Text {...hintColorProps}>{props.composerHint}</Text>
+      ) : null}
       <Text color={accent}>▌ prompt deck <Text color={W.border}>{dockLayout.topDivider.slice(Math.min(14, dockLayout.topDivider.length))}</Text></Text>
       <Box minHeight={1} paddingLeft={1}>
         <Text backgroundColor={accent} {...readableTextColorProps(W.text)}>{" "}</Text>
@@ -1199,15 +1262,15 @@ export function WorkShellView(props: {
   readonly queuedCount?: number;
   readonly queuePaused?: boolean;
 }) {
-  const composerHint = props.composerHintOverride ?? (props.isBusy
-    ? "Enter queues follow-up · Ctrl+C/Esc interrupt · /queue"
-    : props.queuePaused && (props.queuedCount ?? 0) > 0
-      ? "Queue paused after interrupt · /queue shows · /queue clear drops"
-    : getWorkShellComposerHint(
-      props.inputValue,
-      props.slashSuggestionCount,
-      props.selectedSlashCommand,
-    ));
+  const composerHint = resolveWorkShellComposerHint({
+    ...(props.composerHintOverride ? { composerHintOverride: props.composerHintOverride } : {}),
+    isBusy: props.isBusy,
+    ...(props.queuePaused !== undefined ? { queuePaused: props.queuePaused } : {}),
+    ...(props.queuedCount !== undefined ? { queuedCount: props.queuedCount } : {}),
+    inputValue: props.inputValue,
+    slashSuggestionCount: props.slashSuggestionCount,
+    ...(props.selectedSlashCommand ? { selectedSlashCommand: props.selectedSlashCommand } : {}),
+  });
   const panelBorderColor = getWorkShellPanelBorderColor(props.inputValue, props.activePanel.title);
   const panelDisplayMode = getWorkShellPanelDisplayMode({
     panelTitle: props.activePanel.title,
@@ -1299,6 +1362,9 @@ export function WorkShellView(props: {
         {...(props.contextIndicator ? { contextIndicator: props.contextIndicator } : {})}
         {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
         {...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {})}
+        isBusy={props.isBusy}
+        {...(props.queuePaused !== undefined ? { queuePaused: props.queuePaused } : {})}
+        {...(props.queuedCount !== undefined ? { queuedCount: props.queuedCount } : {})}
       />
       {props.attachmentLines
         ? <WorkShellAttachmentBlock

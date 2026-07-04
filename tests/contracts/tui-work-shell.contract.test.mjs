@@ -61,6 +61,7 @@ import {
   refineInlineCommandPanelLines,
   renderEmbeddedWorkShellPaneDashboard,
   resolveComposerCursorOffsetAfterValueChange,
+  resolveWorkShellComposerHint,
   resolveWorkShellActivePanel,
   resolveWorkShellActiveSlashInput,
   resolveWorkShellInputAction,
@@ -75,6 +76,7 @@ import {
   useWorkShellInputController,
   useWorkShellPaneState,
   useWorkShellSlashState,
+  WORK_SHELL_SPINNER_INTERVAL_MS,
 } from "../../packages/tui/src/index.tsx";
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -378,6 +380,37 @@ test("getWorkShellComposerHint keeps slash discovery guidance inside the shared 
     "Enter send · Shift+Enter newline",
   );
   assert.equal(getWorkShellComposerHintMinHeight(), 1);
+});
+
+test("resolveWorkShellComposerHint and spinner interval stay aligned with DESIGN.md workflow states", () => {
+  assert.equal(WORK_SHELL_SPINNER_INTERVAL_MS, 100);
+  assert.equal(
+    resolveWorkShellComposerHint({
+      isBusy: true,
+      inputValue: "plain text",
+      slashSuggestionCount: 0,
+    }),
+    "Enter queues follow-up · Ctrl+C/Esc interrupt · /queue",
+  );
+  assert.equal(
+    resolveWorkShellComposerHint({
+      isBusy: false,
+      queuePaused: true,
+      queuedCount: 1,
+      inputValue: "",
+      slashSuggestionCount: 0,
+    }),
+    "Queue paused after interrupt · /queue shows · /queue clear drops",
+  );
+  assert.equal(
+    resolveWorkShellComposerHint({
+      composerHintOverride: "Enter saves · Esc cancels",
+      isBusy: true,
+      inputValue: "",
+      slashSuggestionCount: 0,
+    }),
+    "Enter saves · Esc cancels",
+  );
 });
 
 test("getWorkShellPanelPlacement keeps long-session panels near the composer by default", () => {
