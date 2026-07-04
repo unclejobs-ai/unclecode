@@ -274,13 +274,59 @@ git diff --cached
 
 ## Architecture Overview
 
-For the current `work` runtime, UncleCode supports three direct provider runtimes:
+UncleCode는 **검사 가능한 컨텍스트**와 **숨겨진 오케스트레이션**을 전제로 한 repo-local 코딩 어시스턴트입니다. Cursor/Codex처럼 “채팅만 하는 터미널”이 아니라, **다음 모델 호출에 들어갈 패킷**을 사용자가 열어보고 조절할 수 있는 것이 핵심 차별점입니다.
 
-- OpenAI mode
-- Anthropic mode
-- Gemini mode
+### UncleCode가 다른 점
 
-This keeps the terminal experience consistent while allowing different model backends.
+| 차별점 | 설명 |
+| --- | --- |
+| **Persistent shared context (`.unclecode/`)** | 프로젝트·세션·메모리·런북·QA 증거가 repo-local `.unclecode/`와 `~/.unclecode/state/`에 남습니다. 매 턴마다 처음부터 읽는 게 아니라, bootstrap → classify → packet 경로로 재사용합니다. |
+| **Runbook-driven agent memory** | `packages/memory-bus`의 procedural SOP(`.unclecode/sop/`)와 `context-broker`의 scoped memory가 런북(`docs/runbooks/unclecode-normalization-runbook.md`) 규칙에 맞게 포함·제외·인용됩니다. 블랙박스 요약이 아닙니다. |
+| **Hidden orchestration, polished TUI** | 모드 라우터(default / yolo / ultrawork / team-parallel)와 intent 분류(simple / complex / research)는 Rust+orchestrator에서 처리하고, Work Shell TUI는 대화·컴포저·`/context` 오버레이만 보여 줍니다. 백그라운드 워커·팀 레인은 사용자에게 노이즈 없이 동작합니다. |
+
+### 런타임 레이어 (요약)
+
+```
+CLI / TUI (apps/unclecode-cli, packages/tui)
+    ↓
+Orchestrator (packages/orchestrator) — Work Shell, mode, team, turn routing
+    ↓
+Context Broker (packages/context-broker) — guidance, packet, memory, OMO
+    ↓
+Providers (packages/providers) — OpenAI, Anthropic, Gemini
+```
+
+Provider는 세 가지를 직접 지원합니다: OpenAI, Anthropic, Gemini. 터미널 UX는 하나로 유지하면서 모델 백엔드만 바꿉니다.
+
+### 컨텍스트 부트스트랩 (한눈에)
+
+세션 시작 시 UncleCode는 워크스페이스 소스를 수집해 **다음 호출 패킷**을 만듭니다.
+
+1. **수집** — `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `UNCLECODE.md`, project skills, MCP registry(`.mcp.json`, `~/.unclecode/mcp.json`), scoped memory, OMO goal state
+2. **분류** — `ContextPacketView`에 included / excluded / warnings (raw ledger·증거는 기본 제외)
+3. **표시** — `/context` 오버레이 + 모델 prefix (`formatContextPacketPromptPrefix`)
+4. **영속** — session-store, memory-bus SOP, agentops recorder, `.unclecode/qa/` 증거
+
+상세 다이어그램: [`docs/design/persistent-context-architecture.md`](docs/design/persistent-context-architecture.md)
+
+### 모드와 오케스트레이션
+
+| 모드 | 역할 |
+| --- | --- |
+| `default` | 균형 잡힌 편집·검색·설명 |
+| `yolo` | 셸 자동 실행 허용, 간결한 응답 |
+| `ultrawork` | 깊은 검색, 백그라운드·병렬 작업 선호 |
+| `analyze` / `search` / `plan` / `build` | 읽기 전용·계획·빌드 등 특화 프로필 |
+
+프롬프트는 Rust `classify-intent`로 simple / complex / research로 나뉘고, complex는 bounded executor pool과 file-ownership으로 병렬 처리합니다. 팀 모드(`team run`)는 Hermes/acpx 레인으로 숨겨진 워커를 띄웁니다.
+
+### 검증과 투명성
+
+운영 게이트는 `npm run qa:health`입니다. 런타임 증거는 `.unclecode/qa/runtime-qa-latest.json`, 라이브 provider는 `.unclecode/qa/live-provider-latest.json`에 기록됩니다. 정상화 런북: [`docs/runbooks/unclecode-normalization-runbook.md`](docs/runbooks/unclecode-normalization-runbook.md)
+
+### 설계 검토 (Devil's Advocate)
+
+아키텍처의 약점·과설계·Cursor/Codex 대비 격차는 [`docs/design/devils-advocate-review-2026-07.md`](docs/design/devils-advocate-review-2026-07.md)에 정리되어 있습니다.
 
 ## Troubleshooting
 
