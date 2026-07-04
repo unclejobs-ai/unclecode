@@ -232,7 +232,7 @@ test("resolveReadableWorkShellTextColor keeps primary text explicit for light te
   assert.equal(resolveReadableWorkShellTextColor("#115e59"), "#115e59");
 });
 
-test("shouldUseCompactAssistantSurface keeps short Korean replies out of heavy cards", () => {
+test("shouldUseCompactAssistantSurface keeps every assistant reply out of heavy cards", () => {
   assert.equal(
     shouldUseCompactAssistantSurface({
       text: "하이요! 무엇을 도와드릴까요?",
@@ -254,6 +254,9 @@ test("shouldUseCompactAssistantSurface keeps short Korean replies out of heavy c
     }),
     true,
   );
+  // DESIGN.md "compact assistant replies avoid heavy cards" + "borders are
+  // structural, not decorative": long replies stay on the same rail surface
+  // instead of flipping to a rounded heavy card.
   assert.equal(
     shouldUseCompactAssistantSurface({
       text: [
@@ -264,7 +267,7 @@ test("shouldUseCompactAssistantSurface keeps short Korean replies out of heavy c
       ].join("\n"),
       width: 92,
     }),
-    false,
+    true,
   );
 });
 

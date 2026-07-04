@@ -38,24 +38,33 @@ export function formatWorkShellFooterLineFast(input: {
     input.contextIndicator,
     input.composerHint,
   ]);
-  const contextFooter = joinFooterParts([statusLine, input.contextIndicator]);
-  const indicatorFooter = input.contextIndicator?.trim();
-  const footer = input.width !== undefined &&
-      getDisplayWidth(fullFooter) > input.width &&
-      indicatorFooter &&
-      contextFooter.length > 0 &&
-      getDisplayWidth(contextFooter) <= input.width
-    ? contextFooter
-    : input.width !== undefined &&
-        getDisplayWidth(fullFooter) > input.width &&
-        indicatorFooter &&
-        getDisplayWidth(indicatorFooter) <= input.width
-    ? indicatorFooter
-    : input.width !== undefined &&
-        getDisplayWidth(fullFooter) > input.width &&
-        getDisplayWidth(coreFooter) <= input.width
-    ? coreFooter
-    : fullFooter;
+  // Overflow fallbacks keep cwd anchored first (footer contract shared with
+  // the Rust footer path): drop the composer hint, then the reasoning fact,
+  // then the context indicator — never the cwd.
+  const cwdContextFooter = joinFooterParts([
+    compactPath,
+    statusLine,
+    input.contextIndicator,
+  ]);
+  const slimStatusLine = formatWorkShellStatusLineFast(
+    input.model,
+    "",
+    input.mode,
+    input.authLabel,
+    { includeContext: false },
+  );
+  const slimCwdContextFooter = hasContextIndicator
+    ? joinFooterParts([compactPath, slimStatusLine, input.contextIndicator])
+    : "";
+  const overflows = input.width !== undefined && getDisplayWidth(fullFooter) > input.width;
+  let footer = fullFooter;
+  if (overflows && cwdContextFooter.length > 0 && getDisplayWidth(cwdContextFooter) <= input.width) {
+    footer = cwdContextFooter;
+  } else if (overflows && slimCwdContextFooter.length > 0 && getDisplayWidth(slimCwdContextFooter) <= input.width) {
+    footer = slimCwdContextFooter;
+  } else if (overflows && getDisplayWidth(coreFooter) <= input.width) {
+    footer = coreFooter;
+  }
   return input.width === undefined ? footer : truncateForDisplayWidth(footer, input.width);
 }
 

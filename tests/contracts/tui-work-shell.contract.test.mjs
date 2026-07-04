@@ -1357,7 +1357,22 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
     }),
     /gpt-5\.4 · Deep · YOLO mode · Saved OAuth/,
   );
-  assert.match(
+  // Footer overflow keeps cwd anchored: when the cwd + status + indicator do
+  // not fit, the reasoning fact is dropped first, then the indicator — the
+  // cwd never disappears from the footer.
+  assert.equal(
+    formatWorkShellFooterLine({
+      cwd: `${process.env.HOME ?? "/Users/me"}/project/unclecode`,
+      model: "gpt-5.4",
+      reasoningLabel: "medium (mode-default)",
+      mode: "default",
+      authLabel: "Browser OAuth · file",
+      contextIndicator: "context 2 ready · 1 held back",
+      width: 96,
+    }),
+    "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth  ·  context 2 ready · 1 held back",
+  );
+  assert.equal(
     formatWorkShellFooterLine({
       cwd: `${process.env.HOME ?? "/Users/me"}/project/unclecode`,
       model: "gpt-5.4",
@@ -1367,7 +1382,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       contextIndicator: "context 2 ready · 1 held back",
       width: 72,
     }),
-    /context 2 ready · 1 held back$/,
+    "~/project/unclecode  ·  gpt-5.4 · Balanced · Work mode · Saved OAuth",
   );
   assert.equal(
     formatWorkShellBusyStatusLine("· thinking inspect repo", 0),

@@ -750,7 +750,7 @@ pub fn format_work_shell_footer_line(
     } else {
         full_status_line
     };
-    let core_footer = [path, Some(status_line.clone())]
+    let core_footer = [path.clone(), Some(status_line.clone())]
         .into_iter()
         .flatten()
         .filter(|item| !item.is_empty())
@@ -771,7 +771,7 @@ pub fn format_work_shell_footer_line(
     .collect::<Vec<_>>()
     .join("  ·  ");
     let context_footer = [
-        Some(status_line),
+        Some(status_line.clone()),
         context_indicator
             .map(str::to_string)
             .filter(|value| !value.is_empty()),
@@ -781,25 +781,22 @@ pub fn format_work_shell_footer_line(
     .filter(|item| !item.is_empty())
     .collect::<Vec<_>>()
     .join("  ·  ");
-    let indicator_footer = context_indicator
-        .map(str::to_string)
-        .filter(|value| !value.is_empty());
+    let cwd_with_context_footer = [path.clone(), Some(context_footer.clone())]
+        .into_iter()
+        .flatten()
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>()
+        .join("  ·  ");
+    // Overflow fallbacks keep cwd anchored first (footer contract shared
+    // with the TS fast path): drop the composer hint, then the context
+    // indicator — never the cwd.
     let footer = match width {
         Some(width)
             if display_width(&full_footer) > width
-                && indicator_footer.is_some()
-                && !context_footer.is_empty()
-                && display_width(&context_footer) <= width =>
+                && !cwd_with_context_footer.is_empty()
+                && display_width(&cwd_with_context_footer) <= width =>
         {
-            context_footer
-        }
-        Some(width)
-            if display_width(&full_footer) > width
-                && indicator_footer
-                    .as_ref()
-                    .is_some_and(|value| display_width(value) <= width) =>
-        {
-            indicator_footer.unwrap_or_default()
+            cwd_with_context_footer
         }
         Some(width)
             if display_width(&full_footer) > width && display_width(&core_footer) <= width =>

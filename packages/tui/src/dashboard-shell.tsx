@@ -37,6 +37,7 @@ import {
   shouldRenderEmbeddedWorkPaneFullscreen,
   shouldReturnToWorkOnEscape,
 } from "./dashboard-navigation.js";
+import { subscribeTerminalResizeClear } from "./terminal-resize-clear.js";
 import { truncateForDisplayWidth } from "./text-width.js";
 import {
   createInitialShellState,
@@ -236,8 +237,13 @@ export function Dashboard(props: DashboardProps) {
       setTerminalColumns(resolveTerminalColumns(stdout));
     };
     updateTerminalColumns();
+    const unsubscribeResizeClear = subscribeTerminalResizeClear(
+      stdout,
+      () => resolveTerminalColumns(stdout),
+    );
     stdout.on("resize", updateTerminalColumns);
     return () => {
+      unsubscribeResizeClear();
       stdout.off("resize", updateTerminalColumns);
     };
   }, [stdout]);
@@ -882,7 +888,15 @@ export function Dashboard(props: DashboardProps) {
               <Text bold color={C.text}>History</Text>
             </Box>
             <Box marginTop={1}>
-              <SessionList sessions={model.primarySessions} selectedIndex={centerState.sessionIndex} isActive={true} emptyState={model.emptyState} />
+              <SessionList
+                sessions={model.primarySessions}
+                selectedIndex={centerState.sessionIndex}
+                isActive={true}
+                emptyState={model.emptyState}
+                emptyStateDetail={model.emptyStateDetail}
+                emptyStateActionKey={model.emptyStateActionKey}
+                emptyStateActionLabel={model.emptyStateActionLabel}
+              />
             </Box>
           </Box>
 

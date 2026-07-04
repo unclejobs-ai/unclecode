@@ -42,7 +42,7 @@ function EmptyStateBlock(props: {
   return (
     <Box flexDirection="column">
       <Text color={C.text} bold>{props.title}</Text>
-      <Text color={C.textMuted}>{truncateForPane(props.detail, 36)}</Text>
+      <Text color={C.textMuted} wrap="wrap">{props.detail}</Text>
       <Box marginTop={1} gap={1}>
         {props.actionKey ? <KeyPill char={props.actionKey} /> : null}
         <Text color={C.success}>{props.actionLabel}</Text>
@@ -57,6 +57,7 @@ export function HeaderChrome(props: { readonly branch: string; readonly gitStatu
   const dirName = getWorkspaceDisplayName(props.workspacePath);
   const statusColor = props.gitStatus === "clean" ? C.accentDim : C.warning;
   const showDir = dirName !== UNCLECODE_COMMAND_NAME;
+  const hasGitRepo = props.branch !== "no git repo" && props.gitStatus !== "no git repo";
 
   return (
     <Box>
@@ -71,10 +72,19 @@ export function HeaderChrome(props: { readonly branch: string; readonly gitStatu
       )}
       <Text color={C.textMuted}> </Text>
       <Text color={C.accentBright}>work context</Text>
-      <Text color={C.textMuted}>·</Text>
-      <Text color={C.accentBright}> {props.branch}</Text>
-      <Text color={C.textMuted}>·</Text>
-      <Text color={statusColor}> {props.gitStatus}</Text>
+      {hasGitRepo ? (
+        <>
+          <Text color={C.textMuted}>·</Text>
+          <Text color={C.accentBright}> {props.branch}</Text>
+          <Text color={C.textMuted}>·</Text>
+          <Text color={statusColor}> {props.gitStatus}</Text>
+        </>
+      ) : (
+        <>
+          <Text color={C.textMuted}>·</Text>
+          <Text color={C.textMuted}> no git repo</Text>
+        </>
+      )}
     </Box>
   );
 }
@@ -156,17 +166,17 @@ export function SessionList(props: {
   readonly selectedIndex: number;
   readonly isActive: boolean;
   readonly emptyState: string;
-  readonly emptyStateDetail?: string;
-  readonly emptyStateActionKey?: string;
-  readonly emptyStateActionLabel?: string;
+  readonly emptyStateDetail: string;
+  readonly emptyStateActionKey: string;
+  readonly emptyStateActionLabel: string;
 }) {
   if (props.sessions.length === 0) {
     return (
       <EmptyStateBlock
         title={props.emptyState}
-        detail={props.emptyStateDetail ?? "Start a Work session and saved conversations will appear here."}
-        actionKey={props.emptyStateActionKey ?? "W"}
-        actionLabel={props.emptyStateActionLabel ?? "start work"}
+        detail={props.emptyStateDetail}
+        actionKey={props.emptyStateActionKey}
+        actionLabel={props.emptyStateActionLabel}
       />
     );
   }

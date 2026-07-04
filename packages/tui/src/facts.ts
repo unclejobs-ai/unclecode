@@ -3,9 +3,10 @@ import os from "node:os";
 
 export function getGitBranch(cwd: string): string {
   try {
-    return execSync("git branch --show-current", { cwd, encoding: "utf8", stdio: "pipe" }).trim();
+    const branch = execSync("git branch --show-current", { cwd, encoding: "utf8", stdio: "pipe" }).trim();
+    return branch.length > 0 ? branch : "detached";
   } catch {
-    return "unknown";
+    return "no git repo";
   }
 }
 
@@ -16,7 +17,7 @@ export function getGitStatus(cwd: string): string {
     const lines = status.split("\n").length;
     return `${lines} modified`;
   } catch {
-    return "unknown";
+    return "no git repo";
   }
 }
 

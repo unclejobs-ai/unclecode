@@ -5,7 +5,7 @@ import {
   sanitizeWorkShellAssistantText,
 } from "@unclecode/orchestrator";
 
-import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
+import { getDisplayWidth, truncateForDisplayWidth, wrapDisplayTextFast } from "./text-width.js";
 import {
   classifyWorkShellPanelLineFast,
   formatWorkShellFooterLineFast,
@@ -83,13 +83,19 @@ function readableTextColorProps(color: string | undefined): { readonly color?: s
   return resolved ? { color: resolved } : {};
 }
 
+/**
+ * DESIGN.md "Conversation entry": compact assistant replies avoid heavy
+ * cards, and borders are structural, not decorative. Long replies used to
+ * flip to a rounded heavy card, which made the transcript surface jump
+ * between short and long answers. Every assistant reply now stays on the
+ * rail/wrap surface; reply length no longer changes the surface.
+ */
 export function shouldUseCompactAssistantSurface(input: {
   readonly text: string;
   readonly width: number;
 }): boolean {
-  const normalized = normalizeMarkdownDisplayText(formatWorkShellAssistantDisplayText(input.text));
-  const lines = wrapDisplayText(normalized, Math.max(20, input.width - 8));
-  return lines.length <= 2 && getDisplayWidth(normalized) <= Math.max(24, input.width - 12);
+  void input;
+  return true;
 }
 
 function WorkShellReadableText(props: {
@@ -275,6 +281,8 @@ export function getWorkShellComposerHint(inputValue: string, slashSuggestionCoun
 }
 
 const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const STREAMING_CURSOR = "▌";
+const RUST_TEXT_CACHE_MAX_ENTRIES = 512;
 const rustBusyStatusCache = new Map<string, string>();
 const rustMarkdownDisplayCache = new Map<string, string>();
 const rustThinkingLineCache = new Map<string, string>();
@@ -283,7 +291,23 @@ const rustWrapDisplayCache = new Map<string, readonly string[]>();
 const rustEntryPresentationCache = new Map<WorkShellEntryRole, WorkShellEntryRolePresentationContract>();
 const rustAttachmentLayoutCache = new Map<number, WorkShellAttachmentLayout>();
 const rustViewportLayoutCache = new Map<string, WorkShellViewportLayout>();
-const rustComposerDockLayoutCache = new Map<string, WorkShellComposerDockLayout>();
+
+function shouldSkipRustTextCacheStore(text: string): boolean {
+  return text.endsWith(STREAMING_CURSOR);
+}
+
+function setBoundedCacheValue<K, V>(cache: Map<K, V>, key: K, value: V, skipStore: boolean): void {
+  if (skipStore) {
+    return;
+  }
+  if (cache.size >= RUST_TEXT_CACHE_MAX_ENTRIES) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey !== undefined) {
+      cache.delete(firstKey);
+    }
+  }
+  cache.set(key, value);
+}
 
 type WorkShellEntryRolePresentationContract = {
   readonly presentation: WorkShellEntryPresentation;
@@ -346,7 +370,7 @@ export function normalizeMarkdownDisplayText(value: string): string {
     return cached;
   }
   const normalized = runRustUxText("normalize-markdown", value);
-  rustMarkdownDisplayCache.set(value, normalized);
+  setBoundedCacheValue(rustMarkdownDisplayCache, value, normalized, shouldSkipRustTextCacheStore(value));
   return normalized;
 }
 
@@ -501,8 +525,8 @@ function renderWorkShellPanelLine(line: string, index: number): React.ReactNode 
   if (classified.kind === "suggestion") {
     return (
       <Text key={`${index}-${line}`}>
-      <Text {...(classified.isSelected ? { color: W.user } : readableTextColorProps(W.textMuted))}>{classified.marker}</Text>
-      <Text color={classified.isSelected ? W.user : W.user}> {classified.command}</Text>
+      <Text {...(classified.isSelected ? { color: W.user, bold: true } : readableTextColorProps(W.textMuted))}>{classified.marker}</Text>
+      <Text color={W.user} bold={classified.isSelected}> {classified.command}</Text>
       <Text {...(classified.isWarning ? { color: W.warning } : readableTextColorProps(classified.isSelected ? W.text : W.textMuted))}>{classified.spacing}{classified.description}</Text>
 </Text>
     );
@@ -687,7 +711,7 @@ function wrapDisplayText(value: string, width: number): string[] {
   }
   const raw = runRustCommandSync(["rust", "ux", "text", "wrap-display"], process.cwd(), key);
   const parsed = JSON.parse(raw) as string[];
-  rustWrapDisplayCache.set(key, parsed);
+  setBoundedCacheValue(rustWrapDisplayCache, key, parsed, shouldSkipRustTextCacheStore(value));
   return parsed;
 }
 
@@ -697,13 +721,8 @@ function resolveWorkShellComposerDockLayout(input: {
   readonly footerLine: string;
   readonly attachmentCount?: number;
 }): WorkShellComposerDockLayout {
-  const key = JSON.stringify(input);
-  const cached = rustComposerDockLayoutCache.get(key);
-  if (cached !== undefined) {
-    return cached;
-  }
   const divider = "─".repeat(input.dockWidth);
-  const layout: WorkShellComposerDockLayout = {
+  return {
     accentColorRole: input.inputValue.trimStart().startsWith("/") ? "user" : "borderStrong",
     attachmentBadgeColorRole: input.attachmentCount !== undefined && input.attachmentCount >= 5
       ? "warning"
@@ -712,8 +731,6 @@ function resolveWorkShellComposerDockLayout(input: {
     bottomDivider: divider,
     footerLine: padDisplayLine(input.footerLine, input.dockWidth),
   };
-  rustComposerDockLayoutCache.set(key, layout);
-  return layout;
 }
 
 function renderWorkShellEntryBlock(input: {
@@ -755,7 +772,16 @@ function renderWorkShellEntryBlock(input: {
   }
 
   if (input.entry.role === "assistant") {
-    const lines = wrapDisplayText(bodyText, Math.max(20, input.width - 8));
+    // Streaming deltas rewrap on every frame; the synchronous Rust wrap
+    // spawn per delta starves the render loop and keeps live text off the
+    // screen. Route the streaming entry through the pure-TS wrapper so
+    // partial text paints immediately (DESIGN.md: streaming cursor only
+    // when assistant text is live). Final entries keep the Rust wrap.
+    const isStreamingEntry = input.entry.text.endsWith(STREAMING_CURSOR);
+    const wrapLines = isStreamingEntry
+      ? wrapDisplayTextFast
+      : wrapDisplayText;
+    const lines = wrapLines(bodyText, Math.max(20, input.width - 8));
     const labelBackgroundColor = presentation.labelBackgroundColor ?? W.assistantBadgeBg;
     const labelTextColor = presentation.labelTextColor ?? W.assistantBadgeText;
     if (shouldUseCompactAssistantSurface({ text: input.entry.text, width: input.width })) {
@@ -890,7 +916,7 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
   const entries = props.streamingAssistantText
     ? [
         ...props.entries.filter(shouldShowWorkShellConversationEntry),
-        { role: "assistant", text: `${props.streamingAssistantText}▌` } as const,
+        { role: "assistant", text: `${props.streamingAssistantText}${STREAMING_CURSOR}` } as const,
       ]
     : props.entries.filter(shouldShowWorkShellConversationEntry);
 
