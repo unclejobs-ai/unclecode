@@ -9,7 +9,9 @@ import {
 import { getDisplayWidth, truncateForDisplayWidth, wrapDisplayTextFast } from "./text-width.js";
 import {
   classifyWorkShellPanelLineFast,
+  formatWorkShellAuthFactsGroup,
   formatWorkShellFooterLineFast,
+  formatWorkShellSessionFactsGroup,
   resolveWorkShellPanelLayoutFast,
   type WorkShellPanelAnchor,
   type WorkShellPanelDisplayMode,
@@ -317,6 +319,8 @@ export function resolveWorkShellComposerHint(input: {
 const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 export const WORK_SHELL_SPINNER_INTERVAL_MS = 100;
 const STREAMING_CURSOR = "▌";
+const BODY_CONTINUATION_INDENT = "   ";
+const WORK_SHELL_STATUS_GROUP_SEPARATOR = " │ ";
 const RUST_TEXT_CACHE_MAX_ENTRIES = 512;
 const rustBusyStatusCache = new Map<string, string>();
 const rustMarkdownDisplayCache = new Map<string, string>();
@@ -438,17 +442,21 @@ export function formatWorkShellUsageLine(input: {
   readonly spinnerFrame?: number;
 }): string {
   const spinner = WORK_SHELL_BUSY_SPINNER_FRAMES[(((input.spinnerFrame ?? 0) % WORK_SHELL_BUSY_SPINNER_FRAMES.length) + WORK_SHELL_BUSY_SPINNER_FRAMES.length) % WORK_SHELL_BUSY_SPINNER_FRAMES.length];
-  const activity = input.isBusy ? `${spinner} Working now` : "Ready";
-  const usage = input.isBusy
-    ? input.currentTurnStartedAt === undefined
-      ? "elapsed now"
-      : `elapsed ${formatCompactDuration(Math.max(0, (input.nowMs ?? input.currentTurnStartedAt) - input.currentTurnStartedAt))}`
-    : input.lastTurnDurationMs === undefined
-      ? "no reply yet"
-      : `last reply ${formatCompactDuration(input.lastTurnDurationMs)}`;
-  const controls = input.isBusy ? "Ctrl+C/Esc interrupt · Enter queues" : "";
-  const detail = input.isBusy ? normalizeBusyDetail(input.busyStatus ?? "") : "";
-  return [activity, usage, controls, detail].filter((part) => part.length > 0).join(" · ");
+  if (input.isBusy) {
+    const elapsed = input.currentTurnStartedAt === undefined
+      ? "starting"
+      : formatCompactDuration(Math.max(0, (input.nowMs ?? input.currentTurnStartedAt) - input.currentTurnStartedAt));
+    const detail = normalizeBusyDetail(input.busyStatus ?? "");
+    return [
+      `${spinner} ${elapsed}`,
+      detail.length > 0 ? detail : undefined,
+      "Ctrl+C/Esc · Enter queues",
+    ].filter((part) => part !== undefined && part.length > 0).join(" · ");
+  }
+  const replyTiming = input.lastTurnDurationMs === undefined
+    ? "no reply yet"
+    : `last reply ${formatCompactDuration(input.lastTurnDurationMs)}`;
+  return ["Ready", replyTiming].join(" · ");
 }
 
 function formatCompactDuration(durationMs: number): string {
@@ -646,6 +654,36 @@ function padDisplayLine(value: string, width: number): string {
   return `${value}${" ".repeat(padding)}`;
 }
 
+function renderRailBodyLines(input: {
+  readonly lines: readonly string[];
+  readonly railColor: string;
+  readonly bodyColor: string;
+  readonly keyPrefix: string;
+}): React.ReactNode {
+  return input.lines.map((line, lineIndex) => (
+    <Text key={`${input.keyPrefix}-${String(lineIndex)}`}>
+      {lineIndex === 0 ? (
+        <>
+          <Text color={input.railColor}>▌ </Text>
+          <WorkShellReadableText color={input.bodyColor}>{line}</WorkShellReadableText>
+        </>
+      ) : (
+        <>
+          <Text {...readableTextColorProps(W.textDim)}>{BODY_CONTINUATION_INDENT}</Text>
+          <WorkShellReadableText color={input.bodyColor}>{line}</WorkShellReadableText>
+        </>
+      )}
+    </Text>
+  ));
+}
+
+function formatWorkShellPromptDeckDivider(width: number): string {
+  const label = " prompt deck ";
+  const labelWidth = getDisplayWidth(label);
+  const dashCount = Math.max(6, width - labelWidth - 1);
+  return `─${label}${"─".repeat(dashCount)}`;
+}
+
 function prefixWrappedDisplayText(prefix: string, text: string, width: number): readonly string[] {
   const prefixWidth = getDisplayWidth(prefix);
   const contentWidth = Math.max(12, width - prefixWidth);
@@ -668,7 +706,10 @@ export function formatWorkShellConversationEntryLines(input: {
 
   if (input.role === "assistant") {
     const bodyLines = wrapDisplayText(bodyText, Math.max(20, input.width - 2));
-    return [`${presentation.badge} ${presentation.label}`, ...bodyLines.map((line) => `  ${line}`)];
+    return [
+      `${presentation.badge} ${presentation.label}`,
+      ...bodyLines.map((line) => `${BODY_CONTINUATION_INDENT}${line}`),
+    ];
   }
 
   if (input.role === "tool") {
@@ -813,15 +854,15 @@ function renderWorkShellEntryBlock(input: {
       >
         <Text>
           <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
-            {" "}{presentation.badge} {presentation.label}{" "}
+            {presentation.badge} {presentation.label}
           </Text>
         </Text>
-        {renderedLines.map((line, lineIndex) => (
-          <Text key={`user-${String(input.index)}-${String(lineIndex)}`}>
-            <Text {...(lineIndex === 0 ? { color: presentation.railColor } : readableTextColorProps(W.textDim))}>▌ </Text>
-            <WorkShellReadableText color={presentation.bodyColor}>{line}</WorkShellReadableText>
-          </Text>
-        ))}
+        {renderRailBodyLines({
+          lines: renderedLines,
+          railColor: presentation.railColor,
+          bodyColor: presentation.bodyColor,
+          keyPrefix: `user-${String(input.index)}`,
+        })}
       </Box>
     );
   }
@@ -849,15 +890,15 @@ function renderWorkShellEntryBlock(input: {
         >
           <Text>
             <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
-              {" "}{presentation.badge} {presentation.label}{" "}
+              {presentation.badge} {presentation.label}
             </Text>
           </Text>
-          {lines.map((line, lineIndex) => (
-            <Text key={`assistant-${String(input.index)}-${String(lineIndex)}`}>
-              <Text {...(lineIndex === 0 ? { color: presentation.railColor } : readableTextColorProps(W.textDim))}>▌ </Text>
-              <WorkShellReadableText color={presentation.bodyColor}>{line}</WorkShellReadableText>
-            </Text>
-          ))}
+          {renderRailBodyLines({
+            lines,
+            railColor: presentation.railColor,
+            bodyColor: presentation.bodyColor,
+            keyPrefix: `assistant-${String(input.index)}`,
+          })}
         </Box>
       );
     }
@@ -872,16 +913,16 @@ function renderWorkShellEntryBlock(input: {
       >
         <Text>
           <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
-            {" "}{presentation.badge} {presentation.label}{" "}
+            {presentation.badge} {presentation.label}
           </Text>
         </Text>
-        <Box marginTop={1} flexDirection="column">
-          {wrapDisplayText(bodyText, Math.max(20, input.width - 4)).map((line, lineIndex) => (
-            <Text key={`assistant-${String(input.index)}-${String(lineIndex)}`}>
-              <Text {...(lineIndex === 0 ? { color: presentation.railColor } : readableTextColorProps(W.textDim))}>▌ </Text>
-              <WorkShellReadableText color={presentation.bodyColor}>{line}</WorkShellReadableText>
-            </Text>
-          ))}
+        <Box marginTop={0} flexDirection="column">
+          {renderRailBodyLines({
+            lines: wrapDisplayText(bodyText, Math.max(20, input.width - 4)),
+            railColor: presentation.railColor,
+            bodyColor: presentation.bodyColor,
+            keyPrefix: `assistant-card-${String(input.index)}`,
+          })}
         </Box>
       </Box>
     );
@@ -1093,7 +1134,7 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
   return (
     <Box flexDirection="column">
       <Text {...readableTextColorProps(W.text)}>{line}</Text>
-      <Text color={W.border}>{"▔".repeat(Math.max(24, Math.min(72, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4)))}</Text>
+      <Text color={W.textDim}>{"─".repeat(Math.max(24, Math.min(48, (props.terminalColumns ?? process.stdout.columns ?? 96) - 8)))}</Text>
     </Box>
   );
 });
@@ -1111,13 +1152,12 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
 }) {
   const [nowMs, setNowMs] = React.useState(() => Date.now());
   const [spinnerFrame, setSpinnerFrame] = React.useState(0);
-  const statusLine = formatWorkShellStatusLine({
+  const sessionGroup = formatWorkShellSessionFactsGroup({
     model: props.model,
-    reasoningLabel: props.reasoningLabel,
     mode: props.mode,
-    authLabel: props.authLabel,
   });
-  const usageLine = formatWorkShellUsageLine({
+  const authGroup = formatWorkShellAuthFactsGroup(props.authLabel);
+  const activityLine = formatWorkShellUsageLine({
     isBusy: props.isBusy,
     ...(props.busyStatus ? { busyStatus: props.busyStatus } : {}),
     ...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {}),
@@ -1149,9 +1189,11 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
     <Box marginTop={1} paddingLeft={1}>
       <Text>
         <Text color={W.assistant}>{props.isBusy ? "◈ " : "◇ "}</Text>
-        <Text {...readableTextColorProps(W.text)}>{statusLine}</Text>
-        <Text {...readableTextColorProps(W.textMuted)}> · </Text>
-        <Text {...(props.isBusy ? { color: W.assistant } : readableTextColorProps(W.textMuted))}>{usageLine}</Text>
+        <Text {...readableTextColorProps(W.text)}>{sessionGroup}</Text>
+        <Text {...readableTextColorProps(W.textMuted)}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
+        <Text {...readableTextColorProps(W.textMuted)}>{authGroup}</Text>
+        <Text {...readableTextColorProps(W.textMuted)}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
+        <Text {...(props.isBusy ? { color: W.assistant } : readableTextColorProps(W.textMuted))}>{activityLine}</Text>
       </Text>
     </Box>
   );
@@ -1209,16 +1251,14 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
       {props.composerHint ? (
         <Text {...hintColorProps}>{props.composerHint}</Text>
       ) : null}
-      <Text color={accent}>▌ prompt deck <Text color={W.border}>{dockLayout.topDivider.slice(Math.min(14, dockLayout.topDivider.length))}</Text></Text>
+      <Text {...readableTextColorProps(W.textDim)}>{formatWorkShellPromptDeckDivider(dockWidth)}</Text>
       <Box minHeight={1} paddingLeft={1}>
-        <Text backgroundColor={accent} {...readableTextColorProps(W.text)}>{" "}</Text>
-        <Text {...readableTextColorProps(W.textMuted)}>{" "}</Text>
+        <Text color={accent}>› </Text>
         {props.composer}
         {props.attachmentCount !== undefined ? (
           <Text {...badgeColorProps}> [{props.attachmentCount}/5]</Text>
         ) : null}
       </Box>
-      <Text color={W.border}>▔{dockLayout.bottomDivider.slice(1)}</Text>
       <Text {...readableTextColorProps(W.textDim)}>{dockLayout.footerLine}</Text>
     </Box>
   );

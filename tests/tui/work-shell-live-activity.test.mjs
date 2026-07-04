@@ -106,7 +106,7 @@ test("busy WorkShellView avoids a duplicate lower activity row", async () => {
   instance.unmount();
   instance.cleanup();
 
-  assert.match(output, /Working now/);
+  assert.match(output, /⠋|starting|thinking/);
   assert.doesNotMatch(
     output,
     /\n\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+thinking/u,
@@ -140,7 +140,7 @@ test("busy WorkShellView keeps the idle empty-state card hidden", async () => {
   instance.unmount();
   instance.cleanup();
 
-  assert.match(output, /Working now/);
+  assert.match(output, /⠋|starting|thinking/);
   assert.doesNotMatch(output, /Ready for the next move/);
   assert.doesNotMatch(
     output,
@@ -180,7 +180,7 @@ test("WorkShellView render keeps the light-terminal status frame visible", async
   instance.cleanup();
 
   assert.match(output, /UncleCode · OpenAI/);
-  assert.match(output, /gpt-5\.4 · YOLO mode · Saved OAuth/);
+  assert.match(output, /gpt-5\.4 · YOLO mode.*│.*Saved OAuth/);
   assert.match(output, /Ready for the next move/);
   assert.match(output, /Work context ready/);
   assert.match(output, /Start\s+· Type the task in plain language/);

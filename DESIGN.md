@@ -101,18 +101,27 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Work shell status line
 
-- Structure: status glyph, model/mode/auth summary, activity/elapsed/control details.
+- Structure: grouped facts — session (`model · mode`), auth, activity — separated by muted `│`.
 - Variants: idle, busy, interrupted idle, queue paused.
-- Spacing: inline separators with muted text.
+- Spacing: inline separators with muted text; avoid repeating footer facts here.
 - States: default, loading/busy, paused, warning.
 - Accessibility: spinner is supplementary; text must carry the state.
 - Motion: single spinner only while busy. Never duplicate activity spinners elsewhere.
 
+### Work shell footer
+
+- Structure: cwd path plus one compact context chip when context is folded.
+- Variants: default, narrow terminal truncation.
+- Spacing: double-dot separators between cwd and context only.
+- States: default, truncated.
+- Accessibility: path and context counts remain readable without color.
+- Motion: none.
+
 ### Conversation entry
 
-- Structure: role badge and wrapped body; rail color carries role identity.
+- Structure: role badge and wrapped body; rail color carries role identity on the first body line only.
 - Variants: user, assistant compact, assistant expanded, system, tool diagnostics.
-- Spacing: one row between entries; compact assistant replies avoid heavy cards.
+- Spacing: one row between entries; continuation lines use a quiet indent without repeating the rail glyph.
 - States: default, streaming assistant, filtered tool trace.
 - Accessibility: role labels are textual; color is not the only role signal.
 - Motion: streaming cursor only when assistant text is live.
@@ -140,9 +149,9 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Composer dock
 
-- Structure: prompt deck label, input row, footer context.
+- Structure: muted prompt-deck divider, `›` input prefix, footer context row.
 - Variants: default, slash command accent, secure entry, attachment count, queue paused hint.
-- Spacing: one row above, one prompt row, one footer row.
+- Spacing: one hint row above, one prompt row, one footer row; no double border above/below input.
 - States: default, focus by input, secure input, attachment cap warning, queued.
 - Accessibility: hints must expose keyboard actions.
 - Motion: none.

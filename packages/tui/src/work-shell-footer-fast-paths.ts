@@ -13,53 +13,43 @@ export function formatWorkShellFooterLineFast(input: {
   readonly width?: number;
   readonly home?: string;
 }): string {
+  void input.model;
+  void input.reasoningLabel;
+  void input.mode;
+  void input.authLabel;
+  void input.composerHint;
+
   const compactPath = compactWorkShellPath(input.cwd, input.home);
-  const reasoningLabel = compactWorkShellReasoningLabel(input.reasoningLabel);
-  const hasContextIndicator = (input.contextIndicator?.trim().length ?? 0) > 0;
-  const fullStatusLine = formatWorkShellStatusLineFast(
-    input.model,
-    reasoningLabel,
-    input.mode,
-    input.authLabel,
-    { includeContext: !hasContextIndicator },
-  );
-  const fullCoreFooter = joinFooterParts([compactPath, fullStatusLine]);
-  const statusLine = input.width !== undefined && getDisplayWidth(fullCoreFooter) > input.width
-    ? fullStatusLine.replace(" · work context", " · context")
-    : fullStatusLine;
-  const coreFooter = joinFooterParts([compactPath, statusLine]);
-  const fullFooter = joinFooterParts([
-    coreFooter,
-    input.contextIndicator,
-  ]);
-  // Overflow fallbacks keep cwd anchored first (footer contract shared with
-  // the Rust footer path): drop the reasoning fact, then the context
-  // indicator — never the cwd. Composer hints live above the prompt deck.
-  const cwdContextFooter = joinFooterParts([
-    compactPath,
-    statusLine,
-    input.contextIndicator,
-  ]);
-  const slimStatusLine = formatWorkShellStatusLineFast(
-    input.model,
-    "",
-    input.mode,
-    input.authLabel,
-    { includeContext: false },
-  );
-  const slimCwdContextFooter = hasContextIndicator
-    ? joinFooterParts([compactPath, slimStatusLine, input.contextIndicator])
-    : "";
-  const overflows = input.width !== undefined && getDisplayWidth(fullFooter) > input.width;
-  let footer = fullFooter;
-  if (overflows && cwdContextFooter.length > 0 && getDisplayWidth(cwdContextFooter) <= input.width) {
-    footer = cwdContextFooter;
-  } else if (overflows && slimCwdContextFooter.length > 0 && getDisplayWidth(slimCwdContextFooter) <= input.width) {
-    footer = slimCwdContextFooter;
-  } else if (overflows && getDisplayWidth(coreFooter) <= input.width) {
-    footer = coreFooter;
-  }
+  const contextChip = compactWorkShellFooterContextChip(input.contextIndicator);
+  const footer = joinFooterParts([compactPath, contextChip]);
   return input.width === undefined ? footer : truncateForDisplayWidth(footer, input.width);
+}
+
+export function formatWorkShellSessionFactsGroup(input: {
+  readonly model: string;
+  readonly mode: string;
+}): string {
+  return joinFooterFacts([
+    input.model.trim(),
+    humanizeWorkShellModeLabel(input.mode),
+  ]);
+}
+
+export function formatWorkShellAuthFactsGroup(authLabel: string): string {
+  return compactWorkShellAuthLabel(authLabel);
+}
+
+export function compactWorkShellFooterContextChip(contextIndicator?: string): string | undefined {
+  const normalized = contextIndicator?.trim() ?? "";
+  if (normalized.length === 0) {
+    return undefined;
+  }
+  const readyMatch = normalized.match(/^context\s+\d+\s+ready/i);
+  if (readyMatch) {
+    return readyMatch[0];
+  }
+  const firstSegment = normalized.split(/\s·\s/u)[0]?.trim();
+  return firstSegment && firstSegment.length > 0 ? firstSegment : normalized;
 }
 
 function joinFooterParts(parts: readonly (string | undefined)[]): string {
@@ -84,39 +74,6 @@ function compactWorkShellPath(cwd: string | undefined, home: string | undefined)
     return `…/${parts.slice(-2).join("/")}`;
   }
   return normalized;
-}
-
-function formatWorkShellStatusLineFast(
-  model: string,
-  reasoningLabel: string,
-  mode: string,
-  authLabel: string,
-  options: { readonly includeContext: boolean },
-): string {
-  return joinFooterFacts([
-    model,
-    reasoningLabel,
-    humanizeWorkShellModeLabel(mode),
-    compactWorkShellAuthLabel(authLabel),
-    options.includeContext ? "work context" : undefined,
-  ]);
-}
-
-function compactWorkShellReasoningLabel(reasoningLabel: string): string {
-  const normalized = reasoningLabel.trim().toLowerCase();
-  if (!normalized || normalized.includes("unsupported") || normalized.includes("unavailable")) {
-    return "Reasoning off";
-  }
-  if (normalized.startsWith("low") || normalized.startsWith("light")) {
-    return "Light";
-  }
-  if (normalized.startsWith("medium") || normalized.startsWith("balanced")) {
-    return "Balanced";
-  }
-  if (normalized.startsWith("high") || normalized.startsWith("deep")) {
-    return "Deep";
-  }
-  return reasoningLabel.trim();
 }
 
 function joinFooterFacts(parts: readonly (string | undefined)[]): string {

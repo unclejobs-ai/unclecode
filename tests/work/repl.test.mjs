@@ -1382,7 +1382,7 @@ test("getConversationLayout gives answer blocks more room than lower-signal note
       composerHint: "Enter send",
       width: 96,
     }),
-    /gpt-5\.4 · Balanced · YOLO mode · Saved OAuth/,
+    /^~\/project\/unclecode$/,
   );
 });
 

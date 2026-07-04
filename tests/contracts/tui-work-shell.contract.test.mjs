@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   Composer,
+  WORK_SHELL_SPINNER_INTERVAL_MS,
   WorkShellPane,
   applyComposerEdit,
   buildAttachmentPreviewLines,
@@ -61,9 +62,9 @@ import {
   refineInlineCommandPanelLines,
   renderEmbeddedWorkShellPaneDashboard,
   resolveComposerCursorOffsetAfterValueChange,
-  resolveWorkShellComposerHint,
   resolveWorkShellActivePanel,
   resolveWorkShellActiveSlashInput,
+  resolveWorkShellComposerHint,
   resolveWorkShellInputAction,
   resolveWorkShellSubmitAction,
   shouldHideWorkShellOverlayForInput,
@@ -76,7 +77,6 @@ import {
   useWorkShellInputController,
   useWorkShellPaneState,
   useWorkShellSlashState,
-  WORK_SHELL_SPINNER_INTERVAL_MS,
 } from "../../packages/tui/src/index.tsx";
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -1356,8 +1356,8 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       text: "Hello. What do you need help with?",
       width: 72,
     }),
-    ["◈ UncleCode", "  Hello. What do you need help with?"],
-    "assistant entries keep a distinct label and readable body",
+    ["◈ UncleCode", "   Hello. What do you need help with?"],
+    "assistant entries keep a distinct label and readable body with a quiet continuation indent",
   );
   assert.equal(
     shouldShowWorkShellConversationEntry({
@@ -1398,9 +1398,9 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       contextIndicator: "context 2 ready · 1 held back",
       width: 120,
     }),
-    "~/project/unclecode  ·  gpt-5.4 · Balanced · Work mode · Saved OAuth  ·  context 2 ready · 1 held back",
+    "~/project/unclecode  ·  context 2 ready",
   );
-  assert.match(
+  assert.equal(
     formatWorkShellFooterLine({
       cwd: `${process.env.HOME ?? "/Users/me"}/project/unclecode`,
       model: "gpt-5.4",
@@ -1409,11 +1409,9 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       authLabel: "Browser OAuth · file",
       width: 72,
     }),
-    /gpt-5\.4 · Deep · YOLO mode · Saved OAuth/,
+    "~/project/unclecode",
   );
-  // Footer overflow keeps cwd anchored: when the cwd + status + indicator do
-  // not fit, the reasoning fact is dropped first, then the indicator — the
-  // cwd never disappears from the footer.
+  // Footer keeps cwd anchored and one compact context chip; session facts live in the status strip.
   assert.equal(
     formatWorkShellFooterLine({
       cwd: `${process.env.HOME ?? "/Users/me"}/project/unclecode`,
@@ -1424,7 +1422,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       contextIndicator: "context 2 ready · 1 held back",
       width: 96,
     }),
-    "~/project/unclecode  ·  gpt-5.4 · Work mode · Saved OAuth  ·  context 2 ready · 1 held back",
+    "~/project/unclecode  ·  context 2 ready",
   );
   assert.equal(
     formatWorkShellFooterLine({
@@ -1436,7 +1434,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       contextIndicator: "context 2 ready · 1 held back",
       width: 72,
     }),
-    "~/project/unclecode  ·  gpt-5.4 · Balanced · Work mode · Saved OAuth",
+    "~/project/unclecode  ·  context 2 ready",
   );
   assert.equal(
     formatWorkShellBusyStatusLine("· thinking inspect repo", 0),
@@ -1473,7 +1471,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       nowMs: 2480,
       lastTurnDurationMs: 1480,
     }),
-    "⠋ Working now · elapsed 1.5s · Ctrl+C/Esc interrupt · Enter queues · thinking inspect repo",
+    "⠋ 1.5s · thinking inspect repo · Ctrl+C/Esc · Enter queues",
   );
   assert.equal(
     normalizeMarkdownDisplayText("## Heading\n- `npm run check`\n- **Done**"),
