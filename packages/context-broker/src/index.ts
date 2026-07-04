@@ -37,12 +37,43 @@ export {
   loadWorkspaceGuidance,
 } from "./workspace-guidance.js";
 export type { MemoryScope } from "./context-memory.js";
+export type { ScopedMemoryEntry } from "./memory-transparency.js";
 export {
   listProjectBridgeLines,
+  listScopedMemoryEntries,
   listScopedMemoryLines,
   publishContextBridge,
   writeScopedMemory,
 } from "./context-memory.js";
+export type { MemoryFreshnessLabel } from "./memory-transparency.js";
+export type {
+  BootstrapSnapshot,
+  BootstrapSourceKind,
+  BootstrapSourceRecord,
+  IngestWorkspaceBootstrapContextInput,
+  IngestWorkspaceBootstrapContextResult,
+} from "./context-bootstrap.js";
+export {
+  augmentContextPacketViewInput,
+  buildBootstrapContextPacketSupplement,
+  createBootstrapPacketId,
+  ingestWorkspaceBootstrapContext,
+  loadBootstrapSnapshot,
+  writeBootstrapSnapshot,
+} from "./context-bootstrap.js";
+export type { CursorRuleSource } from "./cursor-rules.js";
+export { discoverCursorRules } from "./cursor-rules.js";
+export type { MemoryPrefetchResult, MemoryPrefetchStatus } from "./memory-prefetch.js";
+export {
+  DEFAULT_MEMORY_PREFETCH_TIMEOUT_MS,
+  prefetchScopedMemory,
+} from "./memory-prefetch.js";
+export {
+  describeMemoryEntryFreshness,
+  formatScopedMemoryTransparencyLine,
+  formatScopedMemoryTransparencyLines,
+  parseScopedMemoryId,
+} from "./memory-transparency.js";
 export type {
   LoadedWorkspaceSkill,
   WorkspaceSkillItem,

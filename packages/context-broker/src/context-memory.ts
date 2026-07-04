@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
+import { parseScopedMemoryId, type ScopedMemoryEntry } from "./memory-transparency.js";
+
 export type MemoryScope = "session" | "project" | "user" | "agent";
 
 type JsonlMemoryRecord = {
@@ -47,22 +49,39 @@ async function appendJsonlMemoryRecord(input: {
   await appendFile(input.path, `${JSON.stringify(input.record)}\n`, "utf8");
 }
 
-async function readJsonlMemorySummaries(
-  filePath: string,
-): Promise<readonly string[]> {
+async function readJsonlMemoryRecords(filePath: string): Promise<readonly JsonlMemoryRecord[]> {
   try {
     const raw = await readFile(filePath, "utf8");
     return raw
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as JsonlMemoryRecord)
-      .slice(-6)
-      .reverse()
-      .map((record) => record.summary);
+      .map((line) => JSON.parse(line) as JsonlMemoryRecord);
   } catch {
     return [];
   }
+}
+
+function toScopedMemoryEntry(record: JsonlMemoryRecord): ScopedMemoryEntry {
+  return {
+    scope: record.scope,
+    memoryId: record.memoryId,
+    summary: record.summary,
+    timestamp: record.timestamp,
+  };
+}
+
+function toProjectScopedMemoryEntry(input: {
+  readonly memoryId: string;
+  readonly summary: string;
+}): ScopedMemoryEntry {
+  const parsed = parseScopedMemoryId(input.memoryId);
+  return {
+    scope: "project",
+    memoryId: input.memoryId,
+    summary: input.summary,
+    timestamp: parsed.timestamp ?? new Date(0).toISOString(),
+  };
 }
 
 export async function publishContextBridge(input: {
@@ -143,26 +162,28 @@ export async function writeScopedMemory(input: {
   return { memoryId };
 }
 
-export async function listScopedMemoryLines(input: {
+export async function listScopedMemoryEntries(input: {
   scope: MemoryScope;
   cwd: string;
   env?: NodeJS.ProcessEnv;
   sessionId?: string;
   agentId?: string;
-}): Promise<readonly string[]> {
+  limit?: number;
+}): Promise<readonly ScopedMemoryEntry[]> {
   const rootDir = getSessionStoreRoot(input.env);
+  const limit = input.limit ?? 6;
 
   if (input.scope === "project") {
     const sessionStore = createSessionStore({ rootDir });
     const entries = await sessionStore.listProjectMemories(input.cwd);
     return entries
       .filter((entry) => entry.memoryId.startsWith("memory:project:"))
-      .map((entry) => entry.content)
-      .slice(-6)
-      .reverse();
+      .slice(-limit)
+      .reverse()
+      .map((entry) => toProjectScopedMemoryEntry({ memoryId: entry.memoryId, summary: entry.content }));
   }
 
-  return readJsonlMemorySummaries(
+  const records = await readJsonlMemoryRecords(
     getJsonlMemoryPath({
       scope: input.scope,
       rootDir,
@@ -170,4 +191,20 @@ export async function listScopedMemoryLines(input: {
       ...(input.agentId ? { agentId: input.agentId } : {}),
     }),
   );
+
+  return records
+    .slice(-limit)
+    .reverse()
+    .map(toScopedMemoryEntry);
+}
+
+export async function listScopedMemoryLines(input: {
+  scope: MemoryScope;
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+  sessionId?: string;
+  agentId?: string;
+}): Promise<readonly string[]> {
+  const entries = await listScopedMemoryEntries(input);
+  return entries.map((entry) => entry.summary);
 }

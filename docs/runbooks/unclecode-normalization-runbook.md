@@ -1,10 +1,63 @@
 # UncleCode Normalization Runbook
 
-Last validated: 2026-07-03 KST (partial — see Known issues below)
+Last validated: 2026-07-05 KST (T11 modes + memory transparency; orchestrator targeted tests + build)
 
 ## Purpose
 
 UncleCode's operating target is a coding tool with inspectable memory and context, not a black box. The canonical user-facing object is the next model-call context packet; all memory, OMO goal state, research artifacts, team traces, and agent operations must either be included with a reason or excluded with a reason.
+
+## UncleCode vs generic CLI agents
+
+Generic coding CLIs treat each prompt as an isolated chat turn: context is rebuilt ad hoc, memory is opaque, and multi-agent work surfaces as raw JSON or hidden coordinator chatter.
+
+UncleCode keeps four durable differentiators:
+
+| Capability | UncleCode behavior | Generic CLI gap |
+| --- | --- | --- |
+| Persistent workspace context | `.unclecode/config.json`, scoped memory, OMO summaries, and the context packet are assembled before every turn and visible in `/context`. | Context is prompt-local; operators cannot inspect what the model saw. |
+| Runbook truth | This runbook + `docs/audits/*` record validation commands, known issues, and product boundaries (e.g. Runbook DB vs agentops-db). | No single operational source of truth tied to the runtime. |
+| Hidden multi-agent synthesis | Complex turns decompose into bounded executor pools (`runBoundedExecutorPool`), optional guardian review, and a final synthesis pass. Subtask JSON and worker monologue are stripped before user-visible replies (`sanitizeWorkShellAssistantText`). | Planner JSON and internal traces leak into chat. |
+| Intent-aware routing | `classifyWorkIntent` (Rust canonical) routes greetings and explanatory questions (including Korean `뭐냐` / `설명` prompts) to single-turn answers even in `ultrawork` / `yolo`. | Aggressive modes over-orchestrate simple questions. |
+
+Team lanes (`packages/orchestrator/src/team-binding.ts`) add a second multi-agent surface: coordinator/worker checkpoints, file-ownership claims, and SSOT citations — distinct from the Work Shell turn orchestrator but using the same transparency rules.
+
+## Work Shell mode behavior
+
+User-facing labels come from `rust/unclecode-core/src/ux_text.rs` (`humanize_work_shell_mode_label`). Internal mode ids and orchestration behavior come from `rust/unclecode-core/src/mode.rs`, `rust/unclecode-core/src/orchestrator.rs`, and `packages/orchestrator/src/work-agent.ts`.
+
+| Mode id | UI label | Intent routing | Worker budget | Editing | LLM planner | Shell auto-unlock (`UNCLECODE_ALLOW_RUN_SHELL`) | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `default` | Work mode | Simple unless ≥3 file paths or complex keywords (`전체`, `refactor`, …) | 1 | allowed | Static decomposition only | No | Balanced baseline. |
+| `ultrawork` | **Parallel mode** | Simple for greetings/info questions; complex for audit/investigation/action keywords or ≥1 file path | 5 | allowed | LLM planner when ≥2 subtasks parse | Yes | UI says "Parallel"; id stays `ultrawork`. |
+| `yolo` | YOLO mode | Simple for pure questions; complex when action keywords or ≥2 file paths | 4 | allowed | LLM planner when ≥2 subtasks parse | Yes | Low-friction edits; guardian checks may still run. |
+| `plan` | Plan mode | Same classifier as default | 1 | **forbidden** | Static only | No | Read-only planning posture; pair with `/mode set build` or `yolo` to execute. |
+| `search` | Search mode | Always `research` | 3 | **forbidden** | N/A (research turn) | No | Composer guard: "Search mode is read-only…" |
+| `analyze` | Analyze mode | Always `research` | 3 | reviewed | N/A | No | Diagnosis-first; suggest mode switch before edits. |
+| `build` | Build mode | Same as default | 1 | allowed | Static only | No | Execution-focused profile. |
+
+Orchestration pipeline (complex path): `classifyWorkIntent` → `planComplexTurn` (static or LLM in `yolo`/`ultrawork`) → `runBoundedExecutorPool` → optional guardian → synthesis LLM (`work-agent.ts`). Explanatory Korean prompts must stay on the simple path so they never emit subtask JSON.
+
+## Persistent context bootstrap
+
+Work Shell startup and each context refresh follow this order:
+
+1. **Project + user config** — `resolve_mode_status` reads `.unclecode/config.json` (project then `~/.unclecode/config.json`, env override `UNCLECODE_MODE`).
+2. **Context packet** — `packages/context-broker/src/context-packet.ts` assembles repo map, policy signals, token budget, freshness gate.
+3. **Memory prefetch** — `packages/context-broker/src/memory-prefetch.ts` loads `session` + `project` scopes under `DEFAULT_MEMORY_PREFETCH_TIMEOUT_MS` (2000ms). On timeout/error → degrade to empty lines (never block the shell).
+4. **Transparency lines** — `formatScopedMemoryTransparencyLine` renders `scope · summary · cite memory:<id> · fresh|recent|aged`.
+5. **Bootstrap merge** — `apps/unclecode-cli/src/work-runtime-bootstrap.ts` merges guidance, bridge lines, memory, OMO summaries, and trace metadata into the `/context` packet view (single formatter in `context-packet-view.ts`).
+6. **Turn routing** — `extract_routing_prompt` strips `<unclecode_context_packet>…</unclecode_context_packet>` so file metadata in the packet does not force complex routing.
+
+Agent memory scopes (`packages/context-broker/src/context-memory.ts`):
+
+| Scope | Keyed by | Typical use |
+| --- | --- | --- |
+| `session` | Work Shell session id | Turn-local facts, recent decisions |
+| `project` | Workspace root hash | Repo-specific conventions |
+| `user` | Operator identity | Cross-session preferences |
+| `agent` | Agent id (`work-shell`, team worker, …) | Persona/runtime notes |
+
+Prefetch reads `session` + `project` by default; `/memory` slash commands can list other scopes on demand.
 
 ## Current Health Checks
 
@@ -39,7 +92,7 @@ Expected baseline:
 - `mcp list` includes project-local `mmbridge`.
 - `research status --json` reports the workspace root and profile, and does not need to start MCP servers just to show status.
 - `node-version-check` accepts the current Node when it satisfies `engines.node`.
-- `qa:runtime` builds the Rust CLI, starts local Gemini-compatible, OpenAI-compatible, and Anthropic-compatible providers, drives the real `bin/unclecode.cjs work` prompt path, verifies full tool-call loops for Gemini (`functionCall` -> local `run_shell` -> paired `functionResponse` -> final answer), OpenAI Chat (`tool_calls` -> local `run_shell` -> paired `tool` message -> final answer), and Anthropic Messages (`tool_use` -> local `run_shell` -> paired `tool_result` -> final answer), drives an interactive Work TTY through `/status`, `/context`, and an assistant response, asserts 100-column display width, prints a compact operator summary by default, and writes the latest full evidence report to `.unclecode/qa/runtime-qa-latest.json`. The report includes `evidence.providerToolCalls`, `evidence.tui`, and `evidence.context` so tool-call, render, and context transparency checks are machine-readable without mining raw request logs. `evidence.tui.lightTerminalContrast=true` is required; it comes from an ANSI-preserving tmux capture and proves full-screen foreground colors remain readable on a white terminal background. `evidence.tui.idleStable=true` is required; it compares two real tmux captures after the prompt deck returns to idle, normalizing only volatile reply-age text, so residual screen churn remains visible. `evidence.tui.latencyOk=true` is required; the real-use TUI smoke measures first-reply and queued-follow-up latency against the configured runtime budget so slow-path regressions are visible in the report. Each provider entry must include `protocolPaired=true` to prove the tool result belongs to the issued tool call and `finalAnswerGatedByToolResult=true` to prove the provider only returned the final answer after observing the local `run_shell` result. For Gemini specifically, the paired `functionResponse` must preserve both the call id and the function name, for example `functionResponseIdMatched=true` and `functionResponseNameMatched=true`; the function name must remain `run_shell`, not the generated call id. Use `node scripts/unclecode-runtime-qa.mjs --json` only when the full report is needed on stdout.
+- `qa:runtime` builds the Rust CLI, starts local Gemini-compatible, OpenAI-compatible, and Anthropic-compatible providers, drives the real `bin/unclecode.cjs work` prompt path, verifies full tool-call loops for Gemini (`functionCall` -> local `run_shell` -> paired `functionResponse` -> final answer), OpenAI Chat (`tool_calls` -> local `run_shell` -> paired `tool` message -> final answer), and Anthropic Messages (`tool_use` -> local `run_shell` -> paired `tool_result` -> final answer), drives an interactive Work TTY through `/status`, `/context`, and an assistant response, asserts 100-column display width, prints a compact operator summary by default, and writes the latest full evidence report to `.unclecode/qa/runtime-qa-latest.json`. The report includes `evidence.providerToolCalls`, `evidence.tui`, and `evidence.context` so tool-call, render, and context transparency checks are machine-readable without mining raw request logs. OpenAI chat requests now use `stream:true` with live SSE traces; `scripts/runtime-qa/tui-openai-stream-smoke.mjs` verifies partial text, cursor, final answer, and cleared busy state. `evidence.tui.lightTerminalContrast=true` is required; it comes from an ANSI-preserving tmux capture (`FORCE_COLOR=3`) and proves full-screen foreground colors remain readable on a white terminal background. `evidence.tui.idleStable=true` is required; it compares two real tmux captures after the prompt deck returns to idle, normalizing only volatile reply-age text, so residual screen churn remains visible. `evidence.tui.latencyOk=true` is required; the real-use TUI smoke measures first-reply and queued-follow-up latency against the configured runtime budget so slow-path regressions are visible in the report. Each provider entry must include `protocolPaired=true` to prove the tool result belongs to the issued tool call and `finalAnswerGatedByToolResult=true` to prove the provider only returned the final answer after observing the local `run_shell` result. For Gemini specifically, the paired `functionResponse` must preserve both the call id and the function name, for example `functionResponseIdMatched=true` and `functionResponseNameMatched=true`; the function name must remain `run_shell`, not the generated call id. Use `node scripts/unclecode-runtime-qa.mjs --json` only when the full report is needed on stdout.
 - A healthy local runtime summary includes `geminiTool=true`, `openaiTool=true`, `anthropicTool=true`, `toolFinalGate=true`, `lightContrast=true`, `duplicateBusy=false`, `queueDrain=true`, `resize=true`, `idleStable=true`, and `latencyOk=true`; those booleans are runtime evidence, not static configuration claims. The `toolFinalGate=true` signal proves all local provider final answers were gated by observed `run_shell` results, while the `duplicateBusy=false`, `queueDrain=true`, `resize=true`, `idleStable=true`, and `latencyOk=true` signals keep flicker/regression, prompt queue draining, terminal resize handling, post-reply idle stability, and slow-path regressions visible in `qa:health` instead of hiding them inside the JSON report.
 - `qa:live:record` runs the real provider smoke with loaded `.env`, redacts credential-looking output, writes `.unclecode/qa/live-provider-latest.json`, and prints a compact operator summary by default. It reads `auth status --json` plus `doctor --json`, records blocked credential state without failing the shell, including `doctorAuth.auth.apiReady`, `doctorAuth.auth.recovery.reason`, `doctorAuth.auth.recovery.commands`, `doctorAuth.auth.recovery.verify`, `credentialRecovery.reason`, `credentialRecovery.authStatus`, and exact verification commands when auth is not API-ready. If structured auth says `apiReady=false`, the live text call is preflight-skipped with `textSmoke.work.stderr` set to `Skipped live provider call: auth-preflight-blocked`; this keeps blocked auth fast and explicit instead of spending time on a doomed model request. In `qa:health`, this appears as `liveRecovery=refresh credentials then npm run qa:live` so the operator can distinguish external auth blocking from UncleCode tool-call regressions. The report must always carry per-run proof fields under `toolCallSmoke.runId`, `toolCallSmoke.expectedText`, and `toolCallSmoke.markerPath`, even when text smoke blocks before tool execution. When credentials are API-ready, the report must pass both `textSmoke` and marker-backed `toolCallSmoke`; `toolCallSmoke.markerMatched: true` plus the per-run `toolCallSmoke.runId` marker proves the model actually used `run_shell` for this run instead of merely echoing expected text or reusing stale marker state. Use strict `npm run qa:live` when credentials are expected to pass, and use `node scripts/unclecode-live-provider-qa.mjs --json` only when the full live report is needed on stdout.
 - If live OpenAI is blocked by Codex OAuth, the expected reason is `openai-oauth-codex-runtime-not-api-ready`; that is an external auth readiness state, not a local tool-call regression.
@@ -54,6 +107,20 @@ If `qa:health` or `tests/context-broker/context-memory.test.mjs` fails with `ERR
 npm rebuild better-sqlite3
 npm run qa:health --silent
 ```
+
+### Validation record (2026-07-05 KST, T11 modes)
+
+Run on T11 worker branch, Node v22.22.x, macOS host.
+
+| Check | Result |
+| --- | --- |
+| `cargo build --workspace` | Required before orchestrator tests (Rust classify-intent) |
+| `npm run build` | PASS |
+| `node --conditions=source --import tsx --test tests/orchestrator/turn-orchestrator.test.mjs tests/orchestrator/work-shell-engine.test.mjs tests/contracts/orchestrator-multi-agent.contract.test.mjs` | PASS (intent routing + sanitization) |
+| `npm run test:context-broker` | PASS (memory transparency + prefetch degrade) |
+| `qa:health` | Recommended before release; not re-run in this worker |
+
+T11 changes reflected here: mode behavior table, UncleCode differentiation, persistent context bootstrap, Korean explanatory single-turn routing, assistant-text sanitization for leaked subtask JSON/worker monologue.
 
 ### Validation record (2026-07-03 KST)
 
@@ -119,8 +186,16 @@ UncleCode and the separate **Runbook** product (`~/project/runbook`, package can
 Context packet assembly:
 
 - `packages/context-broker/src/context-packet.ts` builds the repo map, selected context files, policy signals, token budget, and freshness gate.
-- `packages/context-broker/src/context-packet-view.ts` formats the model-facing preview and compact TUI indicators.
+- `packages/context-broker/src/context-packet-view.ts` is the single canonical formatter for model-facing previews, compact Work Shell `/context` overlay lines, provider prompt prefixes, and display-width-aware Korean truncation (`truncateForDisplayWidth`).
+- `packages/orchestrator/src/work-shell-context-packet.ts` re-exports the broker view helpers; do not fork packet formatting in orchestrator or TUI.
 - `apps/unclecode-cli/src/work-runtime-bootstrap.ts` merges workspace guidance, bridge lines, scoped memory, runtime trace lines, and OMO summaries into the Work Shell context view.
+
+Memory transparency and prefetch:
+
+- `packages/context-broker/src/context-memory.ts` owns session/project/user/agent scoped memory writes, reads, and structured `listScopedMemoryEntries`.
+- `packages/context-broker/src/memory-transparency.ts` formats inspectable lines: `scope · summary · cite memory:<id> · fresh|recent|aged`.
+- `packages/context-broker/src/memory-prefetch.ts` prefetches session + project memory under `DEFAULT_MEMORY_PREFETCH_TIMEOUT_MS` (2s). On timeout or failure it degrades to empty memory lines instead of blocking Work Shell startup.
+- `packages/orchestrator/src/work-shell-engine-context.ts` uses `prefetchScopedMemory` when loading Work Shell context state.
 
 Memory and runbook storage:
 
@@ -199,8 +274,10 @@ Use `--dispatch` only when a real external worker run is intended and credential
 - Include active OMO goal and criterion summaries, not raw ledgers, in the default packet.
 - Keep raw evidence paths local and inspectable; do not paste full transcripts into the model context unless a criterion requires it.
 - Every memory-derived claim should cite a procedural SOP path, project-memory id, external-doc citation, or SSOT `VersionedRef`.
+- Work Shell memory lines shown in `/context` must expose scope, citation id, and freshness (`fresh`, `recent`, `aged`) via `formatScopedMemoryTransparencyLine`.
 - Prefer section-level inclusion controls over broad all-or-nothing context injection.
-- Memory prefetch must fail fast or degrade to empty context; it must not block CLI startup indefinitely.
+- Memory prefetch must fail fast or degrade to empty context; it must not block CLI startup indefinitely. Default budget: `DEFAULT_MEMORY_PREFETCH_TIMEOUT_MS` (2000ms) in `packages/context-broker/src/memory-prefetch.ts`.
+- Slash commands in the Work Shell composer expose prefix matching and argument placeholders (for example `/model <id>`, `/mode set <profile>`) via `packages/tui/src/work-shell-slash.ts`.
 - Scope memory by user, agent, team, run, project, and session before adding cross-session recall.
 - For multi-agent work, give each lane a durable identity, append-only trace, and file-ownership boundary.
 

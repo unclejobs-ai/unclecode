@@ -111,5 +111,12 @@ export function truncateForDisplayWidth(value: string, maxWidth: number): string
   const ellipsis = "…";
   const ellipsisWidth = getDisplayWidth(ellipsis);
   const contentWidth = Math.max(0, maxWidth - ellipsisWidth);
-  return `${sliceByDisplayWidth(value, contentWidth)}${ellipsis}`;
+  const ellipsisVersion = `${sliceByDisplayWidth(value, contentWidth)}${ellipsis}`;
+  if (getDisplayWidth(ellipsisVersion) < maxWidth) {
+    const exactFit = sliceByDisplayWidth(value, maxWidth);
+    if (getDisplayWidth(exactFit) <= maxWidth && maxWidth <= 8) {
+      return exactFit;
+    }
+  }
+  return ellipsisVersion;
 }

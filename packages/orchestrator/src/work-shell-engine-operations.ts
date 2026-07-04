@@ -1,4 +1,8 @@
 import { runRustCommandSync } from "./rust-command.js";
+import {
+  formatScopedMemoryTransparencyLines,
+  type ScopedMemoryEntry,
+} from "@unclecode/context-broker";
 
 export async function resolveSecureApiKeyEntrySubmission(input: {
   line: string;
@@ -147,6 +151,13 @@ export async function writeWorkShellRememberCommand(input: {
     sessionId?: string;
     agentId?: string;
   }) => Promise<readonly string[]>;
+  listScopedMemoryEntries?: (input: {
+    scope: "session" | "project" | "user" | "agent";
+    cwd: string;
+    sessionId?: string;
+    agentId?: string;
+    limit?: number;
+  }) => Promise<readonly ScopedMemoryEntry[]>;
   formatAgentTraceLine: (event: {
     readonly type: "memory.written";
     readonly level: "high-signal";
@@ -165,12 +176,26 @@ export async function writeWorkShellRememberCommand(input: {
     sessionId: input.sessionId,
     agentId: "work-shell",
   });
-  const nextMemoryLines = await input.listScopedMemoryLines({
-    scope: input.command.scope === "project" ? "project" : input.command.scope,
-    cwd: input.cwd,
-    sessionId: input.sessionId,
-    agentId: "work-shell",
-  });
+  const memoryScope = input.command.scope === "project" ? "project" : input.command.scope;
+  const entries = input.listScopedMemoryEntries
+    ? await input.listScopedMemoryEntries({
+        scope: memoryScope,
+        cwd: input.cwd,
+        sessionId: input.sessionId,
+        agentId: "work-shell",
+      })
+    : (await input.listScopedMemoryLines({
+        scope: memoryScope,
+        cwd: input.cwd,
+        sessionId: input.sessionId,
+        agentId: "work-shell",
+      })).map((summary, index): ScopedMemoryEntry => ({
+        scope: memoryScope,
+        memoryId: `memory:${memoryScope}:1970-01-01T00:00:00.000Z:test${String(index + 1).padStart(4, "0")}`,
+        summary,
+        timestamp: "1970-01-01T00:00:00.000Z",
+      }));
+  const nextMemoryLines = formatScopedMemoryTransparencyLines(entries);
   const memoryTrace = input.formatAgentTraceLine({
     type: "memory.written",
     level: "high-signal",

@@ -1,5 +1,9 @@
 import { createConversationTurnSummary } from "./work-shell-engine-turns.js";
 import { runRustCommandSync } from "./rust-command.js";
+import {
+  formatScopedMemoryTransparencyLines,
+  type ScopedMemoryEntry,
+} from "@unclecode/context-broker";
 
 export type WorkShellSyntheticTraceEvent = {
   readonly type: "bridge.published" | "memory.written";
@@ -33,6 +37,13 @@ export type WorkShellPostTurnSuccessEffectsInput = {
     sessionId?: string;
     agentId?: string;
   }) => Promise<readonly string[]>;
+  listScopedMemoryEntries?: (input: {
+    scope: "session" | "project" | "user" | "agent";
+    cwd: string;
+    sessionId?: string;
+    agentId?: string;
+    limit?: number;
+  }) => Promise<readonly ScopedMemoryEntry[]>;
 };
 
 export type WorkShellPostTurnSuccessEffectsResult = {
@@ -194,11 +205,24 @@ export async function runWorkShellPostTurnSuccessEffects(
       agentId: "work-shell",
     });
     memoryId = memory.memoryId;
-    memoryLines = await input.listScopedMemoryLines({
-      scope: "session",
-      cwd: input.cwd,
-      sessionId: input.sessionId,
-    });
+    const entries = input.listScopedMemoryEntries
+      ? await input.listScopedMemoryEntries({
+          scope: "session",
+          cwd: input.cwd,
+          sessionId: input.sessionId,
+          agentId: "work-shell",
+        })
+      : (await input.listScopedMemoryLines({
+          scope: "session",
+          cwd: input.cwd,
+          sessionId: input.sessionId,
+        })).map((summary, index) => ({
+          scope: "session" as const,
+          memoryId: `memory:session:1970-01-01T00:00:00.000Z:test${String(index + 1).padStart(4, "0")}`,
+          summary,
+          timestamp: "1970-01-01T00:00:00.000Z",
+        }));
+    memoryLines = formatScopedMemoryTransparencyLines(entries);
   } catch (error) {
     memorySummary = "Context memory unavailable; reply kept.";
     memoryTraceEvent = createDegradedPostTurnTraceEvent(

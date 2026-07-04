@@ -1,6 +1,56 @@
+import {
+  formatScopedMemoryTransparencyLines,
+  prefetchScopedMemory,
+} from "@unclecode/context-broker";
+
 import { createCollapsedContextPanel } from "./work-shell-engine-panels.js";
 import { runRustCommandSync } from "./rust-command.js";
 import type { WorkShellPanel } from "./work-shell-engine.js";
+
+type PrefetchScopedMemory = typeof prefetchScopedMemory;
+
+async function resolveWorkShellMemoryLines(input: {
+  cwd: string;
+  sessionId: string;
+  env?: NodeJS.ProcessEnv;
+  prefetchScopedMemory?: PrefetchScopedMemory;
+  listScopedMemoryLines: (input: {
+    scope: "session" | "project" | "user" | "agent";
+    cwd: string;
+    sessionId?: string;
+    agentId?: string;
+  }) => Promise<readonly string[]>;
+}): Promise<readonly string[]> {
+  const prefetch = input.prefetchScopedMemory ?? prefetchScopedMemory;
+  const memoryPrefetch = await prefetch({
+    cwd: input.cwd,
+    sessionId: input.sessionId,
+    agentId: "work-shell",
+    ...(input.env ? { env: input.env } : {}),
+  });
+
+  if (memoryPrefetch.status === "degraded") {
+    return [];
+  }
+  if (memoryPrefetch.lines.length > 0) {
+    return memoryPrefetch.lines;
+  }
+
+  const summaries = await input.listScopedMemoryLines({
+    scope: "session",
+    cwd: input.cwd,
+    sessionId: input.sessionId,
+  });
+
+  return formatScopedMemoryTransparencyLines(
+    summaries.map((summary, index) => ({
+      scope: "session",
+      memoryId: `memory:session:1970-01-01T00:00:00.000Z:test${String(index + 1).padStart(4, "0")}`,
+      summary,
+      timestamp: "1970-01-01T00:00:00.000Z",
+    })),
+  );
+}
 
 type BuildContextPanel = (
   contextSummaryLines: readonly string[],
@@ -44,6 +94,8 @@ export async function loadInitialWorkShellContextState(input: {
     agentId?: string;
   }) => Promise<readonly string[]>;
   buildContextPanel: BuildContextPanel;
+  env?: NodeJS.ProcessEnv;
+  prefetchScopedMemory?: PrefetchScopedMemory;
 }): Promise<{
   readonly bridgeLines: readonly string[];
   readonly memoryLines: readonly string[];
@@ -51,7 +103,13 @@ export async function loadInitialWorkShellContextState(input: {
 }> {
   const [bridgeLines, memoryLines] = await Promise.all([
     input.listProjectBridgeLines(input.cwd),
-    input.listScopedMemoryLines({ scope: "session", cwd: input.cwd, sessionId: input.sessionId }),
+    resolveWorkShellMemoryLines({
+      cwd: input.cwd,
+      sessionId: input.sessionId,
+      listScopedMemoryLines: input.listScopedMemoryLines,
+      ...(input.env ? { env: input.env } : {}),
+      ...(input.prefetchScopedMemory ? { prefetchScopedMemory: input.prefetchScopedMemory } : {}),
+    }),
   ]);
 
   return {
@@ -79,6 +137,8 @@ export async function loadWorkShellContextState(input: {
     sessionId?: string;
     agentId?: string;
   }) => Promise<readonly string[]>;
+  env?: NodeJS.ProcessEnv;
+  prefetchScopedMemory?: PrefetchScopedMemory;
 }): Promise<{
   readonly contextSummaryLines: readonly string[];
   readonly bridgeLines: readonly string[];
@@ -89,10 +149,12 @@ export async function loadWorkShellContextState(input: {
       ? input.reloadWorkspaceContext(input.cwd)
       : Promise.resolve(input.currentContextSummaryLines),
     input.listProjectBridgeLines(input.cwd),
-    input.listScopedMemoryLines({
-      scope: "session",
+    resolveWorkShellMemoryLines({
       cwd: input.cwd,
       sessionId: input.sessionId,
+      listScopedMemoryLines: input.listScopedMemoryLines,
+      ...(input.env ? { env: input.env } : {}),
+      ...(input.prefetchScopedMemory ? { prefetchScopedMemory: input.prefetchScopedMemory } : {}),
     }),
   ]);
 
