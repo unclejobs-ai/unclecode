@@ -1196,10 +1196,46 @@ fn humanize_work_shell_mode_label(mode: &str) -> String {
 }
 
 fn normalize_status_detail(value: &str) -> String {
-    value
-        .trim_start_matches(|ch: char| matches!(ch, '·' | '→' | '★' | '✓' | '✖' | '↔'))
-        .trim()
-        .to_string()
+    let stripped = value
+        .trim_start_matches(|ch: char| matches!(ch, '·' | '→' | '★' | '✓' | '✖' | '↔' | '✦'))
+        .trim();
+    if stripped.is_empty() {
+        return String::new();
+    }
+    let lower = stripped.to_ascii_lowercase();
+    if lower.contains("planner") || lower.contains("routing complex") || lower.contains("prepared ") {
+        return "Planning parallel work".to_string();
+    }
+    if lower.contains("synthesis") || lower.contains("synthesiz") {
+        return "Synthesizing answer".to_string();
+    }
+    if lower.contains("reviewer") || lower.contains("guardian") {
+        return "Reviewing results".to_string();
+    }
+    if lower.starts_with("read ") || lower.starts_with("write ") || lower.starts_with("search ")
+    {
+        return "Reading files".to_string();
+    }
+    if lower.starts_with("calling ") || lower.starts_with("model ") {
+        return stripped
+            .replacen("calling ", "Model ", 1)
+            .replacen("model ", "Model ", 1)
+            .to_string();
+    }
+    if lower == "thinking" || lower == "thinking..." || lower == "reasoning" {
+        return "Thinking".to_string();
+    }
+    if lower.starts_with("executor") || lower.contains(" parallel ") || lower.contains("task") {
+        return "Parallel workers".to_string();
+    }
+    if looks_like_internal_file_path(stripped) {
+        return "Reading files".to_string();
+    }
+    stripped.to_string()
+}
+
+fn looks_like_internal_file_path(value: &str) -> bool {
+    value.contains('/') && value.contains('.') && !value.contains(' ')
 }
 
 fn format_compact_duration(duration_ms: i64) -> String {

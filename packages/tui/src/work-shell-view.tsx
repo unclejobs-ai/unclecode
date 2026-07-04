@@ -471,7 +471,44 @@ function formatCompactDuration(durationMs: number): string {
 }
 
 function normalizeBusyDetail(value: string): string {
-  return value.replace(/^[·→★✓✖↔\s]+/u, "").trim();
+  const stripped = value.replace(/^[·→★✓✖↔✦\s]+/u, "").trim();
+  if (!stripped) {
+    return "";
+  }
+  const lower = stripped.toLowerCase();
+  if (lower.includes("planner") || lower.includes("routing complex") || lower.includes("prepared ")) {
+    return "Planning parallel work";
+  }
+  if (lower.includes("synthesis") || lower.includes("synthesiz")) {
+    return "Synthesizing answer";
+  }
+  if (lower.includes("reviewer") || lower.includes("guardian")) {
+    return "Reviewing results";
+  }
+  if (lower.startsWith("read ") || lower.startsWith("write ") || lower.startsWith("search ")) {
+    return "Reading files";
+  }
+  if (lower.startsWith("calling ")) {
+    return stripped.replace(/^calling /i, "Model ");
+  }
+  if (lower.startsWith("model ")) {
+    return `Model ${stripped.slice(6).trim()}`;
+  }
+  if (
+    lower === "thinking"
+    || lower === "thinking..."
+    || lower === "thinking…"
+    || lower === "reasoning"
+  ) {
+    return "Thinking";
+  }
+  if (lower.startsWith("executor") || lower.includes(" parallel ") || lower.includes("task")) {
+    return "Parallel workers";
+  }
+  if (stripped.includes("/") && stripped.includes(".") && !stripped.includes(" ")) {
+    return "Reading files";
+  }
+  return stripped;
 }
 
 export function parseWorkShellPanelFactLine(line: string): { readonly label: string; readonly value: string } | undefined {
@@ -654,25 +691,15 @@ function padDisplayLine(value: string, width: number): string {
   return `${value}${" ".repeat(padding)}`;
 }
 
-function renderRailBodyLines(input: {
+function renderContinuationBodyLines(input: {
   readonly lines: readonly string[];
-  readonly railColor: string;
   readonly bodyColor: string;
   readonly keyPrefix: string;
 }): React.ReactNode {
   return input.lines.map((line, lineIndex) => (
     <Text key={`${input.keyPrefix}-${String(lineIndex)}`}>
-      {lineIndex === 0 ? (
-        <>
-          <Text color={input.railColor}>▌ </Text>
-          <WorkShellReadableText color={input.bodyColor}>{line}</WorkShellReadableText>
-        </>
-      ) : (
-        <>
-          <Text {...readableTextColorProps(W.textDim)}>{BODY_CONTINUATION_INDENT}</Text>
-          <WorkShellReadableText color={input.bodyColor}>{line}</WorkShellReadableText>
-        </>
-      )}
+      <Text {...readableTextColorProps(W.textDim)}>{BODY_CONTINUATION_INDENT}</Text>
+      <WorkShellReadableText color={input.bodyColor}>{line}</WorkShellReadableText>
     </Text>
   ));
 }
@@ -720,11 +747,66 @@ export function formatWorkShellConversationEntryLines(input: {
   return prefixWrappedDisplayText(`${presentation.badge} ${presentation.label} · `, bodyText, input.width);
 }
 
+function looksLikeHiddenWorkerMeta(text: string): boolean {
+  const trimmed = text.trim();
+  if (/^subtask-\d+/i.test(trimmed)) {
+    return true;
+  }
+  if (/^\[[\s\S]*"id"\s*:\s*"subtask-/i.test(trimmed)) {
+    return true;
+  }
+  if (/^\{[\s\S]*"id"\s*:\s*"subtask-/i.test(trimmed)) {
+    return true;
+  }
+  return false;
+}
+
 export function shouldShowWorkShellConversationEntry(entry: WorkShellEntry): boolean {
-  return entry.role !== "tool" && (
-    entry.role !== "assistant" ||
-    formatWorkShellAssistantDisplayText(entry.text).trim().length > 0
-  );
+  if (entry.role === "tool" || isInternalTraceConversationText(entry.text)) {
+    return false;
+  }
+  if (entry.role === "system" && (isInternalSystemTraceText(entry.text) || looksLikeHiddenWorkerMeta(entry.text))) {
+    return false;
+  }
+  if (entry.role === "assistant") {
+    const sanitized = formatWorkShellAssistantDisplayText(entry.text).trim();
+    return sanitized.length > 0 && !looksLikeHiddenWorkerMeta(sanitized);
+  }
+  return true;
+}
+
+function isInternalTraceConversationText(text: string): boolean {
+  const trimmed = text.trimStart();
+  return /^✦ (?:thinking|reasoning)·/u.test(trimmed)
+    || /^→ (?:read|write|search|model|planner|action)/u.test(trimmed)
+    || /^[✓✖→·★↔↗📎] /u.test(trimmed);
+}
+
+function isInternalSystemTraceText(text: string): boolean {
+  const trimmed = text.trim();
+  return /^(?:Turn (?:started|completed|interrupted)|calling |route |thinking )/i.test(trimmed);
+}
+
+export function resolveWorkShellBusyActivityColor(input: {
+  readonly mode: string;
+  readonly isBusy: boolean;
+  readonly busyStatus?: string;
+}): string {
+  if (!input.isBusy) {
+    return W.textMuted;
+  }
+  const detail = normalizeBusyDetail(input.busyStatus ?? "").toLowerCase();
+  if (
+    input.mode === "ultrawork"
+    || input.mode === "yolo"
+    || detail.includes("parallel")
+    || detail.includes("planning")
+    || detail.includes("synthesiz")
+    || detail.includes("reviewing")
+  ) {
+    return W.user;
+  }
+  return W.assistant;
 }
 
 export function formatWorkShellHeaderLine(input: {
@@ -793,6 +875,7 @@ function wrapDisplayText(value: string, width: number): string[] {
 
 function resolveWorkShellComposerDockAccentRole(input: {
   readonly inputValue: string;
+  readonly mode?: string;
   readonly isBusy?: boolean;
   readonly queuePaused?: boolean;
   readonly queuedCount?: number;
@@ -802,6 +885,9 @@ function resolveWorkShellComposerDockAccentRole(input: {
   }
   if (input.queuePaused && (input.queuedCount ?? 0) > 0) {
     return "warning";
+  }
+  if (input.isBusy && (input.mode === "ultrawork" || input.mode === "yolo")) {
+    return "user";
   }
   if (input.isBusy || (input.queuedCount ?? 0) > 0) {
     return "assistant";
@@ -813,6 +899,7 @@ function resolveWorkShellComposerDockLayout(input: {
   readonly inputValue: string;
   readonly dockWidth: number;
   readonly footerLine: string;
+  readonly mode?: string;
   readonly attachmentCount?: number;
   readonly isBusy?: boolean;
   readonly queuePaused?: boolean;
@@ -841,10 +928,11 @@ function renderWorkShellEntryBlock(input: {
     : input.entry.text;
 
   if (input.entry.role === "user") {
-    const lines = wrapDisplayText(bodyText, Math.max(20, input.width - 8));
-    const renderedLines = lines.length > 0 ? lines : [""];
+    const prefix = `${presentation.badge} ${presentation.label} · `;
+    const lines = prefixWrappedDisplayText(prefix, bodyText, input.width);
     const labelBackgroundColor = presentation.labelBackgroundColor ?? W.userBadgeBg;
     const labelTextColor = presentation.labelTextColor ?? W.userBadgeText;
+    const prefixWidth = getDisplayWidth(prefix);
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
@@ -852,17 +940,26 @@ function renderWorkShellEntryBlock(input: {
         paddingLeft={1}
         flexDirection="column"
       >
-        <Text>
-          <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
-            {presentation.badge} {presentation.label}
+        {lines.map((line, lineIndex) => (
+          <Text key={`user-${String(input.index)}-${String(lineIndex)}`}>
+            {lineIndex === 0 ? (
+              <>
+                <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
+                  {presentation.badge} {presentation.label}
+                </Text>
+                <Text {...readableTextColorProps(W.textMuted)}> · </Text>
+                <WorkShellReadableText color={presentation.bodyColor}>
+                  {line.slice(prefixWidth)}
+                </WorkShellReadableText>
+              </>
+            ) : (
+              <>
+                <Text {...readableTextColorProps(W.textDim)}>{" ".repeat(prefixWidth)}</Text>
+                <WorkShellReadableText color={presentation.bodyColor}>{line.trimStart()}</WorkShellReadableText>
+              </>
+            )}
           </Text>
-        </Text>
-        {renderRailBodyLines({
-          lines: renderedLines,
-          railColor: presentation.railColor,
-          bodyColor: presentation.bodyColor,
-          keyPrefix: `user-${String(input.index)}`,
-        })}
+        ))}
       </Box>
     );
   }
@@ -893,9 +990,8 @@ function renderWorkShellEntryBlock(input: {
               {presentation.badge} {presentation.label}
             </Text>
           </Text>
-          {renderRailBodyLines({
+          {renderContinuationBodyLines({
             lines,
-            railColor: presentation.railColor,
             bodyColor: presentation.bodyColor,
             keyPrefix: `assistant-${String(input.index)}`,
           })}
@@ -917,9 +1013,8 @@ function renderWorkShellEntryBlock(input: {
           </Text>
         </Text>
         <Box marginTop={0} flexDirection="column">
-          {renderRailBodyLines({
+          {renderContinuationBodyLines({
             lines: wrapDisplayText(bodyText, Math.max(20, input.width - 4)),
-            railColor: presentation.railColor,
             bodyColor: presentation.bodyColor,
             keyPrefix: `assistant-card-${String(input.index)}`,
           })}
@@ -1125,16 +1220,40 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
   readonly headerHint?: string;
   readonly terminalColumns?: number;
 }) {
-  const line = formatWorkShellHeaderLine({
-    providerTitle: formatWorkShellProviderTitle(props.provider),
-    headerHint: props.headerHint ?? "work context · Ctrl+O sessions · / commands",
-    ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
-  });
+  const providerTitle = formatWorkShellProviderTitle(props.provider);
+  const headerHint = props.headerHint ?? "work context · Ctrl+O sessions · / commands";
+  const width = Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 2);
+  const leftWidth = getDisplayWidth(providerTitle);
+  const rightWidth = getDisplayWidth(headerHint);
+  const minGap = 2;
+  const dividerWidth = Math.max(24, Math.min(48, (props.terminalColumns ?? process.stdout.columns ?? 96) - 8));
+
+  if (leftWidth + minGap + rightWidth > width && leftWidth + minGap + 12 > width) {
+    return (
+      <Box flexDirection="column">
+        <Text bold {...readableTextColorProps(W.borderStrong)}>
+          {truncateForDisplayWidth(providerTitle, width)}
+        </Text>
+        <Text color={W.textDim}>{"─".repeat(dividerWidth)}</Text>
+      </Box>
+    );
+  }
+
+  const hintText = leftWidth + minGap + rightWidth <= width
+    ? headerHint
+    : truncateForDisplayWidth(headerHint, Math.max(12, width - leftWidth - minGap));
+  const hintGap = leftWidth + minGap + getDisplayWidth(hintText) <= width
+    ? " ".repeat(Math.max(minGap, width - leftWidth - getDisplayWidth(hintText)))
+    : " ".repeat(minGap);
 
   return (
     <Box flexDirection="column">
-      <Text {...readableTextColorProps(W.text)}>{line}</Text>
-      <Text color={W.textDim}>{"─".repeat(Math.max(24, Math.min(48, (props.terminalColumns ?? process.stdout.columns ?? 96) - 8)))}</Text>
+      <Text>
+        <Text bold {...readableTextColorProps(W.borderStrong)}>{providerTitle}</Text>
+        <Text>{hintGap}</Text>
+        <Text {...readableTextColorProps(W.textDim)}>{hintText}</Text>
+      </Text>
+      <Text color={W.textDim}>{"─".repeat(dividerWidth)}</Text>
     </Box>
   );
 });
@@ -1165,6 +1284,11 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
     nowMs,
     spinnerFrame,
   });
+  const activityColor = resolveWorkShellBusyActivityColor({
+    mode: props.mode,
+    isBusy: props.isBusy,
+    ...(props.busyStatus ? { busyStatus: props.busyStatus } : {}),
+  });
 
   React.useEffect(() => {
     if (!props.isBusy) {
@@ -1188,12 +1312,12 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   return (
     <Box marginTop={1} paddingLeft={1}>
       <Text>
-        <Text color={W.assistant}>{props.isBusy ? "◈ " : "◇ "}</Text>
-        <Text {...readableTextColorProps(W.text)}>{sessionGroup}</Text>
+        <Text color={props.isBusy ? W.assistant : W.user}>{props.isBusy ? "◈ " : "◇ "}</Text>
+        <Text bold {...readableTextColorProps(W.borderStrong)}>{sessionGroup}</Text>
         <Text {...readableTextColorProps(W.textMuted)}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
         <Text {...readableTextColorProps(W.textMuted)}>{authGroup}</Text>
         <Text {...readableTextColorProps(W.textMuted)}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
-        <Text {...(props.isBusy ? { color: W.assistant } : readableTextColorProps(W.textMuted))}>{activityLine}</Text>
+        <Text {...(props.isBusy ? { color: activityColor } : readableTextColorProps(W.textMuted))}>{activityLine}</Text>
       </Text>
     </Box>
   );
@@ -1229,22 +1353,27 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
     inputValue: props.inputValue,
     dockWidth,
     footerLine,
+    mode: props.mode,
     ...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {}),
     ...(props.isBusy ? { isBusy: true } : {}),
     ...(props.queuePaused ? { queuePaused: true } : {}),
     ...(props.queuedCount !== undefined ? { queuedCount: props.queuedCount } : {}),
   });
-  const accent = dockLayout.accentColorRole === "user" || dockLayout.accentColorRole === "assistant"
-    ? W.assistant
-    : dockLayout.accentColorRole === "warning"
-      ? W.warning
-      : W.borderStrong;
+  const accent = dockLayout.accentColorRole === "user"
+    ? W.user
+    : dockLayout.accentColorRole === "assistant"
+      ? W.assistant
+      : dockLayout.accentColorRole === "warning"
+        ? W.warning
+        : W.borderStrong;
   const badgeColorProps = dockLayout.attachmentBadgeColorRole === "warning" ? { color: W.warning } : readableTextColorProps(W.textDim);
   const hintColorProps = dockLayout.accentColorRole === "warning"
     ? { color: W.warning }
-    : dockLayout.accentColorRole === "assistant"
-      ? { color: W.assistant }
-      : readableTextColorProps(W.textMuted);
+    : dockLayout.accentColorRole === "user"
+      ? { color: W.user }
+      : dockLayout.accentColorRole === "assistant"
+        ? { color: W.assistant }
+        : readableTextColorProps(W.textMuted);
 
   return (
     <Box marginTop={1} flexDirection="column">

@@ -92,7 +92,7 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Work shell header
 
-- Structure: provider title, shortcut hint, strong divider.
+- Structure: provider title (bold, `--text-secondary`), shortcut hint (caption/muted), strong divider.
 - Variants: default provider, narrow terminal truncation.
 - Spacing: `--space-2` inline gap, one divider row.
 - States: default, truncated.
@@ -101,12 +101,13 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Work shell status line
 
-- Structure: grouped facts — session (`model · mode`), auth, activity — separated by muted `│`.
-- Variants: idle, busy, interrupted idle, queue paused.
+- Structure: grouped facts — session (`model · mode`, bold), auth, activity — separated by muted `│`.
+- Variants: idle, busy, interrupted idle, queue paused, parallel/ultrawork (sky accent on activity).
 - Spacing: inline separators with muted text; avoid repeating footer facts here.
 - States: default, loading/busy, paused, warning.
 - Accessibility: spinner is supplementary; text must carry the state.
 - Motion: single spinner only while busy. Never duplicate activity spinners elsewhere.
+- Busy detail: humanize file paths and raw tool names; keep specific progress phrases like `thinking inspect repo` when they add signal.
 
 ### Work shell footer
 
@@ -119,14 +120,15 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Conversation entry
 
-- Structure: role badge and wrapped body; rail color carries role identity on the first body line only.
+- Structure: role badge and wrapped body; continuation lines use a quiet indent only — no repeated rail glyph (`▌`) spam.
 - Variants: user, assistant compact, assistant expanded, system, tool diagnostics.
-- Spacing: one row between entries; continuation lines use a quiet indent without repeating the rail glyph.
+- Spacing: one row between entries; user entries use `badge label · body` on the first line when short.
 - States: default, streaming assistant, filtered tool trace.
 - Accessibility: role labels are textual; color is not the only role signal.
 - Motion: streaming cursor only when assistant text is live.
 - Badge copy: do not append redundant `message` / `reply` suffixes beside role badges.
 - System feedback: muted body (`text-muted`), dim glyph prefix, no standalone unstyled float.
+- Hidden transcript: reasoning deltas, tool traces, subtask JSON, worker meta, and internal turn routing lines stay out of the default conversation surface.
 
 ### Empty conversation
 
@@ -149,8 +151,8 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Composer dock
 
-- Structure: muted prompt-deck divider, `›` input prefix, footer context row.
-- Variants: default, slash command accent, secure entry, attachment count, queue paused hint.
+- Structure: hint row (accent follows state: user slash, assistant busy, warning queue), muted `─ prompt deck ─` divider, `›` input prefix, footer context row (cwd + one chip).
+- Variants: default, slash command accent, secure entry, attachment count, queue paused hint, parallel busy accent.
 - Spacing: one hint row above, one prompt row, one footer row; no double border above/below input.
 - States: default, focus by input, secure input, attachment cap warning, queued.
 - Accessibility: hints must expose keyboard actions.

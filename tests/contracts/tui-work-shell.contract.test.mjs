@@ -1368,6 +1368,14 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
     "tool traces stay out of the default conversation transcript",
   );
   assert.equal(
+    shouldShowWorkShellConversationEntry({
+      role: "assistant",
+      text: "✦ thinking· inspect repo before editing",
+    }),
+    false,
+    "reasoning trace lines stay out of the default conversation transcript",
+  );
+  assert.equal(
     shouldShowWorkShellConversationEntry({ role: "assistant", text: "Done" }),
     true,
   );
