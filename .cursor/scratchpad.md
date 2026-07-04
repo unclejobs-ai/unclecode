@@ -50,7 +50,7 @@
   - TS `sanitizeWorkShellAssistantText`: strip subtask JSON + worker monologue meta lines
   - Runbook: mode table, differentiation, persistent context bootstrap, memory scopes, T11 validation record
   - Tests: turn-orchestrator, work-shell-engine sanitization, orchestrator-multi-agent contract
-  - 커밋: (pending this worker)
+  - 커밋: `48e0a8a` (orchestrator routing + sanitization), runbook T11 sections in `5898ca0`
 - [x] T9-C1 TUI design pass (conversation rail, status grouping, composer/footer chrome) — Executor 7/5 02:xx
   - 산출: single-line rail, grouped status strip (`model · mode │ auth │ activity`), lighter prompt divider, footer = cwd + one context chip, busy copy `⠋ 1.5s · detail`
   - 검증: test:tui 86/86, contract tui-work-shell 46/46, packages/tui tsc OK (full npm run build blocked by Worker B orchestrator WIP)
@@ -108,9 +108,9 @@
   - **Executor 규칙:** 한 번에 E1만(권장). `context-packet-view.ts` 정본 유지.
 
 - [ ] **T12 Modes & hidden orchestration** (holistic roadmap §T12 — ultrawork/parallel/yolo/plan, JSON leak 방지)
-  - [ ] **T12-E1** Classifier: KO/EN 정보 질문 → simple in ultrawork (contract test 정합)
+  - [x] **T12-E1** Classifier: KO/EN 정보 질문 → simple in ultrawork — `48e0a8a` (partial GATE)
   - [ ] **T12-E2** Mode labels KO + Rust→TS 단일 정본 (`ultrawork` ≠ 별도 mode id)
-  - [ ] **T12-E3** Complex turn transcript = synthesis only; traces → Session Center/agentops
+  - [x] **T12-E3** Complex turn transcript = synthesis only; internal turns no stream — `48e0a8a` + `df4c92d` transcript filter (partial GATE)
   - [ ] **T12-E4** `plan` mode read-only tool gate + slash hint
   - [ ] **T12-E5** Architecture doc mode matrix sync
   - [ ] **T12-GATE** qa:health; "병렬 모드 설명" → 단일 한국어 답, JSON 없음
@@ -167,11 +167,11 @@
 ## Current Status / Progress Tracking
 
 - 2026-07-05 (Planner — Holistic): `docs/design/unclecode-holistic-roadmap-2026-07.md` 작성. Phase B mermaid + Keep/Fix/Add/Remove × 7 regions, Phase C modes/KO naming/Fable-5 spec, Phase D T11–T14 Executor steps + GATE. `context-bootstrap-pipeline.md` 통합. **다음 Executor:** T11-E1 (manifest only) 또는 사용자가 T12 우선 지정 시 T12-E1.
-- 2026-07-05 (조정자 — Planner 묶음): 완료 Planner 4종 — [bootstrap audit](ad5ee52b), [architecture docs](3c5f03ec) `f539dd0`, [holistic roadmap](c3f9e35e), [TUI design](919a78f1) `fbe4722`. **미커밋 docs:** `context-bootstrap-pipeline.md`, `unclecode-holistic-roadmap-2026-07.md`. **Executor WIP(진행/충돌 주의):** `context-bootstrap.ts`+`work-runtime-bootstrap.ts`(T11-E1 초과 가능), `work-agent.ts`+sanitizer(T12), memory-prefetch/transparency(T10). 통합·qa:health는 [T10 integration](9c5223a4) 대기.
+- 2026-07-05 (조정자): T12 partial — [parallel mode fix](92a48367) `48e0a8a` (E1+E3 핵심). TUI — [production polish](25019581) `df4c92d`. T10 partial — `5898ca0` memory transparency. **미커밋 docs:** bootstrap pipeline + holistic roadmap. **WIP:** `context-bootstrap.ts`, `work-runtime-bootstrap.ts`, orchestrator engine-context/operations. **다음:** [T10 integration](9c5223a4) qa:health + docs 커밋.
 - 2026-07-05 (doc worker): README Architecture 섹션 갱신 + `persistent-context-architecture.md`(mermaid 5) + `devils-advocate-review-2026-07.md`. docs-only 커밋, push 없음.
 - 2026-07-05 (Planner): T11 Context Bootstrap audit 완료. 설계 문서 `docs/design/context-bootstrap-pipeline.md` 작성.
 - 2026-07-05 01:45: Planner가 T9를 A1–A4 + B1–B4 + T10으로 재분해. Executor 즉시 T9-A1(스트리밍 미커밋 6파일) 검증·커밋부터 착수.
-- [x] T9-C2 TUI production-grade visual polish (7/5 02:xx) — `feat(tui): production-grade shell visual polish`
+- [x] T9-C2 TUI production-grade visual polish (7/5 02:xx) — `df4c92d` `feat(tui): production-grade shell visual polish`
   - 산출: ▌ rail 제거, user `◇ You · body` compact, header bold/muted hierarchy, busy detail humanization(경로→Reading files, specific progress 유지), parallel busy sky accent, subtask/reasoning trace transcript filter, `docs/design/tui-quality-bar.md`, DESIGN.md 갱신
   - 검증: test:tui 86/86, contract tui-work-shell 46/46, packages/tui tsc OK
 - 2026-07-05 02:xx: T9-C2 production-grade TUI polish 커밋 완료 — before/after checklist는 `docs/design/tui-quality-bar.md` 참조.
@@ -181,6 +181,7 @@
 
 ## Executor's Feedback or Assistance Requests
 
+- [T11-E2/E3 Executor 7/5] Parallel mode TUI leak fix 커밋 `48e0a8a`: ultrawork info 질문 simple 라우팅, `runInternalTurn`으로 planner/executor/guardian 스트리밍 차단, subtask JSON·worker 메타 sanitize, busy 경로 마스킹. 검증: turn-orchestrator 13/13, Rust orchestrator 11/11, sanitize turn-helpers OK. 사용자 TUI 수동 재현 확인 대기.
 - [Holistic Planner→Executor] 우선순위 기본 순서: **T11-E1 → … → T11-GATE → T12 → T13 → T14**. T9/T10 미완(스트리밍·B3·B4·qa:health)은 T11과 병렬 가능하나 `work-runtime-bootstrap.ts` 충돌 시 T11-E2 후 T12-E3.
 - [T11 Planner→Executor] T11-E1 착수 전 확인: bootstrap.json만 먼저(동작 변경 없음) vs E1+E2 묶음(패킷 경고까지). 권장: **E1 단독**.
 - [T1→T2 인계] runtime QA 실패는 워커 B 영역: 풀스크린 TUI 헤더 전경색이 truecolor로 방출되지 않아 라이트 터미널 대비 게이트 실패. → **워커 B가 해소 보고**: 근본 원인은 tmux `capture-pane -e`가 `FORCE_COLOR` 없이는 truecolor ANSI를 캡처하지 못하는 것. `tui-context-contrast-smoke.mjs`·`tui-basic-smokes.mjs`에 `FORCE_COLOR=3` 적용 후 통과.
