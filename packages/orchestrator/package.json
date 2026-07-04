@@ -6,6 +6,7 @@
   "dependencies": {
     "@unclecode/agentops-db": "file:../agentops-db",
     "@unclecode/config-core": "file:../config-core",
+    "@unclecode/context-broker": "file:../context-broker",
     "@unclecode/contracts": "file:../contracts",
     "@unclecode/providers": "file:../providers",
     "@unclecode/session-store": "file:../session-store",

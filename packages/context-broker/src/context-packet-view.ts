@@ -5,6 +5,8 @@ import type {
   CreateContextPacketViewInput,
 } from "@unclecode/contracts";
 
+import { truncateForDisplayWidth } from "./display-width.js";
+
 function cloneItems(items: readonly ContextPacketViewItem[]): readonly ContextPacketViewItem[] {
   return items.map((item) => ({ ...item }));
 }
@@ -66,8 +68,43 @@ function formatPacketItem(item: ContextPacketViewItem): string {
   return `- ${formatPacketCategory(item.category)}: ${formatPacketItemBody(item)}`;
 }
 
-function truncatePacketText(value: string, maxLength = 112): string {
-  return value.length <= maxLength ? value : `${value.slice(0, Math.max(0, maxLength - 3))}...`;
+const WORK_SHELL_GROUP_SUMMARY_MAX_WIDTH = 64;
+
+function truncatePacketText(value: string, maxWidth = 112): string {
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  return truncateForDisplayWidth(normalized, maxWidth);
+}
+
+function formatCompactGroupSummary(
+  item: ContextPacketViewItem,
+  maxWidth = WORK_SHELL_GROUP_SUMMARY_MAX_WIDTH,
+): string {
+  const preview = item.preview?.trim();
+  const label = item.label.trim();
+  if (preview && preview.length > 0 && preview !== label) {
+    return truncatePacketText(preview, maxWidth);
+  }
+  const reason = item.reason.trim();
+  return truncatePacketText(reason.length > 0 ? `${label} — ${reason}` : label, maxWidth);
+}
+
+function formatWorkShellCategorySummaryLines(input: {
+  readonly items: readonly ContextPacketViewItem[];
+  readonly visibleLimit: number;
+  readonly includeHiddenGroupsLine?: boolean;
+}): readonly string[] {
+  const summaries = summarizeItemsByCategory(input.items);
+  if (summaries.length === 0) {
+    return ["  none"];
+  }
+  const visible = summaries
+    .slice(0, input.visibleLimit)
+    .map((summary) =>
+      `  ${formatPacketCategory(summary.sample.category)} · ${summary.count} · ${formatCompactGroupSummary(summary.sample)}`);
+  const hiddenCount = Math.max(0, summaries.length - input.visibleLimit);
+  return hiddenCount > 0 && input.includeHiddenGroupsLine
+    ? [...visible, `  +${hiddenCount} more source groups (counts still tracked)`]
+    : visible;
 }
 
 function summarizeItemsByCategory(items: readonly ContextPacketViewItem[]): readonly PacketSourceSummary[] {
@@ -103,6 +140,22 @@ function formatCategorySummaryLines(input: {
     : visible;
 }
 
+export function buildWorkShellCompactContextPacketPreviewLines(packet: ContextPacketView): readonly string[] {
+  return [
+    formatSourceCountLine(packet),
+    "Included in next answer",
+    ...formatWorkShellCategorySummaryLines({
+      items: packet.included,
+      visibleLimit: 4,
+      includeHiddenGroupsLine: true,
+    }),
+    "Held back locally",
+    ...formatWorkShellCategorySummaryLines({ items: packet.excluded, visibleLimit: 2 }),
+    formatWarningsLine(packet.warnings, 72),
+    formatPreviewLine(packet),
+  ];
+}
+
 function formatWarningCount(count: number): string {
   return count === 1 ? "1 warning" : `${count} warnings`;
 }
@@ -112,13 +165,16 @@ function formatSourceCountLine(packet: ContextPacketView): string {
   return `Sources · ${packet.sourceCounts.included} included · ${packet.sourceCounts.excluded} held back · ${formatWarningCount(packet.sourceCounts.warnings)}${tokenSuffix}`;
 }
 
-function formatWarningsLine(warnings: readonly ContextPacketViewWarning[]): string {
+function formatWarningsLine(
+  warnings: readonly ContextPacketViewWarning[],
+  maxWidth = 96,
+): string {
   const first = warnings[0];
   if (first === undefined) {
     return "Warnings · none";
   }
   const hiddenSuffix = warnings.length > 1 ? ` · ${warnings.length - 1} more` : "";
-  return `Warnings · ${warnings.length} · ${truncatePacketText(`${first.code}: ${first.message}`, 96)}${hiddenSuffix}`;
+  return `Warnings · ${warnings.length} · ${truncatePacketText(`${first.code}: ${first.message}`, maxWidth)}${hiddenSuffix}`;
 }
 
 function formatPreviewLine(packet: ContextPacketView): string {
@@ -186,4 +242,11 @@ export function formatContextPacketPromptPrefix(packet: ContextPacketView): stri
 export function formatContextPacketIndicator(packet: ContextPacketView): string {
   const base = `context ${packet.sourceCounts.included} ready · ${packet.sourceCounts.excluded} held back`;
   return packet.sourceCounts.warnings > 0 ? `${base} · ${packet.sourceCounts.warnings} issue` : base;
+}
+
+export function composeWorkShellTurnPromptFromPacket(input: {
+  readonly packet: ContextPacketView;
+  readonly userPrompt: string;
+}): string {
+  return `${formatContextPacketPromptPrefix(input.packet)}\n\nUser request:\n${input.userPrompt}`;
 }

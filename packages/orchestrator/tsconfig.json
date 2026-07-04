@@ -9,6 +9,7 @@
   "references": [
     { "path": "../agentops-db" },
     { "path": "../config-core" },
+    { "path": "../context-broker" },
     { "path": "../contracts" },
     { "path": "../providers" },
     { "path": "../session-store" }

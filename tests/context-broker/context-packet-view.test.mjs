@@ -3,10 +3,12 @@ import { describe, it } from "node:test";
 
 import {
   buildContextPacketPreviewLines,
+  buildWorkShellCompactContextPacketPreviewLines,
   createContextPacketView,
   formatContextPacketIndicator,
   formatContextPacketPromptPrefix,
 } from "../../packages/context-broker/src/context-packet-view.ts";
+import { getDisplayWidth } from "../../packages/context-broker/src/display-width.ts";
 
 describe("context packet view", () => {
   it("builds a human next-answer context preview with source counts", () => {
@@ -215,5 +217,57 @@ describe("context packet view", () => {
     assert.ok(lines.includes("Warnings · 7 · warning.1: warning 1 · 6 more"));
     assert.ok(lines.includes("Next answer · provider prefix preview"));
     assert.equal(lines.length <= 12, true);
+  });
+
+  it("builds the compact work-shell overlay preview from the shared formatter", () => {
+    const packet = createContextPacketView({
+      id: "packet-work-shell",
+      generatedAt: "2026-06-04T00:00:00.000Z",
+      included: [
+        {
+          id: "workspace-guidance",
+          category: "workspace",
+          label: "AGENTS.md",
+          reason: "repo instructions loaded",
+          preview: "Prefer small reversible diffs.",
+        },
+      ],
+      excluded: [],
+      warnings: [],
+      preview: ["Context will be carried into the next answer."],
+    });
+
+    const lines = buildWorkShellCompactContextPacketPreviewLines(packet);
+    assert.ok(lines[0]?.startsWith("Sources ·"));
+    assert.ok(lines.includes("Included in next answer"));
+    assert.ok(lines.some((line) => line.startsWith("  workspace ·")));
+    assert.equal(lines.some((line) => line.includes("Controls ·")), false);
+  });
+
+  it("truncates Korean summaries by display width instead of code units", () => {
+    const longPreview = "가나다라마바사아자차카타파하".repeat(4);
+    const packet = createContextPacketView({
+      id: "packet-hangul-truncate",
+      generatedAt: "2026-06-04T00:00:00.000Z",
+      included: [
+        {
+          id: "omo-summary",
+          category: "omo",
+          label: "G001 context MVP",
+          reason: "active ULW goal",
+          preview: longPreview,
+        },
+      ],
+      excluded: [],
+      warnings: [],
+      preview: [],
+    });
+
+    const summaryLine = buildWorkShellCompactContextPacketPreviewLines(packet)
+      .find((line) => line.includes("omo ·"));
+    assert.ok(summaryLine);
+    const summary = summaryLine.split(" · ").slice(2).join(" · ");
+    assert.ok(getDisplayWidth(summary) <= 64);
+    assert.match(summary, /…$/);
   });
 });

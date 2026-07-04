@@ -22,6 +22,8 @@ export { assembleContextPacket, estimateTokens, getTokenBudget } from "./context
 export { prepareResearchBundle } from "./research-bundle.js";
 export {
   buildContextPacketPreviewLines,
+  buildWorkShellCompactContextPacketPreviewLines,
+  composeWorkShellTurnPromptFromPacket,
   createContextPacketView,
   formatContextPacketIndicator,
   formatContextPacketPromptPrefix,
