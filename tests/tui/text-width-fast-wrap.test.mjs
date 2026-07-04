@@ -26,6 +26,7 @@ test("wrapDisplayTextFast preserves explicit newlines", () => {
 });
 
 test("truncateForDisplayWidth avoids splitting Hangul and emoji graphemes", () => {
+  assert.equal(truncateForDisplayWidth("한글", 4), "한글");
   assert.equal(truncateForDisplayWidth("한글응답", 4), "한글");
   assert.equal(getDisplayWidth(truncateForDisplayWidth("한글응답", 4)), 4);
   assert.equal(truncateForDisplayWidth("🙂테스트", 3), "🙂");

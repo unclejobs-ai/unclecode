@@ -129,6 +129,7 @@ test("runtime QA stays split into inspectable modules", () => {
     "tui-basic-smokes.mjs",
     "tui-context-contrast-smoke.mjs",
     "tui-korean-smoke.mjs",
+    "tui-openai-stream-smoke.mjs",
     "tui-real-use-smoke.mjs",
     "tui-slash-latency-smoke.mjs",
     "tui-suite-smokes.mjs",
