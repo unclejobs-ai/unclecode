@@ -1782,10 +1782,30 @@ fn number_field(input: &Value, key: &str) -> Option<i64> {
 }
 
 fn normalize_status_detail(value: &str) -> String {
-    value
+    let stripped = value
         .trim_start_matches(|ch: char| matches!(ch, '·' | '→' | '★' | '✓' | '✖' | '↔'))
-        .trim()
-        .to_string()
+        .trim();
+    if stripped.is_empty() {
+        return String::new();
+    }
+    let lower = stripped.to_ascii_lowercase();
+    if lower.starts_with("read ") || lower.starts_with("write ") || lower.starts_with("search ")
+    {
+        return "Reading files".to_string();
+    }
+    if lower.starts_with("calling ") {
+        return stripped
+            .replacen("calling ", "model ", 1)
+            .to_string();
+    }
+    if looks_like_internal_file_path(stripped) {
+        return "Reading files".to_string();
+    }
+    stripped.to_string()
+}
+
+fn looks_like_internal_file_path(value: &str) -> bool {
+    value.contains('/') && value.contains('.') && !value.contains(' ')
 }
 
 fn format_panel_duration(duration_ms: i64) -> String {

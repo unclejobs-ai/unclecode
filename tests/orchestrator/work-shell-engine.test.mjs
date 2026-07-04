@@ -971,6 +971,20 @@ This English conclusion is intentional and contains useful details.`;
     validJsonTaskAnswer,
     "valid assistant JSON answers must not be stripped as internal plans",
   );
+  const leakedSubtaskPlanOnly = `[
+    {"id":"subtask-1","summary":"Locate parallel mode","prompt":"Search codebase"},
+    {"id":"subtask-2","summary":"Explain behavior","prompt":"Summarize UX"}
+  ]`;
+  assert.equal(
+    sanitizeWorkShellAssistantText(leakedSubtaskPlanOnly),
+    "",
+    "orchestrator subtask JSON must never surface in assistant text",
+  );
+  assert.equal(
+    sanitizeWorkShellAssistantText("I'll trace the repo for parallel mode.\n\nParallel mode runs subtasks concurrently."),
+    "Parallel mode runs subtasks concurrently.",
+    "internal orchestrator meta lines must be stripped",
+  );
   assert.equal(
     sanitizeWorkShellAssistantText("Hello Alice. Hello Bob. This is a transcript example."),
     "Hello Alice. Hello Bob. This is a transcript example.",
@@ -1021,10 +1035,10 @@ test("work-shell context helpers merge auth issues and assemble initial/reloaded
     }),
     {
       bridgeLines: ["bridge-1"],
-      memoryLines: ["memory-1"],
+      memoryLines: ["session · memory-1 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged"],
       panel: {
         title: "Context",
-        lines: ["Loaded guidance: AGENTS.md", "bridge-1", "memory-1"],
+        lines: ["Loaded guidance: AGENTS.md", "bridge-1", "session · memory-1 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged"],
       },
     },
   );
@@ -1047,10 +1061,10 @@ test("work-shell context helpers merge auth issues and assemble initial/reloaded
     {
       contextSummaryLines: ["Loaded guidance: CLAUDE.md"],
       bridgeLines: ["bridge-2"],
-      memoryLines: ["memory-2"],
+      memoryLines: ["session · memory-2 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged"],
       panel: {
         title: "Context expanded",
-        lines: ["Loaded guidance: CLAUDE.md", "bridge-2", "memory-2", "trace-1"],
+        lines: ["Loaded guidance: CLAUDE.md", "bridge-2", "session · memory-2 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged", "trace-1"],
       },
     },
   );
@@ -1561,10 +1575,10 @@ test("work-shell lifecycle helpers load initial state, session panels, and overl
 
   assert.deepEqual(loadedState, {
     bridgeLines: ["bridge-1"],
-    memoryLines: ["memory-1"],
+    memoryLines: ["session · memory-1 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged"],
     panel: {
       title: "Context",
-      lines: ["Loaded guidance: AGENTS.md", "bridge-1", "memory-1"],
+      lines: ["Loaded guidance: AGENTS.md", "bridge-1", "session · memory-1 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged"],
     },
   });
   assert.deepEqual(fallbackState, {
@@ -1726,7 +1740,12 @@ test("work-shell command runtime helpers orchestrate secure, inline, and local c
   assert.equal(commandPatches[3]?.isBusy, true);
   assert.equal(commandPatches[4]?.panel?.title, "Auth");
   assert.equal(commandPatches[5]?.authLabel, "oauth-file");
-  assert.deepEqual(commandPatches.at(-1), { memoryLines: ["session-1", "session-2"] });
+  assert.deepEqual(commandPatches.at(-1), {
+    memoryLines: [
+      "session · session-1 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged",
+      "session · session-2 · cite memory:session:1970-01-01T00:00:00.000Z:test0002 · aged",
+    ],
+  });
   assert.deepEqual(commandTraceLines, ["→ auth key", "✓ auth key", "→ auth login --api-key [REDACTED]", "✓ auth login --api-key [REDACTED]", "memory keep this"]);
 });
 
@@ -1785,10 +1804,11 @@ test("work-shell operational helpers resolve secure auth entry, inline command r
     sessionMemory: ["session-1"],
     projectMemory: ["project-1"],
   });
-  assert.deepEqual(rememberResult, {
-    nextMemoryLines: ["session-1", "session-2"],
-    memoryTrace: "memory keep auth fix visible",
-  });
+  assert.deepEqual(rememberResult.nextMemoryLines, [
+    "session · session-1 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged",
+    "session · session-2 · cite memory:session:1970-01-01T00:00:00.000Z:test0002 · aged",
+  ]);
+  assert.equal(rememberResult.memoryTrace, "memory keep auth fix visible");
   assert.deepEqual(secureResult, {
     kind: "success",
     resultLines: ["API key login saved.", "Auth: api-key-file"],
@@ -1944,7 +1964,9 @@ test("work-shell post-turn helpers persist summaries and auth recovery determini
 
   assert.equal(isWorkShellAuthFailure("request failed with status 401"), true);
   assert.deepEqual(effects.bridgeLines, ["bridge-1 line", "bridge-0"]);
-  assert.deepEqual(effects.memoryLines, ["memory-1 line"]);
+  assert.deepEqual(effects.memoryLines, [
+    "session · memory-1 line · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged",
+  ]);
   assert.equal(effects.bridgeTraceEvent.type, "bridge.published");
   assert.equal(effects.memoryTraceEvent.type, "memory.written");
   const rustEffects = resolveWorkShellPostTurnSuccessEffectsPayload({
@@ -2002,7 +2024,8 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
       event: { type: "provider.calling" },
       line: "calling openai gpt-5.4",
     }),
-    { role: "tool", text: "calling openai gpt-5.4" },
+    undefined,
+    "verbose traces stay in the context overlay, not the conversation transcript",
   );
   assert.equal(
     resolveVerboseTraceEntry({
@@ -2076,7 +2099,7 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
     },
   });
   assert.equal(livePatches.length, 1);
-  assert.equal(liveEntries[0]?.text, "calling openai gpt-5.4");
+  assert.equal(liveEntries.length, 0);
   assert.deepEqual(liveTraceLines, ["calling openai gpt-5.4"]);
 });
 
@@ -2136,7 +2159,7 @@ test("work-shell snapshot and context loaders stay available through their helpe
   assert.deepEqual(context, {
     contextSummaryLines: ["Loaded guidance: CLAUDE.md"],
     bridgeLines: ["bridge-1"],
-    memoryLines: ["memory-1"],
+    memoryLines: ["session · memory-1 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged"],
   });
 });
 
@@ -2156,7 +2179,7 @@ test("createInitialWorkShellEngineState derives the shell defaults from options"
   });
 
   assert.equal(state.panel.title, "Context");
-  assert.equal(state.traceMode, "verbose");
+  assert.equal(state.traceMode, "minimal");
   assert.equal(state.authLabel, "oauth-file");
   assert.deepEqual(state.entries, []);
 
@@ -3122,7 +3145,7 @@ test("WorkShellEngine reloads workspace context on demand", async () => {
     "Loaded guidance: CLAUDE.md",
     "Loaded extension: focus-tools",
     "bridge refreshed",
-    "memory refreshed",
+    "session · memory refreshed · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged",
   ]);
   assert.ok(engine.getState().entries.some((entry) => entry.text === "Workspace context reloaded."));
 });
@@ -3147,7 +3170,7 @@ test("WorkShellEngine preserves expanded context while reloading workspace conte
     "Loaded guidance: CLAUDE.md",
     "Loaded extension: focus-tools",
     "bridge refreshed",
-    "memory refreshed",
+    "session · memory refreshed · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged",
   ]);
 
   engine.closeOverlay();
@@ -3157,7 +3180,7 @@ test("WorkShellEngine preserves expanded context while reloading workspace conte
     "Loaded guidance: CLAUDE.md",
     "Loaded extension: focus-tools",
     "bridge refreshed",
-    "memory refreshed",
+    "session · memory refreshed · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged",
   ]);
 });
 

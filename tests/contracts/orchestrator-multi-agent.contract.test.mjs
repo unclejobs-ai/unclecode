@@ -20,9 +20,18 @@ test("classifyWorkIntent routes yolo action prompts to complex orchestration", (
   );
 });
 
-test("classifyWorkIntent routes ultrawork prompts to complex regardless of content", () => {
-  assert.equal(classifyWorkIntent("hello", "ultrawork"), "complex");
-  assert.equal(classifyWorkIntent("what time is it", "ultrawork"), "complex");
+test("classifyWorkIntent routes ultrawork info prompts to simple and work prompts to complex", () => {
+  assert.equal(classifyWorkIntent("hello", "ultrawork"), "simple");
+  assert.equal(classifyWorkIntent("패러랠 모드가 뭐냐", "ultrawork"), "simple");
+  assert.equal(
+    classifyWorkIntent("what is parallel mode", "ultrawork"),
+    "simple",
+  );
+  assert.equal(
+    classifyWorkIntent("look around the project", "ultrawork"),
+    "complex",
+  );
+  assert.equal(classifyWorkIntent("fix the login bug", "ultrawork"), "complex");
 });
 
 test("resolveWorkerBudget scales with mode aggressiveness", () => {

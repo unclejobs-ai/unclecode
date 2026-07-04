@@ -42,6 +42,16 @@ test("classifyWorkIntent keeps fast paths simple and routes explicit complex or 
     "complex",
     "Korean complex keyword triggers complex in any mode",
   );
+  assert.equal(
+    classifyWorkIntent("패러랠 모드가 뭐냐", "ultrawork"),
+    "simple",
+    "Korean info questions stay single-turn even in ultrawork",
+  );
+  assert.equal(
+    classifyWorkIntent("what is parallel mode", "ultrawork"),
+    "simple",
+    "English info questions stay single-turn even in ultrawork",
+  );
 });
 
 test("createTurnOrchestrator executes complex plans with bounded concurrency and real steps", async () => {

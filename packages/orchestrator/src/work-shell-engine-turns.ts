@@ -84,10 +84,12 @@ export function stripPermissionSeekingStallOutro(text: string): string {
 
 export function sanitizeWorkShellAssistantText(value: string): string {
   const withoutInternalPlan = stripLeadingInternalActionPlan(value);
-  const withoutExactDuplicate = collapseExactAdjacentDuplicateText(withoutInternalPlan);
+  const withoutMeta = stripInternalOrchestratorMeta(withoutInternalPlan);
+  const withoutExactDuplicate = collapseExactAdjacentDuplicateText(withoutMeta);
   const withoutGreetingDuplicate = collapseRepeatedGreetingVariants(withoutExactDuplicate);
   const withoutUnexpectedScript = removeUnexpectedIsolatedScriptTokens(withoutGreetingDuplicate);
-  return collapseDuplicatedKoreanEnglishTail(withoutUnexpectedScript);
+  const withoutCursorOnly = stripOrphanStreamingCursor(withoutUnexpectedScript);
+  return collapseDuplicatedKoreanEnglishTail(withoutCursorOnly);
 }
 
 function stripLeadingInternalActionPlan(value: string): string {
@@ -95,7 +97,7 @@ function stripLeadingInternalActionPlan(value: string): string {
   const trimmedStart = value.slice(leadingWhitespaceLength);
   const firstCharacter = trimmedStart.at(0);
   if (firstCharacter !== "[" && firstCharacter !== "{") {
-    return value;
+    return stripStandaloneInternalActionPlan(value);
   }
 
   const jsonEndIndex = findBalancedJsonPrefixEnd(trimmedStart);
@@ -110,10 +112,13 @@ function stripLeadingInternalActionPlan(value: string): string {
       return value;
     }
     const remainder = trimmedStart.slice(jsonEndIndex).trimStart();
-    if (!looksLikeInternalPlanLeakRemainder(remainder)) {
-      return value;
+    if (remainder.length === 0) {
+      return "";
     }
-    return remainder;
+    if (!looksLikeInternalPlanLeakRemainder(remainder)) {
+      return stripStandaloneInternalActionPlan(value);
+    }
+    return stripInternalOrchestratorMeta(remainder);
   } catch (error) {
     if (!(error instanceof SyntaxError)) {
       throw error;
@@ -122,9 +127,54 @@ function stripLeadingInternalActionPlan(value: string): string {
   }
 }
 
+function stripStandaloneInternalActionPlan(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.at(0) !== "[" && trimmed.at(0) !== "{") {
+    return value;
+  }
+  const jsonEndIndex = findBalancedJsonPrefixEnd(trimmed);
+  if (jsonEndIndex === undefined || jsonEndIndex !== trimmed.length) {
+    return value;
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    return looksLikeInternalActionPlan(parsed) ? "" : value;
+  } catch {
+    return value;
+  }
+}
+
+function stripInternalOrchestratorMeta(value: string): string {
+  const hasStreamingCursor = value.endsWith("▌");
+  const text = hasStreamingCursor ? value.slice(0, -1) : value;
+  const metaLinePattern =
+    /^(?:I'll trace|I found|I'm opening|I've got|I am opening|Let me trace|Let me open|찾아보고|관련 (?:소스|파일)|근거 위주로|I'll look|I will trace|opening the relevant)/iu;
+  const cleaned = text
+    .split("\n")
+    .filter((line) => !metaLinePattern.test(line.trim()))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (cleaned.length === 0) {
+    return "";
+  }
+  return hasStreamingCursor ? `${cleaned}▌` : cleaned;
+}
+
+function stripOrphanStreamingCursor(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed === "▌" || trimmed.length === 0) {
+    return "";
+  }
+  if (value.endsWith("▌") && trimmed.slice(0, -1).trim().length === 0) {
+    return "";
+  }
+  return value;
+}
+
 function looksLikeInternalPlanLeakRemainder(value: string): boolean {
   if (value.length === 0) {
-    return false;
+    return true;
   }
   return /^(?:Hi|Hello|Hey)[!.]?\s/i.test(value) || /^(?:안녕|반갑)/.test(value);
 }
@@ -169,7 +219,13 @@ function looksLikeInternalActionPlan(value: unknown): boolean {
     : isRecord(value) && Array.isArray(value.tasks)
       ? value.tasks
       : undefined;
-  return Array.isArray(planItems) && planItems.length > 0 && planItems.every(looksLikeInternalActionPlanItem);
+  if (!Array.isArray(planItems) || planItems.length === 0 || !planItems.every(looksLikeInternalActionPlanItem)) {
+    return false;
+  }
+  if (planItems.some((item) => isRecord(item) && typeof item.id === "string" && item.id.startsWith("subtask-"))) {
+    return true;
+  }
+  return planItems.length >= 2;
 }
 
 function looksLikeInternalActionPlanItem(value: unknown): boolean {

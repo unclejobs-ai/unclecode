@@ -193,6 +193,20 @@ export class WorkAgent<
     this.directAgent.clear();
   }
 
+  private async runInternalTurn(
+    prompt: string,
+    attachments: readonly Attachment[] = [],
+    options: { readonly signal?: AbortSignal | undefined } = {},
+  ): Promise<{ text: string }> {
+    const outerListener = this.traceListener;
+    this.directAgent.setTraceListener(undefined);
+    try {
+      return await this.directAgent.runTurn(prompt, attachments, options);
+    } finally {
+      this.directAgent.setTraceListener(outerListener ? (event) => this.emitTrace(event) : undefined);
+    }
+  }
+
   private async planTasks(
     prompt: string,
     onTrace?: TurnOrchestratorTraceListener,
@@ -216,7 +230,7 @@ export class WorkAgent<
         prompt,
         startedAt: plannerStartedAt,
       }));
-      const result = await this.directAgent.runTurn(planPrompt, [], { signal });
+      const result = await this.runInternalTurn(planPrompt, [], { signal });
       const parsed = parseAgentPlanResponse(result.text);
       if (parsed.length >= 2) {
         return { tasks: parsed, usedLlm: true };
@@ -269,7 +283,7 @@ export class WorkAgent<
         return { tasks, usedLlm };
       },
       executeComplexTask: async (task) => {
-        const result = await this.directAgent.runTurn(task.prompt, [], options);
+        const result = await this.runInternalTurn(task.prompt, [], options);
         return { id: task.id, summary: result.text };
       },
       runGuardianReview: async ({ prompt: originalPrompt, tasks, results }) => {
@@ -286,7 +300,7 @@ export class WorkAgent<
           results,
           ...(executableChecks ? { executableChecks } : {}),
         });
-        const review = await this.directAgent.runTurn(reviewPrompt, [], options);
+        const review = await this.runInternalTurn(reviewPrompt, [], options);
         return {
           summary: executableChecks
             ? `${review.text}\n\nExecutable checks:\n${executableChecks}`

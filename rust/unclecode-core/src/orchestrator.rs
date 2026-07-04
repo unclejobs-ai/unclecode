@@ -2,15 +2,16 @@ use serde_json::{json, Value};
 
 pub fn classify_work_intent(prompt: &str, mode: &str) -> &'static str {
     let routing_prompt = extract_routing_prompt(prompt);
-    if mode == "ultrawork" {
-        return "complex";
-    }
     if is_trivial_conversational_prompt(routing_prompt) {
         return "simple";
     }
 
     if mode == "search" || mode == "analyze" {
         return "research";
+    }
+
+    if is_simple_info_question(routing_prompt) {
+        return "simple";
     }
 
     if routing_prompt.starts_with('/') {
@@ -76,6 +77,29 @@ pub fn classify_work_intent(prompt: &str, mode: &str) -> &'static str {
         return "complex";
     }
 
+    if mode == "ultrawork" {
+        let ultrawork_complex_keyword = [
+            "look around",
+            "investigate",
+            "inspect",
+            "audit",
+            "explore",
+            "trace",
+            "점검",
+            "조사",
+            "찾아봐",
+            "살펴",
+        ]
+        .iter()
+        .any(|keyword| lower_prompt.contains(keyword))
+            || routing_prompt.contains("점검")
+            || routing_prompt.contains("조사");
+        if file_path_count >= 1 || yolo_complex_keyword || complex_keyword || ultrawork_complex_keyword
+        {
+            return "complex";
+        }
+    }
+
     "simple"
 }
 
@@ -98,6 +122,49 @@ fn extract_routing_prompt(prompt: &str) -> &str {
     }
 
     trimmed
+}
+
+fn is_simple_info_question(prompt: &str) -> bool {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_lowercase();
+    let korean_info = [
+        "뭐냐", "뭐야", "뭔지", "뭔가요", "무엇", "설명", "알려", "뜻이", "의미",
+    ]
+    .iter()
+    .any(|marker| trimmed.contains(marker));
+    let english_info = lower.starts_with("what is ")
+        || lower.starts_with("what's ")
+        || lower.starts_with("what are ")
+        || lower.starts_with("explain ")
+        || lower.contains(" what is ")
+        || lower.contains(" what does ")
+        || lower.contains(" how does ")
+        || lower.contains("tell me about ");
+    if !(korean_info || english_info) {
+        return false;
+    }
+    let action_markers = [
+        "implement",
+        "fix",
+        "refactor",
+        "migrate",
+        "build",
+        "create",
+        "update",
+        "구현",
+        "수정",
+        "고쳐",
+        "만들어",
+        "빌드",
+        "추가",
+        "변경",
+    ];
+    !action_markers
+        .iter()
+        .any(|marker| lower.contains(marker) || trimmed.contains(marker))
 }
 
 fn is_trivial_conversational_prompt(prompt: &str) -> bool {
@@ -725,7 +792,15 @@ mod tests {
                 "반갑다 in {mode}"
             );
         }
-        assert_eq!(classify_work_intent("hi", "ultrawork"), "complex");
+        assert_eq!(classify_work_intent("hi", "ultrawork"), "simple");
+        assert_eq!(
+            classify_work_intent("패러랠 모드가 뭐냐", "ultrawork"),
+            "simple"
+        );
+        assert_eq!(
+            classify_work_intent("what is parallel mode", "ultrawork"),
+            "simple"
+        );
         // real tasks still classify as work even in full-autonomy modes
         assert_eq!(
             classify_work_intent("create a landing page", "yolo"),
