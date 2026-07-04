@@ -1372,18 +1372,28 @@ test("getConversationLayout gives answer blocks more room than lower-signal note
     }),
     /YOLO mode/,
   );
-  assert.match(
-    formatWorkShellFooterLine({
-      cwd: "/Users/example/project/unclecode",
-      model: "gpt-5.4",
-      reasoningLabel: "medium (mode-default)",
-      mode: "yolo",
-      authLabel: "Browser OAuth · file",
-      composerHint: "Enter send",
-      width: 96,
-    }),
-    /^~\/project\/unclecode$/,
-  );
+  const previousHome = process.env.HOME;
+  process.env.HOME = "/Users/example";
+  try {
+    assert.match(
+      formatWorkShellFooterLine({
+        cwd: "/Users/example/project/unclecode",
+        model: "gpt-5.4",
+        reasoningLabel: "medium (mode-default)",
+        mode: "yolo",
+        authLabel: "Browser OAuth · file",
+        composerHint: "Enter send",
+        width: 96,
+      }),
+      /^~\/project\/unclecode$/,
+    );
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+  }
 });
 
 test("createWorkShellDashboardProps maps work runtime state into unified Dashboard props", () => {
