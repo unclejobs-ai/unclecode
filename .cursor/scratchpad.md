@@ -204,3 +204,5 @@
 - 단, **전사(transcript) mtime이 멈췄다고 워커가 죽은 것이 아님** (동기화 지연일 수 있음). 실제로 T6 워커는 오류 알림 후에도 계속 작업해 나중에 정상 완료 보고를 보냈고, 그 사이 조정자 검증과 레이스가 발생했음. 폴백 개입 전에 워크트리 mtime(파일 변경 지속 여부)로 활동성을 확인할 것.
 - `qa:health`가 typecheck·lint·work/cli/tui 테스트를 이미 포함하므로 별도 단위 테스트 게이트를 중복 실행할 필요 없음.
 - JSON 리포트 필드·타이밍 상수는 계약 테스트/런북이 고정한 외부 계약 — 간소화 대상에서 제외하는 정책이 유효했음 (qa:health 재실행으로 확인).
+
+**2026-07-05 live verification (Executor):** `FORCE_COLOR=3 node scripts/runtime-qa/run-targeted-live-verification.mjs` — PASS (full/basic/korean/context/parallel KO + /context slash KO). Evidence: `.unclecode/qa/live-verification-latest.json` + `live-verification-*-pane.txt`. Note: fake leaky parallel JSON still hides assistant bubble (sanitize gap); runtime gate uses clean fake reply.
