@@ -35,3 +35,12 @@ export const anthropicToolCallPromptText = "Run the Anthropic local tool-use smo
 export const anthropicToolCallId = "tu_runtime_anthropic_1";
 export const anthropicToolCallShellOutput = "ANTHROPIC_TOOL_CALL_SMOKE_OK";
 export const anthropicToolCallFinalResponseText = "ANTHROPIC_TOOL_CALL_FINAL_OK";
+export const parallelModeKoreanPromptText = "패러랠 모드가 뭐냐";
+export const parallelModeKoreanCleanResponseText =
+  "병렬 모드(Parallel)는 큰 작업을 나눠 동시에 처리하는 ultrawork 모드예요.";
+export const parallelModeKoreanLeakyResponseText = `[{"id":"subtask-1","summary":"Locate parallel mode","prompt":"read packages/orchestrator"}]
+I'll trace the repo for parallel mode.
+
+Parallel mode runs subtasks concurrently.
+
+${parallelModeKoreanCleanResponseText}`;
