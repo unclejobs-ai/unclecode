@@ -1373,11 +1373,11 @@ fn slice_display_width(value: &str, max_width: usize) -> &str {
     &value[..end]
 }
 
-fn display_width(value: &str) -> usize {
+pub(crate) fn display_width(value: &str) -> usize {
     value.chars().map(display_char_width).sum()
 }
 
-fn truncate_display_width(value: &str, max_width: usize) -> String {
+pub(crate) fn truncate_display_width(value: &str, max_width: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
@@ -1398,7 +1398,7 @@ fn truncate_display_width(value: &str, max_width: usize) -> String {
     output
 }
 
-fn pad_display_width(value: &str, width: usize) -> String {
+pub(crate) fn pad_display_width(value: &str, width: usize) -> String {
     let padding = width.saturating_sub(display_width(value));
     format!("{}{}", value, " ".repeat(padding))
 }

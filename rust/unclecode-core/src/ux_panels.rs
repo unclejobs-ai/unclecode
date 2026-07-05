@@ -1,5 +1,6 @@
 use crate::http_transport::describe_proxy_policy_fields;
 use crate::model_registry::{openai_reasoning_support, provider_model_catalog};
+use crate::ux_text::{display_width, pad_display_width, truncate_display_width};
 use serde_json::{json, Value};
 
 pub fn build_ux_panel_json(kind: &str, input_json: &str) -> Result<String, String> {
@@ -657,11 +658,10 @@ fn join_board_row(cells: &[&str], col_width: usize) -> String {
 }
 
 fn pad_board_cell(text: &str, width: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count >= width {
+    if display_width(text) >= width {
         return compact_preview(text, width);
     }
-    format!("{text}{}", " ".repeat(width - char_count))
+    pad_display_width(text, width)
 }
 
 fn context_panel(input: &Value) -> Value {
@@ -1632,15 +1632,7 @@ fn clamp_index(selected_index: usize, count: usize) -> usize {
 
 fn compact_preview(input: &str, max_chars: usize) -> String {
     let normalized = input.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut preview = String::new();
-    for ch in normalized.chars() {
-        if preview.chars().count() >= max_chars {
-            preview.push_str("...");
-            return preview;
-        }
-        preview.push(ch);
-    }
-    preview
+    truncate_display_width(&normalized, max_chars)
 }
 
 fn compact_context_value(input: &str, max_chars: usize) -> String {
