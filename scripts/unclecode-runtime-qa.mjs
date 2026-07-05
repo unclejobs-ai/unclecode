@@ -15,7 +15,10 @@ import {
   runPromptSmoke,
   runToolCallSmoke,
 } from "./runtime-qa/provider-smokes.mjs";
-import { buildRuntimeEvidence, summarizeRuntimeEvidence } from "./runtime-qa/report-evidence.mjs";
+import {
+  buildRuntimeEvidence,
+  formatRuntimeQaCompactReport,
+} from "./runtime-qa/report-evidence.mjs";
 import { killRuntimeTmuxServer } from "./runtime-qa/tmux-helpers.mjs";
 import { runTtySmoke } from "./runtime-qa/tty-smoke.mjs";
 import { runTuiSmokeSuite } from "./runtime-qa/tui-suite-smokes.mjs";
@@ -41,16 +44,9 @@ try {
     const openAIToolCallSmoke = await runOpenAIToolCallSmoke(openAIServer.port, openAIObservations);
     const anthropicToolCallSmoke = await runAnthropicToolCallSmoke(anthropicServer.port, anthropicObservations);
     const ttySmoke = await runTtySmoke({ port: server.port, tmp, observations });
-    const {
-      fullTuiSmoke,
-      reasoningCleanupTuiSmoke,
-      yoloGreetingTuiSmoke,
-      koreanBusyTuiSmoke,
-      realUseTuiStress,
-      contextContrastTuiSmoke,
-      slashLatencyTuiSmoke,
-    } = await runTuiSmokeSuite({ port: server.port, tmp, observations });
-    const evidence = buildRuntimeEvidence({ toolCallSmoke, openAIToolCallSmoke, anthropicToolCallSmoke, fullTuiSmoke, koreanBusyTuiSmoke, realUseTuiStress, contextContrastTuiSmoke, slashLatencyTuiSmoke });
+    const tuiSmokes = await runTuiSmokeSuite({ port: server.port, tmp, observations });
+    const providerSmokes = { toolCallSmoke, openAIToolCallSmoke, anthropicToolCallSmoke };
+    const evidence = buildRuntimeEvidence({ ...providerSmokes, ...tuiSmokes });
     const report = {
       status: "pass",
       startedAt,
@@ -64,17 +60,9 @@ try {
       openAIRequests: openAIObservations,
       anthropicRequests: anthropicObservations,
       promptSmoke,
-      toolCallSmoke,
-      openAIToolCallSmoke,
-      anthropicToolCallSmoke,
       ttySmoke,
-      fullTuiSmoke,
-      reasoningCleanupTuiSmoke,
-      yoloGreetingTuiSmoke,
-      koreanBusyTuiSmoke,
-      realUseTuiStress,
-      contextContrastTuiSmoke,
-      slashLatencyTuiSmoke,
+      ...providerSmokes,
+      ...tuiSmokes,
       externalLiveProviderGate: "not covered by local QA; run a real provider smoke after OPENAI_API_KEY or equivalent provider credentials are API-ready",
       checks: [
         "real bin work prompt response",
@@ -94,7 +82,7 @@ try {
         "Korean full-screen input does not duplicate during submit",
         "Korean delayed response shows a live busy spinner",
         "busy state avoids a duplicate lower activity row below the conversation",
-        "short Korean replies render compactly without heavy cards",
+        "ultrawork Korean parallel-mode question strips planner JSON and English meta leaks",
         "single-session real-use TUI stress covers context, reasoning, busy queue drain, idle stability, and resize",
         "context expanded overlay uses readable foreground colors on light terminals",
         "slash commander first paint, warm reopen, filter, and model picker stay within latency budgets",
@@ -104,7 +92,7 @@ try {
       ],
     };
     persistReport(report);
-    console.log(args.json ? JSON.stringify(report, null, 2) : formatCompactReport(report));
+    console.log(args.json ? JSON.stringify(report, null, 2) : formatRuntimeQaCompactReport(report, reportPath, repoRoot));
   } finally {
     await anthropicServer.close();
     await openAIServer.close();
@@ -123,37 +111,10 @@ function parseArgs(argv) {
       continue;
     }
     if (arg === "--help" || arg === "-h") {
-      printUsageAndExit();
+      console.log("Usage: node scripts/unclecode-runtime-qa.mjs [--json]");
+      process.exit(0);
     }
     throw new Error(`Unknown argument: ${arg}`);
   }
   return { json };
-}
-
-function formatCompactReport(report) {
-  const evidence = summarizeRuntimeEvidence(report);
-  const providerToolCalls = report.evidence?.providerToolCalls ?? {};
-  return [
-    `UncleCode runtime QA: ${report.status}`,
-    [
-      `providers: geminiTool=${evidence.geminiTool} (${providerToolCalls.gemini?.requestDelta ?? 0} requests)`,
-      `openaiTool=${evidence.openaiTool} (${providerToolCalls.openai?.requestDelta ?? 0} requests)`,
-      `anthropicTool=${evidence.anthropicTool} (${providerToolCalls.anthropic?.requestDelta ?? 0} requests)`,
-      `toolFinalGate=${evidence.toolFinalGate}`,
-    ].join("; "),
-    [
-      `tui: lightContrast=${evidence.lightContrast}`,
-      `spinner=${evidence.spinner}`,
-      `hangulResidual=${evidence.hangulResidual}`,
-      `duplicateBusy=${evidence.duplicateBusy}`,
-      `queueDrain=${evidence.queueDrain}`,
-      `resize=${evidence.resize}; idleStable=${evidence.idleStable}; latencyOk=${evidence.latencyOk}`,
-    ].join("; "),
-    `report: ${path.relative(repoRoot, reportPath)} (--json prints full report)`,
-  ].join("\n");
-}
-
-function printUsageAndExit() {
-  console.log("Usage: node scripts/unclecode-runtime-qa.mjs [--json]");
-  process.exit(0);
 }

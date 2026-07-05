@@ -205,14 +205,14 @@ test("slash latency smoke keeps strict budgets but retries transient tmux captur
 test("runtime QA prints compact output by default and keeps full JSON explicit", () => {
   const pkg = JSON.parse(readFileSync(path.join(workspaceRoot, "package.json"), "utf8"));
   const runner = readFileSync(path.join(workspaceRoot, "scripts", "unclecode-runtime-qa.mjs"), "utf8");
+  const evidence = readFileSync(path.join(workspaceRoot, "scripts", "runtime-qa", "report-evidence.mjs"), "utf8");
 
   assert.doesNotMatch(pkg.scripts?.["qa:runtime"] ?? "", /--json/);
-  assert.match(runner, /formatCompactReport/);
-  assert.match(runner, /buildRuntimeEvidence/);
-  assert.match(runner, /buildRuntimeEvidence\(\{[\s\S]*fullTuiSmoke/);
-  assert.match(runner, /UncleCode runtime QA/);
-  assert.match(runner, /toolFinalGate/);
-  assert.match(runner, /--json prints full report/);
+  assert.match(runner, /formatRuntimeQaCompactReport/);
+  assert.match(runner, /buildRuntimeEvidence\(\{[\s\S]*\.\.\.tuiSmokes/);
+  assert.match(evidence, /UncleCode runtime QA/);
+  assert.match(evidence, /toolFinalGate/);
+  assert.match(evidence, /--json prints full report/);
   assert.match(runner, /Usage: node scripts\/unclecode-runtime-qa\.mjs \[--json\]/);
 });
 

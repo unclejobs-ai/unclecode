@@ -1,3 +1,28 @@
+import path from "node:path";
+
+export function formatRuntimeQaCompactReport(report, reportPath, repoRoot) {
+  const evidence = summarizeRuntimeEvidence(report);
+  const providerToolCalls = report.evidence?.providerToolCalls ?? {};
+  return [
+    `UncleCode runtime QA: ${report.status}`,
+    [
+      `providers: geminiTool=${evidence.geminiTool} (${providerToolCalls.gemini?.requestDelta ?? 0} requests)`,
+      `openaiTool=${evidence.openaiTool} (${providerToolCalls.openai?.requestDelta ?? 0} requests)`,
+      `anthropicTool=${evidence.anthropicTool} (${providerToolCalls.anthropic?.requestDelta ?? 0} requests)`,
+      `toolFinalGate=${evidence.toolFinalGate}`,
+    ].join("; "),
+    [
+      `tui: lightContrast=${evidence.lightContrast}`,
+      `spinner=${evidence.spinner}`,
+      `hangulResidual=${evidence.hangulResidual}`,
+      `duplicateBusy=${evidence.duplicateBusy}`,
+      `queueDrain=${evidence.queueDrain}`,
+      `resize=${evidence.resize}; idleStable=${evidence.idleStable}; latencyOk=${evidence.latencyOk}`,
+    ].join("; "),
+    `report: ${path.relative(repoRoot, reportPath)} (--json prints full report)`,
+  ].join("\n");
+}
+
 export function buildRuntimeEvidence(report) {
   return {
     providerToolCalls: {
@@ -38,6 +63,13 @@ export function buildRuntimeEvidence(report) {
         budgets: report.slashLatencyTuiSmoke?.budgets,
       },
       compactKoreanShortReply: report.koreanBusyTuiSmoke?.compactKoreanShortReply === true,
+      parallelModeKorean: {
+        cleanAnswerVisible: report.parallelModeKoreanTuiSmoke?.paneExcerpt?.includes("병렬 모드") === true,
+        plannerJsonLeakRegression: report.parallelModeKoreanTuiSmoke?.plannerJsonLeakRegression === true,
+        englishMetaLeakRegression: report.parallelModeKoreanTuiSmoke?.englishMetaLeakRegression === true,
+        rawPathBusyStripRegression: report.parallelModeKoreanTuiSmoke?.rawPathBusyStripRegression === true,
+        requestDelta: report.parallelModeKoreanTuiSmoke?.requestDelta,
+      },
     },
     context: buildContextEvidence(report.realUseTuiStress),
   };

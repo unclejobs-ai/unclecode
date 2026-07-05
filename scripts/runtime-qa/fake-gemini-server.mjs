@@ -16,7 +16,7 @@ import {
   ttyResponseText,
   yoloGreetingResponseText,
   parallelModeKoreanPromptText,
-  parallelModeKoreanCleanResponseText,
+  parallelModeKoreanLeakyResponseText,
 } from "./constants.mjs";
 
 export function startGeminiServer(onRequest) {
@@ -85,7 +85,7 @@ export function startGeminiServer(onRequest) {
       } else if (currentUserRequest === koreanBusyPromptText) {
         text = koreanBusyResponseText;
       } else if (currentUserRequest === parallelModeKoreanPromptText) {
-        text = parallelModeKoreanCleanResponseText;
+        text = parallelModeKoreanLeakyResponseText;
       }
       responseParts ??= [{ text }];
       const respond = () => {

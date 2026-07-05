@@ -362,6 +362,10 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
     workRuntimeBootstrapSource,
     /export\s+async\s+function\s+loadWorkCliBootstrap\(/,
   );
+  assert.match(
+    workRuntimeBootstrapSource,
+    /reloadWorkspaceContext:[\s\S]*persistMemoryFacts:\s*false/,
+  );
   assert.doesNotMatch(programSource, /from\s+"\.\/interactive-shell\.js"/);
   assert.match(
     programSource,

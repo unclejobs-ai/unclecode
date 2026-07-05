@@ -4,6 +4,7 @@ import path from "node:path";
 
 import {
   parallelModeKoreanCleanResponseText,
+  parallelModeKoreanLeakyResponseText,
   parallelModeKoreanPromptText,
   repoRoot,
 } from "./constants.mjs";
