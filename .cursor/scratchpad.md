@@ -32,7 +32,7 @@
 - [x] Code review (a73c938d): merge blocker Rust board display-width (CJK) **fixed P0** — `pad_board_cell`/`compact_preview` → `ux_text` helpers; builds_work_board 3/3 PASS; also blockedReason narrow, terminalColumns init race, empty post-turn bridge
 - [x] T15 simplify pass (2026-07-05): deduped queue builtin path (`applyQueueBuiltinResult`/`buildQueueBuiltinBase`), removed `renderWorkBoardPanel` wrapper, `pickBusySpinnerFrame` in TUI, Rust dead branches cleaned; WIP loading-card/system-marker diff left unstaged; qa:health 14/14 PASS (105.9s); not pushed
 - [x] Security review (a0f94562): T15 queue/board c2b3f47..15419a4 — no medium+ findings
-- [ ] Adversarial review 2026-07-05 (origin/main..HEAD): **needs-attention** — bootstrap write fails read-only workspaces; synthetic bootstrap memory pollutes prefetch
+- [x] Adversarial review 2026-07-05 (origin/main..HEAD): bootstrap read-only graceful skip + prefetch dedupe — `context-bootstrap.ts`, `memory-prefetch.ts`; qa:health 14/14 PASS
 
 ## Background and Motivation
 
@@ -239,7 +239,7 @@
 - [T3 게이트 결과 — 완료] `npm run qa:health` 14항목 전체 PASS, exit 0 (53.8s). runtime QA 증거: geminiTool/openaiTool/anthropicTool/toolFinalGate/lightContrast/spinner/queueDrain/resize/idleStable/latencyOk 모두 true, hangulResidual=false, duplicateBusy=false. live provider QA는 이번엔 fail-fast를 지나 실행됐고 예상된 외부 auth 차단 상태(openai-oauth-codex-runtime-not-api-ready)로 "blocked recorded" 처리 — 런북에 문서화된 정상 복구 경로(자격증명 갱신 후 qa:live). 리포트: .unclecode/qa/runtime-qa-latest.json, .unclecode/qa/live-provider-latest.json.
 - [T10 Executor 2026-07-05 03:xx] qa:health **14/14 PASS exit 0** (87.7s).
 - [Subagent verify 2026-07-05] qa:health **14/14 PASS exit 0** (115.0s); hangulResidual=false, lightContrast=true — prior 87.7s와 동일 통과, 소요만 증가. Blockers cleared: Hangul truncate exact-fit (`a75b749`), stream smoke in module list, env-independent footer test (`repl.test.mjs` HOME pin). Intermittent work-test flakes (Anthropic Rust spawn) pass after `cargo build`; no push.
-- [T15 Planner 2026-07-05] UI/UX 서브에이전트 API limit → 조정자가 DESIGN.md·기존 `/queue` 패널 대조 후 `docs/design/work-queue-board-t15.md` 작성. 권장: `/queue` 확장, 4열 read-only, KO 라벨, 80/100 responsive. Executor 착수 전 사용자 OK 대기.
+- [Optional tasks Executor 2026-07-05] (1) TUI WIP committed — rail markers, activity indicator, system dividers; stream smoke accepts wrapped final marker. (2) `/clear` clears `lastCompletedTurnSnapshot` + test. (3) Bootstrap read-only skip + prefetch excludes `Bootstrap context:` synthetic memory. qa:health **14/14 PASS** (127.7s). Not pushed.
 
 ## Lessons
 
