@@ -472,7 +472,7 @@ fn build_work_board_status_lines(
             parts.push(detail.to_string());
         }
     }
-    vec![format!("{}", parts.join(" · "))]
+    vec![parts.join(" · ")]
 }
 
 fn build_work_board_grid_lines(input: WorkBoardInput<'_>, terminal_columns: usize) -> Vec<String> {

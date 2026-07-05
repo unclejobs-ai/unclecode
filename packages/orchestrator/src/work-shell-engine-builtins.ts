@@ -878,10 +878,6 @@ export function createQueueBuiltinResult(input: WorkShellQueueBuiltinInput): {
   };
 }
 
-export function renderWorkBoardPanel(input: WorkShellQueueBuiltinInput): WorkShellPanel {
-  return createQueueBuiltinResult(input).panel;
-}
-
 export function createSkillUsageErrorEntries(line: string): readonly WorkShellChatEntry[] {
   return parseSkillCommandResult({ line }).entries;
 }

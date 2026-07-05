@@ -7,6 +7,7 @@ import {
   createLoadedSkillBuiltinResult,
   buildWorkShellQueueBuiltinInput,
   createQueueBuiltinResult,
+  type WorkShellQueueBuiltinInput,
   createReloadBuiltinResult,
   createSessionsBuiltinResult,
   createSkillLoadErrorEntries,
@@ -39,6 +40,35 @@ type WorkShellBuiltinCommand = Extract<
   WorkShellSubmitRoute,
   { readonly kind: "builtin" }
 >["command"];
+
+type WorkShellBuiltinSubmitInput<Reasoning extends WorkShellReasoningConfig> = Parameters<
+  typeof executeWorkShellBuiltinSubmit<Reasoning>
+>[0];
+
+function applyQueueBuiltinResult<Reasoning extends WorkShellReasoningConfig>(
+  input: Pick<WorkShellBuiltinSubmitInput<Reasoning>, "appendEntries" | "setState">,
+  payload: WorkShellQueueBuiltinInput,
+): void {
+  const result = createQueueBuiltinResult(payload);
+  input.appendEntries(...result.entries);
+  input.setState({ panel: result.panel });
+}
+
+function buildQueueBuiltinBase<Reasoning extends WorkShellReasoningConfig>(
+  input: Pick<
+    WorkShellBuiltinSubmitInput<Reasoning>,
+    "line" | "state" | "currentContextSummaryLines" | "lastCompletedTurn"
+  >,
+) {
+  const snapshotTurn = input.lastCompletedTurn?.();
+  return {
+    line: input.line,
+    state: input.state,
+    workerBudget: resolveWorkerBudget(input.state.mode),
+    contextSummaryLines: input.currentContextSummaryLines,
+    ...(snapshotTurn ? { lastCompletedTurn: snapshotTurn } : {}),
+  };
+}
 
 export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellReasoningConfig>(input: {
   line: string;
@@ -275,37 +305,23 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
       return;
     case "queue": {
       const queuedItems = input.queuedItems ? await input.queuedItems() : undefined;
-      const snapshotTurn = input.lastCompletedTurn?.();
-      const result = createQueueBuiltinResult(buildWorkShellQueueBuiltinInput({
-        line: input.line,
-        state: input.state,
-        workerBudget: resolveWorkerBudget(input.state.mode),
+      applyQueueBuiltinResult(input, buildWorkShellQueueBuiltinInput({
+        ...buildQueueBuiltinBase(input),
         ...(input.queuedCount ? { queuedCount: input.queuedCount() } : {}),
         ...(queuedItems ? { queuedItems } : {}),
-        contextSummaryLines: input.currentContextSummaryLines,
-        ...(snapshotTurn ? { lastCompletedTurn: snapshotTurn } : {}),
       }));
-      input.appendEntries(...result.entries);
-      input.setState({ panel: result.panel });
       return;
     }
     case "queue-clear": {
       await input.clearQueuedItems?.();
-      const snapshotTurn = input.lastCompletedTurn?.();
-      const result = createQueueBuiltinResult(buildWorkShellQueueBuiltinInput({
-        line: input.line,
-        state: input.state,
-        workerBudget: resolveWorkerBudget(input.state.mode),
+      applyQueueBuiltinResult(input, buildWorkShellQueueBuiltinInput({
+        ...buildQueueBuiltinBase(input),
         queuedCount: 0,
         queuedItems: [],
-        contextSummaryLines: input.currentContextSummaryLines,
-        ...(snapshotTurn ? { lastCompletedTurn: snapshotTurn } : {}),
         transcriptText: input.state.isBusy
           ? "Queue cleared. Active turn is still running."
           : "Queue cleared.",
       }));
-      input.appendEntries(...result.entries);
-      input.setState({ panel: result.panel });
       return;
     }
     case "harness": {

@@ -344,6 +344,11 @@ export function resolveWorkShellComposerHint(input: {
 
 const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 export const WORK_SHELL_SPINNER_INTERVAL_MS = 100;
+
+function pickBusySpinnerFrame(frame = 0): string {
+  const count = WORK_SHELL_BUSY_SPINNER_FRAMES.length;
+  return WORK_SHELL_BUSY_SPINNER_FRAMES[((frame % count) + count) % count] ?? WORK_SHELL_BUSY_SPINNER_FRAMES[0];
+}
 const STREAMING_CURSOR = "▌";
 const BODY_CONTINUATION_INDENT = "   ";
 const WORK_SHELL_STATUS_GROUP_SEPARATOR = " │ ";
@@ -409,7 +414,7 @@ function runRustUxText(operation: "busy-status" | "normalize-markdown", value: s
 }
 
 export function formatWorkShellBusyStatusLine(status?: string, frame = 0): string {
-  const spinner = WORK_SHELL_BUSY_SPINNER_FRAMES[((frame % WORK_SHELL_BUSY_SPINNER_FRAMES.length) + WORK_SHELL_BUSY_SPINNER_FRAMES.length) % WORK_SHELL_BUSY_SPINNER_FRAMES.length];
+  const spinner = pickBusySpinnerFrame(frame);
   const key = status ?? "";
   const cached = rustBusyStatusCache.get(key);
   const normalizedStatus = cached ?? runRustUxText("busy-status", key);
@@ -467,7 +472,7 @@ export function formatWorkShellUsageLine(input: {
   readonly nowMs?: number;
   readonly spinnerFrame?: number;
 }): string {
-  const spinner = WORK_SHELL_BUSY_SPINNER_FRAMES[(((input.spinnerFrame ?? 0) % WORK_SHELL_BUSY_SPINNER_FRAMES.length) + WORK_SHELL_BUSY_SPINNER_FRAMES.length) % WORK_SHELL_BUSY_SPINNER_FRAMES.length];
+  const spinner = pickBusySpinnerFrame(input.spinnerFrame ?? 0);
   if (input.isBusy) {
     const elapsed = input.currentTurnStartedAt === undefined
       ? "starting"
@@ -1177,10 +1182,8 @@ export function formatWorkShellLiveActivityLine(input: {
   if (!input.isBusy) {
     return null;
   }
-  const frames = WORK_SHELL_BUSY_SPINNER_FRAMES;
-  const spinner = frames[(((input.spinnerFrame ?? 0) % frames.length) + frames.length) % frames.length];
   const detail = normalizeBusyDetail(input.busyStatus ?? "");
-  return `${spinner} ${detail.length > 0 ? detail : "Working…"}`;
+  return `${pickBusySpinnerFrame(input.spinnerFrame ?? 0)} ${detail.length > 0 ? detail : "Working…"}`;
 }
 
 const WorkShellPanelBlock = React.memo(function WorkShellPanelBlock(props: {
@@ -1338,15 +1341,29 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
     };
   }, [props.isBusy, props.currentTurnStartedAt]);
 
+  const isAuthWarning = /blocked|unavailable|not signed|needs refresh|lacks/i.test(props.authLabel);
+  const authColor = isAuthWarning ? W.warning : W.textMuted;
+  const elapsedMs = props.isBusy && props.currentTurnStartedAt !== undefined
+    ? Math.max(0, nowMs - props.currentTurnStartedAt)
+    : undefined;
+  const elapsedLabel = elapsedMs !== undefined ? ` · ${formatCompactDuration(elapsedMs)}` : "";
+  const busyDetail = normalizeBusyDetail(props.busyStatus ?? "");
+  const busyLabel = busyDetail.length > 0 ? busyDetail : "Working";
+  const activityDisplay = props.isBusy ? `${busyLabel}${elapsedLabel}` : activityLine;
+  const spinnerGlyph = props.isBusy
+    ? spinnerFrame % 2 === 0 ? BRAND_SPINNER_GLYPH : "✽"
+    : "◇";
   return (
     <Box marginTop={1} paddingLeft={1}>
       <Text>
-        <Text color={props.isBusy ? W.assistant : W.user}>{props.isBusy ? "◈ " : "◇ "}</Text>
+        <Text color={props.isBusy ? W.spinner : W.user} bold>{spinnerGlyph} </Text>
         <Text bold {...readableTextColorProps(W.borderStrong)}>{sessionGroup}</Text>
-        <Text {...readableTextColorProps(W.borderSoft)}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
-        <Text {...readableTextColorProps(W.textMuted)}>{authGroup}</Text>
-        <Text {...readableTextColorProps(W.borderSoft)}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
-        <Text {...(props.isBusy ? { color: activityColor } : readableTextColorProps(W.textMuted))}>{activityLine}</Text>
+        <Text color={W.borderSoft}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
+        <Text color={authColor} bold={isAuthWarning}>{authGroup}</Text>
+        <Text color={W.borderSoft}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
+        <Text {...(props.isBusy
+          ? { color: activityColor, bold: true }
+          : readableTextColorProps(W.textMuted))}>{activityDisplay}</Text>
       </Text>
     </Box>
   );
@@ -1498,6 +1515,8 @@ export function WorkShellView(props: {
       entries={props.entries}
       {...(props.streamingAssistantText ? { streamingAssistantText: props.streamingAssistantText } : {})}
       isBusy={props.isBusy}
+      {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
+      {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
       panelPlacement={panelPlacement}
       {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
     />

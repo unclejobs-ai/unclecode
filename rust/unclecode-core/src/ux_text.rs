@@ -397,13 +397,10 @@ fn resolve_panel_border_color_role(input_value: &str, panel_title: &str) -> &'st
     }
 }
 
-fn resolve_panel_display_mode(panel_title: &str, input_value: &str) -> &'static str {
-    let slash_active = input_value.trim().starts_with('/');
-    let interactive_panel = matches!(panel_title, "Auth" | "Commands" | "Models" | "Model picker");
+fn resolve_panel_display_mode(panel_title: &str, _input_value: &str) -> &'static str {
     match panel_title {
         "Context" => "hidden",
         "Context expanded" => "overlay",
-        _ if slash_active && interactive_panel => "bottom",
         _ => "bottom",
     }
 }

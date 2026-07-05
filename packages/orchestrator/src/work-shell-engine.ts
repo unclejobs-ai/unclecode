@@ -5,7 +5,7 @@ import { executeWorkShellBuiltinSubmit } from "./work-shell-engine-builtin-runti
 import {
   WORK_BOARD_PANEL_TITLE,
   buildWorkShellQueueBuiltinInput,
-  renderWorkBoardPanel,
+  createQueueBuiltinResult,
   resolveLastCompletedTurn,
 } from "./work-shell-engine-builtins.js";
 import { resolveWorkerBudget } from "./work-agent.js";
@@ -641,7 +641,7 @@ export class WorkShellEngine<
     if (this.state.panel.title !== WORK_BOARD_PANEL_TITLE) {
       return;
     }
-    const panel = renderWorkBoardPanel(buildWorkShellQueueBuiltinInput({
+    const panel = createQueueBuiltinResult(buildWorkShellQueueBuiltinInput({
       line: "/queue",
       state: this.state,
       workerBudget: resolveWorkerBudget(this.state.mode),
@@ -649,7 +649,7 @@ export class WorkShellEngine<
       queuedItems,
       contextSummaryLines: this.currentContextSummaryLines,
       ...(this.lastCompletedTurnSnapshot ? { lastCompletedTurn: this.lastCompletedTurnSnapshot } : {}),
-    }));
+    })).panel;
     this.setState({ panel });
   }
 

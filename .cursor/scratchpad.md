@@ -17,7 +17,9 @@
 - [x] **T15-E2** Orchestrator queue builtin payload (`blockedReason`, `lastCompletedTurn`, `terminalColumns`) — 성공: orchestrator test `/queue` panel lines
 - [x] **T15-E3** TUI grid render in work-shell overlay — 성공: test:tui 86/86 + engine width test
 - [x] **T15-E4** orchestrator 80 vs 120 col layout test
-- [x] **T15-GATE** `npm run qa:health` 14/14 PASS (2026-07-05, 74.1s) — borderSoft `#94a3b8` remapped to textDim for light-terminal contrast
+- [x] **T15-GATE** `npm run qa:health` 14/14 PASS (2026-07-05, 74.1s)
+- [x] **T15-GATE commit (a1c71d37 follow-up)** `fix(tui): gate contrast and ellipsis test after T15 review` — staged `tests/work/repl.test.mjs` only (Unicode `…`); status separator `readableTextColorProps(W.borderSoft)` already on `1f53f0d`; `work-shell-view.tsx` WIP (loading card/system markers) left unstaged; qa:health 14/14 PASS; not pushed
+- [x] **T15-GATE (post-review aa58bf8 + ff997bc)** `npm run qa:health` **14/14 PASS** exit 0 (73.1s, 2026-07-05) — initial fail: work test ellipsis (`…` vs `...`); runtime QA light-contrast `148;163;184` on status separators → fixed in working tree, **no commit** (user gate-only) — borderSoft `#94a3b8` remapped to textDim for light-terminal contrast
 
 ## Project Status Board (T15)
 
@@ -28,7 +30,7 @@
 - [x] T15-E4 orchestrator board width test
 - [x] T15-GATE qa:health 14/14 PASS — commits `c2b3f47`..`15419a4`
 - [x] Code review (a73c938d): merge blocker Rust board display-width (CJK) **fixed P0** — `pad_board_cell`/`compact_preview` → `ux_text` helpers; builds_work_board 3/3 PASS; also blockedReason narrow, terminalColumns init race, empty post-turn bridge
-- [x] T15 review follow-ups P1–P3 (2026-07-05): Work board rebuilds on `terminalColumns` resize; `resolveQueueBlockedReason` broadened (auth/plan guard); Done column uses `lastCompletedTurnSnapshot` from idle persist; docs gate checklist updated
+- [x] T15 simplify pass (2026-07-05): deduped queue builtin path (`applyQueueBuiltinResult`/`buildQueueBuiltinBase`), removed `renderWorkBoardPanel` wrapper, `pickBusySpinnerFrame` in TUI, Rust dead branches cleaned; WIP loading-card/system-marker diff left unstaged; qa:health 14/14 PASS (105.9s); not pushed
 - [x] Security review (a0f94562): T15 queue/board c2b3f47..15419a4 — no medium+ findings
 - [ ] Adversarial review 2026-07-05 (origin/main..HEAD): **needs-attention** — bootstrap write fails read-only workspaces; synthetic bootstrap memory pollutes prefetch
 
@@ -227,6 +229,7 @@
 
 ## Executor's Feedback or Assistance Requests
 
+- [T15-GATE Executor 2026-07-05 post-review] `npm run qa:health` **14/14 PASS** (73.1s) after minimal fixes: `tests/work/repl.test.mjs` expects Unicode ellipsis for context panel truncation; `work-shell-view.tsx` status group separators use `readableTextColorProps(W.borderSoft)`. Uncommitted fix diff only — no push.
 - [T15 review follow-ups 2026-07-05] P0 CJK display-width committed `aa58bf8`. P1–P3 landed in `fix(t15): board resize rebuild and blocked column` — orchestrator 251/251, `cargo test -p unclecode-core queue` 9/9, `npm run check` OK. Deferred: `/clear` without idle persist may still show stale Done until next turn; adversarial bootstrap findings unchanged.
 - [T11-E2/E3 Executor 7/5] Parallel mode TUI leak fix 커밋 `48e0a8a`: ultrawork info 질문 simple 라우팅, `runInternalTurn`으로 planner/executor/guardian 스트리밍 차단, subtask JSON·worker 메타 sanitize, busy 경로 마스킹. 검증: turn-orchestrator 13/13, Rust orchestrator 11/11, sanitize turn-helpers OK. 사용자 TUI 수동 재현 확인 대기.
 - [Holistic Planner→Executor] 우선순위 기본 순서: **T11-E1 → … → T11-GATE → T12 → T13 → T14**. T9/T10 완료(T10 qa:health 2026-07-05). `work-runtime-bootstrap.ts` 충돌 시 T11-E2 후 T12-E3.
@@ -240,7 +243,8 @@
 
 ## Lessons
 
-- 로컬 미커밋 변경 감사는 클라우드 에이전트로 불가 (원격 스냅샷만 접근 가능) → 로컬 워커 사용.
+- T15 simplify: `/simplify` on committed T15 scope only — revert unrelated `work-shell-view.tsx` WIP before commit; partial WIP + simplify edits mix easily and break build (`BRAND_SPINNER_GLYPH` orphans).
+- `resolve_panel_display_mode` had duplicate `"bottom"` arms; both branches identical — safe to collapse.
 - `git show`가 이 저장소에서 ~90초 걸릴 수 있음 (대형 팩파일 추정). 타임아웃 여유 필요.
 - 서브에이전트 인프라가 네트워크 오류(DNS ENOTFOUND, 생성 타임아웃)로 반복 실패할 수 있음 → 워커의 부분 산출물(워킹트리 diff)은 남아 있으므로, 조정자가 diff 전수 검수 + 검증 게이트를 백그라운드 셸로 직접 완주하는 폴백이 유효.
 - 단, **전사(transcript) mtime이 멈췄다고 워커가 죽은 것이 아님** (동기화 지연일 수 있음). 실제로 T6 워커는 오류 알림 후에도 계속 작업해 나중에 정상 완료 보고를 보냈고, 그 사이 조정자 검증과 레이스가 발생했음. 폴백 개입 전에 워크트리 mtime(파일 변경 지속 여부)로 활동성을 확인할 것.
