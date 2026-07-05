@@ -357,7 +357,7 @@ fn queue_panel(input: &Value) -> Value {
     let queued_count = input
         .get("queuedCount")
         .and_then(Value::as_u64)
-        .unwrap_or(0);
+        .unwrap_or(0) as usize;
     let queued_items = input
         .get("queuedItems")
         .and_then(Value::as_array)
@@ -370,60 +370,298 @@ fn queue_panel(input: &Value) -> Value {
                     if line.is_empty() {
                         return None;
                     }
-                    Some((id, compact_preview(line, 72)))
+                    Some((id, compact_preview(line, 28)))
                 })
-                .take(5)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let backlog_line = if queued_count > 0 {
-        format!(
-            "{} follow-up{} waiting to run automatically.",
-            queued_count,
-            if queued_count == 1 { "" } else { "s" }
-        )
-    } else if is_busy {
-        "No queued work beyond the active turn.".to_string()
-    } else {
-        "No queued work in this shell.".to_string()
-    };
+    let terminal_columns = input
+        .get("terminalColumns")
+        .and_then(Value::as_u64)
+        .unwrap_or(100) as usize;
+    let queue_paused = bool_field_default(input, "queuePaused", false);
+    let blocked_reason = str_field(input, "blockedReason")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let active_prompt_preview = str_field(input, "activePromptPreview")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let last_completed_turn = parse_last_completed_turn(input);
 
-    let mut lines = vec!["Current".to_string()];
-    if is_busy {
-        lines.push("State · running".to_string());
-        lines.push(match busy_status {
-            Some(detail) => format!("Now · {detail}"),
-            None => "Now · active turn".to_string(),
-        });
-    } else {
-        lines.push("State · idle".to_string());
-    }
-    if let Some(mode) = mode {
-        lines.push(format!("Mode · {mode}"));
-    }
-    if let Some(worker_budget) = worker_budget {
-        lines.push(format!("Workers · {worker_budget} max"));
-    }
-    lines.extend([String::new(), "Backlog".to_string(), backlog_line]);
-    if let Some((id, line)) = queued_items.first() {
-        lines.push(format!("Next · #{id} · {line}"));
-    }
-    for (id, line) in queued_items.iter().skip(1) {
-        lines.push(format!("Queued #{id} · {line}"));
-    }
+    let mut lines = build_work_board_status_lines(is_busy, busy_status, mode, worker_budget);
+    lines.push(String::new());
+    lines.push("Board".to_string());
+    lines.extend(build_work_board_grid_lines(
+        WorkBoardInput {
+            is_busy,
+            busy_status,
+            queued_count,
+            queued_items: &queued_items,
+            queue_paused,
+            blocked_reason,
+            active_prompt_preview,
+            last_completed_turn: last_completed_turn.as_deref(),
+        },
+        terminal_columns,
+    ));
     lines.extend([
         String::new(),
         "Steer".to_string(),
         if is_busy {
-            "Type a plain follow-up while running; it will queue after the active turn.".to_string()
+            "Enter queues follow-up · Ctrl+C/Esc interrupt · /queue clear drops".to_string()
         } else {
             "Start a turn first; queued follow-ups run in order after it finishes.".to_string()
         },
-        "Slash commands are not queued while busy; /cancel interrupts the active turn.".to_string(),
+        if queue_paused && queued_count > 0 {
+            "Queue paused after interrupt · send a new message to resume or /queue clear to drop."
+                .to_string()
+        } else {
+            "Slash commands are not queued while busy; /cancel interrupts the active turn.".to_string()
+        },
         "/queue clear drops queued follow-ups without stopping the active turn.".to_string(),
     ]);
 
-    json!({ "title": "Queue", "lines": lines })
+    json!({ "title": "Work board", "lines": lines })
+}
+
+struct WorkBoardInput<'a> {
+    is_busy: bool,
+    busy_status: Option<&'a str>,
+    queued_count: usize,
+    queued_items: &'a [(u64, String)],
+    queue_paused: bool,
+    blocked_reason: Option<&'a str>,
+    active_prompt_preview: Option<&'a str>,
+    last_completed_turn: Option<&'a str>,
+}
+
+fn parse_last_completed_turn(input: &Value) -> Option<String> {
+    let turn = input.get("lastCompletedTurn")?;
+    let user = turn.get("user").and_then(Value::as_str)?.trim();
+    let assistant = turn.get("assistant").and_then(Value::as_str)?.trim();
+    if user.is_empty() || assistant.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} → {}",
+        compact_preview(user, 24),
+        compact_preview(assistant, 32)
+    ))
+}
+
+fn build_work_board_status_lines(
+    is_busy: bool,
+    busy_status: Option<&str>,
+    mode: Option<&str>,
+    worker_budget: Option<u64>,
+) -> Vec<String> {
+    let mut parts = Vec::new();
+    parts.push(if is_busy {
+        "State · running".to_string()
+    } else {
+        "State · idle".to_string()
+    });
+    if let Some(mode) = mode {
+        parts.push(mode.to_string());
+    }
+    if let Some(worker_budget) = worker_budget {
+        parts.push(format!("workers {worker_budget}"));
+    } else if is_busy {
+        if let Some(detail) = busy_status {
+            parts.push(detail.to_string());
+        }
+    }
+    vec![format!("{}", parts.join(" · "))]
+}
+
+fn build_work_board_grid_lines(input: WorkBoardInput<'_>, terminal_columns: usize) -> Vec<String> {
+    let queued = build_work_board_column(
+        "대기",
+        input.queued_count,
+        build_queued_board_rows(input.queued_count, input.queued_items),
+    );
+    let running = build_work_board_column(
+        "진행",
+        usize::from(input.is_busy),
+        build_running_board_rows(input.is_busy, input.busy_status, input.active_prompt_preview),
+    );
+    let blocked = build_work_board_column(
+        "막힘",
+        work_board_blocked_count(input.queue_paused, input.queued_count, input.blocked_reason),
+        build_blocked_board_rows(input.queue_paused, input.queued_count, input.blocked_reason),
+    );
+    let done_count = usize::from(input.last_completed_turn.is_some());
+    let done = build_work_board_column(
+        "완료",
+        done_count,
+        build_done_board_rows(input.last_completed_turn),
+    );
+
+    if terminal_columns >= 100 {
+        format_work_board_four_columns(&[queued, running, blocked, done], 22)
+    } else {
+        format_work_board_two_by_two(&[queued, running, blocked, done], 36)
+    }
+}
+
+struct WorkBoardColumn {
+    label: String,
+    rows: Vec<String>,
+}
+
+fn build_work_board_column(label: &str, count: usize, rows: Vec<String>) -> WorkBoardColumn {
+    WorkBoardColumn {
+        label: format!("{label} · {count}"),
+        rows,
+    }
+}
+
+fn build_queued_board_rows(queued_count: usize, queued_items: &[(u64, String)]) -> Vec<String> {
+    if queued_count == 0 {
+        return vec!["—".to_string()];
+    }
+    let mut rows = queued_items
+        .iter()
+        .take(3)
+        .map(|(id, line)| format!("#{id} {line}"))
+        .collect::<Vec<_>>();
+    if queued_count > rows.len() {
+        rows.push(format!("+{} more", queued_count - rows.len()));
+    }
+    rows
+}
+
+fn build_running_board_rows(
+    is_busy: bool,
+    busy_status: Option<&str>,
+    active_prompt_preview: Option<&str>,
+) -> Vec<String> {
+    if !is_busy {
+        return vec!["—".to_string()];
+    }
+    let mut rows = vec![format!(
+        "⠋ {}",
+        busy_status.unwrap_or("active turn")
+    )];
+    if let Some(preview) = active_prompt_preview {
+        rows.push(compact_preview(preview, 28));
+    }
+    rows
+}
+
+fn work_board_blocked_count(
+    queue_paused: bool,
+    queued_count: usize,
+    blocked_reason: Option<&str>,
+) -> usize {
+    if blocked_reason.is_some() {
+        return 1;
+    }
+    if queue_paused && queued_count > 0 {
+        return 1;
+    }
+    0
+}
+
+fn build_blocked_board_rows(
+    queue_paused: bool,
+    queued_count: usize,
+    blocked_reason: Option<&str>,
+) -> Vec<String> {
+    if let Some(reason) = blocked_reason {
+        return vec![compact_preview(reason, 28)];
+    }
+    if queue_paused && queued_count > 0 {
+        return vec![format!("pause · {queued_count} queued")];
+    }
+    vec!["—".to_string()]
+}
+
+fn build_done_board_rows(last_completed_turn: Option<&str>) -> Vec<String> {
+    last_completed_turn
+        .map(|line| vec![line.to_string()])
+        .unwrap_or_else(|| vec!["—".to_string()])
+}
+
+fn format_work_board_four_columns(columns: &[WorkBoardColumn; 4], col_width: usize) -> Vec<String> {
+    let header = join_board_row(
+        &[
+            columns[0].label.as_str(),
+            columns[1].label.as_str(),
+            columns[2].label.as_str(),
+            columns[3].label.as_str(),
+        ],
+        col_width,
+    );
+    let row_count = columns
+        .iter()
+        .map(|column| column.rows.len())
+        .max()
+        .unwrap_or(1);
+    let mut lines = vec![header];
+    for row_index in 0..row_count {
+        lines.push(join_board_row(
+            &[
+                column_row_or_dash(&columns[0], row_index).as_str(),
+                column_row_or_dash(&columns[1], row_index).as_str(),
+                column_row_or_dash(&columns[2], row_index).as_str(),
+                column_row_or_dash(&columns[3], row_index).as_str(),
+            ],
+            col_width,
+        ));
+    }
+    lines
+}
+
+fn format_work_board_two_by_two(columns: &[WorkBoardColumn; 4], col_width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for pair in [(0, 1), (2, 3)] {
+        lines.push(join_board_row(
+            &[columns[pair.0].label.as_str(), columns[pair.1].label.as_str()],
+            col_width,
+        ));
+        let row_count = columns[pair.0]
+            .rows
+            .len()
+            .max(columns[pair.1].rows.len());
+        for row_index in 0..row_count {
+            lines.push(join_board_row(
+                &[
+                    column_row_or_dash(&columns[pair.0], row_index).as_str(),
+                    column_row_or_dash(&columns[pair.1], row_index).as_str(),
+                ],
+                col_width,
+            ));
+        }
+        if pair.0 == 0 {
+            lines.push(String::new());
+        }
+    }
+    lines
+}
+
+fn column_row_or_dash(column: &WorkBoardColumn, row_index: usize) -> String {
+    column
+        .rows
+        .get(row_index)
+        .cloned()
+        .unwrap_or_else(|| "—".to_string())
+}
+
+fn join_board_row(cells: &[&str], col_width: usize) -> String {
+    cells
+        .iter()
+        .map(|cell| pad_board_cell(cell, col_width))
+        .collect::<Vec<_>>()
+        .join(" │ ")
+}
+
+fn pad_board_cell(text: &str, width: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count >= width {
+        return compact_preview(text, width);
+    }
+    format!("{text}{}", " ".repeat(width - char_count))
 }
 
 fn context_panel(input: &Value) -> Value {
@@ -1835,38 +2073,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builds_queue_panel_with_backlog_and_steer_copy() {
+    fn builds_work_board_with_backlog_and_steer_copy() {
         let panel = queue_panel(&json!({
             "isBusy": true,
             "busyStatus": "thinking",
             "mode": "yolo",
             "workerBudget": 4,
             "queuedCount": 2,
+            "terminalColumns": 100,
+            "activePromptPreview": "first active turn",
             "queuedItems": [
                 {"id": 1, "line": "first queued follow-up"},
                 {"id": 2, "line": "second queued follow-up"}
             ]
         }));
         let lines = panel.get("lines").and_then(Value::as_array).expect("lines");
+        assert_eq!(
+            panel.get("title").and_then(Value::as_str),
+            Some("Work board")
+        );
+        assert!(lines.iter().any(|line| line.as_str() == Some("Board")));
         assert!(lines
             .iter()
-            .any(|line| line == "2 follow-ups waiting to run automatically."));
-        assert!(!lines
-            .iter()
-            .any(|line| line == "Queued #1 · first queued follow-up"));
+            .any(|line| line.as_str().is_some_and(|value| value.contains("대기 · 2"))));
         assert!(lines
             .iter()
-            .any(|line| line == "Queued #2 · second queued follow-up"));
+            .any(|line| line.as_str().is_some_and(|value| value.contains("진행 · 1"))));
         assert!(lines
             .iter()
-            .any(|line| line == "Next · #1 · first queued follow-up"));
+            .any(|line| line.as_str().is_some_and(|value| value.contains("#1 first queued"))));
         assert!(lines.iter().any(|line| line == "Steer"));
-        assert!(lines.iter().any(|line| line
-            == "Slash commands are not queued while busy; /cancel interrupts the active turn."));
+        assert!(lines.iter().any(|line| line.as_str().is_some_and(|value| value
+            .contains("Enter queues follow-up"))));
+    }
+
+    #[test]
+    fn builds_work_board_queue_paused_blocked_column() {
+        let panel = queue_panel(&json!({
+            "isBusy": false,
+            "queuePaused": true,
+            "queuedCount": 2,
+            "terminalColumns": 100,
+            "queuedItems": [
+                {"id": 1, "line": "second"},
+                {"id": 2, "line": "third"}
+            ]
+        }));
+        let lines = panel.get("lines").and_then(Value::as_array).expect("lines");
         assert!(lines
             .iter()
-            .any(|line| line
-                == "/queue clear drops queued follow-ups without stopping the active turn."));
+            .any(|line| line.as_str().is_some_and(|value| value.contains("막힘 · 1"))));
+        assert!(lines
+            .iter()
+            .any(|line| line.as_str().is_some_and(|value| value.contains("pause · 2 queued"))));
+        assert!(lines.iter().any(|line| line.as_str().is_some_and(|value| value
+            .contains("Queue paused after interrupt"))));
+    }
+
+    #[test]
+    fn builds_work_board_two_by_two_layout_at_80_columns() {
+        let panel = queue_panel(&json!({
+            "isBusy": true,
+            "busyStatus": "thinking",
+            "queuedCount": 1,
+            "terminalColumns": 80,
+            "queuedItems": [{"id": 1, "line": "queued follow-up"}],
+            "lastCompletedTurn": {"user": "hi", "assistant": "hello there"}
+        }));
+        let lines = panel.get("lines").and_then(Value::as_array).expect("lines");
+        assert!(lines
+            .iter()
+            .any(|line| line.as_str().is_some_and(|value| value.contains("대기 · 1"))));
+        assert!(!lines.iter().any(|line| line.as_str().is_some_and(|value| {
+            value.contains("대기 · 1") && value.contains("완료 · 1")
+        })));
+        assert!(lines
+            .iter()
+            .any(|line| line.as_str().is_some_and(|value| value.contains("완료 · 1"))));
+        assert!(lines
+            .iter()
+            .any(|line| line.as_str().is_some_and(|value| value.contains("hi → hello"))));
     }
 
     #[test]

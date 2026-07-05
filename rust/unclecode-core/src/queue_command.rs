@@ -30,6 +30,11 @@ pub fn resolve_queue_command_json(input_json: &str) -> Result<String, String> {
         "workerBudget": input.get("workerBudget").cloned().unwrap_or(Value::Null),
         "queuedCount": input.get("queuedCount").cloned().unwrap_or(Value::Null),
         "queuedItems": input.get("queuedItems").cloned().unwrap_or(Value::Null),
+        "queuePaused": input.get("queuePaused").cloned().unwrap_or(Value::Null),
+        "blockedReason": input.get("blockedReason").cloned().unwrap_or(Value::Null),
+        "activePromptPreview": input.get("activePromptPreview").cloned().unwrap_or(Value::Null),
+        "lastCompletedTurn": input.get("lastCompletedTurn").cloned().unwrap_or(Value::Null),
+        "terminalColumns": input.get("terminalColumns").cloned().unwrap_or(Value::Null),
     });
     let panel =
         serde_json::from_str::<Value>(&build_ux_panel_json("queue", &panel_input.to_string())?)
@@ -60,12 +65,17 @@ mod tests {
             parsed["entries"][1]["text"],
             "Queue shown. No queued work in this shell."
         );
-        assert_eq!(parsed["panel"]["title"], "Queue");
+        assert_eq!(parsed["panel"]["title"], "Work board");
         assert!(parsed["panel"]["lines"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|line| line.as_str().unwrap_or("").contains("No queued work")));
+            .any(|line| line.as_str().unwrap_or("").contains("State · idle")));
+        assert!(parsed["panel"]["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line.as_str().unwrap_or("").contains("대기 · 0")));
     }
 
     #[test]
@@ -88,7 +98,7 @@ mod tests {
             parsed["entries"][1]["text"],
             "Queue cleared. Active turn is still running."
         );
-        assert_eq!(parsed["panel"]["title"], "Queue");
+        assert_eq!(parsed["panel"]["title"], "Work board");
         assert!(parsed["panel"]["lines"]
             .as_array()
             .unwrap()

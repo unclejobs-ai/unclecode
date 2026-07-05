@@ -257,6 +257,7 @@ fn is_pinned_panel_title(title: &str) -> bool {
     matches!(
         title,
         "Recent sessions" | "Session status" | "Status" | "Help" | "Memories" | "Skills" | "Queue"
+            | "Work board"
     ) || title.starts_with("Skill · ")
 }
 
