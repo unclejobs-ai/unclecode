@@ -6,7 +6,7 @@ pub fn resolve_prompt_success_result_json(input_json: &str) -> Result<String, St
     let assistant_text = input
         .get("assistantText")
         .and_then(Value::as_str)
-        .unwrap_or("(empty response)");
+        .unwrap_or("");
     let bridge_lines = input
         .get("bridgeLines")
         .and_then(Value::as_array)
@@ -22,10 +22,13 @@ pub fn resolve_prompt_success_result_json(input_json: &str) -> Result<String, St
         .and_then(Value::as_u64)
         .unwrap_or(0);
 
+    let mut entries = Vec::new();
+    if !assistant_text.trim().is_empty() {
+        entries.push(json!({ "role": "assistant", "text": assistant_text }));
+    }
+
     serde_json::to_string(&json!({
-        "entries": [
-            { "role": "assistant", "text": assistant_text },
-        ],
+        "entries": entries,
         "patch": {
             "bridgeLines": bridge_lines,
             "memoryLines": memory_lines,
@@ -56,5 +59,21 @@ mod tests {
         assert_eq!(parsed["patch"]["bridgeLines"][0], "bridge-1");
         assert_eq!(parsed["patch"]["memoryLines"][0], "memory-1");
         assert_eq!(parsed["patch"]["lastTurnDurationMs"], 23);
+    }
+
+    #[test]
+    fn omits_assistant_entry_when_sanitized_text_is_empty() {
+        let result = resolve_prompt_success_result_json(
+            r#"{
+                "assistantText": "",
+                "bridgeLines": ["bridge-1"],
+                "memoryLines": ["memory-1"],
+                "lastTurnDurationMs": 12
+            }"#,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["entries"].as_array().map(|entries| entries.len()), Some(0));
+        assert_eq!(parsed["patch"]["bridgeLines"][0], "bridge-1");
     }
 }
