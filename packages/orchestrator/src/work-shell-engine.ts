@@ -1166,6 +1166,9 @@ export class WorkShellEngine<
       persistSessionSnapshot: (state, summary, traceMode) => this.persistSessionSnapshot(state, summary, traceMode),
       lastSessionSummary: this.lastSessionSummary,
       lastCompletedTurn: () => this.lastCompletedTurnSnapshot,
+      clearLastCompletedTurn: () => {
+        this.lastCompletedTurnSnapshot = undefined;
+      },
     });
   }
 

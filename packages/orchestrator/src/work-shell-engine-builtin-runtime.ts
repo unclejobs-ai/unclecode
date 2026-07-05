@@ -137,6 +137,7 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
   ) => Promise<void>;
   lastSessionSummary: string;
   lastCompletedTurn?: (() => { readonly user: string; readonly assistant: string } | undefined) | undefined;
+  clearLastCompletedTurn?: (() => void) | undefined;
 }): Promise<void> {
   switch (input.builtinCommand.kind) {
     case "exit":
@@ -144,6 +145,7 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
       return;
     case "clear":
       input.clearAgent();
+      input.clearLastCompletedTurn?.();
       input.setState(createClearBuiltinResult(input.line).patch);
       return;
     case "cancel":

@@ -2462,6 +2462,19 @@ test("WorkShellEngine handles /clear without UI-owned business logic", async () 
   assert.deepEqual(engine.getState().entries, [{ role: "system", text: "Conversation cleared." }]);
 });
 
+test("WorkShellEngine /clear clears stale work board done snapshot", async () => {
+  const { engine } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("hello");
+  await engine.handleSubmit("/queue");
+  assert.ok(engine.getState().panel?.lines.some((line) => /완료 · 1/.test(line)));
+
+  await engine.handleSubmit("/clear");
+  await engine.handleSubmit("/queue");
+  assert.ok(engine.getState().panel?.lines.some((line) => /완료 · 0/.test(line)));
+});
+
 test("WorkShellEngine applies /reasoning updates and syncs agent runtime settings", async () => {
   const { engine, calls } = createEngine();
 
