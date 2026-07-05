@@ -3,6 +3,13 @@ import { existsSync } from "node:fs";
 
 import { executeWorkShellBuiltinSubmit } from "./work-shell-engine-builtin-runtime.js";
 import {
+  WORK_BOARD_PANEL_TITLE,
+  buildWorkShellQueueBuiltinInput,
+  renderWorkBoardPanel,
+  resolveLastCompletedTurn,
+} from "./work-shell-engine-builtins.js";
+import { resolveWorkerBudget } from "./work-agent.js";
+import {
   executeInlineCommandSubmit,
   executeLocalCommandSubmit,
   executeSecureApiKeyEntrySubmit,
@@ -553,6 +560,10 @@ export class WorkShellEngine<
   private activeTurnEpoch = 0;
   private activeTurnAbortController: AbortController | undefined;
   private queueAutoDrainPaused = false;
+  private workBoardRebuildGeneration = 0;
+  private lastCompletedTurnSnapshot:
+    | { readonly user: string; readonly assistant: string }
+    | undefined;
   private state: WorkShellEngineState<Reasoning>;
 
   constructor(input: WorkShellEngineInput<Attachment, Reasoning, TraceEvent>) {
@@ -596,6 +607,9 @@ export class WorkShellEngine<
       contextSummaryLines: this.currentContextSummaryLines,
       buildContextPanel: input.buildContextPanel,
     });
+    this.lastCompletedTurnSnapshot = resolveLastCompletedTurn(
+      input.options.initialEntries ?? this.state.entries,
+    );
   }
 
   getState(): WorkShellEngineState<Reasoning> {
@@ -608,6 +622,35 @@ export class WorkShellEngine<
       return;
     }
     this.setState({ terminalColumns });
+    if (this.state.panel.title === WORK_BOARD_PANEL_TITLE) {
+      void this.rebuildWorkBoardPanel();
+    }
+  }
+
+  private async rebuildWorkBoardPanel(): Promise<void> {
+    const generation = ++this.workBoardRebuildGeneration;
+    let queuedItems: readonly { readonly id: number; readonly line: string }[] = [];
+    try {
+      queuedItems = await this.listQueuedSubmits();
+    } catch {
+      queuedItems = [];
+    }
+    if (generation !== this.workBoardRebuildGeneration) {
+      return;
+    }
+    if (this.state.panel.title !== WORK_BOARD_PANEL_TITLE) {
+      return;
+    }
+    const panel = renderWorkBoardPanel(buildWorkShellQueueBuiltinInput({
+      line: "/queue",
+      state: this.state,
+      workerBudget: resolveWorkerBudget(this.state.mode),
+      queuedCount: this.queuedCountCache,
+      queuedItems,
+      contextSummaryLines: this.currentContextSummaryLines,
+      ...(this.lastCompletedTurnSnapshot ? { lastCompletedTurn: this.lastCompletedTurnSnapshot } : {}),
+    }));
+    this.setState({ panel });
   }
 
   subscribe(listener: (state: WorkShellEngineState<Reasoning>) => void): () => void {
@@ -1122,6 +1165,7 @@ export class WorkShellEngine<
       setState: (patch) => this.setState(patch),
       persistSessionSnapshot: (state, summary, traceMode) => this.persistSessionSnapshot(state, summary, traceMode),
       lastSessionSummary: this.lastSessionSummary,
+      lastCompletedTurn: () => this.lastCompletedTurnSnapshot,
     });
   }
 
@@ -1188,6 +1232,9 @@ export class WorkShellEngine<
         ? this.state.reasoning.effort
         : undefined;
     this.lastSessionSummary = summary;
+    if (state === "idle") {
+      this.lastCompletedTurnSnapshot = resolveLastCompletedTurn(this.state.entries);
+    }
     await this.persistWorkShellSessionSnapshot(createWorkShellSessionSnapshotInput({
       cwd: this.options.cwd,
       sessionId: this.sessionId,

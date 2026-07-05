@@ -106,6 +106,7 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
     traceMode?: WorkShellTraceMode,
   ) => Promise<void>;
   lastSessionSummary: string;
+  lastCompletedTurn?: (() => { readonly user: string; readonly assistant: string } | undefined) | undefined;
 }): Promise<void> {
   switch (input.builtinCommand.kind) {
     case "exit":
@@ -274,12 +275,15 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
       return;
     case "queue": {
       const queuedItems = input.queuedItems ? await input.queuedItems() : undefined;
+      const snapshotTurn = input.lastCompletedTurn?.();
       const result = createQueueBuiltinResult(buildWorkShellQueueBuiltinInput({
         line: input.line,
         state: input.state,
         workerBudget: resolveWorkerBudget(input.state.mode),
         ...(input.queuedCount ? { queuedCount: input.queuedCount() } : {}),
         ...(queuedItems ? { queuedItems } : {}),
+        contextSummaryLines: input.currentContextSummaryLines,
+        ...(snapshotTurn ? { lastCompletedTurn: snapshotTurn } : {}),
       }));
       input.appendEntries(...result.entries);
       input.setState({ panel: result.panel });
@@ -287,12 +291,15 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
     }
     case "queue-clear": {
       await input.clearQueuedItems?.();
+      const snapshotTurn = input.lastCompletedTurn?.();
       const result = createQueueBuiltinResult(buildWorkShellQueueBuiltinInput({
         line: input.line,
         state: input.state,
         workerBudget: resolveWorkerBudget(input.state.mode),
         queuedCount: 0,
         queuedItems: [],
+        contextSummaryLines: input.currentContextSummaryLines,
+        ...(snapshotTurn ? { lastCompletedTurn: snapshotTurn } : {}),
         transcriptText: input.state.isBusy
           ? "Queue cleared. Active turn is still running."
           : "Queue cleared.",

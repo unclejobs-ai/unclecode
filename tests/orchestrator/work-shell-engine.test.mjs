@@ -19,7 +19,9 @@ import {
   createToolsBuiltinResult,
   createTraceModeBuiltinResult,
   resolveModelBuiltinResult,
+  resolveQueueBlockedReason,
   resolveReasoningBuiltinResult,
+  buildWorkShellQueueBuiltinInput,
 } from "../../packages/orchestrator/src/work-shell-engine-builtins.ts";
 import { executeWorkShellBuiltinSubmit } from "../../packages/orchestrator/src/work-shell-engine-builtin-runtime.ts";
 import {
@@ -3581,12 +3583,92 @@ test("WorkShellEngine queue panel respects terminal width for board layout", asy
   );
 
   engine.updateTerminalColumns(120);
-  await engine.handleSubmit("/queue");
-  const wideLines = engine.getState().panel?.lines ?? [];
+  let wideLines = engine.getState().panel?.lines ?? [];
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    wideLines = engine.getState().panel?.lines ?? [];
+    if (wideLines.some((line) => /대기 ·/.test(line) && /완료 ·/.test(line))) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   assert.ok(
     wideLines.some((line) => /대기 ·/.test(line) && /완료 ·/.test(line)),
-    "wide layout should render four columns on one header row",
+    "wide layout should rebuild on resize without re-running /queue",
   );
+});
+
+test("resolveQueueBlockedReason covers auth, plan guard, and read-only guard", () => {
+  assert.equal(
+    resolveQueueBlockedReason({ authLabel: "oauth-file-api-blocked" }),
+    "oauth file api blocked",
+  );
+  assert.equal(
+    resolveQueueBlockedReason({ authLabel: "none" }),
+    "not signed in",
+  );
+  assert.equal(
+    resolveQueueBlockedReason({
+      authLabel: "oauth-file",
+      contextSummaryLines: [
+        "Auth issue: saved OAuth needs refresh. Use /auth login.",
+      ],
+    }),
+    "saved OAuth needs refresh. Use /auth login.",
+  );
+  assert.match(
+    resolveQueueBlockedReason({
+      authLabel: "api-key-env",
+      entries: [
+        {
+          role: "system",
+          text: "계획 모드는 편집 금지입니다. 구현하려면 /mode set build 또는 yolo 로 전환한 뒤 다시 보내세요.",
+        },
+      ],
+    }) ?? "",
+    /계획 모드는 편집 금지/,
+  );
+  assert.match(
+    resolveQueueBlockedReason({
+      authLabel: "api-key-env",
+      entries: [
+        {
+          role: "system",
+          text: "탐색 모드는 읽기 전용입니다. /mode set yolo 로 전환한 뒤 편집 요청을 다시 보내세요.",
+        },
+      ],
+    }) ?? "",
+    /탐색 모드는 읽기 전용/,
+  );
+  assert.equal(
+    resolveQueueBlockedReason({
+      authLabel: "api-key-env",
+      entries: [{ role: "system", text: "Queue shown." }],
+    }),
+    undefined,
+  );
+});
+
+test("buildWorkShellQueueBuiltinInput prefers session snapshot for done column", () => {
+  const payload = buildWorkShellQueueBuiltinInput({
+    line: "/queue",
+    state: {
+      isBusy: false,
+      busyStatus: undefined,
+      mode: "default",
+      authLabel: "api-key-env",
+      queuePaused: false,
+      entries: [
+        { role: "user", text: "/queue" },
+        { role: "system", text: "Queue shown." },
+      ],
+      terminalColumns: 100,
+    },
+    lastCompletedTurn: { user: "hi", assistant: "hello from snapshot" },
+  });
+  assert.deepEqual(payload.lastCompletedTurn, {
+    user: "hi",
+    assistant: "hello from snapshot",
+  });
 });
 
 test("WorkShellEngine can switch to verbose trace mode explicitly", async () => {

@@ -1,6 +1,6 @@
 # T15 — Work Queue Board (Mini Kanban)
 
-Status: **Planner + UI/UX spec** (2026-07-05). Implementation not started.
+Status: **Shipped** (2026-07-05). T15-E0–GATE complete; review follow-ups P0–P2 landed 2026-07-05.
 
 Related: [DESIGN.md](../../DESIGN.md) §4–6, [work-shell UX standard](../specs/2026-06-03-work-shell-ux-quality-standard.md) §Interrupt/Queue.
 
@@ -143,7 +143,10 @@ Drop EN hints in header before truncating KO labels (DESIGN: drop optional hints
 
 ## Verification (T15-GATE)
 
-- [ ] `/queue` at 100 cols: four columns, no overflow in `calculatePaneWidth`
-- [ ] Interrupt → **막힘** shows paused; after next chat → drain visible in **대기** emptying
-- [ ] Korean preview lines: no hangul residual / mid-char truncation in smoke
-- [ ] Composer indicator unchanged when panel closed; warning tint when paused
+- [x] `/queue` at 100 cols: four columns, no overflow in `calculatePaneWidth`
+- [x] Interrupt → **막힘** shows paused; after next chat → drain visible in **대기** emptying
+- [x] Korean preview lines: no hangul residual / mid-char truncation in smoke (P0 display-width fix)
+- [x] Composer indicator unchanged when panel closed; warning tint when paused
+- [x] Work board rebuilds 2×2 ↔ 4-col on `terminalColumns` resize without re-running `/queue`
+- [x] **막힘** blockedReason: OAuth api-blocked, auth issue context, not signed in, plan/read-only guard
+- [x] **완료** uses session snapshot `lastCompletedTurn` (idle persist), not transient live entries

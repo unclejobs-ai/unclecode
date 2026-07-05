@@ -704,6 +704,8 @@ function isSkillsBuiltinResult(value: unknown): value is {
   );
 }
 
+export const WORK_BOARD_PANEL_TITLE = "Work board";
+
 export type WorkShellQueueBuiltinInput = {
   readonly line: string;
   readonly isBusy: boolean;
@@ -720,10 +722,52 @@ export type WorkShellQueueBuiltinInput = {
   readonly terminalColumns?: number;
 };
 
-export function resolveQueueBlockedReason(authLabel: string): string | undefined {
-  if (authLabel.endsWith("-api-blocked")) {
-    return authLabel.replaceAll("-", " ");
+const READ_ONLY_GUARD_BLOCKED_PATTERNS = [
+  /탐색 모드는 읽기 전용/,
+  /계획 모드는 편집 금지/,
+] as const;
+
+function extractAuthIssueBlockedReason(text: string): string | undefined {
+  const match = text.match(/^Auth issue:\s*(.+)$/);
+  return match?.[1]?.trim() || undefined;
+}
+
+export function resolveQueueBlockedReason(input: {
+  readonly authLabel: string;
+  readonly contextSummaryLines?: readonly string[];
+  readonly entries?: readonly WorkShellChatEntry[];
+}): string | undefined {
+  if (input.authLabel.endsWith("-api-blocked")) {
+    return input.authLabel.replaceAll("-", " ");
   }
+
+  for (const line of input.contextSummaryLines ?? []) {
+    const authIssue = extractAuthIssueBlockedReason(line);
+    if (authIssue) {
+      return authIssue;
+    }
+  }
+
+  if (input.authLabel === "none") {
+    return "not signed in";
+  }
+
+  for (let index = (input.entries?.length ?? 0) - 1; index >= 0; index -= 1) {
+    const entry = input.entries?.[index];
+    if (entry?.role !== "system") {
+      continue;
+    }
+    for (const pattern of READ_ONLY_GUARD_BLOCKED_PATTERNS) {
+      if (pattern.test(entry.text)) {
+        return entry.text.split("\n")[0]?.trim() || entry.text.trim();
+      }
+    }
+    const authIssue = extractAuthIssueBlockedReason(entry.text);
+    if (authIssue) {
+      return authIssue;
+    }
+  }
+
   return undefined;
 }
 
@@ -787,10 +831,16 @@ export function buildWorkShellQueueBuiltinInput<Reasoning extends WorkShellReaso
   readonly queuedItems?: readonly { readonly id: number; readonly line: string }[];
   readonly transcriptText?: string;
   readonly terminalColumns?: number;
+  readonly contextSummaryLines?: readonly string[];
+  readonly lastCompletedTurn?: { readonly user: string; readonly assistant: string };
 }): WorkShellQueueBuiltinInput {
-  const blockedReason = resolveQueueBlockedReason(input.state.authLabel);
+  const blockedReason = resolveQueueBlockedReason({
+    authLabel: input.state.authLabel,
+    ...(input.contextSummaryLines ? { contextSummaryLines: input.contextSummaryLines } : {}),
+    entries: input.state.entries,
+  });
   const activePromptPreview = resolveActivePromptPreview(input.state.entries, input.state.isBusy);
-  const lastCompletedTurn = resolveLastCompletedTurn(input.state.entries);
+  const lastCompletedTurn = input.lastCompletedTurn ?? resolveLastCompletedTurn(input.state.entries);
   return {
     line: input.line,
     isBusy: input.state.isBusy,
@@ -826,6 +876,10 @@ export function createQueueBuiltinResult(input: WorkShellQueueBuiltinInput): {
     entries: parsed.entries,
     panel: parsed.panel,
   };
+}
+
+export function renderWorkBoardPanel(input: WorkShellQueueBuiltinInput): WorkShellPanel {
+  return createQueueBuiltinResult(input).panel;
 }
 
 export function createSkillUsageErrorEntries(line: string): readonly WorkShellChatEntry[] {

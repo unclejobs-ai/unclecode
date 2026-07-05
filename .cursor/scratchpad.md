@@ -1,5 +1,37 @@
 # UncleCode 정비 스크래치패드 (2026-07-03)
 
+**2026-07-05 (Planner — T15 Work Queue Board):** 사용자 칸반 제안 → **미니 보드**로 범위 축소. Jira/Linear 대체 아님. 기존 Rust queue + orchestrator `isBusy` / `queuePaused` / session last turn만 표시, **read-only v1**. UI/UX: **`/queue` 패널을 4열 보드로 확장** (새 `/board` 없음). 열: **대기·진행·막힘·완료**. DESIGN.md 정합 — warning tint(pause), sky accent(running), display-width truncation, panel motion none, composer indicator 유지. 80col=2×2, ≥100col=4열. 상세: `docs/design/work-queue-board-t15.md`. **Executor 착수 전 사용자 확인.**
+
+## Key Challenges and Analysis (T15)
+
+- **데이터 중복 금지**: 새 DB/카드 ID 없이 queue list + engine state + last turn snapshot만 조합.
+- **터미널 폭**: 80/100/120 col QA 게이트 필수; 한글 preview는 `truncateForDisplayWidth`만.
+- **막힘 열 정의**: interrupt pause, auth requires_action, plan guard — **한 가지 primary reason**만 표시.
+- **완료 열**: transcript 전체 X, 마지막 1 turn preview만 (DESIGN conversation noise 규칙).
+- **큐 재개 의존**: T15 drain UX는 이미 shipped된 interrupt 후 next-chat resume에 의존.
+
+## High-level Task Breakdown (T15)
+
+- [ ] **T15-E0** UX spec + scratchpad (Planner) — 성공: `docs/design/work-queue-board-t15.md` + 본 섹션
+- [ ] **T15-E1** Rust `queue_panel` board lines + column counts (`ux_panels.rs`, `queue_command.rs`) — 성공: unit test 80/100 layout lines
+- [x] **T15-E2** Orchestrator queue builtin payload (`blockedReason`, `lastCompletedTurn`, `terminalColumns`) — 성공: orchestrator test `/queue` panel lines
+- [x] **T15-E3** TUI grid render in work-shell overlay — 성공: test:tui 86/86 + engine width test
+- [x] **T15-E4** orchestrator 80 vs 120 col layout test
+- [x] **T15-GATE** `npm run qa:health` 14/14 PASS (2026-07-05, 74.1s) — borderSoft `#94a3b8` remapped to textDim for light-terminal contrast
+
+## Project Status Board (T15)
+
+- [x] T15-E0 Planner + UI/UX design doc
+- [x] T15-E1 Rust panel — `ux_panels.rs` Work board 4열/2×2, title `Work board`, optional JSON fields
+- [x] T15-E2 Orchestrator payload — `buildWorkShellQueueBuiltinInput`, queuePaused/blockedReason/lastCompletedTurn/activePromptPreview/terminalColumns wired
+- [x] T15-E3 TUI terminalColumns — `updateTerminalColumns` + pane resize sync
+- [x] T15-E4 orchestrator board width test
+- [x] T15-GATE qa:health 14/14 PASS — commits `c2b3f47`..`15419a4`
+- [x] Code review (a73c938d): merge blocker Rust board display-width (CJK) **fixed P0** — `pad_board_cell`/`compact_preview` → `ux_text` helpers; builds_work_board 3/3 PASS; also blockedReason narrow, terminalColumns init race, empty post-turn bridge
+- [x] T15 review follow-ups P1–P3 (2026-07-05): Work board rebuilds on `terminalColumns` resize; `resolveQueueBlockedReason` broadened (auth/plan guard); Done column uses `lastCompletedTurnSnapshot` from idle persist; docs gate checklist updated
+- [x] Security review (a0f94562): T15 queue/board c2b3f47..15419a4 — no medium+ findings
+- [ ] Adversarial review 2026-07-05 (origin/main..HEAD): **needs-attention** — bootstrap write fails read-only workspaces; synthetic bootstrap memory pollutes prefetch
+
 ## Background and Motivation
 
 **2026-07-05 (Planner — Holistic roadmap):** 사용자 요청 — 산발적 수정 대신 **한 아키텍처**로 통합: Ultrawork/Parallel/YOLO/Plan 모드 정교화, 우리(제품) 한국어 카피 일관성, TUI 대화 설계(노이즈 숨김·답만 표시), `.unclecode` bootstrap 컨텍스트 로딩, Fable-5식 planner/worker 분리. **산출:** `docs/design/unclecode-holistic-roadmap-2026-07.md` + 본 scratchpad T11–T14. 구현은 Executor가 **한 스텝씩**; qa:health는 각 phase GATE만.
@@ -37,6 +69,7 @@
 - [x] **T12** Modes + hidden orchestration (E1–E5 + GATE) — KO labels, plan guard, runbook sync
 - [x] **T13** TUI conversation design — E1–E5 + GATE (qa:health + live tmux `e3eed6f`)
 - [x] **T14** Product coherence 우리 (E1–E5 + GATE) — docs/runbook/DESIGN KO glossary
+- [x] **T15** Work Queue Board — `/queue` mini kanban (E0–GATE complete 2026-07-05). Spec: `docs/design/work-queue-board-t15.md`
 - [x] Holistic roadmap doc — `docs/design/unclecode-holistic-roadmap-2026-07.md` (Planner 2026-07-05)
 - [x] T9-A2 슬래시 발견성·인자 힌트 → `2ac2f76`
 - [x] T9-A3 truncate-end 한글·이모지 (display-width 테스트) → `2ac2f76`
@@ -184,8 +217,17 @@
 - 2026-07-03 21:1x: 조정자(Fable 5)가 초기 조사 완료. behind 2 확인, ff-pull 실행. 워커 A/B(composer-2.5-fast) 백그라운드 발사.
 - 2026-07-03 21:28: 워커 A 완료. 산출물: `docs/audits/2026-07-03-worktree-audit.md` 신규, 런북 갱신(QA 표면 맵, 7/3 검증 기록, Known issues, Runbook 제품 경계). qa:health 85.8s exit 1 — 11항목 통과, runtime QA 1건 실패(tui-basic-smokes.mjs:56, 풀스크린 TUI 헤더에 truecolor 전경색 `38;2;15;23;42m` 부재), live provider QA는 fail-fast로 미실행. Cloud/local 정합성 OK (Node 22.22.0, Cargo 1.94.1).
 
+- [x] **Important review fixes** (2026-07-05) — reload persist skip, leaky parallel smoke, sanitize empty bubble, runtime QA evidence, docs
+  - `/reload`: `persistMemoryFacts: false` on bootstrap refresh
+  - Parallel KO smoke uses leaky fake response + sanitize regression asserts
+  - Empty sanitized replies skip assistant bubble (TS + Rust prompt-success)
+  - Runtime evidence surfaces `parallelModeKoreanTuiSmoke`
+  - Roadmap + AGENTS.md stale notes updated
+  - 검증: `npm run qa:health` **14/14 PASS** (68.2s)
+
 ## Executor's Feedback or Assistance Requests
 
+- [T15 review follow-ups 2026-07-05] P0 CJK display-width committed `aa58bf8`. P1–P3 landed in `fix(t15): board resize rebuild and blocked column` — orchestrator 251/251, `cargo test -p unclecode-core queue` 9/9, `npm run check` OK. Deferred: `/clear` without idle persist may still show stale Done until next turn; adversarial bootstrap findings unchanged.
 - [T11-E2/E3 Executor 7/5] Parallel mode TUI leak fix 커밋 `48e0a8a`: ultrawork info 질문 simple 라우팅, `runInternalTurn`으로 planner/executor/guardian 스트리밍 차단, subtask JSON·worker 메타 sanitize, busy 경로 마스킹. 검증: turn-orchestrator 13/13, Rust orchestrator 11/11, sanitize turn-helpers OK. 사용자 TUI 수동 재현 확인 대기.
 - [Holistic Planner→Executor] 우선순위 기본 순서: **T11-E1 → … → T11-GATE → T12 → T13 → T14**. T9/T10 완료(T10 qa:health 2026-07-05). `work-runtime-bootstrap.ts` 충돌 시 T11-E2 후 T12-E3.
 - [T11 Planner→Executor] T11-E1 착수 전 확인: bootstrap.json만 먼저(동작 변경 없음) vs E1+E2 묶음(패킷 경고까지). 권장: **E1 단독**.
@@ -194,6 +236,7 @@
 - [T3 게이트 결과 — 완료] `npm run qa:health` 14항목 전체 PASS, exit 0 (53.8s). runtime QA 증거: geminiTool/openaiTool/anthropicTool/toolFinalGate/lightContrast/spinner/queueDrain/resize/idleStable/latencyOk 모두 true, hangulResidual=false, duplicateBusy=false. live provider QA는 이번엔 fail-fast를 지나 실행됐고 예상된 외부 auth 차단 상태(openai-oauth-codex-runtime-not-api-ready)로 "blocked recorded" 처리 — 런북에 문서화된 정상 복구 경로(자격증명 갱신 후 qa:live). 리포트: .unclecode/qa/runtime-qa-latest.json, .unclecode/qa/live-provider-latest.json.
 - [T10 Executor 2026-07-05 03:xx] qa:health **14/14 PASS exit 0** (87.7s).
 - [Subagent verify 2026-07-05] qa:health **14/14 PASS exit 0** (115.0s); hangulResidual=false, lightContrast=true — prior 87.7s와 동일 통과, 소요만 증가. Blockers cleared: Hangul truncate exact-fit (`a75b749`), stream smoke in module list, env-independent footer test (`repl.test.mjs` HOME pin). Intermittent work-test flakes (Anthropic Rust spawn) pass after `cargo build`; no push.
+- [T15 Planner 2026-07-05] UI/UX 서브에이전트 API limit → 조정자가 DESIGN.md·기존 `/queue` 패널 대조 후 `docs/design/work-queue-board-t15.md` 작성. 권장: `/queue` 확장, 4열 read-only, KO 라벨, 80/100 responsive. Executor 착수 전 사용자 OK 대기.
 
 ## Lessons
 
