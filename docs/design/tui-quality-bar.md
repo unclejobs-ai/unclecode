@@ -44,6 +44,7 @@ Production-grade work shell checklist. Fail any item before shipping visual chan
 - [ ] `─ prompt deck ─` divider (muted, not heavy box)
 - [ ] `›` input prefix tinted by state (slash=user, busy=assistant, queue=warning)
 - [ ] Footer row under input: cwd · context chip
+- [ ] `/context`, `/mode` slash descriptions in Korean (product copy)
 
 ## Verification
 

@@ -119,11 +119,11 @@
   - [ ] **T12-GATE** qa:health; "병렬 모드 설명" → 단일 한국어 답, JSON 없음
 
 - [ ] **T13 TUI conversation design** (holistic roadmap §T13 — region show/hide)
-  - [ ] **T13-E1** DESIGN.md region matrix (doc)
+  - [x] **T13-E1** DESIGN.md region matrix (doc) — §5.1 show/hide matrix
   - [x] **T13-E2** Busy/streaming KO copy + parallel sky accent — `df4c92d` + `b34c3e8` (partial GATE)
   - [x] **T13-E3** Orchestrator traces out of chat rail — `b34c3e8` verbose → `/context` overlay only (dashboard trace strip deferred)
-  - [ ] **T13-E4** Slash KO descriptions (`/mode`, `/context`)
-  - [ ] **T13-E5** tui-korean-smoke mode label regression
+  - [x] **T13-E4** Slash KO descriptions (`/mode`, `/context`)
+  - [x] **T13-E5** Slash KO regression tests — `work-shell-slash-ko.test.mjs`
   - [ ] **T13-GATE** qa:health + optional UX captures
 
 - [ ] **T14 Product coherence (우리)** (holistic roadmap §T14)
@@ -172,7 +172,7 @@
 
 - 2026-07-05 (Planner — Holistic): `docs/design/unclecode-holistic-roadmap-2026-07.md` 작성. Phase B mermaid + Keep/Fix/Add/Remove × 7 regions, Phase C modes/KO naming/Fable-5 spec, Phase D T11–T14 Executor steps + GATE. `context-bootstrap-pipeline.md` 통합. **다음 Executor:** T11-E1 (manifest only) 또는 사용자가 T12 우선 지정 시 T12-E1.
 - 2026-07-05 (T10 Integration Executor): WIP 통합 완료. 커밋 `a75b749`(truncate exact-fit + stream smoke module list), `5898ca0`(memory transparency/prefetch + runbook), `a019a11`(header contrast smoke ↔ borderStrong). 검증: npm run build OK, test:context-broker 44/44, test:tui 86/86, **qa:health 14/14 PASS exit 0 (74.5s)**. push 없음.
-- 2026-07-05 (조정자 — **T9/T10 사이클 종료**): [T10 integration](9c5223a4) + [Fix T10 qa:health gate](a629942f) `422cebf`. qa:health **14/14 PASS** (scratchpad 기록). ahead 27→28 after docs commit pending. **T11–T14 GATE 미완.** push 없음.
+- 2026-07-05 (조정자): [Verify completion status](56c5231f) qa:health 재통과(67s). 이후 docs 커밋 `1817197`. ahead 28, 워킹트ree 클린. **T11–T14 GATE·push·TUI 수동 재현 미완.**
 - 2026-07-05 (doc worker): README Architecture 섹션 갱신 + `persistent-context-architecture.md`(mermaid 5) + `devils-advocate-review-2026-07.md`. docs-only 커밋, push 없음.
 - 2026-07-05 (Executor): T11-E1 완료 `a8a5b4e` — `ingestWorkspaceBootstrapContext` → `.unclecode/context/bootstrap.json`, project scoped memory, ContextPacketView augment. `test:context-broker` 48/48. E3 cursor rules included in same commit.
 - 2026-07-05 01:45: Planner가 T9를 A1–A4 + B1–B4 + T10으로 재분해. Executor 즉시 T9-A1(스트리밍 미커밋 6파일) 검증·커밋부터 착수.

@@ -91,7 +91,7 @@ export function createCliSlashCommandRegistry(extraEntries: readonly RegisteredS
     {
       command: "/mode status",
       routeTo: ["mode", "status"],
-      metadata: builtinLocal("Show the active mode and its source."),
+      metadata: builtinLocal("현재 모드와 설정 출처를 표시합니다."),
     },
     {
       command: "/mode set <mode>",
@@ -155,7 +155,7 @@ export function createWorkShellCommandRegistry(extraEntries: readonly Registered
     {
       command: "/context",
       routeTo: ["context"],
-      metadata: builtinLocal("Review the context UncleCode will carry into the next answer.", ["/con"]),
+      metadata: builtinLocal("다음 답변에 넣을 컨텍스트 패킷을 확인합니다.", ["/con"]),
     },
     {
       command: "/model",
@@ -205,7 +205,7 @@ export function createWorkShellCommandRegistry(extraEntries: readonly Registered
     {
       command: "/mode status",
       routeTo: ["mode", "status"],
-      metadata: builtinLocal("Show the active mode and its source."),
+      metadata: builtinLocal("현재 모드와 설정 출처를 표시합니다."),
     },
     {
       command: "/research",

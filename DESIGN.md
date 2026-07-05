@@ -167,6 +167,23 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 - Accessibility: status labels accompany colored dots.
 - Motion: spinner only for active work.
 
+## 5.1 Region show/hide matrix
+
+Default work shell: show answers and high-signal state; hide orchestration noise. `/verbose` moves trace-class content to the context overlay only — never the conversation rail.
+
+| Region | Show (default) | Hide (default) | Notes |
+| --- | --- | --- | --- |
+| **Header** | Provider title, shortcut hint, divider | Duplicate model/mode/auth from status/footer | Bold title + muted hint |
+| **Status strip** | `model · mode`, auth label, single spinner + elapsed + humanized busy detail | Raw file paths, duplicate spinners | Parallel/ultrawork: sky accent on activity |
+| **Conversation** | User messages, final assistant synthesis, streaming partial text, `policy.denied` (minimal) | Reasoning deltas, tool traces, subtask JSON, worker meta, internal routing | User: `◇ You · body`; assistant: badge + quiet indent |
+| **Composer** | Hint row, prompt deck, `›` prefix, cwd · context chip footer | Raw paths in hints, double borders | Tint follows slash / busy / queue state |
+| **Footer** | cwd + one context chip | Model, mode, auth repetition | Never duplicate status strip |
+| **Slash picker** | Matching commands + Korean descriptions for `/context`, `/mode` | Unrelated commands | Selected row uses user accent + bold |
+| **Context overlay** (`/context`, `/verbose`) | Sources fact line, included/excluded/warning groups, trace lines when verbose | Full raw configs, duplicate conversation entries | 64-char summary truncation |
+| **Dashboard panels** | Session Center facts when navigated | Passive while composing | Not mixed into chat rail |
+
+Implementation reference: `packages/tui/src/work-shell-view.tsx`, `work-shell-panels.ts`, `work-shell-engine-turns.ts` (sanitization).
+
 ## 6. Motion & Interaction
 
 ### Timing
