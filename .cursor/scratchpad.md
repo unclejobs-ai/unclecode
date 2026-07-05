@@ -75,6 +75,7 @@
 - [x] **T14** Product coherence 우리 (E1–E5 + GATE) — docs/runbook/DESIGN KO glossary
 - [x] **T15** Work Queue Board — `/queue` mini kanban (E0–GATE complete 2026-07-05). Spec: `docs/design/work-queue-board-t15.md`
 - [x] Holistic roadmap doc — `docs/design/unclecode-holistic-roadmap-2026-07.md` (Planner 2026-07-05)
+- [x] **T9** Fable 종합 고도화 (A1–B4 + T10 + C2) — 완료 2026-07-05; commits `51d5aed`, `2ac2f76`, `8a3ef52`, `5898ca0`, `df4c92d`, `b34c3e8`; Fable planned / Composer executed
 - [x] T9-A2 슬래시 발견성·인자 힌트 → `2ac2f76`
 - [x] T9-A3 truncate-end 한글·이모지 (display-width 테스트) → `2ac2f76`
 - [x] T9-A4 워크플로우·컴포저 UX → `8a3ef52` (composer hint row, busy/queue dock accent, resolveWorkShellComposerHint, test:tui 86/86 + contract 46/46)
