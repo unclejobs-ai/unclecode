@@ -43,14 +43,17 @@
 - [x] T9-A4 워크플로우·컴포저 UX → `8a3ef52` (composer hint row, busy/queue dock accent, resolveWorkShellComposerHint, test:tui 86/86 + contract 46/46)
 - [x] T9-B1 context-packet 정본화 → broker 단일 정본 + orchestrator re-export
 - [x] T9-B2 컨텍스트 한글 display-width → `truncateForDisplayWidth` in broker
-- [ ] T9-B3 메모리 투명성 (보류)
-- [ ] T9-B4 런북 재대조 (보류 — T10 게이트 후)
-- [x] T11 Modes audit + Korean single-turn routing + runbook differentiation (7/5 02:xx)
+- [x] T9-B3 메모리 투명성 → `5898ca0` + `cc9202b` (mock/broker normalize)
+- [x] T9-B4 런북 재대조 → `5898ca0` (Last validated 2026-07-05 KST, stream/slash/context-packet/memory prefetch)
+- [x] T10 qa:health + 커밋 → `a75b749` + `5898ca0` + `a019a11` + `422cebf`; qa:health **14/14 PASS exit 0** (87.7s 재검증)
+  - Hangul exact-fit: `truncateForDisplayWidth` skips ellipsis when ellipsis version under-fills width ≤8 (`a75b749`)
+  - stability-script module list includes `tui-openai-stream-smoke.mjs` (`a75b749`)
+  - Footer cwd test pins `HOME=/Users/example` — `422cebf`
   - Rust `classify_work_intent`: greetings + Korean/English info questions → simple even in ultrawork/yolo
   - TS `sanitizeWorkShellAssistantText`: strip subtask JSON + worker monologue meta lines
   - Runbook: mode table, differentiation, persistent context bootstrap, memory scopes, T11 validation record
   - Tests: turn-orchestrator, work-shell-engine sanitization, orchestrator-multi-agent contract
-  - 커밋: `48e0a8a` (orchestrator routing + sanitization), runbook T11 sections in `5898ca0`
+  - 커밋: `48e0a8a` (orchestrator routing + sanitization), runbook T11 sections in `5898ca0`, scratchpad refs `4f564c1` ([Modes runbook](21f74eb8))
 - [x] T9-C1 TUI design pass (conversation rail, status grouping, composer/footer chrome) — Executor 7/5 02:xx
   - 산출: single-line rail, grouped status strip (`model · mode │ auth │ activity`), lighter prompt divider, footer = cwd + one context chip, busy copy `⠋ 1.5s · detail`
   - 검증: test:tui 86/86, contract tui-work-shell 46/46, packages/tui tsc OK (full npm run build blocked by Worker B orchestrator WIP)
@@ -97,9 +100,9 @@
 - [ ] **T11 Context Bootstrap Pipeline** (→ [`unclecode-holistic-roadmap-2026-07.md`](../docs/design/unclecode-holistic-roadmap-2026-07.md) §T11)
   - **Planner 산출:** `docs/design/context-bootstrap-pipeline.md` (audit) + holistic roadmap Phase B region ①
   - **핵심 발견:** `.unclecode/context/bootstrap.json` 없음; prefetch degrade silent; Cursor rules/MCP packet 미연결
-  - [ ] **T11-E1** Bootstrap manifest writer (ingest only)
-  - [ ] **T11-E2** Packet: MCP + extensions + prefetch-degrade warning
-  - [ ] **T11-E3** Cursor rules adapter
+  - [x] **T11-E1** Bootstrap manifest writer (ingest only) — `a8a5b4e`, `test:context-broker` 48/48
+  - [x] **T11-E2** Packet: MCP + extensions + prefetch-degrade warning — partial in E1 (MCP catalog + prefetch warning; extensions deferred)
+  - [x] **T11-E3** Cursor rules adapter — `cursor-rules.ts` in E1
   - [ ] **T11-E4** Skills catalog vs inject split
   - [ ] **T11-E5** `.cursor/skills` scan
   - [ ] **T11-E6** Reload regenerates bootstrap store
@@ -110,21 +113,21 @@
 - [ ] **T12 Modes & hidden orchestration** (holistic roadmap §T12 — ultrawork/parallel/yolo/plan, JSON leak 방지)
   - [x] **T12-E1** Classifier: KO/EN 정보 질문 → simple in ultrawork — `48e0a8a` (partial GATE)
   - [ ] **T12-E2** Mode labels KO + Rust→TS 단일 정본 (`ultrawork` ≠ 별도 mode id)
-  - [x] **T12-E3** Complex turn transcript = synthesis only; internal turns no stream — `48e0a8a` + `df4c92d` transcript filter (partial GATE)
+  - [x] **T12-E3** Complex turn transcript = synthesis only; internal turns no stream — `48e0a8a` + `df4c92d` transcript filter + `b34c3e8` verbose traces → `/context` overlay only, ultrawork default minimal (partial GATE)
   - [ ] **T12-E4** `plan` mode read-only tool gate + slash hint
   - [ ] **T12-E5** Architecture doc mode matrix sync
   - [ ] **T12-GATE** qa:health; "병렬 모드 설명" → 단일 한국어 답, JSON 없음
 
 - [ ] **T13 TUI conversation design** (holistic roadmap §T13 — region show/hide)
   - [ ] **T13-E1** DESIGN.md region matrix (doc)
-  - [ ] **T13-E2** Busy/streaming KO copy + P3 stream partial fix
-  - [ ] **T13-E3** Orchestrator traces out of chat rail → dashboard trace strip
+  - [x] **T13-E2** Busy/streaming KO copy + parallel sky accent — `df4c92d` + `b34c3e8` (partial GATE)
+  - [x] **T13-E3** Orchestrator traces out of chat rail — `b34c3e8` verbose → `/context` overlay only (dashboard trace strip deferred)
   - [ ] **T13-E4** Slash KO descriptions (`/mode`, `/context`)
   - [ ] **T13-E5** tui-korean-smoke mode label regression
   - [ ] **T13-GATE** qa:health + optional UX captures
 
 - [ ] **T14 Product coherence (우리)** (holistic roadmap §T14)
-  - [ ] **T14-E1** README Architecture + roadmap link
+  - [x] **T14-E1** README Architecture + roadmap link — Architecture in `f539dd0`; holistic roadmap link pending uncommitted `unclecode-holistic-roadmap-2026-07.md`
   - [ ] **T14-E2** Runbook KO mode glossary + verify commands
   - [ ] **T14-E3** DESIGN.md Korean copy rules
   - [ ] **T14-E4** Devil's advocate findings ↔ T11–T13 status
@@ -154,40 +157,43 @@
     - 성공 기준: context-broker+orchestrator 테스트 그린, diff 단일 소스
   - [ ] **T9-B2 컨텍스트 한글 display-width** (워커 B)
     - omo/요약 라인 `truncateForDisplayWidth` 적용, 64자 규칙과 정합
-  - [ ] **T9-B3 메모리 투명성** (워커 B)
+  - [x] **T9-B3 메모리 투명성** (워커 B) → `5898ca0` + normalize follow-up
     - 스코프·인용·freshness 라벨, prefetch degrade 경로 실증(단위/스모크)
-  - [ ] **T9-B4 런북 재대조** (워커 B)
+  - [x] **T9-B4 런북 재대조** (워커 B) → `5898ca0`
     - T9 변경(stream/slash/context) 반영, Last validated 갱신
-  - [ ] **T10 통합** (조정자): qa:health 14/14, 커밋 분할(A1/A2-A4/B), scratchpad 완료 선언
+  - [x] **T10 통합** (조정자) → `a75b749` truncate exact-fit, `5898ca0` memory/runbook, `a019a11` contrast smoke; **qa:health 14/14 PASS exit 0 (74.5s)**; push 없음
   - [+] 사용자 추가 지시 (00:25): 스피너·입력창·대화·입력→큐→busy→응답→idle — T9-A4에 편입
 - [x] T11-DOC 아키텍처 문서 + Devil's Advocate (2026-07-05, doc worker)
-  - 산출: README Architecture, `docs/design/persistent-context-architecture.md`, `docs/design/devils-advocate-review-2026-07.md`
+  - 산출: README Architecture, `docs/design/persistent-context-architecture.md`, `docs/design/devils-advocate-review-2026-07.md` — `f539dd0`
+  - 후속: Devil's Advocate F1(bootstrap 약속) — [Persistent context bootstrap](50c072c1) `a8a5b4e`로 부분 해소; F2–F5 미해결
   - 성공 기준: mermaid 4+ 다이어그램, 한국어 top findings, scratchpad 갱신, docs-only 커밋
 
 ## Current Status / Progress Tracking
 
 - 2026-07-05 (Planner — Holistic): `docs/design/unclecode-holistic-roadmap-2026-07.md` 작성. Phase B mermaid + Keep/Fix/Add/Remove × 7 regions, Phase C modes/KO naming/Fable-5 spec, Phase D T11–T14 Executor steps + GATE. `context-bootstrap-pipeline.md` 통합. **다음 Executor:** T11-E1 (manifest only) 또는 사용자가 T12 우선 지정 시 T12-E1.
-- 2026-07-05 (조정자): T12 partial — [parallel mode fix](92a48367) `48e0a8a` (E1+E3 핵심). TUI — [production polish](25019581) `df4c92d`. T10 partial — `5898ca0` memory transparency. **미커밋 docs:** bootstrap pipeline + holistic roadmap. **WIP:** `context-bootstrap.ts`, `work-runtime-bootstrap.ts`, orchestrator engine-context/operations. **다음:** [T10 integration](9c5223a4) qa:health + docs 커밋.
+- 2026-07-05 (T10 Integration Executor): WIP 통합 완료. 커밋 `a75b749`(truncate exact-fit + stream smoke module list), `5898ca0`(memory transparency/prefetch + runbook), `a019a11`(header contrast smoke ↔ borderStrong). 검증: npm run build OK, test:context-broker 44/44, test:tui 86/86, **qa:health 14/14 PASS exit 0 (74.5s)**. push 없음.
+- 2026-07-05 (조정자 — **T9/T10 사이클 종료**): [T10 integration](9c5223a4) + [Fix T10 qa:health gate](a629942f) `422cebf`. qa:health **14/14 PASS** (scratchpad 기록). ahead 27→28 after docs commit pending. **T11–T14 GATE 미완.** push 없음.
 - 2026-07-05 (doc worker): README Architecture 섹션 갱신 + `persistent-context-architecture.md`(mermaid 5) + `devils-advocate-review-2026-07.md`. docs-only 커밋, push 없음.
-- 2026-07-05 (Planner): T11 Context Bootstrap audit 완료. 설계 문서 `docs/design/context-bootstrap-pipeline.md` 작성.
+- 2026-07-05 (Executor): T11-E1 완료 `a8a5b4e` — `ingestWorkspaceBootstrapContext` → `.unclecode/context/bootstrap.json`, project scoped memory, ContextPacketView augment. `test:context-broker` 48/48. E3 cursor rules included in same commit.
 - 2026-07-05 01:45: Planner가 T9를 A1–A4 + B1–B4 + T10으로 재분해. Executor 즉시 T9-A1(스트리밍 미커밋 6파일) 검증·커밋부터 착수.
-- [x] T9-C2 TUI production-grade visual polish (7/5 02:xx) — `df4c92d` `feat(tui): production-grade shell visual polish`
-  - 산출: ▌ rail 제거, user `◇ You · body` compact, header bold/muted hierarchy, busy detail humanization(경로→Reading files, specific progress 유지), parallel busy sky accent, subtask/reasoning trace transcript filter, `docs/design/tui-quality-bar.md`, DESIGN.md 갱신
+- [x] T9-C2 TUI production-grade visual polish (7/5 02:xx) — `df4c92d` + trace overlay gate `b34c3e8` `feat(tui): hide reasoning traces and polish busy parallel states`
+  - 산출: ▌ rail 제거, user `◇ You · body` compact, header bold/muted hierarchy, busy detail humanization(경로→Reading files, parallel→Planning/Synthesizing), parallel busy sky (`W.user`) vs default teal, subtask/reasoning/tool traces filtered from transcript; `/verbose` fills context traceLines only
+  - 검증: test:tui 86/86, contract tui-work-shell 46/46, work-shell-engine 70/71 (1 pre-existing context-packet WIP fail), npm run build OK
   - 검증: test:tui 86/86, contract tui-work-shell 46/46, packages/tui tsc OK
-- 2026-07-05 02:xx: T9-C2 production-grade TUI polish 커밋 완료 — before/after checklist는 `docs/design/tui-quality-bar.md` 참조.
-- 2026-07-05 02:xx: Executor 완료 — A1 `51d5aed`(stream+smoke 29/29+PASS), A2/A3 `2ac2f76`(slash hints+display-width tests), B1/B2 context-broker 통합 커밋 직전. A4/B3/B4 보류. T10 qa:health 실행 예정.
+- 2026-07-05 (Executor): TUI trace gate `b34c3e8` — ultrawork starts minimal; verbose traces go to context overlay only (conversation shows final synthesis + user). Builds on `fbe4722`/`df4c92d`/`48e0a8a`. push 없음.
+- 2026-07-05 (Worker B T9-B3/B4): Memory transparency + prefetch degrade landed in `5898ca0`; follow-up commit normalizes `listScopedMemoryLines` to emit transparency lines and handles test mocks via `normalizeScopedMemoryLines`. Tests: context-broker memory 7/7, orchestrator work-shell-engine 71/71. Runbook sections: Source-of-truth map, Context Transparency Rules, memory prefetch, validation record 2026-07-05.
 - 2026-07-03 21:1x: 조정자(Fable 5)가 초기 조사 완료. behind 2 확인, ff-pull 실행. 워커 A/B(composer-2.5-fast) 백그라운드 발사.
 - 2026-07-03 21:28: 워커 A 완료. 산출물: `docs/audits/2026-07-03-worktree-audit.md` 신규, 런북 갱신(QA 표면 맵, 7/3 검증 기록, Known issues, Runbook 제품 경계). qa:health 85.8s exit 1 — 11항목 통과, runtime QA 1건 실패(tui-basic-smokes.mjs:56, 풀스크린 TUI 헤더에 truecolor 전경색 `38;2;15;23;42m` 부재), live provider QA는 fail-fast로 미실행. Cloud/local 정합성 OK (Node 22.22.0, Cargo 1.94.1).
 
 ## Executor's Feedback or Assistance Requests
 
 - [T11-E2/E3 Executor 7/5] Parallel mode TUI leak fix 커밋 `48e0a8a`: ultrawork info 질문 simple 라우팅, `runInternalTurn`으로 planner/executor/guardian 스트리밍 차단, subtask JSON·worker 메타 sanitize, busy 경로 마스킹. 검증: turn-orchestrator 13/13, Rust orchestrator 11/11, sanitize turn-helpers OK. 사용자 TUI 수동 재현 확인 대기.
-- [Holistic Planner→Executor] 우선순위 기본 순서: **T11-E1 → … → T11-GATE → T12 → T13 → T14**. T9/T10 미완(스트리밍·B3·B4·qa:health)은 T11과 병렬 가능하나 `work-runtime-bootstrap.ts` 충돌 시 T11-E2 후 T12-E3.
+- [Holistic Planner→Executor] 우선순위 기본 순서: **T11-E1 → … → T11-GATE → T12 → T13 → T14**. T9/T10 완료(T10 qa:health 2026-07-05). `work-runtime-bootstrap.ts` 충돌 시 T11-E2 후 T12-E3.
 - [T11 Planner→Executor] T11-E1 착수 전 확인: bootstrap.json만 먼저(동작 변경 없음) vs E1+E2 묶음(패킷 경고까지). 권장: **E1 단독**.
 - [T1→T2 인계] runtime QA 실패는 워커 B 영역: 풀스크린 TUI 헤더 전경색이 truecolor로 방출되지 않아 라이트 터미널 대비 게이트 실패. → **워커 B가 해소 보고**: 근본 원인은 tmux `capture-pane -e`가 `FORCE_COLOR` 없이는 truecolor ANSI를 캡처하지 못하는 것. `tui-context-contrast-smoke.mjs`·`tui-basic-smokes.mjs`에 `FORCE_COLOR=3` 적용 후 통과.
 - [T2 결과 요약] 실제 폭 버그 2건 TDD 수정: `work-shell-auth-panels.ts:150` `compactContextValue`가 raw `.length`/`.slice`로 한글 중간 절단 가능 → `truncateForDisplayWidth`로 교체; `dashboard-primitives.tsx:66` `RoundedPanel` 상단 테두리 +1칸 넘침 → 정확히 width칸으로 수정. tests/tui+contracts 197/197, tsc, 한글/대비/기본 스모크 모두 통과. 보류 항목: Ink `wrap="truncate-end"` 내부 절단, slash suggestion 색상(의도 불명), 이모지/ZWJ 심화.
 - [T3 게이트 결과 — 완료] `npm run qa:health` 14항목 전체 PASS, exit 0 (53.8s). runtime QA 증거: geminiTool/openaiTool/anthropicTool/toolFinalGate/lightContrast/spinner/queueDrain/resize/idleStable/latencyOk 모두 true, hangulResidual=false, duplicateBusy=false. live provider QA는 이번엔 fail-fast를 지나 실행됐고 예상된 외부 auth 차단 상태(openai-oauth-codex-runtime-not-api-ready)로 "blocked recorded" 처리 — 런북에 문서화된 정상 복구 경로(자격증명 갱신 후 qa:live). 리포트: .unclecode/qa/runtime-qa-latest.json, .unclecode/qa/live-provider-latest.json.
-- [Planner 교차검증] T1 산출 문서 존재 확인, T2 수정이 T1의 게이트 실패를 실제 해소함을 qa:health 재실행으로 확인. 본 사이클 완료 선언. 커밋은 사용자 지시가 없어 하지 않음 — 감사 문서의 "커밋 분할 제안" 8단위 참고.
+- [T10 Executor 2026-07-05 03:xx] qa:health **14/14 PASS exit 0** (87.7s). Blockers cleared: Hangul truncate exact-fit (`a75b749`), stream smoke in module list, env-independent footer test (`repl.test.mjs` HOME pin). Intermittent work-test flakes (Anthropic Rust spawn) pass after `cargo build`; no push.
 
 ## Lessons
 
