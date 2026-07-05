@@ -121,6 +121,10 @@ import {
 } from "../../packages/orchestrator/src/work-shell-engine-turns.ts";
 
 import {
+  parallelModeKoreanCleanResponseText,
+  parallelModeKoreanLeakyResponseText,
+} from "../../scripts/runtime-qa/constants.mjs";
+import {
   appendWorkShellEntries,
   createInitialWorkShellEngineState,
   createWorkShellAuthStatePatch,
@@ -990,6 +994,37 @@ This English conclusion is intentional and contains useful details.`;
     "internal orchestrator meta lines must be stripped",
   );
   assert.equal(
+    sanitizeWorkShellAssistantText(parallelModeKoreanLeakyResponseText),
+    parallelModeKoreanCleanResponseText,
+    "leaky parallel synthesis must collapse to the clean Korean answer",
+  );
+  assert.equal(
+    sanitizeWorkShellAssistantText("관련 파일을 확인했습니다. 병렬 모드는 동시 처리입니다."),
+    "관련 파일을 확인했습니다. 병렬 모드는 동시 처리입니다.",
+    "substantial Korean prose must not be stripped as orchestrator meta",
+  );
+  assert.equal(
+    await finalizeWorkShellAssistantReply({
+      prompt: "explain parallel mode",
+      assistantText: parallelModeKoreanLeakyResponseText,
+      async runTurn() {
+        throw new Error("continuation should not run");
+      },
+    }),
+    parallelModeKoreanCleanResponseText,
+  );
+  assert.equal(
+    await finalizeWorkShellAssistantReply({
+      prompt: "leak only",
+      assistantText: leakedSubtaskPlanOnly,
+      async runTurn() {
+        throw new Error("continuation should not run");
+      },
+    }),
+    "",
+    "fully sanitized assistant replies must not surface an empty-response bubble",
+  );
+  assert.equal(
     sanitizeWorkShellAssistantText("Hello Alice. Hello Bob. This is a transcript example."),
     "Hello Alice. Hello Bob. This is a transcript example.",
     "valid repeated greeting words in user-requested prose must be preserved",
@@ -1071,6 +1106,27 @@ test("work-shell context helpers merge auth issues and assemble initial/reloaded
         lines: ["Loaded guidance: CLAUDE.md", "bridge-2", "session · memory-2 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged", "trace-1"],
       },
     },
+  );
+  assert.deepEqual(
+    await loadInitialWorkShellContextState({
+      cwd: "/repo",
+      sessionId: "work-1",
+      currentContextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      async listProjectBridgeLines() {
+        return ["bridge-1"];
+      },
+      async listScopedMemoryLines() {
+        return ["memory-fallback"];
+      },
+      buildContextPanel,
+      prefetchScopedMemory: async () => ({
+        status: "degraded",
+        lines: [],
+        entries: [],
+        reason: "memory prefetch timed out after 5ms",
+      }),
+    }).then(({ memoryLines }) => memoryLines),
+    ["session · memory-fallback · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged"],
   );
 });
 
@@ -3303,7 +3359,7 @@ test("WorkShellEngine persists an interrupted turn as idle and ignores late fail
   );
 });
 
-test("WorkShellEngine keeps interrupted queued follow-ups paused across a new turn", async () => {
+test("WorkShellEngine resumes interrupted queued follow-ups after the next chat turn", async () => {
   let releaseFirst;
   let releaseThird;
   const prompts = [];
@@ -3346,16 +3402,13 @@ test("WorkShellEngine keeps interrupted queued follow-ups paused across a new tu
   releaseThird();
   await thirdTurn;
 
-  assert.deepEqual(prompts, ["first", "third"]);
-  await engine.handleSubmit("/queue");
-  assert.ok(engine.getState().panel?.lines.some((line) => line === "Next · #1 · second"));
+  assert.deepEqual(prompts, ["first", "third", "second"]);
+  assert.equal(engine.getState().queuePaused, false);
 
   releaseFirst();
   await firstTurn;
 
-  assert.deepEqual(prompts, ["first", "third"]);
-  await engine.handleSubmit("/queue clear");
-  assert.equal(engine.getState().queuePaused, false);
+  assert.deepEqual(prompts, ["first", "third", "second"]);
 });
 
 test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
@@ -3389,9 +3442,11 @@ test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
   assert.ok(engine.getState().entries.some((entry) => /run automatically/.test(entry.text)));
   assert.ok(engine.getState().entries.some((entry) => /\/queue shows backlog/.test(entry.text)));
   await engine.handleSubmit("/queue");
-  assert.ok(engine.getState().panel?.lines.some((line) => line === "Next · #1 · second"));
-  assert.ok(!engine.getState().panel?.lines.some((line) => line === "Queued #1 · second"));
-  assert.ok(engine.getState().panel?.lines.some((line) => /Slash commands are not queued/.test(line)));
+  assert.equal(engine.getState().panel?.title, "Work board");
+  assert.ok(engine.getState().panel?.lines.some((line) => line === "Board"));
+  assert.ok(engine.getState().panel?.lines.some((line) => /대기 · 1/.test(line)));
+  assert.ok(engine.getState().panel?.lines.some((line) => /#1 second/.test(line)));
+  assert.ok(engine.getState().panel?.lines.some((line) => /Enter queues follow-up/.test(line)));
   assert.ok(engine.getState().panel?.lines.some((line) => /\/queue clear drops queued follow-ups/.test(line)));
 
   releaseFirst();
@@ -3502,12 +3557,36 @@ test("WorkShellEngine clears queued follow-ups while busy", async () => {
     engine.getState().entries.filter((entry) => /Queue shown/.test(entry.text)).length,
     0,
   );
-  assert.ok(engine.getState().panel?.lines.some((line) => line === "No queued work beyond the active turn."));
+  assert.equal(engine.getState().panel?.title, "Work board");
+  assert.ok(engine.getState().panel?.lines.some((line) => /대기 · 0/.test(line)));
+  assert.ok(engine.getState().panel?.lines.some((line) => /진행 · 1/.test(line)));
 
   releaseFirst();
   await firstTurn;
 
   assert.deepEqual(prompts, ["first"]);
+});
+
+test("WorkShellEngine queue panel respects terminal width for board layout", async () => {
+  const { engine } = createEngine();
+
+  await engine.initialize();
+  engine.updateTerminalColumns(80);
+  await engine.handleSubmit("/queue");
+  const narrowLines = engine.getState().panel?.lines ?? [];
+  assert.equal(engine.getState().panel?.title, "Work board");
+  assert.ok(
+    !narrowLines.some((line) => /대기 ·/.test(line) && /완료 ·/.test(line)),
+    "80-column layout should use 2×2 rows instead of a single four-column header",
+  );
+
+  engine.updateTerminalColumns(120);
+  await engine.handleSubmit("/queue");
+  const wideLines = engine.getState().panel?.lines ?? [];
+  assert.ok(
+    wideLines.some((line) => /대기 ·/.test(line) && /완료 ·/.test(line)),
+    "wide layout should render four columns on one header row",
+  );
 });
 
 test("WorkShellEngine can switch to verbose trace mode explicitly", async () => {
