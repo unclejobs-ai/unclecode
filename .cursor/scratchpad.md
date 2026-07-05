@@ -35,7 +35,7 @@
 
 - [ ] **T11** Context bootstrap (E1–E7 + GATE) — roadmap §T11, `context-bootstrap-pipeline.md`
 - [ ] **T12** Modes + hidden orchestration (E1–E5 + GATE) — JSON leak, classifier, KO labels
-- [ ] **T13** TUI conversation design (E1–E5 + GATE) — show/hide matrix, traces out of chat
+- [x] **T13** TUI conversation design — E1–E5 + GATE (qa:health + live tmux `e3eed6f`)
 - [ ] **T14** Product coherence 우리 (E1–E5 + GATE) — docs/runbook/DESIGN KO glossary
 - [x] Holistic roadmap doc — `docs/design/unclecode-holistic-roadmap-2026-07.md` (Planner 2026-07-05)
 - [x] T9-A2 슬래시 발견성·인자 힌트 → `2ac2f76`
@@ -116,7 +116,7 @@
   - [x] **T12-E3** Complex turn transcript = synthesis only; internal turns no stream — `48e0a8a` + `df4c92d` transcript filter + `b34c3e8` verbose traces → `/context` overlay only, ultrawork default minimal (partial GATE)
   - [ ] **T12-E4** `plan` mode read-only tool gate + slash hint
   - [ ] **T12-E5** Architecture doc mode matrix sync
-  - [ ] **T12-GATE** qa:health; "병렬 모드 설명" → 단일 한국어 답, JSON 없음
+  - [x] **T12-GATE** parallel KO answer tmux smoke in qa:runtime (`e3eed6f`); classifier/sanitize in unit tests
 
 - [ ] **T13 TUI conversation design** (holistic roadmap §T13 — region show/hide)
   - [x] **T13-E1** DESIGN.md region matrix (doc) — §5.1 show/hide matrix
@@ -124,10 +124,10 @@
   - [x] **T13-E3** Orchestrator traces out of chat rail — `b34c3e8` verbose → `/context` overlay only (dashboard trace strip deferred)
   - [x] **T13-E4** Slash KO descriptions (`/mode`, `/context`)
   - [x] **T13-E5** Slash KO regression tests — `work-shell-slash-ko.test.mjs`
-  - [ ] **T13-GATE** qa:health + optional UX captures
+  - [x] **T13-GATE** qa:health 14/14 + live parallel tmux (`e3eed6f`, `live-verification-latest.json`)
 
 - [ ] **T14 Product coherence (우리)** (holistic roadmap §T14)
-  - [x] **T14-E1** README Architecture + roadmap link — Architecture in `f539dd0`; holistic roadmap link pending uncommitted `unclecode-holistic-roadmap-2026-07.md`
+  - [x] **T14-E1** README Architecture + roadmap link — `f539dd0` + `1817197`
   - [ ] **T14-E2** Runbook KO mode glossary + verify commands
   - [ ] **T14-E3** DESIGN.md Korean copy rules
   - [ ] **T14-E4** Devil's advocate findings ↔ T11–T13 status
@@ -172,7 +172,7 @@
 
 - 2026-07-05 (Planner — Holistic): `docs/design/unclecode-holistic-roadmap-2026-07.md` 작성. Phase B mermaid + Keep/Fix/Add/Remove × 7 regions, Phase C modes/KO naming/Fable-5 spec, Phase D T11–T14 Executor steps + GATE. `context-bootstrap-pipeline.md` 통합. **다음 Executor:** T11-E1 (manifest only) 또는 사용자가 T12 우선 지정 시 T12-E1.
 - 2026-07-05 (T10 Integration Executor): WIP 통합 완료. 커밋 `a75b749`(truncate exact-fit + stream smoke module list), `5898ca0`(memory transparency/prefetch + runbook), `a019a11`(header contrast smoke ↔ borderStrong). 검증: npm run build OK, test:context-broker 44/44, test:tui 86/86, **qa:health 14/14 PASS exit 0 (74.5s)**. push 없음.
-- 2026-07-05 (조정자): [Verify completion status](56c5231f) qa:health 재통과(67s). 이후 docs 커밋 `1817197`. ahead 28, 워킹트ree 클린. **T11–T14 GATE·push·TUI 수동 재현 미완.**
+- 2026-07-05 (조정자 — **사용자 사이클 종료 선언**): T9/T10/T12·T13 사용자 목표 달성. qa:health 14/14, live tmux `패러랠 모드가 뭐냐` PASS. ahead 32→33. **로드맵 잔여:** T11 E4–E7, T12 E2/E4/E5, T14 E2–E5, push.
 - 2026-07-05 (doc worker): README Architecture 섹션 갱신 + `persistent-context-architecture.md`(mermaid 5) + `devils-advocate-review-2026-07.md`. docs-only 커밋, push 없음.
 - 2026-07-05 (Executor): T11-E1 완료 `a8a5b4e` — `ingestWorkspaceBootstrapContext` → `.unclecode/context/bootstrap.json`, project scoped memory, ContextPacketView augment. `test:context-broker` 48/48. E3 cursor rules included in same commit.
 - 2026-07-05 01:45: Planner가 T9를 A1–A4 + B1–B4 + T10으로 재분해. Executor 즉시 T9-A1(스트리밍 미커밋 6파일) 검증·커밋부터 착수.
