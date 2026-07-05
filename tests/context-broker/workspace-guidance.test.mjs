@@ -48,7 +48,7 @@ test("context-broker loadWorkspaceGuidance loads cross-CLI guidance files and pr
   assert.ok(guidance.contextSummaryLines.some((line) => /GEMINI\.local\.md/.test(line)));
   assert.ok(guidance.contextSummaryLines.some((line) => /UNCLECODE\.md/.test(line)));
   assert.ok(guidance.contextSummaryLines.some((line) => /Deduped duplicate guidance/i));
-  assert.ok(guidance.contextSummaryLines.some((line) => /Loaded skills: autopilot/.test(line)));
+  assert.ok(guidance.contextSummaryLines.some((line) => /Skill catalog: autopilot/.test(line)));
   assert.equal(guidance.sources.length, 5);
 });
 
@@ -84,7 +84,7 @@ test("context-broker cached workspace guidance keeps project-skill context stabl
   const cached = await loadCachedWorkspaceGuidance({ cwd: nested });
   assert.match(first.systemPromptAppendix, /Prefer read before edit/);
   assert.match(cached.systemPromptAppendix, /Prefer read before edit/);
-  assert.match(cached.systemPromptAppendix, /Keep moving without waiting for approval/);
+  assert.doesNotMatch(cached.systemPromptAppendix, /Keep moving without waiting for approval/);
 
   clearCachedWorkspaceGuidance(nested);
   const refreshed = await loadCachedWorkspaceGuidance({ cwd: nested });

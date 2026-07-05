@@ -19,5 +19,5 @@ test("work shell /mode suggestions use Korean profile copy", () => {
 
   const parallel = getWorkShellSlashSuggestions("/mode").find((entry) => entry.command === "/mode set ultrawork");
   assert.ok(parallel, "expected /mode set ultrawork suggestion");
-  assert.match(parallel.description, /병렬/);
+  assert.match(parallel.description, /집중/);
 });

@@ -49,17 +49,18 @@ mindmap
 
 **Claim attacked:** `.unclecode/` is the canonical shared context home.
 
-**Reality:**
+**Reality (updated 2026-07-05 after T11):**
 
-- Bootstrap guidance, skills, and packet classification are **recomputed in memory** each session (`workspaceGuidanceCache`, `resolveContextPacket`). There is no `.unclecode/context/bootstrap.json` in production yet (T11 is design-only).
-- Procedural runbooks live under `.unclecode/sop/` but **memory-bus SOPs are not wired into Work Shell bootstrap** (runbook + `context-bootstrap-pipeline.md` both admit this).
-- `assembleContextPacket` (repo map, hotspots, token budget) — the heaviest "coding context" assembler — is **research-only**, not the default work path.
+- `ingestWorkspaceBootstrapContext` now writes `.unclecode/context/bootstrap.json` with guidance, cursor rules, MCP metadata, and skill catalog entries (`a8a5b4e` + T11 E4–E6).
+- Full project skill bodies are **no longer** embedded in every system prompt by default; use `/skill` or `pinned-skills.json`.
+- Procedural runbooks under `.unclecode/sop/` remain **not wired** into Work Shell bootstrap.
+- `assembleContextPacket` (repo map, hotspots) is still research-only.
 
-**What breaks:** Operators believe `/context` shows "everything the model knows." It shows **classified summaries**, not durable replay. After crash or new machine, there is no bootstrap artifact to diff except scattered JSONL/SQLite under `~/.unclecode/state/`.
+**Remaining gap:** Operators may still over-trust `/context` as "full model context" — packet is classified summaries + bootstrap audit, not raw replay.
 
-**vs Cursor:** Cursor indexes the workspace continuously and injects rules from `.cursor/rules` automatically. UncleCode does not ingest Cursor rules at all today.
+**vs Cursor:** Cursor rules now appear in bootstrap manifest; `.cursor/skills` scan added in T11-E5.
 
-**Fix direction (minimal):** Ship T11-E1 manifest first — audit trail without behavior change. Then wire SOP list into packet as included catalog entries.
+**Fix direction (remaining):** Wire SOP list into packet; optional bootstrap snapshot diff UX.
 
 ---
 

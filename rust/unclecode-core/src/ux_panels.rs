@@ -1412,6 +1412,7 @@ fn compact_context_value(input: &str, max_chars: usize) -> String {
         .replace("Loaded guidance: ", "")
         .replace("Loaded extension: ", "ext ")
         .replace("Loaded skills: ", "skills ")
+        .replace("Skill catalog: ", "skills ")
         .replace("AGENTS.md: ", "AGENTS: ")
         .replace("CLAUDE.md: ", "CLAUDE: ");
     compact_preview(&normalized, max_chars)

@@ -896,7 +896,11 @@ test("work-shell turn helpers build summaries and permission-stall continuations
   assert.equal(detectEditIntent("summarize current repo"), false);
   assert.match(
     resolveReadOnlyModeGuard({ mode: "search", prompt: "Anthropic parity 구현해줘" }) ?? "",
-    /Search mode is read-only/,
+    /탐색 모드는 읽기 전용/,
+  );
+  assert.match(
+    resolveReadOnlyModeGuard({ mode: "plan", prompt: "Anthropic parity 구현해줘" }) ?? "",
+    /계획 모드는 편집 금지/,
   );
   assert.equal(
     resolveReadOnlyModeGuard({ mode: "default", prompt: "Anthropic parity 구현해줘" }),
@@ -1524,8 +1528,8 @@ test("work-shell chat runtime short-circuits edit requests in search mode with a
 
   assert.equal(agentCalls, 0);
   assert.deepEqual(entries.map((entry) => entry.role), ["user", "assistant"]);
-  assert.match(entries[1]?.text ?? "", /Search mode is read-only\./);
-  assert.match(entries[1]?.text ?? "", /Shift\+Tab|\/mode set yolo/);
+  assert.match(entries[1]?.text ?? "", /탐색 모드는 읽기 전용/);
+  assert.match(entries[1]?.text ?? "", /\/mode set yolo/);
   assert.deepEqual(snapshots, [
     { state: "idle", summary: "Chat: Anthropic parity 구현해줘" },
   ]);
@@ -2742,7 +2746,7 @@ test("WorkShellEngine setMode switches runtime mode without transcript residue",
 
   await engine.handleSubmit("please edit src/app.ts");
 
-  assert.ok(engine.getState().entries.some((entry) => /Search mode is read-only/.test(entry.text)));
+  assert.ok(engine.getState().entries.some((entry) => /탐색 모드는 읽기 전용/.test(entry.text)));
   assert.deepEqual(calls.inline, []);
 });
 

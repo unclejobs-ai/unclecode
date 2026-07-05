@@ -21,10 +21,10 @@ test("workspace guidance package seam loads AGENTS.md, CLAUDE.md, and workspace 
 
   // AGENTS.md is excluded from systemPromptAppendix (agent orchestration, not coding guidance)
   assert.match(guidance.systemPromptAppendix, /Use slash commands/);
-  assert.match(guidance.systemPromptAppendix, /Keep moving without waiting for approval/);
+  assert.doesNotMatch(guidance.systemPromptAppendix, /Keep moving without waiting for approval/);
   assert.ok(guidance.contextSummaryLines.some((line) => /AGENTS\.md/.test(line)));
   assert.ok(guidance.contextSummaryLines.some((line) => /CLAUDE\.md/.test(line)));
-  assert.ok(guidance.contextSummaryLines.some((line) => /Loaded skills: autopilot/.test(line)));
+  assert.ok(guidance.contextSummaryLines.some((line) => /Skill catalog: autopilot/.test(line)));
   assert.equal(guidance.sources.length, 3);
 });
 

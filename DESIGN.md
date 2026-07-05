@@ -219,3 +219,17 @@ Use mixed terminal-native depth: borders for structure, tonal badges for role id
 - Borders are structural, not decorative. Avoid boxing every message.
 - Tool traces are diagnostic depth and should stay out of the main transcript unless explicitly requested.
 - Empty, loading, and error states must be intentionally composed, never blank areas.
+
+## 8. Korean product copy (우리)
+
+Operator-facing Work Shell copy uses Korean for modes, guards, and slash hints. Internal mode ids stay English for config/tests.
+
+| Surface | Rule | Owner |
+| --- | --- | --- |
+| Status/footer mode chip | Korean label from `humanize_work_shell_mode_label` (`ux_text.rs`); TS fast-path mirrors Rust | `rust/unclecode-core/src/ux_text.rs`, `packages/tui/src/work-shell-footer-fast-paths.ts` |
+| `/mode` slash descriptions | Korean one-line behavior hint per profile | `packages/orchestrator/src/work-shell-slash.ts` |
+| Read-only guards | Korean rejection before turn (`search`, `plan`) | `rust/unclecode-core/src/prompt_turn.rs` |
+| Busy/detail strings | Korean humanization for orchestrator traces in status only | `ux_text.rs` |
+| Model/auth labels | English compact chips OK (`Saved OAuth`, model id) | `ux_text.rs` |
+
+Do not mix EN mode names (`Parallel mode`, `Work mode`) in operator-visible paths. Prefer **집중 작업 모드** for `ultrawork`, not "Parallel mode".

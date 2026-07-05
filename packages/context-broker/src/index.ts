@@ -79,6 +79,7 @@ export type {
   WorkspaceSkillItem,
   WorkspaceSkillMetadata,
 } from "./workspace-skills.js";
+export { loadPinnedSkillNames, getPinnedSkillsPath } from "./pinned-skills.js";
 export {
   clearWorkspaceSkillCache,
   discoverSkillMetadata,

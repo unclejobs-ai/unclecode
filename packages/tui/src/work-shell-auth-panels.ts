@@ -146,6 +146,7 @@ export function compactContextValue(label: string, value: string): string {
     .replace(/^Loaded guidance:\s*/i, "")
     .replace(/^Loaded extension:\s*/i, "ext ")
     .replace(/^Loaded skills:\s*/i, "skills ")
+    .replace(/^Skill catalog:\s*/i, "skills ")
     .replace(/^AGENTS\.md:\s*/i, "AGENTS: ")
     .replace(/^CLAUDE\.md:\s*/i, "CLAUDE: ");
   const limit = label === "Issue" ? 35 : 36;

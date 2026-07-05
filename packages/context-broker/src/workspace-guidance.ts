@@ -2,6 +2,7 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 
 import { runRustCommandSync } from "./rust-command.js";
+import { loadPinnedSkillNames } from "./pinned-skills.js";
 import { clearWorkspaceSkillCache, listAvailableSkills } from "./workspace-skills.js";
 
 export type WorkspaceGuidanceSkill = {
@@ -260,6 +261,7 @@ export async function loadCachedWorkspaceGuidance(input: {
   }
 
   const skillHomeDir = input.userHomeDir ?? process.env.HOME;
+  const pinnedNames = new Set(await loadPinnedSkillNames(input.cwd));
   const workspaceSkills = (
     skillHomeDir
       ? await listAvailableSkills(input.cwd, skillHomeDir)
@@ -275,7 +277,7 @@ export async function loadCachedWorkspaceGuidance(input: {
         path: skill.path,
         scope: skill.scope,
         summary: skill.summary,
-        content: await readFile(skill.path, "utf8"),
+        content: pinnedNames.has(skill.name) ? await readFile(skill.path, "utf8") : "",
       })),
     ),
   });

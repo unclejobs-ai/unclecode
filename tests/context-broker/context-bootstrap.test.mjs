@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import {
   augmentContextPacketViewInput,
   buildBootstrapContextPacketSupplement,
+  clearCachedWorkspaceGuidance,
   discoverCursorRules,
   ingestWorkspaceBootstrapContext,
   listScopedMemoryEntries,
@@ -156,5 +157,64 @@ describe("context bootstrap", () => {
       ),
     );
     assert.ok(manifest.sources.some((source) => source.kind === "guidance" && /AGENTS\.md$/.test(source.path)));
+    const autopilot = manifest.sources.find((source) => source.kind === "skill" && source.id.includes("autopilot"));
+    assert.ok(autopilot);
+    assert.equal(autopilot.includedInModel, false);
+  });
+
+  it("discovers .cursor/skills and marks pinned skills for model injection", async () => {
+    const { home, nested } = createFixtureWorkspace();
+    mkdirSync(path.join(nested, ".cursor", "skills", "cursor-demo"), { recursive: true });
+    writeFileSync(
+      path.join(nested, ".cursor", "skills", "cursor-demo", "SKILL.md"),
+      "---\nname: cursor-demo\ndescription: Cursor workspace skill\n---\n# Cursor demo\n",
+      "utf8",
+    );
+    mkdirSync(path.join(nested, ".unclecode", "context"), { recursive: true });
+    writeFileSync(
+      path.join(nested, ".unclecode", "context", "pinned-skills.json"),
+      JSON.stringify({ skills: ["cursor-demo"] }),
+      "utf8",
+    );
+
+    const result = await ingestWorkspaceBootstrapContext({
+      cwd: nested,
+      env: { ...process.env, HOME: home },
+      userHomeDir: home,
+      persistMemoryFacts: false,
+    });
+
+    const cursorSkill = result.snapshot.sources.find((source) => source.id.includes("cursor-demo"));
+    assert.ok(cursorSkill);
+    assert.equal(cursorSkill.includedInModel, true);
+  });
+
+  it("regenerates bootstrap.json when guidance changes on reload ingest", async () => {
+    const { home, nested } = createFixtureWorkspace();
+    const env = { ...process.env, HOME: home };
+
+    const first = await ingestWorkspaceBootstrapContext({
+      cwd: nested,
+      env,
+      userHomeDir: home,
+      persistMemoryFacts: false,
+    });
+
+    writeFileSync(path.join(nested, "AGENTS.md"), "# Agents\nUpdated guidance after reload.\n", "utf8");
+    clearCachedWorkspaceGuidance(nested, home);
+
+    const second = await ingestWorkspaceBootstrapContext({
+      cwd: nested,
+      env,
+      userHomeDir: home,
+      persistMemoryFacts: false,
+    });
+
+    assert.notEqual(second.snapshot.generatedAt, first.snapshot.generatedAt);
+    assert.ok(
+      second.snapshot.sources.some(
+        (source) => source.kind === "guidance" && source.summary.includes("Updated guidance after reload"),
+      ),
+    );
   });
 });

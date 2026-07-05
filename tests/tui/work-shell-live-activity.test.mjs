@@ -180,7 +180,7 @@ test("WorkShellView render keeps the light-terminal status frame visible", async
   instance.cleanup();
 
   assert.match(output, /UncleCode · OpenAI/);
-  assert.match(output, /gpt-5\.4 · YOLO mode.*│.*Saved OAuth/);
+  assert.match(output, /gpt-5\.4 · YOLO 모드.*│.*Saved OAuth/);
   assert.match(output, /Ready for the next move/);
   assert.match(output, /Work context ready/);
   assert.match(output, /Start\s+· Type the task in plain language/);

@@ -27,7 +27,7 @@ const WORK_SHELL_MODE_PROFILE_IDS = [
 ] as const;
 const WORK_SHELL_MODE_PROFILE_DESCRIPTIONS: Readonly<Record<(typeof WORK_SHELL_MODE_PROFILE_IDS)[number], string>> = {
   default: "일반 작업 모드로 전환합니다.",
-  ultrawork: "병렬 모드(Parallel)로 전환합니다.",
+  ultrawork: "집중 작업 모드(ultrawork)로 전환합니다.",
   search: "검색 모드(읽기 전용)로 전환합니다.",
   analyze: "분석 모드(읽기 전용)로 전환합니다.",
   yolo: "YOLO 모드로 전환합니다.",

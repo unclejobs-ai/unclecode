@@ -25,15 +25,15 @@ Team lanes (`packages/orchestrator/src/team-binding.ts`) add a second multi-agen
 
 User-facing labels come from `rust/unclecode-core/src/ux_text.rs` (`humanize_work_shell_mode_label`). Internal mode ids and orchestration behavior come from `rust/unclecode-core/src/mode.rs`, `rust/unclecode-core/src/orchestrator.rs`, and `packages/orchestrator/src/work-agent.ts`.
 
-| Mode id | UI label | Intent routing | Worker budget | Editing | LLM planner | Shell auto-unlock (`UNCLECODE_ALLOW_RUN_SHELL`) | Notes |
+| Mode id | UI label (KO) | Intent routing | Worker budget | Editing | LLM planner | Shell auto-unlock (`UNCLECODE_ALLOW_RUN_SHELL`) | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `default` | Work mode | Simple unless ≥3 file paths or complex keywords (`전체`, `refactor`, …) | 1 | allowed | Static decomposition only | No | Balanced baseline. |
-| `ultrawork` | **Parallel mode** | Simple for greetings/info questions; complex for audit/investigation/action keywords or ≥1 file path | 5 | allowed | LLM planner when ≥2 subtasks parse | Yes | UI says "Parallel"; id stays `ultrawork`. |
-| `yolo` | YOLO mode | Simple for pure questions; complex when action keywords or ≥2 file paths | 4 | allowed | LLM planner when ≥2 subtasks parse | Yes | Low-friction edits; guardian checks may still run. |
-| `plan` | Plan mode | Same classifier as default | 1 | **forbidden** | Static only | No | Read-only planning posture; pair with `/mode set build` or `yolo` to execute. |
-| `search` | Search mode | Always `research` | 3 | **forbidden** | N/A (research turn) | No | Composer guard: "Search mode is read-only…" |
-| `analyze` | Analyze mode | Always `research` | 3 | reviewed | N/A | No | Diagnosis-first; suggest mode switch before edits. |
-| `build` | Build mode | Same as default | 1 | allowed | Static only | No | Execution-focused profile. |
+| `default` | 작업 모드 | Simple unless ≥3 file paths or complex keywords (`전체`, `refactor`, …) | 1 | allowed | Static decomposition only | No | Balanced baseline. |
+| `ultrawork` | **집중 작업 모드** | Simple for greetings/info questions; complex for audit/investigation/action keywords or ≥1 file path | 5 | allowed | LLM planner when ≥2 subtasks parse | Yes | Internal id `ultrawork`; not a separate team mode. |
+| `yolo` | YOLO 모드 | Simple for pure questions; complex when action keywords or ≥2 file paths | 4 | allowed | LLM planner when ≥2 subtasks parse | Yes | Low-friction edits; guardian checks may still run. |
+| `plan` | 계획 모드 | Same classifier as default | 1 | **forbidden** | Static only | No | Read-only guard blocks edit prompts; pair with `/mode set build` or `yolo` to execute. |
+| `search` | 탐색 모드 | Always `research` | 3 | **forbidden** | N/A (research turn) | No | Composer guard: `탐색 모드는 읽기 전용…` |
+| `analyze` | 분석 모드 | Always `research` | 3 | reviewed | N/A | No | Diagnosis-first; suggest mode switch before edits. |
+| `build` | 구현 모드 | Same as default | 1 | allowed | Static only | No | Execution-focused profile. |
 
 Orchestration pipeline (complex path): `classifyWorkIntent` → `planComplexTurn` (static or LLM in `yolo`/`ultrawork`) → `runBoundedExecutorPool` → optional guardian → synthesis LLM (`work-agent.ts`). Explanatory Korean prompts must stay on the simple path so they never emit subtask JSON.
 
@@ -45,8 +45,18 @@ Work Shell startup and each context refresh follow this order:
 2. **Context packet** — `packages/context-broker/src/context-packet.ts` assembles repo map, policy signals, token budget, freshness gate.
 3. **Memory prefetch** — `packages/context-broker/src/memory-prefetch.ts` loads `session` + `project` scopes under `DEFAULT_MEMORY_PREFETCH_TIMEOUT_MS` (2000ms). On timeout/error → degrade to empty lines (never block the shell).
 4. **Transparency lines** — `formatScopedMemoryTransparencyLine` renders `scope · summary · cite memory:<id> · fresh|recent|aged`.
-5. **Bootstrap merge** — `apps/unclecode-cli/src/work-runtime-bootstrap.ts` merges guidance, bridge lines, memory, OMO summaries, and trace metadata into the `/context` packet view (single formatter in `context-packet-view.ts`).
-6. **Turn routing** — `extract_routing_prompt` strips `<unclecode_context_packet>…</unclecode_context_packet>` so file metadata in the packet does not force complex routing.
+5. **Bootstrap merge** — `ingestWorkspaceBootstrapContext` writes `.unclecode/context/bootstrap.json`, merges guidance, cursor rules, MCP metadata, skill catalog, bridge lines, memory, OMO summaries, and trace metadata into the `/context` packet view (single formatter in `context-packet-view.ts`).
+6. **Skills catalog vs inject** — project skills appear as catalog entries in bootstrap + summary lines; full `SKILL.md` bodies load only via `/skill <name>` or `.unclecode/context/pinned-skills.json`.
+7. **Reload** — `/reload` clears guidance/skill caches, re-runs ingest, and updates `bootstrap.json` `generatedAt`.
+8. **Turn routing** — `extract_routing_prompt` strips `<unclecode_context_packet>…</unclecode_context_packet>` so file metadata in the packet does not force complex routing.
+
+Verify bootstrap manifest:
+
+```bash
+npm run test:context-broker
+node -e "import('@unclecode/context-broker').then(async m => { const r = await m.ingestWorkspaceBootstrapContext({ cwd: process.cwd() }); console.log(r.snapshotPath, r.snapshot.sources.length); })"
+ls -la .unclecode/context/bootstrap.json .unclecode/context/pinned-skills.json 2>/dev/null || true
+```
 
 Agent memory scopes (`packages/context-broker/src/context-memory.ts`):
 

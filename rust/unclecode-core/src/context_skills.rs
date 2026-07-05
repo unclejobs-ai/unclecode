@@ -91,7 +91,15 @@ fn discover_skill_metadata(cwd: &Path, home_dir: &Path) -> Result<Vec<SkillMetad
         SKILL_SEARCH_LIMIT,
     ));
     files.extend(collect_skill_files(
+        &cwd.join(".cursor/skills"),
+        SKILL_SEARCH_LIMIT,
+    ));
+    files.extend(collect_skill_files(
         &home_dir.join(".codex/skills"),
+        SKILL_SEARCH_LIMIT,
+    ));
+    files.extend(collect_skill_files(
+        &home_dir.join(".cursor/skills"),
         SKILL_SEARCH_LIMIT,
     ));
     files.extend(
@@ -238,8 +246,17 @@ fn candidate_skill_paths(name: &str, cwd: &Path, home_dir: &Path) -> Vec<PathBuf
             .join("skills")
             .join(name)
             .join("SKILL.md"),
+        cwd.join(".cursor")
+            .join("skills")
+            .join(name)
+            .join("SKILL.md"),
         home_dir
             .join(".codex")
+            .join("skills")
+            .join(name)
+            .join("SKILL.md"),
+        home_dir
+            .join(".cursor")
             .join("skills")
             .join(name)
             .join("SKILL.md"),
@@ -300,5 +317,31 @@ mod tests {
             Some("Inspect repo.")
         );
         assert_eq!(summarize_skill_content("# Title\nBody\n"), "Body");
+    }
+
+    #[test]
+    fn discovers_cursor_skill_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "unclecode-cursor-skills-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let home = root.join("home");
+        let cwd = root.join("repo");
+        let skill_dir = cwd.join(".cursor/skills/demo");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo\ndescription: Cursor skill fixture\n---\n# Demo\n",
+        )
+        .expect("write skill");
+
+        let json = discover_skill_metadata_json(&cwd, &home).expect("discover");
+        assert!(json.contains("demo"));
+        assert!(json.contains(".cursor/skills/demo/SKILL.md"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

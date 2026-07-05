@@ -141,7 +141,7 @@ function buildContextLineItems(input: {
 
 function isWorkspaceGuidanceSummaryLine(line: string): boolean {
   return (
-    /^(Loaded guidance|Deduped duplicate guidance|Conflict|Loaded skills):/i.test(line) ||
+    /^(Loaded guidance|Deduped duplicate guidance|Conflict|Loaded skills|Skill catalog):/i.test(line) ||
     /^(?:AGENTS|CLAUDE|GEMINI|UNCLECODE)(?:\.local)?\.md:/i.test(line) ||
     /^rules\/.+\.md:/i.test(line)
   );

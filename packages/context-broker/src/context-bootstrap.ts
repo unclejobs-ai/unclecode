@@ -7,6 +7,7 @@ import { writeScopedMemory } from "./context-memory.js";
 import { createContextPacketView } from "./context-packet-view.js";
 import { discoverCursorRules } from "./cursor-rules.js";
 import { prefetchScopedMemory } from "./memory-prefetch.js";
+import { loadPinnedSkillNames } from "./pinned-skills.js";
 import { runRustCommandSync } from "./rust-command.js";
 import { loadCachedWorkspaceGuidance } from "./workspace-guidance.js";
 import { discoverSkillMetadata } from "./workspace-skills.js";
@@ -212,6 +213,7 @@ function buildCursorRuleSourceRecords(
 
 function buildSkillSourceRecords(
   skills: readonly { readonly name: string; readonly path: string; readonly scope: "project" | "user"; readonly description: string }[],
+  pinnedNames: ReadonlySet<string>,
 ): readonly BootstrapSourceRecord[] {
   return skills.map((skill) => ({
     id: `skill:${skill.scope}:${skill.name}`,
@@ -221,10 +223,11 @@ function buildSkillSourceRecords(
     sha256: sha256Content(`${skill.name}:${skill.description}`),
     bytes: skill.description.length,
     summary: skill.description.trim().length > 0 ? skill.description.trim() : `${skill.name} skill`,
-    includedInModel: skill.scope === "project",
+    includedInModel: pinnedNames.has(skill.name),
     includedInView: true,
-    reason:
-      skill.scope === "project"
+    reason: pinnedNames.has(skill.name)
+      ? "pinned skill injected into model context"
+      : skill.scope === "project"
         ? "project skill catalog entry; full SKILL.md stays on demand"
         : "user skill catalog entry; load on /skill",
   }));
@@ -414,7 +417,7 @@ export async function ingestWorkspaceBootstrapContext(
   const generatedAt = new Date().toISOString();
   const userHomeDir = input.userHomeDir ?? input.env?.HOME ?? process.env.HOME;
 
-  const [guidance, skills, cursorRules, memoryPrefetch] = await Promise.all([
+  const [guidance, skills, cursorRules, memoryPrefetch, pinnedNames] = await Promise.all([
     loadCachedWorkspaceGuidance({
       cwd: input.cwd,
       ...(userHomeDir ? { userHomeDir } : {}),
@@ -427,6 +430,7 @@ export async function ingestWorkspaceBootstrapContext(
       ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       agentId: "work-shell",
     }),
+    loadPinnedSkillNames(input.cwd),
   ]);
 
   const warnings = extractGuidanceWarnings(guidance.contextSummaryLines);
@@ -438,7 +442,7 @@ export async function ingestWorkspaceBootstrapContext(
       guidanceSummaryLines: guidance.contextSummaryLines,
     }),
     ...buildCursorRuleSourceRecords(cursorRules),
-    ...buildSkillSourceRecords(skills),
+    ...buildSkillSourceRecords(skills, new Set(pinnedNames)),
     ...discoverMcpSources({
       cwd: input.cwd,
       ...(userHomeDir ? { userHomeDir } : {}),

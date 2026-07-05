@@ -53,14 +53,19 @@ pub fn build_workspace_guidance_json(
             )
         })
         .collect::<Vec<_>>();
-    appendix_blocks.extend(skills.iter().map(|skill| {
-        format!(
-            "## SKILL {} ({})\n{}",
-            skill_name(skill),
-            skill_path(skill),
-            skill_content(skill).trim()
-        )
-    }));
+    appendix_blocks.extend(
+        skills
+            .iter()
+            .filter(|skill| !skill_content(skill).trim().is_empty())
+            .map(|skill| {
+                format!(
+                    "## SKILL {} ({})\n{}",
+                    skill_name(skill),
+                    skill_path(skill),
+                    skill_content(skill).trim()
+                )
+            }),
+    );
 
     let mut context_summary_lines = Vec::new();
     if !sources.is_empty() {
@@ -88,7 +93,7 @@ pub fn build_workspace_guidance_json(
     }));
     if !skills.is_empty() {
         context_summary_lines.push(format!(
-            "Loaded skills: {}",
+            "Skill catalog: {} (load with /skill <name>)",
             skills
                 .iter()
                 .take(6)
@@ -445,12 +450,13 @@ mod tests {
         assert!(summary.iter().any(|line| line
             .as_str()
             .unwrap_or("")
-            .contains("Loaded skills: autopilot")));
+            .contains("Skill catalog: autopilot")));
         let appendix = parsed
             .get("systemPromptAppendix")
             .and_then(Value::as_str)
             .unwrap_or("");
         assert!(appendix.contains("Background workspace guidance"));
+        assert!(!appendix.contains("## SKILL autopilot"));
         // The guidance must be framed as silent reference, not a task to recite.
         assert!(appendix.contains("do NOT recite"));
 
