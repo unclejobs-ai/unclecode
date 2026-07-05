@@ -32,7 +32,7 @@
 - [x] Code review (a73c938d): merge blocker Rust board display-width (CJK) **fixed P0** — `pad_board_cell`/`compact_preview` → `ux_text` helpers; builds_work_board 3/3 PASS; also blockedReason narrow, terminalColumns init race, empty post-turn bridge
 - [x] T15 simplify pass (2026-07-05): deduped queue builtin path (`applyQueueBuiltinResult`/`buildQueueBuiltinBase`), removed `renderWorkBoardPanel` wrapper, `pickBusySpinnerFrame` in TUI, Rust dead branches cleaned; WIP loading-card/system-marker diff left unstaged; qa:health 14/14 PASS (105.9s); not pushed
 - [x] Security review (a0f94562): T15 queue/board c2b3f47..15419a4 — no medium+ findings
-- [x] Adversarial review 2026-07-05 (origin/main..HEAD): bootstrap read-only graceful skip + prefetch dedupe — `context-bootstrap.ts`, `memory-prefetch.ts`; qa:health 14/14 PASS
+- [x] Adversarial review 2026-07-05 (origin/main..HEAD): bootstrap read-only graceful skip + prefetch dedupe — `0db5037`; `/clear` stale Done column — `19fff3a`; TUI activity/system polish — `6683bca`; qa:health 14/14 PASS (128.3s)
 
 ## Background and Motivation
 
@@ -230,7 +230,7 @@
 ## Executor's Feedback or Assistance Requests
 
 - [T15-GATE Executor 2026-07-05 post-review] `npm run qa:health` **14/14 PASS** (73.1s) after minimal fixes: `tests/work/repl.test.mjs` expects Unicode ellipsis for context panel truncation; `work-shell-view.tsx` status group separators use `readableTextColorProps(W.borderSoft)`. Uncommitted fix diff only — no push.
-- [T15 review follow-ups 2026-07-05] P0 CJK display-width committed `aa58bf8`. P1–P3 landed in `fix(t15): board resize rebuild and blocked column` — orchestrator 251/251, `cargo test -p unclecode-core queue` 9/9, `npm run check` OK. Deferred: `/clear` without idle persist may still show stale Done until next turn; adversarial bootstrap findings unchanged.
+- [T15 review follow-ups 2026-07-05] P0 CJK display-width committed `aa58bf8`. P1–P3 landed in `fix(t15): board resize rebuild and blocked column` — orchestrator 251/251, `cargo test -p unclecode-core queue` 9/9, `npm run check` OK. `/clear` stale Done column fixed in `19fff3a`.
 - [T11-E2/E3 Executor 7/5] Parallel mode TUI leak fix 커밋 `48e0a8a`: ultrawork info 질문 simple 라우팅, `runInternalTurn`으로 planner/executor/guardian 스트리밍 차단, subtask JSON·worker 메타 sanitize, busy 경로 마스킹. 검증: turn-orchestrator 13/13, Rust orchestrator 11/11, sanitize turn-helpers OK. 사용자 TUI 수동 재현 확인 대기.
 - [Holistic Planner→Executor] 우선순위 기본 순서: **T11-E1 → … → T11-GATE → T12 → T13 → T14**. T9/T10 완료(T10 qa:health 2026-07-05). `work-runtime-bootstrap.ts` 충돌 시 T11-E2 후 T12-E3.
 - [T11 Planner→Executor] T11-E1 착수 전 확인: bootstrap.json만 먼저(동작 변경 없음) vs E1+E2 묶음(패킷 경고까지). 권장: **E1 단독**.
@@ -239,7 +239,7 @@
 - [T3 게이트 결과 — 완료] `npm run qa:health` 14항목 전체 PASS, exit 0 (53.8s). runtime QA 증거: geminiTool/openaiTool/anthropicTool/toolFinalGate/lightContrast/spinner/queueDrain/resize/idleStable/latencyOk 모두 true, hangulResidual=false, duplicateBusy=false. live provider QA는 이번엔 fail-fast를 지나 실행됐고 예상된 외부 auth 차단 상태(openai-oauth-codex-runtime-not-api-ready)로 "blocked recorded" 처리 — 런북에 문서화된 정상 복구 경로(자격증명 갱신 후 qa:live). 리포트: .unclecode/qa/runtime-qa-latest.json, .unclecode/qa/live-provider-latest.json.
 - [T10 Executor 2026-07-05 03:xx] qa:health **14/14 PASS exit 0** (87.7s).
 - [Subagent verify 2026-07-05] qa:health **14/14 PASS exit 0** (115.0s); hangulResidual=false, lightContrast=true — prior 87.7s와 동일 통과, 소요만 증가. Blockers cleared: Hangul truncate exact-fit (`a75b749`), stream smoke in module list, env-independent footer test (`repl.test.mjs` HOME pin). Intermittent work-test flakes (Anthropic Rust spawn) pass after `cargo build`; no push.
-- [Optional tasks Executor 2026-07-05] (1) TUI WIP committed — rail markers, activity indicator, system dividers; stream smoke accepts wrapped final marker. (2) `/clear` clears `lastCompletedTurnSnapshot` + test. (3) Bootstrap read-only skip + prefetch excludes `Bootstrap context:` synthetic memory. qa:health **14/14 PASS** (127.7s). Not pushed.
+- [Optional tasks Executor 2026-07-05] Commits `6683bca` (TUI activity indicator + system dividers + light-contrast borderSoft), `19fff3a` (/clear clears work board Done snapshot), `0db5037` (bootstrap read-only skip + prefetch dedupe), `6de5c2e` (scratchpad). qa:health **14/14 PASS exit 0** (128.3s). Not pushed.
 
 ## Lessons
 
