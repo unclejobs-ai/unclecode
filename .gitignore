@@ -6,6 +6,7 @@ dist-work
 *.log
 *.tsbuildinfo
 .codex/
+.commandcode/
 .claude/
 .omo/
 .superpowers/

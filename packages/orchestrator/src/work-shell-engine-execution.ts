@@ -438,8 +438,10 @@ export async function executeWorkShellPromptTurn<
       ...successPayload.patch,
       streamingAssistantText: undefined,
     });
-    input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.bridgeTraceEvent));
-    input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.memoryTraceEvent));
+    if (!postTurnEffects.skipped) {
+      input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.bridgeTraceEvent));
+      input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.memoryTraceEvent));
+    }
     await input.persistSessionSnapshot("idle", input.promptTurn.sessionSummary).catch(() => undefined);
     try {
       input.recordTurn?.({

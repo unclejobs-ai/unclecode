@@ -2046,6 +2046,36 @@ test("work-shell post-turn helpers persist summaries and auth recovery determini
   assert.deepEqual(refreshedAuthIssues, ["Auth issue: saved OAuth needs refresh."]);
 });
 
+test("work-shell post-turn helpers skip bridge and memory when assistant text is empty", async () => {
+  let bridgeCalled = false;
+  let memoryCalled = false;
+  const effects = await runWorkShellPostTurnSuccessEffects({
+    cwd: "/repo",
+    transcriptText: "leak only",
+    assistantText: "",
+    sessionId: "work-1",
+    currentBridgeLines: ["bridge-0"],
+    currentMemoryLines: ["memory-0"],
+    async publishContextBridge() {
+      bridgeCalled = true;
+      return { bridgeId: "bridge-1", line: "bridge-1 line" };
+    },
+    async writeScopedMemory() {
+      memoryCalled = true;
+      return { memoryId: "memory-1" };
+    },
+    async listScopedMemoryLines() {
+      return ["memory-1 line"];
+    },
+  });
+
+  assert.equal(effects.skipped, true);
+  assert.equal(bridgeCalled, false);
+  assert.equal(memoryCalled, false);
+  assert.deepEqual(effects.bridgeLines, ["bridge-0"]);
+  assert.deepEqual(effects.memoryLines, ["memory-0"]);
+});
+
 test("work-shell trace helpers derive busy status, apply live updates, and map transcript roles honestly", () => {
   assert.equal(
     resolveBusyStatusFromTraceEvent({ type: "turn.started" }, "thinking inspect repo"),

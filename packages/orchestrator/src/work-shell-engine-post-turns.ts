@@ -45,7 +45,24 @@ export type WorkShellPostTurnSuccessEffectsResult = {
   readonly memorySummary: string;
   readonly bridgeTraceEvent: WorkShellSyntheticTraceEvent;
   readonly memoryTraceEvent: WorkShellSyntheticTraceEvent;
+  /** Set when assistant text sanitized to empty — no bridge/memory side effects. */
+  readonly skipped?: boolean;
 };
+
+export function createSkippedWorkShellPostTurnSuccessEffects(input: {
+  currentBridgeLines: readonly string[];
+  currentMemoryLines?: readonly string[] | undefined;
+}): WorkShellPostTurnSuccessEffectsResult {
+  return {
+    bridgeLines: input.currentBridgeLines,
+    memoryLines: input.currentMemoryLines ?? [],
+    bridgeSummary: "",
+    memorySummary: "",
+    bridgeTraceEvent: { type: "bridge.published", summary: "" },
+    memoryTraceEvent: { type: "memory.written", summary: "" },
+    skipped: true,
+  };
+}
 
 export function isWorkShellAuthFailure(message: string): boolean {
   return /request failed with status 401/i.test(message);
@@ -157,6 +174,13 @@ export async function resolveWorkShellFailureAuthLabel(input: {
 export async function runWorkShellPostTurnSuccessEffects(
   input: WorkShellPostTurnSuccessEffectsInput,
 ): Promise<WorkShellPostTurnSuccessEffectsResult> {
+  if (!input.assistantText.trim()) {
+    return createSkippedWorkShellPostTurnSuccessEffects({
+      currentBridgeLines: input.currentBridgeLines,
+      currentMemoryLines: input.currentMemoryLines,
+    });
+  }
+
   const summary = createConversationTurnSummary({
     transcriptText: input.transcriptText,
     assistantText: input.assistantText,
