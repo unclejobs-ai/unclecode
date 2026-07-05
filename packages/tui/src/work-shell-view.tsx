@@ -67,6 +67,8 @@ const W = {
   toolAccent: "#365314",
   toolMuted: "#334155",
   warning: "#713f12",
+  success: "#166534",
+  spinner: "#0d9488",
 } as const;
 
 // Single thin-rule chrome language: one consistent line weight in a muted
@@ -540,6 +542,40 @@ function normalizeBusyDetail(value: string): string {
     return "Reading files";
   }
   return stripped;
+}
+
+// Activity type classification — drives per-tool icon + color so the user can
+// tell at a glance whether the agent is reading, planning, synthesizing, or
+// calling a model. Mirrors Claude Code's semantic tool-call banners.
+type WorkShellActivityKind =
+  | "thinking"
+  | "reading"
+  | "planning"
+  | "synthesizing"
+  | "reviewing"
+  | "model"
+  | "parallel";
+
+const ACTIVITY_META: Record<WorkShellActivityKind, { readonly icon: string; readonly color: string; readonly verb: string }> = {
+  thinking: { icon: "◐", color: W.spinner, verb: "Thinking" },
+  reading: { icon: "⊏", color: W.user, verb: "Reading" },
+  planning: { icon: "◈", color: W.user, verb: "Planning" },
+  synthesizing: { icon: "✦", color: W.assistant, verb: "Synthesizing" },
+  reviewing: { icon: "✓", color: W.success, verb: "Reviewing" },
+  model: { icon: "⚙", color: W.assistant, verb: "Model" },
+  parallel: { icon: "⬡", color: W.user, verb: "Parallel" },
+};
+
+function classifyWorkShellActivity(busyStatus: string): WorkShellActivityKind {
+  const detail = normalizeBusyDetail(busyStatus);
+  const lower = detail.toLowerCase();
+  if (lower.includes("planning")) return "planning";
+  if (lower.includes("synthesiz")) return "synthesizing";
+  if (lower.includes("reviewing")) return "reviewing";
+  if (lower.includes("reading")) return "reading";
+  if (lower.startsWith("model")) return "model";
+  if (lower.includes("parallel")) return "parallel";
+  return "thinking";
 }
 
 export function parseWorkShellPanelFactLine(line: string): { readonly label: string; readonly value: string } | undefined {
@@ -1078,15 +1114,21 @@ function renderWorkShellEntryBlock(input: {
   }
 
   if (input.entry.role === "system") {
+    // System notices are meta — not part of the conversation flow. Render them
+    // as a quiet dashed-divider block so they read as infrastructure, not as a
+    // message from a speaker. Progress (…/…) vs completion (✓) is marked by
+    // the trailing ellipsis.
+    const isInProgress = bodyText.endsWith("…") || bodyText.endsWith("...");
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
-        marginBottom={0}
-        paddingLeft={2}
+        marginTop={1}
+        marginBottom={1}
         flexDirection="column"
       >
-        <Text {...readableTextColorProps(presentation.bodyColor ?? W.textMuted)}>
-          <Text color={W.textDim}>{presentation.badge} </Text>
+        <Text {...readableTextColorProps(W.borderSoft)}>{"╶".repeat(3)} </Text>
+        <Text {...readableTextColorProps(W.textDim)}>
+          <Text color={isInProgress ? W.user : W.success} bold>{isInProgress ? "◌" : "✓"} </Text>
           {bodyText}
         </Text>
       </Box>
@@ -1145,6 +1187,8 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
   readonly entries: readonly WorkShellEntry[];
   readonly streamingAssistantText?: string;
   readonly isBusy: boolean;
+  readonly busyStatus?: string;
+  readonly currentTurnStartedAt?: number;
   readonly panelPlacement: WorkShellPanelPlacement;
   readonly terminalColumns?: number;
 }) {
@@ -1152,12 +1196,28 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
     panelPlacement: props.panelPlacement,
     ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
   });
+  const [activityFrame, setActivityFrame] = React.useState(0);
+  const [activityNow, setActivityNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    if (!props.isBusy) {
+      setActivityFrame(0);
+      return;
+    }
+    setActivityFrame((f) => f + 1);
+    setActivityNow(Date.now());
+    const interval = setInterval(() => {
+      setActivityFrame((f) => f + 1);
+      setActivityNow(Date.now());
+    }, WORK_SHELL_SPINNER_INTERVAL_MS);
+    return () => { clearInterval(interval); };
+  }, [props.isBusy]);
   const entries = props.streamingAssistantText
     ? [
         ...props.entries.filter(shouldShowWorkShellConversationEntry),
         { role: "assistant", text: `${props.streamingAssistantText}${STREAMING_CURSOR}` } as const,
       ]
     : props.entries.filter(shouldShowWorkShellConversationEntry);
+  const showActivityIndicator = props.isBusy && !props.streamingAssistantText;
 
   return (
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "68%" : undefined} paddingRight={props.panelPlacement === "side" ? 1 : 0}>
@@ -1169,7 +1229,43 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
           index,
           width: conversationWidth,
         }))}
+        {showActivityIndicator ? (
+          <WorkShellActivityIndicator
+            frame={activityFrame}
+            {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
+            {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
+            nowMs={activityNow}
+          />
+        ) : null}
       </Box>
+    </Box>
+  );
+});
+
+const WorkShellActivityIndicator = React.memo(function WorkShellActivityIndicator(props: {
+  readonly frame: number;
+  readonly busyStatus?: string;
+  readonly currentTurnStartedAt?: number;
+  readonly nowMs: number;
+}) {
+  const spinner = pickBusySpinnerFrame(props.frame);
+  const rawDetail = normalizeBusyDetail(props.busyStatus ?? "");
+  const label = rawDetail.length > 0 ? rawDetail : "Thinking";
+  const elapsedMs = props.currentTurnStartedAt !== undefined
+    ? Math.max(0, props.nowMs - props.currentTurnStartedAt)
+    : undefined;
+  const elapsedLabel = elapsedMs !== undefined ? ` · ${formatCompactDuration(elapsedMs)}` : "";
+  // Per-activity-type icon + color so the user sees what the agent is doing,
+  // not just a generic spinner. Falls back to the braille spinner animation.
+  const activityKind = classifyWorkShellActivity(props.busyStatus ?? "");
+  const meta = ACTIVITY_META[activityKind];
+  return (
+    <Box marginTop={1} paddingLeft={1}>
+      <Text>
+        <Text color={meta.color} bold>{meta.icon} </Text>
+        <Text {...readableTextColorProps(W.borderSoft)}>{spinner} </Text>
+        <Text {...readableTextColorProps(W.borderStrong)} bold>{label}{elapsedLabel}</Text>
+      </Text>
     </Box>
   );
 });
@@ -1348,19 +1444,17 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
     : undefined;
   const elapsedLabel = elapsedMs !== undefined ? ` · ${formatCompactDuration(elapsedMs)}` : "";
   const busyDetail = normalizeBusyDetail(props.busyStatus ?? "");
-  const busyLabel = busyDetail.length > 0 ? busyDetail : "Working";
+  const busyLabel = busyDetail.length > 0 ? busyDetail : "Thinking";
   const activityDisplay = props.isBusy ? `${busyLabel}${elapsedLabel}` : activityLine;
-  const spinnerGlyph = props.isBusy
-    ? spinnerFrame % 2 === 0 ? BRAND_SPINNER_GLYPH : "✽"
-    : "◇";
+  const statusSpinner = props.isBusy ? pickBusySpinnerFrame(spinnerFrame) : "◇";
   return (
     <Box marginTop={1} paddingLeft={1}>
       <Text>
-        <Text color={props.isBusy ? W.spinner : W.user} bold>{spinnerGlyph} </Text>
+        <Text color={props.isBusy ? W.spinner : W.user} bold>{statusSpinner} </Text>
         <Text bold {...readableTextColorProps(W.borderStrong)}>{sessionGroup}</Text>
-        <Text color={W.borderSoft}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
+        <Text {...readableTextColorProps(W.borderSoft)}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
         <Text color={authColor} bold={isAuthWarning}>{authGroup}</Text>
-        <Text color={W.borderSoft}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
+        <Text {...readableTextColorProps(W.borderSoft)}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
         <Text {...(props.isBusy
           ? { color: activityColor, bold: true }
           : readableTextColorProps(W.textMuted))}>{activityDisplay}</Text>

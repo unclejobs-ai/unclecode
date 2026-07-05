@@ -92,7 +92,10 @@ export async function runOpenAIStreamTuiSmoke({ tmp }) {
 
     await waitForPane(session, new RegExp(escapeRegExp(openAIStreamFinalMarkerText)), paneFile);
     const pane = await waitForIdlePromptDeck(session, paneFile);
-    assert.match(pane, new RegExp(escapeRegExp(openAIStreamFinalMarkerText)));
+    assert.ok(
+      pane.replace(/\n/g, "").includes(openAIStreamFinalMarkerText),
+      `final stream marker missing from pane: ${openAIStreamFinalMarkerText}`,
+    );
     assert.doesNotMatch(pane, /Unknown command|panic|TypeError|ReferenceError/);
     assert.doesNotMatch(
       pane,
