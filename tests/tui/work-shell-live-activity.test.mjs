@@ -5,6 +5,10 @@ import test from "node:test";
 import { render } from "ink";
 import React from "react";
 
+// Force light terminal background for the render tests below — they were
+// authored against the light palette and assert specific hex values.
+process.env.UNCLECODE_TERMINAL_BACKGROUND = "light";
+
 import {
   formatWorkShellLiveActivityLine,
   formatWorkShellPanelEmptyLines,
@@ -180,7 +184,7 @@ test("WorkShellView render keeps the light-terminal status frame visible", async
   instance.cleanup();
 
   assert.match(output, /UncleCode · OpenAI/);
-  assert.match(output, /gpt-5\.4 · YOLO 모드.*│.*Saved OAuth/);
+  assert.match(output, /gpt-5\.4 · YOLO mode.*│.*Saved OAuth/);
   assert.match(output, /Ready for the next move/);
   assert.match(output, /Work context ready/);
   assert.match(output, /Start\s+· Type the task in plain language/);

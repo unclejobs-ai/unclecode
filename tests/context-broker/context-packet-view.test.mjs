@@ -240,6 +240,7 @@ describe("context packet view", () => {
     const lines = buildWorkShellCompactContextPacketPreviewLines(packet);
     assert.ok(lines[0]?.startsWith("Sources ·"));
     assert.ok(lines.includes("Included in next answer"));
+    assert.ok(lines.includes("Held back locally"));
     assert.ok(lines.some((line) => line.startsWith("  workspace ·")));
     assert.equal(lines.some((line) => line.includes("Controls ·")), false);
   });

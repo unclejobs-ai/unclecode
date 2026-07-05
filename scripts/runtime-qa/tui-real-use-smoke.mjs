@@ -62,12 +62,12 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     await submitLine(session, "/context", paneFile, /\/context/);
     const contextPane = await waitForPane(
       session,
-      /Context expanded|Included in next answer|Held back locally|Warnings · none/i,
+      /Context expanded|Included in next answer|Sources ·|Warnings · none|✓ none/i,
       contextPaneFile,
     );
     assert.match(contextPane, /Included in next answer/);
     assert.match(contextPane, /Held back locally/);
-    assert.match(contextPane, /Warnings · none/);
+    assert.match(contextPane, /Warnings · none|✓ none/i);
     assert.doesNotMatch(contextPane, /Unknown command|panic|TypeError|ReferenceError/);
     await runTmux(["send-keys", "-t", session, "Escape"]);
     await waitForPane(session, /prompt deck/, paneFile);

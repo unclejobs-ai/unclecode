@@ -103,7 +103,7 @@ function formatWorkShellCategorySummaryLines(input: {
       `  ${formatPacketCategory(summary.sample.category)} · ${summary.count} · ${formatCompactGroupSummary(summary.sample)}`);
   const hiddenCount = Math.max(0, summaries.length - input.visibleLimit);
   return hiddenCount > 0 && input.includeHiddenGroupsLine
-    ? [...visible, `  +${hiddenCount} more source groups (counts still tracked)`]
+    ? [...visible, `  +${hiddenCount} more source groups hidden; counts still tracked.`]
     : visible;
 }
 

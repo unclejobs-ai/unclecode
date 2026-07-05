@@ -240,12 +240,12 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
       /AGENTS\.md/,
       "workspace guidance filename is preserved in preview, not the headline label",
     );
-    assert.ok(packet.included.some((item) => item.category === "omo" && /G001-context/.test(item.label)));
+    assert.ok(packet.included.some((item) => item.category === "loop-trail" && /G001-context/.test(item.label)));
     // OMO excluded label must not expose an absolute path; path is preserved in preview
-    const omoLedgerItem = packet.excluded.find((item) => item.category === "omo" && /ledger\.jsonl/.test(item.preview ?? ""));
-    assert.ok(omoLedgerItem, "OMO excluded item preserves ledger path in preview");
+    const loopTrailLedgerItem = packet.excluded.find((item) => item.category === "loop-trail" && /ledger\.jsonl/.test(item.preview ?? ""));
+    assert.ok(loopTrailLedgerItem, "loop trail excluded item preserves ledger path in preview");
     assert.doesNotMatch(
-      omoLedgerItem.label,
+      loopTrailLedgerItem.label,
       /\//,
       "OMO excluded item label must not contain an absolute path (no forward-slash)",
     );
@@ -380,10 +380,10 @@ test("loadWorkCliBootstrap groups large OMO excluded artifact lists", async () =
     });
 
     assert.ok(packet);
-    const omoExcluded = packet.excluded.filter((item) => item.category === "omo");
+    const loopTrailExcluded = packet.excluded.filter((item) => item.category === "loop-trail");
     assert.ok(
-      omoExcluded.length <= 8,
-      `expected bounded OMO excluded list, got ${String(omoExcluded.length)} items`,
+      loopTrailExcluded.length <= 8,
+      `expected bounded loop trail excluded list, got ${String(loopTrailExcluded.length)} items`,
     );
     assert.equal(
       packet.sourceCounts.excluded,
@@ -391,8 +391,8 @@ test("loadWorkCliBootstrap groups large OMO excluded artifact lists", async () =
       "context still reports the full raw artifact count withheld from model-ready context",
     );
     assert.ok(
-      omoExcluded.some((item) => /64 raw OMO evidence transcripts/.test(item.label)),
-      "packet summarizes excluded OMO evidence counts instead of listing every path",
+      loopTrailExcluded.some((item) => /64 loop trail evidence transcripts/.test(item.label)),
+      "packet summarizes excluded loop trail evidence counts instead of listing every path",
     );
     assert.match(
       formatContextPacketPromptPrefix(packet),

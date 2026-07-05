@@ -58,8 +58,10 @@ function commonPrefixOffset(left: string, right: string): number {
   return offset;
 }
 
-function trailingComposerGrapheme(value: string): string {
-  return segmentDisplayGraphemes(value).at(-1) ?? "";
+function graphemeBeforeCursor(value: string, cursorOffset: number): string {
+  const normalized = normalizeComposerCursorOffset(value, cursorOffset);
+  const previousOffset = previousComposerCursorOffset(value, normalized);
+  return value.slice(previousOffset, normalized);
 }
 
 function resolveHangulCompositionReplacement(input: {
@@ -71,7 +73,6 @@ function resolveHangulCompositionReplacement(input: {
   readonly nextCursorOffset: number;
 } | undefined {
   if (
-    input.cursorOffset !== input.value.length ||
     input.value.length === 0 ||
     input.sanitizedInput.length === 0 ||
     input.sanitizedInput.includes("\n") ||
@@ -81,13 +82,38 @@ function resolveHangulCompositionReplacement(input: {
     return undefined;
   }
 
-  const trailing = trailingComposerGrapheme(input.value);
-  if (HANGUL_JAMO_PATTERN.test(trailing)) {
-    const nextValue = `${input.value.slice(0, input.value.length - trailing.length)}${input.sanitizedInput}`;
+  const cursorOffset = normalizeComposerCursorOffset(input.value, input.cursorOffset);
+  const beforeCursor = graphemeBeforeCursor(input.value, cursorOffset);
+
+  if (beforeCursor.length > 0 && HANGUL_JAMO_PATTERN.test(beforeCursor)) {
+    const head = input.value.slice(0, cursorOffset - beforeCursor.length);
+    const tail = input.value.slice(cursorOffset);
+    const nextValue = `${head}${input.sanitizedInput}${tail}`;
     return {
       nextValue,
-      nextCursorOffset: nextValue.length,
+      nextCursorOffset: head.length + input.sanitizedInput.length,
     };
+  }
+
+  const head = input.value.slice(0, cursorOffset);
+  if (input.sanitizedInput.startsWith(head) && input.sanitizedInput.length > head.length) {
+    const inserted = input.sanitizedInput.slice(head.length);
+    const tail = input.value.slice(cursorOffset);
+    const overlap = commonPrefixOffset(inserted, tail);
+    const shorterLength = Math.min(inserted.length, tail.length);
+    const minimumOverlap =
+      shorterLength === 0 ? 0 : Math.max(1, Math.floor(shorterLength * 0.6));
+    if (tail.length === 0 || overlap >= minimumOverlap) {
+      const nextValue = `${head}${inserted}${tail.slice(overlap)}`;
+      return {
+        nextValue,
+        nextCursorOffset: head.length + inserted.length,
+      };
+    }
+  }
+
+  if (cursorOffset !== input.value.length) {
+    return undefined;
   }
 
   if (input.sanitizedInput.length <= 1) {

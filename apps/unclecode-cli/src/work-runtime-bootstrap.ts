@@ -247,9 +247,9 @@ function buildOmoExcludedPacketItems(
 ): readonly ContextPacketViewItem[] {
   if (excludedArtifacts.length <= OMO_EXCLUDED_DETAIL_LIMIT) {
     return excludedArtifacts.map((item, index) => ({
-      id: `omo-excluded-${index + 1}`,
-      category: "omo",
-      label: "OMO session artifact",
+      id: `loop-trail-excluded-${index + 1}`,
+      category: "loop-trail",
+      label: "loop trail artifact",
       reason: item.reason,
       preview: item.path,
     }));
@@ -260,9 +260,9 @@ function buildOmoExcludedPacketItems(
   const items: ContextPacketViewItem[] = otherArtifacts
     .slice(0, OMO_EXCLUDED_DETAIL_LIMIT - 1)
     .map((item, index) => ({
-      id: `omo-excluded-${index + 1}`,
-      category: "omo",
-      label: "OMO session artifact",
+      id: `loop-trail-excluded-${index + 1}`,
+      category: "loop-trail",
+      label: "loop trail artifact",
       reason: item.reason,
       preview: item.path,
     }));
@@ -270,21 +270,21 @@ function buildOmoExcludedPacketItems(
   if (otherArtifacts.length > items.length) {
     const additionalArtifactCount = otherArtifacts.length - items.length;
     items.push({
-      id: "omo-excluded-other-summary",
-      category: "omo",
-      label: `${formatCountLabel(additionalArtifactCount, "additional raw OMO artifact", "additional raw OMO artifacts")}`,
-      reason: "raw OMO artifacts stay local",
+      id: "loop-trail-excluded-other-summary",
+      category: "loop-trail",
+      label: `${formatCountLabel(additionalArtifactCount, "additional loop trail artifact", "additional loop trail artifacts")}`,
+      reason: "loop trail artifacts stay local",
       sourceCount: additionalArtifactCount,
     });
   }
 
   if (evidenceArtifacts.length > 0) {
     items.push({
-      id: "omo-excluded-evidence-summary",
-      category: "omo",
-      label: `${formatCountLabel(evidenceArtifacts.length, "raw OMO evidence transcript", "raw OMO evidence transcripts")}`,
-      reason: "raw OMO evidence transcripts stay local",
-      preview: "Detailed evidence paths stay local; use the OMO session evidence directory for full transcripts.",
+      id: "loop-trail-excluded-evidence-summary",
+      category: "loop-trail",
+      label: `${formatCountLabel(evidenceArtifacts.length, "loop trail evidence transcript", "loop trail evidence transcripts")}`,
+      reason: "loop trail evidence transcripts stay local",
+      preview: "Detailed evidence paths stay local; use the loop trail session evidence directory for full transcripts.",
       sourceCount: evidenceArtifacts.length,
     });
   }
@@ -322,13 +322,13 @@ function createWorkShellContextPacketResolver(options: {
       }),
       ...omo.included.map((item): ContextPacketViewItem => ({
         id: item.kind === "omo-goal"
-          ? `omo-goal-${item.sessionId}-${item.goalId}`
-          : `omo-criterion-${item.sessionId}-${item.goalId}-${item.criterionId}`,
-        category: "omo",
+          ? `loop-trail-goal-${item.sessionId}-${item.goalId}`
+          : `loop-trail-criterion-${item.sessionId}-${item.goalId}-${item.criterionId}`,
+        category: "loop-trail",
         label: item.kind === "omo-goal"
           ? `${item.goalId} · ${item.status}`
           : `${item.goalId}/${item.criterionId} · ${item.status}`,
-        reason: item.kind === "omo-goal" ? "active OMO goal context" : "OMO success criterion context",
+        reason: item.kind === "omo-goal" ? "active loop trail goal context" : "loop trail success criterion context",
         preview: item.summary,
         tokenEstimate: estimateTokens(item.summary),
       })),

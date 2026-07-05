@@ -140,13 +140,16 @@ function buildProviderToolCallEvidence(smoke) {
 
 function buildContextEvidence(realUseTuiStress) {
   const contextPane = realUseTuiStress?.contextPaneExcerpt ?? "";
+  const includedHeader = /Included in next answer/.test(contextPane);
+  const heldBackHeader = /Held back locally/.test(contextPane);
+  const warningsHeader = /Warnings|✓ none/i.test(contextPane);
   return {
-    contextPanelVisible: contextPane.includes("Included in next answer"),
+    contextPanelVisible: includedHeader,
     modelBoundPackets: realUseTuiStress?.contextPacketTransparency === true,
     includedExcludedWarnings:
       realUseTuiStress?.contextPacketTransparency === true &&
-      contextPane.includes("Held back locally") &&
-      contextPane.includes("Warnings"),
+      heldBackHeader &&
+      warningsHeader,
     rawArtifactsHeldBack: /Held back locally|raw audit artifacts stay local/i.test(contextPane),
   };
 }

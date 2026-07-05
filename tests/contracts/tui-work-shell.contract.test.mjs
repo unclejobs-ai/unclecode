@@ -188,10 +188,10 @@ test("formatWorkShellHeaderLine renders one width-bounded row", () => {
   assert.doesNotMatch(narrow, /\n/);
 });
 
-test("formatWorkShellHeaderLine keeps Korean hints within the row width", () => {
+test("formatWorkShellHeaderLine keeps header hints within the row width", () => {
   const line = formatWorkShellHeaderLine({
     providerTitle: "UncleCode · Gemini",
-    headerHint: "작업 컨텍스트 · Ctrl+O 세션 · / 명령",
+    headerHint: "work context · Ctrl+O sessions · / commands",
     terminalColumns: 72,
   });
   assert.equal(getDisplayWidth(line), 70);
@@ -400,7 +400,7 @@ test("resolveWorkShellComposerHint and spinner interval stay aligned with DESIGN
       inputValue: "",
       slashSuggestionCount: 0,
     }),
-    "Queue paused after interrupt · /queue shows · /queue clear drops",
+    "Queue paused after interrupt · check /queue · /queue clear drops",
   );
   assert.equal(
     resolveWorkShellComposerHint({
@@ -1394,7 +1394,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       mode: "default",
       authLabel: "Browser OAuth · file",
     }),
-    "gpt-5.4 · 작업 모드 · Saved OAuth · work context",
+    "gpt-5.4 · Default mode · Saved OAuth · work context",
   );
   assert.equal(
     formatWorkShellFooterLine({

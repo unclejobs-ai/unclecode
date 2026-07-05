@@ -23,6 +23,7 @@ export async function runContextContrastTuiSmoke({ tmp }) {
       "OPENAI_API_KEY=sk-local-context-contrast-test-key",
       "NO_PROXY=127.0.0.1,localhost",
       "FORCE_COLOR=3",
+      "UNCLECODE_TERMINAL_BACKGROUND=light",
       "node bin/unclecode.cjs tui --provider openai --model gpt-5.4",
     ].join(" "),
     "echo EXIT:$?",
@@ -33,16 +34,16 @@ export async function runContextContrastTuiSmoke({ tmp }) {
     await runTmux(["new-session", "-d", "-x", "140", "-y", "34", "-s", session, command]);
     await waitForPane(session, /prompt deck|UncleCode · OpenAI/, paneFile);
     await submitLine(session, "/context", paneFile);
-    const pane = await waitForPane(session, /Context expanded|Included in next answer|Held back locally/, paneFile);
+    const pane = await waitForPane(session, /Context expanded|Included in next answer|Sources ·|Warnings ·/, paneFile);
     const ansiCapture = await runTmux(["capture-pane", "-t", session, "-e", "-p", "-S", "-240"], {
       allowFailure: true,
     });
     writeFileSync(ansiPaneFile, ansiCapture.stdout);
 
-    assert.match(pane, /Context expanded/);
+    assert.match(pane, /Context expanded|Sources ·/);
     assert.match(pane, /Included in next answer/);
     assert.match(pane, /Held back locally/);
-    assert.match(pane, /Warnings/);
+    assert.match(pane, /Warnings|✓ none/i);
     assertReadableForegroundEscapes(
       ansiCapture.stdout,
       "/context expanded overlay should not paint low-contrast text on a light terminal",

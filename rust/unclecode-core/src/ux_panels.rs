@@ -477,23 +477,23 @@ fn build_work_board_status_lines(
 
 fn build_work_board_grid_lines(input: WorkBoardInput<'_>, terminal_columns: usize) -> Vec<String> {
     let queued = build_work_board_column(
-        "대기",
+        "Queued",
         input.queued_count,
         build_queued_board_rows(input.queued_count, input.queued_items),
     );
     let running = build_work_board_column(
-        "진행",
+        "Running",
         usize::from(input.is_busy),
         build_running_board_rows(input.is_busy, input.busy_status, input.active_prompt_preview),
     );
     let blocked = build_work_board_column(
-        "막힘",
+        "Blocked",
         work_board_blocked_count(input.queue_paused, input.queued_count, input.blocked_reason),
         build_blocked_board_rows(input.queue_paused, input.queued_count, input.blocked_reason),
     );
     let done_count = usize::from(input.last_completed_turn.is_some());
     let done = build_work_board_column(
-        "완료",
+        "Done",
         done_count,
         build_done_board_rows(input.last_completed_turn),
     );
@@ -2087,10 +2087,10 @@ mod tests {
         assert!(lines.iter().any(|line| line.as_str() == Some("Board")));
         assert!(lines
             .iter()
-            .any(|line| line.as_str().is_some_and(|value| value.contains("대기 · 2"))));
+            .any(|line| line.as_str().is_some_and(|value| value.contains("Queued · 2"))));
         assert!(lines
             .iter()
-            .any(|line| line.as_str().is_some_and(|value| value.contains("진행 · 1"))));
+            .any(|line| line.as_str().is_some_and(|value| value.contains("Running · 1"))));
         assert!(lines
             .iter()
             .any(|line| line.as_str().is_some_and(|value| value.contains("#1 first queued"))));
@@ -2114,7 +2114,7 @@ mod tests {
         let lines = panel.get("lines").and_then(Value::as_array).expect("lines");
         assert!(lines
             .iter()
-            .any(|line| line.as_str().is_some_and(|value| value.contains("막힘 · 1"))));
+            .any(|line| line.as_str().is_some_and(|value| value.contains("Blocked · 1"))));
         assert!(lines
             .iter()
             .any(|line| line.as_str().is_some_and(|value| value.contains("pause · 2 queued"))));
@@ -2135,13 +2135,13 @@ mod tests {
         let lines = panel.get("lines").and_then(Value::as_array).expect("lines");
         assert!(lines
             .iter()
-            .any(|line| line.as_str().is_some_and(|value| value.contains("대기 · 1"))));
+            .any(|line| line.as_str().is_some_and(|value| value.contains("Queued · 1"))));
         assert!(!lines.iter().any(|line| line.as_str().is_some_and(|value| {
-            value.contains("대기 · 1") && value.contains("완료 · 1")
+            value.contains("Queued · 1") && value.contains("Done · 1")
         })));
         assert!(lines
             .iter()
-            .any(|line| line.as_str().is_some_and(|value| value.contains("완료 · 1"))));
+            .any(|line| line.as_str().is_some_and(|value| value.contains("Done · 1"))));
         assert!(lines
             .iter()
             .any(|line| line.as_str().is_some_and(|value| value.contains("hi → hello"))));

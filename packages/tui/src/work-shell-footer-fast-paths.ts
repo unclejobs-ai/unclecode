@@ -106,19 +106,19 @@ function compactWorkShellAuthLabel(authLabel: string): string {
 function humanizeWorkShellModeLabel(mode: string): string {
   switch (mode.toLowerCase()) {
     case "default":
-      return "작업 모드";
+      return "Default mode";
     case "search":
-      return "탐색 모드";
+      return "Search mode";
     case "analyze":
-      return "분석 모드";
+      return "Analyze mode";
     case "ultrawork":
-      return "집중 작업 모드";
+      return "Ultrawork mode";
     case "yolo":
-      return "YOLO 모드";
+      return "YOLO mode";
     case "plan":
-      return "계획 모드";
+      return "Plan mode";
     case "build":
-      return "구현 모드";
+      return "Build mode";
     default:
       return `${mode} mode`;
   }

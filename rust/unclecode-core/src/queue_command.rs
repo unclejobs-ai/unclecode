@@ -75,7 +75,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .any(|line| line.as_str().unwrap_or("").contains("대기 · 0")));
+            .any(|line| line.as_str().unwrap_or("").contains("Queued · 0")));
     }
 
     #[test]

@@ -79,7 +79,7 @@ test("resolveWorkShellComposerHint surfaces paused queue recovery guidance", () 
       inputValue: "",
       slashSuggestionCount: 0,
     }),
-    "Queue paused after interrupt · /queue shows · /queue clear drops",
+    "Queue paused after interrupt · check /queue · /queue clear drops",
   );
 });
 

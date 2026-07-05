@@ -95,11 +95,11 @@ pub fn resolve_read_only_mode_guard_json(input_json: &str) -> Result<String, Str
     let prompt = string_field(&input, "prompt").unwrap_or("");
     let message = if mode == "search" && detect_edit_intent(prompt) {
         Value::String(
-            "탐색 모드는 읽기 전용입니다. /mode set yolo 로 전환한 뒤 편집 요청을 다시 보내세요.".to_string(),
+            "Search mode is read-only. Switch with /mode set yolo, then resend your edit request.".to_string(),
         )
     } else if mode == "plan" && detect_edit_intent(prompt) {
         Value::String(
-            "계획 모드는 편집 금지입니다. 구현하려면 /mode set build 또는 yolo 로 전환한 뒤 다시 보내세요.".to_string(),
+            "Plan mode blocks edits. Switch with /mode set build or yolo, then resend.".to_string(),
         )
     } else {
         Value::Null
@@ -438,7 +438,7 @@ mod tests {
         assert!(guarded["message"]
             .as_str()
             .unwrap()
-            .contains("탐색 모드는 읽기 전용"));
+            .contains("Search mode is read-only"));
 
         let plan_guarded = serde_json::from_str::<Value>(
             &resolve_read_only_mode_guard_json(
@@ -450,7 +450,7 @@ mod tests {
         assert!(plan_guarded["message"]
             .as_str()
             .unwrap()
-            .contains("계획 모드는 편집 금지"));
+            .contains("Plan mode blocks edits"));
 
         let unguarded = serde_json::from_str::<Value>(
             &resolve_read_only_mode_guard_json(

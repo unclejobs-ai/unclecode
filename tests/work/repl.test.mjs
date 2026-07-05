@@ -1370,7 +1370,7 @@ test("getConversationLayout gives answer blocks more room than lower-signal note
       mode: "yolo",
       authLabel: "Browser OAuth · file",
     }),
-    /YOLO 모드/,
+    /YOLO mode/,
   );
   const previousHome = process.env.HOME;
   process.env.HOME = "/Users/example";

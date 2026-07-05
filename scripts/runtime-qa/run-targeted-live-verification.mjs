@@ -38,7 +38,7 @@ try {
 
   const contextEntry = listWorkShellSlashSuggestionEntries().find((entry) => entry.command === "/context");
   results.slashContextKo = {
-    ok: Boolean(contextEntry && /컨텍스트|답변/.test(contextEntry.description)),
+    ok: Boolean(contextEntry && /context packet|next answer/i.test(contextEntry.description)),
     command: contextEntry?.command,
     description: contextEntry?.description,
   };

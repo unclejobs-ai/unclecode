@@ -723,8 +723,8 @@ export type WorkShellQueueBuiltinInput = {
 };
 
 const READ_ONLY_GUARD_BLOCKED_PATTERNS = [
-  /탐색 모드는 읽기 전용/,
-  /계획 모드는 편집 금지/,
+  /Search mode is read-only/,
+  /Plan mode blocks edits/,
 ] as const;
 
 function extractAuthIssueBlockedReason(text: string): string | undefined {

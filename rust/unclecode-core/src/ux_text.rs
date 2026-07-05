@@ -1183,13 +1183,13 @@ fn compact_work_shell_auth_label(auth_label: &str) -> String {
 
 fn humanize_work_shell_mode_label(mode: &str) -> String {
     match mode.to_ascii_lowercase().as_str() {
-        "default" => "작업 모드".to_string(),
-        "search" => "탐색 모드".to_string(),
-        "analyze" => "분석 모드".to_string(),
-        "ultrawork" => "집중 작업 모드".to_string(),
-        "yolo" => "YOLO 모드".to_string(),
-        "plan" => "계획 모드".to_string(),
-        "build" => "구현 모드".to_string(),
+        "default" => "Default mode".to_string(),
+        "search" => "Search mode".to_string(),
+        "analyze" => "Analyze mode".to_string(),
+        "ultrawork" => "Ultrawork mode".to_string(),
+        "yolo" => "YOLO mode".to_string(),
+        "plan" => "Plan mode".to_string(),
+        "build" => "Build mode".to_string(),
         _ => format!("{mode} mode"),
     }
 }
@@ -1563,11 +1563,11 @@ mod tests {
         );
         assert_eq!(
             format_work_shell_status_line("gpt-5.4", "default", "Browser OAuth · file"),
-            "gpt-5.4 · 작업 모드 · Saved OAuth · work context"
+            "gpt-5.4 · Default mode · Saved OAuth · work context"
         );
         assert_eq!(
             format_work_shell_status_line("gpt-5.4", "default", "OAuth file · API blocked"),
-            "gpt-5.4 · 작업 모드 · OAuth blocked · work context"
+            "gpt-5.4 · Default mode · OAuth blocked · work context"
         );
         assert_eq!(
             format_work_shell_usage_line(false, None, None, Some(1480), None),
@@ -1598,7 +1598,7 @@ mod tests {
                 Some("Enter send · Shift+Enter newline"),
                 None,
             ),
-            "~/project/unclecode  ·  gpt-5.4 · 작업 모드 · Saved OAuth · work context  ·  Enter send · Shift+Enter newline"
+            "~/project/unclecode  ·  gpt-5.4 · Default mode · Saved OAuth · work context  ·  Enter send · Shift+Enter newline"
         );
         assert_eq!(
             format_work_shell_footer_line(
@@ -1637,7 +1637,7 @@ mod tests {
                 None,
                 Some(120),
             ),
-            "~/project/unclecode  ·  gpt-5.4 · 작업 모드 · Saved OAuth · work context  ·  context 2 ready · 1 held back"
+            "~/project/unclecode  ·  gpt-5.4 · Default mode · Saved OAuth · work context  ·  context 2 ready · 1 held back"
         );
     }
 

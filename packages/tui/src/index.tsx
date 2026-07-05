@@ -1,4 +1,5 @@
 export * from "./composer.js";
+export * from "./markdown-render.js";
 export * from "./dashboard-actions.js";
 export * from "./dashboard-components.js";
 export * from "./dashboard-model.js";

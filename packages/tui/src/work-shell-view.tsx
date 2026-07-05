@@ -7,6 +7,7 @@ import {
 } from "@unclecode/orchestrator";
 
 import { getDisplayWidth, truncateForDisplayWidth, wrapDisplayTextFast } from "./text-width.js";
+import { renderMarkdown, type MarkdownTheme } from "./markdown-render.js";
 import {
   classifyWorkShellPanelLineFast,
   formatWorkShellAuthFactsGroup,
@@ -45,7 +46,24 @@ export type WorkShellEntryPresentation = {
   readonly bodyColor: string;
 };
 
-const W = {
+// Terminal background detection — falls back to dark (the modern default).
+// COLORFGBG "fg;bg" where bg >= 7 means a light background. An explicit env
+// override lets users/tests force a theme. Read at call time (not module load)
+// so tests that set the env before calling see the right palette.
+function detectTerminalBackground(): "light" | "dark" {
+  const override = process.env.UNCLECODE_TERMINAL_BACKGROUND;
+  if (override === "dark" || override === "light") return override;
+  const colorfgbg = process.env.COLORFGBG;
+  if (colorfgbg) {
+    const parts = colorfgbg.split(";");
+    const bg = parts.length >= 2 ? Number.parseInt(parts[1] ?? "", 10) : NaN;
+    if (!Number.isNaN(bg)) return bg >= 7 ? "light" : "dark";
+  }
+  return "dark";
+}
+
+// Light-background palette (white/light terminals).
+const W_LIGHT = {
   text: "#0f172a",
   textMuted: "#334155",
   textDim: "#475569",
@@ -68,8 +86,71 @@ const W = {
   toolMuted: "#334155",
   warning: "#713f12",
   success: "#166534",
+  error: "#991b1b",
   spinner: "#0d9488",
 } as const;
+
+// Dark-background palette (black/dark terminals). Tuned for OLED/true-black
+// backgrounds — high-contrast near-white text, vivid-but-not-neon accents.
+// Role hues stay consistent with light (blue=user, teal=assistant, green=tool)
+// but shifted brighter so every element is legible on #000.
+const W_DARK = {
+  text: "#f1f5f9",
+  textMuted: "#cbd5e1",
+  textDim: "#94a3b8",
+  border: "#94a3b8",
+  borderStrong: "#f1f5f9",
+  borderSoft: "#64748b",
+  borderAccent: "#60a5fa",
+  user: "#60a5fa",
+  userBody: "#f1f5f9",
+  userBadgeText: "#dbeafe",
+  userBadgeBg: "#1e3a5f",
+  assistant: "#5eead4",
+  assistantBody: "#f1f5f9",
+  assistantBadgeText: "#a7f3d0",
+  assistantBadgeBg: "#134e4a",
+  assistantMuted: "#5eead4",
+  tool: "#bef264",
+  toolSurface: "#1a2e05",
+  toolAccent: "#bef264",
+  toolMuted: "#cbd5e1",
+  warning: "#fcd34d",
+  success: "#86efac",
+  error: "#fca5a5",
+  spinner: "#5eead4",
+} as const;
+
+// Active palette — resolved at call time so tests/env overrides take effect
+// without a module reload. Every consumer reads from W (the Proxy), not the
+// underlying W_LIGHT/W_DARK objects directly.
+const W = new Proxy({} as typeof W_LIGHT, {
+  get(_target, prop: keyof typeof W_LIGHT) {
+    return (detectTerminalBackground() === "dark" ? W_DARK : W_LIGHT)[prop];
+  },
+});
+
+// Markdown theme derived from the active palette so headings/code/lists match
+// the conversation chrome. Resolved at render time (Proxy) so dark/light
+// switching works without a rebuild.
+function resolveMarkdownTheme(): MarkdownTheme {
+  return {
+    heading: W.assistant,
+    headingL2: W.assistant,
+    headingL3: W.textMuted,
+    bold: W.borderStrong,
+    inlineCode: W.user,
+    inlineCodeBg: W.borderSoft,
+    codeBlock: W.textMuted,
+    bullet: W.assistant,
+    quote: W.textMuted,
+    tableHeader: W.assistant,
+    tableBorder: W.borderSoft,
+    link: W.user,
+    text: W.text,
+    textMuted: W.textMuted,
+  };
+}
 
 // Single thin-rule chrome language: one consistent line weight in a muted
 // slate tone. Refinement comes from restraint — no mixed line weights, no
@@ -93,6 +174,7 @@ const WORK_SHELL_LEGACY_LIGHT_TEXT_COLORS = new Set([
 
 const WORK_SHELL_LOW_CONTRAST_TEXT_COLORS = new Set([
   "#94a3b8",
+  "#0d9488",
 ]);
 
 export function resolveReadableWorkShellTextColor(color: string | undefined): string | undefined {
@@ -335,7 +417,7 @@ export function resolveWorkShellComposerHint(input: {
     return "Enter queues follow-up · Ctrl+C/Esc interrupt · /queue";
   }
   if (input.queuePaused && (input.queuedCount ?? 0) > 0) {
-    return "Queue paused after interrupt · /queue shows · /queue clear drops";
+    return "Queue paused after interrupt · check /queue · /queue clear drops";
   }
   return getWorkShellComposerHint(
     input.inputValue,
@@ -722,6 +804,136 @@ function renderWorkShellPanelLine(line: string, index: number): React.ReactNode 
   return <Text key={`${index}-${line}`} {...readableTextColorProps(W.text)}>{line}</Text>;
 }
 
+// Context Runbook line renderer — gives each source category a distinct icon
+// and color so the user can scan what context flows into the next answer.
+// This is the UncleCode differentiator: every other CLI shows a flat context
+// dump; we show a typed, visually-scoped runbook.
+// UncleCode Runbook source taxonomy — each context source gets a distinct
+// icon + color so the user can scan what knowledge flows into the next answer.
+// The "loop trail" category covers the work-loop session artifacts stored
+// under .omo/ on disk but surfaced under a user-facing name in the runbook.
+const CONTEXT_SOURCE_META: ReadonlyArray<readonly [RegExp, string, string, string]> = [
+  [/^workspace-guidance/i, "≡", W.assistant, "guidance"],
+  [/^workspace/i, "▣", W.user, "workspace"],
+  [/^provider-system-prompt/i, "▤", W.assistant, "system"],
+  [/^bridge/i, "↔", W.assistant, "bridge"],
+  [/^memory/i, "✦", W.toolAccent, "memory"],
+  [/^loop-trail/i, "⋉", W.spinner, "loop trail"],
+  [/^runtime/i, "⚙", W.textMuted, "runtime"],
+  [/^attachment/i, "📎", W.warning, "attachment"],
+  [/^live/i, "→", W.spinner, "live steps"],
+];
+
+function renderRunbookLine(line: string, index: number): React.ReactNode {
+  const trimmed = line.trim();
+  // Compact packet summary
+  if (/^Sources · /i.test(trimmed)) {
+    const tokenMatch = trimmed.match(/~(\d+)\s*tokens/i);
+    const tokenCount = tokenMatch && tokenMatch[1] ? Number.parseInt(tokenMatch[1], 10) : 0;
+    const tokenLabel = tokenMatch ? tokenMatch[0] : "";
+    // Token budget meter: each cell ≈ 25k tokens against a 200k context window.
+    // Shown as a labeled bar so it reads as "context budget used", not noise.
+    const budgetCells = 8;
+    const budgetWindow = 200_000;
+    const filled = Math.min(budgetCells, Math.max(0, Math.round((tokenCount / budgetWindow) * budgetCells)));
+    const meterColor = filled >= 7 ? W.warning : filled >= 5 ? W.user : W.success;
+    const meter = `${"█".repeat(filled)}${"░".repeat(Math.max(0, budgetCells - filled))}`;
+    const summaryWithoutTokens = trimmed.replace(tokenLabel, "").replace(/\s*·\s*$/, "").trimEnd();
+    return (
+      <Box key={`rb-${index}-${line}`} flexDirection="column">
+        <Text>
+          <Text color={W.success} bold>{"● "}</Text>
+          <Text color={W.text} bold>{summaryWithoutTokens}</Text>
+        </Text>
+        {tokenLabel ? (
+          <Text>
+            <Text color={W.textMuted}>{"  budget "}</Text>
+            <Text color={meterColor} bold>{meter}</Text>
+            <Text color={W.textMuted}>{" · "}</Text>
+            <Text color={W.text} bold>{tokenLabel}</Text>
+            <Text color={W.textDim}>{" of 200k window"}</Text>
+          </Text>
+        ) : null}
+      </Box>
+    );
+  }
+  // Section headers — Included vs Held
+  if (/^Included in next answer/i.test(trimmed)) {
+    return (
+      <Box key={`rb-${index}-${line}`} marginTop={1}>
+        <Text>
+          <Text color={W.success} bold>{"↓ "}</Text>
+          <Text color={W.success} bold>{trimmed}</Text>
+        </Text>
+      </Box>
+    );
+  }
+  if (/^Held back locally/i.test(trimmed)) {
+    return (
+      <Box key={`rb-${index}-${line}`} marginTop={1}>
+        <Text>
+          <Text color={W.borderStrong} bold>{"⊘ "}</Text>
+          <Text color={W.textMuted} bold>{trimmed}</Text>
+        </Text>
+      </Box>
+    );
+  }
+  if (/^Warnings · /i.test(trimmed)) {
+    const isNone = /none/i.test(trimmed);
+    return (
+      <Text key={`rb-${index}-${line}`}>
+        <Text color={isNone ? W.success : W.warning} bold>{isNone ? "✓ " : "⚠ "}</Text>
+        <Text color={W.textMuted}>{trimmed}</Text>
+      </Text>
+    );
+  }
+  if (/^Next answer · /i.test(trimmed)) {
+    const preview = trimmed.replace(/^Next answer · /i, "");
+    return (
+      <Box key={`rb-${index}-${line}`} marginTop={1}>
+        <Text {...readableTextColorProps(W.success)} bold>{"➜ "}</Text>
+        <Text {...readableTextColorProps(W.text)}>{preview}</Text>
+      </Box>
+    );
+  }
+  // Source category lines: "  workspace · 158 · ..."
+  const sourceLine = trimmed.match(/^([a-z][a-z\s-]+?)\s*·\s*(\d+)\s*·\s*(.*)$/i);
+  if (sourceLine && sourceLine[1] && sourceLine[2] && sourceLine[3]) {
+    const category = sourceLine[1].trim();
+    const count = sourceLine[2];
+    const rawDetail = sourceLine[3];
+    const iconEntry = CONTEXT_SOURCE_META.find(([pattern]) => pattern.test(category));
+    const icon = iconEntry?.[1] ?? "·";
+    const iconColor = iconEntry?.[2] ?? W.textMuted;
+    const displayCategory = iconEntry?.[3] ?? category;
+    // Replace raw on-disk loop-trail paths with a user-facing label so the
+    // runbook never leaks internal storage details (e.g. .omo/.../ledger.jsonl).
+    const detail = rawDetail
+      .replace(/\.omo\/[^\s)]+/g, "session loop trail")
+      .replace(/\.omo\b/g, "session storage");
+    return (
+      <Text key={`rb-${index}-${line}`}>
+        <Text color={iconColor} bold>{`  ${icon} `}</Text>
+        <Text color={W.user} bold>{`${displayCategory} `}</Text>
+        <Text color={W.borderSoft}>{"· "}</Text>
+        <Text color={W.text} bold>{`${count} `}</Text>
+        <Text color={W.borderSoft}>{"· "}</Text>
+        <Text color={W.textMuted}>{detail}</Text>
+      </Text>
+    );
+  }
+  // Hidden groups line
+  if (/^\+\d+\s*more source groups/i.test(trimmed)) {
+    return (
+      <Text key={`rb-${index}-${line}`} color={W.textMuted} italic>
+        {"  "}
+        {trimmed}
+      </Text>
+    );
+  }
+  return <Text key={`rb-${index}-${line}`} color={W.textMuted}>{line}</Text>;
+}
+
 export function formatWorkShellPanelEmptyLines(panelTitle: string): readonly string[] {
   const title = panelTitle.trim();
   return [
@@ -756,19 +968,6 @@ function getLatestWorkShellSystemText(entries: readonly WorkShellEntry[]): strin
 function padDisplayLine(value: string, width: number): string {
   const padding = Math.max(0, width - getDisplayWidth(value));
   return `${value}${" ".repeat(padding)}`;
-}
-
-function renderContinuationBodyLines(input: {
-  readonly lines: readonly string[];
-  readonly bodyColor: string;
-  readonly keyPrefix: string;
-}): React.ReactNode {
-  return input.lines.map((line, lineIndex) => (
-    <Text key={`${input.keyPrefix}-${String(lineIndex)}`}>
-      <Text {...readableTextColorProps(W.textDim)}>{BODY_CONTINUATION_INDENT}</Text>
-      <WorkShellReadableText color={input.bodyColor}>{line}</WorkShellReadableText>
-    </Text>
-  ));
 }
 
 function formatWorkShellPromptDeckDivider(width: number): string {
@@ -992,41 +1191,27 @@ function renderWorkShellEntryBlock(input: {
   readonly width: number;
 }): React.ReactNode {
   const presentation = getWorkShellEntryPresentation(input.entry.role);
+  // For assistant replies, skip the Rust markdown *stripper* — we render
+  // markdown structure natively now (headings, code, lists, tables). We still
+  // sanitize the text (removes leaked plan JSON etc.) but keep all markdown
+  // syntax so renderMarkdown can style it.
   const bodyText = input.entry.role === "assistant"
-    ? normalizeMarkdownDisplayText(formatWorkShellAssistantDisplayText(input.entry.text))
+    ? formatWorkShellAssistantDisplayText(input.entry.text)
     : input.entry.text;
+  const mdTheme = resolveMarkdownTheme();
 
   if (input.entry.role === "user") {
-    const prefix = `${presentation.badge} ${presentation.label} · `;
-    const lines = prefixWrappedDisplayText(prefix, bodyText, input.width);
-    const labelBackgroundColor = presentation.labelBackgroundColor ?? W.userBadgeBg;
-    const labelTextColor = presentation.labelTextColor ?? W.userBadgeText;
-    const prefixWidth = getDisplayWidth(prefix);
+    const lines = wrapDisplayText(bodyText, Math.max(20, input.width - 4));
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
         marginBottom={1}
-        paddingLeft={1}
         flexDirection="column"
       >
         {lines.map((line, lineIndex) => (
           <Text key={`user-${String(input.index)}-${String(lineIndex)}`}>
-            {lineIndex === 0 ? (
-              <>
-                <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
-                  {presentation.badge} {presentation.label}
-                </Text>
-                <Text {...readableTextColorProps(W.textMuted)}> · </Text>
-                <WorkShellReadableText color={presentation.bodyColor}>
-                  {line.slice(prefixWidth)}
-                </WorkShellReadableText>
-              </>
-            ) : (
-              <>
-                <Text {...readableTextColorProps(W.textDim)}>{" ".repeat(prefixWidth)}</Text>
-                <WorkShellReadableText color={presentation.bodyColor}>{line.trimStart()}</WorkShellReadableText>
-              </>
-            )}
+            <Text color={W.user} bold>{lineIndex === 0 ? "│ " : "  "}</Text>
+            <WorkShellReadableText color={presentation.bodyColor}>{line}</WorkShellReadableText>
           </Text>
         ))}
       </Box>
@@ -1034,36 +1219,42 @@ function renderWorkShellEntryBlock(input: {
   }
 
   if (input.entry.role === "assistant") {
-    // Streaming deltas rewrap on every frame; the synchronous Rust wrap
-    // spawn per delta starves the render loop and keeps live text off the
-    // screen. Route the streaming entry through the pure-TS wrapper so
-    // partial text paints immediately (DESIGN.md: streaming cursor only
-    // when assistant text is live). Final entries keep the Rust wrap.
+    // Streaming deltas: plain fast wrap (no markdown AST — too jumpy mid-stream).
+    // Final assistant reply: render markdown structure (headings, code, lists,
+    // tables, bold) so the user sees rich formatting instead of flat text.
     const isStreamingEntry = input.entry.text.endsWith(STREAMING_CURSOR);
-    const wrapLines = isStreamingEntry
-      ? wrapDisplayTextFast
-      : wrapDisplayText;
-    const lines = wrapLines(bodyText, Math.max(20, input.width - 8));
-    const labelBackgroundColor = presentation.labelBackgroundColor ?? W.assistantBadgeBg;
-    const labelTextColor = presentation.labelTextColor ?? W.assistantBadgeText;
+    const contentWidth = Math.max(20, input.width - 4);
     if (shouldUseCompactAssistantSurface({ text: input.entry.text, width: input.width })) {
+      if (isStreamingEntry) {
+        const streamLines = wrapDisplayTextFast(bodyText, contentWidth);
+        return (
+          <Box
+            key={`${input.entry.role}-${input.index}`}
+            marginBottom={1}
+            flexDirection="column"
+          >
+            {streamLines.map((line, lineIndex) => (
+              <Text key={`assistant-stream-${String(input.index)}-${String(lineIndex)}`}>
+                <Text color={W.assistant} bold>{lineIndex === 0 ? "┃ " : "  "}</Text>
+                <WorkShellReadableText color={presentation.bodyColor}>{line}</WorkShellReadableText>
+              </Text>
+            ))}
+          </Box>
+        );
+      }
+      // Final reply — structured markdown rendering.
       return (
         <Box
           key={`${input.entry.role}-${input.index}`}
           marginBottom={1}
-          paddingLeft={1}
           flexDirection="column"
         >
           <Text>
-            <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
-              {presentation.badge} {presentation.label}
-            </Text>
+            <Text color={W.assistant} bold>{"┃"}</Text>
           </Text>
-          {renderContinuationBodyLines({
-            lines,
-            bodyColor: presentation.bodyColor,
-            keyPrefix: `assistant-${String(input.index)}`,
-          })}
+          <Box paddingLeft={2} flexDirection="column">
+            {renderMarkdown({ text: bodyText, width: contentWidth, theme: mdTheme })}
+          </Box>
         </Box>
       );
     }
@@ -1076,17 +1267,8 @@ function renderWorkShellEntryBlock(input: {
         paddingX={1}
         flexDirection="column"
       >
-        <Text>
-          <Text backgroundColor={labelBackgroundColor} color={labelTextColor} bold>
-            {presentation.badge} {presentation.label}
-          </Text>
-        </Text>
         <Box marginTop={0} flexDirection="column">
-          {renderContinuationBodyLines({
-            lines: wrapDisplayText(bodyText, Math.max(20, input.width - 4)),
-            bodyColor: presentation.bodyColor,
-            keyPrefix: `assistant-card-${String(input.index)}`,
-          })}
+          {renderMarkdown({ text: bodyText, width: contentWidth, theme: mdTheme })}
         </Box>
       </Box>
     );
@@ -1114,22 +1296,26 @@ function renderWorkShellEntryBlock(input: {
   }
 
   if (input.entry.role === "system") {
-    // System notices are meta — not part of the conversation flow. Render them
-    // as a quiet dashed-divider block so they read as infrastructure, not as a
-    // message from a speaker. Progress (…/…) vs completion (✓) is marked by
-    // the trailing ellipsis.
+    // System notices are infrastructure, not conversation. Render as a
+    // centered, dimmed meta line with no left rail — visually unmistakable as
+    // "not from user or assistant". A leading/trailing hairline bookends it so
+    // it reads as a status banner, not a chat turn.
     const isInProgress = bodyText.endsWith("…") || bodyText.endsWith("...");
+    const statusIcon = isInProgress ? "◌" : "✓";
+    const statusColor = isInProgress ? W.warning : W.success;
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
         marginTop={1}
         marginBottom={1}
         flexDirection="column"
+        alignItems="center"
       >
-        <Text {...readableTextColorProps(W.borderSoft)}>{"╶".repeat(3)} </Text>
-        <Text {...readableTextColorProps(W.textDim)}>
-          <Text color={isInProgress ? W.user : W.success} bold>{isInProgress ? "◌" : "✓"} </Text>
-          {bodyText}
+        <Text>
+          <Text {...readableTextColorProps(W.borderSoft)}>{"⋯ "}</Text>
+          <Text color={statusColor}>{`${statusIcon} `}</Text>
+          <Text {...readableTextColorProps(W.textDim)} italic>{bodyText}</Text>
+          <Text {...readableTextColorProps(W.borderSoft)}>{" ⋯"}</Text>
         </Text>
       </Box>
     );
@@ -1154,17 +1340,17 @@ function renderWorkShellEmptyConversation(): React.ReactNode {
     ["Recover", "Use Ctrl+O for saved sessions."],
   ] as const;
   return (
-    <Box borderStyle="round" borderColor={W.borderStrong} paddingX={1} flexDirection="column">
+    <Box flexDirection="column">
       <Text>
         <Text color={W.assistant}>◇ </Text>
         <Text bold {...readableTextColorProps(W.text)}>Ready for the next move</Text>
       </Text>
-      <Box marginTop={1} flexDirection="column">
+      <Box marginTop={1} paddingLeft={2} flexDirection="column">
         <Text {...readableTextColorProps(W.textMuted)}>{getWorkShellEmptyConversationHint()}</Text>
         <Box marginTop={1} flexDirection="column" gap={0}>
           {actions.map(([label, detail], index) => (
             <Text key={label}>
-              <Text {...readableTextColorProps(W.borderSoft)}>{index === actions.length - 1 ? "└─ " : "├─ "}</Text>
+              <Text color={W.borderSoft}>{index === actions.length - 1 ? "└─ " : "├─ "}</Text>
               <Text color={W.user} bold>{label}</Text>
               <Text {...readableTextColorProps(W.textMuted)}> · {detail}</Text>
             </Text>
@@ -1685,17 +1871,18 @@ export function WorkShellView(props: {
         : null}
       {panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput ? (
         <Box marginTop={1} borderStyle="round" borderColor={panelBorderColor} paddingX={1} flexDirection="column">
-          <WorkShellSectionDivider
-            label={props.activePanel.title}
-            accentColor={panelBorderColor}
-            width={getWorkShellDividerWidth({
-              ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
-              reservedColumns: 8,
-            })}
-          />
-          <Text {...readableTextColorProps(W.textMuted)}>Esc closes · /context refreshes</Text>
+          <Box flexDirection="column">
+            <Text>
+              <Text color={W.assistant} bold>{"▤ UncleCode Runbook"}</Text>
+              <Text color={W.textDim}>{" · context carried into the next answer"}</Text>
+            </Text>
+            <Text color={W.textMuted}>
+              <Text color={W.borderSoft}>{"  "}</Text>
+              {"Esc closes · /context refreshes · only included sources reach the model"}
+            </Text>
+          </Box>
           <Box marginTop={1} flexDirection="column">
-            {overlayLines.map((line, index) => renderWorkShellPanelLine(line, index))}
+            {overlayLines.map((line, index) => renderRunbookLine(line, index))}
           </Box>
         </Box>
       ) : panelDisplayMode === "bottom" && !shouldSuppressPassivePanel ? (

@@ -24,6 +24,7 @@ export async function runFullTuiSmoke({ port, tmp }) {
       `GEMINI_API_KEY=local-provider-test-key`,
       `NO_PROXY=127.0.0.1,localhost`,
       `FORCE_COLOR=3`,
+      `UNCLECODE_TERMINAL_BACKGROUND=light`,
       `node bin/unclecode.cjs tui --provider gemini --model gemini-2.5-flash`,
     ].join(" "),
     `echo EXIT:$?`,
@@ -169,7 +170,7 @@ export async function runYoloGreetingTuiSmoke({ port, tmp, observations }) {
     const requestDelta = observations.length - beforeRequests;
 
     assert.equal(requestDelta, 1, `YOLO greeting should make one provider call, got ${requestDelta}`);
-    assert.match(pane, /YOLO 모드/);
+    assert.match(pane, /YOLO mode/);
     assert.match(pane, new RegExp(yoloGreetingResponseText));
     assert.match(pane, /Ready · last reply/);
     assert.doesNotMatch(pane, /Work context · session state/);

@@ -2,7 +2,7 @@ export type ContextPacketSourceCategory =
   | "workspace"
   | "workspace-guidance"
   | "provider-system-prompt"
-  | "omo"
+  | "loop-trail"
   | "memory"
   | "bridge"
   | "runtime"

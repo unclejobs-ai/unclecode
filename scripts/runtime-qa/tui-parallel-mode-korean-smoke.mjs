@@ -39,7 +39,7 @@ export async function runParallelModeKoreanTuiSmoke({ port, tmp, observations })
 
   try {
     await runTmux(["new-session", "-d", "-x", "100", "-y", "30", "-s", session, command]);
-    await waitForPane(session, /prompt deck|UncleCode · Gemini|집중 작업 모드|ultrawork/, paneFile);
+    await waitForPane(session, /prompt deck|UncleCode · Gemini|Ultrawork mode|ultrawork/, paneFile);
     await typeKeys(session, parallelModeKoreanPromptText);
     await waitForPane(session, new RegExp(parallelModeKoreanPromptText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), paneFile);
     await pressEnter(session);

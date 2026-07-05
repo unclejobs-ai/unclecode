@@ -26,13 +26,13 @@ const WORK_SHELL_MODE_PROFILE_IDS = [
   "build",
 ] as const;
 const WORK_SHELL_MODE_PROFILE_DESCRIPTIONS: Readonly<Record<(typeof WORK_SHELL_MODE_PROFILE_IDS)[number], string>> = {
-  default: "일반 작업 모드로 전환합니다.",
-  ultrawork: "집중 작업 모드(ultrawork)로 전환합니다.",
-  search: "검색 모드(읽기 전용)로 전환합니다.",
-  analyze: "분석 모드(읽기 전용)로 전환합니다.",
-  yolo: "YOLO 모드로 전환합니다.",
-  plan: "계획 모드(편집 금지)로 전환합니다.",
-  build: "빌드 모드로 전환합니다.",
+  default: "Switch to default work mode.",
+  ultrawork: "Switch to ultrawork (focused parallel) mode.",
+  search: "Switch to search mode (read-only).",
+  analyze: "Switch to analyze mode (read-only).",
+  yolo: "Switch to YOLO mode.",
+  plan: "Switch to plan mode (edits blocked).",
+  build: "Switch to build mode.",
 };
 
 const workShellSuggestionEntriesCache = new Map<string, readonly WorkShellSlashSuggestion[]>();
