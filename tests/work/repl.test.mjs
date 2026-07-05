@@ -548,7 +548,7 @@ test("buildContextPanel truncates long compact values aggressively", () => {
 
   assert.equal(compact.title, "Context");
   assert.equal(compact.lines[3]?.startsWith("□ Guide   ext extremely-long-extension"), true);
-  assert.equal(compact.lines[3]?.endsWith("..."), true);
+  assert.equal(compact.lines[3]?.endsWith("…"), true);
 });
 
 test("resolveComposerInput turns pasted image paths into image attachments", async () => {
