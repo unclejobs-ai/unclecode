@@ -126,15 +126,15 @@ User prompt (KO)
     → /context unchanged unless reload
 ```
 
-**JSON leak prevention (spec, not yet fully implemented):**
+**JSON leak prevention (shipped in T12–T13; keep regression smokes green):**
 
-| Leak source | Fix |
+| Leak source | Fix status |
 | --- | --- |
-| Planner prompt "Return ONLY a JSON array…" | Keep internal; **never** append planner raw output to transcript |
-| `parseAgentPlanResponse` failure | Fall back to static tasks silently; clear planner-running UI state |
-| Executor `runInternalTurn` returns markdown+JSON | Synthesis step strips structure; transcript gets synthesis output only |
-| Guardian review text | Fold into synthesis; do not emit separate chat entry |
-| `orchestrator.step` traces | Session Center / agentops only; filter from Work Shell `chatEntries` |
+| Planner prompt "Return ONLY a JSON array…" | Internal only; sanitize + runtime parallel KO smoke |
+| `parseAgentPlanResponse` failure | Static task fallback; planner UI cleared |
+| Executor `runInternalTurn` markdown+JSON | Synthesis/sanitize strips structure before transcript |
+| Guardian review text | Folded into synthesis; no separate chat entry |
+| `orchestrator.step` traces | Session Center / agentops only; filtered from Work Shell chat |
 
 **Classifier fixes (T12):**
 
