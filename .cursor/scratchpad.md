@@ -193,7 +193,8 @@
 - [T1→T2 인계] runtime QA 실패는 워커 B 영역: 풀스크린 TUI 헤더 전경색이 truecolor로 방출되지 않아 라이트 터미널 대비 게이트 실패. → **워커 B가 해소 보고**: 근본 원인은 tmux `capture-pane -e`가 `FORCE_COLOR` 없이는 truecolor ANSI를 캡처하지 못하는 것. `tui-context-contrast-smoke.mjs`·`tui-basic-smokes.mjs`에 `FORCE_COLOR=3` 적용 후 통과.
 - [T2 결과 요약] 실제 폭 버그 2건 TDD 수정: `work-shell-auth-panels.ts:150` `compactContextValue`가 raw `.length`/`.slice`로 한글 중간 절단 가능 → `truncateForDisplayWidth`로 교체; `dashboard-primitives.tsx:66` `RoundedPanel` 상단 테두리 +1칸 넘침 → 정확히 width칸으로 수정. tests/tui+contracts 197/197, tsc, 한글/대비/기본 스모크 모두 통과. 보류 항목: Ink `wrap="truncate-end"` 내부 절단, slash suggestion 색상(의도 불명), 이모지/ZWJ 심화.
 - [T3 게이트 결과 — 완료] `npm run qa:health` 14항목 전체 PASS, exit 0 (53.8s). runtime QA 증거: geminiTool/openaiTool/anthropicTool/toolFinalGate/lightContrast/spinner/queueDrain/resize/idleStable/latencyOk 모두 true, hangulResidual=false, duplicateBusy=false. live provider QA는 이번엔 fail-fast를 지나 실행됐고 예상된 외부 auth 차단 상태(openai-oauth-codex-runtime-not-api-ready)로 "blocked recorded" 처리 — 런북에 문서화된 정상 복구 경로(자격증명 갱신 후 qa:live). 리포트: .unclecode/qa/runtime-qa-latest.json, .unclecode/qa/live-provider-latest.json.
-- [T10 Executor 2026-07-05 03:xx] qa:health **14/14 PASS exit 0** (87.7s). Blockers cleared: Hangul truncate exact-fit (`a75b749`), stream smoke in module list, env-independent footer test (`repl.test.mjs` HOME pin). Intermittent work-test flakes (Anthropic Rust spawn) pass after `cargo build`; no push.
+- [T10 Executor 2026-07-05 03:xx] qa:health **14/14 PASS exit 0** (87.7s).
+- [Subagent verify 2026-07-05] qa:health **14/14 PASS exit 0** (115.0s); hangulResidual=false, lightContrast=true — prior 87.7s와 동일 통과, 소요만 증가. Blockers cleared: Hangul truncate exact-fit (`a75b749`), stream smoke in module list, env-independent footer test (`repl.test.mjs` HOME pin). Intermittent work-test flakes (Anthropic Rust spawn) pass after `cargo build`; no push.
 
 ## Lessons
 
