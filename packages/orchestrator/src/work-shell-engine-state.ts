@@ -93,6 +93,7 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     lastTurnDurationMs: undefined,
     queuedCount: 0,
     queuePaused: false,
+    terminalColumns: 100,
   };
 }
 

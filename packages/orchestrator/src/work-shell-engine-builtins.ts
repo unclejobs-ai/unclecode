@@ -704,7 +704,7 @@ function isSkillsBuiltinResult(value: unknown): value is {
   );
 }
 
-export function createQueueBuiltinResult(input: {
+export type WorkShellQueueBuiltinInput = {
   readonly line: string;
   readonly isBusy: boolean;
   readonly busyStatus?: string;
@@ -713,7 +713,102 @@ export function createQueueBuiltinResult(input: {
   readonly queuedCount?: number;
   readonly queuedItems?: readonly { readonly id: number; readonly line: string }[];
   readonly transcriptText?: string;
-}): {
+  readonly queuePaused?: boolean;
+  readonly blockedReason?: string;
+  readonly activePromptPreview?: string;
+  readonly lastCompletedTurn?: { readonly user: string; readonly assistant: string };
+  readonly terminalColumns?: number;
+};
+
+export function resolveQueueBlockedReason(authLabel: string): string | undefined {
+  if (authLabel.endsWith("-api-blocked")) {
+    return authLabel.replaceAll("-", " ");
+  }
+  return undefined;
+}
+
+export function resolveActivePromptPreview(
+  entries: readonly WorkShellChatEntry[],
+  isBusy: boolean,
+): string | undefined {
+  if (!isBusy) {
+    return undefined;
+  }
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.role !== "user") {
+      continue;
+    }
+    const text = entry.text.trim();
+    if (text.length === 0 || text.startsWith("/")) {
+      continue;
+    }
+    return text;
+  }
+  return undefined;
+}
+
+export function resolveLastCompletedTurn(
+  entries: readonly WorkShellChatEntry[],
+): { readonly user: string; readonly assistant: string } | undefined {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.role !== "assistant") {
+      continue;
+    }
+    const assistant = entry.text.trim();
+    if (assistant.length === 0) {
+      continue;
+    }
+    for (let userIndex = index - 1; userIndex >= 0; userIndex -= 1) {
+      const userEntry = entries[userIndex];
+      if (userEntry?.role !== "user") {
+        continue;
+      }
+      const user = userEntry.text.trim();
+      if (user.length === 0 || user.startsWith("/")) {
+        continue;
+      }
+      return { user, assistant };
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+export function buildWorkShellQueueBuiltinInput<Reasoning extends WorkShellReasoningConfig>(input: {
+  readonly line: string;
+  readonly state: Pick<
+    WorkShellEngineState<Reasoning>,
+    "isBusy" | "busyStatus" | "mode" | "authLabel" | "queuePaused" | "entries" | "terminalColumns"
+  >;
+  readonly workerBudget?: number;
+  readonly queuedCount?: number;
+  readonly queuedItems?: readonly { readonly id: number; readonly line: string }[];
+  readonly transcriptText?: string;
+  readonly terminalColumns?: number;
+}): WorkShellQueueBuiltinInput {
+  const blockedReason = resolveQueueBlockedReason(input.state.authLabel);
+  const activePromptPreview = resolveActivePromptPreview(input.state.entries, input.state.isBusy);
+  const lastCompletedTurn = resolveLastCompletedTurn(input.state.entries);
+  return {
+    line: input.line,
+    isBusy: input.state.isBusy,
+    ...(input.state.busyStatus ? { busyStatus: input.state.busyStatus } : {}),
+    mode: input.state.mode,
+    ...(input.workerBudget !== undefined ? { workerBudget: input.workerBudget } : {}),
+    ...(input.queuedCount !== undefined ? { queuedCount: input.queuedCount } : {}),
+    ...(input.queuedItems ? { queuedItems: input.queuedItems } : {}),
+    ...(input.transcriptText ? { transcriptText: input.transcriptText } : {}),
+    ...(input.state.queuePaused ? { queuePaused: true } : {}),
+    ...(blockedReason ? { blockedReason } : {}),
+    ...(activePromptPreview ? { activePromptPreview } : {}),
+    ...(lastCompletedTurn ? { lastCompletedTurn } : {}),
+    terminalColumns: input.terminalColumns ?? input.state.terminalColumns,
+  };
+}
+
+export function createQueueBuiltinResult(input: WorkShellQueueBuiltinInput): {
   readonly entries: readonly WorkShellChatEntry[];
   readonly panel: WorkShellPanel;
 } {

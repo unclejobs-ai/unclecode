@@ -5,6 +5,7 @@ import {
   createHarnessBuiltinResult,
   createHelpBuiltinResult,
   createLoadedSkillBuiltinResult,
+  buildWorkShellQueueBuiltinInput,
   createQueueBuiltinResult,
   createReloadBuiltinResult,
   createSessionsBuiltinResult,
@@ -273,33 +274,29 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
       return;
     case "queue": {
       const queuedItems = input.queuedItems ? await input.queuedItems() : undefined;
-      const result = createQueueBuiltinResult({
+      const result = createQueueBuiltinResult(buildWorkShellQueueBuiltinInput({
         line: input.line,
-        isBusy: input.state.isBusy,
-        ...(input.state.busyStatus ? { busyStatus: input.state.busyStatus } : {}),
-        mode: input.state.mode,
+        state: input.state,
         workerBudget: resolveWorkerBudget(input.state.mode),
         ...(input.queuedCount ? { queuedCount: input.queuedCount() } : {}),
         ...(queuedItems ? { queuedItems } : {}),
-      });
+      }));
       input.appendEntries(...result.entries);
       input.setState({ panel: result.panel });
       return;
     }
     case "queue-clear": {
       await input.clearQueuedItems?.();
-      const result = createQueueBuiltinResult({
+      const result = createQueueBuiltinResult(buildWorkShellQueueBuiltinInput({
         line: input.line,
-        isBusy: input.state.isBusy,
-        ...(input.state.busyStatus ? { busyStatus: input.state.busyStatus } : {}),
-        mode: input.state.mode,
+        state: input.state,
         workerBudget: resolveWorkerBudget(input.state.mode),
         queuedCount: 0,
         queuedItems: [],
         transcriptText: input.state.isBusy
           ? "Queue cleared. Active turn is still running."
           : "Queue cleared.",
-      });
+      }));
       input.appendEntries(...result.entries);
       input.setState({ panel: result.panel });
       return;
