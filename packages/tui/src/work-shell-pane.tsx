@@ -117,6 +117,10 @@ export function WorkShellPane<
     };
   }, [stdout]);
 
+  React.useEffect(() => {
+    props.engine.updateTerminalColumns?.(terminalColumns);
+  }, [terminalColumns, props.engine]);
+
   const {
     entries,
     streamingAssistantText,

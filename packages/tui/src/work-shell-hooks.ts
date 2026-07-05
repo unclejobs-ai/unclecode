@@ -258,6 +258,7 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   interruptTurn?(): void;
   cancelSensitiveInput?(): void;
   closeOverlay?(): void;
+  updateTerminalColumns?(columns: number): void;
   // Optional because not every pane host wires trace plumbing — when
   // absent, the hook silently drops the event. In practice WorkShellEngine
   // always implements this since commit b891c19's follow-up.

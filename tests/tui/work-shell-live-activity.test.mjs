@@ -229,6 +229,7 @@ test("resolveReadableWorkShellTextColor keeps primary text explicit for light te
   assert.equal(resolveReadableWorkShellTextColor("#0f172a"), "#0f172a");
   assert.equal(resolveReadableWorkShellTextColor("#334155"), "#334155");
   assert.equal(resolveReadableWorkShellTextColor("#475569"), "#475569");
+  assert.equal(resolveReadableWorkShellTextColor("#94a3b8"), "#475569");
   assert.equal(resolveReadableWorkShellTextColor("#115e59"), "#115e59");
 });
 

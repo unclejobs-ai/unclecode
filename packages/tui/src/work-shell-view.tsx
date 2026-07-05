@@ -51,6 +51,8 @@ const W = {
   textDim: "#475569",
   border: "#334155",
   borderStrong: "#1e293b",
+  borderSoft: "#94a3b8",
+  borderAccent: "#0284c7",
   user: "#075985",
   userBody: "#0f172a",
   userBadgeText: "#082f49",
@@ -67,6 +69,19 @@ const W = {
   warning: "#713f12",
 } as const;
 
+// Single thin-rule chrome language: one consistent line weight in a muted
+// slate tone. Refinement comes from restraint — no mixed line weights, no
+// loud rules. Sections breathe through whitespace and a quiet label set into
+// the rule, not from decorative weight contrast.
+function renderChromeRule(input: {
+  readonly width: number;
+  readonly color?: string;
+}): React.ReactNode {
+  const width = Math.max(2, input.width);
+  const color = input.color ?? W.borderSoft;
+  return <Text {...readableTextColorProps(color)}>{"─".repeat(width)}</Text>;
+}
+
 const WORK_SHELL_LEGACY_LIGHT_TEXT_COLORS = new Set([
   "#e2e8f0",
   "#e5eef7",
@@ -74,11 +89,22 @@ const WORK_SHELL_LEGACY_LIGHT_TEXT_COLORS = new Set([
   "#f8fafc",
 ]);
 
+const WORK_SHELL_LOW_CONTRAST_TEXT_COLORS = new Set([
+  "#94a3b8",
+]);
+
 export function resolveReadableWorkShellTextColor(color: string | undefined): string | undefined {
   if (!color) {
     return undefined;
   }
-  return WORK_SHELL_LEGACY_LIGHT_TEXT_COLORS.has(color.toLowerCase()) ? W.text : color;
+  const normalized = color.toLowerCase();
+  if (WORK_SHELL_LEGACY_LIGHT_TEXT_COLORS.has(normalized)) {
+    return W.text;
+  }
+  if (WORK_SHELL_LOW_CONTRAST_TEXT_COLORS.has(normalized)) {
+    return W.textDim;
+  }
+  return color;
 }
 
 function readableTextColorProps(color: string | undefined): { readonly color?: string } {
@@ -707,8 +733,10 @@ function renderContinuationBodyLines(input: {
 function formatWorkShellPromptDeckDivider(width: number): string {
   const label = " prompt deck ";
   const labelWidth = getDisplayWidth(label);
-  const dashCount = Math.max(6, width - labelWidth - 1);
-  return `─${label}${"─".repeat(dashCount)}`;
+  // Consistent thin rule with the label set in flush-left, mirroring the
+  // header rule. Width is padded so the rule reaches the right edge.
+  const dashCount = Math.max(0, width - labelWidth);
+  return `${label}${"─".repeat(dashCount)}`;
 }
 
 function prefixWrappedDisplayText(prefix: string, text: string, width: number): readonly string[] {
@@ -1086,10 +1114,11 @@ function renderWorkShellEmptyConversation(): React.ReactNode {
       </Text>
       <Box marginTop={1} flexDirection="column">
         <Text {...readableTextColorProps(W.textMuted)}>{getWorkShellEmptyConversationHint()}</Text>
-        <Box marginTop={1} flexDirection="column">
-          {actions.map(([label, detail]) => (
+        <Box marginTop={1} flexDirection="column" gap={0}>
+          {actions.map(([label, detail], index) => (
             <Text key={label}>
-              <Text color={W.user}>{label}</Text>
+              <Text {...readableTextColorProps(W.borderSoft)}>{index === actions.length - 1 ? "└─ " : "├─ "}</Text>
+              <Text color={W.user} bold>{label}</Text>
               <Text {...readableTextColorProps(W.textMuted)}> · {detail}</Text>
             </Text>
           ))}
@@ -1234,7 +1263,7 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
         <Text bold {...readableTextColorProps(W.borderStrong)}>
           {truncateForDisplayWidth(providerTitle, width)}
         </Text>
-        <Text color={W.textDim}>{"─".repeat(dividerWidth)}</Text>
+        {renderChromeRule({ width: dividerWidth })}
       </Box>
     );
   }
@@ -1253,7 +1282,7 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
         <Text>{hintGap}</Text>
         <Text {...readableTextColorProps(W.textDim)}>{hintText}</Text>
       </Text>
-      <Text color={W.textDim}>{"─".repeat(dividerWidth)}</Text>
+      {renderChromeRule({ width: dividerWidth })}
     </Box>
   );
 });
@@ -1314,9 +1343,9 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
       <Text>
         <Text color={props.isBusy ? W.assistant : W.user}>{props.isBusy ? "◈ " : "◇ "}</Text>
         <Text bold {...readableTextColorProps(W.borderStrong)}>{sessionGroup}</Text>
-        <Text {...readableTextColorProps(W.textMuted)}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
+        <Text {...readableTextColorProps(W.borderSoft)}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
         <Text {...readableTextColorProps(W.textMuted)}>{authGroup}</Text>
-        <Text {...readableTextColorProps(W.textMuted)}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
+        <Text {...readableTextColorProps(W.borderSoft)}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
         <Text {...(props.isBusy ? { color: activityColor } : readableTextColorProps(W.textMuted))}>{activityLine}</Text>
       </Text>
     </Box>
@@ -1380,15 +1409,15 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
       {props.composerHint ? (
         <Text {...hintColorProps}>{props.composerHint}</Text>
       ) : null}
-      <Text {...readableTextColorProps(W.textDim)}>{formatWorkShellPromptDeckDivider(dockWidth)}</Text>
+      <Text {...readableTextColorProps(W.borderSoft)}>{formatWorkShellPromptDeckDivider(dockWidth)}</Text>
       <Box minHeight={1} paddingLeft={1}>
-        <Text color={accent}>› </Text>
+        <Text color={accent} bold>{"› "}</Text>
         {props.composer}
         {props.attachmentCount !== undefined ? (
           <Text {...badgeColorProps}> [{props.attachmentCount}/5]</Text>
         ) : null}
       </Box>
-      <Text {...readableTextColorProps(W.textDim)}>{dockLayout.footerLine}</Text>
+      <Text {...readableTextColorProps(W.borderSoft)}>{dockLayout.footerLine}</Text>
     </Box>
   );
 });
