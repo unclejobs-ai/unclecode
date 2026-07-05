@@ -58,6 +58,7 @@ export type IngestWorkspaceBootstrapContextInput = {
 export type IngestWorkspaceBootstrapContextResult = {
   readonly snapshot: BootstrapSnapshot;
   readonly snapshotPath: string;
+  readonly snapshotWritten: boolean;
   readonly summaryLines: readonly string[];
   readonly packetItems: readonly ContextPacketViewItem[];
   readonly packetWarnings: readonly ContextPacketViewWarning[];
@@ -368,14 +369,34 @@ export function buildBootstrapContextPacketSupplement(
   return { included, excluded, warnings };
 }
 
+function isNonWritableWorkspaceError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "EACCES" || code === "EROFS" || code === "EPERM";
+}
+
+export type WriteBootstrapSnapshotResult = {
+  readonly snapshotPath: string;
+  readonly written: boolean;
+};
+
 export async function writeBootstrapSnapshot(input: {
   readonly workspaceRoot: string;
   readonly snapshot: BootstrapSnapshot;
-}): Promise<string> {
+}): Promise<WriteBootstrapSnapshotResult> {
   const snapshotPath = getBootstrapSnapshotPath(input.workspaceRoot);
-  await mkdir(path.dirname(snapshotPath), { recursive: true });
-  await writeFile(snapshotPath, `${JSON.stringify(input.snapshot, null, 2)}\n`, "utf8");
-  return snapshotPath;
+  try {
+    await mkdir(path.dirname(snapshotPath), { recursive: true });
+    await writeFile(snapshotPath, `${JSON.stringify(input.snapshot, null, 2)}\n`, "utf8");
+    return { snapshotPath, written: true };
+  } catch (error) {
+    if (isNonWritableWorkspaceError(error)) {
+      return { snapshotPath, written: false };
+    }
+    throw error;
+  }
 }
 
 export async function loadBootstrapSnapshot(workspaceRoot: string): Promise<BootstrapSnapshot | undefined> {
@@ -463,7 +484,7 @@ export async function ingestWorkspaceBootstrapContext(
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
   };
 
-  const snapshotPath = await writeBootstrapSnapshot({
+  const snapshotWrite = await writeBootstrapSnapshot({
     workspaceRoot: input.cwd,
     snapshot,
   });
@@ -478,10 +499,16 @@ export async function ingestWorkspaceBootstrapContext(
 
   const supplement = buildBootstrapContextPacketSupplement(snapshot);
 
+  const summaryLines = [
+    ...buildBootstrapSummaryLines(snapshot),
+    ...(!snapshotWrite.written ? ["Bootstrap snapshot not persisted · workspace is read-only"] : []),
+  ];
+
   return {
     snapshot,
-    snapshotPath,
-    summaryLines: buildBootstrapSummaryLines(snapshot),
+    snapshotPath: snapshotWrite.snapshotPath,
+    snapshotWritten: snapshotWrite.written,
+    summaryLines,
     packetItems: supplement.included,
     packetWarnings: supplement.warnings,
   };

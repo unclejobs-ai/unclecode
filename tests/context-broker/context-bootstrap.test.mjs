@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -216,5 +216,28 @@ describe("context bootstrap", () => {
         (source) => source.kind === "guidance" && source.summary.includes("Updated guidance after reload"),
       ),
     );
+  });
+
+  it("skips bootstrap.json write when the workspace context dir is read-only", async () => {
+    const { home, nested } = createFixtureWorkspace();
+    const bootstrapDir = path.join(nested, ".unclecode", "context");
+    mkdirSync(bootstrapDir, { recursive: true });
+    chmodSync(bootstrapDir, 0o555);
+
+    try {
+      const result = await ingestWorkspaceBootstrapContext({
+        cwd: nested,
+        env: { ...process.env, HOME: home },
+        userHomeDir: home,
+        persistMemoryFacts: false,
+      });
+
+      assert.equal(result.snapshotWritten, false);
+      assert.ok(result.summaryLines.some((line) => /read-only/.test(line)));
+      assert.equal(existsSync(path.join(bootstrapDir, "bootstrap.json")), false);
+      assert.ok(result.snapshot.sources.length > 0);
+    } finally {
+      chmodSync(bootstrapDir, 0o755);
+    }
   });
 });

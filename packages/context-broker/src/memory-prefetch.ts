@@ -17,6 +17,12 @@ export type MemoryPrefetchResult = {
 
 const DEFAULT_PREFETCH_SCOPES: readonly MemoryScope[] = ["session", "project"];
 
+const BOOTSTRAP_SYNTHETIC_MEMORY_PREFIX = /^Bootstrap context:/;
+
+function isBootstrapSyntheticMemory(entry: ScopedMemoryEntry): boolean {
+  return BOOTSTRAP_SYNTHETIC_MEMORY_PREFIX.test(entry.summary.trim());
+}
+
 async function withPrefetchTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -61,6 +67,7 @@ async function loadPrefetchEntries(input: {
 
   return batches
     .flat()
+    .filter((entry) => !isBootstrapSyntheticMemory(entry))
     .sort((left, right) => right.timestamp.localeCompare(left.timestamp))
     .slice(0, input.limit);
 }
