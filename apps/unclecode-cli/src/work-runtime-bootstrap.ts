@@ -539,6 +539,7 @@ export async function loadWorkCliBootstrap(
           env,
           ...(userHomeDir ? { userHomeDir } : {}),
           ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
+          persistMemoryFacts: false,
         });
         return [
           ...refreshedBootstrap.summaryLines,

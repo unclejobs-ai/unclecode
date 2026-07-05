@@ -115,6 +115,9 @@ function stripLeadingInternalActionPlan(value: string): string {
     if (remainder.length === 0) {
       return "";
     }
+    if (looksLikeSubtaskOrchestratorPlan(parsed)) {
+      return stripOrchestratorSynthesisLeakRemainder(remainder);
+    }
     if (!looksLikeInternalPlanLeakRemainder(remainder)) {
       return stripStandaloneInternalActionPlan(value);
     }
@@ -148,7 +151,7 @@ function stripInternalOrchestratorMeta(value: string): string {
   const hasStreamingCursor = value.endsWith("▌");
   const text = hasStreamingCursor ? value.slice(0, -1) : value;
   const metaLinePattern =
-    /^(?:I'll trace|I found|I'm opening|I've got|I am opening|Let me trace|Let me open|찾아보고|관련 (?:소스|파일)|근거 위주로|I'll look|I will trace|opening the relevant)/iu;
+    /^(?:I'll trace|I found|I'm opening|I've got|I am opening|Let me trace|Let me open|I'll look|I will trace|opening the relevant)/iu;
   const cleaned = text
     .split("\n")
     .filter((line) => !metaLinePattern.test(line.trim()))
@@ -170,6 +173,37 @@ function stripOrphanStreamingCursor(value: string): string {
     return "";
   }
   return value;
+}
+
+function stripOrchestratorSynthesisLeakRemainder(value: string): string {
+  const cleaned = stripInternalOrchestratorMeta(value);
+  if (!/[\u3131-\uD79D]/u.test(cleaned)) {
+    return cleaned;
+  }
+  const filtered = cleaned
+    .split("\n")
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) {
+        return true;
+      }
+      if (/[\u3131-\uD79D]/u.test(trimmed)) {
+        return true;
+      }
+      return !/^(?:Parallel mode runs|I'll trace|I found|I'm opening|Let me trace)/i.test(trimmed);
+    });
+  return filtered.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function looksLikeSubtaskOrchestratorPlan(value: unknown): boolean {
+  const planItems = Array.isArray(value)
+    ? value
+    : isRecord(value) && Array.isArray(value.tasks)
+      ? value.tasks
+      : undefined;
+  return Array.isArray(planItems) && planItems.some(
+    (item) => isRecord(item) && typeof item.id === "string" && item.id.startsWith("subtask-"),
+  );
 }
 
 function looksLikeInternalPlanLeakRemainder(value: string): boolean {
@@ -377,13 +411,13 @@ export async function finalizeWorkShellAssistantReply(input: {
   runTurn: (prompt: string) => Promise<{ text: string }>;
 }): Promise<string> {
   const sanitizedAssistantText = sanitizeWorkShellAssistantText(input.assistantText);
-  const cleanedAssistantText = stripPermissionSeekingStallOutro(sanitizedAssistantText) || "(empty response)";
+  const cleanedAssistantText = stripPermissionSeekingStallOutro(sanitizedAssistantText);
   if (!input.autoContinueOnPermissionStall || !detectPermissionSeekingStall(input.assistantText)) {
     return cleanedAssistantText;
   }
 
   const followUp = await input.runTurn(
-    buildPermissionStallContinuePrompt(input.prompt, cleanedAssistantText),
+    buildPermissionStallContinuePrompt(input.prompt, cleanedAssistantText || "(empty response)"),
   );
   const continuedText = stripPermissionSeekingStallOutro(
     sanitizeWorkShellAssistantText(followUp.text || ""),

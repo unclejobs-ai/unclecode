@@ -312,6 +312,7 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly contextIndicator?: string | undefined;
   readonly queuedCount: number;
   readonly queuePaused: boolean;
+  readonly terminalColumns: number;
 };
 
 export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkShellReasoningConfig> {
@@ -601,6 +602,14 @@ export class WorkShellEngine<
     return this.state;
   }
 
+  updateTerminalColumns(columns: number): void {
+    const terminalColumns = Math.max(20, Math.floor(columns));
+    if (this.state.terminalColumns === terminalColumns) {
+      return;
+    }
+    this.setState({ terminalColumns });
+  }
+
   subscribe(listener: (state: WorkShellEngineState<Reasoning>) => void): () => void {
     this.subscribers.add(listener);
     return () => {
@@ -717,7 +726,7 @@ export class WorkShellEngine<
       : Math.max(0, Date.now() - this.state.currentTurnStartedAt);
     this.appendEntries({
       role: "system",
-      text: "Turn interrupted. Queued follow-ups are paused; use /queue or /queue clear.",
+      text: "Turn interrupted. Queued follow-ups are paused; send a new message to resume or use /queue clear to drop them.",
     });
     this.setState({
       isBusy: false,
@@ -841,7 +850,7 @@ export class WorkShellEngine<
     this.activeTurnEpoch = turnEpoch;
 
     await this.executeSubmitRoute(route, pendingAttachments, turnEpoch);
-    if (this.shouldSkipQueueDrainAfterTurn(turnEpoch)) {
+    if (this.shouldSkipQueueDrainAfterTurn(turnEpoch, route.kind)) {
       return;
     }
     await this.drainQueuedSubmits();
@@ -1042,9 +1051,23 @@ export class WorkShellEngine<
     }
   }
 
-  private shouldSkipQueueDrainAfterTurn(turnEpoch: number): boolean {
+  private shouldSkipQueueDrainAfterTurn(
+    turnEpoch: number,
+    routeKind: WorkShellSubmitRoute["kind"],
+  ): boolean {
     const wasInterruptedTurn = this.queueDrainSkipTurnEpochs.delete(turnEpoch);
-    return wasInterruptedTurn || this.queueAutoDrainPaused;
+    if (wasInterruptedTurn) {
+      return true;
+    }
+    if (
+      this.queueAutoDrainPaused
+      && (routeKind === "chat" || routeKind === "prompt-command")
+    ) {
+      this.queueAutoDrainPaused = false;
+      this.setState({ queuePaused: false });
+      return false;
+    }
+    return this.queueAutoDrainPaused;
   }
 
   private async handleSecureApiKeyEntrySubmit(line: string): Promise<void> {

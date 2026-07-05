@@ -49,7 +49,7 @@ export async function runPromptTurnSuccessSequence<Attachment>(input: {
   const lastTurnDurationMs = Date.now() - input.turnStartedAt;
   const assistantText = await WorkShellTurns.finalizeWorkShellAssistantReply({
     prompt: input.prompt,
-    assistantText: result.text || "(empty response)",
+    assistantText: result.text ?? "",
     autoContinueOnPermissionStall: input.autoContinueOnPermissionStall,
     // Carry the original attachments into the permission-stall continuation
     // turn so vision context (clipboard-pasted images, file references) is

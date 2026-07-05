@@ -53,10 +53,7 @@ async function resolveWorkShellMemoryLines(input: {
     ...(input.env ? { env: input.env } : {}),
   });
 
-  if (memoryPrefetch.status === "degraded") {
-    return [];
-  }
-  if (memoryPrefetch.lines.length > 0) {
+  if (memoryPrefetch.status !== "degraded" && memoryPrefetch.lines.length > 0) {
     return memoryPrefetch.lines;
   }
 
