@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  AGENT_SEMANTIC_INTENTS,
+  AGENT_TOOL_POLICIES,
+  AGENT_WRITE_POLICIES,
+  EVIDENCE_GATE_STATUSES,
   SESSION_CHECKPOINT_TYPES,
   TEAM_GATE_LEVELS,
   TEAM_LANE_RUNTIMES,
   TEAM_RUNTIME_MODES,
   TEAM_RUN_STATUSES,
+  isEvidenceGateReceiptComplete,
   isTeamLaneRuntime,
 } from "@unclecode/contracts";
 
@@ -58,4 +63,55 @@ test("isTeamLaneRuntime accepts members and rejects unknowns", () => {
   assert.equal(isTeamLaneRuntime(null), false);
   assert.equal(isTeamLaneRuntime(undefined), false);
   assert.equal(isTeamLaneRuntime(42), false);
+});
+
+test("evidence gate statuses support pass fail and blocked receipts", () => {
+  assert.deepEqual(EVIDENCE_GATE_STATUSES, ["pass", "fail", "blocked"]);
+});
+
+test("evidence gate receipts fail closed when artifact or cleanup evidence is empty", () => {
+  const receipt = {
+    status: "pass",
+    summary: "focused tests passed",
+    artifacts: [
+      {
+        path: ".omo/evidence/focused.txt",
+        kind: "test-output",
+        description: "focused test stdout",
+      },
+    ],
+    cleanupReceipt: "no runtime resources spawned",
+    recordedAt: 0,
+  };
+
+  assert.equal(isEvidenceGateReceiptComplete(receipt), true);
+  assert.equal(
+    isEvidenceGateReceiptComplete({ ...receipt, artifacts: [] }),
+    false,
+  );
+  assert.equal(
+    isEvidenceGateReceiptComplete({ ...receipt, cleanupReceipt: "" }),
+    false,
+  );
+  assert.equal(
+    isEvidenceGateReceiptComplete({ ...receipt, summary: "" }),
+    false,
+  );
+});
+
+test("agent intent routing metadata exposes narrow semantic and policy enums", () => {
+  assert.deepEqual(AGENT_SEMANTIC_INTENTS, [
+    "implementation",
+    "verification",
+    "review",
+    "research",
+    "coordination",
+  ]);
+  assert.deepEqual(AGENT_TOOL_POLICIES, [
+    "none",
+    "read_only",
+    "sandboxed",
+    "unrestricted",
+  ]);
+  assert.deepEqual(AGENT_WRITE_POLICIES, ["none", "propose_only", "workspace"]);
 });

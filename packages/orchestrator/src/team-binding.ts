@@ -10,8 +10,8 @@
  * grounded (§5.6).
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 
 import type { Citation, SsotCategory, VersionedRef } from "@unclecode/contracts";
 import {
@@ -36,6 +36,16 @@ export type TeamBindingArgs = {
   readonly runRoot: string;
   readonly role: TeamRole;
   readonly workspaceRoot: string;
+};
+
+export type CitationVerificationStatus = "valid" | "stale" | "missing" | "unsupported";
+
+export type CitationVerificationDetail = {
+  readonly ref: VersionedRef;
+  readonly status: CitationVerificationStatus;
+  readonly summary: string;
+  readonly expectedHash?: string;
+  readonly actualHash?: string;
 };
 
 export class TeamBinding {
@@ -75,9 +85,7 @@ export class TeamBinding {
   }
 
   readCode(relativePath: string): { content: string; sha256: string; mtime: number } {
-    const absPath = relativePath.startsWith("/")
-      ? relativePath
-      : join(this.workspaceRoot, relativePath);
+    const absPath = resolveWorkspacePath(this.workspaceRoot, relativePath);
     if (!existsSync(absPath)) {
       throw new Error(`readCode: path does not exist: ${absPath}`);
     }
@@ -99,7 +107,7 @@ export class TeamBinding {
         break;
       case "checkpoint": {
         const checkpoints = this.readCheckpoints();
-        const index = Number.parseInt(key, 10);
+        const index = parseCheckpointIndex(key);
         const entry = checkpoints[index];
         if (entry && (entry as { lineHash?: string }).lineHash) {
           versionHash = (entry as { lineHash: string }).lineHash;
@@ -133,34 +141,96 @@ export class TeamBinding {
   }
 
   verifyCitation(ref: VersionedRef): boolean {
-    if (ref.versionHash.length === 0) {
-      return false;
-    }
+    return this.verifyCitationDetail(ref).status === "valid";
+  }
+
+  verifyCitationDetail(ref: VersionedRef): CitationVerificationDetail {
     if (ref.category === "code") {
       try {
-        return this.readCode(ref.key).sha256 === ref.versionHash;
+        const actualHash = this.readCode(ref.key).sha256;
+        if (actualHash === ref.versionHash && ref.versionHash.length > 0) {
+          return {
+            ref,
+            status: "valid",
+            summary: `valid code citation: ${ref.key}`,
+            expectedHash: ref.versionHash,
+            actualHash,
+          };
+        }
+        return {
+          ref,
+          status: "stale",
+          summary: `stale code citation: ${ref.key}`,
+          expectedHash: ref.versionHash,
+          actualHash,
+        };
       } catch {
-        return false;
+        return {
+          ref,
+          status: "missing",
+          summary: `missing code citation target: ${ref.key}`,
+          expectedHash: ref.versionHash,
+        };
       }
     }
     if (ref.category === "checkpoint") {
       const checkpoints = this.readCheckpoints();
-      const index = Number.parseInt(ref.key, 10);
+      const index = parseCheckpointIndex(ref.key);
       const entry = checkpoints[index] as { lineHash?: string } | undefined;
-      return entry?.lineHash === ref.versionHash;
+      const actualHash = entry?.lineHash;
+      if (!actualHash) {
+        return {
+          ref,
+          status: "missing",
+          summary: `missing checkpoint citation target: ${ref.key}`,
+          expectedHash: ref.versionHash,
+        };
+      }
+      if (actualHash === ref.versionHash && ref.versionHash.length > 0) {
+        return {
+          ref,
+          status: "valid",
+          summary: `valid checkpoint citation: ${ref.key}`,
+          expectedHash: ref.versionHash,
+          actualHash,
+        };
+      }
+      return {
+        ref,
+        status: "stale",
+        summary: `stale checkpoint citation: ${ref.key}`,
+        expectedHash: ref.versionHash,
+        actualHash,
+      };
     }
-    return false;
+    return {
+      ref,
+      status: "unsupported",
+      summary: `unsupported citation category: ${ref.category}`,
+      expectedHash: ref.versionHash,
+    };
   }
 
   attachCitation(claim: string, refs: ReadonlyArray<VersionedRef>): {
     readonly claim: string;
     readonly citations: ReadonlyArray<Citation>;
   } {
+    const invalid = refs.map((ref) => this.verifyCitationDetail(ref)).find((detail) => detail.status !== "valid");
+    if (invalid) {
+      throw new Error(`Cannot attach invalid citation: ${invalid.summary}`);
+    }
     return {
       claim,
       citations: refs.map((ref) => ({ ...ref })),
     };
   }
+}
+
+function parseCheckpointIndex(key: string): number {
+  if (!/^(0|[1-9]\d*)$/.test(key)) {
+    return -1;
+  }
+  return Number.isSafeInteger(Number(key)) ? Number(key) : -1;
 }
 
 export function bindToRun(args: TeamBindingArgs): TeamBinding {
@@ -183,4 +253,23 @@ export function readBindingFromEnv(env: NodeJS.ProcessEnv = process.env): TeamBi
 
 export function resolveRunRoot(dataRoot: string, runId: string): string {
   return getTeamRunRoot(dataRoot, runId);
+}
+
+function resolveWorkspacePath(workspaceRoot: string, requestedPath: string): string {
+  if (isAbsolute(requestedPath)) {
+    throw new Error(`readCode: absolute paths are not allowed: ${requestedPath}`);
+  }
+  const root = resolve(workspaceRoot);
+  const absPath = resolve(root, requestedPath);
+  const rel = relative(root, absPath);
+  if (rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(`readCode: path escapes working directory: ${requestedPath}`);
+  }
+  const realRoot = realpathSync(root);
+  const realPath = realpathSync(absPath);
+  const realRel = relative(realRoot, realPath);
+  if (realRel.startsWith("..") || isAbsolute(realRel)) {
+    throw new Error(`readCode: path escapes working directory: ${requestedPath}`);
+  }
+  return absPath;
 }
