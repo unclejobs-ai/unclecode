@@ -127,6 +127,67 @@ test("config-core resolves CRP context controls through the documented source or
   assert.equal(envOverride.settings.crpBudget.winner.sourceId, "environment");
 });
 
+test("config-core resolves context.modelWindow from config through the explanation surface", () => {
+  const { workspaceRoot, userHomeDir } = createWorkspaceFixture();
+
+  writeConfigFile(path.join(workspaceRoot, ".unclecode", "config.json"), {
+    context: {
+      modelWindow: 128000,
+    },
+  });
+
+  const explanation = explainUncleCodeConfig({
+    workspaceRoot,
+    userHomeDir,
+  });
+
+  assert.equal(explanation.settings.modelWindow.value, 128000);
+});
+
+test("config-core resolves context.modelWindow override via UNCLECODE_CONTEXT_WINDOW env var", () => {
+  const { workspaceRoot, userHomeDir } = createWorkspaceFixture();
+
+  const previous = process.env.UNCLECODE_CONTEXT_WINDOW;
+  process.env.UNCLECODE_CONTEXT_WINDOW = "1000000";
+  try {
+    const explanation = explainUncleCodeConfig({
+      workspaceRoot,
+      userHomeDir,
+      env: { ...process.env },
+    });
+
+    assert.equal(explanation.settings.modelWindow.value, 1000000);
+    assert.equal(explanation.settings.modelWindow.winner.sourceId, "environment");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.UNCLECODE_CONTEXT_WINDOW;
+    } else {
+      process.env.UNCLECODE_CONTEXT_WINDOW = previous;
+    }
+  }
+});
+
+test("config-core flags an invalid context.modelWindow value as a source issue", () => {
+  const { workspaceRoot, userHomeDir } = createWorkspaceFixture();
+
+  writeConfigFile(path.join(workspaceRoot, ".unclecode", "config.json"), {
+    context: {
+      modelWindow: -5,
+    },
+  });
+
+  const explanation = explainUncleCodeConfig({
+    workspaceRoot,
+    userHomeDir,
+  });
+
+  assert.ok(
+    explanation.sourceIssues.some(
+      (issue) => issue.message === "Invalid context.modelWindow value.",
+    ),
+  );
+});
+
 test("config-core exposes the active mode and mode-derived setting contributions", () => {
   const { workspaceRoot, userHomeDir } = createWorkspaceFixture();
 

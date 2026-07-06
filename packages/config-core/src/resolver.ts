@@ -20,6 +20,7 @@ import type {
 import {
   CONFIG_CORE_DEFAULT_CONTEXT_CRP,
   CONFIG_CORE_DEFAULT_CONTEXT_CRP_BUDGET,
+  CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW,
   buildModeProfileOverlay,
   CONFIG_CORE_DEFAULTS,
   CONFIG_SOURCE_ORDER,
@@ -74,6 +75,7 @@ type MutableBehavior = {
 type MutableContext = {
   crp?: boolean;
   crpBudget?: number;
+  modelWindow?: number;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -221,6 +223,7 @@ function sanitizeConfigLayer(value: unknown): SanitizedConfigLayer {
     const nextContext: MutableContext = {};
     const crp = rawContext.crp;
     const crpBudget = asPositiveInteger(rawContext.crpBudget);
+    const modelWindow = asPositiveInteger(rawContext.modelWindow);
 
     if ("crp" in rawContext && crp !== undefined && typeof crp !== "boolean") {
       issues.push("Invalid context.crp value.");
@@ -228,12 +231,18 @@ function sanitizeConfigLayer(value: unknown): SanitizedConfigLayer {
     if ("crpBudget" in rawContext && rawContext.crpBudget !== undefined && crpBudget === undefined) {
       issues.push("Invalid context.crpBudget value.");
     }
+    if ("modelWindow" in rawContext && rawContext.modelWindow !== undefined && modelWindow === undefined) {
+      issues.push("Invalid context.modelWindow value.");
+    }
 
     if (typeof crp === "boolean") {
       nextContext.crp = crp;
     }
     if (crpBudget !== undefined) {
       nextContext.crpBudget = crpBudget;
+    }
+    if (modelWindow !== undefined) {
+      nextContext.modelWindow = modelWindow;
     }
 
     context = Object.keys(nextContext).length > 0 ? nextContext : undefined;
@@ -286,7 +295,8 @@ function buildEnvironmentLayer(env: NodeJS.ProcessEnv | undefined): UncleCodeCon
   // users to export env vars every session.
   const crpRaw = env.UNCLECODE_CRP;
   const crpBudgetRaw = env.UNCLECODE_CRP_BUDGET;
-  const crpContext: { crp?: boolean; crpBudget?: number } = {};
+  const modelWindowRaw = env.UNCLECODE_CONTEXT_WINDOW;
+  const crpContext: { crp?: boolean; crpBudget?: number; modelWindow?: number } = {};
   if (crpRaw !== undefined) {
     const normalized = crpRaw.toLowerCase();
     crpContext.crp = normalized !== "0" && normalized !== "false" && normalized !== "off";
@@ -295,6 +305,12 @@ function buildEnvironmentLayer(env: NodeJS.ProcessEnv | undefined): UncleCodeCon
     const parsed = Number.parseInt(crpBudgetRaw, 10);
     if (Number.isFinite(parsed) && parsed > 0) {
       crpContext.crpBudget = parsed;
+    }
+  }
+  if (modelWindowRaw !== undefined) {
+    const parsed = Number.parseInt(modelWindowRaw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      crpContext.modelWindow = parsed;
     }
   }
 
@@ -582,6 +598,11 @@ export function explainUncleCodeConfig(
         (config) => config.context?.crpBudget,
         CONFIG_CORE_DEFAULT_CONTEXT_CRP_BUDGET,
       ),
+      modelWindow: explainSetting(
+        sources,
+        (config) => config.context?.modelWindow,
+        CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW,
+      ),
     },
     prompt: {
       sections: promptSections,
@@ -632,6 +653,9 @@ export function formatUncleCodeConfigExplanation(explanation: UncleCodeConfigExp
     `- crpBudget = ${String(explanation.settings.crpBudget.value)}`,
     `  winner: ${explanation.settings.crpBudget.winner.sourceLabel}`,
     `  sources: ${formatContributors(explanation.settings.crpBudget.contributors)}`,
+    `- modelWindow = ${String(explanation.settings.modelWindow.value)}`,
+    `  winner: ${explanation.settings.modelWindow.winner.sourceLabel}`,
+    `  sources: ${formatContributors(explanation.settings.modelWindow.contributors)}`,
     "",
     "Prompt sections:",
     ...explanation.prompt.sections.flatMap((section) => [

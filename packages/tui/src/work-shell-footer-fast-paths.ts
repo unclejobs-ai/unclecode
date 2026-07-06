@@ -48,6 +48,10 @@ export function compactWorkShellFooterContextChip(contextIndicator?: string): st
   if (readyMatch) {
     return readyMatch[0];
   }
+  // Intentionally take only the first ` · `-separated segment (e.g. "▤ 12 ctx")
+  // so appended trailing segments — token/held, pinned (📌 N pinned), or
+  // warnings — never break the parser. Only the leading context-count chip is
+  // surfaced to the footer.
   const firstSegment = normalized.split(/\s·\s/u)[0]?.trim();
   return firstSegment && firstSegment.length > 0 ? firstSegment : normalized;
 }

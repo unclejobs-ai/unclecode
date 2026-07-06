@@ -41,6 +41,8 @@ export type UncleCodeConfigLayer = {
     readonly crp?: boolean;
     /** Token budget for context selection (default 32000). */
     readonly crpBudget?: number;
+    /** Model context window in tokens, used by the /context budget meter. Defaults to 200000. Override via UNCLECODE_CONTEXT_WINDOW. */
+    readonly modelWindow?: number;
   };
   readonly prompt?: {
     readonly sections?: Readonly<Record<string, UncleCodePromptSection | null>>;
@@ -110,6 +112,7 @@ export type UncleCodeConfigExplanation = {
     readonly explanationStyle: SettingExplanation<ModeExplanationStyle>;
     readonly crp: SettingExplanation<boolean>;
     readonly crpBudget: SettingExplanation<number>;
+    readonly modelWindow: SettingExplanation<number>;
   };
   readonly prompt: {
     readonly sections: readonly PromptSectionExplanation[];

@@ -246,8 +246,17 @@ export function formatContextPacketPromptPrefix(packet: ContextPacketView): stri
 export function formatContextPacketIndicator(packet: ContextPacketView): string {
   const included = packet.sourceCounts.included;
   const held = packet.sourceCounts.excluded;
-  const tokenK = packet.tokenEstimate > 0 ? ` · ~${Math.round(packet.tokenEstimate / 1000)}k` : "";
-  const base = `▤ ${included} ctx${tokenK} · ${held} held`;
+  const tokenSuffix = packet.tokenEstimate >= 1000
+    ? ` · ~${Math.round(packet.tokenEstimate / 1000)}k`
+    : packet.tokenEstimate > 0
+      ? ` · ~${packet.tokenEstimate}t`
+      : "";
+  const pinnedCount = packet.included.reduce(
+    (count, item) => count + ((item.salience ?? 0) >= 1 ? 1 : 0),
+    0,
+  );
+  const pinnedSuffix = pinnedCount > 0 ? ` · 📌 ${pinnedCount} pinned` : "";
+  const base = `▤ ${included} ctx${tokenSuffix} · ${held} held${pinnedSuffix}`;
   return packet.sourceCounts.warnings > 0 ? `${base} · ${packet.sourceCounts.warnings}⚠` : base;
 }
 

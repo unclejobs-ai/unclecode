@@ -22,6 +22,7 @@ export const CONFIG_CORE_DEFAULT_MODE_PROFILE = MODE_PROFILES.default.id;
 export const CONFIG_CORE_DEFAULT_MODEL = "claude-sonnet-4-20250514";
 export const CONFIG_CORE_DEFAULT_CONTEXT_CRP = true;
 export const CONFIG_CORE_DEFAULT_CONTEXT_CRP_BUDGET = 32000;
+export const CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW = 200000;
 
 /**
  * v1 composer attachment caps — mirrored by provider and orchestrator
@@ -50,6 +51,7 @@ export const CONFIG_CORE_DEFAULTS: UncleCodeConfigLayer = {
   context: {
     crp: CONFIG_CORE_DEFAULT_CONTEXT_CRP,
     crpBudget: CONFIG_CORE_DEFAULT_CONTEXT_CRP_BUDGET,
+    modelWindow: CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW,
   },
   composer: {
     maxClipboardAttachmentCount: CONFIG_CORE_DEFAULT_MAX_CLIPBOARD_ATTACHMENT_COUNT,
