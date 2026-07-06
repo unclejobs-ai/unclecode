@@ -32,6 +32,25 @@ export type LspBridgeOptions = {
   readonly maxDiagnostics?: number;
 };
 
+export type LspCheckStatus = "pass" | "fail" | "skipped" | "unavailable";
+
+export type LspClientCheckResult = {
+  readonly clientId: string;
+  readonly status: LspCheckStatus;
+  readonly diagnostics: ReadonlyArray<LspDiagnostic>;
+  readonly summary: string;
+};
+
+export type LspCheckResult = {
+  readonly path: string;
+  readonly extension: string;
+  readonly status: LspCheckStatus;
+  readonly matchedClientIds: ReadonlyArray<string>;
+  readonly diagnostics: ReadonlyArray<LspDiagnostic>;
+  readonly clientResults: ReadonlyArray<LspClientCheckResult>;
+  readonly summary: string;
+};
+
 export interface LspClient {
   readonly id: string;
   readonly handlesExtension: (ext: string) => boolean;
@@ -59,21 +78,89 @@ export class LspBridge {
     readonly content: string;
     readonly options?: LspBridgeOptions;
   }): Promise<ReadonlyArray<LspDiagnostic>> {
+    const result = await this.checkAfterEdit(input);
+    return result.diagnostics;
+  }
+
+  async checkAfterEdit(input: {
+    readonly path: string;
+    readonly content: string;
+    readonly options?: LspBridgeOptions;
+  }): Promise<LspCheckResult> {
     const ext = extname(input.path).toLowerCase();
+    if (this.clients.length === 0) {
+      return {
+        path: input.path,
+        extension: ext,
+        status: "unavailable",
+        matchedClientIds: [],
+        diagnostics: [],
+        clientResults: [],
+        summary: "no LSP clients registered",
+      };
+    }
+
     const matched = this.clients.filter((client) => client.handlesExtension(ext));
     if (matched.length === 0) {
-      return [];
+      return {
+        path: input.path,
+        extension: ext,
+        status: "skipped",
+        matchedClientIds: [],
+        diagnostics: [],
+        clientResults: [],
+        summary: `no registered LSP client handles "${ext || "<none>"}"`,
+      };
     }
     const timeoutMs = input.options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const maxDiagnostics = input.options?.maxDiagnostics ?? DEFAULT_MAX_DIAGNOSTICS;
     const collected: LspDiagnostic[] = [];
+    const clientResults: LspClientCheckResult[] = [];
+
     for (const client of matched) {
-      await client.notifyDidChange({ path: input.path, content: input.content });
-      const diagnostics = await client.pollDiagnostics({ path: input.path, timeoutMs });
-      collected.push(...diagnostics);
+      try {
+        await withTimeout(
+          client.notifyDidChange({ path: input.path, content: input.content }),
+          timeoutMs,
+          `${client.id} didChange`,
+        );
+        const diagnostics = await withTimeout(
+          client.pollDiagnostics({ path: input.path, timeoutMs }),
+          timeoutMs,
+          `${client.id} diagnostics`,
+        );
+        const remaining = Math.max(0, maxDiagnostics - collected.length);
+        const limited = diagnostics.slice(0, remaining);
+        collected.push(...limited);
+        clientResults.push({
+          clientId: client.id,
+          status: diagnostics.length > 0 ? "fail" : "pass",
+          diagnostics: limited,
+          summary: diagnostics.length > 0
+            ? `${client.id} reported ${diagnostics.length} diagnostic${diagnostics.length === 1 ? "" : "s"}`
+            : `${client.id} reported no diagnostics`,
+        });
+      } catch (error) {
+        clientResults.push({
+          clientId: client.id,
+          status: "unavailable",
+          diagnostics: [],
+          summary: `${client.id} unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
       if (collected.length >= maxDiagnostics) break;
     }
-    return collected.slice(0, maxDiagnostics);
+
+    const status = resolveCheckStatus(clientResults);
+    return {
+      path: input.path,
+      extension: ext,
+      status,
+      matchedClientIds: matched.map((client) => client.id),
+      diagnostics: collected.slice(0, maxDiagnostics),
+      clientResults,
+      summary: summarizeCheckStatus(status, collected.length, clientResults),
+    };
   }
 
   async shutdownAll(): Promise<void> {
@@ -84,6 +171,69 @@ export class LspBridge {
     }
     this.clients.length = 0;
   }
+}
+
+export function formatLspCheckEvidence(result: LspCheckResult): string {
+  const clientSuffix = result.matchedClientIds.length > 0
+    ? ` · clients: ${result.matchedClientIds.join(", ")}`
+    : "";
+  return `lsp ${result.status}: ${result.summary}${clientSuffix}`;
+}
+
+function resolveCheckStatus(clientResults: readonly LspClientCheckResult[]): LspCheckStatus {
+  if (clientResults.some((result) => result.status === "fail")) {
+    return "fail";
+  }
+  if (clientResults.some((result) => result.status === "unavailable")) {
+    return "unavailable";
+  }
+  return "pass";
+}
+
+function summarizeCheckStatus(
+  status: LspCheckStatus,
+  diagnosticCount: number,
+  clientResults: readonly LspClientCheckResult[],
+): string {
+  if (status === "fail") {
+    return `${diagnosticCount} diagnostic${diagnosticCount === 1 ? "" : "s"}`;
+  }
+  if (status === "unavailable") {
+    return clientResults.map((result) => result.summary).join("; ") || "no LSP clients registered";
+  }
+  return "no diagnostics";
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
 }
 
 export type LspSpawnConfig = {
