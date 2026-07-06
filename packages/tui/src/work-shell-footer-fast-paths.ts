@@ -87,7 +87,10 @@ function compactWorkShellAuthLabel(authLabel: string): string {
   switch (authLabel) {
     case "OAuth file · API blocked":
     case "OAuth env · API blocked":
-      return "OAuth blocked";
+      // The OAuth token is present but lacks the model.request scope, so API
+      // calls are rejected. "needs API key" tells the user the fix (switch to
+      // an API key) instead of the opaque "blocked".
+      return "OAuth · needs API key";
     case "Browser OAuth · file":
       return "Saved OAuth";
     case "Browser OAuth · env":

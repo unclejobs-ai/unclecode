@@ -166,7 +166,11 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
         contextPacket: contextPacket ?? input.state.contextPacket,
         buildContextPanel: input.buildContextPanel,
       });
-      input.appendEntries(...result.entries);
+      // Context Inspector redesign: /context is an inspector, not a chat
+      // turn. It must NOT pollute the conversation history with
+      // `user: /context` + `system: Context opened` entries. Only the
+      // panel state changes (opens the overlay). See
+      // docs/design/context-inspector-redesign.md §A.
       input.setState({ panel: result.panel });
       return;
     }

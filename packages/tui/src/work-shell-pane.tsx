@@ -17,7 +17,7 @@ import {
   type WorkShellSlashSuggestion,
 } from "./work-shell-hooks.js";
 import { formatAuthLabelForDisplay } from "./work-shell-panels.js";
-import { WorkShellView } from "./work-shell-view.js";
+import { getWorkShellComposerTextColor, WorkShellView } from "./work-shell-view.js";
 
 export type WorkShellPaneProps<
   Attachment extends WorkShellImageAttachment,
@@ -160,6 +160,16 @@ export function WorkShellPane<
     () => formatAuthLabelForDisplay(authLabel),
     [authLabel],
   );
+  // Context Inspector (Sprint 2): when the /context overlay is open and the
+  // composer is empty, yield the action keys to the inspector. The controller
+  // dispatches the engine action; the Composer skips inserting the char.
+  const shouldSuppressComposerKeysForInspector = React.useMemo(
+    () =>
+      activePanel.title === "Context expanded"
+      && inputValue.trim().length === 0
+      && props.engine.moveContextInspectorCursor !== undefined,
+    [activePanel.title, inputValue, props.engine],
+  );
   const attachmentLines = React.useMemo(() => {
     const lines = composerPreview.attachments.length > 0
       ? [
@@ -264,7 +274,11 @@ export function WorkShellPane<
           }}
           onClipboardImageError={(reason) => setLastClipboardError(reason)}
           terminalColumns={terminalColumns}
+          textColor={getWorkShellComposerTextColor()}
           {...(isSecureApiKeyEntry ? { mask: "•" } : {})}
+          {...(shouldSuppressComposerKeysForInspector
+            ? { suppressInspectorKeys: true }
+            : {})}
         />
       }
       inputValue={inputValue}

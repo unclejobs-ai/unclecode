@@ -1,5 +1,11 @@
 import {
+  type ContextSourceCategory,
+  type ContextSourceRecord,
+} from "@unclecode/contracts";
+
+import {
   entityStatusValue,
+  numberValue,
   optionalNumber,
   optionalString,
   requiredString,
@@ -8,6 +14,7 @@ import {
 import type {
   AgentOpsArtifactRecord,
   AgentOpsArtifactType,
+  AgentOpsContextSourceRow,
   AgentOpsEventRecord,
   AgentOpsLaneRecord,
   AgentOpsProjectRecord,
@@ -216,4 +223,69 @@ function isVerificationKind(value: string): value is AgentOpsVerificationKind {
 
 function isVerificationStatus(value: string): value is AgentOpsVerificationStatus {
   return VERIFICATION_STATUS_SET.has(value);
+}
+
+const CONTEXT_SOURCE_CATEGORY_VALUES = [
+  "workspace",
+  "workspace-guidance",
+  "bridge",
+  "loop-trail",
+  "memory",
+  "runtime",
+  "attachment",
+  "system",
+] as const satisfies readonly ContextSourceCategory[];
+
+const CONTEXT_SOURCE_CATEGORY_SET: ReadonlySet<string> = new Set(CONTEXT_SOURCE_CATEGORY_VALUES);
+
+// Raw DB row — column names match the SQLite schema (snake_case).
+export function mapContextSourceRow(row: SqlRow): AgentOpsContextSourceRow {
+  const content = optionalString(row, "content");
+  const sha256 = optionalString(row, "sha256");
+  const turnLastSeen = optionalNumber(row, "turn_last_seen");
+  const expiresAt = optionalString(row, "expires_at");
+  return {
+    id: requiredString(row, "id"),
+    projectId: requiredString(row, "project_id"),
+    category: requiredString(row, "category"),
+    label: requiredString(row, "label"),
+    reason: requiredString(row, "reason"),
+    salience: numberValue(row, "salience"),
+    tokenEstimate: numberValue(row, "token_estimate"),
+    includedInModel: numberValue(row, "included_in_model"),
+    createdAt: requiredString(row, "created_at"),
+    updatedAt: requiredString(row, "updated_at"),
+    content: content === undefined ? null : content,
+    sha256: sha256 === undefined ? null : sha256,
+    turnLastSeen: turnLastSeen === undefined ? null : turnLastSeen,
+    expiresAt: expiresAt === undefined ? null : expiresAt,
+  };
+}
+
+// DB row → contracts record (camelCase, typed category).
+export function contextSourceRowToRecord(row: AgentOpsContextSourceRow): ContextSourceRecord {
+  const category = contextSourceCategoryValue(row.category);
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    category,
+    label: row.label,
+    content: row.content,
+    reason: row.reason,
+    sha256: row.sha256,
+    salience: row.salience,
+    tokenEstimate: row.tokenEstimate,
+    includedInModel: row.includedInModel !== 0,
+    turnLastSeen: row.turnLastSeen,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    expiresAt: row.expiresAt,
+  };
+}
+
+function contextSourceCategoryValue(value: string): ContextSourceCategory {
+  if (!CONTEXT_SOURCE_CATEGORY_SET.has(value)) {
+    throw new TypeError(`Unknown context source category: ${value}`);
+  }
+  return value as ContextSourceCategory;
 }

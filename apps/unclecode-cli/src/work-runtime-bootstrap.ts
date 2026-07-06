@@ -10,7 +10,6 @@ import {
   loadOmoContextSnapshot,
 } from "@unclecode/context-broker";
 import type {
-  ContextPacketSourceCategory,
   ContextPacketView,
   ContextPacketViewItem,
   ContextPacketViewWarning,
@@ -47,6 +46,18 @@ import {
 } from "./work-runtime-session.js";
 import { runWorkspaceGuardianChecks } from "./guardian-checks.js";
 import { createRuntimeCodingAgent } from "./runtime-coding-agent.js";
+import {
+  buildContextLineItems,
+  buildContextSummaryItems,
+  buildOmoExcludedPacketItems,
+  estimateTokens,
+  formatCountLabel,
+} from "./work-runtime-context-items.js";
+import {
+  createCrpRuntime,
+  resolveWorkShellCrpConfig,
+  type WorkShellContextPacketResolver,
+} from "./work-runtime-crp.js";
 
 export type WorkCliBootstrapInput = {
   argv: readonly string[];
@@ -119,68 +130,6 @@ async function buildWorkShellContextSummary(input: {
   ];
 }
 
-function estimateTokens(value: string): number {
-  return Math.ceil(value.length / 4);
-}
-
-function buildContextLineItems(input: {
-  readonly lines: readonly string[];
-  readonly category: ContextPacketSourceCategory;
-  readonly idPrefix: string;
-  readonly reason: string;
-}): readonly ContextPacketViewItem[] {
-  return input.lines.map((line, index) => ({
-    id: `${input.idPrefix}-${index + 1}`,
-    category: input.category,
-    label: line,
-    reason: input.reason,
-    preview: line,
-    tokenEstimate: estimateTokens(line),
-  }));
-}
-
-function isWorkspaceGuidanceSummaryLine(line: string): boolean {
-  return (
-    /^(Loaded guidance|Deduped duplicate guidance|Conflict|Loaded skills|Skill catalog):/i.test(line) ||
-    /^(?:AGENTS|CLAUDE|GEMINI|UNCLECODE)(?:\.local)?\.md:/i.test(line) ||
-    /^rules\/.+\.md:/i.test(line)
-  );
-}
-
-const WORKSPACE_GUIDANCE_SAFE_PREVIEW =
-  "Workspace guidance is active; raw guidance text stays out of the context view.";
-
-function extractWorkspaceGuidanceSource(line: string): string | undefined {
-  const sourceMatch = /^((?:AGENTS|CLAUDE|GEMINI|UNCLECODE)(?:\.local)?\.md|rules\/.+\.md):/i.exec(line);
-  return sourceMatch?.[1];
-}
-
-function buildContextSummaryItems(lines: readonly string[]): readonly ContextPacketViewItem[] {
-  return lines.map((line, index) => {
-    const workspaceGuidance = isWorkspaceGuidanceSummaryLine(line);
-    const workspaceGuidanceSource = workspaceGuidance ? extractWorkspaceGuidanceSource(line) : undefined;
-    const label = workspaceGuidanceSource ? "Workspace guidance" : line;
-    const preview = workspaceGuidanceSource
-      ? `${workspaceGuidanceSource} — ${WORKSPACE_GUIDANCE_SAFE_PREVIEW}`
-      : line;
-
-    return {
-      id: workspaceGuidance
-        ? `workspace-guidance-${index + 1}`
-        : `workspace-context-${index + 1}`,
-      category: workspaceGuidance ? "workspace-guidance" : "workspace",
-      label,
-      reason: workspaceGuidance ? "workspace guidance summary" : "loaded workspace context",
-      preview,
-      tokenEstimate: estimateTokens(`${label} ${preview}`),
-    };
-  });
-}
-
-function formatCountLabel(count: number, singular: string, plural: string): string {
-  return count === 1 ? `1 ${singular}` : `${count} ${plural}`;
-}
-
 function buildProviderSystemPromptMetadata(input: {
   readonly configuredPrompt: string;
   readonly guidanceSystemPrompt: string;
@@ -240,65 +189,30 @@ function createPacketId(input: {
   return `packet-${hash}`;
 }
 
-const OMO_EXCLUDED_DETAIL_LIMIT = 6;
-
-function buildOmoExcludedPacketItems(
-  excludedArtifacts: readonly { readonly path: string; readonly reason: string }[],
-): readonly ContextPacketViewItem[] {
-  if (excludedArtifacts.length <= OMO_EXCLUDED_DETAIL_LIMIT) {
-    return excludedArtifacts.map((item, index) => ({
-      id: `loop-trail-excluded-${index + 1}`,
-      category: "loop-trail",
-      label: "loop trail artifact",
-      reason: item.reason,
-      preview: item.path,
-    }));
-  }
-
-  const evidenceArtifacts = excludedArtifacts.filter((item) => /evidence/i.test(item.reason));
-  const otherArtifacts = excludedArtifacts.filter((item) => !/evidence/i.test(item.reason));
-  const items: ContextPacketViewItem[] = otherArtifacts
-    .slice(0, OMO_EXCLUDED_DETAIL_LIMIT - 1)
-    .map((item, index) => ({
-      id: `loop-trail-excluded-${index + 1}`,
-      category: "loop-trail",
-      label: "loop trail artifact",
-      reason: item.reason,
-      preview: item.path,
-    }));
-
-  if (otherArtifacts.length > items.length) {
-    const additionalArtifactCount = otherArtifacts.length - items.length;
-    items.push({
-      id: "loop-trail-excluded-other-summary",
-      category: "loop-trail",
-      label: `${formatCountLabel(additionalArtifactCount, "additional loop trail artifact", "additional loop trail artifacts")}`,
-      reason: "loop trail artifacts stay local",
-      sourceCount: additionalArtifactCount,
-    });
-  }
-
-  if (evidenceArtifacts.length > 0) {
-    items.push({
-      id: "loop-trail-excluded-evidence-summary",
-      category: "loop-trail",
-      label: `${formatCountLabel(evidenceArtifacts.length, "loop trail evidence transcript", "loop trail evidence transcripts")}`,
-      reason: "loop trail evidence transcripts stay local",
-      preview: "Detailed evidence paths stay local; use the loop trail session evidence directory for full transcripts.",
-      sourceCount: evidenceArtifacts.length,
-    });
-  }
-
-  return items;
-}
-
 function createWorkShellContextPacketResolver(options: {
   readonly sourceMetadata: readonly ContextPacketViewItem[];
   readonly bootstrapPacketItems?: readonly ContextPacketViewItem[];
   readonly bootstrapPacketWarnings?: readonly ContextPacketViewWarning[];
-}): StartReplOptions["resolveContextPacket"] {
-  return async (input): Promise<ContextPacketView> => {
-    const omo = await loadOmoContextSnapshot(input.cwd);
+}): WorkShellContextPacketResolver {
+  return legacyResolveContextPacket.bind(null, options);
+}
+
+async function legacyResolveContextPacket(
+  options: {
+    readonly sourceMetadata: readonly ContextPacketViewItem[];
+    readonly bootstrapPacketItems?: readonly ContextPacketViewItem[];
+    readonly bootstrapPacketWarnings?: readonly ContextPacketViewWarning[];
+  },
+  input: {
+    readonly cwd: string;
+    readonly sessionId: string;
+    readonly contextSummaryLines: readonly string[];
+    readonly bridgeLines: readonly string[];
+    readonly memoryLines: readonly string[];
+    readonly traceLines: readonly string[];
+  },
+): Promise<ContextPacketView> {
+    const loopTrail = await loadOmoContextSnapshot(input.cwd);
     const included: ContextPacketViewItem[] = [
       ...options.sourceMetadata,
       ...buildContextSummaryItems(input.contextSummaryLines),
@@ -320,7 +234,7 @@ function createWorkShellContextPacketResolver(options: {
         idPrefix: "runtime-trace",
         reason: "live work-shell trace",
       }),
-      ...omo.included.map((item): ContextPacketViewItem => ({
+      ...loopTrail.included.map((item): ContextPacketViewItem => ({
         id: item.kind === "omo-goal"
           ? `loop-trail-goal-${item.sessionId}-${item.goalId}`
           : `loop-trail-criterion-${item.sessionId}-${item.goalId}-${item.criterionId}`,
@@ -333,10 +247,10 @@ function createWorkShellContextPacketResolver(options: {
         tokenEstimate: estimateTokens(item.summary),
       })),
     ];
-    const excluded = buildOmoExcludedPacketItems(omo.excluded);
+    const excluded = buildOmoExcludedPacketItems(loopTrail.excluded);
     const warnings: ContextPacketViewWarning[] = [
-      ...omo.warnings.map((message, index) => ({
-        code: `omo.warning.${index + 1}`,
+      ...loopTrail.warnings.map((message, index) => ({
+        code: `loop-trail.warning.${index + 1}`,
         message,
         severity: "warning" as const,
       })),
@@ -359,11 +273,10 @@ function createWorkShellContextPacketResolver(options: {
         warnings,
         preview: [
           "UncleCode will carry these summaries into the next answer.",
-          "Raw OMO audit artifacts stay local.",
+          "Raw loop trail artifacts stay local.",
         ],
       },
     });
-  };
 }
 
 export async function loadWorkCliBootstrap(
@@ -499,6 +412,18 @@ export async function loadWorkCliBootstrap(
     ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
   });
 
+  // Context Inspector (Sprint 2): populated as a side-effect of building the
+  // CRP-aware context packet resolver (which lazily creates the AgentOps
+  // store). The mutator shares that store instance so overlay actions write
+  // to the same context_sources rows the resolver reads. Forward-declared
+  // because the resolver is constructed inline inside the options object.
+  let crpMutateContextSource:
+    | ((action: {
+      readonly kind: "pin" | "unpin" | "forget" | "include";
+      readonly id: string;
+    }) => void)
+    | undefined;
+
   return {
     agent,
     prompt: prompt ?? "",
@@ -554,11 +479,30 @@ export async function loadWorkCliBootstrap(
           })),
         ];
       },
-      resolveContextPacket: createWorkShellContextPacketResolver({
-        sourceMetadata: contextPacketSourceMetadata,
-        bootstrapPacketItems: bootstrapContext.packetItems,
-        bootstrapPacketWarnings: bootstrapContext.packetWarnings,
-      }),
+      resolveContextPacket: (() => {
+        // Context Inspector (Sprint 2): build the CRP runtime once so the
+        // resolver and the overlay's mutateContextSource share the same
+        // lazily-created AgentOpsStore instance.
+        const crp = createCrpRuntime(
+          createWorkShellContextPacketResolver({
+            sourceMetadata: contextPacketSourceMetadata,
+            bootstrapPacketItems: bootstrapContext.packetItems,
+            bootstrapPacketWarnings: bootstrapContext.packetWarnings,
+          }),
+          {
+            sourceMetadata: contextPacketSourceMetadata,
+            crpConfig: resolveWorkShellCrpConfig(configExplanation),
+            env,
+            ...(userHomeDir ? { userHomeDir } : {}),
+            ...(bootstrapContext.packetItems ? { bootstrapPacketItems: bootstrapContext.packetItems } : {}),
+            ...(bootstrapContext.packetWarnings
+              ? { bootstrapPacketWarnings: bootstrapContext.packetWarnings }
+              : {}),
+          },
+        );
+        crpMutateContextSource = crp.mutateContextSource;
+        return crp.resolveContextPacket;
+      })(),
       refreshHomeState,
       refreshAuthState,
       browserOAuthAvailable,
@@ -597,6 +541,12 @@ export async function loadWorkCliBootstrap(
           ...(userHomeDir ? { userHomeDir } : {}),
         }),
       recordTurn: (turn) => recorder.recordTurn(turn),
+      // Context Inspector (Sprint 2): forward the lazily-built CRP mutator.
+      // Undefined when CRP is disabled (resolver fell back to legacy), in
+      // which case overlay actions are harmless no-ops.
+      ...(crpMutateContextSource !== undefined
+        ? { mutateContextSource: crpMutateContextSource }
+        : {}),
     },
   };
 }

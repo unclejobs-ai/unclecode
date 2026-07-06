@@ -94,6 +94,12 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     queuedCount: 0,
     queuePaused: false,
     terminalColumns: 100,
+    // Context Inspector (Sprint 2): cursor + expanded-source state for the
+    // /context overlay. Cursor indexes into the navigable source list shown
+    // in the overlay; -1 means "no selection". Only one source expands at a
+    // time. See docs/design/context-inspector-redesign.md §C/§E.
+    contextInspectorCursor: -1,
+    contextInspectorExpanded: null,
   };
 }
 

@@ -434,12 +434,14 @@ test("getWorkShellPanelPlacement keeps long-session panels near the composer by 
     }),
     "overlay",
   );
+  // Context Inspector redesign: the overlay cohabits with the composer.
+  // Typing does NOT hide the overlay — only Esc or /context toggle does.
   assert.equal(
     shouldHideWorkShellOverlayForInput({
       panelTitle: "Context expanded",
       inputValue: "plain text",
     }),
-    true,
+    false,
   );
   assert.equal(
     shouldHideWorkShellOverlayForInput({
@@ -470,6 +472,8 @@ test("getWorkShellPanelPlacement keeps long-session panels near the composer by 
     }),
     false,
   );
+  // Context Inspector redesign: the overlay no longer truncates at 12 lines.
+  // All 14 lines pass through unchanged. Scrolling (Sprint 1C) handles tall lists.
   assert.deepEqual(
     formatWorkShellOverlayPanelLines({
       panelTitle: "Context expanded",
@@ -478,21 +482,10 @@ test("getWorkShellPanelPlacement keeps long-session panels near the composer by 
         (_, index) => `context line ${index + 1}`,
       ),
     }),
-    [
-      "context line 1",
-      "context line 2",
-      "context line 3",
-      "context line 4",
-      "context line 5",
-      "context line 6",
-      "context line 7",
-      "context line 8",
-      "context line 9",
-      "context line 10",
-      "context line 11",
-      "context line 12",
-      "- 2 more context lines hidden; /context refreshes this view.",
-    ],
+    Array.from(
+      { length: 14 },
+      (_, index) => `context line ${index + 1}`,
+    ),
   );
   assert.equal(
     getWorkShellPanelPlacement({
@@ -1446,7 +1439,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
   );
   assert.equal(
     formatWorkShellBusyStatusLine("· thinking inspect repo", 0),
-    "⠋ thinking inspect repo",
+    "◜ thinking inspect repo",
   );
   assert.deepEqual(
     getWorkShellThinkingDetailLines({
@@ -1479,7 +1472,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       nowMs: 2480,
       lastTurnDurationMs: 1480,
     }),
-    "⠋ 1.5s · thinking inspect repo · Ctrl+C/Esc · Enter queues",
+    "◜ 1.5s · thinking inspect repo · Ctrl+C/Esc · Enter queues",
   );
   assert.equal(
     normalizeMarkdownDisplayText("## Heading\n- `npm run check`\n- **Done**"),

@@ -446,7 +446,7 @@ test("formatWorkShellError collapses raw provider failures into operator guidanc
   assert.equal(formatWorkShellError("provider exploded"), "provider exploded");
   assert.equal(
     formatWorkShellBusyStatusLine("· thinking inspect repo", 0),
-    "⠋ thinking inspect repo",
+    "◜ thinking inspect repo",
   );
   assert.equal(
     normalizeMarkdownDisplayText("## Heading\n- `npm run check`\n- **Done**"),

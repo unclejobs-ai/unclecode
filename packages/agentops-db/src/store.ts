@@ -3,6 +3,12 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import {
+  type ContextSourceRecord,
+  type SelectContextSourcesInput,
+  type UpsertContextSourceInput,
+} from "@unclecode/contracts";
+
 import { applyAgentOpsMigrations } from "./migrations.js";
 import { defaultAgentOpsPaths, type AgentOpsPaths } from "./paths.js";
 import { redactAgentOpsSecrets } from "./redaction.js";
@@ -19,8 +25,23 @@ import type {
   CreateAgentOpsStoreOptions,
   FinishAgentOpsRunInput,
   RecordAgentOpsRunInput,
+  SelectedContextSources,
   StartAgentOpsRunInput,
 } from "./store-types.js";
+import {
+  countContextSourcesByCategory as countContextSourcesByCategoryImpl,
+  selectContextSources as selectContextSourcesImpl,
+} from "./store-context-reads.js";
+import {
+  forgetContextSource,
+  includeContextSource,
+  markContextSourceTurnSeen,
+  pinContextSource,
+  pruneExpiredContextSources,
+  unpinContextSource,
+  upsertContextSource,
+} from "./store-writes.js";
+import { contextSourceRowToRecord } from "./store-mappers.js";
 import { addAgentOpsEvent, addAgentOpsTask, addAgentOpsVerification } from "./store-writes.js";
 import type {
   AgentOpsArtifactRecord,
@@ -43,6 +64,7 @@ export type {
   CreateAgentOpsStoreOptions,
   FinishAgentOpsRunInput,
   RecordAgentOpsRunInput,
+  SelectedContextSources,
   StartAgentOpsRunInput,
 } from "./store-types.js";
 
@@ -227,6 +249,43 @@ class SqliteAgentOpsStore implements AgentOpsStore {
 
   addVerification(input: AddAgentOpsVerificationInput): AgentOpsVerificationRecord {
     return addAgentOpsVerification(this.db, input);
+  }
+
+  upsertContextSource(input: UpsertContextSourceInput): ContextSourceRecord {
+    const row = upsertContextSource(this.db, input);
+    return contextSourceRowToRecord(row);
+  }
+
+  selectContextSources(input: SelectContextSourcesInput): SelectedContextSources {
+    return selectContextSourcesImpl(this.db, input);
+  }
+
+  countContextSourcesByCategory(projectId: string): ReadonlyMap<string, number> {
+    return countContextSourcesByCategoryImpl(this.db, projectId);
+  }
+
+  markContextSourceTurnSeen(ids: readonly string[], turnIndex: number): void {
+    markContextSourceTurnSeen(this.db, ids, turnIndex);
+  }
+
+  pruneExpiredContextSources(now?: Date): number {
+    return pruneExpiredContextSources(this.db, now);
+  }
+
+  pinContextSource(id: string): void {
+    pinContextSource(this.db, id);
+  }
+
+  unpinContextSource(id: string): void {
+    unpinContextSource(this.db, id);
+  }
+
+  forgetContextSource(id: string): void {
+    forgetContextSource(this.db, id);
+  }
+
+  includeContextSource(id: string): void {
+    includeContextSource(this.db, id);
   }
 
   close(): void {

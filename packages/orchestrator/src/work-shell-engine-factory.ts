@@ -42,6 +42,10 @@ export type CreateWorkShellEngineInput<
   readonly browserOAuthAvailable?: boolean | undefined;
   /** Optional agentops recorder callback. Non-blocking. Fired after every prompt turn. */
   readonly recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
+  /** Context Inspector (Sprint 2): SQL mutation callback for the /context overlay. */
+  readonly mutateContextSource?: ((
+    action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
+  ) => void) | undefined;
 };
 
 export function createWorkShellEngine<
@@ -151,5 +155,8 @@ export function createWorkShellEngine<
     onExit: input.onExit,
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     ...(input.recordTurn !== undefined ? { recordTurn: input.recordTurn } : {}),
+    ...(input.mutateContextSource !== undefined
+      ? { mutateContextSource: input.mutateContextSource }
+      : {}),
   });
 }

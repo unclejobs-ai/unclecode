@@ -112,3 +112,20 @@ export interface AgentOpsVerificationRecord {
   readonly startedAt?: string;
   readonly finishedAt?: string;
 }
+
+export interface AgentOpsContextSourceRow {
+  readonly id: string;
+  readonly projectId: string;
+  readonly category: string;
+  readonly label: string;
+  readonly content: string | null;
+  readonly reason: string;
+  readonly sha256: string | null;
+  readonly salience: number;
+  readonly tokenEstimate: number;
+  readonly includedInModel: number;
+  readonly turnLastSeen: number | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly expiresAt: string | null;
+}

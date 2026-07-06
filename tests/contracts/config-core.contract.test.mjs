@@ -86,6 +86,47 @@ test("config-core explains precedence in the documented source order", () => {
   );
 });
 
+test("config-core resolves CRP context controls through the documented source order", () => {
+  const { workspaceRoot, userHomeDir } = createWorkspaceFixture();
+
+  writeConfigFile(path.join(workspaceRoot, ".unclecode", "config.json"), {
+    context: {
+      crp: false,
+      crpBudget: 8000,
+    },
+  });
+  writeConfigFile(path.join(userHomeDir, ".unclecode", "config.json"), {
+    context: {
+      crp: true,
+      crpBudget: 16000,
+    },
+  });
+
+  const configOnly = explainUncleCodeConfig({
+    workspaceRoot,
+    userHomeDir,
+  });
+
+  assert.equal(configOnly.settings.crp.value, true);
+  assert.equal(configOnly.settings.crp.winner.sourceId, "user-config");
+  assert.equal(configOnly.settings.crpBudget.value, 16000);
+  assert.equal(configOnly.settings.crpBudget.winner.sourceId, "user-config");
+
+  const envOverride = explainUncleCodeConfig({
+    workspaceRoot,
+    userHomeDir,
+    env: {
+      UNCLECODE_CRP: "0",
+      UNCLECODE_CRP_BUDGET: "24000",
+    },
+  });
+
+  assert.equal(envOverride.settings.crp.value, false);
+  assert.equal(envOverride.settings.crp.winner.sourceId, "environment");
+  assert.equal(envOverride.settings.crpBudget.value, 24000);
+  assert.equal(envOverride.settings.crpBudget.winner.sourceId, "environment");
+});
+
 test("config-core exposes the active mode and mode-derived setting contributions", () => {
   const { workspaceRoot, userHomeDir } = createWorkspaceFixture();
 

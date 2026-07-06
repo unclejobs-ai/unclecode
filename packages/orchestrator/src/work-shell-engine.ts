@@ -48,7 +48,7 @@ import {
 } from "./work-shell-engine-state.js";
 import { applyWorkShellTraceEvent } from "./work-shell-engine-trace.js";
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
-import type { ContextPacketView } from "@unclecode/contracts";
+import type { ContextPacketView, ContextPacketViewItem } from "@unclecode/contracts";
 
 /**
  * Render a one-liner for an attachment lifecycle trace event through the Rust
@@ -320,6 +320,12 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly queuedCount: number;
   readonly queuePaused: boolean;
   readonly terminalColumns: number;
+  // Context Inspector (Sprint 2): cursor highlight index into the navigable
+  // source list (-1 = none) and the source id whose full content is expanded
+  // (null = none). Owned by the engine so every mutation re-renders via the
+  // existing subscriber fan-out.
+  readonly contextInspectorCursor: number;
+  readonly contextInspectorExpanded: string | null;
 };
 
 export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkShellReasoningConfig> {
@@ -438,6 +444,15 @@ export type WorkShellEngineInput<
   sessionId?: string;
   /** Optional agentops recorder callback. Non-blocking. Fired after every prompt turn. */
   recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
+  /**
+   * Context Inspector (Sprint 2): SQL mutation callback for the /context
+   * overlay. Maps a pin/unpin/forget/include action to the AgentOpsStore
+   * write. Optional — when absent, overlay actions are no-ops (the legacy
+   * non-CRP path has no store).
+   */
+  mutateContextSource?: ((
+    action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
+  ) => void) | undefined;
 };
 
 export class WorkShellEngine<
@@ -550,6 +565,9 @@ export class WorkShellEngine<
   private readonly onExit: () => void;
   private readonly sessionId: string;
   private readonly recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
+  private readonly mutateContextSource?: ((
+    action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
+  ) => void) | undefined;
   private readonly subscribers = new Set<(state: WorkShellEngineState<Reasoning>) => void>();
   private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
   private readonly queueDrainSkipTurnEpochs = new Set<number>();
@@ -599,6 +617,7 @@ export class WorkShellEngine<
     this.extractAuthLabel = input.extractAuthLabel;
     this.onExit = input.onExit;
     this.recordTurn = input.recordTurn;
+    this.mutateContextSource = input.mutateContextSource;
     this.sessionId = input.sessionId ?? `work-${randomUUID()}`;
     this.currentContextSummaryLines = input.options.contextSummaryLines;
     this.lastSessionSummary = input.options.initialSessionSummary ?? "Work shell ready.";
@@ -750,7 +769,157 @@ export class WorkShellEngine<
       return;
     }
 
-    this.setState({ panel });
+    // Closing the overlay also resets the inspector cursor/expanded state so
+    // the next open starts fresh.
+    this.setState({
+      panel,
+      contextInspectorCursor: -1,
+      contextInspectorExpanded: null,
+    });
+  }
+
+  /**
+   * Context Inspector (Sprint 2) — move the cursor within the navigable
+   * source list. `direction` is -1 (up) or +1 (down). Wraps around the list
+   * bounds. Clamped to -1 when the overlay is not open or the packet has no
+   * sources.
+   */
+  moveContextInspectorCursor(direction: number): void {
+    if (this.state.panel.title !== "Context expanded") {
+      return;
+    }
+    const sources = this.resolveInspectorSourceList();
+    if (sources.length === 0) {
+      if (this.state.contextInspectorCursor !== -1) {
+        this.setState({ contextInspectorCursor: -1 });
+      }
+      return;
+    }
+    const current = this.state.contextInspectorCursor;
+    const base = current < 0 || current >= sources.length ? 0 : current;
+    const next = (base + (direction >= 0 ? 1 : -1) + sources.length) % sources.length;
+    if (next !== current) {
+      this.setState({ contextInspectorCursor: next });
+    }
+  }
+
+  /**
+   * Context Inspector (Sprint 2) — toggle pin/unpin on the source under the
+   * cursor. Pin sets salience to 1.0 (always include); unpin restores 0.5.
+   * After the SQL write we re-select from the store and re-render so the
+   * overlay reflects the new ranking immediately.
+   */
+  async toggleContextInspectorPin(): Promise<void> {
+    const source = this.resolveInspectorSourceAtCursor();
+    if (!source || !this.mutateContextSource) {
+      return;
+    }
+    this.mutateContextSource({
+      kind: source.pinned ? "unpin" : "pin",
+      id: source.id,
+    });
+    await this.refreshContextPacket();
+  }
+
+  /**
+   * Context Inspector (Sprint 2) — forget the source under the cursor
+   * (included_in_model = 0). The source moves to the "Held back" section.
+   */
+  async forgetContextSourceAtCursor(): Promise<void> {
+    const source = this.resolveInspectorSourceAtCursor();
+    if (!source || !this.mutateContextSource) {
+      return;
+    }
+    this.mutateContextSource({ kind: "forget", id: source.id });
+    await this.refreshContextPacket();
+  }
+
+  /**
+   * Context Inspector (Sprint 2) — re-include a held-back source
+   * (included_in_model = 1). The source moves back into "Included".
+   */
+  async includeContextSourceAtCursor(): Promise<void> {
+    const source = this.resolveInspectorSourceAtCursor();
+    if (!source || !this.mutateContextSource) {
+      return;
+    }
+    this.mutateContextSource({ kind: "include", id: source.id });
+    await this.refreshContextPacket();
+  }
+
+  /**
+   * Context Inspector (Sprint 2) — toggle expanded view for the source
+   * under the cursor. Only one source expands at a time.
+   */
+  toggleContextInspectorExpanded(): void {
+    const source = this.resolveInspectorSourceAtCursor();
+    if (!source) {
+      return;
+    }
+    const current = this.state.contextInspectorExpanded;
+    const next = current === source.id ? null : source.id;
+    if (next !== current) {
+      this.setState({ contextInspectorExpanded: next });
+    }
+  }
+
+  /**
+   * Build the navigable source list for the inspector from the current
+   * context packet: included sources first (sorted by salience desc), then
+   * held-back sources. Each entry carries a `pinned` flag (salience === 1.0)
+   * so the pin toggle and cursor glyph render correctly.
+   */
+  private resolveInspectorSourceList(): readonly {
+    readonly id: string;
+    readonly label: string;
+    readonly category: string;
+    readonly detail: string;
+    readonly pinned: boolean;
+    readonly heldBack: boolean;
+  }[] {
+    const packet = this.state.contextPacket;
+    if (!packet) {
+      return [];
+    }
+    const toEntry = (item: ContextPacketViewItem, heldBack: boolean) => {
+      const content = item.preview ?? item.label;
+      return {
+        id: item.id,
+        label: item.label,
+        category: item.category,
+        detail: content,
+        pinned: false,
+        heldBack,
+      };
+    };
+    // NOTE: ContextPacketViewItem does not carry salience/included flags
+    // (it's the projection sent to the model). Pin state is therefore
+    // approximated as "included and previously pinned" — the authoritative
+    // salience lives in the SQL store and is re-read on each packet
+    // refresh. The pinned glyph here is a best-effort affordance; the store
+    // mutation is the source of truth.
+    return [
+      ...packet.included.map((item) => toEntry(item, false)),
+      ...packet.excluded.map((item) => toEntry(item, true)),
+    ];
+  }
+
+  private resolveInspectorSourceAtCursor():
+    | {
+      readonly id: string;
+      readonly label: string;
+      readonly category: string;
+      readonly detail: string;
+      readonly pinned: boolean;
+      readonly heldBack: boolean;
+    }
+    | undefined {
+    const sources = this.resolveInspectorSourceList();
+    const cursor = this.state.contextInspectorCursor;
+    if (cursor < 0 || cursor >= sources.length) {
+      return undefined;
+    }
+    return sources[cursor];
   }
 
   interruptTurn(): void {

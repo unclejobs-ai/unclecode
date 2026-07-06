@@ -1170,8 +1170,10 @@ fn humanize_work_shell_reasoning_label(reasoning_label: &str) -> String {
 
 fn compact_work_shell_auth_label(auth_label: &str) -> String {
     match auth_label {
-        "OAuth file · API blocked" => "OAuth blocked".to_string(),
-        "OAuth env · API blocked" => "OAuth blocked".to_string(),
+        // OAuth token present but lacks model.request scope — API calls rejected.
+        // "needs API key" names the fix instead of the opaque "blocked".
+        "OAuth file · API blocked" => "OAuth · needs API key".to_string(),
+        "OAuth env · API blocked" => "OAuth · needs API key".to_string(),
         "Browser OAuth · file" => "Saved OAuth".to_string(),
         "Browser OAuth · env" => "OAuth env".to_string(),
         "API key · file" => "Saved API key".to_string(),
@@ -1567,7 +1569,7 @@ mod tests {
         );
         assert_eq!(
             format_work_shell_status_line("gpt-5.4", "default", "OAuth file · API blocked"),
-            "gpt-5.4 · Default mode · OAuth blocked · work context"
+            "gpt-5.4 · Default mode · OAuth · needs API key · work context"
         );
         assert_eq!(
             format_work_shell_usage_line(false, None, None, Some(1480), None),

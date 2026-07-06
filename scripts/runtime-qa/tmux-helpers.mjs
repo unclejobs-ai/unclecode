@@ -105,7 +105,7 @@ function isWide(codePoint) {
 }
 
 export function lowerBusyActivityRowPattern(detail) {
-  const spinnerPattern = "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]";
+  const spinnerPattern = "[◜◠◝◞◡◟]";
   if (detail === undefined) {
     return new RegExp(`\n\\s*${spinnerPattern}\\s+[^\n]+`, "u");
   }

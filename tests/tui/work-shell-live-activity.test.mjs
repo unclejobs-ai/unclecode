@@ -72,7 +72,7 @@ test("formatWorkShellLiveActivityLine shows nothing while idle", () => {
 test("formatWorkShellLiveActivityLine surfaces a live progress line while busy", () => {
   const fallback = formatWorkShellLiveActivityLine({ isBusy: true, spinnerFrame: 0 });
   assert.ok(typeof fallback === "string" && fallback.length > 0);
-  assert.match(fallback, /Working/);
+  assert.match(fallback, /Thinking through the next step/);
 
   const withStatus = formatWorkShellLiveActivityLine({
     isBusy: true,
@@ -81,7 +81,7 @@ test("formatWorkShellLiveActivityLine surfaces a live progress line while busy",
   });
   assert.ok(typeof withStatus === "string" && withStatus.length > 0);
   // a concrete status replaces the generic fallback
-  assert.doesNotMatch(withStatus, /^.\s+Working…$/);
+  assert.match(withStatus, /Reading context/);
 });
 
 test("busy WorkShellView avoids a duplicate lower activity row", async () => {
@@ -110,10 +110,11 @@ test("busy WorkShellView avoids a duplicate lower activity row", async () => {
   instance.unmount();
   instance.cleanup();
 
-  assert.match(output, /⠋|starting|thinking/);
+  assert.match(output, /◆ .* Busy/u);
+  assert.match(output, /\n\s*[◜◠◝◞◡◟]\s+Thinking through the next step/u);
   assert.doesNotMatch(
     output,
-    /\n\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+thinking/u,
+    /\n\s*[◜◠◝◞◡◟]\s+thinking/u,
     "busy screen should not add a second lower activity row when the status line already shows progress",
   );
 });
@@ -144,7 +145,8 @@ test("busy WorkShellView keeps the idle empty-state card hidden", async () => {
   instance.unmount();
   instance.cleanup();
 
-  assert.match(output, /⠋|starting|thinking/);
+  assert.match(output, /◆ .* Busy/u);
+  assert.match(output, /\n\s*[◜◠◝◞◡◟]\s+Preparing context/u);
   assert.doesNotMatch(output, /Ready for the next move/);
   assert.doesNotMatch(
     output,
@@ -184,7 +186,8 @@ test("WorkShellView render keeps the light-terminal status frame visible", async
   instance.cleanup();
 
   assert.match(output, /UncleCode · OpenAI/);
-  assert.match(output, /gpt-5\.4 · YOLO mode.*│.*Saved OAuth/);
+  // Status bar uses · separators (redesigned — was │)
+  assert.match(output, /gpt-5\.4 · YOLO mode.*·.*Saved OAuth/);
   assert.match(output, /Ready for the next move/);
   assert.match(output, /Work context ready/);
   assert.match(output, /Start\s+· Type the task in plain language/);
@@ -231,8 +234,10 @@ test("resolveReadableWorkShellTextColor keeps primary text explicit for light te
   assert.equal(resolveReadableWorkShellTextColor("#f8fafc"), "#0f172a");
   assert.equal(resolveReadableWorkShellTextColor("#e2e8f0"), "#0f172a");
   assert.equal(resolveReadableWorkShellTextColor("#0f172a"), "#0f172a");
-  assert.equal(resolveReadableWorkShellTextColor("#334155"), "#334155");
-  assert.equal(resolveReadableWorkShellTextColor("#475569"), "#475569");
+  // Rust entry-presentation body colors that are too dark on dark backgrounds
+  // are resolved to the palette's primary text color for readability.
+  assert.equal(resolveReadableWorkShellTextColor("#334155"), "#0f172a");
+  assert.equal(resolveReadableWorkShellTextColor("#475569"), "#0f172a");
   assert.equal(resolveReadableWorkShellTextColor("#94a3b8"), "#475569");
   assert.equal(resolveReadableWorkShellTextColor("#115e59"), "#115e59");
 });

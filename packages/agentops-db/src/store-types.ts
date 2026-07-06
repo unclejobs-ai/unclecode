@@ -1,4 +1,10 @@
 import type {
+  ContextSourceRecord,
+  SelectContextSourcesInput,
+  UpsertContextSourceInput,
+} from "@unclecode/contracts";
+
+import type {
   AgentOpsArtifactRecord,
   AgentOpsEventRecord,
   AgentOpsLaneRecord,
@@ -108,6 +114,13 @@ export interface AddAgentOpsVerificationInput {
   readonly finishedAt?: string;
 }
 
+export type SelectedContextSources = {
+  readonly selected: readonly ContextSourceRecord[];
+  readonly heldBack: readonly ContextSourceRecord[];
+  readonly totalTokens: number;
+  readonly budget: number;
+};
+
 export interface AgentOpsStore {
   readonly paths: AgentOpsPaths;
   addProject(input: AddAgentOpsProjectInput): AgentOpsProjectRecord;
@@ -121,5 +134,15 @@ export interface AgentOpsStore {
   addArtifact(input: AddAgentOpsArtifactInput): AgentOpsArtifactRecord;
   addEvent(input: AddAgentOpsEventInput): AgentOpsEventRecord;
   addVerification(input: AddAgentOpsVerificationInput): AgentOpsVerificationRecord;
+  // Context Runbook Protocol (CRP) — typed context source store.
+  upsertContextSource(input: UpsertContextSourceInput): ContextSourceRecord;
+  selectContextSources(input: SelectContextSourcesInput): SelectedContextSources;
+  countContextSourcesByCategory(projectId: string): ReadonlyMap<string, number>;
+  markContextSourceTurnSeen(ids: readonly string[], turnIndex: number): void;
+  pruneExpiredContextSources(now?: Date): number;
+  pinContextSource(id: string): void;
+  unpinContextSource(id: string): void;
+  forgetContextSource(id: string): void;
+  includeContextSource(id: string): void;
   close(): void;
 }

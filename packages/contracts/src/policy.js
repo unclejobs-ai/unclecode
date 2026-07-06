@@ -52,4 +52,29 @@ export const APPROVAL_INTENTS = {
         supportsMode: false,
     },
 };
+export const POLICY_DECISION_EFFECTS = ["allow", "prompt", "deny"];
+export const POLICY_DECISION_SOURCES = [
+    "base",
+    "mode",
+    "runtime",
+    "userOverride",
+    "sessionOverride",
+    "delegation",
+];
+export const EXECUTION_POLICY_DOMAINS = [
+    "filesystem",
+    "shell",
+    "network",
+    "secrets",
+    "inference",
+];
+export const EXECUTION_POLICY_CAPABILITIES = [
+    "filesystem.read",
+    "filesystem.write",
+    "shell.run",
+    "network.egress",
+    "secret.read",
+    "inference.request",
+];
+export const EXECUTION_POLICY_MODES = ["audit", "prompt", "enforce"];
 //# sourceMappingURL=policy.js.map

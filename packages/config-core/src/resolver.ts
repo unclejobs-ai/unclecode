@@ -18,6 +18,8 @@ import type {
 } from "@unclecode/contracts";
 
 import {
+  CONFIG_CORE_DEFAULT_CONTEXT_CRP,
+  CONFIG_CORE_DEFAULT_CONTEXT_CRP_BUDGET,
   buildModeProfileOverlay,
   CONFIG_CORE_DEFAULTS,
   CONFIG_SOURCE_ORDER,
@@ -69,6 +71,11 @@ type MutableBehavior = {
   explanationStyle?: ModeExplanationStyle;
 };
 
+type MutableContext = {
+  crp?: boolean;
+  crpBudget?: number;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -117,6 +124,13 @@ function asPromptSection(value: unknown): UncleCodePromptSection | null | undefi
     title: value.title,
     body: value.body,
   };
+}
+
+function asPositiveInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  return Number.isInteger(value) ? value : undefined;
 }
 
 function sanitizeConfigLayer(value: unknown): SanitizedConfigLayer {
@@ -197,6 +211,34 @@ function sanitizeConfigLayer(value: unknown): SanitizedConfigLayer {
     behavior = Object.keys(nextBehavior).length > 0 ? nextBehavior : undefined;
   }
 
+  const rawContext = isRecord(value.context) ? value.context : undefined;
+  if ("context" in value && value.context !== undefined && rawContext === undefined) {
+    issues.push("Invalid context configuration.");
+  }
+  let context: MutableContext | undefined;
+
+  if (rawContext) {
+    const nextContext: MutableContext = {};
+    const crp = rawContext.crp;
+    const crpBudget = asPositiveInteger(rawContext.crpBudget);
+
+    if ("crp" in rawContext && crp !== undefined && typeof crp !== "boolean") {
+      issues.push("Invalid context.crp value.");
+    }
+    if ("crpBudget" in rawContext && rawContext.crpBudget !== undefined && crpBudget === undefined) {
+      issues.push("Invalid context.crpBudget value.");
+    }
+
+    if (typeof crp === "boolean") {
+      nextContext.crp = crp;
+    }
+    if (crpBudget !== undefined) {
+      nextContext.crpBudget = crpBudget;
+    }
+
+    context = Object.keys(nextContext).length > 0 ? nextContext : undefined;
+  }
+
   const mode = asModeProfileId(value.mode);
   const model = typeof value.model === "string" && value.model.trim() !== "" ? value.model : undefined;
   const prompt = Object.keys(promptSections).length > 0 ? { sections: promptSections } : undefined;
@@ -213,6 +255,7 @@ function sanitizeConfigLayer(value: unknown): SanitizedConfigLayer {
       ...(mode ? { mode } : {}),
       ...(model ? { model } : {}),
       ...(behavior ? { behavior } : {}),
+      ...(context ? { context } : {}),
       ...(prompt ? { prompt } : {}),
     } satisfies UncleCodeConfigLayer,
     issues,
@@ -237,6 +280,24 @@ function buildEnvironmentLayer(env: NodeJS.ProcessEnv | undefined): UncleCodeCon
     return {};
   }
 
+  // CRP env vars: UNCLECODE_CRP (0/false/off disables) and
+  // UNCLECODE_CRP_BUDGET (token budget). These fold into the config layer
+  // so the `unclecode` command picks them up naturally without requiring
+  // users to export env vars every session.
+  const crpRaw = env.UNCLECODE_CRP;
+  const crpBudgetRaw = env.UNCLECODE_CRP_BUDGET;
+  const crpContext: { crp?: boolean; crpBudget?: number } = {};
+  if (crpRaw !== undefined) {
+    const normalized = crpRaw.toLowerCase();
+    crpContext.crp = normalized !== "0" && normalized !== "false" && normalized !== "off";
+  }
+  if (crpBudgetRaw !== undefined) {
+    const parsed = Number.parseInt(crpBudgetRaw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      crpContext.crpBudget = parsed;
+    }
+  }
+
   return sanitizeConfigLayer({
     mode: env.UNCLECODE_MODE,
     model: env.UNCLECODE_MODEL,
@@ -246,6 +307,7 @@ function buildEnvironmentLayer(env: NodeJS.ProcessEnv | undefined): UncleCodeCon
       backgroundTasks: env.UNCLECODE_BACKGROUND_TASKS,
       explanationStyle: env.UNCLECODE_EXPLANATION_STYLE,
     },
+    ...(Object.keys(crpContext).length > 0 ? { context: crpContext } : {}),
   }).config;
 }
 
@@ -510,6 +572,16 @@ export function explainUncleCodeConfig(
         (config) => config.behavior?.explanationStyle,
         getModeProfile(activeMode).explanationStyle,
       ),
+      crp: explainSetting(
+        sources,
+        (config) => config.context?.crp,
+        CONFIG_CORE_DEFAULT_CONTEXT_CRP,
+      ),
+      crpBudget: explainSetting(
+        sources,
+        (config) => config.context?.crpBudget,
+        CONFIG_CORE_DEFAULT_CONTEXT_CRP_BUDGET,
+      ),
     },
     prompt: {
       sections: promptSections,
@@ -554,6 +626,12 @@ export function formatUncleCodeConfigExplanation(explanation: UncleCodeConfigExp
     `- explanationStyle = ${explanation.settings.explanationStyle.value}`,
     `  winner: ${explanation.settings.explanationStyle.winner.sourceLabel}`,
     `  sources: ${formatContributors(explanation.settings.explanationStyle.contributors)}`,
+    `- crp = ${String(explanation.settings.crp.value)}`,
+    `  winner: ${explanation.settings.crp.winner.sourceLabel}`,
+    `  sources: ${formatContributors(explanation.settings.crp.contributors)}`,
+    `- crpBudget = ${String(explanation.settings.crpBudget.value)}`,
+    `  winner: ${explanation.settings.crpBudget.winner.sourceLabel}`,
+    `  sources: ${formatContributors(explanation.settings.crpBudget.contributors)}`,
     "",
     "Prompt sections:",
     ...explanation.prompt.sections.flatMap((section) => [

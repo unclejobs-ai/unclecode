@@ -1,5 +1,6 @@
 import { Box, Text } from "ink";
 import React from "react";
+import type { ContextPacketView } from "@unclecode/contracts";
 import {
   resolveWorkShellSlashArgHint,
   runRustCommandSync,
@@ -177,12 +178,35 @@ const WORK_SHELL_LOW_CONTRAST_TEXT_COLORS = new Set([
   "#0d9488",
 ]);
 
+/**
+ * Composer text color — the high-contrast foreground from the active palette
+ * (W.text). Critical: the Composer renders typed input. Without an explicit
+ * color it inherits terminal default fg, which is near-black on dark themes
+ * and renders the typed text invisible. Always pass this to <Composer textColor>.
+ */
+export function getWorkShellComposerTextColor(): string {
+  return resolveReadableWorkShellTextColor(W.text) ?? W.text;
+}
+
+// Light-palette text colors from the Rust entry-presentation that are too
+// dark to read on a dark terminal. Any of these resolves to W.text (the
+// high-contrast palette foreground) so body text is always readable.
+const WORK_SHELL_RUST_LIGHT_BODY_COLORS = new Set([
+  "#334155",
+  "#475569",
+  "#1e293b",
+  "#0f172a",
+]);
+
 export function resolveReadableWorkShellTextColor(color: string | undefined): string | undefined {
   if (!color) {
     return undefined;
   }
   const normalized = color.toLowerCase();
-  if (WORK_SHELL_LEGACY_LIGHT_TEXT_COLORS.has(normalized)) {
+  if (
+    WORK_SHELL_LEGACY_LIGHT_TEXT_COLORS.has(normalized) ||
+    WORK_SHELL_RUST_LIGHT_BODY_COLORS.has(normalized)
+  ) {
     return W.text;
   }
   if (WORK_SHELL_LOW_CONTRAST_TEXT_COLORS.has(normalized)) {
@@ -284,7 +308,11 @@ export function getWorkShellPanelDisplayMode(input: {
   return resolveWorkShellPanelLayout(input).displayMode;
 }
 
-const WORK_SHELL_CONTEXT_OVERLAY_LINE_LIMIT = 12;
+// Context Inspector: the overlay now shows ALL sources — no line cap.
+// The previous 12-line limit silently hid content with no way to see it.
+// Scrolling (Sprint 1C) will handle tall lists. For now, removing the cap
+// ensures the user sees the full picture even without scroll.
+const WORK_SHELL_CONTEXT_OVERLAY_LINE_LIMIT = 999;
 
 export function formatWorkShellOverlayPanelLines(input: {
   readonly panelTitle: string;
@@ -307,7 +335,11 @@ export function shouldHideWorkShellOverlayForInput(input: {
   readonly panelTitle: string;
   readonly inputValue: string;
 }): boolean {
-  return input.panelTitle === "Context expanded" && input.inputValue.trim().length > 0;
+  // Context Inspector redesign: the overlay cohabits with the composer.
+  // Previously any keystroke hid the overlay — now only Esc or /context
+  // toggle closes it. See docs/design/context-inspector-redesign.md §F.
+  void input;
+  return false;
 }
 
 export function shouldSuppressWorkShellPassivePanel(input: {
@@ -426,7 +458,7 @@ export function resolveWorkShellComposerHint(input: {
   );
 }
 
-const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const WORK_SHELL_BUSY_SPINNER_FRAMES = ["◜", "◠", "◝", "◞", "◡", "◟"] as const;
 export const WORK_SHELL_SPINNER_INTERVAL_MS = 100;
 
 function pickBusySpinnerFrame(frame = 0): string {
@@ -626,38 +658,30 @@ function normalizeBusyDetail(value: string): string {
   return stripped;
 }
 
-// Activity type classification — drives per-tool icon + color so the user can
-// tell at a glance whether the agent is reading, planning, synthesizing, or
-// calling a model. Mirrors Claude Code's semantic tool-call banners.
-type WorkShellActivityKind =
-  | "thinking"
-  | "reading"
-  | "planning"
-  | "synthesizing"
-  | "reviewing"
-  | "model"
-  | "parallel";
-
-const ACTIVITY_META: Record<WorkShellActivityKind, { readonly icon: string; readonly color: string; readonly verb: string }> = {
-  thinking: { icon: "◐", color: W.spinner, verb: "Thinking" },
-  reading: { icon: "⊏", color: W.user, verb: "Reading" },
-  planning: { icon: "◈", color: W.user, verb: "Planning" },
-  synthesizing: { icon: "✦", color: W.assistant, verb: "Synthesizing" },
-  reviewing: { icon: "✓", color: W.success, verb: "Reviewing" },
-  model: { icon: "⚙", color: W.assistant, verb: "Model" },
-  parallel: { icon: "⬡", color: W.user, verb: "Parallel" },
-};
-
-function classifyWorkShellActivity(busyStatus: string): WorkShellActivityKind {
-  const detail = normalizeBusyDetail(busyStatus);
-  const lower = detail.toLowerCase();
-  if (lower.includes("planning")) return "planning";
-  if (lower.includes("synthesiz")) return "synthesizing";
-  if (lower.includes("reviewing")) return "reviewing";
-  if (lower.includes("reading")) return "reading";
-  if (lower.startsWith("model")) return "model";
-  if (lower.includes("parallel")) return "parallel";
-  return "thinking";
+function resolveWorkShellBusyActivityPhrase(detail: string): string {
+  const normalized = normalizeBusyDetail(detail);
+  if (normalized.length === 0 || normalized === "Thinking") {
+    return "Thinking through the next step";
+  }
+  if (normalized.toLowerCase().startsWith("preparing context")) {
+    return "Preparing context";
+  }
+  if (normalized === "Planning parallel work") {
+    return "Planning work";
+  }
+  if (normalized === "Synthesizing answer") {
+    return "Composing answer";
+  }
+  if (normalized === "Reviewing results") {
+    return "Reviewing results";
+  }
+  if (normalized === "Reading files" || normalized.toLowerCase().startsWith("reading ")) {
+    return "Reading context";
+  }
+  if (normalized === "Parallel workers") {
+    return "Coordinating workers";
+  }
+  return normalized;
 }
 
 export function parseWorkShellPanelFactLine(line: string): { readonly label: string; readonly value: string } | undefined {
@@ -824,17 +848,26 @@ const CONTEXT_SOURCE_META: ReadonlyArray<readonly [RegExp, string, string, strin
   [/^live/i, "→", W.spinner, "live steps"],
 ];
 
-function renderRunbookLine(line: string, index: number): React.ReactNode {
+function renderRunbookLine(
+  line: string,
+  index: number,
+  cursor?: { readonly cursorIndex: number },
+): React.ReactNode {
   const trimmed = line.trim();
   // Compact packet summary
   if (/^Sources · /i.test(trimmed)) {
     const tokenMatch = trimmed.match(/~(\d+)\s*tokens/i);
     const tokenCount = tokenMatch && tokenMatch[1] ? Number.parseInt(tokenMatch[1], 10) : 0;
     const tokenLabel = tokenMatch ? tokenMatch[0] : "";
-    // Token budget meter: each cell ≈ 25k tokens against a 200k context window.
-    // Shown as a labeled bar so it reads as "context budget used", not noise.
+    // Token budget meter: each cell ≈ budgetWindow/8 tokens.
+    // The window adapts to UNCLECODE_CONTEXT_WINDOW env var (default 200k)
+    // so the meter is accurate for 128k, 200k, or 1M context models.
     const budgetCells = 8;
-    const budgetWindow = 200_000;
+    const envWindow = Number.parseInt(process.env.UNCLECODE_CONTEXT_WINDOW ?? "", 10);
+    const budgetWindow = Number.isFinite(envWindow) && envWindow > 0 ? envWindow : 200_000;
+    const windowLabel = budgetWindow >= 1_000_000
+      ? `${(budgetWindow / 1_000_000).toFixed(1)}M`
+      : `${Math.round(budgetWindow / 1000)}k`;
     const filled = Math.min(budgetCells, Math.max(0, Math.round((tokenCount / budgetWindow) * budgetCells)));
     const meterColor = filled >= 7 ? W.warning : filled >= 5 ? W.user : W.success;
     const meter = `${"█".repeat(filled)}${"░".repeat(Math.max(0, budgetCells - filled))}`;
@@ -851,30 +884,34 @@ function renderRunbookLine(line: string, index: number): React.ReactNode {
             <Text color={meterColor} bold>{meter}</Text>
             <Text color={W.textMuted}>{" · "}</Text>
             <Text color={W.text} bold>{tokenLabel}</Text>
-            <Text color={W.textDim}>{" of 200k window"}</Text>
+            <Text color={W.textDim}>{` of ${windowLabel} window`}</Text>
           </Text>
         ) : null}
       </Box>
     );
   }
-  // Section headers — Included vs Held
+  // Section headers — Included vs Held.
+  // A thin colored rule under the header gives visual containment so
+  // sections don't blur together in a long list.
   if (/^Included in next answer/i.test(trimmed)) {
     return (
-      <Box key={`rb-${index}-${line}`} marginTop={1}>
+      <Box key={`rb-${index}-${line}`} marginTop={1} flexDirection="column">
         <Text>
           <Text color={W.success} bold>{"↓ "}</Text>
           <Text color={W.success} bold>{trimmed}</Text>
         </Text>
+        <Text color={W.success}>{"─".repeat(38)}</Text>
       </Box>
     );
   }
   if (/^Held back locally/i.test(trimmed)) {
     return (
-      <Box key={`rb-${index}-${line}`} marginTop={1}>
+      <Box key={`rb-${index}-${line}`} marginTop={1} flexDirection="column">
         <Text>
           <Text color={W.borderStrong} bold>{"⊘ "}</Text>
           <Text color={W.textMuted} bold>{trimmed}</Text>
         </Text>
+        <Text color={W.borderSoft}>{"─".repeat(38)}</Text>
       </Box>
     );
   }
@@ -911,14 +948,17 @@ function renderRunbookLine(line: string, index: number): React.ReactNode {
     const detail = rawDetail
       .replace(/\.omo\/[^\s)]+/g, "session loop trail")
       .replace(/\.omo\b/g, "session storage");
+    // Context Inspector cursor: highlight the selected source row.
+    const isCursorRow = cursor !== undefined && cursor.cursorIndex === index;
+    const cursorBg = isCursorRow ? { backgroundColor: W.user } : {};
     return (
-      <Text key={`rb-${index}-${line}`}>
-        <Text color={iconColor} bold>{`  ${icon} `}</Text>
-        <Text color={W.user} bold>{`${displayCategory} `}</Text>
-        <Text color={W.borderSoft}>{"· "}</Text>
-        <Text color={W.text} bold>{`${count} `}</Text>
-        <Text color={W.borderSoft}>{"· "}</Text>
-        <Text color={W.textMuted}>{detail}</Text>
+      <Text key={`rb-${index}-${line}`} {...cursorBg}>
+        <Text color={isCursorRow ? W.borderStrong : iconColor} bold>{`${isCursorRow ? "▶" : " "} ${icon} `}</Text>
+        <Text color={isCursorRow ? W.borderStrong : W.user} bold>{`${displayCategory} `}</Text>
+        <Text color={isCursorRow ? W.borderStrong : W.borderSoft}>{"· "}</Text>
+        <Text color={isCursorRow ? W.borderStrong : W.text} bold>{`${count} `}</Text>
+        <Text color={isCursorRow ? W.borderStrong : W.borderSoft}>{"· "}</Text>
+        <Text color={isCursorRow ? W.borderStrong : W.textMuted}>{detail}</Text>
       </Text>
     );
   }
@@ -1185,6 +1225,57 @@ function resolveWorkShellComposerDockLayout(input: {
   };
 }
 
+// Estimate how many terminal lines a markdown text will occupy after
+// rendering. This is used to size the assistant rail (┃) so it spans
+// the full height of the reply. The estimate accounts for:
+// - explicit newlines (paragraph/heading/list breaks)
+// - wrapping within the content width
+// - extra lines from tables (border rows), code blocks, blockquotes
+// It's intentionally conservative — overestimating by 1-2 lines is fine
+// (the rail just extends slightly past the content), underestimating is
+// worse (rail stops short).
+function estimateMarkdownHeight(text: string, width: number): number {
+  const rawLines = text.split("\n");
+  let total = 0;
+  let inCodeBlock = false;
+  // Count table rows — each may wrap to multiple visual lines depending
+  // on column width constraints we can't predict without parsing.
+  let tableRowCount = 0;
+  for (const line of rawLines) {
+    if (line.startsWith("```")) {
+      inCodeBlock = !inCodeBlock;
+      total += 1;
+      continue;
+    }
+    if (inCodeBlock) {
+      total += 1;
+      continue;
+    }
+    const stripped = line.trim();
+    if (/^\|?[\s-:|]+\|[\s-:|]*$/.test(stripped) && stripped.includes("-")) {
+      continue;
+    }
+    if (stripped.startsWith("|") && stripped.endsWith("|")) {
+      // Table data/header row — count it, then estimate visual lines.
+      // Each cell may wrap. Be generous: assume 2 visual lines per row.
+      tableRowCount += 1;
+      total += 2;
+      continue;
+    }
+    if (stripped === "") {
+      total += 1;
+      continue;
+    }
+    const wrapped = wrapDisplayTextFast(stripped, Math.max(20, width));
+    total += Math.max(1, wrapped.length);
+  }
+  // Table borders: top + header-sep + bottom = 3 extra lines
+  if (tableRowCount > 0) {
+    total += 3;
+  }
+  return Math.max(1, total + 1);
+}
+
 function renderWorkShellEntryBlock(input: {
   readonly entry: WorkShellEntry;
   readonly index: number;
@@ -1219,41 +1310,36 @@ function renderWorkShellEntryBlock(input: {
   }
 
   if (input.entry.role === "assistant") {
-    // Streaming deltas: plain fast wrap (no markdown AST — too jumpy mid-stream).
-    // Final assistant reply: render markdown structure (headings, code, lists,
-    // tables, bold) so the user sees rich formatting instead of flat text.
+    // Render markdown for both streaming and final states. Streaming shows
+    // partial markdown structure (a table grows row by row, a heading appears
+    // as soon as # is typed) which reads better than raw syntax mid-stream.
     const isStreamingEntry = input.entry.text.endsWith(STREAMING_CURSOR);
+    // Strip the streaming cursor for rendering — it's a paint signal, not
+    // content. The cursor visual is handled by the activity row below.
+    const renderText = isStreamingEntry
+      ? bodyText.replace(STREAMING_CURSOR, "")
+      : bodyText;
     const contentWidth = Math.max(20, input.width - 4);
     if (shouldUseCompactAssistantSurface({ text: input.entry.text, width: input.width })) {
-      if (isStreamingEntry) {
-        const streamLines = wrapDisplayTextFast(bodyText, contentWidth);
-        return (
-          <Box
-            key={`${input.entry.role}-${input.index}`}
-            marginBottom={1}
-            flexDirection="column"
-          >
-            {streamLines.map((line, lineIndex) => (
-              <Text key={`assistant-stream-${String(input.index)}-${String(lineIndex)}`}>
-                <Text color={W.assistant} bold>{lineIndex === 0 ? "┃ " : "  "}</Text>
-                <WorkShellReadableText color={presentation.bodyColor}>{line}</WorkShellReadableText>
-              </Text>
-            ))}
-          </Box>
-        );
-      }
-      // Final reply — structured markdown rendering.
+      // A thin colored left rail runs the full height of the reply so the
+      // assistant surface reads as one block, distinct from the user rail
+      // (│) and from plain system text. Content is indented to clear the rail.
+      // We estimate the rendered height so the rail spans every content line.
+      const estimatedHeight = estimateMarkdownHeight(renderText, contentWidth);
+      const railLines = Math.max(1, estimatedHeight);
       return (
         <Box
           key={`${input.entry.role}-${input.index}`}
           marginBottom={1}
-          flexDirection="column"
+          flexDirection="row"
         >
-          <Text>
-            <Text color={W.assistant} bold>{"┃"}</Text>
-          </Text>
-          <Box paddingLeft={2} flexDirection="column">
-            {renderMarkdown({ text: bodyText, width: contentWidth, theme: mdTheme })}
+          <Box flexDirection="column" marginRight={1}>
+            {Array.from({ length: railLines }, (_, i) => (
+              <Text key={`rail-${i}`} color={W.assistant} bold>{"┃"}</Text>
+            ))}
+          </Box>
+          <Box flexDirection="column" flexGrow={1}>
+            {renderMarkdown({ text: renderText, width: contentWidth, theme: mdTheme })}
           </Box>
         </Box>
       );
@@ -1276,46 +1362,50 @@ function renderWorkShellEntryBlock(input: {
 
   if (input.entry.role === "tool") {
     const lines = formatWorkShellToolEntryLines(bodyText, input.width);
+    const toolHeight = Math.max(1, lines.length + 1);
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
         marginBottom={1}
-        paddingLeft={2}
-        flexDirection="column"
+        flexDirection="row"
       >
-        <Text bold color={W.toolAccent}>{presentation.badge} {presentation.label}</Text>
-        <Box marginTop={lines.length > 0 ? 1 : 0} paddingLeft={1} flexDirection="column">
-          {lines.map((line, lineIndex) => (
-            <Text key={`tool-${String(input.index)}-${String(lineIndex)}`} {...readableTextColorProps(W.text)}>
-              {line}
-            </Text>
+        <Box flexDirection="column" marginRight={1}>
+          {Array.from({ length: toolHeight }, (_, i) => (
+            <Text key={`tool-rail-${i}`} color={W.toolAccent}>{"▏"}</Text>
           ))}
+        </Box>
+        <Box flexDirection="column" flexGrow={1}>
+          <Text bold color={W.toolAccent}>{presentation.badge} {presentation.label}</Text>
+          <Box marginTop={lines.length > 0 ? 0 : 0} flexDirection="column">
+            {lines.map((line, lineIndex) => (
+              <Text key={`tool-${String(input.index)}-${String(lineIndex)}`} color={W.textMuted}>
+                {line}
+              </Text>
+            ))}
+          </Box>
         </Box>
       </Box>
     );
   }
 
   if (input.entry.role === "system") {
-    // System notices are infrastructure, not conversation. Render as a
-    // centered, dimmed meta line with no left rail — visually unmistakable as
-    // "not from user or assistant". A leading/trailing hairline bookends it so
-    // it reads as a status banner, not a chat turn.
+    // System notices are infrastructure, not conversation. Render as a compact
+    // left-aligned meta line with a status glyph — distinct from the user (│)
+    // and assistant (┃) rails by using no rail, only a glyph + dimmed text.
     const isInProgress = bodyText.endsWith("…") || bodyText.endsWith("...");
     const statusIcon = isInProgress ? "◌" : "✓";
     const statusColor = isInProgress ? W.warning : W.success;
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
-        marginTop={1}
-        marginBottom={1}
+        marginTop={0}
+        marginBottom={0}
+        paddingLeft={2}
         flexDirection="column"
-        alignItems="center"
       >
         <Text>
-          <Text {...readableTextColorProps(W.borderSoft)}>{"⋯ "}</Text>
           <Text color={statusColor}>{`${statusIcon} `}</Text>
-          <Text {...readableTextColorProps(W.textDim)} italic>{bodyText}</Text>
-          <Text {...readableTextColorProps(W.borderSoft)}>{" ⋯"}</Text>
+          <Text color={W.textMuted} italic>{bodyText}</Text>
         </Text>
       </Box>
     );
@@ -1340,19 +1430,19 @@ function renderWorkShellEmptyConversation(): React.ReactNode {
     ["Recover", "Use Ctrl+O for saved sessions."],
   ] as const;
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" paddingLeft={1}>
       <Text>
-        <Text color={W.assistant}>◇ </Text>
-        <Text bold {...readableTextColorProps(W.text)}>Ready for the next move</Text>
+        <Text color={W.assistant} bold>{"◢ "}</Text>
+        <Text color={W.text} bold>{"Ready for the next move"}</Text>
       </Text>
       <Box marginTop={1} paddingLeft={2} flexDirection="column">
-        <Text {...readableTextColorProps(W.textMuted)}>{getWorkShellEmptyConversationHint()}</Text>
+        <Text color={W.textMuted}>{getWorkShellEmptyConversationHint()}</Text>
         <Box marginTop={1} flexDirection="column" gap={0}>
           {actions.map(([label, detail], index) => (
             <Text key={label}>
-              <Text color={W.borderSoft}>{index === actions.length - 1 ? "└─ " : "├─ "}</Text>
-              <Text color={W.user} bold>{label}</Text>
-              <Text {...readableTextColorProps(W.textMuted)}> · {detail}</Text>
+              <Text color={index === actions.length - 1 ? W.assistant : W.borderSoft}>{index === actions.length - 1 ? "─ " : "─ "}</Text>
+              <Text color={W.user} bold>{` ${label} `}</Text>
+              <Text color={W.textDim}>{`· ${detail}`}</Text>
             </Text>
           ))}
         </Box>
@@ -1435,22 +1525,22 @@ const WorkShellActivityIndicator = React.memo(function WorkShellActivityIndicato
   readonly nowMs: number;
 }) {
   const spinner = pickBusySpinnerFrame(props.frame);
-  const rawDetail = normalizeBusyDetail(props.busyStatus ?? "");
-  const label = rawDetail.length > 0 ? rawDetail : "Thinking";
+  const label = resolveWorkShellBusyActivityPhrase(props.busyStatus ?? "");
   const elapsedMs = props.currentTurnStartedAt !== undefined
     ? Math.max(0, props.nowMs - props.currentTurnStartedAt)
     : undefined;
   const elapsedLabel = elapsedMs !== undefined ? ` · ${formatCompactDuration(elapsedMs)}` : "";
-  // Per-activity-type icon + color so the user sees what the agent is doing,
-  // not just a generic spinner. Falls back to the braille spinner animation.
-  const activityKind = classifyWorkShellActivity(props.busyStatus ?? "");
-  const meta = ACTIVITY_META[activityKind];
+  const activityColor = resolveWorkShellBusyActivityColor({
+    mode: "default",
+    isBusy: true,
+    ...(props.busyStatus ? { busyStatus: props.busyStatus } : {}),
+  });
   return (
     <Box marginTop={1} paddingLeft={1}>
       <Text>
-        <Text color={meta.color} bold>{meta.icon} </Text>
-        <Text {...readableTextColorProps(W.borderSoft)}>{spinner} </Text>
-        <Text {...readableTextColorProps(W.borderStrong)} bold>{label}{elapsedLabel}</Text>
+        <Text color={activityColor} bold>{spinner} </Text>
+        <Text color={W.text} bold>{label}</Text>
+        <Text color={W.textDim}>{elapsedLabel}</Text>
       </Text>
     </Box>
   );
@@ -1464,8 +1554,7 @@ export function formatWorkShellLiveActivityLine(input: {
   if (!input.isBusy) {
     return null;
   }
-  const detail = normalizeBusyDetail(input.busyStatus ?? "");
-  return `${pickBusySpinnerFrame(input.spinnerFrame ?? 0)} ${detail.length > 0 ? detail : "Working…"}`;
+  return `${pickBusySpinnerFrame(input.spinnerFrame ?? 0)} ${resolveWorkShellBusyActivityPhrase(input.busyStatus ?? "")}`;
 }
 
 const WorkShellPanelBlock = React.memo(function WorkShellPanelBlock(props: {
@@ -1537,18 +1626,19 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
   const providerTitle = formatWorkShellProviderTitle(props.provider);
   const headerHint = props.headerHint ?? "work context · Ctrl+O sessions · / commands";
   const width = Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 2);
-  const leftWidth = getDisplayWidth(providerTitle);
+  const headerPrefix = "◢ ";
+  const leftWidth = getDisplayWidth(headerPrefix) + getDisplayWidth(providerTitle);
   const rightWidth = getDisplayWidth(headerHint);
   const minGap = 2;
-  const dividerWidth = Math.max(24, Math.min(48, (props.terminalColumns ?? process.stdout.columns ?? 96) - 8));
 
   if (leftWidth + minGap + rightWidth > width && leftWidth + minGap + 12 > width) {
     return (
       <Box flexDirection="column">
-        <Text bold {...readableTextColorProps(W.borderStrong)}>
-          {truncateForDisplayWidth(providerTitle, width)}
+        <Text>
+          <Text color={W.assistant} bold>{headerPrefix}</Text>
+          <Text color={W.text} bold>{truncateForDisplayWidth(providerTitle, width - getDisplayWidth(headerPrefix))}</Text>
         </Text>
-        {renderChromeRule({ width: dividerWidth })}
+        {renderChromeRule({ width: width - 2, color: W.borderSoft })}
       </Box>
     );
   }
@@ -1563,11 +1653,12 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
   return (
     <Box flexDirection="column">
       <Text>
-        <Text bold {...readableTextColorProps(W.borderStrong)}>{providerTitle}</Text>
+        <Text color={W.assistant} bold>{headerPrefix}</Text>
+        <Text color={W.text} bold>{providerTitle}</Text>
         <Text>{hintGap}</Text>
-        <Text {...readableTextColorProps(W.textDim)}>{hintText}</Text>
+        <Text color={W.textDim}>{hintText}</Text>
       </Text>
-      {renderChromeRule({ width: dividerWidth })}
+      {renderChromeRule({ width: width - 2, color: W.borderSoft })}
     </Box>
   );
 });
@@ -1583,67 +1674,37 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   readonly lastTurnDurationMs?: number;
   readonly terminalColumns?: number;
 }) {
-  const [nowMs, setNowMs] = React.useState(() => Date.now());
-  const [spinnerFrame, setSpinnerFrame] = React.useState(0);
   const sessionGroup = formatWorkShellSessionFactsGroup({
     model: props.model,
     mode: props.mode,
   });
   const authGroup = formatWorkShellAuthFactsGroup(props.authLabel);
-  const activityLine = formatWorkShellUsageLine({
-    isBusy: props.isBusy,
-    ...(props.busyStatus ? { busyStatus: props.busyStatus } : {}),
-    ...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {}),
-    ...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {}),
-    nowMs,
-    spinnerFrame,
-  });
-  const activityColor = resolveWorkShellBusyActivityColor({
-    mode: props.mode,
-    isBusy: props.isBusy,
-    ...(props.busyStatus ? { busyStatus: props.busyStatus } : {}),
-  });
-
-  React.useEffect(() => {
-    if (!props.isBusy) {
-      setNowMs(Date.now());
-      setSpinnerFrame(0);
-      return;
-    }
-
-    setNowMs(Date.now());
-    setSpinnerFrame((frame) => frame + 1);
-    const interval = setInterval(() => {
-      setNowMs(Date.now());
-      setSpinnerFrame((frame) => frame + 1);
-    }, WORK_SHELL_SPINNER_INTERVAL_MS);
-
-    return () => {
-      clearInterval(interval);
-    };
-  }, [props.isBusy, props.currentTurnStartedAt]);
 
   const isAuthWarning = /blocked|unavailable|not signed|needs refresh|lacks/i.test(props.authLabel);
   const authColor = isAuthWarning ? W.warning : W.textMuted;
-  const elapsedMs = props.isBusy && props.currentTurnStartedAt !== undefined
-    ? Math.max(0, nowMs - props.currentTurnStartedAt)
-    : undefined;
-  const elapsedLabel = elapsedMs !== undefined ? ` · ${formatCompactDuration(elapsedMs)}` : "";
-  const busyDetail = normalizeBusyDetail(props.busyStatus ?? "");
-  const busyLabel = busyDetail.length > 0 ? busyDetail : "Thinking";
-  const activityDisplay = props.isBusy ? `${busyLabel}${elapsedLabel}` : activityLine;
-  const statusSpinner = props.isBusy ? pickBusySpinnerFrame(spinnerFrame) : "◇";
+
+  // Status bar is an info strip, not a motion surface. The animated spinner
+  // lives in the conversation area (WorkShellActivityIndicator) so the user
+  // sees ONE spinner, not two competing ones. Here we use a static state mark.
+  const statusGlyph = props.isBusy ? "◆" : "◇";
+  const statusGlyphColor = props.isBusy ? W.spinner : W.user;
+
+  const lastReplyTiming = props.lastTurnDurationMs === undefined
+    ? "no reply yet"
+    : `last ${formatCompactDuration(props.lastTurnDurationMs)}`;
+  const idleDisplay = `Ready · ${lastReplyTiming}`;
+
   return (
     <Box marginTop={1} paddingLeft={1}>
       <Text>
-        <Text color={props.isBusy ? W.spinner : W.user} bold>{statusSpinner} </Text>
-        <Text bold {...readableTextColorProps(W.borderStrong)}>{sessionGroup}</Text>
-        <Text {...readableTextColorProps(W.borderSoft)}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
+        <Text color={statusGlyphColor} bold>{`${statusGlyph} `}</Text>
+        <Text color={W.text} bold>{sessionGroup}</Text>
+        <Text color={W.borderSoft}>{" · "}</Text>
         <Text color={authColor} bold={isAuthWarning}>{authGroup}</Text>
-        <Text {...readableTextColorProps(W.borderSoft)}>{WORK_SHELL_STATUS_GROUP_SEPARATOR}</Text>
+        <Text color={W.borderSoft}>{" · "}</Text>
         <Text {...(props.isBusy
-          ? { color: activityColor, bold: true }
-          : readableTextColorProps(W.textMuted))}>{activityDisplay}</Text>
+          ? { color: W.spinner, bold: true }
+          : { color: W.textMuted })}>{props.isBusy ? "Busy" : idleDisplay}</Text>
       </Text>
     </Box>
   );
@@ -1742,6 +1803,11 @@ export function WorkShellView(props: {
   readonly isBusy: boolean;
   readonly busyStatus?: string;
   readonly activePanel: WorkShellPanel;
+  // Context Inspector (Sprint 2): cursor index into the navigable source list
+  // (-1 = none) and the source id whose full content is expanded.
+  readonly contextInspectorCursor?: number;
+  readonly contextInspectorExpanded?: string | null;
+  readonly contextPacket?: ContextPacketView;
   readonly currentTurnStartedAt?: number;
   readonly lastTurnDurationMs?: number;
   readonly attachmentLines?: readonly string[];
@@ -1882,7 +1948,9 @@ export function WorkShellView(props: {
             </Text>
           </Box>
           <Box marginTop={1} flexDirection="column">
-            {overlayLines.map((line, index) => renderRunbookLine(line, index))}
+            {overlayLines.map((line, index) => renderRunbookLine(line, index, {
+              cursorIndex: props.contextInspectorCursor ?? -1,
+            }))}
           </Box>
         </Box>
       ) : panelDisplayMode === "bottom" && !shouldSuppressPassivePanel ? (
