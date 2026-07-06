@@ -35,4 +35,3 @@ export type GuardianExecutableCheckResult = {
   readonly checks: readonly GuardianExecutableCheck[];
   readonly summary: string;
 };
-

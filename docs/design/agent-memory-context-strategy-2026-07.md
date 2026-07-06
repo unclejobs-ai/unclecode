@@ -1,7 +1,7 @@
 # Agent Memory & Context Strategy (2026-07)
 
-> **Status:** research-backed master plan (Planner, 2026-07-05)  
-> **Thesis:** UncleCode wins as a **context-native coding agent** — not another chat shell.  
+> **Status:** research-backed master plan (Planner, 2026-07-05)
+> **Thesis:** UncleCode wins as a **context-native coding agent** — not another chat shell.
 > **Constraint:** theory informs architecture; Executor ships one vertical slice at a time with `qa:health` gates.
 
 ---
@@ -12,8 +12,8 @@ T11–T15 shipped bootstrap, modes, TUI conversation design, and the Work board.
 
 Operator pain today (Korean input, noisy transcript) is real but **symptomatic**. Root product leverage:
 
-1. **Next-call packet inspectability** — what enters the model, why, and what was withheld.  
-2. **Write–manage–read memory loop** — not append-only chat history.  
+1. **Next-call packet inspectability** — what enters the model, why, and what was withheld.
+2. **Write–manage–read memory loop** — not append-only chat history.
 3. **Long-horizon stability** — compaction, contradiction handling, selective forgetting.
 
 ---
@@ -87,9 +87,9 @@ Perceive → Write? → Manage (index/update/forget) → Read? → Act
 
 Decompose into four modules — **no monolithic “memory score”**:
 
-1. **Representation & storage** — `.unclecode/context/bootstrap.json`, session-store scopes  
-2. **Extraction** — guidance walk, skills catalog, cursor rules, OMO summaries  
-3. **Retrieval & routing** — prefetch, classify-intent, pinned skills  
+1. **Representation & storage** — `.unclecode/context/bootstrap.json`, session-store scopes
+2. **Extraction** — guidance walk, skills catalog, cursor rules, OMO summaries
+3. **Retrieval & routing** — prefetch, classify-intent, pinned skills
 4. **Maintenance** — `/reload`, bootstrap regen, **localized updates** (not full re-ingest every turn)
 
 Finding: **localized maintenance beats global reorganization** on cost-performance. Prefer patch bootstrap manifest + invalidate cache over full workspace re-walk each turn.
@@ -108,7 +108,7 @@ Finding: **localized maintenance beats global reorganization** on cost-performan
 
 **Context rot** (ARC): passive summarization preserves early errors. UncleCode mitigation:
 
-- Sanitize orchestration leaks (shipped T12–T13).  
+- Sanitize orchestration leaks (shipped T12–T13).
 - Next: **milestone compaction** after complex turns — synthesis summary replaces executor trace in *packet*, not chat.
 
 ---
@@ -216,8 +216,8 @@ flowchart TB
 
 Research does not replace terminal IME work. Bundle under **T16** (operator ergonomics):
 
-- Composer Hangul: mid-cursor jamo + prefix-anchored IME merge (`composer.tsx`).  
-- KO-first hints: `/context`, `/queue`, busy/queue copy.  
+- Composer Hangul: mid-cursor jamo + prefix-anchored IME merge (`composer.tsx`).
+- KO-first hints: `/context`, `/queue`, busy/queue copy.
 - Display-width: Rust + TS single owner audit (remaining `Ink truncate-end` edges).
 
 **Rule:** Korean copy explains **context actions** (“맥락 확인”, “다음 호출에 포함”) not generic IDE chrome.
@@ -246,15 +246,15 @@ Research does not replace terminal IME work. Bundle under **T16** (operator ergo
 
 ## References
 
-1. ACL 2026 Findings — *From Storage to Experience: A Survey on the Evolution of LLM Agent Memory*  
-2. arXiv:2603.07670 — *Memory for Autonomous LLM Agents: Mechanisms, Evaluation, and Emerging Frontiers*  
-3. arXiv:2505.00675 — *Rethinking Memory in LLM based Agents*  
-4. arXiv:2606.24775 — *Are We Ready For An Agent-Native Memory System?*  
-5. ACL 2026 Findings — *ARC: Active and Reflection-driven Context Management*  
-6. ACL 2026 Findings — *Context as a Tool (CAT)*  
-7. ACL 2026 Long — *Agentic Memory (AgeMem)*  
-8. Anthropic — *Effective context engineering for AI agents* (2025)  
-9. LangChain — *Context engineering for agents* (write/select/compress/isolate)  
+1. ACL 2026 Findings — *From Storage to Experience: A Survey on the Evolution of LLM Agent Memory*
+2. arXiv:2603.07670 — *Memory for Autonomous LLM Agents: Mechanisms, Evaluation, and Emerging Frontiers*
+3. arXiv:2505.00675 — *Rethinking Memory in LLM based Agents*
+4. arXiv:2606.24775 — *Are We Ready For An Agent-Native Memory System?*
+5. ACL 2026 Findings — *ARC: Active and Reflection-driven Context Management*
+6. ACL 2026 Findings — *Context as a Tool (CAT)*
+7. ACL 2026 Long — *Agentic Memory (AgeMem)*
+8. Anthropic — *Effective context engineering for AI agents* (2025)
+9. LangChain — *Context engineering for agents* (write/select/compress/isolate)
 10. Mem0 — *State of AI Agent Memory 2026* (LoCoMo, LongMemEval, BEAM)
 
 **Internal:** [`persistent-context-architecture.md`](./persistent-context-architecture.md), [`context-bootstrap-pipeline.md`](./context-bootstrap-pipeline.md), [`unclecode-holistic-roadmap-2026-07.md`](./unclecode-holistic-roadmap-2026-07.md)
