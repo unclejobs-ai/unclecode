@@ -96,11 +96,48 @@ test("RuntimeProvider.clearTrace empties buffer", async () => {
   const provider = createRuntimeProvider();
   provider.pushTraceLine("a");
   provider.pushTraceLine("b");
+  await provider.sync({
+    store, projectId: "proj_test", cwd: "/repos/test", sessionId: "s1",
+  });
+  assert.equal(
+    store.selectContextSources({
+      projectId: "proj_test", tokenBudget: 10000, turnIndex: 1,
+    }).selected.length,
+    2,
+  );
   provider.clearTrace();
   const touched = await provider.sync({
     store, projectId: "proj_test", cwd: "/repos/test", sessionId: "s1",
   });
   assert.equal(touched.length, 0);
+  const result = store.selectContextSources({
+    projectId: "proj_test", tokenBudget: 10000, turnIndex: 2,
+  });
+  assert.equal(result.selected.some((item) => item.id.startsWith("runtime-trace-")), false);
+});
+
+test("RuntimeProvider removes stale rows when the trace buffer shrinks", async () => {
+  const store = makeStore();
+  const provider = createRuntimeProvider();
+  provider.pushTraceLine("first trace");
+  provider.pushTraceLine("second trace");
+  await provider.sync({
+    store, projectId: "proj_test", cwd: "/repos/test", sessionId: "s1",
+  });
+
+  provider.clearTrace();
+  provider.pushTraceLine("fresh trace");
+  const touched = await provider.sync({
+    store, projectId: "proj_test", cwd: "/repos/test", sessionId: "s1",
+  });
+
+  assert.deepEqual(touched, ["runtime-trace-1"]);
+  const result = store.selectContextSources({
+    projectId: "proj_test", tokenBudget: 10000, turnIndex: 2,
+  });
+  const runtimeRows = result.selected.filter((item) => item.id.startsWith("runtime-trace-"));
+  assert.equal(runtimeRows.length, 1);
+  assert.equal(runtimeRows[0].label, "fresh trace");
 });
 
 // ── MemoryProvider ───────────────────────────────────────────────────
@@ -278,6 +315,8 @@ test("contextSourceToPacketItem maps fields correctly", () => {
   assert.equal(item.reason, "test reason");
   assert.equal(item.preview, "Test content");
   assert.equal(item.tokenEstimate, 42);
+  assert.equal(item.salience, 0.8);
+  assert.equal(item.includedInModel, true);
 });
 
 test("selectContextPacketFromStore respects token budget", async () => {

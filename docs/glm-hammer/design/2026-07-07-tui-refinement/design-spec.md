@@ -27,14 +27,17 @@ See `references.md` for the full annotated list.
 The original invisible-input bug was structural (typed text had no explicit color → terminal-default fallback), not a value problem. The fix: **every readable token carries an explicit, contrast-verified hex.**
 
 - **`text.default #e6edf3`** (17.77:1 on `#000`) — from GitHub Primer. The highest-contrast near-white that avoids pure `#ffffff` glare. Primary foreground for all content including composer input.
-- **`text.muted #a6adc8`** (9.5:1) — from Catppuccin Mocha's subtext tier. Panel labels, meta lines. Comfortably above the 4.5:1 floor.
+- **`text.muted #a6adc8`** (9.43:1) — from Catppuccin Mocha's subtext tier. Panel labels, meta lines. Comfortably above the 4.5:1 floor. *(Coincidence, documented for future engineers: `text.muted` and `border.strong` share `#a6adc8`. Different group/intent — muted is foreground, strong is chrome. Do not "fix" one without the other.)*
 - **`text.dim #7d8590`** (5.63:1) — from GitHub Primer. Hints, footers, the quietest readable tier. At the 3:1 muted/large threshold; named `dim` so it's clear it's AA-large only.
 - **`surface.default #000000`** — true black, the OLED/common-dark assumption. The contrast baseline all text tokens are verified against.
-- **`accent.primary #7aa2f7`** (Tokyo Night blue, 7.2:1) — replaces the old user-blue `#60a5fa`. Cooler, slightly desaturated. Used for: user role, active selection, interactive accents.
+- **`surface.raised #0d1117`** — GitHub Primer canvas (Ref 1); panels/header bars that lift off the base.
+- **`surface.sunken #1a1b26`** — Tokyo Night base (Ref 2); composer well / inset regions.
+- **`text.inverse #0d1117`** — GitHub Primer canvas, for text on light/accent backgrounds (cursor row highlights, badges).
+- **`accent.primary #92abdf`** (desaturated from Tokyo Night blue `#7aa2f7`, 9.11:1 on `#000`) — replaces the old user-blue `#60a5fa`. H=220.8° kept (cool), saturation pulled from S=88.7% to S=55% per the harmony-critic finding that the most-used accent must not be the loudest value. Now sits under the warm secondary's chroma (S=63%), delivering the brief's "low-to-medium saturation / desaturated, not candy" stance. Used for: user role, active selection, interactive accents.
 - **`accent.secondary #d97757`** (Anthropic Crail, 6.73:1) — the warm identity hue. Used for: spinner, "busy" glyph, brand touchpoints. Replaces teal `#5eead4` which was too candy-bright.
 - **`role`** — derived: user=primary, assistant=text.default (assistant is the "voice," doesn't need a hue), tool=success-green, system=warning-amber. This collapses the old 4-way blue+teal+lime+amber shouting match: assistant now uses plain text color (instrument reads in default), and tool/system inherit semantic hues.
-- **`semantic`** — success `#9ece6a`, warning `#e0af68`, danger `#f7768e` (all from Tokyo Night's desaturated set). Lower saturation than the old `#86efac`/`#fcd34d`/`#fca5a5` — composed, not candy.
-- **`border`** — default/strong/soft form a 3-tier ramp (`#7d8590`/`#a6adc8`/`#484f66`). Soft `#484f66` is deliberately dim so rules recede (Claude Code / Aider style).
+- **`semantic`** — success `#9ece6a` (S=51%), warning `#e0af68` (S=66%), danger `#e28b9b` (desaturated from `#f7768e` to S=60%, 8.40:1). All from Tokyo Night's set, with danger pulled down from S=89% so it no longer reads as the hottest token next to the primary. Lower saturation than the old `#86efac`/`#fcd34d`/`#fca5a5` — composed, not candy.
+- **`border`** — default/strong/soft form a 3-tier ramp (`#30363d`/`#a6adc8`/`#21262d`). `#30363d` and `#21262d` are GitHub Primer's border/border-subtle values (color-prospector Ref 1); soft `#21262d` is deliberately dim so rules recede. Borders are non-text and intentionally sit below 3:1 contrast — that's correct for chrome, not a failure.
 
 ### Typography
 Size is fixed by the terminal cell — "scale" is re-expressed as **weight × case × tone** (the one brief conflict, flagged by the type-prospector: numeric font-size can't be honored in a terminal).

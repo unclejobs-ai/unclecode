@@ -33,6 +33,7 @@ import {
   selectContextSources as selectContextSourcesImpl,
 } from "./store-context-reads.js";
 import {
+  deleteContextSourcesByIdPrefix,
   forgetContextSource,
   includeContextSource,
   markContextSourceTurnSeen,
@@ -264,28 +265,36 @@ class SqliteAgentOpsStore implements AgentOpsStore {
     return countContextSourcesByCategoryImpl(this.db, projectId);
   }
 
-  markContextSourceTurnSeen(ids: readonly string[], turnIndex: number): void {
-    markContextSourceTurnSeen(this.db, ids, turnIndex);
+  markContextSourceTurnSeen(projectId: string, ids: readonly string[], turnIndex: number): void {
+    markContextSourceTurnSeen(this.db, projectId, ids, turnIndex);
+  }
+
+  deleteContextSourcesByIdPrefix(input: {
+    readonly projectId: string;
+    readonly idPrefix: string;
+    readonly keepIds?: readonly string[];
+  }): number {
+    return deleteContextSourcesByIdPrefix(this.db, input);
   }
 
   pruneExpiredContextSources(now?: Date): number {
     return pruneExpiredContextSources(this.db, now);
   }
 
-  pinContextSource(id: string): void {
-    pinContextSource(this.db, id);
+  pinContextSource(projectId: string, id: string): void {
+    pinContextSource(this.db, projectId, id);
   }
 
-  unpinContextSource(id: string): void {
-    unpinContextSource(this.db, id);
+  unpinContextSource(projectId: string, id: string): void {
+    unpinContextSource(this.db, projectId, id);
   }
 
-  forgetContextSource(id: string): void {
-    forgetContextSource(this.db, id);
+  forgetContextSource(projectId: string, id: string): void {
+    forgetContextSource(this.db, projectId, id);
   }
 
-  includeContextSource(id: string): void {
-    includeContextSource(this.db, id);
+  includeContextSource(projectId: string, id: string): void {
+    includeContextSource(this.db, projectId, id);
   }
 
   close(): void {

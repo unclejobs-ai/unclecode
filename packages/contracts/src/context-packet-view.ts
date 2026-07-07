@@ -18,6 +18,8 @@ export type ContextPacketViewItem = {
   readonly preview?: string | undefined;
   readonly tokenEstimate?: number | undefined;
   readonly sourceCount?: number | undefined;
+  readonly salience?: number | undefined;
+  readonly includedInModel?: boolean | undefined;
 };
 
 export type ContextPacketWarningSeverity = "info" | "warning" | "error";

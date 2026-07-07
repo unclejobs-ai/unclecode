@@ -6,7 +6,6 @@ import type {
   GuardianLspBridge,
   ReadFileLike,
 } from "./guardian-check-types.js";
-import { isSourceFile } from "./guardian-script-selection.js";
 
 export async function runLspGuardianChecks(input: {
   readonly cwd: string;
@@ -21,7 +20,7 @@ export async function runLspGuardianChecks(input: {
   }
 
   const checks: GuardianExecutableCheck[] = [];
-  for (const file of input.changedFiles.filter(isSourceFile)) {
+  for (const file of input.changedFiles.filter(isLspCandidateFile)) {
     try {
       const path = await resolveWorkspaceFile(input.cwd, file);
       const content = await input.readFile(path, "utf8");
@@ -48,6 +47,12 @@ export async function runLspGuardianChecks(input: {
   }
 
   return checks;
+}
+
+function isLspCandidateFile(file: string): boolean {
+  return /\.(c|m)?[jt]sx?$|\.rs$|\.py$|\.go$|\.java$|\.kt$|\.swift$|\.rb$|\.php$|\.cs$/i.test(file)
+    && !/(^|\/)(__tests__|tests?)(\/|$)/i.test(file)
+    && !/\.(test|spec)\.(c|m)?[jt]sx?$/i.test(file);
 }
 
 async function resolveWorkspaceFile(cwd: string, file: string): Promise<string> {

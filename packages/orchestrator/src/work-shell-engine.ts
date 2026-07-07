@@ -291,6 +291,7 @@ export type WorkShellEngineOptions<Reasoning extends WorkShellReasoningConfig> =
   readonly initialEntries?: readonly WorkShellChatEntry[] | undefined;
   readonly initialSessionSummary?: string | undefined;
   readonly autoContinueOnPermissionStall?: boolean | undefined;
+  readonly modelWindow?: number | undefined;
 };
 
 export type WorkShellTraceMode = "minimal" | "verbose";
@@ -317,6 +318,7 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly lastTurnDurationMs?: number | undefined;
   readonly contextPacket?: ContextPacketView | undefined;
   readonly contextIndicator?: string | undefined;
+  readonly modelWindow: number;
   readonly queuedCount: number;
   readonly queuePaused: boolean;
   readonly terminalColumns: number;
@@ -888,16 +890,10 @@ export class WorkShellEngine<
         label: item.label,
         category: item.category,
         detail: content,
-        pinned: false,
-        heldBack,
+        pinned: (item.salience ?? 0) >= 1,
+        heldBack: heldBack || item.includedInModel === false,
       };
     };
-    // NOTE: ContextPacketViewItem does not carry salience/included flags
-    // (it's the projection sent to the model). Pin state is therefore
-    // approximated as "included and previously pinned" — the authoritative
-    // salience lives in the SQL store and is re-read on each packet
-    // refresh. The pinned glyph here is a best-effort affordance; the store
-    // mutation is the source of truth.
     return [
       ...packet.included.map((item) => toEntry(item, false)),
       ...packet.excluded.map((item) => toEntry(item, true)),

@@ -1,6 +1,7 @@
 import { useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { runRustCommandSync } from "@unclecode/orchestrator";
+import type { ContextPacketView } from "@unclecode/contracts";
 
 import {
   createWorkShellDashboardHomePatch,
@@ -249,6 +250,9 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly panel: WorkShellPanel;
   readonly queuedCount?: number | undefined;
   readonly queuePaused?: boolean | undefined;
+  readonly contextInspectorCursor?: number | undefined;
+  readonly contextInspectorExpanded?: string | null | undefined;
+  readonly contextPacket?: ContextPacketView | undefined;
 };
 
 export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
@@ -417,10 +421,15 @@ export function useWorkShellInputController(input: {
     // Context Inspector (Sprint 2): when the overlay is open, intercept the
     // action keys before the composer can consume them. The slash picker
     // always wins (resolver returns "none" when input starts with "/").
+    // We check the composer value AFTER the key arrives — if the composer
+    // already has text, don't steal keys. But for navigation keys (arrows,
+    // Enter) we always intercept since those aren't text input.
+    const isNavigationKey = key.upArrow || key.downArrow || key.return;
     if (
       input.hasOverlayOpen
       && input.activePanelTitle === "Context expanded"
       && !input.value.trim().startsWith("/")
+      && (isNavigationKey || input.value.trim().length === 0)
     ) {
       const inspectorAction = resolveWorkShellContextInspectorAction({
         value,

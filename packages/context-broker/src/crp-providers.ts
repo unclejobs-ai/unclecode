@@ -220,6 +220,11 @@ export function createRuntimeProvider(): ContextProvider & {
         input.store.upsertContextSource(upsert);
         touched.push(id);
       }
+      input.store.deleteContextSourcesByIdPrefix({
+        projectId: input.projectId,
+        idPrefix: "runtime-trace-",
+        keepIds: touched,
+      });
       return touched;
     },
   };

@@ -138,11 +138,16 @@ export interface AgentOpsStore {
   upsertContextSource(input: UpsertContextSourceInput): ContextSourceRecord;
   selectContextSources(input: SelectContextSourcesInput): SelectedContextSources;
   countContextSourcesByCategory(projectId: string): ReadonlyMap<string, number>;
-  markContextSourceTurnSeen(ids: readonly string[], turnIndex: number): void;
+  markContextSourceTurnSeen(projectId: string, ids: readonly string[], turnIndex: number): void;
+  deleteContextSourcesByIdPrefix(input: {
+    readonly projectId: string;
+    readonly idPrefix: string;
+    readonly keepIds?: readonly string[];
+  }): number;
   pruneExpiredContextSources(now?: Date): number;
-  pinContextSource(id: string): void;
-  unpinContextSource(id: string): void;
-  forgetContextSource(id: string): void;
-  includeContextSource(id: string): void;
+  pinContextSource(projectId: string, id: string): void;
+  unpinContextSource(projectId: string, id: string): void;
+  forgetContextSource(projectId: string, id: string): void;
+  includeContextSource(projectId: string, id: string): void;
   close(): void;
 }

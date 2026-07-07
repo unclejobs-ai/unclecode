@@ -184,7 +184,7 @@ test("workspace build script cleans stale dist-work outputs before rebuilding th
   );
 });
 
-test("startup router keeps interactive boot behind dynamic imports without a work-launcher shim", () => {
+test("startup router keeps interactive boot behind dynamic imports without native startup imports", () => {
   const indexSource = readFileSync(
     path.join(workspaceRoot, "apps/unclecode-cli/src/index.ts"),
     "utf8",
@@ -266,12 +266,17 @@ test("startup router keeps interactive boot behind dynamic imports without a wor
     indexSource,
     /import\s+\{\s*shouldLaunchDefaultWorkSession\s*\}\s+from\s+"\.\/startup-paths\.js"/,
   );
+  assert.match(
+    indexSource,
+    /import\s+\{\s*runDefaultWorkRustPassthrough\s*\}\s+from\s+"\.\/rust-work-passthrough\.js"/,
+  );
   assert.match(indexSource, /await import\("\.\/fast-cli\.js"\)/);
   assert.match(indexSource, /await maybeRunFastCliPath\(args\)/);
   assert.match(
     indexSource,
-    /await import\("@unclecode\/orchestrator"\)[\s\S]*runRustCommandPassthrough\(\s*\[\s*"work"\s*\]/,
+    /runDefaultWorkRustPassthrough\(process\.cwd\(\),\s*process\.env\)/,
   );
+  assert.doesNotMatch(indexSource, /@unclecode\/orchestrator/);
   assert.match(
     indexSource,
     /slashInput[\s\S]*await import\("\.\/command-router\.js"\)/,

@@ -21,6 +21,10 @@ import {
   type WorkShellPanelLineClass,
   type WorkShellPanelPlacement,
 } from "./work-shell-view-fast-paths.js";
+import {
+  renderContextInspectorOverlay,
+} from "./work-shell-context-inspector.js";
+import { resolveContextSourceMeta } from "./work-shell-context-inspector-model.js";
 
 export type { WorkShellPanelDisplayMode } from "./work-shell-view-fast-paths.js";
 
@@ -70,8 +74,8 @@ const W_LIGHT = {
   textDim: "#475569",
   border: "#334155",
   borderStrong: "#1e293b",
-  borderSoft: "#94a3b8",
-  borderAccent: "#0284c7",
+  borderSoft: "#475569",
+  borderAccent: "#075985",
   user: "#075985",
   userBody: "#0f172a",
   userBadgeText: "#082f49",
@@ -88,7 +92,7 @@ const W_LIGHT = {
   warning: "#713f12",
   success: "#166534",
   error: "#991b1b",
-  spinner: "#0d9488",
+  spinner: "#115e59",
 } as const;
 
 // Dark-background palette (black/dark terminals). Tuned for OLED/true-black
@@ -458,8 +462,10 @@ export function resolveWorkShellComposerHint(input: {
   );
 }
 
-const WORK_SHELL_BUSY_SPINNER_FRAMES = ["◜", "◠", "◝", "◞", "◡", "◟"] as const;
-export const WORK_SHELL_SPINNER_INTERVAL_MS = 100;
+// Classic braille spinner — smooth rotation that reads as "loading".
+// The old single-dot frames (⠁⠂⠄⠠⠐⠈) were too subtle and looked broken.
+const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+export const WORK_SHELL_SPINNER_INTERVAL_MS = 80;
 
 function pickBusySpinnerFrame(frame = 0): string {
   const count = WORK_SHELL_BUSY_SPINNER_FRAMES.length;
@@ -836,18 +842,6 @@ function renderWorkShellPanelLine(line: string, index: number): React.ReactNode 
 // icon + color so the user can scan what knowledge flows into the next answer.
 // The "loop trail" category covers the work-loop session artifacts stored
 // under .omo/ on disk but surfaced under a user-facing name in the runbook.
-const CONTEXT_SOURCE_META: ReadonlyArray<readonly [RegExp, string, string, string]> = [
-  [/^workspace-guidance/i, "≡", W.assistant, "guidance"],
-  [/^workspace/i, "▣", W.user, "workspace"],
-  [/^provider-system-prompt/i, "▤", W.assistant, "system"],
-  [/^bridge/i, "↔", W.assistant, "bridge"],
-  [/^memory/i, "✦", W.toolAccent, "memory"],
-  [/^loop-trail/i, "⋉", W.spinner, "loop trail"],
-  [/^runtime/i, "⚙", W.textMuted, "runtime"],
-  [/^attachment/i, "📎", W.warning, "attachment"],
-  [/^live/i, "→", W.spinner, "live steps"],
-];
-
 function renderRunbookLine(
   line: string,
   index: number,
@@ -939,10 +933,10 @@ function renderRunbookLine(
     const category = sourceLine[1].trim();
     const count = sourceLine[2];
     const rawDetail = sourceLine[3];
-    const iconEntry = CONTEXT_SOURCE_META.find(([pattern]) => pattern.test(category));
-    const icon = iconEntry?.[1] ?? "·";
-    const iconColor = iconEntry?.[2] ?? W.textMuted;
-    const displayCategory = iconEntry?.[3] ?? category;
+    const meta = resolveContextSourceMeta(category, W);
+    const icon = meta.icon;
+    const iconColor = meta.color;
+    const displayCategory = meta.label;
     // Replace raw on-disk loop-trail paths with a user-facing label so the
     // runbook never leaks internal storage details (e.g. .omo/.../ledger.jsonl).
     const detail = rawDetail
@@ -1493,14 +1487,18 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
         { role: "assistant", text: `${props.streamingAssistantText}${STREAMING_CURSOR}` } as const,
       ]
     : props.entries.filter(shouldShowWorkShellConversationEntry);
-  const showActivityIndicator = props.isBusy && !props.streamingAssistantText;
+  // Show the activity indicator whenever we're busy — even during streaming
+  // — so the user always sees feedback that the model is working. Previously
+  // the indicator vanished when streaming text arrived, making it look like
+  // the turn completed prematurely.
+  const showActivityIndicator = props.isBusy;
 
   return (
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "68%" : undefined} paddingRight={props.panelPlacement === "side" ? 1 : 0}>
       <Box flexDirection="column">
         {entries.length === 0 ? (
           props.isBusy ? null : renderWorkShellEmptyConversation()
-        ) : entries.slice(-12).map((entry, index) => renderWorkShellEntryBlock({
+        ) : entries.slice(-50).map((entry, index) => renderWorkShellEntryBlock({
           entry,
           index,
           width: conversationWidth,
@@ -1511,6 +1509,7 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
             {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
             {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
             nowMs={activityNow}
+            {...(props.streamingAssistantText ? { compact: true } : {})}
           />
         ) : null}
       </Box>
@@ -1523,6 +1522,7 @@ const WorkShellActivityIndicator = React.memo(function WorkShellActivityIndicato
   readonly busyStatus?: string;
   readonly currentTurnStartedAt?: number;
   readonly nowMs: number;
+  readonly compact?: boolean;
 }) {
   const spinner = pickBusySpinnerFrame(props.frame);
   const label = resolveWorkShellBusyActivityPhrase(props.busyStatus ?? "");
@@ -1535,10 +1535,22 @@ const WorkShellActivityIndicator = React.memo(function WorkShellActivityIndicato
     isBusy: true,
     ...(props.busyStatus ? { busyStatus: props.busyStatus } : {}),
   });
+  // Compact mode (streaming): just spinner + elapsed, no label — the
+  // streaming text itself shows what's happening.
+  if (props.compact) {
+    return (
+      <Box marginTop={0} paddingLeft={1}>
+        <Text>
+          <Text color={activityColor} bold>{`${spinner} `}</Text>
+          <Text color={W.textDim}>{elapsedLabel.trim() || "streaming…"}</Text>
+        </Text>
+      </Box>
+    );
+  }
   return (
     <Box marginTop={1} paddingLeft={1}>
       <Text>
-        <Text color={activityColor} bold>{spinner} </Text>
+        <Text color={activityColor} bold>{`${spinner} `}</Text>
         <Text color={W.text} bold>{label}</Text>
         <Text color={W.textDim}>{elapsedLabel}</Text>
       </Text>
@@ -1855,6 +1867,8 @@ export function WorkShellView(props: {
     latestSystemText: getLatestWorkShellSystemText(props.entries),
   });
   const queueIndicator = formatWorkShellQueueIndicator(props.queuedCount ?? 0, props.queuePaused ?? false);
+  const shouldRenderContextInspectorOverlay =
+    props.activePanel.title === "Context expanded" && props.contextPacket !== undefined;
 
   const conversation = (
     <WorkShellConversationBlock
@@ -1935,7 +1949,16 @@ export function WorkShellView(props: {
             {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
           />
         : null}
-      {panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput ? (
+      {panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput && shouldRenderContextInspectorOverlay ? (
+        renderContextInspectorOverlay({
+          packet: props.contextPacket,
+          cursorIndex: props.contextInspectorCursor ?? -1,
+          ...(props.contextInspectorExpanded !== undefined ? { expandedId: props.contextInspectorExpanded } : {}),
+          width: Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
+          borderColor: panelBorderColor,
+          palette: W,
+        })
+      ) : panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput ? (
         <Box marginTop={1} borderStyle="round" borderColor={panelBorderColor} paddingX={1} flexDirection="column">
           <Box flexDirection="column">
             <Text>

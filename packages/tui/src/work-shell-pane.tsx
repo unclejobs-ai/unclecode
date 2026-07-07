@@ -133,6 +133,9 @@ export function WorkShellPane<
     currentTurnStartedAt,
     lastTurnDurationMs,
     contextIndicator,
+    contextInspectorCursor,
+    contextInspectorExpanded,
+    contextPacket,
     queuedCount,
     queuePaused,
   } = engineState;
@@ -238,6 +241,9 @@ export function WorkShellPane<
       {...(currentTurnStartedAt !== undefined ? { currentTurnStartedAt } : {})}
       {...(lastTurnDurationMs !== undefined ? { lastTurnDurationMs } : {})}
       activePanel={activePanel}
+      {...(contextInspectorCursor !== undefined ? { contextInspectorCursor } : {})}
+      {...(contextInspectorExpanded !== undefined ? { contextInspectorExpanded } : {})}
+      {...(contextPacket ? { contextPacket } : {})}
       {...(attachmentLines ? { attachmentLines } : {})}
       {...(pendingClipboardAttachmentCount > 0 ? { attachmentCount: pendingClipboardAttachmentCount } : {})}
       composer={

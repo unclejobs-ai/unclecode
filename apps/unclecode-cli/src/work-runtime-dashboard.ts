@@ -53,6 +53,7 @@ export type StartReplOptions = {
   authLabel: string;
   reasoning: AppReasoningConfig;
   cwd: string;
+  modelWindow: number;
   contextSummaryLines: readonly string[];
   contextPacketSourceMetadata?: readonly ContextPacketViewItem[] | undefined;
   homeState: TuiShellHomeState;

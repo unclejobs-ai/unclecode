@@ -4,7 +4,14 @@ import path from "node:path";
 
 import { fullTuiResponseText, repoRoot, yoloGreetingResponseText } from "./constants.mjs";
 import { assertReadableForegroundEscapes, run, shellQuote, sleep } from "./cli-helpers.mjs";
-import { calculatePaneWidth, runTmux, submitLine, waitForIdlePromptDeck, waitForPane } from "./tmux-helpers.mjs";
+import {
+  calculatePaneWidth,
+  READY_LAST_STATUS_PATTERN,
+  runTmux,
+  submitLine,
+  waitForIdlePromptDeck,
+  waitForPane,
+} from "./tmux-helpers.mjs";
 
 export async function runFullTuiSmoke({ port, tmp }) {
   const tmux = await run("sh", ["-lc", "command -v tmux"], process.env);
@@ -44,7 +51,7 @@ export async function runFullTuiSmoke({ port, tmp }) {
 
     assert.match(pane, new RegExp(fullTuiResponseText));
     assert.match(pane, /prompt deck/);
-    assert.match(pane, /Ready · last reply/);
+    assert.match(pane, READY_LAST_STATUS_PATTERN);
     assert.doesNotMatch(pane, /Work context · session state/);
     assert.doesNotMatch(pane, /│ ▌ UNCLECODE_FULL_TUI_QA_OK/);
     assert.doesNotMatch(pane, /Unknown command|panic|TypeError|ReferenceError/);
@@ -172,7 +179,7 @@ export async function runYoloGreetingTuiSmoke({ port, tmp, observations }) {
     assert.equal(requestDelta, 1, `YOLO greeting should make one provider call, got ${requestDelta}`);
     assert.match(pane, /YOLO mode/);
     assert.match(pane, new RegExp(yoloGreetingResponseText));
-    assert.match(pane, /Ready · last reply/);
+    assert.match(pane, READY_LAST_STATUS_PATTERN);
     assert.doesNotMatch(pane, /Work context · session state/);
     assert.doesNotMatch(pane, /│ ▌ UNCLECODE_YOLO_GREETING_QA_OK/);
     assert.doesNotMatch(pane, /subtask-1|Break this request|Guardian|Executable checks|No material contradiction/i);

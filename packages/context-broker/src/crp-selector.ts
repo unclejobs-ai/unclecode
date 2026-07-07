@@ -45,6 +45,8 @@ export function contextSourceToPacketItem(src: ContextSourceRecord): ContextPack
     reason: src.reason,
     ...(src.content !== null ? { preview: src.content } : {}),
     tokenEstimate: src.tokenEstimate,
+    salience: src.salience,
+    includedInModel: src.includedInModel,
   };
 }
 
@@ -131,6 +133,7 @@ export function selectContextPacketFromStore(options: SelectContextPacketOptions
   // Mark selected sources as seen this turn.
   if (included.length > 0) {
     options.store.markContextSourceTurnSeen(
+      options.projectId,
       included.map((item) => item.id),
       options.turnIndex,
     );

@@ -147,7 +147,11 @@ export function upsertContextSource(
   const salience = input.salience ?? CONTEXT_SOURCE_DEFAULT_SALIENCE;
   const tokenEstimate = input.tokenEstimate ?? 0;
   const includedInModel = input.includedInModel === false ? 0 : 1;
-  const content = input.content === undefined ? null : input.content;
+  const label = redactAgentOpsSecrets(input.label);
+  const content = input.content === undefined || input.content === null
+    ? null
+    : redactAgentOpsSecrets(input.content);
+  const reason = redactAgentOpsSecrets(input.reason);
   const sha256 = input.sha256 === undefined ? null : input.sha256;
   const expiresAt = input.expiresAt === undefined ? null : input.expiresAt;
 
@@ -158,25 +162,27 @@ export function upsertContextSource(
        created_at, updated_at, expires_at
      )
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET
-       project_id = excluded.project_id,
+     ON CONFLICT(project_id, id) DO UPDATE SET
        category = excluded.category,
        label = excluded.label,
        content = excluded.content,
        reason = excluded.reason,
        sha256 = excluded.sha256,
-       salience = excluded.salience,
+       salience = CASE
+         WHEN context_sources.salience >= 1.0 THEN context_sources.salience
+         ELSE excluded.salience
+       END,
        token_estimate = excluded.token_estimate,
-       included_in_model = excluded.included_in_model,
+       included_in_model = context_sources.included_in_model,
        expires_at = excluded.expires_at,
        updated_at = excluded.updated_at`,
   ).run(
     input.id,
     input.projectId,
     input.category,
-    input.label,
+    label,
     content,
-    input.reason,
+    reason,
     sha256,
     salience,
     tokenEstimate,
@@ -185,21 +191,44 @@ export function upsertContextSource(
     timestamp,
     expiresAt,
   );
-  return getContextSourceOrThrow(db, input.id);
+  return getContextSourceOrThrow(db, input.projectId, input.id);
+}
+
+export function deleteContextSourcesByIdPrefix(
+  db: DatabaseSync,
+  input: {
+    readonly projectId: string;
+    readonly idPrefix: string;
+    readonly keepIds?: readonly string[];
+  },
+): number {
+  const keepIds = input.keepIds ?? [];
+  const params: (string | number)[] = [input.projectId, `${input.idPrefix}%`];
+  const keepClause = keepIds.length > 0
+    ? ` AND id NOT IN (${keepIds.map(() => "?").join(",")})`
+    : "";
+  params.push(...keepIds);
+  const result = db.prepare(
+    `DELETE FROM context_sources
+     WHERE project_id = ?
+       AND id LIKE ?${keepClause}`,
+  ).run(...params);
+  return typeof result.changes === "number" ? result.changes : 0;
 }
 
 export function markContextSourceTurnSeen(
   db: DatabaseSync,
+  projectId: string,
   ids: readonly string[],
   turnIndex: number,
 ): void {
   if (ids.length === 0) return;
   const stmt = db.prepare(
-    "UPDATE context_sources SET turn_last_seen = ?, updated_at = ? WHERE id = ?",
+    "UPDATE context_sources SET turn_last_seen = ?, updated_at = ? WHERE project_id = ? AND id = ?",
   );
   const timestamp = new Date().toISOString();
   for (const id of ids) {
-    stmt.run(turnIndex, timestamp, id);
+    stmt.run(turnIndex, timestamp, projectId, id);
   }
 }
 
@@ -212,37 +241,37 @@ export function pruneExpiredContextSources(db: DatabaseSync, now = new Date()): 
 }
 
 // Pin a source — set salience to maximum so the selector always includes it.
-export function pinContextSource(db: DatabaseSync, id: string): void {
+export function pinContextSource(db: DatabaseSync, projectId: string, id: string): void {
   db.prepare(
-    "UPDATE context_sources SET salience = 1.0, updated_at = ? WHERE id = ?",
-  ).run(new Date().toISOString(), id);
+    "UPDATE context_sources SET salience = 1.0, updated_at = ? WHERE project_id = ? AND id = ?",
+  ).run(new Date().toISOString(), projectId, id);
 }
 
 // Unpin — restore a reasonable default salience (provider can re-rank later).
-export function unpinContextSource(db: DatabaseSync, id: string): void {
+export function unpinContextSource(db: DatabaseSync, projectId: string, id: string): void {
   db.prepare(
-    "UPDATE context_sources SET salience = 0.5, updated_at = ? WHERE id = ?",
-  ).run(new Date().toISOString(), id);
+    "UPDATE context_sources SET salience = 0.5, updated_at = ? WHERE project_id = ? AND id = ?",
+  ).run(new Date().toISOString(), projectId, id);
 }
 
 // Forget — hold a source back locally (included_in_model = 0).
-export function forgetContextSource(db: DatabaseSync, id: string): void {
+export function forgetContextSource(db: DatabaseSync, projectId: string, id: string): void {
   db.prepare(
-    "UPDATE context_sources SET included_in_model = 0, updated_at = ? WHERE id = ?",
-  ).run(new Date().toISOString(), id);
+    "UPDATE context_sources SET included_in_model = 0, updated_at = ? WHERE project_id = ? AND id = ?",
+  ).run(new Date().toISOString(), projectId, id);
 }
 
 // Include — restore a held-back source to model inclusion.
-export function includeContextSource(db: DatabaseSync, id: string): void {
+export function includeContextSource(db: DatabaseSync, projectId: string, id: string): void {
   db.prepare(
-    "UPDATE context_sources SET included_in_model = 1, updated_at = ? WHERE id = ?",
-  ).run(new Date().toISOString(), id);
+    "UPDATE context_sources SET included_in_model = 1, updated_at = ? WHERE project_id = ? AND id = ?",
+  ).run(new Date().toISOString(), projectId, id);
 }
 
-function getContextSourceOrThrow(db: DatabaseSync, id: string): AgentOpsContextSourceRow {
-  const row = db.prepare("SELECT * FROM context_sources WHERE id = ?").get(id);
-  if (row === undefined) throw new Error(`Context source not found: ${id}`);
-  return mapContextSourceRow(sqlRow(row, `context source ${id}`));
+function getContextSourceOrThrow(db: DatabaseSync, projectId: string, id: string): AgentOpsContextSourceRow {
+  const row = db.prepare("SELECT * FROM context_sources WHERE project_id = ? AND id = ?").get(projectId, id);
+  if (row === undefined) throw new Error(`Context source not found: ${projectId}/${id}`);
+  return mapContextSourceRow(sqlRow(row, `context source ${projectId}/${id}`));
 }
 
 // Re-export the mapper so callers don't need a separate import path.

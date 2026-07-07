@@ -32,6 +32,7 @@ fn model_panel(input: &Value) -> Value {
             "Thinking · {}",
             describe_panel_reasoning(input.get("currentReasoning"), &current_support)
         ),
+        format_reasoning_choice_line(&current_support),
         format!("Available · {} models", models.len()),
         String::new(),
         "Catalog".to_string(),
@@ -50,10 +51,22 @@ fn model_panel(input: &Value) -> Value {
     lines.extend([
         String::new(),
         "Controls".to_string(),
-        "Type filter · exact /model <name> switches · Esc close".to_string(),
+        "Type filter · /model <name> [low|medium|high|default] · Esc close".to_string(),
     ]);
 
     json!({ "title": "Model picker", "lines": lines })
+}
+
+fn format_reasoning_choice_line(support: &ReasoningPanelSupport) -> String {
+    if support.status == "unsupported" {
+        return "Thinking choices · unavailable for this model".to_string();
+    }
+    let choices = if support.supported_efforts.is_empty() {
+        "low / medium / high".to_string()
+    } else {
+        support.supported_efforts.join(" / ")
+    };
+    format!("Thinking choices · {choices} / default")
 }
 
 struct ReasoningPanelSupport {
@@ -163,8 +176,9 @@ mod tests {
         assert!(lines.contains("Provider · OpenAI"));
         assert!(lines.contains("Available · 2 models"));
         assert!(lines.contains("Thinking · high (mode default)"));
+        assert!(lines.contains("Thinking choices · low / medium / high / default"));
         assert!(lines.contains("› /model gpt-5.4  active · reasoning medium · low/medium/high"));
         assert!(lines.contains(" /model gpt-4.1-mini  reasoning unavailable"));
-        assert!(lines.contains("Type filter · exact /model <name> switches · Esc close"));
+        assert!(lines.contains("Type filter · /model <name> [low|medium|high|default] · Esc close"));
     }
 }

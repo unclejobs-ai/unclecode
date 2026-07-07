@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-export const AGENTOPS_SCHEMA_VERSION = 2;
+export const AGENTOPS_SCHEMA_VERSION = 3;
 
 export const AGENTOPS_INITIAL_SCHEMA_SQL = `
 PRAGMA foreign_keys = ON;
@@ -122,7 +122,7 @@ CREATE INDEX IF NOT EXISTS idx_summaries_project_type ON summaries(project_id, s
 -- Providers upsert rows here; the per-turn selector queries and ranks them
 -- under a token budget (see docs/design/crp-context-runbook-protocol.md).
 CREATE TABLE IF NOT EXISTS context_sources (
-  id            TEXT PRIMARY KEY,
+  id            TEXT NOT NULL,
   project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   category      TEXT NOT NULL,
   label         TEXT NOT NULL,
@@ -135,7 +135,8 @@ CREATE TABLE IF NOT EXISTS context_sources (
   turn_last_seen INTEGER,
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL,
-  expires_at    TEXT
+  expires_at    TEXT,
+  PRIMARY KEY (project_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_context_sources_project_model
@@ -174,6 +175,57 @@ CREATE TABLE IF NOT EXISTS context_sources (
   updated_at    TEXT NOT NULL,
   expires_at    TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_context_sources_project_model
+  ON context_sources(project_id, included_in_model);
+CREATE INDEX IF NOT EXISTS idx_context_sources_project_salience
+  ON context_sources(project_id, salience DESC);
+`,
+  },
+  {
+    version: 3,
+    name: "scope_context_sources_by_project",
+    sql: `
+DROP INDEX IF EXISTS idx_context_sources_project_model;
+DROP INDEX IF EXISTS idx_context_sources_project_salience;
+
+CREATE TABLE IF NOT EXISTS context_sources_v3 (
+  id            TEXT NOT NULL,
+  project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  category      TEXT NOT NULL,
+  label         TEXT NOT NULL,
+  content       TEXT,
+  reason        TEXT NOT NULL,
+  sha256        TEXT,
+  salience      REAL NOT NULL DEFAULT 0.5,
+  token_estimate INTEGER NOT NULL DEFAULT 0,
+  included_in_model INTEGER NOT NULL DEFAULT 1,
+  turn_last_seen INTEGER,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  expires_at    TEXT,
+  PRIMARY KEY (project_id, id)
+);
+
+INSERT OR REPLACE INTO context_sources_v3 (
+  id, project_id, category, label, content, reason, sha256,
+  salience, token_estimate, included_in_model, turn_last_seen,
+  created_at, updated_at, expires_at
+)
+SELECT
+  id,
+  project_id,
+  category,
+  '[REDACTED_MIGRATED_CONTEXT]' AS label,
+  NULL AS content,
+  '[REDACTED_MIGRATED_CONTEXT]' AS reason,
+  sha256,
+  salience, token_estimate, included_in_model, turn_last_seen,
+  created_at, updated_at, expires_at
+FROM context_sources;
+
+DROP TABLE context_sources;
+ALTER TABLE context_sources_v3 RENAME TO context_sources;
 
 CREATE INDEX IF NOT EXISTS idx_context_sources_project_model
   ON context_sources(project_id, included_in_model);

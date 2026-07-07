@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { explainUncleCodeConfig } from "@unclecode/config-core";
 import { createAgentOpsRecorder } from "@unclecode/orchestrator";
+import { LspBridge } from "@unclecode/lsp-bridge";
 import {
   augmentContextPacketViewInput,
   clearCachedWorkspaceGuidance,
@@ -45,6 +46,7 @@ import {
   type RustOpenAIAuthStatus,
 } from "./work-runtime-session.js";
 import { runWorkspaceGuardianChecks } from "./guardian-checks.js";
+import type { GuardianLspBridge } from "./guardian-check-types.js";
 import { createRuntimeCodingAgent } from "./runtime-coding-agent.js";
 import {
   buildContextLineItems,
@@ -63,6 +65,7 @@ export type WorkCliBootstrapInput = {
   argv: readonly string[];
   env?: NodeJS.ProcessEnv | undefined;
   userHomeDir?: string | undefined;
+  lspBridge?: GuardianLspBridge | undefined;
 };
 
 export type WorkCliBootstrapResult = {
@@ -349,11 +352,13 @@ export async function loadWorkCliBootstrap(
       const scripts = guardianInput.mode === "ultrawork" || guardianInput.mode === "yolo"
         ? ["lint", "check", "test"]
         : ["check", "test"];
+      const lspBridge = input.lspBridge ?? new LspBridge();
       return runWorkspaceGuardianChecks({
         cwd,
         env,
         scripts,
         changedFiles: guardianInput.changedFiles,
+        lspBridge,
       });
     },
   });
@@ -433,6 +438,7 @@ export async function loadWorkCliBootstrap(
       mode: config.mode,
       authLabel,
       reasoning: config.reasoning,
+      modelWindow: resolveWorkShellCrpConfig(configExplanation).modelWindow,
       cwd,
       contextSummaryLines: [
         ...authIssueLines,

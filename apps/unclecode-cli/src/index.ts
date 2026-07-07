@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { shouldLaunchDefaultWorkSession } from "./startup-paths.js";
+import { runDefaultWorkRustPassthrough } from "./rust-work-passthrough.js";
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -12,12 +13,7 @@ async function main(): Promise<void> {
       stdoutIsTTY: process.stdout.isTTY ?? false,
     })
   ) {
-    const { runRustCommandPassthrough } = await import("@unclecode/orchestrator");
-    process.exitCode = await runRustCommandPassthrough(
-      ["work"],
-      process.cwd(),
-      process.env,
-    );
+    process.exitCode = await runDefaultWorkRustPassthrough(process.cwd(), process.env);
     return;
   }
 

@@ -383,7 +383,7 @@ test("getWorkShellComposerHint keeps slash discovery guidance inside the shared 
 });
 
 test("resolveWorkShellComposerHint and spinner interval stay aligned with DESIGN.md workflow states", () => {
-  assert.equal(WORK_SHELL_SPINNER_INTERVAL_MS, 100);
+  assert.equal(WORK_SHELL_SPINNER_INTERVAL_MS, 80);
   assert.equal(
     resolveWorkShellComposerHint({
       isBusy: true,
@@ -1439,7 +1439,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
   );
   assert.equal(
     formatWorkShellBusyStatusLine("· thinking inspect repo", 0),
-    "◜ thinking inspect repo",
+    "⠋ thinking inspect repo",
   );
   assert.deepEqual(
     getWorkShellThinkingDetailLines({
@@ -1472,7 +1472,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       nowMs: 2480,
       lastTurnDurationMs: 1480,
     }),
-    "◜ 1.5s · thinking inspect repo · Ctrl+C/Esc · Enter queues",
+    "⠋ 1.5s · thinking inspect repo · Ctrl+C/Esc · Enter queues",
   );
   assert.equal(
     normalizeMarkdownDisplayText("## Heading\n- `npm run check`\n- **Done**"),

@@ -3,6 +3,7 @@ import { writeFileSync } from "node:fs";
 import { escapeRegExp, run, sleep } from "./cli-helpers.mjs";
 
 const runtimeTmuxSocketName = `unclecode-runtime-qa-${process.pid}`;
+export const READY_LAST_STATUS_PATTERN = /Ready · last(?: reply)?(?: \d+(?:\.\d+)?s)?/;
 
 export function runtimeTmuxArgs(args) {
   return ["-L", runtimeTmuxSocketName, ...args];
@@ -43,7 +44,7 @@ export async function capturePane(session, paneFile) {
 }
 
 export async function waitForIdlePromptDeck(session, paneFile) {
-  await waitForPane(session, /Ready · last reply/, paneFile);
+  await waitForPane(session, READY_LAST_STATUS_PATTERN, paneFile);
   await waitForPane(session, /prompt deck/, paneFile);
   await sleep(100);
   return capturePane(session, paneFile);
@@ -105,7 +106,7 @@ function isWide(codePoint) {
 }
 
 export function lowerBusyActivityRowPattern(detail) {
-  const spinnerPattern = "[◜◠◝◞◡◟]";
+  const spinnerPattern = "[⠁⠂⠄⠠⠐⠈]";
   if (detail === undefined) {
     return new RegExp(`\n\\s*${spinnerPattern}\\s+[^\n]+`, "u");
   }

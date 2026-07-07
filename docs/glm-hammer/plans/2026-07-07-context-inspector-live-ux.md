@@ -2,335 +2,304 @@
 
 > Plan: `docs/glm-hammer/plans/2026-07-07-context-inspector-live-ux.md`
 > Skill: `forge` → `hammer`
-> Scope: full-face redesign of the `/context` inspector + footer chip, finishing inspector-redesign Sprints 2 & 3.
+> Round 2 — rewritten after round-1 critic panel REJECT. The round-1 plan was written against a stale picture; the codebase already implements the structured overlay (`renderContextInspectorOverlay`, `buildContextInspectorRows`, sourceIndex cursor, ◆/◇ pinned glyph, dimmed held-back). This round targets the **genuinely remaining gaps**.
+
+## Critic Responses (round 2 → round 3)
+
+- **feasibility REJECT "modelWindow never wired into config explanation":** Confirmed — `explainUncleCodeConfig`'s `settings` object (resolver.ts:575-584) has no `modelWindow` entry, and `UncleCodeConfigExplanation['settings']` (types.ts:112) has no field. Task 1 now explicitly adds both the `explainSetting(...)` call and the type field, mirroring `crpBudget` exactly.
+- **feasibility REJECT "resolver throws vs issues.push":** Confirmed — the resolver uses `issues.push("Invalid context.crpBudget value.")` (resolver.ts:229), never throws. Task 1 Step 4 now mandates the `issues.push` pattern and the criterion asserts the issue string, not a throw.
+- **integration REJECT "T5 shared test-file conflict":** Resolved — Task 5 now mandates the pre-existing `tests/context-broker/context-packet-view.test.mjs` (created if absent within that dir), no "OR" fallback. T5's production files remain disjoint from T1–4.
+
+## Critic Responses (round 1 → round 2)
+
+- **feasibility REJECT "fields already exist":** Confirmed — `ContextPacketViewItem` already has `salience`/`includedInModel` (contracts:21-22), and `contextSourceToPacketItem` already propagates them (crp-selector:48-49). Round 2 drops those tasks entirely (T1, T2 gone).
+- **feasibility REJECT "overlay already structured":** Confirmed — `renderContextInspectorOverlay` (work-shell-view.tsx:1043) already renders from `sourceIndex`-tagged rows with cursor + pin glyph + held-back dimming. Round 2 does NOT rebuild the overlay; it enhances the existing one.
+- **feasibility REJECT "test:config-core missing":** Confirmed — no such script; config tests live at `tests/contracts/config-core.contract.test.mjs` under `test:contracts`. Round 2 uses `test:contracts` for all config-core assertions.
+- **integration REJECT "config→engine→pane wiring missing":** Confirmed — no task wired `modelWindow` through state/props. Round 2 Task 1 (config) + Task 2 (state threading) form a single dependency chain that closes this end-to-end.
+- **integration REJECT "T4↔T6 file conflict":** Resolved — round 2 has no parallel tasks touching `work-shell-view.tsx`; the meter change (Task 3) and the adaptive-layout change (Task 4) are sequential on the same file with an explicit dependency edge.
+- **coverage REJECT "#4 composer cohabitation uncovered":** Verified FIXED already — `shouldHideWorkShellOverlayForInput` unconditionally returns `false` (work-shell-view.tsx:342). Not a gap; documented in Work Scope OUT.
+- **coverage REJECT "freshness pulse has no step":** Round 2 Task 5 replaces the vague "freshness" goal with a concrete pinned-count segment (binary-decidable).
 
 ## Goal
 
-Turn the `/context` overlay from a static, string-rendered snapshot into a **live, adaptive inspector**: actions (pin/forget/include/expand) render instantly, cursor state is structurally correct, the layout adapts to source/token volume, the visual hierarchy is scannable, and the footer chip is a live mini-dashboard.
+Close the five genuinely-remaining gaps in the context inspector: (1) the token meter is hard-coded to an env var instead of config-driven (defect #7); (2) no `context.modelWindow` config exists; (3) the footer chip carries no salience/pinned signal; (4) the overlay's section row caps are static (`maxRows: 12/7`) instead of adapting to terminal height and source volume; (5) the config value does not thread from config-core through engine state to the TUI overlay.
 
 ## Architecture
 
-The overlay today renders from a `readonly string[]` produced by `buildWorkShellCompactContextPacketPreviewLines`. Cursor highlight matches against *line indices*, but the engine's navigable source list (`resolveInspectorSourceList`) is a *flat list of sources*. These two coordinate systems never agreed, so the cursor lands on headers/summary lines instead of source rows, and `pinned` is always `false` because `ContextPacketViewItem` carries no flags.
-
-The fix introduces a **structured view model** (`ContextInspectorViewModel`) that both the engine (cursor/actions) and the renderer read from — eliminating the string-roundtrip. `ContextPacketViewItem` gains optional `salience`/`pinned`/`includedInModel` fields so the glyph/dim state is authoritative. A new config field (`context.modelWindow`) + env (`UNCLECODE_CONTEXT_WINDOW`, already read) feeds the adaptive token meter. Footer indicator gains a freshness/salience signal.
+A single config field (`context.modelWindow`, default 200000, env `UNCLECODE_CONTEXT_WINDOW`) threads through: config-core resolver → CLI bootstrap (`WorkShellCrpConfig`) → engine state (`WorkShellEngineState.modelWindow`) → `WorkShellView` props → `renderContextInspectorOverlay` → `renderContextInspectorBudgetLine`. This replaces the two `process.env.UNCLECODE_CONTEXT_WINDOW` reads in the TUI (work-shell-view.tsx:933 and the fallback `renderRunbookLine` meter) with a prop sourced from config. The footer indicator gains a `📌 N pinned` segment computed from `packet.included` items' `pinned`/`salience` flags (already present on the type). The overlay's section row caps become adaptive: derived from `terminalColumns`/terminal height rather than the hard-coded 12/7.
 
 ## Tech Stack
 
 - TypeScript + React (Ink) — TUI in `packages/tui/`
-- `@unclecode/contracts` — `ContextPacketViewItem` type extension
-- `@unclecode/context-broker` — view model builder + indicator formatter
 - `@unclecode/config-core` — `context.modelWindow` config + env
-- `@unclecode/orchestrator` — engine state shape, inspector source list
-- Node `>=22.18.0`, Rust `>=1.85` (no Rust changes in this plan)
-- Test runner: `mocha` via `npm run test:contracts` / `test:context-broker` / `test:orchestrator` / `test:tui`
+- `@unclecode/contracts` — consumes existing `ContextPacketViewItem.salience` (no type change)
+- `@unclecode/context-broker` — `formatContextPacketIndicator` enhancement
+- `@unclecode/orchestrator` — `WorkShellEngineState.modelWindow`, bootstrap threading
+- `apps/unclecode-cli` — `WorkShellCrpConfig.modelWindow`, resolver wiring
+- Node `>=22.18.0`, Rust `>=1.85` (no Rust changes)
+- Test runner: `node --test` via `npm run test:contracts` / `test:context-broker` / `test:orchestrator` / `test:tui`
 
 ## Work Scope
 
 **In:**
-- Structured view model replacing string-roundtrip rendering
-- Authoritative pin/hold flags on `ContextPacketViewItem`
-- Adaptive token meter (config + env driven)
-- Adaptive layout (condensed when few sources, full when many)
-- Live footer chip (freshness pulse, salience hint)
-- Cursor ↔ source index consistency
-- Config + env for model window
+- `context.modelWindow` config field + `UNCLECODE_CONTEXT_WINDOW` env wiring (config-core)
+- `modelWindow` threaded into engine state + CLI bootstrap + TUI props
+- Adaptive token meter reading the threaded `modelWindow` (replaces both env reads)
+- Live footer indicator with pinned-count segment
+- Adaptive overlay section row caps (terminal-height + source-volume aware)
 
 **Out:**
-- Rust `context_panel` retirement (defect #5) — separate effort, needs Rust changes, explicitly deferred
-- Full-height *modal* mode (design §B) — the current overlay already cohabits; modal is cosmetic and deferred to avoid a large panel-layout rewrite in the same PR
-- `.omo/` path scrub replacement (defect #10) — band-aid retained; structural fix deferred
+- Rust `context_panel` retirement (defect #5) — separate effort, Rust changes
+- Full-height *modal* display mode (design §B) — overlay already cohabits; modal is cosmetic
+- `.omo/` path scrub structural replacement (defect #10) — band-aid retained (`sanitizeContextPreview` already centralizes it)
+- Defect #4 (auto-hide) — ALREADY FIXED (`shouldHideWorkShellOverlayForInput` returns false)
+- Defect #9 (64-char truncation) — ALREADY FIXED (`WORK_SHELL_GROUP_SUMMARY_MAX_WIDTH = 110`, overlay uses `previewWidth` derived from width)
 - New dependencies
 
 ## Verification Strategy
 
-**Level:** test-suite + build-only.
+**Level:** test-suite + build.
 **Command:** `npm run build && npm run check && npm run test:contracts && npm run test:context-broker && npm run test:orchestrator && npm run test:tui`
-**What passing proves:** the structured view model, extended contract type, config field, adaptive meter math, and indicator formatter all typecheck under the workspace's composite projects refs and their unit/contract tests pass. (The interactive overlay cannot be driven headlessly; its rendering is locked by a contract test on the view-model → line projection, not a live TUI harness.)
-**Prerequisite note:** `npm run build` is required before `npm run check` (per AGENTS.md — `@unclecode/*` subpath exports resolve to `dist/`). Task 7 (Final Verification) runs the full chain.
+**What passing proves:** the config field resolves and validates, the model window threads through state to the meter, the footer indicator emits the pinned segment, and the adaptive caps compute from terminal dimensions — all typecheck under composite project refs and their unit/contract tests pass. (The interactive overlay is not headlessly drivable; rendering math is locked by contract tests on the pure functions: `formatContextPacketIndicator`, the adaptive-cap helper, and the meter-label derivation.)
+**Prerequisite:** `npm run build` before `npm run check` (per AGENTS.md — `@unclecode/*` subpath exports resolve to `dist/`).
 
 ---
 
 ## File Structure Mapping
 
 **Modify:**
-- `packages/contracts/src/context-packet-view.ts` — extend `ContextPacketViewItem` (anchor: `ContextPacketViewItem` type, line ~13)
-- `packages/config-core/src/types.ts` — add `context.modelWindow` (anchor: `context` block, line ~39)
-- `packages/config-core/src/defaults.ts` — add `CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW` (anchor: context defaults, line ~50)
-- `packages/config-core/src/resolver.ts` — validate `context.modelWindow` + read `UNCLECODE_CONTEXT_WINDOW` env (anchor: context validation block, line ~214; env block, line ~283)
-- `packages/context-broker/src/crp-selector.ts` — propagate `salience`/`includedInModel` into packet items (anchor: `contextSourceToPacketItem`, line ~40)
-- `packages/context-broker/src/context-packet-view.ts` — new `ContextInspectorViewModel` + builder + adaptive `formatContextPacketIndicator` (anchor: end of file, after `composeWorkShellTurnPromptFromPacket`)
-- `packages/context-broker/src/index.ts` — export new symbols (anchor: CRP exports, line ~90)
-- `packages/orchestrator/src/work-shell-engine.ts` — inspector source list reads authoritative flags; `resolveInspectorSourceList` simplification (anchor: line ~872)
-- `packages/orchestrator/src/work-shell-engine-builtins.ts` — `/context` builds view model lines (anchor: `createContextBuiltinResult`, line ~305)
-- `packages/orchestrator/src/work-shell-context-packet.ts` — re-export new builder (anchor: line ~9)
-- `packages/tui/src/work-shell-view.tsx` — `renderRunbookLine` consumes structured rows; adaptive meter from props; dimmed held-back rows (anchor: `renderRunbookLine`, line ~825; `CONTEXT_SOURCE_META`, line ~813)
-- `packages/tui/src/work-shell-pane.tsx` — pass `modelWindow` + inspector rows through props (anchor: inspector props wiring, line ~166)
-- `apps/unclecode-cli/src/work-runtime-crp.ts` — pass `modelWindow` into resolver (anchor: `WorkShellCrpConfig`, line ~32)
+- `packages/config-core/src/types.ts` — add `modelWindow?: number` to `context` block (anchor: `context` block, line 39)
+- `packages/config-core/src/defaults.ts` — add `CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW = 200000` (anchor: context defaults, line 50)
+- `packages/config-core/src/resolver.ts` — validate `context.modelWindow`; read `UNCLECODE_CONTEXT_WINDOW` env (anchor: context validation ~214; env ~283)
+- `packages/orchestrator/src/work-shell-engine.ts` — add `modelWindow?: number` to `WorkShellEngineState` (anchor: line 319, next to `contextIndicator`); set default in `createInitialWorkShellEngineState`-equivalent (the state literal at work-shell-engine-state.ts:76)
+- `packages/orchestrator/src/work-shell-engine-state.ts` — include `modelWindow` in the initial state object (anchor: line 96, next to `terminalColumns`)
+- `packages/orchestrator/src/work-shell-engine-builtins.ts` — pass `modelWindow` into the context builtin result if needed (anchor: `createContextBuiltinResult` ~276)
+- `apps/unclecode-cli/src/work-runtime-crp.ts` — add `modelWindow: number` to `WorkShellCrpConfig` + `resolveWorkShellCrpConfig` (anchor: line 32, 37)
+- `apps/unclecode-cli/src/work-runtime-bootstrap.ts` — thread `modelWindow` into engine construction (anchor: `createCrpRuntime` call ~491)
+- `packages/context-broker/src/context-packet-view.ts` — enhance `formatContextPacketIndicator` with pinned segment (anchor: line 246)
+- `packages/tui/src/work-shell-view.tsx` — `renderContextInspectorOverlay` accepts + forwards `modelWindow`; `renderContextInspectorBudgetLine` uses prop instead of env (anchor: 1043, 931); `WorkShellView` props add `modelWindow?: number` (anchor: 1411/1971/2049); adaptive section caps (anchor: `maxRows: 12` at 1066, `maxRows: 7` at 1076)
+- `packages/tui/src/work-shell-pane.tsx` — pass `modelWindow` from engine state into `WorkShellView` (anchor: inspector props wiring ~166)
 
 **Create (tests):**
-- `tests/contracts/context-inspector-view-model.contract.test.mjs`
-- `tests/context-broker/context-packet-view-model.test.mjs` (if a context-broker test dir exists; else `tests/contracts/`)
+- `tests/contracts/context-model-window.contract.test.mjs` (config + indicator + meter-label assertions)
 
 ---
 
-## Task 1: Extend contract type with authoritative source flags
+## Task 1: Add `context.modelWindow` config + env wiring
 
-**Goal:** Add optional `salience`, `pinned`, and `includedInModel` fields to `ContextPacketViewItem` so the inspector can render glyph/dim state from authoritative data instead of approximating `pinned = false`.
+**Goal:** Create a configurable, env-overridable model context window (default 200000) in config-core that downstream tasks thread into the inspector meter, replacing the hard-coded env reads (defect #7).
 
-**Dependencies:** None (foundation — all other tasks consume this).
-
-**Files:**
-- Modify: `packages/contracts/src/context-packet-view.ts` (anchor: `ContextPacketViewItem`, line 13)
-- Test: `tests/contracts/context-packet-view-type.contract.test.mjs` (create)
-
-**Acceptance Criteria:**
-- [ ] `ContextPacketViewItem` type includes optional `salience?: number`, `pinned?: boolean`, `includedInModel?: boolean` fields, documented with a JSDoc comment explaining they carry authoritative CRP store state for the inspector
-- [ ] `npm run build && npm run check` passes (the type addition is backward-compatible — all existing constructions omit these fields)
-- [ ] A contract test asserts the type is importable and an item constructed *without* the new fields still satisfies the type (backward compat), and an item *with* the fields also satisfies it
-
-**Steps:**
-1. Read `packages/contracts/src/context-packet-view.ts:13-21`.
-2. Add to `ContextPacketViewItem`, after `sourceCount?`:
-   ```ts
-   /** Authoritative CRP salience (0–1) at select time. Inspector-only; not emitted in the model prompt. */
-   readonly salience?: number | undefined;
-   /** True when salience was pinned to 1.0 by the operator. Drives the ◆ glyph. */
-   readonly pinned?: boolean | undefined;
-   /** True when the source is included in the model-ready packet; false when held back locally. */
-   readonly includedInModel?: boolean | undefined;
-   ```
-3. Create `tests/contracts/context-packet-view-type.contract.test.mjs` with two assertions: (a) a minimal item `{id,category,label,reason}` typechecks via a `.d.ts`-style `satisfies` check at runtime is not possible — instead assert the module exports the type symbol path; (b) an enriched item with all three new fields is accepted. Use a runtime shape test: import a constructor that accepts the type and call it both ways, asserting no throw.
-4. Run `npm run build` then `npm run check`. Both must pass.
-
----
-
-## Task 2: Propagate authoritative flags through the CRP selector
-
-**Goal:** `contextSourceToPacketItem` in `crp-selector.ts` sets `salience`, `pinned` (= `salience === 1.0`), and `includedInModel` on every projected item so the inspector renders truth instead of `pinned = false`.
-
-**Dependencies:** Task 1.
+**Dependencies:** None.
 
 **Files:**
-- Modify: `packages/context-broker/src/crp-selector.ts` (anchor: `contextSourceToPacketItem`, line 40)
-- Modify: `apps/unclecode-cli/src/work-runtime-crp.ts` (anchor: `upsertPacketItemsAsContextSources`, line 48 — ensure non-CRP items get a sensible default `includedInModel: true`)
-- Test: `tests/agentops-db/context-sources.test.mjs` (extend) OR `tests/context-broker/` (create)
-
-**Acceptance Criteria:**
-- [ ] `contextSourceToPacketItem` sets `salience: src.salience`, `pinned: src.salience >= 1.0`, and `includedInModel: src.includedInModel` on the returned item
-- [ ] `selectContextPacketFromStore` output: every item in `included` has `includedInModel === true`; every item in `excluded` has `includedInModel === false`
-- [ ] A pinned source (`pinContextSource`) projected through `selectContextPacketFromStore` yields an item with `pinned === true` and `salience === 1.0`
-- [ ] `npm run build && npm run check` passes
-- [ ] A test asserts the three flag propagations (one assertion each)
-
-**Steps:**
-1. Read `packages/context-broker/src/crp-selector.ts:40-49`.
-2. In `contextSourceToPacketItem`, add after `tokenEstimate`:
-   ```ts
-   salience: src.salience,
-   pinned: src.salience >= 1.0,
-   includedInModel: src.includedInModel,
-   ```
-3. In `apps/unclecode-cli/src/work-runtime-crp.ts:48-67`, `upsertPacketItemsAsContextSources` items are upserted but the *resolver return* path also builds items — verify the bootstrap/summary items built in `work-runtime-context-items.ts` get `includedInModel: true` by default since they are model-included. Check that file; if it constructs `ContextPacketViewItem` without the flag, add `includedInModel: true`.
-4. Add a test in the context-broker or agentops-db suite: seed a source, pin it, call `selectContextPacketFromStore`, assert item `pinned === true && salience === 1.0 && includedInModel === true`.
-5. Run `npm run build && npm run check && npm run test:context-broker`. All must pass.
-
----
-
-## Task 3: Add `context.modelWindow` config + env wiring
-
-**Goal:** Provide a configurable, env-overridable model context window (default 200000) that replaces the hard-coded `200_000` in the TUI meter, feeding both the meter and the view model.
-
-**Dependencies:** None (parallelizable with Tasks 1–2).
-
-**Files:**
-- Modify: `packages/config-core/src/types.ts` (anchor: `context` block, line 39)
+- Modify: `packages/config-core/src/types.ts` (anchor: `context` block line 39; AND `UncleCodeConfigExplanation['settings']` line 112 — add `modelWindow: SettingExplanation<number>`)
 - Modify: `packages/config-core/src/defaults.ts` (anchor: line 50)
-- Modify: `packages/config-core/src/resolver.ts` (anchor: context validation ~214; env ~283)
-- Test: `tests/config-core/` (find existing config test, extend)
+- Modify: `packages/config-core/src/resolver.ts` (anchor: context validation ~214-236 — mirror `crpBudget`; env ~283-300 — mirror `UNCLECODE_CRP_BUDGET`; explanation `settings` object ~575-584 — add `modelWindow: explainSetting(...)`)
+- Test: `tests/contracts/config-core.contract.test.mjs` (extend with modelWindow cases)
 
 **Acceptance Criteria:**
-- [ ] `UncleCodeConfig['context']` includes `readonly modelWindow?: number` with JSDoc "Model context window in tokens, used by the /context budget meter. Defaults to 200000. Override via UNCLECODE_CONTEXT_WINDOW."
-- [ ] `CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW = 200000` constant exists in `defaults.ts` and is wired into the defaults object
-- [ ] Resolver validates `context.modelWindow` as a positive integer (error: "Invalid context.modelWindow value.") and reads `UNCLECODE_CONTEXT_WINDOW` env into the setting (positive integer; 0/invalid → default)
+- [ ] `UncleCodeConfig['context']` type includes `readonly modelWindow?: number` with JSDoc "Model context window in tokens, used by the /context budget meter. Defaults to 200000. Override via UNCLECODE_CONTEXT_WINDOW."
+- [ ] `UncleCodeConfigExplanation['settings']` includes `readonly modelWindow: SettingExplanation<number>;` (anchor types.ts:112, next to `crpBudget`)
+- [ ] `CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW = 200000` exists in `defaults.ts` and the context defaults object includes `modelWindow: CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW`
+- [ ] Resolver validation uses the `issues.push(...)` pattern (NOT throw) — when `context.modelWindow` is present and not a positive integer, pushes the string `"Invalid context.modelWindow value."` into `issues` exactly as `crpBudget` does at resolver.ts:229
+- [ ] `explainUncleCodeConfig(...).settings.modelWindow.value` reflects the resolved value, and the resolver's `settings` object includes `modelWindow: explainSetting(sources, (c) => c.context?.modelWindow, CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW)` at resolver.ts ~584
+- [ ] Resolver env layer reads `UNCLECODE_CONTEXT_WINDOW` (mirror the `UNCLECODE_CRP_BUDGET` block at resolver.ts:294-298): when set and a positive integer via `Number.parseInt`, folds into the synthesized env config layer's `context.modelWindow`
 - [ ] `npm run build && npm run check` passes
-- [ ] A test asserts: config `{context:{modelWindow:128000}}` resolves to `128000`; env `UNCLECODE_CONTEXT_WINDOW=1000000` resolves to `1000000`; invalid value `modelWindow:-5` throws the expected error
+- [ ] `npm run test:contracts` passes, including new assertions: (a) `explainUncleCodeConfig` with `{context:{modelWindow:128000}}` yields `.settings.modelWindow.value === 128000`; (b) with env `UNCLECODE_CONTEXT_WINDOW=1000000` yields `.settings.modelWindow.value === 1000000`; (c) `{context:{modelWindow:-5}}` yields `explanation.sourceIssues` containing the string `"Invalid context.modelWindow value."`
 
 **Steps:**
-1. Read `packages/config-core/src/types.ts:39-44`, `defaults.ts:23-53`, `resolver.ts:214-311`.
-2. Add `modelWindow?: number` to the `context` type block.
-3. Add `CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW = 200000` to `defaults.ts` and include `modelWindow: CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW` in the context defaults.
-4. In `resolver.ts`, add validation in the context-validation block: if `modelWindow` present and not a positive integer, throw `"Invalid context.modelWindow value."`. In the env block, read `Number(process.env.UNCLECODE_CONTEXT_WINDOW)` — if a positive integer, set `context.modelWindow` to it.
-5. Find the existing config-core test file (rg for `crpBudget` test assertions), add three assertions for modelWindow: explicit config, env override, invalid throws.
-6. Run `npm run build && npm run check && npm run test:config-core` (or the closest test script — verify script name in package.json).
-
----
-
-## Task 4: Adaptive token meter reads model window from props
-
-**Goal:** The token meter in `renderRunbookLine` (currently hard-coded to `200_000` / `UNCLECODE_CONTEXT_WINDOW` env) reads a `modelWindow` prop passed down from the pane, which sources it from config. Removes the hard-coded 200k (defect #7).
-
-**Dependencies:** Task 3 (config field).
-
-**Files:**
-- Modify: `packages/tui/src/work-shell-view.tsx` (anchor: `renderRunbookLine`, line 825; meter math line 840-845)
-- Modify: `packages/tui/src/work-shell-pane.tsx` (anchor: pass `modelWindow` prop)
-- Test: `tests/contracts/tui-work-shell.contract.test.mjs` (extend)
-
-**Acceptance Criteria:**
-- [ ] `renderRunbookLine` accepts an optional `modelWindow?: number` (default 200000) in its options and uses it instead of reading `process.env.UNCLECODE_CONTEXT_WINDOW`
-- [ ] The meter math (`filled`, `windowLabel`) derives from the passed `modelWindow`
-- [ ] `work-shell-pane.tsx` passes the config-resolved `modelWindow` into the overlay render
-- [ ] No remaining reference to `process.env.UNCLECODE_CONTEXT_WINDOW` in `work-shell-view.tsx`
-- [ ] `npm run build && npm run check && npm run test:contracts` passes
-- [ ] A contract test asserts `renderRunbookLine("Sources · ~1000 tokens", 0, {modelWindow:128000})` produces a meter label containing "128k" (not "200k")
-
-**Steps:**
-1. Read `packages/tui/src/work-shell-view.tsx:825-866`.
-2. Change `renderRunbookLine` signature to accept `{ cursor?, modelWindow? }` as a 4th param (or extend the existing options object). Replace `const envWindow = Number.parseInt(process.env.UNCLECODE_CONTEXT_WINDOW ?? "", 10); const budgetWindow = ...` with `const budgetWindow = input.modelWindow ?? 200000;`.
-3. Trace where `renderRunbookLine` is called (the overlay map at ~1927) and thread `modelWindow` from the pane props.
-4. In `work-shell-pane.tsx`, ensure the pane receives `modelWindow` (sourced from config via the engine state or CLI bootstrap — add to the props passed to `WorkShellView`).
-5. Remove the `process.env.UNCLECODE_CONTEXT_WINDOW` read.
-6. Add a contract test rendering a `Sources ·` line with `modelWindow: 128000` and asserting the output contains "128k".
-7. Run `npm run build && npm run check && npm run test:contracts`.
-
----
-
-## Task 5: Structured view model + adaptive layout lines
-
-**Goal:** Replace the string-roundtrip rendering with a `ContextInspectorViewModel` that the engine (cursor) and renderer both read. The view model produces display *rows* (not opaque strings), each tagged with its kind (`header` | `source` | `summary` | `meter` | `warning` | `hint`), so the cursor matches against navigable source rows only. The layout adapts: ≤4 sources → condensed (no collapsed-groups line); >8 sources → full with "+N more".
-
-**Dependencies:** Task 1 (flags), Task 2 (propagation).
-
-**Files:**
-- Modify: `packages/context-broker/src/context-packet-view.ts` (anchor: append after `composeWorkShellTurnPromptFromPacket`)
-- Modify: `packages/context-broker/src/index.ts` (anchor: CRP exports ~90)
-- Modify: `packages/orchestrator/src/work-shell-engine.ts` (anchor: `resolveInspectorSourceList` ~872)
-- Modify: `packages/orchestrator/src/work-shell-engine-builtins.ts` (anchor: `createContextBuiltinResult` ~305)
-- Modify: `packages/orchestrator/src/work-shell-context-packet.ts` (anchor: ~9)
-- Test: `tests/contracts/context-inspector-view-model.contract.test.mjs` (create)
-
-**Acceptance Criteria:**
-- [ ] `ContextInspectorViewModel` type exists with `rows: readonly ContextInspectorRow[]` where `ContextInspectorRow = { kind: "summary"|"meter"|"section-header"|"source"|"warning"|"hint"; sourceIndex?: number; text: string; item?: ContextPacketViewItem }`
-- [ ] `buildContextInspectorViewModel(packet, options?)` returns a view model where every `kind:"source"` row carries a stable `sourceIndex` (0-based, included-then-excluded order) and the source `item`
-- [ ] The number of source rows shown is adaptive: all included sources always shown; excluded sources capped at 4, with a `kind:"hint"` "+N more held back" row when truncated
-- [ ] `resolveInspectorSourceList` in the engine reads directly from the view model's source rows (or the packet items directly) so cursor `sourceIndex` matches the rendered row — no more flat-list/line-index mismatch
-- [ ] `npm run build && npm run check` passes
-- [ ] A contract test asserts: (a) source rows have sequential `sourceIndex` 0..N-1; (b) cursor moving to `sourceIndex` highlights exactly that source row; (c) with 2 included + 6 excluded, exactly 4 excluded rows + 1 hint row appear
-
-**Steps:**
-1. Read `packages/context-broker/src/context-packet-view.ts` fully and `packages/orchestrator/src/work-shell-engine.ts:866-905`.
-2. In `context-packet-view.ts`, add:
+1. Read `packages/config-core/src/types.ts:39-44` and `:100-113`; `defaults.ts:23-53`; `resolver.ts:210-240`, `:280-300`, `:570-585`.
+2. In `types.ts`: add `readonly modelWindow?: number;` (with the JSDoc) to the `context` block (after `crpBudget`, ~line 44). Add `readonly modelWindow: SettingExplanation<number>;` to the `settings` block of `UncleCodeConfigExplanation` (after `crpBudget`, ~line 112).
+3. In `defaults.ts`: add `export const CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW = 200000;` near the other `CONFIG_CORE_DEFAULT_CONTEXT_*` constants, and add `modelWindow: CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW,` to the context defaults object.
+4. In `resolver.ts`: FIRST add `modelWindow?: number;` to the `MutableContext` type (resolver.ts:74-77) so the assignment below typechecks. Then in the context-validation block (~214-236, alongside `crpBudget`): add `const modelWindow = asPositiveInteger(rawContext.modelWindow);` then `if ("modelWindow" in rawContext && rawContext.modelWindow !== undefined && modelWindow === undefined) { issues.push("Invalid context.modelWindow value."); }` then `if (modelWindow !== undefined) { nextContext.modelWindow = modelWindow; }` — mirror lines 223-236 for `crpBudget` exactly. (Use the SAME `asPositiveInteger` helper `crpBudget` uses.)
+5. In `resolver.ts` env block (~287-300, the `crpContext` synthesis): extend the `crpContext` type to `{ crp?: boolean; crpBudget?: number; modelWindow?: number }`, add `const modelWindowRaw = env.UNCLECODE_CONTEXT_WINDOW;` then `if (modelWindowRaw !== undefined) { const parsed = Number.parseInt(modelWindowRaw, 10); if (Number.isFinite(parsed) && parsed > 0) { crpContext.modelWindow = parsed; } }` — mirror lines 294-298.
+6. In `resolver.ts` explanation `settings` object (~580-584): add after the `crpBudget` entry:
    ```ts
-   export type ContextInspectorRowKind = "summary"|"meter"|"section-header"|"source"|"warning"|"hint";
-   export type ContextInspectorRow = {
-     readonly kind: ContextInspectorRowKind;
-     readonly text: string;
-     readonly sourceIndex?: number;
-     readonly item?: ContextPacketViewItem;
-   };
-   export type ContextInspectorViewModel = { readonly rows: readonly ContextInspectorRow[] };
-   export function buildContextInspectorViewModel(packet: ContextPacketView): ContextInspectorViewModel { ... }
+   modelWindow: explainSetting(
+     sources,
+     (config) => config.context?.modelWindow,
+     CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW,
+   ),
    ```
-   The builder emits: summary row, meter row (token estimate + window from packet), "Included in next answer" header, one source row per included item (sourceIndex = ordinal), "Held back locally" header, up to 4 excluded source rows, optional hint row, warning row, next-answer row.
-3. Export from `packages/context-broker/src/index.ts`.
-4. In `work-shell-engine.ts`, rewrite `resolveInspectorSourceList` to derive from `buildContextInspectorViewModel(state.contextPacket).rows` filtered to `kind:"source"` — preserving the existing return shape (`id,label,category,detail,pinned,heldBack`) but now with authoritative `pinned`/`heldBack` from the item flags.
-5. In `work-shell-engine-builtins.ts`, `createContextBuiltinResult` for context builds `panel.lines` from the view model row `.text` (so the TUI's string-based `renderRunbookLine` still has text to match on) — but the *cursor* math uses `sourceIndex`.
-6. Update `work-shell-context-packet.ts` re-exports.
-7. Create the contract test asserting sourceIndex sequencing, cursor-row match, and adaptive cap.
-8. Run `npm run build && npm run check && npm run test:contracts`.
+7. In `tests/contracts/config-core.contract.test.mjs`, add three tests mirroring the existing `crpBudget` test style (find the existing `crpBudget` test to copy its fixture/teardown pattern): (a) config `{context:{modelWindow:128000}}` → `result.settings.modelWindow.value === 128000`; (b) with env `UNCLECODE_CONTEXT_WINDOW=1000000` (save/restore env) → `.value === 1000000`; (c) `{context:{modelWindow:-5}}` → the resolution surfaces `"Invalid context.modelWindow value."` in `explanation.sourceIssues` (match how the existing `crpBudget` invalid test asserts its issue string).
+8. Run `npm run build && npm run check && npm run test:contracts`. All must pass.
 
 ---
 
-## Task 6: Visual hierarchy — pinned glyph, dimmed held-back, section rules
+## Task 2: Thread `modelWindow` through engine state + CLI bootstrap
 
-**Goal:** `renderRunbookLine` renders pinned sources with `◆` (vs `◇`), held-back rows dimmed, and the cursor highlight tracks `sourceIndex` from the view model. Section headers get visual containment rules (defects #8, #12).
+**Goal:** Carry the resolved `modelWindow` from config-core through `WorkShellCrpConfig` and `WorkShellEngineState` into the TUI props so Task 3 can read it as a prop, not from `process.env`.
 
-**Dependencies:** Task 5 (view model provides sourceIndex + item flags).
+**Dependencies:** Task 1 (config field must exist).
 
 **Files:**
-- Modify: `packages/tui/src/work-shell-view.tsx` (anchor: `renderRunbookLine` source-line branch ~911-937)
-- Test: `tests/contracts/tui-work-shell.contract.test.mjs` (extend) OR `scripts/runtime-qa/tui-context-contrast-smoke.mjs` (extend)
+- Modify: `packages/orchestrator/src/work-shell-engine.ts` (anchor: `WorkShellEngineState` type, line 319; default-state is set via `createInitialWorkShellEngineState` in work-shell-engine-state.ts)
+- Modify: `packages/orchestrator/src/work-shell-engine-state.ts` (anchor: initial state literal, line 96)
+- Modify: `apps/unclecode-cli/src/work-runtime-crp.ts` (anchor: `WorkShellCrpConfig`, line 32; `resolveWorkShellCrpConfig`, line 37)
+- Modify: `apps/unclecode-cli/src/work-runtime-bootstrap.ts` (anchor: `createCrpRuntime`/engine construction, line ~491)
+- Test: `tests/contracts/context-model-window.contract.test.mjs` (extend)
 
 **Acceptance Criteria:**
-- [ ] A source row whose item has `pinned === true` renders `◆` glyph (bold accent color); otherwise `◇`
-- [ ] A source row whose item has `includedInModel === false` renders in a dimmed/muted color
-- [ ] The cursor highlight (`▶` + background) applies when `cursor.sourceIndex === row.sourceIndex` (not line index)
-- [ ] Section headers ("Included in next answer" / "Held back locally") render with a colored rule and a one-line explanatory subtitle for Held back (e.g., "local only · not sent to the model"), addressing defect #8
-- [ ] `npm run build && npm run check && npm run test:contracts` passes
-- [ ] `node scripts/runtime-qa/tui-context-contrast-smoke.mjs` passes (the existing pinned-contract gate)
+- [ ] `WorkShellEngineState` type includes `readonly modelWindow: number;` (required, not optional — always has a default)
+- [ ] `createInitialWorkShellEngineState` sets `modelWindow` to `input.options.modelWindow ?? 200000` in the returned state object
+- [ ] `WorkShellCrpConfig` includes `readonly modelWindow: number;` and `resolveWorkShellCrpConfig` reads it from `explanation.settings.modelWindow.value`
+- [ ] `work-runtime-bootstrap.ts` passes the resolved `modelWindow` into the engine options (or state seed)
+- [ ] `npm run build && npm run check` passes
+- [ ] A contract test asserts `createInitialWorkShellEngineState({...}).modelWindow === 200000` by default and `=== 128000` when `options.modelWindow` is provided
 
 **Steps:**
-1. Read `packages/tui/src/work-shell-view.tsx:911-948`.
-2. Extend `renderRunbookLine` to accept the current row's `item` (from the view model) so it can read `pinned`/`includedInModel`. Thread the view model rows into the overlay render loop (the map at ~1927).
-3. In the source-line branch, change glyph logic: `const glyph = item?.pinned ? "◆" : "◇"`. Color: pinned → bold `W.toolAccent`; normal → icon color from `CONTEXT_SOURCE_META`.
-4. Dimming: if `item?.includedInModel === false`, wrap the row text in `color={W.textMuted}`.
-5. Cursor: change `cursor.cursorIndex === index` (line index) to compare against the row's `sourceIndex` passed via the options. Thread `sourceIndex` from the view model row into the render call.
-6. Held-back header: add a subtitle line `local only · not sent to the model` rendered in muted text under the header.
-7. Update `tui-context-contrast-smoke.mjs` if its fixture needs the new glyph/subtitle — but prefer adding a new assertion in `tui-work-shell.contract.test.mjs` for the pinned/dim/held-back-subtitle behavior.
-8. Run `npm run build && npm run check && npm run test:contracts && node scripts/runtime-qa/tui-context-contrast-smoke.mjs`.
+1. Read `packages/orchestrator/src/work-shell-engine.ts:310-329`, `work-shell-engine-state.ts:64-104`, `apps/unclecode-cli/src/work-runtime-crp.ts:32-42`, `apps/unclecode-cli/src/work-runtime-bootstrap.ts:480-520`.
+2. In `work-shell-engine.ts`, add `readonly modelWindow: number;` to `WorkShellEngineState` (after `contextIndicator`, line 319). Also add `readonly modelWindow?: number;` to `WorkShellEngineOptions` (find its declaration via `rg "WorkShellEngineOptions"`).
+3. In `work-shell-engine-state.ts:76-103`, add `modelWindow: input.options.modelWindow ?? 200000,` to the returned state object (next to `terminalColumns`).
+4. In `work-runtime-crp.ts`, add `readonly modelWindow: number;` to `WorkShellCrpConfig` (line ~34) and set it in `resolveWorkShellCrpConfig`: `modelWindow: explanation.settings.modelWindow.value`.
+5. In `work-runtime-bootstrap.ts`, where `createCrpRuntime` is called (~491) and where the engine is constructed, pass `modelWindow: resolveWorkShellCrpConfig(configExplanation).modelWindow` into the engine options (trace the engine construction call site and add the option).
+6. Add a contract test in `tests/contracts/context-model-window.contract.test.mjs`: import `createInitialWorkShellEngineState`, call with a minimal options fixture (mirror existing engine-state tests in the repo — `rg "createInitialWorkShellEngineState" tests/`), assert `.modelWindow === 200000` default and `=== 128000` when seeded.
+7. Run `npm run build && npm run check && npm run test:contracts`. All must pass.
 
 ---
 
-## Task 7: Live footer chip — freshness pulse + salience hint
+## Task 3: Adaptive token meter reads `modelWindow` from props
 
-**Goal:** `formatContextPacketIndicator` becomes a live mini-dashboard: shows a freshness signal (how many sources changed since last turn), a salience hint (highest-pinned), and keeps the token estimate. Replaces the static `▤ N ctx · ~Xk · M held`.
+**Goal:** Replace the `process.env.UNCLECODE_CONTEXT_WINDOW` read in `renderContextInspectorBudgetLine` (work-shell-view.tsx:933) and the fallback `renderRunbookLine` meter with the threaded `modelWindow` prop. Closes defect #7.
 
-**Dependencies:** Task 2 (flags for salience).
+**Dependencies:** Task 2 (state threading must land first so the prop exists).
+
+**Files:**
+- Modify: `packages/tui/src/work-shell-view.tsx` (anchor: `renderContextInspectorBudgetLine`, line 931; `renderContextInspectorOverlay`, line 1043; `renderRunbookLine` meter branch, line ~1111; `WorkShellView` render of overlay, line ~2188)
+- Modify: `packages/tui/src/work-shell-pane.tsx` (anchor: pass `modelWindow` into `WorkShellView`, ~166)
+- Test: `tests/contracts/context-model-window.contract.test.mjs` (extend)
+
+**Acceptance Criteria:**
+- [ ] `renderContextInspectorBudgetLine(packet, modelWindow)` uses the passed `modelWindow` for the window label and fill math; no `process.env.UNCLECODE_CONTEXT_WINDOW` read remains in this function
+- [ ] `renderContextInspectorOverlay` accepts `modelWindow: number` and forwards it to `renderContextInspectorBudgetLine`
+- [ ] The `WorkShellView` overlay render site (line ~2188) passes `props.modelWindow ?? 200000` into `renderContextInspectorOverlay`
+- [ ] `work-shell-pane.tsx` passes the engine-state `modelWindow` into the `WorkShellView` props
+- [ ] No remaining reference to `process.env.UNCLECODE_CONTEXT_WINDOW` in `packages/tui/src/work-shell-view.tsx`
+- [ ] `npm run build && npm run check && npm run test:contracts && npm run test:tui` passes
+- [ ] A contract test asserts: with `modelWindow = 128000` and a packet token estimate of 16000, the meter fill computes to 1 cell (10-cell meter: `round(16000/128000*10) = 1`) and the label contains "128k" not "200k"
+
+**Steps:**
+1. Read `packages/tui/src/work-shell-view.tsx:931-950`, `1043-1097`, the `renderRunbookLine` meter branch (~1107-1170 — read to find the exact env read in the fallback path), and the overlay render call at ~2188.
+2. Change `renderContextInspectorBudgetLine` signature from `(packet: ContextPacketView)` to `(packet: ContextPacketView, modelWindow: number)`. Replace lines 933-934 (`envWindow`/`budgetWindow` from env) with `const budgetWindow = modelWindow;`.
+3. In `renderContextInspectorOverlay`, add `modelWindow: number` to the input type and pass it: `{renderContextInspectorBudgetLine(input.packet, input.modelWindow)}`.
+4. At the overlay render call site (~2188), add `modelWindow: props.modelWindow ?? 200000` to the `renderContextInspectorOverlay({...})` arguments.
+5. Find and fix the `renderRunbookLine` fallback meter branch — it also reads `process.env.UNCLECODE_CONTEXT_WINDOW`. Since `renderRunbookLine` is the *fallback* (string-based) path and the structured overlay is now primary, thread `modelWindow` into it via its options object (it already accepts `{cursorIndex}` — extend to `{cursorIndex?, modelWindow?}`) and default to 200000. Replace the env read with `input.modelWindow ?? 200000`.
+6. In `work-shell-pane.tsx`, find where `WorkShellView` props are assembled (the inspector props wiring ~166) and add `modelWindow: engineState.modelWindow` (or however the pane reads engine state).
+7. Add a contract test: extract the meter-fill math into a tiny pure helper if it isn't already testable (the math is `Math.min(10, Math.max(0, Math.round((tokenEstimate / modelWindow) * 10)))` — test it directly by replicating or exporting a `computeContextMeterFill(tokenEstimate, modelWindow)` helper from the TUI module). Assert fill=1 and label "128k" for (16000, 128000).
+8. Run `npm run build && npm run check && npm run test:contracts && npm run test:tui`. All must pass.
+
+---
+
+## Task 4: Adaptive overlay section row caps
+
+**Goal:** Replace the hard-coded `maxRows: 12` (included) and `maxRows: 7` (held-back) in `renderContextInspectorOverlay` with values derived from terminal height (`terminalColumns` is available; derive a row budget from it or from a new height prop) so small terminals show fewer rows and tall terminals show more — the layout adapts to the viewport.
+
+**Dependencies:** Task 3 (same file, sequential to avoid conflict).
+
+**Files:**
+- Modify: `packages/tui/src/work-shell-view.tsx` (anchor: `renderContextInspectorOverlay` section calls, lines 1062-1081; `maxRows` at 1066 and 1076)
+- Test: `tests/contracts/context-model-window.contract.test.mjs` (extend — same file T1/T2/T3 write; T4 depends on T3 so sequential)
+
+**Acceptance Criteria:**
+- [ ] A pure helper `computeContextOverlaySectionMaxRows({ terminalRows?: number, sourceCount: number, section: "included"|"held" }): { included: number; held: number }` exists and is exported from `work-shell-view.tsx` (or a new small `work-shell-context-layout.ts` module)
+- [ ] The helper returns: when `terminalRows` is undefined, `{included: 12, held: 7}` (current defaults preserved as fallback); when `terminalRows` is defined, `included = clamp(round(terminalRows * 0.4), 4, 20)` and `held = clamp(round(terminalRows * 0.25), 3, 12)`
+- [ ] `renderContextInspectorOverlay` uses the helper instead of literal `12`/`7`
+- [ ] `npm run build && npm run check && npm run test:contracts && npm run test:tui` passes
+- [ ] A contract test asserts: `computeContextOverlaySectionMaxRows({terminalRows: 24})` returns `{included: 10, held: 6}` (round(9.6)=10, round(6)=6); `computeContextOverlaySectionMaxRows({terminalRows: 50})` returns `{included: 20, held: 12}` (clamped to max); `computeContextOverlaySectionMaxRows({})` returns `{included: 12, held: 7}`
+
+**Steps:**
+1. Read `packages/tui/src/work-shell-view.tsx:1043-1097`.
+2. Add the helper function (with `clamp = (v,min,max)=>Math.min(max,Math.max(min,v))`):
+   ```ts
+   export function computeContextOverlaySectionMaxRows(input: {
+     readonly terminalRows?: number;
+     readonly sourceCount?: number;
+     readonly section?: "included" | "held";
+   }): { readonly included: number; readonly held: number } {
+     if (input.terminalRows === undefined) return { included: 12, held: 7 };
+     const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
+     return {
+       included: clamp(Math.round(input.terminalRows * 0.4), 4, 20),
+       held: clamp(Math.round(input.terminalRows * 0.25), 3, 12),
+     };
+   }
+   ```
+3. In `renderContextInspectorOverlay`, accept `terminalRows?: number` in the input, compute `const caps = computeContextOverlaySectionMaxRows({terminalRows: input.terminalRows});`, and replace `maxRows: 12` → `maxRows: caps.included`, `maxRows: 7` → `maxRows: caps.held`.
+4. At the overlay render call site (~2188), pass `terminalRows: props.terminalRows` (check if `WorkShellView` already receives terminal rows — if only `terminalColumns`, add a `terminalRows?: number` prop threaded the same way columns is).
+5. Add the contract test with the three cases above.
+6. Run `npm run build && npm run check && npm run test:contracts && npm run test:tui`. All must pass.
+
+---
+
+## Task 5: Live footer indicator with pinned-count segment
+
+**Goal:** `formatContextPacketIndicator` emits a `📌 N pinned` segment when any included source is pinned (salience ≥ 1.0), turning the footer chip into a live salience signal. Keeps the existing token/held/warnings segments.
+
+**Dependencies:** None (parallelizable with Tasks 1–4 — touches only `context-packet-view.ts` + footer parser, disjoint files).
 
 **Files:**
 - Modify: `packages/context-broker/src/context-packet-view.ts` (anchor: `formatContextPacketIndicator`, line 246)
 - Modify: `packages/tui/src/work-shell-footer-fast-paths.ts` (anchor: `compactWorkShellFooterContextChip`, line 42)
-- Test: `tests/contracts/tui-work-shell.contract.test.mjs` (extend)
+- Test: `tests/context-broker/context-packet-view.test.mjs` (this file is disjoint from T1–4's `tests/contracts/context-model-window.contract.test.mjs`; create it if absent under `tests/context-broker/`)
 
 **Acceptance Criteria:**
-- [ ] `formatContextPacketIndicator(packet)` output includes: included count, token estimate (`~Xk`), held count, and when >0 pinned sources exist, a `📌 N pinned` segment
-- [ ] When `packet.sourceCounts.warnings > 0`, a `⚠N` segment is present (existing behavior preserved)
-- [ ] The footer chip parser in `work-shell-footer-fast-paths.ts` recognizes the new form (regex updated) and falls back gracefully to the first `·`-segment for unknown forms
-- [ ] `npm run build && npm run check && npm run test:contracts` passes
-- [ ] A test asserts: a packet with 2 pinned sources yields an indicator containing "pinned"; a packet with 0 pinned omits the segment
+- [ ] `formatContextPacketIndicator(packet)` appends ` · 📌 N pinned` when `packet.included.filter(i => (i.salience ?? 0) >= 1).length > 0` (N = that count); omits the segment when count is 0
+- [ ] Existing segments preserved: `▤ N ctx · ~Xk · M held` plus optional ` · W⚠`
+- [ ] `compactWorkShellFooterContextChip` regex still parses the new form (the `📌` segment is after the first `·`-segment, so the existing `firstSegment` logic still returns the `▤ N ctx` segment unchanged — verify and, if needed, update the regex)
+- [ ] `npm run build && npm run check && npm run test:contracts && npm run test:context-broker` passes
+- [ ] A test asserts: a packet with 2 included items both `salience: 1.0` yields an indicator string containing "📌" and "2 pinned"; a packet with 0 pinned omits "pinned"
 
 **Steps:**
 1. Read `packages/context-broker/src/context-packet-view.ts:246-252` and `packages/tui/src/work-shell-footer-fast-paths.ts:42-53`.
-2. In `formatContextPacketIndicator`, compute `pinnedCount = packet.included.filter(i => i.pinned).length`. Append ` · 📌 ${pinnedCount} pinned` when `pinnedCount > 0`.
-3. In `compactWorkShellFooterContextChip`, update the regex to also match the new `📌` segment form; keep the existing fallback for the `context N ready` legacy form.
-4. Add a contract test: build a packet with 2 included items both `pinned: true`, call `formatContextPacketIndicator`, assert output includes "pinned". Build one with 0 pinned, assert "pinned" absent.
-5. Run `npm run build && npm run check && npm run test:contracts`.
+2. In `formatContextPacketIndicator`, after computing `held` and `tokenK`, add:
+   ```ts
+   const pinnedCount = packet.included.reduce(
+     (count, item) => count + ((item.salience ?? 0) >= 1 ? 1 : 0),
+     0,
+   );
+   const pinnedSuffix = pinnedCount > 0 ? ` · 📌 ${pinnedCount} pinned` : "";
+   ```
+   Append `pinnedSuffix` to `base` before the warnings suffix (or after — consistent with existing order).
+3. In `compactWorkShellFooterContextChip`, verify the `firstSegment` split still works: `normalized.split(/\s·\s/u)[0]` on `▤ 12 ctx · ~34k · 2 held · 📌 3 pinned` yields `▤ 12 ctx` — correct, no change needed. Add a comment noting the parser intentionally takes only the first segment so appended segments don't break it. If the existing `readyMatch` regex is the only path, no change; otherwise no change.
+4. Find or create `tests/context-broker/context-packet-view.test.mjs` (do NOT use `tests/contracts/` — that dir is owned by T1–4's `context-model-window.contract.test.mjs` to avoid parallel-write conflict). Add two tests: (a) build a packet via `createContextPacketView` with 2 included items each `salience: 1.0`, call `formatContextPacketIndicator`, assert `/📌.*2 pinned/.test(result)`; (b) same with `salience: 0.5`, assert `!result.includes("pinned")`. Import from `@unclecode/context-broker` (source condition) mirroring the import style in other `tests/context-broker/*.test.mjs` files.
+5. Run `npm run build && npm run check && npm run test:contracts && npm run test:context-broker`. All must pass.
 
 ---
 
-## Task 8: Final Verification
+## Task 6: Final Verification
 
-**Goal:** Run the full verification chain end-to-end and confirm no regressions across the workspace.
+**Goal:** Run the full verification chain end-to-end and confirm no regressions.
 
-**Dependencies:** Tasks 1–7.
+**Dependencies:** Tasks 1–5.
 
 **Files:** None (verification only).
 
 **Acceptance Criteria:**
-- [ ] `npm run build` succeeds
-- [ ] `npm run check` succeeds (tsc -p tsconfig.check.json --noEmit)
-- [ ] `npm run test:contracts` passes
+- [ ] `npm run build` succeeds (exit 0)
+- [ ] `npm run check` succeeds (exit 0)
+- [ ] `npm run test:contracts` passes (includes config-core + context-model-window assertions)
 - [ ] `npm run test:context-broker` passes
 - [ ] `npm run test:orchestrator` passes
 - [ ] `npm run test:tui` passes
-- [ ] `npm run test:config-core` (or nearest equivalent) passes
 - [ ] `node scripts/runtime-qa/tui-context-contrast-smoke.mjs` passes
-- [ ] No new TypeScript errors introduced in any touched package
+- [ ] No reference to `process.env.UNCLECODE_CONTEXT_WINDOW` remains in `packages/tui/src/work-shell-view.tsx`
 
 **Steps:**
 1. Run `npm run build` — confirm exit 0.
 2. Run `npm run check` — confirm exit 0.
-3. Run each test script listed above, confirming exit 0 and no failing assertions.
-4. Run the runtime-qa smoke gate.
-5. Save the combined output to `.glm-hammer/evidence/e2e.md`.
+3. Run `npm run test:contracts && npm run test:context-broker && npm run test:orchestrator && npm run test:tui` — confirm all exit 0.
+4. Run `node scripts/runtime-qa/tui-context-contrast-smoke.mjs` — confirm pass.
+5. Run `rg -n "UNCLECODE_CONTEXT_WINDOW" packages/tui/src/work-shell-view.tsx` — confirm no matches.
+6. Save combined output to `.glm-hammer/evidence/e2e.md`.
 
 ---
 
 ## Notes for Workers
 
-- **Build before check.** Per AGENTS.md, `npm run check` resolves `@unclecode/*` subpath exports from `dist/` — always run `npm run build` first or you get false TS2307 errors.
+- **Build before check.** Per AGENTS.md, `npm run check` resolves `@unclecode/*` subpath exports from `dist/` — always `npm run build` first or you get false TS2307 errors.
 - **Node version.** If `npm run node:check` fails, run `export PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH"`.
-- **No new dependencies.** All work uses existing packages.
-- **No Rust changes.** The model-window metadata does not exist in the Rust model catalog; we source it from config/env, not the catalog.
-- **Match surrounding code style.** `rg` for search, JSDoc on exported symbols, `readonly` fields, no `useEffect` for derived state.
-- **Pre-existing test quirks are not yours to fix** (per AGENTS.md): `orchestrator-multi-agent.contract.test.mjs` and `tests/work/tools.test.mjs` have known issues unrelated to this work.
+- **No new dependencies.** No Rust changes.
+- **`salience`/`includedInModel` already exist** on `ContextPacketViewItem` (contracts:21-22) — do NOT re-add them.
+- **The structured overlay already exists** (`renderContextInspectorOverlay`, `buildContextInspectorRows`) — enhance, do not rebuild.
+- **Config-core tests live at `tests/contracts/config-core.contract.test.mjs`** under `npm run test:contracts` — there is no `test:config-core` script.
+- **Pre-existing test quirks are not yours to fix** (per AGENTS.md): `orchestrator-multi-agent.contract.test.mjs` and `tests/work/tools.test.mjs`.

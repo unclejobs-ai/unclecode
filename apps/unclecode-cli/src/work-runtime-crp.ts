@@ -32,12 +32,14 @@ export type WorkShellContextPacketResolver = (input: {
 type WorkShellCrpConfig = {
   readonly enabled: boolean;
   readonly tokenBudget: number;
+  readonly modelWindow: number;
 };
 
 export function resolveWorkShellCrpConfig(explanation: UncleCodeConfigExplanation): WorkShellCrpConfig {
   return {
     enabled: explanation.settings.crp.value,
     tokenBudget: explanation.settings.crpBudget.value,
+    modelWindow: explanation.settings.modelWindow.value,
   };
 }
 
@@ -184,16 +186,16 @@ export function createCrpRuntime(
     }
     switch (action.kind) {
       case "pin":
-        crpState.store.pinContextSource(action.id);
+        crpState.store.pinContextSource(crpState.projectId, action.id);
         return;
       case "unpin":
-        crpState.store.unpinContextSource(action.id);
+        crpState.store.unpinContextSource(crpState.projectId, action.id);
         return;
       case "forget":
-        crpState.store.forgetContextSource(action.id);
+        crpState.store.forgetContextSource(crpState.projectId, action.id);
         return;
       case "include":
-        crpState.store.includeContextSource(action.id);
+        crpState.store.includeContextSource(crpState.projectId, action.id);
         return;
     }
   };

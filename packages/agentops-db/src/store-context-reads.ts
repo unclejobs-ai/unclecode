@@ -98,9 +98,10 @@ export function countContextSourcesByCategory(
 
 export function getContextSourceById(
   db: DatabaseSync,
+  projectId: string,
   id: string,
 ): ContextSourceRecord | undefined {
-  const row = db.prepare("SELECT * FROM context_sources WHERE id = ?").get(id);
+  const row = db.prepare("SELECT * FROM context_sources WHERE project_id = ? AND id = ?").get(projectId, id);
   if (row === undefined) return undefined;
-  return contextSourceRowToRecord(mapContextSourceRow(sqlRow(row, `context source ${id}`)));
+  return contextSourceRowToRecord(mapContextSourceRow(sqlRow(row, `context source ${projectId}/${id}`)));
 }

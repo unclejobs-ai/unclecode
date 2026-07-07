@@ -1326,7 +1326,8 @@ test("root bin wrapper handles model catalog on the Rust path", () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Provider: OpenAI/);
-  assert.match(result.stdout, /Default model: gpt-5\.4/);
+  assert.match(result.stdout, /Default model: gpt-5\.5/);
+  assert.match(result.stdout, /Active model: gpt-5\.4/);
   assert.match(result.stdout, /gpt-5\.5 · reasoning medium/);
 });
 

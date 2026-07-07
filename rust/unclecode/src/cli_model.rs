@@ -117,17 +117,28 @@ pub fn run_top_level_model_command(args: &[OsString]) -> Result<u8, String> {
 fn print_model_catalog(provider: &str) -> Result<(), String> {
     let active_key = format!("{}_MODEL", provider.to_ascii_uppercase());
     let custom_key = format!("{}_MODELS", provider.to_ascii_uppercase());
+    let active_model = env::var(&active_key).ok();
     let catalog = provider_model_catalog(
         provider,
-        env::var(&active_key).ok().as_deref(),
+        active_model.as_deref(),
         env::var(&custom_key).ok().as_deref(),
     );
     if catalog.models.is_empty() {
         return Err(format!("Unsupported runtime provider: {provider}"));
     }
+    let default_model = resolve_provider_route(provider, None)
+        .map(|route| route.default_model)
+        .unwrap_or_else(|_| catalog.models[0].clone());
 
     println!("Provider: {}", catalog.label);
-    println!("Default model: {}", catalog.models[0]);
+    println!("Default model: {default_model}");
+    if let Some(active_model) = active_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty() && *model != default_model.as_str())
+    {
+        println!("Active model: {active_model}");
+    }
     println!("Models:");
     for model in catalog.models {
         let support = if provider == "openai" {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -179,6 +179,8 @@ test("runWorkspaceGuardianChecks appends LSP evidence when a bridge is provided"
   try {
     writeFileSync(join(workspace, "package.json"), JSON.stringify({ scripts: {} }));
     writeFileSync(join(workspace, "runtime.ts"), "const broken = true;");
+    mkdirSync(join(workspace, "src"));
+    writeFileSync(join(workspace, "src", "main.rs"), "fn main() {}\n");
     writeFileSync(join(workspace, "README.md"), "docs");
 
     const result = await runWorkspaceGuardianChecks(
@@ -186,7 +188,7 @@ test("runWorkspaceGuardianChecks appends LSP evidence when a bridge is provided"
         cwd: workspace,
         env: {},
         scripts: [],
-        changedFiles: ["runtime.ts", "README.md"],
+        changedFiles: ["runtime.ts", "src/main.rs", "README.md"],
         lspBridge: {
           async checkAfterEdit(input) {
             lspCalls.push(input);
@@ -209,12 +211,14 @@ test("runWorkspaceGuardianChecks appends LSP evidence when a bridge is provided"
     );
 
     assert.deepEqual(execCalls, []);
-    assert.equal(lspCalls.length, 1);
+    assert.equal(lspCalls.length, 2);
     assert.equal(lspCalls[0]?.path, "runtime.ts");
+    assert.equal(lspCalls[1]?.path, "src/main.rs");
     assert.deepEqual(lspCalls[0]?.options, { timeoutMs: 25, maxDiagnostics: 3 });
     assert.equal(result.checks[0]?.name, "lsp:runtime.ts");
     assert.equal(result.checks[0]?.status, "failed");
     assert.match(result.summary, /lsp:runtime\.ts FAIL · 1 diagnostic/);
+    assert.match(result.summary, /lsp:src\/main\.rs FAIL · 1 diagnostic/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
