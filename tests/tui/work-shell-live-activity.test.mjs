@@ -370,7 +370,10 @@ test("WorkShellView keeps model picker overlay visible when a context packet exi
 });
 
 test("WorkShellView windows long /context source lists around the cursor", async () => {
-  const included = Array.from({ length: 24 }, (_, index) => ({
+  // The overlay's included-section cap adapts to the source count
+  // (computeContextOverlaySectionMaxRows, capped at 20). Use a list long
+  // enough to exceed that adaptive cap so windowing is still exercised.
+  const included = Array.from({ length: 30 }, (_, index) => ({
     id: `workspace-${index}`,
     category: "workspace",
     label: `workspace source ${index}`,

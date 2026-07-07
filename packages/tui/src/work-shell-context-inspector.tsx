@@ -25,6 +25,38 @@ export function computeContextMeterFill(tokenEstimate: number, modelWindow: numb
   return Math.min(budgetCells, Math.max(0, Math.round((tokenEstimate / window) * budgetCells)));
 }
 
+/**
+ * Pure overlay-section row-cap math. Computes how many source rows the
+ * included and held-back sections of the context inspector overlay may render
+ * at once, so the caps adapt to the available space rather than being fixed.
+ *
+ * - When `terminalRows` is provided, the cap scales with the terminal height
+ *   (`included` ≈ 40%, `held` ≈ 25%), clamped to sensible bounds.
+ * - Otherwise, when `sourceCount` is provided, the cap grows with the number
+ *   of sources actually present, clamped to the same bounds.
+ * - With neither input, the legacy defaults (`included: 12`, `held: 7`) are
+ *   preserved as a fallback.
+ */
+export function computeContextOverlaySectionMaxRows(input: {
+  readonly terminalRows?: number;
+  readonly sourceCount?: number;
+}): { readonly included: number; readonly held: number } {
+  const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+  if (input.terminalRows !== undefined) {
+    return {
+      included: clamp(Math.round(input.terminalRows * 0.4), 4, 20),
+      held: clamp(Math.round(input.terminalRows * 0.25), 3, 12),
+    };
+  }
+  if (input.sourceCount !== undefined) {
+    return {
+      included: clamp(input.sourceCount, 4, 20),
+      held: clamp(Math.round(input.sourceCount * 0.5), 3, 12),
+    };
+  }
+  return { included: 12, held: 7 };
+}
+
 function renderContextInspectorBudgetLine(
   packet: ContextPacketView,
   palette: ContextInspectorPalette,
@@ -154,6 +186,8 @@ export function renderContextInspectorOverlay(input: {
   const includedRows = rows.filter((row) => !row.heldBack);
   const heldRows = rows.filter((row) => row.heldBack);
   const { palette } = input;
+  const includedCaps = computeContextOverlaySectionMaxRows({ sourceCount: includedRows.length });
+  const heldCaps = computeContextOverlaySectionMaxRows({ sourceCount: heldRows.length });
   return (
     <Box marginTop={1} borderStyle="round" borderColor={input.borderColor} paddingX={1} flexDirection="column">
       <Text>
@@ -167,7 +201,7 @@ export function renderContextInspectorOverlay(input: {
           title: "↓ Included in next answer",
           hint: "reaches the model",
           rows: includedRows,
-          maxRows: 12,
+          maxRows: includedCaps.included,
           cursorIndex: input.cursorIndex,
           ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
           width: input.width,
@@ -178,7 +212,7 @@ export function renderContextInspectorOverlay(input: {
           title: "⊘ Held back locally",
           hint: "visible here, not sent",
           rows: heldRows,
-          maxRows: 7,
+          maxRows: heldCaps.held,
           cursorIndex: input.cursorIndex,
           ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
           width: input.width,
