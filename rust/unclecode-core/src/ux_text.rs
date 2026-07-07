@@ -434,46 +434,46 @@ fn resolve_bottom_drawer_min_height(
 
 fn resolve_work_shell_entry_presentation(role: &str) -> Value {
     let (margin_bottom, padding_left, border_style) = match role {
-        "assistant" => (1, 2, "round"),
+        "assistant" => (1, 2, "single"),
         "tool" | "system" => (0, 3, "single"),
-        _ => (1, 0, "round"),
+        _ => (1, 0, "single"),
     };
     let presentation = match role {
         "user" => json!({
             "label": "You",
             "badge": "◇",
-            "labelColor": "#075985",
-            "labelTextColor": "#082f49",
-            "labelBackgroundColor": "#bfdbfe",
-            "railColor": "#115e59",
-            "borderColor": "#334155",
-            "bodyColor": "#0f172a",
+            "labelColor": "#0a3069",
+            "labelTextColor": "#0d1117",
+            "labelBackgroundColor": "#ddf4ff",
+            "railColor": "#0d1117",
+            "borderColor": "#30363d",
+            "bodyColor": "#0d1117",
         }),
         "assistant" => json!({
             "label": "UncleCode",
             "badge": "◈",
-            "labelColor": "#115e59",
-            "labelTextColor": "#042f2e",
-            "labelBackgroundColor": "#ccfbf1",
-            "railColor": "#075985",
-            "borderColor": "#1e293b",
-            "bodyColor": "#0f172a",
+            "labelColor": "#0d1117",
+            "labelTextColor": "#0d1117",
+            "labelBackgroundColor": "#dafbe1",
+            "railColor": "#0a3069",
+            "borderColor": "#30363d",
+            "bodyColor": "#0d1117",
         }),
         "tool" => json!({
             "label": "Trace · execution",
             "badge": "▸",
-            "labelColor": "#365314",
-            "railColor": "#334155",
-            "borderColor": "#1e293b",
-            "bodyColor": "#0f172a",
+            "labelColor": "#033a16",
+            "railColor": "#475569",
+            "borderColor": "#30363d",
+            "bodyColor": "#0d1117",
         }),
         _ => json!({
             "label": "System · state",
             "badge": "·",
-            "labelColor": "#334155",
-            "railColor": "#334155",
-            "borderColor": "#334155",
-            "bodyColor": "#334155",
+            "labelColor": "#475569",
+            "railColor": "#475569",
+            "borderColor": "#30363d",
+            "bodyColor": "#0d1117",
         }),
     };
     json!({
@@ -1731,7 +1731,7 @@ mod tests {
     fn resolves_work_shell_entry_presentation() {
         assert_eq!(
             resolve_work_shell_entry_presentation_json("user").unwrap(),
-            r##"{"borderStyle":"round","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":0},"presentation":{"badge":"◇","bodyColor":"#0f172a","borderColor":"#334155","label":"You","labelBackgroundColor":"#bfdbfe","labelColor":"#075985","labelTextColor":"#082f49","railColor":"#115e59"}}"##
+            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":0},"presentation":{"badge":"◇","bodyColor":"#0d1117","borderColor":"#30363d","label":"You","labelBackgroundColor":"#ddf4ff","labelColor":"#0a3069","labelTextColor":"#0d1117","railColor":"#0d1117"}}"##
         );
         assert_eq!(
             resolve_work_shell_entry_presentation_json("tool").unwrap(),
@@ -1739,7 +1739,7 @@ mod tests {
         );
         assert_eq!(
             resolve_work_shell_entry_presentation_json("assistant").unwrap(),
-            r##"{"borderStyle":"round","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":2},"presentation":{"badge":"◈","bodyColor":"#0f172a","borderColor":"#1e293b","label":"UncleCode","labelBackgroundColor":"#ccfbf1","labelColor":"#115e59","labelTextColor":"#042f2e","railColor":"#075985"}}"##
+            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":2},"presentation":{"badge":"◈","bodyColor":"#0f172a","borderColor":"#1e293b","label":"UncleCode","labelBackgroundColor":"#ccfbf1","labelColor":"#115e59","labelTextColor":"#042f2e","railColor":"#075985"}}"##
         );
         assert_eq!(
             resolve_work_shell_entry_presentation_json("system").unwrap(),

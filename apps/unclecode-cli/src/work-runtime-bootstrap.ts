@@ -429,6 +429,8 @@ export async function loadWorkCliBootstrap(
     }) => void)
     | undefined;
 
+  const crpConfig = resolveWorkShellCrpConfig(configExplanation);
+
   return {
     agent,
     prompt: prompt ?? "",
@@ -438,7 +440,7 @@ export async function loadWorkCliBootstrap(
       mode: config.mode,
       authLabel,
       reasoning: config.reasoning,
-      modelWindow: resolveWorkShellCrpConfig(configExplanation).modelWindow,
+      modelWindow: crpConfig.modelWindow,
       cwd,
       contextSummaryLines: [
         ...authIssueLines,
@@ -497,7 +499,7 @@ export async function loadWorkCliBootstrap(
           }),
           {
             sourceMetadata: contextPacketSourceMetadata,
-            crpConfig: resolveWorkShellCrpConfig(configExplanation),
+            crpConfig,
             env,
             ...(userHomeDir ? { userHomeDir } : {}),
             ...(bootstrapContext.packetItems ? { bootstrapPacketItems: bootstrapContext.packetItems } : {}),
