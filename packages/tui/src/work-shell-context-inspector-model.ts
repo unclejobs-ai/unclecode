@@ -5,6 +5,7 @@ export type ContextInspectorPalette = {
   readonly textMuted: string;
   readonly textDim: string;
   readonly borderSoft: string;
+  readonly borderDefault: string;
   readonly assistant: string;
   readonly user: string;
   readonly toolAccent: string;

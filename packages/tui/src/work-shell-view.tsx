@@ -75,6 +75,7 @@ const W_LIGHT = {
   border: "#30363d",
   borderStrong: "#1e293b",
   borderSoft: "#d0d7de",
+  borderDefault: "#d0d7de",
   borderAccent: "#1e6feb",
   user: "#1e6feb",
   userBody: "#0d1117",
@@ -102,28 +103,29 @@ const W_LIGHT = {
 const W_DARK = {
   text: "#e6edf3",
   textMuted: "#a6adc8",
-  textDim: "#7d8590",
+  textDim: "#7f849c",
   border: "#30363d",
-  borderStrong: "#a6adc8",
+  borderStrong: "#6c7086",
   borderSoft: "#21262d",
+  borderDefault: "#45475a",
   borderAccent: "#92abdf",
   user: "#92abdf",
   userBody: "#e6edf3",
   userBadgeText: "#92abdf",
   userBadgeBg: "#161b22",
-  assistant: "#e6edf3",
+  assistant: "#94e2d5",
   assistantBody: "#e6edf3",
   assistantBadgeText: "#e6edf3",
   assistantBadgeBg: "#161b22",
   assistantMuted: "#a6adc8",
   tool: "#9ece6a",
   toolSurface: "#161b22",
-  toolAccent: "#9ece6a",
+  toolAccent: "#73daca",
   toolMuted: "#a6adc8",
-  warning: "#e0af68",
-  success: "#9ece6a",
-  error: "#e28b9b",
-  spinner: "#d97757",
+  warning: "#f9e2af",
+  success: "#a6e3a1",
+  error: "#f38ba8",
+  spinner: "#fab387",
 } as const;
 
 // Active palette — resolved at call time so tests/env overrides take effect
@@ -185,6 +187,7 @@ const WORK_SHELL_LOW_CONTRAST_TEXT_COLORS = new Set([
   "#0d9488",
   "#94a3b8",
   "#7d8590",
+  "#7f849c",
 ]);
 
 /**
@@ -472,6 +475,7 @@ export function resolveWorkShellComposerHint(input: {
 // The old single-dot frames (⠁⠂⠄⠠⠐⠈) were too subtle and looked broken.
 const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 export const WORK_SHELL_SPINNER_INTERVAL_MS = 80;
+export const WORK_SHELL_SPINNER_SHOW_DELAY_MS = 500;
 
 function pickBusySpinnerFrame(frame = 0): string {
   const count = WORK_SHELL_BUSY_SPINNER_FRAMES.length;
@@ -1473,18 +1477,20 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
   });
   const [activityFrame, setActivityFrame] = React.useState(0);
   const [activityNow, setActivityNow] = React.useState(() => Date.now());
+  const [showSpinner, setShowSpinner] = React.useState(false);
   React.useEffect(() => {
     if (!props.isBusy) {
-      setActivityFrame(0);
+      setShowSpinner(false);
       return;
     }
     setActivityFrame((f) => f + 1);
     setActivityNow(Date.now());
+    const delay = setTimeout(() => setShowSpinner(true), WORK_SHELL_SPINNER_SHOW_DELAY_MS);
     const interval = setInterval(() => {
       setActivityFrame((f) => f + 1);
       setActivityNow(Date.now());
     }, WORK_SHELL_SPINNER_INTERVAL_MS);
-    return () => { clearInterval(interval); };
+    return () => { clearTimeout(delay); clearInterval(interval); setShowSpinner(false); };
   }, [props.isBusy]);
   const entries = props.streamingAssistantText
     ? [
@@ -1496,7 +1502,7 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
   // — so the user always sees feedback that the model is working. Previously
   // the indicator vanished when streaming text arrived, making it look like
   // the turn completed prematurely.
-  const showActivityIndicator = props.isBusy;
+  const showActivityIndicator = props.isBusy && showSpinner;
 
   return (
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "68%" : undefined} paddingRight={props.panelPlacement === "side" ? 1 : 0}>
@@ -1712,7 +1718,7 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   const idleDisplay = `Ready · ${lastReplyTiming}`;
 
   return (
-    <Box marginTop={1} paddingLeft={1}>
+    <Box marginTop={1} paddingLeft={2}>
       <Text>
         <Text color={statusGlyphColor} bold>{`${statusGlyph} `}</Text>
         <Text color={W.text} bold>{sessionGroup}</Text>
@@ -1901,7 +1907,7 @@ export function WorkShellView(props: {
   );
 
   return (
-    <Box flexDirection="column" paddingX={1}>
+    <Box flexDirection="column" paddingX={2}>
       <WorkShellHeaderBlock
         provider={props.provider}
         {...(props.headerHint ? { headerHint: props.headerHint } : {})}
