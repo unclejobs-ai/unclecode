@@ -1735,15 +1735,15 @@ mod tests {
         );
         assert_eq!(
             resolve_work_shell_entry_presentation_json("tool").unwrap(),
-            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":0,"paddingLeft":3},"presentation":{"badge":"▸","bodyColor":"#0f172a","borderColor":"#1e293b","label":"Trace · execution","labelColor":"#365314","railColor":"#334155"}}"##
+            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":0,"paddingLeft":3},"presentation":{"badge":"▸","bodyColor":"#0d1117","borderColor":"#30363d","label":"Trace · execution","labelColor":"#033a16","railColor":"#475569"}}"##
         );
         assert_eq!(
             resolve_work_shell_entry_presentation_json("assistant").unwrap(),
-            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":2},"presentation":{"badge":"◈","bodyColor":"#0f172a","borderColor":"#1e293b","label":"UncleCode","labelBackgroundColor":"#ccfbf1","labelColor":"#115e59","labelTextColor":"#042f2e","railColor":"#075985"}}"##
+            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":1,"paddingLeft":2},"presentation":{"badge":"◈","bodyColor":"#0d1117","borderColor":"#30363d","label":"UncleCode","labelBackgroundColor":"#dafbe1","labelColor":"#0d1117","labelTextColor":"#0d1117","railColor":"#0a3069"}}"##
         );
         assert_eq!(
             resolve_work_shell_entry_presentation_json("system").unwrap(),
-            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":0,"paddingLeft":3},"presentation":{"badge":"·","bodyColor":"#334155","borderColor":"#334155","label":"System · state","labelColor":"#334155","railColor":"#334155"}}"##
+            r##"{"borderStyle":"single","layout":{"hasBorder":false,"marginBottom":0,"paddingLeft":3},"presentation":{"badge":"·","bodyColor":"#0d1117","borderColor":"#30363d","label":"System · state","labelColor":"#475569","railColor":"#475569"}}"##
         );
     }
 

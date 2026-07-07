@@ -423,14 +423,16 @@ test("WorkShellView windows long /context source lists around the cursor", async
 });
 
 test("resolveReadableWorkShellTextColor keeps primary text explicit for light terminals", () => {
-  assert.equal(resolveReadableWorkShellTextColor("#f8fafc"), "#0f172a");
-  assert.equal(resolveReadableWorkShellTextColor("#e2e8f0"), "#0f172a");
-  assert.equal(resolveReadableWorkShellTextColor("#0f172a"), "#0f172a");
+  assert.equal(resolveReadableWorkShellTextColor("#f8fafc"), "#0d1117");
+  assert.equal(resolveReadableWorkShellTextColor("#e2e8f0"), "#0d1117");
+  assert.equal(resolveReadableWorkShellTextColor("#0f172a"), "#0d1117");
   // Rust entry-presentation body colors that are too dark on dark backgrounds
   // are resolved to the palette's primary text color for readability.
-  assert.equal(resolveReadableWorkShellTextColor("#334155"), "#0f172a");
-  assert.equal(resolveReadableWorkShellTextColor("#475569"), "#0f172a");
-  assert.equal(resolveReadableWorkShellTextColor("#94a3b8"), "#475569");
+  assert.equal(resolveReadableWorkShellTextColor("#334155"), "#0d1117");
+  assert.equal(resolveReadableWorkShellTextColor("#475569"), "#0d1117");
+  assert.equal(resolveReadableWorkShellTextColor("#94a3b8"), "#64748b");
+  assert.equal(resolveReadableWorkShellTextColor("#0d9488"), "#64748b");
+  assert.equal(resolveReadableWorkShellTextColor("#7d8590"), "#64748b");
   assert.equal(resolveReadableWorkShellTextColor("#115e59"), "#115e59");
 });
 

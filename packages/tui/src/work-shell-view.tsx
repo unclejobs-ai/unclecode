@@ -100,30 +100,30 @@ const W_LIGHT = {
 // Role hues stay consistent with light (blue=user, teal=assistant, green=tool)
 // but shifted brighter so every element is legible on #000.
 const W_DARK = {
-  text: "#f1f5f9",
-  textMuted: "#cbd5e1",
-  textDim: "#94a3b8",
-  border: "#94a3b8",
-  borderStrong: "#f1f5f9",
-  borderSoft: "#64748b",
-  borderAccent: "#60a5fa",
-  user: "#60a5fa",
-  userBody: "#f1f5f9",
-  userBadgeText: "#dbeafe",
-  userBadgeBg: "#1e3a5f",
-  assistant: "#5eead4",
-  assistantBody: "#f1f5f9",
-  assistantBadgeText: "#a7f3d0",
-  assistantBadgeBg: "#134e4a",
-  assistantMuted: "#5eead4",
-  tool: "#bef264",
-  toolSurface: "#1a2e05",
-  toolAccent: "#bef264",
-  toolMuted: "#cbd5e1",
-  warning: "#fcd34d",
-  success: "#86efac",
-  error: "#fca5a5",
-  spinner: "#5eead4",
+  text: "#e6edf3",
+  textMuted: "#a6adc8",
+  textDim: "#7d8590",
+  border: "#30363d",
+  borderStrong: "#a6adc8",
+  borderSoft: "#21262d",
+  borderAccent: "#92abdf",
+  user: "#92abdf",
+  userBody: "#e6edf3",
+  userBadgeText: "#92abdf",
+  userBadgeBg: "#161b22",
+  assistant: "#e6edf3",
+  assistantBody: "#e6edf3",
+  assistantBadgeText: "#e6edf3",
+  assistantBadgeBg: "#161b22",
+  assistantMuted: "#a6adc8",
+  tool: "#9ece6a",
+  toolSurface: "#161b22",
+  toolAccent: "#9ece6a",
+  toolMuted: "#a6adc8",
+  warning: "#e0af68",
+  success: "#9ece6a",
+  error: "#e28b9b",
+  spinner: "#d97757",
 } as const;
 
 // Active palette — resolved at call time so tests/env overrides take effect
@@ -173,13 +173,18 @@ function renderChromeRule(input: {
 const WORK_SHELL_LEGACY_LIGHT_TEXT_COLORS = new Set([
   "#e2e8f0",
   "#e5eef7",
+  "#e6edf3",
   "#f4f1ea",
   "#f8fafc",
+  "#a6adc8",
+  "#0d1117",
+  "#475569",
 ]);
 
 const WORK_SHELL_LOW_CONTRAST_TEXT_COLORS = new Set([
-  "#94a3b8",
   "#0d9488",
+  "#94a3b8",
+  "#7d8590",
 ]);
 
 /**
@@ -200,6 +205,7 @@ const WORK_SHELL_RUST_LIGHT_BODY_COLORS = new Set([
   "#475569",
   "#1e293b",
   "#0f172a",
+  "#0d1117",
 ]);
 
 export function resolveReadableWorkShellTextColor(color: string | undefined): string | undefined {
@@ -1342,7 +1348,7 @@ function renderWorkShellEntryBlock(input: {
       <Box
         key={`${input.entry.role}-${input.index}`}
         marginBottom={1}
-        borderStyle="round"
+        borderStyle="single"
         borderColor={presentation.borderColor}
         paddingX={1}
         flexDirection="column"
@@ -1959,7 +1965,7 @@ export function WorkShellView(props: {
           palette: W,
         })
       ) : panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput ? (
-        <Box marginTop={1} borderStyle="round" borderColor={panelBorderColor} paddingX={1} flexDirection="column">
+        <Box marginTop={1} borderStyle="single" borderColor={panelBorderColor} paddingX={1} flexDirection="column">
           <Box flexDirection="column">
             <Text>
               <Text color={W.assistant} bold>{"▤ UncleCode Runbook"}</Text>

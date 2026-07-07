@@ -458,7 +458,7 @@ test("formatWorkShellError collapses raw provider failures into operator guidanc
   assert.equal(formatWorkShellError("provider exploded"), "provider exploded");
   assert.equal(
     formatWorkShellBusyStatusLine("· thinking inspect repo", 0),
-    "⠁ thinking inspect repo",
+    "⠋ thinking inspect repo",
   );
   assert.equal(
     normalizeMarkdownDisplayText("## Heading\n- `npm run check`\n- **Done**"),
@@ -1373,8 +1373,8 @@ test("getConversationLayout gives answer blocks more room than lower-signal note
   assert.notEqual(userPresentation.label, assistantPresentation.label);
   assert.notEqual(userPresentation.labelBackgroundColor, assistantPresentation.labelBackgroundColor);
   assert.notEqual(userPresentation.railColor, assistantPresentation.railColor);
-  assert.equal(userPresentation.bodyColor, "#0f172a");
-  assert.equal(assistantPresentation.bodyColor, "#0f172a");
+  assert.equal(userPresentation.bodyColor, "#0d1117");
+  assert.equal(assistantPresentation.bodyColor, "#0d1117");
   assert.equal(formatWorkShellThinkingLine("high (mode-default)"), "Reasoning · Deep");
   assert.match(
     formatWorkShellStatusLine({

@@ -203,41 +203,41 @@ test("getWorkShellEntryPresentation keeps user, assistant, tool, and system role
   assert.deepEqual(getWorkShellEntryPresentation("user"), {
     label: "You",
     badge: "◇",
-    labelColor: "#075985",
-    labelTextColor: "#082f49",
-    labelBackgroundColor: "#bfdbfe",
-    railColor: "#115e59",
-    borderColor: "#334155",
-    bodyColor: "#0f172a",
+    labelColor: "#0a3069",
+    labelTextColor: "#0d1117",
+    labelBackgroundColor: "#ddf4ff",
+    railColor: "#0d1117",
+    borderColor: "#30363d",
+    bodyColor: "#0d1117",
   });
   assert.deepEqual(getWorkShellEntryPresentation("assistant"), {
     label: "UncleCode",
     badge: "◈",
-    labelColor: "#115e59",
-    labelTextColor: "#042f2e",
-    labelBackgroundColor: "#ccfbf1",
-    railColor: "#075985",
-    borderColor: "#1e293b",
-    bodyColor: "#0f172a",
+    labelColor: "#0d1117",
+    labelTextColor: "#0d1117",
+    labelBackgroundColor: "#dafbe1",
+    railColor: "#0a3069",
+    borderColor: "#30363d",
+    bodyColor: "#0d1117",
   });
   assert.deepEqual(getWorkShellEntryPresentation("tool"), {
     label: "Trace · execution",
     badge: "▸",
-    labelColor: "#365314",
-    railColor: "#334155",
-    borderColor: "#1e293b",
-    bodyColor: "#0f172a",
+    labelColor: "#033a16",
+    railColor: "#475569",
+    borderColor: "#30363d",
+    bodyColor: "#0d1117",
   });
   assert.deepEqual(getWorkShellEntryPresentation("system"), {
     label: "System · state",
     badge: "·",
-    labelColor: "#334155",
-    railColor: "#334155",
-    borderColor: "#334155",
-    bodyColor: "#334155",
+    labelColor: "#475569",
+    railColor: "#475569",
+    borderColor: "#30363d",
+    bodyColor: "#0d1117",
   });
-  assert.equal(getWorkShellEntryBorderStyle("user"), "round");
-  assert.equal(getWorkShellEntryBorderStyle("assistant"), "round");
+  assert.equal(getWorkShellEntryBorderStyle("user"), "single");
+  assert.equal(getWorkShellEntryBorderStyle("assistant"), "single");
   assert.equal(getWorkShellEntryBorderStyle("tool"), "single");
   assert.equal(getWorkShellEntryBorderStyle("system"), "single");
   assert.equal(
@@ -255,7 +255,7 @@ test("refined non-orange work context avoids loud orange chrome", () => {
   );
 
   assert.doesNotMatch(paletteValues.join(" "), /#fb923c|#fdba74|#fed7aa/i);
-  assert.match(paletteValues.join(" "), /#075985|#115e59|#365314/i);
+  assert.match(paletteValues.join(" "), /#0a3069|#0d1117|#033a16/i);
 
   const renderedUser = formatWorkShellConversationEntryLines({
     role: "user",
