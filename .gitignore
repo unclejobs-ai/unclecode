@@ -33,5 +33,14 @@ packages/*/src/*.js.map
 apps/*/dist/
 .worktrees/
 .factory/
-completed
-processing
+.codegraph
+.cursor/
+
+# vendored third-party reference (kept on disk only)
+Leonxlnx-claude-code/
+
+# generated render output from hyperframes demos
+renders/
+
+# misspelled duplicate of apps/godness-web (removed 2026-07)
+godness-decetor/

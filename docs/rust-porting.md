@@ -129,12 +129,12 @@ target/debug/unclecode rust queue len-json smoke-session
 target/debug/unclecode rust queue pop-json smoke-session
 target/debug/unclecode rust queue clear smoke-session
 target/debug/unclecode rust session-smoke
-printf 'Chat: inspect repo' | target/debug/unclecode rust session persist smoke-session gpt-5.4 analyze idle verbose
+printf 'Chat: inspect repo' | target/debug/unclecode rust session persist smoke-session gpt-5.5 analyze idle verbose
 target/debug/unclecode rust session list
 target/debug/unclecode rust session resume smoke-session
 target/debug/unclecode rust session paths ~/.unclecode/state "$PWD" smoke-session
-printf '{"cwd":"'"$PWD"'","argv":["--cwd","..","--provider","openai","--model","gpt-5.4","--reasoning","high","--session-id","work-123","--tools","fix","auth"]}' | target/debug/unclecode rust work-runtime parse-args
-printf '{"promptParts":["review","auth.ts"],"options":{"tools":true,"cwd":"/tmp/project-a","provider":"openai","model":"gpt-5.4","reasoning":"high","sessionId":"work-123"}}' | target/debug/unclecode rust work-runtime build-command-args
+printf '{"cwd":"'"$PWD"'","argv":["--cwd","..","--provider","openai","--model","gpt-5.5","--reasoning","high","--session-id","work-123","--tools","fix","auth"]}' | target/debug/unclecode rust work-runtime parse-args
+printf '{"promptParts":["review","auth.ts"],"options":{"tools":true,"cwd":"/tmp/project-a","provider":"openai","model":"gpt-5.5","reasoning":"high","sessionId":"work-123"}}' | target/debug/unclecode rust work-runtime build-command-args
 printf '{"forwardedArgs":["--tools"],"callerCwd":"/tmp/project-a"}' | target/debug/unclecode rust work-runtime with-cwd
 printf '{"cliSourceDir":"'"$PWD"'/apps/unclecode-cli/src"}' | target/debug/unclecode rust work-runtime entrypoint-paths
 OPENAI_API_KEY=sk-test target/debug/unclecode work --provider openai "summarize current workspace"
@@ -217,18 +217,18 @@ UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-raw-smoke.json target/debug/uncl
 printf 'sk-test' | UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-smoke.json target/debug/unclecode rust auth save-api-key - -
 printf 'at-test\nrt-test\n' | UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-oauth-smoke.json target/debug/unclecode rust auth save-oauth codex - test-project test-account
 UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-smoke.json target/debug/unclecode rust auth logout
-OPENAI_MODEL=gpt-5.4 target/debug/unclecode rust model openai-registry
+OPENAI_MODEL=gpt-5.5 target/debug/unclecode rust model openai-registry
 target/debug/unclecode model list openai
 target/debug/unclecode model route auto gpt-5.5
 target/debug/unclecode "/model reasoning gpt-5.5"
-target/debug/unclecode rust model openai-reasoning gpt-5.4
+target/debug/unclecode rust model openai-reasoning gpt-5.5
 target/debug/unclecode rust model price gpt-4.1-mini
 target/debug/unclecode rust model estimate-cost gpt-4.1-mini 1000000 1000000
 target/debug/unclecode rust model detect-provider claude-sonnet-4-6
 	GEMINI_MODEL=gemini-2.5-pro GEMINI_MODELS=gemini-2.5-pro-exp target/debug/unclecode rust model catalog gemini
 	printf 'sk-test' | target/debug/unclecode rust provider openai-request-spec-json api
 	printf 'oauth-token' | target/debug/unclecode rust provider openai-request-spec-json codex acct_123
-	printf '[{"role":"user","content":"hi"}]\0[]' | target/debug/unclecode rust provider openai-chat-body gpt-5.4 - yes
+	printf '[{"role":"user","content":"hi"}]\0[]' | target/debug/unclecode rust provider openai-chat-body gpt-5.5 - yes
 	printf '[{"name":"search","description":"Search","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}]' | target/debug/unclecode rust provider openai-chat-tools
 	printf 'system prompt\0[{"role":"user","content":"hi"}]' | target/debug/unclecode rust provider openai-query-messages
 	printf '{"choices":[{"message":{"content":"hi","tool_calls":[{"id":"call_1","function":{"name":"search","arguments":"{\"q\":\"x\"}"}}]}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}' | target/debug/unclecode rust provider openai-chat-response
@@ -245,8 +245,8 @@ target/debug/unclecode rust model detect-provider claude-sonnet-4-6
 	printf '[{"type":"image","mimeType":"image/png","dataUrl":"data:image/png;base64,AAAA"}]' | target/debug/unclecode rust provider attachment-caps
 	printf '{"path":"README.md"}' | target/debug/unclecode rust provider tool-trace-started openai read_file call_1 10
 	printf '{"path":"README.md"}' | target/debug/unclecode rust provider tool-execution-start openai read_file call_1
-	printf 'thinking' | target/debug/unclecode rust provider reasoning-delta openai gpt-5.4 text
-	printf 'stream thinking' | target/debug/unclecode rust provider reasoning-delta-record openai gpt-5.4 text rs_1
+	printf 'thinking' | target/debug/unclecode rust provider reasoning-delta openai gpt-5.5 text
+	printf 'stream thinking' | target/debug/unclecode rust provider reasoning-delta-record openai gpt-5.5 text rs_1
 	printf 'ok' | target/debug/unclecode rust provider tool-trace-completed openai read_file call_1 10 15 no
 	printf 'ok' | target/debug/unclecode rust provider tool-execution-result openai read_file call_1 10 15 no
 	printf 'ok' | target/debug/unclecode rust provider tool-execution-finish openai read_file call_1 10 no
@@ -274,12 +274,12 @@ target/debug/unclecode rust model detect-provider claude-sonnet-4-6
 	printf 'boom' | target/debug/unclecode rust provider anthropic-tool-result tu_1 yes
 	printf '{"content":[{"type":"text","text":"ok"},{"type":"tool_use","id":"tu_1","name":"run_shell","input":{"command":"echo ok"}}],"usage":{"input_tokens":1,"output_tokens":2}}' | target/debug/unclecode rust provider anthropic-response claude-sonnet-4-6
 	printf 'system\0[{"role":"user","content":"hi"}]\0[{"name":"run_shell"}]' | target/debug/unclecode rust provider anthropic-messages-request claude-sonnet-4-6
-	printf 'system\0[{"type":"message","role":"user","content":[]}]\0[]' | target/debug/unclecode rust provider openai-codex-body gpt-5.4 medium none
+	printf 'system\0[{"type":"message","role":"user","content":[]}]\0[]' | target/debug/unclecode rust provider openai-codex-body gpt-5.5 medium none
 	printf 'data: {"type":"response.completed"}\n\n' | target/debug/unclecode rust sse data-blocks
 	printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust sse responses-records
 	printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust sse responses-result
 	printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust sse responses-message
-	printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust provider openai-responses-message gpt-5.4
+	printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust provider openai-responses-message gpt-5.5
 	target/debug/unclecode rust harness inspect "$PWD"
 	target/debug/unclecode rust harness preset team-auditor
 	target/debug/unclecode rust perf startup
@@ -823,7 +823,7 @@ OpenAI model registry and compatibility catalogs are Rust-owned and keep GPT-5.5
 as the default frontier model, with GPT-5.4 and GPT-5.4-mini still present for
 explicit operator selection.
 The OpenAI compat catalog mirrors the Rust registry's frontier-first order:
-`gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, then `o4-mini` before older 4.1/4o
+`gpt-5.5`, `gpt-5.5`, `gpt-5.4-mini`, then `o4-mini` before older 4.1/4o
 fallbacks, so the model picker does not bury the newer reasoning-capable option
 behind stale fallback models.
 Provider capability decisions now run through `unclecode rust model capability`,
@@ -1269,7 +1269,7 @@ target/debug/unclecode rust queue len smoke-session
 target/debug/unclecode rust queue pop smoke-session
 target/debug/unclecode rust queue clear smoke-session
 target/debug/unclecode rust session-smoke
-printf 'Chat: inspect repo' | target/debug/unclecode rust session persist smoke-session gpt-5.4 analyze idle verbose
+printf 'Chat: inspect repo' | target/debug/unclecode rust session persist smoke-session gpt-5.5 analyze idle verbose
 target/debug/unclecode rust session list
 target/debug/unclecode rust session resume smoke-session
 target/debug/unclecode rust session paths ~/.unclecode/state "$PWD" smoke-session
@@ -1308,7 +1308,7 @@ printf 'data: {"type":"response.completed"}\n\n' | target/debug/unclecode rust s
 printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust sse responses-records
 printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust sse responses-result
 printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust sse responses-message
-printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust provider openai-responses-message gpt-5.4
+printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust provider openai-responses-message gpt-5.5
 target/debug/unclecode rust harness inspect "$PWD"
 target/debug/unclecode rust harness preset team-auditor
 rm -rf target/harness-smoke && mkdir -p target/harness-smoke/.codex && printf 'model_reasoning_effort = "high"\napprovals_reviewer = "user"\n' > target/harness-smoke/.codex/config.toml
@@ -1318,8 +1318,8 @@ UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-raw-smoke.json target/debug/uncl
 printf 'sk-test' | UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-smoke.json target/debug/unclecode rust auth save-api-key - -
 printf 'at-test\nrt-test\n' | UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-oauth-smoke.json target/debug/unclecode rust auth save-oauth codex - test-project test-account
 UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-smoke.json target/debug/unclecode rust auth logout
-OPENAI_MODEL=gpt-5.4 target/debug/unclecode rust model openai-registry
-target/debug/unclecode rust model openai-reasoning gpt-5.4
+OPENAI_MODEL=gpt-5.5 target/debug/unclecode rust model openai-registry
+target/debug/unclecode rust model openai-reasoning gpt-5.5
 target/debug/unclecode rust model price gpt-4.1-mini
 target/debug/unclecode rust model estimate-cost gpt-4.1-mini 1000000 1000000
 target/debug/unclecode rust model detect-provider claude-sonnet-4-6
@@ -1340,7 +1340,7 @@ target/debug/unclecode rust command help
 GEMINI_MODEL=gemini-2.5-pro GEMINI_MODELS=gemini-2.5-pro-exp target/debug/unclecode rust model catalog gemini
 printf 'sk-test' | target/debug/unclecode rust provider openai-request-spec-json api
 printf 'oauth-token' | target/debug/unclecode rust provider openai-request-spec-json codex acct_123
-printf '[{"role":"user","content":"hi"}]\0[]' | target/debug/unclecode rust provider openai-chat-body gpt-5.4 - yes
+printf '[{"role":"user","content":"hi"}]\0[]' | target/debug/unclecode rust provider openai-chat-body gpt-5.5 - yes
 printf '[{"name":"search","description":"Search","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}]' | target/debug/unclecode rust provider openai-chat-tools
 printf 'system prompt\0[{"role":"user","content":"hi"}]' | target/debug/unclecode rust provider openai-query-messages
 printf '{"choices":[{"message":{"content":"hi","tool_calls":[{"id":"call_1","function":{"name":"search","arguments":"{\"q\":\"x\"}"}}]}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}' | target/debug/unclecode rust provider openai-chat-response
@@ -1357,12 +1357,12 @@ printf '[{"role":"system","content":"s"}]\0[{"role":"user","content":"hi"}]' | t
 printf '[{"role":"system","content":"s"}]\0[]' | target/debug/unclecode rust provider start-turn openai inspect
 printf '{"path":"README.md"}' | target/debug/unclecode rust provider tool-trace-started openai read_file call_1 10
 printf '{"path":"README.md"}' | target/debug/unclecode rust provider tool-execution-start openai read_file call_1
-printf 'thinking' | target/debug/unclecode rust provider reasoning-delta openai gpt-5.4 text
-printf 'stream thinking' | target/debug/unclecode rust provider reasoning-delta-record openai gpt-5.4 text rs_1
-printf 'inspect repo' | target/debug/unclecode rust provider turn-started-trace openai gpt-5.4 42
-target/debug/unclecode rust provider route-trace openai gpt-5.4 42
-target/debug/unclecode rust provider calling-trace openai gpt-5.4 42
-printf 'done' | target/debug/unclecode rust provider turn-completed-trace openai gpt-5.4 42 48
+printf 'thinking' | target/debug/unclecode rust provider reasoning-delta openai gpt-5.5 text
+printf 'stream thinking' | target/debug/unclecode rust provider reasoning-delta-record openai gpt-5.5 text rs_1
+printf 'inspect repo' | target/debug/unclecode rust provider turn-started-trace openai gpt-5.5 42
+target/debug/unclecode rust provider route-trace openai gpt-5.5 42
+target/debug/unclecode rust provider calling-trace openai gpt-5.5 42
+printf 'done' | target/debug/unclecode rust provider turn-completed-trace openai gpt-5.5 42 48
 printf 'ok' | target/debug/unclecode rust provider tool-trace-completed openai read_file call_1 10 15 no
 printf 'ok' | target/debug/unclecode rust provider tool-execution-result openai read_file call_1 10 15 no
 printf 'ok' | target/debug/unclecode rust provider tool-execution-finish openai read_file call_1 10 no
@@ -1391,7 +1391,7 @@ printf 'ok' | target/debug/unclecode rust provider anthropic-tool-result tu_1 no
 printf 'boom' | target/debug/unclecode rust provider anthropic-tool-result tu_1 yes
 printf '{"content":[{"type":"text","text":"ok"},{"type":"tool_use","id":"tu_1","name":"run_shell","input":{"command":"echo ok"}}],"usage":{"input_tokens":1,"output_tokens":2}}' | target/debug/unclecode rust provider anthropic-response claude-sonnet-4-6
 printf 'system\0[{"role":"user","content":"hi"}]\0[{"name":"run_shell"}]' | target/debug/unclecode rust provider anthropic-messages-request claude-sonnet-4-6
-printf 'system\0[{"type":"message","role":"user","content":[]}]\0[]' | target/debug/unclecode rust provider openai-codex-body gpt-5.4 medium none
+printf 'system\0[{"type":"message","role":"user","content":[]}]\0[]' | target/debug/unclecode rust provider openai-codex-body gpt-5.5 medium none
 printf 'ghp_%036d' 0 | target/debug/unclecode rust redact
 printf 'abc' | target/debug/unclecode rust sha256
 printf 'abc' | target/debug/unclecode rust sha256-base64url
@@ -1429,14 +1429,14 @@ printf '{"value":"@README.md 요약"}' | target/debug/unclecode rust ux composer
 printf '{"text":"Done.\n\nIf you want, I can continue."}' | target/debug/unclecode rust ux prompt-turn permission-stall
 printf '{"contextSummaryLines":["Loaded guidance: AGENTS.md","AGENTS.md: Follow repo rules."],"bridgeLines":["project-context bridge ready"],"memoryLines":[],"traceLines":[],"expanded":true}' | target/debug/unclecode rust ux panel context
 printf '{"args":["doctor"],"lines":["Doctor summary","config PASS"]}' | target/debug/unclecode rust ux panel inline-command
-printf '{"suggestions":[{"command":"/model","description":"Show models."},{"command":"/model list","description":"List models."},{"command":"/model gpt-5.4","description":"Current · reasoning default medium · supports low, medium, high"},{"command":"/model gpt-5.4-mini","description":"Available · reasoning default medium · supports low, medium, high"}],"selectedIndex":2}' | target/debug/unclecode rust ux panel model-picker
+printf '{"suggestions":[{"command":"/model","description":"Show models."},{"command":"/model list","description":"List models."},{"command":"/model gpt-5.5","description":"Current · reasoning default medium · supports low, medium, high"},{"command":"/model gpt-5.4-mini","description":"Available · reasoning default medium · supports low, medium, high"}],"selectedIndex":2}' | target/debug/unclecode rust ux panel model-picker
 printf '{"input":"/model gkdl","suggestions":[],"selectedIndex":0}' | target/debug/unclecode rust ux panel model-picker
-printf '{"line":"/model gpt-4.1-mini","provider":"openai","currentModel":"gpt-5.4","currentReasoning":{"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},"modeDefaultReasoning":{"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}}}' | target/debug/unclecode rust ux model-builtin-command
+printf '{"line":"/model gpt-4.1-mini","provider":"openai","currentModel":"gpt-5.5","currentReasoning":{"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},"modeDefaultReasoning":{"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}}}' | target/debug/unclecode rust ux model-builtin-command
 printf '{"input":"/zz","suggestions":[],"selectedIndex":0}' | target/debug/unclecode rust ux panel commands
 printf '{"input":"/re","suggestions":[{"command":"/reload","description":"Reload workspace guidance, skills, and extension context."}],"selectedIndex":0}' | target/debug/unclecode rust ux panel commands
 printf '{"suggestions":[{"command":"/auth status","description":"Show auth source."},{"command":"/auth login","description":"Sign in with browser OAuth."}],"selectedIndex":1,"authLabel":"oauth-file","browserOAuthAvailable":true}' | target/debug/unclecode rust ux panel auth-picker
 printf '{"input":"/reasoning low","currentReasoning":{"effort":"high","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},"modeDefaultReasoning":{"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}}}' | target/debug/unclecode rust ux reasoning-command
-printf '{"line":"/reasoning low","provider":"openai","model":"gpt-5.4","mode":"default","cwd":"/repo","authLabel":"api-key-env","currentReasoning":{"effort":"high","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},"modeDefaultReasoning":{"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},"contextSummaryLines":["Loaded guidance: AGENTS.md"],"bridgeLines":["bridge ready"],"memoryLines":[],"traceLines":[]}' | target/debug/unclecode rust ux reasoning-builtin-command
+printf '{"line":"/reasoning low","provider":"openai","model":"gpt-5.5","mode":"default","cwd":"/repo","authLabel":"api-key-env","currentReasoning":{"effort":"high","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},"modeDefaultReasoning":{"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},"contextSummaryLines":["Loaded guidance: AGENTS.md"],"bridgeLines":["bridge ready"],"memoryLines":[],"traceLines":[]}' | target/debug/unclecode rust ux reasoning-builtin-command
 printf '{"line":"/minimal","traceMode":"minimal","contextSummaryLines":["Loaded guidance: AGENTS.md"],"bridgeLines":["bridge ready"],"memoryLines":["memory ready"],"traceLines":["old trace"]}' | target/debug/unclecode rust ux trace-mode-command
 printf '{"event":{"type":"provider.route"},"line":"route openai direct","traceMode":"minimal"}' | target/debug/unclecode rust ux trace-event
 printf '{"line":"new trace","traceLines":["old trace"],"panelTitle":"Status","preservePanel":false}' | target/debug/unclecode rust ux trace-line-patch
@@ -1446,7 +1446,7 @@ printf '{"authLabel":"oauth-file","authLauncherLines":["Saved auth found."]}' | 
 printf '{"authLabel":"oauth-file","bridgeLines":["bridge"],"memoryLines":["memory"]}' | target/debug/unclecode rust ux dashboard-home-patch
 printf '{"isBusy":true,"authLabel":"oauth-file","bridgeLines":["bridge"],"memoryLines":["memory"]}' | target/debug/unclecode rust ux dashboard-home-sync-state
 printf '{"previous":{"isBusy":true,"authLabel":"oauth-file","bridgeLines":[],"memoryLines":[]},"next":{"isBusy":false,"authLabel":"oauth-file","bridgeLines":["bridge"],"memoryLines":[]}}' | target/debug/unclecode rust ux dashboard-home-refresh
-printf '{"model":"gpt-5.4","mode":"ultrawork","reasoning":{"effort":"high","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},"authLabel":"oauth-file"}' | target/debug/unclecode rust ux initial-state
+printf '{"model":"gpt-5.5","mode":"ultrawork","reasoning":{"effort":"high","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},"authLabel":"oauth-file"}' | target/debug/unclecode rust ux initial-state
 printf '{"entries":[{"role":"system","text":"hello"}],"nextEntries":[{"role":"assistant","text":"world"}]}' | target/debug/unclecode rust ux append-entries-patch
 printf '{"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["low","medium","high"]}}' | target/debug/unclecode rust ux mode-default-reasoning
 printf '{"line":"/skills","skills":[{"name":"autopilot","scope":"project","summary":"Keep moving."}]}' | target/debug/unclecode rust ux skills-command
@@ -1456,8 +1456,8 @@ printf '{"line":"/queue","isBusy":true,"busyStatus":"thinking","mode":"yolo","wo
 printf '{"line":"/auth key"}' | target/debug/unclecode rust ux auth-key-command
 printf '{"kind":"success","resultLines":["API key login saved.","Auth: api-key-file"],"nextAuthLabel":"api-key-file"}' | target/debug/unclecode rust ux auth-key-submit-result
 printf '{"progressLines":["Opening browser…","Enter code: ABCD-1234","Waiting for device approval…"]}' | target/debug/unclecode rust ux auth-progress-result
-printf '{"provider":"openai","model":"gpt-5.4","mode":"default","cwd":"/repo","reasoningLabel":"medium (mode-default)","authLabel":"api-key-file","contextSummaryLines":["Loaded guidance: AGENTS.md"],"bridgeLines":[],"memoryLines":[],"traceLines":[]}' | target/debug/unclecode rust ux sensitive-input-cancel-result
-printf '{"formattedMessage":"Auth failed. Run /auth login.","nextAuthLabel":"api-key-file","lastTurnDurationMs":42,"isAuthFailure":true,"provider":"openai","model":"gpt-5.4","mode":"default","cwd":"/repo","reasoningLabel":"medium (mode-default)","contextSummaryLines":["Auth issue: saved OAuth needs refresh."],"bridgeLines":[],"memoryLines":[],"traceLines":[]}' | target/debug/unclecode rust ux prompt-failure-result
+printf '{"provider":"openai","model":"gpt-5.5","mode":"default","cwd":"/repo","reasoningLabel":"medium (mode-default)","authLabel":"api-key-file","contextSummaryLines":["Loaded guidance: AGENTS.md"],"bridgeLines":[],"memoryLines":[],"traceLines":[]}' | target/debug/unclecode rust ux sensitive-input-cancel-result
+printf '{"formattedMessage":"Auth failed. Run /auth login.","nextAuthLabel":"api-key-file","lastTurnDurationMs":42,"isAuthFailure":true,"provider":"openai","model":"gpt-5.5","mode":"default","cwd":"/repo","reasoningLabel":"medium (mode-default)","contextSummaryLines":["Auth issue: saved OAuth needs refresh."],"bridgeLines":[],"memoryLines":[],"traceLines":[]}' | target/debug/unclecode rust ux prompt-failure-result
 printf '{"assistantText":"Done.","bridgeLines":["bridge-1"],"memoryLines":["memory-1"],"lastTurnDurationMs":23}' | target/debug/unclecode rust ux prompt-success-result
 printf '{"turnStartedAt":42}' | target/debug/unclecode rust ux prompt-start-result
 printf '{}' | target/debug/unclecode rust ux prompt-finalize-result
@@ -1468,32 +1468,32 @@ printf '{"panelTitle":"Models","inputValue":"/model"}' | target/debug/unclecode 
 printf 'assistant' | target/debug/unclecode rust ux text entry-presentation
 printf '{"lineIndex":2}' | target/debug/unclecode rust ux text attachment-layout
 printf '{"panelPlacement":"side","terminalColumns":180}' | target/debug/unclecode rust ux text viewport-layout
-printf '{"inputValue":"/model","dockWidth":20,"attachmentCount":5,"footerLine":"~/repo · gpt-5.4"}' | target/debug/unclecode rust ux text composer-dock-layout
+printf '{"inputValue":"/model","dockWidth":20,"attachmentCount":5,"footerLine":"~/repo · gpt-5.5"}' | target/debug/unclecode rust ux text composer-dock-layout
 printf 'OpenAI request failed with status 401' | target/debug/unclecode rust ux text error-message
 printf '{"node":"v22.22.0","platform":"darwin","arch":"arm64"}' | target/debug/unclecode rust ux text runtime-label
 printf '{"inputValue":"/model g","slashSuggestionCount":2}' | target/debug/unclecode rust ux text composer-hint
-printf '{"model":"gpt-5.4","mode":"default","authLabel":"Browser OAuth · file"}' | target/debug/unclecode rust ux text status-line
-printf '{"cwd":"/Users/me/project/엉클코드","home":"/Users/me","model":"gpt-5.4","mode":"default","authLabel":"Browser OAuth · file","composerHint":"하이","width":20}' | target/debug/unclecode rust ux text footer-line
+printf '{"model":"gpt-5.5","mode":"default","authLabel":"Browser OAuth · file"}' | target/debug/unclecode rust ux text status-line
+printf '{"cwd":"/Users/me/project/엉클코드","home":"/Users/me","model":"gpt-5.5","mode":"default","authLabel":"Browser OAuth · file","composerHint":"하이","width":20}' | target/debug/unclecode rust ux text footer-line
 printf '{"prompt":"fix login.ts oauth.ts","mode":"yolo"}' | target/debug/unclecode rust orchestrator classify-intent
 printf 'refactor login.ts oauth.ts session.ts' | target/debug/unclecode rust orchestrator complex-tasks
 printf 'Here are tasks:\n[{"id":"task-1","summary":"Read files","prompt":"Read src/index.ts"}]' | target/debug/unclecode rust orchestrator parse-plan-response
 target/debug/unclecode rust orchestrator worker-budget yolo
 printf '[{"summary":"Inspect login.ts","prompt":"Edit src/login.ts"}]' | target/debug/unclecode rust orchestrator changed-files
 printf '{"prompt":"refactor login","results":[{"summary":"result one"}],"executableChecks":"lint PASS"}' | target/debug/unclecode rust orchestrator guardian-review-prompt
-printf '{"prompt":"refactor login","model":"gpt-5.4","reasoning":"high","results":[{"summary":"result one"}],"guardianSummary":"ok"}' | target/debug/unclecode rust orchestrator synthesis-prompt
+printf '{"prompt":"refactor login","model":"gpt-5.5","reasoning":"high","results":[{"summary":"result one"}],"guardianSummary":"ok"}' | target/debug/unclecode rust orchestrator synthesis-prompt
 printf '{"kind":"executor-running","workerId":"executor-1","taskId":"task-1","summary":"Inspect login.ts","startedAt":10}' | target/debug/unclecode rust orchestrator trace-event
 printf '{"line":"/skill analyze","skill":{"name":"analyze","content":"# Analyze\nLook deeper.","attempts":[{"path":"/skills/analyze","ok":true}]}}' | target/debug/unclecode rust ux skill-command
 printf '{"line":"/tools","toolLines":["read_file","write_file"]}' | target/debug/unclecode rust ux tools-command
-printf '{"line":"/status","provider":"openai","model":"gpt-5.4","mode":"default","cwd":"/repo","reasoningLabel":"medium (mode-default)","authLabel":"api-key-env","contextSummaryLines":["Loaded guidance: AGENTS.md"],"bridgeLines":["bridge ready"],"memoryLines":[],"traceLines":[]}' | target/debug/unclecode rust ux status-command
+printf '{"line":"/status","provider":"openai","model":"gpt-5.5","mode":"default","cwd":"/repo","reasoningLabel":"medium (mode-default)","authLabel":"api-key-env","contextSummaryLines":["Loaded guidance: AGENTS.md"],"bridgeLines":["bridge ready"],"memoryLines":[],"traceLines":[]}' | target/debug/unclecode rust ux status-command
 printf '{}' | target/debug/unclecode rust ux panel help
-printf '{"provider":"openai","model":"gpt-5.4","mode":"default","cwd":"/repo","reasoningLabel":"medium (mode-default)","authLabel":"api-key-env","route":{"providerId":"openai","label":"OpenAI","transport":"native","runtimeSupported":true,"endpointUrl":"https://api.openai.com/v1/responses","proxyPolicy":{"targetHost":"api.openai.com","proxyUrl":null,"source":"none","bypassed":false,"noProxy":[]}}}' | target/debug/unclecode rust ux panel status
+printf '{"provider":"openai","model":"gpt-5.5","mode":"default","cwd":"/repo","reasoningLabel":"medium (mode-default)","authLabel":"api-key-env","route":{"providerId":"openai","label":"OpenAI","transport":"native","runtimeSupported":true,"endpointUrl":"https://api.openai.com/v1/responses","proxyPolicy":{"targetHost":"api.openai.com","proxyUrl":null,"source":"none","bypassed":false,"noProxy":[]}}}' | target/debug/unclecode rust ux panel status
 printf '{"lines":["session-1","session-2"]}' | target/debug/unclecode rust ux panel sessions
 printf '{"sessionMemory":["session-1"],"projectMemory":["project-1"]}' | target/debug/unclecode rust ux panel memories
 printf '{"message":"Paste key."}' | target/debug/unclecode rust ux panel auth-secure-entry
 printf '{"progressLines":["Opening browser…","Enter code: ABCD-1234","Waiting for device approval…"]}' | target/debug/unclecode rust ux panel auth-progress
 printf '## Heading\n- `npm run check`\n- **Done**' | target/debug/unclecode rust ux text normalize-markdown
 printf '· thinking inspect repo' | target/debug/unclecode rust ux text busy-status
-printf '{"type":"orchestrator.step","role":"executor","status":"running","summary":"Calling openai gpt-5.4"}' | target/debug/unclecode rust ux text trace-line
+printf '{"type":"orchestrator.step","role":"executor","status":"running","summary":"Calling openai gpt-5.5"}' | target/debug/unclecode rust ux text trace-line
 printf '{"type":"provider.route","provider":"openai","label":"OpenAI","transport":"native","endpointUrl":"https://api.openai.com/v1/responses","proxyPolicy":{"targetHost":"api.openai.com","proxyUrl":null,"source":"none","bypassed":false,"noProxy":[]}}' | target/debug/unclecode rust ux text trace-line
 printf '{"type":"attachment.attached","source":"clipboard","mimeType":"image/png","byteEstimate":4096}' | target/debug/unclecode rust ux text trace-line
 printf '[{"displayName":"shot.png","mimeType":"image/png"}]' | target/debug/unclecode rust ux text attachment-preview

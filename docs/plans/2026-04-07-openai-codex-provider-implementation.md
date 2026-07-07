@@ -1,5 +1,7 @@
 # OpenAI Codex + OpenAI API Split Implementation Plan
 
+> **Status (2026-07):** ABANDONED — the explicit provider-id split (`openai-codex`/`openai-api`) was never implemented. The runtime instead branches *internally* on the single `openai` provider id (`packages/providers/src/runtime.ts`, `apiReady`/`codex` fields in `openai-status.ts`). PR #1 ("Prefer reusable Codex OAuth") was closed 2026-07 for the same reason. Kept as a decision record of the design space explored.
+
 > **For agentic workers:** Implement this plan with the repo's standard execution workflow. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add first-class `OpenAI Codex` and `OpenAI API` provider paths, with Codex OAuth preferred when available and explicit UI/auth/runtime separation between the two.

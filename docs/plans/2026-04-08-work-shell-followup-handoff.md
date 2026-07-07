@@ -26,7 +26,7 @@ Key outcomes:
 - legacy `~/.agents/skills/superpowers/*` lookup removed from runtime discovery
 - discovery now ignores legacy superpowers paths explicitly
 - regression tests lock that behavior
-- old docs under `docs/superpowers/` were flattened into normal `docs/plans/` and `docs/specs/`
+- old docs under `docs/superpowers/` were removed in the 2026-07 repo cleanup (the flattening into `docs/plans/`/`docs/specs/` had already happened for the live content; the stale 2026-04-09 stubs were deleted as superseded)
 - the local disabled superpowers directory was deleted
 
 **Do not reintroduce hidden always-on skill injection.** Normal workspace/global skills are still supported; only the legacy superpowers pathing was removed.

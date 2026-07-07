@@ -1,5 +1,7 @@
 # ESC Session Center Workflow — Implementation Plan
 
+> **Status (2026-07):** SHIPPED — ESC/sessions features landed (code in `dashboard-navigation.ts`, `work-shell-dashboard.tsx`, `onRequestSessionsView`). The checkboxes below were never flipped; the PRD companion (`docs/specs/2026-06-01-esc-session-center-workflow-prd.md`) records the implementation evidence. Kept as a task record.
+
 **Companion to:** `docs/specs/2026-06-01-esc-session-center-workflow-prd.md`
 **Generated:** 2026-06-01
 

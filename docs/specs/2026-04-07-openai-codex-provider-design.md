@@ -1,5 +1,7 @@
 # OpenAI Codex + OpenAI API Split Design
 
+> **Status (2026-07):** ABANDONED design — the explicit split was never implemented; the runtime branches internally on a single `openai` provider id instead. See the matching plan (`docs/plans/2026-04-07-openai-codex-provider-implementation.md`) for details. Kept as a record of the design space.
+
 ## Goal
 Make UncleCode's OpenAI story honest and reliable by splitting the current overloaded `openai` path into two first-class provider experiences:
 

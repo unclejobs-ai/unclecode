@@ -1,5 +1,7 @@
 # Work-First TUI and Verification Implementation Plan
 
+> **Status (2026-07):** SUPERSEDED — shipped. Work-first TUI is now the default startup (`npm run unclecode`). Reasoning controls, mode defaults, and composer shipped via later T-iterations. The checkboxes below were never flipped, but the work is complete; see `README.md` and `docs/runbooks/unclecode-normalization-runbook.md` for current truth. Kept as a decision record.
+
 > **For agentic workers:** Implement this plan with the repo's standard execution workflow. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `unclecode` open directly into a responsive work composer, expose model-aware reasoning controls, and close the remaining verification gaps.
