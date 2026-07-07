@@ -149,7 +149,7 @@ function renderContextInspectorSection(input: {
         <Text color={input.palette.textDim}>{` · ${input.rows.length}`}</Text>
         <Text color={input.palette.textMuted}>{` · ${input.hint}`}</Text>
       </Text>
-      <Text color={input.color}>{"─".repeat(Math.min(64, Math.max(24, input.width - 4)))}</Text>
+      <Text color={input.palette.borderDefault}>{"─".repeat(Math.min(64, Math.max(24, input.width - 4)))}</Text>
       {input.rows.length === 0
         ? <Text color={input.palette.textMuted}>{"  none"}</Text>
         : (
