@@ -1,0 +1,107 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 520" font-family="-apple-system, 'Segoe UI', Roboto, sans-serif">
+  <title>UncleCode runtime architecture</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="1" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="brokerG" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#115e59"/>
+      <stop offset="1" stop-color="#0d9488"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <rect width="880" height="520" fill="url(#bg)" rx="16"/>
+
+  <!-- Title -->
+  <text x="440" y="38" text-anchor="middle" fill="#f8fafc" font-size="20" font-weight="700">UncleCode 런타임 아키텍처</text>
+  <text x="440" y="58" text-anchor="middle" fill="#94a3b8" font-size="12">워크스페이스 소스 → 컨텍스트 패킷 → 숨겨진 오케스트레이션 → 답변 1개</text>
+
+  <!-- Layer 1: Sources -->
+  <g>
+    <text x="40" y="100" fill="#7dd3fc" font-size="11" font-weight="600" letter-spacing="1">① 워크스페이스 소스</text>
+    <rect x="40" y="110" width="180" height="34" rx="6" fill="#082f49" stroke="#075985"/>
+    <text x="130" y="131" text-anchor="middle" fill="#e2e8f0" font-size="12">AGENTS / CLAUDE / UNCLECODE.md</text>
+    <rect x="40" y="150" width="180" height="34" rx="6" fill="#082f49" stroke="#075985"/>
+    <text x="130" y="171" text-anchor="middle" fill="#e2e8f0" font-size="12">Skills · Cursor rules</text>
+    <rect x="40" y="190" width="180" height="34" rx="6" fill="#082f49" stroke="#075985"/>
+    <text x="130" y="211" text-anchor="middle" fill="#e2e8f0" font-size="12">MCP · OMO 목표 · 메모리</text>
+  </g>
+
+  <!-- Layer 2: Context Broker -->
+  <g>
+    <text x="320" y="100" fill="#5eead4" font-size="11" font-weight="600" letter-spacing="1">② 컨텍스트 브로커</text>
+    <rect x="280" y="110" width="200" height="114" rx="10" fill="url(#brokerG)" opacity="0.92"/>
+    <text x="380" y="138" text-anchor="middle" fill="#f8fafc" font-size="13" font-weight="700">ContextPacketView</text>
+    <text x="380" y="160" text-anchor="middle" fill="#ccfbf1" font-size="11">included · excluded · warnings</text>
+    <line x1="300" y1="174" x2="460" y2="174" stroke="#5eead4" stroke-opacity="0.4"/>
+    <text x="380" y="194" text-anchor="middle" fill="#f0fdfa" font-size="11">bootstrap.json 매니페스트</text>
+    <text x="380" y="212" text-anchor="middle" fill="#f0fdfa" font-size="11">/context 오버레이</text>
+  </g>
+
+  <!-- Layer 3: Orchestrator (hidden) -->
+  <g>
+    <text x="620" y="100" fill="#facc15" font-size="11" font-weight="600" letter-spacing="1">③ 오케스트레이터 (숨김)</text>
+    <rect x="560" y="110" width="280" height="114" rx="10" fill="#451a03" stroke="#713f12" stroke-dasharray="4 3"/>
+    <text x="700" y="134" text-anchor="middle" fill="#fde68a" font-size="12" font-weight="700">classify-intent (Rust)</text>
+    <text x="700" y="152" text-anchor="middle" fill="#fef3c7" font-size="11">simple · research · complex</text>
+    <text x="700" y="178" text-anchor="middle" fill="#fde68a" font-size="11">planner → executor pool → synthesis</text>
+    <text x="700" y="196" text-anchor="middle" fill="#fef3c7" font-size="11">team-runner (별도 RUN_ID)</text>
+    <text x="700" y="214" text-anchor="middle" fill="#a16207" font-size="10" font-style="italic">트레이스는 기본 숨김</text>
+  </g>
+
+  <!-- Arrows L1→L2→L3 -->
+  <line x1="222" y1="167" x2="276" y2="167" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="482" y1="167" x2="556" y2="167" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Persistence row -->
+  <g>
+    <text x="40" y="270" fill="#cbd5e1" font-size="11" font-weight="600" letter-spacing="1">④ 영속 (.unclecode / ~/.unclecode)</text>
+    <rect x="40" y="282" width="800" height="48" rx="8" fill="#1e293b" stroke="#334155"/>
+    <g font-size="11" fill="#e2e8f0">
+      <text x="80" y="310" text-anchor="middle">session-store</text>
+      <text x="200" y="310" text-anchor="middle">memory-bus SOP</text>
+      <text x="330" y="310" text-anchor="middle">agentops (마스킹)</text>
+      <text x="470" y="310" text-anchor="middle">QA 증거 JSON</text>
+      <text x="600" y="310" text-anchor="middle">bootstrap.json</text>
+      <text x="740" y="310" text-anchor="middle">config.json</text>
+    </g>
+    <line x1="380" y1="226" x2="380" y2="280" stroke="#475569" stroke-width="1.5" stroke-dasharray="3 3"/>
+    <line x1="700" y1="226" x2="700" y2="280" stroke="#475569" stroke-width="1.5" stroke-dasharray="3 3"/>
+  </g>
+
+  <!-- Providers + TUI row -->
+  <g>
+    <!-- Providers -->
+    <rect x="560" y="370" width="280" height="110" rx="10" fill="#082f49" stroke="#075985"/>
+    <text x="700" y="394" text-anchor="middle" fill="#7dd3fc" font-size="11" font-weight="600" letter-spacing="1">⑤ 제공자</text>
+    <g font-size="12" fill="#e2e8f0">
+      <rect x="580" y="408" width="74" height="26" rx="13" fill="#0c4a6e"/>
+      <text x="617" y="425" text-anchor="middle">OpenAI</text>
+      <rect x="663" y="408" width="86" height="26" rx="13" fill="#0c4a6e"/>
+      <text x="706" y="425" text-anchor="middle">Anthropic</text>
+      <rect x="758" y="408" width="68" height="26" rx="13" fill="#0c4a6e"/>
+      <text x="792" y="425" text-anchor="middle">Gemini</text>
+    </g>
+    <text x="700" y="458" text-anchor="middle" fill="#94a3b8" font-size="10">터미널 UX는 하나, 백엔드만 교체</text>
+
+    <!-- TUI -->
+    <rect x="40" y="370" width="280" height="110" rx="10" fill="#052e16" stroke="#166534"/>
+    <text x="180" y="394" text-anchor="middle" fill="#86efac" font-size="11" font-weight="600" letter-spacing="1">⑥ 워크 셸 TUI</text>
+    <g font-size="11" fill="#dcfce7">
+      <text x="180" y="418" text-anchor="middle">대화 · 컴포저 · /context</text>
+      <text x="180" y="436" text-anchor="middle">상태줄 · 푸터 · 대시보드</text>
+      <text x="180" y="458" text-anchor="middle" fill="#86efac" font-size="10" font-style="italic">한국어 우선 · display-width 안전</text>
+    </g>
+  </g>
+
+  <!-- Flow from orchestrator to both providers and TUI -->
+  <line x1="700" y1="226" x2="700" y2="366" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M560 167 Q 470 167 470 280 Q 470 366 322 366" fill="none" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Footer note -->
+  <text x="440" y="502" text-anchor="middle" fill="#64748b" font-size="10">Rust 코어(intent·mode·UX 텍스트 SSOT) + Node 런타임(오케스트레이션·TUI·제공자 루프)</text>
+</svg>

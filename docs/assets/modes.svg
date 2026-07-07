@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 300" font-family="-apple-system, 'Segoe UI', Roboto, sans-serif">
+  <title>UncleCode mode system</title>
+  <rect width="880" height="300" fill="#0f172a" rx="14"/>
+  <text x="440" y="34" text-anchor="middle" fill="#f8fafc" font-size="18" font-weight="700">모드 시스템 — 행동 프로필 × 인텐트 라우팅</text>
+  <text x="440" y="54" text-anchor="middle" fill="#94a3b8" font-size="11">모드는 행동을, classify-intent는 턴 경로를 정한다. /mode set 으로 전환</text>
+
+  <!-- Mode cards -->
+  <g font-size="11">
+    <!-- default -->
+    <rect x="30" y="80" width="110" height="78" rx="8" fill="#1e293b" stroke="#64748b"/>
+    <text x="85" y="100" text-anchor="middle" fill="#e2e8f0" font-weight="700">default</text>
+    <text x="85" y="116" text-anchor="middle" fill="#7dd3fc">작업 모드</text>
+    <text x="85" y="136" text-anchor="middle" fill="#94a3b8" font-size="10">균형</text>
+    <text x="85" y="150" text-anchor="middle" fill="#cbd5e1" font-size="10">워커 1</text>
+
+    <!-- yolo -->
+    <rect x="150" y="80" width="110" height="78" rx="8" fill="#451a03" stroke="#facc15"/>
+    <text x="205" y="100" text-anchor="middle" fill="#fde68a" font-weight="700">yolo</text>
+    <text x="205" y="116" text-anchor="middle" fill="#facc15">YOLO 모드</text>
+    <text x="205" y="136" text-anchor="middle" fill="#fef3c7" font-size="10">셸 자동 켬</text>
+    <text x="205" y="150" text-anchor="middle" fill="#fef3c7" font-size="10">워커 4</text>
+
+    <!-- ultrawork -->
+    <rect x="270" y="80" width="110" height="78" rx="8" fill="#082f49" stroke="#7dd3fc" stroke-width="2"/>
+    <text x="325" y="100" text-anchor="middle" fill="#7dd3fc" font-weight="700">ultrawork</text>
+    <text x="325" y="116" text-anchor="middle" fill="#38bdf8">집중 작업</text>
+    <text x="325" y="136" text-anchor="middle" fill="#bae6fd" font-size="10">깊은 검색·병렬</text>
+    <text x="325" y="150" text-anchor="middle" fill="#bae6fd" font-size="10">워커 5</text>
+
+    <!-- search -->
+    <rect x="390" y="80" width="110" height="78" rx="8" fill="#1e293b" stroke="#64748b"/>
+    <text x="445" y="100" text-anchor="middle" fill="#e2e8f0" font-weight="700">search</text>
+    <text x="445" y="116" text-anchor="middle" fill="#86efac">탐색 모드</text>
+    <text x="445" y="136" text-anchor="middle" fill="#94a3b8" font-size="10">읽기 전용</text>
+    <text x="445" y="150" text-anchor="middle" fill="#cbd5e1" font-size="10">research 라우팅</text>
+
+    <!-- analyze -->
+    <rect x="510" y="80" width="110" height="78" rx="8" fill="#1e293b" stroke="#64748b"/>
+    <text x="565" y="100" text-anchor="middle" fill="#e2e8f0" font-weight="700">analyze</text>
+    <text x="565" y="116" text-anchor="middle" fill="#86efac">분석 모드</text>
+    <text x="565" y="136" text-anchor="middle" fill="#94a3b8" font-size="10">진단 우선</text>
+    <text x="565" y="150" text-anchor="middle" fill="#cbd5e1" font-size="10">research 라우팅</text>
+
+    <!-- plan -->
+    <rect x="630" y="80" width="110" height="78" rx="8" fill="#1e293b" stroke="#64748b"/>
+    <text x="685" y="100" text-anchor="middle" fill="#e2e8f0" font-weight="700">plan</text>
+    <text x="685" y="116" text-anchor="middle" fill="#facc15">계획 모드</text>
+    <text x="685" y="136" text-anchor="middle" fill="#94a3b8" font-size="10">편집 금지</text>
+    <text x="685" y="150" text-anchor="middle" fill="#cbd5e1" font-size="10">계획만</text>
+
+    <!-- build -->
+    <rect x="750" y="80" width="110" height="78" rx="8" fill="#1e293b" stroke="#64748b"/>
+    <text x="805" y="100" text-anchor="middle" fill="#e2e8f0" font-weight="700">build</text>
+    <text x="805" y="116" text-anchor="middle" fill="#5eead4">구현 모드</text>
+    <text x="805" y="136" text-anchor="middle" fill="#94a3b8" font-size="10">구현 집중</text>
+    <text x="805" y="150" text-anchor="middle" fill="#cbd5e1" font-size="10">워커 1</text>
+  </g>
+
+  <!-- Intent routing flow -->
+  <text x="440" y="190" text-anchor="middle" fill="#cbd5e1" font-size="11" font-weight="600">인텐트 라우팅 (Rust classify-intent)</text>
+
+  <g font-size="11">
+    <rect x="60" y="208" width="160" height="64" rx="8" fill="#052e16" stroke="#166534"/>
+    <text x="140" y="230" text-anchor="middle" fill="#86efac" font-weight="700">simple</text>
+    <text x="140" y="248" text-anchor="middle" fill="#dcfce7" font-size="10">인사·설명 질문</text>
+    <text x="140" y="264" text-anchor="middle" fill="#dcfce7" font-size="10">→ 모델 직접 1턴</text>
+
+    <rect x="260" y="208" width="160" height="64" rx="8" fill="#082f49" stroke="#0369a1"/>
+    <text x="340" y="230" text-anchor="middle" fill="#7dd3fc" font-weight="700">research</text>
+    <text x="340" y="248" text-anchor="middle" fill="#e0f2fe" font-size="10">탐색·분석</text>
+    <text x="340" y="264" text-anchor="middle" fill="#e0f2fe" font-size="10">→ research 턴 스트림</text>
+
+    <rect x="460" y="208" width="360" height="64" rx="8" fill="#451a03" stroke="#b45309" stroke-dasharray="4 3"/>
+    <text x="640" y="230" text-anchor="middle" fill="#fde68a" font-weight="700">complex  [숨겨진 오케스트레이션]</text>
+    <text x="640" y="248" text-anchor="middle" fill="#fef3c7" font-size="10">planner → executor pool → guardian → synthesis</text>
+    <text x="640" y="264" text-anchor="middle" fill="#a16207" font-size="10" font-style="italic">→ 답변 1개만 대화창에 (JSON·워커 독백은 숨김)</text>
+  </g>
+</svg>
