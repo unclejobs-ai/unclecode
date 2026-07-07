@@ -851,7 +851,7 @@ function renderWorkShellPanelLine(line: string, index: number): React.ReactNode 
 function renderRunbookLine(
   line: string,
   index: number,
-  cursor?: { readonly cursorIndex: number },
+  cursor?: { readonly cursorIndex: number; readonly modelWindow?: number },
 ): React.ReactNode {
   const trimmed = line.trim();
   // Compact packet summary
@@ -860,11 +860,10 @@ function renderRunbookLine(
     const tokenCount = tokenMatch && tokenMatch[1] ? Number.parseInt(tokenMatch[1], 10) : 0;
     const tokenLabel = tokenMatch ? tokenMatch[0] : "";
     // Token budget meter: each cell ≈ budgetWindow/8 tokens.
-    // The window adapts to UNCLECODE_CONTEXT_WINDOW env var (default 200k)
+    // The window is threaded from engine state (modelWindow, default 200k)
     // so the meter is accurate for 128k, 200k, or 1M context models.
     const budgetCells = 8;
-    const envWindow = Number.parseInt(process.env.UNCLECODE_CONTEXT_WINDOW ?? "", 10);
-    const budgetWindow = Number.isFinite(envWindow) && envWindow > 0 ? envWindow : 200_000;
+    const budgetWindow = cursor?.modelWindow ?? 200_000;
     const windowLabel = budgetWindow >= 1_000_000
       ? `${(budgetWindow / 1_000_000).toFixed(1)}M`
       : `${Math.round(budgetWindow / 1000)}k`;
@@ -1826,6 +1825,7 @@ export function WorkShellView(props: {
   readonly contextInspectorCursor?: number;
   readonly contextInspectorExpanded?: string | null;
   readonly contextPacket?: ContextPacketView;
+  readonly modelWindow?: number;
   readonly currentTurnStartedAt?: number;
   readonly lastTurnDurationMs?: number;
   readonly attachmentLines?: readonly string[];
@@ -1963,6 +1963,7 @@ export function WorkShellView(props: {
           width: Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
           borderColor: panelBorderColor,
           palette: W,
+          modelWindow: props.modelWindow ?? 200000,
         })
       ) : panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput ? (
         <Box marginTop={1} borderStyle="single" borderColor={panelBorderColor} paddingX={1} flexDirection="column">
@@ -1979,6 +1980,7 @@ export function WorkShellView(props: {
           <Box marginTop={1} flexDirection="column">
             {overlayLines.map((line, index) => renderRunbookLine(line, index, {
               cursorIndex: props.contextInspectorCursor ?? -1,
+              ...(props.modelWindow !== undefined ? { modelWindow: props.modelWindow } : {}),
             }))}
           </Box>
         </Box>

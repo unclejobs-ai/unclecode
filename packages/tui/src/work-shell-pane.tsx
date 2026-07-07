@@ -136,6 +136,7 @@ export function WorkShellPane<
     contextInspectorCursor,
     contextInspectorExpanded,
     contextPacket,
+    modelWindow,
     queuedCount,
     queuePaused,
   } = engineState;
@@ -244,6 +245,7 @@ export function WorkShellPane<
       {...(contextInspectorCursor !== undefined ? { contextInspectorCursor } : {})}
       {...(contextInspectorExpanded !== undefined ? { contextInspectorExpanded } : {})}
       {...(contextPacket ? { contextPacket } : {})}
+      {...(modelWindow !== undefined ? { modelWindow } : {})}
       {...(attachmentLines ? { attachmentLines } : {})}
       {...(pendingClipboardAttachmentCount > 0 ? { attachmentCount: pendingClipboardAttachmentCount } : {})}
       composer={

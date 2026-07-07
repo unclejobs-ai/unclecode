@@ -13,14 +13,26 @@ import {
   type ContextInspectorSourceRow,
 } from "./work-shell-context-inspector-model.js";
 
+/**
+ * Pure budget-meter fill math. Mirrors the overlay's 10-cell meter so the
+ * contract tests can assert the fill directly without rendering. Clamped to
+ * [0, 10]. Extracted so `modelWindow` (threaded from engine state, replacing
+ * the legacy env-var window read) drives a single source of truth.
+ */
+export function computeContextMeterFill(tokenEstimate: number, modelWindow: number): number {
+  const budgetCells = 10;
+  const window = modelWindow > 0 ? modelWindow : 200_000;
+  return Math.min(budgetCells, Math.max(0, Math.round((tokenEstimate / window) * budgetCells)));
+}
+
 function renderContextInspectorBudgetLine(
   packet: ContextPacketView,
   palette: ContextInspectorPalette,
+  modelWindow: number,
 ): React.ReactNode {
   const budgetCells = 10;
-  const envWindow = Number.parseInt(process.env.UNCLECODE_CONTEXT_WINDOW ?? "", 10);
-  const budgetWindow = Number.isFinite(envWindow) && envWindow > 0 ? envWindow : 200_000;
-  const filled = Math.min(budgetCells, Math.max(0, Math.round((packet.tokenEstimate / budgetWindow) * budgetCells)));
+  const budgetWindow = modelWindow > 0 ? modelWindow : 200_000;
+  const filled = computeContextMeterFill(packet.tokenEstimate, budgetWindow);
   const meter = `${"●".repeat(filled)}${"·".repeat(Math.max(0, budgetCells - filled))}`;
   const windowLabel = budgetWindow >= 1_000_000
     ? `${(budgetWindow / 1_000_000).toFixed(1)}M`
@@ -136,6 +148,7 @@ export function renderContextInspectorOverlay(input: {
   readonly width: number;
   readonly borderColor: string;
   readonly palette: ContextInspectorPalette;
+  readonly modelWindow: number;
 }): React.ReactNode {
   const rows = buildContextInspectorRows(input.packet);
   const includedRows = rows.filter((row) => !row.heldBack);
@@ -149,7 +162,7 @@ export function renderContextInspectorOverlay(input: {
       </Text>
       <Text color={palette.textMuted}>{"  ↑/↓ or j/k move · Enter pin/unpin · e expand · f hold back · i include · Esc close"}</Text>
       <Box marginTop={1} flexDirection="column">
-        {renderContextInspectorBudgetLine(input.packet, palette)}
+        {renderContextInspectorBudgetLine(input.packet, palette, input.modelWindow)}
         {renderContextInspectorSection({
           title: "↓ Included in next answer",
           hint: "reaches the model",

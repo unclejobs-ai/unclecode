@@ -253,6 +253,9 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly contextInspectorCursor?: number | undefined;
   readonly contextInspectorExpanded?: string | null | undefined;
   readonly contextPacket?: ContextPacketView | undefined;
+  // Adaptive model context window (tokens) threaded from engine state so the
+  // budget meter scales with the active model instead of an env var.
+  readonly modelWindow?: number | undefined;
 };
 
 export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
