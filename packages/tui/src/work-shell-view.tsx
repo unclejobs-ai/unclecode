@@ -475,7 +475,6 @@ export function resolveWorkShellComposerHint(input: {
 // The old single-dot frames (⠁⠂⠄⠠⠐⠈) were too subtle and looked broken.
 const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 export const WORK_SHELL_SPINNER_INTERVAL_MS = 80;
-export const WORK_SHELL_SPINNER_SHOW_DELAY_MS = 500;
 
 function pickBusySpinnerFrame(frame = 0): string {
   const count = WORK_SHELL_BUSY_SPINNER_FRAMES.length;
@@ -878,7 +877,7 @@ function renderRunbookLine(
     return (
       <Box key={`rb-${index}-${line}`} flexDirection="column">
         <Text>
-          <Text color={W.success} bold>{"● "}</Text>
+          <Text color={W.success} bold>{"ok "}</Text>
           <Text color={W.text} bold>{summaryWithoutTokens}</Text>
         </Text>
         {tokenLabel ? (
@@ -900,7 +899,7 @@ function renderRunbookLine(
     return (
       <Box key={`rb-${index}-${line}`} marginTop={1} flexDirection="column">
         <Text>
-          <Text color={W.success} bold>{"↓ "}</Text>
+          <Text color={W.success} bold>{"+ "}</Text>
           <Text color={W.success} bold>{trimmed}</Text>
         </Text>
         <Text color={W.success}>{"─".repeat(38)}</Text>
@@ -911,7 +910,7 @@ function renderRunbookLine(
     return (
       <Box key={`rb-${index}-${line}`} marginTop={1} flexDirection="column">
         <Text>
-          <Text color={W.borderStrong} bold>{"⊘ "}</Text>
+          <Text color={W.borderStrong} bold>{"- "}</Text>
           <Text color={W.textMuted} bold>{trimmed}</Text>
         </Text>
         <Text color={W.borderSoft}>{"─".repeat(38)}</Text>
@@ -922,7 +921,7 @@ function renderRunbookLine(
     const isNone = /none/i.test(trimmed);
     return (
       <Text key={`rb-${index}-${line}`}>
-        <Text color={isNone ? W.success : W.warning} bold>{isNone ? "✓ " : "⚠ "}</Text>
+        <Text color={isNone ? W.success : W.warning} bold>{isNone ? "ok " : "warn "}</Text>
         <Text color={W.textMuted}>{trimmed}</Text>
       </Text>
     );
@@ -1477,20 +1476,17 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
   });
   const [activityFrame, setActivityFrame] = React.useState(0);
   const [activityNow, setActivityNow] = React.useState(() => Date.now());
-  const [showSpinner, setShowSpinner] = React.useState(false);
   React.useEffect(() => {
     if (!props.isBusy) {
-      setShowSpinner(false);
       return;
     }
     setActivityFrame((f) => f + 1);
     setActivityNow(Date.now());
-    const delay = setTimeout(() => setShowSpinner(true), WORK_SHELL_SPINNER_SHOW_DELAY_MS);
     const interval = setInterval(() => {
       setActivityFrame((f) => f + 1);
       setActivityNow(Date.now());
     }, WORK_SHELL_SPINNER_INTERVAL_MS);
-    return () => { clearTimeout(delay); clearInterval(interval); setShowSpinner(false); };
+    return () => { clearInterval(interval); };
   }, [props.isBusy]);
   const entries = props.streamingAssistantText
     ? [
@@ -1502,7 +1498,7 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
   // — so the user always sees feedback that the model is working. Previously
   // the indicator vanished when streaming text arrived, making it look like
   // the turn completed prematurely.
-  const showActivityIndicator = props.isBusy && showSpinner;
+  const showActivityIndicator = props.isBusy;
 
   return (
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "68%" : undefined} paddingRight={props.panelPlacement === "side" ? 1 : 0}>
@@ -1975,8 +1971,8 @@ export function WorkShellView(props: {
         <Box marginTop={1} borderStyle="single" borderColor={panelBorderColor} paddingX={1} flexDirection="column">
           <Box flexDirection="column">
             <Text>
-              <Text color={W.assistant} bold>{"▤ UncleCode Runbook"}</Text>
-              <Text color={W.textDim}>{" · context carried into the next answer"}</Text>
+              <Text color={W.assistant} bold>{"▤ UncleCode Context Desk"}</Text>
+              <Text color={W.textDim}>{" · review what reaches the next answer"}</Text>
             </Text>
             <Text color={W.textMuted}>
               <Text color={W.borderSoft}>{"  "}</Text>

@@ -300,13 +300,15 @@ test("WorkShellView renders /context as an interactive source inspector", async 
   instance.unmount();
   instance.cleanup();
 
-  assert.match(output, /UncleCode Runbook/);
-  assert.match(output, /Enter pin\/unpin/);
-  assert.match(output, /◆ pinned.*AGENTS\.md/s);
-  assert.match(output, /▶ .*bridge.*◇ pin.*recent Q&A/s);
+  assert.match(output, /UncleCode Context Desk/);
+  assert.match(output, /Keys.*Enter pin.*f hold back.*e collapse/s);
+  assert.match(output, /Focus.*bridge.*Included in next answer.*recent Q&A/s);
+  assert.match(output, /now.*Enter pin.*f hold back.*e collapse/s);
+  assert.match(output, /pinned.*AGENTS\.md/s);
+  assert.match(output, /> .*bridge.*included.*recent Q&A/s);
   assert.match(output, /반갑다\. 컨텍스트 인스펙터에서 선택한 행은 펼쳐져야 한다\./);
-  assert.match(output, /⊘ Held back locally/);
-  assert.match(output, /i include.*session loop trail/s);
+  assert.match(output, /- Held back locally/);
+  assert.match(output, /include.*session loop trail/s);
   assert.doesNotMatch(output, /\.omo\/ulw-loop/);
 });
 
@@ -421,7 +423,7 @@ test("WorkShellView windows long /context source lists around the cursor", async
 
   assert.match(output, /… \d+ more above/);
   assert.match(output, /… \d+ more below/);
-  assert.match(output, /▶ .*workspace source 14/s);
+  assert.match(output, /> .*workspace source 14/s);
   assert.doesNotMatch(output, /workspace source 0/);
 });
 
