@@ -12,8 +12,8 @@ test("busy activity detector matches whitespace-prefixed spinner rows", () => {
   const genericPattern = lowerBusyActivityRowPattern();
   const detailedPattern = lowerBusyActivityRowPattern("thinking");
 
-  assert.match("\n  ⠋ thinking", genericPattern);
-  assert.match("\n\t⠙ thinking", detailedPattern);
+  assert.match("\n  ⠁ thinking", genericPattern);
+  assert.match("\n\t⠂ thinking", detailedPattern);
   assert.doesNotMatch("\nstatus: thinking", genericPattern);
 });
 

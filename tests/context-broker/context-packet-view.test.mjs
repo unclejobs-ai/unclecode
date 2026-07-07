@@ -143,7 +143,7 @@ describe("context packet view", () => {
       preview: [],
     });
 
-    assert.equal(formatContextPacketIndicator(packet), "context 2 ready · 1 held back");
+    assert.equal(formatContextPacketIndicator(packet), "▤ 2 ctx · 1 held");
   });
 
   it("keeps compact packet rows but counts grouped raw artifacts accurately", () => {
@@ -168,7 +168,7 @@ describe("context packet view", () => {
 
     assert.equal(packet.excluded.length, 1);
     assert.equal(packet.sourceCounts.excluded, 64);
-    assert.equal(formatContextPacketIndicator(packet), "context 1 ready · 64 held back");
+    assert.equal(formatContextPacketIndicator(packet), "▤ 1 ctx · 64 held");
     assert.match(
       formatContextPacketPromptPrefix(packet),
       /Excluded raw artifacts:\n- 64 raw artifacts withheld from model-ready context; inspect \/context for local-only details\./,
@@ -268,7 +268,41 @@ describe("context packet view", () => {
       .find((line) => line.includes("omo ·"));
     assert.ok(summaryLine);
     const summary = summaryLine.split(" · ").slice(2).join(" · ");
-    assert.ok(getDisplayWidth(summary) <= 64);
+    assert.ok(getDisplayWidth(summary) <= 110);
     assert.match(summary, /…$/);
+  });
+
+  it("appends a pinned segment to the footer indicator when included sources are pinned", () => {
+    const packet = createContextPacketView({
+      id: "packet-pinned",
+      generatedAt: "2026-06-04T00:00:00.000Z",
+      included: [
+        { id: "workspace", category: "workspace", label: "AGENTS.md", reason: "loaded", salience: 1.0 },
+        { id: "omo", category: "omo", label: "G001", reason: "active goal", salience: 1.0 },
+      ],
+      excluded: [],
+      warnings: [],
+      preview: [],
+    });
+
+    const result = formatContextPacketIndicator(packet);
+    assert.ok(/📌.*2 pinned/.test(result), `expected pinned segment in "${result}"`);
+  });
+
+  it("omits the pinned segment when no included source is pinned", () => {
+    const packet = createContextPacketView({
+      id: "packet-unpinned",
+      generatedAt: "2026-06-04T00:00:00.000Z",
+      included: [
+        { id: "workspace", category: "workspace", label: "AGENTS.md", reason: "loaded", salience: 0.5 },
+        { id: "omo", category: "omo", label: "G001", reason: "active goal", salience: 0.5 },
+      ],
+      excluded: [],
+      warnings: [],
+      preview: [],
+    });
+
+    const result = formatContextPacketIndicator(packet);
+    assert.equal(result.includes("pinned"), false);
   });
 });

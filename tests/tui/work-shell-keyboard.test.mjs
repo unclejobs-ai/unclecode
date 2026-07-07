@@ -344,6 +344,100 @@ test("Work pane routes repeated Ctrl+O to work context without submitting text",
   assert.deepEqual(submittedLines, []);
 });
 
+test("Work pane context inspector shortcuts do not steal keys while composer has text", async () => {
+  const resolvedValues = [];
+  const forgetCalls = [];
+  const state = {
+    entries: [],
+    model: "gpt-5.4",
+    mode: "yolo",
+    reasoning: "medium",
+    authLabel: "oauth-file",
+    isBusy: false,
+    bridgeLines: [],
+    memoryLines: [],
+    contextInspectorCursor: 0,
+    contextInspectorExpanded: null,
+    contextPacket: {
+      id: "packet-test",
+      version: 1,
+      generatedAt: "2026-07-07T00:00:00.000Z",
+      title: "Next answer context",
+      included: [{
+        id: "src-1",
+        category: "workspace",
+        label: "AGENTS.md",
+        reason: "workspace guidance",
+        preview: "Use narrow diffs.",
+        salience: 0.5,
+        includedInModel: true,
+      }],
+      excluded: [],
+      warnings: [],
+      preview: ["ready"],
+      sourceCounts: { included: 1, excluded: 0, warnings: 0 },
+      tokenEstimate: 10,
+    },
+    panel: {
+      title: "Context expanded",
+      lines: ["Context expanded"],
+    },
+  };
+  const engine = {
+    getState: () => state,
+    subscribe: () => () => {},
+    initialize: async () => {},
+    dispose: () => {},
+    handleSubmit: async () => {},
+    setMode: async () => {},
+    openSessionsPanel: async () => {},
+    moveContextInspectorCursor: () => {},
+    forgetContextSourceAtCursor: async () => {
+      forgetCalls.push("forget");
+    },
+  };
+  const { stdin, instance } = renderWithInput(
+    React.createElement(WorkShellPane, {
+      provider: "OpenAI",
+      model: "gpt-5.4",
+      mode: "yolo",
+      engine,
+      cwd: "/Users/parkeungje/project/unclecode",
+      resolveComposerInput: async (value) => {
+        resolvedValues.push(value);
+        return {
+          prompt: value,
+          attachments: [],
+          transcriptText: value,
+        };
+      },
+      getSuggestions: (value) =>
+        getWorkShellSlashSuggestions(value, {
+          provider: "openai",
+          currentModel: "gpt-5.4",
+        }),
+      onExit: () => {},
+      shouldBlockSlashSubmit: () => false,
+      getReasoningLabel: () => "default medium",
+      isReasoningSupported: () => true,
+    }),
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  stdin.write("f");
+  await waitForCondition(() => forgetCalls.length === 1);
+  assert.equal(resolvedValues.includes("f"), false);
+
+  stdin.write("a");
+  await waitForCondition(() => resolvedValues.includes("a"));
+  stdin.write("f");
+  await waitForCondition(() => resolvedValues.includes("af"));
+  instance.unmount();
+  instance.cleanup();
+
+  assert.deepEqual(forgetCalls, ["forget"]);
+});
+
 test("Work pane submits an explicit model command from the composer and closes the picker", async () => {
   const { engine, submittedLines } = createWorkShellPaneEngine();
   const { stdin, instance, getOutput, clearOutput } = renderWithInput(

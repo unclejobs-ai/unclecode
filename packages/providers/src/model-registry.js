@@ -1,6 +1,6 @@
 import { PROVIDER_CAPABILITIES } from "@unclecode/contracts";
 import { ProviderCapabilityMismatchError } from "./errors.js";
-const OPENAI_DEFAULT_MODELS = ["gpt-5.4", "gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o", "o4-mini"];
+const OPENAI_DEFAULT_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "o4-mini", "gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o"];
 function unique(values) {
     return [...new Set(values.filter((value) => value.trim().length > 0))];
 }

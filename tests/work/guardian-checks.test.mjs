@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { runWorkspaceGuardianChecks } from "../../apps/unclecode-cli/src/guardian-checks.ts";
@@ -167,6 +170,137 @@ test("runWorkspaceGuardianChecks expands source changes into the matching test s
   assert.equal(result.checks.length, 2);
   assert.equal(result.checks[1]?.name, "test:providers");
   assert.match(result.summary, /test:providers PASS/);
+});
+
+test("runWorkspaceGuardianChecks appends LSP evidence when a bridge is provided", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "uc-guardian-workspace-"));
+  const execCalls = [];
+  const lspCalls = [];
+  try {
+    writeFileSync(join(workspace, "package.json"), JSON.stringify({ scripts: {} }));
+    writeFileSync(join(workspace, "runtime.ts"), "const broken = true;");
+    mkdirSync(join(workspace, "src"));
+    writeFileSync(join(workspace, "src", "main.rs"), "fn main() {}\n");
+    writeFileSync(join(workspace, "README.md"), "docs");
+
+    const result = await runWorkspaceGuardianChecks(
+      {
+        cwd: workspace,
+        env: {},
+        scripts: [],
+        changedFiles: ["runtime.ts", "src/main.rs", "README.md"],
+        lspBridge: {
+          async checkAfterEdit(input) {
+            lspCalls.push(input);
+            return {
+              status: "fail",
+              summary: "1 diagnostic",
+            };
+          },
+        },
+        lspTimeoutMs: 25,
+        lspMaxDiagnostics: 3,
+      },
+      {
+        execFile: async (command, args) => {
+          execCalls.push([command, args]);
+          return { stdout: "", stderr: "" };
+        },
+        platform: "darwin",
+      },
+    );
+
+    assert.deepEqual(execCalls, []);
+    assert.equal(lspCalls.length, 2);
+    assert.equal(lspCalls[0]?.path, "runtime.ts");
+    assert.equal(lspCalls[1]?.path, "src/main.rs");
+    assert.deepEqual(lspCalls[0]?.options, { timeoutMs: 25, maxDiagnostics: 3 });
+    assert.equal(result.checks[0]?.name, "lsp:runtime.ts");
+    assert.equal(result.checks[0]?.status, "failed");
+    assert.match(result.summary, /lsp:runtime\.ts FAIL · 1 diagnostic/);
+    assert.match(result.summary, /lsp:src\/main\.rs FAIL · 1 diagnostic/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("runWorkspaceGuardianChecks fails closed when LSP changed file paths escape the workspace", async () => {
+  const lspCalls = [];
+  const result = await runWorkspaceGuardianChecks(
+    {
+      cwd: "/repo",
+      env: {},
+      scripts: [],
+      changedFiles: ["../outside.ts", "/tmp/absolute.ts"],
+      lspBridge: {
+        async checkAfterEdit(input) {
+          lspCalls.push(input);
+          return {
+            status: "pass",
+            summary: "should not run",
+          };
+        },
+      },
+    },
+    {
+      readFile: async (path) => {
+        if (path === "/repo/package.json") {
+          return JSON.stringify({ scripts: {} });
+        }
+        throw new Error(`unexpected read: ${path}`);
+      },
+      execFile: async () => ({ stdout: "", stderr: "" }),
+      platform: "darwin",
+    },
+  );
+
+  assert.deepEqual(lspCalls, []);
+  assert.equal(result.checks.length, 2);
+  assert.equal(result.checks[0]?.status, "failed");
+  assert.equal(result.checks[1]?.status, "failed");
+  assert.match(result.summary, /changed file escapes workspace: \.\.\/outside\.ts/);
+  assert.match(result.summary, /changed file must be workspace-relative: \/tmp\/absolute\.ts/);
+});
+
+test("runWorkspaceGuardianChecks rejects LSP changed file symlinks that resolve outside the workspace", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "uc-guardian-workspace-"));
+  const outside = mkdtempSync(join(tmpdir(), "uc-guardian-outside-"));
+  const lspCalls = [];
+  try {
+    writeFileSync(join(workspace, "package.json"), JSON.stringify({ scripts: {} }));
+    writeFileSync(join(outside, "secret.ts"), "outside-secret");
+    symlinkSync(join(outside, "secret.ts"), join(workspace, "link.ts"));
+
+    const result = await runWorkspaceGuardianChecks(
+      {
+        cwd: workspace,
+        env: {},
+        scripts: [],
+        changedFiles: ["link.ts"],
+        lspBridge: {
+          async checkAfterEdit(input) {
+            lspCalls.push(input);
+            return {
+              status: "pass",
+              summary: "should not run",
+            };
+          },
+        },
+      },
+      {
+        execFile: async () => ({ stdout: "", stderr: "" }),
+        platform: "darwin",
+      },
+    );
+
+    assert.deepEqual(lspCalls, []);
+    assert.equal(result.checks.length, 1);
+    assert.equal(result.checks[0]?.status, "failed");
+    assert.match(result.summary, /changed file escapes workspace: link\.ts/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
 });
 
 test("runWorkspaceGuardianChecks can select multiple targeted test subsets for cross-package source changes", async () => {

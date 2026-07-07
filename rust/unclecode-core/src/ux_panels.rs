@@ -882,8 +882,9 @@ fn model_picker_panel(input: &Value) -> Value {
         "Current model".to_string(),
         format!("Model · {current_model}"),
         format!("Thinking · {}", current_meta.reasoning),
+        model_picker_reasoning_choice_line(&current_meta),
     ];
-    if let Some(support) = current_meta.support {
+    if let Some(support) = current_meta.support.as_deref() {
         lines.push(format!("Supports · {support}"));
     }
     if let Some(filter) = model_filter {
@@ -902,7 +903,7 @@ fn model_picker_panel(input: &Value) -> Value {
     lines.extend([
         String::new(),
         "Controls".to_string(),
-        "↑↓ choose · Enter switch · type to filter · Esc close".to_string(),
+        "↑↓ choose model · Enter switch · append low/medium/high/default · Esc close".to_string(),
     ]);
 
     json!({ "title": "Model picker", "lines": lines })
@@ -1606,6 +1607,18 @@ fn compact_model_suggestion_description(description: &str) -> String {
     }
 }
 
+fn model_picker_reasoning_choice_line(current_meta: &ModelPickerCurrent) -> String {
+    match current_meta.support.as_deref() {
+        Some(support) if !support.trim().is_empty() => {
+            format!("Thinking choices · {} / default", support.replace(", ", " / "))
+        }
+        _ if current_meta.reasoning.eq_ignore_ascii_case("unavailable") => {
+            "Thinking choices · unavailable for this model".to_string()
+        }
+        _ => "Thinking choices · low / medium / high / default".to_string(),
+    }
+}
+
 fn format_model_suggestion_description(description: &str) -> String {
     let lower = description.to_ascii_lowercase();
     if lower.contains("reasoning unsupported") || lower.contains("reasoning unavailable") {
@@ -2229,6 +2242,7 @@ mod tests {
                 json!("Current model"),
                 json!("Model · gpt-5.4"),
                 json!("Thinking · default medium"),
+                json!("Thinking choices · low / medium / high / default"),
                 json!("Supports · low, medium, high"),
                 json!(""),
                 json!("Pick model"),
@@ -2236,7 +2250,7 @@ mod tests {
                 json!("  /model gpt-5.4-mini  reasoning medium"),
                 json!(""),
                 json!("Controls"),
-                json!("↑↓ choose · Enter switch · type to filter · Esc close"),
+                json!("↑↓ choose model · Enter switch · append low/medium/high/default · Esc close"),
             ]
         );
     }

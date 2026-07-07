@@ -190,5 +190,5 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
 }
 
 function normalizeIdlePane(pane) {
-  return pane.replace(/Ready · last reply \d+(?:\.\d+)?s/g, "Ready · last reply <age>");
+  return pane.replace(/Ready · last(?: reply)? \d+(?:\.\d+)?s/g, "Ready · last <age>");
 }

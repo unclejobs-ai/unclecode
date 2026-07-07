@@ -11,6 +11,7 @@ import type {
   PolicyDecisionEffect,
   PolicyDecisionSource,
 } from "./policy.js";
+import type { VersionedRef } from "./ssot.js";
 
 export const TEAM_RUN_STATUSES = [
   "started",
@@ -62,6 +63,63 @@ export function isTeamLaneRuntime(value: unknown): value is TeamLaneRuntime {
   );
 }
 
+export const EVIDENCE_GATE_STATUSES = ["pass", "fail", "blocked"] as const;
+
+export type EvidenceGateStatus = (typeof EVIDENCE_GATE_STATUSES)[number];
+
+export type EvidenceArtifactRef = {
+  readonly path: string;
+  readonly kind: "cli-transcript" | "test-output" | "data-diff" | "screenshot" | "log" | "other";
+  readonly description: string;
+  readonly sha256?: string;
+};
+
+export type EvidenceGateReceipt = {
+  readonly status: EvidenceGateStatus;
+  readonly summary: string;
+  readonly artifacts: ReadonlyArray<EvidenceArtifactRef>;
+  readonly cleanupReceipt: string;
+  readonly recordedAt: number;
+  readonly citedRefs?: ReadonlyArray<VersionedRef>;
+};
+
+export function isEvidenceGateReceiptComplete(receipt: EvidenceGateReceipt): boolean {
+  return receipt.summary.trim().length > 0
+    && receipt.cleanupReceipt.trim().length > 0
+    && receipt.artifacts.length > 0
+    && receipt.artifacts.every((artifact) =>
+      artifact.path.trim().length > 0
+      && artifact.kind.trim().length > 0
+      && artifact.description.trim().length > 0,
+    );
+}
+
+export const AGENT_SEMANTIC_INTENTS = [
+  "implementation",
+  "verification",
+  "review",
+  "research",
+  "coordination",
+] as const;
+
+export type AgentSemanticIntent = (typeof AGENT_SEMANTIC_INTENTS)[number];
+
+export const AGENT_TOOL_POLICIES = ["none", "read_only", "sandboxed", "unrestricted"] as const;
+
+export type AgentToolPolicy = (typeof AGENT_TOOL_POLICIES)[number];
+
+export const AGENT_WRITE_POLICIES = ["none", "propose_only", "workspace"] as const;
+
+export type AgentWritePolicy = (typeof AGENT_WRITE_POLICIES)[number];
+
+export type AgentRoutingContract = {
+  readonly intent: AgentSemanticIntent;
+  readonly toolPolicy: AgentToolPolicy;
+  readonly writePolicy: AgentWritePolicy;
+  readonly rationale: string;
+  readonly citedRefs?: ReadonlyArray<VersionedRef>;
+};
+
 /**
  * Canonical worker spec — single source of truth for both the orchestrator
  * dispatch layer and per-lane adapters. Heterogeneous lanes per run.
@@ -73,6 +131,7 @@ export type WorkerSpec = {
   readonly runtime: TeamLaneRuntime;
   readonly model?: string;
   readonly extras?: Readonly<Record<string, string>>;
+  readonly routingContract?: AgentRoutingContract;
 };
 
 export type TeamRunManifest = {

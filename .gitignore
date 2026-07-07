@@ -18,6 +18,7 @@ rust/*/.unclecode/
 .qoder/
 .pi/
 .qwen/
+.glm-hammer/
 .kiro/
 .goose/
 .acpx-fanout/

@@ -86,6 +86,108 @@ test("config-core explains precedence in the documented source order", () => {
   );
 });
 
+test("config-core resolves CRP context controls through the documented source order", () => {
+  const { workspaceRoot, userHomeDir } = createWorkspaceFixture();
+
+  writeConfigFile(path.join(workspaceRoot, ".unclecode", "config.json"), {
+    context: {
+      crp: false,
+      crpBudget: 8000,
+    },
+  });
+  writeConfigFile(path.join(userHomeDir, ".unclecode", "config.json"), {
+    context: {
+      crp: true,
+      crpBudget: 16000,
+    },
+  });
+
+  const configOnly = explainUncleCodeConfig({
+    workspaceRoot,
+    userHomeDir,
+  });
+
+  assert.equal(configOnly.settings.crp.value, true);
+  assert.equal(configOnly.settings.crp.winner.sourceId, "user-config");
+  assert.equal(configOnly.settings.crpBudget.value, 16000);
+  assert.equal(configOnly.settings.crpBudget.winner.sourceId, "user-config");
+
+  const envOverride = explainUncleCodeConfig({
+    workspaceRoot,
+    userHomeDir,
+    env: {
+      UNCLECODE_CRP: "0",
+      UNCLECODE_CRP_BUDGET: "24000",
+    },
+  });
+
+  assert.equal(envOverride.settings.crp.value, false);
+  assert.equal(envOverride.settings.crp.winner.sourceId, "environment");
+  assert.equal(envOverride.settings.crpBudget.value, 24000);
+  assert.equal(envOverride.settings.crpBudget.winner.sourceId, "environment");
+});
+
+test("config-core resolves context.modelWindow from config through the explanation surface", () => {
+  const { workspaceRoot, userHomeDir } = createWorkspaceFixture();
+
+  writeConfigFile(path.join(workspaceRoot, ".unclecode", "config.json"), {
+    context: {
+      modelWindow: 128000,
+    },
+  });
+
+  const explanation = explainUncleCodeConfig({
+    workspaceRoot,
+    userHomeDir,
+  });
+
+  assert.equal(explanation.settings.modelWindow.value, 128000);
+});
+
+test("config-core resolves context.modelWindow override via UNCLECODE_CONTEXT_WINDOW env var", () => {
+  const { workspaceRoot, userHomeDir } = createWorkspaceFixture();
+
+  const previous = process.env.UNCLECODE_CONTEXT_WINDOW;
+  process.env.UNCLECODE_CONTEXT_WINDOW = "1000000";
+  try {
+    const explanation = explainUncleCodeConfig({
+      workspaceRoot,
+      userHomeDir,
+      env: { ...process.env },
+    });
+
+    assert.equal(explanation.settings.modelWindow.value, 1000000);
+    assert.equal(explanation.settings.modelWindow.winner.sourceId, "environment");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.UNCLECODE_CONTEXT_WINDOW;
+    } else {
+      process.env.UNCLECODE_CONTEXT_WINDOW = previous;
+    }
+  }
+});
+
+test("config-core flags an invalid context.modelWindow value as a source issue", () => {
+  const { workspaceRoot, userHomeDir } = createWorkspaceFixture();
+
+  writeConfigFile(path.join(workspaceRoot, ".unclecode", "config.json"), {
+    context: {
+      modelWindow: -5,
+    },
+  });
+
+  const explanation = explainUncleCodeConfig({
+    workspaceRoot,
+    userHomeDir,
+  });
+
+  assert.ok(
+    explanation.sourceIssues.some(
+      (issue) => issue.message === "Invalid context.modelWindow value.",
+    ),
+  );
+});
+
 test("config-core exposes the active mode and mode-derived setting contributions", () => {
   const { workspaceRoot, userHomeDir } = createWorkspaceFixture();
 

@@ -2632,10 +2632,11 @@ test("WorkShellEngine opens /context as an overlay and can dismiss it", async ()
   const { engine } = createEngine();
 
   await engine.initialize();
+  const entriesBefore = engine.getState().entries.length;
   await engine.handleSubmit("/context");
 
   assert.equal(engine.getState().panel.title, "Context expanded");
-  assert.ok(engine.getState().entries.some((entry) => entry.text === "Context opened."));
+  assert.equal(engine.getState().entries.length, entriesBefore);
 
   engine.closeOverlay();
 
@@ -2714,7 +2715,7 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
   await engine.handleSubmit("summarize repo");
 
   assert.equal(packetCalls, 1);
-  assert.match(engine.getState().contextIndicator ?? "", /context 2 ready · 1 held back · 1 issue/);
+  assert.match(engine.getState().contextIndicator ?? "", /▤ 2 ctx · ~30t · 1 held · 1⚠/);
   assert.equal(prompts.length, 1);
   assert.match(prompts[0] ?? "", /<unclecode_context_packet id="packet-work-shell-1" version="1">/);
   assert.match(prompts[0] ?? "", /Included:\n- workspace: AGENTS\.md \(repo instructions loaded\) - Use &lt;small&gt; reversible diffs\./);
@@ -2739,6 +2740,70 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
   assert.equal(engine.getState().panel.lines.some((line) => /\bPacket\b|provider packet|Next model-call packet/.test(line)), false);
   assert.equal(engine.getState().panel.lines.some((line) => line.startsWith("Context ·")), false);
   assert.equal(engine.getState().panel.lines.some((line) => line.startsWith("Controls ·")), false);
+});
+
+test("WorkShellEngine context inspector actions mutate the selected CRP source", async () => {
+  let salience = 0.5;
+  let includedInModel = true;
+  const mutations = [];
+  const makePacket = () => {
+    const item = {
+      id: "workspace-guidance",
+      category: "workspace",
+      label: "AGENTS.md",
+      reason: "repo instructions loaded",
+      preview: "Use narrow diffs.",
+      tokenEstimate: 12,
+      salience,
+      includedInModel,
+    };
+    return {
+      id: `packet-${mutations.length}`,
+      version: 1,
+      generatedAt: "2026-06-04T00:00:00.000Z",
+      title: "Next answer context",
+      included: includedInModel ? [item] : [],
+      excluded: includedInModel ? [] : [item],
+      warnings: [],
+      preview: ["Context will be carried into the next answer."],
+      sourceCounts: {
+        included: includedInModel ? 1 : 0,
+        excluded: includedInModel ? 0 : 1,
+        warnings: 0,
+      },
+      tokenEstimate: includedInModel ? 12 : 0,
+    };
+  };
+  const { engine } = createEngine({
+    resolveContextPacket: async () => makePacket(),
+    mutateContextSource(action) {
+      mutations.push(action);
+      if (action.kind === "pin") salience = 1;
+      if (action.kind === "unpin") salience = 0.5;
+      if (action.kind === "forget") includedInModel = false;
+      if (action.kind === "include") includedInModel = true;
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  assert.equal(engine.getState().contextInspectorCursor, 0);
+
+  await engine.toggleContextInspectorPin();
+  assert.deepEqual(mutations.at(-1), { kind: "pin", id: "workspace-guidance" });
+  assert.equal(engine.getState().contextPacket?.included[0]?.salience, 1);
+
+  await engine.toggleContextInspectorPin();
+  assert.deepEqual(mutations.at(-1), { kind: "unpin", id: "workspace-guidance" });
+  assert.equal(engine.getState().contextPacket?.included[0]?.salience, 0.5);
+
+  await engine.forgetContextSourceAtCursor();
+  assert.deepEqual(mutations.at(-1), { kind: "forget", id: "workspace-guidance" });
+  assert.equal(engine.getState().contextPacket?.excluded[0]?.includedInModel, false);
+
+  await engine.includeContextSourceAtCursor();
+  assert.deepEqual(mutations.at(-1), { kind: "include", id: "workspace-guidance" });
+  assert.equal(engine.getState().contextPacket?.included[0]?.includedInModel, true);
 });
 
 test("WorkShellEngine shows a busy spinner state while resolving composer context", async () => {
@@ -2791,7 +2856,7 @@ test("WorkShellEngine treats /con as the human context shortcut", async () => {
   await engine.handleSubmit("/con");
 
   assert.equal(engine.getState().panel.title, "Context expanded");
-  assert.ok(engine.getState().entries.some((entry) => entry.text === "Context opened."));
+  assert.equal(engine.getState().entries.some((entry) => entry.text === "Context opened."), false);
   assert.doesNotMatch(engine.getState().entries.map((entry) => entry.text).join("\n"), /Unsupported work-shell inline command|packet/i);
 });
 

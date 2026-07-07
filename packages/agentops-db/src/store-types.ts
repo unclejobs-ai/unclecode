@@ -1,4 +1,10 @@
 import type {
+  ContextSourceRecord,
+  SelectContextSourcesInput,
+  UpsertContextSourceInput,
+} from "@unclecode/contracts";
+
+import type {
   AgentOpsArtifactRecord,
   AgentOpsEventRecord,
   AgentOpsLaneRecord,
@@ -108,6 +114,13 @@ export interface AddAgentOpsVerificationInput {
   readonly finishedAt?: string;
 }
 
+export type SelectedContextSources = {
+  readonly selected: readonly ContextSourceRecord[];
+  readonly heldBack: readonly ContextSourceRecord[];
+  readonly totalTokens: number;
+  readonly budget: number;
+};
+
 export interface AgentOpsStore {
   readonly paths: AgentOpsPaths;
   addProject(input: AddAgentOpsProjectInput): AgentOpsProjectRecord;
@@ -121,5 +134,20 @@ export interface AgentOpsStore {
   addArtifact(input: AddAgentOpsArtifactInput): AgentOpsArtifactRecord;
   addEvent(input: AddAgentOpsEventInput): AgentOpsEventRecord;
   addVerification(input: AddAgentOpsVerificationInput): AgentOpsVerificationRecord;
+  // Context Runbook Protocol (CRP) — typed context source store.
+  upsertContextSource(input: UpsertContextSourceInput): ContextSourceRecord;
+  selectContextSources(input: SelectContextSourcesInput): SelectedContextSources;
+  countContextSourcesByCategory(projectId: string): ReadonlyMap<string, number>;
+  markContextSourceTurnSeen(projectId: string, ids: readonly string[], turnIndex: number): void;
+  deleteContextSourcesByIdPrefix(input: {
+    readonly projectId: string;
+    readonly idPrefix: string;
+    readonly keepIds?: readonly string[];
+  }): number;
+  pruneExpiredContextSources(now?: Date): number;
+  pinContextSource(projectId: string, id: string): void;
+  unpinContextSource(projectId: string, id: string): void;
+  forgetContextSource(projectId: string, id: string): void;
+  includeContextSource(projectId: string, id: string): void;
   close(): void;
 }

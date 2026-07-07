@@ -72,7 +72,7 @@ test("formatWorkShellLiveActivityLine shows nothing while idle", () => {
 test("formatWorkShellLiveActivityLine surfaces a live progress line while busy", () => {
   const fallback = formatWorkShellLiveActivityLine({ isBusy: true, spinnerFrame: 0 });
   assert.ok(typeof fallback === "string" && fallback.length > 0);
-  assert.match(fallback, /Working/);
+  assert.match(fallback, /Thinking through the next step/);
 
   const withStatus = formatWorkShellLiveActivityLine({
     isBusy: true,
@@ -81,7 +81,7 @@ test("formatWorkShellLiveActivityLine surfaces a live progress line while busy",
   });
   assert.ok(typeof withStatus === "string" && withStatus.length > 0);
   // a concrete status replaces the generic fallback
-  assert.doesNotMatch(withStatus, /^.\s+Working…$/);
+  assert.match(withStatus, /Reading context/);
 });
 
 test("busy WorkShellView avoids a duplicate lower activity row", async () => {
@@ -110,7 +110,8 @@ test("busy WorkShellView avoids a duplicate lower activity row", async () => {
   instance.unmount();
   instance.cleanup();
 
-  assert.match(output, /⠋|starting|thinking/);
+  assert.match(output, /◆ .* Busy/u);
+  assert.match(output, /\n\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+Thinking through the next step/u);
   assert.doesNotMatch(
     output,
     /\n\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+thinking/u,
@@ -144,7 +145,8 @@ test("busy WorkShellView keeps the idle empty-state card hidden", async () => {
   instance.unmount();
   instance.cleanup();
 
-  assert.match(output, /⠋|starting|thinking/);
+  assert.match(output, /◆ .* Busy/u);
+  assert.match(output, /\n\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+Preparing context/u);
   assert.doesNotMatch(output, /Ready for the next move/);
   assert.doesNotMatch(
     output,
@@ -184,7 +186,8 @@ test("WorkShellView render keeps the light-terminal status frame visible", async
   instance.cleanup();
 
   assert.match(output, /UncleCode · OpenAI/);
-  assert.match(output, /gpt-5\.4 · YOLO mode.*│.*Saved OAuth/);
+  // Status bar uses · separators (redesigned — was │)
+  assert.match(output, /gpt-5\.4 · YOLO mode.*·.*Saved OAuth/);
   assert.match(output, /Ready for the next move/);
   assert.match(output, /Work context ready/);
   assert.match(output, /Start\s+· Type the task in plain language/);
@@ -227,13 +230,214 @@ test("WorkShellView renders an intentional empty state for blank panels", async 
   assert.match(output, /Keep typing, or use \/ for commands/);
 });
 
+test("WorkShellView renders /context as an interactive source inspector", async () => {
+  const { instance, getOutput } = renderDebugFrame(
+    React.createElement(WorkShellView, {
+      provider: "openai",
+      model: "gpt-5.4",
+      reasoningLabel: "medium",
+      reasoningSupported: true,
+      mode: "Default",
+      authLabel: "Saved OAuth",
+      entries: [],
+      isBusy: false,
+      activePanel: { title: "Context expanded", lines: ["fallback line"] },
+      contextInspectorCursor: 1,
+      contextInspectorExpanded: "bridge-1",
+      contextPacket: {
+        id: "packet-test",
+        version: 1,
+        generatedAt: "2026-07-07T00:00:00.000Z",
+        title: "Next answer context",
+        included: [
+          {
+            id: "workspace-1",
+            category: "workspace",
+            label: "AGENTS.md",
+            reason: "workspace guidance",
+            preview: "Workspace instructions stay active.",
+            tokenEstimate: 42,
+            salience: 1,
+            includedInModel: true,
+          },
+          {
+            id: "bridge-1",
+            category: "bridge",
+            label: "recent Q&A",
+            reason: "session bridge",
+            preview: "반갑다. 컨텍스트 인스펙터에서 선택한 행은 펼쳐져야 한다.",
+            tokenEstimate: 24,
+            salience: 0.7,
+            includedInModel: true,
+          },
+        ],
+        excluded: [
+          {
+            id: "loop-1",
+            category: "loop-trail",
+            label: ".omo/ulw-loop/session/ledger.jsonl",
+            reason: "raw trail stays local",
+            preview: ".omo/ulw-loop/session/ledger.jsonl contains raw evidence",
+            sourceCount: 3,
+            includedInModel: false,
+          },
+        ],
+        warnings: [],
+        preview: ["UncleCode will carry selected summaries into the next answer."],
+        sourceCounts: { included: 2, excluded: 3, warnings: 0 },
+        tokenEstimate: 66,
+      },
+      composer: React.createElement("span", null, ""),
+      inputValue: "",
+      slashSuggestionCount: 0,
+      terminalColumns: 100,
+      cwd: "/Users/parkeungje/project/unclecode",
+    }),
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const output = getOutput();
+  instance.unmount();
+  instance.cleanup();
+
+  assert.match(output, /UncleCode Context Desk/);
+  assert.match(output, /Keys.*Enter pin.*f hold back.*e collapse/s);
+  assert.match(output, /Focus.*bridge.*Included in next answer.*recent Q&A/s);
+  assert.match(output, /now.*Enter pin.*f hold back.*e collapse/s);
+  assert.match(output, /pinned.*AGENTS\.md/s);
+  assert.match(output, /> .*bridge.*included.*recent Q&A/s);
+  assert.match(output, /반갑다\. 컨텍스트 인스펙터에서 선택한 행은 펼쳐져야 한다\./);
+  assert.match(output, /- Held back locally/);
+  assert.match(output, /include.*session loop trail/s);
+  assert.doesNotMatch(output, /\.omo\/ulw-loop/);
+});
+
+test("WorkShellView keeps model picker overlay visible when a context packet exists", async () => {
+  const { instance, getOutput } = renderDebugFrame(
+    React.createElement(WorkShellView, {
+      provider: "openai",
+      model: "gpt-5.5",
+      reasoningLabel: "low",
+      reasoningSupported: true,
+      mode: "Default",
+      authLabel: "Saved OAuth",
+      entries: [],
+      isBusy: false,
+      activePanel: {
+        title: "Model picker",
+        lines: [
+          "Current model",
+          "Model · gpt-5.5",
+          "Thinking choices · low / medium / high / default",
+          "Controls",
+          "Type filter · /model <name> [low|medium|high|default] · Esc close",
+        ],
+      },
+      contextPacket: {
+        id: "packet-test",
+        version: 1,
+        generatedAt: "2026-07-07T00:00:00.000Z",
+        title: "Next answer context",
+        included: [
+          {
+            id: "workspace-1",
+            category: "workspace",
+            label: "AGENTS.md",
+            reason: "workspace guidance",
+            preview: "Workspace instructions stay active.",
+          },
+        ],
+        excluded: [],
+        warnings: [],
+        preview: [],
+        sourceCounts: { included: 1, excluded: 0, warnings: 0 },
+        tokenEstimate: 42,
+      },
+      composer: React.createElement("span", null, ""),
+      inputValue: "",
+      slashSuggestionCount: 1,
+      terminalColumns: 100,
+      cwd: "/Users/parkeungje/project/unclecode",
+    }),
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const output = getOutput();
+  instance.unmount();
+  instance.cleanup();
+
+  assert.match(output, /Model picker/);
+  assert.match(output, /Thinking choices · low \/ medium \/ high \/ default/);
+  assert.doesNotMatch(output, /UncleCode Runbook/);
+});
+
+test("WorkShellView windows long /context source lists around the cursor", async () => {
+  // The overlay's included-section cap adapts to the source count
+  // (computeContextOverlaySectionMaxRows, capped at 20). Use a list long
+  // enough to exceed that adaptive cap so windowing is still exercised.
+  const included = Array.from({ length: 30 }, (_, index) => ({
+    id: `workspace-${index}`,
+    category: "workspace",
+    label: `workspace source ${index}`,
+    reason: "workspace context",
+    preview: `workspace preview ${index}`,
+    tokenEstimate: 5,
+    includedInModel: true,
+  }));
+  const { instance, getOutput } = renderDebugFrame(
+    React.createElement(WorkShellView, {
+      provider: "openai",
+      model: "gpt-5.4",
+      reasoningLabel: "medium",
+      reasoningSupported: true,
+      mode: "Default",
+      authLabel: "Saved OAuth",
+      entries: [],
+      isBusy: false,
+      activePanel: { title: "Context expanded", lines: ["fallback line"] },
+      contextInspectorCursor: 14,
+      contextPacket: {
+        id: "packet-long-test",
+        version: 1,
+        generatedAt: "2026-07-07T00:00:00.000Z",
+        title: "Next answer context",
+        included,
+        excluded: [],
+        warnings: [],
+        preview: [],
+        sourceCounts: { included: included.length, excluded: 0, warnings: 0 },
+        tokenEstimate: 120,
+      },
+      composer: React.createElement("span", null, ""),
+      inputValue: "",
+      slashSuggestionCount: 0,
+      terminalColumns: 100,
+      cwd: "/Users/parkeungje/project/unclecode",
+    }),
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const output = getOutput();
+  instance.unmount();
+  instance.cleanup();
+
+  assert.match(output, /… \d+ more above/);
+  assert.match(output, /… \d+ more below/);
+  assert.match(output, /> .*workspace source 14/s);
+  assert.doesNotMatch(output, /workspace source 0/);
+});
+
 test("resolveReadableWorkShellTextColor keeps primary text explicit for light terminals", () => {
-  assert.equal(resolveReadableWorkShellTextColor("#f8fafc"), "#0f172a");
-  assert.equal(resolveReadableWorkShellTextColor("#e2e8f0"), "#0f172a");
-  assert.equal(resolveReadableWorkShellTextColor("#0f172a"), "#0f172a");
-  assert.equal(resolveReadableWorkShellTextColor("#334155"), "#334155");
-  assert.equal(resolveReadableWorkShellTextColor("#475569"), "#475569");
-  assert.equal(resolveReadableWorkShellTextColor("#94a3b8"), "#475569");
+  assert.equal(resolveReadableWorkShellTextColor("#f8fafc"), "#0d1117");
+  assert.equal(resolveReadableWorkShellTextColor("#e2e8f0"), "#0d1117");
+  assert.equal(resolveReadableWorkShellTextColor("#0f172a"), "#0d1117");
+  // Rust entry-presentation body colors that are too dark on dark backgrounds
+  // are resolved to the palette's primary text color for readability.
+  assert.equal(resolveReadableWorkShellTextColor("#334155"), "#0d1117");
+  assert.equal(resolveReadableWorkShellTextColor("#475569"), "#0d1117");
+  assert.equal(resolveReadableWorkShellTextColor("#94a3b8"), "#64748b");
+  assert.equal(resolveReadableWorkShellTextColor("#0d9488"), "#64748b");
+  assert.equal(resolveReadableWorkShellTextColor("#7d8590"), "#64748b");
   assert.equal(resolveReadableWorkShellTextColor("#115e59"), "#115e59");
 });
 

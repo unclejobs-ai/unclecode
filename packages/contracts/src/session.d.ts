@@ -1,10 +1,12 @@
 import type { SessionPendingAction, SessionState } from "./engine.js";
 import type { JsonValue } from "./json.js";
-export declare const SESSION_METADATA_FIELDS: readonly ["permissionMode", "isUltraworkMode", "model", "pendingAction", "postTurnSummary", "taskSummary"];
+export declare const SESSION_METADATA_FIELDS: readonly ["permissionMode", "isUltraworkMode", "traceMode", "reasoningEffort", "model", "pendingAction", "postTurnSummary", "taskSummary"];
 export type SessionMetadataField = (typeof SESSION_METADATA_FIELDS)[number];
 export type SessionMetadata = {
     readonly permissionMode?: string | null;
     readonly isUltraworkMode?: boolean | null;
+    readonly traceMode?: "minimal" | "verbose" | null;
+    readonly reasoningEffort?: "low" | "medium" | "high" | null;
     readonly model?: string | null;
     readonly pendingAction?: SessionPendingAction | null;
     readonly postTurnSummary?: JsonValue | null;
@@ -21,7 +23,7 @@ export type PersistedWorktreeSession = {
     readonly tmuxSessionName?: string;
     readonly hookBased?: boolean;
 };
-export declare const SESSION_CHECKPOINT_TYPES: readonly ["state", "metadata", "task_summary", "mode", "worktree", "approval"];
+export declare const SESSION_CHECKPOINT_TYPES: readonly ["state", "metadata", "task_summary", "mode", "worktree", "approval", "team_run", "team_step"];
 export type SessionCheckpointType = (typeof SESSION_CHECKPOINT_TYPES)[number];
 export type SessionStateCheckpoint = {
     readonly type: "state";
@@ -48,5 +50,6 @@ export type SessionApprovalCheckpoint = {
     readonly type: "approval";
     readonly pendingAction: SessionPendingAction;
 };
-export type SessionCheckpoint = SessionStateCheckpoint | SessionMetadataCheckpoint | SessionTaskSummaryCheckpoint | SessionModeCheckpoint | SessionWorktreeCheckpoint | SessionApprovalCheckpoint;
+import type { TeamRunCheckpoint, TeamStepCheckpoint } from "./team.js";
+export type SessionCheckpoint = SessionStateCheckpoint | SessionMetadataCheckpoint | SessionTaskSummaryCheckpoint | SessionModeCheckpoint | SessionWorktreeCheckpoint | SessionApprovalCheckpoint | TeamRunCheckpoint | TeamStepCheckpoint;
 //# sourceMappingURL=session.d.ts.map

@@ -119,9 +119,10 @@ test("resolveModelCommand lists models and updates reasoning support on switch",
   assert.match(listed.panel.lines.join("\n"), /\/model gpt-5\.4/);
   assert.match(listed.panel.lines.join("\n"), /\/model gpt-4\.1-mini/);
   assert.match(listed.panel.lines.join("\n"), /Thinking · high \(mode default\)/);
+  assert.match(listed.panel.lines.join("\n"), /Thinking choices · low \/ medium \/ high \/ default/);
   assert.match(listed.panel.lines.join("\n"), /active · reasoning medium/);
   assert.match(listed.panel.lines.join("\n"), /reasoning unavailable/);
-  assert.match(listed.panel.lines.join("\n"), /exact \/model <name> switches/);
+  assert.match(listed.panel.lines.join("\n"), /\/model <name> \[low\|medium\|high\|default\]/);
 
   const switched = resolveModelCommand("/model gpt-4.1-mini", {
     provider: "openai",
@@ -133,6 +134,17 @@ test("resolveModelCommand lists models and updates reasoning support on switch",
   assert.equal(switched.nextModel, "gpt-4.1-mini");
   assert.equal(switched.nextReasoning.effort, "unsupported");
   assert.match(switched.message, /reasoning unsupported/i);
+
+  const switchedWithReasoning = resolveModelCommand("/model gpt-5.5 low", {
+    provider: "openai",
+    currentModel: "gpt-5.4",
+    currentReasoning: supported,
+    modeDefaultReasoning: supported,
+  });
+
+  assert.equal(switchedWithReasoning.nextModel, "gpt-5.5");
+  assert.equal(switchedWithReasoning.nextReasoning.effort, "low");
+  assert.equal(switchedWithReasoning.nextReasoning.source, "override");
 });
 
 test("formatRuntimeLabel distinguishes Node runtime from platform facts", () => {
@@ -976,21 +988,22 @@ test("buildSlashSuggestionPanel shows a model-focused picker for /model intent",
   );
 
   assert.equal(panel.title, "Model picker");
-  assert.deepEqual(panel.lines.slice(0, 8), [
+  assert.deepEqual(panel.lines.slice(0, 9), [
     "Current model",
     "Model · gpt-5.4",
     "Thinking · default medium",
+    "Thinking choices · low / medium / high / default",
     "Supports · low, medium, high",
     "",
     "Pick model",
     "› /model gpt-5.4  active · reasoning medium",
     "  /model gpt-5.4-mini  reasoning medium",
   ]);
-  assert.deepEqual(panel.lines.slice(8, 10), [
+  assert.deepEqual(panel.lines.slice(9, 11), [
     "",
     "Controls",
   ]);
-  assert.equal(panel.lines.at(-1), "↑↓ choose · Enter switch · type to filter · Esc close");
+  assert.equal(panel.lines.at(-1), "↑↓ choose model · Enter switch · append low/medium/high/default · Esc close");
 });
 
 test("buildSlashSuggestionPanel keeps the current model visible when a filter has no matches", () => {
@@ -1360,8 +1373,8 @@ test("getConversationLayout gives answer blocks more room than lower-signal note
   assert.notEqual(userPresentation.label, assistantPresentation.label);
   assert.notEqual(userPresentation.labelBackgroundColor, assistantPresentation.labelBackgroundColor);
   assert.notEqual(userPresentation.railColor, assistantPresentation.railColor);
-  assert.equal(userPresentation.bodyColor, "#0f172a");
-  assert.equal(assistantPresentation.bodyColor, "#0f172a");
+  assert.equal(userPresentation.bodyColor, "#0d1117");
+  assert.equal(assistantPresentation.bodyColor, "#0d1117");
   assert.equal(formatWorkShellThinkingLine("high (mode-default)"), "Reasoning · Deep");
   assert.match(
     formatWorkShellStatusLine({

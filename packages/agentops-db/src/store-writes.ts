@@ -1,15 +1,28 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
+import { CONTEXT_SOURCE_DEFAULT_SALIENCE, type UpsertContextSourceInput } from "@unclecode/contracts";
+
 import { redactAgentOpsSecrets } from "./redaction.js";
 import { sqlRow } from "./sql-row.js";
-import { mapEventRow, mapTaskRow, mapVerificationRow } from "./store-mappers.js";
+import {
+  contextSourceRowToRecord,
+  mapContextSourceRow,
+  mapEventRow,
+  mapTaskRow,
+  mapVerificationRow,
+} from "./store-mappers.js";
 import type {
   AddAgentOpsEventInput,
   AddAgentOpsTaskInput,
   AddAgentOpsVerificationInput,
 } from "./store-types.js";
-import type { AgentOpsEventRecord, AgentOpsTaskRecord, AgentOpsVerificationRecord } from "./types.js";
+import type {
+  AgentOpsContextSourceRow,
+  AgentOpsEventRecord,
+  AgentOpsTaskRecord,
+  AgentOpsVerificationRecord,
+} from "./types.js";
 
 export function addAgentOpsTask(
   db: DatabaseSync,
@@ -119,3 +132,147 @@ function getVerificationOrThrow(db: DatabaseSync, id: string): AgentOpsVerificat
 function redactedOrNull(value: string | undefined): string | null {
   return value === undefined ? null : redactAgentOpsSecrets(value);
 }
+
+// ── Context Runbook Protocol (CRP) store functions ───────────────────
+// See docs/design/crp-context-runbook-protocol.md.
+
+export function upsertContextSource(
+  db: DatabaseSync,
+  input: UpsertContextSourceInput,
+): AgentOpsContextSourceRow {
+  if (!projectExists(db, input.projectId)) {
+    throw new Error(`Unknown project: ${input.projectId}`);
+  }
+  const timestamp = new Date().toISOString();
+  const salience = input.salience ?? CONTEXT_SOURCE_DEFAULT_SALIENCE;
+  const tokenEstimate = input.tokenEstimate ?? 0;
+  const includedInModel = input.includedInModel === false ? 0 : 1;
+  const label = redactAgentOpsSecrets(input.label);
+  const content = input.content === undefined || input.content === null
+    ? null
+    : redactAgentOpsSecrets(input.content);
+  const reason = redactAgentOpsSecrets(input.reason);
+  const sha256 = input.sha256 === undefined ? null : input.sha256;
+  const expiresAt = input.expiresAt === undefined ? null : input.expiresAt;
+
+  db.prepare(
+    `INSERT INTO context_sources (
+       id, project_id, category, label, content, reason, sha256,
+       salience, token_estimate, included_in_model, turn_last_seen,
+       created_at, updated_at, expires_at
+     )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+     ON CONFLICT(project_id, id) DO UPDATE SET
+       category = excluded.category,
+       label = excluded.label,
+       content = excluded.content,
+       reason = excluded.reason,
+       sha256 = excluded.sha256,
+       salience = CASE
+         WHEN context_sources.salience >= 1.0 THEN context_sources.salience
+         ELSE excluded.salience
+       END,
+       token_estimate = excluded.token_estimate,
+       included_in_model = context_sources.included_in_model,
+       expires_at = excluded.expires_at,
+       updated_at = excluded.updated_at`,
+  ).run(
+    input.id,
+    input.projectId,
+    input.category,
+    label,
+    content,
+    reason,
+    sha256,
+    salience,
+    tokenEstimate,
+    includedInModel,
+    timestamp,
+    timestamp,
+    expiresAt,
+  );
+  return getContextSourceOrThrow(db, input.projectId, input.id);
+}
+
+export function deleteContextSourcesByIdPrefix(
+  db: DatabaseSync,
+  input: {
+    readonly projectId: string;
+    readonly idPrefix: string;
+    readonly keepIds?: readonly string[];
+  },
+): number {
+  const keepIds = input.keepIds ?? [];
+  const params: (string | number)[] = [input.projectId, `${input.idPrefix}%`];
+  const keepClause = keepIds.length > 0
+    ? ` AND id NOT IN (${keepIds.map(() => "?").join(",")})`
+    : "";
+  params.push(...keepIds);
+  const result = db.prepare(
+    `DELETE FROM context_sources
+     WHERE project_id = ?
+       AND id LIKE ?${keepClause}`,
+  ).run(...params);
+  return typeof result.changes === "number" ? result.changes : 0;
+}
+
+export function markContextSourceTurnSeen(
+  db: DatabaseSync,
+  projectId: string,
+  ids: readonly string[],
+  turnIndex: number,
+): void {
+  if (ids.length === 0) return;
+  const stmt = db.prepare(
+    "UPDATE context_sources SET turn_last_seen = ?, updated_at = ? WHERE project_id = ? AND id = ?",
+  );
+  const timestamp = new Date().toISOString();
+  for (const id of ids) {
+    stmt.run(turnIndex, timestamp, projectId, id);
+  }
+}
+
+export function pruneExpiredContextSources(db: DatabaseSync, now = new Date()): number {
+  const nowIso = now.toISOString();
+  const result = db.prepare(
+    "DELETE FROM context_sources WHERE expires_at IS NOT NULL AND expires_at <= ?",
+  ).run(nowIso);
+  return typeof result.changes === "number" ? result.changes : 0;
+}
+
+// Pin a source — set salience to maximum so the selector always includes it.
+export function pinContextSource(db: DatabaseSync, projectId: string, id: string): void {
+  db.prepare(
+    "UPDATE context_sources SET salience = 1.0, updated_at = ? WHERE project_id = ? AND id = ?",
+  ).run(new Date().toISOString(), projectId, id);
+}
+
+// Unpin — restore a reasonable default salience (provider can re-rank later).
+export function unpinContextSource(db: DatabaseSync, projectId: string, id: string): void {
+  db.prepare(
+    "UPDATE context_sources SET salience = 0.5, updated_at = ? WHERE project_id = ? AND id = ?",
+  ).run(new Date().toISOString(), projectId, id);
+}
+
+// Forget — hold a source back locally (included_in_model = 0).
+export function forgetContextSource(db: DatabaseSync, projectId: string, id: string): void {
+  db.prepare(
+    "UPDATE context_sources SET included_in_model = 0, updated_at = ? WHERE project_id = ? AND id = ?",
+  ).run(new Date().toISOString(), projectId, id);
+}
+
+// Include — restore a held-back source to model inclusion.
+export function includeContextSource(db: DatabaseSync, projectId: string, id: string): void {
+  db.prepare(
+    "UPDATE context_sources SET included_in_model = 1, updated_at = ? WHERE project_id = ? AND id = ?",
+  ).run(new Date().toISOString(), projectId, id);
+}
+
+function getContextSourceOrThrow(db: DatabaseSync, projectId: string, id: string): AgentOpsContextSourceRow {
+  const row = db.prepare("SELECT * FROM context_sources WHERE project_id = ? AND id = ?").get(projectId, id);
+  if (row === undefined) throw new Error(`Context source not found: ${projectId}/${id}`);
+  return mapContextSourceRow(sqlRow(row, `context source ${projectId}/${id}`));
+}
+
+// Re-export the mapper so callers don't need a separate import path.
+export { contextSourceRowToRecord };

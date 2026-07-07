@@ -1,6 +1,7 @@
 import { useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { runRustCommandSync } from "@unclecode/orchestrator";
+import type { ContextPacketView } from "@unclecode/contracts";
 
 import {
   createWorkShellDashboardHomePatch,
@@ -15,6 +16,7 @@ import {
   resolveWorkShellActivePanel,
 } from "./work-shell-panels.js";
 import {
+  resolveWorkShellContextInspectorAction,
   resolveWorkShellInputAction,
   resolveWorkShellSubmitAction,
 } from "./work-shell-input.js";
@@ -248,6 +250,12 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly panel: WorkShellPanel;
   readonly queuedCount?: number | undefined;
   readonly queuePaused?: boolean | undefined;
+  readonly contextInspectorCursor?: number | undefined;
+  readonly contextInspectorExpanded?: string | null | undefined;
+  readonly contextPacket?: ContextPacketView | undefined;
+  // Adaptive model context window (tokens) threaded from engine state so the
+  // budget meter scales with the active model instead of an env var.
+  readonly modelWindow?: number | undefined;
 };
 
 export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
@@ -259,6 +267,14 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   cancelSensitiveInput?(): void;
   closeOverlay?(): void;
   updateTerminalColumns?(columns: number): void;
+  // Context Inspector (Sprint 2) — keyboard actions for the /context overlay.
+  // All are optional so test harnesses / legacy panes that never open the
+  // overlay don't need stubs.
+  moveContextInspectorCursor?(direction: number): void;
+  toggleContextInspectorPin?(): Promise<void>;
+  forgetContextSourceAtCursor?(): Promise<void>;
+  includeContextSourceAtCursor?(): Promise<void>;
+  toggleContextInspectorExpanded?(): void;
   // Optional because not every pane host wires trace plumbing — when
   // absent, the hook silently drops the event. In practice WorkShellEngine
   // always implements this since commit b891c19's follow-up.
@@ -380,6 +396,14 @@ export function useWorkShellInputController(input: {
   readonly interruptTurn?: (() => void) | undefined;
   readonly cancelSensitiveInput?: (() => void) | undefined;
   readonly closeOverlay?: (() => void) | undefined;
+  // Context Inspector (Sprint 2): engine callbacks for the /context overlay
+  // keyboard actions. All optional — only dispatched when the overlay is open
+  // and the engine wires them.
+  readonly moveContextInspectorCursor?: ((direction: number) => void) | undefined;
+  readonly toggleContextInspectorPin?: (() => Promise<void>) | undefined;
+  readonly forgetContextSourceAtCursor?: (() => Promise<void>) | undefined;
+  readonly includeContextSourceAtCursor?: (() => Promise<void>) | undefined;
+  readonly toggleContextInspectorExpanded?: (() => void) | undefined;
 }): { readonly submit: (value: string) => Promise<void> } {
   const escapeResetArmedAtRef = useRef<number | undefined>(undefined);
   useInput((value, key) => {
@@ -395,6 +419,46 @@ export function useWorkShellInputController(input: {
         input.onRequestSessionsView();
       }
       return;
+    }
+
+    // Context Inspector (Sprint 2): when the overlay is open, intercept the
+    // action keys before the composer can consume them. The slash picker
+    // always wins (resolver returns "none" when input starts with "/").
+    // We check the composer value AFTER the key arrives — if the composer
+    // already has text, don't steal keys. But for navigation keys (arrows,
+    // Enter) we always intercept since those aren't text input.
+    const isNavigationKey = key.upArrow || key.downArrow || key.return;
+    if (
+      input.hasOverlayOpen
+      && input.activePanelTitle === "Context expanded"
+      && !input.value.trim().startsWith("/")
+      && (isNavigationKey || input.value.trim().length === 0)
+    ) {
+      const inspectorAction = resolveWorkShellContextInspectorAction({
+        value,
+        key,
+        panelTitle: "Context expanded",
+      });
+      switch (inspectorAction.type) {
+        case "move-cursor":
+          input.moveContextInspectorCursor?.(inspectorAction.direction);
+          return;
+        case "toggle-pin":
+          escapeResetArmedAtRef.current = undefined;
+          void input.toggleContextInspectorPin?.().catch(() => undefined);
+          return;
+        case "forget":
+          void input.forgetContextSourceAtCursor?.().catch(() => undefined);
+          return;
+        case "include":
+          void input.includeContextSourceAtCursor?.().catch(() => undefined);
+          return;
+        case "expand":
+          input.toggleContextInspectorExpanded?.();
+          return;
+        case "none":
+          break;
+      }
     }
 
     const slashInput = input.activeSlashInput;
@@ -743,6 +807,23 @@ export function useWorkShellPaneState<
       : {}),
     ...(input.engine.closeOverlay
       ? { closeOverlay: () => input.engine.closeOverlay?.() }
+      : {}),
+    // Context Inspector (Sprint 2): forward engine callbacks so the
+    // controller's useInput can dispatch overlay keyboard actions.
+    ...(input.engine.moveContextInspectorCursor
+      ? { moveContextInspectorCursor: (direction: number) => { void input.engine.moveContextInspectorCursor?.(direction); } }
+      : {}),
+    ...(input.engine.toggleContextInspectorPin
+      ? { toggleContextInspectorPin: async () => { await input.engine.toggleContextInspectorPin?.(); } }
+      : {}),
+    ...(input.engine.forgetContextSourceAtCursor
+      ? { forgetContextSourceAtCursor: async () => { await input.engine.forgetContextSourceAtCursor?.(); } }
+      : {}),
+    ...(input.engine.includeContextSourceAtCursor
+      ? { includeContextSourceAtCursor: async () => { await input.engine.includeContextSourceAtCursor?.(); } }
+      : {}),
+    ...(input.engine.toggleContextInspectorExpanded
+      ? { toggleContextInspectorExpanded: () => { input.engine.toggleContextInspectorExpanded?.(); } }
       : {}),
   });
 

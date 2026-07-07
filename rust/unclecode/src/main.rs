@@ -1,5 +1,5 @@
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -355,6 +355,12 @@ fn run_with_start(args: Vec<OsString>, started_at: Instant) -> Result<u8, String
         return cli_team::run_top_level_team_command(&team_args);
     }
     if let Some(work_args) = cli_work::top_level_work_args(&args) {
+        // Interactive `unclecode work` launches the TS TUI runtime so CRP
+        // (Context Runbook Protocol) is active. Non-interactive (piped stdin,
+        // one-shot prompt) falls through to the Rust-native mini-loop.
+        if io::stdin().is_terminal() && io::stdout().is_terminal() {
+            return launch_typescript_tui_bridge(&work_args);
+        }
         return cli_work::run_top_level_work_command(&work_args);
     }
 
@@ -502,6 +508,8 @@ fn launch_typescript_command_bridge(
         return Err("Full-screen TUI bridge is not built yet. Run `npm run build`.".to_string());
     }
 
+    repair_typescript_native_modules_if_needed(&repo_root)?;
+
     let status = Command::new(node_binary())
         .arg(entrypoint)
         .arg(command)
@@ -517,6 +525,120 @@ fn launch_typescript_command_bridge(
         .map_err(|error| format!("Failed to launch UncleCode full-screen TUI: {error}"))?;
 
     Ok(status.code().unwrap_or(1).clamp(0, 255) as u8)
+}
+
+fn repair_typescript_native_modules_if_needed(repo_root: &Path) -> Result<(), String> {
+    if env::var_os("UNCLECODE_SKIP_NATIVE_REBUILD").is_some() {
+        return Ok(());
+    }
+
+    repair_typescript_native_modules_with_runner(
+        repo_root,
+        || probe_better_sqlite3(repo_root),
+        || rebuild_better_sqlite3(repo_root),
+    )
+    .map(|_| ())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NativeModuleRepairOutcome {
+    Healthy,
+    IgnoredFailure,
+    Rebuilt,
+}
+
+struct NativeModuleProbeResult {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+impl NativeModuleProbeResult {
+    fn combined_output(&self) -> String {
+        format!("{}{}", self.stdout, self.stderr)
+    }
+}
+
+struct NativeModuleRebuildResult {
+    success: bool,
+    code: Option<i32>,
+}
+
+fn probe_better_sqlite3(repo_root: &Path) -> Result<NativeModuleProbeResult, String> {
+    let output = Command::new(node_binary())
+        .arg("-e")
+        .arg("require('better-sqlite3')")
+        .current_dir(repo_root)
+        .envs(env::vars_os())
+        .env(
+            "NODE_OPTIONS",
+            node_options_with_experimental_warning_suppressed(env::var_os("NODE_OPTIONS")),
+        )
+        .output()
+        .map_err(|error| format!("Failed to probe better-sqlite3 native module: {error}"))?;
+
+    Ok(NativeModuleProbeResult {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+    })
+}
+
+fn rebuild_better_sqlite3(repo_root: &Path) -> Result<NativeModuleRebuildResult, String> {
+    let status = Command::new(npm_binary())
+        .args(["rebuild", "better-sqlite3"])
+        .current_dir(repo_root)
+        .envs(env::vars_os())
+        .status()
+        .map_err(|error| format!("Failed to run `npm rebuild better-sqlite3`: {error}"))?;
+
+    Ok(NativeModuleRebuildResult {
+        success: status.success(),
+        code: status.code(),
+    })
+}
+
+fn repair_typescript_native_modules_with_runner<Probe, Rebuild>(
+    repo_root: &Path,
+    probe: Probe,
+    rebuild: Rebuild,
+) -> Result<NativeModuleRepairOutcome, String>
+where
+    Probe: FnOnce() -> Result<NativeModuleProbeResult, String>,
+    Rebuild: FnOnce() -> Result<NativeModuleRebuildResult, String>,
+{
+    let output = probe()?;
+
+    if output.success {
+        return Ok(NativeModuleRepairOutcome::Healthy);
+    }
+
+    if !is_better_sqlite3_native_version_mismatch(&output.combined_output()) {
+        return Ok(NativeModuleRepairOutcome::IgnoredFailure);
+    }
+
+    eprintln!(
+        "UncleCode detected a better-sqlite3 Node ABI mismatch; rebuilding native module once..."
+    );
+    let status = rebuild()?;
+
+    if status.success {
+        return Ok(NativeModuleRepairOutcome::Rebuilt);
+    }
+
+    Err(format!(
+        "`npm rebuild better-sqlite3` failed with exit code {}. Run it manually from {} and retry `unclecode`.",
+        status.code.unwrap_or(1),
+        repo_root.display()
+    ))
+}
+
+fn is_better_sqlite3_native_version_mismatch(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    lower.contains("better_sqlite3.node")
+        && (lower.contains("node_module_version")
+            || lower.contains("compiled against a different node.js version")
+            || lower.contains("err_dlopen_failed"))
 }
 
 fn node_options_with_experimental_warning_suppressed(existing: Option<OsString>) -> OsString {
@@ -536,6 +658,68 @@ fn node_options_with_experimental_warning_suppressed(existing: Option<OsString>)
     }
     combined.push(NODE_NO_EXPERIMENTAL_WARNING);
     combined
+}
+
+fn npm_binary() -> OsString {
+    let node = node_binary();
+    npm_binary_for_node(&node)
+}
+
+fn npm_binary_for_node(node: &OsStr) -> OsString {
+    let npm_name = npm_executable_name();
+    let node_path = PathBuf::from(node);
+    if let Some(sibling) = sibling_npm_binary(&node_path, npm_name) {
+        return sibling;
+    }
+    if let Some(resolved_node) = resolve_executable_on_path(node) {
+        if let Some(sibling) = sibling_npm_binary(&resolved_node, npm_name) {
+            return sibling;
+        }
+    }
+    OsString::from(npm_name)
+}
+
+fn sibling_npm_binary(node_path: &Path, npm_name: &str) -> Option<OsString> {
+    if node_path.components().count() <= 1 {
+        return None;
+    }
+    let sibling = node_path.parent()?.join(npm_name);
+    if sibling.is_file() {
+        return Some(sibling.into_os_string());
+    }
+    None
+}
+
+fn resolve_executable_on_path(binary: &OsStr) -> Option<PathBuf> {
+    let path = PathBuf::from(binary);
+    if path.components().count() > 1 {
+        return path.is_file().then_some(path);
+    }
+    let path_var = env::var_os("PATH")?;
+    for dir in env::split_paths(&path_var) {
+        let candidate = dir.join(binary);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        {
+            for extension in ["exe", "cmd", "bat"] {
+                let candidate = dir.join(format!("{}.{}", binary.to_string_lossy(), extension));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn npm_executable_name() -> &'static str {
+    if cfg!(windows) {
+        "npm.cmd"
+    } else {
+        "npm"
+    }
 }
 
 fn run_native_rust_command(args: &[OsString], started_at: Instant) -> Result<u8, String> {
@@ -4746,6 +4930,7 @@ fn is_repo_root(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn detects_workspace_root_shape() {
@@ -4823,6 +5008,107 @@ mod tests {
             ))),
             OsString::from(NODE_NO_EXPERIMENTAL_WARNING)
         );
+    }
+
+    #[test]
+    fn better_sqlite3_native_version_mismatch_detection_is_specific() {
+        assert!(is_better_sqlite3_native_version_mismatch(
+            "The module '/repo/node_modules/better-sqlite3/build/Release/better_sqlite3.node'\n\
+             was compiled against a different Node.js version using\n\
+             NODE_MODULE_VERSION 141. This version of Node.js requires NODE_MODULE_VERSION 127."
+        ));
+        assert!(is_better_sqlite3_native_version_mismatch(
+            "ERR_DLOPEN_FAILED: better_sqlite3.node was compiled against NODE_MODULE_VERSION 137"
+        ));
+        assert!(!is_better_sqlite3_native_version_mismatch(
+            "Cannot find module 'better-sqlite3'"
+        ));
+        assert!(!is_better_sqlite3_native_version_mismatch(
+            "NODE_MODULE_VERSION mismatch in another native module"
+        ));
+    }
+
+    #[test]
+    fn better_sqlite3_native_repair_rebuilds_once_for_abi_mismatch() {
+        let probe_calls = Cell::new(0);
+        let rebuild_calls = Cell::new(0);
+
+        let outcome = repair_typescript_native_modules_with_runner(
+            Path::new("/repo"),
+            || {
+                probe_calls.set(probe_calls.get() + 1);
+                Ok(NativeModuleProbeResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "The module '/repo/node_modules/better-sqlite3/build/Release/better_sqlite3.node'\n\
+                             was compiled against a different Node.js version using\n\
+                             NODE_MODULE_VERSION 141. This version of Node.js requires NODE_MODULE_VERSION 127."
+                        .to_string(),
+                })
+            },
+            || {
+                rebuild_calls.set(rebuild_calls.get() + 1);
+                Ok(NativeModuleRebuildResult {
+                    success: true,
+                    code: Some(0),
+                })
+            },
+        )
+        .expect("repair succeeds");
+
+        assert_eq!(outcome, NativeModuleRepairOutcome::Rebuilt);
+        assert_eq!(probe_calls.get(), 1);
+        assert_eq!(rebuild_calls.get(), 1);
+    }
+
+    #[test]
+    fn better_sqlite3_native_repair_ignores_non_abi_require_failures() {
+        let rebuild_calls = Cell::new(0);
+
+        let outcome = repair_typescript_native_modules_with_runner(
+            Path::new("/repo"),
+            || {
+                Ok(NativeModuleProbeResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "Cannot find module 'better-sqlite3'".to_string(),
+                })
+            },
+            || {
+                rebuild_calls.set(rebuild_calls.get() + 1);
+                Ok(NativeModuleRebuildResult {
+                    success: true,
+                    code: Some(0),
+                })
+            },
+        )
+        .expect("unrelated require failure is left to normal launch");
+
+        assert_eq!(outcome, NativeModuleRepairOutcome::IgnoredFailure);
+        assert_eq!(rebuild_calls.get(), 0);
+    }
+
+    #[test]
+    fn npm_binary_for_node_prefers_sibling_npm_from_same_toolchain() {
+        let temp_dir = env::temp_dir().join(format!(
+            "unclecode-npm-bin-{}-{}",
+            std::process::id(),
+            npm_executable_name()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).expect("temp dir");
+
+        let node_path = temp_dir.join(if cfg!(windows) { "node.exe" } else { "node" });
+        let npm_path = temp_dir.join(npm_executable_name());
+        std::fs::write(&node_path, "").expect("node shim");
+        std::fs::write(&npm_path, "").expect("npm shim");
+
+        assert_eq!(
+            PathBuf::from(npm_binary_for_node(node_path.as_os_str())),
+            npm_path
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

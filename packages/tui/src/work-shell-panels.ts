@@ -249,6 +249,16 @@ function compactModelSuggestionDescription(description: string): string {
   return active ? `active · reasoning ${effort}` : `reasoning ${effort}`;
 }
 
+function modelPickerReasoningChoiceLine(currentMeta: ModelPickerCurrent): string {
+  if (currentMeta.support && currentMeta.support.trim().length > 0) {
+    return `Thinking choices · ${currentMeta.support.replace(/, /g, " / ")} / default`;
+  }
+  if (currentMeta.reasoning.toLowerCase() === "unavailable") {
+    return "Thinking choices · unavailable for this model";
+  }
+  return "Thinking choices · low / medium / high / default";
+}
+
 function buildModelPickerPanel(
   input: string,
   suggestions: readonly { readonly command: string; readonly description: string }[],
@@ -305,6 +315,7 @@ function buildModelPickerPanel(
       "Current model",
       `Model · ${resolvedCurrentModel}`,
       `Thinking · ${currentMeta.reasoning}`,
+      modelPickerReasoningChoiceLine(currentMeta),
       ...(currentMeta.support ? [`Supports · ${currentMeta.support}`] : []),
       ...(modelFilter ? [`Filter · ${modelFilter}`] : []),
       "",
@@ -313,7 +324,7 @@ function buildModelPickerPanel(
         `${selectedModelCommand === suggestion.command ? "›" : " "} ${suggestion.command}  ${compactModelSuggestionDescription(suggestion.description)}`),
       "",
       "Controls",
-      "↑↓ choose · Enter switch · type to filter · Esc close",
+      "↑↓ choose model · Enter switch · append low/medium/high/default · Esc close",
     ],
   };
 }

@@ -36,6 +36,14 @@ export type UncleCodeConfigLayer = {
     readonly backgroundTasks?: ModeBackgroundTaskPolicy;
     readonly explanationStyle?: ModeExplanationStyle;
   };
+  readonly context?: {
+    /** Context Runbook Protocol (CRP) — SQL-backed context selection. */
+    readonly crp?: boolean;
+    /** Token budget for context selection (default 32000). */
+    readonly crpBudget?: number;
+    /** Model context window in tokens, used by the /context budget meter. Defaults to 200000. Override via UNCLECODE_CONTEXT_WINDOW. */
+    readonly modelWindow?: number;
+  };
   readonly prompt?: {
     readonly sections?: Readonly<Record<string, UncleCodePromptSection | null>>;
   };
@@ -102,6 +110,9 @@ export type UncleCodeConfigExplanation = {
     readonly searchDepth: SettingExplanation<ModeSearchDepth>;
     readonly backgroundTasks: SettingExplanation<ModeBackgroundTaskPolicy>;
     readonly explanationStyle: SettingExplanation<ModeExplanationStyle>;
+    readonly crp: SettingExplanation<boolean>;
+    readonly crpBudget: SettingExplanation<number>;
+    readonly modelWindow: SettingExplanation<number>;
   };
   readonly prompt: {
     readonly sections: readonly PromptSectionExplanation[];

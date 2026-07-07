@@ -80,8 +80,48 @@ export type BackgroundTaskApprovalIntent = {
     readonly action: "kill" | "resume" | "attach";
 };
 export type ApprovalIntent = ToolExecutionApprovalIntent | PlanApprovalIntent | McpServerApprovalIntent | BackgroundTaskApprovalIntent;
+export declare const POLICY_DECISION_EFFECTS: readonly ["allow", "prompt", "deny"];
+export type PolicyDecisionEffect = (typeof POLICY_DECISION_EFFECTS)[number];
+export declare const POLICY_DECISION_SOURCES: readonly ["base", "mode", "runtime", "userOverride", "sessionOverride", "delegation"];
+export type PolicyDecisionSource = (typeof POLICY_DECISION_SOURCES)[number];
 export type PolicyDecision = {
-    readonly allowed: boolean;
+    readonly effect: PolicyDecisionEffect;
+    readonly source: PolicyDecisionSource;
     readonly reason: string;
+    readonly matchedRule: string;
+};
+export declare const EXECUTION_POLICY_DOMAINS: readonly ["filesystem", "shell", "network", "secrets", "inference"];
+export type ExecutionPolicyDomain = (typeof EXECUTION_POLICY_DOMAINS)[number];
+export declare const EXECUTION_POLICY_CAPABILITIES: readonly ["filesystem.read", "filesystem.write", "shell.run", "network.egress", "secret.read", "inference.request"];
+export type ExecutionPolicyCapability = (typeof EXECUTION_POLICY_CAPABILITIES)[number];
+export declare const EXECUTION_POLICY_MODES: readonly ["audit", "prompt", "enforce"];
+export type ExecutionPolicyMode = (typeof EXECUTION_POLICY_MODES)[number];
+export type ExecutionPolicyRuleMatch = {
+    readonly pathPrefix?: string;
+    readonly commandPrefix?: string;
+    readonly host?: string;
+    readonly provider?: string;
+    readonly runtimeMode?: string;
+};
+export type ExecutionPolicyRule = {
+    readonly id: string;
+    readonly capability: ExecutionPolicyCapability;
+    readonly effect: PolicyDecisionEffect;
+    readonly reason: string;
+    readonly match?: ExecutionPolicyRuleMatch;
+};
+export type ExecutionPolicyProfile = {
+    readonly id: string;
+    readonly mode: ExecutionPolicyMode;
+    readonly defaultEffect: PolicyDecisionEffect;
+    readonly rules: readonly ExecutionPolicyRule[];
+};
+export type ExecutionPolicyEvaluation = {
+    readonly capability: ExecutionPolicyCapability;
+    readonly effect: PolicyDecisionEffect;
+    readonly source: PolicyDecisionSource;
+    readonly reason: string;
+    readonly matchedRule: string;
+    readonly auditOnly: boolean;
 };
 //# sourceMappingURL=policy.d.ts.map

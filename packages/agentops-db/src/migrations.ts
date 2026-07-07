@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-export const AGENTOPS_SCHEMA_VERSION = 1;
+export const AGENTOPS_SCHEMA_VERSION = 3;
 
 export const AGENTOPS_INITIAL_SCHEMA_SQL = `
 PRAGMA foreign_keys = ON;
@@ -117,7 +117,123 @@ CREATE INDEX IF NOT EXISTS idx_lanes_run ON lanes(run_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id);
 CREATE INDEX IF NOT EXISTS idx_verifications_run ON verifications(run_id);
 CREATE INDEX IF NOT EXISTS idx_summaries_project_type ON summaries(project_id, summary_type);
+
+-- Context Runbook Protocol (CRP) — typed, queryable context source store.
+-- Providers upsert rows here; the per-turn selector queries and ranks them
+-- under a token budget (see docs/design/crp-context-runbook-protocol.md).
+CREATE TABLE IF NOT EXISTS context_sources (
+  id            TEXT NOT NULL,
+  project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  category      TEXT NOT NULL,
+  label         TEXT NOT NULL,
+  content       TEXT,
+  reason        TEXT NOT NULL,
+  sha256        TEXT,
+  salience      REAL NOT NULL DEFAULT 0.5,
+  token_estimate INTEGER NOT NULL DEFAULT 0,
+  included_in_model INTEGER NOT NULL DEFAULT 1,
+  turn_last_seen INTEGER,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  expires_at    TEXT,
+  PRIMARY KEY (project_id, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_context_sources_project_model
+  ON context_sources(project_id, included_in_model);
+CREATE INDEX IF NOT EXISTS idx_context_sources_project_salience
+  ON context_sources(project_id, salience DESC);
 `;
+
+// Incremental migrations for existing databases. Each entry targets a
+// specific version boundary and must be idempotent (uses IF NOT EXISTS).
+// A fresh DB runs AGENTOPS_INITIAL_SCHEMA_SQL (which already includes all
+// tables up to the current version) then records every version as applied.
+// An existing DB at version N runs only migrations for N+1..current.
+const AGENTOPS_INCREMENTAL_MIGRATIONS: ReadonlyArray<{
+  readonly version: number;
+  readonly name: string;
+  readonly sql: string;
+}> = [
+  {
+    version: 2,
+    name: "add_context_sources",
+    sql: `
+CREATE TABLE IF NOT EXISTS context_sources (
+  id            TEXT PRIMARY KEY,
+  project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  category      TEXT NOT NULL,
+  label         TEXT NOT NULL,
+  content       TEXT,
+  reason        TEXT NOT NULL,
+  sha256        TEXT,
+  salience      REAL NOT NULL DEFAULT 0.5,
+  token_estimate INTEGER NOT NULL DEFAULT 0,
+  included_in_model INTEGER NOT NULL DEFAULT 1,
+  turn_last_seen INTEGER,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  expires_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_context_sources_project_model
+  ON context_sources(project_id, included_in_model);
+CREATE INDEX IF NOT EXISTS idx_context_sources_project_salience
+  ON context_sources(project_id, salience DESC);
+`,
+  },
+  {
+    version: 3,
+    name: "scope_context_sources_by_project",
+    sql: `
+DROP INDEX IF EXISTS idx_context_sources_project_model;
+DROP INDEX IF EXISTS idx_context_sources_project_salience;
+
+CREATE TABLE IF NOT EXISTS context_sources_v3 (
+  id            TEXT NOT NULL,
+  project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  category      TEXT NOT NULL,
+  label         TEXT NOT NULL,
+  content       TEXT,
+  reason        TEXT NOT NULL,
+  sha256        TEXT,
+  salience      REAL NOT NULL DEFAULT 0.5,
+  token_estimate INTEGER NOT NULL DEFAULT 0,
+  included_in_model INTEGER NOT NULL DEFAULT 1,
+  turn_last_seen INTEGER,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  expires_at    TEXT,
+  PRIMARY KEY (project_id, id)
+);
+
+INSERT OR REPLACE INTO context_sources_v3 (
+  id, project_id, category, label, content, reason, sha256,
+  salience, token_estimate, included_in_model, turn_last_seen,
+  created_at, updated_at, expires_at
+)
+SELECT
+  id,
+  project_id,
+  category,
+  '[REDACTED_MIGRATED_CONTEXT]' AS label,
+  NULL AS content,
+  '[REDACTED_MIGRATED_CONTEXT]' AS reason,
+  sha256,
+  salience, token_estimate, included_in_model, turn_last_seen,
+  created_at, updated_at, expires_at
+FROM context_sources;
+
+DROP TABLE context_sources;
+ALTER TABLE context_sources_v3 RENAME TO context_sources;
+
+CREATE INDEX IF NOT EXISTS idx_context_sources_project_model
+  ON context_sources(project_id, included_in_model);
+CREATE INDEX IF NOT EXISTS idx_context_sources_project_salience
+  ON context_sources(project_id, salience DESC);
+`,
+  },
+];
 
 export function applyAgentOpsMigrations(db: DatabaseSync): void {
   db.exec("PRAGMA journal_mode = WAL;");
@@ -136,12 +252,31 @@ export function applyAgentOpsMigrations(db: DatabaseSync): void {
 
   db.exec("BEGIN");
   try {
-    db.exec(AGENTOPS_INITIAL_SCHEMA_SQL);
-    db.prepare("INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(
-      AGENTOPS_SCHEMA_VERSION,
-      "initial_schema",
-      new Date().toISOString(),
-    );
+    if (currentVersion === 0) {
+      // Fresh database — apply the full schema, then record every version
+      // so incremental migrations don't re-run on the next open.
+      db.exec(AGENTOPS_INITIAL_SCHEMA_SQL);
+      for (let v = 1; v <= AGENTOPS_SCHEMA_VERSION; v += 1) {
+        db.prepare("INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(
+          v,
+          v === 1 ? "initial_schema" : `migration_v${v}`,
+          new Date().toISOString(),
+        );
+      }
+    } else {
+      // Existing database — apply only the incremental migrations for
+      // versions greater than the last applied one.
+      for (const migration of AGENTOPS_INCREMENTAL_MIGRATIONS) {
+        if (migration.version > currentVersion) {
+          db.exec(migration.sql);
+          db.prepare("INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)").run(
+            migration.version,
+            migration.name,
+            new Date().toISOString(),
+          );
+        }
+      }
+    }
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");

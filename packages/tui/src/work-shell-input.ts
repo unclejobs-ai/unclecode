@@ -65,3 +65,63 @@ export function resolveWorkShellSubmitAction(input: {
     runRustCommandSync(["rust", "ux", "submit-action"], process.cwd(), JSON.stringify(input)),
   ) as WorkShellSubmitAction;
 }
+
+/**
+ * Context Inspector (Sprint 2) — keyboard action resolver for the /context
+ * overlay. Pure TS (no Rust): the decision is a handful of key comparisons
+ * and does not need the ux contract's state machine. Kept here next to the
+ * other resolvers so the input-handling seam stays in one file.
+ *
+ * Fires ONLY when the context overlay is the active panel. The slash command
+ * picker always wins: when the composer input starts with `/`, every key
+ * returns `"none"` so the picker keeps typing/navigation.
+ */
+export type WorkShellContextInspectorAction =
+  | { readonly type: "none" }
+  | { readonly type: "move-cursor"; readonly direction: -1 | 1 }
+  | { readonly type: "toggle-pin" }
+  | { readonly type: "forget" }
+  | { readonly type: "include" }
+  | { readonly type: "expand" };
+
+export function resolveWorkShellContextInspectorAction(input: {
+  readonly value: string;
+  readonly key: {
+    readonly upArrow?: boolean;
+    readonly downArrow?: boolean;
+    readonly return?: boolean;
+  };
+  readonly panelTitle: string;
+}): WorkShellContextInspectorAction {
+  // The slash command picker takes priority — never steal keys while the
+  // user is typing a `/` command, even if the overlay is visible behind it.
+  if (input.value.trim().startsWith("/")) {
+    return { type: "none" };
+  }
+  if (input.panelTitle !== "Context expanded") {
+    return { type: "none" };
+  }
+  if (input.key.upArrow) {
+    return { type: "move-cursor", direction: -1 };
+  }
+  if (input.key.downArrow) {
+    return { type: "move-cursor", direction: 1 };
+  }
+  if (input.key.return) {
+    return { type: "toggle-pin" };
+  }
+  switch (input.value) {
+    case "j":
+      return { type: "move-cursor", direction: 1 };
+    case "k":
+      return { type: "move-cursor", direction: -1 };
+    case "f":
+      return { type: "forget" };
+    case "i":
+      return { type: "include" };
+    case "e":
+      return { type: "expand" };
+    default:
+      return { type: "none" };
+  }
+}

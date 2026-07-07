@@ -87,4 +87,20 @@ export {
   loadNamedSkill,
 } from "./workspace-skills.js";
 
+// Context Runbook Protocol (CRP) — providers + selector.
+export type { ContextProvider, ProviderSyncInput } from "./crp-providers.js";
+export {
+  createBridgeProvider,
+  createBuiltinProviderRegistry,
+  createLoopTrailProvider,
+  createMemoryProvider,
+  createRuntimeProvider,
+  createWorkspaceGuidanceProvider,
+  ContextProviderRegistry,
+} from "./crp-providers.js";
+export {
+  contextSourceToPacketItem,
+  selectContextPacketFromStore,
+} from "./crp-selector.js";
+
 export const CONTEXT_BROKER_DEFAULT_CHECKPOINT = SESSION_CHECKPOINT_TYPES[0];

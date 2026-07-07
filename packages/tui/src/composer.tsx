@@ -375,10 +375,12 @@ function renderComposerLine(
   line: string,
   cursorColumn: number | undefined,
   terminalColumns?: number,
+  textColor?: string,
 ): React.ReactNode {
+  const colorProps = textColor ? { color: textColor } : {};
   const visibleWidth = resolveComposerVisibleWidth(terminalColumns);
   if (cursorColumn === undefined) {
-    return <Text>{padComposerLine(line.length > 0 ? line : " ", visibleWidth)}</Text>;
+    return <Text {...colorProps}>{padComposerLine(line.length > 0 ? line : " ", visibleWidth)}</Text>;
   }
 
   const lineWidth = getDisplayWidth(line);
@@ -386,7 +388,7 @@ function renderComposerLine(
   if (cursorColumn >= lineWidth) {
     const paddingWidth = Math.max(0, visibleWidth - lineWidth - cursorWidth);
     return (
-      <Text>
+      <Text {...colorProps}>
         {line}
         {COMPOSER_CURSOR_GLYPH}
         {" ".repeat(paddingWidth)}
@@ -397,7 +399,7 @@ function renderComposerLine(
   const { before, atCursor, after } = splitLineAtDisplayColumn(line, cursorColumn);
   const renderedWidth = getDisplayWidth(`${before}${atCursor}${after}`) + cursorWidth;
   return (
-    <Text>
+    <Text {...colorProps}>
       {before}
       {COMPOSER_CURSOR_GLYPH}
       {atCursor}
@@ -421,6 +423,21 @@ export function Composer(props: {
     | undefined;
   readonly mask?: string | undefined;
   readonly terminalColumns?: number | undefined;
+  /**
+   * Explicit text color for typed input. Critical for dark terminals: without
+   * it the Composer inherits terminal default fg and typed text vanishes on
+   * black/dark backgrounds. Pass a high-contrast palette color (e.g. W.text).
+   */
+  readonly textColor?: string | undefined;
+  /**
+   * Context Inspector (Sprint 2): when true AND the composer value is empty,
+   * the inspector overlay captures the single-char action keys (j/k/f/i/e)
+   * and Enter instead of inserting them as text. Arrow keys are already
+   * dropped above this check. Typing any other character (or any character
+   * once the composer has input) proceeds normally so the user can still
+   * compose a follow-up while reading context.
+   */
+  readonly suppressInspectorKeys?: boolean | undefined;
 }) {
   const [isPasting, setIsPasting] = useState(false);
   const [cursorOffset, setCursorOffset] = useState(props.value.length);
@@ -500,6 +517,23 @@ export function Composer(props: {
       return;
     }
 
+    // Context Inspector (Sprint 2): when the /context overlay is open and the
+    // composer is empty, yield the action keys (Enter, j/k/f/i/e) to the
+    // inspector so they don't insert stray characters. The pane's inspector
+    // handler dispatches the corresponding engine action. Once the composer
+    // has real input, typing wins so follow-up composition is unaffected.
+    if (
+      props.suppressInspectorKeys
+      && (props.value ?? pendingLocalValueRef.current ?? "").length === 0
+    ) {
+      if (key.return) {
+        return;
+      }
+      if (input === "j" || input === "k" || input === "f" || input === "i" || input === "e") {
+        return;
+      }
+    }
+
     const currentValue = pendingLocalValueRef.current ?? props.value;
     const currentCursorOffset = cursorOffsetRef.current;
     const carriageReturnIndex = input.indexOf("\r");
@@ -568,6 +602,7 @@ export function Composer(props: {
             line,
             index === cursorPosition.lineIndex ? cursorPosition.columnIndex : undefined,
             props.terminalColumns,
+            props.textColor,
           )}
         </Box>
       ))}

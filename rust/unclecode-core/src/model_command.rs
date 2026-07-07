@@ -39,28 +39,37 @@ pub fn resolve_model_command_json(input_json: &str) -> Result<String, String> {
                     current_reasoning.clone(),
                     "Usage: /model <name>".to_string(),
                 )
-            } else if !models.iter().any(|model| model == candidate) {
+            } else if let Some((candidate, explicit_reasoning)) = parse_model_selection(candidate) {
+                if !models.iter().any(|model| model == candidate) {
+                    (
+                        current_model.to_string(),
+                        current_reasoning.clone(),
+                        format!("No model match for {candidate}. Current model unchanged."),
+                    )
+                } else {
+                    let next_reasoning = resolve_reasoning_for_model(
+                        provider,
+                        candidate,
+                        &current_reasoning,
+                        &mode_default_reasoning,
+                        explicit_reasoning,
+                    );
+                    let message = if reasoning_status(&next_reasoning) == "unsupported" {
+                        format!("Model set to {candidate}. Reasoning unsupported.")
+                    } else {
+                        format!(
+                            "Model set to {candidate}. Reasoning {}.",
+                            str_field(&next_reasoning, "effort").unwrap_or("unsupported")
+                        )
+                    };
+                    (candidate.to_string(), next_reasoning, message)
+                }
+            } else {
                 (
                     current_model.to_string(),
                     current_reasoning.clone(),
-                    format!("No model match for {candidate}. Current model unchanged."),
+                    "Usage: /model <name> [low|medium|high|default]".to_string(),
                 )
-            } else {
-                let next_reasoning = resolve_reasoning_for_model(
-                    provider,
-                    candidate,
-                    &current_reasoning,
-                    &mode_default_reasoning,
-                );
-                let message = if reasoning_status(&next_reasoning) == "unsupported" {
-                    format!("Model set to {candidate}. Reasoning unsupported.")
-                } else {
-                    format!(
-                        "Model set to {candidate}. Reasoning {}.",
-                        str_field(&next_reasoning, "effort").unwrap_or("unsupported")
-                    )
-                };
-                (candidate.to_string(), next_reasoning, message)
             }
         };
 
@@ -82,11 +91,25 @@ pub fn resolve_model_command_json(input_json: &str) -> Result<String, String> {
     .map_err(|error| error.to_string())
 }
 
+fn parse_model_selection(input: &str) -> Option<(&str, Option<&str>)> {
+    let mut parts = input.split_whitespace();
+    let model = parts.next()?;
+    let reasoning = parts.next();
+    if parts.next().is_some() {
+        return None;
+    }
+    match reasoning {
+        None | Some("low" | "medium" | "high" | "default") => Some((model, reasoning)),
+        Some(_) => None,
+    }
+}
+
 fn resolve_reasoning_for_model(
     provider: &str,
     model: &str,
     current_reasoning: &Value,
     mode_default_reasoning: &Value,
+    explicit_reasoning: Option<&str>,
 ) -> Value {
     let support = reasoning_support_value(provider, model);
     if reasoning_status(&support) == "unsupported" {
@@ -103,11 +126,17 @@ fn resolve_reasoning_for_model(
         .and_then(Value::as_array)
         .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
         .unwrap_or_default();
+    if let Some(explicit) = explicit_reasoning.filter(|effort| *effort != "default") {
+        if supported_efforts.contains(&explicit) {
+            return merge_reasoning_fields(mode_default_reasoning, explicit, "override", support);
+        }
+    }
     let current_effort = str_field(current_reasoning, "effort")
         .filter(|effort| matches!(*effort, "low" | "medium" | "high"));
-    let can_keep_current = current_effort
-        .map(|effort| supported_efforts.contains(&effort))
-        .unwrap_or(false);
+    let can_keep_current = explicit_reasoning.is_none()
+        && current_effort
+            .map(|effort| supported_efforts.contains(&effort))
+            .unwrap_or(false);
     let mode_default_effort = str_field(mode_default_reasoning, "effort")
         .filter(|effort| *effort != "unsupported")
         .filter(|_| reasoning_status(mode_default_reasoning) == "supported");
@@ -211,6 +240,43 @@ mod tests {
     }
 
     #[test]
+    fn switches_model_and_reasoning_together() {
+        let result = resolve_model_command_json(
+            r#"{
+                "input": "/model gpt-5.5 low",
+                "provider": "openai",
+                "currentModel": "gpt-5.4",
+                "currentReasoning": {"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},
+                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}}
+            }"#,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["nextModel"], "gpt-5.5");
+        assert_eq!(parsed["nextReasoning"]["effort"], "low");
+        assert_eq!(parsed["nextReasoning"]["source"], "override");
+        assert_eq!(parsed["message"], "Model set to gpt-5.5. Reasoning low.");
+    }
+
+    #[test]
+    fn model_reasoning_default_returns_to_mode_default() {
+        let result = resolve_model_command_json(
+            r#"{
+                "input": "/model gpt-5.5 default",
+                "provider": "openai",
+                "currentModel": "gpt-5.4",
+                "currentReasoning": {"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},
+                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}}
+            }"#,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["nextModel"], "gpt-5.5");
+        assert_eq!(parsed["nextReasoning"]["effort"], "medium");
+        assert_eq!(parsed["nextReasoning"]["source"], "mode-default");
+    }
+
+    #[test]
     fn switches_unsupported_model_to_model_capability() {
         let result = resolve_model_command_json(
             r#"{
@@ -229,6 +295,27 @@ mod tests {
         assert_eq!(
             parsed["message"],
             "Model set to gpt-4.1-mini. Reasoning unsupported."
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_inline_reasoning_without_changing_runtime_state() {
+        let result = resolve_model_command_json(
+            r#"{
+                "input": "/model gpt-5.5 huge",
+                "provider": "openai",
+                "currentModel": "gpt-5.4",
+                "currentReasoning": {"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},
+                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}}
+            }"#,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["nextModel"], "gpt-5.4");
+        assert_eq!(parsed["nextReasoning"]["effort"], "high");
+        assert_eq!(
+            parsed["message"],
+            "Usage: /model <name> [low|medium|high|default]"
         );
     }
 

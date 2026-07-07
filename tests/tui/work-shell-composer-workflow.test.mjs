@@ -55,7 +55,7 @@ function renderDebugFrame(element) {
 }
 
 test("WORK_SHELL_SPINNER_INTERVAL_MS matches DESIGN.md Motion timing", () => {
-  assert.equal(WORK_SHELL_SPINNER_INTERVAL_MS, 100);
+  assert.equal(WORK_SHELL_SPINNER_INTERVAL_MS, 80);
 });
 
 test("resolveWorkShellComposerHint prioritizes busy queue guidance over slash hints", () => {

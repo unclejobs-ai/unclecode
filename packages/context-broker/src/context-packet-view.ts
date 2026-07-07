@@ -68,7 +68,11 @@ function formatPacketItem(item: ContextPacketViewItem): string {
   return `- ${formatPacketCategory(item.category)}: ${formatPacketItemBody(item)}`;
 }
 
-const WORK_SHELL_GROUP_SUMMARY_MAX_WIDTH = 64;
+// Context Inspector: preview width was 64 — too short to be meaningful on
+// an 80+ column terminal. Widened to 110 so the user sees the actual
+// summary content, not a cryptic fragment. The overlay wraps long lines
+// if needed.
+const WORK_SHELL_GROUP_SUMMARY_MAX_WIDTH = 110;
 
 function truncatePacketText(value: string, maxWidth = 112): string {
   const normalized = value.replace(/\s+/gu, " ").trim();
@@ -146,12 +150,12 @@ export function buildWorkShellCompactContextPacketPreviewLines(packet: ContextPa
     "Included in next answer",
     ...formatWorkShellCategorySummaryLines({
       items: packet.included,
-      visibleLimit: 4,
+      visibleLimit: 8,
       includeHiddenGroupsLine: true,
     }),
     "Held back locally",
-    ...formatWorkShellCategorySummaryLines({ items: packet.excluded, visibleLimit: 2 }),
-    formatWarningsLine(packet.warnings, 72),
+    ...formatWorkShellCategorySummaryLines({ items: packet.excluded, visibleLimit: 4 }),
+    formatWarningsLine(packet.warnings, 110),
     formatPreviewLine(packet),
   ];
 }
@@ -240,8 +244,20 @@ export function formatContextPacketPromptPrefix(packet: ContextPacketView): stri
 }
 
 export function formatContextPacketIndicator(packet: ContextPacketView): string {
-  const base = `context ${packet.sourceCounts.included} ready · ${packet.sourceCounts.excluded} held back`;
-  return packet.sourceCounts.warnings > 0 ? `${base} · ${packet.sourceCounts.warnings} issue` : base;
+  const included = packet.sourceCounts.included;
+  const held = packet.sourceCounts.excluded;
+  const tokenSuffix = packet.tokenEstimate >= 1000
+    ? ` · ~${Math.round(packet.tokenEstimate / 1000)}k`
+    : packet.tokenEstimate > 0
+      ? ` · ~${packet.tokenEstimate}t`
+      : "";
+  const pinnedCount = packet.included.reduce(
+    (count, item) => count + ((item.salience ?? 0) >= 1 ? 1 : 0),
+    0,
+  );
+  const pinnedSuffix = pinnedCount > 0 ? ` · 📌 ${pinnedCount} pinned` : "";
+  const base = `▤ ${included} ctx${tokenSuffix} · ${held} held${pinnedSuffix}`;
+  return packet.sourceCounts.warnings > 0 ? `${base} · ${packet.sourceCounts.warnings}⚠` : base;
 }
 
 export function composeWorkShellTurnPromptFromPacket(input: {

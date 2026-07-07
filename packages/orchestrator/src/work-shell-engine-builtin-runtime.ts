@@ -159,15 +159,24 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
     }
     case "context": {
       const contextPacket = await input.refreshContextPacket?.();
+      const activeContextPacket = contextPacket ?? input.state.contextPacket;
       const result = createContextBuiltinResult({
         line: input.line,
         contextSummaryLines: input.currentContextSummaryLines,
         state: input.state,
-        contextPacket: contextPacket ?? input.state.contextPacket,
+        contextPacket: activeContextPacket,
         buildContextPanel: input.buildContextPanel,
       });
-      input.appendEntries(...result.entries);
-      input.setState({ panel: result.panel });
+      // Context Inspector redesign: /context is an inspector, not a chat
+      // turn. It must NOT pollute the conversation history with
+      // `user: /context` + `system: Context opened` entries. Only the
+      // panel state changes (opens the overlay). See
+      // docs/design/context-inspector-redesign.md §A.
+      input.setState({
+        panel: result.panel,
+        contextInspectorCursor: activeContextPacket ? 0 : -1,
+        contextInspectorExpanded: null,
+      });
       return;
     }
     case "reload":

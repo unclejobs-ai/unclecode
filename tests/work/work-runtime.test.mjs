@@ -257,6 +257,94 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
   }
 });
 
+test("loadWorkCliBootstrap forwards optional LSP bridge into guardian checks", async () => {
+  const originalEnv = { ...process.env };
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-runtime-lsp-guardian-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+  const lspCalls = [];
+
+  try {
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(path.join(workspaceRoot, "runtime.ts"), "const ok = true;\n", "utf8");
+
+    process.env = {
+      ...originalEnv,
+      LLM_PROVIDER: "openai",
+      OPENAI_MODEL: "gpt-5.4",
+      HOME: fakeHome,
+      ...preserveRustToolchainEnv(originalEnv),
+      UNCLECODE_SESSION_STORE_ROOT: path.join(workspaceRoot, ".state"),
+      OPENAI_API_KEY: "sk-test-123",
+      OPENAI_OAUTH_CLIENT_ID: "",
+    };
+    delete process.env.OPENAI_AUTH_TOKEN;
+
+    const result = await loadWorkCliBootstrap({
+      argv: ["--cwd", workspaceRoot],
+      lspBridge: {
+        async checkAfterEdit(input) {
+          lspCalls.push(input);
+          return { status: "pass", summary: "runtime clean" };
+        },
+      },
+    });
+
+    const summary = await result.agent.loadExecutableGuardianSummary({
+      prompt: "check runtime",
+      mode: "default",
+      tasks: [],
+      results: [],
+      changedFiles: ["runtime.ts"],
+    });
+
+    assert.equal(lspCalls.length, 1);
+    assert.equal(lspCalls[0]?.path, "runtime.ts");
+    assert.match(summary ?? "", /lsp:runtime\.ts PASS · runtime clean/);
+  } finally {
+    process.env = originalEnv;
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("loadWorkCliBootstrap reports default LSP bridge unavailability honestly", async () => {
+  const originalEnv = { ...process.env };
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-runtime-lsp-default-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+
+  try {
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(path.join(workspaceRoot, "runtime.ts"), "const ok = true;\n", "utf8");
+
+    process.env = {
+      ...originalEnv,
+      LLM_PROVIDER: "openai",
+      OPENAI_MODEL: "gpt-5.4",
+      HOME: fakeHome,
+      ...preserveRustToolchainEnv(originalEnv),
+      UNCLECODE_SESSION_STORE_ROOT: path.join(workspaceRoot, ".state"),
+      OPENAI_API_KEY: "sk-test-123",
+      OPENAI_OAUTH_CLIENT_ID: "",
+    };
+    delete process.env.OPENAI_AUTH_TOKEN;
+
+    const result = await loadWorkCliBootstrap({
+      argv: ["--cwd", workspaceRoot],
+    });
+    const summary = await result.agent.loadExecutableGuardianSummary({
+      prompt: "check runtime",
+      mode: "default",
+      tasks: [],
+      results: [],
+      changedFiles: ["runtime.ts"],
+    });
+
+    assert.match(summary ?? "", /lsp:runtime\.ts UNAVAILABLE · no LSP clients registered/);
+  } finally {
+    process.env = originalEnv;
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("loadWorkCliBootstrap represents configured provider prompt as metadata without raw prompt preview", async () => {
   const originalEnv = { ...process.env };
   const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-runtime-prompt-metadata-"));
