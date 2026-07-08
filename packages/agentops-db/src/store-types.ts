@@ -3,7 +3,6 @@ import type {
   SelectContextSourcesInput,
   UpsertContextSourceInput,
 } from "@unclecode/contracts";
-
 import type {
   AgentOpsArtifactRecord,
   AgentOpsEventRecord,
@@ -149,5 +148,11 @@ export interface AgentOpsStore {
   unpinContextSource(projectId: string, id: string): void;
   forgetContextSource(projectId: string, id: string): void;
   includeContextSource(projectId: string, id: string): void;
+  restoreContextSourceState(input: {
+    readonly projectId: string;
+    readonly id: string;
+    readonly salience: number;
+    readonly includedInModel: boolean;
+  }): void;
   close(): void;
 }

@@ -38,6 +38,7 @@ import { createWorkShellSessionSnapshotInput } from "./work-shell-engine-persist
 import {
   composeWorkShellTurnPromptFromPacket,
   formatWorkShellContextPacketIndicator,
+  formatWorkShellContextPacketUsedReceipt,
 } from "./work-shell-context-packet.js";
 import {
   appendWorkShellEntries,
@@ -48,7 +49,11 @@ import {
 } from "./work-shell-engine-state.js";
 import { applyWorkShellTraceEvent } from "./work-shell-engine-trace.js";
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
-import type { ContextPacketView, ContextPacketViewItem } from "@unclecode/contracts";
+import type {
+  ContextPacketView,
+  ContextPacketViewActionReceipt,
+  ContextPacketViewItem,
+} from "@unclecode/contracts";
 
 /**
  * Render a one-liner for an attachment lifecycle trace event through the Rust
@@ -75,7 +80,7 @@ function parseQueuedSubmit(stdout: string): { readonly id: number; readonly line
   if (!trimmed || trimmed === "null") {
     return undefined;
   }
-  const parsed = JSON.parse(trimmed) as unknown;
+  const parsed: unknown = JSON.parse(trimmed);
   if (typeof parsed !== "object" || parsed === null) {
     throw new Error(`Invalid Rust queue response: ${trimmed}`);
   }
@@ -96,7 +101,7 @@ function parseQueueLength(stdout: string): number {
   if (!trimmed) {
     return 0;
   }
-  const parsed = JSON.parse(trimmed) as unknown;
+  const parsed: unknown = JSON.parse(trimmed);
   if (typeof parsed !== "object" || parsed === null) {
     throw new Error("Invalid Rust queue length response.");
   }
@@ -112,7 +117,7 @@ function parseQueuedSubmitList(stdout: string): readonly { readonly id: number; 
   if (!trimmed) {
     return [];
   }
-  const parsed = JSON.parse(trimmed) as unknown;
+  const parsed: unknown = JSON.parse(trimmed);
   if (!Array.isArray(parsed)) {
     throw new Error("Invalid Rust queue list response.");
   }
@@ -317,7 +322,9 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly currentTurnStartedAt?: number | undefined;
   readonly lastTurnDurationMs?: number | undefined;
   readonly contextPacket?: ContextPacketView | undefined;
+  readonly contextActionReceipt?: ContextPacketViewActionReceipt | undefined;
   readonly contextIndicator?: string | undefined;
+  readonly contextSourceActionsEnabled: boolean;
   readonly modelWindow: number;
   readonly queuedCount: number;
   readonly queuePaused: boolean;
@@ -454,7 +461,7 @@ export type WorkShellEngineInput<
    */
   mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
-  ) => void) | undefined;
+  ) => ContextPacketViewActionReceipt | undefined) | undefined;
 };
 
 export class WorkShellEngine<
@@ -569,7 +576,7 @@ export class WorkShellEngine<
   private readonly recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
   private readonly mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
-  ) => void) | undefined;
+  ) => ContextPacketViewActionReceipt | undefined) | undefined;
   private readonly subscribers = new Set<(state: WorkShellEngineState<Reasoning>) => void>();
   private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
   private readonly queueDrainSkipTurnEpochs = new Set<number>();
@@ -581,6 +588,7 @@ export class WorkShellEngine<
   private activeTurnAbortController: AbortController | undefined;
   private queueAutoDrainPaused = false;
   private workBoardRebuildGeneration = 0;
+  private workBoardQueuedItemsSnapshot: readonly { readonly id: number; readonly line: string }[] = [];
   private lastCompletedTurnSnapshot:
     | { readonly user: string; readonly assistant: string }
     | undefined;
@@ -623,11 +631,14 @@ export class WorkShellEngine<
     this.sessionId = input.sessionId ?? `work-${randomUUID()}`;
     this.currentContextSummaryLines = input.options.contextSummaryLines;
     this.lastSessionSummary = input.options.initialSessionSummary ?? "Work shell ready.";
-    this.state = createInitialWorkShellEngineState({
-      options: input.options,
-      contextSummaryLines: this.currentContextSummaryLines,
-      buildContextPanel: input.buildContextPanel,
-    });
+    this.state = {
+      ...createInitialWorkShellEngineState({
+        options: input.options,
+        contextSummaryLines: this.currentContextSummaryLines,
+        buildContextPanel: input.buildContextPanel,
+      }),
+      contextSourceActionsEnabled: input.mutateContextSource !== undefined,
+    };
     this.lastCompletedTurnSnapshot = resolveLastCompletedTurn(
       input.options.initialEntries ?? this.state.entries,
     );
@@ -644,8 +655,23 @@ export class WorkShellEngine<
     }
     this.setState({ terminalColumns });
     if (this.state.panel.title === WORK_BOARD_PANEL_TITLE) {
+      this.setState({ panel: this.createWorkBoardPanel(this.workBoardQueuedItemsSnapshot) });
       void this.rebuildWorkBoardPanel();
     }
+  }
+
+  private createWorkBoardPanel(
+    queuedItems: readonly { readonly id: number; readonly line: string }[],
+  ): WorkShellPanel {
+    return createQueueBuiltinResult(buildWorkShellQueueBuiltinInput({
+      line: "/queue",
+      state: this.state,
+      workerBudget: resolveWorkerBudget(this.state.mode),
+      queuedCount: this.queuedCountCache,
+      queuedItems,
+      contextSummaryLines: this.currentContextSummaryLines,
+      ...(this.lastCompletedTurnSnapshot ? { lastCompletedTurn: this.lastCompletedTurnSnapshot } : {}),
+    })).panel;
   }
 
   private async rebuildWorkBoardPanel(): Promise<void> {
@@ -662,16 +688,8 @@ export class WorkShellEngine<
     if (this.state.panel.title !== WORK_BOARD_PANEL_TITLE) {
       return;
     }
-    const panel = createQueueBuiltinResult(buildWorkShellQueueBuiltinInput({
-      line: "/queue",
-      state: this.state,
-      workerBudget: resolveWorkerBudget(this.state.mode),
-      queuedCount: this.queuedCountCache,
-      queuedItems,
-      contextSummaryLines: this.currentContextSummaryLines,
-      ...(this.lastCompletedTurnSnapshot ? { lastCompletedTurn: this.lastCompletedTurnSnapshot } : {}),
-    })).panel;
-    this.setState({ panel });
+    this.workBoardQueuedItemsSnapshot = queuedItems;
+    this.setState({ panel: this.createWorkBoardPanel(queuedItems) });
   }
 
   subscribe(listener: (state: WorkShellEngineState<Reasoning>) => void): () => void {
@@ -728,6 +746,9 @@ export class WorkShellEngine<
       });
       this.setState({ panel: loadedPanel });
     } catch (error: unknown) {
+      if (!(error instanceof Error)) {
+        throw error;
+      }
       this.setState({ panel: createOpenSessionsFailurePanel(error) });
     }
   }
@@ -816,11 +837,10 @@ export class WorkShellEngine<
     if (!source || !this.mutateContextSource) {
       return;
     }
-    this.mutateContextSource({
+    await this.mutateInspectorContextSource({
       kind: source.pinned ? "unpin" : "pin",
       id: source.id,
     });
-    await this.refreshContextPacket();
   }
 
   /**
@@ -832,8 +852,7 @@ export class WorkShellEngine<
     if (!source || !this.mutateContextSource) {
       return;
     }
-    this.mutateContextSource({ kind: "forget", id: source.id });
-    await this.refreshContextPacket();
+    await this.mutateInspectorContextSource({ kind: "forget", id: source.id });
   }
 
   /**
@@ -845,8 +864,29 @@ export class WorkShellEngine<
     if (!source || !this.mutateContextSource) {
       return;
     }
-    this.mutateContextSource({ kind: "include", id: source.id });
-    await this.refreshContextPacket();
+    await this.mutateInspectorContextSource({ kind: "include", id: source.id });
+  }
+
+  private async mutateInspectorContextSource(action: {
+    readonly kind: "pin" | "unpin" | "forget" | "include";
+    readonly id: string;
+  }): Promise<void> {
+    if (!this.mutateContextSource) {
+      return;
+    }
+    const beforePacketId = this.state.contextPacket?.id;
+    const receipt = this.mutateContextSource(action);
+    const packet = await this.refreshContextPacket(true);
+    if (!receipt) {
+      return;
+    }
+    this.setState({
+      contextActionReceipt: {
+        ...receipt,
+        ...(beforePacketId !== undefined ? { beforePacketId } : {}),
+        ...(packet !== undefined ? { afterPacketId: packet.id } : {}),
+      },
+    });
   }
 
   /**
@@ -1129,6 +1169,9 @@ export class WorkShellEngine<
               } }
               : {}),
           });
+          if (contextPacket && isCurrentTurn()) {
+            this.appendEntries({ role: "system", text: formatWorkShellContextPacketUsedReceipt(contextPacket) });
+          }
         } finally {
           this.clearActiveTurnAbortController(abortController);
           this.clearSubmitPreparationIfStillPending(isCurrentTurn);
@@ -1196,6 +1239,9 @@ export class WorkShellEngine<
               } }
               : {}),
           });
+          if (contextPacket && isCurrentTurn()) {
+            this.appendEntries({ role: "system", text: formatWorkShellContextPacketUsedReceipt(contextPacket) });
+          }
         } finally {
           this.clearActiveTurnAbortController(abortController);
           this.clearSubmitPreparationIfStillPending(isCurrentTurn);
@@ -1322,9 +1368,13 @@ export class WorkShellEngine<
       onExit: this.onExit,
       openSessionsPanel: () => this.openSessionsPanel(),
       reloadContextState: () => this.reloadContextState(),
-      refreshContextPacket: () => this.refreshContextPacket(),
+      refreshContextPacket: () => this.refreshContextPacket(true),
       queuedCount: () => this.queuedCountCache,
-      queuedItems: () => this.listQueuedSubmits(),
+      queuedItems: async () => {
+        const queuedItems = await this.listQueuedSubmits();
+        this.workBoardQueuedItemsSnapshot = queuedItems;
+        return queuedItems;
+      },
       clearQueuedItems: () => this.clearQueuedSubmits(),
       appendEntries: (...entries) => this.appendEntries(...entries),
       setState: (patch) => this.setState(patch),
@@ -1495,6 +1545,7 @@ export class WorkShellEngine<
   private async clearQueuedSubmits(): Promise<void> {
     await runRustCommand(["rust", "queue", "clear", this.sessionId], this.queueCommandCwd());
     this.setQueuedCount(0);
+    this.workBoardQueuedItemsSnapshot = [];
     this.queuedAttachments.clear();
     this.queueAutoDrainPaused = false;
     this.queueDrainSkipTurnEpochs.clear();
@@ -1531,11 +1582,11 @@ export class WorkShellEngine<
       memoryLines: contextState.memoryLines,
       panel: contextState.panel,
     });
-    await this.refreshContextPacket();
+    await this.refreshContextPacket(true);
   }
 
-  private async refreshContextPacket(): Promise<ContextPacketView | undefined> {
-    if (!this.resolveContextPacket) {
+  private async refreshContextPacket(forceRefresh = false): Promise<ContextPacketView | undefined> {
+    if (!this.resolveContextPacket || (!forceRefresh && this.state.panel.title === "Context expanded" && this.state.contextPacket)) {
       return this.state.contextPacket;
     }
     const packet = await this.resolveContextPacket({

@@ -197,24 +197,7 @@ function createWorkShellContextPacketResolver(options: {
   readonly bootstrapPacketItems?: readonly ContextPacketViewItem[];
   readonly bootstrapPacketWarnings?: readonly ContextPacketViewWarning[];
 }): WorkShellContextPacketResolver {
-  return legacyResolveContextPacket.bind(null, options);
-}
-
-async function legacyResolveContextPacket(
-  options: {
-    readonly sourceMetadata: readonly ContextPacketViewItem[];
-    readonly bootstrapPacketItems?: readonly ContextPacketViewItem[];
-    readonly bootstrapPacketWarnings?: readonly ContextPacketViewWarning[];
-  },
-  input: {
-    readonly cwd: string;
-    readonly sessionId: string;
-    readonly contextSummaryLines: readonly string[];
-    readonly bridgeLines: readonly string[];
-    readonly memoryLines: readonly string[];
-    readonly traceLines: readonly string[];
-  },
-): Promise<ContextPacketView> {
+  return async (input): Promise<ContextPacketView> => {
     const loopTrail = await loadOmoContextSnapshot(input.cwd);
     const included: ContextPacketViewItem[] = [
       ...options.sourceMetadata,
@@ -280,6 +263,7 @@ async function legacyResolveContextPacket(
         ],
       },
     });
+  };
 }
 
 export async function loadWorkCliBootstrap(
@@ -416,20 +400,20 @@ export async function loadWorkCliBootstrap(
     ...(userHomeDir ? { userHomeDir } : {}),
     ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
   });
-
-  // Context Inspector (Sprint 2): populated as a side-effect of building the
-  // CRP-aware context packet resolver (which lazily creates the AgentOps
-  // store). The mutator shares that store instance so overlay actions write
-  // to the same context_sources rows the resolver reads. Forward-declared
-  // because the resolver is constructed inline inside the options object.
-  let crpMutateContextSource:
-    | ((action: {
-      readonly kind: "pin" | "unpin" | "forget" | "include";
-      readonly id: string;
-    }) => void)
-    | undefined;
-
+  const legacyContextPacketResolver = createWorkShellContextPacketResolver({
+    sourceMetadata: contextPacketSourceMetadata,
+    bootstrapPacketItems: bootstrapContext.packetItems,
+    bootstrapPacketWarnings: bootstrapContext.packetWarnings,
+  });
   const crpConfig = resolveWorkShellCrpConfig(configExplanation);
+  const crpRuntime = createCrpRuntime(legacyContextPacketResolver, {
+    sourceMetadata: contextPacketSourceMetadata,
+    crpConfig,
+    env,
+    ...(userHomeDir ? { userHomeDir } : {}),
+    ...(bootstrapContext.packetItems ? { bootstrapPacketItems: bootstrapContext.packetItems } : {}),
+    ...(bootstrapContext.packetWarnings ? { bootstrapPacketWarnings: bootstrapContext.packetWarnings } : {}),
+  });
 
   return {
     agent,
@@ -487,30 +471,7 @@ export async function loadWorkCliBootstrap(
           })),
         ];
       },
-      resolveContextPacket: (() => {
-        // Context Inspector (Sprint 2): build the CRP runtime once so the
-        // resolver and the overlay's mutateContextSource share the same
-        // lazily-created AgentOpsStore instance.
-        const crp = createCrpRuntime(
-          createWorkShellContextPacketResolver({
-            sourceMetadata: contextPacketSourceMetadata,
-            bootstrapPacketItems: bootstrapContext.packetItems,
-            bootstrapPacketWarnings: bootstrapContext.packetWarnings,
-          }),
-          {
-            sourceMetadata: contextPacketSourceMetadata,
-            crpConfig,
-            env,
-            ...(userHomeDir ? { userHomeDir } : {}),
-            ...(bootstrapContext.packetItems ? { bootstrapPacketItems: bootstrapContext.packetItems } : {}),
-            ...(bootstrapContext.packetWarnings
-              ? { bootstrapPacketWarnings: bootstrapContext.packetWarnings }
-              : {}),
-          },
-        );
-        crpMutateContextSource = crp.mutateContextSource;
-        return crp.resolveContextPacket;
-      })(),
+      resolveContextPacket: crpRuntime.resolveContextPacket,
       refreshHomeState,
       refreshAuthState,
       browserOAuthAvailable,
@@ -549,12 +510,7 @@ export async function loadWorkCliBootstrap(
           ...(userHomeDir ? { userHomeDir } : {}),
         }),
       recordTurn: (turn) => recorder.recordTurn(turn),
-      // Context Inspector (Sprint 2): forward the lazily-built CRP mutator.
-      // Undefined when CRP is disabled (resolver fell back to legacy), in
-      // which case overlay actions are harmless no-ops.
-      ...(crpMutateContextSource !== undefined
-        ? { mutateContextSource: crpMutateContextSource }
-        : {}),
+      mutateContextSource: crpRuntime.mutateContextSource,
     },
   };
 }

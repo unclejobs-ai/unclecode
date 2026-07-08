@@ -133,6 +133,8 @@ export function WorkShellPane<
     currentTurnStartedAt,
     lastTurnDurationMs,
     contextIndicator,
+    contextActionReceipt,
+    contextSourceActionsEnabled,
     contextInspectorCursor,
     contextInspectorExpanded,
     contextPacket,
@@ -242,6 +244,8 @@ export function WorkShellPane<
       {...(currentTurnStartedAt !== undefined ? { currentTurnStartedAt } : {})}
       {...(lastTurnDurationMs !== undefined ? { lastTurnDurationMs } : {})}
       activePanel={activePanel}
+      {...(contextActionReceipt ? { contextActionReceipt } : {})}
+      contextSourceActionsEnabled={contextSourceActionsEnabled ?? false}
       {...(contextInspectorCursor !== undefined ? { contextInspectorCursor } : {})}
       {...(contextInspectorExpanded !== undefined ? { contextInspectorExpanded } : {})}
       {...(contextPacket ? { contextPacket } : {})}
@@ -287,6 +291,7 @@ export function WorkShellPane<
           {...(shouldSuppressComposerKeysForInspector
             ? { suppressInspectorKeys: true }
             : {})}
+          suppressInspectorMutationKeys={contextSourceActionsEnabled ?? false}
         />
       }
       inputValue={inputValue}

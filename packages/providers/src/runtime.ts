@@ -2,6 +2,7 @@ import type {
   ClipboardImageAttachment,
   ExecutionTraceEvent,
   ModeReasoningEffort,
+  ToolMetadata,
 } from "@unclecode/contracts";
 
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
@@ -185,6 +186,7 @@ export type ToolDefinition = {
     properties: Record<string, unknown>;
     required?: string[];
   };
+  metadata?: ToolMetadata;
 };
 
 export type ToolResult = {
@@ -612,6 +614,7 @@ export class OpenAIProvider implements LlmProvider {
           ? await executeProviderToolDispatches(
           "openai",
           actions,
+          this.toolRuntime.definitions,
           this.toolRuntime.handlers,
           this.cwd,
           this.traceListener,
@@ -786,6 +789,7 @@ export class AnthropicProvider implements LlmProvider {
           ? await executeProviderToolDispatches(
           "anthropic",
           parsed.actions,
+          this.toolRuntime.definitions,
           this.toolRuntime.handlers,
           this.cwd,
           this.traceListener,
@@ -1004,6 +1008,7 @@ export class GeminiProvider implements LlmProvider {
           ? await executeProviderToolDispatches(
           "gemini",
           parsed.actions,
+          this.toolRuntime.definitions,
           this.toolRuntime.handlers,
           this.cwd,
           this.traceListener,
@@ -2680,6 +2685,7 @@ function buildProviderToolExecutionStart(
 async function executeProviderToolDispatches(
   provider: RuntimeProviderName,
   actions: readonly RustProviderAction[],
+  definitions: readonly ToolDefinition[],
   handlers: Readonly<Record<string, ToolHandler>>,
   cwd: string,
   traceListener?: ProviderTraceListener,
@@ -2687,32 +2693,136 @@ async function executeProviderToolDispatches(
 ): Promise<ProviderToolResultOutcome[]> {
   const dispatchPlan = buildProviderToolDispatchPlan(provider, actions, handlers);
   const outcomes: ProviderToolResultOutcome[] = [...dispatchPlan.outcomes];
-  for (const action of dispatchPlan.dispatches) {
+  for (const batch of buildProviderToolDispatchBatches(dispatchPlan.dispatches, definitions)) {
     throwIfAborted(options.signal);
-    const handler = handlers[action.tool];
-    if (!handler) {
-      throw new Error(`Rust dispatch plan selected missing handler: ${action.tool}`);
-    }
-
-    const started = buildProviderToolExecutionStart(provider, action.tool, action.callId, action.input);
-    emitProviderTrace(traceListener, started.trace);
-    try {
-      const result = await handler(action.input, cwd, { signal: options.signal });
-      throwIfAborted(options.signal);
-      const execution = buildProviderToolExecutionFinishResult(provider, action.tool, action.callId, started.startedAt, result);
-      emitProviderTrace(traceListener, execution.trace);
-      outcomes.push(execution.outcome);
-    } catch (error) {
-      if (isAbortError(error) || options.signal?.aborted) {
-        throw error;
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      const execution = buildProviderToolExecutionFinish(provider, action.tool, action.callId, started.startedAt, true, message);
-      emitProviderTrace(traceListener, execution.trace);
-      outcomes.push(execution.outcome);
-    }
+    const executions = await Promise.all(batch.map((action) =>
+      executeProviderToolAction(provider, action, handlers, cwd, traceListener, options)
+    ));
+    outcomes.push(...executions.map((execution) => execution.outcome));
   }
   return outcomes;
+}
+
+async function executeProviderToolAction(
+  provider: RuntimeProviderName,
+  action: RustProviderAction,
+  handlers: Readonly<Record<string, ToolHandler>>,
+  cwd: string,
+  traceListener?: ProviderTraceListener,
+  options: ProviderTurnOptions = {},
+): Promise<ProviderToolExecutionResult> {
+  throwIfAborted(options.signal);
+  const handler = handlers[action.tool];
+  if (!handler) {
+    throw new Error(`Rust dispatch plan selected missing handler: ${action.tool}`);
+  }
+
+  const started = buildProviderToolExecutionStart(provider, action.tool, action.callId, action.input);
+  emitProviderTrace(traceListener, started.trace);
+  try {
+    const result = await handler(action.input, cwd, { signal: options.signal });
+    throwIfAborted(options.signal);
+    const execution = buildProviderToolExecutionFinishResult(provider, action.tool, action.callId, started.startedAt, result);
+    emitProviderTrace(traceListener, execution.trace);
+    return execution;
+  } catch (error) {
+    if (isAbortError(error) || options.signal?.aborted) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    const execution = buildProviderToolExecutionFinish(provider, action.tool, action.callId, started.startedAt, true, message);
+    emitProviderTrace(traceListener, execution.trace);
+    return execution;
+  }
+}
+
+function buildProviderToolDispatchBatches(
+  dispatches: readonly RustProviderAction[],
+  definitions: readonly ToolDefinition[],
+): readonly (readonly RustProviderAction[])[] {
+  const definitionsByName = new Map(definitions.map((definition) => [definition.name, definition]));
+  const batches: RustProviderAction[][] = [];
+  let currentBatch: RustProviderAction[] = [];
+  let currentResources = new Set<string>();
+
+  const flush = () => {
+    if (currentBatch.length === 0) {
+      return;
+    }
+    batches.push(currentBatch);
+    currentBatch = [];
+    currentResources = new Set();
+  };
+
+  for (const action of dispatches) {
+    const resources = resolveProviderToolDispatchResources(
+      action,
+      definitionsByName.get(action.tool)?.metadata,
+    );
+    if (!resources) {
+      flush();
+      batches.push([action]);
+      continue;
+    }
+    if (resources.some((resource) => currentResources.has(resource))) {
+      flush();
+    }
+    currentBatch.push(action);
+    for (const resource of resources) {
+      currentResources.add(resource);
+    }
+  }
+  flush();
+  return batches;
+}
+
+function resolveProviderToolDispatchResources(
+  action: RustProviderAction,
+  metadata: ToolMetadata | undefined,
+): readonly string[] | undefined {
+  if (!metadata || metadata.resources.length === 0) {
+    return undefined;
+  }
+  const resolved: string[] = [];
+  for (const resource of metadata.resources) {
+    if (!resource.declared) {
+      return undefined;
+    }
+    if (resource.resolver === "apply-patch-files") {
+      const patchFiles = resolveApplyPatchResourceFiles(action.input.patch);
+      if (patchFiles.length === 0) {
+        return undefined;
+      }
+      resolved.push(...patchFiles.map((filePath) => `file:${filePath}`));
+      continue;
+    }
+    resolved.push(resolveToolResourceTemplate(resource.template, action.input));
+  }
+  return resolved;
+}
+
+function resolveApplyPatchResourceFiles(patch: unknown): readonly string[] {
+  if (typeof patch !== "string") {
+    return [];
+  }
+  const files = new Set<string>();
+  for (const match of patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)) {
+    const filePath = match[1]?.trim();
+    if (filePath) {
+      files.add(filePath);
+    }
+  }
+  return [...files];
+}
+
+function resolveToolResourceTemplate(template: string, input: Record<string, unknown>): string {
+  return template.replace(/\{([^}:]+)(?::-(.+?))?\}/g, (_match, key: string, fallback: string | undefined) => {
+    const value = input[key];
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+    return fallback ?? "*";
+  });
 }
 
 function buildProviderReasoningDeltaTrace(

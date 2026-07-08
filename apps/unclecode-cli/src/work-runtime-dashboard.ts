@@ -8,6 +8,7 @@ import {
 } from "@unclecode/context-broker";
 import type {
   ContextPacketView,
+  ContextPacketViewActionReceipt,
   ContextPacketViewItem,
   ExecutionTraceEvent,
   ProviderId,
@@ -83,7 +84,7 @@ export type StartReplOptions = {
   /** Context Inspector (Sprint 2): SQL mutation callback for the /context overlay. */
   mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
-  ) => void) | undefined;
+  ) => ContextPacketViewActionReceipt | undefined) | undefined;
 };
 
 type StartReplTraceEvent =

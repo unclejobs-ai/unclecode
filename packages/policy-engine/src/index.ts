@@ -58,3 +58,11 @@ export {
 } from "./execution-policy.js";
 export type { ExecutionPolicyRequest } from "./execution-policy.js";
 export { getPolicyEffectRank } from "./delegation.js";
+export {
+  TOOL_CONFIRMATION_POLICIES,
+  resolveToolConfirmationDecision,
+} from "./tool-confirmation.js";
+export type {
+  ToolConfirmationPolicy,
+  ToolConfirmationRequest,
+} from "./tool-confirmation.js";

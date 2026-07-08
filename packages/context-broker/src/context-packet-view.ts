@@ -5,6 +5,10 @@ import type {
   CreateContextPacketViewInput,
 } from "@unclecode/contracts";
 
+import {
+  formatContextPacketTokenEstimateSuffix,
+  resolveContextPacketTokenEstimateState,
+} from "./context-packet-token-estimate.js";
 import { truncateForDisplayWidth } from "./display-width.js";
 
 function cloneItems(items: readonly ContextPacketViewItem[]): readonly ContextPacketViewItem[] {
@@ -23,7 +27,7 @@ export function createContextPacketView(input: CreateContextPacketViewInput): Co
   const included = cloneItems(input.included);
   const excluded = cloneItems(input.excluded);
   const warnings = cloneWarnings(input.warnings);
-  return {
+  const packetWithoutPreview: ContextPacketView = {
     id: input.id,
     version: 1,
     generatedAt: input.generatedAt,
@@ -38,6 +42,11 @@ export function createContextPacketView(input: CreateContextPacketViewInput): Co
       warnings: warnings.length,
     },
     tokenEstimate: included.reduce((total, item) => total + Math.max(0, item.tokenEstimate ?? 0), 0),
+    tokenEstimateState: resolveContextPacketTokenEstimateState(input, included),
+  };
+  return {
+    ...packetWithoutPreview,
+    preview: formatContextPacketPromptPrefix(packetWithoutPreview).split("\n"),
   };
 }
 
@@ -157,6 +166,8 @@ export function buildWorkShellCompactContextPacketPreviewLines(packet: ContextPa
     ...formatWorkShellCategorySummaryLines({ items: packet.excluded, visibleLimit: 4 }),
     formatWarningsLine(packet.warnings, 110),
     formatPreviewLine(packet),
+    "Provider prompt prefix",
+    ...formatContextPacketPromptPrefix(packet).split("\n"),
   ];
 }
 
@@ -165,7 +176,7 @@ function formatWarningCount(count: number): string {
 }
 
 function formatSourceCountLine(packet: ContextPacketView): string {
-  const tokenSuffix = packet.tokenEstimate > 0 ? ` · ~${packet.tokenEstimate} tokens` : "";
+  const tokenSuffix = formatContextPacketTokenEstimateSuffix(packet);
   return `Sources · ${packet.sourceCounts.included} included · ${packet.sourceCounts.excluded} held back · ${formatWarningCount(packet.sourceCounts.warnings)}${tokenSuffix}`;
 }
 
@@ -182,7 +193,7 @@ function formatWarningsLine(
 }
 
 function formatPreviewLine(packet: ContextPacketView): string {
-  const first = packet.preview[0]?.trim();
+  const first = formatContextPacketPromptPrefix(packet).split("\n")[0]?.trim();
   return `Next answer · ${truncatePacketText(first && first.length > 0 ? first : "No model-ready context preview available.")}`;
 }
 

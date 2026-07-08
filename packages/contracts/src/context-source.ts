@@ -1,3 +1,6 @@
+import type { ContextPacketViewBadge } from "./context-packet-view.js";
+import type { ContextSourceMetadata } from "./context-source-metadata.js";
+
 /**
  * Context Runbook Protocol (CRP) — typed context source records.
  *
@@ -15,6 +18,7 @@ export type ContextSourceCategory =
   | "workspace-guidance"
   | "bridge"
   | "loop-trail"
+  | "condensed-history"
   | "memory"
   | "runtime"
   | "attachment"
@@ -35,6 +39,8 @@ export type ContextSourceRecord = {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly expiresAt: string | null;
+  readonly badges?: readonly ContextPacketViewBadge[] | undefined;
+  readonly metadata?: ContextSourceMetadata | undefined;
 };
 
 export type UpsertContextSourceInput = {
@@ -49,6 +55,8 @@ export type UpsertContextSourceInput = {
   readonly tokenEstimate?: number;
   readonly includedInModel?: boolean;
   readonly expiresAt?: string | null;
+  readonly badges?: readonly ContextPacketViewBadge[] | undefined;
+  readonly metadata?: ContextSourceMetadata | undefined;
 };
 
 export type SelectContextSourcesInput = {

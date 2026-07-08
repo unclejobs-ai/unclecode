@@ -7,6 +7,7 @@
     "unclecode": "./dist/index.js"
   },
   "dependencies": {
+    "@unclecode/agentops-db": "file:../../packages/agentops-db",
     "@unclecode/config-core": "file:../../packages/config-core",
     "@unclecode/context-broker": "file:../../packages/context-broker",
     "@unclecode/contracts": "file:../../packages/contracts",

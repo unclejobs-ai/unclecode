@@ -230,6 +230,7 @@ const CONTEXT_SOURCE_CATEGORY_VALUES = [
   "workspace-guidance",
   "bridge",
   "loop-trail",
+  "condensed-history",
   "memory",
   "runtime",
   "attachment",
@@ -244,6 +245,8 @@ export function mapContextSourceRow(row: SqlRow): AgentOpsContextSourceRow {
   const sha256 = optionalString(row, "sha256");
   const turnLastSeen = optionalNumber(row, "turn_last_seen");
   const expiresAt = optionalString(row, "expires_at");
+  const badgesJson = optionalString(row, "badges_json");
+  const metadataJson = optionalString(row, "metadata_json");
   return {
     id: requiredString(row, "id"),
     projectId: requiredString(row, "project_id"),
@@ -259,6 +262,8 @@ export function mapContextSourceRow(row: SqlRow): AgentOpsContextSourceRow {
     sha256: sha256 === undefined ? null : sha256,
     turnLastSeen: turnLastSeen === undefined ? null : turnLastSeen,
     expiresAt: expiresAt === undefined ? null : expiresAt,
+    badgesJson: badgesJson === undefined ? null : badgesJson,
+    metadataJson: metadataJson === undefined ? null : metadataJson,
   };
 }
 

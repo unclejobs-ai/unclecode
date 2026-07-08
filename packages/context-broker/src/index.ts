@@ -28,6 +28,7 @@ export {
   formatContextPacketIndicator,
   formatContextPacketPromptPrefix,
 } from "./context-packet-view.js";
+export { formatContextPacketUsedReceipt } from "./context-packet-receipt.js";
 export type { OmoContextExcludedItem, OmoContextIncludedItem, OmoContextSnapshot } from "./omo-context.js";
 export { loadOmoContextSnapshot } from "./omo-context.js";
 export type { WorkspaceGuidance, WorkspaceGuidanceSkill } from "./workspace-guidance.js";
@@ -86,8 +87,6 @@ export {
   listAvailableSkills,
   loadNamedSkill,
 } from "./workspace-skills.js";
-
-// Context Runbook Protocol (CRP) — providers + selector.
 export type { ContextProvider, ProviderSyncInput } from "./crp-providers.js";
 export {
   createBridgeProvider,
@@ -98,6 +97,7 @@ export {
   createWorkspaceGuidanceProvider,
   ContextProviderRegistry,
 } from "./crp-providers.js";
+export { createCondensedHistoryProvider } from "./crp-condensed-history-provider.js";
 export {
   contextSourceToPacketItem,
   selectContextPacketFromStore,

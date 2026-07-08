@@ -655,6 +655,23 @@ export const TEAM_RUN_SHELL_TOOL: ToolDefinition = {
     },
     required: ["command"],
   },
+  metadata: {
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+      riskLevel: "unknown",
+      requiresConfirmation: true,
+      reason: "Shell commands can read or mutate arbitrary workspace state.",
+    },
+    resources: [{
+      kind: "shell",
+      mode: "execute",
+      template: "shell:*",
+      declared: false,
+    }],
+  },
 };
 
 export const TEAM_READ_FILE_TOOL: ToolDefinition = {
@@ -674,6 +691,21 @@ export const TEAM_READ_FILE_TOOL: ToolDefinition = {
       },
     },
     required: ["path"],
+  },
+  metadata: {
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+      riskLevel: "low",
+    },
+    resources: [{
+      kind: "file",
+      mode: "read",
+      template: "file:{path}",
+      declared: true,
+    }],
   },
 };
 
@@ -695,6 +727,23 @@ export const TEAM_WRITE_FILE_TOOL: ToolDefinition = {
     },
     required: ["path", "contents"],
   },
+  metadata: {
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+      riskLevel: "high",
+      requiresConfirmation: true,
+      reason: "Overwrites workspace file content.",
+    },
+    resources: [{
+      kind: "file",
+      mode: "write",
+      template: "file:{path}",
+      declared: true,
+    }],
+  },
 };
 
 export const TEAM_SEARCH_TEXT_TOOL: ToolDefinition = {
@@ -712,6 +761,21 @@ export const TEAM_SEARCH_TEXT_TOOL: ToolDefinition = {
     },
     required: ["query"],
   },
+  metadata: {
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+      riskLevel: "low",
+    },
+    resources: [{
+      kind: "workspace",
+      mode: "read",
+      template: "workspace:{path:-.}",
+      declared: true,
+    }],
+  },
 };
 
 export const TEAM_LIST_FILES_TOOL: ToolDefinition = {
@@ -726,6 +790,21 @@ export const TEAM_LIST_FILES_TOOL: ToolDefinition = {
         description: "Glob pattern (e.g. 'src/**/*.ts').",
       },
     },
+  },
+  metadata: {
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+      riskLevel: "low",
+    },
+    resources: [{
+      kind: "workspace",
+      mode: "read",
+      template: "workspace:{pattern:-**/*}",
+      declared: true,
+    }],
   },
 };
 
@@ -742,6 +821,24 @@ export const TEAM_APPLY_PATCH_TOOL: ToolDefinition = {
       },
     },
     required: ["patch"],
+  },
+  metadata: {
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+      riskLevel: "high",
+      requiresConfirmation: true,
+      reason: "Applies edits to workspace files.",
+    },
+    resources: [{
+      kind: "file",
+      mode: "write",
+      template: "file:<patch files>",
+      declared: true,
+      resolver: "apply-patch-files",
+    }],
   },
 };
 

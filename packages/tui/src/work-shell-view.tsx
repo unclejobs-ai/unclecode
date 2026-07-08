@@ -1,6 +1,6 @@
 import { Box, Text } from "ink";
 import React from "react";
-import type { ContextPacketView } from "@unclecode/contracts";
+import type { ContextPacketView, ContextPacketViewActionReceipt } from "@unclecode/contracts";
 import {
   resolveWorkShellSlashArgHint,
   runRustCommandSync,
@@ -1822,6 +1822,8 @@ export function WorkShellView(props: {
   readonly isBusy: boolean;
   readonly busyStatus?: string;
   readonly activePanel: WorkShellPanel;
+  readonly contextActionReceipt?: ContextPacketViewActionReceipt;
+  readonly contextSourceActionsEnabled?: boolean;
   // Context Inspector (Sprint 2): cursor index into the navigable source list
   // (-1 = none) and the source id whose full content is expanded.
   readonly contextInspectorCursor?: number;
@@ -1966,6 +1968,8 @@ export function WorkShellView(props: {
           borderColor: panelBorderColor,
           palette: W,
           modelWindow: props.modelWindow ?? 200000,
+          actionsEnabled: props.contextSourceActionsEnabled ?? false,
+          ...(props.contextActionReceipt ? { actionReceipt: props.contextActionReceipt } : {}),
         })
       ) : panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput ? (
         <Box marginTop={1} borderStyle="single" borderColor={panelBorderColor} paddingX={1} flexDirection="column">

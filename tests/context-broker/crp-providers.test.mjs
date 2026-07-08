@@ -223,14 +223,14 @@ test("LoopTrailProvider upserts goals + holds back excluded artifacts", async ()
 
 // ── Registry ─────────────────────────────────────────────────────────
 
-test("createBuiltinProviderRegistry registers all 5 providers", () => {
+test("createBuiltinProviderRegistry registers all 6 providers", () => {
   const store = makeStore();
   const fakeListMemory = async () => [];
   const registry = createBuiltinProviderRegistry(store, "proj_test", fakeListMemory);
   const providerIds = registry.listProviders().map((p) => p.providerId);
   assert.deepEqual(
     [...providerIds].sort(),
-    ["bridge", "loop-trail", "memory", "runtime", "workspace-guidance"],
+    ["bridge", "condensed-history", "loop-trail", "memory", "runtime", "workspace-guidance"],
   );
 });
 

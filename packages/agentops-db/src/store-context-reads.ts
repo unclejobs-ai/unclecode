@@ -2,7 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 
 import { type ContextSourceRecord, type SelectContextSourcesInput } from "@unclecode/contracts";
 
-import { contextSourceRowToRecord, mapContextSourceRow } from "./store-mappers.js";
+import { contextSourceRowToRecord, mapContextSourceRow } from "./store-context-source-mappers.js";
 import type { SelectedContextSources } from "./store-types.js";
 import { sqlRow, sqlRows } from "./sql-row.js";
 

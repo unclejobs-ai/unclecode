@@ -1,3 +1,4 @@
+import type { ToolMetadata } from "@unclecode/contracts";
 import { runRustCommand } from "./rust-command.js";
 
 export type ToolDefinition = {
@@ -8,6 +9,7 @@ export type ToolDefinition = {
     properties: Record<string, unknown>;
     required?: string[];
   };
+  metadata?: ToolMetadata;
 };
 
 export type ToolResult = {
@@ -121,6 +123,21 @@ export const toolDefinitions: ToolDefinition[] = [
         path: { type: "string", description: "Relative path to inspect." },
       },
     },
+    metadata: {
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+        riskLevel: "low",
+      },
+      resources: [{
+        kind: "directory",
+        mode: "read",
+        template: "directory:{path:-.}",
+        declared: true,
+      }],
+    },
   },
   {
     name: "read_file",
@@ -131,6 +148,21 @@ export const toolDefinitions: ToolDefinition[] = [
         path: { type: "string", description: "Relative file path." },
       },
       required: ["path"],
+    },
+    metadata: {
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+        riskLevel: "low",
+      },
+      resources: [{
+        kind: "file",
+        mode: "read",
+        template: "file:{path}",
+        declared: true,
+      }],
     },
   },
   {
@@ -144,6 +176,23 @@ export const toolDefinitions: ToolDefinition[] = [
       },
       required: ["path", "content"],
     },
+    metadata: {
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+        riskLevel: "high",
+        requiresConfirmation: true,
+        reason: "Overwrites workspace file content.",
+      },
+      resources: [{
+        kind: "file",
+        mode: "write",
+        template: "file:{path}",
+        declared: true,
+      }],
+    },
   },
   {
     name: "delete_file",
@@ -154,6 +203,23 @@ export const toolDefinitions: ToolDefinition[] = [
         path: { type: "string", description: "Relative file path to delete." },
       },
       required: ["path"],
+    },
+    metadata: {
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+        riskLevel: "high",
+        requiresConfirmation: true,
+        reason: "Deletes workspace file content.",
+      },
+      resources: [{
+        kind: "file",
+        mode: "delete",
+        template: "file:{path}",
+        declared: true,
+      }],
     },
   },
   {
@@ -167,6 +233,21 @@ export const toolDefinitions: ToolDefinition[] = [
       },
       required: ["query"],
     },
+    metadata: {
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+        riskLevel: "low",
+      },
+      resources: [{
+        kind: "workspace",
+        mode: "read",
+        template: "workspace:{path:-.}",
+        declared: true,
+      }],
+    },
   },
   {
     name: "run_shell",
@@ -177,6 +258,23 @@ export const toolDefinitions: ToolDefinition[] = [
         command: { type: "string", description: "Shell command to execute after explicit opt-in." },
       },
       required: ["command"],
+    },
+    metadata: {
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+        riskLevel: "unknown",
+        requiresConfirmation: true,
+        reason: "Shell commands can read or mutate arbitrary workspace state.",
+      },
+      resources: [{
+        kind: "shell",
+        mode: "execute",
+        template: "shell:*",
+        declared: false,
+      }],
     },
   },
 ];
@@ -189,3 +287,19 @@ export const toolHandlers: Record<string, ToolHandler> = {
   search_text: searchText,
   run_shell: runShell,
 };
+
+export function formatToolDefinitionLine(tool: ToolDefinition | undefined): string {
+  if (!tool) {
+    return "unknown: tool metadata unavailable";
+  }
+  const metadata = tool.metadata;
+  if (!metadata) {
+    return `${tool.name}: ${tool.description}`;
+  }
+  const risk = metadata.annotations.riskLevel;
+  const resources = metadata.resources.map((resource) => {
+    const opaque = resource.declared ? "" : " (opaque)";
+    return `${resource.mode} ${resource.template}${opaque}`;
+  }).join(", ");
+  return `${tool.name}: ${tool.description} · risk ${risk} · resources ${resources}`;
+}

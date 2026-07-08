@@ -20,10 +20,15 @@ import {
   type ContextProvider,
   type ProviderSyncInput,
 } from "./crp-provider-utils.js";
+import {
+  createCondensedHistoryProvider,
+  type CondensedHistoryProvider,
+} from "./crp-condensed-history-provider.js";
 import { createWorkspaceGuidanceProvider } from "./crp-workspace-provider.js";
 import { loadOmoContextSnapshot } from "./omo-context.js";
 
 export type { ContextProvider, ProviderSyncInput } from "./crp-provider-utils.js";
+export { createCondensedHistoryProvider } from "./crp-condensed-history-provider.js";
 export { createWorkspaceGuidanceProvider } from "./crp-workspace-provider.js";
 
 // ── 2. BridgeProvider ────────────────────────────────────────────────
@@ -270,13 +275,18 @@ export function createBuiltinProviderRegistry(
     readonly sessionId?: string;
     readonly agentId?: string;
   }) => Promise<readonly string[]>,
-): ContextProviderRegistry & { readonly runtime: ReturnType<typeof createRuntimeProvider> } {
+): ContextProviderRegistry & {
+  readonly runtime: ReturnType<typeof createRuntimeProvider>;
+  readonly condensedHistory: CondensedHistoryProvider;
+} {
   const registry = new ContextProviderRegistry(store, projectId);
   const runtime = createRuntimeProvider();
+  const condensedHistory = createCondensedHistoryProvider();
   registry.register(createWorkspaceGuidanceProvider());
   registry.register(createBridgeProvider());
   registry.register(createLoopTrailProvider());
   registry.register(createMemoryProvider(listScopedMemoryLines));
+  registry.register(condensedHistory);
   registry.register(runtime);
-  return Object.assign(registry, { runtime });
+  return Object.assign(registry, { runtime, condensedHistory });
 }

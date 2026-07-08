@@ -19,6 +19,7 @@ import {
 } from "@unclecode/contracts";
 
 import { createContextPacketView } from "./context-packet-view.js";
+import { buildContextSourcePacketMetadata } from "./context-source-packet-metadata.js";
 
 const OMO_EXCLUDED_DETAIL_LIMIT = 8;
 
@@ -37,7 +38,10 @@ function sourceCategoryToPacketCategory(category: ContextSourceCategory): Contex
 }
 
 /** Convert a stored context source to the model-facing packet item shape. */
-export function contextSourceToPacketItem(src: ContextSourceRecord): ContextPacketViewItem {
+export function contextSourceToPacketItem(
+  src: ContextSourceRecord,
+  input: { readonly turnIndex?: number } = {},
+): ContextPacketViewItem {
   return {
     id: src.id,
     category: toPacketCategory(src),
@@ -47,6 +51,8 @@ export function contextSourceToPacketItem(src: ContextSourceRecord): ContextPack
     tokenEstimate: src.tokenEstimate,
     salience: src.salience,
     includedInModel: src.includedInModel,
+    ...buildContextSourcePacketMetadata(src, input),
+    ...(src.metadata === undefined ? {} : { metadata: src.metadata }),
   };
 }
 
@@ -98,6 +104,18 @@ function compactHeldBackItems(items: readonly ContextPacketViewItem[]): readonly
   return [...nonLoopTrailItems, ...summarizeLoopTrailHeldBack(loopTrailItems)];
 }
 
+function buildCondensedHistoryWarnings(items: readonly ContextPacketViewItem[]): readonly ContextPacketViewWarning[] {
+  return items
+    .filter((item) =>
+      item.category === "condensed-history" &&
+      (item.freshness?.state === "stale" || item.freshness?.state === "expired"))
+    .map((item) => ({
+      code: "context.condensed-history.stale",
+      message: `Compressed history summary is stale: ${item.label}. Refresh /context before relying on it.`,
+      severity: "warning",
+    }));
+}
+
 export type SelectContextPacketOptions = {
   readonly store: AgentOpsStore;
   readonly projectId: string;
@@ -126,9 +144,13 @@ export function selectContextPacketFromStore(options: SelectContextPacketOptions
     turnIndex: options.turnIndex,
   });
 
-  const included = selection.selected.map(contextSourceToPacketItem);
-  const excluded = compactHeldBackItems(selection.heldBack.map(contextSourceToPacketItem));
-  const warnings = options.warnings ?? [];
+  const packetInput = { turnIndex: options.turnIndex };
+  const included = selection.selected.map((source) => contextSourceToPacketItem(source, packetInput));
+  const excluded = compactHeldBackItems(selection.heldBack.map((source) => contextSourceToPacketItem(source, packetInput)));
+  const warnings = [
+    ...(options.warnings ?? []),
+    ...buildCondensedHistoryWarnings(included),
+  ];
 
   // Mark selected sources as seen this turn.
   if (included.length > 0) {

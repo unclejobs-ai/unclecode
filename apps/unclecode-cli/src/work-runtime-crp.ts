@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { basename, join } from "node:path";
 
 import { createAgentOpsStore } from "@unclecode/agentops-db";
 import type { UncleCodeConfigExplanation } from "@unclecode/config-core";
@@ -10,7 +11,10 @@ import {
 import type {
   ContextPacketSourceCategory,
   ContextPacketView,
+  ContextPacketViewAction,
+  ContextPacketViewActionReceipt,
   ContextPacketViewItem,
+  ContextPacketViewSourceState,
   ContextPacketViewWarning,
   ContextSourceCategory,
 } from "@unclecode/contracts";
@@ -33,6 +37,21 @@ type WorkShellCrpConfig = {
   readonly enabled: boolean;
   readonly tokenBudget: number;
   readonly modelWindow: number;
+};
+
+type ContextSourceMutationKind = "pin" | "unpin" | "forget" | "hold-back" | "include";
+
+type ContextSourceMutation = {
+  readonly kind: ContextSourceMutationKind;
+  readonly id: string;
+};
+
+type ContextSourceUndoEntry = {
+  readonly action: ContextPacketViewAction;
+  readonly sourceId: string;
+  readonly sourceLabel: string;
+  readonly before: ContextPacketViewSourceState;
+  readonly after: ContextPacketViewSourceState;
 };
 
 export function resolveWorkShellCrpConfig(explanation: UncleCodeConfigExplanation): WorkShellCrpConfig {
@@ -77,10 +96,23 @@ export function createCrpAwareContextPacketResolver(
     readonly crpConfig: WorkShellCrpConfig;
     readonly env?: NodeJS.ProcessEnv;
     readonly userHomeDir?: string;
+    readonly storeHome?: string;
   },
 ): WorkShellContextPacketResolver {
   const crp = createCrpRuntime(legacy, bootstrap);
   return crp.resolveContextPacket;
+}
+
+function resolveStoreHome(bootstrap: {
+  readonly userHomeDir?: string;
+  readonly storeHome?: string;
+}): string | undefined {
+  if (bootstrap.storeHome !== undefined) {
+    return bootstrap.storeHome;
+  }
+  return bootstrap.userHomeDir === undefined
+    ? undefined
+    : join(bootstrap.userHomeDir, ".unclecode", "agentops");
 }
 
 /**
@@ -100,13 +132,13 @@ export function createCrpRuntime(
     readonly crpConfig: WorkShellCrpConfig;
     readonly env?: NodeJS.ProcessEnv;
     readonly userHomeDir?: string;
+    readonly storeHome?: string;
   },
 ): {
   readonly resolveContextPacket: WorkShellContextPacketResolver;
-  readonly mutateContextSource: (action: {
-    readonly kind: "pin" | "unpin" | "forget" | "include";
-    readonly id: string;
-  }) => void;
+  readonly mutateContextSource: (action: ContextSourceMutation) => ContextPacketViewActionReceipt | undefined;
+  readonly undoLastContextSourceAction: () => ContextPacketViewActionReceipt | undefined;
+  readonly listContextSourceActionReceipts: () => readonly ContextPacketViewActionReceipt[];
 } {
   let crpState: {
     readonly store: ReturnType<typeof createAgentOpsStore>;
@@ -114,6 +146,8 @@ export function createCrpRuntime(
     readonly projectId: string;
     turnIndex: number;
   } | undefined;
+  const actionReceipts: ContextPacketViewActionReceipt[] = [];
+  const undoStack: ContextSourceUndoEntry[] = [];
 
   const resolveContextPacket: WorkShellContextPacketResolver = async (input) => {
     if (!bootstrap.crpConfig.enabled) {
@@ -121,9 +155,10 @@ export function createCrpRuntime(
     }
 
     if (crpState === undefined) {
-      const store = createAgentOpsStore();
+      const storeHome = resolveStoreHome(bootstrap);
+      const store = storeHome === undefined ? createAgentOpsStore() : createAgentOpsStore({ home: storeHome });
       const projectId = createHash("sha256").update(input.cwd).digest("hex").slice(0, 16);
-      store.addProject({ id: projectId, name: input.cwd.split("/").pop() ?? "workspace", repoPath: input.cwd });
+      store.addProject({ id: projectId, name: basename(input.cwd) || "workspace", repoPath: input.cwd });
       const registry = createBuiltinProviderRegistry(store, projectId, listScopedMemoryLines);
       crpState = { store, registry, projectId, turnIndex: 0 };
     }
@@ -133,6 +168,7 @@ export function createCrpRuntime(
 
       for (const line of input.traceLines) {
         crpState.registry.runtime.pushTraceLine(line);
+        crpState.registry.condensedHistory.pushTraceLine(line);
       }
 
       await crpState.registry.syncAll({
@@ -177,28 +213,150 @@ export function createCrpRuntime(
     }
   };
 
-  const mutateContextSource = (action: {
-    readonly kind: "pin" | "unpin" | "forget" | "include";
-    readonly id: string;
-  }): void => {
-    if (!crpState) {
-      return;
+  const pushReceipt = (receipt: ContextPacketViewActionReceipt): ContextPacketViewActionReceipt => {
+    actionReceipts.push(receipt);
+    return receipt;
+  };
+
+  const resolveSourceState = (
+    state: NonNullable<typeof crpState>,
+    sourceId: string,
+  ): ContextPacketViewSourceState | undefined => {
+    const selection = state.store.selectContextSources({
+      projectId: state.projectId,
+      tokenBudget: Number.MAX_SAFE_INTEGER,
+      turnIndex: state.turnIndex,
+    });
+    const source = [...selection.selected, ...selection.heldBack].find((item) => item.id === sourceId);
+    if (source === undefined) {
+      return undefined;
     }
-    switch (action.kind) {
+    return {
+      category: source.category,
+      label: source.label,
+      includedInModel: source.includedInModel,
+      salience: source.salience,
+      tokenEstimate: source.tokenEstimate,
+    };
+  };
+
+  const normalizeAction = (kind: ContextSourceMutationKind): ContextPacketViewAction => {
+    switch (kind) {
       case "pin":
-        crpState.store.pinContextSource(crpState.projectId, action.id);
-        return;
       case "unpin":
-        crpState.store.unpinContextSource(crpState.projectId, action.id);
-        return;
-      case "forget":
-        crpState.store.forgetContextSource(crpState.projectId, action.id);
-        return;
       case "include":
-        crpState.store.includeContextSource(crpState.projectId, action.id);
-        return;
+        return kind;
+      case "forget":
+      case "hold-back":
+        return "hold-back";
     }
   };
 
-  return { resolveContextPacket, mutateContextSource };
+  const formatReceiptMessage = (input: {
+    readonly action: ContextPacketViewAction;
+    readonly sourceLabel: string;
+    readonly before: ContextPacketViewSourceState;
+    readonly after: ContextPacketViewSourceState;
+  }): string => {
+    const beforeModel = input.before.includedInModel ? "model on" : "model off";
+    const afterModel = input.after.includedInModel ? "model on" : "model off";
+    return `${input.action} ${input.sourceLabel} · ${beforeModel} -> ${afterModel}`;
+  };
+
+  const mutateContextSource = (action: ContextSourceMutation): ContextPacketViewActionReceipt | undefined => {
+    if (!crpState) {
+      return undefined;
+    }
+    const before = resolveSourceState(crpState, action.id);
+    if (before === undefined) {
+      return undefined;
+    }
+    const receiptAction = normalizeAction(action.kind);
+    switch (action.kind) {
+      case "pin":
+        crpState.store.pinContextSource(crpState.projectId, action.id);
+        break;
+      case "unpin":
+        crpState.store.unpinContextSource(crpState.projectId, action.id);
+        break;
+      case "forget":
+      case "hold-back":
+        crpState.store.forgetContextSource(crpState.projectId, action.id);
+        break;
+      case "include":
+        crpState.store.includeContextSource(crpState.projectId, action.id);
+        break;
+    }
+    const after = resolveSourceState(crpState, action.id);
+    if (after === undefined) {
+      return undefined;
+    }
+    undoStack.push({
+      action: receiptAction,
+      sourceId: action.id,
+      sourceLabel: before.label,
+      before,
+      after,
+    });
+    return pushReceipt({
+      id: `context-action-${actionReceipts.length + 1}`,
+      action: receiptAction,
+      sourceId: action.id,
+      sourceLabel: before.label,
+      message: formatReceiptMessage({
+        action: receiptAction,
+        sourceLabel: before.label,
+        before,
+        after,
+      }),
+      canUndo: true,
+      before,
+      after,
+    });
+  };
+
+  const undoLastContextSourceAction = (): ContextPacketViewActionReceipt | undefined => {
+    if (!crpState) {
+      return undefined;
+    }
+    const entry = undoStack.pop();
+    if (entry === undefined) {
+      return undefined;
+    }
+    const beforeUndo = resolveSourceState(crpState, entry.sourceId) ?? entry.after;
+    crpState.store.restoreContextSourceState({
+      projectId: crpState.projectId,
+      id: entry.sourceId,
+      salience: entry.before.salience,
+      includedInModel: entry.before.includedInModel,
+    });
+    const afterUndo = resolveSourceState(crpState, entry.sourceId);
+    if (afterUndo === undefined) {
+      return undefined;
+    }
+    return pushReceipt({
+      id: `context-action-${actionReceipts.length + 1}`,
+      action: "undo",
+      sourceId: entry.sourceId,
+      sourceLabel: entry.sourceLabel,
+      message: formatReceiptMessage({
+        action: "undo",
+        sourceLabel: entry.sourceLabel,
+        before: beforeUndo,
+        after: afterUndo,
+      }),
+      canUndo: undoStack.length > 0,
+      before: beforeUndo,
+      after: afterUndo,
+    });
+  };
+
+  const listContextSourceActionReceipts = (): readonly ContextPacketViewActionReceipt[] => [...actionReceipts];
+
+  return {
+    resolveContextPacket,
+    mutateContextSource,
+    undoLastContextSourceAction,
+    listContextSourceActionReceipts,
+  };
 }

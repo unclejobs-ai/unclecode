@@ -8,6 +8,7 @@
   },
   "include": ["src/**/*.ts", "src/**/*.tsx"],
   "references": [
+    { "path": "../../packages/agentops-db" },
     { "path": "../../packages/config-core" },
     { "path": "../../packages/context-broker" },
     { "path": "../../packages/contracts" },

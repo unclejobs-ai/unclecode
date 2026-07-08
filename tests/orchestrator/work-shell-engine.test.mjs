@@ -2726,6 +2726,10 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
   assert.doesNotMatch(prompts[0] ?? "", /Multiple active OMO sessions/);
   assert.match(prompts[0] ?? "", /User request:\nsummarize repo$/);
   assert.equal(engine.getState().entries.find((entry) => entry.role === "user")?.text, "summarize repo");
+  assert.ok(engine.getState().entries.some(
+    (entry) => entry.role === "system" &&
+      entry.text === "Context used · packet packet-work-shell-1 · 2 included · ~30t · 1 held · 1 warning",
+  ));
 
   await engine.handleSubmit("/context");
 
@@ -2736,7 +2740,8 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
   assert.ok(engine.getState().panel.lines.some((line) => /workspace · 1 · Use <small> reversible diffs\./.test(line)));
   assert.ok(engine.getState().panel.lines.some((line) => /omo · 1 · Deliver context view\./.test(line)));
   assert.ok(engine.getState().panel.lines.includes("Held back locally"));
-  assert.ok(engine.getState().panel.lines.some((line) => /Next answer · Context will be carried into the next answer\./.test(line)));
+  assert.ok(engine.getState().panel.lines.some((line) => line.includes('Next answer · <unclecode_context_packet id="packet-work-shell-1" version="1">')));
+  assert.ok(engine.getState().panel.lines.includes("Provider prompt prefix"));
   assert.equal(engine.getState().panel.lines.some((line) => /\bPacket\b|provider packet|Next model-call packet/.test(line)), false);
   assert.equal(engine.getState().panel.lines.some((line) => line.startsWith("Context ·")), false);
   assert.equal(engine.getState().panel.lines.some((line) => line.startsWith("Controls ·")), false);
@@ -2777,11 +2782,34 @@ test("WorkShellEngine context inspector actions mutate the selected CRP source",
   const { engine } = createEngine({
     resolveContextPacket: async () => makePacket(),
     mutateContextSource(action) {
+      const before = {
+        category: "workspace",
+        label: "AGENTS.md",
+        includedInModel,
+        salience,
+        tokenEstimate: 12,
+      };
       mutations.push(action);
       if (action.kind === "pin") salience = 1;
       if (action.kind === "unpin") salience = 0.5;
       if (action.kind === "forget") includedInModel = false;
       if (action.kind === "include") includedInModel = true;
+      return {
+        id: `receipt-${mutations.length}`,
+        action: action.kind === "forget" ? "hold-back" : action.kind,
+        sourceId: action.id,
+        sourceLabel: "AGENTS.md",
+        message: `${action.kind} AGENTS.md`,
+        canUndo: true,
+        before,
+        after: {
+          category: "workspace",
+          label: "AGENTS.md",
+          includedInModel,
+          salience,
+          tokenEstimate: 12,
+        },
+      };
     },
   });
 
@@ -2792,6 +2820,9 @@ test("WorkShellEngine context inspector actions mutate the selected CRP source",
   await engine.toggleContextInspectorPin();
   assert.deepEqual(mutations.at(-1), { kind: "pin", id: "workspace-guidance" });
   assert.equal(engine.getState().contextPacket?.included[0]?.salience, 1);
+  assert.equal(engine.getState().contextActionReceipt?.beforePacketId, "packet-0");
+  assert.equal(engine.getState().contextActionReceipt?.afterPacketId, "packet-1");
+  assert.equal(engine.getState().contextActionReceipt?.action, "pin");
 
   await engine.toggleContextInspectorPin();
   assert.deepEqual(mutations.at(-1), { kind: "unpin", id: "workspace-guidance" });
@@ -2800,10 +2831,71 @@ test("WorkShellEngine context inspector actions mutate the selected CRP source",
   await engine.forgetContextSourceAtCursor();
   assert.deepEqual(mutations.at(-1), { kind: "forget", id: "workspace-guidance" });
   assert.equal(engine.getState().contextPacket?.excluded[0]?.includedInModel, false);
+  assert.equal(engine.getState().contextActionReceipt?.action, "hold-back");
+  assert.equal(engine.getState().contextActionReceipt?.before?.includedInModel, true);
+  assert.equal(engine.getState().contextActionReceipt?.after?.includedInModel, false);
 
   await engine.includeContextSourceAtCursor();
   assert.deepEqual(mutations.at(-1), { kind: "include", id: "workspace-guidance" });
   assert.equal(engine.getState().contextPacket?.included[0]?.includedInModel, true);
+});
+
+test("WorkShellEngine reuses the previewed /context packet for the next chat turn", async () => {
+  const prompts = [];
+  let packetCalls = 0;
+  const makePacket = (id) => ({
+    id,
+    version: 1,
+    generatedAt: "2026-07-08T00:00:00.000Z",
+    title: "Next answer context",
+    included: [{
+      id: "workspace-guidance",
+      category: "workspace",
+      label: "AGENTS.md",
+      reason: "repo instructions loaded",
+      preview: "Keep diffs small.",
+      tokenEstimate: 20,
+    }],
+    excluded: [],
+    warnings: [],
+    preview: ["decorative preview"],
+    sourceCounts: { included: 1, excluded: 0, warnings: 0 },
+    tokenEstimate: 20,
+  });
+  const previewPacket = makePacket("packet-previewed");
+  const refreshedPacket = makePacket("packet-refreshed");
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        prompts.push(prompt);
+        return { text: "used preview" };
+      },
+    },
+    resolveContextPacket: async () => {
+      packetCalls += 1;
+      return packetCalls === 1 ? previewPacket : refreshedPacket;
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  assert.equal(packetCalls, 1);
+  assert.equal(engine.getState().panel.title, "Context expanded");
+  assert.ok(engine.getState().panel.lines.some((line) => line.includes("packet-previewed")));
+
+  await engine.handleSubmit("use the preview");
+
+  assert.equal(packetCalls, 1);
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0] ?? "", /<unclecode_context_packet id="packet-previewed" version="1">/);
+  assert.doesNotMatch(prompts[0] ?? "", /packet-refreshed/);
+  assert.ok(engine.getState().entries.some(
+    (entry) => entry.role === "system" &&
+      entry.text === "Context used · packet packet-previewed · 1 included · ~20t · 0 held · 0 warnings",
+  ));
 });
 
 test("WorkShellEngine shows a busy spinner state while resolving composer context", async () => {

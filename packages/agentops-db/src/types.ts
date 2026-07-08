@@ -128,4 +128,6 @@ export interface AgentOpsContextSourceRow {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly expiresAt: string | null;
+  readonly badgesJson: string | null;
+  readonly metadataJson: string | null;
 }

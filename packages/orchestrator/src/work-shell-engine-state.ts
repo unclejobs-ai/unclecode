@@ -91,6 +91,8 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
     lastTurnDurationMs: undefined,
+    contextActionReceipt: undefined,
+    contextSourceActionsEnabled: false,
     queuedCount: 0,
     queuePaused: false,
     terminalColumns: 100,
