@@ -308,6 +308,12 @@ test("Gemini generateContent google_search request and groundingMetadata URL par
   const payload = JSON.parse(result.content);
   assert.ok(payload.sources.some((source) => source.url === "https://www.uefa.com/euro2024/"));
   assert.deepEqual(payload.grounding, {
+    groundingChunks: [{
+      web: {
+        uri: "https://www.uefa.com/euro2024/",
+        title: "UEFA",
+      },
+    }],
     webSearchQueries: ["Euro 2024 winner"],
     searchEntryPoint: "<div>Search UEFA</div>",
     groundingSupports: [{
@@ -321,6 +327,52 @@ test("Gemini generateContent google_search request and groundingMetadata URL par
   assert.equal(calls[0].init.headers["x-goog-api-key"], "g-test");
   const body = JSON.parse(calls[0].init.body);
   assert.deepEqual(body.tools, [{ google_search: {} }]);
+});
+
+test("Gemini parser keeps one candidate citation graph internally consistent", () => {
+  const result = parseGeminiWebSearchResponse({
+    candidates: [
+      {
+        content: { parts: [{ text: "First grounded answer." }] },
+        groundingMetadata: {
+          groundingChunks: [{
+            web: { uri: "https://example.com/first", title: "First" },
+          }],
+          groundingSupports: [{
+            segment: { startIndex: 0, endIndex: 22, text: "First grounded answer." },
+            groundingChunkIndices: [0],
+          }],
+        },
+      },
+      {
+        content: { parts: [{ text: "Second candidate answer." }] },
+        groundingMetadata: {
+          groundingChunks: [{
+            web: { uri: "https://example.com/second", title: "Second" },
+          }],
+          groundingSupports: [{
+            segment: { startIndex: 0, endIndex: 24, text: "Second candidate answer." },
+            groundingChunkIndices: [0],
+          }],
+        },
+      },
+    ],
+  });
+
+  assert.equal(result.text, "First grounded answer.");
+  assert.deepEqual(result.sources, [{
+    url: "https://example.com/first",
+    title: "First",
+  }]);
+  assert.deepEqual(result.grounding, {
+    groundingChunks: [{
+      web: { uri: "https://example.com/first", title: "First" },
+    }],
+    groundingSupports: [{
+      segment: { startIndex: 0, endIndex: 22, text: "First grounded answer." },
+      groundingChunkIndices: [0],
+    }],
+  });
 });
 
 test("source-less provider responses never claim success", async () => {

@@ -201,9 +201,16 @@ function renderContextInspectorDetailReader(input: {
     ...summaryLines,
     ...(contentLines.length > 0 ? ["", "Local source content", ...contentLines] : []),
   ];
-  const visibleCount = Math.max(1, input.maxRows - 3);
-  const maxOffset = Math.max(0, lines.length - visibleCount);
+  // `maxRows` includes the margin, separator, and detail heading. Overflow
+  // markers consume rows too, so reserve them before slicing the content.
+  const availableRows = Math.max(1, input.maxRows - 3);
+  const bottomPageSize = Math.max(1, availableRows - 1);
+  const maxOffset = Math.max(0, lines.length - bottomPageSize);
   const offset = Math.min(maxOffset, Math.max(0, input.offset));
+  const hasAbove = offset > 0;
+  const rowsAfterAboveMarker = Math.max(1, availableRows - (hasAbove ? 1 : 0));
+  const hasBelow = offset + rowsAfterAboveMarker < lines.length;
+  const visibleCount = Math.max(1, rowsAfterAboveMarker - (hasBelow ? 1 : 0));
   const visibleLines = lines.slice(offset, offset + visibleCount);
 
   return (

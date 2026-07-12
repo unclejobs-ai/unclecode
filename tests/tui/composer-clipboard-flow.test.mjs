@@ -75,8 +75,10 @@ function renderWithInput(element, options = {}) {
   const stdin = createInkInput();
   const stdout = createWritableOutput(options.columns ?? 120, options.rows ?? 40);
   let output = "";
+  let renderCount = 0;
   stdout.on("data", (chunk) => {
     output += chunk.toString();
+    renderCount += 1;
   });
   const instance = render(element, {
     stdin,
@@ -91,6 +93,7 @@ function renderWithInput(element, options = {}) {
     stdout,
     instance,
     getOutput: () => output,
+    getRenderCount: () => renderCount,
     clearOutput: () => {
       output = "";
     },
@@ -377,7 +380,7 @@ test("busy queue accepts an attachment-only follow-up and clears its badge", asy
     openSessionsPanel: async () => {},
   };
   let captureCalls = 0;
-  const { stdin, instance, getOutput, clearOutput } = renderWithInput(
+  const { stdin, instance, getOutput, clearOutput, getRenderCount } = renderWithInput(
     React.createElement(
       WorkShellPane,
       paneProps(busyEngine, {
@@ -395,8 +398,10 @@ test("busy queue accepts an attachment-only follow-up and clears its badge", asy
     await waitForCondition(() => captureCalls === 1);
     await waitForCondition(() => getOutput().includes("[1/5]"));
     clearOutput();
+    const renderCountBeforeSubmit = getRenderCount();
     stdin.write("\r");
     await waitForCondition(() => submitted.length === 1);
+    await waitForCondition(() => getRenderCount() > renderCountBeforeSubmit);
     await waitForCondition(() => !getOutput().includes("[1/5]"));
     assert.deepEqual(submitted, [{
       line: "Please inspect the attached image.",

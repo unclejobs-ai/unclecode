@@ -8,6 +8,7 @@ import {
   WorkShellView,
 } from "../../packages/tui/src/work-shell-view.tsx";
 import { buildContextInspectorRows } from "../../packages/tui/src/work-shell-context-inspector-model.ts";
+import { renderContextInspectorGroupedViewport } from "../../packages/tui/src/work-shell-context-inspector-sources.tsx";
 import { renderDebugFrame } from "./work-shell-render-harness.mjs";
 
 process.env.UNCLECODE_TERMINAL_BACKGROUND = "light";
@@ -320,6 +321,28 @@ test("WorkShellView renders a compact 52x40 inspector for 40+ grouped sources", 
     expandedOutput.split("\n").length <= 40,
     "expanded 52x40 context detail must fit the terminal height",
   );
+  const middleScrolledOutput = await renderView(
+    {
+      terminalColumns: 52,
+      terminalRows: 40,
+      contextSourceActionsEnabled: true,
+      contextInspectorCursor: selectedIndex,
+      contextInspectorExpanded: "src-included-22",
+      contextPacket,
+      contextInspectorDetailContent: Array.from(
+        { length: 60 },
+        (_, index) => `Local detail line ${index + 1}`,
+      ).join("\n"),
+      contextInspectorDetailOffset: 8,
+    },
+    { columns: 52, rows: 40 },
+  );
+  assert.match(middleScrolledOutput, /… 8 lines above/);
+  assert.match(middleScrolledOutput, /lines below/);
+  assert.ok(
+    middleScrolledOutput.split("\n").length <= 40,
+    "middle-scrolled context detail must reserve rows for both overflow markers",
+  );
   // Group headers live only in the scrolled viewport; offscreen groups are not duplicated in a summary block.
   assert.doesNotMatch(output, /^\s*Groups\s*$/m);
   assert.doesNotMatch(output, /preview body for source 22/);
@@ -333,6 +356,45 @@ test("WorkShellView renders a compact 52x40 inspector for 40+ grouped sources", 
   assert.doesNotMatch(output, /Preflight/);
   assert.doesNotMatch(output, /↓ Included in next answer/);
   assert.doesNotMatch(output, /Held back locally/);
+});
+
+test("detail viewport reserves rows for both overflow markers", async () => {
+  const contextPacket = packet();
+  const rows = buildContextInspectorRows(contextPacket);
+  const detail = renderContextInspectorGroupedViewport({
+    rows,
+    maxRows: 10,
+    cursorIndex: 0,
+    expandedId: rows[0]?.item.id,
+    detailContent: Array.from({ length: 30 }, (_, index) => `Detail line ${index + 1}`).join("\n"),
+    detailOffset: 5,
+    width: 80,
+    palette: {
+      assistant: "cyan",
+      text: "white",
+      textDim: "gray",
+      borderDefault: "gray",
+    },
+    actionsEnabled: true,
+  });
+  const { instance, getOutput } = renderDebugFrame(
+    React.createElement(React.Fragment, null, detail),
+    { columns: 100, rows: 100 },
+  );
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const output = getOutput();
+    assert.match(output, /… 5 lines above/);
+    assert.match(output, /lines below/);
+    assert.ok(
+      output.split("\n").length <= 10,
+      `detail viewport rendered ${output.split("\n").length} rows for a 10-row budget`,
+    );
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
 });
 
 test("WorkShellView formats only compact agent console tool evidence", () => {

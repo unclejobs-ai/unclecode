@@ -1001,7 +1001,7 @@ export class WorkShellEngine<
     }
     this.setState({
       contextInspectorExpanded: source.id,
-      ...(content !== undefined ? { contextInspectorDetailContent: content } : {}),
+      contextInspectorDetailContent: content,
       contextInspectorDetailOffset: 0,
     });
   }

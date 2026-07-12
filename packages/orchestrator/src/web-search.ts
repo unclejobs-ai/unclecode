@@ -1,67 +1,53 @@
-export type WebSearchProviderName = "anthropic" | "gemini" | "openai";
-export type WebSearchRecency = "day" | "week" | "month" | "year";
-export type OpenAIWebSearchRuntime = "api" | "codex";
+import {
+  buildAnthropicWebSearchRequest,
+  parseAnthropicWebSearchResponse,
+} from "./web-search-anthropic.js";
+import {
+  buildGeminiWebSearchRequest,
+  parseGeminiWebSearchResponse,
+} from "./web-search-gemini.js";
+import {
+  buildOpenAIWebSearchRequest,
+  parseOpenAIWebSearchResponse,
+} from "./web-search-openai.js";
+import {
+  isWebSearchRecord,
+  normalizeWebSearchLimit,
+  type RunWebSearchArgs,
+  type WebSearchActiveProvider,
+  type WebSearchFetch,
+  type WebSearchInput,
+  type WebSearchParsedResult,
+  type WebSearchProviderName,
+  type WebSearchSource,
+  type WebSearchToolResult,
+} from "./web-search-shared.js";
 
-export type WebSearchSource = {
-  readonly url: string;
-  readonly title?: string;
+export {
+  buildAnthropicWebSearchRequest,
+  buildGeminiWebSearchRequest,
+  buildOpenAIWebSearchRequest,
+  parseAnthropicWebSearchResponse,
+  parseGeminiWebSearchResponse,
+  parseOpenAIWebSearchResponse,
 };
-
-export type WebSearchGroundingMetadata = {
-  readonly webSearchQueries?: readonly string[];
-  readonly searchEntryPoint?: string;
-  readonly groundingSupports?: readonly unknown[];
-};
-
-export type WebSearchParsedResult = {
-  readonly text: string;
-  readonly sources: readonly WebSearchSource[];
-  readonly grounding?: WebSearchGroundingMetadata;
-};
-
-export type WebSearchToolResult = {
-  readonly isError?: boolean;
-  readonly content: string;
-};
-
-export type WebSearchFetch = (
-  input: string | URL,
-  init?: RequestInit,
-) => Promise<Response>;
-
-export type WebSearchActiveProvider = {
-  readonly provider: WebSearchProviderName;
-  readonly apiKey: string;
-  readonly model: string;
-  readonly openAIRuntime?: OpenAIWebSearchRuntime;
-  readonly fetchImpl?: WebSearchFetch;
-};
-
-export type WebSearchInput = {
-  readonly query: string;
-  readonly recency?: WebSearchRecency;
-  readonly limit?: number;
-};
-
-export type RunWebSearchArgs = WebSearchActiveProvider & WebSearchInput & {
-  readonly signal?: AbortSignal;
-  readonly env?: NodeJS.ProcessEnv;
-};
+export type {
+  OpenAIWebSearchRuntime,
+  RunWebSearchArgs,
+  WebSearchActiveProvider,
+  WebSearchFetch,
+  WebSearchGroundingMetadata,
+  WebSearchInput,
+  WebSearchParsedResult,
+  WebSearchProviderName,
+  WebSearchRecency,
+  WebSearchSource,
+  WebSearchToolResult,
+} from "./web-search-shared.js";
 
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
 const DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
-
-const RECENCY_HINT: Record<WebSearchRecency, string> = {
-  day: "Prefer sources from the past day.",
-  week: "Prefer sources from the past week.",
-  month: "Prefer sources from the past month.",
-  year: "Prefer sources from the past year.",
-};
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function trimBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/, "");
@@ -85,7 +71,8 @@ export function resolveOpenAIWebSearchBaseUrl(env: NodeJS.ProcessEnv = process.e
 
 export function resolveAnthropicWebSearchBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
   return trimBaseUrl(
-    firstEnv(env, ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_BASE_URL"]) ?? DEFAULT_ANTHROPIC_BASE_URL,
+    firstEnv(env, ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_BASE_URL"])
+      ?? DEFAULT_ANTHROPIC_BASE_URL,
   );
 }
 
@@ -95,47 +82,11 @@ export function resolveGeminiWebSearchBaseUrl(env: NodeJS.ProcessEnv = process.e
   );
 }
 
-function normalizeLimit(limit: number | undefined): number | undefined {
-  if (typeof limit !== "number" || !Number.isFinite(limit)) {
-    return undefined;
-  }
-  const normalized = Math.floor(limit);
-  return normalized >= 1 ? normalized : undefined;
-}
-
-function composeQuery(query: string, recency: WebSearchRecency | undefined): string {
-  const trimmed = query.trim();
-  if (!recency) {
-    return trimmed;
-  }
-  return `${trimmed}\n\n${RECENCY_HINT[recency]}`;
-}
-
-function pushUniqueSource(
-  sources: WebSearchSource[],
-  seen: Set<string>,
-  url: unknown,
-  title?: unknown,
-): void {
-  if (typeof url !== "string") {
-    return;
-  }
-  const normalized = url.trim();
-  if (!/^https?:\/\//i.test(normalized) || seen.has(normalized)) {
-    return;
-  }
-  seen.add(normalized);
-  sources.push({
-    url: normalized,
-    ...(typeof title === "string" && title.trim() ? { title: title.trim() } : {}),
-  });
-}
-
 function truncateSources(
   sources: readonly WebSearchSource[],
   limit: number | undefined,
 ): readonly WebSearchSource[] {
-  const normalized = normalizeLimit(limit);
+  const normalized = normalizeWebSearchLimit(limit);
   if (!normalized) {
     return sources;
   }
@@ -165,220 +116,6 @@ function successResult(parsed: WebSearchParsedResult, limit?: number): WebSearch
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
-}
-
-export function buildOpenAIWebSearchRequest(input: {
-  readonly model: string;
-  readonly query: string;
-  readonly recency?: WebSearchRecency;
-  readonly limit?: number;
-}): { readonly body: Record<string, unknown> } {
-  return {
-    body: {
-      model: input.model,
-      tools: [{ type: "web_search" }],
-      include: ["web_search_call.action.sources"],
-      input: composeQuery(input.query, input.recency),
-    },
-  };
-}
-
-export function buildAnthropicWebSearchRequest(input: {
-  readonly model: string;
-  readonly query: string;
-  readonly recency?: WebSearchRecency;
-  readonly limit?: number;
-}): { readonly body: Record<string, unknown> } {
-  const maxUses = normalizeLimit(input.limit) ?? 5;
-  return {
-    body: {
-      model: input.model,
-      max_tokens: 4096,
-      tools: [{
-        name: "web_search",
-        type: "web_search_20250305",
-        max_uses: maxUses,
-      }],
-      messages: [{
-        role: "user",
-        content: composeQuery(input.query, input.recency),
-      }],
-    },
-  };
-}
-
-export function buildGeminiWebSearchRequest(input: {
-  readonly model: string;
-  readonly query: string;
-  readonly recency?: WebSearchRecency;
-  readonly limit?: number;
-}): { readonly body: Record<string, unknown> } {
-  return {
-    body: {
-      contents: [{
-        role: "user",
-        parts: [{ text: composeQuery(input.query, input.recency) }],
-      }],
-      tools: [{ google_search: {} }],
-    },
-  };
-}
-
-export function parseOpenAIWebSearchResponse(payload: unknown): WebSearchParsedResult {
-  const sources: WebSearchSource[] = [];
-  const seen = new Set<string>();
-  const textParts: string[] = [];
-
-  if (!isRecord(payload)) {
-    return { text: "", sources };
-  }
-
-  const output = Array.isArray(payload.output) ? payload.output : [];
-  for (const item of output) {
-    if (!isRecord(item)) {
-      continue;
-    }
-    if (item.type === "web_search_call" && isRecord(item.action)) {
-      const actionSources = Array.isArray(item.action.sources) ? item.action.sources : [];
-      for (const source of actionSources) {
-        if (isRecord(source)) {
-          pushUniqueSource(sources, seen, source.url, source.title);
-        }
-      }
-    }
-    if (item.type === "message" && Array.isArray(item.content)) {
-      for (const block of item.content) {
-        if (!isRecord(block)) {
-          continue;
-        }
-        if (typeof block.text === "string" && block.text.trim()) {
-          textParts.push(block.text.trim());
-        }
-        const annotations = Array.isArray(block.annotations) ? block.annotations : [];
-        for (const annotation of annotations) {
-          if (isRecord(annotation) && annotation.type === "url_citation") {
-            pushUniqueSource(sources, seen, annotation.url, annotation.title);
-          }
-        }
-      }
-    }
-  }
-
-  return {
-    text: textParts.join("\n\n"),
-    sources,
-  };
-}
-
-export function parseAnthropicWebSearchResponse(payload: unknown): WebSearchParsedResult {
-  const sources: WebSearchSource[] = [];
-  const seen = new Set<string>();
-  const textParts: string[] = [];
-
-  if (!isRecord(payload) || !Array.isArray(payload.content)) {
-    return { text: "", sources };
-  }
-
-  for (const block of payload.content) {
-    if (!isRecord(block)) {
-      continue;
-    }
-    if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
-      textParts.push(block.text.trim());
-    }
-    if (block.type === "web_search_tool_result") {
-      const content = Array.isArray(block.content) ? block.content : [];
-      for (const result of content) {
-        if (isRecord(result) && result.type === "web_search_result") {
-          pushUniqueSource(sources, seen, result.url, result.title);
-        }
-      }
-    }
-    const citations = Array.isArray(block.citations) ? block.citations : [];
-    for (const citation of citations) {
-      if (isRecord(citation)) {
-        pushUniqueSource(sources, seen, citation.url, citation.title);
-      }
-    }
-  }
-
-  return {
-    text: textParts.join("\n\n"),
-    sources,
-  };
-}
-
-export function parseGeminiWebSearchResponse(payload: unknown): WebSearchParsedResult {
-  const sources: WebSearchSource[] = [];
-  const seen = new Set<string>();
-  const textParts: string[] = [];
-  const webSearchQueries: string[] = [];
-  const groundingSupports: unknown[] = [];
-  let searchEntryPoint: string | undefined;
-
-  if (!isRecord(payload) || !Array.isArray(payload.candidates)) {
-    return { text: "", sources };
-  }
-
-  for (const candidate of payload.candidates) {
-    if (!isRecord(candidate)) {
-      continue;
-    }
-    const content = isRecord(candidate.content) ? candidate.content : undefined;
-    const parts = content && Array.isArray(content.parts) ? content.parts : [];
-    for (const part of parts) {
-      if (isRecord(part) && typeof part.text === "string" && part.text.trim()) {
-        textParts.push(part.text.trim());
-      }
-    }
-    const grounding = isRecord(candidate.groundingMetadata) ? candidate.groundingMetadata : undefined;
-    const chunks = grounding && Array.isArray(grounding.groundingChunks)
-      ? grounding.groundingChunks
-      : [];
-    for (const chunk of chunks) {
-      if (!isRecord(chunk) || !isRecord(chunk.web)) {
-        continue;
-      }
-      pushUniqueSource(sources, seen, chunk.web.uri ?? chunk.web.url, chunk.web.title);
-    }
-    const queries = grounding && Array.isArray(grounding.webSearchQueries)
-      ? grounding.webSearchQueries
-      : [];
-    for (const query of queries) {
-      if (typeof query === "string" && query.trim() && !webSearchQueries.includes(query.trim())) {
-        webSearchQueries.push(query.trim());
-      }
-    }
-    const entryPoint = grounding && isRecord(grounding.searchEntryPoint)
-      ? grounding.searchEntryPoint
-      : undefined;
-    if (
-      searchEntryPoint === undefined
-      && entryPoint
-      && typeof entryPoint.renderedContent === "string"
-      && entryPoint.renderedContent.trim()
-    ) {
-      searchEntryPoint = entryPoint.renderedContent.trim();
-    }
-    if (grounding && Array.isArray(grounding.groundingSupports)) {
-      groundingSupports.push(...grounding.groundingSupports);
-    }
-  }
-
-  const grounding = webSearchQueries.length > 0
-    || searchEntryPoint !== undefined
-    || groundingSupports.length > 0
-    ? {
-        ...(webSearchQueries.length > 0 ? { webSearchQueries } : {}),
-        ...(searchEntryPoint !== undefined ? { searchEntryPoint } : {}),
-        ...(groundingSupports.length > 0 ? { groundingSupports } : {}),
-      }
-    : undefined;
-  return {
-    text: textParts.join("\n\n"),
-    sources,
-    ...(grounding ? { grounding } : {}),
-  };
 }
 
 async function postJson(input: {
@@ -422,7 +159,7 @@ export async function runWebSearch(args: RunWebSearchArgs): Promise<WebSearchToo
 
   const env = args.env ?? process.env;
   const fetchImpl = args.fetchImpl ?? fetch;
-  const limit = normalizeLimit(args.limit);
+  const limit = normalizeWebSearchLimit(args.limit);
 
   try {
     if (args.provider === "openai") {
@@ -471,8 +208,8 @@ export async function runWebSearch(args: RunWebSearchArgs): Promise<WebSearchToo
           fetchImpl,
           ...(args.signal ? { signal: args.signal } : {}),
         });
-        if (!isRecord(payload) || payload.stop_reason !== "pause_turn") {
-          const completedPayload = isRecord(payload) && Array.isArray(payload.content)
+        if (!isWebSearchRecord(payload) || payload.stop_reason !== "pause_turn") {
+          const completedPayload = isWebSearchRecord(payload) && Array.isArray(payload.content)
             ? { ...payload, content: [...pausedContent, ...payload.content] }
             : payload;
           return successResult(parseAnthropicWebSearchResponse(completedPayload), limit);

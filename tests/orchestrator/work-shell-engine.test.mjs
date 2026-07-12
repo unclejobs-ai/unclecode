@@ -3048,6 +3048,54 @@ test("WorkShellEngine loads local source details on Enter and scrolls without mo
   assert.equal(engine.getState().contextInspectorDetailOffset, 0);
 });
 
+test("WorkShellEngine clears local detail when the next source has no resolver content", async () => {
+  const packet = {
+    id: "packet-detail-switch",
+    version: 1,
+    generatedAt: "2026-07-12T00:00:00.000Z",
+    title: "Next answer context",
+    included: [
+      {
+        id: "source-with-detail",
+        category: "workspace-guidance",
+        label: "Workspace guidance",
+        reason: "local detail available",
+        preview: "Detail stays local.",
+        includedInModel: true,
+      },
+      {
+        id: "source-without-detail",
+        category: "runtime",
+        label: "Runtime source",
+        reason: "metadata only",
+        preview: "No local detail.",
+        includedInModel: true,
+      },
+    ],
+    excluded: [],
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: 2, excluded: 0, warnings: 0 },
+    tokenEstimate: 0,
+  };
+  const { engine } = createEngine({
+    resolveContextPacket: async () => packet,
+    resolveContextSourceDetail: async (sourceId) =>
+      sourceId === "source-with-detail" ? "LOCAL_DETAIL_A" : undefined,
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  await engine.toggleContextInspectorExpanded();
+  assert.equal(engine.getState().contextInspectorDetailContent, "LOCAL_DETAIL_A");
+
+  engine.moveContextInspectorCursor(1);
+  await engine.toggleContextInspectorExpanded();
+
+  assert.equal(engine.getState().contextInspectorExpanded, "source-without-detail");
+  assert.equal(engine.getState().contextInspectorDetailContent, undefined);
+});
+
 test("WorkShellEngine ignores late local detail after the Context Desk closes", async () => {
   let releaseDetail;
   const packet = {
