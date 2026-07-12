@@ -6,6 +6,7 @@ import {
   classifyWorkIntent,
   createTurnOrchestrator,
   runBoundedExecutorPool,
+  runGoalTaskExecutorPool,
 } from "../../packages/orchestrator/src/index.ts";
 
 test("classifyWorkIntent keeps fast paths simple and routes explicit complex or research work", () => {
@@ -381,4 +382,39 @@ test("createTurnOrchestrator hands the trace listener into planComplexTurn for l
   );
   assert.equal(plannerRunning.length, 1, "planner running must fire exactly once (from inside planComplexTurn)");
   assert.equal(plannerCompleted.length, 1, "planner completed must fire exactly once (from the orchestrator after await)");
+});
+
+test("runGoalTaskExecutorPool honors dependencies and blocks dependents after failure", async () => {
+  const executed = [];
+  const statuses = [];
+  const tasks = [
+    { id: "task-1", summary: "fails", dependsOn: [] },
+    { id: "task-2", summary: "blocked", dependsOn: ["task-1"] },
+    { id: "task-3", summary: "independent", dependsOn: [] },
+    { id: "task-4", summary: "transitively blocked", dependsOn: ["task-2"] },
+  ];
+
+  const results = await runGoalTaskExecutorPool({
+    tasks,
+    maxWorkers: 2,
+    async executeTask(task) {
+      executed.push(task.id);
+      return {
+        id: task.id,
+        status: task.id === "task-1" ? "failed" : "completed",
+      };
+    },
+    isSuccessful: (result) => result.status === "completed",
+    createBlockedResult: (task) => ({ id: task.id, status: "blocked" }),
+    onStatus: (task, status) => statuses.push([task.id, status]),
+  });
+  assert.deepEqual(results, [
+    { id: "task-1", status: "failed" },
+    { id: "task-2", status: "blocked" },
+    { id: "task-3", status: "completed" },
+    { id: "task-4", status: "blocked" },
+  ]);
+  assert.ok(statuses.some(([id, status]) => id === "task-2" && status === "blocked"));
+  assert.ok(statuses.some(([id, status]) => id === "task-4" && status === "blocked"));
+  assert.equal(statuses.some(([id, status]) => id === "task-2" && status === "running"), false);
 });

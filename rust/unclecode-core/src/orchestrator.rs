@@ -238,48 +238,82 @@ pub fn resolve_worker_budget_json(mode: &str) -> Result<String, String> {
 
 pub fn build_complex_tasks_json(prompt: &str) -> Result<String, String> {
     let routing_prompt = extract_routing_prompt(prompt);
-    let file_paths = extract_file_paths(routing_prompt);
-    let tasks: Vec<Value> = if file_paths.is_empty() {
-        vec![
-            json!({
-                "id": "task-1",
-                "summary": "Investigate scope and current implementation",
-                "prompt": format!(
-                    "Read the relevant code to understand what exists today. Identify the files, functions, and types involved.\n\nRequest: {prompt}"
-                ),
-            }),
-            json!({
-                "id": "task-2",
-                "summary": "Plan changes and identify risks",
-                "prompt": format!(
-                    "Based on the codebase, outline what needs to change, what tests are needed, and what could break.\n\nRequest: {prompt}"
-                ),
-            }),
-            json!({
-                "id": "task-3",
-                "summary": "Verify constraints and edge cases",
-                "prompt": format!(
-                    "Check for edge cases, type safety concerns, and existing test coverage gaps related to this request.\n\nRequest: {prompt}"
-                ),
-            }),
-        ]
-    } else {
-        file_paths
-            .iter()
-            .enumerate()
-            .map(|(index, file_path)| {
-                json!({
-                    "id": format!("task-{}", index + 1),
-                    "summary": format!("Inspect {file_path}"),
-                    "prompt": format!(
-                        "Inspect {file_path} for this request and report the concrete changes or risks.\n\nOriginal request: {prompt}"
-                    ),
-                })
-            })
-            .collect()
-    };
+    let write_paths = extract_file_paths(routing_prompt);
+    let tasks = vec![json!({
+        "id": "task-1",
+        "summary": "Complete requested change end to end",
+        "prompt": format!(
+            "Complete the request end to end. Inspect the existing implementation, make the required changes, and run focused verification before reporting the result.\n\nRequest: {prompt}"
+        ),
+        "goal": routing_prompt,
+        "constraints": [
+            "Preserve behavior outside the requested scope",
+            "Reuse existing project conventions and dependencies"
+        ],
+        "acceptanceCriteria": [
+            "The requested behavior is implemented end to end",
+            "Relevant focused verification passes"
+        ],
+        "dependsOn": [],
+        "writePaths": write_paths,
+    })];
 
     serde_json::to_string(&tasks).map_err(|error| error.to_string())
+}
+
+fn nonempty_string(value: Option<&Value>) -> Option<&str> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn string_array<'a>(value: Option<&'a Value>, require_nonempty: bool) -> Option<Vec<&'a str>> {
+    let values = value?.as_array()?;
+    if require_nonempty && values.is_empty() {
+        return None;
+    }
+    values
+        .iter()
+        .map(|value| nonempty_string(Some(value)))
+        .collect()
+}
+
+fn is_valid_goal_task_plan(tasks: &[Value]) -> bool {
+    let ids: Vec<&str> = tasks
+        .iter()
+        .filter_map(|task| task.get("id").and_then(Value::as_str))
+        .collect();
+    if ids.len() != tasks.len()
+        || ids
+            .iter()
+            .enumerate()
+            .any(|(index, id)| ids[..index].contains(id))
+    {
+        return false;
+    }
+
+    let Some(goal) = tasks
+        .first()
+        .and_then(|task| task.get("goal"))
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+
+    tasks.iter().enumerate().all(|(index, task)| {
+        task.get("goal").and_then(Value::as_str) == Some(goal)
+            && task
+                .get("dependsOn")
+                .and_then(Value::as_array)
+                .is_some_and(|dependencies| {
+                    dependencies.iter().all(|dependency| {
+                        dependency
+                            .as_str()
+                            .is_some_and(|dependency| ids[..index].contains(&dependency))
+                    })
+                })
+    })
 }
 
 pub fn parse_plan_response_json(text: &str) -> Result<String, String> {
@@ -293,28 +327,60 @@ pub fn parse_plan_response_json(text: &str) -> Result<String, String> {
         return Ok("[]".to_string());
     }
 
-    let json_slice = &text[start..=end];
-    let Ok(value) = serde_json::from_str::<Value>(json_slice) else {
+    let Ok(value) = serde_json::from_str::<Value>(&text[start..=end]) else {
         return Ok("[]".to_string());
     };
     let Some(items) = value.as_array() else {
         return Ok("[]".to_string());
     };
+    if items.is_empty() || items.len() > 4 {
+        return Ok("[]".to_string());
+    }
 
-    let tasks: Vec<Value> = items
-        .iter()
-        .filter_map(|item| {
-            let id = item.get("id").and_then(Value::as_str)?;
-            let summary = item.get("summary").and_then(Value::as_str)?;
-            let prompt = item.get("prompt").and_then(Value::as_str)?;
-            Some(json!({
-                "id": id,
-                "summary": summary,
-                "prompt": prompt,
-            }))
-        })
-        .collect();
+    let mut tasks = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(item) = item.as_object() else {
+            return Ok("[]".to_string());
+        };
+        let Some(id) = nonempty_string(item.get("id")) else {
+            return Ok("[]".to_string());
+        };
+        let Some(summary) = nonempty_string(item.get("summary")) else {
+            return Ok("[]".to_string());
+        };
+        let Some(prompt) = nonempty_string(item.get("prompt")) else {
+            return Ok("[]".to_string());
+        };
+        let Some(goal) = nonempty_string(item.get("goal")) else {
+            return Ok("[]".to_string());
+        };
+        let Some(constraints) = string_array(item.get("constraints"), false) else {
+            return Ok("[]".to_string());
+        };
+        let Some(acceptance_criteria) = string_array(item.get("acceptanceCriteria"), true) else {
+            return Ok("[]".to_string());
+        };
+        let Some(depends_on) = string_array(item.get("dependsOn"), false) else {
+            return Ok("[]".to_string());
+        };
+        let Some(write_paths) = string_array(item.get("writePaths"), false) else {
+            return Ok("[]".to_string());
+        };
+        tasks.push(json!({
+            "id": id,
+            "summary": summary,
+            "prompt": prompt,
+            "goal": goal,
+            "constraints": constraints,
+            "acceptanceCriteria": acceptance_criteria,
+            "dependsOn": depends_on,
+            "writePaths": write_paths,
+        }));
+    }
 
+    if !is_valid_goal_task_plan(&tasks) {
+        return Ok("[]".to_string());
+    }
     serde_json::to_string(&tasks).map_err(|error| error.to_string())
 }
 
@@ -323,10 +389,15 @@ pub fn build_planner_prompt_json(input_json: &str) -> Result<String, String> {
     let value = object_value(&value, "planner prompt")?;
     let prompt = string_field(value, "prompt", "planner prompt")?;
     Ok([
-        "Break this request into 2-4 independent subtasks.".to_string(),
-        "Return ONLY a JSON array of objects with {id, summary, prompt} fields.".to_string(),
-        "Each subtask should be independently executable.".to_string(),
+        "<goal_task_planner>".to_string(),
+        "Decompose the request into 2-4 executable goal tasks.".to_string(),
+        "Return ONLY one JSON array. Every object must have exactly these fields:".to_string(),
+        r#"{"id":"task-1","summary":"short title","prompt":"complete executor assignment","goal":"shared end state","constraints":["hard constraint"],"acceptanceCriteria":["observable proof"],"dependsOn":[],"writePaths":["repo/relative/path"]}"#.to_string(),
+        "Use the same goal for every task. Keep tasks independently executable when dependencies allow.".to_string(),
+        "dependsOn may reference only earlier task IDs. acceptanceCriteria must be non-empty and observable.".to_string(),
+        "writePaths must list only repo-relative files the task may modify; use [] for read-only tasks.".to_string(),
         format!("Request: {prompt}"),
+        "</goal_task_planner>".to_string(),
     ]
     .join("\n"))
 }
@@ -403,6 +474,16 @@ pub fn extract_changed_files_from_tasks_json(tasks_json: &str) -> Result<String,
 
     let mut files = Vec::new();
     for task in tasks {
+        if let Some(write_paths) = task.get("writePaths").and_then(Value::as_array) {
+            for file_path in write_paths.iter().filter_map(Value::as_str) {
+                let file_path = file_path.to_string();
+                if !files.contains(&file_path) {
+                    files.push(file_path);
+                }
+            }
+            continue;
+        }
+
         for field in ["summary", "prompt"] {
             if let Some(text) = task.get(field).and_then(Value::as_str) {
                 for file_path in extract_file_paths(text) {
@@ -851,16 +932,25 @@ hi"#;
     }
 
     #[test]
-    fn builds_file_scoped_complex_tasks() {
-        let output =
-            build_complex_tasks_json("check packages/a.ts and rust/src/lib.rs please").unwrap();
+    fn builds_goal_oriented_static_task() {
+        let request = "check packages/a.ts and rust/src/lib.rs please";
+        let output = build_complex_tasks_json(request).unwrap();
         let tasks: Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(tasks.as_array().unwrap().len(), 2);
-        assert_eq!(tasks[0]["summary"], "Inspect packages/a.ts");
-        assert!(tasks[1]["prompt"]
+        assert_eq!(tasks.as_array().unwrap().len(), 1);
+        assert_eq!(tasks[0]["id"], "task-1");
+        assert_eq!(tasks[0]["goal"], request);
+        assert_eq!(tasks[0]["dependsOn"], json!([]));
+        assert_eq!(
+            tasks[0]["writePaths"],
+            json!(["packages/a.ts", "rust/src/lib.rs"])
+        );
+        assert!(tasks[0]["acceptanceCriteria"]
+            .as_array()
+            .is_some_and(|criteria| !criteria.is_empty()));
+        assert!(tasks[0]["prompt"]
             .as_str()
             .unwrap()
-            .contains("Original request: check packages/a.ts"));
+            .contains("Complete the request end to end"));
     }
 
     #[test]
@@ -876,27 +966,44 @@ check packages/a.ts and rust/src/lib.rs please"#,
         )
         .unwrap();
         let tasks: Value = serde_json::from_str(&output).unwrap();
-        assert_eq!(tasks.as_array().unwrap().len(), 2);
-        assert_eq!(tasks[0]["summary"], "Inspect packages/a.ts");
-        assert_eq!(tasks[1]["summary"], "Inspect rust/src/lib.rs");
+        assert_eq!(tasks.as_array().unwrap().len(), 1);
+        assert_eq!(
+            tasks[0]["writePaths"],
+            json!(["packages/a.ts", "rust/src/lib.rs"])
+        );
+        assert!(!tasks[0]["goal"]
+            .as_str()
+            .unwrap()
+            .contains("CLAUDE.md"));
     }
 
     #[test]
     fn parses_agent_plan_response() {
         let output = parse_plan_response_json(
             r#"Here:
-[{"id":"task-1","summary":"Read files","prompt":"Read src/index.ts"},{"id":"bad","summary":2,"prompt":"skip"},{"id":"task-2","summary":"Fix bug","prompt":"Fix auth.ts"}]"#,
+[{"id":"task-1","summary":"Implement parser","prompt":"Implement src/parser.ts","goal":"Ship parser support","constraints":["No dependencies"],"acceptanceCriteria":["Parser tests pass"],"dependsOn":[],"writePaths":["src/parser.ts"]},{"id":"task-2","summary":"Verify integration","prompt":"Run integration verification","goal":"Ship parser support","constraints":["No dependencies"],"acceptanceCriteria":["Integration passes"],"dependsOn":["task-1"],"writePaths":["tests/parser.test.ts"]}]"#,
         )
         .unwrap();
         let tasks: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(tasks.as_array().unwrap().len(), 2);
-        assert_eq!(tasks[0]["id"], "task-1");
-        assert_eq!(tasks[1]["summary"], "Fix bug");
+        assert_eq!(tasks[0]["goal"], "Ship parser support");
+        assert_eq!(tasks[1]["dependsOn"], json!(["task-1"]));
+        assert_eq!(tasks[1]["acceptanceCriteria"], json!(["Integration passes"]));
 
         assert_eq!(parse_plan_response_json("no json").unwrap(), "[]");
         assert_eq!(parse_plan_response_json("[invalid").unwrap(), "[]");
         assert_eq!(
-            parse_plan_response_json(r#"["not objects"]"#).unwrap(),
+            parse_plan_response_json(
+                r#"[{"id":"task-1","summary":"Valid","prompt":"Run","goal":"Goal","constraints":[],"acceptanceCriteria":["Done"],"dependsOn":[],"writePaths":[]},{"id":"bad","summary":2}]"#,
+            )
+            .unwrap(),
+            "[]"
+        );
+        assert_eq!(
+            parse_plan_response_json(
+                r#"[{"id":"task-1","summary":"A","prompt":"A","goal":"Goal","constraints":[],"acceptanceCriteria":["A done"],"dependsOn":["task-2"],"writePaths":[]},{"id":"task-2","summary":"B","prompt":"B","goal":"Goal","constraints":[],"acceptanceCriteria":["B done"],"dependsOn":["task-1"],"writePaths":[]}]"#,
+            )
+            .unwrap(),
             "[]"
         );
     }
@@ -914,8 +1021,11 @@ check packages/a.ts and rust/src/lib.rs please"#,
     #[test]
     fn builds_agent_prompts() {
         let planner = build_planner_prompt_json(r#"{"prompt":"refactor login"}"#).unwrap();
-        assert!(planner.starts_with("Break this request into 2-4 independent subtasks."));
-        assert!(planner.ends_with("Request: refactor login"));
+        assert!(planner.starts_with("<goal_task_planner>"));
+        assert!(planner.contains("\"acceptanceCriteria\""));
+        assert!(planner.contains("\"dependsOn\""));
+        assert!(planner.contains("\"writePaths\""));
+        assert!(planner.ends_with("Request: refactor login\n</goal_task_planner>"));
 
         let guardian = build_guardian_review_prompt_json(
             r#"{"prompt":"ship it","results":[{"summary":"result one"},{"summary":"result two"}],"executableChecks":"lint PASS"}"#,

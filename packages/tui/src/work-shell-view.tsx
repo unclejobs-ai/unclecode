@@ -4,6 +4,7 @@ import type {
   AgentConsoleSnapshot,
   ContextPacketView,
   ContextPacketViewActionReceipt,
+  WorkNodeStatus,
 } from "@unclecode/contracts";
 import {
   resolveWorkShellSlashArgHint,
@@ -1822,7 +1823,24 @@ export function formatWorkShellAgentConsoleActivityLines(
   if (!agentConsole) {
     return [];
   }
-  return agentConsole.activity
+  const prioritizedNodes = agentConsole.workGraph
+    ? [...agentConsole.workGraph.nodes].sort(
+        (left, right) => Number(isActiveWorkNodeStatus(right.status)) - Number(isActiveWorkNodeStatus(left.status)),
+      )
+    : [];
+
+  const graph = agentConsole.workGraph;
+  const graphLines = graph
+    ? [
+        `Goal · ${graph.goal ?? graph.id}`,
+        ...prioritizedNodes.slice(0, 4).map((node) => {
+          const dependencies = node.dependsOn ?? [];
+          return `${formatWorkNodeStatus(node.status)} ${node.title || node.id}${dependencies.length > 0 ? ` · after ${dependencies.join(", ")}` : ""}`;
+        }),
+        ...(graph.nodes.length > 4 ? [`… ${graph.nodes.length - 4} more tasks`] : []),
+      ]
+    : [];
+  const activityLines = agentConsole.activity
     .slice(-2)
     .reverse()
     .map((activity) => {
@@ -1834,6 +1852,29 @@ export function formatWorkShellAgentConsoleActivityLines(
         : "";
       return `Tool · ${activity.intent}${target} · ${status}`;
     });
+  return [...graphLines, ...activityLines];
+}
+function isActiveWorkNodeStatus(status: WorkNodeStatus): boolean {
+  return status === "running" || status === "blocked" || status === "requires_action";
+}
+
+
+function formatWorkNodeStatus(status: WorkNodeStatus): string {
+  switch (status) {
+    case "completed":
+      return "✓";
+    case "running":
+      return "●";
+    case "failed":
+      return "×";
+    case "blocked":
+    case "cancelled":
+      return "⊘";
+    case "requires_action":
+      return "!";
+    default:
+      return "○";
+  }
 }
 
 export function WorkShellView(props: {

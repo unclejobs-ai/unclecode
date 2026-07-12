@@ -56,6 +56,7 @@ import {
   buildContextLineItems,
   buildContextSummaryItems,
   buildOmoExcludedPacketItems,
+  buildWorkGraphContextItems,
   estimateTokens,
   formatCountLabel,
 } from "./work-runtime-context-items.js";
@@ -268,6 +269,7 @@ function createWorkShellContextPacketResolver(options: {
         idPrefix: "runtime-trace",
         reason: "live work-shell trace",
       }),
+      ...buildWorkGraphContextItems(input.workGraph),
       ...loopTrail.included.map((item): ContextPacketViewItem => ({
         id: item.kind === "omo-goal"
           ? `loop-trail-goal-${item.sessionId}-${item.goalId}`
@@ -379,21 +381,39 @@ export async function loadWorkCliBootstrap(
     configuredPrompt: configExplanation.prompt.rendered,
     guidanceSystemPrompt: guidance.systemPromptAppendix,
   });
-  const directAgent = await createRuntimeCodingAgent({
+  let executorApiKey = config.apiKey;
+  const createConfiguredCodingAgent = (
+    apiKey: string,
+    model: string,
+    reasoning: typeof config.reasoning,
+  ) => createRuntimeCodingAgent({
     provider: resolveRuntimeProvider(config.provider),
-    apiKey: config.apiKey,
-    model: config.model,
+    apiKey,
+    model,
     cwd,
-    reasoning: config.reasoning,
+    reasoning,
     ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
     ...(config.openAIRuntime ? { openAIRuntime: config.openAIRuntime } : {}),
     ...(config.openAIAccountId !== undefined
       ? { openAIAccountId: config.openAIAccountId }
       : {}),
   });
+  const directAgent = await createConfiguredCodingAgent(
+    config.apiKey,
+    config.model,
+    config.reasoning,
+  );
 
   const agent = new WorkAgent({
     directAgent,
+    createExecutorAgent: async (settings) => {
+      const executor = await createConfiguredCodingAgent(
+        executorApiKey,
+        settings.model,
+        settings.reasoning,
+      );
+      return executor;
+    },
     mode: config.mode,
     reasoning: config.reasoning,
     model: config.model,
@@ -418,6 +438,7 @@ export async function loadWorkCliBootstrap(
   }> => {
     const status = await resolveRustOpenAIAuthStatus({ cwd, env });
     const resolved = await resolveRustOpenAIAuth({ cwd, env });
+    executorApiKey = resolved.status === "ok" ? resolved.bearerToken : "";
 
     directAgent.refreshAuthToken(resolved.status === "ok" ? resolved.bearerToken : "");
     return {

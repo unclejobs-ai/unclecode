@@ -96,12 +96,15 @@ export type WorkNode = {
   readonly status: WorkNodeStatus;
   readonly dependsOn: readonly string[];
   readonly fileOwnership: readonly string[];
-  readonly manifestId: string;
+  readonly manifestId?: string;
+  readonly acceptanceCriteria?: readonly string[];
   readonly evidenceRefs: readonly string[];
 };
 
 export type WorkGraph = {
   readonly id: string;
+  readonly goal?: string;
+  readonly constraints?: readonly string[];
   readonly nodes: readonly WorkNode[];
   readonly approval: "pending" | "approved" | "rejected";
 };
@@ -396,10 +399,13 @@ function parseAskUserQuestionOption(value: unknown): AskUserQuestionOption | und
 
 function parseWorkGraph(value: unknown): WorkGraph | undefined {
   const record = asRecord(value);
+  const constraints = parseOptionalStringList(record, "constraints");
   if (
     !record
     || !isNonEmptyString(record.id)
     || !Array.isArray(record.nodes)
+    || (hasOwn(record, "goal") && !isNonEmptyString(record.goal))
+    || constraints === null
     || (record.approval !== "pending" && record.approval !== "approved" && record.approval !== "rejected")
   ) {
     return undefined;
@@ -412,13 +418,20 @@ function parseWorkGraph(value: unknown): WorkGraph | undefined {
   const parsedNodes = nodes.filter(
     (node): node is WorkNode => node !== undefined,
   );
-  return { id: record.id, approval: record.approval, nodes: parsedNodes };
+  return {
+    id: record.id,
+    ...(typeof record.goal === "string" ? { goal: record.goal } : {}),
+    ...(constraints === undefined ? {} : { constraints }),
+    approval: record.approval,
+    nodes: parsedNodes,
+  };
 }
 
 function parseWorkNode(value: unknown): WorkNode | undefined {
   const record = asRecord(value);
   const dependsOn = parseStringList(record?.dependsOn);
   const fileOwnership = parseStringList(record?.fileOwnership);
+  const acceptanceCriteria = parseOptionalStringList(record, "acceptanceCriteria");
   const evidenceRefs = parseStringList(record?.evidenceRefs);
   if (
     !record
@@ -429,7 +442,8 @@ function parseWorkNode(value: unknown): WorkNode | undefined {
     || !WORK_NODE_STATUS_SET.has(record.status)
     || !dependsOn
     || !fileOwnership
-    || !isNonEmptyString(record.manifestId)
+    || (hasOwn(record, "manifestId") && !isNonEmptyString(record.manifestId))
+    || acceptanceCriteria === null
     || !evidenceRefs
   ) {
     return undefined;
@@ -441,9 +455,20 @@ function parseWorkNode(value: unknown): WorkNode | undefined {
     status: record.status as WorkNodeStatus,
     dependsOn,
     fileOwnership,
-    manifestId: record.manifestId,
+    ...(typeof record.manifestId === "string" ? { manifestId: record.manifestId } : {}),
+    ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
     evidenceRefs,
   };
+}
+
+function parseOptionalStringList(
+  record: Record<string, unknown> | undefined,
+  key: string,
+): readonly string[] | undefined | null {
+  if (!record || !hasOwn(record, key)) {
+    return undefined;
+  }
+  return parseStringList(record[key]) ?? null;
 }
 
 function parseToolActivity(value: unknown): ToolActivity | undefined {

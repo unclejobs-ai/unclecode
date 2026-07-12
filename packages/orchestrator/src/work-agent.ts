@@ -1,4 +1,11 @@
-import type { OrchestratorStepTraceEvent } from "@unclecode/contracts";
+import type {
+  OrchestratorStepTraceEvent,
+  WorkApprovedTraceEvent,
+  WorkGraph,
+  WorkNodeStatus,
+  WorkProposedTraceEvent,
+  WorkStatusTraceEvent,
+} from "@unclecode/contracts";
 
 import {
   createTurnOrchestrator,
@@ -13,11 +20,25 @@ type ReasoningLike = {
 
 type PlannedWorkTask = ComplexPlanTask & {
   readonly prompt: string;
+  readonly goal: string;
+  readonly constraints: readonly string[];
+  readonly acceptanceCriteria: readonly string[];
+  readonly dependsOn: readonly string[];
+  readonly writePaths: readonly string[];
+};
+
+type PlannedWorkResult = {
+  readonly id: string;
+  readonly summary: string;
+  readonly status: Extract<WorkNodeStatus, "completed" | "failed" | "blocked">;
 };
 
 export type OrchestratedWorkAgentTraceEvent<TraceEvent extends { readonly type: string }> =
   | TraceEvent
-  | OrchestratorStepTraceEvent;
+  | OrchestratorStepTraceEvent
+  | WorkProposedTraceEvent
+  | WorkApprovedTraceEvent
+  | WorkStatusTraceEvent;
 
 export interface OrchestratedWorkTurnAgent<
   Attachment,
@@ -43,21 +64,38 @@ function parsePlannedWorkTasks(raw: string): readonly PlannedWorkTask[] {
     throw new Error("Rust orchestrator returned invalid complex tasks.");
   }
   return parsed.map((item) => {
+    const record = typeof item === "object" && item !== null
+      ? item as Record<string, unknown>
+      : undefined;
     if (
-      typeof item !== "object" ||
-      item === null ||
-      typeof (item as Record<string, unknown>).id !== "string" ||
-      typeof (item as Record<string, unknown>).summary !== "string" ||
-      typeof (item as Record<string, unknown>).prompt !== "string"
+      !record
+      || typeof record.id !== "string"
+      || typeof record.summary !== "string"
+      || typeof record.prompt !== "string"
+      || typeof record.goal !== "string"
+      || !isStringArray(record.constraints)
+      || !isStringArray(record.acceptanceCriteria)
+      || record.acceptanceCriteria.length === 0
+      || !isStringArray(record.dependsOn)
+      || !isStringArray(record.writePaths)
     ) {
       throw new Error("Rust orchestrator returned invalid complex task entries.");
     }
     return {
-      id: (item as { id: string }).id,
-      summary: (item as { summary: string }).summary,
-      prompt: (item as { prompt: string }).prompt,
+      id: record.id,
+      summary: record.summary,
+      prompt: record.prompt,
+      goal: record.goal,
+      constraints: record.constraints,
+      acceptanceCriteria: record.acceptanceCriteria,
+      dependsOn: record.dependsOn,
+      writePaths: record.writePaths,
     };
   });
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
 function buildComplexTasks(prompt: string): readonly PlannedWorkTask[] {
@@ -141,12 +179,45 @@ export function resolveWorkerBudget(mode: string): number {
   return workerBudget;
 }
 
+let workGraphSequence = 0;
+
+function createWorkGraph(tasks: readonly PlannedWorkTask[], startedAt: number): WorkGraph {
+  workGraphSequence += 1;
+  return {
+    id: `goal-${startedAt}-${workGraphSequence}`,
+    ...(tasks[0]?.goal ? { goal: tasks[0].goal } : {}),
+    ...(tasks[0]?.constraints ? { constraints: tasks[0].constraints } : {}),
+    approval: "pending",
+    nodes: tasks.map((task) => ({
+      id: task.id,
+      title: task.summary,
+      prompt: task.prompt,
+      status: "proposed",
+      dependsOn: task.dependsOn,
+      fileOwnership: task.writePaths,
+      acceptanceCriteria: task.acceptanceCriteria,
+      evidenceRefs: [],
+    })),
+  };
+}
+
+type ExecutorAgentFactory<
+  Attachment,
+  TraceEvent extends { readonly type: string },
+  Reasoning extends ReasoningLike,
+> = (settings: {
+  readonly mode: string;
+  readonly model: string;
+  readonly reasoning: Reasoning;
+}) => Promise<OrchestratedWorkTurnAgent<Attachment, TraceEvent, Reasoning>>;
+
 export class WorkAgent<
   Attachment,
   TraceEvent extends { readonly type: string },
   Reasoning extends ReasoningLike,
 > {
   private readonly directAgent: OrchestratedWorkTurnAgent<Attachment, TraceEvent, Reasoning>;
+  private readonly createExecutorAgent: ExecutorAgentFactory<Attachment, TraceEvent, Reasoning> | undefined;
   private mode: string;
   private reasoning: Reasoning;
   private model: string;
@@ -154,13 +225,14 @@ export class WorkAgent<
     readonly prompt: string;
     readonly mode: string;
     readonly tasks: readonly PlannedWorkTask[];
-    readonly results: readonly { id: string; summary: string }[];
+    readonly results: readonly PlannedWorkResult[];
     readonly changedFiles: readonly string[];
   }) => Promise<{ readonly summary: string }>) | undefined;
   private traceListener: ((event: OrchestratedWorkAgentTraceEvent<TraceEvent>) => void) | undefined;
 
   constructor(input: {
     directAgent: OrchestratedWorkTurnAgent<Attachment, TraceEvent, Reasoning>;
+    createExecutorAgent?: ExecutorAgentFactory<Attachment, TraceEvent, Reasoning> | undefined;
     mode: string;
     reasoning: Reasoning;
     model: string;
@@ -168,11 +240,12 @@ export class WorkAgent<
       readonly prompt: string;
       readonly mode: string;
       readonly tasks: readonly PlannedWorkTask[];
-      readonly results: readonly { id: string; summary: string }[];
+      readonly results: readonly PlannedWorkResult[];
       readonly changedFiles: readonly string[];
     }) => Promise<{ readonly summary: string }>) | undefined;
   }) {
     this.directAgent = input.directAgent;
+    this.createExecutorAgent = input.createExecutorAgent;
     this.mode = input.mode;
     this.reasoning = input.reasoning;
     this.model = input.model;
@@ -213,40 +286,48 @@ export class WorkAgent<
     signal?: AbortSignal | undefined,
   ): Promise<{ readonly tasks: readonly PlannedWorkTask[]; readonly usedLlm: boolean }> {
     const staticTasks = buildComplexTasks(prompt);
-    if (this.mode !== "yolo" && this.mode !== "ultrawork") {
-      return { tasks: staticTasks, usedLlm: false };
-    }
+    let plannerInvoked = false;
 
     try {
       const planPrompt = buildPlannerPrompt(prompt);
-      // Emit running BEFORE the LLM call so a UI rendering live progress
-      // sees the planner's spinner state for the duration of the actual
-      // model invocation. The orchestrator emits the matching completed
-      // event after planComplexTurn resolves with usedLlm:true. This is
-      // option C from Hermes review of c91cd24's Codex S3 finding.
       const plannerStartedAt = Date.now();
       onTrace?.(resolveAgentTraceEvent({
         kind: "planner-running",
         prompt,
         startedAt: plannerStartedAt,
       }));
+      plannerInvoked = true;
       const result = await this.runInternalTurn(planPrompt, [], { signal });
       const parsed = parseAgentPlanResponse(result.text);
       if (parsed.length >= 2) {
         return { tasks: parsed, usedLlm: true };
       }
-      // Parse failure — silently fall through to static. The running event
-      // is left dangling on purpose: the orchestrator's usedLlm:false path
-      // will not emit a completed event, so the UI will see the running
-      // state cleared by the next turn's events. A "failed" event would
-      // misrepresent a successful turn that simply could not parse 2+
-      // subtasks; we prefer the smaller dishonesty (a phantom running
-      // tile) until the planner has a richer outcome enum.
     } catch {
-      // Fall back to static decomposition on any failure
+      // A deterministic end-to-end task keeps the turn actionable when planning fails.
     }
 
-    return { tasks: staticTasks, usedLlm: false };
+    return { tasks: staticTasks, usedLlm: plannerInvoked };
+  }
+
+  private async runExecutorTurn(
+    prompt: string,
+    options: { readonly signal?: AbortSignal | undefined },
+  ): Promise<{ text: string }> {
+    if (!this.createExecutorAgent) {
+      return this.runInternalTurn(prompt, [], options);
+    }
+
+    const executor = await this.createExecutorAgent({
+      mode: this.mode,
+      model: this.model,
+      reasoning: this.reasoning,
+    });
+    executor.setTraceListener(this.traceListener ? (event) => this.emitTrace(event) : undefined);
+    try {
+      return await executor.runTurn(prompt, [], options);
+    } finally {
+      executor.clear();
+    }
   }
 
   setTraceListener(listener?: ((event: OrchestratedWorkAgentTraceEvent<TraceEvent>) => void) | undefined): void {
@@ -275,7 +356,8 @@ export class WorkAgent<
       return this.directAgent.runTurn(prompt, attachments, options);
     }
 
-    const orchestrator = createTurnOrchestrator<PlannedWorkTask, { id: string; summary: string }>({
+    let activeGraphId: string | undefined;
+    const orchestrator = createTurnOrchestrator<PlannedWorkTask, PlannedWorkResult>({
       runSimpleTurn: (simplePrompt) => this.directAgent.runTurn(simplePrompt, attachments, options),
       runResearchTurn: (researchPrompt) => this.directAgent.runTurn(researchPrompt, attachments, options),
       planComplexTurn: async (complexPrompt, planOptions) => {
@@ -283,9 +365,20 @@ export class WorkAgent<
         return { tasks, usedLlm };
       },
       executeComplexTask: async (task) => {
-        const result = await this.runInternalTurn(task.prompt, [], options);
-        return { id: task.id, summary: result.text };
+        const result = await this.runExecutorTurn(task.prompt, options);
+        return { id: task.id, summary: result.text, status: "completed" };
       },
+      isComplexTaskSuccessful: (taskResult) => taskResult.status === "completed",
+      createFailedComplexTaskResult: (task, error) => ({
+        id: task.id,
+        summary: `Executor failed: ${error instanceof Error ? error.message : String(error)}`,
+        status: "failed",
+      }),
+      createBlockedComplexTaskResult: (task) => ({
+        id: task.id,
+        summary: "Blocked because a dependency failed.",
+        status: "blocked",
+      }),
       runGuardianReview: async ({ prompt: originalPrompt, tasks, results }) => {
         const changedFiles = extractChangedFilesFromTasks(tasks);
         const executableChecks = await this.loadExecutableGuardianSummary({
@@ -312,8 +405,41 @@ export class WorkAgent<
     const result = await orchestrator.run({
       prompt,
       mode: this.mode,
-      maxWorkers: resolveWorkerBudget(this.mode),
+      maxWorkers: this.createExecutorAgent ? resolveWorkerBudget(this.mode) : 1,
       ...(this.traceListener ? { onTrace: (event) => this.emitTrace(event) } : {}),
+      onPlan: (tasks) => {
+        const startedAt = Date.now();
+        const graph = createWorkGraph(tasks, startedAt);
+        activeGraphId = graph.id;
+        this.emitTrace({
+          type: "work.proposed",
+          level: "high-signal",
+          graphId: graph.id,
+          nodeCount: graph.nodes.length,
+          startedAt,
+          graph,
+        });
+        this.emitTrace({
+          type: "work.approved",
+          level: "high-signal",
+          graphId: graph.id,
+          startedAt: Date.now(),
+        });
+      },
+      onTaskStatus: (task, status) => {
+        if (!activeGraphId) {
+          return;
+        }
+        this.emitTrace({
+          type: "work.status",
+          level: "high-signal",
+          graphId: activeGraphId,
+          nodeId: task.id,
+          status,
+          summary: task.summary,
+          startedAt: Date.now(),
+        });
+      },
     });
 
     if (result.kind !== "complex") {
@@ -351,7 +477,7 @@ export class WorkAgent<
     readonly prompt: string;
     readonly mode: string;
     readonly tasks: readonly PlannedWorkTask[];
-    readonly results: readonly { id: string; summary: string }[];
+    readonly results: readonly PlannedWorkResult[];
     readonly changedFiles: readonly string[];
   }): Promise<string | undefined> {
     if (!this.runExecutableGuardianChecks) {

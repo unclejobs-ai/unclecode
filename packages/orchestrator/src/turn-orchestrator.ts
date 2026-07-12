@@ -1,4 +1,4 @@
-import type { OrchestratorStepTraceEvent } from "@unclecode/contracts";
+import type { OrchestratorStepTraceEvent, WorkNodeStatus } from "@unclecode/contracts";
 
 import { FileOwnershipRegistry } from "./file-ownership-registry.js";
 import { runRustCommandSync } from "./rust-command.js";
@@ -8,6 +8,10 @@ export type WorkIntent = "simple" | "complex" | "research";
 export type ComplexPlanTask = {
   readonly id: string;
   readonly summary: string;
+  readonly goal?: string;
+  readonly constraints?: readonly string[];
+  readonly acceptanceCriteria?: readonly string[];
+  readonly dependsOn?: readonly string[];
   readonly writePaths?: readonly string[];
 };
 
@@ -128,6 +132,107 @@ export async function runBoundedExecutorPool<Task extends ComplexPlanTask, Resul
   return results;
 }
 
+export async function runGoalTaskExecutorPool<Task extends ComplexPlanTask, Result>(input: {
+  readonly tasks: readonly Task[];
+  readonly maxWorkers: number;
+  readonly executeTask: (task: Task) => Promise<Result>;
+  readonly isSuccessful: (result: Result) => boolean;
+  readonly createFailedResult?: ((task: Task, error: unknown) => Result) | undefined;
+  readonly createBlockedResult?: ((task: Task) => Result) | undefined;
+  readonly ownershipRegistry?: FileOwnershipRegistry | undefined;
+  readonly onTrace?: TurnOrchestratorTraceListener | undefined;
+  readonly onStatus?: ((task: Task, status: WorkNodeStatus) => void) | undefined;
+}): Promise<readonly Result[]> {
+  const taskById = new Map(input.tasks.map((task) => [task.id, task]));
+  if (taskById.size !== input.tasks.length) {
+    throw new Error("Goal task plan contains duplicate task ids.");
+  }
+
+  for (const [index, task] of input.tasks.entries()) {
+    for (const dependencyId of task.dependsOn ?? []) {
+      const dependencyIndex = input.tasks.findIndex((candidate) => candidate.id === dependencyId);
+      if (dependencyIndex < 0 || dependencyIndex >= index) {
+        throw new Error(`Goal task ${task.id} has an invalid dependency: ${dependencyId}`);
+      }
+    }
+  }
+
+  const pending = new Set(input.tasks.map((task) => task.id));
+  const successful = new Set<string>();
+  const failed = new Set<string>();
+  const results = new Map<string, Result>();
+  const ownershipRegistry = input.ownershipRegistry ?? new FileOwnershipRegistry();
+
+  while (pending.size > 0) {
+    const blocked = input.tasks.filter((task) =>
+      pending.has(task.id) && (task.dependsOn ?? []).some((dependencyId) => failed.has(dependencyId))
+    );
+    for (const task of blocked) {
+      pending.delete(task.id);
+      failed.add(task.id);
+      input.onStatus?.(task, "blocked");
+      const blockedResult = input.createBlockedResult?.(task);
+      if (blockedResult !== undefined) {
+        results.set(task.id, blockedResult);
+      }
+    }
+    if (blocked.length > 0) {
+      continue;
+    }
+
+
+    const ready = input.tasks.filter((task) =>
+      pending.has(task.id) && (task.dependsOn ?? []).every((dependencyId) => successful.has(dependencyId))
+    );
+    if (ready.length === 0) {
+      if (pending.size > 0) {
+        throw new Error("Goal task plan cannot make progress.");
+      }
+      break;
+    }
+
+    for (const task of ready) {
+      pending.delete(task.id);
+      input.onStatus?.(task, "ready");
+    }
+    const waveResults = await runBoundedExecutorPool({
+      tasks: ready,
+      maxWorkers: input.maxWorkers,
+      ownershipRegistry,
+      executeTask: async (task) => {
+        input.onStatus?.(task, "running");
+        try {
+          const result = await input.executeTask(task);
+          input.onStatus?.(task, input.isSuccessful(result) ? "completed" : "failed");
+          return result;
+        } catch (error) {
+          input.onStatus?.(task, "failed");
+          const failedResult = input.createFailedResult?.(task, error);
+          if (failedResult === undefined) {
+            throw error;
+          }
+          return failedResult;
+        }
+      },
+      ...(input.onTrace ? { onTrace: input.onTrace } : {}),
+    });
+
+    for (const [index, task] of ready.entries()) {
+      const result = waveResults[index];
+      if (result === undefined) {
+        throw new Error(`Goal task ${task.id} did not produce a result.`);
+      }
+      results.set(task.id, result);
+      (input.isSuccessful(result) ? successful : failed).add(task.id);
+    }
+  }
+
+  return input.tasks.flatMap((task) => {
+    const result = results.get(task.id);
+    return result === undefined ? [] : [result];
+  });
+}
+
 export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(deps: {
   readonly runSimpleTurn: (prompt: string) => Promise<{ text: string }>;
   readonly runResearchTurn: (prompt: string) => Promise<{ text: string }>;
@@ -136,6 +241,9 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
     options?: { readonly onTrace?: TurnOrchestratorTraceListener | undefined },
   ) => Promise<{ readonly tasks: readonly Task[]; readonly usedLlm: boolean }>;
   readonly executeComplexTask: (task: Task) => Promise<Result>;
+  readonly isComplexTaskSuccessful?: ((result: Result) => boolean) | undefined;
+  readonly createFailedComplexTaskResult?: ((task: Task, error: unknown) => Result) | undefined;
+  readonly createBlockedComplexTaskResult?: ((task: Task) => Result) | undefined;
   readonly runGuardianReview?: ((input: {
     readonly prompt: string;
     readonly mode: string;
@@ -150,6 +258,8 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
       readonly maxWorkers?: number | undefined;
       readonly ownershipRegistry?: FileOwnershipRegistry | undefined;
       readonly onTrace?: TurnOrchestratorTraceListener | undefined;
+      readonly onPlan?: ((tasks: readonly Task[]) => void) | undefined;
+      readonly onTaskStatus?: ((task: Task, status: WorkNodeStatus) => void) | undefined;
     }): Promise<
       | { readonly kind: "simple"; readonly text: string }
       | { readonly kind: "research"; readonly text: string }
@@ -196,6 +306,7 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
         onTrace: input.onTrace,
       });
       const tasks = planOutcome.tasks;
+      input.onPlan?.(tasks);
       const plannerCompletedAt = Date.now();
       if (planOutcome.usedLlm) {
         // Pair the running event the planner already emitted with a
@@ -210,13 +321,29 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
         }));
       }
 
-      const results = await runBoundedExecutorPool({
-        tasks,
-        maxWorkers: input.maxWorkers ?? 1,
-        executeTask: deps.executeComplexTask,
-        ownershipRegistry: input.ownershipRegistry ?? new FileOwnershipRegistry(),
-        ...(input.onTrace ? { onTrace: input.onTrace } : {}),
-      });
+      const results = deps.isComplexTaskSuccessful
+        ? await runGoalTaskExecutorPool({
+            tasks,
+            maxWorkers: input.maxWorkers ?? 1,
+            executeTask: deps.executeComplexTask,
+            isSuccessful: deps.isComplexTaskSuccessful,
+            ...(deps.createFailedComplexTaskResult
+              ? { createFailedResult: deps.createFailedComplexTaskResult }
+              : {}),
+            ...(deps.createBlockedComplexTaskResult
+              ? { createBlockedResult: deps.createBlockedComplexTaskResult }
+              : {}),
+            ownershipRegistry: input.ownershipRegistry ?? new FileOwnershipRegistry(),
+            ...(input.onTrace ? { onTrace: input.onTrace } : {}),
+            ...(input.onTaskStatus ? { onStatus: input.onTaskStatus } : {}),
+          })
+        : await runBoundedExecutorPool({
+            tasks,
+            maxWorkers: input.maxWorkers ?? 1,
+            executeTask: deps.executeComplexTask,
+            ownershipRegistry: input.ownershipRegistry ?? new FileOwnershipRegistry(),
+            ...(input.onTrace ? { onTrace: input.onTrace } : {}),
+          });
 
       const runGuardianReview = deps.runGuardianReview;
       const guardian = runGuardianReview

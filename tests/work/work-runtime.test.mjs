@@ -16,6 +16,7 @@ import { loadWorkCliBootstrap } from "../../apps/unclecode-cli/src/work-runtime-
 import { loadWorkShellDashboardProps } from "../../apps/unclecode-cli/src/work-runtime.ts";
 import { persistWorkShellSessionSnapshot } from "@unclecode/orchestrator";
 import { formatContextPacketPromptPrefix } from "../../packages/context-broker/src/context-packet-view.ts";
+import { buildWorkGraphContextItems } from "../../apps/unclecode-cli/src/work-runtime-context-items.ts";
 
 test("parseArgs extracts cwd/provider/model/reasoning/session/help/tools/prompt from work argv", () => {
   assert.deepEqual(
@@ -200,6 +201,21 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
       bridgeLines: ["bridge ready"],
       memoryLines: ["memory ready"],
       traceLines: ["trace ready"],
+      workGraph: {
+        id: "goal-runtime-1",
+        goal: "Ship safe context lifecycle",
+        approval: "approved",
+        nodes: [{
+          id: "task-1",
+          title: "Wire lifecycle state",
+          prompt: "RAW_EXECUTOR_PROMPT_MUST_STAY_LOCAL",
+          status: "running",
+          dependsOn: [],
+          fileOwnership: ["private/path.ts"],
+          acceptanceCriteria: ["Packet exposes safe status"],
+          evidenceRefs: [],
+        }],
+      },
     });
 
     assert.match(packet.id, /^crp-/, "bootstrap context packets are backed by the CRP selector");
@@ -243,6 +259,14 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
       "workspace guidance filename is preserved in preview, not the headline label",
     );
     assert.ok(packet.included.some((item) => item.category === "loop-trail" && /G001-context/.test(item.label)));
+    assert.ok(
+      packet.included.some((item) =>
+        item.category === "loop-trail" && /running · Wire lifecycle state/.test(item.label)
+      ),
+      "packet includes the allowlisted autonomous task status",
+    );
+    assert.doesNotMatch(JSON.stringify(packet), /RAW_EXECUTOR_PROMPT_MUST_STAY_LOCAL/);
+    assert.doesNotMatch(JSON.stringify(packet), /private\/path\.ts/);
     // OMO excluded label must not expose an absolute path; path is preserved in preview
     const loopTrailLedgerItem = packet.excluded.find((item) => item.category === "loop-trail" && /ledger\.jsonl/.test(item.preview ?? ""));
     assert.ok(loopTrailLedgerItem, "loop trail excluded item preserves ledger path in preview");
@@ -683,4 +707,25 @@ test("loadWorkCliBootstrap reuses resumed reasoning overrides unless the CLI ove
     process.env = originalEnv;
     rmSync(workspaceRoot, { recursive: true, force: true });
   }
+});
+
+test("goal context projection prioritizes active tasks and excludes private executor fields", () => {
+  const items = buildWorkGraphContextItems({
+    id: "goal-context",
+    goal: "Ship context",
+    approval: "approved",
+    nodes: Array.from({ length: 6 }, (_, index) => ({
+      id: `task-${index + 1}`,
+      title: `Task ${index + 1}`,
+      prompt: `PRIVATE_PROMPT_${index + 1}`,
+      status: index === 5 ? "running" : "completed",
+      dependsOn: [],
+      fileOwnership: [`private-${index + 1}.ts`],
+      evidenceRefs: [],
+    })),
+  });
+
+  assert.match(items[1]?.label ?? "", /running · Task 6/);
+  assert.equal(items.some((item) => /Task 5/.test(item.label)), false);
+  assert.doesNotMatch(JSON.stringify(items), /PRIVATE_PROMPT|private-\d+\.ts/);
 });

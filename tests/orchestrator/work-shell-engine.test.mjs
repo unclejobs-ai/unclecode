@@ -4398,8 +4398,8 @@ test("parseAgentPlanResponse extracts valid tasks from agent JSON output", async
 
   const validJson = `Here are the tasks:
 [
-  {"id": "task-1", "summary": "Read the files", "prompt": "Read src/index.ts"},
-  {"id": "task-2", "summary": "Fix the bug", "prompt": "Fix the null check in auth.ts"}
+  {"id": "task-1", "summary": "Read the files", "prompt": "Read src/index.ts", "goal": "Fix auth", "constraints": ["No dependencies"], "acceptanceCriteria": ["Relevant code is understood"], "dependsOn": [], "writePaths": []},
+  {"id": "task-2", "summary": "Fix the bug", "prompt": "Fix the null check in auth.ts", "goal": "Fix auth", "constraints": ["No dependencies"], "acceptanceCriteria": ["Auth tests pass"], "dependsOn": ["task-1"], "writePaths": ["auth.ts"]}
 ]`;
   const tasks = parseAgentPlanResponse(validJson);
   assert.equal(tasks.length, 2);

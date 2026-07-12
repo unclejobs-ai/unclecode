@@ -86,3 +86,61 @@ test("tool activity reducer bounds history by discarding routine completed reads
   assert.equal(console.activity[0]?.toolCallId, "read-1");
   assert.equal(console.activity.at(-1)?.toolCallId, "read-80");
 });
+
+test("work lifecycle reducer projects the proposed graph and correlated task statuses", () => {
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(initialConsole, {
+      type: "work.proposed",
+      graphId: "invalid",
+      graph: {
+        id: "invalid",
+        approval: "pending",
+        nodes: [{ id: "task-1", title: "Missing required fields", status: "ready" }],
+      },
+    }),
+    initialConsole,
+  );
+
+  const proposed = applyTraceEventToAgentConsole(initialConsole, {
+    type: "work.proposed",
+    graphId: "goal-1",
+    graph: {
+      id: "goal-1",
+      goal: "Ship authentication",
+      constraints: ["No dependencies"],
+      approval: "pending",
+      nodes: [{
+        id: "task-1",
+        title: "Implement auth",
+        prompt: "private executor assignment",
+        status: "proposed",
+        dependsOn: [],
+        fileOwnership: ["src/auth.ts"],
+        acceptanceCriteria: ["Auth tests pass"],
+        evidenceRefs: [],
+      }],
+    },
+  });
+  const approved = applyTraceEventToAgentConsole(proposed, {
+    type: "work.approved",
+    graphId: "goal-1",
+  });
+  const running = applyTraceEventToAgentConsole(approved, {
+    type: "work.status",
+    graphId: "goal-1",
+    nodeId: "task-1",
+    status: "running",
+  });
+
+  assert.equal(running.workGraph?.approval, "approved");
+  assert.equal(running.workGraph?.nodes[0]?.status, "running");
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(running, {
+      type: "work.status",
+      graphId: "other",
+      nodeId: "task-1",
+      status: "completed",
+    }),
+    running,
+  );
+});

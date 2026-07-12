@@ -1,6 +1,7 @@
 import type {
   ContextPacketSourceCategory,
   ContextPacketViewItem,
+  WorkGraph,
 } from "@unclecode/contracts";
 
 export function estimateTokens(value: string): number {
@@ -21,6 +22,51 @@ export function buildContextLineItems(input: {
     preview: line,
     tokenEstimate: estimateTokens(line),
   }));
+}
+
+export function buildWorkGraphContextItems(
+  graph: WorkGraph | undefined,
+): readonly ContextPacketViewItem[] {
+  if (!graph) {
+    return [];
+  }
+
+  const completed = graph.nodes.filter((node) => node.status === "completed").length;
+  const terminal = graph.nodes.filter((node) =>
+    node.status === "completed" || node.status === "failed" || node.status === "blocked" || node.status === "cancelled"
+  ).length;
+  const goal = graph.goal?.replace(/\s+/g, " ").trim().slice(0, 180);
+  const summary = `${completed}/${graph.nodes.length} completed · ${terminal}/${graph.nodes.length} terminal`;
+  const prioritizedNodes = [...graph.nodes].sort(
+    (left, right) => Number(isActiveGoalTaskStatus(right.status)) - Number(isActiveGoalTaskStatus(left.status)),
+  );
+  return [
+    {
+      id: `goal-loop-${graph.id}`,
+      category: "loop-trail",
+      label: `Goal loop · ${summary}`,
+      reason: "current autonomous goal-task state",
+      ...(goal ? { preview: goal } : {}),
+      tokenEstimate: estimateTokens(`${summary} ${goal ?? ""}`),
+    },
+    ...prioritizedNodes.slice(0, 4).map((node): ContextPacketViewItem => {
+      const title = node.title?.slice(0, 120) || node.id;
+      return {
+        id: `goal-loop-${graph.id}-${node.id}`,
+        category: "loop-trail",
+        label: `${node.status} · ${title}`,
+        reason: "current autonomous task state",
+        preview: `${node.dependsOn?.length ?? 0} dependencies · ${node.acceptanceCriteria?.length ?? 0} acceptance criteria`,
+        tokenEstimate: estimateTokens(`${node.status} ${title}`),
+      };
+    }),
+  ];
+}
+
+function isActiveGoalTaskStatus(
+  status: WorkGraph["nodes"][number]["status"],
+): boolean {
+  return status === "running" || status === "blocked" || status === "requires_action";
 }
 
 function isWorkspaceGuidanceSummaryLine(line: string): boolean {

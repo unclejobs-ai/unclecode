@@ -161,3 +161,35 @@ test("agent-console resume parser keeps declared evidence and rejects raw tool o
     undefined,
   );
 });
+
+test("agent-console resume parser accepts goal metadata before a prompt manifest exists", async () => {
+  const { parseAgentConsoleSnapshot } = await import("@unclecode/contracts");
+  const parsed = parseAgentConsoleSnapshot({
+    profileId: "build",
+    workGraph: {
+      id: "goal-1",
+      goal: "Ship auth",
+      constraints: ["No new dependencies"],
+      approval: "approved",
+      nodes: [
+        {
+          id: "task-1",
+          title: "Implement auth",
+          prompt: "executor assignment",
+          status: "ready",
+          dependsOn: [],
+          fileOwnership: ["src/auth.ts"],
+          acceptanceCriteria: ["Auth tests pass"],
+          evidenceRefs: [],
+        },
+      ],
+    },
+    activity: [],
+  });
+
+  assert.equal(parsed?.workGraph?.goal, "Ship auth");
+  assert.deepEqual(parsed?.workGraph?.nodes[0]?.acceptanceCriteria, [
+    "Auth tests pass",
+  ]);
+  assert.equal(parsed?.workGraph?.nodes[0]?.manifestId, undefined);
+});

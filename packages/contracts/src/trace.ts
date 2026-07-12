@@ -1,4 +1,4 @@
-import type { AskUserQuestionResult, WorkNodeStatus } from "./agent-console.js";
+import type { AskUserQuestionResult, WorkGraph, WorkNodeStatus } from "./agent-console.js";
 import type {
   ExecutionPolicyCapability,
   PolicyDecisionEffect,
@@ -131,6 +131,7 @@ export type WorkProposedTraceEvent = {
   readonly graphId: string;
   readonly nodeCount: number;
   readonly startedAt: number;
+  readonly graph?: WorkGraph;
 };
 
 export type WorkApprovedTraceEvent = {

@@ -65,6 +65,7 @@ import type {
   ContextPacketViewItem,
   ContextProfileId,
   PromptManifest,
+  WorkGraph,
 } from "@unclecode/contracts";
 
 type PromiseResolvers<Value> = {
@@ -483,6 +484,7 @@ export type WorkShellEngineInput<
     readonly bridgeLines: readonly string[];
     readonly memoryLines: readonly string[];
     readonly traceLines: readonly string[];
+    readonly workGraph?: WorkGraph | undefined;
   }) => Promise<ContextPacketView>) | undefined;
   resolveContextSourceDetail?: ((sourceId: string) => Promise<string | undefined>) | undefined;
   resolvePromptManifest?: WorkShellPromptManifestResolver | undefined;
@@ -613,6 +615,7 @@ export class WorkShellEngine<
     readonly bridgeLines: readonly string[];
     readonly memoryLines: readonly string[];
     readonly traceLines: readonly string[];
+    readonly workGraph?: WorkGraph | undefined;
   }) => Promise<ContextPacketView>) | undefined;
   private readonly resolveContextSourceDetail?: ((sourceId: string) => Promise<string | undefined>) | undefined;
   private readonly resolvePromptManifest?: WorkShellPromptManifestResolver | undefined;
@@ -1839,6 +1842,7 @@ export class WorkShellEngine<
       bridgeLines: this.state.bridgeLines,
       memoryLines: this.state.memoryLines,
       traceLines: this.state.traceLines,
+      ...(this.state.agentConsole.workGraph ? { workGraph: this.state.agentConsole.workGraph } : {}),
     });
     this.setState({
       contextPacket: packet,

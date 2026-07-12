@@ -13,6 +13,29 @@ const supportedReasoning = {
   },
 };
 
+const goalPlan = JSON.stringify([
+  {
+    id: "task-1",
+    summary: "Implement auth refactor",
+    prompt: "Implement login.ts and oauth.ts",
+    goal: "Refactor authentication safely",
+    constraints: ["Preserve public behavior"],
+    acceptanceCriteria: ["Auth unit tests pass"],
+    dependsOn: [],
+    writePaths: ["login.ts", "oauth.ts"],
+  },
+  {
+    id: "task-2",
+    summary: "Verify session integration",
+    prompt: "Update and verify session.ts",
+    goal: "Refactor authentication safely",
+    constraints: ["Preserve public behavior"],
+    acceptanceCriteria: ["Session integration passes"],
+    dependsOn: ["task-1"],
+    writePaths: ["session.ts"],
+  },
+]);
+
 test("WorkAgent keeps simple turns on the direct single-call path", async () => {
   const calls = [];
   const traces = [];
@@ -73,24 +96,42 @@ test("WorkAgent enables run_shell only in full-autonomy modes (yolo/ultrawork)",
   }
 });
 
-test("WorkAgent routes complex turns through the real orchestrator and synthesizes executor output", async () => {
+test("WorkAgent plans goal tasks, runs isolated executors, and emits truthful lifecycle events", async () => {
   const calls = [];
+  const executorCalls = [];
   const traces = [];
+  let executorCount = 0;
   const directAgent = {
     clear() {},
     updateRuntimeSettings() {},
     setTraceListener() {},
     async runTurn(prompt) {
       calls.push(prompt);
+      if (prompt.startsWith("<goal_task_planner>")) {
+        return { text: goalPlan };
+      }
       if (prompt.startsWith("Synthesize executor findings")) {
         return { text: "final synthesis" };
       }
-      return { text: `result:${calls.length}` };
+      return { text: "guardian passed" };
     },
   };
 
   const agent = new WorkAgent({
     directAgent,
+    async createExecutorAgent() {
+      executorCount += 1;
+      const executorId = executorCount;
+      return {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn(prompt) {
+          executorCalls.push([executorId, prompt]);
+          return { text: `executor:${executorId}` };
+        },
+      };
+    },
     mode: "default",
     reasoning: supportedReasoning,
     model: "gpt-5.4",
@@ -100,19 +141,31 @@ test("WorkAgent routes complex turns through the real orchestrator and synthesiz
   const result = await agent.runTurn("refactor login.ts oauth.ts session.ts");
 
   assert.equal(result.text, "final synthesis");
-  assert.equal(calls.length, 5);
-  assert.ok(calls[0]?.includes("login.ts"));
-  assert.ok(calls[1]?.includes("oauth.ts"));
-  assert.ok(calls[2]?.includes("session.ts"));
-  assert.ok(calls[3]?.startsWith("Review the executor findings"));
-  assert.ok(calls[4]?.startsWith("Synthesize executor findings"));
-  assert.equal(traces.some((event) => event.type === "orchestrator.step" && event.role === "planner"), false);
+  assert.equal(calls.length, 3, "planner, guardian, and synthesis use the coordinator");
+  assert.deepEqual(executorCalls, [
+    [1, "Implement login.ts and oauth.ts"],
+    [2, "Update and verify session.ts"],
+  ]);
+  const proposed = traces.find((event) => event.type === "work.proposed");
+  assert.equal(proposed?.graph?.goal, "Refactor authentication safely");
+  assert.deepEqual(proposed?.graph?.nodes[1]?.dependsOn, ["task-1"]);
+  assert.deepEqual(
+    traces.filter((event) => event.type === "work.status").map((event) => [event.nodeId, event.status]),
+    [
+      ["task-1", "ready"],
+      ["task-1", "running"],
+      ["task-1", "completed"],
+      ["task-2", "ready"],
+      ["task-2", "running"],
+      ["task-2", "completed"],
+    ],
+  );
   assert.ok(
     traces.some(
       (event) =>
-        event.type === "orchestrator.step" &&
-        event.role === "reviewer" &&
-        event.status === "completed",
+        event.type === "orchestrator.step"
+        && event.role === "reviewer"
+        && event.status === "completed",
     ),
   );
 });
@@ -126,6 +179,9 @@ test("WorkAgent includes executable guardian checks in review and synthesis prom
     setTraceListener() {},
     async runTurn(prompt) {
       calls.push(prompt);
+      if (prompt.startsWith("<goal_task_planner>")) {
+        return { text: goalPlan };
+      }
       if (prompt.startsWith("Synthesize executor findings")) {
         return { text: "final synthesis" };
       }
@@ -156,8 +212,8 @@ test("WorkAgent includes executable guardian checks in review and synthesis prom
   assert.equal(result.text, "final synthesis");
   assert.deepEqual(guardCalls, [{
     mode: "ultrawork",
-    taskCount: 3,
-    resultCount: 3,
+    taskCount: 2,
+    resultCount: 2,
     changedFiles: ["login.ts", "oauth.ts", "session.ts"],
   }]);
   const reviewCall = calls.find((c) => /Executable verification:/.test(c));

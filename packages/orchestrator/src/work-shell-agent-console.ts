@@ -1,8 +1,10 @@
 import {
   createAgentConsoleSnapshot,
   isCoalescibleToolActivity,
+  parseAgentConsoleSnapshot,
   type AgentConsoleSnapshot,
   type ToolActivity,
+  type WorkNodeStatus,
   type ToolActivityKind,
 } from "@unclecode/contracts";
 
@@ -18,6 +20,11 @@ export function applyTraceEventToAgentConsole(
   snapshot: AgentConsoleSnapshot,
   event: { readonly type: string },
 ): AgentConsoleSnapshot {
+  const workSnapshot = applyWorkLifecycleEvent(snapshot, event);
+  if (workSnapshot !== snapshot) {
+    return workSnapshot;
+  }
+
   if (event.type !== "tool.started" && event.type !== "tool.completed") {
     return snapshot;
   }
@@ -48,6 +55,74 @@ export function applyTraceEventToAgentConsole(
     ...snapshot,
     activity: capToolActivity(activity),
   });
+}
+
+function applyWorkLifecycleEvent(
+  snapshot: AgentConsoleSnapshot,
+  event: { readonly type: string },
+): AgentConsoleSnapshot {
+  const trace = asRecord(event);
+  if (!trace) {
+    return snapshot;
+  }
+
+  if (event.type === "work.proposed") {
+    const parsed = parseAgentConsoleSnapshot({
+      ...snapshot,
+      workGraph: trace.graph,
+    });
+    if (
+      !parsed?.workGraph
+      || parsed.workGraph.id !== readNonEmptyString(trace, "graphId")
+    ) {
+      return snapshot;
+    }
+    return parsed;
+  }
+
+  const graph = snapshot.workGraph;
+  if (!graph || readNonEmptyString(trace, "graphId") !== graph.id) {
+    return snapshot;
+  }
+
+  if (event.type === "work.approved") {
+    return createAgentConsoleSnapshot({
+      ...snapshot,
+      workGraph: { ...graph, approval: "approved" },
+    });
+  }
+
+  if (event.type !== "work.status") {
+    return snapshot;
+  }
+  const nodeId = readNonEmptyString(trace, "nodeId");
+  const status = readWorkNodeStatus(trace.status);
+  if (!nodeId || !status || !graph.nodes.some((node) => node.id === nodeId)) {
+    return snapshot;
+  }
+  return createAgentConsoleSnapshot({
+    ...snapshot,
+    workGraph: {
+      ...graph,
+      nodes: graph.nodes.map((node) => node.id === nodeId ? { ...node, status } : node),
+    },
+  });
+}
+
+function readWorkNodeStatus(value: unknown): WorkNodeStatus | undefined {
+  return typeof value === "string" && [
+    "proposed",
+    "approved",
+    "ready",
+    "running",
+    "blocked",
+    "requires_action",
+    "completed",
+    "failed",
+    "cancelled",
+  ].includes(value)
+    ? value as WorkNodeStatus
+    : undefined;
 }
 
 function createStartedActivity(input: {

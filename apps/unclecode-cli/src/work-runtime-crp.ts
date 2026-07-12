@@ -17,10 +17,12 @@ import type {
   ContextPacketViewSourceState,
   ContextPacketViewWarning,
   ContextSourceCategory,
+  WorkGraph,
 } from "@unclecode/contracts";
 
 import {
   buildContextSummaryItems,
+  buildWorkGraphContextItems,
   estimateTokens,
 } from "./work-runtime-context-items.js";
 
@@ -31,6 +33,7 @@ export type WorkShellContextPacketResolver = (input: {
   readonly bridgeLines: readonly string[];
   readonly memoryLines: readonly string[];
   readonly traceLines: readonly string[];
+  readonly workGraph?: WorkGraph | undefined;
 }) => Promise<ContextPacketView>;
 
 type WorkShellCrpConfig = {
@@ -189,6 +192,12 @@ export function createCrpRuntime(
         projectId: crpState.projectId,
         items: buildContextSummaryItems(input.contextSummaryLines),
         salience: 0.9,
+      });
+      upsertPacketItemsAsContextSources({
+        store: crpState.store,
+        projectId: crpState.projectId,
+        items: buildWorkGraphContextItems(input.workGraph),
+        salience: 0.93,
       });
       upsertPacketItemsAsContextSources({
         store: crpState.store,

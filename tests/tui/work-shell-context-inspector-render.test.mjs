@@ -417,3 +417,35 @@ test("WorkShellView formats only compact agent console tool evidence", () => {
     ["Tool · Read session state · session.json · completed · 12ms"],
   );
 });
+
+test("WorkShellView renders a bounded goal task lifecycle without executor prompts", () => {
+  const lines = formatWorkShellAgentConsoleActivityLines({
+    profileId: "build",
+    workGraph: {
+      id: "goal-1",
+      goal: "Ship authentication",
+      approval: "approved",
+      nodes: Array.from({ length: 6 }, (_, index) => ({
+        id: `task-${index + 1}`,
+        title: `Task ${index + 1}`,
+        prompt: `private executor prompt ${index + 1}`,
+        status: index === 0 ? "completed" : index === 1 ? "running" : "ready",
+        dependsOn: index === 0 ? [] : [`task-${index}`],
+        fileOwnership: [],
+        acceptanceCriteria: ["observable proof"],
+        evidenceRefs: [],
+      })),
+    },
+    activity: [],
+  });
+
+  assert.deepEqual(lines, [
+    "Goal · Ship authentication",
+    "● Task 2 · after task-1",
+    "✓ Task 1",
+    "○ Task 3 · after task-2",
+    "○ Task 4 · after task-3",
+    "… 2 more tasks",
+  ]);
+  assert.doesNotMatch(lines.join("\n"), /private executor prompt/);
+});
