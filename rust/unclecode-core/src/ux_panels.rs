@@ -417,7 +417,8 @@ fn queue_panel(input: &Value) -> Value {
             "Queue paused after interrupt · send a new message to resume or /queue clear to drop."
                 .to_string()
         } else {
-            "Slash commands are not queued while busy; /cancel interrupts the active turn.".to_string()
+            "Slash commands are not queued while busy; /cancel interrupts the active turn."
+                .to_string()
         },
         "/queue clear drops queued follow-ups without stopping the active turn.".to_string(),
     ]);
@@ -484,7 +485,11 @@ fn build_work_board_grid_lines(input: WorkBoardInput<'_>, terminal_columns: usiz
     let running = build_work_board_column(
         "Running",
         usize::from(input.is_busy),
-        build_running_board_rows(input.is_busy, input.busy_status, input.active_prompt_preview),
+        build_running_board_rows(
+            input.is_busy,
+            input.busy_status,
+            input.active_prompt_preview,
+        ),
     );
     let blocked = build_work_board_column(
         "Blocked",
@@ -540,10 +545,7 @@ fn build_running_board_rows(
     if !is_busy {
         return vec!["—".to_string()];
     }
-    let mut rows = vec![format!(
-        "⠋ {}",
-        busy_status.unwrap_or("active turn")
-    )];
+    let mut rows = vec![format!("⠋ {}", busy_status.unwrap_or("active turn"))];
     if let Some(preview) = active_prompt_preview {
         rows.push(compact_preview(preview, 28));
     }
@@ -618,13 +620,13 @@ fn format_work_board_two_by_two(columns: &[WorkBoardColumn; 4], col_width: usize
     let mut lines = Vec::new();
     for pair in [(0, 1), (2, 3)] {
         lines.push(join_board_row(
-            &[columns[pair.0].label.as_str(), columns[pair.1].label.as_str()],
+            &[
+                columns[pair.0].label.as_str(),
+                columns[pair.1].label.as_str(),
+            ],
             col_width,
         ));
-        let row_count = columns[pair.0]
-            .rows
-            .len()
-            .max(columns[pair.1].rows.len());
+        let row_count = columns[pair.0].rows.len().max(columns[pair.1].rows.len());
         for row_index in 0..row_count {
             lines.push(join_board_row(
                 &[
@@ -903,7 +905,7 @@ fn model_picker_panel(input: &Value) -> Value {
     lines.extend([
         String::new(),
         "Controls".to_string(),
-        "↑↓ choose model · Enter switch · append low/medium/high/default · Esc close".to_string(),
+        "↑↓ choose model · Enter switch · append none/low/medium/high/xhigh/max/default · Esc close".to_string(),
     ]);
 
     json!({ "title": "Model picker", "lines": lines })
@@ -1610,12 +1612,15 @@ fn compact_model_suggestion_description(description: &str) -> String {
 fn model_picker_reasoning_choice_line(current_meta: &ModelPickerCurrent) -> String {
     match current_meta.support.as_deref() {
         Some(support) if !support.trim().is_empty() => {
-            format!("Thinking choices · {} / default", support.replace(", ", " / "))
+            format!(
+                "Thinking choices · {} / default",
+                support.replace(", ", " / ")
+            )
         }
         _ if current_meta.reasoning.eq_ignore_ascii_case("unavailable") => {
             "Thinking choices · unavailable for this model".to_string()
         }
-        _ => "Thinking choices · low / medium / high / default".to_string(),
+        _ => "Thinking choices · none / low / medium / high / xhigh / max / default".to_string(),
     }
 }
 
@@ -2033,14 +2038,11 @@ fn normalize_status_detail(value: &str) -> String {
         return String::new();
     }
     let lower = stripped.to_ascii_lowercase();
-    if lower.starts_with("read ") || lower.starts_with("write ") || lower.starts_with("search ")
-    {
+    if lower.starts_with("read ") || lower.starts_with("write ") || lower.starts_with("search ") {
         return "Reading files".to_string();
     }
     if lower.starts_with("calling ") {
-        return stripped
-            .replacen("calling ", "model ", 1)
-            .to_string();
+        return stripped.replacen("calling ", "model ", 1).to_string();
     }
     if looks_like_internal_file_path(stripped) {
         return "Reading files".to_string();
@@ -2098,18 +2100,19 @@ mod tests {
             Some("Work board")
         );
         assert!(lines.iter().any(|line| line.as_str() == Some("Board")));
-        assert!(lines
-            .iter()
-            .any(|line| line.as_str().is_some_and(|value| value.contains("Queued · 2"))));
-        assert!(lines
-            .iter()
-            .any(|line| line.as_str().is_some_and(|value| value.contains("Running · 1"))));
-        assert!(lines
-            .iter()
-            .any(|line| line.as_str().is_some_and(|value| value.contains("#1 first queued"))));
+        assert!(lines.iter().any(|line| line
+            .as_str()
+            .is_some_and(|value| value.contains("Queued · 2"))));
+        assert!(lines.iter().any(|line| line
+            .as_str()
+            .is_some_and(|value| value.contains("Running · 1"))));
+        assert!(lines.iter().any(|line| line
+            .as_str()
+            .is_some_and(|value| value.contains("#1 first queued"))));
         assert!(lines.iter().any(|line| line == "Steer"));
-        assert!(lines.iter().any(|line| line.as_str().is_some_and(|value| value
-            .contains("Enter queues follow-up"))));
+        assert!(lines.iter().any(|line| line
+            .as_str()
+            .is_some_and(|value| value.contains("Enter queues follow-up"))));
     }
 
     #[test]
@@ -2125,14 +2128,15 @@ mod tests {
             ]
         }));
         let lines = panel.get("lines").and_then(Value::as_array).expect("lines");
-        assert!(lines
-            .iter()
-            .any(|line| line.as_str().is_some_and(|value| value.contains("Blocked · 1"))));
-        assert!(lines
-            .iter()
-            .any(|line| line.as_str().is_some_and(|value| value.contains("pause · 2 queued"))));
-        assert!(lines.iter().any(|line| line.as_str().is_some_and(|value| value
-            .contains("Queue paused after interrupt"))));
+        assert!(lines.iter().any(|line| line
+            .as_str()
+            .is_some_and(|value| value.contains("Blocked · 1"))));
+        assert!(lines.iter().any(|line| line
+            .as_str()
+            .is_some_and(|value| value.contains("pause · 2 queued"))));
+        assert!(lines.iter().any(|line| line
+            .as_str()
+            .is_some_and(|value| value.contains("Queue paused after interrupt"))));
     }
 
     #[test]
@@ -2146,18 +2150,18 @@ mod tests {
             "lastCompletedTurn": {"user": "hi", "assistant": "hello there"}
         }));
         let lines = panel.get("lines").and_then(Value::as_array).expect("lines");
-        assert!(lines
-            .iter()
-            .any(|line| line.as_str().is_some_and(|value| value.contains("Queued · 1"))));
+        assert!(lines.iter().any(|line| line
+            .as_str()
+            .is_some_and(|value| value.contains("Queued · 1"))));
         assert!(!lines.iter().any(|line| line.as_str().is_some_and(|value| {
             value.contains("Queued · 1") && value.contains("Done · 1")
         })));
-        assert!(lines
-            .iter()
-            .any(|line| line.as_str().is_some_and(|value| value.contains("Done · 1"))));
-        assert!(lines
-            .iter()
-            .any(|line| line.as_str().is_some_and(|value| value.contains("hi → hello"))));
+        assert!(lines.iter().any(|line| line
+            .as_str()
+            .is_some_and(|value| value.contains("Done · 1"))));
+        assert!(lines.iter().any(|line| line
+            .as_str()
+            .is_some_and(|value| value.contains("hi → hello"))));
     }
 
     #[test]
@@ -2227,8 +2231,8 @@ mod tests {
             "suggestions": [
                 {"command": "/model", "description": "Show the current model and available model picks."},
                 {"command": "/model list", "description": "List available models and reasoning support."},
-                {"command": "/model gpt-5.4", "description": "Current · reasoning default medium · supports low, medium, high"},
-                {"command": "/model gpt-5.4-mini", "description": "Available · reasoning default medium · supports low, medium, high"}
+                {"command": "/model gpt-5.6-sol", "description": "Current · reasoning default medium · supports none, low, medium, high, xhigh, max"},
+                {"command": "/model gpt-5.6-terra", "description": "Available · reasoning default medium · supports none, low, medium, high, xhigh, max"}
             ],
             "selectedIndex": 2
         }));
@@ -2240,17 +2244,17 @@ mod tests {
             panel.get("lines").and_then(Value::as_array).unwrap(),
             &vec![
                 json!("Current model"),
-                json!("Model · gpt-5.4"),
+                json!("Model · gpt-5.6-sol"),
                 json!("Thinking · default medium"),
-                json!("Thinking choices · low / medium / high / default"),
-                json!("Supports · low, medium, high"),
+                json!("Thinking choices · none / low / medium / high / xhigh / max / default"),
+                json!("Supports · none, low, medium, high, xhigh, max"),
                 json!(""),
                 json!("Pick model"),
-                json!("› /model gpt-5.4  active · reasoning medium"),
-                json!("  /model gpt-5.4-mini  reasoning medium"),
+                json!("› /model gpt-5.6-sol  active · reasoning medium"),
+                json!("  /model gpt-5.6-terra  reasoning medium"),
                 json!(""),
                 json!("Controls"),
-                json!("↑↓ choose model · Enter switch · append low/medium/high/default · Esc close"),
+                json!("↑↓ choose model · Enter switch · append none/low/medium/high/xhigh/max/default · Esc close"),
             ]
         );
     }
@@ -2261,14 +2265,14 @@ mod tests {
             "suggestions": [
                 {"command": "/model", "description": "Show the current model and available model picks."},
                 {"command": "/model list", "description": "List available models and reasoning support."},
-                {"command": "/model gpt-5.4", "description": "Current · reasoning default medium · supports low, medium, high"},
-                {"command": "/model gpt-5.4-mini", "description": "Available · reasoning default medium · supports low, medium, high"}
+                {"command": "/model gpt-5.6-sol", "description": "Current · reasoning default medium · supports none, low, medium, high, xhigh, max"},
+                {"command": "/model gpt-5.6-terra", "description": "Available · reasoning default medium · supports none, low, medium, high, xhigh, max"}
             ],
             "selectedIndex": 0
         }));
         let lines = panel.get("lines").and_then(Value::as_array).unwrap();
-        assert!(lines.contains(&json!("› /model gpt-5.4  active · reasoning medium")));
-        assert!(lines.contains(&json!("  /model gpt-5.4-mini  reasoning medium")));
+        assert!(lines.contains(&json!("› /model gpt-5.6-sol  active · reasoning medium")));
+        assert!(lines.contains(&json!("  /model gpt-5.6-terra  reasoning medium")));
     }
 
     #[test]

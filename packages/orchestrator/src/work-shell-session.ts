@@ -1,5 +1,9 @@
 import { runRustCommand } from "./rust-command.js";
-import { createAgentConsoleSnapshot, type AgentConsoleSnapshot } from "@unclecode/contracts";
+import {
+  createAgentConsoleSnapshot,
+  type AgentConsoleSnapshot,
+  type ModeReasoningEffort,
+} from "@unclecode/contracts";
 
 export async function listSessionLines(
   workspaceRoot: string,
@@ -25,7 +29,7 @@ export async function persistWorkShellSessionSnapshot(input: {
   readonly state: "running" | "idle" | "requires_action";
   readonly summary: string;
   readonly traceMode?: "minimal" | "verbose" | undefined;
-  readonly reasoningEffort?: "low" | "medium" | "high" | undefined;
+  readonly reasoningEffort?: ModeReasoningEffort | undefined;
   readonly entries?: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[] | undefined;
   readonly agentConsole?: AgentConsoleSnapshot | undefined;
 }): Promise<void> {

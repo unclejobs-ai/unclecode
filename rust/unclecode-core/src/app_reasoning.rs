@@ -1,4 +1,4 @@
-use crate::model_registry::openai_reasoning_support;
+use crate::model_registry::{is_openai_reasoning_effort, openai_reasoning_support};
 use serde_json::json;
 
 pub fn resolve_app_reasoning_effort(
@@ -20,7 +20,7 @@ pub fn resolve_app_reasoning_effort(
     let override_effort = override_effort
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != "-")
-        .filter(|value| matches!(*value, "low" | "medium" | "high"));
+        .filter(|value| is_openai_reasoning_effort(value));
     Some(
         override_effort
             .unwrap_or_else(|| mode_default_reasoning(mode))
@@ -63,7 +63,7 @@ pub fn resolve_app_reasoning_config_json(
     let normalized_override = override_effort
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != "-")
-        .filter(|value| matches!(*value, "low" | "medium" | "high"));
+        .filter(|value| is_openai_reasoning_effort(value));
     let effort = resolve_app_reasoning_effort(provider, model, mode, override_effort)
         .unwrap_or_else(|| mode_default_reasoning(mode).to_string());
     let source = if normalized_override.is_some() {
@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn resolves_openai_mode_default_reasoning() {
         let parsed: Value = serde_json::from_str(
-            &resolve_app_reasoning_config_json("openai", "gpt-5.5", "ultrawork", None).unwrap(),
+            &resolve_app_reasoning_config_json("openai", "gpt-5.6-sol", "ultrawork", None).unwrap(),
         )
         .unwrap();
         assert_eq!(parsed["effort"], "high");
@@ -113,10 +113,11 @@ mod tests {
     #[test]
     fn resolves_override_reasoning() {
         let parsed: Value = serde_json::from_str(
-            &resolve_app_reasoning_config_json("openai", "gpt-5.4", "search", Some("low")).unwrap(),
+            &resolve_app_reasoning_config_json("openai", "gpt-5.6-terra", "search", Some("xhigh"))
+                .unwrap(),
         )
         .unwrap();
-        assert_eq!(parsed["effort"], "low");
+        assert_eq!(parsed["effort"], "xhigh");
         assert_eq!(parsed["source"], "override");
     }
 

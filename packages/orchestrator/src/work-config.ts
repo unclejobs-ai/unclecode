@@ -1,4 +1,5 @@
 import { explainUncleCodeConfig } from "@unclecode/config-core";
+import { isModeReasoningEffort } from "@unclecode/contracts";
 import {
   type ModeProfileId,
   type ModeReasoningEffort,
@@ -22,7 +23,7 @@ const providerSchema = z.enum(["anthropic", "gemini", "openai"]);
 const envSchema = z.object({
   LLM_PROVIDER: providerSchema.default("openai"),
   OPENAI_API_KEY: z.string().optional(),
-  OPENAI_MODEL: z.string().min(1).default("gpt-5.5"),
+  OPENAI_MODEL: z.string().min(1).default("gpt-5.6-sol"),
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_MODEL: z.string().min(1).default("claude-sonnet-4-20250514"),
   GEMINI_API_KEY: z.string().optional(),
@@ -89,10 +90,7 @@ function isAppReasoningConfig(value: unknown): value is AppReasoningConfig {
   if (!isRecord(value) || !isRecord(value.support)) {
     return false;
   }
-  const effortOk = value.effort === "low"
-    || value.effort === "medium"
-    || value.effort === "high"
-    || value.effort === "unsupported";
+  const effortOk = isModeReasoningEffort(value.effort) || value.effort === "unsupported";
   const sourceOk = value.source === "mode-default"
     || value.source === "override"
     || value.source === "model-capability";

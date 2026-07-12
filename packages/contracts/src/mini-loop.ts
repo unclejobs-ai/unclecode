@@ -26,7 +26,7 @@ export type MiniLoopConfig = {
   readonly costLimitUsd: number;
   readonly submitMarker: string;
   readonly model?: string;
-  readonly reasoningEffort?: "low" | "medium" | "high" | "minimal" | "none";
+  readonly reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   readonly allowedTools: ReadonlyArray<string>;
 };
 

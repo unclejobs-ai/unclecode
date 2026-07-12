@@ -606,14 +606,14 @@ test("work-shell builtin helpers resolve panels, transcript entries, and runtime
     line: "/reasoning low",
     options: {
       provider: "openai",
-      model: "gpt-5.4",
+      model: "gpt-5.6-sol",
       mode: "default",
       authLabel: "api-key-env",
       reasoning: supportedReasoning,
       cwd: "/repo",
       contextSummaryLines: ["Loaded guidance: AGENTS.md"],
     },
-    stateModel: "gpt-5.4",
+    stateModel: "gpt-5.6-sol",
     currentReasoning: supportedReasoning,
     modeDefaultReasoning: supportedReasoning,
     authLabel: "api-key-env",
@@ -626,9 +626,9 @@ test("work-shell builtin helpers resolve panels, transcript entries, and runtime
     buildStatusPanel: (nextReasoning, authLabel) => ({ title: "Status", lines: [nextReasoning.effort, authLabel] }),
   });
   const model = resolveModelBuiltinResult({
-    line: "/model gpt-4.1-mini",
+    line: "/model gpt-5.6-terra",
     provider: "openai",
-    currentModel: "gpt-5.4",
+    currentModel: "gpt-5.6-sol",
     currentReasoning: supportedReasoning,
     modeDefaultReasoning: supportedReasoning,
   });
@@ -658,7 +658,7 @@ test("work-shell builtin helpers resolve panels, transcript entries, and runtime
   assert.equal(reasoning.nextReasoning.effort, "low");
   assert.equal(reasoning.panel.title, "Status");
   assert.deepEqual(reasoning.panel.lines, ["low", "api-key-env"]);
-  assert.equal(model?.nextModel, "gpt-4.1-mini");
+  assert.equal(model?.nextModel, "gpt-5.6-terra");
   assert.equal(model?.shouldUpdateRuntime, true);
   assert.equal(createToolsBuiltinResult("/tools", ["tool-a"]).at(-1)?.text, "tool-a");
   assert.equal(authKey.composerMode, "api-key-entry");
@@ -2488,12 +2488,12 @@ test("createWorkShellPaneRuntime builds shared engine and slash runtime helpers"
   assert.equal(runtime.shouldBlockSlashSubmit("/auth"), true);
   assert.equal(runtime.shouldBlockSlashSubmit("/context"), false);
 
-  await runtime.engine.handleSubmit("/model gpt-4.1-mini");
+  await runtime.engine.handleSubmit("/model gpt-5.6-terra");
   const modelSuggestions = runtime.getSuggestions("/model");
-  assert.equal(modelSuggestions[0]?.command, "/model gpt-4.1-mini");
+  assert.equal(modelSuggestions[0]?.command, "/model gpt-5.6-terra");
   assert.match(modelSuggestions[0]?.description ?? "", /Current/i);
   assert.equal(runtime.shouldBlockSlashSubmit("/model"), true);
-  assert.equal(runtime.shouldBlockSlashSubmit("/model gpt-4.1-mini"), false);
+  assert.equal(runtime.shouldBlockSlashSubmit("/model gpt-5.6-terra"), false);
 });
 
 test("createWorkShellEngine builds a real shared engine instance", () => {
@@ -2561,34 +2561,34 @@ test("WorkShellEngine applies /reasoning updates and syncs agent runtime setting
   );
 });
 
-test("WorkShellEngine applies /model updates and syncs model plus reasoning runtime settings", async () => {
+test("WorkShellEngine applies GPT-5.6 model and reasoning updates together", async () => {
   const { engine, calls } = createEngine();
 
   await engine.initialize();
-  await engine.handleSubmit("/model gpt-4.1-mini");
+  await engine.handleSubmit("/model gpt-5.6-luna none");
 
-  assert.equal(engine.getState().model, "gpt-4.1-mini");
-  assert.equal(engine.getState().reasoning.effort, "unsupported");
+  assert.equal(engine.getState().model, "gpt-5.6-luna");
+  assert.equal(engine.getState().reasoning.effort, "none");
   assert.equal(calls.runtimeSettings.length, 1);
-  assert.equal(calls.runtimeSettings[0]?.model, "gpt-4.1-mini");
-  assert.equal(calls.runtimeSettings[0]?.reasoning?.effort, "unsupported");
+  assert.equal(calls.runtimeSettings[0]?.model, "gpt-5.6-luna");
+  assert.equal(calls.runtimeSettings[0]?.reasoning?.effort, "none");
   assert.equal(engine.getState().panel.title, "Status");
-  assert.ok(engine.getState().panel.lines.includes("model:gpt-4.1-mini"));
-  assert.ok(engine.getState().panel.lines.includes("reasoning:unsupported"));
+  assert.ok(engine.getState().panel.lines.includes("model:gpt-5.6-luna"));
+  assert.ok(engine.getState().panel.lines.includes("reasoning:none"));
 });
 
-test("WorkShellEngine applies supported /model updates without losing reasoning overrides", async () => {
+test("WorkShellEngine preserves GPT-5.6 reasoning overrides across model switches", async () => {
   const { engine, calls } = createEngine();
 
   await engine.initialize();
-  await engine.handleSubmit("/model gpt-5.5");
+  await engine.handleSubmit("/model gpt-5.6-terra max");
 
-  assert.equal(engine.getState().model, "gpt-5.5");
-  assert.equal(engine.getState().reasoning.effort, "high");
-  assert.equal(engine.getState().reasoning.source, "mode-default");
+  assert.equal(engine.getState().model, "gpt-5.6-terra");
+  assert.equal(engine.getState().reasoning.effort, "max");
+  assert.equal(engine.getState().reasoning.source, "override");
   assert.equal(calls.runtimeSettings.length, 1);
-  assert.equal(calls.runtimeSettings[0]?.model, "gpt-5.5");
-  assert.equal(calls.runtimeSettings[0]?.reasoning?.effort, "high");
+  assert.equal(calls.runtimeSettings[0]?.model, "gpt-5.6-terra");
+  assert.equal(calls.runtimeSettings[0]?.reasoning?.effort, "max");
   assert.equal(calls.turns.length, 0);
 });
 

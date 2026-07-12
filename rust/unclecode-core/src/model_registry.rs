@@ -49,28 +49,11 @@ pub struct OpenAICompatPolicy {
     pub thinking_format: String,
 }
 
-const OPENAI_DEFAULT_MODEL: &str = "gpt-5.5";
-const OPENAI_DEFAULT_MODELS: &[&str] = &[
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "o4-mini",
-    "gpt-4.1-mini",
-    "gpt-4.1",
-    "gpt-4o-mini",
-    "gpt-4o",
-];
+const OPENAI_DEFAULT_MODEL: &str = "gpt-5.6-sol";
+const OPENAI_DEFAULT_MODELS: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+pub const OPENAI_REASONING_EFFORTS: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
 
-const COMPAT_OPENAI_MODELS: &[&str] = &[
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "o4-mini",
-    "gpt-4.1-mini",
-    "gpt-4.1",
-    "gpt-4o-mini",
-    "gpt-4o",
-];
+const COMPAT_OPENAI_MODELS: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 const COMPAT_ANTHROPIC_MODELS: &[&str] = &[
     "claude-sonnet-4-20250514",
     "claude-sonnet-4-6",
@@ -100,11 +83,17 @@ const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &["anthropic", "gemini", "openai"];
 
 pub fn openai_reasoning_support(model_id: &str) -> ReasoningSupport {
     let normalized = model_id.trim().to_ascii_lowercase();
-    if normalized.starts_with("gpt-5") || normalized.starts_with("o4") {
+    if matches!(
+        normalized.as_str(),
+        "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+    ) {
         return ReasoningSupport {
             status: "supported".to_string(),
             default_effort: Some("medium".to_string()),
-            supported_efforts: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+            supported_efforts: OPENAI_REASONING_EFFORTS
+                .iter()
+                .map(|effort| (*effort).to_string())
+                .collect(),
         };
     }
 
@@ -113,6 +102,9 @@ pub fn openai_reasoning_support(model_id: &str) -> ReasoningSupport {
         default_effort: None,
         supported_efforts: Vec::new(),
     }
+}
+pub fn is_openai_reasoning_effort(value: &str) -> bool {
+    OPENAI_REASONING_EFFORTS.contains(&value)
 }
 
 pub fn openai_model_registry(active_model: Option<&str>) -> ModelRegistry {
@@ -440,30 +432,32 @@ mod tests {
 
     #[test]
     fn openai_registry_keeps_active_model_first() {
-        let registry = openai_model_registry(Some("gpt-5.4"));
+        let registry = openai_model_registry(Some("custom-openai-model"));
         assert_eq!(registry.provider_id, "openai");
-        assert_eq!(registry.default_model, "gpt-5.5");
+        assert_eq!(registry.default_model, "gpt-5.6-sol");
         assert_eq!(
-            &registry.models[..5],
-            &[
-                "gpt-5.4",
-                "gpt-5.5",
-                "gpt-5.4-mini",
-                "o4-mini",
-                "gpt-4.1-mini"
+            registry.models,
+            [
+                "custom-openai-model",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
             ]
         );
     }
 
     #[test]
-    fn openai_reasoning_support_matches_frontier_families() {
-        assert_eq!(openai_reasoning_support("gpt-5.4").status, "supported");
-        assert_eq!(
-            openai_reasoning_support("o4-mini")
-                .default_effort
-                .as_deref(),
-            Some("medium")
-        );
+    fn openai_reasoning_support_matches_gpt_5_6_family() {
+        for model in ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            let support = openai_reasoning_support(model);
+            assert_eq!(support.status, "supported");
+            assert_eq!(support.default_effort.as_deref(), Some("medium"));
+            assert_eq!(
+                support.supported_efforts,
+                ["none", "low", "medium", "high", "xhigh", "max"]
+            );
+        }
+        assert_eq!(openai_reasoning_support("gpt-5.5").status, "unsupported");
         assert_eq!(
             openai_reasoning_support("gpt-4.1-mini").status,
             "unsupported"
@@ -474,7 +468,7 @@ mod tests {
     fn detects_provider_from_model_family() {
         assert_eq!(detect_provider_for_model("Claude-Sonnet"), "anthropic");
         assert_eq!(detect_provider_for_model("Gemini-3.1"), "gemini");
-        assert_eq!(detect_provider_for_model("gpt-5.4"), "openai");
+        assert_eq!(detect_provider_for_model("gpt-5.6-terra"), "openai");
     }
 
     #[test]
@@ -488,7 +482,7 @@ mod tests {
         assert_eq!(route.endpoint_url, "https://api.anthropic.com/v1/messages");
         assert!(route.env_keys.contains(&"ANTHROPIC_API_KEY".to_string()));
 
-        let openai_route = resolve_provider_route("auto", Some("gpt-5.5")).unwrap();
+        let openai_route = resolve_provider_route("auto", Some("gpt-5.6-sol")).unwrap();
         assert_eq!(openai_route.provider_id, "openai");
         assert_eq!(openai_route.transport, "native");
         assert!(openai_route.runtime_supported);
@@ -507,7 +501,7 @@ mod tests {
 
     #[test]
     fn renders_provider_route_with_proxy_policy_as_json() {
-        let route = resolve_provider_route("auto", Some("gpt-5.5")).unwrap();
+        let route = resolve_provider_route("auto", Some("gpt-5.6-sol")).unwrap();
         let proxy = ProxyPolicy {
             target_host: "api.openai.com".to_string(),
             proxy_url: Some("http://user:secret@proxy.local:8080".to_string()),
@@ -519,7 +513,7 @@ mod tests {
             serde_json::from_str(&provider_route_json(&route, &proxy).unwrap()).unwrap();
 
         assert_eq!(parsed["providerId"], "openai");
-        assert_eq!(parsed["defaultModel"], "gpt-5.5");
+        assert_eq!(parsed["defaultModel"], "gpt-5.6-sol");
         assert_eq!(
             parsed["proxyPolicy"]["proxyUrl"],
             "http://redacted@proxy.local:8080/"
@@ -572,12 +566,12 @@ mod tests {
     #[test]
     fn renders_provider_capability_support_as_json() {
         let openai: serde_json::Value = serde_json::from_str(
-            &provider_capability_json("openai", "prompt-caching", "gpt-5.5").unwrap(),
+            &provider_capability_json("openai", "prompt-caching", "gpt-5.6-sol").unwrap(),
         )
         .unwrap();
         assert_eq!(openai["providerId"], "openai");
         assert_eq!(openai["capability"], "prompt-caching");
-        assert_eq!(openai["modelId"], "gpt-5.5");
+        assert_eq!(openai["modelId"], "gpt-5.6-sol");
         assert_eq!(openai["supported"], false);
 
         let anthropic: serde_json::Value = serde_json::from_str(
@@ -606,9 +600,11 @@ mod tests {
     }
 
     #[test]
-    fn openai_provider_catalog_includes_frontier_defaults() {
+    fn openai_provider_catalog_includes_only_gpt_5_6_defaults() {
         let catalog = provider_model_catalog("openai", None, None);
-        assert_eq!(catalog.models[0], "gpt-5.5");
-        assert!(catalog.models.contains(&"gpt-5.4-mini".to_string()));
+        assert_eq!(
+            catalog.models,
+            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+        );
     }
 }

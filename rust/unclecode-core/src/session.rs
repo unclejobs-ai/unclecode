@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::model_registry::is_openai_reasoning_effort;
 use crate::redaction::redact_secrets;
 use crate::session_listing::{parse_session_list_item, parse_session_resume_summary};
 pub use crate::session_listing::{SessionListItem, SessionResumeSummary};
@@ -251,7 +252,7 @@ impl WorkShellSessionStore {
             .get("metadata")
             .and_then(|value| value.get("reasoningEffort"))
             .and_then(Value::as_str)
-            .filter(|value| *value == "low" || *value == "medium" || *value == "high")
+            .filter(|value| is_openai_reasoning_effort(value))
             .map(str::to_string);
         let summary = parsed
             .get("taskSummary")
@@ -324,7 +325,7 @@ pub fn persist_work_shell_session_snapshot_json(
     let reasoning_effort = parsed
         .get("reasoningEffort")
         .and_then(Value::as_str)
-        .filter(|value| matches!(*value, "low" | "medium" | "high"))
+        .filter(|value| is_openai_reasoning_effort(value))
         .map(str::to_string);
     let entries = parsed
         .get("entries")
@@ -605,13 +606,13 @@ fn sanitize_agent_console_snapshot(value: &Value) -> Option<Value> {
     }
 
     let mut snapshot = Map::new();
-    snapshot.insert("profileId".to_string(), Value::String(profile_id.to_string()));
+    snapshot.insert(
+        "profileId".to_string(),
+        Value::String(profile_id.to_string()),
+    );
 
     if let Some(manifest) = source.get("manifest") {
-        snapshot.insert(
-            "manifest".to_string(),
-            sanitize_prompt_manifest(manifest)?,
-        );
+        snapshot.insert("manifest".to_string(), sanitize_prompt_manifest(manifest)?);
     }
     if let Some(pending_decision) = source.get("pendingDecision") {
         snapshot.insert(
@@ -653,7 +654,9 @@ fn sanitize_prompt_manifest(value: &Value) -> Option<Value> {
         .get("policy")?
         .as_array()?
         .iter()
-        .map(|source| copy_known_fields(source, &["id", "label", "authority", "digest"]).map(Value::Object))
+        .map(|source| {
+            copy_known_fields(source, &["id", "label", "authority", "digest"]).map(Value::Object)
+        })
         .collect::<Option<Vec<_>>>()?;
     manifest.insert("policy".to_string(), Value::Array(policy));
     Some(Value::Object(manifest))
@@ -668,12 +671,15 @@ fn sanitize_pending_decision(value: &Value) -> Option<Value> {
         .iter()
         .map(|question| {
             let source = question.as_object()?;
-            let mut question = copy_known_fields(question, &["id", "question", "multi", "recommended"])?;
+            let mut question =
+                copy_known_fields(question, &["id", "question", "multi", "recommended"])?;
             let options = source
                 .get("options")?
                 .as_array()?
                 .iter()
-                .map(|option| copy_known_fields(option, &["label", "description"]).map(Value::Object))
+                .map(|option| {
+                    copy_known_fields(option, &["label", "description"]).map(Value::Object)
+                })
                 .collect::<Option<Vec<_>>>()?;
             question.insert("options".to_string(), Value::Array(options));
             Some(Value::Object(question))

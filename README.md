@@ -312,7 +312,7 @@ npm run unclecode -- work --provider gemini
 모델 id까지 직접 지정(기본 프롬프트 건너뜀):
 
 ```bash
-npm run unclecode -- work --provider openai --model gpt-5.5
+npm run unclecode -- work --provider openai --model gpt-5.6-sol
 npm run unclecode -- work --provider gemini --model gemini-2.5-pro
 npm run unclecode -- work --provider anthropic --model claude-sonnet-4-6
 ```
@@ -323,7 +323,7 @@ npm run unclecode -- work --provider anthropic --model claude-sonnet-4-6
 echo "이 저장소 요약해 줘" | npm run unclecode -- work
 ```
 
-워크 셸에서 제공자를 고른 뒤 모델 id를 입력한다. 엔터를 치면 기본값을 유지하고, 직접 id(예: `gpt-5.5`, `claude-sonnet-4-6`, `gemini-2.5-pro`)를 입력해도 된다.
+워크 셸에서 제공자를 고른 뒤 모델 id를 입력한다. 엔터를 치면 기본값을 유지하고, 직접 id(예: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`)를 입력해도 된다. GPT-5.6 모델은 `none`, `low`, `medium`, `high`, `xhigh`, `max` reasoning 단계를 지원한다.
 
 ---
 
@@ -342,7 +342,7 @@ ANTHROPIC_MODEL=claude-sonnet-4-20250514
 
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
-OPENAI_MODEL=gpt-4.1-mini
+OPENAI_MODEL=gpt-5.6-sol
 ```
 
 `OPENAI_API_KEY` 또는 UncleCode OpenAI 인증 흐름을 쓴다. `unclecode auth login --browser`로 로컬 자격 증명을 만들 수 있다. `.env.example`의 자리표시자 값은 미설정으로 본다.

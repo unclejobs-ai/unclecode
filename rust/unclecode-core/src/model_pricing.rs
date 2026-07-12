@@ -6,59 +6,31 @@ pub struct ModelPrice {
 
 const OPENAI_PRICES: &[(&str, ModelPrice)] = &[
     (
-        "gpt-4.1-mini",
-        ModelPrice {
-            input_usd_per_1m: 0.4,
-            output_usd_per_1m: 1.6,
-        },
-    ),
-    (
-        "gpt-4.1",
-        ModelPrice {
-            input_usd_per_1m: 2.0,
-            output_usd_per_1m: 8.0,
-        },
-    ),
-    (
-        "gpt-4o-mini",
-        ModelPrice {
-            input_usd_per_1m: 0.15,
-            output_usd_per_1m: 0.6,
-        },
-    ),
-    (
-        "gpt-4o",
-        ModelPrice {
-            input_usd_per_1m: 2.5,
-            output_usd_per_1m: 10.0,
-        },
-    ),
-    (
-        "gpt-5.4-mini",
-        ModelPrice {
-            input_usd_per_1m: 1.0,
-            output_usd_per_1m: 4.0,
-        },
-    ),
-    (
-        "gpt-5.5",
-        ModelPrice {
-            input_usd_per_1m: 7.5,
-            output_usd_per_1m: 22.5,
-        },
-    ),
-    (
-        "gpt-5.4",
+        "gpt-5.6-sol",
         ModelPrice {
             input_usd_per_1m: 5.0,
+            output_usd_per_1m: 30.0,
+        },
+    ),
+    (
+        "gpt-5.6-terra",
+        ModelPrice {
+            input_usd_per_1m: 2.5,
             output_usd_per_1m: 15.0,
         },
     ),
     (
-        "o4-mini",
+        "gpt-5.6-luna",
         ModelPrice {
-            input_usd_per_1m: 1.1,
-            output_usd_per_1m: 4.4,
+            input_usd_per_1m: 1.0,
+            output_usd_per_1m: 6.0,
+        },
+    ),
+    (
+        "gpt-5.6",
+        ModelPrice {
+            input_usd_per_1m: 5.0,
+            output_usd_per_1m: 30.0,
         },
     ),
 ];
@@ -159,7 +131,12 @@ mod tests {
 
     #[test]
     fn returns_known_provider_prices() {
-        assert_eq!(model_price("gpt-4.1-mini").unwrap().input_usd_per_1m, 0.4);
+        assert_eq!(model_price("gpt-5.6-sol").unwrap().input_usd_per_1m, 5.0);
+        assert_eq!(
+            model_price("gpt-5.6-terra").unwrap().output_usd_per_1m,
+            15.0
+        );
+        assert_eq!(model_price("gpt-5.6-luna").unwrap().output_usd_per_1m, 6.0);
         assert_eq!(
             model_price("claude-sonnet-4-6").unwrap().output_usd_per_1m,
             15.0
@@ -180,8 +157,8 @@ mod tests {
     #[test]
     fn estimates_cost_and_unknowns_as_zero() {
         assert_eq!(
-            estimate_cost_usd("gpt-4.1-mini", 1_000_000.0, 1_000_000.0),
-            2.0
+            estimate_cost_usd("gpt-5.6-sol", 1_000_000.0, 1_000_000.0),
+            35.0
         );
         assert_eq!(
             estimate_cost_usd("no-such-model", 1_000_000.0, 1_000_000.0),

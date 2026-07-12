@@ -51,7 +51,8 @@ fn model_panel(input: &Value) -> Value {
     lines.extend([
         String::new(),
         "Controls".to_string(),
-        "Type filter · /model <name> [low|medium|high|default] · Esc close".to_string(),
+        "Type filter · /model <name> [none|low|medium|high|xhigh|max|default] · Esc close"
+            .to_string(),
     ]);
 
     json!({ "title": "Model picker", "lines": lines })
@@ -148,13 +149,13 @@ mod tests {
         let output = build_model_panel_json(
             r#"{
                 "provider":"openai",
-                "currentModel":"gpt-5.4",
+                "currentModel":"gpt-5.6-sol",
                 "currentReasoning":{
-                    "effort":"high",
-                    "source":"mode-default",
+                    "effort":"xhigh",
+                    "source":"override",
                     "support":{"status":"supported"}
                 },
-                "models":["gpt-5.4","gpt-4.1-mini"]
+                "models":["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"]
             }"#,
         )
         .expect("json");
@@ -174,11 +175,18 @@ mod tests {
         assert!(lines.contains("Current model"));
         assert!(lines.contains("Catalog"));
         assert!(lines.contains("Provider · OpenAI"));
-        assert!(lines.contains("Available · 2 models"));
-        assert!(lines.contains("Thinking · high (mode default)"));
-        assert!(lines.contains("Thinking choices · low / medium / high / default"));
-        assert!(lines.contains("› /model gpt-5.4  active · reasoning medium · low/medium/high"));
-        assert!(lines.contains(" /model gpt-4.1-mini  reasoning unavailable"));
-        assert!(lines.contains("Type filter · /model <name> [low|medium|high|default] · Esc close"));
+        assert!(lines.contains("Available · 3 models"));
+        assert!(lines.contains("Thinking · xhigh (override)"));
+        assert!(
+            lines.contains("Thinking choices · none / low / medium / high / xhigh / max / default")
+        );
+        assert!(lines.contains(
+            "› /model gpt-5.6-sol  active · reasoning medium · none/low/medium/high/xhigh/max"
+        ));
+        assert!(lines
+            .contains(" /model gpt-5.6-terra  reasoning medium · none/low/medium/high/xhigh/max"));
+        assert!(lines.contains(
+            "Type filter · /model <name> [none|low|medium|high|xhigh|max|default] · Esc close"
+        ));
     }
 }

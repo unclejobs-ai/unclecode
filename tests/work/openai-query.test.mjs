@@ -226,7 +226,7 @@ test("OpenAIProvider.query throws on non-2xx response", async () => {
 test("OpenAIProvider.query reports non-zero costUsd when the response carries token usage", async () => {
   const provider = new OpenAIProvider({
     apiKey: "sk-test-123",
-    model: "gpt-4.1-mini",
+    model: "gpt-5.6-luna",
     cwd: process.cwd(),
     reasoning: UNSUPPORTED_REASONING,
     fetchImpl: async () => ({
@@ -241,8 +241,8 @@ test("OpenAIProvider.query reports non-zero costUsd when the response carries to
   });
 
   const result = await provider.query([{ role: "user", content: "hi" }]);
-  // gpt-4.1-mini: $0.40/M input + $1.60/M output → $2.00 for 1M+1M
-  assert.equal(result.costUsd, 2.0);
+  // GPT-5.6 Luna: $1.00/M input + $6.00/M output → $7.00 for 1M+1M
+  assert.equal(result.costUsd, 7.0);
 });
 
 test("OpenAIProvider.query falls back to zero cost when the model is unknown", async () => {
@@ -357,7 +357,7 @@ test("OpenAIProvider.query uses Rust one-shot chat query when fetch is not injec
     process.env.NO_PROXY = [originalNoProxy, "127.0.0.1", "localhost"].filter(Boolean).join(",");
     const provider = new OpenAIProvider({
       apiKey: "sk-test-rust",
-      model: "gpt-4.1-mini",
+      model: "gpt-5.6-luna",
       cwd: process.cwd(),
       reasoning: UNSUPPORTED_REASONING,
     });
@@ -385,7 +385,7 @@ test("OpenAIProvider.query uses Rust one-shot chat query when fetch is not injec
     assert.deepEqual(result.actions, [
       { callId: "call_rust", tool: "run_shell", input: { command: "echo rust" } },
     ]);
-    assert.equal(result.costUsd, 2.0);
+    assert.equal(result.costUsd, 7.0);
     assert.equal(observedRequest.method, "POST");
     assert.equal(observedRequest.url, "/v1/chat/completions");
     assert.equal(observedRequest.authorization, "Bearer sk-test-rust");

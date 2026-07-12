@@ -129,12 +129,12 @@ target/debug/unclecode rust queue len-json smoke-session
 target/debug/unclecode rust queue pop-json smoke-session
 target/debug/unclecode rust queue clear smoke-session
 target/debug/unclecode rust session-smoke
-printf 'Chat: inspect repo' | target/debug/unclecode rust session persist smoke-session gpt-5.5 analyze idle verbose
+printf 'Chat: inspect repo' | target/debug/unclecode rust session persist smoke-session gpt-5.6-sol analyze idle verbose
 target/debug/unclecode rust session list
 target/debug/unclecode rust session resume smoke-session
 target/debug/unclecode rust session paths ~/.unclecode/state "$PWD" smoke-session
-printf '{"cwd":"'"$PWD"'","argv":["--cwd","..","--provider","openai","--model","gpt-5.5","--reasoning","high","--session-id","work-123","--tools","fix","auth"]}' | target/debug/unclecode rust work-runtime parse-args
-printf '{"promptParts":["review","auth.ts"],"options":{"tools":true,"cwd":"/tmp/project-a","provider":"openai","model":"gpt-5.5","reasoning":"high","sessionId":"work-123"}}' | target/debug/unclecode rust work-runtime build-command-args
+printf '{"cwd":"'"$PWD"'","argv":["--cwd","..","--provider","openai","--model","gpt-5.6-sol","--reasoning","max","--session-id","work-123","--tools","fix","auth"]}' | target/debug/unclecode rust work-runtime parse-args
+printf '{"promptParts":["review","auth.ts"],"options":{"tools":true,"cwd":"/tmp/project-a","provider":"openai","model":"gpt-5.6-sol","reasoning":"max","sessionId":"work-123"}}' | target/debug/unclecode rust work-runtime build-command-args
 printf '{"forwardedArgs":["--tools"],"callerCwd":"/tmp/project-a"}' | target/debug/unclecode rust work-runtime with-cwd
 printf '{"cliSourceDir":"'"$PWD"'/apps/unclecode-cli/src"}' | target/debug/unclecode rust work-runtime entrypoint-paths
 OPENAI_API_KEY=sk-test target/debug/unclecode work --provider openai "summarize current workspace"
@@ -154,8 +154,8 @@ printf '{"dataRoot":".data"}' | target/debug/unclecode rust team list-runs
 target/debug/unclecode team --help
 target/debug/unclecode team run --record tr_1 --lanes codex,opencode "record native run"
 UNCLECODE_TEAM_WORKER_LIVE=0 target/debug/unclecode team run --dispatch --record tr_dispatch_1 --lanes codex,opencode "dispatch native dry run"
-target/debug/unclecode team run --dispatch --record tr_codex_live --lanes codex:gpt-5.5 "dispatch native codex worker"
-OPENAI_API_KEY=sk-test target/debug/unclecode team run --dispatch --record tr_openai_live --lanes openai:gpt-5.5 "dispatch native openai mini-loop worker"
+target/debug/unclecode team run --dispatch --record tr_codex_live --lanes codex:gpt-5.6-sol "dispatch native codex worker"
+OPENAI_API_KEY=sk-test target/debug/unclecode team run --dispatch --record tr_openai_live --lanes openai:gpt-5.6-sol "dispatch native openai mini-loop worker"
 ANTHROPIC_API_KEY=sk-ant target/debug/unclecode team run --dispatch --record tr_anthropic_live --lanes anthropic:claude-sonnet-4-6 "dispatch native anthropic mini-loop worker"
 GEMINI_API_KEY=gemini-key target/debug/unclecode team run --dispatch --record tr_gemini_live --lanes gemini:gemini-2.5-pro "dispatch native gemini mini-loop worker"
 CURSOR_API_KEY=cursor-key target/debug/unclecode team run --dispatch --record tr_cursor_live --lanes cursor:composer-2.5 "dispatch native cursor worker"
@@ -217,22 +217,22 @@ UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-raw-smoke.json target/debug/uncl
 printf 'sk-test' | UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-smoke.json target/debug/unclecode rust auth save-api-key - -
 printf 'at-test\nrt-test\n' | UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-oauth-smoke.json target/debug/unclecode rust auth save-oauth codex - test-project test-account
 UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-smoke.json target/debug/unclecode rust auth logout
-OPENAI_MODEL=gpt-5.5 target/debug/unclecode rust model openai-registry
+OPENAI_MODEL=gpt-5.6-sol target/debug/unclecode rust model openai-registry
 target/debug/unclecode model list openai
-target/debug/unclecode model route auto gpt-5.5
-target/debug/unclecode "/model reasoning gpt-5.5"
-target/debug/unclecode rust model openai-reasoning gpt-5.5
-target/debug/unclecode rust model price gpt-4.1-mini
-target/debug/unclecode rust model estimate-cost gpt-4.1-mini 1000000 1000000
+target/debug/unclecode model route auto gpt-5.6-sol
+target/debug/unclecode "/model reasoning gpt-5.6-sol"
+target/debug/unclecode rust model openai-reasoning gpt-5.6-sol
+target/debug/unclecode rust model price gpt-5.6-luna
+target/debug/unclecode rust model estimate-cost gpt-5.6-luna 1000000 1000000
 target/debug/unclecode rust model detect-provider claude-sonnet-4-6
 	GEMINI_MODEL=gemini-2.5-pro GEMINI_MODELS=gemini-2.5-pro-exp target/debug/unclecode rust model catalog gemini
 	printf 'sk-test' | target/debug/unclecode rust provider openai-request-spec-json api
 	printf 'oauth-token' | target/debug/unclecode rust provider openai-request-spec-json codex acct_123
-	printf '[{"role":"user","content":"hi"}]\0[]' | target/debug/unclecode rust provider openai-chat-body gpt-5.5 - yes
+	printf '[{"role":"user","content":"hi"}]\0[]' | target/debug/unclecode rust provider openai-chat-body gpt-5.6-sol max yes
 	printf '[{"name":"search","description":"Search","input_schema":{"type":"object","properties":{"q":{"type":"string"}}}}]' | target/debug/unclecode rust provider openai-chat-tools
 	printf 'system prompt\0[{"role":"user","content":"hi"}]' | target/debug/unclecode rust provider openai-query-messages
 	printf '{"choices":[{"message":{"content":"hi","tool_calls":[{"id":"call_1","function":{"name":"search","arguments":"{\"q\":\"x\"}"}}]}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}' | target/debug/unclecode rust provider openai-chat-response
-	printf '{"choices":[{"message":{"content":"hi","tool_calls":[{"id":"call_1","function":{"name":"search","arguments":"{\"q\":\"x\"}"}}]}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}' | target/debug/unclecode rust provider openai-chat-response-json gpt-5.5
+	printf '{"choices":[{"message":{"content":"hi","tool_calls":[{"id":"call_1","function":{"name":"search","arguments":"{\"q\":\"x\"}"}}]}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}' | target/debug/unclecode rust provider openai-chat-response-json gpt-5.6-sol
 	printf 'boom' | target/debug/unclecode rust provider request-error openai 500 3
 	printf '[{"id":"call_1","function":{"name":"search","arguments":"{\"q\":\"x\"}"}}]' | target/debug/unclecode rust provider openai-tool-actions
 	printf 'thinking' | target/debug/unclecode rust provider loop-decision 7 1 8
@@ -245,8 +245,8 @@ target/debug/unclecode rust model detect-provider claude-sonnet-4-6
 	printf '[{"type":"image","mimeType":"image/png","dataUrl":"data:image/png;base64,AAAA"}]' | target/debug/unclecode rust provider attachment-caps
 	printf '{"path":"README.md"}' | target/debug/unclecode rust provider tool-trace-started openai read_file call_1 10
 	printf '{"path":"README.md"}' | target/debug/unclecode rust provider tool-execution-start openai read_file call_1
-	printf 'thinking' | target/debug/unclecode rust provider reasoning-delta openai gpt-5.5 text
-	printf 'stream thinking' | target/debug/unclecode rust provider reasoning-delta-record openai gpt-5.5 text rs_1
+	printf 'thinking' | target/debug/unclecode rust provider reasoning-delta openai gpt-5.6-sol text
+	printf 'stream thinking' | target/debug/unclecode rust provider reasoning-delta-record openai gpt-5.6-sol text rs_1
 	printf 'ok' | target/debug/unclecode rust provider tool-trace-completed openai read_file call_1 10 15 no
 	printf 'ok' | target/debug/unclecode rust provider tool-execution-result openai read_file call_1 10 15 no
 	printf 'ok' | target/debug/unclecode rust provider tool-execution-finish openai read_file call_1 10 no
@@ -274,12 +274,12 @@ target/debug/unclecode rust model detect-provider claude-sonnet-4-6
 	printf 'boom' | target/debug/unclecode rust provider anthropic-tool-result tu_1 yes
 	printf '{"content":[{"type":"text","text":"ok"},{"type":"tool_use","id":"tu_1","name":"run_shell","input":{"command":"echo ok"}}],"usage":{"input_tokens":1,"output_tokens":2}}' | target/debug/unclecode rust provider anthropic-response claude-sonnet-4-6
 	printf 'system\0[{"role":"user","content":"hi"}]\0[{"name":"run_shell"}]' | target/debug/unclecode rust provider anthropic-messages-request claude-sonnet-4-6
-	printf 'system\0[{"type":"message","role":"user","content":[]}]\0[]' | target/debug/unclecode rust provider openai-codex-body gpt-5.5 medium none
+	printf 'system\0[{"type":"message","role":"user","content":[]}]\0[]' | target/debug/unclecode rust provider openai-codex-body gpt-5.6-sol max none
 	printf 'data: {"type":"response.completed"}\n\n' | target/debug/unclecode rust sse data-blocks
 	printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust sse responses-records
 	printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust sse responses-result
 	printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust sse responses-message
-	printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust provider openai-responses-message gpt-5.5
+	printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust provider openai-responses-message gpt-5.6-sol
 	target/debug/unclecode rust harness inspect "$PWD"
 	target/debug/unclecode rust harness preset team-auditor
 	target/debug/unclecode rust perf startup
@@ -819,13 +819,11 @@ status-line entries, MCP server names, and named team presets.
 Harness preset patch lookup now reads from Rust via `unclecode rust harness
 preset`, leaving TypeScript as a command/parser bridge instead of the preset
 source of truth.
-OpenAI model registry and compatibility catalogs are Rust-owned and keep GPT-5.5
-as the default frontier model, with GPT-5.4 and GPT-5.4-mini still present for
-explicit operator selection.
-The OpenAI compat catalog mirrors the Rust registry's frontier-first order:
-`gpt-5.5`, `gpt-5.5`, `gpt-5.4-mini`, then `o4-mini` before older 4.1/4o
-fallbacks, so the model picker does not bury the newer reasoning-capable option
-behind stale fallback models.
+OpenAI model registry and compatibility catalogs are Rust-owned. The default
+is GPT-5.6 Sol, followed by GPT-5.6 Terra and GPT-5.6 Luna. Older GPT-5,
+GPT-4, and o-series models are no longer advertised by the OpenAI catalog.
+All three GPT-5.6 tiers expose the official `none`, `low`, `medium`, `high`,
+`xhigh`, and `max` reasoning levels in the model picker and runtime contract.
 Provider capability decisions now run through `unclecode rust model capability`,
 so prompt-caching, tool-call, and session-memory support checks share the same
 Rust model registry as provider routing and catalogs. TypeScript keeps only the
@@ -1269,7 +1267,7 @@ target/debug/unclecode rust queue len smoke-session
 target/debug/unclecode rust queue pop smoke-session
 target/debug/unclecode rust queue clear smoke-session
 target/debug/unclecode rust session-smoke
-printf 'Chat: inspect repo' | target/debug/unclecode rust session persist smoke-session gpt-5.5 analyze idle verbose
+printf 'Chat: inspect repo' | target/debug/unclecode rust session persist smoke-session gpt-5.6-sol analyze idle verbose
 target/debug/unclecode rust session list
 target/debug/unclecode rust session resume smoke-session
 target/debug/unclecode rust session paths ~/.unclecode/state "$PWD" smoke-session
@@ -1308,7 +1306,7 @@ printf 'data: {"type":"response.completed"}\n\n' | target/debug/unclecode rust s
 printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust sse responses-records
 printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust sse responses-result
 printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust sse responses-message
-printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust provider openai-responses-message gpt-5.5
+printf 'data: {"type":"response.completed","response":{"id":"resp-smoke"}}\n\n' | target/debug/unclecode rust provider openai-responses-message gpt-5.6-sol
 target/debug/unclecode rust harness inspect "$PWD"
 target/debug/unclecode rust harness preset team-auditor
 rm -rf target/harness-smoke && mkdir -p target/harness-smoke/.codex && printf 'model_reasoning_effort = "high"\napprovals_reviewer = "user"\n' > target/harness-smoke/.codex/config.toml
@@ -1318,10 +1316,10 @@ UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-raw-smoke.json target/debug/uncl
 printf 'sk-test' | UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-smoke.json target/debug/unclecode rust auth save-api-key - -
 printf 'at-test\nrt-test\n' | UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-oauth-smoke.json target/debug/unclecode rust auth save-oauth codex - test-project test-account
 UNCLECODE_OPENAI_CREDENTIALS_PATH=target/openai-smoke.json target/debug/unclecode rust auth logout
-OPENAI_MODEL=gpt-5.5 target/debug/unclecode rust model openai-registry
-target/debug/unclecode rust model openai-reasoning gpt-5.5
-target/debug/unclecode rust model price gpt-4.1-mini
-target/debug/unclecode rust model estimate-cost gpt-4.1-mini 1000000 1000000
+OPENAI_MODEL=gpt-5.6-sol target/debug/unclecode rust model openai-registry
+target/debug/unclecode rust model openai-reasoning gpt-5.6-sol
+target/debug/unclecode rust model price gpt-5.6-luna
+target/debug/unclecode rust model estimate-cost gpt-5.6-luna 1000000 1000000
 target/debug/unclecode rust model detect-provider claude-sonnet-4-6
 target/debug/unclecode rust model provider-route auto gemini-2.5-flash
 target/debug/unclecode rust model provider-route-json auto gemini-2.5-flash

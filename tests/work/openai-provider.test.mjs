@@ -125,7 +125,7 @@ test("loadConfig supports openai provider selection", async () => {
 });
 
 
-test("loadConfig uses gpt-5.5 and mode-default reasoning for openai work sessions", async () => {
+test("loadConfig uses GPT-5.6 Sol and mode-default reasoning for openai work sessions", async () => {
   const originalEnv = { ...process.env };
   const workspaceRoot = createWorkspaceWithMode("analyze");
 
@@ -136,7 +136,7 @@ test("loadConfig uses gpt-5.5 and mode-default reasoning for openai work session
 
     const config = await loadConfig({ cwd: workspaceRoot });
     assert.equal(config.provider, "openai");
-    assert.equal(config.model, "gpt-5.5");
+    assert.equal(config.model, "gpt-5.6-sol");
     assert.equal(config.mode, "analyze");
     assert.equal(config.reasoning.effort, "high");
     assert.equal(config.reasoning.source, "mode-default");
@@ -154,10 +154,10 @@ test("loadConfig lets explicit reasoning overrides beat mode defaults", async ()
   try {
     process.env.LLM_PROVIDER = "openai";
     process.env.OPENAI_API_KEY = "sk-test-123";
-    process.env.OPENAI_MODEL = "gpt-5.4";
+    process.env.OPENAI_MODEL = "gpt-5.6-terra";
 
-    const config = await loadConfig({ cwd: workspaceRoot, reasoning: "low" });
-    assert.equal(config.reasoning.effort, "low");
+    const config = await loadConfig({ cwd: workspaceRoot, reasoning: "max" });
+    assert.equal(config.reasoning.effort, "max");
     assert.equal(config.reasoning.source, "override");
   } finally {
     process.env = originalEnv;

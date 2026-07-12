@@ -50,7 +50,7 @@ export const PROVIDER_CAPABILITIES = {
     id: "openai",
     label: "OpenAI",
     transport: "compat",
-    defaultModel: "gpt-5.5",
+    defaultModel: "gpt-5.6-sol",
     envKeys: ["OPENAI_API_KEY", "OPENAI_MODEL"],
     supportsToolCalls: true,
     supportsSessionMemory: true,

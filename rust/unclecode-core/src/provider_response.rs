@@ -653,7 +653,7 @@ data: [DONE]
                 }}],
                 "usage":{"prompt_tokens":12,"completion_tokens":34}
             }"#,
-            Some("gpt-5.5"),
+            Some("gpt-5.6-sol"),
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&raw).unwrap();

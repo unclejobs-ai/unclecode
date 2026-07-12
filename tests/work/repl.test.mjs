@@ -67,7 +67,7 @@ const supported = {
   support: {
     status: "supported",
     defaultEffort: "medium",
-    supportedEfforts: ["low", "medium", "high"],
+    supportedEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
   },
 };
 
@@ -102,48 +102,53 @@ test("resolveReasoningCommand keeps unsupported models visible but immutable", (
   assert.match(result.message, /does not support/i);
 });
 
-test("resolveModelCommand lists models and updates reasoning support on switch", () => {
+test("resolveModelCommand lists the GPT-5.6 family and applies full reasoning depth", () => {
   const listed = resolveModelCommand("/model", {
     provider: "openai",
-    currentModel: "gpt-5.4",
+    currentModel: "gpt-5.6-sol",
     currentReasoning: supported,
     modeDefaultReasoning: supported,
   });
 
-  assert.equal(listed.nextModel, "gpt-5.4");
+  assert.equal(listed.nextModel, "gpt-5.6-sol");
   assert.equal(listed.panel.title, "Model picker");
   assert.match(listed.panel.lines.join("\n"), /^Current model/m);
   assert.match(listed.panel.lines.join("\n"), /^Catalog/m);
   assert.match(listed.panel.lines.join("\n"), /Provider · OpenAI/);
-  assert.match(listed.panel.lines.join("\n"), /Available · \d+ models/);
-  assert.match(listed.panel.lines.join("\n"), /\/model gpt-5\.4/);
-  assert.match(listed.panel.lines.join("\n"), /\/model gpt-4\.1-mini/);
+  assert.match(listed.panel.lines.join("\n"), /Available · 3 models/);
+  assert.match(listed.panel.lines.join("\n"), /\/model gpt-5\.6-sol/);
+  assert.match(listed.panel.lines.join("\n"), /\/model gpt-5\.6-terra/);
+  assert.match(listed.panel.lines.join("\n"), /\/model gpt-5\.6-luna/);
   assert.match(listed.panel.lines.join("\n"), /Thinking · high \(mode default\)/);
-  assert.match(listed.panel.lines.join("\n"), /Thinking choices · low \/ medium \/ high \/ default/);
+  assert.match(
+    listed.panel.lines.join("\n"),
+    /Thinking choices · none \/ low \/ medium \/ high \/ xhigh \/ max \/ default/,
+  );
   assert.match(listed.panel.lines.join("\n"), /active · reasoning medium/);
-  assert.match(listed.panel.lines.join("\n"), /reasoning unavailable/);
-  assert.match(listed.panel.lines.join("\n"), /\/model <name> \[low\|medium\|high\|default\]/);
+  assert.match(
+    listed.panel.lines.join("\n"),
+    /\/model <name> \[none\|low\|medium\|high\|xhigh\|max\|default\]/,
+  );
 
-  const switched = resolveModelCommand("/model gpt-4.1-mini", {
+  const obsolete = resolveModelCommand("/model gpt-4.1-mini", {
     provider: "openai",
-    currentModel: "gpt-5.4",
+    currentModel: "gpt-5.6-sol",
     currentReasoning: supported,
     modeDefaultReasoning: supported,
   });
 
-  assert.equal(switched.nextModel, "gpt-4.1-mini");
-  assert.equal(switched.nextReasoning.effort, "unsupported");
-  assert.match(switched.message, /reasoning unsupported/i);
+  assert.equal(obsolete.nextModel, "gpt-5.6-sol");
+  assert.match(obsolete.message, /no model match/i);
 
-  const switchedWithReasoning = resolveModelCommand("/model gpt-5.5 low", {
+  const switchedWithReasoning = resolveModelCommand("/model gpt-5.6-terra max", {
     provider: "openai",
-    currentModel: "gpt-5.4",
+    currentModel: "gpt-5.6-sol",
     currentReasoning: supported,
     modeDefaultReasoning: supported,
   });
 
-  assert.equal(switchedWithReasoning.nextModel, "gpt-5.5");
-  assert.equal(switchedWithReasoning.nextReasoning.effort, "low");
+  assert.equal(switchedWithReasoning.nextModel, "gpt-5.6-terra");
+  assert.equal(switchedWithReasoning.nextReasoning.effort, "max");
   assert.equal(switchedWithReasoning.nextReasoning.source, "override");
 });
 
@@ -764,18 +769,28 @@ test("getWorkShellSlashSuggestions keeps /auth launcher status-first", () => {
   assert.equal(suggestions[2]?.command, "/auth key");
 });
 
-test("getWorkShellSlashSuggestions expands /model into concrete model picks", () => {
+test("getWorkShellSlashSuggestions expands /model into GPT-5.6 picks", () => {
   const suggestions = getWorkShellSlashSuggestions("/model", {
     provider: "openai",
-    currentModel: "gpt-5.4",
+    currentModel: "gpt-5.6-sol",
   });
   const commands = suggestions.map((item) => item.command);
 
-  assert.deepEqual(commands.slice(0, 3), ["/model gpt-5.4", "/model gpt-5.5", "/model gpt-5.4-mini"]);
+  assert.deepEqual(commands.slice(0, 3), [
+    "/model gpt-5.6-sol",
+    "/model gpt-5.6-terra",
+    "/model gpt-5.6-luna",
+  ]);
   assert.equal(commands.includes("/model"), false);
   assert.equal(commands.includes("/model list"), true);
-  assert.match(suggestions[0]?.description ?? "", /Current · reasoning default medium · supports low, medium, high/i);
-  assert.match(suggestions[1]?.description ?? "", /Available · reasoning default medium · supports low, medium, high/i);
+  assert.match(
+    suggestions[0]?.description ?? "",
+    /Current · reasoning default medium · supports none, low, medium, high, xhigh, max/i,
+  );
+  assert.match(
+    suggestions[1]?.description ?? "",
+    /Available · reasoning default medium · supports none, low, medium, high, xhigh, max/i,
+  );
 });
 
 test("composer helpers support multiline editing without slow preview for plain text", () => {

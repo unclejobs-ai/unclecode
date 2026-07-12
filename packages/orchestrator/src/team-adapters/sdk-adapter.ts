@@ -29,7 +29,7 @@ const ENV_BY_RUNTIME: Record<SdkLaneRuntime, string> = {
 };
 
 const DEFAULT_MODEL_BY_RUNTIME: Record<SdkLaneRuntime, string> = {
-  openai: "gpt-4.1-mini",
+  openai: "gpt-5.6-sol",
   anthropic: "claude-sonnet-4-6",
   gemini: "gemini-2.5-pro",
 };

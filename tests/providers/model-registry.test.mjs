@@ -8,28 +8,28 @@ import {
   resolveProviderRoute,
 } from "@unclecode/providers";
 
-test("openai provider exposes a model registry with the configured model first", () => {
+test("openai provider exposes only GPT-5.6 defaults after an active custom model", () => {
   const adapter = getProviderAdapter("openai");
-  const registry = adapter.getModelRegistry({ OPENAI_MODEL: "gpt-4.1" });
+  const registry = adapter.getModelRegistry({ OPENAI_MODEL: "custom-openai-model" });
 
   assert.equal(registry.providerId, "openai");
-  assert.equal(registry.defaultModel, "gpt-5.5");
-  assert.equal(registry.models[0], "gpt-4.1");
-  assert.ok(registry.models.includes("gpt-5.5"));
-  assert.ok(registry.models.includes("gpt-5.4"));
-  assert.ok(registry.models.includes("gpt-5.4-mini"));
+  assert.equal(registry.defaultModel, "gpt-5.6-sol");
+  assert.deepEqual(registry.models, [
+    "custom-openai-model",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+  ]);
 });
 
-test("openai provider keeps newer gpt-5 picks ahead of stale fallback models", () => {
+test("openai provider keeps the GPT-5.6 family in capability order", () => {
   const adapter = getProviderAdapter("openai");
-  const registry = adapter.getModelRegistry({ OPENAI_MODEL: "gpt-5.4" });
+  const registry = adapter.getModelRegistry({ OPENAI_MODEL: "" });
 
-  assert.deepEqual(registry.models.slice(0, 5), [
-    "gpt-5.4",
-    "gpt-5.5",
-    "gpt-5.4-mini",
-    "o4-mini",
-    "gpt-4.1-mini",
+  assert.deepEqual(registry.models, [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
   ]);
 });
 
@@ -55,20 +55,18 @@ test("provider adapter capability decisions come from the Rust registry", () => 
   });
 });
 
-test("openai provider exposes model-specific reasoning support", () => {
+test("openai provider exposes GPT-5.6 reasoning levels", () => {
   const adapter = getProviderAdapter("openai");
+  const expected = {
+    status: "supported",
+    defaultEffort: "medium",
+    supportedEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
+  };
 
-  assert.deepEqual(adapter.getReasoningSupport({ modelId: "gpt-5.4" }), {
-    status: "supported",
-    defaultEffort: "medium",
-    supportedEfforts: ["low", "medium", "high"],
-  });
-  assert.deepEqual(adapter.getReasoningSupport({ modelId: "o4-mini" }), {
-    status: "supported",
-    defaultEffort: "medium",
-    supportedEfforts: ["low", "medium", "high"],
-  });
-  assert.deepEqual(adapter.getReasoningSupport({ modelId: "gpt-4.1-mini" }), {
+  for (const modelId of ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+    assert.deepEqual(adapter.getReasoningSupport({ modelId }), expected);
+  }
+  assert.deepEqual(adapter.getReasoningSupport({ modelId: "gpt-5.5" }), {
     status: "unsupported",
     supportedEfforts: [],
   });
@@ -91,7 +89,7 @@ test("provider route metadata is resolved by the Rust router", () => {
       label: "OpenAI",
       transport: "native",
       runtimeSupported: true,
-      defaultModel: "gpt-5.5",
+      defaultModel: "gpt-5.6-sol",
       endpointUrl: "https://api.openai.com/v1/responses",
       envKeys: ["OPENAI_API_KEY", "OPENAI_MODEL"],
     },

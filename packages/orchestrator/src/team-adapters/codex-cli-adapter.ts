@@ -14,7 +14,7 @@ import { applySystemPrefix } from "./system-prefix.js";
 
 const CODEX_LANE_ID = "codex" as const;
 const CODEX_BINARY = "codex";
-const CODEX_DEFAULT_MODEL = "gpt-5.5";
+const CODEX_DEFAULT_MODEL = "gpt-5.6-sol";
 
 export type CreateCodexCliAdapterArgs = {
   readonly executor?: CliExecutor;

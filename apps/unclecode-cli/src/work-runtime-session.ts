@@ -3,8 +3,10 @@ import { getSessionStoreRoot } from "@unclecode/session-store";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
+  isModeReasoningEffort,
   parseAgentConsoleSnapshot,
   type AgentConsoleSnapshot,
+  type ModeReasoningEffort,
 } from "@unclecode/contracts";
 
 export type WorkRuntimeAuthIssueInput = {
@@ -69,7 +71,7 @@ export async function loadResumedWorkSession(input: {
 }): Promise<{
   sessionId: string;
   initialTraceMode?: "minimal" | "verbose";
-  reasoningEffort?: "low" | "medium" | "high";
+  reasoningEffort?: ModeReasoningEffort;
   contextLine: string;
   initialEntries: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[];
   initialAgentConsole?: AgentConsoleSnapshot;
@@ -208,7 +210,7 @@ export async function resolveRustOpenAIAuth(input: {
 function parseRustResumedWorkSession(stdout: string): {
   readonly sessionId: string;
   readonly traceMode?: "minimal" | "verbose";
-  readonly reasoningEffort?: "low" | "medium" | "high";
+  readonly reasoningEffort?: ModeReasoningEffort;
   readonly contextLine: string;
   readonly initialEntries: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[];
   readonly initialAgentConsole?: AgentConsoleSnapshot;
@@ -243,11 +245,7 @@ function parseRustResumedWorkSession(stdout: string): {
   return {
     sessionId,
     ...(traceMode === "minimal" || traceMode === "verbose" ? { traceMode } : {}),
-    ...(reasoningEffort === "low" ||
-    reasoningEffort === "medium" ||
-    reasoningEffort === "high"
-      ? { reasoningEffort }
-      : {}),
+    ...(isModeReasoningEffort(reasoningEffort) ? { reasoningEffort } : {}),
     contextLine: typeof parsed.contextLine === "string" ? parsed.contextLine : `Resumed session: ${sessionId}`,
     initialEntries,
     ...(typeof parsed.initialSessionSummary === "string"

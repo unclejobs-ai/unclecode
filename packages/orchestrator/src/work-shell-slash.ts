@@ -241,7 +241,7 @@ function getModelSuggestions(
   options?: WorkShellSlashOptions,
 ): readonly WorkShellSlashSuggestion[] {
   const provider = options?.provider ?? "openai";
-  const currentModel = options?.currentModel ?? "gpt-5.5";
+  const currentModel = options?.currentModel ?? "gpt-5.6-sol";
   const cacheKey = JSON.stringify({
     workspaceRoot: options?.workspaceRoot ?? process.cwd(),
     provider,

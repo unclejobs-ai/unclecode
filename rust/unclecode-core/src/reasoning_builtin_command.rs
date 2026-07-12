@@ -78,9 +78,12 @@ fn build_reasoning_picker_panel(reasoning: &Value) -> Value {
 
 fn humanize_reasoning_effort(effort: &str) -> &'static str {
     match effort {
+        "none" => "None",
         "low" => "Light",
         "medium" => "Balanced",
         "high" => "Deep",
+        "xhigh" => "Very deep",
+        "max" => "Maximum",
         "default" => "Mode default",
         _ => "Reasoning fixed",
     }
@@ -88,9 +91,12 @@ fn humanize_reasoning_effort(effort: &str) -> &'static str {
 
 fn reasoning_effort_description(effort: &str) -> &'static str {
     match effort {
+        "none" => "lowest latency",
         "low" => "fast checks",
         "medium" => "steady default",
-        "high" => "best for hard changes",
+        "high" => "hard changes",
+        "xhigh" => "deep research and review",
+        "max" => "maximum reasoning depth",
         _ => "fixed for this model",
     }
 }

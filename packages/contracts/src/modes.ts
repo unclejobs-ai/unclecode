@@ -26,9 +26,13 @@ export const MODE_EXPLANATION_STYLES = ["concise", "balanced", "detailed"] as co
 
 export type ModeExplanationStyle = (typeof MODE_EXPLANATION_STYLES)[number];
 
-export const MODE_REASONING_EFFORTS = ["low", "medium", "high"] as const;
+export const MODE_REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
 
 export type ModeReasoningEffort = (typeof MODE_REASONING_EFFORTS)[number];
+
+export function isModeReasoningEffort(value: unknown): value is ModeReasoningEffort {
+  return typeof value === "string" && MODE_REASONING_EFFORTS.some((effort) => effort === value);
+}
 
 export type ModeProfile = {
   readonly id: ModeProfileId;

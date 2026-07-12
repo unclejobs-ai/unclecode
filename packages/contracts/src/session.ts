@@ -1,6 +1,7 @@
 import type { SessionPendingAction, SessionState } from "./engine.js";
 import type { JsonValue } from "./json.js";
 import type { AgentConsoleSnapshot } from "./agent-console.js";
+import type { ModeReasoningEffort } from "./modes.js";
 
 export const SESSION_METADATA_FIELDS = [
   "permissionMode",
@@ -19,7 +20,7 @@ export type SessionMetadata = {
   readonly permissionMode?: string | null;
   readonly isUltraworkMode?: boolean | null;
   readonly traceMode?: "minimal" | "verbose" | null;
-  readonly reasoningEffort?: "low" | "medium" | "high" | null;
+  readonly reasoningEffort?: ModeReasoningEffort | null;
   readonly model?: string | null;
   readonly pendingAction?: SessionPendingAction | null;
   readonly postTurnSummary?: JsonValue | null;

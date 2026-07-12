@@ -1,4 +1,6 @@
-use crate::model_registry::{openai_reasoning_support, provider_model_catalog};
+use crate::model_registry::{
+    is_openai_reasoning_effort, openai_reasoning_support, provider_model_catalog,
+};
 use crate::ux_model::build_model_panel_json;
 use serde_json::{json, Map, Value};
 
@@ -68,7 +70,7 @@ pub fn resolve_model_command_json(input_json: &str) -> Result<String, String> {
                 (
                     current_model.to_string(),
                     current_reasoning.clone(),
-                    "Usage: /model <name> [low|medium|high|default]".to_string(),
+                    "Usage: /model <name> [none|low|medium|high|xhigh|max|default]".to_string(),
                 )
             }
         };
@@ -99,7 +101,8 @@ fn parse_model_selection(input: &str) -> Option<(&str, Option<&str>)> {
         return None;
     }
     match reasoning {
-        None | Some("low" | "medium" | "high" | "default") => Some((model, reasoning)),
+        None | Some("default") => Some((model, reasoning)),
+        Some(effort) if is_openai_reasoning_effort(effort) => Some((model, reasoning)),
         Some(_) => None,
     }
 }
@@ -131,8 +134,8 @@ fn resolve_reasoning_for_model(
             return merge_reasoning_fields(mode_default_reasoning, explicit, "override", support);
         }
     }
-    let current_effort = str_field(current_reasoning, "effort")
-        .filter(|effort| matches!(*effort, "low" | "medium" | "high"));
+    let current_effort =
+        str_field(current_reasoning, "effort").filter(|effort| is_openai_reasoning_effort(effort));
     let can_keep_current = explicit_reasoning.is_none()
         && current_effort
             .map(|effort| supported_efforts.contains(&effort))
@@ -224,77 +227,82 @@ mod tests {
     fn switches_model_and_keeps_supported_override() {
         let result = resolve_model_command_json(
             r#"{
-                "input": "/model gpt-5.5",
+                "input": "/model gpt-5.6-terra",
                 "provider": "openai",
-                "currentModel": "gpt-5.4",
-                "currentReasoning": {"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},
-                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}}
+                "currentModel": "gpt-5.6-sol",
+                "currentReasoning": {"effort":"xhigh","source":"override","support":{"status":"supported","supportedEfforts":["none","low","medium","high","xhigh","max"]}},
+                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["none","low","medium","high","xhigh","max"]}}
             }"#,
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["nextModel"], "gpt-5.5");
-        assert_eq!(parsed["nextReasoning"]["effort"], "high");
+        assert_eq!(parsed["nextModel"], "gpt-5.6-terra");
+        assert_eq!(parsed["nextReasoning"]["effort"], "xhigh");
         assert_eq!(parsed["nextReasoning"]["source"], "override");
-        assert_eq!(parsed["message"], "Model set to gpt-5.5. Reasoning high.");
+        assert_eq!(
+            parsed["message"],
+            "Model set to gpt-5.6-terra. Reasoning xhigh."
+        );
     }
 
     #[test]
     fn switches_model_and_reasoning_together() {
         let result = resolve_model_command_json(
             r#"{
-                "input": "/model gpt-5.5 low",
+                "input": "/model gpt-5.6-sol max",
                 "provider": "openai",
-                "currentModel": "gpt-5.4",
-                "currentReasoning": {"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},
-                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}}
+                "currentModel": "gpt-5.6-terra",
+                "currentReasoning": {"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["none","low","medium","high","xhigh","max"]}},
+                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["none","low","medium","high","xhigh","max"]}}
             }"#,
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["nextModel"], "gpt-5.5");
-        assert_eq!(parsed["nextReasoning"]["effort"], "low");
+        assert_eq!(parsed["nextModel"], "gpt-5.6-sol");
+        assert_eq!(parsed["nextReasoning"]["effort"], "max");
         assert_eq!(parsed["nextReasoning"]["source"], "override");
-        assert_eq!(parsed["message"], "Model set to gpt-5.5. Reasoning low.");
+        assert_eq!(
+            parsed["message"],
+            "Model set to gpt-5.6-sol. Reasoning max."
+        );
     }
 
     #[test]
     fn model_reasoning_default_returns_to_mode_default() {
         let result = resolve_model_command_json(
             r#"{
-                "input": "/model gpt-5.5 default",
+                "input": "/model gpt-5.6-luna default",
                 "provider": "openai",
-                "currentModel": "gpt-5.4",
-                "currentReasoning": {"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},
-                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}}
+                "currentModel": "gpt-5.6-sol",
+                "currentReasoning": {"effort":"max","source":"override","support":{"status":"supported","supportedEfforts":["none","low","medium","high","xhigh","max"]}},
+                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["none","low","medium","high","xhigh","max"]}}
             }"#,
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["nextModel"], "gpt-5.5");
+        assert_eq!(parsed["nextModel"], "gpt-5.6-luna");
         assert_eq!(parsed["nextReasoning"]["effort"], "medium");
         assert_eq!(parsed["nextReasoning"]["source"], "mode-default");
     }
 
     #[test]
-    fn switches_unsupported_model_to_model_capability() {
+    fn rejects_obsolete_models_removed_from_the_catalog() {
         let result = resolve_model_command_json(
             r#"{
                 "input": "/model gpt-4.1-mini",
                 "provider": "openai",
-                "currentModel": "gpt-5.4",
-                "currentReasoning": {"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},
-                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}}
+                "currentModel": "gpt-5.6-sol",
+                "currentReasoning": {"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["none","low","medium","high","xhigh","max"]}},
+                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["none","low","medium","high","xhigh","max"]}}
             }"#,
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["nextModel"], "gpt-4.1-mini");
-        assert_eq!(parsed["nextReasoning"]["effort"], "unsupported");
-        assert_eq!(parsed["nextReasoning"]["source"], "model-capability");
+        assert_eq!(parsed["nextModel"], "gpt-5.6-sol");
+        assert_eq!(parsed["nextReasoning"]["effort"], "high");
         assert_eq!(
             parsed["message"],
-            "Model set to gpt-4.1-mini. Reasoning unsupported."
+            "No model match for gpt-4.1-mini. Current model unchanged."
         );
     }
 
@@ -302,20 +310,20 @@ mod tests {
     fn rejects_invalid_inline_reasoning_without_changing_runtime_state() {
         let result = resolve_model_command_json(
             r#"{
-                "input": "/model gpt-5.5 huge",
+                "input": "/model gpt-5.6-sol huge",
                 "provider": "openai",
-                "currentModel": "gpt-5.4",
-                "currentReasoning": {"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},
-                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}}
+                "currentModel": "gpt-5.6-sol",
+                "currentReasoning": {"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["none","low","medium","high","xhigh","max"]}},
+                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["none","low","medium","high","xhigh","max"]}}
             }"#,
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["nextModel"], "gpt-5.4");
+        assert_eq!(parsed["nextModel"], "gpt-5.6-sol");
         assert_eq!(parsed["nextReasoning"]["effort"], "high");
         assert_eq!(
             parsed["message"],
-            "Usage: /model <name> [low|medium|high|default]"
+            "Usage: /model <name> [none|low|medium|high|xhigh|max|default]"
         );
     }
 

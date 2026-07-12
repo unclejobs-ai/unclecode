@@ -59,21 +59,21 @@ mod tests {
     fn builds_model_result_with_entries_and_panel() {
         let result = resolve_model_builtin_command_json(
             r#"{
-                "line": "/model gpt-4.1-mini",
+                "line": "/model gpt-5.6-luna none",
                 "provider": "openai",
-                "currentModel": "gpt-5.4",
-                "currentReasoning": {"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["low","medium","high"]}},
-                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["low","medium","high"]}}
+                "currentModel": "gpt-5.6-sol",
+                "currentReasoning": {"effort":"high","source":"override","support":{"status":"supported","supportedEfforts":["none","low","medium","high","xhigh","max"]}},
+                "modeDefaultReasoning": {"effort":"medium","source":"mode-default","support":{"status":"supported","supportedEfforts":["none","low","medium","high","xhigh","max"]}}
             }"#,
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(
             parsed["entries"][1]["text"],
-            "Model set to gpt-4.1-mini. Reasoning unsupported."
+            "Model set to gpt-5.6-luna. Reasoning none."
         );
-        assert_eq!(parsed["nextModel"], "gpt-4.1-mini");
-        assert_eq!(parsed["nextReasoning"]["effort"], "unsupported");
+        assert_eq!(parsed["nextModel"], "gpt-5.6-luna");
+        assert_eq!(parsed["nextReasoning"]["effort"], "none");
         assert_eq!(parsed["panel"]["title"], "Model picker");
     }
 }

@@ -125,9 +125,12 @@ fn humanize_supported_efforts_with_default(efforts: &[String]) -> String {
 
 fn humanize_reasoning_effort(effort: &str) -> &'static str {
     match effort {
+        "none" => "None",
         "low" => "Light",
         "medium" => "Balanced",
         "high" => "Deep",
+        "xhigh" => "Very deep",
+        "max" => "Maximum",
         "default" => "Mode default",
         _ => "Reasoning fixed",
     }

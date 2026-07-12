@@ -26,9 +26,9 @@ test("parseArgs extracts cwd/provider/model/reasoning/session/help/tools/prompt 
       "--provider",
       "openai",
       "--model",
-      "gpt-5.4",
+      "gpt-5.6-luna",
       "--reasoning",
-      "high",
+      "max",
       "--session-id",
       "work-123",
       "--tools",
@@ -38,8 +38,8 @@ test("parseArgs extracts cwd/provider/model/reasoning/session/help/tools/prompt 
     {
       cwd: "/tmp/project-a",
       provider: "openai",
-      model: "gpt-5.4",
-      reasoning: "high",
+      model: "gpt-5.6-luna",
+      reasoning: "max",
       sessionId: "work-123",
       prompt: "fix auth",
       showHelp: false,
@@ -666,11 +666,11 @@ test("loadWorkCliBootstrap reuses resumed reasoning overrides unless the CLI ove
       cwd: workspaceRoot,
       env: { ...process.env, UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot },
       sessionId: "work-session-77",
-      model: "gpt-5.4",
+      model: "gpt-5.6-sol",
       mode: "analyze",
       state: "idle",
       summary: "Chat: inspect repo",
-      reasoningEffort: "low",
+      reasoningEffort: "max",
       entries: [
         { role: "user", text: "inspect repo" },
         { role: "assistant", text: "repo inspected" },
@@ -680,7 +680,7 @@ test("loadWorkCliBootstrap reuses resumed reasoning overrides unless the CLI ove
     process.env = {
       ...originalEnv,
       LLM_PROVIDER: "openai",
-      OPENAI_MODEL: "gpt-5.4",
+      OPENAI_MODEL: "gpt-5.6-sol",
       HOME: originalEnv.HOME ?? workspaceRoot,
       UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot,
       OPENAI_API_KEY: "sk-test-123",
@@ -690,7 +690,7 @@ test("loadWorkCliBootstrap reuses resumed reasoning overrides unless the CLI ove
     const resumed = await loadWorkCliBootstrap({
       argv: ["--cwd", workspaceRoot, "--session-id", "work-session-77"],
     });
-    assert.equal(resumed.options.reasoning.effort, "low");
+    assert.equal(resumed.options.reasoning.effort, "max");
     assert.equal(resumed.options.reasoning.source, "override");
     assert.deepEqual(resumed.options.initialEntries, [
       { role: "user", text: "inspect repo" },
@@ -699,9 +699,9 @@ test("loadWorkCliBootstrap reuses resumed reasoning overrides unless the CLI ove
     assert.equal(resumed.options.initialSessionSummary, "Chat: inspect repo");
 
     const overridden = await loadWorkCliBootstrap({
-      argv: ["--cwd", workspaceRoot, "--session-id", "work-session-77", "--reasoning", "high"],
+      argv: ["--cwd", workspaceRoot, "--session-id", "work-session-77", "--reasoning", "none"],
     });
-    assert.equal(overridden.options.reasoning.effort, "high");
+    assert.equal(overridden.options.reasoning.effort, "none");
     assert.equal(overridden.options.reasoning.source, "override");
   } finally {
     process.env = originalEnv;

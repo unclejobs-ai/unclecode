@@ -1,3 +1,4 @@
+use crate::model_registry::is_openai_reasoning_effort;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -129,12 +130,10 @@ fn parse_work_runtime_args(argv: &[String], cwd: &str) -> Value {
                 index += 1;
             }
             "--reasoning" => {
-                match argv.get(index + 1).map(String::as_str) {
-                    Some("low") => reasoning = Some("low"),
-                    Some("medium") => reasoning = Some("medium"),
-                    Some("high") => reasoning = Some("high"),
-                    _ => {}
-                }
+                reasoning = argv
+                    .get(index + 1)
+                    .map(String::as_str)
+                    .filter(|value| is_openai_reasoning_effort(value));
                 index += 1;
             }
             "--session-id" => {
@@ -272,15 +271,15 @@ mod tests {
     fn parses_work_runtime_args_contract() {
         let parsed = serde_json::from_str::<Value>(
             &parse_work_runtime_args_json(
-                r#"{"cwd":"/repo","argv":["--cwd","/tmp/project-a","--provider","openai","--model","gpt-5.4","--reasoning","high","--session-id","work-123","--tools","fix","auth"]}"#,
+                r#"{"cwd":"/repo","argv":["--cwd","/tmp/project-a","--provider","openai","--model","gpt-5.6-sol","--reasoning","max","--session-id","work-123","--tools","fix","auth"]}"#,
             )
             .unwrap(),
         )
         .unwrap();
         assert_eq!(parsed["cwd"], "/tmp/project-a");
         assert_eq!(parsed["provider"], "openai");
-        assert_eq!(parsed["model"], "gpt-5.4");
-        assert_eq!(parsed["reasoning"], "high");
+        assert_eq!(parsed["model"], "gpt-5.6-sol");
+        assert_eq!(parsed["reasoning"], "max");
         assert_eq!(parsed["sessionId"], "work-123");
         assert_eq!(parsed["prompt"], "fix auth");
         assert_eq!(parsed["showHelp"], false);

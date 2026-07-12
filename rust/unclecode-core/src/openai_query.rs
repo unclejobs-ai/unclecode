@@ -236,7 +236,7 @@ connection: close
 
         let output = run_openai_chat_query_json(
             "sk-test",
-            "gpt-4.1-mini",
+            "gpt-5.6-luna",
             "system",
             r#"[{"role":"user","content":"run"}]"#,
             r#"[{"name":"run_shell","description":"Run shell","input_schema":{"type":"object","properties":{"command":{"type":"string"}}}}]"#,
@@ -249,7 +249,7 @@ connection: close
         assert_eq!(parsed["content"], "running");
         assert_eq!(parsed["actions"][0]["tool"], "run_shell");
         assert_eq!(parsed["actions"][0]["input"]["command"], "echo ok");
-        assert_eq!(parsed["costUsd"], 2.0);
+        assert_eq!(parsed["costUsd"], 7.0);
     }
 
     #[test]

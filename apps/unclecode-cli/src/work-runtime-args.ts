@@ -1,4 +1,4 @@
-import type { ModeReasoningEffort } from "@unclecode/contracts";
+import { isModeReasoningEffort, type ModeReasoningEffort } from "@unclecode/contracts";
 import { runRustCommandSync, toolDefinitions } from "@unclecode/orchestrator";
 
 export type ParsedArgs = {
@@ -24,7 +24,7 @@ export function printHelp(): void {
   process.stdout.write(`  --cwd    Set the workspace root\n`);
   process.stdout.write(`  --provider  Choose openai, anthropic, or gemini\n`);
   process.stdout.write(`  --model  Override the model for the chosen provider\n`);
-  process.stdout.write(`  --reasoning  Override reasoning effort: low, medium, high\n`);
+  process.stdout.write(`  --reasoning  Override reasoning effort: none, low, medium, high, xhigh, max\n`);
   process.stdout.write(`  --session-id  Resume a persisted work session id\n`);
 }
 
@@ -85,7 +85,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (typeof parsed.model === "string") {
     result.model = parsed.model;
   }
-  if (parsed.reasoning === "low" || parsed.reasoning === "medium" || parsed.reasoning === "high") {
+  if (isModeReasoningEffort(parsed.reasoning)) {
     result.reasoning = parsed.reasoning;
   }
   if (typeof parsed.sessionId === "string") {
