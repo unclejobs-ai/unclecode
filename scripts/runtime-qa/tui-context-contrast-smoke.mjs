@@ -34,15 +34,15 @@ export async function runContextContrastTuiSmoke({ tmp }) {
     await runTmux(["new-session", "-d", "-x", "140", "-y", "34", "-s", session, command]);
     await waitForPane(session, /prompt deck|UncleCode · OpenAI/, paneFile);
     await submitLine(session, "/context", paneFile);
-    const pane = await waitForPane(session, /Context expanded|Included in next answer|Sources ·|Warnings ·/, paneFile);
+    const pane = await waitForPane(session, /Sources · \d+ included|Warnings ·/, paneFile);
     const ansiCapture = await runTmux(["capture-pane", "-t", session, "-e", "-p", "-S", "-240"], {
       allowFailure: true,
     });
     writeFileSync(ansiPaneFile, ansiCapture.stdout);
 
     assert.match(pane, /Context expanded|Sources ·/);
-    assert.match(pane, /Included in next answer/);
-    assert.match(pane, /Held back locally/);
+    assert.match(pane, /Sources · \d+ included/);
+    assert.match(pane, /\d+ held back/);
     assert.match(pane, /Warnings|✓ none/i);
     assertReadableForegroundEscapes(
       ansiCapture.stdout,

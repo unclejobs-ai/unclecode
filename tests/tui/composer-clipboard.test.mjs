@@ -106,3 +106,11 @@ test("text-paste sanitizer and threshold heuristic remain wired alongside clipbo
   assert.equal(shouldTreatComposerChangeAsPaste("a", "a".repeat(80)), true);
   assert.equal(shouldTreatComposerChangeAsPaste("foo", "foo bar"), false);
 });
+
+
+test("macOS clipboard capture no longer probes with redundant pbpaste -Prefer", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../../packages/orchestrator/src/clipboard-image.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /pbpaste[\s\S]*?-Prefer/);
+  assert.match(source, /osascript/);
+});

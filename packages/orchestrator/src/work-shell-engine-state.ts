@@ -104,6 +104,8 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     // time. See docs/design/context-inspector-redesign.md §C/§E.
     contextInspectorCursor: -1,
     contextInspectorExpanded: null,
+    contextInspectorDetailContent: undefined,
+    contextInspectorDetailOffset: 0,
     agentConsole: createAgentConsoleSnapshot({
       profileId: input.options.contextProfile ?? input.options.initialAgentConsole?.profileId ?? "build",
       ...(input.options.initialAgentConsole

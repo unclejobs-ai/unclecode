@@ -369,6 +369,8 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   // existing subscriber fan-out.
   readonly contextInspectorCursor: number;
   readonly contextInspectorExpanded: string | null;
+  readonly contextInspectorDetailContent?: string | undefined;
+  readonly contextInspectorDetailOffset: number;
   readonly agentConsole: AgentConsoleSnapshot;
 };
 
@@ -482,6 +484,7 @@ export type WorkShellEngineInput<
     readonly memoryLines: readonly string[];
     readonly traceLines: readonly string[];
   }) => Promise<ContextPacketView>) | undefined;
+  resolveContextSourceDetail?: ((sourceId: string) => Promise<string | undefined>) | undefined;
   resolvePromptManifest?: WorkShellPromptManifestResolver | undefined;
   toolLines?: readonly string[];
   extractAuthLabel?: (lines: readonly string[]) => string | undefined;
@@ -611,6 +614,7 @@ export class WorkShellEngine<
     readonly memoryLines: readonly string[];
     readonly traceLines: readonly string[];
   }) => Promise<ContextPacketView>) | undefined;
+  private readonly resolveContextSourceDetail?: ((sourceId: string) => Promise<string | undefined>) | undefined;
   private readonly resolvePromptManifest?: WorkShellPromptManifestResolver | undefined;
   private readonly toolLines: readonly string[];
   private readonly extractAuthLabel?: ((lines: readonly string[]) => string | undefined) | undefined;
@@ -670,6 +674,7 @@ export class WorkShellEngine<
     this.reloadWorkspaceContext = input.reloadWorkspaceContext;
     this.resolveContextPacket = input.resolveContextPacket;
     this.resolvePromptManifest = input.resolvePromptManifest;
+    this.resolveContextSourceDetail = input.resolveContextSourceDetail;
     this.toolLines = input.toolLines ?? [];
     this.extractAuthLabel = input.extractAuthLabel;
     this.onExit = input.onExit;
@@ -851,6 +856,8 @@ export class WorkShellEngine<
       panel,
       contextInspectorCursor: -1,
       contextInspectorExpanded: null,
+      contextInspectorDetailContent: undefined,
+      contextInspectorDetailOffset: 0,
     });
   }
 
@@ -928,9 +935,14 @@ export class WorkShellEngine<
       return;
     }
     const beforePacketId = this.state.contextPacket?.id;
+    const selectedSourceId = action.id;
     const receipt = this.mutateContextSource(action);
     const packet = await this.refreshContextPacket(true);
+    const remappedCursor = this.resolveInspectorCursorForSourceId(selectedSourceId);
     if (!receipt) {
+      if (remappedCursor !== this.state.contextInspectorCursor) {
+        this.setState({ contextInspectorCursor: remappedCursor });
+      }
       return;
     }
     this.setState({
@@ -939,22 +951,68 @@ export class WorkShellEngine<
         ...(beforePacketId !== undefined ? { beforePacketId } : {}),
         ...(packet !== undefined ? { afterPacketId: packet.id } : {}),
       },
+      contextInspectorCursor: remappedCursor,
     });
+  }
+
+  /**
+   * Keep the numeric cursor as compatibility output, but re-anchor it to the
+   * same source id after include/hold refresh reorders the navigable list.
+   */
+  private resolveInspectorCursorForSourceId(sourceId: string): number {
+    const sources = this.resolveInspectorSourceList();
+    if (sources.length === 0) {
+      return -1;
+    }
+    const index = sources.findIndex((source) => source.id === sourceId);
+    if (index >= 0) {
+      return index;
+    }
+    const current = this.state.contextInspectorCursor;
+    if (current < 0) {
+      return 0;
+    }
+    return Math.min(current, sources.length - 1);
   }
 
   /**
    * Context Inspector (Sprint 2) — toggle expanded view for the source
    * under the cursor. Only one source expands at a time.
    */
-  toggleContextInspectorExpanded(): void {
+  async toggleContextInspectorExpanded(): Promise<void> {
     const source = this.resolveInspectorSourceAtCursor();
     if (!source) {
       return;
     }
-    const current = this.state.contextInspectorExpanded;
-    const next = current === source.id ? null : source.id;
-    if (next !== current) {
-      this.setState({ contextInspectorExpanded: next });
+    if (this.state.contextInspectorExpanded === source.id) {
+      this.setState({
+        contextInspectorExpanded: null,
+        contextInspectorDetailContent: undefined,
+        contextInspectorDetailOffset: 0,
+      });
+      return;
+    }
+    const content = await this.resolveContextSourceDetail?.(source.id);
+    if (
+      this.state.panel.title !== "Context expanded"
+      || this.resolveInspectorSourceAtCursor()?.id !== source.id
+    ) {
+      return;
+    }
+    this.setState({
+      contextInspectorExpanded: source.id,
+      ...(content !== undefined ? { contextInspectorDetailContent: content } : {}),
+      contextInspectorDetailOffset: 0,
+    });
+  }
+
+  moveContextInspectorDetailOffset(direction: number): void {
+    if (this.state.contextInspectorExpanded === null) {
+      return;
+    }
+    const next = Math.max(0, this.state.contextInspectorDetailOffset + (direction >= 0 ? 1 : -1));
+    if (next !== this.state.contextInspectorDetailOffset) {
+      this.setState({ contextInspectorDetailOffset: next });
     }
   }
 
@@ -976,7 +1034,15 @@ export class WorkShellEngine<
     if (!packet) {
       return [];
     }
-    const toEntry = (item: ContextPacketViewItem, heldBack: boolean) => {
+    const groupRank = (category: string): number => {
+      if (/^(workspace-guidance|workspace|provider-system-prompt)/i.test(category) || /^system$/i.test(category)) return 0;
+      if (/^(bridge|condensed-history)/i.test(category)) return 1;
+      if (/^memory/i.test(category)) return 2;
+      if (/^attachment/i.test(category)) return 3;
+      if (/^(loop-trail|runtime|live)/i.test(category)) return 4;
+      return 5;
+    };
+    const toEntry = (item: ContextPacketViewItem, heldBack: boolean, order: number) => {
       const content = item.preview ?? item.label;
       return {
         id: item.id,
@@ -985,12 +1051,26 @@ export class WorkShellEngine<
         detail: content,
         pinned: (item.salience ?? 0) >= 1,
         heldBack: heldBack || item.includedInModel === false,
+        order,
       };
     };
-    return [
-      ...packet.included.map((item) => toEntry(item, false)),
-      ...packet.excluded.map((item) => toEntry(item, true)),
+    const unsorted = [
+      ...packet.included.map((item, index) => toEntry(item, false, index)),
+      ...packet.excluded.map((item, index) => toEntry(item, true, packet.included.length + index)),
     ];
+    return [...unsorted]
+      .sort((left, right) => {
+        const leftGroup = groupRank(left.category);
+        const rightGroup = groupRank(right.category);
+        if (leftGroup !== rightGroup) {
+          return leftGroup - rightGroup;
+        }
+        if (left.heldBack !== right.heldBack) {
+          return left.heldBack ? 1 : -1;
+        }
+        return left.order - right.order;
+      })
+      .map(({ order: _order, ...entry }) => entry);
   }
 
   private resolveInspectorSourceAtCursor():

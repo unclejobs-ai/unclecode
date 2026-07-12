@@ -421,6 +421,12 @@ export function Composer(props: {
   readonly onClipboardImageError?:
     | ((reason: string, status: "no-image" | "unsupported" | "failed") => void)
     | undefined;
+  /**
+   * Injectable clipboard image capture. Production defaults to the platform
+   * capture from `@unclecode/orchestrator`; tests inject a synthetic PNG
+   * capture so the Ctrl+V path never mutates the OS clipboard.
+   */
+  readonly captureClipboardImage?: (() => ClipboardImageResult) | undefined;
   readonly mask?: string | undefined;
   readonly terminalColumns?: number | undefined;
   /**
@@ -444,9 +450,14 @@ export function Composer(props: {
   const pendingLocalValueRef = useRef<string | undefined>(undefined);
   const pasteTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const suppressNextSubmitRef = useRef(false);
+  // Ink's useInput rebinds when the handler identity changes, but Enter after
+  // Ctrl+V can still observe a stale onSubmit/onClipboardImage closure from
+  // the pre-attachment render. Always read the latest props through a ref.
+  const propsRef = useRef(props);
+  propsRef.current = props;
 
   useEffect(() => {
-    props.onIsPastingChange?.(isPasting);
+    propsRef.current.onIsPastingChange?.(isPasting);
   }, [isPasting, props.onIsPastingChange]);
 
   useEffect(() => {
@@ -474,7 +485,7 @@ export function Composer(props: {
   const armPasteWindow = (text: string): void => {
     suppressNextSubmitRef.current = true;
     setIsPasting(true);
-    props.onPaste?.(text);
+    propsRef.current.onPaste?.(text);
     if (pasteTimeoutRef.current) {
       clearTimeout(pasteTimeoutRef.current);
     }
@@ -490,6 +501,7 @@ export function Composer(props: {
   };
 
   useInput((input, key) => {
+    const latestProps = propsRef.current;
     if (
       key.upArrow ||
       key.downArrow ||
@@ -503,9 +515,9 @@ export function Composer(props: {
 
     if (key.ctrl && input === "v") {
       const outcome = handleComposerClipboardPaste({
-        capture: defaultCaptureClipboardImage,
-        onClipboardImage: props.onClipboardImage,
-        onClipboardImageError: props.onClipboardImageError,
+        capture: latestProps.captureClipboardImage ?? defaultCaptureClipboardImage,
+        onClipboardImage: latestProps.onClipboardImage,
+        onClipboardImageError: latestProps.onClipboardImageError,
       });
       if (outcome === "handled") {
         return;
@@ -516,29 +528,24 @@ export function Composer(props: {
       return;
     }
 
-    // Context Inspector (Sprint 2): when the /context overlay is open and the
-    // composer is empty, yield the action keys (Enter, j/k/f/i/e) to the
-    // inspector so they don't insert stray characters. The pane's inspector
-    // handler dispatches the corresponding engine action. Once the composer
-    // has real input, typing wins so follow-up composition is unaffected.
+    // While Context Desk owns an empty composer, keep its navigation and
+    // mutation keys out of the draft. Read-only panes still allow Space/P as
+    // ordinary text because those actions are unavailable.
     if (
-      props.suppressInspectorKeys
-      && (props.value ?? pendingLocalValueRef.current ?? "").length === 0
+      latestProps.suppressInspectorKeys
+      && (pendingLocalValueRef.current ?? latestProps.value ?? "").length === 0
     ) {
       const suppressMutationKeys =
-        props.suppressInspectorMutationKeys ?? props.suppressInspectorKeys;
-      if (key.return && suppressMutationKeys) {
+        latestProps.suppressInspectorMutationKeys ?? latestProps.suppressInspectorKeys;
+      if (key.return) {
         return;
       }
-      if (input === "j" || input === "k" || input === "e") {
-        return;
-      }
-      if (suppressMutationKeys && (input === "f" || input === "i")) {
+      if (suppressMutationKeys && (input === " " || input === "p")) {
         return;
       }
     }
 
-    const currentValue = pendingLocalValueRef.current ?? props.value;
+    const currentValue = pendingLocalValueRef.current ?? latestProps.value;
     const currentCursorOffset = cursorOffsetRef.current;
     const carriageReturnIndex = input.indexOf("\r");
     const textBeforeReturn =
@@ -556,12 +563,12 @@ export function Composer(props: {
         setCursorOffset(submittedValue.length);
         pendingLocalValueRef.current = submittedValue;
         if (submittedValue !== currentValue) {
-          props.onChange(submittedValue);
+          latestProps.onChange(submittedValue);
         }
         return;
       }
       resetLocalValueAfterSubmit();
-      void Promise.resolve(props.onSubmit(sanitizeComposerInput(submittedValue))).catch(() => undefined);
+      void Promise.resolve(latestProps.onSubmit(sanitizeComposerInput(submittedValue))).catch(() => undefined);
       return;
     }
 
@@ -570,7 +577,7 @@ export function Composer(props: {
       cursorOffset: currentCursorOffset,
       input,
       key,
-      allowLineBreaks: props.mask === undefined,
+      allowLineBreaks: latestProps.mask === undefined,
     });
 
     cursorOffsetRef.current = result.nextCursorOffset;
@@ -581,7 +588,7 @@ export function Composer(props: {
         return;
       }
       resetLocalValueAfterSubmit();
-      void Promise.resolve(props.onSubmit(sanitizeComposerInput(result.nextValue))).catch(() => undefined);
+      void Promise.resolve(latestProps.onSubmit(sanitizeComposerInput(result.nextValue))).catch(() => undefined);
       return;
     }
 
@@ -590,7 +597,7 @@ export function Composer(props: {
         armPasteWindow(result.nextValue);
       }
       pendingLocalValueRef.current = result.nextValue;
-      props.onChange(result.nextValue);
+      latestProps.onChange(result.nextValue);
     }
   }, { isActive: true });
 

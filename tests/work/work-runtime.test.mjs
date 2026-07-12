@@ -396,6 +396,10 @@ test("loadWorkCliBootstrap represents configured provider prompt as metadata wit
       "bootstrap exposes configured prompt metadata before first submit",
     );
     assert.doesNotMatch(JSON.stringify(metadata), /SECRET_PROMPT_SENTINEL_DO_NOT_SHOW/);
+    const localDetail = await result.options.resolveContextSourceDetail?.(
+      "provider-system-prompt-configured",
+    );
+    assert.match(localDetail ?? "", /SECRET_PROMPT_SENTINEL_DO_NOT_SHOW/);
 
     const packet = await result.options.resolveContextPacket?.({
       cwd: workspaceRoot,
@@ -416,6 +420,7 @@ test("loadWorkCliBootstrap represents configured provider prompt as metadata wit
       "packet includes system guidance metadata",
     );
     assert.doesNotMatch(JSON.stringify(packet), /SECRET_PROMPT_SENTINEL_DO_NOT_SHOW/);
+    assert.doesNotMatch(packet.preview.join("\n"), /SECRET_PROMPT_SENTINEL_DO_NOT_SHOW/);
   } finally {
     process.env = originalEnv;
     rmSync(workspaceRoot, { recursive: true, force: true });

@@ -373,11 +373,11 @@ test("getWorkShellComposerHint keeps slash discovery guidance inside the shared 
   );
   assert.equal(
     getWorkShellComposerHint("", 0),
-    "Enter send · Shift+Enter newline · / commands",
+    "Enter send · Shift+Enter newline · / commands · Ctrl+V image",
   );
   assert.equal(
     getWorkShellComposerHint("plain text", 3),
-    "Enter send · Shift+Enter newline",
+    "Enter send · Shift+Enter newline · Ctrl+V image",
   );
   assert.equal(getWorkShellComposerHintMinHeight(), 1);
 });

@@ -446,9 +446,9 @@ export function getWorkShellComposerHint(
       : "No matches · try /model, /auth, /context, /queue";
   }
   if (trimmed.length === 0) {
-    return "Enter send · Shift+Enter newline · / commands";
+    return "Enter send · Shift+Enter newline · / commands · Ctrl+V image";
   }
-  return "Enter send · Shift+Enter newline";
+  return "Enter send · Shift+Enter newline · Ctrl+V image";
 }
 
 export function resolveWorkShellComposerHint(input: {
@@ -1855,8 +1855,11 @@ export function WorkShellView(props: {
   // (-1 = none) and the source id whose full content is expanded.
   readonly contextInspectorCursor?: number;
   readonly contextInspectorExpanded?: string | null;
+  readonly contextInspectorDetailContent?: string;
+  readonly contextInspectorDetailOffset?: number;
   readonly contextPacket?: ContextPacketView;
   readonly modelWindow?: number;
+  readonly terminalRows?: number;
   readonly currentTurnStartedAt?: number;
   readonly lastTurnDurationMs?: number;
   readonly attachmentLines?: readonly string[];
@@ -1933,6 +1936,51 @@ export function WorkShellView(props: {
     />
   );
 
+  if (
+    shouldRenderContextInspectorOverlay
+    && panelDisplayMode === "overlay"
+    && !shouldSuppressOverlayForInput
+  ) {
+    return (
+      <Box flexDirection="column" paddingX={2}>
+        <WorkShellHeaderBlock
+          provider={props.provider}
+          {...(props.headerHint ? { headerHint: props.headerHint } : {})}
+          {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+        />
+        <WorkShellStatusBlock
+          model={props.model}
+          reasoningLabel={props.reasoningLabel}
+          mode={props.mode}
+          authLabel={props.authLabel}
+          isBusy={props.isBusy}
+          {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
+          {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
+          {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
+          {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+        />
+        {renderContextInspectorOverlay({
+          packet: props.contextPacket,
+          cursorIndex: props.contextInspectorCursor ?? -1,
+          ...(props.contextInspectorExpanded !== undefined ? { expandedId: props.contextInspectorExpanded } : {}),
+          ...(props.contextInspectorDetailContent !== undefined
+            ? { detailContent: props.contextInspectorDetailContent }
+            : {}),
+          ...(props.contextInspectorDetailOffset !== undefined
+            ? { detailOffset: props.contextInspectorDetailOffset }
+            : {}),
+          width: Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
+          borderColor: panelBorderColor,
+          palette: W,
+          modelWindow: props.modelWindow ?? 200000,
+          actionsEnabled: props.contextSourceActionsEnabled ?? false,
+          ...(props.contextActionReceipt ? { actionReceipt: props.contextActionReceipt } : {}),
+          ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
+        })}
+      </Box>
+    );
+  }
+
   return (
     <Box flexDirection="column" paddingX={2}>
       <WorkShellHeaderBlock
@@ -2005,12 +2053,19 @@ export function WorkShellView(props: {
           packet: props.contextPacket,
           cursorIndex: props.contextInspectorCursor ?? -1,
           ...(props.contextInspectorExpanded !== undefined ? { expandedId: props.contextInspectorExpanded } : {}),
+          ...(props.contextInspectorDetailContent !== undefined
+            ? { detailContent: props.contextInspectorDetailContent }
+            : {}),
+          ...(props.contextInspectorDetailOffset !== undefined
+            ? { detailOffset: props.contextInspectorDetailOffset }
+            : {}),
           width: Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
           borderColor: panelBorderColor,
           palette: W,
           modelWindow: props.modelWindow ?? 200000,
           actionsEnabled: props.contextSourceActionsEnabled ?? false,
           ...(props.contextActionReceipt ? { actionReceipt: props.contextActionReceipt } : {}),
+          ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
         })
       ) : panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput ? (
         <Box marginTop={1} borderStyle="single" borderColor={panelBorderColor} paddingX={1} flexDirection="column">

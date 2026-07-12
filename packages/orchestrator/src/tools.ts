@@ -6,6 +6,10 @@ import type {
 } from "@unclecode/contracts";
 import type { WorkShellInteractionBridge } from "./work-shell-interaction-bridge.js";
 import { runRustCommand } from "./rust-command.js";
+import {
+  createWebSearchHandler,
+  type WebSearchActiveProvider,
+} from "./web-search.js";
 
 export type ToolDefinition = {
   name: string;
@@ -440,20 +444,67 @@ export type ToolRuntime = {
   readonly handlers: Readonly<Record<string, ToolHandler>>;
 };
 
+function createWebSearchToolDefinition(): ToolDefinition {
+  return {
+    name: "web_search",
+    description:
+      "Search the public web through the active model provider native search tool and return URL-bearing sources. Distinct from search_text (workspace text search) and /research (local artifact flow).",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Web search query." },
+        recency: {
+          type: "string",
+          enum: ["day", "week", "month", "year"],
+          description: "Optional recency preference for sources.",
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          description: "Optional maximum number of URL sources to return.",
+        },
+      },
+      required: ["query"],
+    },
+    metadata: {
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+        riskLevel: "medium",
+      },
+      resources: [{
+        kind: "network",
+        mode: "read",
+        template: "url:*",
+        declared: false,
+      }],
+    },
+  };
+}
+
 export function createToolRuntime(input: {
   readonly interactionBridge: WorkShellInteractionBridge;
+  readonly webSearch?: WebSearchActiveProvider;
 }): ToolRuntime {
   const askUser: ToolHandler = async (rawInput, _cwd, options = {}) => {
     const request = parseAskUserQuestionRequest(rawInput);
     const result = await input.interactionBridge.ask(request, options.signal);
     return { content: JSON.stringify(result) };
   };
+  const webSearch = createWebSearchHandler(input.webSearch);
 
   return {
-    definitions: [...toolDefinitions, createAskUserToolDefinition()],
+    definitions: [
+      ...toolDefinitions,
+      createAskUserToolDefinition(),
+      createWebSearchToolDefinition(),
+    ],
     handlers: {
       ...toolHandlers,
       ask_user: askUser,
+      web_search: webSearch,
     },
   };
 }

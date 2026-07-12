@@ -12,9 +12,10 @@ import {
 export function renderContextInspectorFocus(input: {
   readonly row?: ContextInspectorSourceRow | undefined;
   readonly sectionLabel: string;
-  readonly actionLabel: string;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
+  readonly ordinal?: number;
+  readonly total?: number;
 }): React.ReactNode {
   if (!input.row) {
     return (
@@ -23,28 +24,30 @@ export function renderContextInspectorFocus(input: {
           <Text color={input.palette.user} bold>{"Focus"}</Text>
           <Text color={input.palette.textMuted}>{" · No context sources are loaded yet."}</Text>
         </Text>
-        <Text color={input.palette.textMuted}>{`  ${input.actionLabel}`}</Text>
       </Box>
     );
   }
 
   const meta = resolveContextSourceMeta(input.row.item.category, input.palette);
   const label = sanitizeContextPreview(input.row.item.label);
+  const ordinal = input.ordinal ?? (input.row.sourceIndex + 1);
+  const total = input.total ?? ordinal;
+  const ordinalLabel = `#${ordinal}/${total}`;
 
   return (
     <Box marginTop={1} flexDirection="column">
       <Text>
         <Text color={input.palette.user} bold>{"Focus"}</Text>
         <Text color={input.palette.borderSoft}>{" · "}</Text>
+        <Text color={input.palette.text} bold>{ordinalLabel}</Text>
+        <Text color={input.palette.borderSoft}>{" · "}</Text>
         <Text color={meta.color} bold>{meta.label}</Text>
         <Text color={input.palette.borderSoft}>{" · "}</Text>
         <Text color={input.palette.textMuted}>{input.sectionLabel}</Text>
         <Text color={input.palette.borderSoft}>{" · "}</Text>
-        <Text color={input.palette.text} bold>{truncateForDisplayWidth(label, Math.max(16, input.width - 44))}</Text>
-      </Text>
-      <Text>
-        <Text color={input.palette.borderSoft}>{"  now · "}</Text>
-        <Text color={input.palette.textMuted}>{input.actionLabel}</Text>
+        <Text color={input.palette.text} bold>
+          {truncateForDisplayWidth(label, Math.max(12, input.width - 52))}
+        </Text>
       </Text>
     </Box>
   );

@@ -1,17 +1,23 @@
 import type { ContextPacketView, ContextPacketViewItem } from "@unclecode/contracts";
 
 import {
+  CONTEXT_INSPECTOR_GROUP_ORDER,
+  resolveContextSourceGroup,
   resolveContextInspectorSuggestion,
   type ContextInspectorBudgetState,
+  type ContextInspectorHumanGroup,
   type ContextInspectorSuggestion,
 } from "./work-shell-context-inspector-suggestion.js";
 
 export type {
   ContextInspectorBudgetState,
+  ContextInspectorHumanGroup,
   ContextInspectorSuggestion,
 } from "./work-shell-context-inspector-suggestion.js";
 export {
   formatContextTokenEstimate,
+  CONTEXT_INSPECTOR_GROUP_ORDER,
+  resolveContextSourceGroup,
   resolveContextInspectorSuggestion,
 } from "./work-shell-context-inspector-suggestion.js";
 export {
@@ -51,33 +57,70 @@ export type ContextInspectorOverview = {
   readonly suggestion: ContextInspectorSuggestion;
 };
 
-const CONTEXT_SOURCE_META: ReadonlyArray<readonly [RegExp, keyof ContextInspectorPalette, string, string]> = [
-  [/^workspace-guidance/i, "assistant", "≡", "guidance"],
-  [/^workspace/i, "user", "▣", "workspace"],
-  [/^provider-system-prompt/i, "assistant", "▤", "system"],
-  [/^bridge/i, "assistant", "↔", "bridge"],
-  [/^memory/i, "toolAccent", "✦", "memory"],
-  [/^loop-trail/i, "spinner", "⋉", "loop trail"],
-  [/^runtime/i, "textMuted", "⚙", "runtime"],
-  [/^attachment/i, "warning", "▧", "attachment"],
-  [/^live/i, "spinner", "→", "live steps"],
+
+const CONTEXT_SOURCE_META: ReadonlyArray<
+  readonly [RegExp, keyof ContextInspectorPalette, string]
+> = [
+  [/^workspace-guidance/i, "assistant", "≡"],
+  [/^workspace/i, "user", "▣"],
+  [/^provider-system-prompt/i, "assistant", "▤"],
+  [/^system$/i, "assistant", "▤"],
+  [/^bridge/i, "assistant", "↔"],
+  [/^condensed-history/i, "assistant", "↔"],
+  [/^memory/i, "toolAccent", "✦"],
+  [/^attachment/i, "warning", "▧"],
+  [/^loop-trail/i, "spinner", "⋉"],
+  [/^runtime/i, "textMuted", "⚙"],
+  [/^live/i, "spinner", "→"],
 ];
+
 
 export function resolveContextSourceMeta(category: string, palette: ContextInspectorPalette): {
   readonly icon: string;
   readonly color: string;
-  readonly label: string;
+  readonly label: ContextInspectorHumanGroup;
+  readonly group: ContextInspectorHumanGroup;
 } {
   const entry = CONTEXT_SOURCE_META.find(([pattern]) => pattern.test(category));
+  const group = resolveContextSourceGroup(category);
   return {
     color: entry ? palette[entry[1]] : palette.textMuted,
     icon: entry?.[2] ?? "·",
-    label: entry?.[3] ?? category,
+    label: group,
+    group,
   };
 }
 
+export function computeContextOverlayViewportMaxRows(input: {
+  readonly terminalRows?: number;
+}): number {
+  const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+  if (input.terminalRows === undefined) {
+    return 12;
+  }
+  return clamp(Math.trunc(input.terminalRows) - 25, 6, 24);
+}
+
+export function buildContextInspectorGroupedRows(
+  rows: readonly ContextInspectorSourceRow[],
+): readonly {
+  readonly group: ContextInspectorHumanGroup;
+  readonly rows: readonly ContextInspectorSourceRow[];
+}[] {
+  const buckets = new Map<ContextInspectorHumanGroup, ContextInspectorSourceRow[]>(
+    CONTEXT_INSPECTOR_GROUP_ORDER.map((group) => [group, []]),
+  );
+  for (const row of rows) {
+    const group = resolveContextSourceGroup(row.item.category);
+    buckets.get(group)?.push(row);
+  }
+  return CONTEXT_INSPECTOR_GROUP_ORDER
+    .map((group) => ({ group, rows: buckets.get(group) ?? [] }))
+    .filter((section) => section.rows.length > 0);
+}
+
 export function buildContextInspectorRows(packet: ContextPacketView): readonly ContextInspectorSourceRow[] {
-  return [
+  const unsorted: ContextInspectorSourceRow[] = [
     ...packet.included.map((item, index) => ({
       item,
       sourceIndex: index,
@@ -89,6 +132,30 @@ export function buildContextInspectorRows(packet: ContextPacketView): readonly C
       heldBack: true,
     })),
   ];
+  const ranked = [...unsorted].sort((left, right) => {
+    const leftGroup = CONTEXT_INSPECTOR_GROUP_ORDER.indexOf(resolveContextSourceGroup(left.item.category));
+    const rightGroup = CONTEXT_INSPECTOR_GROUP_ORDER.indexOf(resolveContextSourceGroup(right.item.category));
+    if (leftGroup !== rightGroup) {
+      return leftGroup - rightGroup;
+    }
+    if (left.heldBack !== right.heldBack) {
+      return left.heldBack ? 1 : -1;
+    }
+    return left.sourceIndex - right.sourceIndex;
+  });
+  return ranked.map((row, index) => ({
+    ...row,
+    sourceIndex: index,
+  }));
+}
+
+export function isContextInspectorSourceHeldBack(
+  packet: ContextPacketView,
+  cursorIndex: number,
+): boolean {
+  return buildContextInspectorRows(packet)
+    .find((row) => row.sourceIndex === cursorIndex)
+    ?.heldBack ?? false;
 }
 
 export function getContextInspectorVisibleRows(

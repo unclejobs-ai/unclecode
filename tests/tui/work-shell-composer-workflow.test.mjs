@@ -91,7 +91,7 @@ test("resolveWorkShellComposerHint keeps idle slash discovery guidance", () => {
       inputValue: "",
       slashSuggestionCount: 0,
     }),
-    "Enter send · Shift+Enter newline · / commands",
+    "Enter send · Shift+Enter newline · / commands · Ctrl+V image",
   );
 });
 

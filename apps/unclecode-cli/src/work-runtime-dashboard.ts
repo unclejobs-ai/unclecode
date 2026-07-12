@@ -80,6 +80,7 @@ export type StartReplOptions = {
     readonly memoryLines: readonly string[];
     readonly traceLines: readonly string[];
   }) => Promise<ContextPacketView>) | undefined;
+  resolveContextSourceDetail?: ((sourceId: string) => Promise<string | undefined>) | undefined;
   resolvePromptManifest?: WorkShellPromptManifestResolver | undefined;
   refreshHomeState?: (() => Promise<TuiShellHomeState>) | undefined;
   refreshAuthState?: (() => Promise<{ authLabel: string; authIssueLines?: readonly string[] }>) | undefined;
@@ -260,6 +261,9 @@ export function createManagedDashboardInput(
         : {}),
       ...(session.options.mutateContextSource !== undefined
         ? { mutateContextSource: session.options.mutateContextSource }
+        : {}),
+      ...(session.options.resolveContextSourceDetail !== undefined
+        ? { resolveContextSourceDetail: session.options.resolveContextSourceDetail }
         : {}),
     },
     getReasoningLabel: describeReasoning,

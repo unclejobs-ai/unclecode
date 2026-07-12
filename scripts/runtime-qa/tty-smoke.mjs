@@ -39,7 +39,9 @@ export async function runTtySmoke({ port, tmp, observations }) {
     await sendKeys(session, "/status");
     await sleep(400);
     await sendKeys(session, "/context");
-    await sleep(600);
+    await waitForPane(session, /Sources · \d+ included/, paneFile);
+    await runTmux(["send-keys", "-t", session, "Escape"]);
+    await waitForPane(session, /prompt deck/, paneFile);
     await sendKeys(session, "Say hello from runtime TTY QA.");
     try {
       await waitForPane(session, new RegExp(ttyResponseText), paneFile);

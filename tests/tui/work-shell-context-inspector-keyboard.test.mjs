@@ -83,61 +83,62 @@ function ContextInputControllerHarness(props) {
     hasOverlayOpen: true,
     activePanelTitle: "Context expanded",
     contextSourceActionsEnabled: props.actionsEnabled,
+    contextInspectorExpanded: props.expandedId,
     moveContextInspectorCursor: props.onMove,
+    moveContextInspectorDetailOffset: props.onScroll ?? (() => {}),
     toggleContextInspectorPin: async () => props.onPin(),
-    forgetContextSourceAtCursor: async () => props.onForget(),
-    includeContextSourceAtCursor: async () => props.onInclude(),
+    toggleContextSourceDelivery: async () => props.onToggleDelivery(),
     toggleContextInspectorExpanded: props.onExpand,
   });
   return null;
 }
 
-test("context inspector resolver keeps navigation live while read-only mutation actions are disabled", () => {
+test("context inspector resolver uses human navigation and action keys", () => {
   assert.deepEqual(resolveWorkShellContextInspectorAction({
-    value: "j",
-    key: {},
+    value: "",
+    key: { downArrow: true },
     panelTitle: "Context expanded",
     actionsEnabled: false,
   }), { type: "move-cursor", direction: 1 });
-  assert.deepEqual(resolveWorkShellContextInspectorAction({
-    value: "e",
-    key: {},
-    panelTitle: "Context expanded",
-    actionsEnabled: false,
-  }), { type: "expand" });
-  assert.deepEqual(resolveWorkShellContextInspectorAction({
-    value: "f",
-    key: {},
-    panelTitle: "Context expanded",
-    actionsEnabled: false,
-  }), { type: "none" });
-  assert.deepEqual(resolveWorkShellContextInspectorAction({
-    value: "i",
-    key: {},
-    panelTitle: "Context expanded",
-    actionsEnabled: false,
-  }), { type: "none" });
   assert.deepEqual(resolveWorkShellContextInspectorAction({
     value: "",
     key: { return: true },
     panelTitle: "Context expanded",
     actionsEnabled: false,
+  }), { type: "expand" });
+  assert.deepEqual(resolveWorkShellContextInspectorAction({
+    value: " ",
+    key: {},
+    panelTitle: "Context expanded",
+    actionsEnabled: true,
+  }), { type: "toggle-delivery" });
+  assert.deepEqual(resolveWorkShellContextInspectorAction({
+    value: "p",
+    key: {},
+    panelTitle: "Context expanded",
+    actionsEnabled: true,
+  }), { type: "toggle-pin" });
+  assert.deepEqual(resolveWorkShellContextInspectorAction({
+    value: " ",
+    key: {},
+    panelTitle: "Context expanded",
+    actionsEnabled: false,
   }), { type: "none" });
 });
 
-test("context inspector input controller dispatches mutation shortcuts only when actions are enabled", async () => {
+test("context inspector input controller dispatches only enabled human actions", async () => {
   const readOnlyCalls = [];
   const readOnly = renderWithInput(
     React.createElement(ContextInputControllerHarness, {
       actionsEnabled: false,
       onMove: () => {},
       onPin: () => readOnlyCalls.push("pin"),
-      onForget: () => readOnlyCalls.push("forget"),
-      onInclude: () => readOnlyCalls.push("include"),
-      onExpand: () => {},
+      onToggleDelivery: () => readOnlyCalls.push("delivery"),
+      onExpand: () => readOnlyCalls.push("expand"),
     }),
   );
-  readOnly.stdin.write("f");
+  readOnly.stdin.write(" ");
+  readOnly.stdin.write("p");
   await new Promise((resolve) => setTimeout(resolve, 200));
   readOnly.instance.unmount();
   readOnly.instance.cleanup();
@@ -149,19 +150,46 @@ test("context inspector input controller dispatches mutation shortcuts only when
       actionsEnabled: true,
       onMove: () => {},
       onPin: () => writableCalls.push("pin"),
-      onForget: () => writableCalls.push("forget"),
-      onInclude: () => writableCalls.push("include"),
-      onExpand: () => {},
+      onToggleDelivery: () => writableCalls.push("delivery"),
+      onExpand: () => writableCalls.push("expand"),
     }),
   );
-  writable.stdin.write("f");
-  await waitForCondition(() => writableCalls.includes("forget"));
+  writable.stdin.write(" ");
+  await waitForCondition(() => writableCalls.includes("delivery"));
+  writable.stdin.write("p");
+  await waitForCondition(() => writableCalls.includes("pin"));
+  writable.stdin.write("\r");
+  await waitForCondition(() => writableCalls.includes("expand"));
   writable.instance.unmount();
   writable.instance.cleanup();
-  assert.deepEqual(writableCalls, ["forget"]);
+  assert.deepEqual(writableCalls, ["delivery", "pin", "expand"]);
 });
 
-test("composer does not swallow read-only context mutation keys", async () => {
+test("expanded context details route arrow keys to scrolling instead of source movement", async () => {
+  const calls = [];
+  const view = renderWithInput(
+    React.createElement(ContextInputControllerHarness, {
+      actionsEnabled: true,
+      expandedId: "configured-prompt",
+      onMove: () => calls.push("move"),
+      onScroll: (direction) => calls.push(`scroll:${direction}`),
+      onPin: () => {},
+      onToggleDelivery: () => {},
+      onExpand: async () => {},
+    }),
+  );
+
+  try {
+    view.stdin.write("\u001b[B");
+    await waitForCondition(() => calls.length > 0);
+    assert.deepEqual(calls, ["scroll:1"]);
+  } finally {
+    view.instance.unmount();
+    view.instance.cleanup();
+  }
+});
+
+test("composer only suppresses context mutation keys when actions are enabled", async () => {
   const changes = [];
   const { stdin, instance } = renderWithInput(
     React.createElement(Composer, {
@@ -173,10 +201,33 @@ test("composer does not swallow read-only context mutation keys", async () => {
     }),
   );
 
-  stdin.write("f");
-  await waitForCondition(() => changes.includes("f"));
+  stdin.write("p");
+  await waitForCondition(() => changes.includes("p"));
   instance.unmount();
   instance.cleanup();
 
-  assert.deepEqual(changes, ["f"]);
+  assert.deepEqual(changes, ["p"]);
+});
+
+test("composer does not suppress a mutation letter after locally pending text", async () => {
+  const changes = [];
+  const { stdin, instance } = renderWithInput(
+    React.createElement(Composer, {
+      value: "",
+      onChange: (value) => changes.push(value),
+      onSubmit: async () => {},
+      suppressInspectorKeys: true,
+      suppressInspectorMutationKeys: true,
+    }),
+  );
+
+  try {
+    stdin.write("a");
+    stdin.write("p");
+    await waitForCondition(() => changes.includes("ap"));
+    assert.equal(changes.at(-1), "ap");
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
 });

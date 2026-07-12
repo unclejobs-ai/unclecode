@@ -3001,6 +3001,190 @@ test("WorkShellEngine context inspector actions mutate the selected CRP source",
   assert.equal(engine.getState().contextPacket?.included[0]?.includedInModel, true);
 });
 
+test("WorkShellEngine loads local source details on Enter and scrolls without moving the source cursor", async () => {
+  const packet = {
+    id: "packet-detail-reader",
+    version: 1,
+    generatedAt: "2026-07-12T00:00:00.000Z",
+    title: "Next answer context",
+    included: [{
+      id: "provider-system-prompt-configured",
+      category: "provider-system-prompt",
+      label: "Configured prompt",
+      reason: "prompt guidance active",
+      preview: "Configured prompt sections are active; raw prompt text stays local.",
+      tokenEstimate: 22,
+      includedInModel: true,
+    }],
+    excluded: [],
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: 1, excluded: 0, warnings: 0 },
+    tokenEstimate: 22,
+  };
+  const { engine } = createEngine({
+    resolveContextPacket: async () => packet,
+    resolveContextSourceDetail: async (sourceId) =>
+      sourceId === "provider-system-prompt-configured"
+        ? "# Configured prompt\nRule one.\nRule two.\nRule three."
+        : undefined,
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  await engine.toggleContextInspectorExpanded();
+
+  assert.equal(engine.getState().contextInspectorExpanded, "provider-system-prompt-configured");
+  assert.match(engine.getState().contextInspectorDetailContent ?? "", /Rule three\./);
+  assert.equal(engine.getState().contextInspectorDetailOffset, 0);
+
+  engine.moveContextInspectorDetailOffset(1);
+  assert.equal(engine.getState().contextInspectorDetailOffset, 1);
+  assert.equal(engine.getState().contextInspectorCursor, 0);
+
+  await engine.toggleContextInspectorExpanded();
+  assert.equal(engine.getState().contextInspectorExpanded, null);
+  assert.equal(engine.getState().contextInspectorDetailContent, undefined);
+  assert.equal(engine.getState().contextInspectorDetailOffset, 0);
+});
+
+test("WorkShellEngine ignores late local detail after the Context Desk closes", async () => {
+  let releaseDetail;
+  const packet = {
+    id: "packet-late-detail",
+    version: 1,
+    generatedAt: "2026-07-12T00:00:00.000Z",
+    title: "Next answer context",
+    included: [{
+      id: "configured-prompt",
+      category: "provider-system-prompt",
+      label: "Configured prompt",
+      reason: "prompt guidance active",
+      preview: "Local detail available.",
+      includedInModel: true,
+    }],
+    excluded: [],
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: 1, excluded: 0, warnings: 0 },
+    tokenEstimate: 0,
+  };
+  const { engine } = createEngine({
+    resolveContextPacket: async () => packet,
+    resolveContextSourceDetail: async () => new Promise((resolve) => {
+      releaseDetail = resolve;
+    }),
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  const opening = engine.toggleContextInspectorExpanded();
+  engine.closeOverlay();
+  releaseDetail?.("LATE_LOCAL_PROMPT");
+  await opening;
+
+  assert.equal(engine.getState().contextInspectorExpanded, null);
+  assert.equal(engine.getState().contextInspectorDetailContent, undefined);
+});
+
+test("WorkShellEngine preserves selected source identity across include/hold refresh reorder", async () => {
+  /** @type {Map<string, { includedInModel: boolean, salience: number }>} */
+  const sourceState = new Map([
+    ["alpha", { includedInModel: true, salience: 0.4 }],
+    ["beta", { includedInModel: true, salience: 0.9 }],
+    ["gamma", { includedInModel: false, salience: 0.5 }],
+  ]);
+  const mutations = [];
+  const makePacket = () => {
+    const items = [...sourceState.entries()].map(([id, state]) => ({
+      id,
+      category: id === "gamma" ? "runtime" : "workspace",
+      label: `${id}.md`,
+      reason: "identity fixture",
+      preview: `${id} preview`,
+      tokenEstimate: 10,
+      salience: state.salience,
+      includedInModel: state.includedInModel,
+    }));
+    // Reorder on every refresh: held sources first by descending salience, then included.
+    // This intentionally reshuffles numeric indexes after include/hold.
+    const held = items.filter((item) => !item.includedInModel).sort((a, b) => b.salience - a.salience);
+    const included = items.filter((item) => item.includedInModel).sort((a, b) => b.salience - a.salience);
+    return {
+      id: `packet-identity-${mutations.length}`,
+      version: 1,
+      generatedAt: "2026-07-12T00:00:00.000Z",
+      title: "Next answer context",
+      included,
+      excluded: held,
+      warnings: [],
+      preview: [],
+      sourceCounts: { included: included.length, excluded: held.length, warnings: 0 },
+      tokenEstimate: included.length * 10,
+    };
+  };
+  const { engine } = createEngine({
+    resolveContextPacket: async () => makePacket(),
+    mutateContextSource(action) {
+      mutations.push(action);
+      const current = sourceState.get(action.id);
+      if (!current) {
+        throw new Error(`unknown source ${action.id}`);
+      }
+      if (action.kind === "forget") {
+        sourceState.set(action.id, { ...current, includedInModel: false });
+      }
+      if (action.kind === "include") {
+        sourceState.set(action.id, { ...current, includedInModel: true, salience: 1 });
+      }
+      if (action.kind === "pin") {
+        sourceState.set(action.id, { ...current, salience: 1 });
+      }
+      if (action.kind === "unpin") {
+        sourceState.set(action.id, { ...current, salience: 0.5 });
+      }
+      return {
+        id: `receipt-${mutations.length}`,
+        action: action.kind === "forget" ? "hold-back" : action.kind,
+        sourceId: action.id,
+        sourceLabel: `${action.id}.md`,
+        message: `${action.kind} ${action.id}.md`,
+        canUndo: true,
+      };
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+
+  // included order after first load: beta (0.9), alpha (0.4), then held gamma
+  assert.deepEqual(
+    engine.getState().contextPacket?.included.map((item) => item.id),
+    ["beta", "alpha"],
+  );
+  engine.moveContextInspectorCursor(1); // land on alpha (index 1)
+  assert.equal(engine.getState().contextInspectorCursor, 1);
+
+  await engine.forgetContextSourceAtCursor();
+  assert.deepEqual(mutations.at(-1), { kind: "forget", id: "alpha" });
+  // After hold-back, packet reorders but selection must stay on alpha by id.
+  assert.equal(
+    engine.getState().contextPacket?.excluded.some((item) => item.id === "alpha"),
+    true,
+  );
+
+  // Prove identity via the next action, not packet concat order (inspector list is group-sorted).
+  await engine.includeContextSourceAtCursor();
+  assert.deepEqual(mutations.at(-1), { kind: "include", id: "alpha" });
+  assert.equal(
+    engine.getState().contextPacket?.included.some((item) => item.id === "alpha"),
+    true,
+  );
+  // Include fixture pins salience to 1.0; the next Enter must still target alpha.
+  await engine.toggleContextInspectorPin();
+  assert.deepEqual(mutations.at(-1), { kind: "unpin", id: "alpha" });
+});
+
 test("WorkShellEngine reuses the previewed /context packet for the next chat turn", async () => {
   const prompts = [];
   let packetCalls = 0;

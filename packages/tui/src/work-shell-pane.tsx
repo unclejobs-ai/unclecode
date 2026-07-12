@@ -1,8 +1,13 @@
 import { useStdout } from "ink";
 import React from "react";
 
+import {
+  captureClipboardImage as defaultCaptureClipboardImage,
+  type ClipboardImageResult,
+} from "@unclecode/orchestrator";
+
 import type { TuiShellHomeState } from "./shell-state.js";
-import { Composer } from "./composer.js";
+import { Composer, handleComposerClipboardPaste } from "./composer.js";
 import {
   buildAttachmentPreviewLines,
   formatAttachmentErrorLine,
@@ -43,6 +48,11 @@ export type WorkShellPaneProps<
   readonly shouldBlockSlashSubmit: (line: string) => boolean;
   readonly getReasoningLabel: (reasoning: State["reasoning"]) => string;
   readonly isReasoningSupported: (reasoning: State["reasoning"]) => boolean;
+  /**
+   * Injectable clipboard capture for Ctrl+V and exact `/attach clipboard`.
+   * Production defaults to the platform capture; tests inject synthetic PNGs.
+   */
+  readonly captureClipboardImage?: (() => ClipboardImageResult) | undefined;
 };
 
 const AUTO_PROMOTE_IMAGE_PROMPTS = new Set([
@@ -53,6 +63,53 @@ const STANDALONE_IMAGE_PATH_PATTERN = /^(?:"(?:file:\/\/|\/|[A-Za-z]:[\\/]).+\.(
 
 export function resolveWorkShellPaneTerminalColumns(stdout: NodeJS.WriteStream): number {
   return stdout.columns ?? process.stdout.columns ?? 96;
+}
+
+export function resolveWorkShellPaneTerminalRows(stdout: NodeJS.WriteStream): number {
+  return stdout.rows ?? process.stdout.rows ?? 24;
+}
+
+const ATTACH_CLIPBOARD_COMMAND = "/attach clipboard";
+const ATTACH_CLIPBOARD_USAGE =
+  "Use /attach clipboard to capture the current clipboard image.";
+
+export function normalizeComposerSlashLine(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+export function isExactAttachClipboardCommand(value: string): boolean {
+  return normalizeComposerSlashLine(value) === ATTACH_CLIPBOARD_COMMAND;
+}
+
+export function isAttachClipboardNearMiss(value: string): boolean {
+  const normalized = normalizeComposerSlashLine(value).toLowerCase();
+  if (normalized.length === 0) {
+    return false;
+  }
+  if (normalized === ATTACH_CLIPBOARD_COMMAND) {
+    return false;
+  }
+  return normalized === "/attach" || normalized.startsWith("/attach ");
+}
+
+export function resolveAttachmentOnlyInspectionPrompt(attachmentCount: number): string {
+  return attachmentCount === 1
+    ? "Please inspect the attached image."
+    : "Please inspect the attached images.";
+}
+
+export function formatClipboardCaptureFriendlyError(
+  status: "no-image" | "unsupported" | "failed",
+  reason: string,
+): string {
+  switch (status) {
+    case "no-image":
+      return "Clipboard has no image to attach.";
+    case "unsupported":
+      return "Clipboard image capture is not supported on this platform.";
+    case "failed":
+      return reason.trim() || "Could not capture clipboard image.";
+  }
 }
 
 export function looksLikeStandaloneImagePathInput(value: string): boolean {
@@ -84,6 +141,7 @@ export function WorkShellPane<
     submit,
     addClipboardAttachment,
     clearClipboardAttachments,
+    pendingClipboardAttachments,
     pendingClipboardAttachmentCount,
   } = useWorkShellPaneState<Attachment, State>({
     engine: props.engine,
@@ -105,15 +163,18 @@ export function WorkShellPane<
   });
 
   const { stdout } = useStdout();
+  const captureClipboardImage = props.captureClipboardImage ?? defaultCaptureClipboardImage;
   const [terminalColumns, setTerminalColumns] = React.useState(() => resolveWorkShellPaneTerminalColumns(stdout));
+  const [terminalRows, setTerminalRows] = React.useState(() => resolveWorkShellPaneTerminalRows(stdout));
   React.useEffect(() => {
-    const updateTerminalColumns = () => {
+    const updateTerminalSize = () => {
       setTerminalColumns(resolveWorkShellPaneTerminalColumns(stdout));
+      setTerminalRows(resolveWorkShellPaneTerminalRows(stdout));
     };
-    updateTerminalColumns();
-    stdout.on("resize", updateTerminalColumns);
+    updateTerminalSize();
+    stdout.on("resize", updateTerminalSize);
     return () => {
-      stdout.off("resize", updateTerminalColumns);
+      stdout.off("resize", updateTerminalSize);
     };
   }, [stdout]);
 
@@ -137,6 +198,8 @@ export function WorkShellPane<
     contextSourceActionsEnabled,
     contextInspectorCursor,
     contextInspectorExpanded,
+    contextInspectorDetailContent,
+    contextInspectorDetailOffset,
     contextPacket,
     modelWindow,
     queuedCount,
@@ -190,6 +253,16 @@ export function WorkShellPane<
     return lines.length > 0 ? lines : undefined;
   }, [composerPreview.attachments, lastClipboardError]);
 
+  const acceptClipboardImage = React.useCallback((attachment: Attachment) => {
+    const outcome = addClipboardAttachment(attachment);
+    if (outcome.accepted === false) {
+      setLastClipboardError(outcome.reason);
+      return false;
+    }
+    setLastClipboardError(null);
+    return true;
+  }, [addClipboardAttachment]);
+
   const handleComposerChange = React.useCallback((nextValue: string) => {
     const requestId = standaloneImageResolveRequestIdRef.current + 1;
     standaloneImageResolveRequestIdRef.current = requestId;
@@ -213,13 +286,10 @@ export function WorkShellPane<
           return;
         }
         for (const attachment of resolved.attachments) {
-          const outcome = addClipboardAttachment(attachment as Attachment);
-          if (outcome.accepted === false) {
-            setLastClipboardError(outcome.reason);
+          if (!acceptClipboardImage(attachment as Attachment)) {
             return;
           }
         }
-        setLastClipboardError(null);
       })
       .catch(() => {
         if (standaloneImageResolveRequestIdRef.current !== requestId) {
@@ -227,7 +297,7 @@ export function WorkShellPane<
         }
         setInputValue((current) => (current.length === 0 ? nextValue : current));
       });
-  }, [addClipboardAttachment, props.cwd, props.resolveComposerInput, setInputValue]);
+  }, [acceptClipboardImage, props.cwd, props.resolveComposerInput, setInputValue]);
 
   return (
     <WorkShellView
@@ -249,44 +319,70 @@ export function WorkShellPane<
       contextSourceActionsEnabled={contextSourceActionsEnabled ?? false}
       {...(contextInspectorCursor !== undefined ? { contextInspectorCursor } : {})}
       {...(contextInspectorExpanded !== undefined ? { contextInspectorExpanded } : {})}
+      {...(contextInspectorDetailContent !== undefined ? { contextInspectorDetailContent } : {})}
+      {...(contextInspectorDetailOffset !== undefined ? { contextInspectorDetailOffset } : {})}
       {...(contextPacket ? { contextPacket } : {})}
       {...(modelWindow !== undefined ? { modelWindow } : {})}
       {...(agentConsole ? { agentConsole } : {})}
       {...(attachmentLines ? { attachmentLines } : {})}
       {...(pendingClipboardAttachmentCount > 0 ? { attachmentCount: pendingClipboardAttachmentCount } : {})}
+      {...{ terminalRows }}
       composer={
         <Composer
           value={inputValue}
           onChange={handleComposerChange}
           onSubmit={async (line) => {
+            const normalized = normalizeComposerSlashLine(line);
+
+            if (isExactAttachClipboardCommand(normalized)) {
+              handleComposerClipboardPaste({
+                capture: captureClipboardImage,
+                onClipboardImage: (attachment) => {
+                  acceptClipboardImage(attachment as Attachment);
+                },
+                onClipboardImageError: (reason, status) => {
+                  setLastClipboardError(formatClipboardCaptureFriendlyError(status, reason));
+                },
+              });
+              setInputValue("");
+              return;
+            }
+
+            if (isAttachClipboardNearMiss(normalized)) {
+              setLastClipboardError(ATTACH_CLIPBOARD_USAGE);
+              setInputValue("");
+              return;
+            }
+
+            const submittedClipboardAttachments = pendingClipboardAttachments;
+            if (normalized.length === 0 && pendingClipboardAttachmentCount > 0) {
+              const prompt = resolveAttachmentOnlyInspectionPrompt(pendingClipboardAttachmentCount);
+              const accepted = await submit(prompt);
+              if (accepted) {
+                clearClipboardAttachments(submittedClipboardAttachments);
+              }
+              return;
+            }
+
             // Run the engine submit FIRST (it closes over the live pending
             // list, so attachments cross the engine boundary correctly).
-            // Then drop the local pending list — but only when the line had
-            // content. An empty Enter today is a noop in the engine; if we
-            // cleared first the user's paste would silently disappear.
-            // Attachment-only submission (line=="" + attachments) is a
-            // separate dispatch path tracked as a memo §4 follow-up.
-            await submit(line);
-            if (line.trim().length > 0) {
-              clearClipboardAttachments();
+            // Clear only after an accepted submission — busy/noop paths must
+            // keep the pending badge intact.
+            const accepted = await submit(line);
+            if (accepted) {
+              clearClipboardAttachments(submittedClipboardAttachments);
             }
           }}
+          captureClipboardImage={captureClipboardImage}
           onClipboardImage={(attachment) => {
             // ClipboardImageAttachment is byte-identical to the project-wide
             // WorkShellImageAttachment alias from contracts. Cast at this
             // seam keeps the generic constraint honest.
-            const outcome = addClipboardAttachment(attachment as Attachment);
-            if (outcome.accepted === false) {
-              // Surface the cap rejection through the same channel the
-              // capture-side errors use — the user sees a single line of
-              // explanation instead of the pasted image silently
-              // disappearing into the void.
-              setLastClipboardError(outcome.reason);
-              return;
-            }
-            setLastClipboardError(null);
+            acceptClipboardImage(attachment as Attachment);
           }}
-          onClipboardImageError={(reason) => setLastClipboardError(reason)}
+          onClipboardImageError={(reason, status) => {
+            setLastClipboardError(formatClipboardCaptureFriendlyError(status, reason));
+          }}
           terminalColumns={terminalColumns}
           textColor={getWorkShellComposerTextColor()}
           {...(isSecureApiKeyEntry ? { mask: "•" } : {})}

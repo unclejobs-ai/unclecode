@@ -176,6 +176,8 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
         panel: result.panel,
         contextInspectorCursor: activeContextPacket ? 0 : -1,
         contextInspectorExpanded: null,
+        contextInspectorDetailContent: undefined,
+        contextInspectorDetailOffset: 0,
       });
       return;
     }

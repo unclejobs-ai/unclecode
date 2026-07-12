@@ -12,13 +12,46 @@ export type ContextInspectorSuggestion = {
   readonly message: string;
 };
 
+export const CONTEXT_INSPECTOR_GROUP_ORDER = [
+  "Project instructions",
+  "Current conversation",
+  "Saved memory",
+  "Files & attachments",
+  "Tool activity",
+  "Other context",
+] as const;
+
+export type ContextInspectorHumanGroup = (typeof CONTEXT_INSPECTOR_GROUP_ORDER)[number];
+
 type ContextInspectorSuggestionRow = {
   readonly item: ContextPacketViewItem;
   readonly heldBack: boolean;
 };
 
+export function resolveContextSourceGroup(category: string): ContextInspectorHumanGroup {
+  if (
+    /^(workspace-guidance|workspace|provider-system-prompt)/i.test(category)
+    || /^system$/i.test(category)
+  ) {
+    return "Project instructions";
+  }
+  if (/^(bridge|condensed-history)/i.test(category)) {
+    return "Current conversation";
+  }
+  if (/^memory/i.test(category)) {
+    return "Saved memory";
+  }
+  if (/^attachment/i.test(category)) {
+    return "Files & attachments";
+  }
+  if (/^(loop-trail|runtime|live)/i.test(category)) {
+    return "Tool activity";
+  }
+  return "Other context";
+}
+
 function formatSuggestionSourceLabel(row: ContextInspectorSuggestionRow): string {
-  return `${row.item.category} · ${row.item.label}`;
+  return `${resolveContextSourceGroup(row.item.category)} · ${row.item.label}`;
 }
 
 export function formatContextTokenEstimate(
@@ -69,7 +102,7 @@ export function resolveContextInspectorSuggestion(input: {
   if (staleRow) {
     return {
       tone: "warning",
-      message: `Freshness risk: ${staleRow.item.category} source needs refresh (${formatFreshnessPhrase(staleRow)}).`,
+      message: `Freshness risk: ${resolveContextSourceGroup(staleRow.item.category)} source needs refresh (${formatFreshnessPhrase(staleRow)}).`,
     };
   }
 

@@ -14,6 +14,7 @@ import {
   type WorkShellDashboardHomeSyncState,
 } from "./work-shell-dashboard-sync.js";
 import type { TuiShellHomeState } from "./shell-state.js";
+import { isContextInspectorSourceHeldBack } from "./work-shell-context-inspector-model.js";
 import {
   clampWorkShellSlashSelection,
   cycleWorkShellSlashSelection,
@@ -256,6 +257,8 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly queuePaused?: boolean | undefined;
   readonly contextInspectorCursor?: number | undefined;
   readonly contextInspectorExpanded?: string | null | undefined;
+  readonly contextInspectorDetailContent?: string | undefined;
+  readonly contextInspectorDetailOffset?: number | undefined;
   readonly contextPacket?: ContextPacketView | undefined;
   readonly contextActionReceipt?: ContextPacketViewActionReceipt | undefined;
   readonly contextSourceActionsEnabled?: boolean | undefined;
@@ -278,10 +281,11 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   // All are optional so test harnesses / legacy panes that never open the
   // overlay don't need stubs.
   moveContextInspectorCursor?(direction: number): void;
+  moveContextInspectorDetailOffset?(direction: number): void;
   toggleContextInspectorPin?(): Promise<void>;
   forgetContextSourceAtCursor?(): Promise<void>;
   includeContextSourceAtCursor?(): Promise<void>;
-  toggleContextInspectorExpanded?(): void;
+  toggleContextInspectorExpanded?(): Promise<void>;
   // Optional because not every pane host wires trace plumbing — when
   // absent, the hook silently drops the event. In practice WorkShellEngine
   // always implements this since commit b891c19's follow-up.
@@ -314,6 +318,21 @@ export type AttachmentLifecycleTraceEvent =
       readonly startedAt: number;
     };
 
+function filterSelectableSlashSuggestions(
+  slashInput: string | undefined,
+  suggestions: readonly WorkShellSlashSuggestion[],
+): readonly WorkShellSlashSuggestion[] {
+  if (!slashInput?.trim().startsWith("/model")) {
+    return suggestions;
+  }
+  return suggestions.filter((suggestion) => {
+    const command = suggestion.command.trim();
+    return command.startsWith("/model ")
+      && command !== "/model list"
+      && command.slice("/model ".length).trim().length > 0;
+  });
+}
+
 export function useWorkShellSlashState(input: {
   readonly value: string;
   readonly activeSlashInput?: string | undefined;
@@ -327,13 +346,15 @@ export function useWorkShellSlashState(input: {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const slashInput = input.activeSlashInput;
 
-  const suggestions = useMemo(
-    () =>
-      slashInput
-        ? input.getSuggestions(slashInput)
-        : [],
-    [slashInput, input.getSuggestions],
-  );
+  const suggestions = useMemo(() => {
+    if (!slashInput) {
+      return [];
+    }
+    return filterSelectableSlashSuggestions(
+      slashInput,
+      input.getSuggestions(slashInput),
+    );
+  }, [slashInput, input.getSuggestions]);
 
   useEffect(() => {
     setSelectedIndex((current) =>
@@ -404,15 +425,18 @@ export function useWorkShellInputController(input: {
   readonly cancelSensitiveInput?: (() => void) | undefined;
   readonly closeOverlay?: (() => void) | undefined;
   readonly contextSourceActionsEnabled?: boolean | undefined;
+  readonly contextInspectorExpanded?: string | null | undefined;
   // Context Inspector (Sprint 2): engine callbacks for the /context overlay
   // keyboard actions. All optional — only dispatched when the overlay is open
   // and the engine wires them.
   readonly moveContextInspectorCursor?: ((direction: number) => void) | undefined;
+  readonly moveContextInspectorDetailOffset?: ((direction: number) => void) | undefined;
   readonly toggleContextInspectorPin?: (() => Promise<void>) | undefined;
   readonly forgetContextSourceAtCursor?: (() => Promise<void>) | undefined;
   readonly includeContextSourceAtCursor?: (() => Promise<void>) | undefined;
-  readonly toggleContextInspectorExpanded?: (() => void) | undefined;
-}): { readonly submit: (value: string) => Promise<void> } {
+  readonly toggleContextSourceDelivery?: (() => Promise<void>) | undefined;
+  readonly toggleContextInspectorExpanded?: (() => Promise<void>) | undefined;
+}): { readonly submit: (value: string) => Promise<boolean> } {
   const escapeResetArmedAtRef = useRef<number | undefined>(undefined);
   useInput((value, key) => {
     const ctrlOCount = value.split("\u000f").length - 1;
@@ -450,17 +474,19 @@ export function useWorkShellInputController(input: {
       });
       switch (inspectorAction.type) {
         case "move-cursor":
-          input.moveContextInspectorCursor?.(inspectorAction.direction);
+          if (input.contextInspectorExpanded) {
+            input.moveContextInspectorDetailOffset?.(inspectorAction.direction);
+          } else {
+            input.moveContextInspectorCursor?.(inspectorAction.direction);
+          }
           return;
         case "toggle-pin":
           escapeResetArmedAtRef.current = undefined;
           void input.toggleContextInspectorPin?.().catch(() => undefined);
           return;
-        case "forget":
-          void input.forgetContextSourceAtCursor?.().catch(() => undefined);
-          return;
-        case "include":
-          void input.includeContextSourceAtCursor?.().catch(() => undefined);
+        case "toggle-delivery":
+          escapeResetArmedAtRef.current = undefined;
+          void input.toggleContextSourceDelivery?.().catch(() => undefined);
           return;
         case "expand":
           input.toggleContextInspectorExpanded?.();
@@ -544,7 +570,7 @@ export function useWorkShellInputController(input: {
   }, { isActive: true });
 
   const submit = useCallback(
-    async (value: string) => {
+    async (value: string): Promise<boolean> => {
       const typedLine = value.trim();
       const submitValue =
         input.activeSlashInput && (typedLine.length === 0 || !typedLine.startsWith("/"))
@@ -564,12 +590,12 @@ export function useWorkShellInputController(input: {
       });
 
       if (action.type === "noop") {
-        return;
+        return false;
       }
 
       if (action.type === "replace-input") {
         input.replaceValue(action.value);
-        return;
+        return false;
       }
 
       if (action.clearInput) {
@@ -580,6 +606,7 @@ export function useWorkShellInputController(input: {
       if (input.activePanelTitle === "Model picker" || action.line.trim().startsWith("/model ")) {
         input.closeSlashPicker?.("Model picker");
       }
+      return true;
     },
     [
       input.handleSubmit,
@@ -597,7 +624,7 @@ export function useWorkShellInputController(input: {
 }
 
 export function useWorkShellPaneState<
-  Attachment extends { readonly dataUrl: string },
+  Attachment extends { readonly dataUrl: string; readonly mimeType?: string },
   State extends WorkShellPaneRuntimeState,
 >(input: {
   readonly engine: WorkShellPaneEngine<State>;
@@ -635,8 +662,7 @@ export function useWorkShellPaneState<
           source: "clipboard",
           reason: "cap-exceeded",
           byteEstimate: capDecision.byteEstimate,
-          mimeType:
-            (attachment as { readonly mimeType?: string }).mimeType ?? "application/octet-stream",
+          mimeType: attachment.mimeType ?? "application/octet-stream",
           startedAt,
         });
         return capDecision;
@@ -651,8 +677,7 @@ export function useWorkShellPaneState<
         type: "attachment.attached",
         level: "default",
         source: "clipboard",
-        mimeType:
-          (attachment as { readonly mimeType?: string }).mimeType ?? "application/octet-stream",
+        mimeType: attachment.mimeType ?? "application/octet-stream",
         byteEstimate: capDecision.byteEstimate,
         startedAt,
       });
@@ -674,19 +699,21 @@ export function useWorkShellPaneState<
           source: "clipboard",
           reason: "user-cleared",
           byteEstimate: estimateAttachmentBytes(item),
-          mimeType:
-            (item as { readonly mimeType?: string }).mimeType ?? "application/octet-stream",
+          mimeType: item.mimeType ?? "application/octet-stream",
           startedAt,
         });
       }
       return [];
     });
   }, [input.engine]);
-  const clearClipboardAttachments = useCallback(() => {
-    // Submit-time clear — stays silent (no dropped events) so a normal
-    // turn does not log N attached + N dropped lines. The same-reference
-    // return on empty avoids re-rendering when there was nothing to clear.
-    setPendingClipboardAttachments((current) => (current.length === 0 ? current : []));
+  const clearClipboardAttachments = useCallback((submitted: readonly Attachment[]) => {
+    // Submit-time clear stays silent. Remove only the captured submission
+    // snapshot so an image pasted while the engine is awaiting remains queued.
+    const submittedDataUrls = new Set(submitted.map((item) => item.dataUrl));
+    setPendingClipboardAttachments((current) => {
+      const remaining = current.filter((item) => !submittedDataUrls.has(item.dataUrl));
+      return remaining.length === current.length ? current : remaining;
+    });
   }, []);
   const engineState = useWorkShellEngineState(input.engine);
   const enginePanelKey = getWorkShellPanelDismissKey(engineState.panel);
@@ -773,6 +800,7 @@ export function useWorkShellPaneState<
     [input.engine],
   );
 
+
   const { submit } = useWorkShellInputController({
     value: inputValue,
     replaceValue: setInputValue,
@@ -818,10 +846,14 @@ export function useWorkShellPaneState<
       ? { closeOverlay: () => input.engine.closeOverlay?.() }
       : {}),
     contextSourceActionsEnabled: engineState.contextSourceActionsEnabled ?? false,
+    contextInspectorExpanded: engineState.contextInspectorExpanded,
     // Context Inspector (Sprint 2): forward engine callbacks so the
     // controller's useInput can dispatch overlay keyboard actions.
     ...(input.engine.moveContextInspectorCursor
       ? { moveContextInspectorCursor: (direction: number) => { void input.engine.moveContextInspectorCursor?.(direction); } }
+      : {}),
+    ...(input.engine.moveContextInspectorDetailOffset
+      ? { moveContextInspectorDetailOffset: (direction: number) => { input.engine.moveContextInspectorDetailOffset?.(direction); } }
       : {}),
     ...(input.engine.toggleContextInspectorPin
       ? { toggleContextInspectorPin: async () => { await input.engine.toggleContextInspectorPin?.(); } }
@@ -832,8 +864,24 @@ export function useWorkShellPaneState<
     ...(input.engine.includeContextSourceAtCursor
       ? { includeContextSourceAtCursor: async () => { await input.engine.includeContextSourceAtCursor?.(); } }
       : {}),
+    ...(input.engine.forgetContextSourceAtCursor && input.engine.includeContextSourceAtCursor
+      ? {
+          toggleContextSourceDelivery: async () => {
+            const packet = engineState.contextPacket;
+            const cursor = engineState.contextInspectorCursor;
+            const heldBack = packet && cursor !== undefined && cursor >= 0
+              ? isContextInspectorSourceHeldBack(packet, cursor)
+              : false;
+            if (heldBack) {
+              await input.engine.includeContextSourceAtCursor?.();
+            } else {
+              await input.engine.forgetContextSourceAtCursor?.();
+            }
+          },
+        }
+      : {}),
     ...(input.engine.toggleContextInspectorExpanded
-      ? { toggleContextInspectorExpanded: () => { input.engine.toggleContextInspectorExpanded?.(); } }
+      ? { toggleContextInspectorExpanded: async () => { await input.engine.toggleContextInspectorExpanded?.(); } }
       : {}),
   });
 
@@ -848,6 +896,7 @@ export function useWorkShellPaneState<
     submit,
     addClipboardAttachment,
     clearClipboardAttachments,
+    pendingClipboardAttachments,
     pendingClipboardAttachmentCount: pendingClipboardAttachments.length,
   };
 }
@@ -919,31 +968,35 @@ function checkClipboardCapViolation<A extends { readonly dataUrl: string }>(
     ),
   ) as unknown;
   if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    typeof (parsed as { accepted?: unknown }).accepted !== "boolean" ||
-    typeof (parsed as { byteEstimate?: unknown }).byteEstimate !== "number" ||
-    !Number.isSafeInteger((parsed as { byteEstimate: number }).byteEstimate)
+    typeof parsed !== "object"
+    || parsed === null
+    || !("accepted" in parsed)
+    || typeof parsed.accepted !== "boolean"
+    || !("byteEstimate" in parsed)
+    || typeof parsed.byteEstimate !== "number"
+    || !Number.isSafeInteger(parsed.byteEstimate)
   ) {
     throw new Error("Rust clipboard attachment cap returned an invalid payload.");
   }
-  if ((parsed as { accepted: boolean }).accepted) {
+  if (parsed.accepted) {
     return {
       accepted: true,
-      byteEstimate: (parsed as { byteEstimate: number }).byteEstimate,
+      byteEstimate: parsed.byteEstimate,
     };
   }
   if (
-    (parsed as { status?: unknown }).status !== "failed" ||
-    typeof (parsed as { reason?: unknown }).reason !== "string"
+    !("status" in parsed)
+    || parsed.status !== "failed"
+    || !("reason" in parsed)
+    || typeof parsed.reason !== "string"
   ) {
     throw new Error("Rust clipboard attachment cap returned an invalid rejection.");
   }
   return {
     accepted: false,
     status: "failed",
-    reason: (parsed as { reason: string }).reason,
-    byteEstimate: (parsed as { byteEstimate: number }).byteEstimate,
+    reason: parsed.reason,
+    byteEstimate: parsed.byteEstimate,
   };
 }
 
@@ -964,13 +1017,34 @@ export function dedupAttachmentsByDataUrl<A extends { readonly dataUrl: string }
     ),
   ) as unknown;
   if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    !Array.isArray((parsed as { attachments?: unknown }).attachments)
+    typeof parsed !== "object"
+    || parsed === null
+    || !("attachments" in parsed)
+    || !Array.isArray(parsed.attachments)
   ) {
     throw new Error("Rust attachment dedup returned an invalid payload.");
   }
-  return (parsed as { attachments: A[] }).attachments;
+  const originalsByDataUrl = new Map<string, A>();
+  for (const item of items) {
+    if (!originalsByDataUrl.has(item.dataUrl)) {
+      originalsByDataUrl.set(item.dataUrl, item);
+    }
+  }
+  return parsed.attachments.map((attachment) => {
+    if (
+      typeof attachment !== "object"
+      || attachment === null
+      || !("dataUrl" in attachment)
+      || typeof attachment.dataUrl !== "string"
+    ) {
+      throw new Error("Rust attachment dedup returned an invalid attachment.");
+    }
+    const original = originalsByDataUrl.get(attachment.dataUrl);
+    if (!original) {
+      throw new Error("Rust attachment dedup returned an unknown attachment.");
+    }
+    return original;
+  });
 }
 
 export function useWorkShellComposerPreview<Attachment extends { readonly dataUrl: string }>(input: {

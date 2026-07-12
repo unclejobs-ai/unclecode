@@ -62,10 +62,10 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     await submitLine(session, "/context", paneFile);
     const contextPane = await waitForPane(
       session,
-      /Context expanded|Included in next answer|Sources ·|Warnings · none|✓ none/i,
+      /Sources · \d+ included|Warnings · none|✓ none/i,
       contextPaneFile,
     );
-    assert.match(contextPane, /Included in next answer/);
+    assert.match(contextPane, /Sources · \d+ included/);
     assert.match(contextPane, /Held back locally|\d+ held back/);
     assert.match(contextPane, /Warnings · none|✓ none/i);
     assert.doesNotMatch(contextPane, /Unknown command|panic|TypeError|ReferenceError/);

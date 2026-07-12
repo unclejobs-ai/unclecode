@@ -192,6 +192,55 @@ test("Work model picker closes after Enter submits the selected model option", a
   assert.equal(closeCount, 1);
 });
 
+test("Work model picker submits the visibly selected model instead of hidden controls", async () => {
+  const suggestions = [
+    { command: "/model", description: "Show model picker" },
+    ...Array.from({ length: 8 }, (_, index) => ({
+      command: `/model gpt-test-${index + 1}`,
+      description: index === 0 ? "current · reasoning medium" : "reasoning medium",
+    })),
+    { command: "/model list", description: "Show full model catalog" },
+  ];
+  const { engine, submittedLines } = createWorkShellPaneEngine({
+    panel: {
+      title: "Model picker",
+      lines: ["Model · gpt-test-1"],
+    },
+  });
+  const { stdin, instance, getOutput } = renderWithInput(
+    React.createElement(WorkShellPane, {
+      provider: "OpenAI",
+      model: "gpt-test-1",
+      mode: "yolo",
+      engine,
+      cwd: "/tmp/unclecode-test-workspace",
+      resolveComposerInput: async (value) => ({
+        prompt: value,
+        attachments: [],
+        transcriptText: value,
+      }),
+      getSuggestions: () => suggestions,
+      onExit: () => {},
+      shouldBlockSlashSubmit: (line) => line === "/model",
+      getReasoningLabel: () => "default medium",
+      isReasoningSupported: () => true,
+    }),
+  );
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stdin.write("\u001b[A");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.match(getLastWorkFrame(getOutput()), /› \/model gpt-test-8/);
+    stdin.write("\r");
+    await waitForCondition(() => submittedLines.length === 1, 2_000);
+    assert.deepEqual(submittedLines, ["/model gpt-test-8"]);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
 test("Work Ctrl+O opens the work context", async () => {
   let openCount = 0;
   const { stdin, instance } = renderWithInput(

@@ -68,7 +68,15 @@ export class RuntimeCodingAgent
       ...(args.systemPrompt ? { systemPrompt: args.systemPrompt } : {}),
       ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
       ...(args.openAIAccountId !== undefined ? { openAIAccountId: args.openAIAccountId } : {}),
-      toolRuntime: createToolRuntime({ interactionBridge }),
+      toolRuntime: createToolRuntime({
+        interactionBridge,
+        webSearch: {
+          provider: args.provider,
+          apiKey: args.apiKey,
+          model: args.model,
+          ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
+        },
+      }),
     });
     super({
       providerName: args.provider,

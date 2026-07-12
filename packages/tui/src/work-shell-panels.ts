@@ -259,6 +259,39 @@ function modelPickerReasoningChoiceLine(currentMeta: ModelPickerCurrent): string
   return "Thinking choices · low / medium / high / default";
 }
 
+const MODEL_PICKER_VISIBLE_ROWS = 6;
+
+function normalizeWorkShellSuggestions(
+  suggestions: readonly { readonly command: string; readonly description: string }[],
+): readonly { readonly command: string; readonly description: string }[] {
+  return suggestions
+    .filter(isWorkShellSuggestion)
+    .map((suggestion) => ({
+      command: suggestion.command.trim(),
+      description: suggestion.description.trim(),
+    }))
+    .filter((suggestion) => suggestion.command.length > 0);
+}
+
+function windowModelPickerRows<T>(
+  entries: readonly T[],
+  selectedIndex: number,
+  maxRows = MODEL_PICKER_VISIBLE_ROWS,
+): readonly T[] {
+  if (entries.length <= maxRows) {
+    return entries;
+  }
+  if (selectedIndex < 0) {
+    return entries.slice(0, maxRows);
+  }
+  const halfWindow = Math.floor(maxRows / 2);
+  const start = Math.min(
+    Math.max(0, selectedIndex - halfWindow),
+    Math.max(0, entries.length - maxRows),
+  );
+  return entries.slice(start, start + maxRows);
+}
+
 function buildModelPickerPanel(
   input: string,
   suggestions: readonly { readonly command: string; readonly description: string }[],
@@ -269,19 +302,26 @@ function buildModelPickerPanel(
   const modelFilter = inputText.startsWith("/model")
     ? inputText.slice("/model".length).trim() || undefined
     : undefined;
-  const visible = visibleSlashSuggestions(suggestions);
-  const selected = clampWorkShellSlashSelection(selectedIndex, visible.length);
-  const selectedCommand = visible[selected]?.command ?? "";
-  const modelEntries = visible
-    .filter((suggestion) =>
-      suggestion.command.startsWith("/model ") && suggestion.command !== "/model list")
-    .slice(0, 6);
-  const selectedModelCommand = selectedCommand === "/model"
-    ? modelEntries[0]?.command ?? ""
-    : selectedCommand;
+  const normalized = normalizeWorkShellSuggestions(suggestions);
+  const selected = clampWorkShellSlashSelection(selectedIndex, normalized.length);
+  const selectedCommand = normalized[selected]?.command ?? "";
+  const allModelEntries = normalized.filter(
+    (suggestion) =>
+      suggestion.command.startsWith("/model ") && suggestion.command !== "/model list",
+  );
+  const selectedModelCommand =
+    selectedCommand === "/model"
+      ? allModelEntries[0]?.command ?? ""
+      : selectedCommand === "/model list"
+        ? ""
+        : selectedCommand;
+  const selectedModelIndex = allModelEntries.findIndex(
+    (suggestion) => suggestion.command === selectedModelCommand,
+  );
+  const modelEntries = windowModelPickerRows(allModelEntries, selectedModelIndex);
   const currentEntry =
-    modelEntries.find((suggestion) => suggestion.description.toLowerCase().includes("current")) ??
-    modelEntries[0];
+    allModelEntries.find((suggestion) => suggestion.description.toLowerCase().includes("current")) ??
+    allModelEntries[0];
   const resolvedCurrentModel =
     currentModel?.trim() ||
     currentEntry?.command.trim().replace(/^\/model\s+/, "") ||
@@ -338,6 +378,10 @@ export function buildSlashSuggestionPanel(
   authLauncherLines?: readonly string[],
   currentModel?: string,
 ): WorkShellPanel {
+  if (input.trim().startsWith("/model")) {
+    return buildModelPickerPanel(input, suggestions, selectedIndex, currentModel);
+  }
+
   const visible = suggestions.slice(0, 6);
   const selected = clampWorkShellSlashSelection(selectedIndex, visible.length);
 
@@ -356,10 +400,6 @@ export function buildSlashSuggestionPanel(
       ),
       "Auth",
     );
-  }
-
-  if (input.trim().startsWith("/model")) {
-    return buildModelPickerPanel(input, visible, selected, currentModel);
   }
 
   return buildCommandsPanel(input, visible, selected);

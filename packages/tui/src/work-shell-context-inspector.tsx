@@ -3,117 +3,92 @@ import { Box, Text } from "ink";
 import React from "react";
 
 import {
-  computeContextOverlaySectionMaxRows,
   renderContextInspectorBudgetLine,
-  renderContextInspectorManifestLine,
-  renderContextInspectorReceipt,
 } from "./work-shell-context-inspector-header.js";
 import {
   buildContextInspectorOverview,
   buildContextInspectorRows,
+  computeContextOverlayViewportMaxRows,
   type ContextInspectorPalette,
 } from "./work-shell-context-inspector-model.js";
 import { renderContextInspectorFocus } from "./work-shell-context-inspector-focus.js";
-import { renderContextInspectorSection } from "./work-shell-context-inspector-sources.js";
+import { renderContextInspectorGroupedViewport } from "./work-shell-context-inspector-sources.js";
 import { renderContextInspectorWarnings } from "./work-shell-context-inspector-warnings.js";
-import { renderContextInspectorWorkbench } from "./work-shell-context-workbench.js";
 
 export {
   computeContextMeterFill,
   computeContextOverlaySectionMaxRows,
 } from "./work-shell-context-inspector-header.js";
+export { computeContextOverlayViewportMaxRows } from "./work-shell-context-inspector-model.js";
+
+const CONTEXT_INSPECTOR_CONTROLS =
+  "↑↓ move · Enter details · Space send/hold · P pin · Esc close";
+const CONTEXT_INSPECTOR_DETAIL_CONTROLS =
+  "↑↓ scroll · Enter back · Space send/hold · P pin · Esc close";
 
 export function renderContextInspectorOverlay(input: {
   readonly packet: ContextPacketView;
   readonly cursorIndex: number;
   readonly expandedId?: string | null;
+  readonly detailContent?: string | undefined;
+  readonly detailOffset?: number | undefined;
   readonly width: number;
   readonly borderColor: string;
   readonly palette: ContextInspectorPalette;
   readonly modelWindow: number;
   readonly actionsEnabled: boolean;
   readonly actionReceipt?: ContextPacketViewActionReceipt | undefined;
+  readonly terminalRows?: number;
 }): React.ReactNode {
+  void input.actionReceipt;
   const rows = buildContextInspectorRows(input.packet);
-  const includedRows = rows.filter((row) => !row.heldBack);
-  const heldRows = rows.filter((row) => row.heldBack);
   const overview = buildContextInspectorOverview({
     packet: input.packet,
     rows,
     modelWindow: input.modelWindow,
   });
   const selectedRow = rows.find((row) => row.sourceIndex === input.cursorIndex);
-  const selectedSection = selectedRow?.heldBack ? "Held back locally" : "Included in next answer";
-  const expandAction = input.expandedId !== undefined && input.expandedId !== null ? "e collapse" : "e expand";
-  const mutationActionLabel = input.actionsEnabled
-    ? "Enter pin/unpin · f hold back · i include"
-    : "source actions unavailable";
-  const actionLabel = input.actionsEnabled
-    ? `${mutationActionLabel} · ${expandAction}`
-    : `${expandAction} · ${mutationActionLabel}`;
-  const includedCaps = computeContextOverlaySectionMaxRows({ sourceCount: includedRows.length });
-  const heldCaps = computeContextOverlaySectionMaxRows({ sourceCount: heldRows.length });
+  const selectedSection = selectedRow?.heldBack ? "held" : "sent";
+  const viewportMaxRows = computeContextOverlayViewportMaxRows({
+    ...(input.terminalRows !== undefined ? { terminalRows: input.terminalRows } : {}),
+  });
   const { palette } = input;
+  const compactSuggestion = overview.suggestion.message;
 
   return (
     <Box marginTop={1} borderStyle="round" borderColor={input.borderColor} paddingX={1} flexDirection="column">
       <Text>
         <Text color={palette.assistant} bold>{"▤ UncleCode Context Desk"}</Text>
-        <Text color={palette.textDim}>{" · inspect, pin, and trim the context carried forward"}</Text>
+        <Text color={palette.textDim}>{" · inspect and trim context"}</Text>
       </Text>
-      <Text color={palette.textMuted}>{`  Keys · ↑/↓/j/k move · ${expandAction} · Esc close`}</Text>
-      <Text color={palette.textMuted}>{`  Actions · ${mutationActionLabel}`}</Text>
       <Box marginTop={1} flexDirection="column">
         {renderContextInspectorBudgetLine({
           packet: input.packet,
           palette,
           modelWindow: input.modelWindow,
         })}
-        {renderContextInspectorManifestLine({
-          packet: input.packet,
-          palette,
-          width: input.width,
-        })}
-        {renderContextInspectorReceipt({
-          ...(input.actionReceipt ? { receipt: input.actionReceipt } : {}),
-          width: input.width,
-          palette,
-        })}
+        <Text>
+          <Text color={overview.suggestion.tone === "warning" ? palette.warning : palette.success} bold>
+            {"Summary"}
+          </Text>
+          <Text color={palette.borderSoft}>{" · "}</Text>
+          <Text color={palette.textMuted}>{compactSuggestion}</Text>
+        </Text>
         {renderContextInspectorFocus({
           ...(selectedRow ? { row: selectedRow } : {}),
           sectionLabel: selectedSection,
-          actionLabel,
           width: input.width,
           palette,
+          ...(selectedRow ? { ordinal: selectedRow.sourceIndex + 1, total: rows.length } : {}),
         })}
-        {renderContextInspectorWorkbench({
-          packet: input.packet,
+        {renderContextInspectorGroupedViewport({
           rows,
-          suggestion: overview.suggestion,
-          width: input.width,
-          palette,
-        })}
-        {renderContextInspectorSection({
-          title: "↓ Included in next answer",
-          hint: "reaches the model",
-          rows: includedRows,
-          maxRows: includedCaps.included,
+          maxRows: viewportMaxRows,
           cursorIndex: input.cursorIndex,
           ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
+          ...(input.detailContent !== undefined ? { detailContent: input.detailContent } : {}),
+          ...(input.detailOffset !== undefined ? { detailOffset: input.detailOffset } : {}),
           width: input.width,
-          color: palette.success,
-          palette,
-          actionsEnabled: input.actionsEnabled,
-        })}
-        {renderContextInspectorSection({
-          title: "- Held back locally",
-          hint: "visible here, not sent",
-          rows: heldRows,
-          maxRows: heldCaps.held,
-          cursorIndex: input.cursorIndex,
-          ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
-          width: input.width,
-          color: palette.borderSoft,
           palette,
           actionsEnabled: input.actionsEnabled,
         })}
@@ -122,6 +97,9 @@ export function renderContextInspectorOverlay(input: {
           width: input.width,
           palette,
         })}
+        <Text color={palette.textMuted}>
+          {input.expandedId ? CONTEXT_INSPECTOR_DETAIL_CONTROLS : CONTEXT_INSPECTOR_CONTROLS}
+        </Text>
       </Box>
     </Box>
   );

@@ -8,6 +8,9 @@ import {
   formatContextItemBadgeSummary,
   getContextItemDetailLines,
   getContextItemPreview,
+  resolveContextSourceMeta,
+  computeContextOverlayViewportMaxRows,
+  isContextInspectorSourceHeldBack,
 } from "../../packages/tui/src/work-shell-context-inspector-model.ts";
 
 test("context inspector model appends packet badges to human preview text", () => {
@@ -155,7 +158,7 @@ test("context inspector overview warns about stale heavy sources without exposin
   assert.equal(overview.suggestion.tone, "warning");
   assert.equal(
     overview.suggestion.message,
-    "Budget is tight. Largest source is runtime · terminal output at ~6200t and stale since turn 4.",
+    "Budget is tight. Largest source is Tool activity · terminal output at ~6200t and stale since turn 4.",
   );
 });
 
@@ -193,7 +196,7 @@ test("context inspector overview phrases stale-only preflight copy cleanly", () 
   assert.equal(overview.suggestion.tone, "warning");
   assert.equal(
     overview.suggestion.message,
-    "Freshness risk: runtime source needs refresh (stale).",
+    "Freshness risk: Tool activity source needs refresh (stale).",
   );
   assert.doesNotMatch(overview.suggestion.message, /is and stale/);
 });
@@ -236,4 +239,62 @@ test("context token labels distinguish estimated, exact, and unknown totals", ()
   assert.equal(formatContextTokenEstimate(42, "estimated"), "~42t");
   assert.equal(formatContextTokenEstimate(42, "exact"), "42t exact");
   assert.equal(formatContextTokenEstimate(0, "unknown"), "unknown token estimate");
+});
+
+test("context inspector delivery state follows grouped cursor identity after packet reordering", () => {
+  const packet = {
+    included: [{
+      id: "runtime-sent",
+      category: "runtime",
+      label: "runtime sent",
+      includedInModel: true,
+    }],
+    excluded: [{
+      id: "workspace-held",
+      category: "workspace",
+      label: "workspace held",
+      includedInModel: false,
+    }],
+  };
+  const rows = buildContextInspectorRows(packet);
+  assert.equal(rows[0].item.id, "workspace-held");
+  assert.equal(isContextInspectorSourceHeldBack(packet, 0), true);
+  assert.equal(isContextInspectorSourceHeldBack(packet, 1), false);
+});
+
+const palette = {
+  text: "text",
+  textMuted: "muted",
+  textDim: "dim",
+  borderSoft: "soft",
+  borderDefault: "default",
+  assistant: "assistant",
+  user: "user",
+  toolAccent: "tool",
+  spinner: "spinner",
+  warning: "warning",
+  success: "success",
+};
+
+test("context inspector maps CRP categories to human groups and never renders raw unknowns", () => {
+  assert.equal(resolveContextSourceMeta("workspace-guidance", palette).label, "Project instructions");
+  assert.equal(resolveContextSourceMeta("workspace", palette).label, "Project instructions");
+  assert.equal(resolveContextSourceMeta("workspace-guidance-1", palette).label, "Project instructions");
+  assert.equal(resolveContextSourceMeta("provider-system-prompt", palette).label, "Project instructions");
+  assert.equal(resolveContextSourceMeta("system", palette).label, "Project instructions");
+  assert.equal(resolveContextSourceMeta("bridge", palette).label, "Current conversation");
+  assert.equal(resolveContextSourceMeta("condensed-history", palette).label, "Current conversation");
+  assert.equal(resolveContextSourceMeta("memory", palette).label, "Saved memory");
+  assert.equal(resolveContextSourceMeta("attachment", palette).label, "Files & attachments");
+  assert.equal(resolveContextSourceMeta("runtime", palette).label, "Tool activity");
+  assert.equal(resolveContextSourceMeta("loop-trail", palette).label, "Tool activity");
+  assert.equal(resolveContextSourceMeta("live", palette).label, "Tool activity");
+  assert.equal(resolveContextSourceMeta("mystery-provider", palette).label, "Other context");
+  assert.equal(resolveContextSourceMeta("totally-unknown", palette).label, "Other context");
+});
+
+test("context inspector viewport uses one physical terminalRows budget", () => {
+  assert.equal(computeContextOverlayViewportMaxRows({ terminalRows: 40 }), 15);
+  assert.equal(computeContextOverlayViewportMaxRows({ terminalRows: 24 }), 6);
+  assert.equal(computeContextOverlayViewportMaxRows({}), 12);
 });

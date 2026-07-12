@@ -144,6 +144,9 @@ export function createWorkShellEngine<
     ...(input.resolveContextPacket
       ? { resolveContextPacket: input.resolveContextPacket }
       : {}),
+    ...(input.resolveContextSourceDetail
+      ? { resolveContextSourceDetail: input.resolveContextSourceDetail }
+      : {}),
     ...(input.resolvePromptManifest
       ? { resolvePromptManifest: input.resolvePromptManifest }
       : {}),

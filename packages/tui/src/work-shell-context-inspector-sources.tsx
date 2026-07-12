@@ -3,49 +3,52 @@ import React from "react";
 
 import { truncateForDisplayWidth, wrapDisplayTextFast } from "./text-width.js";
 import {
-  getContextInspectorVisibleRows,
-  getContextItemPreview,
+  type ContextInspectorVisibleRows,
+  getContextItemDetailLines,
   formatContextTokenEstimate,
-  resolveContextSourceMeta,
-  sanitizeContextPreview,
+  resolveContextSourceGroup,
+  type ContextInspectorHumanGroup,
   type ContextInspectorPalette,
   type ContextInspectorSourceRow,
 } from "./work-shell-context-inspector-model.js";
+import { sanitizeContextPreview } from "./work-shell-context-inspector-details.js";
 
 function renderContextInspectorSourceRow(input: {
   readonly row: ContextInspectorSourceRow;
   readonly cursorIndex: number;
   readonly expandedId?: string | null | undefined;
+  readonly maxDetailLines: number;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
-  readonly actionsEnabled: boolean;
 }): React.ReactNode {
   const { row, palette } = input;
   const { item } = row;
   const selected = row.sourceIndex === input.cursorIndex;
   const expanded = input.expandedId === item.id;
-  const meta = resolveContextSourceMeta(item.category, palette);
   const sourceCount = Math.max(1, Math.trunc(item.sourceCount ?? 1));
-  const tokenSuffix = ` · ${formatContextTokenEstimate(item.tokenEstimate)}`;
-  const stateLabel = input.actionsEnabled
-    ? row.heldBack
-      ? "i include"
-      : (item.salience ?? 0) >= 1
-        ? "Enter unpin"
-        : "Enter pin"
-    : row.heldBack
-      ? "held back"
-      : (item.salience ?? 0) >= 1
-        ? "pinned"
-        : "included";
   const label = sanitizeContextPreview(item.label);
-  const preview = getContextItemPreview(item);
-  const previewWidth = Math.max(28, input.width - 18);
-  const collapsedPreview = truncateForDisplayWidth(preview, previewWidth);
-  const detailLines = expanded ? wrapDisplayTextFast(preview, previewWidth) : [collapsedPreview];
-  const stateColor = row.heldBack
+  const statusLabel = row.heldBack ? "held" : "sent";
+  const pinned = !row.heldBack && (item.salience ?? 0) >= 1;
+  const tokenLabel = formatContextTokenEstimate(item.tokenEstimate);
+  const parts = [
+    label,
+    ...(sourceCount > 1 ? [`${sourceCount}`] : []),
+    statusLabel,
+    ...(pinned ? ["pinned"] : []),
+    tokenLabel,
+  ];
+  const body = truncateForDisplayWidth(
+    parts.join(" · "),
+    Math.max(20, input.width - 4),
+  );
+  const detailLines = expanded
+    ? getContextItemDetailLines(item)
+      .flatMap((line) => wrapDisplayTextFast(line, Math.max(24, input.width - 8)))
+      .slice(0, input.maxDetailLines)
+    : [];
+  const statusColor = row.heldBack
     ? palette.textDim
-    : (item.salience ?? 0) >= 1
+    : pinned
       ? palette.success
       : palette.textMuted;
 
@@ -53,18 +56,11 @@ function renderContextInspectorSourceRow(input: {
     <Box key={`context-source-${row.sourceIndex}-${item.id}`} flexDirection="column">
       <Text>
         <Text color={selected ? palette.user : palette.textDim} bold>{selected ? "> " : "  "}</Text>
-        <Text color={meta.color} bold>{`${meta.icon} ${meta.label}`}</Text>
-        <Text color={palette.borderSoft}>{" · "}</Text>
-        <Text color={palette.text} bold>{`${sourceCount}`}</Text>
-        <Text color={palette.textDim}>{tokenSuffix}</Text>
-        <Text color={palette.borderSoft}>{" · "}</Text>
-        <Text color={stateColor} bold={selected}>{stateLabel}</Text>
-        <Text color={palette.borderSoft}>{" · "}</Text>
-        <Text color={selected ? palette.text : palette.textMuted} bold={selected}>{truncateForDisplayWidth(label, Math.max(16, input.width - 36))}</Text>
+        <Text color={selected ? palette.text : statusColor} bold={selected}>{body}</Text>
       </Text>
       {detailLines.map((line, index) => (
         <Text key={`context-source-${row.sourceIndex}-${item.id}-detail-${index}`}>
-          <Text color={selected ? palette.user : palette.borderSoft}>{expanded ? "    │ " : "    · "}</Text>
+          <Text color={selected ? palette.user : palette.borderSoft}>{"    │ "}</Text>
           <Text color={selected ? palette.text : palette.textMuted}>{line}</Text>
         </Text>
       ))}
@@ -72,47 +68,223 @@ function renderContextInspectorSourceRow(input: {
   );
 }
 
-export function renderContextInspectorSection(input: {
-  readonly title: string;
-  readonly hint: string;
+function buildContextInspectorViewportPlan(input: {
+  readonly rows: readonly ContextInspectorSourceRow[];
+  readonly cursorIndex: number;
+  readonly maxRows: number;
+  readonly expandedId?: string | null | undefined;
+}): ContextInspectorVisibleRows & { readonly detailLineLimit: number } {
+  if (input.rows.length === 0) {
+    return { rows: [], hiddenBefore: 0, hiddenAfter: 0, detailLineLimit: 0 };
+  }
+  const selectedOffset = input.rows.findIndex((row) => row.sourceIndex === input.cursorIndex);
+  const anchor = selectedOffset >= 0 ? selectedOffset : 0;
+  const detailReserve = input.expandedId ? 3 : 0;
+  let bestStart = anchor;
+  let bestEnd = anchor + 1;
+  let bestCount = 0;
+  let bestCenterDistance = Number.POSITIVE_INFINITY;
+
+  for (let start = 0; start <= anchor; start += 1) {
+    let groupHeaderCount = 0;
+    for (let end = start + 1; end <= input.rows.length; end += 1) {
+      const current = input.rows[end - 1];
+      const previous = end - 2 >= start ? input.rows[end - 2] : undefined;
+      if (
+        current
+        && (!previous
+          || resolveContextSourceGroup(current.item.category)
+          !== resolveContextSourceGroup(previous.item.category))
+      ) {
+        groupHeaderCount += 1;
+      }
+      if (end <= anchor) {
+        continue;
+      }
+      const hiddenMarkerCount = (start > 0 ? 1 : 0) + (end < input.rows.length ? 1 : 0);
+      const structuralRows = 2 + (end - start) + groupHeaderCount + hiddenMarkerCount;
+      if (structuralRows + detailReserve > input.maxRows) {
+        continue;
+      }
+      const count = end - start;
+      const centerDistance = Math.abs((start + end - 1) / 2 - anchor);
+      if (count > bestCount || (count === bestCount && centerDistance < bestCenterDistance)) {
+        bestStart = start;
+        bestEnd = end;
+        bestCount = count;
+        bestCenterDistance = centerDistance;
+      }
+    }
+  }
+
+  const visibleRows = input.rows.slice(bestStart, bestEnd);
+  const groupHeaderCount = visibleRows.reduce((count, row, index) => {
+    const previous = index > 0 ? visibleRows[index - 1] : undefined;
+    return count + (
+      !previous
+      || resolveContextSourceGroup(row.item.category)
+      !== resolveContextSourceGroup(previous.item.category)
+        ? 1
+        : 0
+    );
+  }, 0);
+  const hiddenBefore = bestStart;
+  const hiddenAfter = input.rows.length - bestEnd;
+  const structuralRows = 2
+    + visibleRows.length
+    + groupHeaderCount
+    + (hiddenBefore > 0 ? 1 : 0)
+    + (hiddenAfter > 0 ? 1 : 0);
+  return {
+    rows: visibleRows,
+    hiddenBefore,
+    hiddenAfter,
+    detailLineLimit: input.expandedId
+      ? Math.max(0, input.maxRows - structuralRows)
+      : 0,
+  };
+}
+
+function renderGroupedVisibleRows(input: {
+  readonly allRows: readonly ContextInspectorSourceRow[];
+  readonly visibleRows: readonly ContextInspectorSourceRow[];
+  readonly cursorIndex: number;
+  readonly expandedId?: string | null | undefined;
+  readonly maxDetailLines: number;
+  readonly width: number;
+  readonly palette: ContextInspectorPalette;
+}): React.ReactNode {
+  const nodes: React.ReactNode[] = [];
+  let previousGroup: ContextInspectorHumanGroup | undefined;
+  for (const row of input.visibleRows) {
+    const group = resolveContextSourceGroup(row.item.category);
+    if (group !== previousGroup) {
+      previousGroup = group;
+      const groupCount = input.allRows.filter(
+        (candidate) => resolveContextSourceGroup(candidate.item.category) === group,
+      ).length;
+      nodes.push(
+        <Text key={`context-group-${group}-${row.sourceIndex}`}>
+          <Text color={input.palette.assistant} bold>{group}</Text>
+          <Text color={input.palette.textDim}>{` · ${groupCount}`}</Text>
+        </Text>,
+      );
+    }
+    nodes.push(renderContextInspectorSourceRow({
+      row,
+      cursorIndex: input.cursorIndex,
+      ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
+      maxDetailLines: input.maxDetailLines,
+      width: input.width,
+      palette: input.palette,
+    }));
+  }
+  return nodes;
+}
+
+function renderContextInspectorDetailReader(input: {
+  readonly row: ContextInspectorSourceRow;
+  readonly content?: string | undefined;
+  readonly offset: number;
+  readonly maxRows: number;
+  readonly width: number;
+  readonly palette: ContextInspectorPalette;
+}): React.ReactNode {
+  const summaryLines = getContextItemDetailLines(input.row.item)
+    .flatMap((line) => wrapDisplayTextFast(line, Math.max(24, input.width - 8)));
+  const contentLines = input.content?.trim()
+    ? input.content
+      .split(/\r?\n/u)
+      .flatMap((line) => wrapDisplayTextFast(line.length > 0 ? line : " ", Math.max(24, input.width - 8)))
+    : [];
+  const lines = [
+    ...summaryLines,
+    ...(contentLines.length > 0 ? ["", "Local source content", ...contentLines] : []),
+  ];
+  const visibleCount = Math.max(1, input.maxRows - 3);
+  const maxOffset = Math.max(0, lines.length - visibleCount);
+  const offset = Math.min(maxOffset, Math.max(0, input.offset));
+  const visibleLines = lines.slice(offset, offset + visibleCount);
+
+  return (
+    <Box marginTop={1} flexDirection="column">
+      <Text color={input.palette.borderDefault}>
+        {"─".repeat(Math.min(64, Math.max(24, input.width - 4)))}
+      </Text>
+      <Text>
+        <Text color={input.palette.assistant} bold>{"Detail"}</Text>
+        <Text color={input.palette.textDim}>{` · ${sanitizeContextPreview(input.row.item.label)}`}</Text>
+      </Text>
+      {offset > 0 ? <Text color={input.palette.textDim}>{`  … ${offset} lines above`}</Text> : null}
+      {visibleLines.map((line, index) => (
+        <Text key={`context-detail-${offset + index}`} color={input.palette.text}>
+          {line.length > 0 ? line : " "}
+        </Text>
+      ))}
+      {offset + visibleLines.length < lines.length ? (
+        <Text color={input.palette.textDim}>
+          {`  … ${lines.length - offset - visibleLines.length} lines below`}
+        </Text>
+      ) : null}
+    </Box>
+  );
+}
+
+export function renderContextInspectorGroupedViewport(input: {
   readonly rows: readonly ContextInspectorSourceRow[];
   readonly maxRows: number;
   readonly cursorIndex: number;
   readonly expandedId?: string | null | undefined;
+  readonly detailContent?: string | undefined;
+  readonly detailOffset?: number | undefined;
   readonly width: number;
-  readonly color: string;
   readonly palette: ContextInspectorPalette;
   readonly actionsEnabled: boolean;
 }): React.ReactNode {
-  const visible = getContextInspectorVisibleRows(input.rows, input.cursorIndex, input.maxRows);
+  void input.actionsEnabled;
+  const detailRow = input.expandedId
+    ? input.rows.find((row) => row.item.id === input.expandedId)
+    : undefined;
+  if (detailRow) {
+    return renderContextInspectorDetailReader({
+      row: detailRow,
+      ...(input.detailContent !== undefined ? { content: input.detailContent } : {}),
+      offset: input.detailOffset ?? 0,
+      maxRows: input.maxRows,
+      width: input.width,
+      palette: input.palette,
+    });
+  }
+  const visible = buildContextInspectorViewportPlan({
+    rows: input.rows,
+    cursorIndex: input.cursorIndex,
+    maxRows: input.maxRows,
+    ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
+  });
   return (
-    <Box key={input.title} marginTop={1} flexDirection="column">
-      <Text>
-        <Text color={input.color} bold>{input.title}</Text>
-        <Text color={input.palette.textDim}>{` · ${input.rows.length}`}</Text>
-        <Text color={input.palette.textMuted}>{` · ${input.hint}`}</Text>
-      </Text>
+    <Box marginTop={1} flexDirection="column">
       <Text color={input.palette.borderDefault}>{"─".repeat(Math.min(64, Math.max(24, input.width - 4)))}</Text>
-      {input.rows.length === 0
-        ? <Text color={input.palette.textMuted}>{"  none"}</Text>
-        : (
-            <>
-              {visible.hiddenBefore > 0 ? (
-                <Text color={input.palette.textDim}>{`  … ${visible.hiddenBefore} more above`}</Text>
-              ) : null}
-              {visible.rows.map((row) => renderContextInspectorSourceRow({
-                row,
-                cursorIndex: input.cursorIndex,
-                ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
-                width: input.width,
-                palette: input.palette,
-                actionsEnabled: input.actionsEnabled,
-              }))}
-              {visible.hiddenAfter > 0 ? (
-                <Text color={input.palette.textDim}>{`  … ${visible.hiddenAfter} more below`}</Text>
-              ) : null}
-            </>
-          )}
+      {input.rows.length === 0 ? (
+        <Text color={input.palette.textMuted}>{"  none"}</Text>
+      ) : (
+        <>
+          {visible.hiddenBefore > 0 ? (
+            <Text color={input.palette.textDim}>{`  … ${visible.hiddenBefore} more above`}</Text>
+          ) : null}
+          {renderGroupedVisibleRows({
+            allRows: input.rows,
+            visibleRows: visible.rows,
+            cursorIndex: input.cursorIndex,
+            ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
+            maxDetailLines: visible.detailLineLimit,
+            width: input.width,
+            palette: input.palette,
+          })}
+          {visible.hiddenAfter > 0 ? (
+            <Text color={input.palette.textDim}>{`  … ${visible.hiddenAfter} more below`}</Text>
+          ) : null}
+        </>
+      )}
     </Box>
   );
 }

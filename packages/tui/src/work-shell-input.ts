@@ -80,8 +80,7 @@ export type WorkShellContextInspectorAction =
   | { readonly type: "none" }
   | { readonly type: "move-cursor"; readonly direction: -1 | 1 }
   | { readonly type: "toggle-pin" }
-  | { readonly type: "forget" }
-  | { readonly type: "include" }
+  | { readonly type: "toggle-delivery" }
   | { readonly type: "expand" };
 
 export function resolveWorkShellContextInspectorAction(input: {
@@ -109,20 +108,13 @@ export function resolveWorkShellContextInspectorAction(input: {
     return { type: "move-cursor", direction: 1 };
   }
   if (input.key.return) {
+    return { type: "expand" };
+  }
+  if (input.value === "p") {
     return input.actionsEnabled ? { type: "toggle-pin" } : { type: "none" };
   }
-  switch (input.value) {
-    case "j":
-      return { type: "move-cursor", direction: 1 };
-    case "k":
-      return { type: "move-cursor", direction: -1 };
-    case "f":
-      return input.actionsEnabled ? { type: "forget" } : { type: "none" };
-    case "i":
-      return input.actionsEnabled ? { type: "include" } : { type: "none" };
-    case "e":
-      return { type: "expand" };
-    default:
-      return { type: "none" };
+  if (input.value === " ") {
+    return input.actionsEnabled ? { type: "toggle-delivery" } : { type: "none" };
   }
+  return { type: "none" };
 }

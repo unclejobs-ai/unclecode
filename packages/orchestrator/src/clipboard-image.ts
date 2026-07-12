@@ -1,5 +1,5 @@
 /**
- * Clipboard image capture — platform-specific shells out to pbpaste / xclip /
+ * Clipboard image capture — platform-specific shells out to osascript / xclip /
  * powershell to grab the current clipboard image and synthesise a
  * WorkShellComposerImageAttachment-equivalent payload.
  *
@@ -61,13 +61,10 @@ function captureMacOs(): ClipboardImageResult {
   const dir = mkdtempSync(join(tmpdir(), "uc-clip-"));
   const path = join(dir, "clip.png");
   try {
-    execFileSync("pbpaste", ["-Prefer", "image"], { stdio: ["ignore", "pipe", "pipe"] });
-  } catch (error) {
-    rmSync(dir, { recursive: true, force: true });
-    return { status: "failed", reason: `pbpaste exec failed: ${(error as Error).message}` };
-  }
-  try {
     // Path is passed via env attribute, never interpolated into AppleScript source.
+    // osascript itself fails when the clipboard has no PNG image — no separate
+    // pbpaste probe is required (and a text-only clipboard would make that
+    // probe fail even when PNG bytes are present under a different class).
     execFileSync(
       "osascript",
       [
@@ -89,7 +86,10 @@ function captureMacOs(): ClipboardImageResult {
     );
   } catch (error) {
     rmSync(dir, { recursive: true, force: true });
-    return { status: "no-image", reason: `clipboard does not hold an image: ${(error as Error).message}` };
+    return {
+      status: "no-image",
+      reason: `clipboard does not hold an image: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
   if (!existsSync(path)) {
     rmSync(dir, { recursive: true, force: true });
@@ -135,7 +135,10 @@ function captureLinux(): ClipboardImageResult {
       },
     };
   } catch (error) {
-    return { status: "failed", reason: `xclip exec failed: ${(error as Error).message}` };
+    return {
+      status: "failed",
+      reason: `xclip exec failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
 }
 

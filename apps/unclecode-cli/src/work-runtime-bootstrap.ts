@@ -166,6 +166,22 @@ function buildProviderSystemPromptMetadata(input: {
 
   return items;
 }
+function createContextSourceDetailResolver(input: {
+  readonly configuredPrompt: string;
+  readonly guidanceSystemPrompt: string;
+}): (sourceId: string) => Promise<string | undefined> {
+  const details = new Map<string, string>();
+  const configuredPrompt = input.configuredPrompt.trim();
+  if (configuredPrompt.length > 0) {
+    details.set("provider-system-prompt-configured", configuredPrompt);
+  }
+  const guidanceSystemPrompt = input.guidanceSystemPrompt.trim();
+  if (guidanceSystemPrompt.length > 0) {
+    details.set("provider-system-prompt-workspace-guidance", guidanceSystemPrompt);
+  }
+  return async (sourceId) => details.get(sourceId);
+}
+
 
 function buildPromptManifestPolicySources(input: {
   readonly configuredPrompt: string;
@@ -359,6 +375,10 @@ export async function loadWorkCliBootstrap(
     guidanceSystemPrompt: guidance.systemPromptAppendix,
     guidanceSources: guidance.sources,
   });
+  const resolveContextSourceDetail = createContextSourceDetailResolver({
+    configuredPrompt: configExplanation.prompt.rendered,
+    guidanceSystemPrompt: guidance.systemPromptAppendix,
+  });
   const directAgent = await createRuntimeCodingAgent({
     provider: resolveRuntimeProvider(config.provider),
     apiKey: config.apiKey,
@@ -534,6 +554,7 @@ export async function loadWorkCliBootstrap(
         ];
       },
       resolveContextPacket,
+      resolveContextSourceDetail,
       resolvePromptManifest: ({ packet, userPrompt }) => createTurnPromptManifest(packet, userPrompt),
       refreshHomeState,
       refreshAuthState,
