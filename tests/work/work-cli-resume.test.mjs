@@ -25,6 +25,29 @@ test("loadResumedWorkSession restores persisted trace mode and reasoning overrid
       { role: "user", text: "inspect repo" },
       { role: "assistant", text: "repo inspected" },
     ],
+    agentConsole: {
+      profileId: "build",
+      manifest: {
+        id: "manifest-42",
+        profileId: "build",
+        createdAt: "2026-07-12T00:00:00.000Z",
+        packetId: "packet-42",
+        policy: [],
+        includedSourceCount: 2,
+        excludedSourceCount: 1,
+        tokenEstimate: 42,
+      },
+      activity: [{
+        id: "activity-42",
+        toolCallId: "call-42",
+        toolName: "read_file",
+        kind: "read",
+        intent: `Read token sk-proj-${"a".repeat(30)}`,
+        status: "completed",
+        startedAt: 1,
+        output: "raw tool output must not resume",
+      }],
+    },
   });
 
   const resumed = await loadResumedWorkSession({
@@ -42,6 +65,28 @@ test("loadResumedWorkSession restores persisted trace mode and reasoning overrid
     { role: "user", text: "inspect repo" },
     { role: "assistant", text: "repo inspected" },
   ]);
+  assert.deepEqual(resumed.initialAgentConsole, {
+    profileId: "build",
+    manifest: {
+      id: "manifest-42",
+      profileId: "build",
+      createdAt: "2026-07-12T00:00:00.000Z",
+      packetId: "packet-42",
+      policy: [],
+      includedSourceCount: 2,
+      excludedSourceCount: 1,
+      tokenEstimate: 42,
+    },
+    activity: [{
+      id: "activity-42",
+      toolCallId: "call-42",
+      toolName: "read_file",
+      kind: "read",
+      intent: "Read token [REDACTED]",
+      status: "completed",
+      startedAt: 1,
+    }],
+  });
 });
 
 test("loadResumedWorkSession falls back to legacy session memory summaries when checkpoints have no transcript entries", async () => {

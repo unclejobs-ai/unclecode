@@ -23,7 +23,7 @@ Team lanes (`packages/orchestrator/src/team-binding.ts`) add a second multi-agen
 
 ## Work Shell mode behavior
 
-User-facing labels come from `rust/unclecode-core/src/ux_text.rs` (`humanize_work_shell_mode_label`). Internal mode ids and orchestration behavior come from `rust/unclecode-core/src/mode.rs`, `rust/unclecode-core/src/orchestrator.rs`, and `packages/orchestrator/src/work-agent.ts`.
+User-facing labels come from `rust/unclecode-core/src/mode.rs` (`mode_label`). The Rust status formatter and the TypeScript footer both use that source through the native UX route. Internal mode ids and orchestration behavior come from `rust/unclecode-core/src/mode.rs`, `rust/unclecode-core/src/orchestrator.rs`, and `packages/orchestrator/src/work-agent.ts`.
 
 | Mode id | UI label (KO) | Intent routing | Worker budget | Editing | LLM planner | Shell auto-unlock (`UNCLECODE_ALLOW_RUN_SHELL`) | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |

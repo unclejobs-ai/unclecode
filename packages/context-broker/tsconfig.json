@@ -6,6 +6,10 @@
     "outDir": "dist",
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
-  "references": [{ "path": "../agentops-db" }, { "path": "../contracts" }, { "path": "../session-store" }],
+  "references": [
+    { "path": "../agentops-db" },
+    { "path": "../contracts" },
+    { "path": "../session-store" }
+  ],
   "include": ["src/**/*.ts"]
 }

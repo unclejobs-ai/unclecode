@@ -1,9 +1,10 @@
-import type { ProviderId } from "./providers.js";
+import type { AskUserQuestionResult, WorkNodeStatus } from "./agent-console.js";
 import type {
   ExecutionPolicyCapability,
   PolicyDecisionEffect,
   PolicyDecisionSource,
 } from "./policy.js";
+import type { ProviderId } from "./providers.js";
 
 export const EXECUTION_TRACE_EVENT_TYPES = [
   "turn.started",
@@ -12,6 +13,11 @@ export const EXECUTION_TRACE_EVENT_TYPES = [
   "turn.completed",
   "tool.started",
   "tool.completed",
+  "decision.opened",
+  "decision.resolved",
+  "work.proposed",
+  "work.approved",
+  "work.status",
   "orchestrator.step",
   "bridge.published",
   "memory.written",
@@ -92,11 +98,56 @@ export type ToolCompletedTraceEvent = {
   readonly provider: ProviderId | "unknown";
   readonly toolName: string;
   readonly toolCallId: string;
+  /** Display-safe tool arguments retained only for concise activity rendering. */
+  readonly input?: Record<string, unknown>;
   readonly isError: boolean;
   readonly output: string;
   readonly startedAt: number;
   readonly completedAt: number;
   readonly durationMs: number;
+};
+
+export type DecisionOpenedTraceEvent = {
+  readonly type: "decision.opened";
+  readonly level: "high-signal";
+  readonly requestId: string;
+  readonly title?: string;
+  readonly questionCount: number;
+  readonly startedAt: number;
+};
+
+export type DecisionResolvedTraceEvent = {
+  readonly type: "decision.resolved";
+  readonly level: "high-signal";
+  readonly requestId: string;
+  readonly status: AskUserQuestionResult["status"];
+  readonly selectedOptions?: readonly string[];
+  readonly startedAt: number;
+};
+
+export type WorkProposedTraceEvent = {
+  readonly type: "work.proposed";
+  readonly level: "high-signal";
+  readonly graphId: string;
+  readonly nodeCount: number;
+  readonly startedAt: number;
+};
+
+export type WorkApprovedTraceEvent = {
+  readonly type: "work.approved";
+  readonly level: "high-signal";
+  readonly graphId: string;
+  readonly startedAt: number;
+};
+
+export type WorkStatusTraceEvent = {
+  readonly type: "work.status";
+  readonly level: "high-signal";
+  readonly graphId: string;
+  readonly nodeId: string;
+  readonly status: WorkNodeStatus;
+  readonly summary: string;
+  readonly startedAt: number;
 };
 
 /**
@@ -243,6 +294,11 @@ export type ExecutionTraceEvent =
   | TurnCompletedTraceEvent
   | ToolStartedTraceEvent
   | ToolCompletedTraceEvent
+  | DecisionOpenedTraceEvent
+  | DecisionResolvedTraceEvent
+  | WorkProposedTraceEvent
+  | WorkApprovedTraceEvent
+  | WorkStatusTraceEvent
   | OrchestratorStepTraceEvent
   | BridgePublishedTraceEvent
   | MemoryWrittenTraceEvent

@@ -141,6 +141,7 @@ export function WorkShellPane<
     modelWindow,
     queuedCount,
     queuePaused,
+    agentConsole,
   } = engineState;
   const isSecureApiKeyEntry = engineState.composerMode === "api-key-entry";
   // Most recent rejection reason from the clipboard capture or cap gate.
@@ -250,6 +251,7 @@ export function WorkShellPane<
       {...(contextInspectorExpanded !== undefined ? { contextInspectorExpanded } : {})}
       {...(contextPacket ? { contextPacket } : {})}
       {...(modelWindow !== undefined ? { modelWindow } : {})}
+      {...(agentConsole ? { agentConsole } : {})}
       {...(attachmentLines ? { attachmentLines } : {})}
       {...(pendingClipboardAttachmentCount > 0 ? { attachmentCount: pendingClipboardAttachmentCount } : {})}
       composer={

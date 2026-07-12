@@ -93,7 +93,7 @@ test("compact health runner preserves the full operational gate", () => {
   assert.match(healthRunner, /SIGKILL/);
   assert.match(healthRunner, /startTimeoutWatchdog/);
   assert.match(healthRunner, /didTimeOut \? normalizeTimedOutCode\(code, signal\)/);
-  assert.match(healthRunner, /terminateProcessTree\(child, "SIGKILL", knownDescendantPids\)/);
+  assert.match(healthRunner, /terminateProcessTree\(child, "SIGKILL", knownDescendantPids, useProcessGroup\)/);
   assert.match(summary, /isFreshReport/);
   assert.match(summary, /stale runtime report ignored/);
   assert.match(summary, /stale live report ignored/);

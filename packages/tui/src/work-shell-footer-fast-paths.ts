@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import { runRustCommandSync } from "@unclecode/orchestrator";
+
 import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
 
 export function formatWorkShellFooterLineFast(input: {
@@ -31,7 +33,7 @@ export function formatWorkShellSessionFactsGroup(input: {
 }): string {
   return joinFooterFacts([
     input.model.trim(),
-    humanizeWorkShellModeLabel(input.mode),
+    resolveWorkShellModeLabel(input.mode),
   ]);
 }
 
@@ -110,23 +112,24 @@ function compactWorkShellAuthLabel(authLabel: string): string {
   }
 }
 
-function humanizeWorkShellModeLabel(mode: string): string {
-  switch (mode.toLowerCase()) {
-    case "default":
-      return "Default mode";
-    case "search":
-      return "Search mode";
-    case "analyze":
-      return "Analyze mode";
-    case "ultrawork":
-      return "Ultrawork mode";
-    case "yolo":
-      return "YOLO mode";
-    case "plan":
-      return "Plan mode";
-    case "build":
-      return "Build mode";
-    default:
-      return `${mode} mode`;
+const modeLabelCache = new Map<string, string>();
+
+function resolveWorkShellModeLabel(mode: string): string {
+  const normalized = mode.trim().toLowerCase();
+  if (normalized.length === 0) {
+    return "";
   }
+
+  const cached = modeLabelCache.get(normalized);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const label = runRustCommandSync(
+    ["rust", "ux", "text", "mode-label"],
+    process.cwd(),
+    normalized,
+  ).trim();
+  modeLabelCache.set(normalized, label);
+  return label;
 }

@@ -351,7 +351,7 @@ test("formatToolTraceLine makes tool execution visible in the work shell", () =>
       completedAt: 7,
       durationMs: 7,
     }),
-    /✓ read 7ms/,
+    /✓ read · 7ms/,
   );
 });
 
@@ -1383,7 +1383,7 @@ test("getConversationLayout gives answer blocks more room than lower-signal note
       mode: "yolo",
       authLabel: "Browser OAuth · file",
     }),
-    /YOLO mode/,
+    /YOLO 모드/,
   );
   const previousHome = process.env.HOME;
   process.env.HOME = "/Users/example";

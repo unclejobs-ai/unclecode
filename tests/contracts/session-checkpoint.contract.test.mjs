@@ -14,6 +14,7 @@ test("session-checkpoint fixtures expose canonical restore-safe checkpoint shape
     "mode",
     "worktree",
     "approval",
+    "agent_console",
     "team_run",
     "team_step",
   ]);

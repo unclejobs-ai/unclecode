@@ -3,14 +3,30 @@ import { writeFileSync } from "node:fs";
 import { escapeRegExp, run, sleep } from "./cli-helpers.mjs";
 
 const runtimeTmuxSocketName = `unclecode-runtime-qa-${process.pid}`;
+const DEFAULT_PANE_WAIT_TIMEOUT_MS = 30_000;
+const PANE_POLL_INTERVAL_MS = 100;
 export const READY_LAST_STATUS_PATTERN = /Ready · last(?: reply)?(?: \d+(?:\.\d+)?s)?/;
 
 export function runtimeTmuxArgs(args) {
-  return ["-L", runtimeTmuxSocketName, ...args];
+  return ["-f", "/dev/null", "-L", runtimeTmuxSocketName, ...args];
+}
+
+export function typedComposerLinePattern(line) {
+  return new RegExp(`(?:^|\\n)\\s*[›>]\\s*${escapeRegExp(line)}▏`, "u");
+}
+
+export function runtimeTmuxEnvironment(env = process.env) {
+  const sanitized = { ...env };
+  delete sanitized.CI;
+  delete sanitized.NO_COLOR;
+  return sanitized;
 }
 
 export function runTmux(args, options = {}) {
-  return run("tmux", runtimeTmuxArgs(args), process.env, options);
+  return run("tmux", runtimeTmuxArgs(args), runtimeTmuxEnvironment(), {
+    ...options,
+    detached: false,
+  });
 }
 
 export async function killRuntimeTmuxServer() {
@@ -21,7 +37,7 @@ export async function sendKeys(session, line) {
   await runTmux(["send-keys", "-t", session, line, "C-m"]);
 }
 
-export async function submitLine(session, line, paneFile, typedPattern = new RegExp(escapeRegExp(line))) {
+export async function submitLine(session, line, paneFile, typedPattern = typedComposerLinePattern(line)) {
   await typeKeys(session, line);
   await waitForPane(session, typedPattern, paneFile);
   await pressEnter(session);
@@ -39,6 +55,9 @@ export async function capturePane(session, paneFile) {
   const capture = await runTmux(["capture-pane", "-t", session, "-p", "-S", "-240"], {
     allowFailure: true,
   });
+  if (capture.code !== 0) {
+    throw new Error(`Failed to capture tmux session ${session}: ${capture.stderr.trim()}`);
+  }
   writeFileSync(paneFile, capture.stdout);
   return capture.stdout;
 }
@@ -50,17 +69,29 @@ export async function waitForIdlePromptDeck(session, paneFile) {
   return capturePane(session, paneFile);
 }
 
-export async function waitForPane(session, pattern, paneFile) {
+export async function waitForPane(
+  session,
+  pattern,
+  paneFile,
+  timeoutMs = DEFAULT_PANE_WAIT_TIMEOUT_MS,
+) {
+  const deadline = Date.now() + timeoutMs;
   let lastPane = "";
-  for (let attempt = 0; attempt < 180; attempt += 1) {
+  while (Date.now() < deadline) {
     const pane = await capturePane(session, paneFile);
     lastPane = pane;
     if (pattern.test(pane)) {
       return pane;
     }
-    await sleep(100);
+    await sleep(PANE_POLL_INTERVAL_MS);
   }
-  throw new Error(`Timed out waiting for ${pattern}\nLast pane:\n${lastPane.trimEnd()}`);
+  const paneState = await runTmux(
+    ["list-panes", "-t", session, "-F", "#{pane_pid} #{pane_dead} #{pane_dead_status} #{pane_current_command}"],
+    { allowFailure: true },
+  );
+  throw new Error(
+    `Timed out waiting for ${pattern}\nPane state: ${paneState.stdout.trim()} ${paneState.stderr.trim()}\nLast pane:\n${lastPane.trimEnd()}`,
+  );
 }
 
 export function calculatePaneWidth(pane, expectedColumns = 100) {

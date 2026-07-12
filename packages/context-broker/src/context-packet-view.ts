@@ -43,6 +43,7 @@ export function createContextPacketView(input: CreateContextPacketViewInput): Co
     },
     tokenEstimate: included.reduce((total, item) => total + Math.max(0, item.tokenEstimate ?? 0), 0),
     tokenEstimateState: resolveContextPacketTokenEstimateState(input, included),
+    ...(input.manifest ? { manifest: input.manifest } : {}),
   };
   return {
     ...packetWithoutPreview,

@@ -2,6 +2,7 @@ import {
   ENGINE_EVENT_TYPES,
   SESSION_CHECKPOINT_TYPES,
   SESSION_STATES,
+  parseAgentConsoleSnapshot,
   type EngineEvent,
   type JsonObject,
   type JsonValue,
@@ -191,6 +192,15 @@ export function sanitizeTaskSummary(value: unknown): SessionTaskSummarySnapshot 
   };
 }
 
+export function sanitizeAgentConsole(value: unknown) {
+  const parsed = parseAgentConsoleSnapshot(value);
+  if (!parsed) {
+    return undefined;
+  }
+  const redacted: unknown = JSON.parse(stringifyWithRedaction(parsed));
+  return parseAgentConsoleSnapshot(redacted);
+}
+
 export function parseCheckpoint(value: unknown): SessionCheckpoint | undefined {
   if (!isRecord(value) || typeof value.type !== "string" || !SESSION_CHECKPOINT_TYPE_SET.has(value.type)) {
     return undefined;
@@ -218,6 +228,10 @@ export function parseCheckpoint(value: unknown): SessionCheckpoint | undefined {
     case "approval": {
       const pendingAction = sanitizePendingAction(value.pendingAction);
       return pendingAction ? { type: "approval", pendingAction } : undefined;
+    }
+    case "agent_console": {
+      const agentConsole = sanitizeAgentConsole(value.agentConsole);
+      return agentConsole ? { type: "agent_console", agentConsole } : undefined;
     }
     default:
       return undefined;
@@ -341,6 +355,12 @@ export function applyCheckpoint(
         ...snapshot,
         updatedAt,
         pendingAction: checkpoint.pendingAction,
+      };
+    case "agent_console":
+      return {
+        ...snapshot,
+        updatedAt,
+        agentConsole: checkpoint.agentConsole,
       };
     case "team_run":
     case "team_step":

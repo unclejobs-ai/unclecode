@@ -199,12 +199,13 @@ use unclecode_core::ux_text::{
     build_work_shell_transition_json, classify_work_shell_panel_line_json,
     format_inline_image_support_line_from_env, format_runtime_label_json, format_trace_line_json,
     format_work_shell_error_message, format_work_shell_footer_line_json,
-    format_work_shell_provider_title, format_work_shell_status_line_json,
-    format_work_shell_thinking_line, format_work_shell_usage_line_json, normalize_busy_status,
-    normalize_markdown_display_text, resolve_work_shell_attachment_layout_json,
-    resolve_work_shell_composer_dock_layout_json, resolve_work_shell_entry_presentation_json,
-    resolve_work_shell_panel_layout_json, resolve_work_shell_viewport_layout_json,
-    work_shell_composer_hint_json, work_shell_empty_conversation_hint, wrap_display_text_json,
+    format_work_shell_mode_label, format_work_shell_provider_title,
+    format_work_shell_status_line_json, format_work_shell_thinking_line,
+    format_work_shell_usage_line_json, normalize_busy_status, normalize_markdown_display_text,
+    resolve_work_shell_attachment_layout_json, resolve_work_shell_composer_dock_layout_json,
+    resolve_work_shell_entry_presentation_json, resolve_work_shell_panel_layout_json,
+    resolve_work_shell_viewport_layout_json, work_shell_composer_hint_json,
+    work_shell_empty_conversation_hint, wrap_display_text_json,
 };
 use unclecode_core::work_runtime_args::{
     build_work_command_args_json, parse_work_runtime_args_json, resolve_work_entrypoint_paths_json,
@@ -1936,7 +1937,7 @@ fn run_native_ux_command(args: &[OsString]) -> Result<u8, String> {
         }
         Some("text") => {
             let operation = args.get(1).and_then(|arg| arg.to_str()).ok_or(
-                "Usage: unclecode rust ux text <normalize-markdown|busy-status|trace-line|attachment-preview|inline-command-summary|inline-image-support|inline-image-sequence|work-shell-transition|wrap-display|panel-line-class|panel-layout|entry-presentation|attachment-layout|viewport-layout|composer-dock-layout|error-message|provider-title|runtime-label|empty-conversation-hint|composer-hint|thinking-line|status-line|usage-line|footer-line>",
+                "Usage: unclecode rust ux text <normalize-markdown|busy-status|trace-line|attachment-preview|inline-command-summary|inline-image-support|inline-image-sequence|work-shell-transition|wrap-display|panel-line-class|panel-layout|entry-presentation|attachment-layout|viewport-layout|composer-dock-layout|error-message|provider-title|runtime-label|empty-conversation-hint|composer-hint|thinking-line|mode-label|status-line|usage-line|footer-line>",
             )?;
             let mut input = String::new();
             io::stdin()
@@ -1979,12 +1980,13 @@ fn run_native_ux_command(args: &[OsString]) -> Result<u8, String> {
                 "empty-conversation-hint" => println!("{}", work_shell_empty_conversation_hint()),
                 "composer-hint" => println!("{}", work_shell_composer_hint_json(&input)?),
                 "thinking-line" => println!("{}", format_work_shell_thinking_line(input.trim())),
+                "mode-label" => println!("{}", format_work_shell_mode_label(input.trim())),
                 "status-line" => println!("{}", format_work_shell_status_line_json(&input)?),
                 "usage-line" => println!("{}", format_work_shell_usage_line_json(&input)?),
                 "footer-line" => println!("{}", format_work_shell_footer_line_json(&input)?),
                 _ => {
                     return Err(
-                        "Usage: unclecode rust ux text <normalize-markdown|busy-status|trace-line|attachment-preview|inline-command-summary|inline-image-support|inline-image-sequence|work-shell-transition|wrap-display|panel-line-class|panel-layout|entry-presentation|attachment-layout|viewport-layout|composer-dock-layout|error-message|provider-title|runtime-label|empty-conversation-hint|composer-hint|thinking-line|status-line|usage-line|footer-line>"
+                        "Usage: unclecode rust ux text <normalize-markdown|busy-status|trace-line|attachment-preview|inline-command-summary|inline-image-support|inline-image-sequence|work-shell-transition|wrap-display|panel-line-class|panel-layout|entry-presentation|attachment-layout|viewport-layout|composer-dock-layout|error-message|provider-title|runtime-label|empty-conversation-hint|composer-hint|thinking-line|mode-label|status-line|usage-line|footer-line>"
                             .to_string(),
                     )
                 }
@@ -4405,6 +4407,7 @@ fn run_native_session_command(args: &[OsString]) -> Result<u8, String> {
                     trace_mode,
                     reasoning_effort,
                     entries: vec![],
+                    agent_console: None,
                 })
                 .map_err(|error| format!("Failed to persist session snapshot: {error}"))?;
             println!("Persisted {session_id}");

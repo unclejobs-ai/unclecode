@@ -1,4 +1,5 @@
 import type { ContextSourceMetadata } from "./context-source-metadata.js";
+import type { PersistedPromptManifest } from "./agent-console.js";
 
 export type ContextPacketSourceCategory =
   | "workspace"
@@ -151,6 +152,7 @@ export type ContextPacketView = {
   readonly sourceCounts: ContextPacketSourceCounts;
   readonly tokenEstimate: number;
   readonly tokenEstimateState: ContextPacketTokenEstimateState;
+  readonly manifest?: PersistedPromptManifest | undefined;
 };
 
 export type CreateContextPacketViewInput = {
@@ -162,4 +164,5 @@ export type CreateContextPacketViewInput = {
   readonly warnings: readonly ContextPacketViewWarning[];
   readonly preview: readonly string[];
   readonly tokenEstimateState?: ContextPacketTokenEstimateState | undefined;
+  readonly manifest?: PersistedPromptManifest | undefined;
 };

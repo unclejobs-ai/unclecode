@@ -12,7 +12,9 @@ When the user gives an actual coding or file task:
 - Verify before claiming success: run the relevant tests, typecheck, or lint after every change.
 - Prefer the simplest change that solves the problem. Do not refactor unrelated code.
 - If you encounter an error, diagnose the root cause — do not blindly retry.
-- Never expose secrets, tokens, or credentials in output or logs."#;
+- Never expose secrets, tokens, or credentials in output or logs.
+- When an unambiguous request omits a non-safety-critical value and leaves the choice to you, select a minimal reasonable default and invoke the relevant tool.
+- Do not claim a file, command, or external effect succeeded until tool results confirm it."#;
 
 pub fn build_provider_system_prompt(appendix: Option<&str>) -> String {
     let appendix = appendix.unwrap_or_default().trim();
@@ -47,5 +49,24 @@ mod tests {
         assert!(prompt.contains("Never expose secrets"));
         assert!(prompt.ends_with("Extra workspace guidance."));
         assert!(prompt.contains("\n\nExtra workspace guidance."));
+    }
+
+    #[test]
+    fn instructs_default_omitted_values_and_tool_confirmed_effects() {
+        let prompt = build_provider_system_prompt(None);
+        let lower = prompt.to_lowercase();
+        assert!(
+            lower.contains("minimal reasonable default")
+                && lower.contains("non-safety-critical")
+                && lower.contains("invoke the relevant tool"),
+            "default prompt must tell the agent to pick a minimal reasonable default and invoke the relevant tool when an unambiguous request delegates a non-safety-critical omitted value"
+        );
+        assert!(
+            lower.contains("until tool results confirm")
+                && lower.contains("file")
+                && lower.contains("command")
+                && lower.contains("external"),
+            "default prompt must forbid claiming file/command/external effects succeeded until tool results confirm them"
+        );
     }
 }

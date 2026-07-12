@@ -38,7 +38,6 @@ import { createWorkShellSessionSnapshotInput } from "./work-shell-engine-persist
 import {
   composeWorkShellTurnPromptFromPacket,
   formatWorkShellContextPacketIndicator,
-  formatWorkShellContextPacketUsedReceipt,
 } from "./work-shell-context-packet.js";
 import {
   appendWorkShellEntries,
@@ -49,11 +48,38 @@ import {
 } from "./work-shell-engine-state.js";
 import { applyWorkShellTraceEvent } from "./work-shell-engine-trace.js";
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
+import {
+  createAgentConsoleSnapshot,
+  type AskUserQuestionRequest,
+  type AskUserQuestionResult,
+} from "@unclecode/contracts";
+import {
+  formatWorkShellDecisionLines,
+  resolveWorkShellDecisionReply,
+} from "./work-shell-decision.js";
+import type { WorkShellInteractionBridge } from "./work-shell-interaction-bridge.js";
 import type {
+  AgentConsoleSnapshot,
   ContextPacketView,
   ContextPacketViewActionReceipt,
   ContextPacketViewItem,
+  ContextProfileId,
+  PromptManifest,
 } from "@unclecode/contracts";
+
+type PromiseResolvers<Value> = {
+  readonly promise: Promise<Value>;
+  resolve(value: Value | PromiseLike<Value>): void;
+  reject(reason?: unknown): void;
+};
+
+function createPromiseResolvers<Value>(): PromiseResolvers<Value> {
+  return (
+    Promise as PromiseConstructor & {
+      withResolvers<Result>(): PromiseResolvers<Result>;
+    }
+  ).withResolvers<Value>();
+}
 
 /**
  * Render a one-liner for an attachment lifecycle trace event through the Rust
@@ -284,6 +310,11 @@ export type WorkShellSkillListItem = {
 
 export type WorkShellMemoryScope = "session" | "project" | "user" | "agent";
 
+export type WorkShellPromptManifestResolver = (input: {
+  readonly packet: ContextPacketView;
+  readonly userPrompt: string;
+}) => PromptManifest;
+
 export type WorkShellEngineOptions<Reasoning extends WorkShellReasoningConfig> = {
   readonly provider: string;
   readonly model: string;
@@ -297,6 +328,9 @@ export type WorkShellEngineOptions<Reasoning extends WorkShellReasoningConfig> =
   readonly initialSessionSummary?: string | undefined;
   readonly autoContinueOnPermissionStall?: boolean | undefined;
   readonly modelWindow?: number | undefined;
+  readonly contextProfile?: ContextProfileId | undefined;
+  readonly initialAgentConsole?: AgentConsoleSnapshot | undefined;
+  readonly interactionBridge?: WorkShellInteractionBridge | undefined;
 };
 
 export type WorkShellTraceMode = "minimal" | "verbose";
@@ -335,6 +369,7 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   // existing subscriber fan-out.
   readonly contextInspectorCursor: number;
   readonly contextInspectorExpanded: string | null;
+  readonly agentConsole: AgentConsoleSnapshot;
 };
 
 export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkShellReasoningConfig> {
@@ -447,6 +482,7 @@ export type WorkShellEngineInput<
     readonly memoryLines: readonly string[];
     readonly traceLines: readonly string[];
   }) => Promise<ContextPacketView>) | undefined;
+  resolvePromptManifest?: WorkShellPromptManifestResolver | undefined;
   toolLines?: readonly string[];
   extractAuthLabel?: (lines: readonly string[]) => string | undefined;
   onExit: () => void;
@@ -462,6 +498,11 @@ export type WorkShellEngineInput<
   mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
   ) => ContextPacketViewActionReceipt | undefined) | undefined;
+};
+
+type PendingDecision = {
+  readonly request: AskUserQuestionRequest;
+  settle(result: AskUserQuestionResult): void;
 };
 
 export class WorkShellEngine<
@@ -505,6 +546,7 @@ export class WorkShellEngine<
     state: "running" | "idle" | "requires_action";
     summary: string;
     traceMode?: WorkShellTraceMode | undefined;
+    agentConsole?: AgentConsoleSnapshot | undefined;
   }) => Promise<void>;
   private readonly resolveReasoningCommand: (
     input: string,
@@ -569,6 +611,7 @@ export class WorkShellEngine<
     readonly memoryLines: readonly string[];
     readonly traceLines: readonly string[];
   }) => Promise<ContextPacketView>) | undefined;
+  private readonly resolvePromptManifest?: WorkShellPromptManifestResolver | undefined;
   private readonly toolLines: readonly string[];
   private readonly extractAuthLabel?: ((lines: readonly string[]) => string | undefined) | undefined;
   private readonly onExit: () => void;
@@ -577,6 +620,7 @@ export class WorkShellEngine<
   private readonly mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
   ) => ContextPacketViewActionReceipt | undefined) | undefined;
+  private readonly interactionBridge?: WorkShellInteractionBridge | undefined;
   private readonly subscribers = new Set<(state: WorkShellEngineState<Reasoning>) => void>();
   private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
   private readonly queueDrainSkipTurnEpochs = new Set<number>();
@@ -593,10 +637,12 @@ export class WorkShellEngine<
     | { readonly user: string; readonly assistant: string }
     | undefined;
   private state: WorkShellEngineState<Reasoning>;
+  private pendingDecision: PendingDecision | undefined;
 
   constructor(input: WorkShellEngineInput<Attachment, Reasoning, TraceEvent>) {
     this.agent = input.agent;
     this.options = input.options;
+    this.interactionBridge = input.options.interactionBridge;
     this.buildContextPanel = input.buildContextPanel;
     this.buildHelpPanel = input.buildHelpPanel;
     this.buildStatusPanel = input.buildStatusPanel;
@@ -623,6 +669,7 @@ export class WorkShellEngine<
     this.loadNamedSkill = input.loadNamedSkill ?? (async (name) => ({ name, path: name, content: "", attempts: [] }));
     this.reloadWorkspaceContext = input.reloadWorkspaceContext;
     this.resolveContextPacket = input.resolveContextPacket;
+    this.resolvePromptManifest = input.resolvePromptManifest;
     this.toolLines = input.toolLines ?? [];
     this.extractAuthLabel = input.extractAuthLabel;
     this.onExit = input.onExit;
@@ -700,6 +747,10 @@ export class WorkShellEngine<
   }
 
   async initialize(): Promise<void> {
+    this.interactionBridge?.bind({
+      ask: (request, signal) => this.openDecision(request, signal),
+    });
+    this.clearResumedPendingDecision();
     this.agent.setTraceListener((event) => {
       applyWorkShellTraceEvent({
         state: this.state,
@@ -735,6 +786,8 @@ export class WorkShellEngine<
 
   dispose(): void {
     this.agent.setTraceListener(undefined);
+    this.settlePendingDecision({ status: "unavailable", reason: "Work Shell closed." });
+    this.interactionBridge?.unbind("Work Shell closed.");
   }
 
   async openSessionsPanel(): Promise<void> {
@@ -1061,6 +1114,110 @@ export class WorkShellEngine<
     this.setState({ mode });
   }
 
+  private clearResumedPendingDecision(): void {
+    if (!this.state.agentConsole.pendingDecision) {
+      return;
+    }
+    const { pendingDecision: _pendingDecision, ...consoleWithoutDecision } = this.state.agentConsole;
+    this.setState({
+      agentConsole: createAgentConsoleSnapshot(consoleWithoutDecision),
+    });
+    this.appendEntries({
+      role: "system",
+      text: "A pending decision from the previous session could not be resumed. Re-run the request if it is still needed.",
+    });
+  }
+
+  private openDecision(
+    request: AskUserQuestionRequest,
+    signal?: AbortSignal | undefined,
+  ): Promise<AskUserQuestionResult> {
+    if (signal?.aborted) {
+      return Promise.resolve({ status: "cancelled" });
+    }
+    if (this.pendingDecision) {
+      return Promise.resolve({
+        status: "unavailable",
+        reason: "A Work Shell decision is already pending.",
+      });
+    }
+
+    const { promise, resolve } = createPromiseResolvers<AskUserQuestionResult>();
+    let onAbort: () => void = () => {};
+    const pending: PendingDecision = {
+      request,
+      settle: (result) => {
+        if (this.pendingDecision !== pending) {
+          return;
+        }
+        signal?.removeEventListener("abort", onAbort);
+        this.pendingDecision = undefined;
+        const { pendingDecision: _pendingDecision, ...consoleWithoutDecision } = this.state.agentConsole;
+        this.setState({
+          agentConsole: createAgentConsoleSnapshot(consoleWithoutDecision),
+          panel: this.buildContextPanel(
+            this.currentContextSummaryLines,
+            this.state.bridgeLines,
+            this.state.memoryLines,
+            this.state.traceLines,
+          ),
+        });
+        resolve(result);
+        void this.persistSessionSnapshot(
+          "running",
+          result.status === "answered" ? "Decision answered." : "Decision cancelled.",
+        ).catch(() => undefined);
+      },
+    };
+    onAbort = () => pending.settle({ status: "cancelled" });
+    this.pendingDecision = pending;
+    signal?.addEventListener("abort", onAbort, { once: true });
+    this.setState({
+      agentConsole: createAgentConsoleSnapshot({
+        ...this.state.agentConsole,
+        pendingDecision: request,
+      }),
+      panel: {
+        title: "Decision",
+        lines: formatWorkShellDecisionLines(request),
+      },
+    });
+    void this.persistSessionSnapshot(
+      "requires_action",
+      `Decision required: ${request.title?.trim() || request.id}`,
+    ).catch(() => undefined);
+    return promise;
+  }
+
+  private handlePendingDecisionReply(value: string): void {
+    const pending = this.pendingDecision;
+    if (!pending) {
+      return;
+    }
+    const reply = resolveWorkShellDecisionReply({
+      request: pending.request,
+      value,
+    });
+    if (reply.kind === "cancelled") {
+      pending.settle({ status: "cancelled" });
+      return;
+    }
+    if (reply.kind === "answered") {
+      pending.settle(reply.result);
+      return;
+    }
+    this.setState({
+      panel: {
+        title: "Decision",
+        lines: [...formatWorkShellDecisionLines(pending.request), `Input needed · ${reply.message}`],
+      },
+    });
+  }
+
+  private settlePendingDecision(result: AskUserQuestionResult): void {
+    this.pendingDecision?.settle(result);
+  }
+
   /**
    * Submit the composer value plus any attachments produced outside the
    * text-resolution path (e.g. clipboard paste). The optional
@@ -1074,6 +1231,10 @@ export class WorkShellEngine<
   ): Promise<void> {
     const line = value.trim();
     if (!line) {
+      return;
+    }
+    if (this.pendingDecision) {
+      this.handlePendingDecisionReply(line);
       return;
     }
     if (this.state.isBusy) {
@@ -1142,7 +1303,7 @@ export class WorkShellEngine<
             buildStatusPanel: this.buildStatusPanel,
             autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
             runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(
-              contextPacket ? composeWorkShellTurnPromptFromPacket({ packet: contextPacket, userPrompt: prompt }) : prompt,
+              contextPacket ? this.composeProviderPrompt(contextPacket, prompt) : prompt,
               attachments,
               { signal: abortController.signal },
             ),
@@ -1169,9 +1330,6 @@ export class WorkShellEngine<
               } }
               : {}),
           });
-          if (contextPacket && isCurrentTurn()) {
-            this.appendEntries({ role: "system", text: formatWorkShellContextPacketUsedReceipt(contextPacket) });
-          }
         } finally {
           this.clearActiveTurnAbortController(abortController);
           this.clearSubmitPreparationIfStillPending(isCurrentTurn);
@@ -1212,7 +1370,7 @@ export class WorkShellEngine<
             buildStatusPanel: this.buildStatusPanel,
             autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
             runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(
-              contextPacket ? composeWorkShellTurnPromptFromPacket({ packet: contextPacket, userPrompt: prompt }) : prompt,
+              contextPacket ? this.composeProviderPrompt(contextPacket, prompt) : prompt,
               attachments,
               { signal: abortController.signal },
             ),
@@ -1239,9 +1397,6 @@ export class WorkShellEngine<
               } }
               : {}),
           });
-          if (contextPacket && isCurrentTurn()) {
-            this.appendEntries({ role: "system", text: formatWorkShellContextPacketUsedReceipt(contextPacket) });
-          }
         } finally {
           this.clearActiveTurnAbortController(abortController);
           this.clearSubmitPreparationIfStillPending(isCurrentTurn);
@@ -1463,6 +1618,7 @@ export class WorkShellEngine<
       traceMode,
       reasoningEffort: overrideReasoningEffort,
       entries: this.state.entries,
+      agentConsole: this.state.agentConsole,
     }));
   }
 
@@ -1585,6 +1741,13 @@ export class WorkShellEngine<
     await this.refreshContextPacket(true);
   }
 
+  private composeProviderPrompt(packet: ContextPacketView, userPrompt: string): string {
+    if (this.resolvePromptManifest) {
+      return this.resolvePromptManifest({ packet, userPrompt }).providerPrompt;
+    }
+    return composeWorkShellTurnPromptFromPacket({ packet, userPrompt });
+  }
+
   private async refreshContextPacket(forceRefresh = false): Promise<ContextPacketView | undefined> {
     if (!this.resolveContextPacket || (!forceRefresh && this.state.panel.title === "Context expanded" && this.state.contextPacket)) {
       return this.state.contextPacket;
@@ -1600,6 +1763,14 @@ export class WorkShellEngine<
     this.setState({
       contextPacket: packet,
       contextIndicator: formatWorkShellContextPacketIndicator(packet),
+      ...(packet.manifest
+        ? {
+            agentConsole: {
+              ...this.state.agentConsole,
+              manifest: packet.manifest,
+            },
+          }
+        : {}),
     });
     return packet;
   }

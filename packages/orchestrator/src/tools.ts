@@ -1,4 +1,10 @@
-import type { ToolMetadata } from "@unclecode/contracts";
+import type {
+  AskUserQuestion,
+  AskUserQuestionOption,
+  AskUserQuestionRequest,
+  ToolMetadata,
+} from "@unclecode/contracts";
+import type { WorkShellInteractionBridge } from "./work-shell-interaction-bridge.js";
 import { runRustCommand } from "./rust-command.js";
 
 export type ToolDefinition = {
@@ -287,6 +293,170 @@ export const toolHandlers: Record<string, ToolHandler> = {
   search_text: searchText,
   run_shell: runShell,
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseAskUserQuestionOption(value: unknown): AskUserQuestionOption {
+  if (!isRecord(value) || typeof value.label !== "string" || value.label.trim().length === 0) {
+    throw new Error("ask_user options require non-empty labels.");
+  }
+  if (value.label.trim().toLowerCase() === "other") {
+    throw new Error("ask_user options must not use reserved label \"Other\".");
+  }
+  if (value.description !== undefined && typeof value.description !== "string") {
+    throw new Error("ask_user option descriptions must be strings.");
+  }
+  return {
+    label: value.label.trim(),
+    ...(typeof value.description === "string" ? { description: value.description } : {}),
+  };
+}
+
+function parseAskUserQuestion(value: unknown, questionIds: Set<string>): AskUserQuestion {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id.trim().length === 0) {
+    throw new Error("ask_user questions require non-empty ids.");
+  }
+  const id = value.id.trim();
+  if (questionIds.has(id)) {
+    throw new Error(`ask_user question id is duplicated: ${id}`);
+  }
+  if (typeof value.question !== "string" || value.question.trim().length === 0) {
+    throw new Error("ask_user questions require non-empty question text.");
+  }
+  if (!Array.isArray(value.options) || value.options.length === 0) {
+    throw new Error("ask_user questions require at least one option.");
+  }
+  if (value.multi !== undefined && typeof value.multi !== "boolean") {
+    throw new Error("ask_user multi must be boolean.");
+  }
+  const recommended = value.recommended;
+  if (
+    recommended !== undefined
+    && (
+      typeof recommended !== "number"
+      || !Number.isInteger(recommended)
+      || recommended < 0
+      || recommended >= value.options.length
+    )
+  ) {
+    throw new Error("ask_user recommended index must select an option.");
+  }
+
+  questionIds.add(id);
+  return {
+    id,
+    question: value.question.trim(),
+    options: value.options.map(parseAskUserQuestionOption),
+    ...(typeof value.multi === "boolean" ? { multi: value.multi } : {}),
+    ...(typeof recommended === "number" ? { recommended } : {}),
+  };
+}
+
+export function parseAskUserQuestionRequest(input: Record<string, unknown>): AskUserQuestionRequest {
+  if (typeof input.id !== "string" || input.id.trim().length === 0) {
+    throw new Error("ask_user requires a non-empty id.");
+  }
+  if (input.title !== undefined && typeof input.title !== "string") {
+    throw new Error("ask_user title must be a string.");
+  }
+  if (!Array.isArray(input.questions) || input.questions.length === 0) {
+    throw new Error("ask_user requires at least one question.");
+  }
+
+  const questionIds = new Set<string>();
+  return {
+    id: input.id.trim(),
+    ...(typeof input.title === "string" && input.title.trim().length > 0 ? { title: input.title.trim() } : {}),
+    questions: input.questions.map((question) => parseAskUserQuestion(question, questionIds)),
+  };
+}
+
+function createAskUserToolDefinition(): ToolDefinition {
+  return {
+    name: "ask_user",
+    description: "Ask the Work Shell user to choose between explicit options before continuing.",
+    input_schema: {
+      type: "object",
+      properties: {
+        id: { type: "string", minLength: 1, description: "Stable interaction id for this request." },
+        title: { type: "string", description: "Optional short decision title." },
+        questions: {
+          type: "array",
+          minItems: 1,
+          description: "One or more questions with explicit options.",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", minLength: 1, description: "Stable question id." },
+              question: { type: "string", minLength: 1, description: "Question shown to the user." },
+              options: {
+                type: "array",
+                minItems: 1,
+                description: "Explicit choices for this question.",
+                items: {
+                  type: "object",
+                  properties: {
+                    label: { type: "string", minLength: 1, description: "Option label." },
+                    description: { type: "string", description: "Optional option detail." },
+                  },
+                  required: ["label"],
+                },
+              },
+              multi: { type: "boolean", description: "Whether multiple options may be selected." },
+              recommended: {
+                type: "integer",
+                minimum: 0,
+                description: "Optional zero-based recommended option index.",
+              },
+            },
+            required: ["id", "question", "options"],
+          },
+        },
+      },
+      required: ["id", "questions"],
+    },
+    metadata: {
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+        riskLevel: "medium",
+      },
+      resources: [{
+        kind: "context",
+        mode: "write",
+        template: "context:decision",
+        declared: true,
+      }],
+    },
+  };
+}
+
+export type ToolRuntime = {
+  readonly definitions: readonly ToolDefinition[];
+  readonly handlers: Readonly<Record<string, ToolHandler>>;
+};
+
+export function createToolRuntime(input: {
+  readonly interactionBridge: WorkShellInteractionBridge;
+}): ToolRuntime {
+  const askUser: ToolHandler = async (rawInput, _cwd, options = {}) => {
+    const request = parseAskUserQuestionRequest(rawInput);
+    const result = await input.interactionBridge.ask(request, options.signal);
+    return { content: JSON.stringify(result) };
+  };
+
+  return {
+    definitions: [...toolDefinitions, createAskUserToolDefinition()],
+    handlers: {
+      ...toolHandlers,
+      ask_user: askUser,
+    },
+  };
+}
 
 export function formatToolDefinitionLine(tool: ToolDefinition | undefined): string {
   if (!tool) {

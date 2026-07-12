@@ -12,7 +12,11 @@ import {
   type CodingAgentTraceEvent,
   type TurnAgent,
 } from "./coding-agent.js";
-import { toolDefinitions, toolHandlers } from "./tools.js";
+import { createToolRuntime } from "./tools.js";
+import {
+  createWorkShellInteractionBridge,
+  type WorkShellInteractionBridge,
+} from "./work-shell-interaction-bridge.js";
 import type { AppReasoningConfig } from "./work-config.js";
 
 export type AgentTraceEvent =
@@ -35,12 +39,12 @@ type RuntimeProviderArgs = {
   systemPrompt?: string;
   openAIRuntime?: "api" | "codex";
   openAIAccountId?: string | null;
+  interactionBridge?: WorkShellInteractionBridge;
 };
 
-const toolRuntime = {
-  definitions: toolDefinitions,
-  handlers: toolHandlers,
-} as const;
+export type RuntimeCodingAgentOptions = RuntimeProviderArgs & {
+  providerOverride?: RuntimeProvider;
+};
 
 export class RuntimeCodingAgent
   extends BaseCodingAgent<
@@ -51,15 +55,20 @@ export class RuntimeCodingAgent
   implements WorkTurnAgent
 {
   private readonly runtimeProvider: RuntimeProvider;
+  private readonly interactionBridge: WorkShellInteractionBridge;
 
-  constructor(
-    args: RuntimeProviderArgs & {
-      providerOverride?: RuntimeProvider;
-    },
-  ) {
+  constructor(args: RuntimeCodingAgentOptions) {
+    const interactionBridge = args.interactionBridge ?? createWorkShellInteractionBridge();
     const runtimeProvider = args.providerOverride ?? createRuntimeProvider({
-      ...args,
-      toolRuntime,
+      provider: args.provider,
+      apiKey: args.apiKey,
+      model: args.model,
+      cwd: args.cwd,
+      reasoning: args.reasoning,
+      ...(args.systemPrompt ? { systemPrompt: args.systemPrompt } : {}),
+      ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
+      ...(args.openAIAccountId !== undefined ? { openAIAccountId: args.openAIAccountId } : {}),
+      toolRuntime: createToolRuntime({ interactionBridge }),
     });
     super({
       providerName: args.provider,
@@ -67,17 +76,21 @@ export class RuntimeCodingAgent
       provider: runtimeProvider,
     });
     this.runtimeProvider = runtimeProvider;
+    this.interactionBridge = interactionBridge;
   }
 
   refreshAuthToken(apiKey: string): void {
     this.runtimeProvider.updateAuthToken?.(apiKey);
   }
+
+  getInteractionBridge(): WorkShellInteractionBridge {
+    return this.interactionBridge;
+  }
 }
 
+
 export async function createRuntimeCodingAgent(
-  args: RuntimeProviderArgs & {
-    providerOverride?: RuntimeProvider;
-  },
+  args: RuntimeCodingAgentOptions,
 ): Promise<RuntimeCodingAgent> {
   return new RuntimeCodingAgent(args);
 }

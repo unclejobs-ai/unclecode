@@ -2,6 +2,7 @@ import { useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { runRustCommandSync } from "@unclecode/orchestrator";
 import type {
+  AgentConsoleSnapshot,
   ContextPacketView,
   ContextPacketViewActionReceipt,
 } from "@unclecode/contracts";
@@ -261,6 +262,7 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   // Adaptive model context window (tokens) threaded from engine state so the
   // budget meter scales with the active model instead of an env var.
   readonly modelWindow?: number | undefined;
+  readonly agentConsole?: AgentConsoleSnapshot | undefined;
 };
 
 export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>

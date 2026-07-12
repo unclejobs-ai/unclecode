@@ -1,5 +1,6 @@
 import type { SessionPendingAction, SessionState } from "./engine.js";
 import type { JsonValue } from "./json.js";
+import type { AgentConsoleSnapshot } from "./agent-console.js";
 
 export const SESSION_METADATA_FIELDS = [
   "permissionMode",
@@ -44,10 +45,11 @@ export const SESSION_CHECKPOINT_TYPES = [
   "mode",
   "worktree",
   "approval",
+  "agent_console",
   "team_run",
   "team_step",
-] as const;
 
+] as const;
 export type SessionCheckpointType = (typeof SESSION_CHECKPOINT_TYPES)[number];
 
 export type SessionStateCheckpoint = {
@@ -83,6 +85,11 @@ export type SessionApprovalCheckpoint = {
 
 import type { TeamRunCheckpoint, TeamStepCheckpoint } from "./team.js";
 
+export type SessionAgentConsoleCheckpoint = {
+  readonly type: "agent_console";
+  readonly agentConsole: AgentConsoleSnapshot;
+};
+
 export type SessionCheckpoint =
   | SessionStateCheckpoint
   | SessionMetadataCheckpoint
@@ -90,5 +97,6 @@ export type SessionCheckpoint =
   | SessionModeCheckpoint
   | SessionWorktreeCheckpoint
   | SessionApprovalCheckpoint
+  | SessionAgentConsoleCheckpoint
   | TeamRunCheckpoint
   | TeamStepCheckpoint;

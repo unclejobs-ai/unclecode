@@ -3,7 +3,10 @@ import test from "node:test";
 
 import React from "react";
 
-import { WorkShellView } from "../../packages/tui/src/work-shell-view.tsx";
+import {
+  formatWorkShellAgentConsoleActivityLines,
+  WorkShellView,
+} from "../../packages/tui/src/work-shell-view.tsx";
 import { renderDebugFrame } from "./work-shell-render-harness.mjs";
 
 process.env.UNCLECODE_TERMINAL_BACKGROUND = "light";
@@ -83,6 +86,16 @@ function packet(overrides = {}) {
     sourceCounts: { included: 2, excluded: 3, warnings: 0 },
     tokenEstimate: 66,
     tokenEstimateState: "estimated",
+    manifest: {
+      id: "packet-test:review",
+      profileId: "review",
+      createdAt: "2026-07-07T00:00:00.000Z",
+      packetId: "packet-test",
+      policy: [{ id: "workspace-guidance", label: "AGENTS.md", authority: "mandatory", digest: "digest" }],
+      includedSourceCount: 2,
+      excludedSourceCount: 3,
+      tokenEstimate: 66,
+    },
     ...overrides,
   };
 }
@@ -113,6 +126,7 @@ test("WorkShellView renders /context as an interactive source inspector", async 
   assert.doesNotMatch(output, /rules \/ preview \/ history/);
   assert.match(output, /Recommendation.*keep current packet.*review included rows/s);
   assert.match(output, /Budget lane.*AGENTS\.md.*~42t/s);
+  assert.match(output, /Prompt.*review.*1 policy source.*packet-test:review/s);
   assert.match(output, /> .*bridge.*Enter pin.*recent Q&A/s);
   assert.match(output, /반갑다\. 컨텍스트 인스펙터에서 선택한 행은 펼쳐져야 한다\./);
   assert.match(output, /include.*session loop trail/s);
@@ -202,4 +216,25 @@ test("WorkShellView windows long /context source lists around the cursor", async
   assert.match(output, /> .*workspace source 14/s);
   assert.match(output, /Budget lane.*workspace source 0/s);
   assert.doesNotMatch(output, /↓ Included in next answer[\s\S]*workspace source 0/);
+});
+
+test("WorkShellView formats only compact agent console tool evidence", () => {
+  assert.deepEqual(
+    formatWorkShellAgentConsoleActivityLines({
+      profileId: "build",
+      activity: [{
+        id: "tool-1",
+        toolCallId: "call-1",
+        toolName: "read_file",
+        kind: "read",
+        intent: "Read session state",
+        target: "session.json",
+        status: "completed",
+        summary: "completed · 12ms",
+        startedAt: 1,
+        output: "raw output must not render",
+      }],
+    }),
+    ["Tool · Read session state · session.json · completed · 12ms"],
+  );
 });

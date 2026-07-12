@@ -1299,6 +1299,7 @@ test("OpenAIProvider emits tool trace events for visible tool use", async () => 
   assert.equal(traces[1]?.isError, false);
   assert.equal(typeof traces[1]?.durationMs, "number");
   assert.match(traces[1]?.output ?? "", /hello trace/);
+  assert.deepEqual(traces[1]?.input, { path: "hello.txt" });
 });
 
 test("OpenAIProvider aborts in-flight tool handlers and rolls back turn state", async () => {

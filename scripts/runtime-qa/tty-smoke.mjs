@@ -16,18 +16,22 @@ export async function runTtySmoke({ port, tmp, observations }) {
   const beforeRequests = observations.length;
   await runTmux(["kill-session", "-t", session], { allowFailure: true });
 
+  const launchCommand = [
+    `UNCLECODE_MODE=default`,
+    `HOME=${shellQuote(tmp)}`,
+    `UNCLECODE_SESSION_STORE_ROOT=${shellQuote(path.join(tmp, "session-store"))}`,
+    `GEMINI_API_BASE_URL=${shellQuote(`http://127.0.0.1:${port}/v1beta`)}`,
+    `GEMINI_API_KEY=local-provider-test-key`,
+    `NO_PROXY=127.0.0.1,localhost`,
+    `${shellQuote(process.execPath)} bin/unclecode.cjs work --provider gemini --model gemini-2.5-flash`,
+  ].join(" ");
   const command = [
-    `cd ${shellQuote(repoRoot)}`,
-    [
-      `UNCLECODE_MODE=default`,
-      `GEMINI_API_BASE_URL=${shellQuote(`http://127.0.0.1:${port}/v1beta`)}`,
-      `GEMINI_API_KEY=local-provider-test-key`,
-      `NO_PROXY=127.0.0.1,localhost`,
-      `node bin/unclecode.cjs work --provider gemini --model gemini-2.5-flash`,
-    ].join(" "),
-    `echo EXIT:$?`,
+    `cd ${shellQuote(repoRoot)} && ${launchCommand}`,
+    `status=$?`,
+    `echo EXIT:$status`,
     `sleep 20`,
-  ].join(" && ");
+    `exit $status`,
+  ].join("; ");
 
   try {
     await runTmux(["new-session", "-d", "-x", "100", "-y", "30", "-s", session, command]);
@@ -44,8 +48,8 @@ export async function runTtySmoke({ port, tmp, observations }) {
       throw new Error(`${message}\nRecent provider observations:\n${JSON.stringify(observations.slice(beforeRequests), null, 2)}`);
     }
     const pane = readFileSync(paneFile, "utf8");
-    assert.match(pane, /provider: gemini/);
-    assert.match(pane, /Work context status|Context opened|context \d+ ready/i);
+    assert.match(pane, /UncleCode · Gemini/);
+    assert.match(pane, /Work context status|Context opened|context \d+ ready|▤ \d+ ctx/i);
     assert.doesNotMatch(pane, /Unknown command|panic|TypeError|ReferenceError/);
 
     const width = calculatePaneWidth(pane);

@@ -60,6 +60,29 @@ export function renderContextInspectorBudgetLine(input: {
   );
 }
 
+export function renderContextInspectorManifestLine(input: {
+  readonly packet: ContextPacketView;
+  readonly palette: ContextInspectorPalette;
+  readonly width: number;
+}): React.ReactNode {
+  const manifest = input.packet.manifest;
+  if (!manifest) {
+    return null;
+  }
+  const policyLabel = `${manifest.policy.length} policy ${manifest.policy.length === 1 ? "source" : "sources"}`;
+  const body = truncateForDisplayWidth(
+    `${manifest.profileId} · ${policyLabel} · ${manifest.id}`,
+    Math.max(24, input.width - 10),
+  );
+  return (
+    <Text>
+      <Text color={input.palette.assistant} bold>{"Prompt"}</Text>
+      <Text color={input.palette.borderSoft}>{" · "}</Text>
+      <Text color={input.palette.textMuted}>{body}</Text>
+    </Text>
+  );
+}
+
 function formatReceiptPacketTransition(receipt: ContextPacketViewActionReceipt): string {
   if (receipt.beforePacketId && receipt.afterPacketId) {
     return `${receipt.beforePacketId} -> ${receipt.afterPacketId}`;

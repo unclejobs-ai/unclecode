@@ -28,10 +28,21 @@ export {
   formatContextPacketIndicator,
   formatContextPacketPromptPrefix,
 } from "./context-packet-view.js";
+export { CONTEXT_PROFILES, resolveContextProfile } from "./context-profiles.js";
+export {
+  attachPromptManifestToPacket,
+  createPromptManifest,
+  redactPromptManifestForSession,
+} from "./prompt-manifest.js";
+export type { CreatePromptManifestInput } from "./prompt-manifest.js";
 export { formatContextPacketUsedReceipt } from "./context-packet-receipt.js";
 export type { OmoContextExcludedItem, OmoContextIncludedItem, OmoContextSnapshot } from "./omo-context.js";
 export { loadOmoContextSnapshot } from "./omo-context.js";
-export type { WorkspaceGuidance, WorkspaceGuidanceSkill } from "./workspace-guidance.js";
+export type {
+  WorkspaceGuidance,
+  WorkspaceGuidanceSkill,
+  WorkspaceGuidanceSourceMetadata,
+} from "./workspace-guidance.js";
 export {
   clearCachedWorkspaceGuidance,
   loadCachedWorkspaceGuidance,

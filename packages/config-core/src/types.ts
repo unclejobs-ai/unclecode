@@ -5,6 +5,8 @@ import type {
   ModeProfile,
   ModeProfileId,
   ModeSearchDepth,
+  ConsoleMotionPreference,
+  ContextProfileId,
 } from "@unclecode/contracts";
 
 export type ConfigSourceId =
@@ -43,6 +45,12 @@ export type UncleCodeConfigLayer = {
     readonly crpBudget?: number;
     /** Model context window in tokens, used by the /context budget meter. Defaults to 200000. Override via UNCLECODE_CONTEXT_WINDOW. */
     readonly modelWindow?: number;
+    /** Named selection posture for optional model-ready context sources. */
+    readonly profile?: ContextProfileId;
+  };
+  readonly tui?: {
+    /** Motion policy for live terminal projections. */
+    readonly motion?: ConsoleMotionPreference;
   };
   readonly prompt?: {
     readonly sections?: Readonly<Record<string, UncleCodePromptSection | null>>;
@@ -113,6 +121,8 @@ export type UncleCodeConfigExplanation = {
     readonly crp: SettingExplanation<boolean>;
     readonly crpBudget: SettingExplanation<number>;
     readonly modelWindow: SettingExplanation<number>;
+    readonly contextProfile: SettingExplanation<ContextProfileId>;
+    readonly motion: SettingExplanation<ConsoleMotionPreference>;
   };
   readonly prompt: {
     readonly sections: readonly PromptSectionExplanation[];

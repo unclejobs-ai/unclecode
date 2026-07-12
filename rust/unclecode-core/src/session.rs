@@ -9,9 +9,11 @@ use crate::session_listing::{parse_session_list_item, parse_session_resume_summa
 pub use crate::session_listing::{SessionListItem, SessionResumeSummary};
 use crate::sha256::sha256_hex;
 use crate::time_iso::{unix_millis_to_iso, utc_now_iso};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 const MAX_RESUME_ENTRIES: usize = 24;
+const MAX_AGENT_CONSOLE_BYTES: usize = 32 * 1024;
+const MAX_AGENT_CONSOLE_ACTIVITY: usize = 80;
 const MAX_RESUME_ENTRY_CHARS: usize = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +45,7 @@ pub struct WorkShellSessionSnapshot {
     pub trace_mode: Option<String>,
     pub reasoning_effort: Option<String>,
     pub entries: Vec<WorkShellTranscriptEntry>,
+    pub agent_console: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +63,7 @@ pub struct WorkShellResume {
     pub reasoning_effort: Option<String>,
     pub summary: String,
     pub entries: Vec<WorkShellTranscriptEntry>,
+    pub agent_console: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -272,12 +276,16 @@ impl WorkShellSessionStore {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let agent_console = parsed
+            .get("agentConsole")
+            .and_then(sanitize_agent_console_snapshot);
         Ok(Some(WorkShellResume {
             session_id: parsed_session_id,
             trace_mode,
             reasoning_effort,
             summary,
             entries,
+            agent_console,
         }))
     }
 
@@ -323,6 +331,9 @@ pub fn persist_work_shell_session_snapshot_json(
         .and_then(Value::as_array)
         .map(|items| parse_transcript_entries(items))
         .unwrap_or_default();
+    let agent_console = parsed
+        .get("agentConsole")
+        .and_then(sanitize_agent_console_snapshot);
 
     store
         .persist_work_shell_snapshot(&WorkShellSessionSnapshot {
@@ -335,6 +346,7 @@ pub fn persist_work_shell_session_snapshot_json(
             trace_mode,
             reasoning_effort,
             entries,
+            agent_console,
         })
         .map_err(|error| format!("Failed to persist session snapshot: {error}"))?;
     Ok(session_id.to_string())
@@ -362,6 +374,7 @@ pub fn resume_work_shell_session_json(
             .into_iter()
             .map(|entry| json!({ "role": entry.role, "text": entry.text }))
             .collect::<Vec<_>>(),
+        "agentConsole": resumed.agent_console,
     }))
     .map(Some)
     .map_err(|error| format!("Failed to serialize resumed session: {error}"))
@@ -584,6 +597,164 @@ fn count_lines(path: &Path) -> io::Result<usize> {
     }
 }
 
+fn sanitize_agent_console_snapshot(value: &Value) -> Option<Value> {
+    let source = value.as_object()?;
+    let profile_id = source.get("profileId")?.as_str()?;
+    if !matches!(profile_id, "build" | "explore" | "review") {
+        return None;
+    }
+
+    let mut snapshot = Map::new();
+    snapshot.insert("profileId".to_string(), Value::String(profile_id.to_string()));
+
+    if let Some(manifest) = source.get("manifest") {
+        snapshot.insert(
+            "manifest".to_string(),
+            sanitize_prompt_manifest(manifest)?,
+        );
+    }
+    if let Some(pending_decision) = source.get("pendingDecision") {
+        snapshot.insert(
+            "pendingDecision".to_string(),
+            sanitize_pending_decision(pending_decision)?,
+        );
+    }
+    if let Some(work_graph) = source.get("workGraph") {
+        snapshot.insert("workGraph".to_string(), sanitize_work_graph(work_graph)?);
+    }
+
+    let activity = source.get("activity")?.as_array()?;
+    let start = activity.len().saturating_sub(MAX_AGENT_CONSOLE_ACTIVITY);
+    let activity = activity[start..]
+        .iter()
+        .map(sanitize_tool_activity)
+        .collect::<Option<Vec<_>>>()?;
+    snapshot.insert("activity".to_string(), Value::Array(activity));
+
+    let sanitized = redact_json_strings(Value::Object(snapshot));
+    (serde_json::to_vec(&sanitized).ok()?.len() <= MAX_AGENT_CONSOLE_BYTES).then_some(sanitized)
+}
+
+fn sanitize_prompt_manifest(value: &Value) -> Option<Value> {
+    let mut manifest = copy_known_fields(
+        value,
+        &[
+            "id",
+            "profileId",
+            "createdAt",
+            "packetId",
+            "includedSourceCount",
+            "excludedSourceCount",
+            "tokenEstimate",
+        ],
+    )?;
+    let policy = value
+        .as_object()?
+        .get("policy")?
+        .as_array()?
+        .iter()
+        .map(|source| copy_known_fields(source, &["id", "label", "authority", "digest"]).map(Value::Object))
+        .collect::<Option<Vec<_>>>()?;
+    manifest.insert("policy".to_string(), Value::Array(policy));
+    Some(Value::Object(manifest))
+}
+
+fn sanitize_pending_decision(value: &Value) -> Option<Value> {
+    let mut decision = copy_known_fields(value, &["id", "title"])?;
+    let questions = value
+        .as_object()?
+        .get("questions")?
+        .as_array()?
+        .iter()
+        .map(|question| {
+            let source = question.as_object()?;
+            let mut question = copy_known_fields(question, &["id", "question", "multi", "recommended"])?;
+            let options = source
+                .get("options")?
+                .as_array()?
+                .iter()
+                .map(|option| copy_known_fields(option, &["label", "description"]).map(Value::Object))
+                .collect::<Option<Vec<_>>>()?;
+            question.insert("options".to_string(), Value::Array(options));
+            Some(Value::Object(question))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    decision.insert("questions".to_string(), Value::Array(questions));
+    Some(Value::Object(decision))
+}
+
+fn sanitize_work_graph(value: &Value) -> Option<Value> {
+    let mut graph = copy_known_fields(value, &["id", "approval"])?;
+    let nodes = value
+        .as_object()?
+        .get("nodes")?
+        .as_array()?
+        .iter()
+        .map(|node| {
+            copy_known_fields(
+                node,
+                &[
+                    "id",
+                    "title",
+                    "prompt",
+                    "status",
+                    "dependsOn",
+                    "fileOwnership",
+                    "manifestId",
+                    "evidenceRefs",
+                ],
+            )
+            .map(Value::Object)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    graph.insert("nodes".to_string(), Value::Array(nodes));
+    Some(Value::Object(graph))
+}
+
+fn sanitize_tool_activity(value: &Value) -> Option<Value> {
+    copy_known_fields(
+        value,
+        &[
+            "id",
+            "toolCallId",
+            "toolName",
+            "kind",
+            "intent",
+            "status",
+            "target",
+            "summary",
+            "startedAt",
+            "completedAt",
+        ],
+    )
+    .map(Value::Object)
+}
+
+fn copy_known_fields(value: &Value, fields: &[&str]) -> Option<Map<String, Value>> {
+    let source = value.as_object()?;
+    let mut result = Map::new();
+    for field in fields {
+        if let Some(field_value) = source.get(*field) {
+            result.insert((*field).to_string(), field_value.clone());
+        }
+    }
+    Some(result)
+}
+
+fn redact_json_strings(value: Value) -> Value {
+    match value {
+        Value::String(value) => Value::String(redact_secrets(&value)),
+        Value::Array(items) => Value::Array(items.into_iter().map(redact_json_strings).collect()),
+        Value::Object(items) => Value::Object(
+            items
+                .into_iter()
+                .map(|(key, value)| (key, redact_json_strings(value)))
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
 fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShellRecord> {
     let summary_timestamp = now_timestamp();
     let metadata_trace = snapshot
@@ -598,7 +769,7 @@ fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShel
             format!(",\"reasoningEffort\":\"{}\"", escape_json(reasoning_effort))
         })
         .unwrap_or_default();
-    vec![
+    let mut records = vec![
         WorkShellRecord {
             timestamp: now_timestamp(),
             checkpoint_json: format!(
@@ -629,7 +800,16 @@ fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShel
             timestamp: now_timestamp(),
             checkpoint_json: "{\"type\":\"mode\",\"mode\":\"normal\"}".to_string(),
         },
-    ]
+    ];
+    if let Some(agent_console) = &snapshot.agent_console {
+        records.push(WorkShellRecord {
+            timestamp: now_timestamp(),
+            checkpoint_json: format!(
+                "{{\"type\":\"agent_console\",\"agentConsole\":{agent_console}}}"
+            ),
+        });
+    }
+    records
 }
 
 fn build_checkpoint_json(
@@ -669,6 +849,7 @@ fn build_checkpoint_json(
             .into_iter()
             .map(|entry| json!({ "role": entry.role, "text": entry.text }))
             .collect::<Vec<_>>(),
+        "agentConsole": snapshot.agent_console.clone(),
     }))
     .unwrap_or_else(|_| "{}".to_string())
 }
@@ -786,6 +967,7 @@ mod tests {
                         text: "repo inspected".to_string(),
                     },
                 ],
+                agent_console: None,
             })
             .expect("persist snapshot");
 
@@ -804,6 +986,57 @@ mod tests {
         assert_eq!(resumed.entries.len(), 2);
         assert_eq!(resumed.entries[0].text, "inspect repo");
         assert_eq!(resumed.entries[1].text, "repo inspected");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn work_shell_persist_json_strips_raw_agent_console_output() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-console-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let project = env::current_dir().expect("cwd");
+        let store = WorkShellSessionStore::new(&root);
+        let payload = json!({
+            "sessionId": "work-session-console",
+            "model": "gpt-5.4",
+            "mode": "normal",
+            "state": "idle",
+            "summary": "Chat: persist console",
+            "entries": [],
+            "agentConsole": {
+                "profileId": "build",
+                "activity": [{
+                    "id": "activity-1",
+                    "toolCallId": "call-1",
+                    "toolName": "read_file",
+                    "kind": "read",
+                    "intent": format!("Read sk-proj-{}", "a".repeat(30)),
+                    "status": "completed",
+                    "startedAt": 1,
+                    "output": "unbounded raw output"
+                }]
+            }
+        })
+        .to_string();
+
+        persist_work_shell_session_snapshot_json(&store, &project, &payload)
+            .expect("persist JSON snapshot");
+
+        let paths = session_paths(&root, &project, "work-session-console");
+        let checkpoint = fs::read_to_string(paths.checkpoint_path).expect("checkpoint");
+        assert!(!checkpoint.contains("unbounded raw output"));
+        assert!(!checkpoint.contains("sk-proj-"));
+
+        let resumed = store
+            .resume_work_shell_session(&project, "work-session-console")
+            .expect("resume")
+            .expect("resumed");
+        let console = resumed.agent_console.expect("agent console");
+        assert_eq!(console["profileId"], "build");
+        assert!(console["activity"][0].get("output").is_none());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -908,6 +1141,7 @@ mod tests {
                 trace_mode: Some("minimal".to_string()),
                 reasoning_effort: None,
                 entries,
+                agent_console: None,
             })
             .expect("persist snapshot");
 

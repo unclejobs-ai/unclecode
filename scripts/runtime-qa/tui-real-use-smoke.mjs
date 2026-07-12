@@ -49,7 +49,7 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
       `GEMINI_API_BASE_URL=${shellQuote(`http://127.0.0.1:${port}/v1beta`)}`,
       `GEMINI_API_KEY=local-provider-test-key`,
       `NO_PROXY=127.0.0.1,localhost`,
-      `node bin/unclecode.cjs tui --provider gemini --model gemini-2.5-flash`,
+      `${shellQuote(process.execPath)} bin/unclecode.cjs tui --provider gemini --model gemini-2.5-flash`,
     ].join(" "),
     `echo EXIT:$?`,
     `sleep 20`,
@@ -59,7 +59,7 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     await runTmux(["new-session", "-d", "-x", "100", "-y", "32", "-s", session, command]);
     await waitForPane(session, /prompt deck|UncleCode · Gemini/, paneFile);
 
-    await submitLine(session, "/context", paneFile, /\/context/);
+    await submitLine(session, "/context", paneFile);
     const contextPane = await waitForPane(
       session,
       /Context expanded|Included in next answer|Sources ·|Warnings · none|✓ none/i,

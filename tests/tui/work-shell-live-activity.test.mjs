@@ -76,6 +76,37 @@ test("busy WorkShellView avoids a duplicate lower activity row", async () => {
   );
 });
 
+test("streaming WorkShellView keeps a visible cursor after partial assistant text", async () => {
+  const { instance, getOutput } = renderDebugFrame(
+    React.createElement(WorkShellView, {
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      reasoningLabel: "medium",
+      reasoningSupported: true,
+      mode: "default",
+      authLabel: "env-key",
+      entries: [],
+      streamingAssistantText: "OPENAI_STREAM_FIRST_TOKEN",
+      isBusy: true,
+      busyStatus: "streaming",
+      activePanel: { title: "Session status", lines: ["Work context ready."] },
+      composer: React.createElement("span", null, ""),
+      inputValue: "",
+      slashSuggestionCount: 0,
+      terminalColumns: 100,
+      cwd: "/Users/parkeungje/project/unclecode",
+    }),
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const output = getOutput();
+  instance.unmount();
+  instance.cleanup();
+
+  assert.match(output, /OPENAI_STREAM_FIRST_TOKEN/);
+  assert.match(output, /▌/);
+});
+
 test("busy WorkShellView keeps the idle empty-state card hidden", async () => {
   const { instance, getOutput } = renderDebugFrame(
     React.createElement(WorkShellView, {
@@ -144,7 +175,7 @@ test("WorkShellView render keeps the light-terminal status frame visible", async
 
   assert.match(output, /UncleCode · OpenAI/);
   // Status bar uses · separators (redesigned — was │)
-  assert.match(output, /gpt-5\.4 · YOLO mode.*·.*Saved OAuth/);
+  assert.match(output, /gpt-5\.4 · YOLO 모드.*·.*Saved OAuth/);
   assert.match(output, /Ready for the next move/);
   assert.match(output, /Work context ready/);
   assert.match(output, /Start\s+· Type the task in plain language/);
@@ -192,9 +223,9 @@ test("resolveReadableWorkShellTextColor keeps primary text explicit for light te
   // are resolved to the palette's primary text color for readability.
   assert.equal(resolveReadableWorkShellTextColor("#334155"), "#0d1117");
   assert.equal(resolveReadableWorkShellTextColor("#475569"), "#0d1117");
-  assert.equal(resolveReadableWorkShellTextColor("#94a3b8"), "#64748b");
-  assert.equal(resolveReadableWorkShellTextColor("#0d9488"), "#64748b");
-  assert.equal(resolveReadableWorkShellTextColor("#7d8590"), "#64748b");
+  assert.equal(resolveReadableWorkShellTextColor("#94a3b8"), "#334155");
+  assert.equal(resolveReadableWorkShellTextColor("#0d9488"), "#334155");
+  assert.equal(resolveReadableWorkShellTextColor("#7d8590"), "#334155");
   assert.equal(resolveReadableWorkShellTextColor("#115e59"), "#115e59");
 });
 

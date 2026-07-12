@@ -31,7 +31,7 @@ export async function runParallelModeKoreanTuiSmoke({ port, tmp, observations })
       `GEMINI_API_KEY=local-provider-test-key`,
       `NO_PROXY=127.0.0.1,localhost`,
       `FORCE_COLOR=3`,
-      `node bin/unclecode.cjs tui --provider gemini --model gemini-2.5-flash`,
+      `${shellQuote(process.execPath)} bin/unclecode.cjs tui --provider gemini --model gemini-2.5-flash`,
     ].join(" "),
     `echo EXIT:$?`,
     `sleep 25`,
@@ -39,7 +39,7 @@ export async function runParallelModeKoreanTuiSmoke({ port, tmp, observations })
 
   try {
     await runTmux(["new-session", "-d", "-x", "100", "-y", "30", "-s", session, command]);
-    await waitForPane(session, /prompt deck|UncleCode · Gemini|Ultrawork mode|ultrawork/, paneFile);
+    await waitForPane(session, /prompt deck|UncleCode · Gemini|집중 작업 모드|ultrawork/, paneFile);
     await typeKeys(session, parallelModeKoreanPromptText);
     await waitForPane(session, new RegExp(parallelModeKoreanPromptText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), paneFile);
     await pressEnter(session);

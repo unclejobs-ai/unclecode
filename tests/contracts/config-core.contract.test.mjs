@@ -127,6 +127,61 @@ test("config-core resolves CRP context controls through the documented source or
   assert.equal(envOverride.settings.crpBudget.winner.sourceId, "environment");
 });
 
+test("config-core resolves context profile and terminal motion with source provenance", () => {
+  const { workspaceRoot, userHomeDir } = createWorkspaceFixture();
+
+  writeConfigFile(path.join(workspaceRoot, ".unclecode", "config.json"), {
+    context: { profile: "explore" },
+    tui: { motion: "off" },
+  });
+
+  const configOnly = explainUncleCodeConfig({ workspaceRoot, userHomeDir });
+  assert.equal(configOnly.settings.contextProfile.value, "explore");
+  assert.equal(
+    configOnly.settings.contextProfile.winner.sourceId,
+    "project-config",
+  );
+  assert.equal(configOnly.settings.motion.value, "off");
+
+  const environmentOverride = explainUncleCodeConfig({
+    workspaceRoot,
+    userHomeDir,
+    env: {
+      UNCLECODE_CONTEXT_PROFILE: "review",
+      UNCLECODE_TUI_MOTION: "full",
+    },
+  });
+  assert.equal(environmentOverride.settings.contextProfile.value, "review");
+  assert.equal(environmentOverride.settings.motion.value, "full");
+  assert.equal(
+    environmentOverride.settings.motion.winner.sourceId,
+    "environment",
+  );
+
+  const noColorDefault = explainUncleCodeConfig({
+    workspaceRoot,
+    userHomeDir,
+    env: { NO_COLOR: "1" },
+  });
+  assert.equal(noColorDefault.settings.motion.value, "reduced");
+
+  writeConfigFile(path.join(userHomeDir, ".unclecode", "config.json"), {
+    context: { profile: "not-a-profile" },
+    tui: { motion: "spin" },
+  });
+  const invalid = explainUncleCodeConfig({ workspaceRoot, userHomeDir });
+  assert.ok(
+    invalid.sourceIssues.some(
+      (issue) => issue.message === "Invalid context.profile value.",
+    ),
+  );
+  assert.ok(
+    invalid.sourceIssues.some(
+      (issue) => issue.message === "Invalid tui.motion value.",
+    ),
+  );
+});
+
 test("config-core resolves context.modelWindow from config through the explanation surface", () => {
   const { workspaceRoot, userHomeDir } = createWorkspaceFixture();
 
@@ -157,10 +212,13 @@ test("config-core resolves context.modelWindow override via UNCLECODE_CONTEXT_WI
     });
 
     assert.equal(explanation.settings.modelWindow.value, 1000000);
-    assert.equal(explanation.settings.modelWindow.winner.sourceId, "environment");
+    assert.equal(
+      explanation.settings.modelWindow.winner.sourceId,
+      "environment",
+    );
   } finally {
     if (previous === undefined) {
-      delete process.env.UNCLECODE_CONTEXT_WINDOW;
+      Reflect.deleteProperty(process.env, "UNCLECODE_CONTEXT_WINDOW");
     } else {
       process.env.UNCLECODE_CONTEXT_WINDOW = previous;
     }

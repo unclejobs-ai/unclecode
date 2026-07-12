@@ -2722,7 +2722,10 @@ async function executeProviderToolAction(
   try {
     const result = await handler(action.input, cwd, { signal: options.signal });
     throwIfAborted(options.signal);
-    const execution = buildProviderToolExecutionFinishResult(provider, action.tool, action.callId, started.startedAt, result);
+    const execution = attachDisplayToolInput(
+      buildProviderToolExecutionFinishResult(provider, action.tool, action.callId, started.startedAt, result),
+      action.input,
+    );
     emitProviderTrace(traceListener, execution.trace);
     return execution;
   } catch (error) {
@@ -2730,7 +2733,10 @@ async function executeProviderToolAction(
       throw error;
     }
     const message = error instanceof Error ? error.message : String(error);
-    const execution = buildProviderToolExecutionFinish(provider, action.tool, action.callId, started.startedAt, true, message);
+    const execution = attachDisplayToolInput(
+      buildProviderToolExecutionFinish(provider, action.tool, action.callId, started.startedAt, true, message),
+      action.input,
+    );
     emitProviderTrace(traceListener, execution.trace);
     return execution;
   }
@@ -2904,6 +2910,31 @@ function buildProviderToolExecutionFinishResult(
     JSON.stringify(result),
   ).trim();
   return parseProviderToolExecutionResultPayload(provider, raw);
+}
+
+function attachDisplayToolInput(
+  execution: ProviderToolExecutionResult,
+  input: Record<string, unknown>,
+): ProviderToolExecutionResult {
+  if (execution.trace.type !== "tool.completed") {
+    return execution;
+  }
+
+  const displayInput: Record<string, string> = {};
+  for (const key of ["path", "query", "command"] as const) {
+    const value = input[key];
+    if (typeof value === "string") {
+      displayInput[key] = value;
+    }
+  }
+
+  return {
+    ...execution,
+    trace: {
+      ...execution.trace,
+      input: displayInput,
+    },
+  };
 }
 
 function parseProviderToolExecutionResultPayload(

@@ -5,6 +5,7 @@ import React from "react";
 import {
   computeContextOverlaySectionMaxRows,
   renderContextInspectorBudgetLine,
+  renderContextInspectorManifestLine,
   renderContextInspectorReceipt,
 } from "./work-shell-context-inspector-header.js";
 import {
@@ -67,6 +68,11 @@ export function renderContextInspectorOverlay(input: {
           packet: input.packet,
           palette,
           modelWindow: input.modelWindow,
+        })}
+        {renderContextInspectorManifestLine({
+          packet: input.packet,
+          palette,
+          width: input.width,
         })}
         {renderContextInspectorReceipt({
           ...(input.actionReceipt ? { receipt: input.actionReceipt } : {}),

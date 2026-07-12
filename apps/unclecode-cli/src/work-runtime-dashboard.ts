@@ -12,6 +12,9 @@ import type {
   ContextPacketViewItem,
   ExecutionTraceEvent,
   ProviderId,
+  ConsoleMotionPreference,
+  ContextProfileId,
+  AgentConsoleSnapshot,
 } from "@unclecode/contracts";
 import {
   describeReasoning,
@@ -27,7 +30,9 @@ import {
   type OrchestratedWorkAgentTraceEvent,
   type WorkShellChatEntry,
   type WorkShellReasoningConfig,
+  type WorkShellPromptManifestResolver,
 } from "@unclecode/orchestrator";
+import type { WorkShellInteractionBridge } from "@unclecode/orchestrator";
 import type {
   ProviderInputAttachment,
   ProviderName,
@@ -55,6 +60,8 @@ export type StartReplOptions = {
   reasoning: AppReasoningConfig;
   cwd: string;
   modelWindow: number;
+  contextProfile?: ContextProfileId | undefined;
+  motion?: ConsoleMotionPreference | undefined;
   contextSummaryLines: readonly string[];
   contextPacketSourceMetadata?: readonly ContextPacketViewItem[] | undefined;
   homeState: TuiShellHomeState;
@@ -62,6 +69,8 @@ export type StartReplOptions = {
   initialTraceMode?: "minimal" | "verbose" | undefined;
   initialEntries?: readonly WorkShellChatEntry[] | undefined;
   initialSessionSummary?: string | undefined;
+  initialAgentConsole?: AgentConsoleSnapshot | undefined;
+  interactionBridge?: WorkShellInteractionBridge | undefined;
   reloadWorkspaceContext?: ((cwd: string) => Promise<readonly string[]>) | undefined;
   resolveContextPacket?: ((input: {
     readonly cwd: string;
@@ -71,6 +80,7 @@ export type StartReplOptions = {
     readonly memoryLines: readonly string[];
     readonly traceLines: readonly string[];
   }) => Promise<ContextPacketView>) | undefined;
+  resolvePromptManifest?: WorkShellPromptManifestResolver | undefined;
   refreshHomeState?: (() => Promise<TuiShellHomeState>) | undefined;
   refreshAuthState?: (() => Promise<{ authLabel: string; authIssueLines?: readonly string[] }>) | undefined;
   runInlineCommand?: ((args: readonly string[]) => Promise<readonly string[]>) | undefined;
@@ -222,6 +232,9 @@ export function createManagedDashboardInput(
         : {}),
       ...(session.options.resolveContextPacket
         ? { resolveContextPacket: session.options.resolveContextPacket }
+        : {}),
+      ...(session.options.resolvePromptManifest
+        ? { resolvePromptManifest: session.options.resolvePromptManifest }
         : {}),
       publishContextBridge,
       writeScopedMemory,

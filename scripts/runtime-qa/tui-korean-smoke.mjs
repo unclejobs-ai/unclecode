@@ -33,7 +33,7 @@ export async function runKoreanBusyTuiSmoke({ port, tmp, observations }) {
       `GEMINI_API_BASE_URL=${shellQuote(`http://127.0.0.1:${port}/v1beta`)}`,
       `GEMINI_API_KEY=local-provider-test-key`,
       `NO_PROXY=127.0.0.1,localhost`,
-      `node bin/unclecode.cjs tui --provider gemini --model gemini-2.5-flash`,
+      `${shellQuote(process.execPath)} bin/unclecode.cjs tui --provider gemini --model gemini-2.5-flash`,
     ].join(" "),
     `echo EXIT:$?`,
     `sleep 20`,

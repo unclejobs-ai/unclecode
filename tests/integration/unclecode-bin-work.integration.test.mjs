@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,6 +9,14 @@ import { fileURLToPath } from "node:url";
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(testDirectory, "../..");
 const binEntrypoint = path.join(workspaceRoot, "bin/unclecode.cjs");
+
+test("bin wrapper pins Rust bridge launches to its verified Node runtime", () => {
+  const source = readFileSync(binEntrypoint, "utf8");
+  assert.match(
+    source,
+    /UNCLECODE_NODE: process\.env\.UNCLECODE_NODE \|\| process\.execPath/,
+  );
+});
 
 test("bin/unclecode.cjs can launch the built work runtime from an external cwd", () => {
   const externalCwd = mkdtempSync(path.join(tmpdir(), "unclecode-bin-work-"));

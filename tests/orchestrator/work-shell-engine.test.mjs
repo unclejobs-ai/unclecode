@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   WorkShellEngine,
   createWorkShellEngine,
+  createWorkShellInteractionBridge,
   createWorkShellPaneRuntime,
 } from "@unclecode/orchestrator";
 import {
@@ -2146,6 +2147,30 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
     undefined,
     "tool.started stays out of the default conversation transcript",
   );
+  assert.deepEqual(
+    resolveVerboseTraceEntry({
+      traceMode: "minimal",
+      event: { type: "tool.completed", toolName: "write_file" },
+      line: "✓ wrote notes.txt · 7 lines",
+    }),
+    {
+      role: "tool",
+      text: "✓ wrote notes.txt · 7 lines",
+    },
+    "a completed file mutation remains visible in minimal mode",
+  );
+  assert.deepEqual(
+    resolveVerboseTraceEntry({
+      traceMode: "minimal",
+      event: { type: "tool.completed", toolName: "read_file" },
+      line: "Read src/index.ts · 18 lines",
+    }),
+    {
+      role: "tool",
+      text: "Read src/index.ts · 18 lines",
+    },
+    "a completed read remains visible for the later activity projection to coalesce",
+  );
   assert.equal(
     resolveVerboseTraceEntry({
       traceMode: "minimal",
@@ -2193,6 +2218,21 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
   assert.equal(livePatches.length, 1);
   assert.equal(liveEntries.length, 0);
   assert.deepEqual(liveTraceLines, ["calling openai gpt-5.4"]);
+  const completedEntries = [];
+  applyWorkShellTraceEvent({
+    state: createState({ traceMode: "minimal", isBusy: true }),
+    event: { type: "tool.completed", toolName: "run_shell" },
+    formatAgentTraceLine: () => "✓ $ npm test -- work · 34ms",
+    setState() {},
+    appendEntries: (...entries) => {
+      completedEntries.push(...entries);
+    },
+    pushTraceLine() {},
+  });
+  assert.deepEqual(completedEntries, [{
+    role: "tool",
+    text: "✓ $ npm test -- work · 34ms",
+  }]);
 });
 
 test("assistant delta trace accumulates streaming assistant text without transcript noise", () => {
@@ -2726,10 +2766,9 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
   assert.doesNotMatch(prompts[0] ?? "", /Multiple active OMO sessions/);
   assert.match(prompts[0] ?? "", /User request:\nsummarize repo$/);
   assert.equal(engine.getState().entries.find((entry) => entry.role === "user")?.text, "summarize repo");
-  assert.ok(engine.getState().entries.some(
-    (entry) => entry.role === "system" &&
-      entry.text === "Context used · packet packet-work-shell-1 · 2 included · ~30t · 1 held · 1 warning",
-  ));
+  assert.equal(engine.getState().entries.some(
+    (entry) => entry.role === "system" && entry.text.startsWith("Context used ·"),
+  ), false, "context packet receipts stay in the context surface, not the transcript");
 
   await engine.handleSubmit("/context");
 
@@ -2745,6 +2784,128 @@ test("WorkShellEngine binds chat prompts and /context inspector to the same inje
   assert.equal(engine.getState().panel.lines.some((line) => /\bPacket\b|provider packet|Next model-call packet/.test(line)), false);
   assert.equal(engine.getState().panel.lines.some((line) => line.startsWith("Context ·")), false);
   assert.equal(engine.getState().panel.lines.some((line) => line.startsWith("Controls ·")), false);
+});
+
+test("WorkShellEngine sends the manifest-owned provider prompt for a resolved packet", async () => {
+  const providerPrompts = [];
+  const manifestInputs = [];
+  const packet = {
+    id: "packet-manifest-1",
+    version: 1,
+    generatedAt: "2026-07-12T00:00:00.000Z",
+    title: "Next answer context",
+    included: [],
+    excluded: [],
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: 0, excluded: 0, warnings: 0 },
+    tokenEstimate: 0,
+    tokenEstimateState: "exact",
+    manifest: {
+      id: "packet-manifest-1:build",
+      profileId: "build",
+      createdAt: "2026-07-12T00:00:00.000Z",
+      packetId: "packet-manifest-1",
+      policy: [],
+      includedSourceCount: 0,
+      excludedSourceCount: 0,
+      tokenEstimate: 0,
+    },
+  };
+  const { engine, calls } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        providerPrompts.push(prompt);
+        return { text: "done" };
+      },
+    },
+    resolveContextPacket: async () => packet,
+    resolvePromptManifest(input) {
+      manifestInputs.push(input);
+      return { providerPrompt: `manifest-owned:${input.packet.id}:${input.userPrompt}` };
+    },
+  });
+
+  await engine.handleSubmit("write focused tests");
+
+  assert.deepEqual(manifestInputs, [{ packet, userPrompt: "write focused tests" }]);
+  assert.deepEqual(providerPrompts, ["manifest-owned:packet-manifest-1:write focused tests"]);
+  assert.deepEqual(engine.getState().agentConsole.manifest, packet.manifest);
+  assert.deepEqual(calls.snapshots.at(-1)?.agentConsole?.manifest, packet.manifest);
+});
+
+test("WorkShellEngine binds ask_user to a durable composer decision", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  const { engine, calls } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+    },
+  });
+  await engine.initialize();
+
+  const result = interactionBridge.ask({
+    id: "decision-1",
+    title: "Execution choice",
+    questions: [{
+      id: "strategy",
+      question: "Choose execution strategy.",
+      options: [{ label: "Safe" }, { label: "Fast" }],
+      recommended: 0,
+    }],
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-1");
+  assert.equal(engine.getState().panel.title, "Decision");
+
+  await engine.handleSubmit("2");
+
+  assert.deepEqual(await result, {
+    status: "answered",
+    answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
+  assert.ok(calls.snapshots.some((snapshot) => snapshot.state === "requires_action"));
+  assert.ok(calls.snapshots.some((snapshot) => snapshot.state === "running"));
+});
+
+test("WorkShellEngine clears orphaned resumed decisions before accepting new input", async () => {
+  const { engine } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      initialAgentConsole: {
+        profileId: "build",
+        pendingDecision: {
+          id: "decision-stale",
+          questions: [{
+            id: "strategy",
+            question: "Choose a strategy.",
+            options: [{ label: "Safe" }],
+          }],
+        },
+        activity: [],
+      },
+    },
+  });
+
+  await engine.initialize();
+
+  assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
+  assert.ok(engine.getState().entries.some((entry) => entry.text.includes("could not be resumed")));
 });
 
 test("WorkShellEngine context inspector actions mutate the selected CRP source", async () => {
@@ -2892,10 +3053,9 @@ test("WorkShellEngine reuses the previewed /context packet for the next chat tur
   assert.equal(prompts.length, 1);
   assert.match(prompts[0] ?? "", /<unclecode_context_packet id="packet-previewed" version="1">/);
   assert.doesNotMatch(prompts[0] ?? "", /packet-refreshed/);
-  assert.ok(engine.getState().entries.some(
-    (entry) => entry.role === "system" &&
-      entry.text === "Context used · packet packet-previewed · 1 included · ~20t · 0 held · 0 warnings",
-  ));
+  assert.equal(engine.getState().entries.some(
+    (entry) => entry.role === "system" && entry.text.startsWith("Context used ·"),
+  ), false, "reusing a previewed packet does not append a duplicate context receipt");
 });
 
 test("WorkShellEngine shows a busy spinner state while resolving composer context", async () => {
@@ -3012,7 +3172,7 @@ test("WorkShellEngine accepts explicit /mode set without unsupported inline resi
   const { engine, calls } = createEngine({
     async runInlineCommand(args) {
       calls.inline.push(args);
-      return ["Active mode saved: search", "Label: Search"];
+      return ["Active mode saved: search", "Label: 탐색 모드"];
     },
     resolveWorkShellSlashCommand(input) {
       throw new Error(`Rust-owned mode route should not need TS re-resolution for ${input}`);

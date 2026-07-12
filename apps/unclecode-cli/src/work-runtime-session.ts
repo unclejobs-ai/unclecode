@@ -2,6 +2,10 @@ import { runRustCommand } from "@unclecode/orchestrator";
 import { getSessionStoreRoot } from "@unclecode/session-store";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import {
+  parseAgentConsoleSnapshot,
+  type AgentConsoleSnapshot,
+} from "@unclecode/contracts";
 
 export type WorkRuntimeAuthIssueInput = {
   authStatus?: Pick<RustOpenAIAuthStatus, "authType" | "runtime" | "expiresAt" | "apiReady">;
@@ -68,6 +72,7 @@ export async function loadResumedWorkSession(input: {
   reasoningEffort?: "low" | "medium" | "high";
   contextLine: string;
   initialEntries: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[];
+  initialAgentConsole?: AgentConsoleSnapshot;
   initialSessionSummary?: string;
 }> {
   const stdout = await runRustCommand(
@@ -97,6 +102,9 @@ export async function loadResumedWorkSession(input: {
     initialEntries,
     ...(resumed.initialSessionSummary
       ? { initialSessionSummary: resumed.initialSessionSummary }
+      : {}),
+    ...(resumed.initialAgentConsole
+      ? { initialAgentConsole: resumed.initialAgentConsole }
       : {}),
   };
 }
@@ -203,6 +211,7 @@ function parseRustResumedWorkSession(stdout: string): {
   readonly reasoningEffort?: "low" | "medium" | "high";
   readonly contextLine: string;
   readonly initialEntries: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[];
+  readonly initialAgentConsole?: AgentConsoleSnapshot;
   readonly initialSessionSummary?: string;
 } {
   const parsed = JSON.parse(stdout) as {
@@ -212,6 +221,7 @@ function parseRustResumedWorkSession(stdout: string): {
     contextLine?: unknown;
     initialEntries?: unknown;
     initialSessionSummary?: unknown;
+    agentConsole?: unknown;
   };
   const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId : undefined;
   if (!sessionId) {
@@ -229,6 +239,7 @@ function parseRustResumedWorkSession(stdout: string): {
           || ((entry as { role?: unknown }).role === "tool"))
         && typeof (entry as { text?: unknown }).text === "string")
     : [];
+  const initialAgentConsole = parseAgentConsoleSnapshot(parsed.agentConsole);
   return {
     sessionId,
     ...(traceMode === "minimal" || traceMode === "verbose" ? { traceMode } : {}),
@@ -242,6 +253,7 @@ function parseRustResumedWorkSession(stdout: string): {
     ...(typeof parsed.initialSessionSummary === "string"
       ? { initialSessionSummary: parsed.initialSessionSummary }
       : {}),
+    ...(initialAgentConsole ? { initialAgentConsole } : {}),
   };
 }
 
