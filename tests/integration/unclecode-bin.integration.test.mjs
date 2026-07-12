@@ -1271,7 +1271,7 @@ test("root bin wrapper handles mode set and status on the Rust path", () => {
 
     assert.equal(setResult.status, 0, setResult.stderr);
     assert.match(setResult.stdout, /Active mode saved: yolo/);
-    assert.match(setResult.stdout, /Label: YOLO/);
+    assert.match(setResult.stdout, /Label: YOLO 모드/);
 
     const savedConfig = JSON.parse(
       readFileSync(path.join(tempDir, ".unclecode", "config.json"), "utf8"),
@@ -1285,6 +1285,7 @@ test("root bin wrapper handles mode set and status on the Rust path", () => {
 
     assert.equal(statusResult.status, 0, statusResult.stderr);
     assert.match(statusResult.stdout, /Active mode: yolo/);
+    assert.match(statusResult.stdout, /Label: YOLO 모드/);
     assert.match(statusResult.stdout, /Source: project config/);
     assert.match(statusResult.stdout, /Background tasks: preferred/);
   } finally {

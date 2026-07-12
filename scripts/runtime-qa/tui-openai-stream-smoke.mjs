@@ -58,7 +58,7 @@ export async function runOpenAIStreamTuiSmoke({ tmp }) {
       // Clear inherited proxy configuration so the provider stays on the
       // live-stream fetch path instead of the proxy-aware Rust transport.
       "HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy=",
-      "node bin/unclecode.cjs tui --provider openai --model gpt-4.1-mini",
+      `${shellQuote(process.execPath)} bin/unclecode.cjs tui --provider openai --model gpt-4.1-mini`,
     ].join(" "),
     "echo EXIT:$?",
     "sleep 20",

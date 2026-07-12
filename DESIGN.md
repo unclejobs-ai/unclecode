@@ -226,7 +226,7 @@ Operator-facing Work Shell copy uses Korean for modes, guards, and slash hints. 
 
 | Surface | Rule | Owner |
 | --- | --- | --- |
-| Status/footer mode chip | Korean label from `humanize_work_shell_mode_label` (`ux_text.rs`); TS fast-path mirrors Rust | `rust/unclecode-core/src/ux_text.rs`, `packages/tui/src/work-shell-footer-fast-paths.ts` |
+| Status/footer mode chip | `mode_label` (`mode.rs`) is the label source; `ux_text.rs` and the TS footer call the Rust runtime path | `rust/unclecode-core/src/mode.rs`, `rust/unclecode-core/src/ux_text.rs`, `packages/tui/src/work-shell-footer-fast-paths.ts` |
 | `/mode` slash descriptions | Korean one-line behavior hint per profile | `packages/orchestrator/src/work-shell-slash.ts` |
 | Read-only guards | Korean rejection before turn (`search`, `plan`) | `rust/unclecode-core/src/prompt_turn.rs` |
 | Busy/detail strings | Korean humanization for orchestrator traces in status only | `ux_text.rs` |

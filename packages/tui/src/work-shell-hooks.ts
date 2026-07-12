@@ -1,7 +1,11 @@
 import { useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { runRustCommandSync } from "@unclecode/orchestrator";
-import type { ContextPacketView } from "@unclecode/contracts";
+import type {
+  AgentConsoleSnapshot,
+  ContextPacketView,
+  ContextPacketViewActionReceipt,
+} from "@unclecode/contracts";
 
 import {
   createWorkShellDashboardHomePatch,
@@ -253,9 +257,12 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly contextInspectorCursor?: number | undefined;
   readonly contextInspectorExpanded?: string | null | undefined;
   readonly contextPacket?: ContextPacketView | undefined;
+  readonly contextActionReceipt?: ContextPacketViewActionReceipt | undefined;
+  readonly contextSourceActionsEnabled?: boolean | undefined;
   // Adaptive model context window (tokens) threaded from engine state so the
   // budget meter scales with the active model instead of an env var.
   readonly modelWindow?: number | undefined;
+  readonly agentConsole?: AgentConsoleSnapshot | undefined;
 };
 
 export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
@@ -396,6 +403,7 @@ export function useWorkShellInputController(input: {
   readonly interruptTurn?: (() => void) | undefined;
   readonly cancelSensitiveInput?: (() => void) | undefined;
   readonly closeOverlay?: (() => void) | undefined;
+  readonly contextSourceActionsEnabled?: boolean | undefined;
   // Context Inspector (Sprint 2): engine callbacks for the /context overlay
   // keyboard actions. All optional — only dispatched when the overlay is open
   // and the engine wires them.
@@ -438,6 +446,7 @@ export function useWorkShellInputController(input: {
         value,
         key,
         panelTitle: "Context expanded",
+        actionsEnabled: input.contextSourceActionsEnabled ?? false,
       });
       switch (inspectorAction.type) {
         case "move-cursor":
@@ -808,6 +817,7 @@ export function useWorkShellPaneState<
     ...(input.engine.closeOverlay
       ? { closeOverlay: () => input.engine.closeOverlay?.() }
       : {}),
+    contextSourceActionsEnabled: engineState.contextSourceActionsEnabled ?? false,
     // Context Inspector (Sprint 2): forward engine callbacks so the
     // controller's useInput can dispatch overlay keyboard actions.
     ...(input.engine.moveContextInspectorCursor

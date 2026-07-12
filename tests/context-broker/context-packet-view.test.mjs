@@ -79,7 +79,7 @@ describe("context packet view", () => {
     assert.ok(lines.includes("Held back locally"));
     assert.ok(lines.includes("- omo · 1 · .omo/ulw-loop/session/ledger.jsonl (raw audit ledger stays local)"));
     assert.ok(lines.includes("Warnings · 1 · omo.multiple-active: Multiple active OMO sessions detected."));
-    assert.ok(lines.includes("Next answer · Context will be carried into the next answer."));
+    assert.ok(lines.includes('Next answer · <unclecode_context_packet id="packet-test-1" version="1">'));
     assert.ok(lines.includes("Controls · Esc close · /context refresh · Ctrl+O context"));
     assert.equal(lines.some((line) => /\bPacket\b|provider packet|Next model-call packet/.test(line)), false);
   });
@@ -126,6 +126,59 @@ describe("context packet view", () => {
     assert.match(prefix, /Warnings:\n- 1 context issue withheld from model-ready context; inspect \/context for local-only details\./);
     assert.doesNotMatch(prefix, /local-session-a/);
     assert.match(prefix, /<\/unclecode_context_packet>$/);
+  });
+
+  it("keeps packet preview lines identical to the provider-bound prompt prefix", () => {
+    const packet = createContextPacketView({
+      id: "packet-preview-parity",
+      generatedAt: "2026-07-08T00:00:00.000Z",
+      included: [
+        {
+          id: "runtime-summary",
+          category: "runtime",
+          label: "terminal output",
+          reason: "latest shell output",
+          preview: "tests passed",
+        },
+      ],
+      excluded: [],
+      warnings: [],
+      preview: ["Stale human summary that must not masquerade as model preview."],
+    });
+
+    const prefixLines = formatContextPacketPromptPrefix(packet).split("\n");
+
+    assert.deepEqual(packet.preview, prefixLines);
+    assert.equal(
+      buildContextPacketPreviewLines(packet)
+        .some((line) => line.includes("Stale human summary")),
+      false,
+    );
+  });
+
+  it("includes the provider-bound prompt prefix in the compact work-shell preview", () => {
+    const packet = createContextPacketView({
+      id: "packet-work-shell-prefix",
+      generatedAt: "2026-07-08T00:00:00.000Z",
+      included: [
+        {
+          id: "workspace-guidance",
+          category: "workspace",
+          label: "AGENTS.md",
+          reason: "repo instructions loaded",
+          preview: "Use small diffs.",
+        },
+      ],
+      excluded: [],
+      warnings: [],
+      preview: ["decorative preview must not be used"],
+    });
+
+    const lines = buildWorkShellCompactContextPacketPreviewLines(packet);
+    const prefixStart = lines.indexOf("Provider prompt prefix");
+
+    assert.notEqual(prefixStart, -1);
+    assert.deepEqual(lines.slice(prefixStart + 1), formatContextPacketPromptPrefix(packet).split("\n"));
   });
 
   it("formats a compact footer indicator for folded context state", () => {
@@ -208,14 +261,14 @@ describe("context packet view", () => {
 
     assert.deepEqual(lines.slice(0, 4), [
       "Context · Next answer context",
-      "Sources · 16 included · 12 held back · 7 warnings",
+      "Sources · 16 included · 12 held back · 7 warnings · token estimate unknown",
       "UncleCode · included summaries go to the model; raw audit artifacts stay local.",
       "Included in next answer",
     ]);
     assert.equal(lines.filter((line) => line.startsWith("+ bridge ·")).length, 1);
     assert.equal(lines.filter((line) => line.startsWith("- omo ·")).length, 1);
     assert.ok(lines.includes("Warnings · 7 · warning.1: warning 1 · 6 more"));
-    assert.ok(lines.includes("Next answer · provider prefix preview"));
+    assert.ok(lines.includes('Next answer · <unclecode_context_packet id="packet-bounded" version="1">'));
     assert.equal(lines.length <= 12, true);
   });
 

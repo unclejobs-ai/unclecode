@@ -223,14 +223,14 @@ test("LoopTrailProvider upserts goals + holds back excluded artifacts", async ()
 
 // ── Registry ─────────────────────────────────────────────────────────
 
-test("createBuiltinProviderRegistry registers all 5 providers", () => {
+test("createBuiltinProviderRegistry registers all 6 providers", () => {
   const store = makeStore();
   const fakeListMemory = async () => [];
   const registry = createBuiltinProviderRegistry(store, "proj_test", fakeListMemory);
   const providerIds = registry.listProviders().map((p) => p.providerId);
   assert.deepEqual(
     [...providerIds].sort(),
-    ["bridge", "loop-trail", "memory", "runtime", "workspace-guidance"],
+    ["bridge", "condensed-history", "loop-trail", "memory", "runtime", "workspace-guidance"],
   );
 });
 
@@ -255,6 +255,38 @@ test("registry.syncAll runs memory + runtime providers (deterministic subset)", 
   assert.ok(touched.length >= 2);
   assert.ok(touched.includes("context-memory-1"));
   assert.ok(touched.includes("runtime-trace-1"));
+});
+
+test("registry.syncAll starts independent providers concurrently", async () => {
+  const store = makeStore();
+  const { ContextProviderRegistry } = await import("@unclecode/context-broker");
+  const registry = new ContextProviderRegistry(store, "proj_test");
+  let started = 0;
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const provider = (providerId) => ({
+    providerId,
+    categories: ["runtime"],
+    refresh: "on-turn",
+    trustTier: "builtin",
+    async sync() {
+      started += 1;
+      await gate;
+      return [providerId];
+    },
+  });
+  registry.register(provider("first"));
+  registry.register(provider("second"));
+
+  const syncing = registry.syncAll({ cwd: "/repos/test", sessionId: "s1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const providersStartedBeforeRelease = started;
+  release();
+
+  assert.deepEqual(await syncing, ["first", "second"]);
+  assert.equal(providersStartedBeforeRelease, 2);
 });
 
 // ── Selector ─────────────────────────────────────────────────────────

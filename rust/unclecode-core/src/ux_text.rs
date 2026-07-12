@@ -1,4 +1,6 @@
-use crate::http_transport::describe_proxy_policy_fields;
+use crate::{
+    http_transport::describe_proxy_policy_fields, mode::mode_label, redaction::redact_secrets,
+};
 use serde_json::{json, Value};
 
 pub fn build_attachment_preview_lines_json(input_json: &str) -> Result<String, String> {
@@ -642,7 +644,7 @@ pub fn format_work_shell_status_line_json(input_json: &str) -> Result<String, St
 pub fn format_work_shell_status_line(model: &str, mode: &str, auth_label: &str) -> String {
     format!(
         "{model} · {} · {} · work context",
-        humanize_work_shell_mode_label(mode),
+        format_work_shell_mode_label(mode),
         compact_work_shell_auth_label(auth_label)
     )
 }
@@ -834,29 +836,7 @@ fn format_trace_line(event: &Value) -> String {
         )
         .trim()
         .to_string(),
-        "tool.completed" => {
-            let output = event
-                .get("output")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-                .unwrap_or_else(|| {
-                    event
-                        .get("output")
-                        .map(Value::to_string)
-                        .unwrap_or_default()
-                });
-            format!(
-                "{} {} {}ms {}",
-                if bool_field(event, "isError") {
-                    "✖"
-                } else {
-                    "✓"
-                },
-                tool_display_name(str_field(event, "toolName").unwrap_or_default()),
-                number_field(event, "durationMs").unwrap_or(0),
-                summarize_text(&output)
-            )
-        }
+        "tool.completed" => format_completed_tool_trace(event),
         "orchestrator.step" => format_orchestrator_step(event),
         "bridge.published" => format!(
             "↔ context saved {}",
@@ -883,6 +863,70 @@ fn format_trace_line(event: &Value) -> String {
         }
         _ => String::new(),
     }
+}
+
+fn format_completed_tool_trace(event: &Value) -> String {
+    let tool_name = str_field(event, "toolName").unwrap_or_default();
+    let subject = describe_completed_tool_subject(tool_name, event.get("input").unwrap_or(&Value::Null));
+    let duration_ms = number_field(event, "durationMs").unwrap_or(0);
+    if !bool_field(event, "isError") {
+        return format!("✓ {subject} · {duration_ms}ms");
+    }
+
+    let diagnostic = summarize_completed_tool_error(event);
+    if diagnostic.is_empty() {
+        format!("✖ {subject} · {duration_ms}ms")
+    } else {
+        format!("✖ {subject} · {duration_ms}ms · {diagnostic}")
+    }
+}
+
+fn describe_completed_tool_subject(tool_name: &str, input: &Value) -> String {
+    match tool_name {
+        "read_file" => input_display_value(input, "path")
+            .map(|path| format!("read {path}"))
+            .unwrap_or_else(|| "read".to_string()),
+        "list_files" => input_display_value(input, "path")
+            .map(|path| format!("listed {path}"))
+            .unwrap_or_else(|| "listed files".to_string()),
+        "write_file" => input_display_value(input, "path")
+            .map(|path| format!("wrote {path}"))
+            .unwrap_or_else(|| "wrote file".to_string()),
+        "delete_file" => input_display_value(input, "path")
+            .map(|path| format!("deleted {path}"))
+            .unwrap_or_else(|| "deleted file".to_string()),
+        "search_text" => {
+            let query = input_display_value(input, "query").unwrap_or_else(|| "text".to_string());
+            match input_display_value(input, "path") {
+                Some(path) => format!("search {query} in {path}"),
+                None => format!("search {query}"),
+            }
+        }
+        "run_shell" => input_display_value(input, "command")
+            .map(|command| format!("$ {command}"))
+            .unwrap_or_else(|| "bash".to_string()),
+        _ => tool_display_name(tool_name).to_string(),
+    }
+}
+
+fn input_display_value(input: &Value, key: &str) -> Option<String> {
+    str_field(input, key)
+        .map(redact_secrets)
+        .map(|value| truncate_display_width(&value, 72))
+        .filter(|value| !value.is_empty())
+}
+
+fn summarize_completed_tool_error(event: &Value) -> String {
+    let output = event
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let first_line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    summarize_text(&redact_secrets(first_line))
 }
 
 fn format_policy_denied_trace(event: &Value) -> String {
@@ -1183,17 +1227,8 @@ fn compact_work_shell_auth_label(auth_label: &str) -> String {
     }
 }
 
-fn humanize_work_shell_mode_label(mode: &str) -> String {
-    match mode.to_ascii_lowercase().as_str() {
-        "default" => "Default mode".to_string(),
-        "search" => "Search mode".to_string(),
-        "analyze" => "Analyze mode".to_string(),
-        "ultrawork" => "Ultrawork mode".to_string(),
-        "yolo" => "YOLO mode".to_string(),
-        "plan" => "Plan mode".to_string(),
-        "build" => "Build mode".to_string(),
-        _ => format!("{mode} mode"),
-    }
+pub fn format_work_shell_mode_label(mode: &str) -> String {
+    mode_label(mode)
 }
 
 fn normalize_status_detail(value: &str) -> String {
@@ -1565,11 +1600,11 @@ mod tests {
         );
         assert_eq!(
             format_work_shell_status_line("gpt-5.4", "default", "Browser OAuth · file"),
-            "gpt-5.4 · Default mode · Saved OAuth · work context"
+            "gpt-5.4 · 작업 모드 · Saved OAuth · work context"
         );
         assert_eq!(
             format_work_shell_status_line("gpt-5.4", "default", "OAuth file · API blocked"),
-            "gpt-5.4 · Default mode · OAuth · needs API key · work context"
+            "gpt-5.4 · 작업 모드 · OAuth · needs API key · work context"
         );
         assert_eq!(
             format_work_shell_usage_line(false, None, None, Some(1480), None),
@@ -1600,7 +1635,7 @@ mod tests {
                 Some("Enter send · Shift+Enter newline"),
                 None,
             ),
-            "~/project/unclecode  ·  gpt-5.4 · Default mode · Saved OAuth · work context  ·  Enter send · Shift+Enter newline"
+            "~/project/unclecode  ·  gpt-5.4 · 작업 모드 · Saved OAuth · work context  ·  Enter send · Shift+Enter newline"
         );
         assert_eq!(
             format_work_shell_footer_line(
@@ -1626,7 +1661,7 @@ mod tests {
                 Some("Enter send · Shift+Enter newline · / commands"),
                 Some(72),
             ),
-            "~/project/unclecode  ·  gpt-5.4 · YOLO mode · Saved OAuth · context"
+            "~/project/unclecode  ·  gpt-5.4 · YOLO 모드 · Saved OAuth · context"
         );
         assert_eq!(
             format_work_shell_footer_line(
@@ -1639,7 +1674,7 @@ mod tests {
                 None,
                 Some(120),
             ),
-            "~/project/unclecode  ·  gpt-5.4 · Default mode · Saved OAuth · work context  ·  context 2 ready · 1 held back"
+            "~/project/unclecode  ·  gpt-5.4 · 작업 모드 · Saved OAuth · work context  ·  context 2 ready · 1 held back"
         );
     }
 
@@ -1885,6 +1920,31 @@ mod tests {
             )
             .unwrap(),
             "✦ thinking· inspect repo before editing"
+        );
+    }
+
+    #[test]
+    fn formats_completed_tool_traces_as_compact_evidence() {
+        assert_eq!(
+            format_trace_line_json(
+                r#"{"type":"tool.completed","toolName":"write_file","input":{"path":"notes.txt","content":"private text"},"output":"Wrote notes.txt","isError":false,"durationMs":12}"#
+            )
+            .unwrap(),
+            "✓ wrote notes.txt · 12ms"
+        );
+        assert_eq!(
+            format_trace_line_json(
+                r#"{"type":"tool.completed","toolName":"run_shell","input":{"command":"npm test -- work"},"output":"all tests passed\nwith verbose details","isError":false,"durationMs":34}"#
+            )
+            .unwrap(),
+            "✓ $ npm test -- work · 34ms"
+        );
+        assert_eq!(
+            format_trace_line_json(
+                r#"{"type":"tool.completed","toolName":"run_shell","input":{"command":"npm test"},"output":"exit 1: syntax error","isError":true,"durationMs":42}"#
+            )
+            .unwrap(),
+            "✖ $ npm test · 42ms · exit 1: syntax error"
         );
     }
 

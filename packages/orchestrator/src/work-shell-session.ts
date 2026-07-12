@@ -1,4 +1,5 @@
 import { runRustCommand } from "./rust-command.js";
+import { createAgentConsoleSnapshot, type AgentConsoleSnapshot } from "@unclecode/contracts";
 
 export async function listSessionLines(
   workspaceRoot: string,
@@ -26,6 +27,7 @@ export async function persistWorkShellSessionSnapshot(input: {
   readonly traceMode?: "minimal" | "verbose" | undefined;
   readonly reasoningEffort?: "low" | "medium" | "high" | undefined;
   readonly entries?: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[] | undefined;
+  readonly agentConsole?: AgentConsoleSnapshot | undefined;
 }): Promise<void> {
   await runRustCommand(
     ["rust", "session", "persist-json"],
@@ -39,6 +41,9 @@ export async function persistWorkShellSessionSnapshot(input: {
       traceMode: input.traceMode,
       reasoningEffort: input.reasoningEffort,
       entries: input.entries ?? [],
+      ...(input.agentConsole
+        ? { agentConsole: createAgentConsoleSnapshot(input.agentConsole) }
+        : {}),
     }),
     input.env ?? process.env,
   );

@@ -48,7 +48,38 @@ import {
 } from "./work-shell-engine-state.js";
 import { applyWorkShellTraceEvent } from "./work-shell-engine-trace.js";
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
-import type { ContextPacketView, ContextPacketViewItem } from "@unclecode/contracts";
+import {
+  createAgentConsoleSnapshot,
+  type AskUserQuestionRequest,
+  type AskUserQuestionResult,
+} from "@unclecode/contracts";
+import {
+  formatWorkShellDecisionLines,
+  resolveWorkShellDecisionReply,
+} from "./work-shell-decision.js";
+import type { WorkShellInteractionBridge } from "./work-shell-interaction-bridge.js";
+import type {
+  AgentConsoleSnapshot,
+  ContextPacketView,
+  ContextPacketViewActionReceipt,
+  ContextPacketViewItem,
+  ContextProfileId,
+  PromptManifest,
+} from "@unclecode/contracts";
+
+type PromiseResolvers<Value> = {
+  readonly promise: Promise<Value>;
+  resolve(value: Value | PromiseLike<Value>): void;
+  reject(reason?: unknown): void;
+};
+
+function createPromiseResolvers<Value>(): PromiseResolvers<Value> {
+  return (
+    Promise as PromiseConstructor & {
+      withResolvers<Result>(): PromiseResolvers<Result>;
+    }
+  ).withResolvers<Value>();
+}
 
 /**
  * Render a one-liner for an attachment lifecycle trace event through the Rust
@@ -75,7 +106,7 @@ function parseQueuedSubmit(stdout: string): { readonly id: number; readonly line
   if (!trimmed || trimmed === "null") {
     return undefined;
   }
-  const parsed = JSON.parse(trimmed) as unknown;
+  const parsed: unknown = JSON.parse(trimmed);
   if (typeof parsed !== "object" || parsed === null) {
     throw new Error(`Invalid Rust queue response: ${trimmed}`);
   }
@@ -96,7 +127,7 @@ function parseQueueLength(stdout: string): number {
   if (!trimmed) {
     return 0;
   }
-  const parsed = JSON.parse(trimmed) as unknown;
+  const parsed: unknown = JSON.parse(trimmed);
   if (typeof parsed !== "object" || parsed === null) {
     throw new Error("Invalid Rust queue length response.");
   }
@@ -112,7 +143,7 @@ function parseQueuedSubmitList(stdout: string): readonly { readonly id: number; 
   if (!trimmed) {
     return [];
   }
-  const parsed = JSON.parse(trimmed) as unknown;
+  const parsed: unknown = JSON.parse(trimmed);
   if (!Array.isArray(parsed)) {
     throw new Error("Invalid Rust queue list response.");
   }
@@ -279,6 +310,11 @@ export type WorkShellSkillListItem = {
 
 export type WorkShellMemoryScope = "session" | "project" | "user" | "agent";
 
+export type WorkShellPromptManifestResolver = (input: {
+  readonly packet: ContextPacketView;
+  readonly userPrompt: string;
+}) => PromptManifest;
+
 export type WorkShellEngineOptions<Reasoning extends WorkShellReasoningConfig> = {
   readonly provider: string;
   readonly model: string;
@@ -292,6 +328,9 @@ export type WorkShellEngineOptions<Reasoning extends WorkShellReasoningConfig> =
   readonly initialSessionSummary?: string | undefined;
   readonly autoContinueOnPermissionStall?: boolean | undefined;
   readonly modelWindow?: number | undefined;
+  readonly contextProfile?: ContextProfileId | undefined;
+  readonly initialAgentConsole?: AgentConsoleSnapshot | undefined;
+  readonly interactionBridge?: WorkShellInteractionBridge | undefined;
 };
 
 export type WorkShellTraceMode = "minimal" | "verbose";
@@ -317,7 +356,9 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly currentTurnStartedAt?: number | undefined;
   readonly lastTurnDurationMs?: number | undefined;
   readonly contextPacket?: ContextPacketView | undefined;
+  readonly contextActionReceipt?: ContextPacketViewActionReceipt | undefined;
   readonly contextIndicator?: string | undefined;
+  readonly contextSourceActionsEnabled: boolean;
   readonly modelWindow: number;
   readonly queuedCount: number;
   readonly queuePaused: boolean;
@@ -328,6 +369,7 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   // existing subscriber fan-out.
   readonly contextInspectorCursor: number;
   readonly contextInspectorExpanded: string | null;
+  readonly agentConsole: AgentConsoleSnapshot;
 };
 
 export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkShellReasoningConfig> {
@@ -440,6 +482,7 @@ export type WorkShellEngineInput<
     readonly memoryLines: readonly string[];
     readonly traceLines: readonly string[];
   }) => Promise<ContextPacketView>) | undefined;
+  resolvePromptManifest?: WorkShellPromptManifestResolver | undefined;
   toolLines?: readonly string[];
   extractAuthLabel?: (lines: readonly string[]) => string | undefined;
   onExit: () => void;
@@ -454,7 +497,12 @@ export type WorkShellEngineInput<
    */
   mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
-  ) => void) | undefined;
+  ) => ContextPacketViewActionReceipt | undefined) | undefined;
+};
+
+type PendingDecision = {
+  readonly request: AskUserQuestionRequest;
+  settle(result: AskUserQuestionResult): void;
 };
 
 export class WorkShellEngine<
@@ -498,6 +546,7 @@ export class WorkShellEngine<
     state: "running" | "idle" | "requires_action";
     summary: string;
     traceMode?: WorkShellTraceMode | undefined;
+    agentConsole?: AgentConsoleSnapshot | undefined;
   }) => Promise<void>;
   private readonly resolveReasoningCommand: (
     input: string,
@@ -562,6 +611,7 @@ export class WorkShellEngine<
     readonly memoryLines: readonly string[];
     readonly traceLines: readonly string[];
   }) => Promise<ContextPacketView>) | undefined;
+  private readonly resolvePromptManifest?: WorkShellPromptManifestResolver | undefined;
   private readonly toolLines: readonly string[];
   private readonly extractAuthLabel?: ((lines: readonly string[]) => string | undefined) | undefined;
   private readonly onExit: () => void;
@@ -569,7 +619,8 @@ export class WorkShellEngine<
   private readonly recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
   private readonly mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
-  ) => void) | undefined;
+  ) => ContextPacketViewActionReceipt | undefined) | undefined;
+  private readonly interactionBridge?: WorkShellInteractionBridge | undefined;
   private readonly subscribers = new Set<(state: WorkShellEngineState<Reasoning>) => void>();
   private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
   private readonly queueDrainSkipTurnEpochs = new Set<number>();
@@ -581,14 +632,17 @@ export class WorkShellEngine<
   private activeTurnAbortController: AbortController | undefined;
   private queueAutoDrainPaused = false;
   private workBoardRebuildGeneration = 0;
+  private workBoardQueuedItemsSnapshot: readonly { readonly id: number; readonly line: string }[] = [];
   private lastCompletedTurnSnapshot:
     | { readonly user: string; readonly assistant: string }
     | undefined;
   private state: WorkShellEngineState<Reasoning>;
+  private pendingDecision: PendingDecision | undefined;
 
   constructor(input: WorkShellEngineInput<Attachment, Reasoning, TraceEvent>) {
     this.agent = input.agent;
     this.options = input.options;
+    this.interactionBridge = input.options.interactionBridge;
     this.buildContextPanel = input.buildContextPanel;
     this.buildHelpPanel = input.buildHelpPanel;
     this.buildStatusPanel = input.buildStatusPanel;
@@ -615,6 +669,7 @@ export class WorkShellEngine<
     this.loadNamedSkill = input.loadNamedSkill ?? (async (name) => ({ name, path: name, content: "", attempts: [] }));
     this.reloadWorkspaceContext = input.reloadWorkspaceContext;
     this.resolveContextPacket = input.resolveContextPacket;
+    this.resolvePromptManifest = input.resolvePromptManifest;
     this.toolLines = input.toolLines ?? [];
     this.extractAuthLabel = input.extractAuthLabel;
     this.onExit = input.onExit;
@@ -623,11 +678,14 @@ export class WorkShellEngine<
     this.sessionId = input.sessionId ?? `work-${randomUUID()}`;
     this.currentContextSummaryLines = input.options.contextSummaryLines;
     this.lastSessionSummary = input.options.initialSessionSummary ?? "Work shell ready.";
-    this.state = createInitialWorkShellEngineState({
-      options: input.options,
-      contextSummaryLines: this.currentContextSummaryLines,
-      buildContextPanel: input.buildContextPanel,
-    });
+    this.state = {
+      ...createInitialWorkShellEngineState({
+        options: input.options,
+        contextSummaryLines: this.currentContextSummaryLines,
+        buildContextPanel: input.buildContextPanel,
+      }),
+      contextSourceActionsEnabled: input.mutateContextSource !== undefined,
+    };
     this.lastCompletedTurnSnapshot = resolveLastCompletedTurn(
       input.options.initialEntries ?? this.state.entries,
     );
@@ -644,8 +702,23 @@ export class WorkShellEngine<
     }
     this.setState({ terminalColumns });
     if (this.state.panel.title === WORK_BOARD_PANEL_TITLE) {
+      this.setState({ panel: this.createWorkBoardPanel(this.workBoardQueuedItemsSnapshot) });
       void this.rebuildWorkBoardPanel();
     }
+  }
+
+  private createWorkBoardPanel(
+    queuedItems: readonly { readonly id: number; readonly line: string }[],
+  ): WorkShellPanel {
+    return createQueueBuiltinResult(buildWorkShellQueueBuiltinInput({
+      line: "/queue",
+      state: this.state,
+      workerBudget: resolveWorkerBudget(this.state.mode),
+      queuedCount: this.queuedCountCache,
+      queuedItems,
+      contextSummaryLines: this.currentContextSummaryLines,
+      ...(this.lastCompletedTurnSnapshot ? { lastCompletedTurn: this.lastCompletedTurnSnapshot } : {}),
+    })).panel;
   }
 
   private async rebuildWorkBoardPanel(): Promise<void> {
@@ -662,16 +735,8 @@ export class WorkShellEngine<
     if (this.state.panel.title !== WORK_BOARD_PANEL_TITLE) {
       return;
     }
-    const panel = createQueueBuiltinResult(buildWorkShellQueueBuiltinInput({
-      line: "/queue",
-      state: this.state,
-      workerBudget: resolveWorkerBudget(this.state.mode),
-      queuedCount: this.queuedCountCache,
-      queuedItems,
-      contextSummaryLines: this.currentContextSummaryLines,
-      ...(this.lastCompletedTurnSnapshot ? { lastCompletedTurn: this.lastCompletedTurnSnapshot } : {}),
-    })).panel;
-    this.setState({ panel });
+    this.workBoardQueuedItemsSnapshot = queuedItems;
+    this.setState({ panel: this.createWorkBoardPanel(queuedItems) });
   }
 
   subscribe(listener: (state: WorkShellEngineState<Reasoning>) => void): () => void {
@@ -682,6 +747,10 @@ export class WorkShellEngine<
   }
 
   async initialize(): Promise<void> {
+    this.interactionBridge?.bind({
+      ask: (request, signal) => this.openDecision(request, signal),
+    });
+    this.clearResumedPendingDecision();
     this.agent.setTraceListener((event) => {
       applyWorkShellTraceEvent({
         state: this.state,
@@ -717,6 +786,8 @@ export class WorkShellEngine<
 
   dispose(): void {
     this.agent.setTraceListener(undefined);
+    this.settlePendingDecision({ status: "unavailable", reason: "Work Shell closed." });
+    this.interactionBridge?.unbind("Work Shell closed.");
   }
 
   async openSessionsPanel(): Promise<void> {
@@ -728,6 +799,9 @@ export class WorkShellEngine<
       });
       this.setState({ panel: loadedPanel });
     } catch (error: unknown) {
+      if (!(error instanceof Error)) {
+        throw error;
+      }
       this.setState({ panel: createOpenSessionsFailurePanel(error) });
     }
   }
@@ -816,11 +890,10 @@ export class WorkShellEngine<
     if (!source || !this.mutateContextSource) {
       return;
     }
-    this.mutateContextSource({
+    await this.mutateInspectorContextSource({
       kind: source.pinned ? "unpin" : "pin",
       id: source.id,
     });
-    await this.refreshContextPacket();
   }
 
   /**
@@ -832,8 +905,7 @@ export class WorkShellEngine<
     if (!source || !this.mutateContextSource) {
       return;
     }
-    this.mutateContextSource({ kind: "forget", id: source.id });
-    await this.refreshContextPacket();
+    await this.mutateInspectorContextSource({ kind: "forget", id: source.id });
   }
 
   /**
@@ -845,8 +917,29 @@ export class WorkShellEngine<
     if (!source || !this.mutateContextSource) {
       return;
     }
-    this.mutateContextSource({ kind: "include", id: source.id });
-    await this.refreshContextPacket();
+    await this.mutateInspectorContextSource({ kind: "include", id: source.id });
+  }
+
+  private async mutateInspectorContextSource(action: {
+    readonly kind: "pin" | "unpin" | "forget" | "include";
+    readonly id: string;
+  }): Promise<void> {
+    if (!this.mutateContextSource) {
+      return;
+    }
+    const beforePacketId = this.state.contextPacket?.id;
+    const receipt = this.mutateContextSource(action);
+    const packet = await this.refreshContextPacket(true);
+    if (!receipt) {
+      return;
+    }
+    this.setState({
+      contextActionReceipt: {
+        ...receipt,
+        ...(beforePacketId !== undefined ? { beforePacketId } : {}),
+        ...(packet !== undefined ? { afterPacketId: packet.id } : {}),
+      },
+    });
   }
 
   /**
@@ -1021,6 +1114,110 @@ export class WorkShellEngine<
     this.setState({ mode });
   }
 
+  private clearResumedPendingDecision(): void {
+    if (!this.state.agentConsole.pendingDecision) {
+      return;
+    }
+    const { pendingDecision: _pendingDecision, ...consoleWithoutDecision } = this.state.agentConsole;
+    this.setState({
+      agentConsole: createAgentConsoleSnapshot(consoleWithoutDecision),
+    });
+    this.appendEntries({
+      role: "system",
+      text: "A pending decision from the previous session could not be resumed. Re-run the request if it is still needed.",
+    });
+  }
+
+  private openDecision(
+    request: AskUserQuestionRequest,
+    signal?: AbortSignal | undefined,
+  ): Promise<AskUserQuestionResult> {
+    if (signal?.aborted) {
+      return Promise.resolve({ status: "cancelled" });
+    }
+    if (this.pendingDecision) {
+      return Promise.resolve({
+        status: "unavailable",
+        reason: "A Work Shell decision is already pending.",
+      });
+    }
+
+    const { promise, resolve } = createPromiseResolvers<AskUserQuestionResult>();
+    let onAbort: () => void = () => {};
+    const pending: PendingDecision = {
+      request,
+      settle: (result) => {
+        if (this.pendingDecision !== pending) {
+          return;
+        }
+        signal?.removeEventListener("abort", onAbort);
+        this.pendingDecision = undefined;
+        const { pendingDecision: _pendingDecision, ...consoleWithoutDecision } = this.state.agentConsole;
+        this.setState({
+          agentConsole: createAgentConsoleSnapshot(consoleWithoutDecision),
+          panel: this.buildContextPanel(
+            this.currentContextSummaryLines,
+            this.state.bridgeLines,
+            this.state.memoryLines,
+            this.state.traceLines,
+          ),
+        });
+        resolve(result);
+        void this.persistSessionSnapshot(
+          "running",
+          result.status === "answered" ? "Decision answered." : "Decision cancelled.",
+        ).catch(() => undefined);
+      },
+    };
+    onAbort = () => pending.settle({ status: "cancelled" });
+    this.pendingDecision = pending;
+    signal?.addEventListener("abort", onAbort, { once: true });
+    this.setState({
+      agentConsole: createAgentConsoleSnapshot({
+        ...this.state.agentConsole,
+        pendingDecision: request,
+      }),
+      panel: {
+        title: "Decision",
+        lines: formatWorkShellDecisionLines(request),
+      },
+    });
+    void this.persistSessionSnapshot(
+      "requires_action",
+      `Decision required: ${request.title?.trim() || request.id}`,
+    ).catch(() => undefined);
+    return promise;
+  }
+
+  private handlePendingDecisionReply(value: string): void {
+    const pending = this.pendingDecision;
+    if (!pending) {
+      return;
+    }
+    const reply = resolveWorkShellDecisionReply({
+      request: pending.request,
+      value,
+    });
+    if (reply.kind === "cancelled") {
+      pending.settle({ status: "cancelled" });
+      return;
+    }
+    if (reply.kind === "answered") {
+      pending.settle(reply.result);
+      return;
+    }
+    this.setState({
+      panel: {
+        title: "Decision",
+        lines: [...formatWorkShellDecisionLines(pending.request), `Input needed · ${reply.message}`],
+      },
+    });
+  }
+
+  private settlePendingDecision(result: AskUserQuestionResult): void {
+    this.pendingDecision?.settle(result);
+  }
+
   /**
    * Submit the composer value plus any attachments produced outside the
    * text-resolution path (e.g. clipboard paste). The optional
@@ -1034,6 +1231,10 @@ export class WorkShellEngine<
   ): Promise<void> {
     const line = value.trim();
     if (!line) {
+      return;
+    }
+    if (this.pendingDecision) {
+      this.handlePendingDecisionReply(line);
       return;
     }
     if (this.state.isBusy) {
@@ -1102,7 +1303,7 @@ export class WorkShellEngine<
             buildStatusPanel: this.buildStatusPanel,
             autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
             runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(
-              contextPacket ? composeWorkShellTurnPromptFromPacket({ packet: contextPacket, userPrompt: prompt }) : prompt,
+              contextPacket ? this.composeProviderPrompt(contextPacket, prompt) : prompt,
               attachments,
               { signal: abortController.signal },
             ),
@@ -1169,7 +1370,7 @@ export class WorkShellEngine<
             buildStatusPanel: this.buildStatusPanel,
             autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
             runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(
-              contextPacket ? composeWorkShellTurnPromptFromPacket({ packet: contextPacket, userPrompt: prompt }) : prompt,
+              contextPacket ? this.composeProviderPrompt(contextPacket, prompt) : prompt,
               attachments,
               { signal: abortController.signal },
             ),
@@ -1322,9 +1523,13 @@ export class WorkShellEngine<
       onExit: this.onExit,
       openSessionsPanel: () => this.openSessionsPanel(),
       reloadContextState: () => this.reloadContextState(),
-      refreshContextPacket: () => this.refreshContextPacket(),
+      refreshContextPacket: () => this.refreshContextPacket(true),
       queuedCount: () => this.queuedCountCache,
-      queuedItems: () => this.listQueuedSubmits(),
+      queuedItems: async () => {
+        const queuedItems = await this.listQueuedSubmits();
+        this.workBoardQueuedItemsSnapshot = queuedItems;
+        return queuedItems;
+      },
       clearQueuedItems: () => this.clearQueuedSubmits(),
       appendEntries: (...entries) => this.appendEntries(...entries),
       setState: (patch) => this.setState(patch),
@@ -1413,6 +1618,7 @@ export class WorkShellEngine<
       traceMode,
       reasoningEffort: overrideReasoningEffort,
       entries: this.state.entries,
+      agentConsole: this.state.agentConsole,
     }));
   }
 
@@ -1495,6 +1701,7 @@ export class WorkShellEngine<
   private async clearQueuedSubmits(): Promise<void> {
     await runRustCommand(["rust", "queue", "clear", this.sessionId], this.queueCommandCwd());
     this.setQueuedCount(0);
+    this.workBoardQueuedItemsSnapshot = [];
     this.queuedAttachments.clear();
     this.queueAutoDrainPaused = false;
     this.queueDrainSkipTurnEpochs.clear();
@@ -1531,11 +1738,18 @@ export class WorkShellEngine<
       memoryLines: contextState.memoryLines,
       panel: contextState.panel,
     });
-    await this.refreshContextPacket();
+    await this.refreshContextPacket(true);
   }
 
-  private async refreshContextPacket(): Promise<ContextPacketView | undefined> {
-    if (!this.resolveContextPacket) {
+  private composeProviderPrompt(packet: ContextPacketView, userPrompt: string): string {
+    if (this.resolvePromptManifest) {
+      return this.resolvePromptManifest({ packet, userPrompt }).providerPrompt;
+    }
+    return composeWorkShellTurnPromptFromPacket({ packet, userPrompt });
+  }
+
+  private async refreshContextPacket(forceRefresh = false): Promise<ContextPacketView | undefined> {
+    if (!this.resolveContextPacket || (!forceRefresh && this.state.panel.title === "Context expanded" && this.state.contextPacket)) {
       return this.state.contextPacket;
     }
     const packet = await this.resolveContextPacket({
@@ -1549,6 +1763,14 @@ export class WorkShellEngine<
     this.setState({
       contextPacket: packet,
       contextIndicator: formatWorkShellContextPacketIndicator(packet),
+      ...(packet.manifest
+        ? {
+            agentConsole: {
+              ...this.state.agentConsole,
+              manifest: packet.manifest,
+            },
+          }
+        : {}),
     });
     return packet;
   }

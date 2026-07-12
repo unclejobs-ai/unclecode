@@ -7,6 +7,7 @@ import React from "react";
 
 import {
   WORK_SHELL_SPINNER_INTERVAL_MS,
+  resolveReadableWorkShellTextColor,
   resolveWorkShellComposerHint,
   WorkShellView,
 } from "../../packages/tui/src/work-shell-view.tsx";
@@ -155,4 +156,43 @@ test("queued WorkShellView keeps queue indicator and composer hint visible", asy
 
   assert.match(output, /1 queued/);
   assert.match(output, /Enter queues follow-up/);
+});
+
+test("prompt deck footer keeps context cost readable on dark terminals", async () => {
+  const previousBackground = process.env.UNCLECODE_TERMINAL_BACKGROUND;
+  process.env.UNCLECODE_TERMINAL_BACKGROUND = "dark";
+  const { instance, getOutput } = renderDebugFrame(
+    React.createElement(WorkShellView, {
+      provider: "openai",
+      model: "gpt-5.6-terra",
+      reasoningLabel: "medium",
+      reasoningSupported: true,
+      mode: "default",
+      authLabel: "Saved OAuth",
+      entries: [],
+      isBusy: false,
+      activePanel: { title: "Session status", lines: ["Work context ready."] },
+      composer: React.createElement("span", null, ""),
+      inputValue: "",
+      slashSuggestionCount: 0,
+      terminalColumns: 100,
+      cwd: "/Users/parkeungje/project/unclecode",
+      contextIndicator: "▤ 44 ctx · ~2k · 113 held",
+    }),
+  );
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const output = getOutput();
+    assert.match(output, /▤ 44 ctx · ~2k/);
+    assert.equal(resolveReadableWorkShellTextColor("#21262d"), "#7f849c");
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+    if (previousBackground === undefined) {
+      delete process.env.UNCLECODE_TERMINAL_BACKGROUND;
+    } else {
+      process.env.UNCLECODE_TERMINAL_BACKGROUND = previousBackground;
+    }
+  }
 });

@@ -27,7 +27,7 @@ export async function runSlashLatencyTuiSmoke({ tmp }) {
       `UNCLECODE_MODE=default`,
       `OPENAI_API_KEY=sk-local-slash-latency-test-key`,
       `NO_PROXY=127.0.0.1,localhost`,
-      `node bin/unclecode.cjs tui --provider openai --model gpt-5.4`,
+      `${shellQuote(process.execPath)} bin/unclecode.cjs tui --provider openai --model gpt-5.4`,
     ].join(" "),
     `echo EXIT:$?`,
     `sleep 20`,

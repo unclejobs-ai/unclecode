@@ -104,11 +104,19 @@ pub fn persist_project_mode(workspace_root: &Path, mode: &str) -> Result<PathBuf
     Ok(config_path)
 }
 
+pub fn mode_label(mode: &str) -> String {
+    let normalized = mode.trim().to_ascii_lowercase();
+    if is_mode_profile_id(&normalized) {
+        return mode_profile(&normalized).label.to_string();
+    }
+    format!("{normalized} mode")
+}
+
 pub fn mode_profile(mode: &str) -> ModeProfile {
     match mode {
         "ultrawork" => ModeProfile {
             id: "ultrawork",
-            label: "Ultra Work",
+            label: "집중 작업 모드",
             editing: "allowed",
             search_depth: "deep",
             background_tasks: "preferred",
@@ -116,7 +124,7 @@ pub fn mode_profile(mode: &str) -> ModeProfile {
         },
         "search" => ModeProfile {
             id: "search",
-            label: "Search",
+            label: "탐색 모드",
             editing: "forbidden",
             search_depth: "deep",
             background_tasks: "preferred",
@@ -124,7 +132,7 @@ pub fn mode_profile(mode: &str) -> ModeProfile {
         },
         "analyze" => ModeProfile {
             id: "analyze",
-            label: "Analyze",
+            label: "분석 모드",
             editing: "reviewed",
             search_depth: "balanced",
             background_tasks: "allowed",
@@ -132,7 +140,7 @@ pub fn mode_profile(mode: &str) -> ModeProfile {
         },
         "yolo" => ModeProfile {
             id: "yolo",
-            label: "YOLO",
+            label: "YOLO 모드",
             editing: "allowed",
             search_depth: "balanced",
             background_tasks: "preferred",
@@ -140,7 +148,7 @@ pub fn mode_profile(mode: &str) -> ModeProfile {
         },
         "plan" => ModeProfile {
             id: "plan",
-            label: "Plan",
+            label: "계획 모드",
             editing: "forbidden",
             search_depth: "deep",
             background_tasks: "forbidden",
@@ -148,7 +156,7 @@ pub fn mode_profile(mode: &str) -> ModeProfile {
         },
         "build" => ModeProfile {
             id: "build",
-            label: "Build",
+            label: "구현 모드",
             editing: "allowed",
             search_depth: "balanced",
             background_tasks: "allowed",
@@ -156,7 +164,7 @@ pub fn mode_profile(mode: &str) -> ModeProfile {
         },
         _ => ModeProfile {
             id: "default",
-            label: "Default",
+            label: "작업 모드",
             editing: "allowed",
             search_depth: "balanced",
             background_tasks: "allowed",
@@ -202,11 +210,22 @@ mod tests {
 
         assert_eq!(config_path, root.join(".unclecode/config.json"));
         assert_eq!(status.profile.id, "yolo");
-        assert_eq!(status.profile.label, "YOLO");
+        assert_eq!(status.profile.label, "YOLO 모드");
         assert_eq!(status.source_label, "project config");
         let raw = fs::read_to_string(config_path).expect("config raw");
         assert!(raw.contains("\"mode\": \"yolo\""));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mode_profiles_use_korean_operator_labels() {
+        assert_eq!(mode_label("default"), "작업 모드");
+        assert_eq!(mode_label("yolo"), "YOLO 모드");
+        assert_eq!(mode_label("ultrawork"), "집중 작업 모드");
+        assert_eq!(mode_label("search"), "탐색 모드");
+        assert_eq!(mode_label("analyze"), "분석 모드");
+        assert_eq!(mode_label("plan"), "계획 모드");
+        assert_eq!(mode_label("build"), "구현 모드");
     }
 
     #[test]

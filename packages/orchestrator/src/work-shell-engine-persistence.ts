@@ -1,3 +1,4 @@
+import type { AgentConsoleSnapshot } from "@unclecode/contracts";
 import type { WorkShellChatEntry, WorkShellTraceMode } from "./work-shell-engine.js";
 
 export type WorkShellSessionSnapshotInput = {
@@ -10,6 +11,7 @@ export type WorkShellSessionSnapshotInput = {
   traceMode: WorkShellTraceMode;
   reasoningEffort?: "low" | "medium" | "high" | undefined;
   entries?: readonly WorkShellChatEntry[] | undefined;
+  agentConsole?: AgentConsoleSnapshot | undefined;
 };
 
 export function createWorkShellSessionSnapshotInput(

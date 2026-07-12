@@ -1,4 +1,5 @@
 import type {
+  AgentConsoleSnapshot,
   EngineEvent,
   PersistedWorktreeSession,
   SessionCheckpoint,
@@ -46,6 +47,7 @@ export interface SessionCheckpointSnapshot {
   readonly worktree?: PersistedWorktreeSession | null;
   readonly pendingAction?: SessionPendingAction;
   readonly taskSummary?: SessionTaskSummarySnapshot;
+  readonly agentConsole?: AgentConsoleSnapshot;
   readonly forkedFromSessionId?: string;
 }
 
@@ -60,6 +62,7 @@ export interface SessionResumeResult {
   readonly pendingAction?: SessionPendingAction;
   readonly taskSummary?: SessionTaskSummarySnapshot;
   readonly forkedFromSessionId?: string;
+  readonly agentConsole?: AgentConsoleSnapshot;
 }
 
 export interface ProjectMemoryEntry {

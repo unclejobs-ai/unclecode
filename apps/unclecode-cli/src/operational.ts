@@ -9,7 +9,7 @@ import {
 } from "@unclecode/mcp-host";
 import { loadExtensionConfigOverlays, loadExtensionManifestSummaries, runRustCommand, runRustCommandSync } from "@unclecode/orchestrator";
 import type { ModeProfileId } from "@unclecode/contracts";
-import { MODE_PROFILE_IDS, MODE_PROFILES } from "@unclecode/contracts";
+import { MODE_PROFILE_IDS } from "@unclecode/contracts";
 import {
   buildOpenAIAuthorizationUrl,
   completeOpenAIBrowserLogin,
@@ -337,10 +337,19 @@ export async function buildSetupReport(input: {
   ].join("\n");
 }
 
-export function formatModeSetReport(mode: ModeProfileId, configPath: string): string {
+export function formatModeSetReport(
+  mode: ModeProfileId,
+  configPath: string,
+  workspaceRoot = process.cwd(),
+): string {
+  const label = runRustCommandSync(
+    ["rust", "ux", "text", "mode-label"],
+    workspaceRoot,
+    mode,
+  ).trim();
   return [
     `Active mode saved: ${mode}`,
-    `Label: ${MODE_PROFILES[mode].label}`,
+    `Label: ${label}`,
     `Config path: ${configPath}`,
   ].join("\n");
 }
@@ -455,7 +464,15 @@ export async function buildTuiHomeState(input: {
       ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : input.env.HOME ? { userHomeDir: input.env.HOME } : {}),
     }),
   });
-  const authStatus = await resolveOpenAIAuthStatus({ env: input.env });
+  const [authStatus, modeLabel] = await Promise.all([
+    resolveOpenAIAuthStatus({ env: input.env }),
+    runRustCommand(
+      ["rust", "ux", "text", "mode-label"],
+      input.workspaceRoot,
+      explanation.activeMode.id,
+      input.env,
+    ).then((output) => output.trim()),
+  ]);
   const sessions = await listSessions(input);
   const registry = loadMcpHostRegistry({
     workspaceRoot: input.workspaceRoot,
@@ -477,7 +494,7 @@ export async function buildTuiHomeState(input: {
     .flatMap((extension) => extension.statusLines.slice(0, 2).map((line) => `Extension ${extension.name} · ${line}`));
 
   return {
-    modeLabel: explanation.activeMode.id,
+    modeLabel,
     authLabel: workShellAuthLabelFromOpenAIStatus(authStatus),
     sessions,
     sessionCount: sessions.length,
@@ -626,7 +643,7 @@ export async function runTuiSessionCenterAction(input: {
       const nextMode =
         MODE_PROFILE_IDS[(currentIndex + 1) % MODE_PROFILE_IDS.length] ?? MODE_PROFILE_IDS[0] ?? "default";
       const configPath = await persistProjectMode(input.workspaceRoot, nextMode);
-      return formatModeSetReport(nextMode, configPath).split("\n");
+      return formatModeSetReport(nextMode, configPath, input.workspaceRoot).split("\n");
     }
     case "mode-set": {
       const mode = input.prompt?.trim() ?? "";
@@ -634,7 +651,7 @@ export async function runTuiSessionCenterAction(input: {
         return [`Unsupported mode: ${mode || "<empty>"}`, `Supported: ${MODE_PROFILE_IDS.join(", ")}`];
       }
       const configPath = await persistProjectMode(input.workspaceRoot, mode);
-      return formatModeSetReport(mode, configPath).split("\n");
+      return formatModeSetReport(mode, configPath, input.workspaceRoot).split("\n");
     }
     case "browser-login": {
       const browserClientId = input.env.OPENAI_OAUTH_CLIENT_ID?.trim();

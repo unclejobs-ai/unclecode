@@ -7,6 +7,7 @@ import type {
   WorkShellTraceMode,
 } from "./work-shell-engine.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
+import { createAgentConsoleSnapshot } from "@unclecode/contracts";
 
 type BuildContextPanel<Reasoning extends WorkShellReasoningConfig> = (
   contextSummaryLines: readonly string[],
@@ -91,6 +92,8 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
     lastTurnDurationMs: undefined,
+    contextActionReceipt: undefined,
+    contextSourceActionsEnabled: false,
     queuedCount: 0,
     queuePaused: false,
     terminalColumns: 100,
@@ -101,6 +104,23 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     // time. See docs/design/context-inspector-redesign.md §C/§E.
     contextInspectorCursor: -1,
     contextInspectorExpanded: null,
+    agentConsole: createAgentConsoleSnapshot({
+      profileId: input.options.contextProfile ?? input.options.initialAgentConsole?.profileId ?? "build",
+      ...(input.options.initialAgentConsole
+        ? {
+            ...(input.options.initialAgentConsole.manifest
+              ? { manifest: input.options.initialAgentConsole.manifest }
+              : {}),
+            ...(input.options.initialAgentConsole.pendingDecision
+              ? { pendingDecision: input.options.initialAgentConsole.pendingDecision }
+              : {}),
+            ...(input.options.initialAgentConsole.workGraph
+              ? { workGraph: input.options.initialAgentConsole.workGraph }
+              : {}),
+            activity: input.options.initialAgentConsole.activity,
+          }
+        : { activity: [] }),
+    }),
   };
 }
 

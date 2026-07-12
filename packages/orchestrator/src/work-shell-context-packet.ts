@@ -4,6 +4,7 @@ import {
   composeWorkShellTurnPromptFromPacket,
   formatContextPacketIndicator,
   formatContextPacketPromptPrefix,
+  formatContextPacketUsedReceipt,
 } from "@unclecode/context-broker";
 
 export {
@@ -11,6 +12,7 @@ export {
   composeWorkShellTurnPromptFromPacket,
   formatContextPacketIndicator as formatWorkShellContextPacketIndicator,
   formatContextPacketPromptPrefix as formatWorkShellContextPacketPromptPrefix,
+  formatContextPacketUsedReceipt as formatWorkShellContextPacketUsedReceipt,
 };
 
 export type { ContextPacketView };

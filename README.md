@@ -70,17 +70,17 @@ UncleCode의 핵심 객체는 **다음 모델 호출에 실릴 패킷**이다. �
 
 UncleCode는 한국어 운영자를 1급 사용자로 둔다. 모드 칩, 상태줄·푸터, `/mode` 설명, 읽기 전용 가드 메시지를 한국어로 통일하는 게 목표다. 안쪽 모드 id(`default`, `ultrawork`, `plan`…)는 설정과 테스트를 위해 영어로 고정한다.
 
-**오늘의 상태(정직히):** 모드 한글 라벨(아래 표)은 정규화 런북과 본 README의 명세는 맞췄지만, **상태줄·푸터의 모드 칩은 아직 영문으로 렌더된다** (`humanize_work_shell_mode_label`이 `Default mode`/`Ultrawork mode`를 반환). 한글 라벨은 `/mode` 설명과 composer 가드로 진행 중이다(로드맵 T12-E2/T13-E4).
+**현재 상태:** 상태줄·푸터와 Rust CLI는 `rust/unclecode-core/src/mode.rs`의 `mode_label`을 공유한다. TUI 푸터는 Rust `ux text mode-label` 경로를 호출하므로 TypeScript에 별도 모드 라벨 맵이 없다. 내부 id는 그대로 설정·테스트용 영어다.
 
-| 내부 id | 목표 한글 라벨 | 현재 푸터 라벨 |
-| --- | --- | --- |
-| `default` | 작업 모드 | Default mode |
-| `ultrawork` | 집중 작업 모드 | Ultrawork mode |
-| `yolo` | YOLO 모드 | YOLO mode |
-| `search` | 탐색 모드 | Search mode |
-| `analyze` | 분석 모드 | Analyze mode |
-| `plan` | 계획 모드 | Plan mode |
-| `build` | 구현 모드 | Build mode |
+| 내부 id | 표시 라벨 |
+| --- | --- |
+| `default` | 작업 모드 |
+| `ultrawork` | 집중 작업 모드 |
+| `yolo` | YOLO 모드 |
+| `search` | 탐색 모드 |
+| `analyze` | 분석 모드 |
+| `plan` | 계획 모드 |
+| `build` | 구현 모드 |
 
 한국어·CJK·이모지 폭 글리프와 박스 문자는 표시 너비 계산의 1급 시민이다(이쪽은 이미 코드에 반영됐다). 레이아웃 계산은 항상 표시 너비를 쓰고, 문자열 길이를 쓰지 않는다.
 

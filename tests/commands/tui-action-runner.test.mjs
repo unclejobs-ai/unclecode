@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   buildTuiHomeState,
   createTuiActivityEntry,
+  formatModeSetReport,
   runTuiSessionCenterAction,
   runWorkShellInlineAction,
   persistProjectMode,
@@ -94,6 +95,13 @@ test("runTuiSessionCenterAction executes doctor inline", async () => {
   }
 });
 
+test("formatModeSetReport uses the Rust operator label", () => {
+  assert.match(
+    formatModeSetReport("ultrawork", "/tmp/unclecode-config.json"),
+    /Label: 집중 작업 모드/,
+  );
+});
+
 test("runTuiSessionCenterAction executes mode status inline", async () => {
   const cwd = makeTempWorkspace();
 
@@ -125,13 +133,14 @@ test("runTuiSessionCenterAction can cycle and persist the next mode inline", asy
     });
 
     assert.match(lines.join("\n"), /Active mode saved: ultrawork/);
+    assert.match(lines.join("\n"), /Label:\s+집중 작업 모드/);
 
     const homeState = await buildTuiHomeState({
       workspaceRoot: cwd,
       env: process.env,
     });
 
-    assert.equal(homeState.modeLabel, "ultrawork");
+    assert.equal(homeState.modeLabel, "집중 작업 모드");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -148,12 +157,13 @@ test("runWorkShellInlineAction supports explicit mode set commands", async () =>
     });
 
     assert.match(lines.join("\n"), /Active mode saved: search/);
+    assert.match(lines.join("\n"), /Label:\s+탐색 모드/);
 
     const homeState = await buildTuiHomeState({
       workspaceRoot: cwd,
       env: process.env,
     });
-    assert.equal(homeState.modeLabel, "search");
+    assert.equal(homeState.modeLabel, "탐색 모드");
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

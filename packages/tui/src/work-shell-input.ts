@@ -92,6 +92,7 @@ export function resolveWorkShellContextInspectorAction(input: {
     readonly return?: boolean;
   };
   readonly panelTitle: string;
+  readonly actionsEnabled?: boolean;
 }): WorkShellContextInspectorAction {
   // The slash command picker takes priority — never steal keys while the
   // user is typing a `/` command, even if the overlay is visible behind it.
@@ -108,7 +109,7 @@ export function resolveWorkShellContextInspectorAction(input: {
     return { type: "move-cursor", direction: 1 };
   }
   if (input.key.return) {
-    return { type: "toggle-pin" };
+    return input.actionsEnabled ? { type: "toggle-pin" } : { type: "none" };
   }
   switch (input.value) {
     case "j":
@@ -116,9 +117,9 @@ export function resolveWorkShellContextInspectorAction(input: {
     case "k":
       return { type: "move-cursor", direction: -1 };
     case "f":
-      return { type: "forget" };
+      return input.actionsEnabled ? { type: "forget" } : { type: "none" };
     case "i":
-      return { type: "include" };
+      return input.actionsEnabled ? { type: "include" } : { type: "none" };
     case "e":
       return { type: "expand" };
     default:

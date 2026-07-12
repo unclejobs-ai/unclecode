@@ -29,8 +29,8 @@ function seedProject(store) {
   return store.addProject({ id: "proj_crp", name: "CRP Test", repoPath: "/repos/crp" });
 }
 
-test("schema version bumps to 3 for project-scoped context_sources table", () => {
-  assert.equal(AGENTOPS_SCHEMA_VERSION, 3);
+test("schema version bumps to 5 for context source metadata", () => {
+  assert.equal(AGENTOPS_SCHEMA_VERSION, 5);
 });
 
 test("v3 migration purges legacy context source text instead of preserving possible secrets", () => {

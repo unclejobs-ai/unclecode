@@ -24,7 +24,7 @@ export async function runContextContrastTuiSmoke({ tmp }) {
       "NO_PROXY=127.0.0.1,localhost",
       "FORCE_COLOR=3",
       "UNCLECODE_TERMINAL_BACKGROUND=light",
-      "node bin/unclecode.cjs tui --provider openai --model gpt-5.4",
+      `${shellQuote(process.execPath)} bin/unclecode.cjs tui --provider openai --model gpt-5.4`,
     ].join(" "),
     "echo EXIT:$?",
     "sleep 20",

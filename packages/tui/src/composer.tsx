@@ -431,13 +431,12 @@ export function Composer(props: {
   readonly textColor?: string | undefined;
   /**
    * Context Inspector (Sprint 2): when true AND the composer value is empty,
-   * the inspector overlay captures the single-char action keys (j/k/f/i/e)
-   * and Enter instead of inserting them as text. Arrow keys are already
-   * dropped above this check. Typing any other character (or any character
-   * once the composer has input) proceeds normally so the user can still
-   * compose a follow-up while reading context.
+   * the inspector overlay captures its single-char keys before they become
+   * draft text. Mutation keys (Enter/f/i) are gated separately so read-only
+   * context panes do not silently swallow input they cannot act on.
    */
   readonly suppressInspectorKeys?: boolean | undefined;
+  readonly suppressInspectorMutationKeys?: boolean | undefined;
 }) {
   const [isPasting, setIsPasting] = useState(false);
   const [cursorOffset, setCursorOffset] = useState(props.value.length);
@@ -526,10 +525,15 @@ export function Composer(props: {
       props.suppressInspectorKeys
       && (props.value ?? pendingLocalValueRef.current ?? "").length === 0
     ) {
-      if (key.return) {
+      const suppressMutationKeys =
+        props.suppressInspectorMutationKeys ?? props.suppressInspectorKeys;
+      if (key.return && suppressMutationKeys) {
         return;
       }
-      if (input === "j" || input === "k" || input === "f" || input === "i" || input === "e") {
+      if (input === "j" || input === "k" || input === "e") {
+        return;
+      }
+      if (suppressMutationKeys && (input === "f" || input === "i")) {
         return;
       }
     }

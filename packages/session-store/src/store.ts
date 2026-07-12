@@ -288,6 +288,7 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
         ...(snapshot.worktree !== undefined ? { worktree: snapshot.worktree } : {}),
         ...(snapshot.pendingAction ? { pendingAction: snapshot.pendingAction } : {}),
         ...(snapshot.taskSummary ? { taskSummary: snapshot.taskSummary } : {}),
+        ...(snapshot.agentConsole ? { agentConsole: snapshot.agentConsole } : {}),
         ...(snapshot.forkedFromSessionId
           ? { forkedFromSessionId: snapshot.forkedFromSessionId }
           : {}),

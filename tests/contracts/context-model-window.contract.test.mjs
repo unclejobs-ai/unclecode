@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createInitialWorkShellEngineState } from "../../packages/orchestrator/src/work-shell-engine-state.ts";
-import { computeContextMeterFill, computeContextOverlaySectionMaxRows } from "../../packages/tui/src/work-shell-context-inspector.tsx";
+import {
+  computeContextMeterFill,
+  computeContextOverlaySectionMaxRows,
+} from "../../packages/tui/src/work-shell-context-inspector.tsx";
 
 const supportedReasoning = {
   effort: "high",
@@ -14,10 +17,20 @@ const supportedReasoning = {
   },
 };
 
-function buildContextPanel(contextSummaryLines, bridgeLines, memoryLines, traceLines) {
+function buildContextPanel(
+  contextSummaryLines,
+  bridgeLines,
+  memoryLines,
+  traceLines,
+) {
   return {
     title: "Context",
-    lines: [...contextSummaryLines, ...bridgeLines, ...memoryLines, ...traceLines],
+    lines: [
+      ...contextSummaryLines,
+      ...bridgeLines,
+      ...memoryLines,
+      ...traceLines,
+    ],
   };
 }
 
@@ -67,19 +80,31 @@ test("computeContextMeterFill scales with a larger window and clamps within [0, 
 
 test("computeContextOverlaySectionMaxRows scales with terminalRows", () => {
   // round(24 * 0.4) = round(9.6) = 10 ; round(24 * 0.25) = round(6) = 6
-  assert.deepEqual(computeContextOverlaySectionMaxRows({ terminalRows: 24 }), { included: 10, held: 6 });
+  assert.deepEqual(computeContextOverlaySectionMaxRows({ terminalRows: 24 }), {
+    included: 10,
+    held: 6,
+  });
 });
 
 test("computeContextOverlaySectionMaxRows clamps to the maximum when terminalRows is large", () => {
   // round(50 * 0.4) = 20 (capped at 20) ; round(50 * 0.25) = round(12.5) = 12 (capped at 12)
-  assert.deepEqual(computeContextOverlaySectionMaxRows({ terminalRows: 50 }), { included: 20, held: 12 });
+  assert.deepEqual(computeContextOverlaySectionMaxRows({ terminalRows: 50 }), {
+    included: 20,
+    held: 12,
+  });
 });
 
 test("computeContextOverlaySectionMaxRows preserves the legacy defaults with no input", () => {
-  assert.deepEqual(computeContextOverlaySectionMaxRows({}), { included: 12, held: 7 });
+  assert.deepEqual(computeContextOverlaySectionMaxRows({}), {
+    included: 12,
+    held: 7,
+  });
 });
 
 test("computeContextOverlaySectionMaxRows adapts to sourceCount and clamps", () => {
   // 30 sources clamp included to 20 ; held = round(30 * 0.5) = 15, clamped to 12
-  assert.deepEqual(computeContextOverlaySectionMaxRows({ sourceCount: 30 }), { included: 20, held: 12 });
+  assert.deepEqual(computeContextOverlaySectionMaxRows({ sourceCount: 30 }), {
+    included: 20,
+    held: 12,
+  });
 });

@@ -136,6 +136,7 @@ mod tests {
                 trace_mode: None,
                 reasoning_effort: None,
                 entries: vec![],
+                agent_console: None,
             })
             .unwrap();
 
@@ -175,6 +176,7 @@ mod tests {
                 trace_mode: None,
                 reasoning_effort: None,
                 entries: vec![],
+                agent_console: None,
             })
             .unwrap();
 

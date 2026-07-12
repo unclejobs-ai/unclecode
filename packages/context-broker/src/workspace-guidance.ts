@@ -13,10 +13,23 @@ export type WorkspaceGuidanceSkill = {
   readonly content: string;
 };
 
+
+export type WorkspaceGuidanceSourceMetadata = {
+  readonly id: string;
+  readonly path: string;
+  readonly label: string;
+  readonly authority: "mandatory" | "profile-eligible";
+  readonly sha256: string;
+};
 export type WorkspaceGuidance = {
   readonly systemPromptAppendix: string;
   readonly contextSummaryLines: readonly string[];
   readonly sources: readonly string[];
+  readonly guidanceSources: readonly WorkspaceGuidanceSourceMetadata[];
+};
+
+type WorkspaceGuidancePayload = Omit<WorkspaceGuidance, "guidanceSources"> & {
+  readonly guidanceSources?: readonly WorkspaceGuidanceSourceMetadata[];
 };
 
 type WorkspaceGuidanceSource = {
@@ -218,20 +231,39 @@ export async function loadWorkspaceGuidance(input: {
   if (!isWorkspaceGuidance(parsed)) {
     throw new Error("Rust workspace guidance command returned an invalid payload.");
   }
-  return parsed;
+  return {
+    ...parsed,
+    guidanceSources: parsed.guidanceSources ?? [],
+  };
 }
 
-function isWorkspaceGuidance(value: unknown): value is WorkspaceGuidance {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    typeof (value as { systemPromptAppendix?: unknown }).systemPromptAppendix === "string" &&
-    Array.isArray((value as { contextSummaryLines?: unknown }).contextSummaryLines) &&
-    Array.isArray((value as { sources?: unknown }).sources) &&
-    (value as { contextSummaryLines: unknown[] }).contextSummaryLines.every((line) => typeof line === "string") &&
-    (value as { sources: unknown[] }).sources.every((source) => typeof source === "string")
-  );
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isWorkspaceGuidanceSourceMetadata(value: unknown): value is WorkspaceGuidanceSourceMetadata {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.path === "string"
+    && typeof value.label === "string"
+    && (value.authority === "mandatory" || value.authority === "profile-eligible")
+    && typeof value.sha256 === "string";
+}
+
+function isWorkspaceGuidance(value: unknown): value is WorkspaceGuidancePayload {
+  return isRecord(value)
+    && typeof value.systemPromptAppendix === "string"
+    && Array.isArray(value.contextSummaryLines)
+    && Array.isArray(value.sources)
+    && value.contextSummaryLines.every((line) => typeof line === "string")
+    && value.sources.every((source) => typeof source === "string")
+    && (
+      value.guidanceSources === undefined
+      || (
+        Array.isArray(value.guidanceSources)
+        && value.guidanceSources.every(isWorkspaceGuidanceSourceMetadata)
+      )
+    );
 }
 
 export function clearCachedWorkspaceGuidance(cwd?: string, userHomeDir?: string): void {

@@ -50,6 +50,17 @@ test("context-broker loadWorkspaceGuidance loads cross-CLI guidance files and pr
   assert.ok(guidance.contextSummaryLines.some((line) => /Deduped duplicate guidance/i));
   assert.ok(guidance.contextSummaryLines.some((line) => /Skill catalog: autopilot/.test(line)));
   assert.equal(guidance.sources.length, 5);
+  assert.ok(guidance.guidanceSources.some((source) => source.authority === "mandatory"));
+  assert.deepEqual(
+    guidance.guidanceSources.find((source) => source.label === "SKILL autopilot"),
+    {
+      id: guidance.guidanceSources.find((source) => source.label === "SKILL autopilot")?.id,
+      path: path.join(nested, ".codex", "skills", "autopilot", "SKILL.md"),
+      label: "SKILL autopilot",
+      authority: "profile-eligible",
+      sha256: guidance.guidanceSources.find((source) => source.label === "SKILL autopilot")?.sha256,
+    },
+  );
 });
 
 test("context-broker loadWorkspaceGuidance reports basic directive conflicts with higher-priority winners", async () => {

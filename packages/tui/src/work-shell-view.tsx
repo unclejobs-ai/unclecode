@@ -1,6 +1,10 @@
 import { Box, Text } from "ink";
 import React from "react";
-import type { ContextPacketView } from "@unclecode/contracts";
+import type {
+  AgentConsoleSnapshot,
+  ContextPacketView,
+  ContextPacketViewActionReceipt,
+} from "@unclecode/contracts";
 import {
   resolveWorkShellSlashArgHint,
   runRustCommandSync,
@@ -71,13 +75,13 @@ function detectTerminalBackground(): "light" | "dark" {
 const W_LIGHT = {
   text: "#0d1117",
   textMuted: "#475569",
-  textDim: "#64748b",
+  textDim: "#334155",
   border: "#30363d",
   borderStrong: "#1e293b",
-  borderSoft: "#d0d7de",
-  borderDefault: "#d0d7de",
-  borderAccent: "#1e6feb",
-  user: "#1e6feb",
+  borderSoft: "#475569",
+  borderDefault: "#475569",
+  borderAccent: "#0750a4",
+  user: "#0750a4",
   userBody: "#0d1117",
   userBadgeText: "#0d1117",
   userBadgeBg: "#ddf4ff",
@@ -86,14 +90,14 @@ const W_LIGHT = {
   assistantBadgeText: "#0d1117",
   assistantBadgeBg: "#dafbe1",
   assistantMuted: "#475569",
-  tool: "#1a7f37",
+  tool: "#116329",
   toolSurface: "#ddf4ff",
-  toolAccent: "#1a7f37",
+  toolAccent: "#116329",
   toolMuted: "#475569",
-  warning: "#9a6700",
-  success: "#1a7f37",
-  error: "#cf222e",
-  spinner: "#bc4c00",
+  warning: "#7a4b00",
+  success: "#116329",
+  error: "#a40e26",
+  spinner: "#873800",
 } as const;
 
 // Dark-background palette (black/dark terminals). Tuned for OLED/true-black
@@ -188,6 +192,7 @@ const WORK_SHELL_LOW_CONTRAST_TEXT_COLORS = new Set([
   "#94a3b8",
   "#7d8590",
   "#7f849c",
+  "#21262d",
 ]);
 
 /**
@@ -1316,8 +1321,8 @@ function renderWorkShellEntryBlock(input: {
     // partial markdown structure (a table grows row by row, a heading appears
     // as soon as # is typed) which reads better than raw syntax mid-stream.
     const isStreamingEntry = input.entry.text.endsWith(STREAMING_CURSOR);
-    // Strip the streaming cursor for rendering — it's a paint signal, not
-    // content. The cursor visual is handled by the activity row below.
+    // Keep the cursor out of the markdown parser, then paint it explicitly
+    // after the rendered content so partial replies retain a visible live edge.
     const renderText = isStreamingEntry
       ? bodyText.replace(STREAMING_CURSOR, "")
       : bodyText;
@@ -1342,6 +1347,7 @@ function renderWorkShellEntryBlock(input: {
           </Box>
           <Box flexDirection="column" flexGrow={1}>
             {renderMarkdown({ text: renderText, width: contentWidth, theme: mdTheme })}
+            {isStreamingEntry ? <Text color={W.assistant} bold>{STREAMING_CURSOR}</Text> : null}
           </Box>
         </Box>
       );
@@ -1356,7 +1362,8 @@ function renderWorkShellEntryBlock(input: {
         flexDirection="column"
       >
         <Box marginTop={0} flexDirection="column">
-          {renderMarkdown({ text: bodyText, width: contentWidth, theme: mdTheme })}
+          {renderMarkdown({ text: renderText, width: contentWidth, theme: mdTheme })}
+          {isStreamingEntry ? <Text color={W.assistant} bold>{STREAMING_CURSOR}</Text> : null}
         </Box>
       </Box>
     );
@@ -1809,6 +1816,26 @@ export function formatWorkShellQueueIndicator(queuedCount: number, queuePaused =
   return `⋯ ${queuedCount} queued · /queue`;
 }
 
+export function formatWorkShellAgentConsoleActivityLines(
+  agentConsole: AgentConsoleSnapshot | undefined,
+): readonly string[] {
+  if (!agentConsole) {
+    return [];
+  }
+  return agentConsole.activity
+    .slice(-2)
+    .reverse()
+    .map((activity) => {
+      const status = activity.status === "running"
+        ? "running"
+        : activity.summary ?? activity.status;
+      const target = activity.target && !activity.intent.includes(activity.target)
+        ? ` · ${activity.target}`
+        : "";
+      return `Tool · ${activity.intent}${target} · ${status}`;
+    });
+}
+
 export function WorkShellView(props: {
   readonly provider: string;
   readonly model: string;
@@ -1822,6 +1849,8 @@ export function WorkShellView(props: {
   readonly isBusy: boolean;
   readonly busyStatus?: string;
   readonly activePanel: WorkShellPanel;
+  readonly contextActionReceipt?: ContextPacketViewActionReceipt;
+  readonly contextSourceActionsEnabled?: boolean;
   // Context Inspector (Sprint 2): cursor index into the navigable source list
   // (-1 = none) and the source id whose full content is expanded.
   readonly contextInspectorCursor?: number;
@@ -1842,6 +1871,7 @@ export function WorkShellView(props: {
   readonly cwd?: string;
   readonly queuedCount?: number;
   readonly queuePaused?: boolean;
+  readonly agentConsole?: AgentConsoleSnapshot;
 }) {
   const composerHint = resolveWorkShellComposerHint({
     ...(props.composerHintOverride ? { composerHintOverride: props.composerHintOverride } : {}),
@@ -1875,6 +1905,7 @@ export function WorkShellView(props: {
     latestSystemText: getLatestWorkShellSystemText(props.entries),
   });
   const queueIndicator = formatWorkShellQueueIndicator(props.queuedCount ?? 0, props.queuePaused ?? false);
+  const agentConsoleActivityLines = formatWorkShellAgentConsoleActivityLines(props.agentConsole);
   const shouldRenderContextInspectorOverlay =
     props.activePanel.title === "Context expanded" && props.contextPacket !== undefined;
 
@@ -1920,6 +1951,18 @@ export function WorkShellView(props: {
         {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
         {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
       />
+      {agentConsoleActivityLines.length > 0 ? (
+        <Box marginTop={1} flexDirection="column">
+          {agentConsoleActivityLines.map((line, index) => (
+            <Text key={`${index}:${line}`} {...readableTextColorProps(W.textMuted)}>
+              {truncateForDisplayWidth(
+                line,
+                Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
+              )}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
       {getWorkShellPanelAnchor(panelDisplayMode) === "with-conversation" ? (
         <Box marginTop={1}>
           {conversation}
@@ -1966,6 +2009,8 @@ export function WorkShellView(props: {
           borderColor: panelBorderColor,
           palette: W,
           modelWindow: props.modelWindow ?? 200000,
+          actionsEnabled: props.contextSourceActionsEnabled ?? false,
+          ...(props.contextActionReceipt ? { actionReceipt: props.contextActionReceipt } : {}),
         })
       ) : panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput ? (
         <Box marginTop={1} borderStyle="single" borderColor={panelBorderColor} paddingX={1} flexDirection="column">

@@ -482,10 +482,7 @@ test("getWorkShellPanelPlacement keeps long-session panels near the composer by 
         (_, index) => `context line ${index + 1}`,
       ),
     }),
-    Array.from(
-      { length: 14 },
-      (_, index) => `context line ${index + 1}`,
-    ),
+    Array.from({ length: 14 }, (_, index) => `context line ${index + 1}`),
   );
   assert.equal(
     getWorkShellPanelPlacement({
@@ -1283,7 +1280,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       completedAt: 5,
       durationMs: 5,
     }),
-    /✓ read 5ms/,
+    /✓ read · 5ms/,
   );
   assert.doesNotThrow(
     () =>
@@ -1387,7 +1384,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       mode: "default",
       authLabel: "Browser OAuth · file",
     }),
-    "gpt-5.4 · Default mode · Saved OAuth · work context",
+    "gpt-5.4 · 작업 모드 · Saved OAuth · work context",
   );
   assert.equal(
     formatWorkShellFooterLine({

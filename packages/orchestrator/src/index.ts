@@ -40,6 +40,8 @@ export * from "./file-ownership-registry.js";
 export * from "./turn-orchestrator.js";
 export * from "./work-agent.js";
 export * from "./work-shell-engine.js";
+export * from "./work-shell-agent-console.js";
+export * from "./work-shell-decision.js";
 export * from "./work-shell-engine-builtins.js";
 export * from "./work-shell-engine-builtin-runtime.js";
 export * from "./work-shell-engine-command-runtime.js";
@@ -59,6 +61,7 @@ export * from "./work-shell-engine-turns.js";
 export * from "./work-shell-engine-factory.js";
 export * from "./work-shell-inline-command.js";
 export * from "./work-shell-pane-runtime.js";
+export * from "./work-shell-interaction-bridge.js";
 export * from "./work-shell-session.js";
 export * from "./work-shell-slash.js";
 

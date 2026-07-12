@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 
-export function terminateProcessTree(child, signal, knownDescendantPids = []) {
+export function terminateProcessTree(child, signal, knownDescendantPids = [], useProcessGroup = shouldUseProcessGroup()) {
   const rootPid = child.pid;
   if (!Number.isInteger(rootPid)) {
     child.kill(signal);
@@ -8,12 +8,18 @@ export function terminateProcessTree(child, signal, knownDescendantPids = []) {
   }
 
   killImmediateChildren(rootPid, signal);
-  if (shouldUseProcessGroup()) {
+  if (useProcessGroup) {
     killPid(-rootPid, signal);
   }
   killPid(rootPid, signal);
 
-  const pids = [...new Set([...collectProcessTree(rootPid), ...collectProcessGroup(rootPid), ...knownDescendantPids])];
+  const pids = [
+    ...new Set([
+      ...collectProcessTree(rootPid),
+      ...(useProcessGroup ? collectProcessGroup(rootPid) : []),
+      ...knownDescendantPids,
+    ]),
+  ];
   for (const pid of pids.filter((pid) => pid !== rootPid).reverse()) {
     killPid(pid, signal);
   }

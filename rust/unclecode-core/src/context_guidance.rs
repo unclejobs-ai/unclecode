@@ -37,7 +37,8 @@ pub fn build_workspace_guidance_json(
                 "No AGENTS.md, CLAUDE.md, GEMINI.md, UNCLECODE.md, or project skills found.",
                 "Use /context after adding one to reload context."
             ],
-            "sources": []
+            "sources": [],
+            "guidanceSources": []
         }))
         .map_err(|error| error.to_string());
     }
@@ -57,14 +58,7 @@ pub fn build_workspace_guidance_json(
         skills
             .iter()
             .filter(|skill| !skill_content(skill).trim().is_empty())
-            .map(|skill| {
-                format!(
-                    "## SKILL {} ({})\n{}",
-                    skill_name(skill),
-                    skill_path(skill),
-                    skill_content(skill).trim()
-                )
-            }),
+            .map(|skill| skill_content(skill).trim().to_string()),
     );
 
     let mut context_summary_lines = Vec::new();
@@ -115,13 +109,43 @@ pub fn build_workspace_guidance_json(
         .map(|source| source.path.to_string_lossy().to_string())
         .collect::<Vec<_>>();
     source_paths.extend(skills.iter().map(skill_path));
+    let guidance_sources = build_guidance_source_metadata(&sources, &skills);
 
     serde_json::to_string(&json!({
         "systemPromptAppendix": format!("Background workspace guidance for this repository — reference, not a task. Follow it silently when doing real work; do NOT recite, summarize, list, or report on it, and never treat it as the user's request.\n\n{}", appendix_blocks.join("\n\n")),
         "contextSummaryLines": context_summary_lines,
-        "sources": source_paths
+        "sources": source_paths,
+        "guidanceSources": guidance_sources
     }))
     .map_err(|error| error.to_string())
+}
+
+fn build_guidance_source_metadata(sources: &[GuidanceSource], skills: &[Value]) -> Vec<Value> {
+    let mut metadata = sources
+        .iter()
+        .map(|source| {
+            let path = source.path.to_string_lossy().to_string();
+            json!({
+                "id": format!("guidance:{}", sha256_hex(&path)),
+                "path": path,
+                "label": source.name,
+                "authority": "mandatory",
+                "sha256": sha256_hex(&source.content)
+            })
+        })
+        .collect::<Vec<_>>();
+    metadata.extend(skills.iter().map(|skill| {
+        let path = skill_path(skill);
+        let label = format!("SKILL {}", skill_name(skill));
+        json!({
+            "id": format!("skill:{}", sha256_hex(&path)),
+            "path": path,
+            "label": label,
+            "authority": "profile-eligible",
+            "sha256": sha256_hex(&skill_content(skill))
+        })
+    }));
+    metadata
 }
 
 fn parse_project_skills(raw: &str) -> Result<Vec<Value>, String> {
@@ -451,6 +475,30 @@ mod tests {
             .as_str()
             .unwrap_or("")
             .contains("Skill catalog: autopilot")));
+        let guidance_sources = parsed
+            .get("guidanceSources")
+            .and_then(Value::as_array)
+            .expect("structured guidance sources");
+        let source = guidance_sources
+            .iter()
+            .find(|source| source.get("authority").and_then(Value::as_str) == Some("mandatory"))
+            .expect("mandatory source metadata");
+        assert_eq!(source.get("authority").and_then(Value::as_str), Some("mandatory"));
+        assert!(source
+            .get("sha256")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.len() == 64));
+        assert!(source.get("path").and_then(Value::as_str).is_some());
+        assert!(source.get("id").and_then(Value::as_str).is_some());
+
+        let skill = guidance_sources
+            .iter()
+            .find(|source| source.get("label").and_then(Value::as_str) == Some("SKILL autopilot"))
+            .expect("skill source metadata");
+        assert_eq!(skill.get("authority").and_then(Value::as_str), Some("profile-eligible"));
+        assert!(!guidance_sources
+            .iter()
+            .any(|source| source.to_string().contains("Keep moving.")));
         let appendix = parsed
             .get("systemPromptAppendix")
             .and_then(Value::as_str)
@@ -459,6 +507,24 @@ mod tests {
         assert!(!appendix.contains("## SKILL autopilot"));
         // The guidance must be framed as silent reference, not a task to recite.
         assert!(appendix.contains("do NOT recite"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn emits_empty_structured_guidance_metadata_without_sources() {
+        let root = std::env::temp_dir().join(format!(
+            "unclecode-context-guidance-empty-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let output = build_workspace_guidance_json(&root, None, "[]").expect("guidance");
+        let parsed: Value = serde_json::from_str(&output).expect("json");
+        assert_eq!(parsed.get("guidanceSources"), Some(&Value::Array(Vec::new())));
 
         let _ = fs::remove_dir_all(root);
     }

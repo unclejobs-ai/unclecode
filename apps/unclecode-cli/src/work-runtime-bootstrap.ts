@@ -1,19 +1,23 @@
 import { createHash } from "node:crypto";
 
 import { explainUncleCodeConfig } from "@unclecode/config-core";
-import { createAgentOpsRecorder } from "@unclecode/orchestrator";
+import { createAgentOpsRecorder, runRustCommand } from "@unclecode/orchestrator";
 import { LspBridge } from "@unclecode/lsp-bridge";
 import {
+  attachPromptManifestToPacket,
   augmentContextPacketViewInput,
   clearCachedWorkspaceGuidance,
+  createPromptManifest,
   ingestWorkspaceBootstrapContext,
   loadCachedWorkspaceGuidance,
   loadOmoContextSnapshot,
+  resolveContextProfile,
 } from "@unclecode/context-broker";
 import type {
   ContextPacketView,
   ContextPacketViewItem,
   ContextPacketViewWarning,
+  PromptManifestPolicySource,
 } from "@unclecode/contracts";
 import {
   clearExtensionRegistryCache,
@@ -163,6 +167,34 @@ function buildProviderSystemPromptMetadata(input: {
   return items;
 }
 
+function buildPromptManifestPolicySources(input: {
+  readonly configuredPrompt: string;
+  readonly guidanceSources: readonly {
+    readonly id: string;
+    readonly label: string;
+    readonly authority: "mandatory" | "profile-eligible";
+    readonly sha256: string;
+  }[];
+}): readonly PromptManifestPolicySource[] {
+  const configuredPrompt = input.configuredPrompt.trim();
+  return [
+    ...(configuredPrompt.length > 0
+      ? [{
+          id: "configured-prompt",
+          label: "Configured prompt",
+          authority: "mandatory" as const,
+          digest: createHash("sha256").update(configuredPrompt).digest("hex"),
+        }]
+      : []),
+    ...input.guidanceSources.map((source) => ({
+      id: source.id,
+      label: source.label,
+      authority: source.authority,
+      digest: source.sha256,
+    })),
+  ];
+}
+
 function createInitialHomeState(input: {
   readonly modeLabel: string;
   readonly authLabel: string;
@@ -197,24 +229,7 @@ function createWorkShellContextPacketResolver(options: {
   readonly bootstrapPacketItems?: readonly ContextPacketViewItem[];
   readonly bootstrapPacketWarnings?: readonly ContextPacketViewWarning[];
 }): WorkShellContextPacketResolver {
-  return legacyResolveContextPacket.bind(null, options);
-}
-
-async function legacyResolveContextPacket(
-  options: {
-    readonly sourceMetadata: readonly ContextPacketViewItem[];
-    readonly bootstrapPacketItems?: readonly ContextPacketViewItem[];
-    readonly bootstrapPacketWarnings?: readonly ContextPacketViewWarning[];
-  },
-  input: {
-    readonly cwd: string;
-    readonly sessionId: string;
-    readonly contextSummaryLines: readonly string[];
-    readonly bridgeLines: readonly string[];
-    readonly memoryLines: readonly string[];
-    readonly traceLines: readonly string[];
-  },
-): Promise<ContextPacketView> {
+  return async (input): Promise<ContextPacketView> => {
     const loopTrail = await loadOmoContextSnapshot(input.cwd);
     const included: ContextPacketViewItem[] = [
       ...options.sourceMetadata,
@@ -280,6 +295,7 @@ async function legacyResolveContextPacket(
         ],
       },
     });
+  };
 }
 
 export async function loadWorkCliBootstrap(
@@ -317,6 +333,7 @@ export async function loadWorkCliBootstrap(
     env,
     pluginOverlays,
   });
+  const contextProfile = resolveContextProfile(configExplanation.settings.contextProfile.value);
   const systemPromptAppendix = [
     configExplanation.prompt.rendered
       ? `Configured prompt:\n\n${configExplanation.prompt.rendered}`
@@ -325,6 +342,18 @@ export async function loadWorkCliBootstrap(
   ]
     .filter((value) => value.trim().length > 0)
     .join("\n\n");
+  const promptManifestPolicy = buildPromptManifestPolicySources({
+    configuredPrompt: configExplanation.prompt.rendered,
+    guidanceSources: guidance.guidanceSources,
+  });
+  const createTurnPromptManifest = (packet: ContextPacketView, userPrompt: string) =>
+    createPromptManifest({
+      profile: contextProfile,
+      packet,
+      policy: promptManifestPolicy,
+      systemPromptAppendix,
+      userPrompt,
+    });
   const contextPacketSourceMetadata = buildProviderSystemPromptMetadata({
     configuredPrompt: configExplanation.prompt.rendered,
     guidanceSystemPrompt: guidance.systemPromptAppendix,
@@ -400,8 +429,14 @@ export async function loadWorkCliBootstrap(
       env,
       ...(userHomeDir ? { userHomeDir } : {}),
     });
+  const modeLabel = (await runRustCommand(
+    ["rust", "ux", "text", "mode-label"],
+    cwd,
+    config.mode,
+    env,
+  )).trim();
   const homeState = createInitialHomeState({
-    modeLabel: config.mode,
+    modeLabel,
     authLabel,
   });
 
@@ -416,20 +451,25 @@ export async function loadWorkCliBootstrap(
     ...(userHomeDir ? { userHomeDir } : {}),
     ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
   });
-
-  // Context Inspector (Sprint 2): populated as a side-effect of building the
-  // CRP-aware context packet resolver (which lazily creates the AgentOps
-  // store). The mutator shares that store instance so overlay actions write
-  // to the same context_sources rows the resolver reads. Forward-declared
-  // because the resolver is constructed inline inside the options object.
-  let crpMutateContextSource:
-    | ((action: {
-      readonly kind: "pin" | "unpin" | "forget" | "include";
-      readonly id: string;
-    }) => void)
-    | undefined;
-
+  const legacyContextPacketResolver = createWorkShellContextPacketResolver({
+    sourceMetadata: contextPacketSourceMetadata,
+    bootstrapPacketItems: bootstrapContext.packetItems,
+    bootstrapPacketWarnings: bootstrapContext.packetWarnings,
+  });
   const crpConfig = resolveWorkShellCrpConfig(configExplanation);
+  const crpRuntime = createCrpRuntime(legacyContextPacketResolver, {
+    sourceMetadata: contextPacketSourceMetadata,
+    crpConfig,
+    env,
+    ...(userHomeDir ? { userHomeDir } : {}),
+    ...(bootstrapContext.packetItems ? { bootstrapPacketItems: bootstrapContext.packetItems } : {}),
+    ...(bootstrapContext.packetWarnings ? { bootstrapPacketWarnings: bootstrapContext.packetWarnings } : {}),
+  });
+
+  const resolveContextPacket: WorkShellContextPacketResolver = async (packetInput) => {
+    const packet = await crpRuntime.resolveContextPacket(packetInput);
+    return attachPromptManifestToPacket(packet, createTurnPromptManifest(packet, ""));
+  };
 
   return {
     agent,
@@ -441,6 +481,8 @@ export async function loadWorkCliBootstrap(
       authLabel,
       reasoning: config.reasoning,
       modelWindow: crpConfig.modelWindow,
+      contextProfile: contextProfile.id,
+      motion: configExplanation.settings.motion.value,
       cwd,
       contextSummaryLines: [
         ...authIssueLines,
@@ -466,6 +508,10 @@ export async function loadWorkCliBootstrap(
       ...(resumedSession?.initialSessionSummary
         ? { initialSessionSummary: resumedSession.initialSessionSummary }
         : {}),
+      ...(resumedSession?.initialAgentConsole
+        ? { initialAgentConsole: resumedSession.initialAgentConsole }
+        : {}),
+      interactionBridge: directAgent.getInteractionBridge(),
       reloadWorkspaceContext: async (workspaceRoot: string) => {
         const refreshedBootstrap = await ingestWorkspaceBootstrapContext({
           cwd: workspaceRoot,
@@ -487,30 +533,8 @@ export async function loadWorkCliBootstrap(
           })),
         ];
       },
-      resolveContextPacket: (() => {
-        // Context Inspector (Sprint 2): build the CRP runtime once so the
-        // resolver and the overlay's mutateContextSource share the same
-        // lazily-created AgentOpsStore instance.
-        const crp = createCrpRuntime(
-          createWorkShellContextPacketResolver({
-            sourceMetadata: contextPacketSourceMetadata,
-            bootstrapPacketItems: bootstrapContext.packetItems,
-            bootstrapPacketWarnings: bootstrapContext.packetWarnings,
-          }),
-          {
-            sourceMetadata: contextPacketSourceMetadata,
-            crpConfig,
-            env,
-            ...(userHomeDir ? { userHomeDir } : {}),
-            ...(bootstrapContext.packetItems ? { bootstrapPacketItems: bootstrapContext.packetItems } : {}),
-            ...(bootstrapContext.packetWarnings
-              ? { bootstrapPacketWarnings: bootstrapContext.packetWarnings }
-              : {}),
-          },
-        );
-        crpMutateContextSource = crp.mutateContextSource;
-        return crp.resolveContextPacket;
-      })(),
+      resolveContextPacket,
+      resolvePromptManifest: ({ packet, userPrompt }) => createTurnPromptManifest(packet, userPrompt),
       refreshHomeState,
       refreshAuthState,
       browserOAuthAvailable,
@@ -549,12 +573,7 @@ export async function loadWorkCliBootstrap(
           ...(userHomeDir ? { userHomeDir } : {}),
         }),
       recordTurn: (turn) => recorder.recordTurn(turn),
-      // Context Inspector (Sprint 2): forward the lazily-built CRP mutator.
-      // Undefined when CRP is disabled (resolver fell back to legacy), in
-      // which case overlay actions are harmless no-ops.
-      ...(crpMutateContextSource !== undefined
-        ? { mutateContextSource: crpMutateContextSource }
-        : {}),
+      mutateContextSource: crpRuntime.mutateContextSource,
     },
   };
 }

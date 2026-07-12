@@ -3,16 +3,11 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import {
-  type ContextSourceRecord,
-  type SelectContextSourcesInput,
-  type UpsertContextSourceInput,
-} from "@unclecode/contracts";
-
 import { applyAgentOpsMigrations } from "./migrations.js";
 import { defaultAgentOpsPaths, type AgentOpsPaths } from "./paths.js";
 import { redactAgentOpsSecrets } from "./redaction.js";
 import { sqlRow, sqlRows } from "./sql-row.js";
+import { createAgentOpsContextStoreMethods } from "./store-context-methods.js";
 import { mapArtifactRow, mapLaneRow, mapProjectRow, mapRunRow } from "./store-mappers.js";
 import type {
   AddAgentOpsArtifactInput,
@@ -25,24 +20,8 @@ import type {
   CreateAgentOpsStoreOptions,
   FinishAgentOpsRunInput,
   RecordAgentOpsRunInput,
-  SelectedContextSources,
   StartAgentOpsRunInput,
 } from "./store-types.js";
-import {
-  countContextSourcesByCategory as countContextSourcesByCategoryImpl,
-  selectContextSources as selectContextSourcesImpl,
-} from "./store-context-reads.js";
-import {
-  deleteContextSourcesByIdPrefix,
-  forgetContextSource,
-  includeContextSource,
-  markContextSourceTurnSeen,
-  pinContextSource,
-  pruneExpiredContextSources,
-  unpinContextSource,
-  upsertContextSource,
-} from "./store-writes.js";
-import { contextSourceRowToRecord } from "./store-mappers.js";
 import { addAgentOpsEvent, addAgentOpsTask, addAgentOpsVerification } from "./store-writes.js";
 import type {
   AgentOpsArtifactRecord,
@@ -77,10 +56,10 @@ export function createAgentOpsStore(options: CreateAgentOpsStoreOptions = {}): A
   mkdirSync(paths.artifactsDir, { recursive: true });
   const db = new DatabaseSync(paths.dbPath);
   applyAgentOpsMigrations(db);
-  return new SqliteAgentOpsStore(db, paths);
+  return Object.assign(new SqliteAgentOpsStore(db, paths), createAgentOpsContextStoreMethods(db));
 }
 
-class SqliteAgentOpsStore implements AgentOpsStore {
+class SqliteAgentOpsStore {
   constructor(
     private readonly db: DatabaseSync,
     readonly paths: AgentOpsPaths,
@@ -250,51 +229,6 @@ class SqliteAgentOpsStore implements AgentOpsStore {
 
   addVerification(input: AddAgentOpsVerificationInput): AgentOpsVerificationRecord {
     return addAgentOpsVerification(this.db, input);
-  }
-
-  upsertContextSource(input: UpsertContextSourceInput): ContextSourceRecord {
-    const row = upsertContextSource(this.db, input);
-    return contextSourceRowToRecord(row);
-  }
-
-  selectContextSources(input: SelectContextSourcesInput): SelectedContextSources {
-    return selectContextSourcesImpl(this.db, input);
-  }
-
-  countContextSourcesByCategory(projectId: string): ReadonlyMap<string, number> {
-    return countContextSourcesByCategoryImpl(this.db, projectId);
-  }
-
-  markContextSourceTurnSeen(projectId: string, ids: readonly string[], turnIndex: number): void {
-    markContextSourceTurnSeen(this.db, projectId, ids, turnIndex);
-  }
-
-  deleteContextSourcesByIdPrefix(input: {
-    readonly projectId: string;
-    readonly idPrefix: string;
-    readonly keepIds?: readonly string[];
-  }): number {
-    return deleteContextSourcesByIdPrefix(this.db, input);
-  }
-
-  pruneExpiredContextSources(now?: Date): number {
-    return pruneExpiredContextSources(this.db, now);
-  }
-
-  pinContextSource(projectId: string, id: string): void {
-    pinContextSource(this.db, projectId, id);
-  }
-
-  unpinContextSource(projectId: string, id: string): void {
-    unpinContextSource(this.db, projectId, id);
-  }
-
-  forgetContextSource(projectId: string, id: string): void {
-    forgetContextSource(this.db, projectId, id);
-  }
-
-  includeContextSource(projectId: string, id: string): void {
-    includeContextSource(this.db, projectId, id);
   }
 
   close(): void {

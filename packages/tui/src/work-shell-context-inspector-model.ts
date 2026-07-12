@@ -1,5 +1,26 @@
 import type { ContextPacketView, ContextPacketViewItem } from "@unclecode/contracts";
 
+import {
+  resolveContextInspectorSuggestion,
+  type ContextInspectorBudgetState,
+  type ContextInspectorSuggestion,
+} from "./work-shell-context-inspector-suggestion.js";
+
+export type {
+  ContextInspectorBudgetState,
+  ContextInspectorSuggestion,
+} from "./work-shell-context-inspector-suggestion.js";
+export {
+  formatContextTokenEstimate,
+  resolveContextInspectorSuggestion,
+} from "./work-shell-context-inspector-suggestion.js";
+export {
+  formatContextItemBadgeSummary,
+  getContextItemDetailLines,
+  getContextItemPreview,
+  sanitizeContextPreview,
+} from "./work-shell-context-inspector-details.js";
+
 export type ContextInspectorPalette = {
   readonly text: string;
   readonly textMuted: string;
@@ -26,6 +47,10 @@ export type ContextInspectorVisibleRows = {
   readonly hiddenAfter: number;
 };
 
+export type ContextInspectorOverview = {
+  readonly suggestion: ContextInspectorSuggestion;
+};
+
 const CONTEXT_SOURCE_META: ReadonlyArray<readonly [RegExp, keyof ContextInspectorPalette, string, string]> = [
   [/^workspace-guidance/i, "assistant", "≡", "guidance"],
   [/^workspace/i, "user", "▣", "workspace"],
@@ -49,23 +74,6 @@ export function resolveContextSourceMeta(category: string, palette: ContextInspe
     icon: entry?.[2] ?? "·",
     label: entry?.[3] ?? category,
   };
-}
-
-export function sanitizeContextPreview(value: string): string {
-  return value
-    .replace(/\.omo\/[^\s)]+/g, "session loop trail")
-    .replace(/\.omo\b/g, "session storage")
-    .replace(/\s+/gu, " ")
-    .trim();
-}
-
-export function getContextItemPreview(item: ContextPacketViewItem): string {
-  const preview = item.preview?.trim();
-  if (preview && preview.length > 0) {
-    return sanitizeContextPreview(preview);
-  }
-  const reason = item.reason.trim();
-  return sanitizeContextPreview(reason.length > 0 ? reason : item.label);
 }
 
 export function buildContextInspectorRows(packet: ContextPacketView): readonly ContextInspectorSourceRow[] {
@@ -103,5 +111,44 @@ export function getContextInspectorVisibleRows(
     rows: rows.slice(start, end),
     hiddenBefore: start,
     hiddenAfter: rows.length - end,
+  };
+}
+
+function resolveContextInspectorBudgetState(input: {
+  readonly packet: ContextPacketView;
+  readonly modelWindow: number;
+}): ContextInspectorBudgetState {
+  if (input.packet.tokenEstimateState === "unknown") {
+    return "roomy";
+  }
+  const window = input.modelWindow > 0 ? input.modelWindow : 200_000;
+  const ratio = input.packet.tokenEstimate / window;
+  if (ratio > 1) {
+    return "over";
+  }
+  if (ratio >= 0.8) {
+    return "tight";
+  }
+  if (ratio >= 0.45) {
+    return "steady";
+  }
+  return "roomy";
+}
+
+export function buildContextInspectorOverview(input: {
+  readonly packet: ContextPacketView;
+  readonly rows: readonly ContextInspectorSourceRow[];
+  readonly modelWindow: number;
+}): ContextInspectorOverview {
+  const budgetState = resolveContextInspectorBudgetState({
+    packet: input.packet,
+    modelWindow: input.modelWindow,
+  });
+  return {
+    suggestion: resolveContextInspectorSuggestion({
+      packet: input.packet,
+      rows: input.rows,
+      budgetState,
+    }),
   };
 }

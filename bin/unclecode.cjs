@@ -26,7 +26,10 @@ if (rustEntrypoint) {
   const result = spawnSync(rustEntrypoint, process.argv.slice(2), {
     cwd: process.cwd(),
     stdio: "inherit",
-    env: process.env,
+    env: {
+      ...process.env,
+      UNCLECODE_NODE: process.env.UNCLECODE_NODE || process.execPath,
+    },
   });
   process.exit(result.status ?? 0);
 }

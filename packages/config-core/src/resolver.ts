@@ -8,6 +8,8 @@ import {
   MODE_EXPLANATION_STYLES,
   MODE_PROFILE_IDS,
   MODE_SEARCH_DEPTHS,
+  CONSOLE_MOTION_PREFERENCES,
+  CONTEXT_PROFILE_IDS,
 } from "@unclecode/contracts";
 import type {
   ModeBackgroundTaskPolicy,
@@ -15,12 +17,16 @@ import type {
   ModeExplanationStyle,
   ModeProfileId,
   ModeSearchDepth,
+  ConsoleMotionPreference,
+  ContextProfileId,
 } from "@unclecode/contracts";
 
 import {
   CONFIG_CORE_DEFAULT_CONTEXT_CRP,
   CONFIG_CORE_DEFAULT_CONTEXT_CRP_BUDGET,
   CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW,
+  CONFIG_CORE_DEFAULT_CONTEXT_PROFILE,
+  CONFIG_CORE_DEFAULT_TUI_MOTION,
   buildModeProfileOverlay,
   CONFIG_CORE_DEFAULTS,
   CONFIG_SOURCE_ORDER,
@@ -76,6 +82,11 @@ type MutableContext = {
   crp?: boolean;
   crpBudget?: number;
   modelWindow?: number;
+  profile?: ContextProfileId;
+};
+
+type MutableTui = {
+  motion?: ConsoleMotionPreference;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -85,6 +96,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function asModeProfileId(value: unknown): ModeProfileId | undefined {
   return typeof value === "string" && MODE_PROFILE_IDS.includes(value as ModeProfileId)
     ? (value as ModeProfileId)
+    : undefined;
+}
+
+function asContextProfileId(value: unknown): ContextProfileId | undefined {
+  return typeof value === "string" && CONTEXT_PROFILE_IDS.includes(value as ContextProfileId)
+    ? (value as ContextProfileId)
+    : undefined;
+}
+
+function asConsoleMotionPreference(value: unknown): ConsoleMotionPreference | undefined {
+  return typeof value === "string" && CONSOLE_MOTION_PREFERENCES.includes(value as ConsoleMotionPreference)
+    ? (value as ConsoleMotionPreference)
     : undefined;
 }
 
@@ -224,6 +247,7 @@ function sanitizeConfigLayer(value: unknown): SanitizedConfigLayer {
     const crp = rawContext.crp;
     const crpBudget = asPositiveInteger(rawContext.crpBudget);
     const modelWindow = asPositiveInteger(rawContext.modelWindow);
+    const profile = asContextProfileId(rawContext.profile);
 
     if ("crp" in rawContext && crp !== undefined && typeof crp !== "boolean") {
       issues.push("Invalid context.crp value.");
@@ -233,6 +257,9 @@ function sanitizeConfigLayer(value: unknown): SanitizedConfigLayer {
     }
     if ("modelWindow" in rawContext && rawContext.modelWindow !== undefined && modelWindow === undefined) {
       issues.push("Invalid context.modelWindow value.");
+    }
+    if ("profile" in rawContext && rawContext.profile !== undefined && profile === undefined) {
+      issues.push("Invalid context.profile value.");
     }
 
     if (typeof crp === "boolean") {
@@ -244,8 +271,27 @@ function sanitizeConfigLayer(value: unknown): SanitizedConfigLayer {
     if (modelWindow !== undefined) {
       nextContext.modelWindow = modelWindow;
     }
+    if (profile !== undefined) {
+      nextContext.profile = profile;
+    }
 
     context = Object.keys(nextContext).length > 0 ? nextContext : undefined;
+  }
+
+  const rawTui = isRecord(value.tui) ? value.tui : undefined;
+  if ("tui" in value && value.tui !== undefined && rawTui === undefined) {
+    issues.push("Invalid tui configuration.");
+  }
+  let tui: MutableTui | undefined;
+
+  if (rawTui) {
+    const motion = asConsoleMotionPreference(rawTui.motion);
+    if ("motion" in rawTui && rawTui.motion !== undefined && motion === undefined) {
+      issues.push("Invalid tui.motion value.");
+    }
+    if (motion !== undefined) {
+      tui = { motion };
+    }
   }
 
   const mode = asModeProfileId(value.mode);
@@ -265,6 +311,7 @@ function sanitizeConfigLayer(value: unknown): SanitizedConfigLayer {
       ...(model ? { model } : {}),
       ...(behavior ? { behavior } : {}),
       ...(context ? { context } : {}),
+      ...(tui ? { tui } : {}),
       ...(prompt ? { prompt } : {}),
     } satisfies UncleCodeConfigLayer,
     issues,
@@ -296,7 +343,9 @@ function buildEnvironmentLayer(env: NodeJS.ProcessEnv | undefined): UncleCodeCon
   const crpRaw = env.UNCLECODE_CRP;
   const crpBudgetRaw = env.UNCLECODE_CRP_BUDGET;
   const modelWindowRaw = env.UNCLECODE_CONTEXT_WINDOW;
-  const crpContext: { crp?: boolean; crpBudget?: number; modelWindow?: number } = {};
+  const contextProfileRaw = env.UNCLECODE_CONTEXT_PROFILE;
+  const motionRaw = env.UNCLECODE_TUI_MOTION ?? (env.NO_COLOR === undefined ? undefined : "reduced");
+  const crpContext: { crp?: boolean; crpBudget?: number; modelWindow?: number; profile?: string } = {};
   if (crpRaw !== undefined) {
     const normalized = crpRaw.toLowerCase();
     crpContext.crp = normalized !== "0" && normalized !== "false" && normalized !== "off";
@@ -313,6 +362,9 @@ function buildEnvironmentLayer(env: NodeJS.ProcessEnv | undefined): UncleCodeCon
       crpContext.modelWindow = parsed;
     }
   }
+  if (contextProfileRaw !== undefined) {
+    crpContext.profile = contextProfileRaw;
+  }
 
   return sanitizeConfigLayer({
     mode: env.UNCLECODE_MODE,
@@ -324,6 +376,7 @@ function buildEnvironmentLayer(env: NodeJS.ProcessEnv | undefined): UncleCodeCon
       explanationStyle: env.UNCLECODE_EXPLANATION_STYLE,
     },
     ...(Object.keys(crpContext).length > 0 ? { context: crpContext } : {}),
+    ...(motionRaw === undefined ? {} : { tui: { motion: motionRaw } }),
   }).config;
 }
 
@@ -603,6 +656,16 @@ export function explainUncleCodeConfig(
         (config) => config.context?.modelWindow,
         CONFIG_CORE_DEFAULT_CONTEXT_MODEL_WINDOW,
       ),
+      contextProfile: explainSetting(
+        sources,
+        (config) => config.context?.profile,
+        CONFIG_CORE_DEFAULT_CONTEXT_PROFILE,
+      ),
+      motion: explainSetting(
+        sources,
+        (config) => config.tui?.motion,
+        CONFIG_CORE_DEFAULT_TUI_MOTION,
+      ),
     },
     prompt: {
       sections: promptSections,
@@ -656,6 +719,12 @@ export function formatUncleCodeConfigExplanation(explanation: UncleCodeConfigExp
     `- modelWindow = ${String(explanation.settings.modelWindow.value)}`,
     `  winner: ${explanation.settings.modelWindow.winner.sourceLabel}`,
     `  sources: ${formatContributors(explanation.settings.modelWindow.contributors)}`,
+    `- contextProfile = ${explanation.settings.contextProfile.value}`,
+    `  winner: ${explanation.settings.contextProfile.winner.sourceLabel}`,
+    `  sources: ${formatContributors(explanation.settings.contextProfile.contributors)}`,
+    `- motion = ${explanation.settings.motion.value}`,
+    `  winner: ${explanation.settings.motion.winner.sourceLabel}`,
+    `  sources: ${formatContributors(explanation.settings.motion.contributors)}`,
     "",
     "Prompt sections:",
     ...explanation.prompt.sections.flatMap((section) => [

@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import { runRustCommandSync } from "@unclecode/orchestrator";
+
 import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
 
 export function formatWorkShellFooterLineFast(input: {
@@ -31,7 +33,7 @@ export function formatWorkShellSessionFactsGroup(input: {
 }): string {
   return joinFooterFacts([
     input.model.trim(),
-    humanizeWorkShellModeLabel(input.mode),
+    resolveWorkShellModeLabel(input.mode),
   ]);
 }
 
@@ -48,12 +50,18 @@ export function compactWorkShellFooterContextChip(contextIndicator?: string): st
   if (readyMatch) {
     return readyMatch[0];
   }
-  // Intentionally take only the first ` · `-separated segment (e.g. "▤ 12 ctx")
-  // so appended trailing segments — token/held, pinned (📌 N pinned), or
-  // warnings — never break the parser. Only the leading context-count chip is
-  // surfaced to the footer.
-  const firstSegment = normalized.split(/\s·\s/u)[0]?.trim();
-  return firstSegment && firstSegment.length > 0 ? firstSegment : normalized;
+  const segments = normalized.split(/\s·\s/u).map((segment) => segment.trim());
+  const contextCount = segments[0];
+  const tokenCost = segments[1];
+  if (
+    contextCount &&
+    /^▤\s+\d+\s+ctx$/u.test(contextCount) &&
+    tokenCost &&
+    /^(?:~\d+(?:\.\d+)?k|~\d+t|tokens unknown)$/u.test(tokenCost)
+  ) {
+    return `${contextCount} · ${tokenCost}`;
+  }
+  return contextCount && contextCount.length > 0 ? contextCount : normalized;
 }
 
 function joinFooterParts(parts: readonly (string | undefined)[]): string {
@@ -110,23 +118,24 @@ function compactWorkShellAuthLabel(authLabel: string): string {
   }
 }
 
-function humanizeWorkShellModeLabel(mode: string): string {
-  switch (mode.toLowerCase()) {
-    case "default":
-      return "Default mode";
-    case "search":
-      return "Search mode";
-    case "analyze":
-      return "Analyze mode";
-    case "ultrawork":
-      return "Ultrawork mode";
-    case "yolo":
-      return "YOLO mode";
-    case "plan":
-      return "Plan mode";
-    case "build":
-      return "Build mode";
-    default:
-      return `${mode} mode`;
+const modeLabelCache = new Map<string, string>();
+
+function resolveWorkShellModeLabel(mode: string): string {
+  const normalized = mode.trim().toLowerCase();
+  if (normalized.length === 0) {
+    return "";
   }
+
+  const cached = modeLabelCache.get(normalized);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const label = runRustCommandSync(
+    ["rust", "ux", "text", "mode-label"],
+    process.cwd(),
+    normalized,
+  ).trim();
+  modeLabelCache.set(normalized, label);
+  return label;
 }

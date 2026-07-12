@@ -46,6 +46,7 @@ export async function run(command, args, env, options = {}) {
     env,
     timeoutMs: options.timeoutMs,
     killGraceMs: options.killGraceMs,
+    ...(options.detached === undefined ? {} : { detached: options.detached }),
   });
   if ((result.code !== 0 || result.timedOut) && !options.allowFailure) {
     throw new Error(formatRunFailure(command, args, result));

@@ -12,13 +12,14 @@ export function runCommand(command, args, options = {}) {
     const startedAtMs = Date.now();
     const timeoutMs = options.timeoutMs ?? DEFAULT_CHECK_TIMEOUT_MS;
     const killGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
+    const useProcessGroup = options.detached ?? shouldUseProcessGroup();
     const child = spawn(command, args, {
       cwd: options.cwd,
-      detached: shouldUseProcessGroup(),
+      detached: useProcessGroup,
       env: options.env ?? process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    const watchdog = shouldUseProcessGroup()
+    const watchdog = useProcessGroup
       ? startTimeoutWatchdog(child.pid, timeoutMs, killGraceMs)
       : null;
     let stdout = "";
@@ -44,14 +45,14 @@ export function runCommand(command, args, options = {}) {
       terminateWatchdog(watchdog);
       resolve(result);
     };
-    if (shouldUseProcessGroup()) {
+    if (useProcessGroup) {
       treeSampler = setInterval(sampleProcessTree, PROCESS_TREE_SAMPLE_INTERVAL_MS);
     }
     const timeoutTimer = setTimeout(() => {
       timedOut = true;
-      terminateProcessTree(child, "SIGTERM", knownDescendantPids);
+      terminateProcessTree(child, "SIGTERM", knownDescendantPids, useProcessGroup);
       killTimer = setTimeout(() => {
-        terminateProcessTree(child, "SIGKILL", knownDescendantPids);
+        terminateProcessTree(child, "SIGKILL", knownDescendantPids, useProcessGroup);
       }, killGraceMs);
     }, timeoutMs);
 
@@ -78,7 +79,7 @@ export function runCommand(command, args, options = {}) {
       const didTimeOut = timedOut || Date.now() - startedAtMs >= timeoutMs;
       if (didTimeOut) {
         sampleProcessTree();
-        terminateProcessTree(child, "SIGKILL", knownDescendantPids);
+        terminateProcessTree(child, "SIGKILL", knownDescendantPids, useProcessGroup);
       }
       finish({
         code: didTimeOut ? normalizeTimedOutCode(code, signal) : code ?? (signal ? 1 : 0),

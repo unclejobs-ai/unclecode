@@ -202,6 +202,8 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
       traceLines: ["trace ready"],
     });
 
+    assert.match(packet.id, /^crp-/, "bootstrap context packets are backed by the CRP selector");
+
     const providerPromptItem = packet.included.find(
       (item) =>
         item.category === "provider-system-prompt" &&

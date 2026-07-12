@@ -85,7 +85,7 @@ fn resolve_verbose_trace_entry(trace_mode: &str, event: &Value, line: &str) -> O
     }
 
     match str_field(event, "type").unwrap_or_default() {
-        "policy.denied" => Some(json!({
+        "policy.denied" | "tool.completed" => Some(json!({
             "role": "tool",
             "text": line,
         })),
@@ -169,6 +169,45 @@ mod tests {
             )
             .unwrap(),
             r#"{"busyStatus":"calling openai gpt-5.4","busyStatusAction":"set","traceEntryRole":"tool"}"#
+        );
+    }
+
+    #[test]
+    fn resolves_minimal_completed_tool_trace_entries() {
+        assert_eq!(
+            resolve_work_shell_trace_event_json(
+                r#"{"event":{"type":"tool.completed","toolName":"write_file","isError":false},"line":"✓ write 12ms notes.txt","traceMode":"minimal"}"#,
+            )
+            .unwrap(),
+            r#"{"busyStatusAction":"none","traceEntry":{"role":"tool","text":"✓ write 12ms notes.txt"},"traceEntryRole":"tool"}"#
+        );
+        assert_eq!(
+            resolve_work_shell_trace_event_json(
+                r#"{"event":{"type":"tool.completed","toolName":"run_shell","isError":false},"line":"✓ bash 34ms cargo test -p unclecode-core","traceMode":"minimal"}"#,
+            )
+            .unwrap(),
+            r#"{"busyStatusAction":"none","traceEntry":{"role":"tool","text":"✓ bash 34ms cargo test -p unclecode-core"},"traceEntryRole":"tool"}"#
+        );
+        assert_eq!(
+            resolve_work_shell_trace_event_json(
+                r#"{"event":{"type":"tool.completed","toolName":"write_file","isError":false},"line":"✓ write 12ms notes.txt","traceMode":"verbose"}"#,
+            )
+            .unwrap(),
+            r#"{"busyStatusAction":"none","traceEntry":{"role":"tool","text":"✓ write 12ms notes.txt"},"traceEntryRole":"tool"}"#
+        );
+        assert_eq!(
+            resolve_work_shell_trace_event_json(
+                r#"{"event":{"type":"provider.route"},"line":"route openai direct","traceMode":"minimal"}"#,
+            )
+            .unwrap(),
+            r#"{"busyStatusAction":"none","traceEntryRole":"tool"}"#
+        );
+        assert_eq!(
+            resolve_work_shell_trace_event_json(
+                r#"{"event":{"type":"tool.started"},"line":"→ write notes.txt","traceMode":"minimal"}"#,
+            )
+            .unwrap(),
+            r#"{"busyStatus":"→ write notes.txt","busyStatusAction":"set","traceEntryRole":"tool"}"#
         );
     }
 }

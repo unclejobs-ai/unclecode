@@ -102,6 +102,7 @@ pub fn research_run_report(
             trace_mode: None,
             reasoning_effort: None,
             entries: vec![],
+            agent_console: None,
         })
         .map_err(|error| format!("Failed to persist research session: {error}"))?;
 
