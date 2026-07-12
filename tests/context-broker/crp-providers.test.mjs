@@ -257,6 +257,38 @@ test("registry.syncAll runs memory + runtime providers (deterministic subset)", 
   assert.ok(touched.includes("runtime-trace-1"));
 });
 
+test("registry.syncAll starts independent providers concurrently", async () => {
+  const store = makeStore();
+  const { ContextProviderRegistry } = await import("@unclecode/context-broker");
+  const registry = new ContextProviderRegistry(store, "proj_test");
+  let started = 0;
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const provider = (providerId) => ({
+    providerId,
+    categories: ["runtime"],
+    refresh: "on-turn",
+    trustTier: "builtin",
+    async sync() {
+      started += 1;
+      await gate;
+      return [providerId];
+    },
+  });
+  registry.register(provider("first"));
+  registry.register(provider("second"));
+
+  const syncing = registry.syncAll({ cwd: "/repos/test", sessionId: "s1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const providersStartedBeforeRelease = started;
+  release();
+
+  assert.deepEqual(await syncing, ["first", "second"]);
+  assert.equal(providersStartedBeforeRelease, 2);
+});
+
 // ── Selector ─────────────────────────────────────────────────────────
 
 test("selectContextPacketFromStore produces a ContextPacketView", async () => {

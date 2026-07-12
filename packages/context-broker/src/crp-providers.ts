@@ -247,16 +247,14 @@ export class ContextProviderRegistry {
 
   /** Run all registered providers and return touched IDs. */
   async syncAll(input: Omit<ProviderSyncInput, "store" | "projectId">): Promise<readonly string[]> {
-    const all: string[] = [];
-    for (const provider of this.providers) {
-      const touched = await provider.sync({
+    const touchedByProvider = await Promise.all(
+      this.providers.map((provider) => provider.sync({
         store: this.store,
         projectId: this.projectId,
         ...input,
-      });
-      all.push(...touched);
-    }
-    return all;
+      })),
+    );
+    return touchedByProvider.flat();
   }
 
   listProviders(): readonly ContextProvider[] {

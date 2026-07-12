@@ -66,7 +66,7 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
       contextPaneFile,
     );
     assert.match(contextPane, /Included in next answer/);
-    assert.match(contextPane, /Held back locally/);
+    assert.match(contextPane, /Held back locally|\d+ held back/);
     assert.match(contextPane, /Warnings · none|✓ none/i);
     assert.doesNotMatch(contextPane, /Unknown command|panic|TypeError|ReferenceError/);
     await runTmux(["send-keys", "-t", session, "Escape"]);

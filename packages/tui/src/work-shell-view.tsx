@@ -192,6 +192,7 @@ const WORK_SHELL_LOW_CONTRAST_TEXT_COLORS = new Set([
   "#94a3b8",
   "#7d8590",
   "#7f849c",
+  "#21262d",
 ]);
 
 /**
