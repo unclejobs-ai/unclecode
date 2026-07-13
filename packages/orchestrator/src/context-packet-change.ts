@@ -81,6 +81,22 @@ export function classifyContextPacketChange(input: {
       reason: "A pinned or explicitly included source disappeared.",
     };
   }
+
+  const mandatory = input.mandatorySourceIds ?? new Set<string>();
+  const presentIds = new Set([...beforeById.keys(), ...afterById.keys()]);
+  const hasUnmatchedMandatoryPolicy = [...mandatory].some((id) => !presentIds.has(id));
+  // Fail closed before the unchanged short-circuit: a mandatory policy ID that
+  // does not match any included source ID is never treated as unchanged.
+  if (hasUnmatchedMandatoryPolicy) {
+    return {
+      kind: "meaning-change",
+      removedSourceIds: removed,
+      addedSourceIds: added,
+      protectedSourceIds: [],
+      reason: "The selected source set changed.",
+    };
+  }
+
   if (removed.length === 0 && added.length === 0 && changedSha.length === 0) {
     return {
       kind: "unchanged",
@@ -90,14 +106,11 @@ export function classifyContextPacketChange(input: {
       reason: "Packet source selection is unchanged.",
     };
   }
-  const mandatory = input.mandatorySourceIds ?? new Set<string>();
-  const presentIds = new Set([...beforeById.keys(), ...afterById.keys()]);
-  const hasUnmatchedMandatoryPolicy = [...mandatory].some((id) => !presentIds.has(id));
+
   const safetyCandidates = [...added, ...changedSha];
   const safetyOnly = removed.length === 0
     && safetyCandidates.length > 0
-    && safetyCandidates.every((id) => mandatory.has(id))
-    && !hasUnmatchedMandatoryPolicy;
+    && safetyCandidates.every((id) => mandatory.has(id));
   return {
     kind: safetyOnly ? "safety-refresh" : "meaning-change",
     removedSourceIds: removed,

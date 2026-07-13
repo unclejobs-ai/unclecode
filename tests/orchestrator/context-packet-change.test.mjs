@@ -103,6 +103,22 @@ test("policy id source id mismatch is treated conservatively as meaning-change",
   assert.equal(result.kind, "meaning-change");
 });
 
+test("unchanged source refs still meaning-change when mandatory policy id is unmatched", () => {
+  const refs = [
+    { sourceId: "rules", category: "workspace-guidance", sha256: "sha-1", salience: 0.95, includedInModel: true },
+  ];
+  const result = classifyContextPacketChange({
+    before: refs,
+    after: refs.map((ref) => ({ ...ref })),
+    protectedSourceIds: new Set(),
+    mandatorySourceIds: new Set(["ghost-policy"]),
+  });
+  assert.equal(result.kind, "meaning-change");
+  assert.deepEqual(result.removedSourceIds, []);
+  assert.deepEqual(result.addedSourceIds, []);
+  assert.deepEqual(result.protectedSourceIds, []);
+});
+
 test("unmatched mandatory policy ids force meaning-change even when a matched mandatory sha refreshes", () => {
   const result = classifyContextPacketChange({
     before: [{ sourceId: "rules", category: "workspace-guidance", sha256: "sha-old", salience: 0.95, includedInModel: true }],
