@@ -48,6 +48,7 @@ export * from "./work-shell-engine-command-runtime.js";
 export * from "./work-shell-engine-commands.js";
 export * from "./work-shell-context-packet.js";
 export * from "./context-packet-change.js";
+export * from "./context-policy-evaluator.js";
 export * from "./work-shell-engine-context.js";
 export * from "./work-shell-engine-execution.js";
 export * from "./work-shell-engine-lifecycle.js";
