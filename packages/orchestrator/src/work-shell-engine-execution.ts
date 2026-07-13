@@ -401,7 +401,7 @@ export async function executeWorkShellPromptTurn<
     summary: string,
   ) => Promise<void>;
   /** Optional agentops recorder callback. Called after every turn (success or failure). Non-blocking. */
-  recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string }) => void) | undefined;
+  recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string; contextReceiptId?: string; packetId?: string }) => void) | undefined;
   readonly turnId?: string | undefined;
   readonly contextReceipt?: ContextPacketReceipt | undefined;
 }): Promise<void> {
@@ -453,6 +453,12 @@ export async function executeWorkShellPromptTurn<
         status: "completed",
         summary: input.promptTurn.sessionSummary,
         ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
+        ...(input.contextReceipt !== undefined
+          ? {
+              contextReceiptId: input.contextReceipt.id,
+              packetId: input.contextReceipt.packetId,
+            }
+          : {}),
       });
     } catch {
       /* non-blocking */
@@ -489,6 +495,12 @@ export async function executeWorkShellPromptTurn<
         status: "failed",
         summary: input.promptTurn.failureSummary,
         ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
+        ...(input.contextReceipt !== undefined
+          ? {
+              contextReceiptId: input.contextReceipt.id,
+              packetId: input.contextReceipt.packetId,
+            }
+          : {}),
       });
     } catch {
       /* non-blocking */

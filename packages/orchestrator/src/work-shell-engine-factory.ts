@@ -41,7 +41,7 @@ export type CreateWorkShellEngineInput<
   readonly userHomeDir?: string | undefined;
   readonly browserOAuthAvailable?: boolean | undefined;
   /** Optional agentops recorder callback. Non-blocking. Fired after every prompt turn. */
-  readonly recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
+  readonly recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string; contextReceiptId?: string; packetId?: string }) => void) | undefined;
 };
 
 export function createWorkShellEngine<

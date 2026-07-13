@@ -91,7 +91,7 @@ type PromptRuntimeInput<Attachment, Reasoning extends WorkShellReasoningConfig> 
     summary: string,
   ) => Promise<void>;
   /** Optional agentops recorder callback. Non-blocking. */
-  recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string }) => void) | undefined;
+  recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string; contextReceiptId?: string; packetId?: string }) => void) | undefined;
   readonly turnId?: string | undefined;
   readonly contextReceipt?: ContextPacketReceipt | undefined;
 };

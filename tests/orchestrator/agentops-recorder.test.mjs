@@ -83,6 +83,43 @@ test("createAgentOpsRecorder: healthy=true, writes project + run + events to tem
   }
 });
 
+test("createAgentOpsRecorder: persists turnId with packet receipt evidence", () => {
+  const home = makeTempHome();
+  const workspaceRoot = "/tmp/test-workspace-turnid";
+  const recorder = createAgentOpsRecorder({
+    workspaceRoot,
+    command: "unclecode work --test",
+    sessionId: "test-session-turnid",
+    home,
+  });
+
+  assert.equal(recorder.healthy, true);
+  recorder.recordTurn({
+    prompt: "inspect auth",
+    status: "completed",
+    summary: "Lifecycle turn",
+    turnId: "turn-session-1-2",
+    contextReceiptId: "preview-9",
+    packetId: "packet-lifecycle-2",
+  });
+  recorder.finish("completed");
+
+  const db = new DatabaseSync(recorder.dbPath);
+  try {
+    const event = db
+      .prepare("SELECT metadata_json FROM events WHERE event_type = ? ORDER BY rowid DESC LIMIT 1")
+      .get("prompt.turn");
+    assert.ok(event?.metadata_json);
+    const metadata = JSON.parse(event.metadata_json);
+    assert.equal(metadata.turnId, "turn-session-1-2");
+    assert.equal(metadata.contextReceiptId, "preview-9");
+    assert.equal(metadata.packetId, "packet-lifecycle-2");
+    assert.equal(metadata.status, "completed");
+  } finally {
+    db.close();
+  }
+});
+
 test("createAgentOpsRecorder: non-blocking — unwritable path returns healthy=false, recordTurn/finish do not throw", () => {
   // /dev/null is a file, not a dir — mkdirSync on /dev/null/x throws
   const recorder = createAgentOpsRecorder({

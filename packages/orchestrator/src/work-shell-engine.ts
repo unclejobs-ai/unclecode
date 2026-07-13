@@ -500,7 +500,7 @@ export type WorkShellEngineInput<
   onExit: () => void;
   sessionId?: string;
   /** Optional agentops recorder callback. Non-blocking. Fired after every prompt turn. */
-  recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
+  recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string; contextReceiptId?: string; packetId?: string }) => void) | undefined;
   /**
    * Context Inspector (Sprint 2): SQL mutation callback for the /context
    * overlay. Maps a pin/unpin/forget/include action to the AgentOpsStore
@@ -643,7 +643,7 @@ export class WorkShellEngine<
   private readonly extractAuthLabel?: ((lines: readonly string[]) => string | undefined) | undefined;
   private readonly onExit: () => void;
   private readonly sessionId: string;
-  private readonly recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
+  private readonly recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string; contextReceiptId?: string; packetId?: string }) => void) | undefined;
   private readonly mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
   ) => ContextPacketViewActionReceipt | undefined) | undefined;
@@ -1403,11 +1403,13 @@ export class WorkShellEngine<
         this.beginSubmitPreparation();
         try {
           const turnId = `turn-${this.sessionId}-${turnEpoch}`;
-          const prepared = await this.prepareProviderContext(turnId);
+          const prepared = await this.prepareProviderContext(turnId, isCurrentTurn);
           if (prepared === "blocked") {
+            this.pauseQueueAfterProofBlock(turnEpoch);
             return;
           }
           if (!isCurrentTurn()) {
+            this.queueDrainSkipTurnEpochs.add(turnEpoch);
             return;
           }
           const contextPacket = prepared.packet;
@@ -1475,11 +1477,13 @@ export class WorkShellEngine<
         this.beginSubmitPreparation();
         try {
           const turnId = `turn-${this.sessionId}-${turnEpoch}`;
-          const prepared = await this.prepareProviderContext(turnId);
+          const prepared = await this.prepareProviderContext(turnId, isCurrentTurn);
           if (prepared === "blocked") {
+            this.pauseQueueAfterProofBlock(turnEpoch);
             return;
           }
           if (!isCurrentTurn()) {
+            this.queueDrainSkipTurnEpochs.add(turnEpoch);
             return;
           }
           const contextPacket = prepared.packet;
@@ -1590,9 +1594,20 @@ export class WorkShellEngine<
         this.queuedAttachments.delete(step.item.id);
         this.appendEntries({ role: "system", text: step.message });
         await this.handleSubmit(step.item.line, pendingAttachments);
+        if (this.queueAutoDrainPaused) {
+          break;
+        }
       }
     } finally {
       this.drainingQueue = false;
+    }
+  }
+
+  private pauseQueueAfterProofBlock(turnEpoch: number): void {
+    this.queueDrainSkipTurnEpochs.add(turnEpoch);
+    if (this.queuedCountCache > 0) {
+      this.queueAutoDrainPaused = true;
+      this.setState({ queuePaused: true });
     }
   }
 
@@ -1934,14 +1949,20 @@ export class WorkShellEngine<
 
   /**
    * Resolve/revalidate the candidate packet and durably submit exactly one
-   * preview receipt before any provider turn. Returns "blocked" when the
-   * provider call must not start.
+   * preview receipt before any provider turn. Returns undefined when the
+   * provider call must not start (meaning-change, ledger failure, or stale turn).
    */
-  private async prepareSubmittedContext(turnId: string): Promise<{
+  private async prepareSubmittedContext(
+    turnId: string,
+    isCurrentTurn: () => boolean,
+  ): Promise<{
     readonly packet: ContextPacketView;
     readonly receipt: ContextPacketReceipt;
   } | undefined> {
-    const packet = await this.refreshContextPacket(true);
+    const packet = await this.refreshContextPacket(true, isCurrentTurn);
+    if (!isCurrentTurn()) {
+      return undefined;
+    }
     if (!packet || !this.hasContextLifecycleLedger()) {
       return undefined;
     }
@@ -1964,9 +1985,32 @@ export class WorkShellEngine<
       preview,
       packet,
     });
+    if (!isCurrentTurn()) {
+      return undefined;
+    }
     this.setState({ contextPacketChange: change });
     if (change.kind === "meaning-change") {
       this.reopenContextDesk(packet);
+      return undefined;
+    }
+
+    // Production CRP assigns a fresh packet ID per resolve. Revalidate may
+    // accept unchanged/safety-refresh against the inspected preview, but the
+    // durable submitted receipt must belong to the exact candidate sent to the
+    // provider — replace/reuse via the preview lifecycle as needed.
+    if (preview.packetId !== packet.id) {
+      this.captureContextPacketPreview(packet);
+      preview = this.state.contextPreviewReceipt;
+      if (!preview || preview.packetId !== packet.id) {
+        this.appendEntries({
+          role: "system",
+          text: this.formatWorkShellError("Context proof unavailable. The provider call was not started."),
+        });
+        return undefined;
+      }
+    }
+
+    if (!isCurrentTurn()) {
       return undefined;
     }
 
@@ -1976,9 +2020,18 @@ export class WorkShellEngine<
         sessionId: this.sessionId,
         turnId,
       });
+      if (!isCurrentTurn()) {
+        return undefined;
+      }
+      // One-shot submit: advance to a fresh preview so the next chat/queued
+      // turn cannot re-submit the already-submitted receipt.
+      this.captureContextPacketPreview(packet);
       this.setState({ contextSubmittedReceipt: receipt });
       return { packet, receipt };
     } catch {
+      if (!isCurrentTurn()) {
+        return undefined;
+      }
       this.appendEntries({
         role: "system",
         text: this.formatWorkShellError("Context proof unavailable. The provider call was not started."),
@@ -1987,7 +2040,10 @@ export class WorkShellEngine<
     }
   }
 
-  private async prepareProviderContext(turnId: string): Promise<
+  private async prepareProviderContext(
+    turnId: string,
+    isCurrentTurn: () => boolean,
+  ): Promise<
     | {
       readonly packet: ContextPacketView | undefined;
       readonly receipt?: ContextPacketReceipt | undefined;
@@ -1995,10 +2051,17 @@ export class WorkShellEngine<
     | "blocked"
   > {
     if (!this.hasContextLifecycleLedger()) {
-      return { packet: await this.refreshContextPacket() };
+      const packet = await this.refreshContextPacket(false, isCurrentTurn);
+      if (!isCurrentTurn()) {
+        return "blocked";
+      }
+      return { packet };
     }
-    const prepared = await this.prepareSubmittedContext(turnId);
+    const prepared = await this.prepareSubmittedContext(turnId, isCurrentTurn);
     if (!prepared) {
+      return "blocked";
+    }
+    if (!isCurrentTurn()) {
       return "blocked";
     }
     return prepared;
@@ -2012,7 +2075,10 @@ export class WorkShellEngine<
     return composeWorkShellTurnPromptFromPacket({ packet, userPrompt });
   }
 
-  private async refreshContextPacket(forceRefresh = false): Promise<ContextPacketView | undefined> {
+  private async refreshContextPacket(
+    forceRefresh = false,
+    isCurrentTurn?: () => boolean,
+  ): Promise<ContextPacketView | undefined> {
     if (!this.resolveContextPacket || (!forceRefresh && this.state.panel.title === "Context expanded" && this.state.contextPacket)) {
       return this.state.contextPacket;
     }
@@ -2025,6 +2091,9 @@ export class WorkShellEngine<
       traceLines: this.state.traceLines,
       ...(this.state.agentConsole.workGraph ? { workGraph: this.state.agentConsole.workGraph } : {}),
     });
+    if (isCurrentTurn && !isCurrentTurn()) {
+      return undefined;
+    }
     this.setState({
       contextPacket: packet,
       contextIndicator: formatWorkShellContextPacketIndicator(packet),

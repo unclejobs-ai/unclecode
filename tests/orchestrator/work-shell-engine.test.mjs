@@ -2870,10 +2870,22 @@ function createLifecycleLedgerHarness(overrides = {}) {
   const ledgerPreviews = [];
   const ledgerSubmissions = [];
   const ledgerRevalidations = [];
+  const receiptsById = new Map();
+  const submittedReceiptIds = new Set();
   let packet = overrides.packet ?? createLifecyclePacket();
   let previewCounter = 0;
+  let resolveGate = overrides.resolveGate;
   const ledger = {
     previewPacket({ sessionId, packet: nextPacket, profile }) {
+      const active = [...receiptsById.values()].find((receipt) => (
+        receipt.state === "previewed"
+        && receipt.sessionId === sessionId
+        && receipt.packetId === nextPacket.id
+      ));
+      if (active) {
+        ledgerPreviews.push({ sessionId, packetId: nextPacket.id, profile, receiptId: active.id, reused: true });
+        return active;
+      }
       previewCounter += 1;
       const receipt = {
         id: `preview-${previewCounter}`,
@@ -2893,7 +2905,8 @@ function createLifecycleLedgerHarness(overrides = {}) {
         })),
         createdAt: "2026-07-13T00:00:00.000Z",
       };
-      ledgerPreviews.push({ sessionId, packetId: nextPacket.id, profile, receiptId: receipt.id });
+      receiptsById.set(receipt.id, receipt);
+      ledgerPreviews.push({ sessionId, packetId: nextPacket.id, profile, receiptId: receipt.id, reused: false });
       return receipt;
     },
     revalidate({ sessionId, preview, packet: nextPacket }) {
@@ -2911,25 +2924,29 @@ function createLifecycleLedgerHarness(overrides = {}) {
       if (typeof overrides.submitPreview === "function") {
         return overrides.submitPreview(input);
       }
-      ledgerSubmissions.push(input);
-      return {
-        id: input.receiptId,
-        projectId: "project-1",
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        packetId: packet.id,
+      if (submittedReceiptIds.has(input.receiptId)) {
+        throw new Error(`submitted receipt already exists: ${input.receiptId}`);
+      }
+      const preview = receiptsById.get(input.receiptId);
+      if (!preview || preview.state !== "previewed") {
+        throw new Error(`receipt not submittable: ${input.receiptId}`);
+      }
+      submittedReceiptIds.add(input.receiptId);
+      const receipt = {
+        ...preview,
         state: "submitted",
-        profile: "build",
-        tokenEstimate: packet.tokenEstimate,
-        tokenEstimateState: packet.tokenEstimateState,
-        sourceCount: packet.included.length + packet.excluded.length,
-        sourceRefs: [],
-        createdAt: "2026-07-13T00:00:00.000Z",
+        turnId: input.turnId,
       };
+      receiptsById.set(receipt.id, receipt);
+      ledgerSubmissions.push({
+        ...input,
+        packetId: receipt.packetId,
+      });
+      return receipt;
     },
   };
   const { engine, calls } = createEngine({
-    sessionId: "session-lifecycle-1",
+    sessionId: overrides.sessionId ?? "session-lifecycle-1",
     options: {
       provider: "openai",
       model: "gpt-5.4",
@@ -2946,10 +2963,18 @@ function createLifecycleLedgerHarness(overrides = {}) {
       setTraceListener() {},
       async runTurn(prompt) {
         providerPrompts.push(prompt);
+        if (typeof overrides.agentRunTurn === "function") {
+          return overrides.agentRunTurn(prompt);
+        }
         return { text: "lifecycle-ok" };
       },
     },
-    resolveContextPacket: async () => packet,
+    resolveContextPacket: async () => {
+      if (typeof resolveGate === "function") {
+        await resolveGate();
+      }
+      return packet;
+    },
     previewContextPacket: (input) => ledger.previewPacket(input),
     revalidateContextPacket: (input) => ledger.revalidate(input),
     submitContextPacketReceipt: (input) => ledger.submitPreview(input),
@@ -2969,6 +2994,9 @@ function createLifecycleLedgerHarness(overrides = {}) {
     getPacket() {
       return packet;
     },
+    setResolveGate(next) {
+      resolveGate = next;
+    },
   };
 }
 
@@ -2977,23 +3005,32 @@ test("WorkShellEngine submits exactly the inspected packet receipt", async () =>
     engine,
     providerPrompts,
     ledgerSubmissions,
+    ledgerPreviews,
+    setPacket,
     getPacket,
   } = createLifecycleLedgerHarness();
-  const packet = getPacket();
 
   await engine.initialize();
   await engine.handleSubmit("/context");
-  const previewId = engine.getState().contextPreviewReceipt?.id;
-  assert.equal(typeof previewId, "string");
+  const inspectedPreviewId = engine.getState().contextPreviewReceipt?.id;
+  const inspectedPacketId = getPacket().id;
+  assert.equal(typeof inspectedPreviewId, "string");
+  assert.equal(inspectedPacketId, "packet-lifecycle-1");
 
+  // Production CRP mint a fresh packet ID on every resolve even when sources
+  // are unchanged. The submitted receipt must track that candidate.
+  setPacket(createLifecyclePacket({ id: "packet-lifecycle-2" }));
   await engine.handleSubmit("inspect auth");
 
   assert.equal(providerPrompts.length, 1);
   assert.equal(ledgerSubmissions.length, 1);
-  assert.equal(ledgerSubmissions[0].receiptId, previewId);
+  assert.notEqual(ledgerSubmissions[0].receiptId, inspectedPreviewId);
+  assert.equal(ledgerSubmissions[0].packetId, "packet-lifecycle-2");
   assert.match(ledgerSubmissions[0].turnId, /^turn-session-lifecycle-1-\d+$/);
-  assert.equal(engine.getState().contextSubmittedReceipt?.packetId, packet.id);
-  assert.equal(engine.getState().contextSubmittedReceipt?.id, previewId);
+  assert.equal(engine.getState().contextSubmittedReceipt?.packetId, "packet-lifecycle-2");
+  assert.equal(engine.getState().contextSubmittedReceipt?.id, ledgerSubmissions[0].receiptId);
+  assert.match(providerPrompts[0] ?? "", /id="packet-lifecycle-2"/);
+  assert.ok(ledgerPreviews.some((entry) => entry.packetId === "packet-lifecycle-2"));
 });
 
 test("WorkShellEngine blocks provider when a protected source disappears", async () => {
@@ -3048,21 +3085,223 @@ test("WorkShellEngine prompt-command submits the same inspected packet receipt",
     engine,
     providerPrompts,
     ledgerSubmissions,
-    getPacket,
+    setPacket,
   } = createLifecycleLedgerHarness();
-  const packet = getPacket();
 
   await engine.initialize();
   await engine.handleSubmit("/context");
-  const previewId = engine.getState().contextPreviewReceipt?.id;
-  assert.equal(typeof previewId, "string");
+  const inspectedPreviewId = engine.getState().contextPreviewReceipt?.id;
+  assert.equal(typeof inspectedPreviewId, "string");
 
+  setPacket(createLifecyclePacket({ id: "packet-lifecycle-review-2" }));
   await engine.handleSubmit("/review auth flow");
 
   assert.equal(providerPrompts.length, 1);
   assert.equal(ledgerSubmissions.length, 1);
-  assert.equal(ledgerSubmissions[0].receiptId, previewId);
-  assert.equal(engine.getState().contextSubmittedReceipt?.packetId, packet.id);
+  assert.notEqual(ledgerSubmissions[0].receiptId, inspectedPreviewId);
+  assert.equal(ledgerSubmissions[0].packetId, "packet-lifecycle-review-2");
+  assert.equal(engine.getState().contextSubmittedReceipt?.packetId, "packet-lifecycle-review-2");
+  assert.match(providerPrompts[0] ?? "", /id="packet-lifecycle-review-2"/);
+});
+
+test("WorkShellEngine advances preview after submit so the next turn does not re-submit", async () => {
+  const {
+    engine,
+    providerPrompts,
+    ledgerSubmissions,
+    setPacket,
+  } = createLifecycleLedgerHarness({
+    packet: createLifecyclePacket({ id: "packet-seq-1" }),
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+
+  setPacket(createLifecyclePacket({ id: "packet-seq-2" }));
+  await engine.handleSubmit("first turn");
+  assert.equal(providerPrompts.length, 1);
+  assert.equal(ledgerSubmissions.length, 1);
+  assert.equal(ledgerSubmissions[0].packetId, "packet-seq-2");
+  const firstReceiptId = ledgerSubmissions[0].receiptId;
+  assert.notEqual(engine.getState().contextPreviewReceipt?.id, firstReceiptId);
+  assert.equal(engine.getState().contextPreviewReceipt?.state, "previewed");
+
+  setPacket(createLifecyclePacket({ id: "packet-seq-3" }));
+  await engine.handleSubmit("second turn");
+
+  assert.equal(providerPrompts.length, 2);
+  assert.equal(ledgerSubmissions.length, 2);
+  assert.notEqual(ledgerSubmissions[1].receiptId, firstReceiptId);
+  assert.equal(ledgerSubmissions[1].packetId, "packet-seq-3");
+  assert.match(providerPrompts[1] ?? "", /id="packet-seq-3"/);
+});
+
+test("WorkShellEngine cancels during context refresh without submitting or calling provider", async () => {
+  let releaseResolve;
+  const {
+    engine,
+    providerPrompts,
+    ledgerSubmissions,
+    setResolveGate,
+  } = createLifecycleLedgerHarness();
+  setResolveGate(() => new Promise((resolve) => {
+    releaseResolve = resolve;
+  }));
+
+  await engine.initialize();
+  const turn = engine.handleSubmit("inspect auth");
+  while (!engine.getState().isBusy || typeof releaseResolve !== "function") {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  engine.interruptTurn();
+  releaseResolve();
+  await turn;
+
+  assert.equal(providerPrompts.length, 0);
+  assert.equal(ledgerSubmissions.length, 0);
+  assert.equal(
+    engine.getState().entries.some((entry) => /context proof unavailable/i.test(entry.text)),
+    false,
+  );
+});
+
+test("WorkShellEngine preserves queued follow-ups when context proof blocks a turn", async () => {
+  let releaseResolve;
+  const {
+    engine,
+    providerPrompts,
+    ledgerSubmissions,
+    setPacket,
+    setResolveGate,
+  } = createLifecycleLedgerHarness({
+    sessionId: "session-lifecycle-proof-block",
+    revalidate: () => ({
+      kind: "meaning-change",
+      removedSourceIds: ["pinned-auth"],
+      addedSourceIds: [],
+      protectedSourceIds: ["pinned-auth"],
+      reason: "A pinned or explicitly included source disappeared.",
+    }),
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/queue clear");
+  await engine.handleSubmit("/context");
+  setPacket(createLifecyclePacket({
+    id: "packet-lifecycle-missing-pin",
+    included: [],
+    sourceCounts: { included: 0, excluded: 0, warnings: 0 },
+    tokenEstimate: 0,
+  }));
+  setResolveGate(() => new Promise((resolve) => {
+    releaseResolve = resolve;
+  }));
+
+  const blockedTurn = engine.handleSubmit("inspect auth");
+  while (!engine.getState().isBusy || typeof releaseResolve !== "function") {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  await engine.handleSubmit("queued follow-up");
+  assert.ok(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)));
+  assert.equal(engine.getState().queuedCount, 1);
+
+  releaseResolve();
+  await blockedTurn;
+
+  assert.equal(providerPrompts.length, 0);
+  assert.equal(ledgerSubmissions.length, 0);
+  assert.equal(engine.getState().queuedCount, 1);
+  assert.equal(engine.getState().panel.title, "Context expanded");
+  assert.equal(
+    engine.getState().entries.some((entry) => /Running queued follow-up/.test(entry.text)),
+    false,
+  );
+});
+
+test("WorkShellEngine stops queue drain when a queued turn fails context proof", async () => {
+  let releaseFirstTurn;
+  const firstTurnGate = new Promise((resolve) => {
+    releaseFirstTurn = resolve;
+  });
+  const {
+    engine,
+    providerPrompts,
+    ledgerSubmissions,
+    setPacket,
+  } = createLifecycleLedgerHarness({
+    sessionId: "session-lifecycle-queued-proof-block",
+    agentRunTurn: async () => {
+      await firstTurnGate;
+      return { text: "lifecycle-ok" };
+    },
+    revalidate: ({ packet: nextPacket }) => nextPacket.id === "packet-queued-proof-block"
+      ? {
+          kind: "meaning-change",
+          removedSourceIds: ["pinned-auth"],
+          addedSourceIds: [],
+          protectedSourceIds: ["pinned-auth"],
+          reason: "A pinned or explicitly included source disappeared.",
+        }
+      : {
+          kind: "unchanged",
+          removedSourceIds: [],
+          addedSourceIds: [],
+          protectedSourceIds: [],
+          reason: "Packet source selection is unchanged.",
+        },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/queue clear");
+  const firstTurn = engine.handleSubmit("first turn");
+  while (providerPrompts.length === 0) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  await engine.handleSubmit("blocked queued turn");
+  await engine.handleSubmit("preserved queued follow-up");
+  assert.equal(engine.getState().queuedCount, 2);
+  setPacket(createLifecyclePacket({ id: "packet-queued-proof-block" }));
+
+  releaseFirstTurn();
+  await firstTurn;
+
+  assert.equal(providerPrompts.length, 1);
+  assert.equal(ledgerSubmissions.length, 1);
+  assert.equal(engine.getState().queuedCount, 1);
+  assert.equal(engine.getState().queuePaused, true);
+  assert.equal(
+    engine.getState().entries.some((entry) => /Running queued follow-up #2/.test(entry.text)),
+    false,
+  );
+});
+
+test("WorkShellEngine recordTurn receives the same turnId and packet receipt evidence", async () => {
+  const recordedTurns = [];
+  const {
+    engine,
+    ledgerSubmissions,
+    setPacket,
+  } = createLifecycleLedgerHarness({
+    engineOverrides: {
+      recordTurn(turn) {
+        recordedTurns.push(turn);
+      },
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  setPacket(createLifecyclePacket({ id: "packet-lifecycle-record-2" }));
+  await engine.handleSubmit("inspect auth");
+
+  assert.equal(ledgerSubmissions.length, 1);
+  assert.equal(recordedTurns.length, 1);
+  assert.equal(recordedTurns[0]?.turnId, ledgerSubmissions[0].turnId);
+  assert.equal(recordedTurns[0]?.contextReceiptId, ledgerSubmissions[0].receiptId);
+  assert.equal(recordedTurns[0]?.packetId, "packet-lifecycle-record-2");
+  assert.match(recordedTurns[0]?.turnId ?? "", /^turn-session-lifecycle-1-\d+$/);
 });
 
 test("WorkShellEngine binds ask_user to a durable composer decision", async () => {

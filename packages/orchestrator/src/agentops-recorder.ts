@@ -6,7 +6,14 @@ import type { AgentOpsStore } from "@unclecode/agentops-db";
 export interface AgentOpsRecorder {
   readonly healthy: boolean;
   readonly dbPath: string | undefined;
-  recordTurn(input: { prompt: string; status: string; summary?: string }): void;
+  recordTurn(input: {
+    prompt: string;
+    status: string;
+    summary?: string;
+    turnId?: string;
+    contextReceiptId?: string;
+    packetId?: string;
+  }): void;
   finish(status: string): void;
 }
 
@@ -107,7 +114,7 @@ export function createAgentOpsRecorder(
   return {
     healthy: true,
     dbPath,
-    recordTurn({ prompt, status, summary }) {
+    recordTurn({ prompt, status, summary, turnId, contextReceiptId, packetId }) {
       if (store === undefined || runId === undefined || projectId === undefined) {
         return;
       }
@@ -121,6 +128,9 @@ export function createAgentOpsRecorder(
           metadataJson: JSON.stringify({
             status,
             ...(summary !== undefined ? { summary } : {}),
+            ...(turnId !== undefined ? { turnId } : {}),
+            ...(contextReceiptId !== undefined ? { contextReceiptId } : {}),
+            ...(packetId !== undefined ? { packetId } : {}),
           }),
         });
       } catch {

@@ -94,7 +94,7 @@ export type StartReplOptions = {
   saveApiKeyAuth?: ((raw: string) => Promise<readonly string[]>) | undefined;
   browserOAuthAvailable?: boolean | undefined;
   /** Optional agentops recorder callback. Non-blocking. Fired after every prompt turn. */
-  recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
+  recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string; contextReceiptId?: string; packetId?: string }) => void) | undefined;
   /** Context Inspector (Sprint 2): SQL mutation callback for the /context overlay. */
   mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
