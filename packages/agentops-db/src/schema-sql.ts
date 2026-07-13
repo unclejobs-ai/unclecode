@@ -147,6 +147,27 @@ CREATE INDEX IF NOT EXISTS idx_context_sources_project_model
   ON context_sources(project_id, included_in_model);
 CREATE INDEX IF NOT EXISTS idx_context_sources_project_salience
   ON context_sources(project_id, salience DESC);
+
+CREATE TABLE IF NOT EXISTS context_packet_receipts (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL,
+  turn_id TEXT,
+  packet_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('previewed', 'submitted', 'invalidated')),
+  replaces_receipt_id TEXT REFERENCES context_packet_receipts(id) ON DELETE SET NULL,
+  profile TEXT NOT NULL,
+  token_estimate INTEGER,
+  token_estimate_state TEXT NOT NULL CHECK (token_estimate_state IN ('exact', 'estimated', 'unknown')),
+  source_count INTEGER NOT NULL,
+  source_refs_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_context_packet_receipts_project_session_state
+  ON context_packet_receipts(project_id, session_id, state, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_context_packet_receipts_submitted_turn
+  ON context_packet_receipts(project_id, session_id, turn_id)
+  WHERE state = 'submitted' AND turn_id IS NOT NULL;
 `;
 
 export const AGENTOPS_INCREMENTAL_MIGRATIONS: readonly AgentOpsMigration[] = [
@@ -240,6 +261,32 @@ ALTER TABLE context_sources ADD COLUMN badges_json TEXT;
     name: "add_context_source_metadata",
     sql: `
 ALTER TABLE context_sources ADD COLUMN metadata_json TEXT;
+`,
+  },
+  {
+    version: 6,
+    name: "add_context_packet_receipts",
+    sql: `
+CREATE TABLE IF NOT EXISTS context_packet_receipts (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL,
+  turn_id TEXT,
+  packet_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('previewed', 'submitted', 'invalidated')),
+  replaces_receipt_id TEXT REFERENCES context_packet_receipts(id) ON DELETE SET NULL,
+  profile TEXT NOT NULL,
+  token_estimate INTEGER,
+  token_estimate_state TEXT NOT NULL CHECK (token_estimate_state IN ('exact', 'estimated', 'unknown')),
+  source_count INTEGER NOT NULL,
+  source_refs_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_context_packet_receipts_project_session_state
+  ON context_packet_receipts(project_id, session_id, state, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_context_packet_receipts_submitted_turn
+  ON context_packet_receipts(project_id, session_id, turn_id)
+  WHERE state = 'submitted' AND turn_id IS NOT NULL;
 `,
   },
 ];

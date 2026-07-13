@@ -1,6 +1,9 @@
 import type {
+  ContextPacketReceipt,
   ContextSourceRecord,
+  RecordContextPacketPreviewInput,
   SelectContextSourcesInput,
+  SubmitContextPacketReceiptInput,
   UpsertContextSourceInput,
 } from "@unclecode/contracts";
 import type {
@@ -154,5 +157,10 @@ export interface AgentOpsStore {
     readonly salience: number;
     readonly includedInModel: boolean;
   }): void;
+  recordContextPacketPreview(input: RecordContextPacketPreviewInput): ContextPacketReceipt;
+  invalidateContextPacketReceipt(projectId: string, receiptId: string): ContextPacketReceipt;
+  submitContextPacketReceipt(input: SubmitContextPacketReceiptInput): ContextPacketReceipt;
+  getContextPacketReceipt(projectId: string, receiptId: string): ContextPacketReceipt | undefined;
+  getActiveContextPacketPreview(projectId: string, sessionId: string): ContextPacketReceipt | undefined;
   close(): void;
 }

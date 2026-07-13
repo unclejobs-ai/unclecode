@@ -29,8 +29,8 @@ function seedProject(store) {
   return store.addProject({ id: "proj_crp", name: "CRP Test", repoPath: "/repos/crp" });
 }
 
-test("schema version bumps to 5 for context source metadata", () => {
-  assert.equal(AGENTOPS_SCHEMA_VERSION, 5);
+test("schema version bumps to 6 for context packet receipts", () => {
+  assert.equal(AGENTOPS_SCHEMA_VERSION, 6);
 });
 
 test("v3 migration purges legacy context source text instead of preserving possible secrets", () => {
@@ -521,4 +521,192 @@ test("includeContextSource restores held-back source", () => {
   });
   assert.equal(result.selected.length, 1);
   assert.equal(result.heldBack.length, 0);
+});
+
+// ── Context packet receipts (lifecycle ledger) ───────────────────────
+
+test("packet receipt lifecycle records one submitted receipt per turn", () => {
+  const home = makeHome();
+  const store = createAgentOpsStore({ home });
+  store.addProject({ id: "project-1", name: "Receipt Project", repoPath: "/repos/receipt" });
+
+  const receipt = store.recordContextPacketPreview({
+    id: "receipt-1",
+    projectId: "project-1",
+    sessionId: "session-1",
+    packetId: "crp-1",
+    profile: "build",
+    tokenEstimate: 1200,
+    tokenEstimateState: "estimated",
+    sourceCount: 1,
+    sourceRefs: [{ sourceId: "AGENTS.md", category: "workspace-guidance", salience: 1, includedInModel: true }],
+  });
+  assert.equal(receipt.state, "previewed");
+  const submitted = store.submitContextPacketReceipt({
+    receiptId: receipt.id,
+    projectId: "project-1",
+    sessionId: "session-1",
+    turnId: "turn-1",
+  });
+  assert.equal(submitted.state, "submitted");
+  assert.equal(submitted.turnId, "turn-1");
+
+  assert.throws(
+    () => store.submitContextPacketReceipt({ receiptId: "receipt-2", projectId: "project-1", sessionId: "session-1", turnId: "turn-1" }),
+    /submitted receipt already exists/i,
+  );
+});
+
+test("packet receipts never persist raw source content", () => {
+  const home = makeHome();
+  const store = createAgentOpsStore({ home });
+  store.addProject({ id: "project-1", name: "Receipt Project", repoPath: "/repos/receipt" });
+
+  store.recordContextPacketPreview({
+    id: "receipt-safe",
+    projectId: "project-1",
+    sessionId: "session-safe",
+    packetId: "crp-safe",
+    profile: "build",
+    tokenEstimateState: "unknown",
+    sourceCount: 1,
+    sourceRefs: [{ sourceId: "secret-source", category: "system", salience: 1, includedInModel: true }],
+  });
+
+  assert.throws(
+    () =>
+      store.recordContextPacketPreview({
+        id: "receipt-unsafe",
+        projectId: "project-1",
+        sessionId: "session-unsafe",
+        packetId: "crp-unsafe",
+        profile: "build",
+        tokenEstimateState: "unknown",
+        sourceCount: 1,
+        sourceRefs: [
+          {
+            sourceId: "secret-source",
+            category: "system",
+            salience: 1,
+            includedInModel: true,
+            content: "sk-leakedsecretvalue123",
+          },
+        ],
+      }),
+    /unsupported source ref key/i,
+  );
+
+  const db = new DatabaseSync(store.paths.dbPath);
+  try {
+    const raw = db.prepare("SELECT source_refs_json FROM context_packet_receipts WHERE id = ?").get("receipt-safe");
+    assert.doesNotMatch(String(raw.source_refs_json), /content|sk-[A-Za-z0-9]/);
+  } finally {
+    db.close();
+  }
+});
+
+test("packet receipt transitions only allow previewed rows", () => {
+  const home = makeHome();
+  const store = createAgentOpsStore({ home });
+  store.addProject({ id: "project-1", name: "Receipt Project", repoPath: "/repos/receipt" });
+
+  const preview = store.recordContextPacketPreview({
+    id: "receipt-guard",
+    projectId: "project-1",
+    sessionId: "session-guard",
+    packetId: "crp-guard",
+    profile: "build",
+    tokenEstimateState: "exact",
+    tokenEstimate: 10,
+    sourceCount: 0,
+    sourceRefs: [],
+  });
+  assert.equal(store.getActiveContextPacketPreview("project-1", "session-guard")?.id, preview.id);
+
+  const submitted = store.submitContextPacketReceipt({
+    receiptId: preview.id,
+    projectId: "project-1",
+    sessionId: "session-guard",
+    turnId: "turn-guard",
+  });
+  assert.equal(submitted.state, "submitted");
+  assert.equal(store.getActiveContextPacketPreview("project-1", "session-guard"), undefined);
+
+  assert.throws(
+    () =>
+      store.submitContextPacketReceipt({
+        receiptId: preview.id,
+        projectId: "project-1",
+        sessionId: "session-guard",
+        turnId: "turn-guard-2",
+      }),
+    /not submittable/i,
+  );
+  assert.throws(
+    () => store.invalidateContextPacketReceipt("project-1", preview.id),
+    /not invalidatable/i,
+  );
+
+  const replacePreview = store.recordContextPacketPreview({
+    id: "receipt-replace",
+    projectId: "project-1",
+    sessionId: "session-guard",
+    packetId: "crp-guard-2",
+    profile: "build",
+    tokenEstimateState: "unknown",
+    sourceCount: 0,
+    sourceRefs: [],
+    replacesReceiptId: preview.id,
+  });
+  const invalidated = store.invalidateContextPacketReceipt("project-1", replacePreview.id);
+  assert.equal(invalidated.state, "invalidated");
+  assert.equal(store.getContextPacketReceipt("project-1", replacePreview.id)?.state, "invalidated");
+});
+
+test("v6 migration adds context_packet_receipts for upgraded databases", () => {
+  const home = makeHome();
+  mkdirSync(home, { recursive: true });
+  const db = new DatabaseSync(join(home, "agentops.db"));
+  const timestamp = new Date().toISOString();
+  db.exec(`
+    CREATE TABLE schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+    INSERT INTO schema_migrations (version, name, applied_at) VALUES
+      (1, 'initial_schema', '${timestamp}'),
+      (2, 'add_context_sources', '${timestamp}'),
+      (3, 'scope_context_sources_by_project', '${timestamp}'),
+      (4, 'add_context_source_badges', '${timestamp}'),
+      (5, 'add_context_source_metadata', '${timestamp}');
+
+    CREATE TABLE projects (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      repo_path TEXT NOT NULL,
+      config_path TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  db.close();
+
+  const store = createAgentOpsStore({ home });
+  try {
+    assert.equal(AGENTOPS_SCHEMA_VERSION, 6);
+    const upgraded = new DatabaseSync(store.paths.dbPath);
+    try {
+      const version = upgraded.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get();
+      assert.equal(version.version, 6);
+      const table = upgraded
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'context_packet_receipts'")
+        .get();
+      assert.equal(table?.name, "context_packet_receipts");
+    } finally {
+      upgraded.close();
+    }
+  } finally {
+    store.close();
+  }
 });
