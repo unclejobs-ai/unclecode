@@ -1603,7 +1603,6 @@ export class WorkShellEngine<
     this.drainingQueue = true;
     try {
       while ((await this.resolveQueueDrainContinueDecision()).action === "drain") {
-        const queuedCountBefore = this.queuedCountCache;
         const next = (await this.listQueuedSubmits())[0];
         const step = await this.resolveQueueDrainStepDecision(next);
         if (step.action === "empty") {
@@ -1615,7 +1614,7 @@ export class WorkShellEngine<
         this.appendEntries({ role: "system", text: step.message });
         await this.handleSubmit(step.item.line, pendingAttachments);
         if (this.queueAutoDrainPaused) {
-          this.setQueuedCount(queuedCountBefore);
+          this.setQueuedCount(await this.loadQueuedSubmitCount());
           break;
         }
         const popped = await this.popQueuedSubmit();

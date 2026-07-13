@@ -3277,6 +3277,7 @@ test("WorkShellEngine preserves queued follow-ups when context proof blocks a tu
 
 test("WorkShellEngine stops queue drain when a queued turn fails context proof", async () => {
   let releaseFirstTurn;
+  let releaseQueuedResolve;
   const firstTurnGate = new Promise((resolve) => {
     releaseFirstTurn = resolve;
   });
@@ -3286,6 +3287,7 @@ test("WorkShellEngine stops queue drain when a queued turn fails context proof",
     providerAttachments,
     ledgerSubmissions,
     setPacket,
+    setResolveGate,
   } = createLifecycleLedgerHarness({
     sessionId: "session-lifecycle-queued-proof-block",
     agentRunTurn: async () => {
@@ -3320,13 +3322,22 @@ test("WorkShellEngine stops queue drain when a queued turn fails context proof",
   await engine.handleSubmit("preserved queued follow-up");
   assert.equal(engine.getState().queuedCount, 2);
   setPacket(createLifecyclePacket({ id: "packet-queued-proof-block" }));
+  setResolveGate(() => new Promise((resolve) => {
+    releaseQueuedResolve = resolve;
+  }));
 
   releaseFirstTurn();
+  while (typeof releaseQueuedResolve !== "function") {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  await engine.handleSubmit("late queued follow-up");
+  setResolveGate(undefined);
+  releaseQueuedResolve();
   await firstTurn;
 
   assert.equal(providerPrompts.length, 1);
   assert.equal(ledgerSubmissions.length, 1);
-  assert.equal(engine.getState().queuedCount, 2);
+  assert.equal(engine.getState().queuedCount, 3);
   assert.equal(engine.getState().queuePaused, true);
   assert.equal(
     engine.getState().entries.some((entry) => /Running queued follow-up #2/.test(entry.text)),
@@ -3338,7 +3349,7 @@ test("WorkShellEngine stops queue drain when a queued turn fails context proof",
 
   assert.equal(engine.getState().queuedCount, 0);
   assert.equal(engine.getState().queuePaused, false);
-  assert.equal(providerPrompts.length, 4);
+  assert.equal(providerPrompts.length, 5);
   assert.ok(providerAttachments.some((attachments) => (
     attachments?.some((attachment) => attachment.id === "queued-attachment")
   )));
