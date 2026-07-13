@@ -149,6 +149,33 @@ function createPromptRuntimeExecutionInput<Attachment, Reasoning extends WorkShe
   };
 }
 
+type WorkShellChatPreflight<Attachment> = {
+  readonly promptTurn: ReturnType<typeof WorkShellTurns.createChatPromptTurnInput<Attachment>>;
+  readonly readOnlyGuard: string | undefined;
+};
+
+export async function resolveWorkShellChatPreflight<Attachment>(input: {
+  readonly line: string;
+  readonly cwd: string;
+  readonly mode: WorkShellEngineOptions<WorkShellReasoningConfig>["mode"];
+  readonly resolveComposerInput: (value: string, cwd: string) => Promise<WorkShellComposerResolution<Attachment>>;
+  readonly pendingAttachments?: readonly Attachment[] | undefined;
+}): Promise<WorkShellChatPreflight<Attachment>> {
+  const resolved = await input.resolveComposerInput(input.line, input.cwd);
+  const composer = mergeWorkShellComposerAttachments(resolved, input.pendingAttachments);
+  const promptTurn = WorkShellTurns.createChatPromptTurnInput({
+    line: input.line,
+    composer,
+  });
+  return {
+    promptTurn,
+    readOnlyGuard: WorkShellTurns.resolveReadOnlyModeGuard({
+      mode: input.mode,
+      prompt: promptTurn.prompt,
+    }),
+  };
+}
+
 export async function executeWorkShellChatSubmit<
   Attachment,
   Reasoning extends WorkShellReasoningConfig,
@@ -162,23 +189,23 @@ export async function executeWorkShellChatSubmit<
   // that pendingClipboardAttachments lived only in TUI hook state and
   // never crossed the engine boundary.
   pendingAttachments?: readonly Attachment[];
+  preflight?: WorkShellChatPreflight<Attachment>;
 } & PromptRuntimeInput<Attachment, Reasoning>): Promise<void> {
-  const resolved = await input.resolveComposerInput(input.line, input.options.cwd);
-  const composer = mergeWorkShellComposerAttachments(resolved, input.pendingAttachments);
-  const basePromptTurn = WorkShellTurns.createChatPromptTurnInput({
+  const preflight = input.preflight ?? await resolveWorkShellChatPreflight({
     line: input.line,
-    composer,
+    cwd: input.options.cwd,
+    mode: input.options.mode,
+    resolveComposerInput: input.resolveComposerInput,
+    ...(input.pendingAttachments ? { pendingAttachments: input.pendingAttachments } : {}),
   });
+  const basePromptTurn = preflight.promptTurn;
   const promptTurn = input.turnId !== undefined && input.contextReceipt !== undefined
     ? WorkShellTurns.withPromptTurnContextProof(basePromptTurn, {
       turnId: input.turnId,
       contextReceipt: input.contextReceipt,
     })
     : basePromptTurn;
-  const readOnlyGuard = WorkShellTurns.resolveReadOnlyModeGuard({
-    mode: input.options.mode,
-    prompt: promptTurn.prompt,
-  });
+  const readOnlyGuard = preflight.readOnlyGuard;
   if (readOnlyGuard) {
     input.appendEntries(
       { role: "user", text: promptTurn.transcriptText },

@@ -21,6 +21,7 @@ import {
 import {
   executeWorkShellChatSubmit,
   executeWorkShellPromptCommandSubmit,
+  resolveWorkShellChatPreflight,
 } from "./work-shell-engine-prompt-runtime.js";
 import {
   createOpenSessionsFailurePanel,
@@ -1477,17 +1478,35 @@ export class WorkShellEngine<
         this.beginSubmitPreparation();
         try {
           const turnId = `turn-${this.sessionId}-${turnEpoch}`;
-          const prepared = await this.prepareProviderContext(turnId, isCurrentTurn);
-          if (prepared === "blocked") {
-            this.pauseQueueAfterProofBlock(turnEpoch);
-            return;
-          }
+          const preflight = await resolveWorkShellChatPreflight({
+            line: route.line,
+            cwd: this.options.cwd,
+            mode: this.options.mode,
+            resolveComposerInput: this.resolveComposerInput,
+            ...(pendingAttachments && pendingAttachments.length > 0
+              ? { pendingAttachments }
+              : {}),
+          });
           if (!isCurrentTurn()) {
             this.queueDrainSkipTurnEpochs.add(turnEpoch);
             return;
           }
-          const contextPacket = prepared.packet;
-          const contextReceipt = prepared.receipt;
+
+          let contextPacket: ContextPacketView | undefined;
+          let contextReceipt: ContextPacketReceipt | undefined;
+          if (!preflight.readOnlyGuard) {
+            const prepared = await this.prepareProviderContext(turnId, isCurrentTurn);
+            if (prepared === "blocked") {
+              this.pauseQueueAfterProofBlock(turnEpoch);
+              return;
+            }
+            if (!isCurrentTurn()) {
+              this.queueDrainSkipTurnEpochs.add(turnEpoch);
+              return;
+            }
+            contextPacket = prepared.packet;
+            contextReceipt = prepared.receipt;
+          }
           this.setState({
             panel: this.buildContextPanel(
               this.currentContextSummaryLines,
@@ -1502,6 +1521,7 @@ export class WorkShellEngine<
             ...(pendingAttachments && pendingAttachments.length > 0
               ? { pendingAttachments }
               : {}),
+            preflight,
             state: this.state,
             options: this.options,
             sessionId: this.sessionId,
@@ -1583,7 +1603,8 @@ export class WorkShellEngine<
     this.drainingQueue = true;
     try {
       while ((await this.resolveQueueDrainContinueDecision()).action === "drain") {
-        const next = await this.popQueuedSubmit();
+        const queuedCountBefore = this.queuedCountCache;
+        const next = (await this.listQueuedSubmits())[0];
         const step = await this.resolveQueueDrainStepDecision(next);
         if (step.action === "empty") {
           this.setQueuedCount(step.queuedCount);
@@ -1591,12 +1612,17 @@ export class WorkShellEngine<
         }
         this.setQueuedCount(step.queuedCount);
         const pendingAttachments = this.queuedAttachments.get(step.item.id);
-        this.queuedAttachments.delete(step.item.id);
         this.appendEntries({ role: "system", text: step.message });
         await this.handleSubmit(step.item.line, pendingAttachments);
         if (this.queueAutoDrainPaused) {
+          this.setQueuedCount(queuedCountBefore);
           break;
         }
+        const popped = await this.popQueuedSubmit();
+        if (!popped || popped.id !== step.item.id) {
+          throw new Error("Rust queue changed while a queued turn was running.");
+        }
+        this.queuedAttachments.delete(step.item.id);
       }
     } finally {
       this.drainingQueue = false;
@@ -1605,7 +1631,7 @@ export class WorkShellEngine<
 
   private pauseQueueAfterProofBlock(turnEpoch: number): void {
     this.queueDrainSkipTurnEpochs.add(turnEpoch);
-    if (this.queuedCountCache > 0) {
+    if (this.drainingQueue || this.queuedCountCache > 0) {
       this.queueAutoDrainPaused = true;
       this.setState({ queuePaused: true });
     }
@@ -1959,79 +1985,83 @@ export class WorkShellEngine<
     readonly packet: ContextPacketView;
     readonly receipt: ContextPacketReceipt;
   } | undefined> {
-    const packet = await this.refreshContextPacket(true, isCurrentTurn);
-    if (!isCurrentTurn()) {
-      return undefined;
-    }
-    if (!packet || !this.hasContextLifecycleLedger()) {
-      return undefined;
-    }
-
-    let preview = this.state.contextPreviewReceipt;
-    if (!preview) {
-      this.captureContextPacketPreview(packet);
-      preview = this.state.contextPreviewReceipt;
-    }
-    if (!preview) {
-      this.appendEntries({
-        role: "system",
-        text: this.formatWorkShellError("Context proof unavailable. The provider call was not started."),
-      });
-      return undefined;
-    }
-
-    const change = this.revalidateContextPacket!({
-      sessionId: this.sessionId,
-      preview,
-      packet,
-    });
-    if (!isCurrentTurn()) {
-      return undefined;
-    }
-    this.setState({ contextPacketChange: change });
-    if (change.kind === "meaning-change") {
-      this.reopenContextDesk(packet);
-      return undefined;
-    }
-
-    // Production CRP assigns a fresh packet ID per resolve. Revalidate may
-    // accept unchanged/safety-refresh against the inspected preview, but the
-    // durable submitted receipt must belong to the exact candidate sent to the
-    // provider — replace/reuse via the preview lifecycle as needed.
-    if (preview.packetId !== packet.id) {
-      this.captureContextPacketPreview(packet);
-      preview = this.state.contextPreviewReceipt;
-      if (!preview || preview.packetId !== packet.id) {
-        this.appendEntries({
-          role: "system",
-          text: this.formatWorkShellError("Context proof unavailable. The provider call was not started."),
-        });
+    try {
+      const packet = await this.refreshContextPacket(true, isCurrentTurn);
+      if (!isCurrentTurn()) {
         return undefined;
       }
-    }
+      if (!packet || !this.hasContextLifecycleLedger()) {
+        throw new Error("Context lifecycle ledger is unavailable.");
+      }
 
-    if (!isCurrentTurn()) {
-      return undefined;
-    }
+      let preview = this.state.contextPreviewReceipt;
+      if (!preview) {
+        this.captureContextPacketPreview(packet);
+        preview = this.state.contextPreviewReceipt;
+      }
+      if (!preview) {
+        throw new Error("Context preview receipt is unavailable.");
+      }
 
-    try {
+      const change = this.revalidateContextPacket!({
+        sessionId: this.sessionId,
+        preview,
+        packet,
+      });
+      if (!isCurrentTurn()) {
+        return undefined;
+      }
+      this.setState({ contextPacketChange: change });
+      if (change.kind === "meaning-change") {
+        this.reopenContextDesk(packet);
+        return undefined;
+      }
+
+      // Production CRP assigns a fresh packet ID per resolve. Revalidation may
+      // accept an unchanged source set, but the durable submitted receipt must
+      // still identify the exact candidate sent to the provider.
+      if (preview.packetId !== packet.id) {
+        this.captureContextPacketPreview(packet);
+        preview = this.state.contextPreviewReceipt;
+      }
+      if (!preview || preview.packetId !== packet.id) {
+        throw new Error("Context preview does not identify the provider packet.");
+      }
+      if (!isCurrentTurn()) {
+        return undefined;
+      }
+
       const receipt = this.submitContextPacketReceipt!({
         receiptId: preview.id,
         sessionId: this.sessionId,
         turnId,
       });
+      if (
+        receipt.id !== preview.id
+        || receipt.packetId !== packet.id
+        || receipt.sessionId !== this.sessionId
+        || receipt.turnId !== turnId
+        || receipt.state !== "submitted"
+      ) {
+        throw new Error("Submitted context receipt does not match the provider turn.");
+      }
       if (!isCurrentTurn()) {
         return undefined;
       }
-      // One-shot submit: advance to a fresh preview so the next chat/queued
-      // turn cannot re-submit the already-submitted receipt.
-      this.captureContextPacketPreview(packet);
-      this.setState({ contextSubmittedReceipt: receipt });
+
+      // The submitted receipt is one-shot. Clear the preview pointer without
+      // performing another ledger write after durable submission; the next
+      // turn will create or reuse its own candidate preview before submission.
+      this.setState({
+        contextPreviewReceipt: undefined,
+        contextSubmittedReceipt: receipt,
+      });
       return { packet, receipt };
     } catch {
       if (!isCurrentTurn()) {
         return undefined;
       }
+      this.setState({ contextPreviewReceipt: undefined });
       this.appendEntries({
         role: "system",
         text: this.formatWorkShellError("Context proof unavailable. The provider call was not started."),

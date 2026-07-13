@@ -2867,6 +2867,7 @@ function createLifecyclePacket(overrides = {}) {
 
 function createLifecycleLedgerHarness(overrides = {}) {
   const providerPrompts = [];
+  const providerAttachments = [];
   const ledgerPreviews = [];
   const ledgerSubmissions = [];
   const ledgerRevalidations = [];
@@ -2950,7 +2951,7 @@ function createLifecycleLedgerHarness(overrides = {}) {
     options: {
       provider: "openai",
       model: "gpt-5.4",
-      mode: "default",
+      mode: overrides.mode ?? "default",
       authLabel: "api-key-env",
       reasoning: supportedReasoning,
       cwd: "/repo",
@@ -2961,10 +2962,11 @@ function createLifecycleLedgerHarness(overrides = {}) {
       clear() {},
       updateRuntimeSettings() {},
       setTraceListener() {},
-      async runTurn(prompt) {
+      async runTurn(prompt, attachments) {
         providerPrompts.push(prompt);
+        providerAttachments.push(attachments);
         if (typeof overrides.agentRunTurn === "function") {
-          return overrides.agentRunTurn(prompt);
+          return overrides.agentRunTurn(prompt, attachments);
         }
         return { text: "lifecycle-ok" };
       },
@@ -2983,6 +2985,7 @@ function createLifecycleLedgerHarness(overrides = {}) {
   return {
     engine,
     calls,
+    providerAttachments,
     providerPrompts,
     ledgerPreviews,
     ledgerSubmissions,
@@ -3080,6 +3083,59 @@ test("WorkShellEngine aborts provider call when context proof unavailable", asyn
   assert.match(engine.getState().entries.at(-1)?.text ?? "", /context proof unavailable/i);
 });
 
+test("WorkShellEngine applies the search-mode guard before submitting context proof", async () => {
+  const { engine, providerPrompts, ledgerSubmissions } = createLifecycleLedgerHarness({
+    mode: "search",
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("Anthropic parity 구현해줘");
+
+  assert.equal(providerPrompts.length, 0);
+  assert.equal(ledgerSubmissions.length, 0);
+  assert.match(engine.getState().entries.at(-1)?.text ?? "", /Search mode is read-only/);
+});
+
+test("WorkShellEngine handles preview classification failure before provider invocation", async () => {
+  const { engine, providerPrompts, ledgerSubmissions } = createLifecycleLedgerHarness({
+    revalidate: () => {
+      throw new Error("classifier unavailable");
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("inspect auth");
+
+  assert.equal(providerPrompts.length, 0);
+  assert.equal(ledgerSubmissions.length, 0);
+  assert.match(engine.getState().entries.at(-1)?.text ?? "", /context proof unavailable/i);
+});
+
+test("WorkShellEngine rejects a submitted receipt that does not match the provider packet", async () => {
+  const { engine, providerPrompts } = createLifecycleLedgerHarness({
+    submitPreview: (input) => ({
+      id: input.receiptId,
+      projectId: "project-1",
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      packetId: "wrong-packet",
+      state: "submitted",
+      profile: "build",
+      tokenEstimate: 0,
+      tokenEstimateState: "exact",
+      sourceCount: 0,
+      sourceRefs: [],
+      createdAt: "2026-07-13T00:00:00.000Z",
+    }),
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("inspect auth");
+
+  assert.equal(providerPrompts.length, 0);
+  assert.match(engine.getState().entries.at(-1)?.text ?? "", /context proof unavailable/i);
+});
+
 test("WorkShellEngine prompt-command submits the same inspected packet receipt", async () => {
   const {
     engine,
@@ -3123,8 +3179,8 @@ test("WorkShellEngine advances preview after submit so the next turn does not re
   assert.equal(ledgerSubmissions.length, 1);
   assert.equal(ledgerSubmissions[0].packetId, "packet-seq-2");
   const firstReceiptId = ledgerSubmissions[0].receiptId;
-  assert.notEqual(engine.getState().contextPreviewReceipt?.id, firstReceiptId);
-  assert.equal(engine.getState().contextPreviewReceipt?.state, "previewed");
+  assert.equal(engine.getState().contextPreviewReceipt, undefined);
+  assert.equal(engine.getState().contextSubmittedReceipt?.id, firstReceiptId);
 
   setPacket(createLifecyclePacket({ id: "packet-seq-3" }));
   await engine.handleSubmit("second turn");
@@ -3227,6 +3283,7 @@ test("WorkShellEngine stops queue drain when a queued turn fails context proof",
   const {
     engine,
     providerPrompts,
+    providerAttachments,
     ledgerSubmissions,
     setPacket,
   } = createLifecycleLedgerHarness({
@@ -3259,7 +3316,7 @@ test("WorkShellEngine stops queue drain when a queued turn fails context proof",
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
-  await engine.handleSubmit("blocked queued turn");
+  await engine.handleSubmit("blocked queued turn", [{ id: "queued-attachment" }]);
   await engine.handleSubmit("preserved queued follow-up");
   assert.equal(engine.getState().queuedCount, 2);
   setPacket(createLifecyclePacket({ id: "packet-queued-proof-block" }));
@@ -3269,12 +3326,22 @@ test("WorkShellEngine stops queue drain when a queued turn fails context proof",
 
   assert.equal(providerPrompts.length, 1);
   assert.equal(ledgerSubmissions.length, 1);
-  assert.equal(engine.getState().queuedCount, 1);
+  assert.equal(engine.getState().queuedCount, 2);
   assert.equal(engine.getState().queuePaused, true);
   assert.equal(
     engine.getState().entries.some((entry) => /Running queued follow-up #2/.test(entry.text)),
     false,
   );
+
+  setPacket(createLifecyclePacket({ id: "packet-queued-proof-repaired" }));
+  await engine.handleSubmit("repair turn");
+
+  assert.equal(engine.getState().queuedCount, 0);
+  assert.equal(engine.getState().queuePaused, false);
+  assert.equal(providerPrompts.length, 4);
+  assert.ok(providerAttachments.some((attachments) => (
+    attachments?.some((attachment) => attachment.id === "queued-attachment")
+  )));
 });
 
 test("WorkShellEngine recordTurn receives the same turnId and packet receipt evidence", async () => {
