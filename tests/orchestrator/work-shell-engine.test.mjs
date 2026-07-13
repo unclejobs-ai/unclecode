@@ -3173,8 +3173,8 @@ test("WorkShellEngine forces condensed-history refresh for accepted summarize ad
         effects.push(`resolve:${status}`);
         return suggestion(status);
       },
-      async refreshCondensedHistory(input) {
-        effects.push(`summarize:${input.sessionId}:${input.traceLines.length}`);
+      async refreshCondensedHistory() {
+        effects.push("summarize");
       },
       invalidateContextSuggestions(receiptId) {
         effects.push(`stale:${receiptId}`);
@@ -3188,7 +3188,7 @@ test("WorkShellEngine forces condensed-history refresh for accepted summarize ad
   await engine.acceptContextSuggestion("suggestion-summarize-history");
 
   assert.match(effects[0] ?? "", /^resolve:accepted$/);
-  assert.match(effects[1] ?? "", /^summarize:session-lifecycle-1:\d+$/);
+  assert.equal(effects[1], "summarize");
   assert.equal(effects[2], "stale:preview-1");
   assert.equal(engine.getState().contextPolicySuggestions[0]?.status, "accepted");
 });

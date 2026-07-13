@@ -539,11 +539,7 @@ export type WorkShellEngineInput<
     status: Extract<ContextPolicySuggestionState, "accepted" | "rejected">,
   ) => ContextPolicySuggestion) | undefined;
   readonly invalidateContextSuggestions?: ((receiptId: string) => number) | undefined;
-  readonly refreshCondensedHistory?: ((input: {
-    readonly cwd: string;
-    readonly sessionId: string;
-    readonly traceLines: readonly string[];
-  }) => Promise<void>) | undefined;
+  readonly refreshCondensedHistory?: (() => Promise<void>) | undefined;
 };
 
 type PendingDecision = {
@@ -690,11 +686,7 @@ export class WorkShellEngine<
     status: Extract<ContextPolicySuggestionState, "accepted" | "rejected">,
   ) => ContextPolicySuggestion) | undefined;
   private readonly invalidateContextSuggestions?: ((receiptId: string) => number) | undefined;
-  private readonly refreshCondensedHistory?: ((input: {
-    readonly cwd: string;
-    readonly sessionId: string;
-    readonly traceLines: readonly string[];
-  }) => Promise<void>) | undefined;
+  private readonly refreshCondensedHistory?: (() => Promise<void>) | undefined;
   private readonly interactionBridge?: WorkShellInteractionBridge | undefined;
   private readonly subscribers = new Set<(state: WorkShellEngineState<Reasoning>) => void>();
   private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
@@ -1043,11 +1035,7 @@ export class WorkShellEngine<
           if (!this.refreshCondensedHistory) {
             throw new Error("Condensed history refresh is unavailable.");
           }
-          await this.refreshCondensedHistory({
-            cwd: this.options.cwd,
-            sessionId: this.sessionId,
-            traceLines: this.state.traceLines,
-          });
+          await this.refreshCondensedHistory();
           const packet = await this.refreshContextPacket(true);
           this.captureContextPacketPreview(packet);
           break;

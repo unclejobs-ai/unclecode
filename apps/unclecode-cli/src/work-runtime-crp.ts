@@ -148,11 +148,7 @@ export function createCrpRuntime(
   readonly listContextSourceActionReceipts: () => readonly ContextPacketViewActionReceipt[];
   readonly contextLedger: ContextLedgerRuntime;
   readonly getProjectId: () => string | undefined;
-  readonly refreshCondensedHistory: (input: {
-    readonly cwd: string;
-    readonly sessionId: string;
-    readonly traceLines: readonly string[];
-  }) => Promise<void>;
+  readonly refreshCondensedHistory: () => Promise<void>;
 } {
   let crpState: {
     readonly store: ReturnType<typeof createAgentOpsStore>;
@@ -389,26 +385,15 @@ export function createCrpRuntime(
     listActionReceipts: listContextSourceActionReceipts,
   });
 
-  const refreshCondensedHistory = async (input: {
-    readonly cwd: string;
-    readonly sessionId: string;
-    readonly traceLines: readonly string[];
-  }): Promise<void> => {
+  const refreshCondensedHistory = (): Promise<void> => {
     if (crpState === undefined) {
       throw new Error("Context ledger is unavailable until a context packet has been resolved for this session.");
     }
+    // The immediately following forced packet resolution pushes the current
+    // trace exactly once and syncs every provider. Clearing here prevents the
+    // old condensed buffer from being appended to itself during that refresh.
     crpState.registry.condensedHistory.clearTrace();
-    for (const line of input.traceLines) {
-      crpState.registry.condensedHistory.pushTraceLine(line);
-    }
-    await crpState.registry.condensedHistory.sync({
-      store: crpState.store,
-      projectId: crpState.projectId,
-      cwd: input.cwd,
-      sessionId: input.sessionId,
-      ...(bootstrap.env !== undefined ? { env: bootstrap.env } : {}),
-      ...(bootstrap.userHomeDir !== undefined ? { userHomeDir: bootstrap.userHomeDir } : {}),
-    });
+    return Promise.resolve();
   };
 
   const getProjectId = (): string | undefined => crpState?.projectId;

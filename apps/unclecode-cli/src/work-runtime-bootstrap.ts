@@ -635,8 +635,8 @@ export async function loadWorkCliBootstrap(
         crpRuntime.contextLedger.resolveSuggestion(suggestionId, status),
       invalidateContextSuggestions: (receiptId) =>
         crpRuntime.contextLedger.invalidateSuggestions(receiptId),
-      refreshCondensedHistory: (input) =>
-        crpRuntime.refreshCondensedHistory(input),
+      refreshCondensedHistory: () =>
+        crpRuntime.refreshCondensedHistory(),
     },
   };
 }

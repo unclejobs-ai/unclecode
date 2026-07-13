@@ -123,11 +123,7 @@ export type StartReplOptions = {
     status: Extract<ContextPolicySuggestionState, "accepted" | "rejected">,
   ) => ContextPolicySuggestion) | undefined;
   invalidateContextSuggestions?: ((receiptId: string) => number) | undefined;
-  refreshCondensedHistory?: ((input: {
-    readonly cwd: string;
-    readonly sessionId: string;
-    readonly traceLines: readonly string[];
-  }) => Promise<void>) | undefined;
+  refreshCondensedHistory?: (() => Promise<void>) | undefined;
 };
 
 type StartReplTraceEvent =

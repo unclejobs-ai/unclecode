@@ -312,21 +312,17 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
       "accepted",
     );
     assert.equal(result.options.invalidateContextSuggestions(submitted.id), suggestions.length - 1);
-    await result.options.refreshCondensedHistory({
-      cwd: workspaceRoot,
-      sessionId: "work-test",
-      traceLines: Array.from(
-        { length: 10 },
-        (_, index) => `Optimizer lifecycle trace ${index + 1}.`,
-      ),
-    });
+    await result.options.refreshCondensedHistory();
     const refreshedPacket = await result.options.resolveContextPacket({
       cwd: workspaceRoot,
       sessionId: "work-test",
       contextSummaryLines: [],
       bridgeLines: [],
       memoryLines: [],
-      traceLines: [],
+      traceLines: Array.from(
+        { length: 10 },
+        (_, index) => `Optimizer lifecycle trace ${index + 1}.`,
+      ),
     });
     assert.ok(
       [...refreshedPacket.included, ...refreshedPacket.excluded].some(
