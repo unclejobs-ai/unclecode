@@ -25,6 +25,10 @@ import {
   buildWorkGraphContextItems,
   estimateTokens,
 } from "./work-runtime-context-items.js";
+import {
+  createContextLedgerRuntime,
+  type ContextLedgerRuntime,
+} from "./work-runtime-context-ledger.js";
 
 export type WorkShellContextPacketResolver = (input: {
   readonly cwd: string;
@@ -142,6 +146,8 @@ export function createCrpRuntime(
   readonly mutateContextSource: (action: ContextSourceMutation) => ContextPacketViewActionReceipt | undefined;
   readonly undoLastContextSourceAction: () => ContextPacketViewActionReceipt | undefined;
   readonly listContextSourceActionReceipts: () => readonly ContextPacketViewActionReceipt[];
+  readonly contextLedger: ContextLedgerRuntime;
+  readonly getProjectId: () => string | undefined;
 } {
   let crpState: {
     readonly store: ReturnType<typeof createAgentOpsStore>;
@@ -362,10 +368,28 @@ export function createCrpRuntime(
 
   const listContextSourceActionReceipts = (): readonly ContextPacketViewActionReceipt[] => [...actionReceipts];
 
+  const requireLedgerStore = () => {
+    if (crpState === undefined) {
+      throw new Error(
+        "Context ledger is unavailable until a context packet has been resolved for this session.",
+      );
+    }
+    return { store: crpState.store, projectId: crpState.projectId };
+  };
+
+  const contextLedger = createContextLedgerRuntime({
+    requireStore: requireLedgerStore,
+    listActionReceipts: listContextSourceActionReceipts,
+  });
+
+  const getProjectId = (): string | undefined => crpState?.projectId;
+
   return {
     resolveContextPacket,
     mutateContextSource,
     undoLastContextSourceAction,
     listContextSourceActionReceipts,
+    contextLedger,
+    getProjectId,
   };
 }
