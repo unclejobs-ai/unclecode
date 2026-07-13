@@ -195,6 +195,9 @@ export function WorkShellPane<
     lastTurnDurationMs,
     contextIndicator,
     contextActionReceipt,
+    contextPreviewReceipt,
+    contextSubmittedReceipt,
+    contextPacketChange,
     contextSourceActionsEnabled,
     contextInspectorCursor,
     contextInspectorExpanded,
@@ -316,6 +319,9 @@ export function WorkShellPane<
       {...(lastTurnDurationMs !== undefined ? { lastTurnDurationMs } : {})}
       activePanel={activePanel}
       {...(contextActionReceipt ? { contextActionReceipt } : {})}
+      {...(contextPreviewReceipt ? { contextPreviewReceipt } : {})}
+      {...(contextSubmittedReceipt ? { contextSubmittedReceipt } : {})}
+      {...(contextPacketChange ? { contextPacketChange } : {})}
       contextSourceActionsEnabled={contextSourceActionsEnabled ?? false}
       {...(contextInspectorCursor !== undefined ? { contextInspectorCursor } : {})}
       {...(contextInspectorExpanded !== undefined ? { contextInspectorExpanded } : {})}

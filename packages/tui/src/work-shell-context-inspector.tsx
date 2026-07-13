@@ -1,9 +1,15 @@
-import type { ContextPacketView, ContextPacketViewActionReceipt } from "@unclecode/contracts";
+import type {
+  ContextPacketChangeClassification,
+  ContextPacketReceipt,
+  ContextPacketView,
+  ContextPacketViewActionReceipt,
+} from "@unclecode/contracts";
 import { Box, Text } from "ink";
 import React from "react";
 
 import {
   renderContextInspectorBudgetLine,
+  renderContextInspectorPacketProof,
 } from "./work-shell-context-inspector-header.js";
 import {
   buildContextInspectorOverview,
@@ -38,6 +44,9 @@ export function renderContextInspectorOverlay(input: {
   readonly modelWindow: number;
   readonly actionsEnabled: boolean;
   readonly actionReceipt?: ContextPacketViewActionReceipt | undefined;
+  readonly previewReceipt?: ContextPacketReceipt | undefined;
+  readonly submittedReceipt?: ContextPacketReceipt | undefined;
+  readonly packetChange?: ContextPacketChangeClassification | undefined;
   readonly terminalRows?: number;
 }): React.ReactNode {
   void input.actionReceipt;
@@ -66,6 +75,15 @@ export function renderContextInspectorOverlay(input: {
           packet: input.packet,
           palette,
           modelWindow: input.modelWindow,
+        })}
+        {renderContextInspectorPacketProof({
+          packet: input.packet,
+          modelWindow: input.modelWindow,
+          width: input.width,
+          palette,
+          ...(input.previewReceipt ? { previewReceipt: input.previewReceipt } : {}),
+          ...(input.submittedReceipt ? { submittedReceipt: input.submittedReceipt } : {}),
+          ...(input.packetChange ? { packetChange: input.packetChange } : {}),
         })}
         <Text>
           <Text color={overview.suggestion.tone === "warning" ? palette.warning : palette.success} bold>

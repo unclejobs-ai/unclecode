@@ -3,6 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { runRustCommandSync } from "@unclecode/orchestrator";
 import type {
   AgentConsoleSnapshot,
+  ContextPacketChangeClassification,
+  ContextPacketReceipt,
   ContextPacketView,
   ContextPacketViewActionReceipt,
 } from "@unclecode/contracts";
@@ -261,6 +263,9 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly contextInspectorDetailOffset?: number | undefined;
   readonly contextPacket?: ContextPacketView | undefined;
   readonly contextActionReceipt?: ContextPacketViewActionReceipt | undefined;
+  readonly contextPreviewReceipt?: ContextPacketReceipt | undefined;
+  readonly contextSubmittedReceipt?: ContextPacketReceipt | undefined;
+  readonly contextPacketChange?: ContextPacketChangeClassification | undefined;
   readonly contextSourceActionsEnabled?: boolean | undefined;
   // Adaptive model context window (tokens) threaded from engine state so the
   // budget meter scales with the active model instead of an env var.

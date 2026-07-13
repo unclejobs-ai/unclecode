@@ -11,6 +11,7 @@ export * from "./tui-entry.js";
 export * from "./work-shell-attachments.js";
 export * from "./work-shell-auth-panels.js";
 export * from "./work-shell-dashboard-sync.js";
+export * from "./work-shell-context-receipt.js";
 export * from "./work-shell-dashboard.js";
 export * from "./work-shell-formatters.js";
 export * from "./work-shell-hooks.js";

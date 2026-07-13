@@ -1,4 +1,9 @@
-import type { ContextPacketView, ContextPacketViewActionReceipt } from "@unclecode/contracts";
+import type {
+  ContextPacketChangeClassification,
+  ContextPacketReceipt,
+  ContextPacketView,
+  ContextPacketViewActionReceipt,
+} from "@unclecode/contracts";
 import { Text } from "ink";
 import React from "react";
 
@@ -7,6 +12,7 @@ import type {
   ContextInspectorPalette,
 } from "./work-shell-context-inspector-model.js";
 import { formatContextTokenEstimate } from "./work-shell-context-inspector-model.js";
+import { formatContextReceiptTokenEstimate } from "./work-shell-context-receipt.js";
 
 export function computeContextMeterFill(tokenEstimate: number, modelWindow: number): number {
   const budgetCells = 10;
@@ -32,6 +38,85 @@ export function computeContextOverlaySectionMaxRows(input: {
     };
   }
   return { included: 12, held: 7 };
+}
+
+function formatContextWindow(modelWindow: number): string {
+  const safeWindow = Math.max(0, Math.trunc(modelWindow));
+  if (safeWindow < 1_000) {
+    return String(safeWindow);
+  }
+  const thousands = safeWindow / 1_000;
+  return `${thousands >= 10 ? Math.round(thousands) : thousands.toFixed(1)}k`;
+}
+
+export function formatContextInspectorPacketProofLines(input: {
+  readonly packet: ContextPacketView;
+  readonly previewReceipt?: ContextPacketReceipt | undefined;
+  readonly submittedReceipt?: ContextPacketReceipt | undefined;
+  readonly packetChange?: ContextPacketChangeClassification | undefined;
+  readonly modelWindow: number;
+  readonly width: number;
+}): readonly string[] {
+  if (input.packetChange?.kind === "meaning-change") {
+    const beforePacketId = input.previewReceipt?.packetId
+      ?? input.submittedReceipt?.packetId
+      ?? "unknown";
+    return [
+      truncateForDisplayWidth(
+        `PACKET CHANGED ${beforePacketId} -> ${input.packet.id}`,
+        input.width,
+      ),
+      truncateForDisplayWidth(
+        `${input.packetChange.reason} · review required`,
+        input.width,
+      ),
+    ];
+  }
+
+  if (input.previewReceipt?.state === "previewed") {
+    const estimate = formatContextReceiptTokenEstimate(input.previewReceipt);
+    return [truncateForDisplayWidth(
+      `NEXT REQUEST ${input.previewReceipt.packetId} previewed ${estimate} / ${formatContextWindow(input.modelWindow)}`,
+      input.width,
+    )];
+  }
+
+  if (input.submittedReceipt?.state === "submitted") {
+    return [truncateForDisplayWidth(
+      `SUBMITTED ${input.submittedReceipt.packetId} ${input.submittedReceipt.turnId ?? "turn unknown"}`,
+      input.width,
+    )];
+  }
+
+  return [];
+}
+
+export function renderContextInspectorPacketProof(input: {
+  readonly packet: ContextPacketView;
+  readonly previewReceipt?: ContextPacketReceipt | undefined;
+  readonly submittedReceipt?: ContextPacketReceipt | undefined;
+  readonly packetChange?: ContextPacketChangeClassification | undefined;
+  readonly modelWindow: number;
+  readonly width: number;
+  readonly palette: ContextInspectorPalette;
+}): React.ReactNode {
+  const lines = formatContextInspectorPacketProofLines(input);
+  if (lines.length === 0) {
+    return null;
+  }
+  return (
+    <>
+      {lines.map((line, index) => (
+        <Text
+          key={`${index}:${line}`}
+          color={input.packetChange?.kind === "meaning-change" ? input.palette.warning : input.palette.textMuted}
+          bold={index === 0}
+        >
+          {line}
+        </Text>
+      ))}
+    </>
+  );
 }
 
 export function renderContextInspectorBudgetLine(input: {

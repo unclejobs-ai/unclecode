@@ -9,6 +9,11 @@ import {
 } from "../../packages/tui/src/work-shell-view.tsx";
 import { buildContextInspectorRows } from "../../packages/tui/src/work-shell-context-inspector-model.ts";
 import { renderContextInspectorGroupedViewport } from "../../packages/tui/src/work-shell-context-inspector-sources.tsx";
+import { formatContextInspectorPacketProofLines } from "../../packages/tui/src/work-shell-context-inspector-header.tsx";
+import {
+  formatContextTurnReceiptLine,
+  renderContextTurnReceipt,
+} from "../../packages/tui/src/work-shell-context-receipt.tsx";
 import { renderDebugFrame } from "./work-shell-render-harness.mjs";
 
 process.env.UNCLECODE_TERMINAL_BACKGROUND = "light";
@@ -102,6 +107,152 @@ function packet(overrides = {}) {
     ...overrides,
   };
 }
+
+function receipt(overrides = {}) {
+  return {
+    id: "receipt-preview",
+    projectId: "project-1",
+    sessionId: "session-1",
+    packetId: "crp-b203",
+    state: "previewed",
+    profile: "build",
+    tokenEstimate: 18_100,
+    tokenEstimateState: "estimated",
+    sourceCount: 14,
+    sourceRefs: [
+      {
+        sourceId: "rules",
+        category: "workspace-guidance",
+        sha256: "sha-rules",
+        trustTier: "trusted",
+        salience: 1,
+        includedInModel: true,
+      },
+      {
+        sourceId: "memory-1",
+        category: "memory",
+        salience: 0.8,
+        includedInModel: true,
+      },
+      {
+        sourceId: "memory-2",
+        category: "memory",
+        salience: 0.7,
+        includedInModel: true,
+      },
+    ],
+    createdAt: "2026-07-13T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+test("Context Desk renders preview and meaning-change proof", async () => {
+  const packetChange = {
+    kind: "meaning-change",
+    removedSourceIds: ["rules"],
+    addedSourceIds: [],
+    protectedSourceIds: ["rules"],
+    reason: "A pinned or explicitly included source disappeared.",
+  };
+  const output = formatContextInspectorPacketProofLines({
+    packet: packet({ id: "crp-b203" }),
+    previewReceipt: receipt({ packetId: "crp-a91f" }),
+    packetChange,
+    modelWindow: 128_000,
+    width: 100,
+  }).join("\n");
+  const rendered = await renderView({
+    contextPacket: packet({ id: "crp-b203" }),
+    contextPreviewReceipt: receipt({ packetId: "crp-a91f" }),
+    contextPacketChange: packetChange,
+    modelWindow: 128_000,
+  });
+
+  for (const proof of [output, rendered]) {
+    assert.match(proof, /PACKET CHANGED/);
+    assert.match(proof, /crp-a91f -> crp-b203/);
+    assert.match(proof, /review required/i);
+  }
+});
+
+test("Context Desk preview renders honest unknown token state", async () => {
+  const previewReceipt = receipt({
+    packetId: "crp-unknown",
+    tokenEstimate: undefined,
+    tokenEstimateState: "unknown",
+  });
+  const packetView = packet({ id: "crp-unknown", tokenEstimate: 0, tokenEstimateState: "unknown" });
+  const output = formatContextInspectorPacketProofLines({
+    packet: packetView,
+    previewReceipt,
+    modelWindow: 128_000,
+    width: 100,
+  }).join("\n");
+  const rendered = await renderView({
+    contextPacket: packetView,
+    contextPreviewReceipt: previewReceipt,
+    modelWindow: 128_000,
+  });
+
+  for (const proof of [output, rendered]) {
+    assert.match(proof, /NEXT REQUEST crp-unknown previewed unknown \/ 128k/);
+    assert.doesNotMatch(proof, /~0/);
+  }
+});
+
+test("turn receipt exposes submitted packet aggregates without source content", () => {
+  const submitted = receipt({
+    state: "submitted",
+    turnId: "turn-session-1-7",
+  });
+  const output = formatContextTurnReceiptLine(submitted);
+
+  assert.equal(output, "ctx crp-b203 · 14 sources · ~18.1k · 2 memories");
+  assert.doesNotMatch(output, /preview|reason|content/);
+});
+
+test("WorkShellView renders submitted proof outside the conversation transcript", async () => {
+  const output = await renderView({
+    activePanel: { title: "Status", lines: ["Ready"] },
+    entries: [{ role: "assistant", text: "Completed." }],
+    contextSubmittedReceipt: receipt({
+      state: "submitted",
+      turnId: "turn-session-1-7",
+    }),
+  });
+
+  assert.match(output, /ctx crp-b203 · 14 sources · ~18.1k · 2 memories/);
+  assert.match(output, /SUBMITTED crp-b203 turn-session-1-7/);
+  assert.equal(output.match(/ctx crp-b203/g)?.length, 1);
+  assert.doesNotMatch(output, /System · state[\s\S]*ctx crp-b203/);
+});
+
+test("expanded turn receipt clips metadata to a narrow terminal width", async () => {
+  const node = renderContextTurnReceipt({
+    receipt: receipt({
+      id: "receipt-with-an-intentionally-long-identifier",
+      packetId: "crp-with-an-intentionally-long-packet-identifier",
+    }),
+    width: 28,
+    expanded: true,
+  });
+  const { instance, getOutput } = renderDebugFrame(
+    React.createElement(React.Fragment, null, node),
+    { columns: 28, rows: 20 },
+  );
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const output = getOutput();
+    for (const line of output.split("\n")) {
+      assert.ok(line.length <= 28, `receipt line exceeded width: ${line}`);
+    }
+    assert.doesNotMatch(output, /Workspace instructions stay active/);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
 
 test("WorkShellView renders /context as an interactive source inspector", async () => {
   const output = await renderView({

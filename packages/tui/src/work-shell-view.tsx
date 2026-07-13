@@ -2,6 +2,8 @@ import { Box, Text } from "ink";
 import React from "react";
 import type {
   AgentConsoleSnapshot,
+  ContextPacketChangeClassification,
+  ContextPacketReceipt,
   ContextPacketView,
   ContextPacketViewActionReceipt,
   WorkNodeStatus,
@@ -29,6 +31,7 @@ import {
 import {
   renderContextInspectorOverlay,
 } from "./work-shell-context-inspector.js";
+import { renderContextTurnReceipt } from "./work-shell-context-receipt.js";
 import { resolveContextSourceMeta } from "./work-shell-context-inspector-model.js";
 
 export type { WorkShellPanelDisplayMode } from "./work-shell-view-fast-paths.js";
@@ -1891,6 +1894,9 @@ export function WorkShellView(props: {
   readonly busyStatus?: string;
   readonly activePanel: WorkShellPanel;
   readonly contextActionReceipt?: ContextPacketViewActionReceipt;
+  readonly contextPreviewReceipt?: ContextPacketReceipt;
+  readonly contextSubmittedReceipt?: ContextPacketReceipt;
+  readonly contextPacketChange?: ContextPacketChangeClassification;
   readonly contextSourceActionsEnabled?: boolean;
   // Context Inspector (Sprint 2): cursor index into the navigable source list
   // (-1 = none) and the source id whose full content is expanded.
@@ -2016,6 +2022,9 @@ export function WorkShellView(props: {
           modelWindow: props.modelWindow ?? 200000,
           actionsEnabled: props.contextSourceActionsEnabled ?? false,
           ...(props.contextActionReceipt ? { actionReceipt: props.contextActionReceipt } : {}),
+          ...(props.contextPreviewReceipt ? { previewReceipt: props.contextPreviewReceipt } : {}),
+          ...(props.contextSubmittedReceipt ? { submittedReceipt: props.contextSubmittedReceipt } : {}),
+          ...(props.contextPacketChange ? { packetChange: props.contextPacketChange } : {}),
           ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
         })}
       </Box>
@@ -2062,6 +2071,15 @@ export function WorkShellView(props: {
           {conversation}
         </Box>
       )}
+      {props.contextSubmittedReceipt ? (
+        <Box marginTop={1} flexDirection="column">
+          {renderContextTurnReceipt({
+            receipt: props.contextSubmittedReceipt,
+            width: Math.max(16, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
+            expanded: false,
+          })}
+        </Box>
+      ) : null}
       {queueIndicator !== null ? (
         <Box marginTop={1}>
           <Text {...readableTextColorProps(props.queuePaused ? W.warning : W.textMuted)}>{queueIndicator}</Text>
@@ -2106,6 +2124,9 @@ export function WorkShellView(props: {
           modelWindow: props.modelWindow ?? 200000,
           actionsEnabled: props.contextSourceActionsEnabled ?? false,
           ...(props.contextActionReceipt ? { actionReceipt: props.contextActionReceipt } : {}),
+          ...(props.contextPreviewReceipt ? { previewReceipt: props.contextPreviewReceipt } : {}),
+          ...(props.contextSubmittedReceipt ? { submittedReceipt: props.contextSubmittedReceipt } : {}),
+          ...(props.contextPacketChange ? { packetChange: props.contextPacketChange } : {}),
           ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
         })
       ) : panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput ? (

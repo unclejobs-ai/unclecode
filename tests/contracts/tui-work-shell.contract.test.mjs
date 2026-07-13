@@ -27,6 +27,7 @@ import {
   formatAgentTraceLine,
   formatAttachmentBadgeLine,
   formatAttachmentErrorLine,
+  formatContextTurnReceiptLine,
   formatAuthLabelForDisplay,
   formatInlineImageSupportLine,
   formatRuntimeLabel,
@@ -156,6 +157,30 @@ test("work-shell hotspot re-exports extracted helper owner seams instead of regr
   );
   assert.doesNotMatch(tuiSource, /export function buildContextPanel\(/);
   assert.doesNotMatch(tuiSource, /export function buildInlineCommandPanel\(/);
+});
+
+test("TUI exports the read-only context turn receipt formatter", () => {
+  const line = formatContextTurnReceiptLine({
+    id: "receipt-1",
+    projectId: "project-1",
+    sessionId: "session-1",
+    turnId: "turn-1",
+    packetId: "crp-b203",
+    state: "submitted",
+    profile: "build",
+    tokenEstimate: undefined,
+    tokenEstimateState: "unknown",
+    sourceCount: 1,
+    sourceRefs: [{
+      sourceId: "rules",
+      category: "workspace-guidance",
+      salience: 1,
+      includedInModel: true,
+    }],
+    createdAt: "2026-07-13T00:00:00.000Z",
+  });
+
+  assert.equal(line, "ctx crp-b203 · 1 source · unknown · 0 memories");
 });
 
 test("formatWorkShellProviderTitle humanizes known providers for the unified work tab", () => {
