@@ -138,6 +138,7 @@ export function WorkShellPane<
     activePanel,
     slashSuggestionCount,
     selectedSlashCommand,
+    contextAdviceKeyActionsEnabled,
     submit,
     addClipboardAttachment,
     clearClipboardAttachments,
@@ -199,6 +200,8 @@ export function WorkShellPane<
     contextSubmittedReceipt,
     contextPacketChange,
     contextSourceActionsEnabled,
+    contextPolicySuggestions,
+    contextAdviceUnavailable,
     contextInspectorCursor,
     contextInspectorExpanded,
     contextInspectorDetailContent,
@@ -323,6 +326,9 @@ export function WorkShellPane<
       {...(contextSubmittedReceipt ? { contextSubmittedReceipt } : {})}
       {...(contextPacketChange ? { contextPacketChange } : {})}
       contextSourceActionsEnabled={contextSourceActionsEnabled ?? false}
+      contextPolicySuggestions={contextPolicySuggestions ?? []}
+      {...(contextAdviceUnavailable ? { contextAdviceUnavailable } : {})}
+      contextAdviceActionsEnabled={contextAdviceKeyActionsEnabled}
       {...(contextInspectorCursor !== undefined ? { contextInspectorCursor } : {})}
       {...(contextInspectorExpanded !== undefined ? { contextInspectorExpanded } : {})}
       {...(contextInspectorDetailContent !== undefined ? { contextInspectorDetailContent } : {})}
@@ -396,6 +402,7 @@ export function WorkShellPane<
             ? { suppressInspectorKeys: true }
             : {})}
           suppressInspectorMutationKeys={contextSourceActionsEnabled ?? false}
+          suppressInspectorAdviceKeys={contextAdviceKeyActionsEnabled}
         />
       }
       inputValue={inputValue}

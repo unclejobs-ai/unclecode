@@ -169,5 +169,17 @@ export function createWorkShellEngine<
     ...(input.submitContextPacketReceipt !== undefined
       ? { submitContextPacketReceipt: input.submitContextPacketReceipt }
       : {}),
+    ...(input.generateContextSuggestions !== undefined
+      ? { generateContextSuggestions: input.generateContextSuggestions }
+      : {}),
+    ...(input.resolveContextSuggestion !== undefined
+      ? { resolveContextSuggestion: input.resolveContextSuggestion }
+      : {}),
+    ...(input.invalidateContextSuggestions !== undefined
+      ? { invalidateContextSuggestions: input.invalidateContextSuggestions }
+      : {}),
+    ...(input.refreshCondensedHistory !== undefined
+      ? { refreshCondensedHistory: input.refreshCondensedHistory }
+      : {}),
   });
 }

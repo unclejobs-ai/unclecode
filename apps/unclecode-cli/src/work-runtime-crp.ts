@@ -148,6 +148,11 @@ export function createCrpRuntime(
   readonly listContextSourceActionReceipts: () => readonly ContextPacketViewActionReceipt[];
   readonly contextLedger: ContextLedgerRuntime;
   readonly getProjectId: () => string | undefined;
+  readonly refreshCondensedHistory: (input: {
+    readonly cwd: string;
+    readonly sessionId: string;
+    readonly traceLines: readonly string[];
+  }) => Promise<void>;
 } {
   let crpState: {
     readonly store: ReturnType<typeof createAgentOpsStore>;
@@ -384,6 +389,28 @@ export function createCrpRuntime(
     listActionReceipts: listContextSourceActionReceipts,
   });
 
+  const refreshCondensedHistory = async (input: {
+    readonly cwd: string;
+    readonly sessionId: string;
+    readonly traceLines: readonly string[];
+  }): Promise<void> => {
+    if (crpState === undefined) {
+      throw new Error("Context ledger is unavailable until a context packet has been resolved for this session.");
+    }
+    crpState.registry.condensedHistory.clearTrace();
+    for (const line of input.traceLines) {
+      crpState.registry.condensedHistory.pushTraceLine(line);
+    }
+    await crpState.registry.condensedHistory.sync({
+      store: crpState.store,
+      projectId: crpState.projectId,
+      cwd: input.cwd,
+      sessionId: input.sessionId,
+      ...(bootstrap.env !== undefined ? { env: bootstrap.env } : {}),
+      ...(bootstrap.userHomeDir !== undefined ? { userHomeDir: bootstrap.userHomeDir } : {}),
+    });
+  };
+
   const getProjectId = (): string | undefined => crpState?.projectId;
 
   return {
@@ -393,5 +420,6 @@ export function createCrpRuntime(
     listContextSourceActionReceipts,
     contextLedger,
     getProjectId,
+    refreshCondensedHistory,
   };
 }

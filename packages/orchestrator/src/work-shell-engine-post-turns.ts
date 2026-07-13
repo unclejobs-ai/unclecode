@@ -3,6 +3,7 @@ import { runRustCommandSync } from "./rust-command.js";
 import {
   formatScopedMemoryTransparencyLines,
 } from "@unclecode/context-broker";
+import type { ContextPolicySuggestion } from "@unclecode/contracts";
 
 export type WorkShellSyntheticTraceEvent = {
   readonly type: "bridge.published" | "memory.written";
@@ -48,6 +49,24 @@ export type WorkShellPostTurnSuccessEffectsResult = {
   /** Set when assistant text sanitized to empty — no bridge/memory side effects. */
   readonly skipped?: boolean;
 };
+export type WorkShellContextAdviceEffectsResult = {
+  readonly suggestions: readonly ContextPolicySuggestion[];
+  readonly unavailable?: string | undefined;
+};
+
+export async function runWorkShellContextAdviceEffects(
+  generate: () => Promise<readonly ContextPolicySuggestion[]>,
+): Promise<WorkShellContextAdviceEffectsResult> {
+  try {
+    return { suggestions: await generate() };
+  } catch {
+    return {
+      suggestions: [],
+      unavailable: "Context optimizer unavailable; reply kept.",
+    };
+  }
+}
+
 
 export function createSkippedWorkShellPostTurnSuccessEffects(input: {
   currentBridgeLines: readonly string[];

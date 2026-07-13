@@ -7,6 +7,7 @@ import type {
   ContextPacketReceipt,
   ContextPacketView,
   ContextPacketViewActionReceipt,
+  ContextPolicySuggestion,
 } from "@unclecode/contracts";
 
 import {
@@ -16,7 +17,10 @@ import {
   type WorkShellDashboardHomeSyncState,
 } from "./work-shell-dashboard-sync.js";
 import type { TuiShellHomeState } from "./shell-state.js";
-import { isContextInspectorSourceHeldBack } from "./work-shell-context-inspector-model.js";
+import {
+  buildContextInspectorRows,
+  isContextInspectorSourceHeldBack,
+} from "./work-shell-context-inspector-model.js";
 import {
   clampWorkShellSlashSelection,
   cycleWorkShellSlashSelection,
@@ -267,6 +271,9 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly contextSubmittedReceipt?: ContextPacketReceipt | undefined;
   readonly contextPacketChange?: ContextPacketChangeClassification | undefined;
   readonly contextSourceActionsEnabled?: boolean | undefined;
+  readonly contextPolicySuggestions?: readonly ContextPolicySuggestion[] | undefined;
+  readonly contextAdviceUnavailable?: string | undefined;
+  readonly contextAdviceActionsEnabled?: boolean | undefined;
   // Adaptive model context window (tokens) threaded from engine state so the
   // budget meter scales with the active model instead of an env var.
   readonly modelWindow?: number | undefined;
@@ -291,6 +298,8 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   forgetContextSourceAtCursor?(): Promise<void>;
   includeContextSourceAtCursor?(): Promise<void>;
   toggleContextInspectorExpanded?(): Promise<void>;
+  acceptContextSuggestion?(suggestionId: string): Promise<void>;
+  rejectContextSuggestion?(suggestionId: string): Promise<void>;
   // Optional because not every pane host wires trace plumbing — when
   // absent, the hook silently drops the event. In practice WorkShellEngine
   // always implements this since commit b891c19's follow-up.
@@ -430,6 +439,9 @@ export function useWorkShellInputController(input: {
   readonly cancelSensitiveInput?: (() => void) | undefined;
   readonly closeOverlay?: (() => void) | undefined;
   readonly contextSourceActionsEnabled?: boolean | undefined;
+  readonly contextAdviceActionsEnabled?: boolean | undefined;
+  readonly acceptContextSuggestion?: (() => Promise<void>) | undefined;
+  readonly rejectContextSuggestion?: (() => Promise<void>) | undefined;
   readonly contextInspectorExpanded?: string | null | undefined;
   // Context Inspector (Sprint 2): engine callbacks for the /context overlay
   // keyboard actions. All optional — only dispatched when the overlay is open
@@ -476,6 +488,7 @@ export function useWorkShellInputController(input: {
         key,
         panelTitle: "Context expanded",
         actionsEnabled: input.contextSourceActionsEnabled ?? false,
+        adviceActionsEnabled: input.contextAdviceActionsEnabled ?? false,
       });
       switch (inspectorAction.type) {
         case "move-cursor":
@@ -492,6 +505,14 @@ export function useWorkShellInputController(input: {
         case "toggle-delivery":
           escapeResetArmedAtRef.current = undefined;
           void input.toggleContextSourceDelivery?.().catch(() => undefined);
+          return;
+        case "accept-advice":
+          escapeResetArmedAtRef.current = undefined;
+          void input.acceptContextSuggestion?.().catch(() => undefined);
+          return;
+        case "reject-advice":
+          escapeResetArmedAtRef.current = undefined;
+          void input.rejectContextSuggestion?.().catch(() => undefined);
           return;
         case "expand":
           input.toggleContextInspectorExpanded?.();
@@ -804,6 +825,26 @@ export function useWorkShellPaneState<
     },
     [input.engine],
   );
+  const selectedContextSuggestion = useMemo(() => {
+    const packet = engineState.contextPacket;
+    const cursor = engineState.contextInspectorCursor ?? -1;
+    if (!packet || cursor < 0) {
+      return undefined;
+    }
+    const sourceId = buildContextInspectorRows(packet).find(
+      (row) => row.sourceIndex === cursor,
+    )?.item.id;
+    return engineState.contextPolicySuggestions?.find(
+      (suggestion) =>
+        suggestion.status === "proposed"
+        && suggestion.sourceId === sourceId,
+    );
+  }, [
+    engineState.contextInspectorCursor,
+    engineState.contextPacket,
+    engineState.contextPolicySuggestions,
+  ]);
+
 
 
   const { submit } = useWorkShellInputController({
@@ -851,6 +892,23 @@ export function useWorkShellPaneState<
       ? { closeOverlay: () => input.engine.closeOverlay?.() }
       : {}),
     contextSourceActionsEnabled: engineState.contextSourceActionsEnabled ?? false,
+    contextAdviceActionsEnabled:
+      (engineState.contextAdviceActionsEnabled ?? false)
+      && selectedContextSuggestion !== undefined,
+    ...(selectedContextSuggestion && input.engine.acceptContextSuggestion
+      ? {
+          acceptContextSuggestion: async () => {
+            await input.engine.acceptContextSuggestion?.(selectedContextSuggestion.id);
+          },
+        }
+      : {}),
+    ...(selectedContextSuggestion && input.engine.rejectContextSuggestion
+      ? {
+          rejectContextSuggestion: async () => {
+            await input.engine.rejectContextSuggestion?.(selectedContextSuggestion.id);
+          },
+        }
+      : {}),
     contextInspectorExpanded: engineState.contextInspectorExpanded,
     // Context Inspector (Sprint 2): forward engine callbacks so the
     // controller's useInput can dispatch overlay keyboard actions.
@@ -898,6 +956,9 @@ export function useWorkShellPaneState<
     activePanel,
     slashSuggestionCount: slashSuggestions.length,
     selectedSlashCommand: selectedSuggestion?.command,
+    contextAdviceKeyActionsEnabled:
+      (engineState.contextAdviceActionsEnabled ?? false)
+      && selectedContextSuggestion !== undefined,
     submit,
     addClipboardAttachment,
     clearClipboardAttachments,

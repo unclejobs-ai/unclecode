@@ -443,6 +443,7 @@ export function Composer(props: {
    */
   readonly suppressInspectorKeys?: boolean | undefined;
   readonly suppressInspectorMutationKeys?: boolean | undefined;
+  readonly suppressInspectorAdviceKeys?: boolean | undefined;
 }) {
   const [isPasting, setIsPasting] = useState(false);
   const [cursorOffset, setCursorOffset] = useState(props.value.length);
@@ -541,6 +542,12 @@ export function Composer(props: {
         return;
       }
       if (suppressMutationKeys && (input === " " || input === "p")) {
+        return;
+      }
+      if (
+        latestProps.suppressInspectorAdviceKeys
+        && (input.toLowerCase() === "a" || input.toLowerCase() === "r")
+      ) {
         return;
       }
     }

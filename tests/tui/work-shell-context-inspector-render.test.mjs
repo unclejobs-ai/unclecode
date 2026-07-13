@@ -415,6 +415,83 @@ test("WorkShellView windows long /context source lists around the cursor", async
   assert.doesNotMatch(output, /↓ Included in next answer[\s\S]*workspace source 0/);
 });
 
+test("WorkShellView renders actionable optimizer advice without source content", async () => {
+  const contextPacket = packet();
+  const output = await renderView({
+    contextPacket,
+    contextInspectorCursor: 0,
+    contextSourceActionsEnabled: true,
+    contextAdviceActionsEnabled: true,
+    contextPolicySuggestions: [
+      {
+        id: "suggestion-hold-workspace",
+        packetReceiptId: "receipt-submitted",
+        sourceId: "workspace-1",
+        action: "hold-back",
+        reasonCode: "low-trust-token-hotspot",
+        reasonText: "This source exceeds the strict low-trust token threshold.",
+        estimatedTokenSaving: 42,
+        status: "proposed",
+        createdAt: "2026-07-13T00:00:01.000Z",
+      },
+      {
+        id: "suggestion-refresh-memory",
+        packetReceiptId: "receipt-submitted",
+        sourceId: "bridge-1",
+        action: "refresh",
+        reasonCode: "expired-source",
+        reasonText: "Source metadata expired and must be refreshed.",
+        status: "accepted",
+        createdAt: "2026-07-13T00:00:01.000Z",
+        resolvedAt: "2026-07-13T00:00:02.000Z",
+      },
+      {
+        id: "suggestion-keep-loop",
+        packetReceiptId: "receipt-submitted",
+        sourceId: "loop-1",
+        action: "keep",
+        reasonCode: "mandatory-guidance",
+        reasonText: "The source was retained after review.",
+        status: "rejected",
+        createdAt: "2026-07-13T00:00:01.000Z",
+        resolvedAt: "2026-07-13T00:00:02.000Z",
+      },
+      {
+        id: "suggestion-summarize-bridge",
+        packetReceiptId: "receipt-submitted",
+        sourceId: "bridge-1",
+        action: "summarize",
+        reasonCode: "stale-condensed-history",
+        reasonText: "Condensed history is stale.",
+        status: "proposed",
+        createdAt: "2026-07-13T00:00:03.000Z",
+      },
+    ],
+  });
+
+  assert.match(output, /Context optimizer/);
+  assert.match(output, /Hold back · AGENTS\.md · Save ~42t/);
+  assert.match(output, /strict low-trust token threshold/);
+  assert.match(output, /\[A\] accept · \[R\] reject/);
+  assert.match(output, /Refresh · recent Q&A · accepted/);
+  assert.match(output, /Keep · session loop trail · rejected/);
+  assert.match(output, /Summarize · recent Q&A · Savings unknown/);
+  assert.doesNotMatch(output, /Workspace instructions stay active/);
+});
+
+test("WorkShellView renders optimizer failure as a bounded non-fatal state", async () => {
+  const output = await renderView({
+    contextPacket: packet(),
+    contextInspectorCursor: 0,
+    contextPolicySuggestions: [],
+    contextAdviceUnavailable: "Context optimizer unavailable; reply kept.",
+  });
+
+  assert.match(output, /Context optimizer/);
+  assert.match(output, /Context optimizer unavailable; reply kept\./);
+  assert.doesNotMatch(output, /\[A\] accept/);
+});
+
 test("WorkShellView renders a compact 52x40 inspector for 40+ grouped sources", async () => {
   const categories = [
     "workspace-guidance",

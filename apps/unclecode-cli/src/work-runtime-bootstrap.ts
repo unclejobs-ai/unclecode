@@ -629,6 +629,14 @@ export async function loadWorkCliBootstrap(
           mandatorySourceIds: buildMandatorySourceIds(packet),
         }),
       submitContextPacketReceipt: (input) => crpRuntime.contextLedger.submitPreview(input),
+      generateContextSuggestions: async (input) =>
+        crpRuntime.contextLedger.generateSuggestions(input),
+      resolveContextSuggestion: (suggestionId, status) =>
+        crpRuntime.contextLedger.resolveSuggestion(suggestionId, status),
+      invalidateContextSuggestions: (receiptId) =>
+        crpRuntime.contextLedger.invalidateSuggestions(receiptId),
+      refreshCondensedHistory: (input) =>
+        crpRuntime.refreshCondensedHistory(input),
     },
   };
 }

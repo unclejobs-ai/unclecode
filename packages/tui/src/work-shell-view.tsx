@@ -6,6 +6,7 @@ import type {
   ContextPacketReceipt,
   ContextPacketView,
   ContextPacketViewActionReceipt,
+  ContextPolicySuggestion,
   WorkNodeStatus,
 } from "@unclecode/contracts";
 import {
@@ -1898,6 +1899,9 @@ export function WorkShellView(props: {
   readonly contextSubmittedReceipt?: ContextPacketReceipt;
   readonly contextPacketChange?: ContextPacketChangeClassification;
   readonly contextSourceActionsEnabled?: boolean;
+  readonly contextPolicySuggestions?: readonly ContextPolicySuggestion[];
+  readonly contextAdviceUnavailable?: string;
+  readonly contextAdviceActionsEnabled?: boolean;
   // Context Inspector (Sprint 2): cursor index into the navigable source list
   // (-1 = none) and the source id whose full content is expanded.
   readonly contextInspectorCursor?: number;
@@ -2025,6 +2029,11 @@ export function WorkShellView(props: {
           ...(props.contextPreviewReceipt ? { previewReceipt: props.contextPreviewReceipt } : {}),
           ...(props.contextSubmittedReceipt ? { submittedReceipt: props.contextSubmittedReceipt } : {}),
           ...(props.contextPacketChange ? { packetChange: props.contextPacketChange } : {}),
+          contextPolicySuggestions: props.contextPolicySuggestions ?? [],
+          ...(props.contextAdviceUnavailable
+            ? { contextAdviceUnavailable: props.contextAdviceUnavailable }
+            : {}),
+          contextAdviceActionsEnabled: props.contextAdviceActionsEnabled ?? false,
           ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
         })}
       </Box>
@@ -2128,6 +2137,11 @@ export function WorkShellView(props: {
           ...(props.contextPreviewReceipt ? { previewReceipt: props.contextPreviewReceipt } : {}),
           ...(props.contextSubmittedReceipt ? { submittedReceipt: props.contextSubmittedReceipt } : {}),
           ...(props.contextPacketChange ? { packetChange: props.contextPacketChange } : {}),
+          contextPolicySuggestions: props.contextPolicySuggestions ?? [],
+          ...(props.contextAdviceUnavailable
+            ? { contextAdviceUnavailable: props.contextAdviceUnavailable }
+            : {}),
+          contextAdviceActionsEnabled: props.contextAdviceActionsEnabled ?? false,
           ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
         })
       ) : panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput ? (

@@ -190,7 +190,7 @@ export async function executeWorkShellChatSubmit<
   // never crossed the engine boundary.
   pendingAttachments?: readonly Attachment[];
   preflight?: WorkShellChatPreflight<Attachment>;
-} & PromptRuntimeInput<Attachment, Reasoning>): Promise<void> {
+} & PromptRuntimeInput<Attachment, Reasoning>): Promise<boolean> {
   const preflight = input.preflight ?? await resolveWorkShellChatPreflight({
     line: input.line,
     cwd: input.options.cwd,
@@ -213,9 +213,9 @@ export async function executeWorkShellChatSubmit<
     );
     input.setState({ lastTurnDurationMs: 0 });
     await input.persistSessionSnapshot("idle", promptTurn.sessionSummary).catch(() => undefined);
-    return;
+    return false;
   }
-  await executeWorkShellPromptTurn(
+  return executeWorkShellPromptTurn(
     createPromptRuntimeExecutionInput({
       ...input,
       promptTurn,
@@ -229,8 +229,8 @@ export async function executeWorkShellPromptCommandSubmit<
 >(input: {
   transcriptText: string;
   promptCommand: WorkShellPromptCommand;
-} & PromptRuntimeInput<Attachment, Reasoning>): Promise<void> {
-  await executeWorkShellPromptTurn(
+} & PromptRuntimeInput<Attachment, Reasoning>): Promise<boolean> {
+  return executeWorkShellPromptTurn(
     createPromptRuntimeExecutionInput({
       ...input,
       promptTurn: (

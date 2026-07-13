@@ -83,6 +83,9 @@ function ContextInputControllerHarness(props) {
     hasOverlayOpen: true,
     activePanelTitle: "Context expanded",
     contextSourceActionsEnabled: props.actionsEnabled,
+    contextAdviceActionsEnabled: props.adviceActionsEnabled,
+    acceptContextSuggestion: async () => props.onAccept?.(),
+    rejectContextSuggestion: async () => props.onReject?.(),
     contextInspectorExpanded: props.expandedId,
     moveContextInspectorCursor: props.onMove,
     moveContextInspectorDetailOffset: props.onScroll ?? (() => {}),
@@ -124,6 +127,24 @@ test("context inspector resolver uses human navigation and action keys", () => {
     panelTitle: "Context expanded",
     actionsEnabled: false,
   }), { type: "none" });
+  assert.deepEqual(resolveWorkShellContextInspectorAction({
+    value: "a",
+    key: {},
+    panelTitle: "Context expanded",
+    adviceActionsEnabled: true,
+  }), { type: "accept-advice" });
+  assert.deepEqual(resolveWorkShellContextInspectorAction({
+    value: "r",
+    key: {},
+    panelTitle: "Context expanded",
+    adviceActionsEnabled: true,
+  }), { type: "reject-advice" });
+  assert.deepEqual(resolveWorkShellContextInspectorAction({
+    value: "a",
+    key: {},
+    panelTitle: "Context expanded",
+    adviceActionsEnabled: false,
+  }), { type: "none" });
 });
 
 test("context inspector input controller dispatches only enabled human actions", async () => {
@@ -148,10 +169,13 @@ test("context inspector input controller dispatches only enabled human actions",
   const writable = renderWithInput(
     React.createElement(ContextInputControllerHarness, {
       actionsEnabled: true,
+      adviceActionsEnabled: true,
       onMove: () => {},
       onPin: () => writableCalls.push("pin"),
       onToggleDelivery: () => writableCalls.push("delivery"),
       onExpand: () => writableCalls.push("expand"),
+      onAccept: () => writableCalls.push("accept"),
+      onReject: () => writableCalls.push("reject"),
     }),
   );
   writable.stdin.write(" ");
@@ -160,9 +184,13 @@ test("context inspector input controller dispatches only enabled human actions",
   await waitForCondition(() => writableCalls.includes("pin"));
   writable.stdin.write("\r");
   await waitForCondition(() => writableCalls.includes("expand"));
+  writable.stdin.write("a");
+  await waitForCondition(() => writableCalls.includes("accept"));
+  writable.stdin.write("r");
+  await waitForCondition(() => writableCalls.includes("reject"));
   writable.instance.unmount();
   writable.instance.cleanup();
-  assert.deepEqual(writableCalls, ["delivery", "pin", "expand"]);
+  assert.deepEqual(writableCalls, ["delivery", "pin", "expand", "accept", "reject"]);
 });
 
 test("expanded context details route arrow keys to scrolling instead of source movement", async () => {
@@ -207,6 +235,27 @@ test("composer only suppresses context mutation keys when actions are enabled", 
   instance.cleanup();
 
   assert.deepEqual(changes, ["p"]);
+});
+
+test("composer suppresses optimizer keys only while advice actions are enabled", async () => {
+  const changes = [];
+  const { stdin, instance } = renderWithInput(
+    React.createElement(Composer, {
+      value: "",
+      onChange: (value) => changes.push(value),
+      onSubmit: async () => {},
+      suppressInspectorKeys: true,
+      suppressInspectorMutationKeys: false,
+      suppressInspectorAdviceKeys: true,
+    }),
+  );
+
+  stdin.write("a");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  instance.unmount();
+  instance.cleanup();
+
+  assert.deepEqual(changes, []);
 });
 
 test("composer does not suppress a mutation letter after locally pending text", async () => {

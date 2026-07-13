@@ -3036,6 +3036,164 @@ test("WorkShellEngine submits exactly the inspected packet receipt", async () =>
   assert.ok(ledgerPreviews.some((entry) => entry.packetId === "packet-lifecycle-2"));
 });
 
+test("WorkShellEngine generates optimizer advice only after a submitted turn", async () => {
+  const generated = [];
+  const invalidated = [];
+  const { engine, ledgerSubmissions } = createLifecycleLedgerHarness({
+    engineOverrides: {
+      async generateContextSuggestions({ receipt, packet }) {
+        generated.push({ receiptId: receipt.id, packetId: packet.id, state: receipt.state });
+        return [{
+          id: `suggestion-${receipt.id}`,
+          packetReceiptId: receipt.id,
+          sourceId: "pinned-auth",
+          action: "keep",
+          reasonCode: "mandatory-guidance",
+          reasonText: "Mandatory guidance remains active.",
+          status: "proposed",
+          createdAt: "2026-07-13T00:00:01.000Z",
+        }];
+      },
+      invalidateContextSuggestions(receiptId) {
+        invalidated.push(receiptId);
+        return 1;
+      },
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("first turn");
+
+  const firstReceiptId = ledgerSubmissions[0].receiptId;
+  assert.deepEqual(generated, [{
+    receiptId: firstReceiptId,
+    packetId: ledgerSubmissions[0].packetId,
+    state: "submitted",
+  }]);
+  assert.equal(engine.getState().contextPolicySuggestions[0]?.packetReceiptId, firstReceiptId);
+  assert.equal(engine.getState().contextAdviceUnavailable, undefined);
+  assert.ok(engine.getState().entries.some((entry) => entry.role === "assistant" && entry.text === "lifecycle-ok"));
+
+  await engine.handleSubmit("second turn");
+
+  assert.deepEqual(invalidated, [firstReceiptId]);
+  assert.equal(engine.getState().contextPolicySuggestions[0]?.packetReceiptId, ledgerSubmissions[1].receiptId);
+});
+
+test("WorkShellEngine keeps the assistant reply when optimizer advice fails", async () => {
+  const { engine } = createLifecycleLedgerHarness({
+    engineOverrides: {
+      async generateContextSuggestions() {
+        throw new Error("optimizer database unavailable");
+      },
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("reply must survive");
+
+  assert.ok(engine.getState().entries.some((entry) => entry.role === "assistant" && entry.text === "lifecycle-ok"));
+  assert.deepEqual(engine.getState().contextPolicySuggestions, []);
+  assert.equal(engine.getState().contextAdviceUnavailable, "Context optimizer unavailable; reply kept.");
+});
+
+test("WorkShellEngine applies accepted advice and never applies rejected advice", async () => {
+  const mutations = [];
+  const resolutions = [];
+  const makeSuggestion = (status = "proposed") => ({
+    id: "suggestion-hold-auth",
+    packetReceiptId: "preview-1",
+    sourceId: "pinned-auth",
+    action: "hold-back",
+    reasonCode: "low-trust-token-hotspot",
+    reasonText: "External source exceeds the strict hotspot threshold.",
+    estimatedTokenSaving: 8,
+    status,
+    createdAt: "2026-07-13T00:00:01.000Z",
+    ...(status === "proposed" ? {} : { resolvedAt: "2026-07-13T00:00:02.000Z" }),
+  });
+  const createHarness = () => createLifecycleLedgerHarness({
+    engineOverrides: {
+      async generateContextSuggestions() {
+        return [makeSuggestion()];
+      },
+      resolveContextSuggestion(id, status) {
+        resolutions.push({ id, status });
+        return makeSuggestion(status);
+      },
+      mutateContextSource(action) {
+        mutations.push(action);
+        return {
+          id: `action-${mutations.length}`,
+          action: "hold-back",
+          sourceId: action.id,
+          sourceLabel: "auth.ts",
+          message: "Held back auth.ts",
+          canUndo: true,
+        };
+      },
+    },
+  });
+
+  const accepted = createHarness().engine;
+  await accepted.initialize();
+  await accepted.handleSubmit("accept advice");
+  await accepted.acceptContextSuggestion("suggestion-hold-auth");
+  assert.deepEqual(resolutions.at(-1), { id: "suggestion-hold-auth", status: "accepted" });
+  assert.deepEqual(mutations, [{ kind: "forget", id: "pinned-auth" }]);
+  assert.equal(accepted.getState().contextPolicySuggestions[0]?.status, "accepted");
+
+  const rejected = createHarness().engine;
+  await rejected.initialize();
+  await rejected.handleSubmit("reject advice");
+  await rejected.rejectContextSuggestion("suggestion-hold-auth");
+  assert.deepEqual(resolutions.at(-1), { id: "suggestion-hold-auth", status: "rejected" });
+  assert.deepEqual(mutations, [{ kind: "forget", id: "pinned-auth" }]);
+  assert.equal(rejected.getState().contextPolicySuggestions[0]?.status, "rejected");
+});
+test("WorkShellEngine forces condensed-history refresh for accepted summarize advice", async () => {
+  const effects = [];
+  const suggestion = (status = "proposed") => ({
+    id: "suggestion-summarize-history",
+    packetReceiptId: "preview-1",
+    sourceId: "pinned-auth",
+    action: "summarize",
+    reasonCode: "stale-condensed-history",
+    reasonText: "Condensed history is stale.",
+    status,
+    createdAt: "2026-07-13T00:00:01.000Z",
+    ...(status === "proposed" ? {} : { resolvedAt: "2026-07-13T00:00:02.000Z" }),
+  });
+  const { engine } = createLifecycleLedgerHarness({
+    engineOverrides: {
+      async generateContextSuggestions() {
+        return [suggestion()];
+      },
+      resolveContextSuggestion(_id, status) {
+        effects.push(`resolve:${status}`);
+        return suggestion(status);
+      },
+      async refreshCondensedHistory(input) {
+        effects.push(`summarize:${input.sessionId}:${input.traceLines.length}`);
+      },
+      invalidateContextSuggestions(receiptId) {
+        effects.push(`stale:${receiptId}`);
+        return 0;
+      },
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("summarize advice");
+  await engine.acceptContextSuggestion("suggestion-summarize-history");
+
+  assert.match(effects[0] ?? "", /^resolve:accepted$/);
+  assert.match(effects[1] ?? "", /^summarize:session-lifecycle-1:\d+$/);
+  assert.equal(effects[2], "stale:preview-1");
+  assert.equal(engine.getState().contextPolicySuggestions[0]?.status, "accepted");
+});
+
+
 test("WorkShellEngine blocks provider when a protected source disappears", async () => {
   const {
     engine,

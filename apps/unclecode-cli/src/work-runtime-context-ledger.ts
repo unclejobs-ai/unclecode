@@ -1,12 +1,17 @@
 import { randomUUID } from "node:crypto";
 
 import type { createAgentOpsStore } from "@unclecode/agentops-db";
-import { buildContextPacketSourceRefs } from "@unclecode/orchestrator";
+import {
+  buildContextPacketSourceRefs,
+  evaluateContextPolicy,
+} from "@unclecode/orchestrator";
 import type {
   ContextPacketReceipt,
   ContextPacketReceiptSourceRef,
   ContextPacketView,
   ContextPacketViewActionReceipt,
+  ContextPolicySuggestion,
+  ContextPolicySuggestionState,
   SubmitContextPacketReceiptInput,
 } from "@unclecode/contracts";
 
@@ -23,6 +28,16 @@ export type ContextLedgerRuntime = {
   getReceipt(receiptId: string): ContextPacketReceipt | undefined;
   getActivePreview(sessionId: string): ContextPacketReceipt | undefined;
   protectedSourceIds(): ReadonlySet<string>;
+  generateSuggestions(input: {
+    receipt: ContextPacketReceipt;
+    packet: ContextPacketView;
+  }): readonly ContextPolicySuggestion[];
+  resolveSuggestion(
+    suggestionId: string,
+    status: Extract<ContextPolicySuggestionState, "accepted" | "rejected">,
+  ): ContextPolicySuggestion;
+  invalidateSuggestions(receiptId: string): number;
+  listSuggestions(receiptId: string): readonly ContextPolicySuggestion[];
 };
 
 export type ContextLedgerStoreHandle = {
@@ -121,6 +136,7 @@ export function createContextLedgerRuntime(access: {
 
     if (active !== undefined) {
       store.invalidateContextPacketReceipt(projectId, active.id);
+      store.markContextPolicySuggestionsStale(active.id);
     }
 
     const recordInput: {
@@ -155,7 +171,9 @@ export function createContextLedgerRuntime(access: {
     previewPacket,
     invalidatePreview(receiptId) {
       const { store, projectId } = access.requireStore();
-      return store.invalidateContextPacketReceipt(projectId, receiptId);
+      const receipt = store.invalidateContextPacketReceipt(projectId, receiptId);
+      store.markContextPolicySuggestionsStale(receiptId);
+      return receipt;
     },
     submitPreview(input) {
       const { store, projectId } = access.requireStore();
@@ -173,6 +191,26 @@ export function createContextLedgerRuntime(access: {
     getActivePreview(sessionId) {
       const { store, projectId } = access.requireStore();
       return store.getActiveContextPacketPreview(projectId, sessionId);
+    },
+    generateSuggestions(input) {
+      const { store } = access.requireStore();
+      const suggestions = evaluateContextPolicy(input);
+      for (const suggestion of suggestions) {
+        store.addContextPolicySuggestion(suggestion);
+      }
+      return suggestions;
+    },
+    resolveSuggestion(suggestionId, status) {
+      const { store } = access.requireStore();
+      return store.resolveContextPolicySuggestion(suggestionId, status);
+    },
+    invalidateSuggestions(receiptId) {
+      const { store } = access.requireStore();
+      return store.markContextPolicySuggestionsStale(receiptId);
+    },
+    listSuggestions(receiptId) {
+      const { store } = access.requireStore();
+      return store.listContextPolicySuggestions(receiptId);
     },
     protectedSourceIds() {
       access.requireStore();

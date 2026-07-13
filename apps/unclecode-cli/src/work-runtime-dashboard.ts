@@ -12,6 +12,8 @@ import type {
   ContextPacketView,
   ContextPacketViewActionReceipt,
   ContextPacketViewItem,
+  ContextPolicySuggestion,
+  ContextPolicySuggestionState,
   ExecutionTraceEvent,
   ProviderId,
   ConsoleMotionPreference,
@@ -112,6 +114,20 @@ export type StartReplOptions = {
   submitContextPacketReceipt?: ((
     input: Omit<SubmitContextPacketReceiptInput, "projectId">,
   ) => ContextPacketReceipt) | undefined;
+  generateContextSuggestions?: ((input: {
+    readonly receipt: ContextPacketReceipt;
+    readonly packet: ContextPacketView;
+  }) => Promise<readonly ContextPolicySuggestion[]>) | undefined;
+  resolveContextSuggestion?: ((
+    suggestionId: string,
+    status: Extract<ContextPolicySuggestionState, "accepted" | "rejected">,
+  ) => ContextPolicySuggestion) | undefined;
+  invalidateContextSuggestions?: ((receiptId: string) => number) | undefined;
+  refreshCondensedHistory?: ((input: {
+    readonly cwd: string;
+    readonly sessionId: string;
+    readonly traceLines: readonly string[];
+  }) => Promise<void>) | undefined;
 };
 
 type StartReplTraceEvent =
@@ -286,6 +302,18 @@ export function createManagedDashboardInput(
         : {}),
       ...(session.options.submitContextPacketReceipt !== undefined
         ? { submitContextPacketReceipt: session.options.submitContextPacketReceipt }
+        : {}),
+      ...(session.options.generateContextSuggestions !== undefined
+        ? { generateContextSuggestions: session.options.generateContextSuggestions }
+        : {}),
+      ...(session.options.resolveContextSuggestion !== undefined
+        ? { resolveContextSuggestion: session.options.resolveContextSuggestion }
+        : {}),
+      ...(session.options.invalidateContextSuggestions !== undefined
+        ? { invalidateContextSuggestions: session.options.invalidateContextSuggestions }
+        : {}),
+      ...(session.options.refreshCondensedHistory !== undefined
+        ? { refreshCondensedHistory: session.options.refreshCondensedHistory }
         : {}),
       ...(session.options.resolveContextSourceDetail !== undefined
         ? { resolveContextSourceDetail: session.options.resolveContextSourceDetail }

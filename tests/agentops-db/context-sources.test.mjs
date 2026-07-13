@@ -872,8 +872,9 @@ test("suggestions resolve once and stale only while proposed for their receipt",
     /unsupported context policy resolution/i,
   );
 
-  assert.equal(store.markContextPolicySuggestionsStale("receipt-1"), 0);
-  store.invalidateContextPacketReceipt("project-1", "receipt-1");
+  // Suggestions are generated only after submission, and submitted receipts
+  // are terminal. The lifecycle caller explicitly stales their remaining
+  // proposals when a newer packet or accepted mutation supersedes them.
   assert.equal(store.markContextPolicySuggestionsStale("receipt-1"), 1);
   assert.equal(store.markContextPolicySuggestionsStale("receipt-1"), 0);
   assert.deepEqual(

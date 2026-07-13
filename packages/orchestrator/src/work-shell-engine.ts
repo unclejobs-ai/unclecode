@@ -48,6 +48,7 @@ import {
   createWorkShellTraceLinePatch,
   resolveModeDefaultReasoning,
 } from "./work-shell-engine-state.js";
+import { runWorkShellContextAdviceEffects } from "./work-shell-engine-post-turns.js";
 import { applyWorkShellTraceEvent } from "./work-shell-engine-trace.js";
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 import {
@@ -68,6 +69,8 @@ import type {
   ContextPacketViewActionReceipt,
   ContextPacketViewItem,
   ContextProfileId,
+  ContextPolicySuggestion,
+  ContextPolicySuggestionState,
   PromptManifest,
   SubmitContextPacketReceiptInput,
   WorkGraph,
@@ -368,6 +371,9 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly contextPacketChange?: ContextPacketChangeClassification | undefined;
   readonly contextIndicator?: string | undefined;
   readonly contextSourceActionsEnabled: boolean;
+  readonly contextPolicySuggestions: readonly ContextPolicySuggestion[];
+  readonly contextAdviceUnavailable?: string | undefined;
+  readonly contextAdviceActionsEnabled: boolean;
   readonly modelWindow: number;
   readonly queuedCount: number;
   readonly queuePaused: boolean;
@@ -524,6 +530,20 @@ export type WorkShellEngineInput<
   readonly submitContextPacketReceipt?: ((
     input: Omit<SubmitContextPacketReceiptInput, "projectId">,
   ) => ContextPacketReceipt) | undefined;
+  readonly generateContextSuggestions?: ((input: {
+    readonly receipt: ContextPacketReceipt;
+    readonly packet: ContextPacketView;
+  }) => Promise<readonly ContextPolicySuggestion[]>) | undefined;
+  readonly resolveContextSuggestion?: ((
+    suggestionId: string,
+    status: Extract<ContextPolicySuggestionState, "accepted" | "rejected">,
+  ) => ContextPolicySuggestion) | undefined;
+  readonly invalidateContextSuggestions?: ((receiptId: string) => number) | undefined;
+  readonly refreshCondensedHistory?: ((input: {
+    readonly cwd: string;
+    readonly sessionId: string;
+    readonly traceLines: readonly string[];
+  }) => Promise<void>) | undefined;
 };
 
 type PendingDecision = {
@@ -661,6 +681,20 @@ export class WorkShellEngine<
   private readonly submitContextPacketReceipt?: ((
     input: Omit<SubmitContextPacketReceiptInput, "projectId">,
   ) => ContextPacketReceipt) | undefined;
+  private readonly generateContextSuggestions?: ((input: {
+    readonly receipt: ContextPacketReceipt;
+    readonly packet: ContextPacketView;
+  }) => Promise<readonly ContextPolicySuggestion[]>) | undefined;
+  private readonly resolveContextSuggestion?: ((
+    suggestionId: string,
+    status: Extract<ContextPolicySuggestionState, "accepted" | "rejected">,
+  ) => ContextPolicySuggestion) | undefined;
+  private readonly invalidateContextSuggestions?: ((receiptId: string) => number) | undefined;
+  private readonly refreshCondensedHistory?: ((input: {
+    readonly cwd: string;
+    readonly sessionId: string;
+    readonly traceLines: readonly string[];
+  }) => Promise<void>) | undefined;
   private readonly interactionBridge?: WorkShellInteractionBridge | undefined;
   private readonly subscribers = new Set<(state: WorkShellEngineState<Reasoning>) => void>();
   private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
@@ -720,6 +754,10 @@ export class WorkShellEngine<
     this.previewContextPacket = input.previewContextPacket;
     this.revalidateContextPacket = input.revalidateContextPacket;
     this.submitContextPacketReceipt = input.submitContextPacketReceipt;
+    this.generateContextSuggestions = input.generateContextSuggestions;
+    this.resolveContextSuggestion = input.resolveContextSuggestion;
+    this.invalidateContextSuggestions = input.invalidateContextSuggestions;
+    this.refreshCondensedHistory = input.refreshCondensedHistory;
     this.sessionId = input.sessionId ?? `work-${randomUUID()}`;
     this.currentContextSummaryLines = input.options.contextSummaryLines;
     this.lastSessionSummary = input.options.initialSessionSummary ?? "Work shell ready.";
@@ -730,6 +768,7 @@ export class WorkShellEngine<
         buildContextPanel: input.buildContextPanel,
       }),
       contextSourceActionsEnabled: input.mutateContextSource !== undefined,
+      contextAdviceActionsEnabled: input.resolveContextSuggestion !== undefined,
     };
     this.lastCompletedTurnSnapshot = resolveLastCompletedTurn(
       input.options.initialEntries ?? this.state.entries,
@@ -966,6 +1005,96 @@ export class WorkShellEngine<
     }
     await this.mutateInspectorContextSource({ kind: "include", id: source.id });
   }
+  async acceptContextSuggestion(suggestionId: string): Promise<void> {
+    const suggestion = this.state.contextPolicySuggestions.find(
+      (candidate) => candidate.id === suggestionId && candidate.status === "proposed",
+    );
+    if (!suggestion || !this.resolveContextSuggestion) {
+      return;
+    }
+
+
+    try {
+      const resolved = this.resolveContextSuggestion(suggestion.id, "accepted");
+      this.setState({
+        contextPolicySuggestions: this.state.contextPolicySuggestions.map((candidate) =>
+          candidate.id === resolved.id ? resolved : candidate
+        ),
+        contextAdviceUnavailable: undefined,
+      });
+      switch (suggestion.action) {
+        case "keep":
+          return;
+        case "hold-back":
+          if (!this.mutateContextSource) {
+            throw new Error("Context source mutation is unavailable.");
+          }
+          await this.mutateInspectorContextSource({
+            kind: "forget",
+            id: suggestion.sourceId,
+          });
+          break;
+        case "refresh": {
+          const packet = await this.refreshContextPacket(true);
+          this.captureContextPacketPreview(packet);
+          break;
+        }
+        case "summarize": {
+          if (!this.refreshCondensedHistory) {
+            throw new Error("Condensed history refresh is unavailable.");
+          }
+          await this.refreshCondensedHistory({
+            cwd: this.options.cwd,
+            sessionId: this.sessionId,
+            traceLines: this.state.traceLines,
+          });
+          const packet = await this.refreshContextPacket(true);
+          this.captureContextPacketPreview(packet);
+          break;
+        }
+      }
+      this.invalidateProposedContextSuggestions(suggestion.packetReceiptId);
+    } catch {
+      this.setState({
+        contextAdviceUnavailable: "Context optimizer unavailable; reply kept.",
+      });
+    }
+  }
+
+  async rejectContextSuggestion(suggestionId: string): Promise<void> {
+    const suggestion = this.state.contextPolicySuggestions.find(
+      (candidate) => candidate.id === suggestionId && candidate.status === "proposed",
+    );
+    if (!suggestion || !this.resolveContextSuggestion) {
+      return;
+    }
+    try {
+      const resolved = this.resolveContextSuggestion(suggestion.id, "rejected");
+      this.setState({
+        contextPolicySuggestions: this.state.contextPolicySuggestions.map((candidate) =>
+          candidate.id === resolved.id ? resolved : candidate
+        ),
+        contextAdviceUnavailable: undefined,
+      });
+    } catch {
+      this.setState({
+        contextAdviceUnavailable: "Context optimizer unavailable; reply kept.",
+      });
+    }
+  }
+
+  private invalidateProposedContextSuggestions(packetReceiptId: string): void {
+    const resolvedAt = new Date().toISOString();
+    this.setState({
+      contextPolicySuggestions: this.state.contextPolicySuggestions.map((suggestion) =>
+        suggestion.packetReceiptId === packetReceiptId && suggestion.status === "proposed"
+          ? { ...suggestion, status: "stale", resolvedAt }
+          : suggestion
+      ),
+    });
+    this.invalidateContextSuggestions?.(packetReceiptId);
+  }
+
 
   private async mutateInspectorContextSource(action: {
     readonly kind: "pin" | "unpin" | "forget" | "include";
@@ -1423,7 +1552,7 @@ export class WorkShellEngine<
               this.state.traceLines,
             ),
           });
-          await executeWorkShellPromptCommandSubmit({
+          const completed = await executeWorkShellPromptCommandSubmit({
             transcriptText: route.line,
             promptCommand: route.promptCommand,
             state: this.state,
@@ -1461,6 +1590,9 @@ export class WorkShellEngine<
             turnId,
             ...(contextReceipt !== undefined ? { contextReceipt } : {}),
           });
+          if (completed && contextPacket && contextReceipt && isCurrentTurn()) {
+            await this.refreshContextAdvice(contextReceipt, contextPacket);
+          }
         } finally {
           this.clearActiveTurnAbortController(abortController);
           this.clearSubmitPreparationIfStillPending(isCurrentTurn);
@@ -1515,7 +1647,7 @@ export class WorkShellEngine<
               this.state.traceLines,
             ),
           });
-          await executeWorkShellChatSubmit({
+          const completed = await executeWorkShellChatSubmit({
             line: route.line,
             resolveComposerInput: this.resolveComposerInput,
             ...(pendingAttachments && pendingAttachments.length > 0
@@ -1557,6 +1689,9 @@ export class WorkShellEngine<
             turnId,
             ...(contextReceipt !== undefined ? { contextReceipt } : {}),
           });
+          if (completed && contextPacket && contextReceipt && isCurrentTurn()) {
+            await this.refreshContextAdvice(contextReceipt, contextPacket);
+          }
         } finally {
           this.clearActiveTurnAbortController(abortController);
           this.clearSubmitPreparationIfStillPending(isCurrentTurn);
@@ -2094,6 +2229,36 @@ export class WorkShellEngine<
       return "blocked";
     }
     return prepared;
+  }
+
+  private async refreshContextAdvice(
+    receipt: ContextPacketReceipt,
+    packet: ContextPacketView,
+  ): Promise<void> {
+    if (!this.generateContextSuggestions) {
+      return;
+    }
+
+    const result = await runWorkShellContextAdviceEffects(async () => {
+      const priorReceiptIds = new Set(
+        this.state.contextPolicySuggestions
+          .filter(
+            (suggestion) =>
+              suggestion.status === "proposed"
+              && suggestion.packetReceiptId !== receipt.id,
+          )
+          .map((suggestion) => suggestion.packetReceiptId),
+      );
+      for (const priorReceiptId of priorReceiptIds) {
+        this.invalidateContextSuggestions?.(priorReceiptId);
+      }
+      return this.generateContextSuggestions?.({ receipt, packet }) ?? [];
+    });
+
+    this.setState({
+      contextPolicySuggestions: result.suggestions,
+      contextAdviceUnavailable: result.unavailable,
+    });
   }
 
   private composeProviderPrompt(packet: ContextPacketView, userPrompt: string): string {

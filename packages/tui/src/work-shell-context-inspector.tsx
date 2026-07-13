@@ -3,6 +3,7 @@ import type {
   ContextPacketReceipt,
   ContextPacketView,
   ContextPacketViewActionReceipt,
+  ContextPolicySuggestion,
 } from "@unclecode/contracts";
 import { Box, Text } from "ink";
 import React from "react";
@@ -20,6 +21,7 @@ import {
 import { renderContextInspectorFocus } from "./work-shell-context-inspector-focus.js";
 import { renderContextInspectorGroupedViewport } from "./work-shell-context-inspector-sources.js";
 import { renderContextInspectorWarnings } from "./work-shell-context-inspector-warnings.js";
+import { renderWorkShellContextAdvice } from "./work-shell-context-advice.js";
 
 export {
   computeContextMeterFill,
@@ -47,6 +49,9 @@ export function renderContextInspectorOverlay(input: {
   readonly previewReceipt?: ContextPacketReceipt | undefined;
   readonly submittedReceipt?: ContextPacketReceipt | undefined;
   readonly packetChange?: ContextPacketChangeClassification | undefined;
+  readonly contextPolicySuggestions?: readonly ContextPolicySuggestion[] | undefined;
+  readonly contextAdviceUnavailable?: string | undefined;
+  readonly contextAdviceActionsEnabled?: boolean | undefined;
   readonly terminalRows?: number;
 }): React.ReactNode {
   void input.actionReceipt;
@@ -113,6 +118,14 @@ export function renderContextInspectorOverlay(input: {
         {renderContextInspectorWarnings({
           packet: input.packet,
           width: input.width,
+          palette,
+        })}
+        {renderWorkShellContextAdvice({
+          packet: input.packet,
+          suggestions: input.contextPolicySuggestions ?? [],
+          unavailable: input.contextAdviceUnavailable,
+          ...(selectedRow ? { selectedSourceId: selectedRow.item.id } : {}),
+          actionsEnabled: input.contextAdviceActionsEnabled ?? false,
           palette,
         })}
         <Text color={palette.textMuted}>

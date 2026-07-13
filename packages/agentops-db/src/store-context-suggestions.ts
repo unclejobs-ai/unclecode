@@ -117,13 +117,7 @@ export function markContextPolicySuggestionsStale(
       `UPDATE context_policy_suggestions
        SET status = 'stale', resolved_at = ?
        WHERE packet_receipt_id = ?
-         AND status = 'proposed'
-         AND EXISTS (
-           SELECT 1
-           FROM context_packet_receipts AS receipt
-           WHERE receipt.id = context_policy_suggestions.packet_receipt_id
-             AND receipt.state = 'invalidated'
-         )`,
+         AND status = 'proposed'`,
     )
     .run(new Date().toISOString(), packetReceiptId);
   return Number(result.changes);

@@ -193,6 +193,10 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
     assert.equal(result.options.browserOAuthAvailable, false);
     assert.equal(typeof result.agent.runTurn, "function");
     assert.equal(typeof result.options.resolveContextPacket, "function");
+    assert.equal(typeof result.options.generateContextSuggestions, "function");
+    assert.equal(typeof result.options.resolveContextSuggestion, "function");
+    assert.equal(typeof result.options.invalidateContextSuggestions, "function");
+    assert.equal(typeof result.options.refreshCondensedHistory, "function");
 
     const packet = await result.options.resolveContextPacket({
       cwd: workspaceRoot,
@@ -283,6 +287,53 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
     );
     assert.doesNotMatch(JSON.stringify(packet), /RAW_LEDGER_SENTINEL_DO_NOT_SHOW/);
     assert.doesNotMatch(JSON.stringify(packet), /RAW_EVIDENCE_SENTINEL_DO_NOT_SHOW/);
+    const preview = result.options.previewContextPacket({
+      sessionId: "work-test",
+      packet,
+      profile: "build",
+    });
+    const submitted = result.options.submitContextPacketReceipt({
+      receiptId: preview.id,
+      sessionId: "work-test",
+      turnId: "turn-work-test-1",
+    });
+    const suggestions = await result.options.generateContextSuggestions({
+      receipt: submitted,
+      packet,
+    });
+    const mandatorySuggestion = suggestions.find(
+      (suggestion) => suggestion.reasonCode === "mandatory-guidance",
+    );
+    assert.ok(mandatorySuggestion, "submitted packet produces mandatory keep advice");
+    assert.equal(mandatorySuggestion.packetReceiptId, submitted.id);
+    assert.doesNotMatch(JSON.stringify(suggestions), /Use workspace guidance sentinel text/);
+    assert.equal(
+      result.options.resolveContextSuggestion(mandatorySuggestion.id, "accepted").status,
+      "accepted",
+    );
+    assert.equal(result.options.invalidateContextSuggestions(submitted.id), suggestions.length - 1);
+    await result.options.refreshCondensedHistory({
+      cwd: workspaceRoot,
+      sessionId: "work-test",
+      traceLines: Array.from(
+        { length: 10 },
+        (_, index) => `Optimizer lifecycle trace ${index + 1}.`,
+      ),
+    });
+    const refreshedPacket = await result.options.resolveContextPacket({
+      cwd: workspaceRoot,
+      sessionId: "work-test",
+      contextSummaryLines: [],
+      bridgeLines: [],
+      memoryLines: [],
+      traceLines: [],
+    });
+    assert.ok(
+      [...refreshedPacket.included, ...refreshedPacket.excluded].some(
+        (item) => item.category === "condensed-history",
+      ),
+      "forced refresh rebuilds the condensed-history provider before packet selection",
+    );
   } finally {
     process.env = originalEnv;
     rmSync(workspaceRoot, { recursive: true, force: true });

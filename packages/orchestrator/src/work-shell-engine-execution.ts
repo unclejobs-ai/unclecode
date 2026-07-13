@@ -404,7 +404,7 @@ export async function executeWorkShellPromptTurn<
   recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string; contextReceiptId?: string; packetId?: string }) => void) | undefined;
   readonly turnId?: string | undefined;
   readonly contextReceipt?: ContextPacketReceipt | undefined;
-}): Promise<void> {
+}): Promise<boolean> {
   input.appendEntries({ role: "user", text: input.promptTurn.transcriptText });
   const turnStartedAt = Date.now();
   input.setState(createPromptTurnStartPatch({
@@ -463,6 +463,7 @@ export async function executeWorkShellPromptTurn<
     } catch {
       /* non-blocking */
     }
+    return true;
   } catch (error) {
     const failure = await resolvePromptTurnFailureResult({
       error,
@@ -505,6 +506,7 @@ export async function executeWorkShellPromptTurn<
     } catch {
       /* non-blocking */
     }
+    return false;
   } finally {
     input.setState(createPromptTurnFinalizePatch(input.state));
   }
