@@ -37,25 +37,25 @@ export function renderContextTurnReceipt(input: {
   readonly receipt: ContextPacketReceipt;
   readonly width: number;
   readonly expanded: boolean;
+  readonly showPrimary?: boolean;
 }): React.ReactNode {
-  const width = Math.max(16, input.width);
+  const width = Math.max(0, Math.trunc(input.width));
+  const summary = truncateForDisplayWidth(formatContextTurnReceiptLine(input.receipt), width);
   const primary = truncateForDisplayWidth(
     `${input.receipt.state.toUpperCase()} ${input.receipt.packetId} ${input.receipt.turnId ?? "turn unknown"}`,
     width,
   );
-  const summary = truncateForDisplayWidth(formatContextTurnReceiptLine(input.receipt), width);
   if (!input.expanded) {
-    return (
+    return input.showPrimary ? (
       <Box flexDirection="column">
         <Text color="gray" bold>{primary}</Text>
         <Text color="gray">{summary}</Text>
       </Box>
-    );
+    ) : <Text color="gray">{summary}</Text>;
   }
 
   return (
     <Box flexDirection="column">
-      <Text color="gray" bold>{primary}</Text>
       <Text color="gray">{summary}</Text>
       <Text color="gray">
         {truncateForDisplayWidth(

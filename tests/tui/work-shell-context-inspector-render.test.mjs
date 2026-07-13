@@ -165,7 +165,13 @@ test("Context Desk renders preview and meaning-change proof", async () => {
     contextPacket: packet({ id: "crp-b203" }),
     contextPreviewReceipt: receipt({ packetId: "crp-a91f" }),
     contextPacketChange: packetChange,
-    modelWindow: 128_000,
+    contextSubmittedReceipt: receipt({
+      id: "receipt-submitted",
+      packetId: "crp-a91f",
+      state: "submitted",
+      turnId: "turn-session-1-6",
+    }),
+    terminalColumns: 52,
   });
 
   for (const proof of [output, rendered]) {
@@ -173,6 +179,15 @@ test("Context Desk renders preview and meaning-change proof", async () => {
     assert.match(proof, /crp-a91f -> crp-b203/);
     assert.match(proof, /review required/i);
   }
+  assert.equal(rendered.match(/PACKET CHANGED|NEXT REQUEST|SUBMITTED/g)?.length, 1);
+  const narrowProof = formatContextInspectorPacketProofLines({
+    packet: packet({ id: "crp-b203" }),
+    previewReceipt: receipt({ packetId: "crp-a91f" }),
+    packetChange,
+    modelWindow: 128_000,
+    width: 48,
+  }).join("\n");
+  assert.match(narrowProof, /review required/i);
 });
 
 test("Context Desk preview renders honest unknown token state", async () => {
@@ -227,31 +242,48 @@ test("WorkShellView renders submitted proof outside the conversation transcript"
   assert.doesNotMatch(output, /System · state[\s\S]*ctx crp-b203/);
 });
 
-test("expanded turn receipt clips metadata to a narrow terminal width", async () => {
-  const node = renderContextTurnReceipt({
-    receipt: receipt({
-      id: "receipt-with-an-intentionally-long-identifier",
-      packetId: "crp-with-an-intentionally-long-packet-identifier",
-    }),
-    width: 28,
-    expanded: true,
+test("expanded turn receipt proves metadata without leaking content and respects narrow widths", async () => {
+  const contentSentinel = "SECRET SOURCE CONTENT MUST NOT RENDER";
+  const expandedReceipt = receipt({
+    id: "receipt-with-an-intentionally-long-identifier",
+    packetId: "crp-with-an-intentionally-long-packet-identifier",
+    sourceRefs: receipt().sourceRefs.map((source, index) => (
+      index === 0 ? { ...source, preview: contentSentinel } : source
+    )),
   });
-  const { instance, getOutput } = renderDebugFrame(
-    React.createElement(React.Fragment, null, node),
-    { columns: 28, rows: 20 },
-  );
+  let fullOutput = "";
 
-  try {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const output = getOutput();
-    for (const line of output.split("\n")) {
-      assert.ok(line.length <= 28, `receipt line exceeded width: ${line}`);
+  for (const width of [100, 32, 8]) {
+    const node = renderContextTurnReceipt({
+      receipt: expandedReceipt,
+      width,
+      expanded: true,
+    });
+    const { instance, getOutput } = renderDebugFrame(
+      React.createElement(React.Fragment, null, node),
+      { columns: width, rows: 20 },
+    );
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const output = getOutput();
+      for (const line of output.split("\n")) {
+        assert.ok(line.length <= width, `receipt line exceeded width ${width}: ${line}`);
+      }
+      if (width === 100) {
+        fullOutput = output;
+      }
+    } finally {
+      instance.unmount();
+      instance.cleanup();
     }
-    assert.doesNotMatch(output, /Workspace instructions stay active/);
-  } finally {
-    instance.unmount();
-    instance.cleanup();
   }
+
+  assert.match(fullOutput, /ctx crp-with-an-intentionally-long-packet-identifier · 14 sources · ~18.1k · 2 memories/);
+  assert.match(fullOutput, /receipt receipt-with-an-intentionally-long-identifier · previewed · estimated/);
+  assert.match(fullOutput, /rules · workspace-guidance · sha · trusted · sent/);
+  assert.match(fullOutput, /memory-1 · memory · sha missing · trust unknown · sent/);
+  assert.doesNotMatch(fullOutput, new RegExp(contentSentinel));
 });
 
 test("WorkShellView renders /context as an interactive source inspector", async () => {

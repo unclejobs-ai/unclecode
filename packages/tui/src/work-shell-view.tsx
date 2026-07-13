@@ -2075,8 +2075,9 @@ export function WorkShellView(props: {
         <Box marginTop={1} flexDirection="column">
           {renderContextTurnReceipt({
             receipt: props.contextSubmittedReceipt,
-            width: Math.max(16, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
+            width: Math.max(0, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
             expanded: false,
+            showPrimary: props.contextPacket === undefined,
           })}
         </Box>
       ) : null}

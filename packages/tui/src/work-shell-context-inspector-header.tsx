@@ -67,7 +67,7 @@ export function formatContextInspectorPacketProofLines(input: {
         input.width,
       ),
       truncateForDisplayWidth(
-        `${input.packetChange.reason} · review required`,
+        `Review required · ${input.packetChange.reason}`,
         input.width,
       ),
     ];
