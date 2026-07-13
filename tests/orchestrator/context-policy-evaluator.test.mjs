@@ -77,10 +77,20 @@ function packet(items, mandatorySourceIds = []) {
 
 const cases = [
   {
-    name: "mandatory guidance",
-    refs: [sourceRef("rules", { category: "workspace-guidance" })],
-    items: [item("rules", { category: "workspace-guidance", freshness: { state: "expired" } })],
-    mandatory: ["rules"],
+    name: "configured prompt mandatory guidance",
+    refs: [sourceRef("provider-system-prompt-configured", { category: "provider-system-prompt" })],
+    items: [item("provider-system-prompt-configured", {
+      category: "provider-system-prompt",
+      freshness: { state: "expired" },
+    })],
+    mandatory: ["provider-system-prompt-configured"],
+    expected: ["mandatory-guidance", "keep"],
+  },
+  {
+    name: "workspace mandatory guidance",
+    refs: [sourceRef("guidance:workspace-sha", { category: "workspace-guidance" })],
+    items: [item("guidance:workspace-sha", { category: "workspace-guidance" })],
+    mandatory: ["guidance:workspace-sha"],
     expected: ["mandatory-guidance", "keep"],
   },
   {
@@ -141,6 +151,37 @@ test("optimizer uses strict hotspot threshold and ignores held sources", () => {
     ]),
   });
   assert.deepEqual(suggestions, []);
+});
+
+for (const [trustTier, expectedCount] of [
+  ["builtin", 0],
+  ["project", 0],
+  ["user", 0],
+  ["external", 1],
+  ["runtime", 1],
+]) {
+  test(`optimizer classifies ${trustTier} trust tier explicitly`, () => {
+    const suggestions = evaluateContextPolicy({
+      receipt: receipt([sourceRef(`tier-${trustTier}`, { trustTier })]),
+      packet: packet([item(`tier-${trustTier}`, { trustTier, tokenEstimate: 201 })]),
+    });
+    assert.equal(suggestions.length, expectedCount);
+  });
+}
+
+test("optimizer compares the 20% threshold exactly across safe integers", () => {
+  const packetTokens = 9_007_199_254_740_989;
+  const sourceTokens = 1_801_439_850_948_198;
+  const [suggestion] = evaluateContextPolicy({
+    receipt: receipt(
+      [sourceRef("large-hotspot", { trustTier: "external" })],
+      { tokenEstimate: packetTokens },
+    ),
+    packet: packet([
+      item("large-hotspot", { trustTier: "external", tokenEstimate: sourceTokens }),
+    ]),
+  });
+  assert.equal(suggestion?.reasonCode, "low-trust-token-hotspot");
 });
 test("optimizer skips low-trust hotspot advice when packet tokens are unknown", () => {
   const unknownBudget = evaluateContextPolicy({

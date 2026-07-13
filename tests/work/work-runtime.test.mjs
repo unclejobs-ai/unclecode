@@ -232,6 +232,12 @@ test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without sta
     assert.ok(providerPromptItem, "packet includes system guidance metadata");
     assert.ok(workspaceGuidanceItem, "packet includes workspace guidance summary with safe label");
     assert.notEqual(providerPromptItem.id, workspaceGuidanceItem.id);
+    assert.ok(
+      packet.manifest?.policy.some(
+        (source) => source.authority === "mandatory" && source.id === workspaceGuidanceItem.id,
+      ),
+      "workspace guidance packet and mandatory policy share one canonical source ID",
+    );
     assert.equal(
       packet.included.some((item) => item.category === "workspace" && /AGENTS\.md/.test(item.label)),
       false,
@@ -442,6 +448,16 @@ test("loadWorkCliBootstrap represents configured provider prompt as metadata wit
           item.reason === "prompt guidance active",
       ),
       "packet includes system guidance metadata",
+    );
+    const configuredItem = packet.included.find(
+      (item) => item.id === "provider-system-prompt-configured",
+    );
+    assert.ok(configuredItem);
+    assert.ok(
+      packet.manifest?.policy.some(
+        (source) => source.authority === "mandatory" && source.id === configuredItem.id,
+      ),
+      "configured prompt packet and mandatory policy share one canonical source ID",
     );
     assert.doesNotMatch(JSON.stringify(packet), /SECRET_PROMPT_SENTINEL_DO_NOT_SHOW/);
     assert.doesNotMatch(packet.preview.join("\n"), /SECRET_PROMPT_SENTINEL_DO_NOT_SHOW/);

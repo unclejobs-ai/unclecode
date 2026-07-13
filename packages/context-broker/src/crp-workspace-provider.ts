@@ -1,3 +1,5 @@
+import { basename } from "node:path";
+
 import type { UpsertContextSourceInput } from "@unclecode/contracts";
 
 import {
@@ -38,24 +40,38 @@ export function createWorkspaceGuidanceProvider(): ContextProvider {
         cwd: input.cwd,
         ...(input.userHomeDir !== undefined ? { userHomeDir: input.userHomeDir } : {}),
       });
-      const lines = guidance.contextSummaryLines;
-      for (let i = 0; i < lines.length; i += 1) {
-        const line = lines[i];
-        if (line === undefined) continue;
-        const text = workspaceGuidancePacketText(line);
-        const id = `workspace-guidance-${i + 1}`;
+      const canonicalSources = guidance.guidanceSources.map((source) => ({
+        id: source.id,
+        label: "Workspace guidance",
+        content: `${basename(source.path)} — ${WORKSPACE_GUIDANCE_SAFE_PREVIEW}`,
+        sha256: source.sha256,
+      }));
+      const sources = canonicalSources.length > 0
+        ? canonicalSources
+        : guidance.contextSummaryLines.map((line, index) => {
+            const text = workspaceGuidancePacketText(line);
+            return {
+              id: `workspace-guidance-${index + 1}`,
+              label: text.label,
+              content: text.content,
+              sha256: undefined,
+            };
+          });
+
+      for (const source of sources) {
         const upsert: UpsertContextSourceInput = {
-          id,
+          id: source.id,
           projectId: input.projectId,
           category: "workspace-guidance",
-          label: text.label,
-          content: text.content,
+          label: source.label,
+          content: source.content,
           reason: "workspace guidance summary",
-          salience: deriveSalience({ base: 0.7, length: text.content.length }),
-          tokenEstimate: estimateTokens(`${text.label} ${text.content}`),
+          salience: deriveSalience({ base: 0.7, length: source.content.length }),
+          tokenEstimate: estimateTokens(`${source.label} ${source.content}`),
+          ...(source.sha256 === undefined ? {} : { sha256: source.sha256 }),
         };
         input.store.upsertContextSource(upsert);
-        touched.push(id);
+        touched.push(source.id);
       }
       return touched;
     },

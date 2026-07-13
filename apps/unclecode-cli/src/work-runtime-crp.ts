@@ -193,10 +193,16 @@ export function createCrpRuntime(
         items: bootstrap.sourceMetadata,
         salience: 0.95,
       });
+      crpState.store.deleteContextSourcesByIdPrefix({
+        projectId: crpState.projectId,
+        idPrefix: "workspace-guidance-",
+      });
       upsertPacketItemsAsContextSources({
         store: crpState.store,
         projectId: crpState.projectId,
-        items: buildContextSummaryItems(input.contextSummaryLines),
+        items: buildContextSummaryItems(input.contextSummaryLines).filter(
+          (item) => item.category !== "workspace-guidance",
+        ),
         salience: 0.9,
       });
       upsertPacketItemsAsContextSources({

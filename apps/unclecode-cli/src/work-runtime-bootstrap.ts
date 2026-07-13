@@ -200,7 +200,7 @@ function buildPromptManifestPolicySources(input: {
   return [
     ...(configuredPrompt.length > 0
       ? [{
-          id: "configured-prompt",
+          id: "provider-system-prompt-configured",
           label: "Configured prompt",
           authority: "mandatory" as const,
           digest: createHash("sha256").update(configuredPrompt).digest("hex"),

@@ -5,6 +5,7 @@ import type {
   ContextPacketReceiptSourceRef,
   ContextPacketView,
   ContextPacketViewItem,
+  ContextPacketViewTrustTier,
   ContextPolicyAction,
   ContextPolicySuggestion,
 } from "@unclecode/contracts";
@@ -27,6 +28,13 @@ const ACTION_PRIORITY: Readonly<Record<ContextPolicyAction, number>> = {
   summarize: 1,
   "hold-back": 2,
   keep: 3,
+};
+const LOW_TRUST_BY_TIER: Readonly<Record<ContextPacketViewTrustTier, boolean>> = {
+  builtin: false,
+  project: false,
+  user: false,
+  external: true,
+  runtime: true,
 };
 
 const MANDATORY_GUIDANCE: SuggestionRule = {
@@ -155,7 +163,7 @@ function isLowTrustTokenHotspot(
   packetTokenEstimate: number | undefined,
 ): boolean {
   const trustTier = ref.trustTier ?? item?.trustTier;
-  if (trustTier !== "external" && trustTier !== "runtime") {
+  if (trustTier === undefined || !LOW_TRUST_BY_TIER[trustTier]) {
     return false;
   }
   const sourceTokens = normalizedTokenEstimate(item?.tokenEstimate);
@@ -163,7 +171,7 @@ function isLowTrustTokenHotspot(
     sourceTokens !== undefined
     && packetTokenEstimate !== undefined
     && packetTokenEstimate > 0
-    && sourceTokens > packetTokenEstimate * 0.2
+    && BigInt(sourceTokens) * 5n > BigInt(packetTokenEstimate)
   );
 }
 
