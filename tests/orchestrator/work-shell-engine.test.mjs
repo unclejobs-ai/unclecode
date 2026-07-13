@@ -3135,13 +3135,18 @@ test("WorkShellEngine applies accepted advice and never applies rejected advice"
     },
   });
 
-  const accepted = createHarness().engine;
+  const acceptedHarness = createHarness();
+  const accepted = acceptedHarness.engine;
   await accepted.initialize();
   await accepted.handleSubmit("accept advice");
+  const submittedPacketId = accepted.getState().contextSubmittedReceipt?.packetId;
+  acceptedHarness.setPacket(createLifecyclePacket({ id: "packet-after-hold-back" }));
   await accepted.acceptContextSuggestion("suggestion-hold-auth");
   assert.deepEqual(resolutions.at(-1), { id: "suggestion-hold-auth", status: "accepted" });
   assert.deepEqual(mutations, [{ kind: "forget", id: "pinned-auth" }]);
   assert.equal(accepted.getState().contextPolicySuggestions[0]?.status, "accepted");
+  assert.equal(accepted.getState().contextActionReceipt?.action, "hold-back");
+  assert.notEqual(accepted.getState().contextPreviewReceipt?.packetId, submittedPacketId);
 
   const rejected = createHarness().engine;
   await rejected.initialize();
