@@ -11,6 +11,7 @@ import { createAgentOpsContextStoreMethods } from "./store-context-methods.js";
 import { createAgentOpsContextReceiptStoreMethods } from "./store-context-receipts.js";
 import { createAgentOpsContextSuggestionStoreMethods } from "./store-context-suggestions.js";
 import { mapArtifactRow, mapLaneRow, mapProjectRow, mapRunRow } from "./store-mappers.js";
+import { createAgentOpsMemoryLineageStoreMethods } from "./store-memory-lineage.js";
 import type {
   AddAgentOpsArtifactInput,
   AddAgentOpsEventInput,
@@ -63,6 +64,7 @@ export function createAgentOpsStore(options: CreateAgentOpsStoreOptions = {}): A
     createAgentOpsContextStoreMethods(db),
     createAgentOpsContextReceiptStoreMethods(db),
     createAgentOpsContextSuggestionStoreMethods(db),
+    createAgentOpsMemoryLineageStoreMethods(db),
   );
 }
 

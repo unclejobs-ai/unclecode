@@ -4,6 +4,8 @@ import type {
   ContextPolicySuggestionState,
   ContextPacketReceipt,
   ContextSourceRecord,
+  MemoryLineageRecord,
+  RecordMemoryLineageInput,
   RecordContextPacketPreviewInput,
   SelectContextSourcesInput,
   SubmitContextPacketReceiptInput,
@@ -175,5 +177,10 @@ export interface AgentOpsStore {
   ): ContextPolicySuggestion;
   markContextPolicySuggestionsStale(packetReceiptId: string): number;
   listContextPolicySuggestions(packetReceiptId: string): readonly ContextPolicySuggestion[];
+  recordMemoryLineage(input: RecordMemoryLineageInput): MemoryLineageRecord;
+  supersedeMemoryLineage(memoryId: string): MemoryLineageRecord;
+  expireMemoryLineage(now?: Date): number;
+  getMemoryLineage(memoryId: string): MemoryLineageRecord | undefined;
+  listActiveMemoryLineage(): readonly MemoryLineageRecord[];
   close(): void;
 }

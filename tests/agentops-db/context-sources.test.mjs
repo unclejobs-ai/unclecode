@@ -29,8 +29,28 @@ function seedProject(store) {
   return store.addProject({ id: "proj_crp", name: "CRP Test", repoPath: "/repos/crp" });
 }
 
-test("schema version bumps to 7 for context optimizer suggestions", () => {
-  assert.equal(AGENTOPS_SCHEMA_VERSION, 7);
+function seedSubmittedReceipt(store, id = "receipt-memory", turnId = "turn-memory") {
+  store.recordContextPacketPreview({
+    id,
+    projectId: "proj_crp",
+    sessionId: `session-${id}`,
+    packetId: `packet-${id}`,
+    profile: "build",
+    tokenEstimateState: "exact",
+    tokenEstimate: 1,
+    sourceCount: 0,
+    sourceRefs: [],
+  });
+  return store.submitContextPacketReceipt({
+    receiptId: id,
+    projectId: "proj_crp",
+    sessionId: `session-${id}`,
+    turnId,
+  });
+}
+
+test("schema version bumps to 8 for memory lineage", () => {
+  assert.equal(AGENTOPS_SCHEMA_VERSION, 8);
 });
 
 test("v3 migration purges legacy context source text instead of preserving possible secrets", () => {
@@ -777,11 +797,11 @@ test("upgraded v5 databases apply receipt and suggestion migrations", () => {
 
   const store = createAgentOpsStore({ home });
   try {
-    assert.equal(AGENTOPS_SCHEMA_VERSION, 7);
+    assert.equal(AGENTOPS_SCHEMA_VERSION, 8);
     const upgraded = new DatabaseSync(store.paths.dbPath);
     try {
       const version = upgraded.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get();
-      assert.equal(version.version, 7);
+      assert.equal(version.version, 8);
       const table = upgraded
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'context_packet_receipts'")
         .get();
@@ -969,11 +989,11 @@ test("v7 migration adds context_policy_suggestions for upgraded databases", () =
 
   const store = createAgentOpsStore({ home });
   try {
-    assert.equal(AGENTOPS_SCHEMA_VERSION, 7);
+    assert.equal(AGENTOPS_SCHEMA_VERSION, 8);
     const upgraded = new DatabaseSync(store.paths.dbPath);
     try {
       const version = upgraded.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get();
-      assert.equal(version.version, 7);
+      assert.equal(version.version, 8);
       const table = upgraded
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'context_policy_suggestions'")
         .get();
@@ -982,6 +1002,286 @@ test("v7 migration adds context_policy_suggestions for upgraded databases", () =
         .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_context_policy_suggestions_receipt_status'")
         .get();
       assert.equal(index?.name, "idx_context_policy_suggestions_receipt_status");
+    } finally {
+      upgraded.close();
+    }
+  } finally {
+    store.close();
+  }
+});
+
+test("memory lineage atomically supersedes one active predecessor", () => {
+  const store = createAgentOpsStore({ home: makeHome() });
+  seedProject(store);
+  const receipt = seedSubmittedReceipt(store);
+  const oldMemory = store.recordMemoryLineage({
+    memoryId: "memory-old",
+    sourceId: "source-a",
+    originTurnId: "turn-old",
+    originPacketReceiptId: receipt.id,
+    state: "active",
+    confidence: 0.8,
+  });
+
+  const nextMemory = store.recordMemoryLineage({
+    memoryId: "memory-new",
+    sourceId: "source-a",
+    originTurnId: "turn-new",
+    originPacketReceiptId: receipt.id,
+    supersedesMemoryId: oldMemory.memoryId,
+    state: "active",
+    confidence: 0.9,
+  });
+
+  assert.equal(store.getMemoryLineage(oldMemory.memoryId)?.state, "superseded");
+  assert.equal(nextMemory.state, "active");
+  assert.deepEqual(store.listActiveMemoryLineage().map((record) => record.memoryId), ["memory-new"]);
+  store.close();
+});
+
+test("memory lineage replacement rolls back predecessor transition when insert fails", () => {
+  const store = createAgentOpsStore({ home: makeHome() });
+  seedProject(store);
+  const receipt = seedSubmittedReceipt(store);
+  store.recordMemoryLineage({
+    memoryId: "memory-old",
+    sourceId: "source-a",
+    originTurnId: "turn-old",
+    originPacketReceiptId: receipt.id,
+    state: "active",
+    confidence: 0.8,
+  });
+  store.recordMemoryLineage({
+    memoryId: "memory-duplicate",
+    sourceId: "source-a",
+    originTurnId: "turn-existing",
+    originPacketReceiptId: receipt.id,
+    state: "active",
+    confidence: 0.7,
+  });
+
+  assert.throws(
+    () => store.recordMemoryLineage({
+      memoryId: "memory-duplicate",
+      sourceId: "source-a",
+      originTurnId: "turn-new",
+      originPacketReceiptId: receipt.id,
+      supersedesMemoryId: "memory-old",
+      state: "active",
+      confidence: 0.9,
+    }),
+    /unique constraint failed/i,
+  );
+  assert.equal(store.getMemoryLineage("memory-old")?.state, "active");
+  store.close();
+});
+
+test("memory lineage expiry is inclusive and preserves terminal states", () => {
+  const store = createAgentOpsStore({ home: makeHome() });
+  seedProject(store);
+  const receipt = seedSubmittedReceipt(store);
+  for (const [memoryId, expiresAt] of [
+    ["memory-before", "2026-07-13T00:00:00.000Z"],
+    ["memory-boundary", "2026-07-13T00:00:01.000Z"],
+    ["memory-after", "2026-07-13T00:00:02.000Z"],
+  ]) {
+    store.recordMemoryLineage({
+      memoryId,
+      sourceId: memoryId,
+      originTurnId: `turn-${memoryId}`,
+      originPacketReceiptId: receipt.id,
+      state: "active",
+      confidence: 0.5,
+      expiresAt,
+    });
+  }
+  store.supersedeMemoryLineage("memory-before");
+
+  assert.equal(store.expireMemoryLineage(new Date("2026-07-13T00:00:01.000Z")), 1);
+  assert.equal(store.getMemoryLineage("memory-before")?.state, "superseded");
+  assert.equal(store.getMemoryLineage("memory-boundary")?.state, "expired");
+  assert.equal(store.getMemoryLineage("memory-after")?.state, "active");
+  store.close();
+});
+
+test("memory lineage rejects missing and terminal transitions without mutation", () => {
+  const store = createAgentOpsStore({ home: makeHome() });
+  seedProject(store);
+  const receipt = seedSubmittedReceipt(store);
+  store.recordMemoryLineage({
+    memoryId: "memory-terminal",
+    sourceId: "source-a",
+    originTurnId: "turn-old",
+    originPacketReceiptId: receipt.id,
+    state: "active",
+    confidence: 0.8,
+  });
+  store.supersedeMemoryLineage("memory-terminal");
+
+  assert.throws(() => store.supersedeMemoryLineage("memory-missing"), /not found/i);
+  assert.throws(() => store.supersedeMemoryLineage("memory-terminal"), /not active/i);
+  assert.throws(
+    () => store.recordMemoryLineage({
+      memoryId: "memory-from-missing",
+      sourceId: "source-a",
+      originTurnId: "turn-new",
+      originPacketReceiptId: receipt.id,
+      supersedesMemoryId: "memory-missing",
+      state: "active",
+      confidence: 0.9,
+    }),
+    /predecessor not found/i,
+  );
+  assert.throws(
+    () => store.recordMemoryLineage({
+      memoryId: "memory-from-terminal",
+      sourceId: "source-a",
+      originTurnId: "turn-new",
+      originPacketReceiptId: receipt.id,
+      supersedesMemoryId: "memory-terminal",
+      state: "active",
+      confidence: 0.9,
+    }),
+    /predecessor is not active/i,
+  );
+  assert.equal(store.getMemoryLineage("memory-terminal")?.state, "superseded");
+  assert.equal(store.getMemoryLineage("memory-from-missing"), undefined);
+  assert.equal(store.getMemoryLineage("memory-from-terminal"), undefined);
+  store.close();
+});
+
+test("memory lineage rejects invalid provenance metadata and expanded-year timestamps", () => {
+  const store = createAgentOpsStore({ home: makeHome() });
+  seedProject(store);
+  const receipt = seedSubmittedReceipt(store);
+  const base = {
+    memoryId: "memory-invalid",
+    sourceId: "source-a",
+    originTurnId: "turn-invalid",
+    originPacketReceiptId: receipt.id,
+    state: "active",
+    confidence: 0.5,
+  };
+
+  assert.throws(
+    () => store.recordMemoryLineage({ ...base, originPacketReceiptId: "receipt-missing" }),
+    /foreign key constraint failed/i,
+  );
+  assert.throws(() => store.recordMemoryLineage({ ...base, state: "unknown" }), /unknown memory lineage state/i);
+  assert.throws(() => store.recordMemoryLineage({ ...base, confidence: 1.1 }), /confidence/i);
+  assert.throws(
+    () => store.recordMemoryLineage({ ...base, expiresAt: "+010000-01-01T00:00:00.000Z" }),
+    /fixed-width UTC ISO timestamp/i,
+  );
+  assert.throws(
+    () => store.expireMemoryLineage(new Date("+010000-01-01T00:00:00.000Z")),
+    /fixed-width UTC ISO timestamp/i,
+  );
+  assert.equal(store.getMemoryLineage(base.memoryId), undefined);
+  store.close();
+});
+
+test("memory lineage lists active records deterministically without content fields", () => {
+  const store = createAgentOpsStore({ home: makeHome() });
+  seedProject(store);
+  const receipt = seedSubmittedReceipt(store);
+  for (const memoryId of ["memory-b", "memory-a"]) {
+    store.recordMemoryLineage({
+      memoryId,
+      sourceId: memoryId,
+      originTurnId: `turn-${memoryId}`,
+      originPacketReceiptId: receipt.id,
+      state: "active",
+      confidence: 0.5,
+      createdAt: "2026-07-13T00:00:00.000Z",
+    });
+  }
+
+  const active = store.listActiveMemoryLineage();
+  assert.deepEqual(active.map((record) => record.memoryId), ["memory-a", "memory-b"]);
+  assert.deepEqual(Object.keys(active[0]).sort(), [
+    "confidence",
+    "createdAt",
+    "memoryId",
+    "originPacketReceiptId",
+    "originTurnId",
+    "sourceId",
+    "state",
+  ]);
+  store.close();
+});
+
+test("v8 migration adds memory lineage for upgraded v7 databases", () => {
+  const home = makeHome();
+  mkdirSync(home, { recursive: true });
+  const db = new DatabaseSync(join(home, "agentops.db"));
+  const timestamp = new Date().toISOString();
+  db.exec(`
+    CREATE TABLE schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+    INSERT INTO schema_migrations (version, name, applied_at) VALUES
+      (1, 'initial_schema', '${timestamp}'),
+      (2, 'add_context_sources', '${timestamp}'),
+      (3, 'scope_context_sources_by_project', '${timestamp}'),
+      (4, 'add_context_source_badges', '${timestamp}'),
+      (5, 'add_context_source_metadata', '${timestamp}'),
+      (6, 'add_context_packet_receipts', '${timestamp}'),
+      (7, 'add_context_policy_suggestions', '${timestamp}');
+    CREATE TABLE context_packet_receipts (id TEXT PRIMARY KEY);
+  `);
+  db.close();
+
+  const store = createAgentOpsStore({ home });
+  try {
+    const upgraded = new DatabaseSync(store.paths.dbPath);
+    try {
+      const version = upgraded.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get();
+      assert.equal(version.version, 8);
+      const columns = upgraded.prepare("PRAGMA table_info(memory_lineage)").all().map((row) => row.name);
+      assert.deepEqual(columns, [
+        "memory_id",
+        "source_id",
+        "origin_turn_id",
+        "origin_packet_receipt_id",
+        "supersedes_memory_id",
+        "state",
+        "confidence",
+        "created_at",
+        "expires_at",
+      ]);
+      const foreignKeys = upgraded.prepare("PRAGMA foreign_key_list(memory_lineage)").all()
+        .map((row) => ({
+          from: row.from,
+          table: row.table,
+          to: row.to,
+          onDelete: row.on_delete,
+        }))
+        .sort((left, right) => left.from.localeCompare(right.from));
+      assert.deepEqual(foreignKeys, [
+        {
+          from: "origin_packet_receipt_id",
+          table: "context_packet_receipts",
+          to: "id",
+          onDelete: "RESTRICT",
+        },
+        {
+          from: "supersedes_memory_id",
+          table: "memory_lineage",
+          to: "memory_id",
+          onDelete: "SET NULL",
+        },
+      ]);
+      const stateIndex = upgraded.prepare(
+        "PRAGMA index_xinfo('idx_memory_lineage_state_created')",
+      ).all().filter((row) => row.key === 1).map((row) => [row.name, row.desc]);
+      assert.deepEqual(stateIndex, [["state", 0], ["created_at", 1]]);
+      const sourceIndex = upgraded.prepare(
+        "PRAGMA index_xinfo('idx_memory_lineage_source')",
+      ).all().filter((row) => row.key === 1).map((row) => [row.name, row.desc]);
+      assert.deepEqual(sourceIndex, [["source_id", 0], ["state", 0]]);
     } finally {
       upgraded.close();
     }

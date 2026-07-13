@@ -183,6 +183,22 @@ CREATE TABLE IF NOT EXISTS context_policy_suggestions (
 );
 CREATE INDEX IF NOT EXISTS idx_context_policy_suggestions_receipt_status
   ON context_policy_suggestions(packet_receipt_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS memory_lineage (
+  memory_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL,
+  origin_turn_id TEXT NOT NULL,
+  origin_packet_receipt_id TEXT NOT NULL REFERENCES context_packet_receipts(id) ON DELETE RESTRICT,
+  supersedes_memory_id TEXT REFERENCES memory_lineage(memory_id) ON DELETE SET NULL,
+  state TEXT NOT NULL CHECK (state IN ('active', 'superseded', 'expired')),
+  confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+  created_at TEXT NOT NULL,
+  expires_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_memory_lineage_state_created
+  ON memory_lineage(state, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_lineage_source
+  ON memory_lineage(source_id, state);
 `;
 
 export const AGENTOPS_INCREMENTAL_MIGRATIONS: readonly AgentOpsMigration[] = [
@@ -322,6 +338,27 @@ CREATE TABLE IF NOT EXISTS context_policy_suggestions (
 );
 CREATE INDEX IF NOT EXISTS idx_context_policy_suggestions_receipt_status
   ON context_policy_suggestions(packet_receipt_id, status, created_at);
+`,
+  },
+  {
+    version: 8,
+    name: "add_memory_lineage",
+    sql: `
+CREATE TABLE IF NOT EXISTS memory_lineage (
+  memory_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL,
+  origin_turn_id TEXT NOT NULL,
+  origin_packet_receipt_id TEXT NOT NULL REFERENCES context_packet_receipts(id) ON DELETE RESTRICT,
+  supersedes_memory_id TEXT REFERENCES memory_lineage(memory_id) ON DELETE SET NULL,
+  state TEXT NOT NULL CHECK (state IN ('active', 'superseded', 'expired')),
+  confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+  created_at TEXT NOT NULL,
+  expires_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_memory_lineage_state_created
+  ON memory_lineage(state, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_lineage_source
+  ON memory_lineage(source_id, state);
 `,
   },
 ];
