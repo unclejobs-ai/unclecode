@@ -11,6 +11,7 @@ import { loadCachedWorkspaceGuidance } from "./workspace-guidance.js";
 
 const WORKSPACE_GUIDANCE_SAFE_PREVIEW =
   "Workspace guidance is active; raw guidance text stays out of the context view.";
+const WORKSPACE_GUIDANCE_ID_PREFIXES = ["workspace-guidance-", "guidance:", "skill:"] as const;
 
 function extractWorkspaceGuidanceSource(line: string): string | undefined {
   const sourceMatch = /^((?:AGENTS|CLAUDE|GEMINI|UNCLECODE)(?:\.local)?\.md|rules\/.+\.md):/i.exec(line);
@@ -28,7 +29,9 @@ function workspaceGuidancePacketText(line: string): { readonly label: string; re
   };
 }
 
-export function createWorkspaceGuidanceProvider(): ContextProvider {
+export function createWorkspaceGuidanceProvider(
+  loadGuidance: typeof loadCachedWorkspaceGuidance = loadCachedWorkspaceGuidance,
+): ContextProvider {
   return {
     providerId: "workspace-guidance",
     categories: ["workspace-guidance", "workspace"],
@@ -36,7 +39,7 @@ export function createWorkspaceGuidanceProvider(): ContextProvider {
     trustTier: "builtin",
     async sync(input) {
       const touched: string[] = [];
-      const guidance = await loadCachedWorkspaceGuidance({
+      const guidance = await loadGuidance({
         cwd: input.cwd,
         ...(input.userHomeDir !== undefined ? { userHomeDir: input.userHomeDir } : {}),
       });
@@ -72,6 +75,13 @@ export function createWorkspaceGuidanceProvider(): ContextProvider {
         };
         input.store.upsertContextSource(upsert);
         touched.push(source.id);
+      }
+      for (const idPrefix of WORKSPACE_GUIDANCE_ID_PREFIXES) {
+        input.store.deleteContextSourcesByIdPrefix({
+          projectId: input.projectId,
+          idPrefix,
+          keepIds: touched,
+        });
       }
       return touched;
     },

@@ -140,6 +140,92 @@ test("RuntimeProvider removes stale rows when the trace buffer shrinks", async (
   assert.equal(runtimeRows[0].label, "fresh trace");
 });
 
+// ── WorkspaceGuidanceProvider ───────────────────────────────────────
+
+test("WorkspaceGuidanceProvider preserves summary fallback rows without source metadata", async () => {
+  const store = makeStore();
+  const provider = createWorkspaceGuidanceProvider(async () => ({
+    systemPromptAppendix: "",
+    contextSummaryLines: ["AGENTS.md: loaded"],
+    sources: ["AGENTS.md"],
+    guidanceSources: [],
+  }));
+
+  const touched = await provider.sync({
+    store,
+    projectId: "proj_test",
+    cwd: "/repos/test",
+    sessionId: "s1",
+  });
+  assert.deepEqual(touched, ["workspace-guidance-1"]);
+  const result = store.selectContextSources({
+    projectId: "proj_test",
+    tokenBudget: 10_000,
+    turnIndex: 1,
+  });
+  assert.equal(result.selected.some(({ id }) => id === "workspace-guidance-1"), true);
+});
+
+test("WorkspaceGuidanceProvider removes obsolete canonical rows after each sync", async () => {
+  const store = makeStore();
+  let guidanceSources = [
+    {
+      id: "guidance:a",
+      path: "/repos/test/AGENTS.md",
+      label: "AGENTS.md",
+      authority: "mandatory",
+      sha256: "sha-a",
+    },
+    {
+      id: "guidance:b",
+      path: "/repos/test/rules/b.md",
+      label: "rules/b.md",
+      authority: "mandatory",
+      sha256: "sha-b",
+    },
+    {
+      id: "skill:old",
+      path: "/repos/test/.agents/skills/old/SKILL.md",
+      label: "old skill",
+      authority: "profile-eligible",
+      sha256: "sha-skill",
+    },
+  ];
+  const provider = createWorkspaceGuidanceProvider(async () => ({
+    systemPromptAppendix: "",
+    contextSummaryLines: [],
+    sources: guidanceSources.map(({ path }) => path),
+    guidanceSources,
+  }));
+
+  await provider.sync({
+    store,
+    projectId: "proj_test",
+    cwd: "/repos/test",
+    sessionId: "s1",
+  });
+  guidanceSources = [guidanceSources[1]];
+  const touched = await provider.sync({
+    store,
+    projectId: "proj_test",
+    cwd: "/repos/test",
+    sessionId: "s1",
+  });
+  assert.deepEqual(touched, ["guidance:b"]);
+  const result = store.selectContextSources({
+    projectId: "proj_test",
+    tokenBudget: 10_000,
+    turnIndex: 2,
+  });
+  assert.deepEqual(
+    [...result.selected, ...result.heldBack]
+      .filter(({ category }) => category === "workspace-guidance")
+      .map(({ id }) => id)
+      .sort(),
+    ["guidance:b"],
+  );
+});
+
 // ── MemoryProvider ───────────────────────────────────────────────────
 
 test("MemoryProvider upserts scoped memory lines", async () => {
