@@ -175,6 +175,7 @@ export function createContextLedgerRuntime(access: {
       return store.getActiveContextPacketPreview(projectId, sessionId);
     },
     protectedSourceIds() {
+      access.requireStore();
       return deriveProtectedSourceIds(access.listActionReceipts());
     },
   };

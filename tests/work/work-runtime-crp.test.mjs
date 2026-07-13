@@ -175,6 +175,10 @@ test("CRP runtime persists preview replacement and submission", async () => {
       () => runtime.contextLedger.previewPacket({ sessionId: input.sessionId, packet: createLegacyPacket(), profile: "build" }),
       /context packet has been resolved|Context ledger is unavailable/i,
     );
+    assert.throws(
+      () => runtime.contextLedger.protectedSourceIds(),
+      /context packet has been resolved|Context ledger is unavailable/i,
+    );
     assert.equal(runtime.getProjectId(), undefined);
 
     const first = await runtime.resolveContextPacket(input);
