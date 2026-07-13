@@ -80,6 +80,10 @@ export function recordContextPacketPreview(
     throw new Error(`Unknown project: ${input.projectId}`);
   }
 
+  if (input.replacesReceiptId !== undefined) {
+    assertPredecessorInScope(db, input.projectId, input.sessionId, input.replacesReceiptId);
+  }
+
   const sourceRefs = normalizeSourceRefs(input.sourceRefs);
   const createdAt = input.createdAt ?? new Date().toISOString();
   db.prepare(
@@ -198,6 +202,25 @@ function getContextPacketReceiptOrThrow(
 
 function projectExists(db: DatabaseSync, projectId: string): boolean {
   return db.prepare("SELECT 1 FROM projects WHERE id = ?").get(projectId) !== undefined;
+}
+
+function assertPredecessorInScope(
+  db: DatabaseSync,
+  projectId: string,
+  sessionId: string,
+  replacesReceiptId: string,
+): void {
+  const predecessor = db
+    .prepare(
+      `SELECT id FROM context_packet_receipts
+       WHERE id = ? AND project_id = ? AND session_id = ?`,
+    )
+    .get(replacesReceiptId, projectId, sessionId);
+  if (predecessor === undefined) {
+    throw new Error(
+      `Predecessor receipt is missing or out of scope: ${replacesReceiptId}`,
+    );
+  }
 }
 
 function normalizeSourceRefs(

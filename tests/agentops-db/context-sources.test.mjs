@@ -663,6 +663,89 @@ test("packet receipt transitions only allow previewed rows", () => {
   assert.equal(store.getContextPacketReceipt("project-1", replacePreview.id)?.state, "invalidated");
 });
 
+test("packet receipt replacesReceiptId rejects cross-project predecessors", () => {
+  const home = makeHome();
+  const store = createAgentOpsStore({ home });
+  store.addProject({ id: "project-a", name: "Project A", repoPath: "/repos/a" });
+  store.addProject({ id: "project-b", name: "Project B", repoPath: "/repos/b" });
+
+  store.recordContextPacketPreview({
+    id: "receipt-a",
+    projectId: "project-a",
+    sessionId: "session-shared",
+    packetId: "crp-a",
+    profile: "build",
+    tokenEstimateState: "unknown",
+    sourceCount: 0,
+    sourceRefs: [],
+  });
+
+  assert.throws(
+    () =>
+      store.recordContextPacketPreview({
+        id: "receipt-b",
+        projectId: "project-b",
+        sessionId: "session-shared",
+        packetId: "crp-b",
+        profile: "build",
+        tokenEstimateState: "unknown",
+        sourceCount: 0,
+        sourceRefs: [],
+        replacesReceiptId: "receipt-a",
+      }),
+    /missing or out of scope/i,
+  );
+});
+
+test("packet receipt replacesReceiptId rejects cross-session predecessors", () => {
+  const home = makeHome();
+  const store = createAgentOpsStore({ home });
+  store.addProject({ id: "project-1", name: "Receipt Project", repoPath: "/repos/receipt" });
+
+  store.recordContextPacketPreview({
+    id: "receipt-session-a",
+    projectId: "project-1",
+    sessionId: "session-a",
+    packetId: "crp-session-a",
+    profile: "build",
+    tokenEstimateState: "unknown",
+    sourceCount: 0,
+    sourceRefs: [],
+  });
+
+  assert.throws(
+    () =>
+      store.recordContextPacketPreview({
+        id: "receipt-session-b",
+        projectId: "project-1",
+        sessionId: "session-b",
+        packetId: "crp-session-b",
+        profile: "build",
+        tokenEstimateState: "unknown",
+        sourceCount: 0,
+        sourceRefs: [],
+        replacesReceiptId: "receipt-session-a",
+      }),
+    /missing or out of scope/i,
+  );
+
+  assert.throws(
+    () =>
+      store.recordContextPacketPreview({
+        id: "receipt-missing",
+        projectId: "project-1",
+        sessionId: "session-b",
+        packetId: "crp-missing",
+        profile: "build",
+        tokenEstimateState: "unknown",
+        sourceCount: 0,
+        sourceRefs: [],
+        replacesReceiptId: "does-not-exist",
+      }),
+    /missing or out of scope/i,
+  );
+});
+
 test("v6 migration adds context_packet_receipts for upgraded databases", () => {
   const home = makeHome();
   mkdirSync(home, { recursive: true });
