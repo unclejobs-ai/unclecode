@@ -160,5 +160,14 @@ export function createWorkShellEngine<
     ...(input.mutateContextSource !== undefined
       ? { mutateContextSource: input.mutateContextSource }
       : {}),
+    ...(input.previewContextPacket !== undefined
+      ? { previewContextPacket: input.previewContextPacket }
+      : {}),
+    ...(input.revalidateContextPacket !== undefined
+      ? { revalidateContextPacket: input.revalidateContextPacket }
+      : {}),
+    ...(input.submitContextPacketReceipt !== undefined
+      ? { submitContextPacketReceipt: input.submitContextPacketReceipt }
+      : {}),
   });
 }

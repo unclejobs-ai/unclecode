@@ -3,6 +3,7 @@ import { executeWorkShellPromptTurn } from "./work-shell-engine-execution.js";
 import { createWorkShellStatusPanel } from "./work-shell-engine-panels.js";
 import * as WorkShellTurns from "./work-shell-engine-turns.js";
 import type { WorkShellPromptCommand } from "./work-shell-engine-turns.js";
+import type { ContextPacketReceipt } from "@unclecode/contracts";
 import type {
   WorkShellChatEntry,
   WorkShellComposerResolution,
@@ -90,7 +91,9 @@ type PromptRuntimeInput<Attachment, Reasoning extends WorkShellReasoningConfig> 
     summary: string,
   ) => Promise<void>;
   /** Optional agentops recorder callback. Non-blocking. */
-  recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
+  recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string }) => void) | undefined;
+  readonly turnId?: string | undefined;
+  readonly contextReceipt?: ContextPacketReceipt | undefined;
 };
 
 function createPromptRuntimeExecutionInput<Attachment, Reasoning extends WorkShellReasoningConfig>(input: {
@@ -141,6 +144,8 @@ function createPromptRuntimeExecutionInput<Attachment, Reasoning extends WorkShe
     pushTraceLine: input.pushTraceLine,
     persistSessionSnapshot: input.persistSessionSnapshot,
     ...(input.recordTurn !== undefined ? { recordTurn: input.recordTurn } : {}),
+    ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
+    ...(input.contextReceipt !== undefined ? { contextReceipt: input.contextReceipt } : {}),
   };
 }
 
@@ -160,10 +165,16 @@ export async function executeWorkShellChatSubmit<
 } & PromptRuntimeInput<Attachment, Reasoning>): Promise<void> {
   const resolved = await input.resolveComposerInput(input.line, input.options.cwd);
   const composer = mergeWorkShellComposerAttachments(resolved, input.pendingAttachments);
-  const promptTurn = WorkShellTurns.createChatPromptTurnInput({
+  const basePromptTurn = WorkShellTurns.createChatPromptTurnInput({
     line: input.line,
     composer,
   });
+  const promptTurn = input.turnId !== undefined && input.contextReceipt !== undefined
+    ? WorkShellTurns.withPromptTurnContextProof(basePromptTurn, {
+      turnId: input.turnId,
+      contextReceipt: input.contextReceipt,
+    })
+    : basePromptTurn;
   const readOnlyGuard = WorkShellTurns.resolveReadOnlyModeGuard({
     mode: input.options.mode,
     prompt: promptTurn.prompt,
@@ -195,11 +206,25 @@ export async function executeWorkShellPromptCommandSubmit<
   await executeWorkShellPromptTurn(
     createPromptRuntimeExecutionInput({
       ...input,
-      promptTurn: WorkShellTurns.createPromptCommandTurnInput({
-        transcriptText: input.transcriptText,
-        prompt: buildPromptCommandPrompt(input.promptCommand),
-        promptCommand: input.promptCommand,
-      }),
+      promptTurn: (
+        input.turnId !== undefined && input.contextReceipt !== undefined
+          ? WorkShellTurns.withPromptTurnContextProof(
+            WorkShellTurns.createPromptCommandTurnInput({
+              transcriptText: input.transcriptText,
+              prompt: buildPromptCommandPrompt(input.promptCommand),
+              promptCommand: input.promptCommand,
+            }),
+            {
+              turnId: input.turnId,
+              contextReceipt: input.contextReceipt,
+            },
+          )
+          : WorkShellTurns.createPromptCommandTurnInput({
+            transcriptText: input.transcriptText,
+            prompt: buildPromptCommandPrompt(input.promptCommand),
+            promptCommand: input.promptCommand,
+          })
+      ),
     }),
   );
 }

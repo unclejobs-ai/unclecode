@@ -1,4 +1,5 @@
 import { runRustCommandSync } from "./rust-command.js";
+import type { ContextPacketReceipt } from "@unclecode/contracts";
 
 export type WorkShellPromptCommand = {
   readonly kind: "review" | "commit";
@@ -11,7 +12,23 @@ export type WorkShellPromptTurnInput<Attachment> = {
   sessionSummary: string;
   failureSummary: string;
   attachments?: readonly Attachment[];
+  turnId?: string | undefined;
+  contextReceipt?: ContextPacketReceipt | undefined;
 };
+
+export function withPromptTurnContextProof<Attachment>(
+  turn: WorkShellPromptTurnInput<Attachment>,
+  proof: {
+    readonly turnId: string;
+    readonly contextReceipt: ContextPacketReceipt;
+  },
+): WorkShellPromptTurnInput<Attachment> {
+  return {
+    ...turn,
+    turnId: proof.turnId,
+    contextReceipt: proof.contextReceipt,
+  };
+}
 
 export function summarizeWorkShellPrompt(value: string): string {
   return parseRustStringField(

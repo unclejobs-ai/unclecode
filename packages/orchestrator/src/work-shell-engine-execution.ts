@@ -8,6 +8,7 @@ import type {
   WorkShellPanel,
 } from "./work-shell-engine.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
+import type { ContextPacketReceipt } from "@unclecode/contracts";
 
 export async function runPromptTurnSuccessSequence<Attachment>(input: {
   prompt: string;
@@ -400,7 +401,9 @@ export async function executeWorkShellPromptTurn<
     summary: string,
   ) => Promise<void>;
   /** Optional agentops recorder callback. Called after every turn (success or failure). Non-blocking. */
-  recordTurn?: ((turn: { prompt: string; status: string; summary?: string }) => void) | undefined;
+  recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string }) => void) | undefined;
+  readonly turnId?: string | undefined;
+  readonly contextReceipt?: ContextPacketReceipt | undefined;
 }): Promise<void> {
   input.appendEntries({ role: "user", text: input.promptTurn.transcriptText });
   const turnStartedAt = Date.now();
@@ -437,6 +440,7 @@ export async function executeWorkShellPromptTurn<
     input.setState({
       ...successPayload.patch,
       streamingAssistantText: undefined,
+      ...(input.contextReceipt !== undefined ? { contextSubmittedReceipt: input.contextReceipt } : {}),
     });
     if (!postTurnEffects.skipped) {
       input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.bridgeTraceEvent));
@@ -448,6 +452,7 @@ export async function executeWorkShellPromptTurn<
         prompt: input.promptTurn.prompt,
         status: "completed",
         summary: input.promptTurn.sessionSummary,
+        ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
       });
     } catch {
       /* non-blocking */
@@ -475,6 +480,7 @@ export async function executeWorkShellPromptTurn<
     input.setState({
       ...failurePayload.patch,
       streamingAssistantText: undefined,
+      ...(input.contextReceipt !== undefined ? { contextSubmittedReceipt: input.contextReceipt } : {}),
     });
     await input.persistSessionSnapshot("requires_action", input.promptTurn.failureSummary).catch(() => undefined);
     try {
@@ -482,6 +488,7 @@ export async function executeWorkShellPromptTurn<
         prompt: input.promptTurn.prompt,
         status: "failed",
         summary: input.promptTurn.failureSummary,
+        ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
       });
     } catch {
       /* non-blocking */

@@ -7,6 +7,8 @@ import {
   writeScopedMemory,
 } from "@unclecode/context-broker";
 import type {
+  ContextPacketChangeClassification,
+  ContextPacketReceipt,
   ContextPacketView,
   ContextPacketViewActionReceipt,
   ContextPacketViewItem,
@@ -15,6 +17,7 @@ import type {
   ConsoleMotionPreference,
   ContextProfileId,
   AgentConsoleSnapshot,
+  SubmitContextPacketReceiptInput,
 } from "@unclecode/contracts";
 import {
   describeReasoning,
@@ -96,6 +99,19 @@ export type StartReplOptions = {
   mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
   ) => ContextPacketViewActionReceipt | undefined) | undefined;
+  previewContextPacket?: ((input: {
+    readonly sessionId: string;
+    readonly packet: ContextPacketView;
+    readonly profile: string;
+  }) => ContextPacketReceipt) | undefined;
+  revalidateContextPacket?: ((input: {
+    readonly sessionId: string;
+    readonly preview: ContextPacketReceipt;
+    readonly packet: ContextPacketView;
+  }) => ContextPacketChangeClassification) | undefined;
+  submitContextPacketReceipt?: ((
+    input: Omit<SubmitContextPacketReceiptInput, "projectId">,
+  ) => ContextPacketReceipt) | undefined;
 };
 
 type StartReplTraceEvent =
@@ -261,6 +277,15 @@ export function createManagedDashboardInput(
         : {}),
       ...(session.options.mutateContextSource !== undefined
         ? { mutateContextSource: session.options.mutateContextSource }
+        : {}),
+      ...(session.options.previewContextPacket !== undefined
+        ? { previewContextPacket: session.options.previewContextPacket }
+        : {}),
+      ...(session.options.revalidateContextPacket !== undefined
+        ? { revalidateContextPacket: session.options.revalidateContextPacket }
+        : {}),
+      ...(session.options.submitContextPacketReceipt !== undefined
+        ? { submitContextPacketReceipt: session.options.submitContextPacketReceipt }
         : {}),
       ...(session.options.resolveContextSourceDetail !== undefined
         ? { resolveContextSourceDetail: session.options.resolveContextSourceDetail }

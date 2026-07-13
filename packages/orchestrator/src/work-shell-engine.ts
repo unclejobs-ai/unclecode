@@ -36,6 +36,7 @@ import {
 } from "./work-shell-engine-submit.js";
 import { createWorkShellSessionSnapshotInput } from "./work-shell-engine-persistence.js";
 import {
+  buildWorkShellContextPacketPreviewLines,
   composeWorkShellTurnPromptFromPacket,
   formatWorkShellContextPacketIndicator,
 } from "./work-shell-context-packet.js";
@@ -60,11 +61,14 @@ import {
 import type { WorkShellInteractionBridge } from "./work-shell-interaction-bridge.js";
 import type {
   AgentConsoleSnapshot,
+  ContextPacketChangeClassification,
+  ContextPacketReceipt,
   ContextPacketView,
   ContextPacketViewActionReceipt,
   ContextPacketViewItem,
   ContextProfileId,
   PromptManifest,
+  SubmitContextPacketReceiptInput,
   WorkGraph,
 } from "@unclecode/contracts";
 
@@ -358,6 +362,9 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly lastTurnDurationMs?: number | undefined;
   readonly contextPacket?: ContextPacketView | undefined;
   readonly contextActionReceipt?: ContextPacketViewActionReceipt | undefined;
+  readonly contextPreviewReceipt?: ContextPacketReceipt | undefined;
+  readonly contextSubmittedReceipt?: ContextPacketReceipt | undefined;
+  readonly contextPacketChange?: ContextPacketChangeClassification | undefined;
   readonly contextIndicator?: string | undefined;
   readonly contextSourceActionsEnabled: boolean;
   readonly modelWindow: number;
@@ -503,6 +510,19 @@ export type WorkShellEngineInput<
   mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
   ) => ContextPacketViewActionReceipt | undefined) | undefined;
+  readonly previewContextPacket?: ((input: {
+    readonly sessionId: string;
+    readonly packet: ContextPacketView;
+    readonly profile: string;
+  }) => ContextPacketReceipt) | undefined;
+  readonly revalidateContextPacket?: ((input: {
+    readonly sessionId: string;
+    readonly preview: ContextPacketReceipt;
+    readonly packet: ContextPacketView;
+  }) => ContextPacketChangeClassification) | undefined;
+  readonly submitContextPacketReceipt?: ((
+    input: Omit<SubmitContextPacketReceiptInput, "projectId">,
+  ) => ContextPacketReceipt) | undefined;
 };
 
 type PendingDecision = {
@@ -627,6 +647,19 @@ export class WorkShellEngine<
   private readonly mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
   ) => ContextPacketViewActionReceipt | undefined) | undefined;
+  private readonly previewContextPacket?: ((input: {
+    readonly sessionId: string;
+    readonly packet: ContextPacketView;
+    readonly profile: string;
+  }) => ContextPacketReceipt) | undefined;
+  private readonly revalidateContextPacket?: ((input: {
+    readonly sessionId: string;
+    readonly preview: ContextPacketReceipt;
+    readonly packet: ContextPacketView;
+  }) => ContextPacketChangeClassification) | undefined;
+  private readonly submitContextPacketReceipt?: ((
+    input: Omit<SubmitContextPacketReceiptInput, "projectId">,
+  ) => ContextPacketReceipt) | undefined;
   private readonly interactionBridge?: WorkShellInteractionBridge | undefined;
   private readonly subscribers = new Set<(state: WorkShellEngineState<Reasoning>) => void>();
   private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
@@ -683,6 +716,9 @@ export class WorkShellEngine<
     this.onExit = input.onExit;
     this.recordTurn = input.recordTurn;
     this.mutateContextSource = input.mutateContextSource;
+    this.previewContextPacket = input.previewContextPacket;
+    this.revalidateContextPacket = input.revalidateContextPacket;
+    this.submitContextPacketReceipt = input.submitContextPacketReceipt;
     this.sessionId = input.sessionId ?? `work-${randomUUID()}`;
     this.currentContextSummaryLines = input.options.contextSummaryLines;
     this.lastSessionSummary = input.options.initialSessionSummary ?? "Work shell ready.";
@@ -941,6 +977,7 @@ export class WorkShellEngine<
     const selectedSourceId = action.id;
     const receipt = this.mutateContextSource(action);
     const packet = await this.refreshContextPacket(true);
+    this.captureContextPacketPreview(packet);
     const remappedCursor = this.resolveInspectorCursorForSourceId(selectedSourceId);
     if (!receipt) {
       if (remappedCursor !== this.state.contextInspectorCursor) {
@@ -1365,10 +1402,16 @@ export class WorkShellEngine<
         const abortController = this.startActiveTurnAbortController();
         this.beginSubmitPreparation();
         try {
-          const contextPacket = await this.refreshContextPacket();
+          const turnId = `turn-${this.sessionId}-${turnEpoch}`;
+          const prepared = await this.prepareProviderContext(turnId);
+          if (prepared === "blocked") {
+            return;
+          }
           if (!isCurrentTurn()) {
             return;
           }
+          const contextPacket = prepared.packet;
+          const contextReceipt = prepared.receipt;
           this.setState({
             panel: this.buildContextPanel(
               this.currentContextSummaryLines,
@@ -1412,6 +1455,8 @@ export class WorkShellEngine<
                 if (isCurrentTurn()) this.recordTurn?.(turn);
               } }
               : {}),
+            turnId,
+            ...(contextReceipt !== undefined ? { contextReceipt } : {}),
           });
         } finally {
           this.clearActiveTurnAbortController(abortController);
@@ -1429,10 +1474,16 @@ export class WorkShellEngine<
         const abortController = this.startActiveTurnAbortController();
         this.beginSubmitPreparation();
         try {
-          const contextPacket = await this.refreshContextPacket();
+          const turnId = `turn-${this.sessionId}-${turnEpoch}`;
+          const prepared = await this.prepareProviderContext(turnId);
+          if (prepared === "blocked") {
+            return;
+          }
           if (!isCurrentTurn()) {
             return;
           }
+          const contextPacket = prepared.packet;
+          const contextReceipt = prepared.receipt;
           this.setState({
             panel: this.buildContextPanel(
               this.currentContextSummaryLines,
@@ -1479,6 +1530,8 @@ export class WorkShellEngine<
                 if (isCurrentTurn()) this.recordTurn?.(turn);
               } }
               : {}),
+            turnId,
+            ...(contextReceipt !== undefined ? { contextReceipt } : {}),
           });
         } finally {
           this.clearActiveTurnAbortController(abortController);
@@ -1606,7 +1659,11 @@ export class WorkShellEngine<
       onExit: this.onExit,
       openSessionsPanel: () => this.openSessionsPanel(),
       reloadContextState: () => this.reloadContextState(),
-      refreshContextPacket: () => this.refreshContextPacket(true),
+      refreshContextPacket: async () => {
+        const packet = await this.refreshContextPacket(true);
+        this.captureContextPacketPreview(packet);
+        return packet;
+      },
       queuedCount: () => this.queuedCountCache,
       queuedItems: async () => {
         const queuedItems = await this.listQueuedSubmits();
@@ -1824,7 +1881,131 @@ export class WorkShellEngine<
     await this.refreshContextPacket(true);
   }
 
+  private resolveContextLifecycleProfile(): string {
+    return this.options.contextProfile
+      ?? this.state.agentConsole.profileId
+      ?? "build";
+  }
+
+  private hasContextLifecycleLedger(): boolean {
+    return this.previewContextPacket !== undefined
+      && this.revalidateContextPacket !== undefined
+      && this.submitContextPacketReceipt !== undefined;
+  }
+
+  private captureContextPacketPreview(packet: ContextPacketView | undefined): void {
+    if (!packet || !this.previewContextPacket) {
+      return;
+    }
+    const receipt = this.previewContextPacket({
+      sessionId: this.sessionId,
+      packet,
+      profile: this.resolveContextLifecycleProfile(),
+    });
+    this.setState({
+      contextPreviewReceipt: receipt,
+      contextSubmittedReceipt: undefined,
+      contextPacketChange: undefined,
+    });
+  }
+
+  private reopenContextDesk(packet: ContextPacketView): void {
+    this.setState({
+      contextPacket: packet,
+      contextIndicator: formatWorkShellContextPacketIndicator(packet),
+      panel: {
+        title: "Context expanded",
+        lines: buildWorkShellContextPacketPreviewLines(packet),
+      },
+      contextInspectorCursor: 0,
+      contextInspectorExpanded: null,
+      contextInspectorDetailContent: undefined,
+      contextInspectorDetailOffset: 0,
+      ...(packet.manifest
+        ? {
+            agentConsole: {
+              ...this.state.agentConsole,
+              manifest: packet.manifest,
+            },
+          }
+        : {}),
+    });
+  }
+
+  /**
+   * Resolve/revalidate the candidate packet and durably submit exactly one
+   * preview receipt before any provider turn. Returns "blocked" when the
+   * provider call must not start.
+   */
+  private async prepareSubmittedContext(turnId: string): Promise<{
+    readonly packet: ContextPacketView;
+    readonly receipt: ContextPacketReceipt;
+  } | undefined> {
+    const packet = await this.refreshContextPacket(true);
+    if (!packet || !this.hasContextLifecycleLedger()) {
+      return undefined;
+    }
+
+    let preview = this.state.contextPreviewReceipt;
+    if (!preview) {
+      this.captureContextPacketPreview(packet);
+      preview = this.state.contextPreviewReceipt;
+    }
+    if (!preview) {
+      this.appendEntries({
+        role: "system",
+        text: this.formatWorkShellError("Context proof unavailable. The provider call was not started."),
+      });
+      return undefined;
+    }
+
+    const change = this.revalidateContextPacket!({
+      sessionId: this.sessionId,
+      preview,
+      packet,
+    });
+    this.setState({ contextPacketChange: change });
+    if (change.kind === "meaning-change") {
+      this.reopenContextDesk(packet);
+      return undefined;
+    }
+
+    try {
+      const receipt = this.submitContextPacketReceipt!({
+        receiptId: preview.id,
+        sessionId: this.sessionId,
+        turnId,
+      });
+      this.setState({ contextSubmittedReceipt: receipt });
+      return { packet, receipt };
+    } catch {
+      this.appendEntries({
+        role: "system",
+        text: this.formatWorkShellError("Context proof unavailable. The provider call was not started."),
+      });
+      return undefined;
+    }
+  }
+
+  private async prepareProviderContext(turnId: string): Promise<
+    | {
+      readonly packet: ContextPacketView | undefined;
+      readonly receipt?: ContextPacketReceipt | undefined;
+    }
+    | "blocked"
+  > {
+    if (!this.hasContextLifecycleLedger()) {
+      return { packet: await this.refreshContextPacket() };
+    }
+    const prepared = await this.prepareSubmittedContext(turnId);
+    if (!prepared) {
+      return "blocked";
+    }
+    return prepared;
+  }
+
   private composeProviderPrompt(packet: ContextPacketView, userPrompt: string): string {
+
     if (this.resolvePromptManifest) {
       return this.resolvePromptManifest({ packet, userPrompt }).providerPrompt;
     }

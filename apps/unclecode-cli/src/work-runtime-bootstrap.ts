@@ -20,6 +20,9 @@ import type {
   PromptManifestPolicySource,
 } from "@unclecode/contracts";
 import {
+  buildContextPacketSourceRefs,
+  buildMandatorySourceIds,
+  classifyContextPacketChange,
   clearExtensionRegistryCache,
   loadConfig,
   loadExtensionConfigOverlays,
@@ -616,6 +619,16 @@ export async function loadWorkCliBootstrap(
         }),
       recordTurn: (turn) => recorder.recordTurn(turn),
       mutateContextSource: crpRuntime.mutateContextSource,
+      previewContextPacket: ({ sessionId, packet, profile }) =>
+        crpRuntime.contextLedger.previewPacket({ sessionId, packet, profile }),
+      revalidateContextPacket: ({ preview, packet }) =>
+        classifyContextPacketChange({
+          before: preview.sourceRefs,
+          after: buildContextPacketSourceRefs(packet),
+          protectedSourceIds: crpRuntime.contextLedger.protectedSourceIds(),
+          mandatorySourceIds: buildMandatorySourceIds(packet),
+        }),
+      submitContextPacketReceipt: (input) => crpRuntime.contextLedger.submitPreview(input),
     },
   };
 }
