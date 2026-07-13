@@ -815,7 +815,7 @@ test("suggestions resolve once and stale only while proposed for their receipt",
   }
 
   const rejected = store.addContextPolicySuggestion({
-    id: "suggestion-rejected",
+    id: "suggestion-z-rejected",
     packetReceiptId: "receipt-1",
     sourceId: "trace-1",
     action: "hold-back",
@@ -825,7 +825,7 @@ test("suggestions resolve once and stale only while proposed for their receipt",
     createdAt: "2026-07-13T00:00:01.000Z",
   });
   const stale = store.addContextPolicySuggestion({
-    id: "suggestion-stale",
+    id: "suggestion-a-stale",
     packetReceiptId: "receipt-1",
     sourceId: "history-1",
     action: "summarize",
@@ -857,7 +857,7 @@ test("suggestions resolve once and stale only while proposed for their receipt",
   assert.equal(stale.estimatedTokenSaving, undefined);
   assert.deepEqual(
     store.listContextPolicySuggestions("receipt-1").map((suggestion) => suggestion.id),
-    ["suggestion-rejected", "suggestion-stale"],
+    ["suggestion-a-stale", "suggestion-z-rejected"],
   );
   const resolved = store.resolveContextPolicySuggestion(rejected.id, "rejected");
   assert.equal(resolved.status, "rejected");
@@ -872,13 +872,15 @@ test("suggestions resolve once and stale only while proposed for their receipt",
     /unsupported context policy resolution/i,
   );
 
+  assert.equal(store.markContextPolicySuggestionsStale("receipt-1"), 0);
+  store.invalidateContextPacketReceipt("project-1", "receipt-1");
   assert.equal(store.markContextPolicySuggestionsStale("receipt-1"), 1);
   assert.equal(store.markContextPolicySuggestionsStale("receipt-1"), 0);
   assert.deepEqual(
     store.listContextPolicySuggestions("receipt-1").map(({ id, status }) => ({ id, status })),
     [
-      { id: "suggestion-rejected", status: "rejected" },
-      { id: "suggestion-stale", status: "stale" },
+      { id: "suggestion-a-stale", status: "stale" },
+      { id: "suggestion-z-rejected", status: "rejected" },
     ],
   );
   assert.equal(
@@ -898,7 +900,7 @@ test("suggestions resolve once and stale only while proposed for their receipt",
   );
   const rawDb = new DatabaseSync(store.paths.dbPath);
   try {
-    const raw = rawDb.prepare("SELECT * FROM context_policy_suggestions WHERE id = ?").get("suggestion-stale");
+    const raw = rawDb.prepare("SELECT * FROM context_policy_suggestions WHERE id = ?").get("suggestion-a-stale");
     assert.doesNotMatch(JSON.stringify(raw), new RegExp(contentSentinel));
   } finally {
     rawDb.close();
