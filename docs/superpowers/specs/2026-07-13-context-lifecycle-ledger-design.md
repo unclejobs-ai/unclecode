@@ -78,6 +78,7 @@ CRP Selector ---> Context Packet
 | Column | Type/values | Purpose |
 |---|---|---|
 | `id` | text primary key | Durable receipt identifier |
+| `project_id` | text foreign key | Owning CRP project; prevents cross-workspace receipt lookup |
 | `session_id` | text | Owning Work Shell session |
 | `turn_id` | text nullable | Set when submitted for a turn |
 | `packet_id` | text | Existing CRP packet identifier |
@@ -87,9 +88,10 @@ CRP Selector ---> Context Packet
 | `token_estimate` | integer nullable | Packet estimate when known |
 | `token_estimate_state` | `exact \| estimated \| unknown` | Prevents fake precision |
 | `source_count` | integer | Included source count |
+| `source_refs_json` | JSON array | Ordered source IDs plus category, SHA, trust tier, salience, and inclusion state; never raw content |
 | `created_at` | timestamp | Durable ordering |
 
-Packet bodies are not copied into this table. The packet manifest and referenced source IDs remain the content proof.
+Packet bodies are not copied into this table. `source_refs_json` persists the minimal metadata needed to prove and compare the submitted selection while the existing packet manifest and `context_sources` rows remain authoritative for content. Direct pin/include protection during an active session is derived from CRP action receipts; resumed previews are always stale and must be rebuilt.
 
 ### 6.2 `context_policy_suggestions`
 
