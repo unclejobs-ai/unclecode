@@ -229,6 +229,7 @@ test("turn receipt exposes submitted packet aggregates without source content", 
 test("WorkShellView renders submitted proof outside the conversation transcript", async () => {
   const output = await renderView({
     activePanel: { title: "Status", lines: ["Ready"] },
+    contextPacket: packet({ id: "crp-b203" }),
     entries: [{ role: "assistant", text: "Completed." }],
     contextSubmittedReceipt: receipt({
       state: "submitted",
