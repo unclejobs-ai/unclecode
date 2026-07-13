@@ -195,10 +195,7 @@ export function createContextLedgerRuntime(access: {
     generateSuggestions(input) {
       const { store } = access.requireStore();
       const suggestions = evaluateContextPolicy(input);
-      for (const suggestion of suggestions) {
-        store.addContextPolicySuggestion(suggestion);
-      }
-      return suggestions;
+      return store.addContextPolicySuggestions(suggestions);
     },
     resolveSuggestion(suggestionId, status) {
       const { store } = access.requireStore();

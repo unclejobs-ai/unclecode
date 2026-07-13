@@ -430,7 +430,7 @@ test("WorkShellView renders actionable optimizer advice without source content",
         action: "hold-back",
         reasonCode: "low-trust-token-hotspot",
         reasonText: "This source exceeds the strict low-trust token threshold.",
-        estimatedTokenSaving: 42,
+        estimatedTokenSaving: 3_200,
         status: "proposed",
         createdAt: "2026-07-13T00:00:01.000Z",
       },
@@ -470,7 +470,7 @@ test("WorkShellView renders actionable optimizer advice without source content",
   });
 
   assert.match(output, /Context optimizer/);
-  assert.match(output, /Hold back · AGENTS\.md · Save ~42t/);
+  assert.match(output, /Hold back · AGENTS\.md · Save ~3\.2k/);
   assert.match(output, /strict low-trust token threshold/);
   assert.match(output, /\[A\] accept · \[R\] reject/);
   assert.match(output, /Refresh · recent Q&A · accepted/);
@@ -478,6 +478,37 @@ test("WorkShellView renders actionable optimizer advice without source content",
   assert.match(output, /Summarize · recent Q&A · Savings unknown/);
   assert.doesNotMatch(output, /Workspace instructions stay active/);
 });
+test("WorkShellView reserves source rows when optimizer advice fills a compact terminal", async () => {
+  const output = await renderView(
+    {
+      terminalColumns: 52,
+      terminalRows: 40,
+      contextPacket: packet(),
+      contextInspectorCursor: 0,
+      contextSourceActionsEnabled: true,
+      contextAdviceActionsEnabled: true,
+      contextPolicySuggestions: Array.from({ length: 6 }, (_, index) => ({
+        id: `suggestion-${index}`,
+        packetReceiptId: "receipt-submitted",
+        sourceId: index < 3 ? "workspace-1" : "bridge-1",
+        action: index === 0 ? "hold-back" : "refresh",
+        reasonCode: index === 0 ? "low-trust-token-hotspot" : "expired-source",
+        reasonText: index === 0 ? "Hold back oversized guidance." : "Refresh stale metadata.",
+        estimatedTokenSaving: 3_200 - index,
+        status: "proposed",
+        createdAt: "2026-07-13T00:00:01.000Z",
+      })),
+    },
+    { columns: 52, rows: 40 },
+  );
+
+  assert.match(output, /> AGENTS\.md · sent · pinned/);
+  assert.match(output, /\[A\] accept · \[R\] reject/);
+  assert.equal(output.match(/\[A\] accept · \[R\] reject/g)?.length, 1);
+  assert.match(output, /… 2 more suggestions/);
+  assert.ok(output.split("\n").length <= 40, "advice and source evidence must fit a 52x40 terminal");
+});
+
 
 test("WorkShellView renders optimizer failure as a bounded non-fatal state", async () => {
   const output = await renderView({

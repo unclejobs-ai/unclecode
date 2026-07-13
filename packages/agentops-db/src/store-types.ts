@@ -166,6 +166,9 @@ export interface AgentOpsStore {
   getContextPacketReceipt(projectId: string, receiptId: string): ContextPacketReceipt | undefined;
   getActiveContextPacketPreview(projectId: string, sessionId: string): ContextPacketReceipt | undefined;
   addContextPolicySuggestion(input: AddContextPolicySuggestionInput): ContextPolicySuggestion;
+  addContextPolicySuggestions(
+    inputs: readonly AddContextPolicySuggestionInput[],
+  ): readonly ContextPolicySuggestion[];
   resolveContextPolicySuggestion(
     id: string,
     status: Extract<ContextPolicySuggestionState, "accepted" | "rejected">,

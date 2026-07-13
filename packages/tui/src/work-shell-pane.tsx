@@ -7,7 +7,11 @@ import {
 } from "@unclecode/orchestrator";
 
 import type { TuiShellHomeState } from "./shell-state.js";
-import { Composer, handleComposerClipboardPaste } from "./composer.js";
+import {
+  Composer,
+  handleComposerClipboardPaste,
+  isRawComposerEmpty,
+} from "./composer.js";
 import {
   buildAttachmentPreviewLines,
   formatAttachmentErrorLine,
@@ -242,7 +246,7 @@ export function WorkShellPane<
   const shouldSuppressComposerKeysForInspector = React.useMemo(
     () =>
       activePanel.title === "Context expanded"
-      && inputValue.trim().length === 0
+      && isRawComposerEmpty(inputValue)
       && props.engine.moveContextInspectorCursor !== undefined,
     [activePanel.title, inputValue, props.engine],
   );

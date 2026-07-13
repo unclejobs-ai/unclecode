@@ -10,6 +10,8 @@ import {
   resolveWorkShellContextInspectorAction,
   useWorkShellInputController,
 } from "../../packages/tui/src/index.tsx";
+import { getVisibleContextPolicySuggestions } from "../../packages/tui/src/work-shell-context-advice.tsx";
+import { areContextAdviceActionsAvailable } from "../../packages/tui/src/work-shell-hooks.ts";
 
 function createInkInput() {
   const input = new PassThrough();
@@ -67,7 +69,7 @@ async function waitForCondition(predicate, timeoutMs = 5_000) {
 }
 
 function ContextInputControllerHarness(props) {
-  const [value, setValue] = React.useState("");
+  const [value, setValue] = React.useState(props.initialValue ?? "");
   useWorkShellInputController({
     value,
     replaceValue: setValue,
@@ -84,6 +86,9 @@ function ContextInputControllerHarness(props) {
     activePanelTitle: "Context expanded",
     contextSourceActionsEnabled: props.actionsEnabled,
     contextAdviceActionsEnabled: props.adviceActionsEnabled,
+    ...(props.isComposerRawEmpty
+      ? { isComposerRawEmpty: props.isComposerRawEmpty }
+      : {}),
     acceptContextSuggestion: async () => props.onAccept?.(),
     rejectContextSuggestion: async () => props.onReject?.(),
     contextInspectorExpanded: props.expandedId,
@@ -146,6 +151,41 @@ test("context inspector resolver uses human navigation and action keys", () => {
     adviceActionsEnabled: false,
   }), { type: "none" });
 });
+test("optimizer actions require both callbacks and a visible selected suggestion", () => {
+  const suggestions = Array.from({ length: 5 }, (_, index) => ({
+    id: `suggestion-${index}`,
+    packetReceiptId: "receipt-1",
+    sourceId: `source-${index}`,
+    action: "keep",
+    reasonCode: "mandatory-guidance",
+    reasonText: "Keep mandatory guidance.",
+    status: "proposed",
+    createdAt: "2026-07-13T00:00:00.000Z",
+  }));
+  const visible = getVisibleContextPolicySuggestions(suggestions);
+  const accept = async () => {};
+  const reject = async () => {};
+
+  assert.equal(visible.length, 4);
+  assert.doesNotMatch(JSON.stringify(visible), /source-4/);
+  assert.equal(areContextAdviceActionsAvailable({
+    enabled: true,
+    selectedSuggestion: visible[0],
+    accept,
+  }), false);
+  assert.equal(areContextAdviceActionsAvailable({
+    enabled: true,
+    selectedSuggestion: visible[0],
+    reject,
+  }), false);
+  assert.equal(areContextAdviceActionsAvailable({
+    enabled: true,
+    selectedSuggestion: visible[0],
+    accept,
+    reject,
+  }), true);
+});
+
 
 test("context inspector input controller dispatches only enabled human actions", async () => {
   const readOnlyCalls = [];
@@ -192,6 +232,35 @@ test("context inspector input controller dispatches only enabled human actions",
   writable.instance.cleanup();
   assert.deepEqual(writableCalls, ["delivery", "pin", "expand", "accept", "reject"]);
 });
+test("context advice keys never steal whitespace or locally pending drafts", async () => {
+  const calls = [];
+  const whitespace = renderWithInput(
+    React.createElement(ContextInputControllerHarness, {
+      initialValue: " ",
+      adviceActionsEnabled: true,
+      onAccept: () => calls.push("whitespace"),
+    }),
+  );
+  whitespace.stdin.write("a");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  whitespace.instance.unmount();
+  whitespace.instance.cleanup();
+
+  const pending = renderWithInput(
+    React.createElement(ContextInputControllerHarness, {
+      adviceActionsEnabled: true,
+      isComposerRawEmpty: () => false,
+      onAccept: () => calls.push("pending"),
+    }),
+  );
+  pending.stdin.write("a");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  pending.instance.unmount();
+  pending.instance.cleanup();
+
+  assert.deepEqual(calls, []);
+});
+
 
 test("expanded context details route arrow keys to scrolling instead of source movement", async () => {
   const calls = [];
@@ -280,3 +349,26 @@ test("composer does not suppress a mutation letter after locally pending text", 
     instance.cleanup();
   }
 });
+test("composer preserves optimizer letters after a whitespace-only draft", async () => {
+  const changes = [];
+  const { stdin, instance } = renderWithInput(
+    React.createElement(Composer, {
+      value: " ",
+      onChange: (value) => changes.push(value),
+      onSubmit: async () => {},
+      suppressInspectorKeys: true,
+      suppressInspectorMutationKeys: true,
+      suppressInspectorAdviceKeys: true,
+    }),
+  );
+
+  try {
+    stdin.write("a");
+    await waitForCondition(() => changes.includes(" a"));
+    assert.equal(changes.at(-1), " a");
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+

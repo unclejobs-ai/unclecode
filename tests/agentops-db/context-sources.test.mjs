@@ -907,6 +907,43 @@ test("suggestions resolve once and stale only while proposed for their receipt",
     rawDb.close();
   }
 });
+test("suggestion batches roll back every row when one insert fails", () => {
+  const home = makeHome();
+  const store = createAgentOpsStore({ home });
+  store.addProject({ id: "project-1", name: "Batch Project", repoPath: "/repos/batch" });
+  store.recordContextPacketPreview({
+    id: "receipt-batch",
+    projectId: "project-1",
+    sessionId: "session-batch",
+    packetId: "packet-batch",
+    profile: "build",
+    tokenEstimateState: "unknown",
+    sourceCount: 0,
+    sourceRefs: [],
+  });
+  const suggestion = {
+    id: "suggestion-duplicate",
+    packetReceiptId: "receipt-batch",
+    sourceId: "trace-1",
+    action: "keep",
+    reasonCode: "mandatory-guidance",
+    reasonText: "Mandatory guidance remains active.",
+  };
+
+  try {
+    assert.throws(
+      () => store.addContextPolicySuggestions([
+        suggestion,
+        { ...suggestion, sourceId: "trace-2" },
+      ]),
+      /unique constraint failed/i,
+    );
+    assert.deepEqual(store.listContextPolicySuggestions("receipt-batch"), []);
+  } finally {
+    store.close();
+  }
+});
+
 
 test("v7 migration adds context_policy_suggestions for upgraded databases", () => {
   const home = makeHome();

@@ -348,6 +348,11 @@ export function resolvePromptTurnFinalizePatch<Reasoning extends WorkShellReason
   };
 }
 
+type WorkShellPromptTurnExecutionResult = {
+  readonly completed: boolean;
+  readonly replyPersisted: boolean;
+};
+
 export async function executeWorkShellPromptTurn<
   Attachment,
   Reasoning extends WorkShellReasoningConfig,
@@ -404,7 +409,7 @@ export async function executeWorkShellPromptTurn<
   recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string; contextReceiptId?: string; packetId?: string }) => void) | undefined;
   readonly turnId?: string | undefined;
   readonly contextReceipt?: ContextPacketReceipt | undefined;
-}): Promise<boolean> {
+}): Promise<WorkShellPromptTurnExecutionResult> {
   input.appendEntries({ role: "user", text: input.promptTurn.transcriptText });
   const turnStartedAt = Date.now();
   input.setState(createPromptTurnStartPatch({
@@ -446,7 +451,12 @@ export async function executeWorkShellPromptTurn<
       input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.bridgeTraceEvent));
       input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.memoryTraceEvent));
     }
-    await input.persistSessionSnapshot("idle", input.promptTurn.sessionSummary).catch(() => undefined);
+    const replyPersisted = await input
+      .persistSessionSnapshot("idle", input.promptTurn.sessionSummary)
+      .then(
+        () => true,
+        () => false,
+      );
     try {
       input.recordTurn?.({
         prompt: input.promptTurn.prompt,
@@ -463,7 +473,7 @@ export async function executeWorkShellPromptTurn<
     } catch {
       /* non-blocking */
     }
-    return true;
+    return { completed: true, replyPersisted };
   } catch (error) {
     const failure = await resolvePromptTurnFailureResult({
       error,
@@ -506,7 +516,7 @@ export async function executeWorkShellPromptTurn<
     } catch {
       /* non-blocking */
     }
-    return false;
+    return { completed: false, replyPersisted: false };
   } finally {
     input.setState(createPromptTurnFinalizePatch(input.state));
   }

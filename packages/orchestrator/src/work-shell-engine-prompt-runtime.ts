@@ -14,6 +14,11 @@ import type {
 } from "./work-shell-engine.js";
 import { describeReasoning, type WorkShellReasoningConfig } from "./reasoning.js";
 
+type WorkShellPromptTurnExecutionResult = {
+  readonly completed: boolean;
+  readonly replyPersisted: boolean;
+};
+
 /**
  * Merge text-derived attachments (from resolveComposerInput) with attachments
  * produced outside the text-resolution path (e.g. clipboard paste). Dedupes
@@ -190,7 +195,7 @@ export async function executeWorkShellChatSubmit<
   // never crossed the engine boundary.
   pendingAttachments?: readonly Attachment[];
   preflight?: WorkShellChatPreflight<Attachment>;
-} & PromptRuntimeInput<Attachment, Reasoning>): Promise<boolean> {
+} & PromptRuntimeInput<Attachment, Reasoning>): Promise<WorkShellPromptTurnExecutionResult> {
   const preflight = input.preflight ?? await resolveWorkShellChatPreflight({
     line: input.line,
     cwd: input.options.cwd,
@@ -213,7 +218,7 @@ export async function executeWorkShellChatSubmit<
     );
     input.setState({ lastTurnDurationMs: 0 });
     await input.persistSessionSnapshot("idle", promptTurn.sessionSummary).catch(() => undefined);
-    return false;
+    return { completed: false, replyPersisted: false };
   }
   return executeWorkShellPromptTurn(
     createPromptRuntimeExecutionInput({
@@ -229,7 +234,7 @@ export async function executeWorkShellPromptCommandSubmit<
 >(input: {
   transcriptText: string;
   promptCommand: WorkShellPromptCommand;
-} & PromptRuntimeInput<Attachment, Reasoning>): Promise<boolean> {
+} & PromptRuntimeInput<Attachment, Reasoning>): Promise<WorkShellPromptTurnExecutionResult> {
   return executeWorkShellPromptTurn(
     createPromptRuntimeExecutionInput({
       ...input,

@@ -21,7 +21,10 @@ import {
 import { renderContextInspectorFocus } from "./work-shell-context-inspector-focus.js";
 import { renderContextInspectorGroupedViewport } from "./work-shell-context-inspector-sources.js";
 import { renderContextInspectorWarnings } from "./work-shell-context-inspector-warnings.js";
-import { renderWorkShellContextAdvice } from "./work-shell-context-advice.js";
+import {
+  computeWorkShellContextAdviceRows,
+  renderWorkShellContextAdvice,
+} from "./work-shell-context-advice.js";
 
 export {
   computeContextMeterFill,
@@ -63,8 +66,16 @@ export function renderContextInspectorOverlay(input: {
   });
   const selectedRow = rows.find((row) => row.sourceIndex === input.cursorIndex);
   const selectedSection = selectedRow?.heldBack ? "held" : "sent";
+  const contextPolicySuggestions = input.contextPolicySuggestions ?? [];
+  const contextAdviceRows = computeWorkShellContextAdviceRows({
+    suggestions: contextPolicySuggestions,
+    unavailable: input.contextAdviceUnavailable,
+    ...(selectedRow ? { selectedSourceId: selectedRow.item.id } : {}),
+    actionsEnabled: input.contextAdviceActionsEnabled ?? false,
+  });
   const viewportMaxRows = computeContextOverlayViewportMaxRows({
     ...(input.terminalRows !== undefined ? { terminalRows: input.terminalRows } : {}),
+    reservedRows: contextAdviceRows,
   });
   const { palette } = input;
   const compactSuggestion = overview.suggestion.message;
@@ -122,11 +133,12 @@ export function renderContextInspectorOverlay(input: {
         })}
         {renderWorkShellContextAdvice({
           packet: input.packet,
-          suggestions: input.contextPolicySuggestions ?? [],
+          suggestions: contextPolicySuggestions,
           unavailable: input.contextAdviceUnavailable,
           ...(selectedRow ? { selectedSourceId: selectedRow.item.id } : {}),
           actionsEnabled: input.contextAdviceActionsEnabled ?? false,
           palette,
+          width: input.width,
         })}
         <Text color={palette.textMuted}>
           {input.expandedId ? CONTEXT_INSPECTOR_DETAIL_CONTROLS : CONTEXT_INSPECTOR_CONTROLS}

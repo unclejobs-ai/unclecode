@@ -3097,6 +3097,140 @@ test("WorkShellEngine keeps the assistant reply when optimizer advice fails", as
   assert.equal(engine.getState().contextAdviceUnavailable, "Context optimizer unavailable; reply kept.");
 });
 
+test("WorkShellEngine skips advice when the completed reply snapshot is not durable", async () => {
+  let generationCount = 0;
+  const { engine } = createLifecycleLedgerHarness({
+    engineOverrides: {
+      async persistWorkShellSessionSnapshot(input) {
+        if (input.state === "idle") {
+          throw new Error("snapshot unavailable");
+        }
+      },
+      async generateContextSuggestions() {
+        generationCount += 1;
+        return [];
+      },
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("reply persistence fails");
+
+  assert.equal(generationCount, 0);
+  assert.ok(engine.getState().entries.some((entry) => entry.role === "assistant" && entry.text === "lifecycle-ok"));
+  assert.deepEqual(engine.getState().contextPolicySuggestions, []);
+});
+test("WorkShellEngine retires prior advice before a newer reply snapshot can fail", async () => {
+  let idleSnapshotCount = 0;
+  let generationCount = 0;
+  const invalidated = [];
+  const { engine } = createLifecycleLedgerHarness({
+    engineOverrides: {
+      async persistWorkShellSessionSnapshot(input) {
+        if (input.state === "idle") {
+          idleSnapshotCount += 1;
+          if (idleSnapshotCount === 3) {
+            throw new Error("snapshot unavailable");
+          }
+        }
+      },
+      async generateContextSuggestions({ receipt }) {
+        generationCount += 1;
+        return [{
+          id: `suggestion-${receipt.id}`,
+          packetReceiptId: receipt.id,
+          sourceId: "pinned-auth",
+          action: "hold-back",
+          reasonCode: "low-trust-token-hotspot",
+          reasonText: "Hold back oversized context.",
+          status: "proposed",
+          createdAt: "2026-07-13T00:00:01.000Z",
+        }];
+      },
+      invalidateContextSuggestions(receiptId) {
+        invalidated.push(receiptId);
+        return 1;
+      },
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("first reply persists");
+  const firstReceiptId = engine.getState().contextPolicySuggestions[0]?.packetReceiptId;
+  await engine.handleSubmit("second reply persistence fails");
+
+  assert.equal(generationCount, 1);
+  assert.deepEqual(invalidated, [firstReceiptId]);
+  assert.equal(engine.getState().contextPolicySuggestions[0]?.status, "stale");
+  assert.equal(
+    engine.getState().contextPolicySuggestions.some(({ status }) => status === "proposed"),
+    false,
+  );
+});
+
+
+test("WorkShellEngine stales advice generated after its turn is superseded", async () => {
+  const firstGeneration = Promise.withResolvers();
+  const firstGenerationEntered = Promise.withResolvers();
+  const invalidated = [];
+  let generationCount = 0;
+  let firstReceiptId;
+  const { engine } = createLifecycleLedgerHarness({
+    engineOverrides: {
+      async generateContextSuggestions({ receipt }) {
+        generationCount += 1;
+        const suggestion = {
+          id: `suggestion-${receipt.id}`,
+          packetReceiptId: receipt.id,
+          sourceId: "pinned-auth",
+          action: "keep",
+          reasonCode: "mandatory-guidance",
+          reasonText: "Mandatory guidance remains active.",
+          status: "proposed",
+          createdAt: "2026-07-13T00:00:01.000Z",
+        };
+        if (generationCount === 1) {
+          firstReceiptId = receipt.id;
+          firstGenerationEntered.resolve();
+          return firstGeneration.promise;
+        }
+        return [suggestion];
+      },
+      invalidateContextSuggestions(receiptId) {
+        invalidated.push(receiptId);
+        if (
+          receiptId === firstReceiptId
+          && invalidated.filter((id) => id === receiptId).length === 1
+        ) {
+          throw new Error("transient stale failure");
+        }
+        return 1;
+      },
+    },
+  });
+
+  await engine.initialize();
+  const firstTurn = engine.handleSubmit("first turn");
+  await firstGenerationEntered.promise;
+  await engine.handleSubmit("second turn");
+  const currentReceiptId = engine.getState().contextPolicySuggestions[0]?.packetReceiptId;
+  firstGeneration.resolve([{
+    id: `suggestion-${firstReceiptId}`,
+    packetReceiptId: firstReceiptId,
+    sourceId: "pinned-auth",
+    action: "keep",
+    reasonCode: "mandatory-guidance",
+    reasonText: "Mandatory guidance remains active.",
+    status: "proposed",
+    createdAt: "2026-07-13T00:00:01.000Z",
+  }]);
+  await firstTurn;
+
+  assert.notEqual(currentReceiptId, firstReceiptId);
+  assert.equal(engine.getState().contextPolicySuggestions[0]?.packetReceiptId, currentReceiptId);
+  assert.equal(invalidated.filter((id) => id === firstReceiptId).length, 2);
+});
+
 test("WorkShellEngine applies accepted advice and never applies rejected advice", async () => {
   const mutations = [];
   const resolutions = [];
@@ -3156,6 +3290,77 @@ test("WorkShellEngine applies accepted advice and never applies rejected advice"
   assert.deepEqual(mutations, [{ kind: "forget", id: "pinned-auth" }]);
   assert.equal(rejected.getState().contextPolicySuggestions[0]?.status, "rejected");
 });
+test("WorkShellEngine closes packet-changing advice before awaiting refresh", async () => {
+  const refreshGate = Promise.withResolvers();
+  const resolutions = [];
+  const mutations = [];
+  const suggestions = [
+    {
+      id: "suggestion-first",
+      packetReceiptId: "receipt-placeholder",
+      sourceId: "pinned-auth",
+      action: "hold-back",
+      reasonCode: "low-trust-token-hotspot",
+      reasonText: "Hold back oversized context.",
+      status: "proposed",
+      createdAt: "2026-07-13T00:00:01.000Z",
+    },
+    {
+      id: "suggestion-second",
+      packetReceiptId: "receipt-placeholder",
+      sourceId: "pinned-auth",
+      action: "refresh",
+      reasonCode: "expired-source",
+      reasonText: "Refresh stale context.",
+      status: "proposed",
+      createdAt: "2026-07-13T00:00:02.000Z",
+    },
+  ];
+  const harness = createLifecycleLedgerHarness({
+    engineOverrides: {
+      async generateContextSuggestions({ receipt }) {
+        return suggestions.map((suggestion) => ({
+          ...suggestion,
+          packetReceiptId: receipt.id,
+        }));
+      },
+      resolveContextSuggestion(id, status) {
+        resolutions.push({ id, status });
+        const suggestion = harness.engine.getState().contextPolicySuggestions.find(
+          (candidate) => candidate.id === id,
+        );
+        return { ...suggestion, status, resolvedAt: "2026-07-13T00:00:03.000Z" };
+      },
+      mutateContextSource(action) {
+        mutations.push(action);
+        return undefined;
+      },
+      invalidateContextSuggestions() {
+        return 1;
+      },
+    },
+  });
+
+  await harness.engine.initialize();
+  await harness.engine.handleSubmit("generate concurrent advice");
+  harness.setResolveGate(() => refreshGate.promise);
+  const firstAcceptance = harness.engine.acceptContextSuggestion("suggestion-first");
+  const secondAcceptance = harness.engine.acceptContextSuggestion("suggestion-second");
+  await Promise.resolve();
+
+  assert.deepEqual(resolutions, [{ id: "suggestion-first", status: "accepted" }]);
+  assert.deepEqual(mutations, [{ kind: "forget", id: "pinned-auth" }]);
+  assert.equal(
+    harness.engine.getState().contextPolicySuggestions.find(
+      ({ id }) => id === "suggestion-second",
+    )?.status,
+    "stale",
+  );
+
+  refreshGate.resolve();
+  await Promise.all([firstAcceptance, secondAcceptance]);
+});
+
 test("WorkShellEngine forces condensed-history refresh for accepted summarize advice", async () => {
   const effects = [];
   const suggestion = (status = "proposed") => ({
@@ -3193,8 +3398,8 @@ test("WorkShellEngine forces condensed-history refresh for accepted summarize ad
   await engine.acceptContextSuggestion("suggestion-summarize-history");
 
   assert.match(effects[0] ?? "", /^resolve:accepted$/);
-  assert.equal(effects[1], "summarize");
-  assert.equal(effects[2], "stale:preview-1");
+  assert.equal(effects[1], "stale:preview-1");
+  assert.equal(effects[2], "summarize");
   assert.equal(engine.getState().contextPolicySuggestions[0]?.status, "accepted");
 });
 

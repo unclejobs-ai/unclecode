@@ -93,12 +93,18 @@ export function resolveContextSourceMeta(category: string, palette: ContextInspe
 
 export function computeContextOverlayViewportMaxRows(input: {
   readonly terminalRows?: number;
+  readonly reservedRows?: number;
 }): number {
   const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
   if (input.terminalRows === undefined) {
     return 12;
   }
-  return clamp(Math.trunc(input.terminalRows) - 25, 6, 24);
+  const reservedRows = Math.max(0, Math.trunc(input.reservedRows ?? 0));
+  return clamp(
+    Math.trunc(input.terminalRows) - 25 - reservedRows,
+    reservedRows > 0 ? 2 : 6,
+    24,
+  );
 }
 
 export function buildContextInspectorGroupedRows(

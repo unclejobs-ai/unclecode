@@ -1,5 +1,12 @@
 import { useInput } from "ink";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type SetStateAction,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { runRustCommandSync } from "@unclecode/orchestrator";
 import type {
   AgentConsoleSnapshot,
@@ -21,6 +28,8 @@ import {
   buildContextInspectorRows,
   isContextInspectorSourceHeldBack,
 } from "./work-shell-context-inspector-model.js";
+import { getSelectedVisibleContextPolicySuggestion } from "./work-shell-context-advice.js";
+import { isRawComposerEmpty } from "./composer.js";
 import {
   clampWorkShellSlashSelection,
   cycleWorkShellSlashSelection,
@@ -440,6 +449,7 @@ export function useWorkShellInputController(input: {
   readonly closeOverlay?: (() => void) | undefined;
   readonly contextSourceActionsEnabled?: boolean | undefined;
   readonly contextAdviceActionsEnabled?: boolean | undefined;
+  readonly isComposerRawEmpty?: (() => boolean) | undefined;
   readonly acceptContextSuggestion?: (() => Promise<void>) | undefined;
   readonly rejectContextSuggestion?: (() => Promise<void>) | undefined;
   readonly contextInspectorExpanded?: string | null | undefined;
@@ -481,7 +491,10 @@ export function useWorkShellInputController(input: {
       input.hasOverlayOpen
       && input.activePanelTitle === "Context expanded"
       && !input.value.trim().startsWith("/")
-      && (isNavigationKey || input.value.trim().length === 0)
+      && (
+        isNavigationKey
+        || (input.isComposerRawEmpty?.() ?? isRawComposerEmpty(input.value))
+      )
     ) {
       const inspectorAction = resolveWorkShellContextInspectorAction({
         value,
@@ -649,6 +662,18 @@ export function useWorkShellInputController(input: {
   return { submit };
 }
 
+export function areContextAdviceActionsAvailable(input: {
+  readonly enabled: boolean;
+  readonly selectedSuggestion?: ContextPolicySuggestion | undefined;
+  readonly accept?: ((suggestionId: string) => Promise<void>) | undefined;
+  readonly reject?: ((suggestionId: string) => Promise<void>) | undefined;
+}): boolean {
+  return input.enabled
+    && input.selectedSuggestion !== undefined
+    && input.accept !== undefined
+    && input.reject !== undefined;
+}
+
 export function useWorkShellPaneState<
   Attachment extends { readonly dataUrl: string; readonly mimeType?: string },
   State extends WorkShellPaneRuntimeState,
@@ -667,7 +692,15 @@ export function useWorkShellPaneState<
   readonly refreshHomeState?: (() => Promise<TuiShellHomeState>) | undefined;
   readonly shouldBlockSlashSubmit: (line: string) => boolean;
 }) {
-  const [inputValue, setInputValue] = useState("");
+  const [inputValue, setInputValueState] = useState("");
+  const pendingInputValueRef = useRef("");
+  const setInputValue = useCallback((value: SetStateAction<string>): void => {
+    const nextValue = typeof value === "function"
+      ? value(pendingInputValueRef.current)
+      : value;
+    pendingInputValueRef.current = nextValue;
+    setInputValueState(nextValue);
+  }, []);
   // Clipboard-pasted attachments live alongside the input value but
   // outside the text-derived `resolveComposerInput` flow. They are kept
   // in pane state so they survive every keystroke and only flush on
@@ -834,16 +867,21 @@ export function useWorkShellPaneState<
     const sourceId = buildContextInspectorRows(packet).find(
       (row) => row.sourceIndex === cursor,
     )?.item.id;
-    return engineState.contextPolicySuggestions?.find(
-      (suggestion) =>
-        suggestion.status === "proposed"
-        && suggestion.sourceId === sourceId,
-    );
+    return getSelectedVisibleContextPolicySuggestion({
+      suggestions: engineState.contextPolicySuggestions ?? [],
+      selectedSourceId: sourceId,
+    });
   }, [
     engineState.contextInspectorCursor,
     engineState.contextPacket,
     engineState.contextPolicySuggestions,
   ]);
+  const contextAdviceActionsAvailable = areContextAdviceActionsAvailable({
+    enabled: engineState.contextAdviceActionsEnabled ?? false,
+    selectedSuggestion: selectedContextSuggestion,
+    accept: input.engine.acceptContextSuggestion,
+    reject: input.engine.rejectContextSuggestion,
+  });
 
 
 
@@ -864,6 +902,10 @@ export function useWorkShellPaneState<
     cycleMode,
     shouldBlockSlashSubmit: input.shouldBlockSlashSubmit,
     handleSubmit,
+    isComposerRawEmpty: () => isRawComposerEmpty(
+      inputValue,
+      pendingInputValueRef.current,
+    ),
     hasSensitiveInput: engineState.composerMode === "api-key-entry",
     hasOverlayOpen: shouldReportWorkShellOverlayOpen({
       panelTitle: engineState.panel.title,
@@ -892,18 +934,12 @@ export function useWorkShellPaneState<
       ? { closeOverlay: () => input.engine.closeOverlay?.() }
       : {}),
     contextSourceActionsEnabled: engineState.contextSourceActionsEnabled ?? false,
-    contextAdviceActionsEnabled:
-      (engineState.contextAdviceActionsEnabled ?? false)
-      && selectedContextSuggestion !== undefined,
-    ...(selectedContextSuggestion && input.engine.acceptContextSuggestion
+    contextAdviceActionsEnabled: contextAdviceActionsAvailable,
+    ...(contextAdviceActionsAvailable && selectedContextSuggestion
       ? {
           acceptContextSuggestion: async () => {
             await input.engine.acceptContextSuggestion?.(selectedContextSuggestion.id);
           },
-        }
-      : {}),
-    ...(selectedContextSuggestion && input.engine.rejectContextSuggestion
-      ? {
           rejectContextSuggestion: async () => {
             await input.engine.rejectContextSuggestion?.(selectedContextSuggestion.id);
           },
@@ -956,9 +992,7 @@ export function useWorkShellPaneState<
     activePanel,
     slashSuggestionCount: slashSuggestions.length,
     selectedSlashCommand: selectedSuggestion?.command,
-    contextAdviceKeyActionsEnabled:
-      (engineState.contextAdviceActionsEnabled ?? false)
-      && selectedContextSuggestion !== undefined,
+    contextAdviceKeyActionsEnabled: contextAdviceActionsAvailable,
     submit,
     addClipboardAttachment,
     clearClipboardAttachments,

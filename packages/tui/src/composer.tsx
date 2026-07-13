@@ -22,6 +22,10 @@ const HANGUL_JAMO_PATTERN = /^[\u1100-\u11ff\u3130-\u318f]+$/u;
 const COMPOSER_DEFAULT_VISIBLE_WIDTH = 72;
 const COMPOSER_CURSOR_GLYPH = "▏";
 
+export function isRawComposerEmpty(value: string, pendingValue?: string): boolean {
+  return (pendingValue ?? value).length === 0;
+}
+
 export function sanitizeComposerInput(value: string): string {
   return value
     .replace(BRACKETED_PASTE_ARTIFACT_PATTERN, "")
@@ -534,7 +538,7 @@ export function Composer(props: {
     // ordinary text because those actions are unavailable.
     if (
       latestProps.suppressInspectorKeys
-      && (pendingLocalValueRef.current ?? latestProps.value ?? "").length === 0
+      && isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current)
     ) {
       const suppressMutationKeys =
         latestProps.suppressInspectorMutationKeys ?? latestProps.suppressInspectorKeys;

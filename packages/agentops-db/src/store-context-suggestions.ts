@@ -28,6 +28,9 @@ export type ResolvedContextPolicySuggestionState = Extract<
 
 export type AgentOpsContextSuggestionStoreMethods = {
   addContextPolicySuggestion(input: AddContextPolicySuggestionInput): ContextPolicySuggestion;
+  addContextPolicySuggestions(
+    inputs: readonly AddContextPolicySuggestionInput[],
+  ): readonly ContextPolicySuggestion[];
   resolveContextPolicySuggestion(
     id: string,
     status: ResolvedContextPolicySuggestionState,
@@ -42,6 +45,9 @@ export function createAgentOpsContextSuggestionStoreMethods(
   return {
     addContextPolicySuggestion(input) {
       return addContextPolicySuggestion(db, input);
+    },
+    addContextPolicySuggestions(inputs) {
+      return addContextPolicySuggestions(db, inputs);
     },
     resolveContextPolicySuggestion(id, status) {
       return resolveContextPolicySuggestion(db, id, status);
@@ -78,6 +84,21 @@ export function addContextPolicySuggestion(
     createdAt,
   );
   return getContextPolicySuggestionOrThrow(db, input.id);
+}
+
+export function addContextPolicySuggestions(
+  db: DatabaseSync,
+  inputs: readonly AddContextPolicySuggestionInput[],
+): readonly ContextPolicySuggestion[] {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const suggestions = inputs.map((input) => addContextPolicySuggestion(db, input));
+    db.exec("COMMIT");
+    return suggestions;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 export function resolveContextPolicySuggestion(

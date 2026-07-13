@@ -691,6 +691,7 @@ export class WorkShellEngine<
   private readonly subscribers = new Set<(state: WorkShellEngineState<Reasoning>) => void>();
   private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
   private readonly queueDrainSkipTurnEpochs = new Set<number>();
+  private readonly pendingContextSuggestionInvalidations = new Set<string>();
   private queuedCountCache = 0;
   private currentContextSummaryLines: readonly string[];
   private lastSessionSummary: string;
@@ -1014,6 +1015,14 @@ export class WorkShellEngine<
         ),
         contextAdviceUnavailable: undefined,
       });
+      if (suggestion.action !== "keep") {
+        const retired = this.invalidateProposedContextSuggestions(
+          suggestion.packetReceiptId,
+        );
+        if (!retired) {
+          throw new Error("Context suggestion retirement is unavailable.");
+        }
+      }
       switch (suggestion.action) {
         case "keep":
           return;
@@ -1041,7 +1050,6 @@ export class WorkShellEngine<
           break;
         }
       }
-      this.invalidateProposedContextSuggestions(suggestion.packetReceiptId);
     } catch {
       this.setState({
         contextAdviceUnavailable: "Context optimizer unavailable; reply kept.",
@@ -1071,7 +1079,7 @@ export class WorkShellEngine<
     }
   }
 
-  private invalidateProposedContextSuggestions(packetReceiptId: string): void {
+  private invalidateProposedContextSuggestions(packetReceiptId: string): boolean {
     const resolvedAt = new Date().toISOString();
     this.setState({
       contextPolicySuggestions: this.state.contextPolicySuggestions.map((suggestion) =>
@@ -1080,9 +1088,34 @@ export class WorkShellEngine<
           : suggestion
       ),
     });
-    this.invalidateContextSuggestions?.(packetReceiptId);
+    if (!this.invalidateContextSuggestions) {
+      return true;
+    }
+    this.pendingContextSuggestionInvalidations.add(packetReceiptId);
+    return this.flushPendingContextSuggestionInvalidations(2);
   }
 
+  private flushPendingContextSuggestionInvalidations(maxAttempts = 1): boolean {
+    if (!this.invalidateContextSuggestions) {
+      this.pendingContextSuggestionInvalidations.clear();
+      return true;
+    }
+    for (
+      let attempt = 0;
+      attempt < maxAttempts && this.pendingContextSuggestionInvalidations.size > 0;
+      attempt += 1
+    ) {
+      for (const receiptId of [...this.pendingContextSuggestionInvalidations]) {
+        try {
+          this.invalidateContextSuggestions(receiptId);
+          this.pendingContextSuggestionInvalidations.delete(receiptId);
+        } catch {
+          // Keep the receipt pending for this bounded retry or the next ledger operation.
+        }
+      }
+    }
+    return this.pendingContextSuggestionInvalidations.size === 0;
+  }
 
   private async mutateInspectorContextSource(action: {
     readonly kind: "pin" | "unpin" | "forget" | "include";
@@ -1540,7 +1573,7 @@ export class WorkShellEngine<
               this.state.traceLines,
             ),
           });
-          const completed = await executeWorkShellPromptCommandSubmit({
+          const executionResult = await executeWorkShellPromptCommandSubmit({
             transcriptText: route.line,
             promptCommand: route.promptCommand,
             state: this.state,
@@ -1578,8 +1611,18 @@ export class WorkShellEngine<
             turnId,
             ...(contextReceipt !== undefined ? { contextReceipt } : {}),
           });
-          if (completed && contextPacket && contextReceipt && isCurrentTurn()) {
-            await this.refreshContextAdvice(contextReceipt, contextPacket);
+          if (
+            executionResult.completed
+            && executionResult.replyPersisted
+            && contextPacket
+            && contextReceipt
+            && isCurrentTurn()
+          ) {
+            await this.refreshContextAdvice(
+              contextReceipt,
+              contextPacket,
+              isCurrentTurn,
+            );
           }
         } finally {
           this.clearActiveTurnAbortController(abortController);
@@ -1635,7 +1678,7 @@ export class WorkShellEngine<
               this.state.traceLines,
             ),
           });
-          const completed = await executeWorkShellChatSubmit({
+          const executionResult = await executeWorkShellChatSubmit({
             line: route.line,
             resolveComposerInput: this.resolveComposerInput,
             ...(pendingAttachments && pendingAttachments.length > 0
@@ -1677,8 +1720,18 @@ export class WorkShellEngine<
             turnId,
             ...(contextReceipt !== undefined ? { contextReceipt } : {}),
           });
-          if (completed && contextPacket && contextReceipt && isCurrentTurn()) {
-            await this.refreshContextAdvice(contextReceipt, contextPacket);
+          if (
+            executionResult.completed
+            && executionResult.replyPersisted
+            && contextPacket
+            && contextReceipt
+            && isCurrentTurn()
+          ) {
+            await this.refreshContextAdvice(
+              contextReceipt,
+              contextPacket,
+              isCurrentTurn,
+            );
           }
         } finally {
           this.clearActiveTurnAbortController(abortController);
@@ -2108,6 +2161,7 @@ export class WorkShellEngine<
     readonly receipt: ContextPacketReceipt;
   } | undefined> {
     try {
+      this.flushPendingContextSuggestionInvalidations(2);
       const packet = await this.refreshContextPacket(true, isCurrentTurn);
       if (!isCurrentTurn()) {
         return undefined;
@@ -2178,6 +2232,26 @@ export class WorkShellEngine<
         contextPreviewReceipt: undefined,
         contextSubmittedReceipt: receipt,
       });
+      const priorReceiptIds = new Set(
+        this.state.contextPolicySuggestions
+          .filter(
+            (suggestion) =>
+              suggestion.status === "proposed"
+              && suggestion.packetReceiptId !== receipt.id,
+          )
+          .map((suggestion) => suggestion.packetReceiptId),
+      );
+      let priorAdviceRetired = true;
+      for (const priorReceiptId of priorReceiptIds) {
+        priorAdviceRetired =
+          this.invalidateProposedContextSuggestions(priorReceiptId)
+          && priorAdviceRetired;
+      }
+      if (!priorAdviceRetired) {
+        this.setState({
+          contextAdviceUnavailable: "Context optimizer unavailable; reply kept.",
+        });
+      }
       return { packet, receipt };
     } catch {
       if (!isCurrentTurn()) {
@@ -2222,26 +2296,29 @@ export class WorkShellEngine<
   private async refreshContextAdvice(
     receipt: ContextPacketReceipt,
     packet: ContextPacketView,
+    isCurrentTurn: () => boolean,
   ): Promise<void> {
-    if (!this.generateContextSuggestions) {
+    const generateContextSuggestions = this.generateContextSuggestions;
+    if (!generateContextSuggestions) {
+      return;
+    }
+    if (!this.flushPendingContextSuggestionInvalidations(2)) {
+      if (isCurrentTurn()) {
+        this.setState({
+          contextAdviceUnavailable: "Context optimizer unavailable; reply kept.",
+        });
+      }
       return;
     }
 
-    const result = await runWorkShellContextAdviceEffects(async () => {
-      const priorReceiptIds = new Set(
-        this.state.contextPolicySuggestions
-          .filter(
-            (suggestion) =>
-              suggestion.status === "proposed"
-              && suggestion.packetReceiptId !== receipt.id,
-          )
-          .map((suggestion) => suggestion.packetReceiptId),
-      );
-      for (const priorReceiptId of priorReceiptIds) {
-        this.invalidateContextSuggestions?.(priorReceiptId);
-      }
-      return this.generateContextSuggestions?.({ receipt, packet }) ?? [];
-    });
+    const result = await runWorkShellContextAdviceEffects(
+      () => generateContextSuggestions({ receipt, packet }),
+    );
+
+    if (!isCurrentTurn()) {
+      this.invalidateProposedContextSuggestions(receipt.id);
+      return;
+    }
 
     this.setState({
       contextPolicySuggestions: result.suggestions,
