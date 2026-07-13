@@ -19,6 +19,7 @@ export * from "./attachments.js";
 export * from "./context-packet-view.js";
 export * from "./context-source.js";
 export * from "./context-source-metadata.js";
+export * from "./context-lifecycle.js";
 export * from "./tool-metadata.js";
 
 export * from "./agent-console.js";
