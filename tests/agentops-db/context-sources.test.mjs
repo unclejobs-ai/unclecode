@@ -29,8 +29,8 @@ function seedProject(store) {
   return store.addProject({ id: "proj_crp", name: "CRP Test", repoPath: "/repos/crp" });
 }
 
-test("schema version bumps to 6 for context packet receipts", () => {
-  assert.equal(AGENTOPS_SCHEMA_VERSION, 6);
+test("schema version bumps to 7 for context optimizer suggestions", () => {
+  assert.equal(AGENTOPS_SCHEMA_VERSION, 7);
 });
 
 test("v3 migration purges legacy context source text instead of preserving possible secrets", () => {
@@ -746,7 +746,7 @@ test("packet receipt replacesReceiptId rejects cross-session predecessors", () =
   );
 });
 
-test("v6 migration adds context_packet_receipts for upgraded databases", () => {
+test("upgraded v5 databases apply receipt and suggestion migrations", () => {
   const home = makeHome();
   mkdirSync(home, { recursive: true });
   const db = new DatabaseSync(join(home, "agentops.db"));
@@ -777,15 +777,171 @@ test("v6 migration adds context_packet_receipts for upgraded databases", () => {
 
   const store = createAgentOpsStore({ home });
   try {
-    assert.equal(AGENTOPS_SCHEMA_VERSION, 6);
+    assert.equal(AGENTOPS_SCHEMA_VERSION, 7);
     const upgraded = new DatabaseSync(store.paths.dbPath);
     try {
       const version = upgraded.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get();
-      assert.equal(version.version, 6);
+      assert.equal(version.version, 7);
       const table = upgraded
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'context_packet_receipts'")
         .get();
       assert.equal(table?.name, "context_packet_receipts");
+    } finally {
+      upgraded.close();
+    }
+  } finally {
+    store.close();
+  }
+});
+
+// ── Context optimizer suggestions ───────────────────────────────────
+
+test("suggestions resolve once and stale only while proposed for their receipt", () => {
+  const home = makeHome();
+  const store = createAgentOpsStore({ home });
+  store.addProject({ id: "project-1", name: "Suggestion Project", repoPath: "/repos/suggestion" });
+  const contentSentinel = "SECRET RAW CONTEXT MUST NOT PERSIST";
+  for (const [receiptId, sessionId] of [["receipt-1", "session-1"], ["receipt-2", "session-2"]]) {
+    store.recordContextPacketPreview({
+      id: receiptId,
+      projectId: "project-1",
+      sessionId,
+      packetId: `packet-${receiptId}`,
+      profile: "build",
+      tokenEstimateState: "unknown",
+      sourceCount: 0,
+      sourceRefs: [],
+    });
+  }
+
+  const rejected = store.addContextPolicySuggestion({
+    id: "suggestion-rejected",
+    packetReceiptId: "receipt-1",
+    sourceId: "trace-1",
+    action: "hold-back",
+    reasonCode: "duplicate-fingerprint",
+    reasonText: "Duplicate runtime trace.",
+    estimatedTokenSaving: 450,
+    createdAt: "2026-07-13T00:00:01.000Z",
+  });
+  const stale = store.addContextPolicySuggestion({
+    id: "suggestion-stale",
+    packetReceiptId: "receipt-1",
+    sourceId: "history-1",
+    action: "summarize",
+    reasonCode: "stale-condensed-history",
+    reasonText: "Condensed history is stale.",
+    createdAt: "2026-07-13T00:00:01.000Z",
+    content: contentSentinel,
+  });
+  const accepted = store.addContextPolicySuggestion({
+    id: "suggestion-accepted",
+    packetReceiptId: "receipt-2",
+    sourceId: "rules",
+    action: "keep",
+    reasonCode: "mandatory-guidance",
+    reasonText: "Mandatory guidance remains active.",
+    createdAt: "2026-07-13T00:00:03.000Z",
+  });
+  store.addContextPolicySuggestion({
+    id: "suggestion-unrelated",
+    packetReceiptId: "receipt-2",
+    sourceId: "trace-2",
+    action: "keep",
+    reasonCode: "mandatory-guidance",
+    reasonText: "Mandatory guidance remains active.",
+    createdAt: "2026-07-13T00:00:04.000Z",
+  });
+
+  assert.equal(rejected.status, "proposed");
+  assert.equal(stale.estimatedTokenSaving, undefined);
+  assert.deepEqual(
+    store.listContextPolicySuggestions("receipt-1").map((suggestion) => suggestion.id),
+    ["suggestion-rejected", "suggestion-stale"],
+  );
+  const resolved = store.resolveContextPolicySuggestion(rejected.id, "rejected");
+  assert.equal(resolved.status, "rejected");
+  assert.equal(typeof resolved.resolvedAt, "string");
+  assert.throws(
+    () => store.resolveContextPolicySuggestion(rejected.id, "accepted"),
+    /already resolved/i,
+  );
+  assert.equal(store.resolveContextPolicySuggestion(accepted.id, "accepted").status, "accepted");
+  assert.throws(
+    () => store.resolveContextPolicySuggestion("suggestion-unrelated", "stale"),
+    /unsupported context policy resolution/i,
+  );
+
+  assert.equal(store.markContextPolicySuggestionsStale("receipt-1"), 1);
+  assert.equal(store.markContextPolicySuggestionsStale("receipt-1"), 0);
+  assert.deepEqual(
+    store.listContextPolicySuggestions("receipt-1").map(({ id, status }) => ({ id, status })),
+    [
+      { id: "suggestion-rejected", status: "rejected" },
+      { id: "suggestion-stale", status: "stale" },
+    ],
+  );
+  assert.equal(
+    store.listContextPolicySuggestions("receipt-2").find(({ id }) => id === "suggestion-unrelated")?.status,
+    "proposed",
+  );
+  assert.throws(
+    () => store.addContextPolicySuggestion({
+      id: "suggestion-orphan",
+      packetReceiptId: "receipt-missing",
+      sourceId: "trace-orphan",
+      action: "hold-back",
+      reasonCode: "duplicate-fingerprint",
+      reasonText: "Orphan suggestion.",
+    }),
+    /foreign key constraint failed/i,
+  );
+  const rawDb = new DatabaseSync(store.paths.dbPath);
+  try {
+    const raw = rawDb.prepare("SELECT * FROM context_policy_suggestions WHERE id = ?").get("suggestion-stale");
+    assert.doesNotMatch(JSON.stringify(raw), new RegExp(contentSentinel));
+  } finally {
+    rawDb.close();
+  }
+});
+
+test("v7 migration adds context_policy_suggestions for upgraded databases", () => {
+  const home = makeHome();
+  mkdirSync(home, { recursive: true });
+  const db = new DatabaseSync(join(home, "agentops.db"));
+  const timestamp = new Date().toISOString();
+  db.exec(`
+    CREATE TABLE schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+    INSERT INTO schema_migrations (version, name, applied_at) VALUES
+      (1, 'initial_schema', '${timestamp}'),
+      (2, 'add_context_sources', '${timestamp}'),
+      (3, 'scope_context_sources_by_project', '${timestamp}'),
+      (4, 'add_context_source_badges', '${timestamp}'),
+      (5, 'add_context_source_metadata', '${timestamp}'),
+      (6, 'add_context_packet_receipts', '${timestamp}');
+    CREATE TABLE context_packet_receipts (id TEXT PRIMARY KEY);
+  `);
+  db.close();
+
+  const store = createAgentOpsStore({ home });
+  try {
+    assert.equal(AGENTOPS_SCHEMA_VERSION, 7);
+    const upgraded = new DatabaseSync(store.paths.dbPath);
+    try {
+      const version = upgraded.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get();
+      assert.equal(version.version, 7);
+      const table = upgraded
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'context_policy_suggestions'")
+        .get();
+      assert.equal(table?.name, "context_policy_suggestions");
+      const index = upgraded
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_context_policy_suggestions_receipt_status'")
+        .get();
+      assert.equal(index?.name, "idx_context_policy_suggestions_receipt_status");
     } finally {
       upgraded.close();
     }

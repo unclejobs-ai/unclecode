@@ -1,4 +1,7 @@
 import type {
+  AddContextPolicySuggestionInput,
+  ContextPolicySuggestion,
+  ContextPolicySuggestionState,
   ContextPacketReceipt,
   ContextSourceRecord,
   RecordContextPacketPreviewInput,
@@ -162,5 +165,12 @@ export interface AgentOpsStore {
   submitContextPacketReceipt(input: SubmitContextPacketReceiptInput): ContextPacketReceipt;
   getContextPacketReceipt(projectId: string, receiptId: string): ContextPacketReceipt | undefined;
   getActiveContextPacketPreview(projectId: string, sessionId: string): ContextPacketReceipt | undefined;
+  addContextPolicySuggestion(input: AddContextPolicySuggestionInput): ContextPolicySuggestion;
+  resolveContextPolicySuggestion(
+    id: string,
+    status: Extract<ContextPolicySuggestionState, "accepted" | "rejected">,
+  ): ContextPolicySuggestion;
+  markContextPolicySuggestionsStale(packetReceiptId: string): number;
+  listContextPolicySuggestions(packetReceiptId: string): readonly ContextPolicySuggestion[];
   close(): void;
 }

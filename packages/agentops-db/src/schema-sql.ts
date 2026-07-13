@@ -168,6 +168,21 @@ CREATE INDEX IF NOT EXISTS idx_context_packet_receipts_project_session_state
 CREATE UNIQUE INDEX IF NOT EXISTS idx_context_packet_receipts_submitted_turn
   ON context_packet_receipts(project_id, session_id, turn_id)
   WHERE state = 'submitted' AND turn_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS context_policy_suggestions (
+  id TEXT PRIMARY KEY,
+  packet_receipt_id TEXT NOT NULL REFERENCES context_packet_receipts(id) ON DELETE CASCADE,
+  source_id TEXT NOT NULL,
+  action TEXT NOT NULL CHECK (action IN ('keep', 'summarize', 'hold-back', 'refresh')),
+  reason_code TEXT NOT NULL,
+  reason_text TEXT NOT NULL,
+  estimated_token_saving INTEGER,
+  status TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed', 'accepted', 'rejected', 'stale')),
+  created_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_context_policy_suggestions_receipt_status
+  ON context_policy_suggestions(packet_receipt_id, status, created_at);
 `;
 
 export const AGENTOPS_INCREMENTAL_MIGRATIONS: readonly AgentOpsMigration[] = [
@@ -287,6 +302,26 @@ CREATE INDEX IF NOT EXISTS idx_context_packet_receipts_project_session_state
 CREATE UNIQUE INDEX IF NOT EXISTS idx_context_packet_receipts_submitted_turn
   ON context_packet_receipts(project_id, session_id, turn_id)
   WHERE state = 'submitted' AND turn_id IS NOT NULL;
+`,
+  },
+  {
+    version: 7,
+    name: "add_context_policy_suggestions",
+    sql: `
+CREATE TABLE IF NOT EXISTS context_policy_suggestions (
+  id TEXT PRIMARY KEY,
+  packet_receipt_id TEXT NOT NULL REFERENCES context_packet_receipts(id) ON DELETE CASCADE,
+  source_id TEXT NOT NULL,
+  action TEXT NOT NULL CHECK (action IN ('keep', 'summarize', 'hold-back', 'refresh')),
+  reason_code TEXT NOT NULL,
+  reason_text TEXT NOT NULL,
+  estimated_token_saving INTEGER,
+  status TEXT NOT NULL DEFAULT 'proposed' CHECK (status IN ('proposed', 'accepted', 'rejected', 'stale')),
+  created_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_context_policy_suggestions_receipt_status
+  ON context_policy_suggestions(packet_receipt_id, status, created_at);
 `,
   },
 ];

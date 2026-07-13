@@ -9,6 +9,7 @@ import { redactAgentOpsSecrets } from "./redaction.js";
 import { sqlRow, sqlRows } from "./sql-row.js";
 import { createAgentOpsContextStoreMethods } from "./store-context-methods.js";
 import { createAgentOpsContextReceiptStoreMethods } from "./store-context-receipts.js";
+import { createAgentOpsContextSuggestionStoreMethods } from "./store-context-suggestions.js";
 import { mapArtifactRow, mapLaneRow, mapProjectRow, mapRunRow } from "./store-mappers.js";
 import type {
   AddAgentOpsArtifactInput,
@@ -61,6 +62,7 @@ export function createAgentOpsStore(options: CreateAgentOpsStoreOptions = {}): A
     new SqliteAgentOpsStore(db, paths),
     createAgentOpsContextStoreMethods(db),
     createAgentOpsContextReceiptStoreMethods(db),
+    createAgentOpsContextSuggestionStoreMethods(db),
   );
 }
 
