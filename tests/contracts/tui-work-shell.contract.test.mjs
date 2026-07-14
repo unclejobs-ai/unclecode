@@ -27,8 +27,8 @@ import {
   formatAgentTraceLine,
   formatAttachmentBadgeLine,
   formatAttachmentErrorLine,
-  formatContextTurnReceiptLine,
   formatAuthLabelForDisplay,
+  formatContextTurnReceiptLine,
   formatInlineImageSupportLine,
   formatRuntimeLabel,
   formatToolTraceLine,
@@ -171,12 +171,14 @@ test("TUI exports the read-only context turn receipt formatter", () => {
     tokenEstimate: undefined,
     tokenEstimateState: "unknown",
     sourceCount: 1,
-    sourceRefs: [{
-      sourceId: "rules",
-      category: "workspace-guidance",
-      salience: 1,
-      includedInModel: true,
-    }],
+    sourceRefs: [
+      {
+        sourceId: "rules",
+        category: "workspace-guidance",
+        salience: 1,
+        includedInModel: true,
+      },
+    ],
     createdAt: "2026-07-13T00:00:00.000Z",
   });
 
