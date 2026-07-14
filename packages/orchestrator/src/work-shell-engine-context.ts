@@ -2,12 +2,20 @@ import {
   formatScopedMemoryTransparencyLines,
   prefetchScopedMemory,
 } from "@unclecode/context-broker";
+import type { MemoryLineageAdapter } from "@unclecode/context-broker";
 
 import { createCollapsedContextPanel } from "./work-shell-engine-panels.js";
 import { runRustCommandSync } from "./rust-command.js";
 import type { WorkShellPanel } from "./work-shell-engine.js";
 
 type PrefetchScopedMemory = typeof prefetchScopedMemory;
+type ListScopedMemoryLines = (input: {
+  scope: "session" | "project" | "user" | "agent";
+  cwd: string;
+  sessionId?: string;
+  agentId?: string;
+  lineage?: MemoryLineageAdapter;
+}) => Promise<readonly string[]>;
 
 function formatMemoryLinesFromSummaries(input: {
   readonly scope: "session" | "project" | "user" | "agent";
@@ -38,12 +46,8 @@ async function resolveWorkShellMemoryLines(input: {
   sessionId: string;
   env?: NodeJS.ProcessEnv;
   prefetchScopedMemory?: PrefetchScopedMemory;
-  listScopedMemoryLines: (input: {
-    scope: "session" | "project" | "user" | "agent";
-    cwd: string;
-    sessionId?: string;
-    agentId?: string;
-  }) => Promise<readonly string[]>;
+  lineage?: MemoryLineageAdapter;
+  listScopedMemoryLines: ListScopedMemoryLines;
 }): Promise<readonly string[]> {
   const prefetch = input.prefetchScopedMemory ?? prefetchScopedMemory;
   const memoryPrefetch = await prefetch({
@@ -51,6 +55,7 @@ async function resolveWorkShellMemoryLines(input: {
     sessionId: input.sessionId,
     agentId: "work-shell",
     ...(input.env ? { env: input.env } : {}),
+    ...(input.lineage ? { lineage: input.lineage } : {}),
   });
 
   if (memoryPrefetch.status !== "degraded" && memoryPrefetch.lines.length > 0) {
@@ -61,6 +66,7 @@ async function resolveWorkShellMemoryLines(input: {
     scope: "session",
     cwd: input.cwd,
     sessionId: input.sessionId,
+    ...(input.lineage ? { lineage: input.lineage } : {}),
   });
 
   return normalizeScopedMemoryLines({ scope: "session", lines: summaries });
@@ -101,15 +107,11 @@ export async function loadInitialWorkShellContextState(input: {
   sessionId: string;
   currentContextSummaryLines: readonly string[];
   listProjectBridgeLines: (cwd: string) => Promise<readonly string[]>;
-  listScopedMemoryLines: (input: {
-    scope: "session" | "project" | "user" | "agent";
-    cwd: string;
-    sessionId?: string;
-    agentId?: string;
-  }) => Promise<readonly string[]>;
+  listScopedMemoryLines: ListScopedMemoryLines;
   buildContextPanel: BuildContextPanel;
   env?: NodeJS.ProcessEnv;
   prefetchScopedMemory?: PrefetchScopedMemory;
+  lineage?: MemoryLineageAdapter;
 }): Promise<{
   readonly bridgeLines: readonly string[];
   readonly memoryLines: readonly string[];
@@ -123,6 +125,7 @@ export async function loadInitialWorkShellContextState(input: {
       listScopedMemoryLines: input.listScopedMemoryLines,
       ...(input.env ? { env: input.env } : {}),
       ...(input.prefetchScopedMemory ? { prefetchScopedMemory: input.prefetchScopedMemory } : {}),
+      ...(input.lineage ? { lineage: input.lineage } : {}),
     }),
   ]);
 
@@ -145,14 +148,10 @@ export async function loadWorkShellContextState(input: {
   currentContextSummaryLines: readonly string[];
   reloadWorkspaceContext?: ((cwd: string) => Promise<readonly string[]>) | undefined;
   listProjectBridgeLines: (cwd: string) => Promise<readonly string[]>;
-  listScopedMemoryLines: (input: {
-    scope: "session" | "project" | "user" | "agent";
-    cwd: string;
-    sessionId?: string;
-    agentId?: string;
-  }) => Promise<readonly string[]>;
+  listScopedMemoryLines: ListScopedMemoryLines;
   env?: NodeJS.ProcessEnv;
   prefetchScopedMemory?: PrefetchScopedMemory;
+  lineage?: MemoryLineageAdapter;
 }): Promise<{
   readonly contextSummaryLines: readonly string[];
   readonly bridgeLines: readonly string[];
@@ -169,6 +168,7 @@ export async function loadWorkShellContextState(input: {
       listScopedMemoryLines: input.listScopedMemoryLines,
       ...(input.env ? { env: input.env } : {}),
       ...(input.prefetchScopedMemory ? { prefetchScopedMemory: input.prefetchScopedMemory } : {}),
+      ...(input.lineage ? { lineage: input.lineage } : {}),
     }),
   ]);
 
@@ -185,15 +185,11 @@ export async function reloadWorkShellContextState(input: {
   currentContextSummaryLines: readonly string[];
   reloadWorkspaceContext?: ((cwd: string) => Promise<readonly string[]>) | undefined;
   listProjectBridgeLines: (cwd: string) => Promise<readonly string[]>;
-  listScopedMemoryLines: (input: {
-    scope: "session" | "project" | "user" | "agent";
-    cwd: string;
-    sessionId?: string;
-    agentId?: string;
-  }) => Promise<readonly string[]>;
+  listScopedMemoryLines: ListScopedMemoryLines;
   traceLines: readonly string[];
   buildContextPanel: BuildContextPanel;
   expanded?: boolean | undefined;
+  lineage?: MemoryLineageAdapter;
 }): Promise<{
   readonly contextSummaryLines: readonly string[];
   readonly bridgeLines: readonly string[];
@@ -207,6 +203,7 @@ export async function reloadWorkShellContextState(input: {
     reloadWorkspaceContext: input.reloadWorkspaceContext,
     listProjectBridgeLines: input.listProjectBridgeLines,
     listScopedMemoryLines: input.listScopedMemoryLines,
+    ...(input.lineage ? { lineage: input.lineage } : {}),
   });
 
   return {

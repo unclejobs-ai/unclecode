@@ -102,4 +102,87 @@ describe("memory prefetch", () => {
     assert.ok(result.lines.some((line) => /release objective/.test(line)));
     assert.ok(result.lines.every((line) => !/Bootstrap context:/.test(line)));
   });
+
+  it("filters inactive lineage before applying the prefetch limit", async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-memory-prefetch-lineage-"));
+    const env = { ...process.env, UNCLECODE_SESSION_STORE_ROOT: path.join(cwd, ".state") };
+    const sessionId = "work-prefetch-lineage";
+    const active = await writeScopedMemory({
+      scope: "session",
+      cwd,
+      env,
+      sessionId,
+      summary: "Older active memory remains visible.",
+    });
+    const superseded = await writeScopedMemory({
+      scope: "session",
+      cwd,
+      env,
+      sessionId,
+      summary: "Superseded memory is hidden.",
+    });
+    const expiring = await writeScopedMemory({
+      scope: "session",
+      cwd,
+      env,
+      sessionId,
+      summary: "Expired memory is hidden.",
+    });
+    await writeScopedMemory({
+      scope: "session",
+      cwd,
+      env,
+      sessionId,
+      summary: "Untracked memory is hidden.",
+    });
+    const states = new Map([
+      [active.memoryId, "active"],
+      [superseded.memoryId, "superseded"],
+      [expiring.memoryId, "active"],
+    ]);
+    let expiryRuns = 0;
+    const lineage = {
+      record() {
+        throw new Error("not used");
+      },
+      invalidate() {
+        throw new Error("not used");
+      },
+      expire() {
+        expiryRuns += 1;
+        states.set(expiring.memoryId, "expired");
+        return 1;
+      },
+      get(memoryId) {
+        const state = states.get(memoryId);
+        return state === undefined ? undefined : {
+          memoryId,
+          sourceId: "assistant-summary",
+          originTurnId: "turn-1",
+          originPacketReceiptId: "receipt-1",
+          state,
+          confidence: 0.9,
+          createdAt: "2026-07-13T00:00:00.000Z",
+        };
+      },
+      isActive(memoryId) {
+        return states.get(memoryId) === "active";
+      },
+    };
+
+    const result = await prefetchScopedMemory({
+      cwd,
+      env,
+      sessionId,
+      scopes: ["session"],
+      limit: 1,
+      lineage,
+    });
+
+    assert.equal(result.status, "ok");
+    assert.equal(expiryRuns, 1);
+    assert.deepEqual(result.entries.map((entry) => entry.memoryId), [active.memoryId]);
+    assert.equal(result.entries[0]?.scope, "session");
+    assert.match(result.lines[0] ?? "", /Older active memory remains visible/);
+  });
 });

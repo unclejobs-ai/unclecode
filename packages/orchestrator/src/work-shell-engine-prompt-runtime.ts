@@ -5,6 +5,10 @@ import * as WorkShellTurns from "./work-shell-engine-turns.js";
 import type { WorkShellPromptCommand } from "./work-shell-engine-turns.js";
 import type { ContextPacketReceipt } from "@unclecode/contracts";
 import type {
+  MemoryLineageAdapter,
+  PromoteScopedMemoryInput,
+} from "@unclecode/context-broker";
+import type {
   WorkShellChatEntry,
   WorkShellComposerResolution,
   WorkShellEngineOptions,
@@ -61,6 +65,7 @@ type PromptRuntimeInput<Attachment, Reasoning extends WorkShellReasoningConfig> 
   ) => WorkShellPanel;
   autoContinueOnPermissionStall?: boolean | undefined;
   runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => Promise<{ text: string }>;
+  isTurnActive?: (() => boolean) | undefined;
   publishContextBridge: (input: {
     cwd: string;
     summary: string;
@@ -75,11 +80,14 @@ type PromptRuntimeInput<Attachment, Reasoning extends WorkShellReasoningConfig> 
     sessionId?: string;
     agentId?: string;
   }) => Promise<{ memoryId: string }>;
+  memoryLineage?: MemoryLineageAdapter | undefined;
+  promoteScopedMemory?: ((input: PromoteScopedMemoryInput) => Promise<{ memoryId: string }>) | undefined;
   listScopedMemoryLines: (input: {
     scope: "session" | "project" | "user" | "agent";
     cwd: string;
     sessionId?: string;
     agentId?: string;
+    lineage?: MemoryLineageAdapter;
   }) => Promise<readonly string[]>;
   refreshAuthState?: (() => Promise<{ authLabel: string; authIssueLines?: readonly string[] }>) | undefined;
   applyAuthIssueLines: (authIssueLines?: readonly string[]) => void;
@@ -117,9 +125,16 @@ function createPromptRuntimeExecutionInput<Attachment, Reasoning extends WorkShe
     sessionId: input.sessionId,
     autoContinueOnPermissionStall: input.autoContinueOnPermissionStall,
     runAgentTurn: input.runAgentTurn,
+    ...(input.isTurnActive !== undefined
+      ? { isTurnActive: input.isTurnActive }
+      : {}),
     publishContextBridge: input.publishContextBridge,
     writeScopedMemory: input.writeScopedMemory,
     listScopedMemoryLines: input.listScopedMemoryLines,
+    ...(input.memoryLineage !== undefined ? { memoryLineage: input.memoryLineage } : {}),
+    ...(input.promoteScopedMemory !== undefined
+      ? { promoteScopedMemory: input.promoteScopedMemory }
+      : {}),
     refreshAuthState: input.refreshAuthState,
     applyAuthIssueLines: input.applyAuthIssueLines,
     formatWorkShellError: input.formatWorkShellError,

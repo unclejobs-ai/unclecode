@@ -120,6 +120,23 @@ export function upsertContextSource(
   return getContextSourceOrThrow(db, input.projectId, input.id);
 }
 
+export function upsertContextSources(
+  db: DatabaseSync,
+  inputs: readonly UpsertContextSourceInput[],
+): void {
+  if (inputs.length === 0) return;
+  db.exec("BEGIN");
+  try {
+    for (const input of inputs) {
+      upsertContextSource(db, input);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 export function deleteContextSourcesByIdPrefix(
   db: DatabaseSync,
   input: {
@@ -149,13 +166,12 @@ export function markContextSourceTurnSeen(
   turnIndex: number,
 ): void {
   if (ids.length === 0) return;
-  const stmt = db.prepare(
-    "UPDATE context_sources SET turn_last_seen = ?, updated_at = ? WHERE project_id = ? AND id = ?",
-  );
-  const timestamp = new Date().toISOString();
-  for (const id of ids) {
-    stmt.run(turnIndex, timestamp, projectId, id);
-  }
+  const placeholders = ids.map(() => "?").join(",");
+  db.prepare(
+    `UPDATE context_sources
+     SET turn_last_seen = ?, updated_at = ?
+     WHERE project_id = ? AND id IN (${placeholders})`,
+  ).run(turnIndex, new Date().toISOString(), projectId, ...ids);
 }
 
 export function pruneExpiredContextSources(db: DatabaseSync, now = new Date()): number {

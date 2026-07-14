@@ -9,6 +9,17 @@ import type {
 } from "./work-shell-engine.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 import type { ContextPacketReceipt } from "@unclecode/contracts";
+import type {
+  MemoryLineageAdapter,
+  PromoteScopedMemoryInput,
+} from "@unclecode/context-broker";
+
+type WorkShellMemoryLineageRuntime = {
+  readonly turnId?: string | undefined;
+  readonly contextReceipt?: ContextPacketReceipt | undefined;
+  readonly memoryLineage?: MemoryLineageAdapter | undefined;
+  readonly promoteScopedMemory?: (input: PromoteScopedMemoryInput) => Promise<{ memoryId: string }>;
+};
 
 export async function runPromptTurnSuccessSequence<Attachment>(input: {
   prompt: string;
@@ -21,6 +32,7 @@ export async function runPromptTurnSuccessSequence<Attachment>(input: {
   sessionId: string;
   currentBridgeLines: readonly string[];
   currentMemoryLines?: readonly string[] | undefined;
+  isTurnActive?: (() => boolean) | undefined;
   publishContextBridge: (input: {
     cwd: string;
     summary: string;
@@ -40,13 +52,17 @@ export async function runPromptTurnSuccessSequence<Attachment>(input: {
     cwd: string;
     sessionId?: string;
     agentId?: string;
+    lineage?: MemoryLineageAdapter;
   }) => Promise<readonly string[]>;
-}): Promise<{
+} & WorkShellMemoryLineageRuntime): Promise<{
   readonly assistantText: string;
   readonly lastTurnDurationMs: number;
   readonly postTurnEffects: Awaited<ReturnType<typeof WorkShellPostTurns.runWorkShellPostTurnSuccessEffects>>;
 }> {
   const result = await input.runAgentTurn(input.prompt, input.attachments ?? []);
+  if (input.isTurnActive?.() === false) {
+    throw new Error("Turn is no longer active.");
+  }
   const lastTurnDurationMs = Date.now() - input.turnStartedAt;
   const assistantText = await WorkShellTurns.finalizeWorkShellAssistantReply({
     prompt: input.prompt,
@@ -60,6 +76,9 @@ export async function runPromptTurnSuccessSequence<Attachment>(input: {
     // rare-event cost — never paid on the happy path.
     runTurn: (prompt) => input.runAgentTurn(prompt, input.attachments ?? []),
   });
+  if (input.isTurnActive?.() === false) {
+    throw new Error("Turn is no longer active.");
+  }
   const postTurnEffects = await WorkShellPostTurns.runWorkShellPostTurnSuccessEffects({
     cwd: input.cwd,
     transcriptText: input.transcriptText,
@@ -67,6 +86,15 @@ export async function runPromptTurnSuccessSequence<Attachment>(input: {
     sessionId: input.sessionId,
     currentBridgeLines: input.currentBridgeLines,
     currentMemoryLines: input.currentMemoryLines,
+    ...(input.isTurnActive !== undefined
+      ? { isTurnActive: input.isTurnActive }
+      : {}),
+    ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
+    ...(input.contextReceipt !== undefined ? { contextReceipt: input.contextReceipt } : {}),
+    ...(input.memoryLineage !== undefined ? { memoryLineage: input.memoryLineage } : {}),
+    ...(input.promoteScopedMemory !== undefined
+      ? { promoteScopedMemory: input.promoteScopedMemory }
+      : {}),
     publishContextBridge: input.publishContextBridge,
     writeScopedMemory: input.writeScopedMemory,
     listScopedMemoryLines: input.listScopedMemoryLines,
@@ -368,6 +396,7 @@ export async function executeWorkShellPromptTurn<
   cwd: string;
   sessionId: string;
   autoContinueOnPermissionStall?: boolean | undefined;
+  isTurnActive?: (() => boolean) | undefined;
   runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => Promise<{ text: string }>;
   publishContextBridge: (input: {
     cwd: string;
@@ -388,6 +417,7 @@ export async function executeWorkShellPromptTurn<
     cwd: string;
     sessionId?: string;
     agentId?: string;
+    lineage?: MemoryLineageAdapter;
   }) => Promise<readonly string[]>;
   refreshAuthState?: (() => Promise<{ authLabel: string; authIssueLines?: readonly string[] }>) | undefined;
   applyAuthIssueLines?: ((authIssueLines?: readonly string[]) => void) | undefined;
@@ -407,9 +437,7 @@ export async function executeWorkShellPromptTurn<
   ) => Promise<void>;
   /** Optional agentops recorder callback. Called after every turn (success or failure). Non-blocking. */
   recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string; contextReceiptId?: string; packetId?: string }) => void) | undefined;
-  readonly turnId?: string | undefined;
-  readonly contextReceipt?: ContextPacketReceipt | undefined;
-}): Promise<WorkShellPromptTurnExecutionResult> {
+} & WorkShellMemoryLineageRuntime): Promise<WorkShellPromptTurnExecutionResult> {
   input.appendEntries({ role: "user", text: input.promptTurn.transcriptText });
   const turnStartedAt = Date.now();
   input.setState(createPromptTurnStartPatch({
@@ -427,6 +455,9 @@ export async function executeWorkShellPromptTurn<
       turnStartedAt,
       autoContinueOnPermissionStall: input.autoContinueOnPermissionStall,
       runAgentTurn: input.runAgentTurn,
+      ...(input.isTurnActive !== undefined
+        ? { isTurnActive: input.isTurnActive }
+        : {}),
       cwd: input.cwd,
       sessionId: input.sessionId,
       currentBridgeLines: input.state.bridgeLines,
@@ -434,6 +465,12 @@ export async function executeWorkShellPromptTurn<
       publishContextBridge: input.publishContextBridge,
       writeScopedMemory: input.writeScopedMemory,
       listScopedMemoryLines: input.listScopedMemoryLines,
+      ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
+      ...(input.contextReceipt !== undefined ? { contextReceipt: input.contextReceipt } : {}),
+      ...(input.memoryLineage !== undefined ? { memoryLineage: input.memoryLineage } : {}),
+      ...(input.promoteScopedMemory !== undefined
+        ? { promoteScopedMemory: input.promoteScopedMemory }
+        : {}),
     });
     const successPayload = resolvePromptTurnSuccessPayload<Reasoning>({
       assistantText,
@@ -449,7 +486,9 @@ export async function executeWorkShellPromptTurn<
     });
     if (!postTurnEffects.skipped) {
       input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.bridgeTraceEvent));
-      input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.memoryTraceEvent));
+      if (postTurnEffects.memoryTraceEvent !== undefined) {
+        input.pushTraceLine(input.formatAgentTraceLine(postTurnEffects.memoryTraceEvent));
+      }
     }
     const replyPersisted = await input
       .persistSessionSnapshot("idle", input.promptTurn.sessionSummary)

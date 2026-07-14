@@ -1,5 +1,5 @@
-import type { ContextSourceMetadata } from "./context-source-metadata.js";
 import type { PersistedPromptManifest } from "./agent-console.js";
+import type { ContextSourceCompressionMetadata } from "./context-source-metadata.js";
 
 export type ContextPacketSourceCategory =
   | "workspace"
@@ -102,6 +102,19 @@ export type ContextPacketViewActionReceipt = {
 
 export type ContextPacketViewPreviewKind = "summary" | "excerpt" | "full" | "redacted";
 
+export type ContextPacketViewCondensedHistoryMetadata = {
+  readonly kind: "condensed-history";
+  readonly sourceEventIds: readonly string[];
+  readonly summary: string;
+  readonly recomputeReason: string;
+  readonly compactedEventCount: number;
+  readonly recentEventCount: number;
+  readonly compression: ContextSourceCompressionMetadata;
+};
+
+export type ContextPacketViewMetadata =
+  ContextPacketViewCondensedHistoryMetadata;
+
 export type ContextPacketViewItem = {
   readonly id: string;
   readonly category: ContextPacketSourceCategory;
@@ -121,7 +134,7 @@ export type ContextPacketViewItem = {
   readonly conflictGroupId?: string | undefined;
   readonly actions?: readonly ContextPacketViewAction[] | undefined;
   readonly previewKind?: ContextPacketViewPreviewKind | undefined;
-  readonly metadata?: ContextSourceMetadata | undefined;
+  readonly metadata?: ContextPacketViewMetadata | undefined;
 };
 
 export type ContextPacketWarningSeverity = "info" | "warning" | "error";

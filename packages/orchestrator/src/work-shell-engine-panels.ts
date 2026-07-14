@@ -115,13 +115,16 @@ export function createCollapsedContextPanel(input: {
   ) => WorkShellPanel;
   expanded?: boolean | undefined;
 }): WorkShellPanel {
-  return input.buildContextPanel(
+  const panel = input.buildContextPanel(
     input.contextSummaryLines,
     input.bridgeLines,
     input.memoryLines,
     input.traceLines,
     input.expanded,
   );
+  return input.expanded
+    ? panel
+    : { ...panel, lines: [...panel.lines, "Inspect sources · /context"] };
 }
 
 export function createRecentSessionsLoadingPanel(): WorkShellPanel {

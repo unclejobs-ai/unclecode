@@ -48,12 +48,17 @@ export {
   loadCachedWorkspaceGuidance,
   loadWorkspaceGuidance,
 } from "./workspace-guidance.js";
-export type { MemoryScope } from "./context-memory.js";
+export type {
+  MemoryLineageAdapter,
+  MemoryScope,
+  PromoteScopedMemoryInput,
+} from "./context-memory.js";
 export type { ScopedMemoryEntry } from "./memory-transparency.js";
 export {
   listProjectBridgeLines,
   listScopedMemoryEntries,
   listScopedMemoryLines,
+  promoteScopedMemory,
   publishContextBridge,
   writeScopedMemory,
 } from "./context-memory.js";

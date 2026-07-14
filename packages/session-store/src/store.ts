@@ -2,7 +2,11 @@ import { type EngineEvent, type SessionCheckpoint } from "@unclecode/contracts";
 import { dirname } from "node:path";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 
-import { listProjectMemoryRecords, writeProjectMemoryRecord } from "./project-memory-db.js";
+import {
+  deleteProjectMemoryRecord,
+  listProjectMemoryRecords,
+  writeProjectMemoryRecord,
+} from "./project-memory-db.js";
 import { getProjectMemoryPath, getSessionPaths } from "./paths.js";
 import { redactSecrets, stringifyWithRedaction } from "./redaction.js";
 import {
@@ -321,6 +325,12 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
 
       await mkdir(paths.projectMemoryDir, { recursive: true });
       writeProjectMemoryRecord(getProjectMemoryPath(options, projectPath), memoryId, content);
+    },
+
+    async deleteProjectMemory({ projectPath, memoryId }): Promise<void> {
+      const dbPath = getProjectMemoryPath(options, projectPath);
+      await mkdir(dirname(dbPath), { recursive: true });
+      deleteProjectMemoryRecord(dbPath, memoryId);
     },
 
     async listProjectMemories(projectPath: string): Promise<readonly ProjectMemoryEntry[]> {

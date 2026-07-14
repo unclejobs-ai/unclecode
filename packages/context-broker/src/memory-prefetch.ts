@@ -1,4 +1,8 @@
-import { listScopedMemoryEntries, type MemoryScope } from "./context-memory.js";
+import {
+  listScopedMemoryEntries,
+  type MemoryLineageAdapter,
+  type MemoryScope,
+} from "./context-memory.js";
 import {
   formatScopedMemoryTransparencyLines,
   type ScopedMemoryEntry,
@@ -48,6 +52,7 @@ async function loadPrefetchEntries(input: {
   readonly agentId?: string;
   readonly scopes: readonly MemoryScope[];
   readonly limit: number;
+  readonly lineage?: MemoryLineageAdapter;
 }): Promise<readonly ScopedMemoryEntry[]> {
   const batches = await Promise.all(
     input.scopes.map(async (scope) => {
@@ -58,6 +63,7 @@ async function loadPrefetchEntries(input: {
           ...(input.env ? { env: input.env } : {}),
           ...(input.sessionId ? { sessionId: input.sessionId } : {}),
           ...(input.agentId ? { agentId: input.agentId } : {}),
+          ...(input.lineage ? { lineage: input.lineage } : {}),
         });
       } catch {
         return [];
@@ -83,6 +89,7 @@ export async function prefetchScopedMemory(input: {
   readonly timeoutMs?: number;
   readonly limit?: number;
   readonly loadEntries?: MemoryPrefetchLoader;
+  readonly lineage?: MemoryLineageAdapter;
 }): Promise<MemoryPrefetchResult> {
   const timeoutMs = input.timeoutMs ?? DEFAULT_MEMORY_PREFETCH_TIMEOUT_MS;
   const scopes = input.scopes ?? DEFAULT_PREFETCH_SCOPES;
@@ -98,6 +105,7 @@ export async function prefetchScopedMemory(input: {
         ...(input.env ? { env: input.env } : {}),
         ...(input.sessionId ? { sessionId: input.sessionId } : {}),
         ...(input.agentId ? { agentId: input.agentId } : {}),
+        ...(input.lineage ? { lineage: input.lineage } : {}),
       }),
       timeoutMs,
     );

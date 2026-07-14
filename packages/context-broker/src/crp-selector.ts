@@ -19,6 +19,7 @@ import {
 } from "@unclecode/contracts";
 
 import { createContextPacketView } from "./context-packet-view.js";
+import { toContextPacketViewMetadata } from "./context-packet-item.js";
 import { buildContextSourcePacketMetadata } from "./context-source-packet-metadata.js";
 
 const OMO_EXCLUDED_DETAIL_LIMIT = 8;
@@ -52,7 +53,9 @@ export function contextSourceToPacketItem(
     salience: src.salience,
     includedInModel: src.includedInModel,
     ...buildContextSourcePacketMetadata(src, input),
-    ...(src.metadata === undefined ? {} : { metadata: src.metadata }),
+    ...(src.metadata === undefined
+      ? {}
+      : { metadata: toContextPacketViewMetadata(src.metadata) }),
   };
 }
 
@@ -150,6 +153,13 @@ export function selectContextPacketFromStore(options: SelectContextPacketOptions
   const warnings = [
     ...(options.warnings ?? []),
     ...buildCondensedHistoryWarnings(included),
+    ...(selection.omittedCount > 0
+      ? [{
+          code: "context.sources.bounded",
+          message: `${selection.omittedCount} lower-ranked context sources were omitted from this packet.`,
+          severity: "warning" as const,
+        }]
+      : []),
   ];
 
   // Mark selected sources as seen this turn.

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,8 +15,14 @@ import {
 } from "../../apps/unclecode-cli/src/work-runtime-session.ts";
 import { loadWorkCliBootstrap } from "../../apps/unclecode-cli/src/work-runtime-bootstrap.ts";
 import { loadWorkShellDashboardProps } from "../../apps/unclecode-cli/src/work-runtime.ts";
+import { createManagedDashboardInput } from "../../apps/unclecode-cli/src/work-runtime-dashboard.ts";
+import { createAgentOpsStore } from "@unclecode/agentops-db";
 import { persistWorkShellSessionSnapshot } from "@unclecode/orchestrator";
-import { formatContextPacketPromptPrefix } from "../../packages/context-broker/src/context-packet-view.ts";
+import {
+  formatContextPacketPromptPrefix,
+  listScopedMemoryEntries,
+  writeScopedMemory,
+} from "../../packages/context-broker/src/index.ts";
 import { buildWorkGraphContextItems } from "../../apps/unclecode-cli/src/work-runtime-context-items.ts";
 
 test("parseArgs extracts cwd/provider/model/reasoning/session/help/tools/prompt from work argv", () => {
@@ -772,6 +779,217 @@ test("loadWorkCliBootstrap reuses resumed reasoning overrides unless the CLI ove
   }
 });
 
+test("resuming invalidates previews and excludes memory with unsubmitted lineage", async () => {
+  const originalEnv = { ...process.env };
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-runtime-resume-lineage-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+  const sessionStoreRoot = path.join(workspaceRoot, ".state");
+  const sessionId = "work-session-lineage";
+  const projectId = createHash("sha256").update(workspaceRoot).digest("hex").slice(0, 16);
+  const env = {
+    ...process.env,
+    LLM_PROVIDER: "openai",
+    OPENAI_MODEL: "gpt-5.6-sol",
+    HOME: fakeHome,
+    UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot,
+    OPENAI_API_KEY: "sk-test-123",
+  };
+
+  try {
+    mkdirSync(fakeHome, { recursive: true });
+    const store = createAgentOpsStore({
+      home: path.join(fakeHome, ".unclecode", "agentops"),
+    });
+    store.addProject({
+      id: projectId,
+      name: "resume-lineage",
+      repoPath: workspaceRoot,
+    });
+    store.recordContextPacketPreview({
+      id: "receipt-submitted",
+      projectId,
+      sessionId,
+      packetId: "packet-submitted",
+      profile: "build",
+      tokenEstimate: 100,
+      tokenEstimateState: "estimated",
+      sourceCount: 0,
+      sourceRefs: [],
+    });
+    store.submitContextPacketReceipt({
+      receiptId: "receipt-submitted",
+      projectId,
+      sessionId,
+      turnId: "turn-submitted",
+    });
+    store.recordContextPacketPreview({
+      id: "receipt-preview",
+      projectId,
+      sessionId,
+      packetId: "packet-preview",
+      profile: "build",
+      tokenEstimate: 100,
+      tokenEstimateState: "estimated",
+      sourceCount: 0,
+      sourceRefs: [],
+    });
+    const memory = await writeScopedMemory({
+      scope: "session",
+      cwd: workspaceRoot,
+      env,
+      sessionId,
+      summary: "orphan-memory must never be injected",
+    });
+    store.recordMemoryLineage({
+      memoryId: memory.memoryId,
+      sourceId: "assistant-summary",
+      originTurnId: "turn-preview",
+      originPacketReceiptId: "receipt-preview",
+      state: "active",
+      confidence: 0.9,
+    });
+    store.addProject({
+      id: "other-project",
+      name: "other-project",
+      repoPath: path.join(workspaceRoot, "other"),
+    });
+    store.recordContextPacketPreview({
+      id: "receipt-other-preview",
+      projectId: "other-project",
+      sessionId: "other-session",
+      packetId: "packet-other-preview",
+      profile: "build",
+      tokenEstimateState: "unknown",
+      sourceCount: 0,
+      sourceRefs: [],
+    });
+    store.recordMemoryLineage({
+      memoryId: "memory:session:2026-07-13T00:00:00.000Z:other",
+      sourceId: "assistant-summary",
+      originTurnId: "turn-other-preview",
+      originPacketReceiptId: "receipt-other-preview",
+      state: "active",
+      confidence: 0.9,
+    });
+    store.close();
+
+    await persistWorkShellSessionSnapshot({
+      cwd: workspaceRoot,
+      env,
+      sessionId,
+      model: "gpt-5.6-sol",
+      mode: "analyze",
+      state: "idle",
+      summary: "Chat: lifecycle",
+      lastSubmittedContextReceiptId: "receipt-submitted",
+    });
+
+    process.env = env;
+    delete process.env.OPENAI_AUTH_TOKEN;
+    const resumedSession = await loadResumedWorkSession({
+      cwd: workspaceRoot,
+      sessionId,
+      env,
+    });
+    assert.equal(
+      resumedSession.lastSubmittedContextReceiptId,
+      "receipt-submitted",
+      "only the submitted receipt identity is resumable",
+    );
+
+    const resumed = await loadWorkCliBootstrap({
+      argv: ["--cwd", workspaceRoot, "--session-id", sessionId],
+      env,
+      userHomeDir: fakeHome,
+    });
+    assert.equal(
+      resumed.options.initialLastSubmittedContextReceiptId,
+      "receipt-submitted",
+    );
+    const reopened = createAgentOpsStore({
+      home: path.join(fakeHome, ".unclecode", "agentops"),
+    });
+    assert.equal(
+      reopened.getContextPacketReceipt(projectId, "receipt-preview")?.state,
+      "invalidated",
+    );
+    assert.equal(
+      reopened.getMemoryLineage(
+        "memory:session:2026-07-13T00:00:00.000Z:other",
+      )?.state,
+      "active",
+      "resuming one project must not mutate another project's lineage",
+    );
+    reopened.close();
+    assert.equal(resumed.options.memoryLineage?.isActive(memory.memoryId), false);
+    assert.deepEqual(
+      await listScopedMemoryEntries({
+        scope: "session",
+        cwd: workspaceRoot,
+        env,
+        sessionId,
+        lineage: resumed.options.memoryLineage,
+      }),
+      [],
+    );
+    assert.ok(
+      resumed.options.contextSummaryLines.some((line) =>
+        /memory lineage.*1/i.test(line)
+      ),
+    );
+  } finally {
+    process.env = originalEnv;
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("resuming fails closed when lifecycle integrity cannot be reconciled", async () => {
+  const originalEnv = { ...process.env };
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-runtime-resume-integrity-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+  const sessionStoreRoot = path.join(workspaceRoot, ".state");
+  const env = {
+    ...process.env,
+    LLM_PROVIDER: "openai",
+    OPENAI_MODEL: "gpt-5.6-sol",
+    HOME: fakeHome,
+    UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot,
+    OPENAI_API_KEY: "sk-test-123",
+  };
+
+  try {
+    await persistWorkShellSessionSnapshot({
+      cwd: workspaceRoot,
+      env,
+      sessionId: "resume-integrity-failure",
+      model: "gpt-5.6-sol",
+      mode: "analyze",
+      state: "idle",
+      summary: "Chat: integrity",
+    });
+    mkdirSync(path.join(fakeHome, ".unclecode"), { recursive: true });
+    writeFileSync(path.join(fakeHome, ".unclecode", "agentops"), "not a directory");
+    process.env = env;
+
+    await assert.rejects(
+      () => loadWorkCliBootstrap({
+        argv: [
+          "--cwd",
+          workspaceRoot,
+          "--session-id",
+          "resume-integrity-failure",
+        ],
+        env,
+        userHomeDir: fakeHome,
+      }),
+      /Unable to resume safely: context integrity validation failed/,
+    );
+  } finally {
+    process.env = originalEnv;
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("goal context projection prioritizes active tasks and excludes private executor fields", () => {
   const items = buildWorkGraphContextItems({
     id: "goal-context",
@@ -791,4 +1009,37 @@ test("goal context projection prioritizes active tasks and excludes private exec
   assert.match(items[1]?.label ?? "", /running · Task 6/);
   assert.equal(items.some((item) => /Task 5/.test(item.label)), false);
   assert.doesNotMatch(JSON.stringify(items), /PRIVATE_PROMPT|private-\d+\.ts/);
+});
+
+test("managed dashboard preserves the resumed submitted receipt identity", () => {
+  const managed = createManagedDashboardInput({
+    agent: {},
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "build",
+      authLabel: "api-key-env",
+      reasoning: {
+        effort: "high",
+        source: "mode-default",
+        support: {
+          status: "supported",
+          defaultEffort: "medium",
+          supportedEfforts: ["low", "medium", "high"],
+        },
+      },
+      cwd: "/repo",
+      modelWindow: 128_000,
+      contextSummaryLines: [],
+      homeState: {},
+      initialLastSubmittedContextReceiptId: "receipt-resumed-submitted",
+    },
+  }, {
+    resolveWorkShellInlineCommand: async () => ({ lines: [], failed: false }),
+  });
+
+  assert.equal(
+    managed.paneRuntime.initialLastSubmittedContextReceiptId,
+    "receipt-resumed-submitted",
+  );
 });

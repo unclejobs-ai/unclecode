@@ -2,8 +2,10 @@ import { createConversationTurnSummary } from "./work-shell-engine-turns.js";
 import { runRustCommandSync } from "./rust-command.js";
 import {
   formatScopedMemoryTransparencyLines,
+  type MemoryLineageAdapter,
+  type PromoteScopedMemoryInput,
 } from "@unclecode/context-broker";
-import type { ContextPolicySuggestion } from "@unclecode/contracts";
+import type { ContextPacketReceipt, ContextPolicySuggestion } from "@unclecode/contracts";
 
 export type WorkShellSyntheticTraceEvent = {
   readonly type: "bridge.published" | "memory.written";
@@ -17,25 +19,41 @@ export type WorkShellPostTurnSuccessEffectsInput = {
   sessionId: string;
   currentBridgeLines: readonly string[];
   currentMemoryLines?: readonly string[] | undefined;
+  turnId?: string | undefined;
+  contextReceipt?: ContextPacketReceipt | undefined;
+  memoryLineage?: MemoryLineageAdapter | undefined;
+  promoteScopedMemory?: (input: PromoteScopedMemoryInput) => Promise<{
+    memoryId: string;
+    rollback?: (() => Promise<void>) | undefined;
+  }>;
+  isTurnActive?: (() => boolean) | undefined;
   publishContextBridge: (input: {
     cwd: string;
     summary: string;
     source: string;
     target: string;
     kind: "summary" | "decision" | "fact" | "file-change" | "task-state" | "warning";
-  }) => Promise<{ bridgeId: string; line: string }>;
+  }) => Promise<{
+    bridgeId: string;
+    line: string;
+    rollback?: (() => Promise<void>) | undefined;
+  }>;
   writeScopedMemory: (input: {
     scope: "session" | "project" | "user" | "agent";
     cwd: string;
     summary: string;
     sessionId?: string;
     agentId?: string;
-  }) => Promise<{ memoryId: string }>;
+  }) => Promise<{
+    memoryId: string;
+    rollback?: (() => Promise<void>) | undefined;
+  }>;
   listScopedMemoryLines: (input: {
     scope: "session" | "project" | "user" | "agent";
     cwd: string;
     sessionId?: string;
     agentId?: string;
+    lineage?: MemoryLineageAdapter;
   }) => Promise<readonly string[]>;
 };
 
@@ -45,7 +63,7 @@ export type WorkShellPostTurnSuccessEffectsResult = {
   readonly bridgeSummary: string;
   readonly memorySummary: string;
   readonly bridgeTraceEvent: WorkShellSyntheticTraceEvent;
-  readonly memoryTraceEvent: WorkShellSyntheticTraceEvent;
+  readonly memoryTraceEvent?: WorkShellSyntheticTraceEvent | undefined;
   /** Set when assistant text sanitized to empty — no bridge/memory side effects. */
   readonly skipped?: boolean;
 };
@@ -190,6 +208,55 @@ export async function resolveWorkShellFailureAuthLabel(input: {
   }
 }
 
+function resolveAssistantSummaryPredecessor(
+  lines: readonly string[],
+  lineage: MemoryLineageAdapter,
+): string | undefined {
+  for (const line of lines) {
+    const memoryId = / · cite (memory:\S+) · /.exec(line)?.[1];
+    if (memoryId === undefined) continue;
+    const record = lineage.get(memoryId);
+    if (record?.sourceId === "assistant-summary" && lineage.isActive(memoryId)) {
+      return memoryId;
+    }
+  }
+  return undefined;
+}
+
+function requireSubmittedMemoryProof(input: {
+  readonly sessionId: string;
+  readonly turnId?: string | undefined;
+  readonly contextReceipt?: ContextPacketReceipt | undefined;
+}): { readonly turnId: string; readonly packetReceiptId: string } {
+  if (
+    !input.turnId?.trim()
+    || input.contextReceipt?.state !== "submitted"
+    || input.contextReceipt.turnId !== input.turnId
+    || input.contextReceipt.sessionId !== input.sessionId
+  ) {
+    throw new Error("Submitted packet receipt required for memory promotion.");
+  }
+  return {
+    turnId: input.turnId,
+    packetReceiptId: input.contextReceipt.id,
+  };
+}
+
+async function rollbackDurableEffects(
+  effects: readonly (((() => Promise<void>) | undefined))[],
+): Promise<void> {
+  const rollbacks = effects.filter(
+    (effect): effect is () => Promise<void> => effect !== undefined,
+  );
+  const results = await Promise.allSettled(rollbacks.map((rollback) => rollback()));
+  const failures = results.flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : []
+  );
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "Interrupted turn rollback failed.");
+  }
+}
+
 export async function runWorkShellPostTurnSuccessEffects(
   input: WorkShellPostTurnSuccessEffectsInput,
 ): Promise<WorkShellPostTurnSuccessEffectsResult> {
@@ -208,7 +275,11 @@ export async function runWorkShellPostTurnSuccessEffects(
   let bridgeLine: string | undefined;
   let bridgeSummary = summary;
   let bridgeTraceEvent: WorkShellSyntheticTraceEvent = { type: "bridge.published", summary };
+  let bridgeRollback: (() => Promise<void>) | undefined;
   try {
+    if (input.isTurnActive?.() === false) {
+      throw new Error("Turn is no longer active.");
+    }
     const bridge = await input.publishContextBridge({
       cwd: input.cwd,
       summary,
@@ -216,8 +287,13 @@ export async function runWorkShellPostTurnSuccessEffects(
       target: "project-context",
       kind: "summary",
     });
+    if (input.isTurnActive?.() === false) {
+      await rollbackDurableEffects([bridge.rollback]);
+      throw new Error("Turn is no longer active.");
+    }
     bridgeId = bridge.bridgeId;
     bridgeLine = bridge.line;
+    bridgeRollback = bridge.rollback;
   } catch (error) {
     bridgeSummary = "Context bridge unavailable; reply kept.";
     bridgeTraceEvent = createDegradedPostTurnTraceEvent(
@@ -230,20 +306,61 @@ export async function runWorkShellPostTurnSuccessEffects(
   let memoryId: string | undefined;
   let memoryLines = input.currentMemoryLines ?? [];
   let memorySummary = summary;
-  let memoryTraceEvent: WorkShellSyntheticTraceEvent = { type: "memory.written", summary };
+  let memoryTraceEvent: WorkShellSyntheticTraceEvent | undefined = {
+    type: "memory.written",
+    summary,
+  };
+  let memoryRollback: (() => Promise<void>) | undefined;
   try {
-    const memory = await input.writeScopedMemory({
-      scope: "session",
-      cwd: input.cwd,
-      summary,
-      sessionId: input.sessionId,
-      agentId: "work-shell",
-    });
+    if (input.isTurnActive?.() === false) {
+      throw new Error("Turn is no longer active.");
+    }
+    const lineageConfigured = input.contextReceipt !== undefined
+      || input.turnId !== undefined
+      || input.memoryLineage !== undefined
+      || input.promoteScopedMemory !== undefined;
+    if (
+      lineageConfigured
+      && (input.memoryLineage === undefined || input.promoteScopedMemory === undefined)
+    ) {
+      throw new Error("Memory lineage promotion is only partially configured.");
+    }
+    const supersedesMemoryId = input.memoryLineage === undefined
+      ? undefined
+      : resolveAssistantSummaryPredecessor(
+          input.currentMemoryLines ?? [],
+          input.memoryLineage,
+        );
+    const memory = input.memoryLineage !== undefined && input.promoteScopedMemory !== undefined
+      ? await input.promoteScopedMemory({
+          scope: "session",
+          cwd: input.cwd,
+          summary,
+          sessionId: input.sessionId,
+          agentId: "work-shell",
+          sourceId: "assistant-summary",
+          ...requireSubmittedMemoryProof(input),
+          confidence: 0.9,
+          ...(supersedesMemoryId === undefined ? {} : { supersedesMemoryId }),
+          lineage: input.memoryLineage,
+        })
+      : await input.writeScopedMemory({
+          scope: "session",
+          cwd: input.cwd,
+          summary,
+          sessionId: input.sessionId,
+          agentId: "work-shell",
+        });
     memoryId = memory.memoryId;
+    memoryRollback = memory.rollback;
+    if (input.isTurnActive?.() === false) {
+      throw new Error("Turn is no longer active.");
+    }
     const lines = await input.listScopedMemoryLines({
       scope: "session",
       cwd: input.cwd,
       sessionId: input.sessionId,
+      ...(input.memoryLineage === undefined ? {} : { lineage: input.memoryLineage }),
     });
     memoryLines = lines.some((line) => line.includes(" · cite memory:"))
       ? lines
@@ -255,13 +372,27 @@ export async function runWorkShellPostTurnSuccessEffects(
             timestamp: "1970-01-01T00:00:00.000Z",
           })),
         );
+    if (input.isTurnActive?.() === false) {
+      throw new Error("Turn is no longer active.");
+    }
   } catch (error) {
+    if (input.isTurnActive?.() === false) {
+      await rollbackDurableEffects([memoryRollback, bridgeRollback]);
+      memoryId = undefined;
+      bridgeId = undefined;
+      bridgeLine = undefined;
+      memoryRollback = undefined;
+      bridgeRollback = undefined;
+    }
     memorySummary = "Context memory unavailable; reply kept.";
-    memoryTraceEvent = createDegradedPostTurnTraceEvent(
-      "memory.written",
-      memorySummary,
-      error,
-    );
+    memoryTraceEvent = undefined;
+  }
+
+  if (input.isTurnActive?.() === false) {
+    await rollbackDurableEffects([memoryRollback, bridgeRollback]);
+    memoryId = undefined;
+    bridgeId = undefined;
+    bridgeLine = undefined;
   }
 
   if (bridgeId && bridgeLine && memoryId) {

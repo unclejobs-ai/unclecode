@@ -5,6 +5,8 @@ import {
   loadNamedSkill,
   publishContextBridge,
   writeScopedMemory,
+  type MemoryLineageAdapter,
+  type PromoteScopedMemoryInput,
 } from "@unclecode/context-broker";
 import type {
   ContextPacketChangeClassification,
@@ -75,6 +77,7 @@ export type StartReplOptions = {
   initialEntries?: readonly WorkShellChatEntry[] | undefined;
   initialSessionSummary?: string | undefined;
   initialAgentConsole?: AgentConsoleSnapshot | undefined;
+  initialLastSubmittedContextReceiptId?: string | undefined;
   interactionBridge?: WorkShellInteractionBridge | undefined;
   reloadWorkspaceContext?: ((cwd: string) => Promise<readonly string[]>) | undefined;
   resolveContextPacket?: ((input: {
@@ -124,6 +127,8 @@ export type StartReplOptions = {
   ) => ContextPolicySuggestion) | undefined;
   invalidateContextSuggestions?: ((receiptId: string) => number) | undefined;
   refreshCondensedHistory?: (() => Promise<void>) | undefined;
+  memoryLineage?: MemoryLineageAdapter | undefined;
+  promoteScopedMemory?: ((input: PromoteScopedMemoryInput) => Promise<{ memoryId: string }>) | undefined;
 };
 
 type StartReplTraceEvent =
@@ -267,6 +272,12 @@ export function createManagedDashboardInput(
         : {}),
       publishContextBridge,
       writeScopedMemory,
+      ...(session.options.memoryLineage !== undefined
+        ? { memoryLineage: session.options.memoryLineage }
+        : {}),
+      ...(session.options.promoteScopedMemory !== undefined
+        ? { promoteScopedMemory: session.options.promoteScopedMemory }
+        : {}),
       listAvailableSkills,
       loadNamedSkill,
       toolLines: toolDefinitions.map(
@@ -275,6 +286,12 @@ export function createManagedDashboardInput(
       extractAuthLabel,
       ...(session.options.sessionId
         ? { sessionId: session.options.sessionId }
+        : {}),
+      ...(session.options.initialLastSubmittedContextReceiptId
+        ? {
+            initialLastSubmittedContextReceiptId:
+              session.options.initialLastSubmittedContextReceiptId,
+          }
         : {}),
       ...(session.options.initialEntries
         ? { initialEntries: session.options.initialEntries }

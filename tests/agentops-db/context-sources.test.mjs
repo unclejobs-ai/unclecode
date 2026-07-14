@@ -1039,6 +1039,39 @@ test("memory lineage atomically supersedes one active predecessor", () => {
   store.close();
 });
 
+test("memory lineage promotion rollback restores its active predecessor atomically", () => {
+  const store = createAgentOpsStore({ home: makeHome() });
+  seedProject(store);
+  const receipt = seedSubmittedReceipt(store);
+  store.recordMemoryLineage({
+    memoryId: "memory-rollback-old",
+    sourceId: "source-a",
+    originTurnId: "turn-old",
+    originPacketReceiptId: receipt.id,
+    state: "active",
+    confidence: 0.8,
+  });
+  store.recordMemoryLineage({
+    memoryId: "memory-rollback-new",
+    sourceId: "source-a",
+    originTurnId: "turn-new",
+    originPacketReceiptId: receipt.id,
+    supersedesMemoryId: "memory-rollback-old",
+    state: "active",
+    confidence: 0.9,
+  });
+
+  store.rollbackMemoryLineagePromotion("memory-rollback-new");
+
+  assert.equal(store.getMemoryLineage("memory-rollback-old")?.state, "active");
+  assert.equal(store.getMemoryLineage("memory-rollback-new")?.state, "superseded");
+  assert.deepEqual(
+    store.listActiveMemoryLineage().map((record) => record.memoryId),
+    ["memory-rollback-old"],
+  );
+  store.close();
+});
+
 test("memory lineage replacement rolls back predecessor transition when insert fails", () => {
   const store = createAgentOpsStore({ home: makeHome() });
   seedProject(store);
@@ -1209,6 +1242,65 @@ test("memory lineage lists active records deterministically without content fiel
     "state",
   ]);
   store.close();
+});
+
+test("project lineage listing includes orphaned receipts without crossing projects", () => {
+  const home = makeHome();
+  const store = createAgentOpsStore({ home });
+  store.addProject({ id: "project-a", name: "Project A", repoPath: "/project-a" });
+  store.addProject({ id: "project-b", name: "Project B", repoPath: "/project-b" });
+  store.recordContextPacketPreview({
+    id: "receipt-project-b",
+    projectId: "project-b",
+    sessionId: "session-b",
+    packetId: "packet-b",
+    profile: "build",
+    tokenEstimateState: "unknown",
+    sourceCount: 0,
+    sourceRefs: [],
+  });
+  store.recordMemoryLineage({
+    memoryId: "memory-project-b",
+    sourceId: "source-b",
+    originTurnId: "turn-b",
+    originPacketReceiptId: "receipt-project-b",
+    state: "active",
+    confidence: 0.5,
+  });
+  const dbPath = store.paths.dbPath;
+  store.close();
+
+  const rawDb = new DatabaseSync(dbPath);
+  rawDb.exec("PRAGMA foreign_keys = OFF");
+  rawDb.prepare(`
+    INSERT INTO memory_lineage (
+      memory_id,
+      source_id,
+      origin_turn_id,
+      origin_packet_receipt_id,
+      state,
+      confidence,
+      created_at
+    ) VALUES (?, ?, ?, ?, 'active', 0.5, ?)
+  `).run(
+    "memory-orphan",
+    "source-orphan",
+    "turn-orphan",
+    "receipt-missing",
+    "2026-07-13T00:00:00.000Z",
+  );
+  rawDb.close();
+
+  const reopened = createAgentOpsStore({ home });
+  assert.deepEqual(
+    reopened.listActiveMemoryLineage("project-a").map((record) => record.memoryId),
+    ["memory-orphan"],
+  );
+  assert.deepEqual(
+    reopened.listActiveMemoryLineage("project-b").map((record) => record.memoryId),
+    ["memory-orphan", "memory-project-b"],
+  );
+  reopened.close();
 });
 
 test("v8 migration adds memory lineage for upgraded v7 databases", () => {

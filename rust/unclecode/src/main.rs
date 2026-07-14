@@ -4406,6 +4406,7 @@ fn run_native_session_command(args: &[OsString]) -> Result<u8, String> {
                     summary,
                     trace_mode,
                     reasoning_effort,
+                    last_submitted_context_receipt_id: None,
                     entries: vec![],
                     agent_console: None,
                 })

@@ -45,6 +45,16 @@ export function writeProjectMemoryRecord(
   }
 }
 
+export function deleteProjectMemoryRecord(dbPath: string, memoryId: string): void {
+  const database = openProjectMemoryDatabase(dbPath);
+
+  try {
+    database.prepare(`DELETE FROM project_memory WHERE memory_id = ?`).run(memoryId);
+  } finally {
+    database.close();
+  }
+}
+
 export function listProjectMemoryRecords(dbPath: string): ProjectMemoryEntry[] {
   const database = openProjectMemoryDatabase(dbPath);
 

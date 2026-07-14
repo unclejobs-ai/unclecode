@@ -21,12 +21,14 @@ import {
   restoreContextSourceState,
   unpinContextSource,
   upsertContextSource,
+  upsertContextSources,
 } from "./store-context-writes.js";
 import type { AgentOpsStore, SelectedContextSources } from "./store-types.js";
 
 export type AgentOpsContextStoreMethods = Pick<
   AgentOpsStore,
   | "upsertContextSource"
+  | "upsertContextSources"
   | "selectContextSources"
   | "countContextSourcesByCategory"
   | "markContextSourceTurnSeen"
@@ -43,6 +45,9 @@ export function createAgentOpsContextStoreMethods(db: DatabaseSync): AgentOpsCon
   return {
     upsertContextSource(input: UpsertContextSourceInput): ContextSourceRecord {
       return contextSourceRowToRecord(upsertContextSource(db, input));
+    },
+    upsertContextSources(inputs: readonly UpsertContextSourceInput[]): void {
+      upsertContextSources(db, inputs);
     },
     selectContextSources(input: SelectContextSourcesInput): SelectedContextSources {
       return selectContextSourcesImpl(db, input);

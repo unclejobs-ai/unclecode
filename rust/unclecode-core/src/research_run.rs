@@ -101,6 +101,7 @@ pub fn research_run_report(
             summary: summary.clone(),
             trace_mode: None,
             reasoning_effort: None,
+            last_submitted_context_receipt_id: None,
             entries: vec![],
             agent_console: None,
         })

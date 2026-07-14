@@ -126,6 +126,7 @@ export type SelectedContextSources = {
   readonly heldBack: readonly ContextSourceRecord[];
   readonly totalTokens: number;
   readonly budget: number;
+  readonly omittedCount: number;
 };
 
 export interface AgentOpsStore {
@@ -143,6 +144,7 @@ export interface AgentOpsStore {
   addVerification(input: AddAgentOpsVerificationInput): AgentOpsVerificationRecord;
   // Context Runbook Protocol (CRP) — typed context source store.
   upsertContextSource(input: UpsertContextSourceInput): ContextSourceRecord;
+  upsertContextSources(inputs: readonly UpsertContextSourceInput[]): void;
   selectContextSources(input: SelectContextSourcesInput): SelectedContextSources;
   countContextSourcesByCategory(projectId: string): ReadonlyMap<string, number>;
   markContextSourceTurnSeen(projectId: string, ids: readonly string[], turnIndex: number): void;
@@ -179,8 +181,9 @@ export interface AgentOpsStore {
   listContextPolicySuggestions(packetReceiptId: string): readonly ContextPolicySuggestion[];
   recordMemoryLineage(input: RecordMemoryLineageInput): MemoryLineageRecord;
   supersedeMemoryLineage(memoryId: string): MemoryLineageRecord;
+  rollbackMemoryLineagePromotion(memoryId: string): void;
   expireMemoryLineage(now?: Date): number;
   getMemoryLineage(memoryId: string): MemoryLineageRecord | undefined;
-  listActiveMemoryLineage(): readonly MemoryLineageRecord[];
+  listActiveMemoryLineage(projectId?: string): readonly MemoryLineageRecord[];
   close(): void;
 }

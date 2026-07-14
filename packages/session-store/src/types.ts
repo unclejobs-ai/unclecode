@@ -93,6 +93,10 @@ export interface SessionStore {
     readonly memoryId: string;
     readonly content: string;
   }): Promise<void>;
+  deleteProjectMemory(entry: {
+    readonly projectPath: string;
+    readonly memoryId: string;
+  }): Promise<void>;
   listProjectMemories(projectPath: string): Promise<readonly ProjectMemoryEntry[]>;
   getSessionPaths(ref: SessionStoreSessionRef): SessionStorePaths;
 }

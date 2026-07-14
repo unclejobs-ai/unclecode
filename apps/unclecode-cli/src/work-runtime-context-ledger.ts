@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { createAgentOpsStore } from "@unclecode/agentops-db";
+import type { MemoryLineageAdapter } from "@unclecode/context-broker";
 import {
   buildContextPacketSourceRefs,
   evaluateContextPolicy,
@@ -38,6 +39,7 @@ export type ContextLedgerRuntime = {
   ): ContextPolicySuggestion;
   invalidateSuggestions(receiptId: string): number;
   listSuggestions(receiptId: string): readonly ContextPolicySuggestion[];
+  readonly memoryLineage: MemoryLineageAdapter;
 };
 
 export type ContextLedgerStoreHandle = {
@@ -114,6 +116,20 @@ export function deriveProtectedSourceIds(
   return protectedIds;
 }
 
+export function createMemoryLineageAdapter(
+  requireStore: () => AgentOpsStore,
+): MemoryLineageAdapter {
+  return {
+    record: (input) => requireStore().recordMemoryLineage(input),
+    invalidate: (memoryId) => requireStore().supersedeMemoryLineage(memoryId),
+    rollbackPromotion: (memoryId) =>
+      requireStore().rollbackMemoryLineagePromotion(memoryId),
+    expire: () => requireStore().expireMemoryLineage(),
+    get: (memoryId) => requireStore().getMemoryLineage(memoryId),
+    isActive: (memoryId) => requireStore().getMemoryLineage(memoryId)?.state === "active",
+  };
+}
+
 export function createContextLedgerRuntime(access: {
   readonly requireStore: () => ContextLedgerStoreHandle;
   readonly listActionReceipts: () => readonly ContextPacketViewActionReceipt[];
@@ -167,6 +183,10 @@ export function createContextLedgerRuntime(access: {
     return store.recordContextPacketPreview(recordInput);
   };
 
+  const memoryLineage = createMemoryLineageAdapter(
+    () => access.requireStore().store,
+  );
+
   return {
     previewPacket,
     invalidatePreview(receiptId) {
@@ -213,5 +233,6 @@ export function createContextLedgerRuntime(access: {
       access.requireStore();
       return deriveProtectedSourceIds(access.listActionReceipts());
     },
+    memoryLineage,
   };
 }

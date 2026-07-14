@@ -75,6 +75,10 @@ import type {
   SubmitContextPacketReceiptInput,
   WorkGraph,
 } from "@unclecode/contracts";
+import type {
+  MemoryLineageAdapter,
+  PromoteScopedMemoryInput,
+} from "@unclecode/context-broker";
 
 type PromiseResolvers<Value> = {
   readonly promise: Promise<Value>;
@@ -335,6 +339,7 @@ export type WorkShellEngineOptions<Reasoning extends WorkShellReasoningConfig> =
   readonly initialTraceMode?: WorkShellTraceMode | undefined;
   readonly initialEntries?: readonly WorkShellChatEntry[] | undefined;
   readonly initialSessionSummary?: string | undefined;
+  readonly initialLastSubmittedContextReceiptId?: string | undefined;
   readonly autoContinueOnPermissionStall?: boolean | undefined;
   readonly modelWindow?: number | undefined;
   readonly contextProfile?: ContextProfileId | undefined;
@@ -428,6 +433,7 @@ export type WorkShellEngineInput<
     cwd: string;
     sessionId?: string;
     agentId?: string;
+    lineage?: MemoryLineageAdapter;
   }) => Promise<readonly string[]>;
   listSessionLines: (cwd: string) => Promise<readonly string[]>;
   persistWorkShellSessionSnapshot: (input: {
@@ -488,6 +494,8 @@ export type WorkShellEngineInput<
     sessionId?: string;
     agentId?: string;
   }) => Promise<{ memoryId: string }>;
+  memoryLineage?: MemoryLineageAdapter | undefined;
+  promoteScopedMemory?: ((input: PromoteScopedMemoryInput) => Promise<{ memoryId: string }>) | undefined;
   listAvailableSkills?: (cwd: string) => Promise<readonly WorkShellSkillListItem[]>;
   loadNamedSkill?: (name: string, cwd: string) => Promise<WorkShellLoadedSkill>;
   reloadWorkspaceContext?: (cwd: string) => Promise<readonly string[]>;
@@ -578,6 +586,7 @@ export class WorkShellEngine<
     cwd: string;
     sessionId?: string;
     agentId?: string;
+    lineage?: MemoryLineageAdapter;
   }) => Promise<readonly string[]>;
   private readonly listSessionLines: (cwd: string) => Promise<readonly string[]>;
   private readonly persistWorkShellSessionSnapshot: (input: {
@@ -642,6 +651,8 @@ export class WorkShellEngine<
     sessionId?: string;
     agentId?: string;
   }) => Promise<{ memoryId: string }>;
+  private readonly memoryLineage?: MemoryLineageAdapter | undefined;
+  private readonly promoteScopedMemory?: ((input: PromoteScopedMemoryInput) => Promise<{ memoryId: string }>) | undefined;
   private readonly listAvailableSkills: (cwd: string) => Promise<readonly WorkShellSkillListItem[]>;
   private readonly loadNamedSkill: (name: string, cwd: string) => Promise<WorkShellLoadedSkill>;
   private readonly reloadWorkspaceContext?: ((cwd: string) => Promise<readonly string[]>) | undefined;
@@ -695,6 +706,7 @@ export class WorkShellEngine<
   private queuedCountCache = 0;
   private currentContextSummaryLines: readonly string[];
   private lastSessionSummary: string;
+  private lastSubmittedContextReceiptId: string | undefined;
   private drainingQueue = false;
   private activeTurnEpoch = 0;
   private activeTurnAbortController: AbortController | undefined;
@@ -733,6 +745,8 @@ export class WorkShellEngine<
     this.resolveComposerInput = input.resolveComposerInput;
     this.publishContextBridge = input.publishContextBridge;
     this.writeScopedMemory = input.writeScopedMemory;
+    this.memoryLineage = input.memoryLineage;
+    this.promoteScopedMemory = input.promoteScopedMemory;
     this.listAvailableSkills = input.listAvailableSkills ?? (async () => []);
     this.loadNamedSkill = input.loadNamedSkill ?? (async (name) => ({ name, path: name, content: "", attempts: [] }));
     this.reloadWorkspaceContext = input.reloadWorkspaceContext;
@@ -754,6 +768,8 @@ export class WorkShellEngine<
     this.sessionId = input.sessionId ?? `work-${randomUUID()}`;
     this.currentContextSummaryLines = input.options.contextSummaryLines;
     this.lastSessionSummary = input.options.initialSessionSummary ?? "Work shell ready.";
+    this.lastSubmittedContextReceiptId =
+      input.options.initialLastSubmittedContextReceiptId;
     this.state = {
       ...createInitialWorkShellEngineState({
         options: input.options,
@@ -849,6 +865,7 @@ export class WorkShellEngine<
         currentContextSummaryLines: this.currentContextSummaryLines,
         listProjectBridgeLines: this.listProjectBridgeLines,
         listScopedMemoryLines: this.listScopedMemoryLines,
+        ...(this.memoryLineage !== undefined ? { lineage: this.memoryLineage } : {}),
         buildContextPanel: this.buildContextPanel,
       });
 
@@ -1586,9 +1603,14 @@ export class WorkShellEngine<
               attachments,
               { signal: abortController.signal },
             ),
+            isTurnActive: isCurrentTurn,
             publishContextBridge: this.publishContextBridge,
             writeScopedMemory: this.writeScopedMemory,
             listScopedMemoryLines: this.listScopedMemoryLines,
+            ...(this.memoryLineage !== undefined ? { memoryLineage: this.memoryLineage } : {}),
+            ...(this.promoteScopedMemory !== undefined
+              ? { promoteScopedMemory: this.promoteScopedMemory }
+              : {}),
             refreshAuthState: this.refreshAuthState,
             applyAuthIssueLines: (authIssueLines) => this.applyAuthIssueLines(authIssueLines),
             formatWorkShellError: this.formatWorkShellError,
@@ -1695,9 +1717,14 @@ export class WorkShellEngine<
               attachments,
               { signal: abortController.signal },
             ),
+            isTurnActive: isCurrentTurn,
             publishContextBridge: this.publishContextBridge,
             writeScopedMemory: this.writeScopedMemory,
             listScopedMemoryLines: this.listScopedMemoryLines,
+            ...(this.memoryLineage !== undefined ? { memoryLineage: this.memoryLineage } : {}),
+            ...(this.promoteScopedMemory !== undefined
+              ? { promoteScopedMemory: this.promoteScopedMemory }
+              : {}),
             refreshAuthState: this.refreshAuthState,
             applyAuthIssueLines: (authIssueLines) => this.applyAuthIssueLines(authIssueLines),
             formatWorkShellError: this.formatWorkShellError,
@@ -1973,6 +2000,7 @@ export class WorkShellEngine<
       summary,
       traceMode,
       reasoningEffort: overrideReasoningEffort,
+      lastSubmittedContextReceiptId: this.lastSubmittedContextReceiptId,
       entries: this.state.entries,
       agentConsole: this.state.agentConsole,
     }));
@@ -2084,6 +2112,7 @@ export class WorkShellEngine<
       reloadWorkspaceContext: this.reloadWorkspaceContext,
       listProjectBridgeLines: this.listProjectBridgeLines,
       listScopedMemoryLines: this.listScopedMemoryLines,
+      ...(this.memoryLineage !== undefined ? { lineage: this.memoryLineage } : {}),
       traceLines: this.state.traceLines,
       buildContextPanel: this.buildContextPanel,
       expanded: this.state.panel.title === "Context expanded",
@@ -2224,6 +2253,7 @@ export class WorkShellEngine<
       if (!isCurrentTurn()) {
         return undefined;
       }
+      this.lastSubmittedContextReceiptId = receipt.id;
 
       // The submitted receipt is one-shot. Clear the preview pointer without
       // performing another ledger write after durable submission; the next

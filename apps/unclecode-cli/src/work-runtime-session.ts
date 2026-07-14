@@ -72,6 +72,7 @@ export async function loadResumedWorkSession(input: {
   sessionId: string;
   initialTraceMode?: "minimal" | "verbose";
   reasoningEffort?: ModeReasoningEffort;
+  lastSubmittedContextReceiptId?: string;
   contextLine: string;
   initialEntries: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[];
   initialAgentConsole?: AgentConsoleSnapshot;
@@ -99,6 +100,9 @@ export async function loadResumedWorkSession(input: {
       : {}),
     ...(resumed.reasoningEffort
       ? { reasoningEffort: resumed.reasoningEffort }
+      : {}),
+    ...(resumed.lastSubmittedContextReceiptId
+      ? { lastSubmittedContextReceiptId: resumed.lastSubmittedContextReceiptId }
       : {}),
     contextLine: resumed.contextLine,
     initialEntries,
@@ -211,6 +215,7 @@ function parseRustResumedWorkSession(stdout: string): {
   readonly sessionId: string;
   readonly traceMode?: "minimal" | "verbose";
   readonly reasoningEffort?: ModeReasoningEffort;
+  readonly lastSubmittedContextReceiptId?: string;
   readonly contextLine: string;
   readonly initialEntries: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[];
   readonly initialAgentConsole?: AgentConsoleSnapshot;
@@ -220,6 +225,7 @@ function parseRustResumedWorkSession(stdout: string): {
     sessionId?: unknown;
     traceMode?: unknown;
     reasoningEffort?: unknown;
+    lastSubmittedContextReceiptId?: unknown;
     contextLine?: unknown;
     initialEntries?: unknown;
     initialSessionSummary?: unknown;
@@ -231,6 +237,7 @@ function parseRustResumedWorkSession(stdout: string): {
   }
   const traceMode = parsed.traceMode;
   const reasoningEffort = parsed.reasoningEffort;
+  const lastSubmittedContextReceiptId = parsed.lastSubmittedContextReceiptId;
   const initialEntries = Array.isArray(parsed.initialEntries)
     ? parsed.initialEntries.filter((entry): entry is { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string } =>
         Boolean(entry)
@@ -246,6 +253,9 @@ function parseRustResumedWorkSession(stdout: string): {
     sessionId,
     ...(traceMode === "minimal" || traceMode === "verbose" ? { traceMode } : {}),
     ...(isModeReasoningEffort(reasoningEffort) ? { reasoningEffort } : {}),
+    ...(typeof lastSubmittedContextReceiptId === "string" && lastSubmittedContextReceiptId.trim()
+      ? { lastSubmittedContextReceiptId }
+      : {}),
     contextLine: typeof parsed.contextLine === "string" ? parsed.contextLine : `Resumed session: ${sessionId}`,
     initialEntries,
     ...(typeof parsed.initialSessionSummary === "string"

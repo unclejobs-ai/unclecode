@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { basename, join } from "node:path";
+import { performance } from "node:perf_hooks";
 
 import { createAgentOpsStore } from "@unclecode/agentops-db";
 import type { UncleCodeConfigExplanation } from "@unclecode/config-core";
@@ -27,6 +28,7 @@ import {
 } from "./work-runtime-context-items.js";
 import {
   createContextLedgerRuntime,
+  createMemoryLineageAdapter,
   type ContextLedgerRuntime,
 } from "./work-runtime-context-ledger.js";
 
@@ -45,6 +47,35 @@ type WorkShellCrpConfig = {
   readonly tokenBudget: number;
   readonly modelWindow: number;
 };
+
+export type CrpPerformanceSample = {
+  readonly label: string;
+  readonly durationMs: number;
+  readonly cpuMs: number;
+};
+
+type RecordCrpPerformanceSample =
+  ((sample: CrpPerformanceSample) => void) | undefined;
+
+function measureSynchronousCrpWork<T>(
+  record: RecordCrpPerformanceSample,
+  label: string,
+  operation: () => T,
+): T {
+  if (record === undefined) return operation();
+  const startedAt = performance.now();
+  const startedCpu = process.cpuUsage();
+  try {
+    return operation();
+  } finally {
+    const cpu = process.cpuUsage(startedCpu);
+    record({
+      label,
+      durationMs: performance.now() - startedAt,
+      cpuMs: (cpu.user + cpu.system) / 1_000,
+    });
+  }
+}
 
 type ContextSourceMutationKind = "pin" | "unpin" | "forget" | "hold-back" | "include";
 
@@ -73,24 +104,54 @@ function contextSourceCategoryForPacketCategory(category: ContextPacketSourceCat
   return category === "provider-system-prompt" || category === "user" ? "system" : category;
 }
 
-function upsertPacketItemsAsContextSources(input: {
+const CONTEXT_SOURCE_UPSERT_BATCH_SIZE = 4;
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function upsertPacketItemsAsContextSources(input: {
   readonly store: ReturnType<typeof createAgentOpsStore>;
   readonly projectId: string;
   readonly items: readonly ContextPacketViewItem[];
   readonly salience: number;
-}): void {
-  for (const item of input.items) {
-    const content = item.preview ?? item.label;
-    input.store.upsertContextSource({
-      id: item.id,
-      projectId: input.projectId,
-      category: contextSourceCategoryForPacketCategory(item.category),
-      label: item.label.slice(0, 120),
-      content,
-      reason: item.reason,
-      salience: input.salience,
-      tokenEstimate: item.tokenEstimate ?? estimateTokens(`${item.label} ${content}`),
-    });
+  readonly recordPerformanceSample?: RecordCrpPerformanceSample;
+}): Promise<void> {
+  for (
+    let batchStart = 0;
+    batchStart < input.items.length;
+    batchStart += CONTEXT_SOURCE_UPSERT_BATCH_SIZE
+  ) {
+    const batchEnd = Math.min(
+      batchStart + CONTEXT_SOURCE_UPSERT_BATCH_SIZE,
+      input.items.length,
+    );
+    measureSynchronousCrpWork(
+      input.recordPerformanceSample,
+      "source-upsert-batch",
+      () => {
+        const sources = [];
+        for (let index = batchStart; index < batchEnd; index += 1) {
+          const item = input.items[index];
+          if (item === undefined) continue;
+          const content = item.preview ?? item.label;
+          sources.push({
+            id: item.id,
+            projectId: input.projectId,
+            category: contextSourceCategoryForPacketCategory(item.category),
+            label: item.label.slice(0, 120),
+            content,
+            reason: item.reason,
+            salience: input.salience,
+            tokenEstimate: item.tokenEstimate ?? estimateTokens(`${item.label} ${content}`),
+          });
+        }
+        input.store.upsertContextSources(sources);
+      },
+    );
+    if (batchEnd < input.items.length) {
+      await yieldToEventLoop();
+    }
   }
 }
 
@@ -104,6 +165,8 @@ export function createCrpAwareContextPacketResolver(
     readonly env?: NodeJS.ProcessEnv;
     readonly userHomeDir?: string;
     readonly storeHome?: string;
+    readonly workspaceRoot?: string;
+    readonly recordPerformanceSample?: RecordCrpPerformanceSample;
   },
 ): WorkShellContextPacketResolver {
   const crp = createCrpRuntime(legacy, bootstrap);
@@ -122,13 +185,99 @@ function resolveStoreHome(bootstrap: {
     : join(bootstrap.userHomeDir, ".unclecode", "agentops");
 }
 
+function openContextLifecycleStore(
+  cwd: string,
+  bootstrap: {
+    readonly userHomeDir?: string;
+    readonly storeHome?: string;
+  },
+): {
+  readonly store: ReturnType<typeof createAgentOpsStore>;
+  readonly projectId: string;
+} {
+  const storeHome = resolveStoreHome(bootstrap);
+  const store = storeHome === undefined
+    ? createAgentOpsStore()
+    : createAgentOpsStore({ home: storeHome });
+  const projectId = createHash("sha256").update(cwd).digest("hex").slice(0, 16);
+  store.addProject({ id: projectId, name: basename(cwd) || "workspace", repoPath: cwd });
+  return { store, projectId };
+}
+
+export function reconcileResumedContextLifecycle(input: {
+  readonly cwd: string;
+  readonly sessionId: string;
+  readonly lastSubmittedContextReceiptId?: string;
+  readonly userHomeDir?: string;
+  readonly storeHome?: string;
+}): {
+  readonly invalidatedPreviewCount: number;
+  readonly invalidatedMemoryCount: number;
+  readonly warningLines: readonly string[];
+} {
+  const { store, projectId } = openContextLifecycleStore(input.cwd, input);
+  try {
+    store.expireMemoryLineage();
+    let invalidatedPreviewCount = 0;
+    const activePreview = store.getActiveContextPacketPreview(projectId, input.sessionId);
+    if (activePreview !== undefined) {
+      store.invalidateContextPacketReceipt(projectId, activePreview.id);
+      store.markContextPolicySuggestionsStale(activePreview.id);
+      invalidatedPreviewCount = 1;
+    }
+
+    let invalidatedMemoryCount = 0;
+    for (const lineage of store.listActiveMemoryLineage(projectId)) {
+      const origin = store.getContextPacketReceipt(
+        projectId,
+        lineage.originPacketReceiptId,
+      );
+      if (origin?.state === "submitted") continue;
+      store.supersedeMemoryLineage(lineage.memoryId);
+      invalidatedMemoryCount += 1;
+    }
+
+    const savedReceipt = input.lastSubmittedContextReceiptId === undefined
+      ? undefined
+      : store.getContextPacketReceipt(
+          projectId,
+          input.lastSubmittedContextReceiptId,
+        );
+    const savedReceiptInvalid = input.lastSubmittedContextReceiptId !== undefined
+      && (
+        savedReceipt?.state !== "submitted"
+        || savedReceipt.sessionId !== input.sessionId
+      );
+    return {
+      invalidatedPreviewCount,
+      invalidatedMemoryCount,
+      warningLines: [
+        ...(invalidatedPreviewCount > 0
+          ? [
+              `Context resume · invalidated ${invalidatedPreviewCount} stale packet preview`,
+            ]
+          : []),
+        ...(invalidatedMemoryCount > 0
+          ? [
+              `Memory lineage degraded · excluded ${invalidatedMemoryCount} active memory entr${invalidatedMemoryCount === 1 ? "y" : "ies"} with non-submitted provenance`,
+            ]
+          : []),
+        ...(savedReceiptInvalid
+          ? [
+              "Context resume provenance degraded · saved submitted receipt is unavailable",
+            ]
+          : []),
+      ],
+    };
+  } finally {
+    store.close();
+  }
+}
+
 /**
- * Context Inspector (Sprint 2): the Context Runbook overlay mutates
- * context_sources (pin/unpin/forget/include) directly through the AgentOps
- * store. The store is created lazily inside the CRP resolver closure, so this
- * factory builds both the resolver and a mutator that share the same store
- * instance. The mutator resolves the store lazily — if the overlay is opened
- * before any turn has run, it no-ops (the store does not exist yet).
+ * Context Inspector and lifecycle-ledger runtime. Tests and legacy callers
+ * retain lazy store creation; production may provide `workspaceRoot` so the
+ * lineage adapter is ready before initial memory prefetch.
  */
 export function createCrpRuntime(
   legacy: WorkShellContextPacketResolver,
@@ -140,6 +289,8 @@ export function createCrpRuntime(
     readonly env?: NodeJS.ProcessEnv;
     readonly userHomeDir?: string;
     readonly storeHome?: string;
+    readonly workspaceRoot?: string;
+    readonly recordPerformanceSample?: RecordCrpPerformanceSample;
   },
 ): {
   readonly resolveContextPacket: WorkShellContextPacketResolver;
@@ -158,6 +309,25 @@ export function createCrpRuntime(
   } | undefined;
   const actionReceipts: ContextPacketViewActionReceipt[] = [];
   const undoStack: ContextSourceUndoEntry[] = [];
+  const createCrpState = (cwd: string): NonNullable<typeof crpState> => {
+    const { store, projectId } = openContextLifecycleStore(cwd, bootstrap);
+    const memoryLineage = createMemoryLineageAdapter(() => store);
+    const registry = createBuiltinProviderRegistry(
+      store,
+      projectId,
+      (input) => listScopedMemoryLines({ ...input, lineage: memoryLineage }),
+    );
+    return { store, registry, projectId, turnIndex: 0 };
+  };
+  const workspaceRoot = bootstrap.workspaceRoot;
+  if (bootstrap.crpConfig.enabled && workspaceRoot !== undefined) {
+    crpState = measureSynchronousCrpWork(
+      bootstrap.recordPerformanceSample,
+      "store-open",
+      () => createCrpState(workspaceRoot),
+    );
+  }
+
 
   const resolveContextPacket: WorkShellContextPacketResolver = async (input) => {
     if (!bootstrap.crpConfig.enabled) {
@@ -165,12 +335,12 @@ export function createCrpRuntime(
     }
 
     if (crpState === undefined) {
-      const storeHome = resolveStoreHome(bootstrap);
-      const store = storeHome === undefined ? createAgentOpsStore() : createAgentOpsStore({ home: storeHome });
-      const projectId = createHash("sha256").update(input.cwd).digest("hex").slice(0, 16);
-      store.addProject({ id: projectId, name: basename(input.cwd) || "workspace", repoPath: input.cwd });
-      const registry = createBuiltinProviderRegistry(store, projectId, listScopedMemoryLines);
-      crpState = { store, registry, projectId, turnIndex: 0 };
+      crpState = measureSynchronousCrpWork(
+        bootstrap.recordPerformanceSample,
+        "store-open",
+        () => createCrpState(input.cwd),
+      );
+      await yieldToEventLoop();
     }
 
     try {
@@ -187,43 +357,62 @@ export function createCrpRuntime(
         ...(bootstrap.env !== undefined ? { env: bootstrap.env } : {}),
         ...(bootstrap.userHomeDir !== undefined ? { userHomeDir: bootstrap.userHomeDir } : {}),
       });
+      await yieldToEventLoop();
 
-      upsertPacketItemsAsContextSources({
+      await upsertPacketItemsAsContextSources({
         store: crpState.store,
         projectId: crpState.projectId,
         items: bootstrap.sourceMetadata,
         salience: 0.95,
+        ...(bootstrap.recordPerformanceSample !== undefined
+          ? { recordPerformanceSample: bootstrap.recordPerformanceSample }
+          : {}),
       });
-      upsertPacketItemsAsContextSources({
+      await upsertPacketItemsAsContextSources({
         store: crpState.store,
         projectId: crpState.projectId,
         items: buildContextSummaryItems(input.contextSummaryLines).filter(
           (item) => item.category !== "workspace-guidance",
         ),
         salience: 0.9,
+        ...(bootstrap.recordPerformanceSample !== undefined
+          ? { recordPerformanceSample: bootstrap.recordPerformanceSample }
+          : {}),
       });
-      upsertPacketItemsAsContextSources({
+      await upsertPacketItemsAsContextSources({
         store: crpState.store,
         projectId: crpState.projectId,
         items: buildWorkGraphContextItems(input.workGraph),
         salience: 0.93,
+        ...(bootstrap.recordPerformanceSample !== undefined
+          ? { recordPerformanceSample: bootstrap.recordPerformanceSample }
+          : {}),
       });
-      upsertPacketItemsAsContextSources({
+      await upsertPacketItemsAsContextSources({
         store: crpState.store,
         projectId: crpState.projectId,
         items: bootstrap.bootstrapPacketItems ?? [],
         salience: 0.8,
-      });
-
-      return selectContextPacketFromStore({
-        store: crpState.store,
-        projectId: crpState.projectId,
-        tokenBudget: bootstrap.crpConfig.tokenBudget,
-        turnIndex: crpState.turnIndex,
-        ...(bootstrap.bootstrapPacketWarnings !== undefined
-          ? { warnings: bootstrap.bootstrapPacketWarnings }
+        ...(bootstrap.recordPerformanceSample !== undefined
+          ? { recordPerformanceSample: bootstrap.recordPerformanceSample }
           : {}),
       });
+      await yieldToEventLoop();
+
+      const activeState = crpState;
+      return measureSynchronousCrpWork(
+        bootstrap.recordPerformanceSample,
+        "packet-select",
+        () => selectContextPacketFromStore({
+          store: activeState.store,
+          projectId: activeState.projectId,
+          tokenBudget: bootstrap.crpConfig.tokenBudget,
+          turnIndex: activeState.turnIndex,
+          ...(bootstrap.bootstrapPacketWarnings !== undefined
+            ? { warnings: bootstrap.bootstrapPacketWarnings }
+            : {}),
+        }),
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       process.stderr.write(`[crp] fallback to legacy resolver: ${message}\n`);

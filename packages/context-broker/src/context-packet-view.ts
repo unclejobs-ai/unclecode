@@ -9,10 +9,11 @@ import {
   formatContextPacketTokenEstimateSuffix,
   resolveContextPacketTokenEstimateState,
 } from "./context-packet-token-estimate.js";
+import { cloneContextPacketViewItem } from "./context-packet-item.js";
 import { truncateForDisplayWidth } from "./display-width.js";
 
 function cloneItems(items: readonly ContextPacketViewItem[]): readonly ContextPacketViewItem[] {
-  return items.map((item) => ({ ...item }));
+  return items.map(cloneContextPacketViewItem);
 }
 
 function cloneWarnings(warnings: readonly ContextPacketViewWarning[]): readonly ContextPacketViewWarning[] {
@@ -209,7 +210,7 @@ export function buildContextPacketPreviewLines(packet: ContextPacketView): reado
     ...formatCategorySummaryLines({ items: packet.excluded, marker: "-", visibleLimit: 1 }),
     formatWarningsLine(packet.warnings),
     formatPreviewLine(packet),
-    "Controls · Esc close · /context refresh · Ctrl+O context",
+    "Controls · Esc close · /context refresh",
   ];
 }
 

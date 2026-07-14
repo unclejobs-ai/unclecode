@@ -1080,7 +1080,7 @@ test("work-shell context helpers merge auth issues and assemble initial/reloaded
       memoryLines: ["session · memory-1 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged"],
       panel: {
         title: "Context",
-        lines: ["Loaded guidance: AGENTS.md", "bridge-1", "session · memory-1 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged"],
+        lines: ["Loaded guidance: AGENTS.md", "bridge-1", "session · memory-1 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged", "Inspect sources · /context"],
       },
     },
   );
@@ -1152,7 +1152,7 @@ test("work-shell panel helpers assemble collapsed context, session panels, reloa
     buildContextPanel,
   }), {
     title: "Context",
-    lines: ["Loaded guidance: AGENTS.md", "bridge-1", "memory-1", "trace-1"],
+    lines: ["Loaded guidance: AGENTS.md", "bridge-1", "memory-1", "trace-1", "Inspect sources · /context"],
   });
   assert.deepEqual(createRecentSessionsLoadingPanel(), {
     title: "Recent sessions",
@@ -1641,7 +1641,7 @@ test("work-shell lifecycle helpers load initial state, session panels, and overl
     memoryLines: ["session · memory-1 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged"],
     panel: {
       title: "Context",
-      lines: ["Loaded guidance: AGENTS.md", "bridge-1", "session · memory-1 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged"],
+      lines: ["Loaded guidance: AGENTS.md", "bridge-1", "session · memory-1 · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged", "Inspect sources · /context"],
     },
   });
   assert.deepEqual(fallbackState, {
@@ -1649,7 +1649,7 @@ test("work-shell lifecycle helpers load initial state, session panels, and overl
     memoryLines: [],
     panel: {
       title: "Context",
-      lines: ["Loaded guidance: AGENTS.md"],
+      lines: ["Loaded guidance: AGENTS.md", "Inspect sources · /context"],
     },
   });
   assert.deepEqual(sessionPanels, {
@@ -1698,7 +1698,7 @@ test("work-shell lifecycle helpers load initial state, session panels, and overl
     buildContextPanel,
   }), {
     title: "Context",
-    lines: ["Loaded guidance: AGENTS.md", "bridge-1", "memory-1", "trace-1"],
+    lines: ["Loaded guidance: AGENTS.md", "bridge-1", "memory-1", "trace-1", "Inspect sources · /context"],
   });
 });
 
@@ -1924,9 +1924,7 @@ test("work-shell success sequence keeps the assistant reply when post-turn memor
     "bridge-0",
   ]);
   assert.deepEqual(success.postTurnEffects.memoryLines, ["memory-0"]);
-  assert.equal(success.postTurnEffects.memoryTraceEvent.type, "memory.written");
-  assert.equal(success.postTurnEffects.memoryTraceEvent.degraded, true);
-  assert.equal(success.postTurnEffects.memoryTraceEvent.errorClass, "native-module-version-mismatch");
+  assert.equal(success.postTurnEffects.memoryTraceEvent, undefined);
   assert.match(success.postTurnEffects.memorySummary, /unavailable/i);
 });
 
@@ -1986,7 +1984,7 @@ test("work-shell prompt turn does not surface native post-turn memory errors in 
   assert.equal(entries.at(-1)?.text, "반갑다.");
   assert.equal(entries.some((entry) => /better_sqlite3\.node|NODE_MODULE_VERSION/.test(entry.text)), false);
   assert.equal(patches.some((patch) => patch.memoryLines?.includes("memory-0")), true);
-  assert.ok(traceLines.some((line) => /native-module-version-mismatch/.test(line)));
+  assert.equal(traceLines.some((line) => /native-module-version-mismatch/.test(line)), false);
   assert.deepEqual(
     snapshots,
     [
@@ -2045,6 +2043,242 @@ test("work-shell post-turn helpers persist summaries and auth recovery determini
   assert.equal(rustEffects.memoryTraceEvent.type, "memory.written");
   assert.equal(authLabel, "api-key-file");
   assert.deepEqual(refreshedAuthIssues, ["Auth issue: saved OAuth needs refresh."]);
+});
+
+test("work-shell post-turn memory promotion carries submitted proof and active predecessor", async () => {
+  const oldMemoryId = "memory:session:2026-07-13T00:00:00.000Z:aaaaaaaa";
+  const newMemoryId = "memory:session:2026-07-13T00:00:01.000Z:bbbbbbbb";
+  const lineageRecords = new Map([[
+    oldMemoryId,
+    {
+      memoryId: oldMemoryId,
+      sourceId: "assistant-summary",
+      originTurnId: "turn-old",
+      originPacketReceiptId: "receipt-old",
+      state: "active",
+      confidence: 0.9,
+      createdAt: "2026-07-13T00:00:00.000Z",
+    },
+  ]]);
+  const lineage = {
+    record(input) {
+      const record = { ...input, createdAt: "2026-07-13T00:00:01.000Z" };
+      lineageRecords.set(record.memoryId, record);
+      return record;
+    },
+    invalidate(memoryId) {
+      const current = lineageRecords.get(memoryId);
+      if (!current) throw new Error("missing");
+      const invalid = { ...current, state: "superseded" };
+      lineageRecords.set(memoryId, invalid);
+      return invalid;
+    },
+    expire() {
+      return 0;
+    },
+    get(memoryId) {
+      return lineageRecords.get(memoryId);
+    },
+    isActive(memoryId) {
+      return lineageRecords.get(memoryId)?.state === "active";
+    },
+  };
+  const promotions = [];
+  let legacyWrites = 0;
+  let listedLineage;
+  const effects = await runWorkShellPostTurnSuccessEffects({
+    cwd: "/repo",
+    transcriptText: "hello",
+    assistantText: "world",
+    sessionId: "work-1",
+    currentBridgeLines: [],
+    currentMemoryLines: [
+      `session · previous summary · cite ${oldMemoryId} · recent`,
+    ],
+    turnId: "turn-2",
+    contextReceipt: {
+      id: "receipt-2",
+      projectId: "project-1",
+      sessionId: "work-1",
+      turnId: "turn-2",
+      packetId: "packet-2",
+      state: "submitted",
+      profile: "build",
+      tokenEstimate: 0,
+      tokenEstimateState: "exact",
+      sourceCount: 0,
+      sourceRefs: [],
+      createdAt: "2026-07-13T00:00:01.000Z",
+    },
+    memoryLineage: lineage,
+    async promoteScopedMemory(input) {
+      promotions.push(input);
+      return { memoryId: newMemoryId };
+    },
+    async publishContextBridge() {
+      return { bridgeId: "bridge-2", line: "bridge-2 line" };
+    },
+    async writeScopedMemory() {
+      legacyWrites += 1;
+      return { memoryId: "legacy-memory" };
+    },
+    async listScopedMemoryLines(input) {
+      listedLineage = input.lineage;
+      return [`session · current summary · cite ${newMemoryId} · fresh`];
+    },
+  });
+
+  assert.equal(legacyWrites, 0);
+  assert.equal(promotions.length, 1);
+  assert.equal(promotions[0].turnId, "turn-2");
+  assert.equal(promotions[0].packetReceiptId, "receipt-2");
+  assert.equal(promotions[0].sourceId, "assistant-summary");
+  assert.equal(promotions[0].confidence, 0.9);
+  assert.equal(promotions[0].supersedesMemoryId, oldMemoryId);
+  assert.equal(promotions[0].lineage, lineage);
+  assert.equal(listedLineage, lineage);
+  assert.equal(effects.memoryTraceEvent.degraded, undefined);
+  assert.deepEqual(effects.memoryLines, [
+    `session · current summary · cite ${newMemoryId} · fresh`,
+  ]);
+});
+
+test("work-shell success sequence forwards lineage proof into post-turn promotion", async () => {
+  const lineage = {
+    record() {
+      throw new Error("not used");
+    },
+    invalidate() {
+      throw new Error("not used");
+    },
+    expire() {
+      return 0;
+    },
+    get() {
+      return undefined;
+    },
+    isActive() {
+      return false;
+    },
+  };
+  const promotions = [];
+  let legacyWrites = 0;
+  const result = await runPromptTurnSuccessSequence({
+    prompt: "hello",
+    transcriptText: "hello",
+    turnStartedAt: Date.now(),
+    runAgentTurn: async () => ({ text: "world" }),
+    cwd: "/repo",
+    sessionId: "work-1",
+    currentBridgeLines: [],
+    currentMemoryLines: [],
+    turnId: "turn-3",
+    contextReceipt: {
+      id: "receipt-3",
+      projectId: "project-1",
+      sessionId: "work-1",
+      turnId: "turn-3",
+      packetId: "packet-3",
+      state: "submitted",
+      profile: "build",
+      tokenEstimate: 0,
+      tokenEstimateState: "exact",
+      sourceCount: 0,
+      sourceRefs: [],
+      createdAt: "2026-07-13T00:00:02.000Z",
+    },
+    memoryLineage: lineage,
+    async promoteScopedMemory(input) {
+      promotions.push(input);
+      return { memoryId: "memory:session:2026-07-13T00:00:02.000Z:cccccccc" };
+    },
+    publishContextBridge: async () => ({ bridgeId: "bridge-3", line: "bridge-3 line" }),
+    async writeScopedMemory() {
+      legacyWrites += 1;
+      return { memoryId: "legacy-memory" };
+    },
+    async listScopedMemoryLines(input) {
+      assert.equal(input.lineage, lineage);
+      return [];
+    },
+  });
+
+  assert.equal(result.assistantText, "world");
+  assert.equal(legacyWrites, 0);
+  assert.equal(promotions.length, 1);
+  assert.equal(promotions[0].turnId, "turn-3");
+  assert.equal(promotions[0].packetReceiptId, "receipt-3");
+});
+
+test("work-shell never falls back under incomplete or invalid lifecycle proof", async () => {
+  const lineage = {
+    record() {
+      throw new Error("not used");
+    },
+    invalidate() {
+      throw new Error("not used");
+    },
+    expire() {
+      return 0;
+    },
+    get() {
+      return undefined;
+    },
+    isActive() {
+      return false;
+    },
+  };
+  for (const configuration of ["partial", "preview", "cross-session", "receipt-only"]) {
+    let legacyWrites = 0;
+    let promotions = 0;
+    const effects = await runWorkShellPostTurnSuccessEffects({
+      cwd: "/repo",
+      transcriptText: "hello",
+      assistantText: "world",
+      sessionId: "work-1",
+      currentBridgeLines: [],
+      currentMemoryLines: ["memory-0"],
+      turnId: "turn-2",
+      contextReceipt: {
+        id: "receipt-2",
+        projectId: "project-1",
+        sessionId: configuration === "cross-session" ? "work-2" : "work-1",
+        packetId: "packet-2",
+        state: configuration === "preview" ? "previewed" : "submitted",
+        ...(configuration === "preview" ? {} : { turnId: "turn-2" }),
+        profile: "build",
+        tokenEstimate: 0,
+        tokenEstimateState: "exact",
+        sourceCount: 0,
+        sourceRefs: [],
+        createdAt: "2026-07-13T00:00:01.000Z",
+      },
+      ...(configuration === "receipt-only" ? {} : { memoryLineage: lineage }),
+      ...(["preview", "cross-session"].includes(configuration)
+        ? {
+            async promoteScopedMemory() {
+              promotions += 1;
+              return { memoryId: "governed-memory" };
+            },
+          }
+        : {}),
+      async publishContextBridge() {
+        return { bridgeId: "bridge-2", line: "bridge-2 line" };
+      },
+      async writeScopedMemory() {
+        legacyWrites += 1;
+        return { memoryId: "legacy-memory" };
+      },
+      async listScopedMemoryLines() {
+        return [];
+      },
+    });
+
+    assert.equal(legacyWrites, 0, configuration);
+    assert.equal(promotions, 0, configuration);
+    assert.equal(effects.memoryTraceEvent, undefined, configuration);
+    assert.deepEqual(effects.memoryLines, ["memory-0"], configuration);
+  }
 });
 
 test("work-shell post-turn helpers skip bridge and memory when assistant text is empty", async () => {
@@ -2311,6 +2545,7 @@ test("createInitialWorkShellEngineState derives the shell defaults from options"
   });
 
   assert.equal(state.panel.title, "Context");
+  assert.ok(state.panel.lines.includes("Inspect sources · /context"));
   assert.equal(state.traceMode, "minimal");
   assert.equal(state.authLabel, "oauth-file");
   assert.deepEqual(state.entries, []);
@@ -3560,6 +3795,37 @@ test("WorkShellEngine advances preview after submit so the next turn does not re
   assert.match(providerPrompts[1] ?? "", /id="packet-seq-3"/);
 });
 
+test("WorkShellEngine preserves the last submitted receipt across later previews", async () => {
+  const {
+    engine,
+    calls,
+    ledgerSubmissions,
+    setPacket,
+  } = createLifecycleLedgerHarness();
+
+  await engine.initialize();
+  setPacket(createLifecyclePacket({ id: "packet-last-submitted-1" }));
+  await engine.handleSubmit("first turn");
+  const submittedReceiptId = ledgerSubmissions[0]?.receiptId;
+  assert.equal(typeof submittedReceiptId, "string");
+
+  setPacket(createLifecyclePacket({ id: "packet-last-submitted-preview" }));
+  await engine.handleSubmit("/context");
+  assert.equal(
+    engine.getState().contextPreviewReceipt?.packetId,
+    "packet-last-submitted-preview",
+  );
+  assert.equal(engine.getState().contextSubmittedReceipt, undefined);
+
+  const snapshotCountBeforeModelChange = calls.snapshots.length;
+  await engine.handleSubmit("/model gpt-4.1-mini");
+  assert.equal(calls.snapshots.length, snapshotCountBeforeModelChange + 1);
+  assert.equal(
+    calls.snapshots.at(-1)?.lastSubmittedContextReceiptId,
+    submittedReceiptId,
+  );
+});
+
 test("WorkShellEngine cancels during context refresh without submitting or calling provider", async () => {
   let releaseResolve;
   const {
@@ -4713,6 +4979,7 @@ test("WorkShellEngine reloads workspace context on demand", async () => {
     "Loaded extension: focus-tools",
     "bridge refreshed",
     "session · memory refreshed · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged",
+    "Inspect sources · /context",
   ]);
   assert.ok(engine.getState().entries.some((entry) => entry.text === "Workspace context reloaded."));
 });
@@ -4748,6 +5015,7 @@ test("WorkShellEngine preserves expanded context while reloading workspace conte
     "Loaded extension: focus-tools",
     "bridge refreshed",
     "session · memory refreshed · cite memory:session:1970-01-01T00:00:00.000Z:test0001 · aged",
+    "Inspect sources · /context",
   ]);
 });
 
@@ -4787,6 +5055,8 @@ test("WorkShellEngine keeps a lightweight busy status even outside verbose trace
 test("WorkShellEngine soft-interrupts a busy turn and ignores late assistant output", async () => {
   let releaseTurn;
   let turnSignal;
+  const bridgeWrites = [];
+  const memoryWrites = [];
   const { engine } = createEngine({
     agent: {
       clear() {},
@@ -4799,6 +5069,14 @@ test("WorkShellEngine soft-interrupts a busy turn and ignores late assistant out
         });
         return { text: `late:${prompt}` };
       },
+    },
+    async publishContextBridge(input) {
+      bridgeWrites.push(input);
+      return { bridgeId: "late-bridge", line: "late bridge" };
+    },
+    async writeScopedMemory(input) {
+      memoryWrites.push(input);
+      return { memoryId: "late-memory" };
     },
   });
 
@@ -4823,6 +5101,118 @@ test("WorkShellEngine soft-interrupts a busy turn and ignores late assistant out
     engine.getState().entries.some((entry) => entry.text.includes("late:first")),
     false,
   );
+  assert.deepEqual(bridgeWrites, []);
+  assert.deepEqual(memoryWrites, []);
+});
+
+test("WorkShellEngine retracts a bridge when interruption lands during publication", async () => {
+  let releaseBridge;
+  let markBridgeStarted;
+  const bridgeStarted = new Promise((resolve) => {
+    markBridgeStarted = resolve;
+  });
+  const durableBridges = new Set();
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn() {
+        return { text: "finished reply" };
+      },
+    },
+    async publishContextBridge() {
+      markBridgeStarted();
+      await new Promise((resolve) => {
+        releaseBridge = resolve;
+      });
+      durableBridges.add("bridge-during-cancel");
+      return {
+        bridgeId: "bridge-during-cancel",
+        line: "bridge during cancel",
+        async rollback() {
+          durableBridges.delete("bridge-during-cancel");
+        },
+      };
+    },
+  });
+
+  await engine.initialize();
+  const turn = engine.handleSubmit("first");
+  await bridgeStarted;
+  engine.interruptTurn();
+  releaseBridge();
+  await turn;
+
+  assert.deepEqual([...durableBridges], []);
+});
+
+test("WorkShellEngine rolls back bridge and memory when interruption lands during promotion", async () => {
+  let releaseMemory;
+  let markMemoryStarted;
+  const memoryStarted = new Promise((resolve) => {
+    markMemoryStarted = resolve;
+  });
+  const durableBridges = new Set();
+  const activeMemories = new Set(["memory-predecessor"]);
+  const { engine } = createLifecycleLedgerHarness({
+    agentRunTurn: async () => ({ text: "finished reply" }),
+    engineOverrides: {
+      async publishContextBridge() {
+        durableBridges.add("bridge-before-memory");
+        return {
+          bridgeId: "bridge-before-memory",
+          line: "bridge before memory",
+          async rollback() {
+            durableBridges.delete("bridge-before-memory");
+          },
+        };
+      },
+      memoryLineage: {
+        record(input) {
+          return { ...input, createdAt: "2026-07-13T00:00:00.000Z" };
+        },
+        invalidate() {
+          throw new Error("not used");
+        },
+        rollbackPromotion() {},
+        expire() {
+          return 0;
+        },
+        get() {
+          return undefined;
+        },
+        isActive(memoryId) {
+          return activeMemories.has(memoryId);
+        },
+      },
+      async promoteScopedMemory() {
+        markMemoryStarted();
+        await new Promise((resolve) => {
+          releaseMemory = resolve;
+        });
+        activeMemories.delete("memory-predecessor");
+        activeMemories.add("memory-during-cancel");
+        return {
+          memoryId: "memory-during-cancel",
+          async rollback() {
+            activeMemories.delete("memory-during-cancel");
+            activeMemories.add("memory-predecessor");
+          },
+        };
+      },
+    },
+  });
+
+  await engine.initialize();
+  const turn = engine.handleSubmit("first");
+  await memoryStarted;
+  engine.interruptTurn();
+  releaseMemory();
+  await turn;
+
+  assert.deepEqual([...durableBridges], []);
+  assert.deepEqual([...activeMemories], ["memory-predecessor"]);
 });
 
 test("WorkShellEngine persists an interrupted turn as idle and ignores late failure snapshots", async () => {
@@ -5212,7 +5602,7 @@ test("WorkShellEngine can restore a persisted trace mode for a resumed work sess
   assert.equal(engine.getState().traceMode, "verbose");
 });
 
-test("WorkShellEngine keeps automatic bridge and memory bookkeeping out of the conversation transcript", async () => {
+test("WorkShellEngine keeps bridge bookkeeping and unproven memory out of the transcript", async () => {
   const { engine } = createEngine();
 
   await engine.initialize();
@@ -5225,7 +5615,7 @@ test("WorkShellEngine keeps automatic bridge and memory bookkeeping out of the c
   assert.equal(typeof engine.getState().lastTurnDurationMs, "number");
   assert.ok((engine.getState().lastTurnDurationMs ?? 0) >= 0);
   assert.ok(engine.getState().traceLines.some((line) => line.startsWith("bridge ")));
-  assert.ok(engine.getState().traceLines.some((line) => line.startsWith("memory ")));
+  assert.equal(engine.getState().traceLines.some((line) => line.startsWith("memory ")), false);
 });
 
 test("WorkShellEngine trims permission-seeking stall outros from assistant replies", async () => {

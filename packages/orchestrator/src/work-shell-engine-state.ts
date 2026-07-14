@@ -1,4 +1,5 @@
 import { runRustCommandSync } from "./rust-command.js";
+import { createCollapsedContextPanel } from "./work-shell-engine-panels.js";
 import type {
   WorkShellChatEntry,
   WorkShellEngineOptions,
@@ -84,7 +85,13 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     authLauncherLines: [...decision.authLauncherLines],
     bridgeLines: [...decision.bridgeLines],
     memoryLines: [...decision.memoryLines],
-    panel: input.buildContextPanel(input.contextSummaryLines, decision.bridgeLines, decision.memoryLines, decision.traceLines),
+    panel: createCollapsedContextPanel({
+      contextSummaryLines: input.contextSummaryLines,
+      bridgeLines: decision.bridgeLines,
+      memoryLines: decision.memoryLines,
+      traceLines: decision.traceLines,
+      buildContextPanel: input.buildContextPanel,
+    }),
     traceLines: [...decision.traceLines],
     traceMode: decision.traceMode,
     composerMode: decision.composerMode,

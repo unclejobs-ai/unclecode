@@ -22,9 +22,10 @@ const FIXED_WIDTH_ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$
 export type AgentOpsMemoryLineageStoreMethods = {
   recordMemoryLineage(input: RecordMemoryLineageInput): MemoryLineageRecord;
   supersedeMemoryLineage(memoryId: string): MemoryLineageRecord;
+  rollbackMemoryLineagePromotion(memoryId: string): void;
   expireMemoryLineage(now?: Date): number;
   getMemoryLineage(memoryId: string): MemoryLineageRecord | undefined;
-  listActiveMemoryLineage(): readonly MemoryLineageRecord[];
+  listActiveMemoryLineage(projectId?: string): readonly MemoryLineageRecord[];
 };
 
 export function createAgentOpsMemoryLineageStoreMethods(
@@ -37,14 +38,17 @@ export function createAgentOpsMemoryLineageStoreMethods(
     supersedeMemoryLineage(memoryId) {
       return supersedeMemoryLineage(db, memoryId);
     },
+    rollbackMemoryLineagePromotion(memoryId) {
+      rollbackMemoryLineagePromotion(db, memoryId);
+    },
     expireMemoryLineage(now) {
       return expireMemoryLineage(db, now);
     },
     getMemoryLineage(memoryId) {
       return getMemoryLineage(db, memoryId);
     },
-    listActiveMemoryLineage() {
-      return listActiveMemoryLineage(db);
+    listActiveMemoryLineage(projectId) {
+      return listActiveMemoryLineage(db, projectId);
     },
   };
 }
@@ -118,6 +122,50 @@ export function supersedeMemoryLineage(
   return getMemoryLineageOrThrow(db, memoryId);
 }
 
+export function rollbackMemoryLineagePromotion(
+  db: DatabaseSync,
+  memoryId: string,
+): void {
+  assertIdentifier(memoryId, "memoryId");
+  const current = getMemoryLineage(db, memoryId);
+  if (current === undefined) throw new Error(`Memory lineage not found: ${memoryId}`);
+  if (current.state !== "active") throw new Error(`Memory lineage is not active: ${memoryId}`);
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (current.supersedesMemoryId !== undefined) {
+      const predecessor = getMemoryLineage(db, current.supersedesMemoryId);
+      if (predecessor?.state !== "superseded") {
+        throw new Error(
+          `Memory lineage predecessor is not superseded: ${current.supersedesMemoryId}`,
+        );
+      }
+      const restored = db
+        .prepare(
+          "UPDATE memory_lineage SET state = 'active' WHERE memory_id = ? AND state = 'superseded'",
+        )
+        .run(current.supersedesMemoryId);
+      if (restored.changes !== 1) {
+        throw new Error(
+          `Memory lineage predecessor is not superseded: ${current.supersedesMemoryId}`,
+        );
+      }
+    }
+    const invalidated = db
+      .prepare(
+        "UPDATE memory_lineage SET state = 'superseded' WHERE memory_id = ? AND state = 'active'",
+      )
+      .run(memoryId);
+    if (invalidated.changes !== 1) {
+      throw new Error(`Memory lineage is not active: ${memoryId}`);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 export function expireMemoryLineage(db: DatabaseSync, now = new Date()): number {
   if (!Number.isFinite(now.getTime())) throw new TypeError("now must be a valid Date");
   const timestamp = now.toISOString();
@@ -143,7 +191,27 @@ export function getMemoryLineage(
   return row === undefined ? undefined : mapMemoryLineageRow(sqlRow(row, `memory lineage ${memoryId}`));
 }
 
-export function listActiveMemoryLineage(db: DatabaseSync): readonly MemoryLineageRecord[] {
+export function listActiveMemoryLineage(
+  db: DatabaseSync,
+  projectId?: string,
+): readonly MemoryLineageRecord[] {
+  if (projectId !== undefined) {
+    assertIdentifier(projectId, "projectId");
+    const rows = db
+      .prepare(
+        `SELECT memory_lineage.* FROM memory_lineage
+         LEFT JOIN context_packet_receipts
+           ON context_packet_receipts.id = memory_lineage.origin_packet_receipt_id
+         WHERE memory_lineage.state = 'active'
+           AND (
+             context_packet_receipts.project_id = ?
+             OR context_packet_receipts.id IS NULL
+           )
+         ORDER BY memory_lineage.created_at ASC, memory_lineage.memory_id ASC`,
+      )
+      .all(projectId);
+    return sqlRows(rows, "active project memory lineage").map(mapMemoryLineageRow);
+  }
   const rows = db
     .prepare(
       `SELECT * FROM memory_lineage

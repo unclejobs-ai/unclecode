@@ -14,6 +14,7 @@ import type {
   WorkShellStatusContext,
 } from "./work-shell-engine.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
+import type { MemoryLineageAdapter } from "@unclecode/context-broker";
 
 type BuildContextPanel = (
   contextSummaryLines: readonly string[],
@@ -33,8 +34,10 @@ export async function loadInitialWorkShellLifecycleState(input: {
     cwd: string;
     sessionId?: string;
     agentId?: string;
+    lineage?: MemoryLineageAdapter;
   }) => Promise<readonly string[]>;
   buildContextPanel: BuildContextPanel;
+  lineage?: MemoryLineageAdapter;
 }): Promise<{
   readonly bridgeLines: readonly string[];
   readonly memoryLines: readonly string[];

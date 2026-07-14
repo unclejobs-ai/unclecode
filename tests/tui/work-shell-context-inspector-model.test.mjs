@@ -56,11 +56,6 @@ test("context inspector model expands condensed history metadata for human inspe
     metadata: {
       kind: "condensed-history",
       sourceEventIds: ["trace-a", "trace-b", "trace-c"],
-      sourceEventPreviews: [
-        "shell read package.json",
-        "tool wrote packages/context-broker/src/crp-selector.ts",
-        "tests passed for context broker",
-      ],
       summary: "3 earlier trace lines summarized; 8 recent trace lines stay as runtime rows.",
       recomputeReason: "history exceeded recent-window threshold",
       compactedEventCount: 3,
@@ -79,9 +74,6 @@ test("context inspector model expands condensed history metadata for human inspe
     "Summary · 3 earlier trace lines summarized; 8 recent trace lines stay as runtime rows.",
     "Reason · history exceeded recent-window threshold",
     "Provenance · 3 trace ids · trace-a, trace-b, trace-c",
-    "Raw preview · 3 compacted trace lines · shell read package.json",
-    "  2. tool wrote packages/context-broker/src/crp-selector.ts",
-    "  3. tests passed for context broker",
   ]);
 });
 

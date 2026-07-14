@@ -1,42 +1,72 @@
-import type { ContextPacketViewItem, ContextSourceMetadata } from "@unclecode/contracts";
+import type {
+  ContextPacketViewItem,
+  ContextPacketViewMetadata,
+  ContextSourceMetadata,
+} from "@unclecode/contracts";
 
-function cloneContextSourceMetadata(metadata: ContextSourceMetadata): ContextSourceMetadata {
-  switch (metadata.kind) {
-    case "condensed-history":
-      return {
-        kind: "condensed-history",
-        sourceEventIds: [...metadata.sourceEventIds],
-        ...(metadata.sourceEventPreviews === undefined
-          ? {}
-          : { sourceEventPreviews: [...metadata.sourceEventPreviews] }),
-        summary: metadata.summary,
-        recomputeReason: metadata.recomputeReason,
-        compactedEventCount: metadata.compactedEventCount,
-        recentEventCount: metadata.recentEventCount,
-        compression: { ...metadata.compression },
-      };
-  }
+export function toContextPacketViewMetadata(
+  metadata: ContextSourceMetadata,
+): ContextPacketViewMetadata {
+  return {
+    kind: "condensed-history",
+    sourceEventIds: [...metadata.sourceEventIds],
+    summary: metadata.summary,
+    recomputeReason: metadata.recomputeReason,
+    compactedEventCount: metadata.compactedEventCount,
+    recentEventCount: metadata.recentEventCount,
+    compression: { ...metadata.compression },
+  };
 }
 
 export function cloneContextPacketViewItem(item: ContextPacketViewItem): ContextPacketViewItem {
-  const badges = item.badges?.map((badge) => ({ ...badge }));
-  const provenance = item.provenance ? { ...item.provenance } : undefined;
-  const freshness = item.freshness ? { ...item.freshness } : undefined;
-  const rank = item.rank
-    ? {
-        ...item.rank,
-        factors: item.rank.factors.map((factor) => ({ ...factor })),
-      }
-    : undefined;
-  const actions = item.actions ? [...item.actions] : undefined;
-  const metadata = item.metadata ? cloneContextSourceMetadata(item.metadata) : undefined;
   return {
-    ...item,
-    ...(badges ? { badges } : {}),
-    ...(provenance ? { provenance } : {}),
-    ...(freshness ? { freshness } : {}),
-    ...(rank ? { rank } : {}),
-    ...(actions ? { actions } : {}),
-    ...(metadata ? { metadata } : {}),
+    id: item.id,
+    category: item.category,
+    label: item.label,
+    reason: item.reason,
+    ...(item.preview === undefined ? {} : { preview: item.preview }),
+    ...(item.tokenEstimate === undefined ? {} : { tokenEstimate: item.tokenEstimate }),
+    ...(item.sourceCount === undefined ? {} : { sourceCount: item.sourceCount }),
+    ...(item.salience === undefined ? {} : { salience: item.salience }),
+    ...(item.includedInModel === undefined
+      ? {}
+      : { includedInModel: item.includedInModel }),
+    ...(item.badges === undefined
+      ? {}
+      : { badges: item.badges.map((badge) => ({ ...badge })) }),
+    ...(item.provenance === undefined
+      ? {}
+      : { provenance: { ...item.provenance } }),
+    ...(item.freshness === undefined
+      ? {}
+      : { freshness: { ...item.freshness } }),
+    ...(item.confidence === undefined ? {} : { confidence: item.confidence }),
+    ...(item.trustTier === undefined ? {} : { trustTier: item.trustTier }),
+    ...(item.rank === undefined
+      ? {}
+      : {
+          rank: {
+            ...item.rank,
+            factors: item.rank.factors.map((factor) => ({ ...factor })),
+          },
+        }),
+    ...(item.conflictGroupId === undefined
+      ? {}
+      : { conflictGroupId: item.conflictGroupId }),
+    ...(item.actions === undefined ? {} : { actions: [...item.actions] }),
+    ...(item.previewKind === undefined ? {} : { previewKind: item.previewKind }),
+    ...(item.metadata === undefined
+      ? {}
+      : {
+          metadata: {
+            kind: "condensed-history",
+            sourceEventIds: [...item.metadata.sourceEventIds],
+            summary: item.metadata.summary,
+            recomputeReason: item.metadata.recomputeReason,
+            compactedEventCount: item.metadata.compactedEventCount,
+            recentEventCount: item.metadata.recentEventCount,
+            compression: { ...item.metadata.compression },
+          },
+        }),
   };
 }

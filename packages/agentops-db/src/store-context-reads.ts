@@ -6,6 +6,8 @@ import { contextSourceRowToRecord, mapContextSourceRow } from "./store-context-s
 import type { SelectedContextSources } from "./store-types.js";
 import { sqlRow, sqlRows } from "./sql-row.js";
 
+export const MAX_CONTEXT_SOURCE_SELECTION_ROWS = 128;
+
 /**
  * Select context sources for a turn under a token budget.
  *
@@ -38,16 +40,24 @@ export function selectContextSources(
 
   const rows = db
     .prepare(
-      `SELECT * FROM context_sources
+      `SELECT *, COUNT(*) OVER() AS total_matching FROM context_sources
        WHERE project_id = ?
          AND (expires_at IS NULL OR expires_at > ?)
          AND salience >= ?${categoryClause}
-       ORDER BY salience DESC, updated_at DESC`,
+       ORDER BY salience DESC, updated_at DESC
+       LIMIT ?`,
     )
-    .all(...params, ...(input.categoryFilter ?? []));
+    .all(
+      ...params,
+      ...(input.categoryFilter ?? []),
+      MAX_CONTEXT_SOURCE_SELECTION_ROWS,
+    );
 
   const sqlRowsAll = sqlRows(rows, "context_sources select");
   const allRecords = sqlRowsAll.map((row) => contextSourceRowToRecord(mapContextSourceRow(row)));
+  const totalMatching = sqlRowsAll[0] === undefined
+    ? 0
+    : Number(sqlRowsAll[0].total_matching);
 
   const selected: ContextSourceRecord[] = [];
   const heldBack: ContextSourceRecord[] = [];
@@ -72,6 +82,7 @@ export function selectContextSources(
     heldBack,
     totalTokens,
     budget: input.tokenBudget,
+    omittedCount: Math.max(0, totalMatching - allRecords.length),
   };
 }
 

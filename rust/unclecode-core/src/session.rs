@@ -45,6 +45,7 @@ pub struct WorkShellSessionSnapshot {
     pub summary: String,
     pub trace_mode: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub last_submitted_context_receipt_id: Option<String>,
     pub entries: Vec<WorkShellTranscriptEntry>,
     pub agent_console: Option<Value>,
 }
@@ -62,6 +63,7 @@ pub struct WorkShellResume {
     pub session_id: String,
     pub trace_mode: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub last_submitted_context_receipt_id: Option<String>,
     pub summary: String,
     pub entries: Vec<WorkShellTranscriptEntry>,
     pub agent_console: Option<Value>,
@@ -254,6 +256,12 @@ impl WorkShellSessionStore {
             .and_then(Value::as_str)
             .filter(|value| is_openai_reasoning_effort(value))
             .map(str::to_string);
+        let last_submitted_context_receipt_id = parsed
+            .get("metadata")
+            .and_then(|value| value.get("lastSubmittedContextReceiptId"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string);
         let summary = parsed
             .get("taskSummary")
             .and_then(|value| value.get("summary"))
@@ -284,6 +292,7 @@ impl WorkShellSessionStore {
             session_id: parsed_session_id,
             trace_mode,
             reasoning_effort,
+            last_submitted_context_receipt_id,
             summary,
             entries,
             agent_console,
@@ -327,6 +336,11 @@ pub fn persist_work_shell_session_snapshot_json(
         .and_then(Value::as_str)
         .filter(|value| is_openai_reasoning_effort(value))
         .map(str::to_string);
+    let last_submitted_context_receipt_id = parsed
+        .get("lastSubmittedContextReceiptId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
     let entries = parsed
         .get("entries")
         .and_then(Value::as_array)
@@ -346,6 +360,7 @@ pub fn persist_work_shell_session_snapshot_json(
             summary: summary.to_string(),
             trace_mode,
             reasoning_effort,
+            last_submitted_context_receipt_id,
             entries,
             agent_console,
         })
@@ -368,6 +383,7 @@ pub fn resume_work_shell_session_json(
         "sessionId": resumed.session_id,
         "traceMode": resumed.trace_mode,
         "reasoningEffort": resumed.reasoning_effort,
+        "lastSubmittedContextReceiptId": resumed.last_submitted_context_receipt_id,
         "contextLine": format!("Resumed session: {session_id}"),
         "initialSessionSummary": resumed.summary,
         "initialEntries": resumed
@@ -775,6 +791,16 @@ fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShel
             format!(",\"reasoningEffort\":\"{}\"", escape_json(reasoning_effort))
         })
         .unwrap_or_default();
+    let metadata_context_receipt = snapshot
+        .last_submitted_context_receipt_id
+        .as_ref()
+        .map(|receipt_id| {
+            format!(
+                ",\"lastSubmittedContextReceiptId\":\"{}\"",
+                escape_json(receipt_id)
+            )
+        })
+        .unwrap_or_default();
     let mut records = vec![
         WorkShellRecord {
             timestamp: now_timestamp(),
@@ -786,12 +812,13 @@ fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShel
         WorkShellRecord {
             timestamp: now_timestamp(),
             checkpoint_json: format!(
-                "{{\"type\":\"metadata\",\"metadata\":{{\"model\":\"{}\",\"taskSummary\":\"{}\",\"isUltraworkMode\":{}{}{}}}}}",
+                "{{\"type\":\"metadata\",\"metadata\":{{\"model\":\"{}\",\"taskSummary\":\"{}\",\"isUltraworkMode\":{}{}{}{}}}}}",
                 escape_json(&snapshot.model),
                 escape_json(&snapshot.summary),
                 if snapshot.mode == "ultrawork" { "true" } else { "false" },
                 metadata_trace,
                 metadata_reasoning,
+                metadata_context_receipt,
             ),
         },
         WorkShellRecord {
@@ -835,6 +862,12 @@ fn build_checkpoint_json(
     }
     if let Some(reasoning_effort) = &snapshot.reasoning_effort {
         metadata.insert("reasoningEffort".to_string(), json!(reasoning_effort));
+    }
+    if let Some(receipt_id) = &snapshot.last_submitted_context_receipt_id {
+        metadata.insert(
+            "lastSubmittedContextReceiptId".to_string(),
+            json!(receipt_id),
+        );
     }
 
     let entries = minimize_resume_entries(&snapshot.entries);
@@ -963,6 +996,7 @@ mod tests {
                 summary: "Chat: inspect repo".to_string(),
                 trace_mode: Some("verbose".to_string()),
                 reasoning_effort: Some("high".to_string()),
+                last_submitted_context_receipt_id: Some("receipt-submitted".to_string()),
                 entries: vec![
                     WorkShellTranscriptEntry {
                         role: "user".to_string(),
@@ -988,6 +1022,10 @@ mod tests {
             .expect("resumed");
         assert_eq!(resumed.session_id, "work-session-1");
         assert_eq!(resumed.trace_mode, Some("verbose".to_string()));
+        assert_eq!(
+            resumed.last_submitted_context_receipt_id,
+            Some("receipt-submitted".to_string())
+        );
         assert_eq!(resumed.summary, "Chat: inspect repo");
         assert_eq!(resumed.entries.len(), 2);
         assert_eq!(resumed.entries[0].text, "inspect repo");
@@ -1146,6 +1184,7 @@ mod tests {
                 summary: "Chat: minimize".to_string(),
                 trace_mode: Some("minimal".to_string()),
                 reasoning_effort: None,
+                last_submitted_context_receipt_id: None,
                 entries,
                 agent_console: None,
             })

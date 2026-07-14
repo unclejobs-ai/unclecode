@@ -1,4 +1,7 @@
-import type { ContextPacketViewItem, ContextSourceMetadata } from "@unclecode/contracts";
+import type {
+  ContextPacketViewItem,
+  ContextPacketViewMetadata,
+} from "@unclecode/contracts";
 
 export function sanitizeContextPreview(value: string): string {
   return value
@@ -40,27 +43,10 @@ function getCondensedHistoryWarningLine(item: ContextPacketViewItem): string | u
   return `Warning · compressed summary is ${state}; refresh before relying on it${turnSuffix}`;
 }
 
-function getCondensedHistoryRawPreviewLines(
-  metadata: Extract<ContextSourceMetadata, { readonly kind: "condensed-history" }>,
-): readonly string[] {
-  const previews = metadata.sourceEventPreviews ?? [];
-  const lines: string[] = [];
-  for (let index = 0; index < previews.length; index += 1) {
-    const preview = previews[index];
-    if (preview === undefined) continue;
-    const sanitized = sanitizeContextPreview(preview);
-    lines.push(
-      index === 0
-        ? `Raw preview · ${previews.length} compacted trace lines · ${sanitized}`
-        : `  ${index + 1}. ${sanitized}`,
-    );
-  }
-  return lines;
-}
 
 function getCondensedHistoryDetailLines(
   item: ContextPacketViewItem,
-  metadata: Extract<ContextSourceMetadata, { readonly kind: "condensed-history" }>,
+  metadata: ContextPacketViewMetadata,
 ): readonly string[] {
   const modelSuffix = metadata.compression.model === undefined ? "" : ` · ${metadata.compression.model}`;
   const warningLine = getCondensedHistoryWarningLine(item);
@@ -70,11 +56,13 @@ function getCondensedHistoryDetailLines(
     `Summary · ${metadata.summary}`,
     `Reason · ${metadata.recomputeReason}`,
     `Provenance · ${metadata.sourceEventIds.length} trace ids · ${formatTraceIdPreview(metadata.sourceEventIds)}`,
-    ...getCondensedHistoryRawPreviewLines(metadata),
   ];
 }
 
-function getMetadataDetailLines(item: ContextPacketViewItem, metadata: ContextSourceMetadata): readonly string[] {
+function getMetadataDetailLines(
+  item: ContextPacketViewItem,
+  metadata: ContextPacketViewMetadata,
+): readonly string[] {
   return getCondensedHistoryDetailLines(item, metadata);
 }
 

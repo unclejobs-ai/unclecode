@@ -98,6 +98,15 @@ export function sanitizeSessionMetadata(value: unknown): SessionMetadata {
             typeof value.model === "string" ? redactSecrets(value.model) : value.model,
         }
       : {}),
+    ...(typeof value.lastSubmittedContextReceiptId === "string"
+      || value.lastSubmittedContextReceiptId === null
+      ? {
+          lastSubmittedContextReceiptId:
+            typeof value.lastSubmittedContextReceiptId === "string"
+              ? redactSecrets(value.lastSubmittedContextReceiptId)
+              : value.lastSubmittedContextReceiptId,
+        }
+      : {}),
     ...(pendingAction ? { pendingAction } : {}),
     ...(value.pendingAction === null ? { pendingAction: null } : {}),
     ...(postTurnSummary !== undefined ? { postTurnSummary } : {}),

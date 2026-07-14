@@ -12,6 +12,7 @@ import {
   loadCachedWorkspaceGuidance,
   loadOmoContextSnapshot,
   resolveContextProfile,
+  promoteScopedMemory,
 } from "@unclecode/context-broker";
 import type {
   ContextPacketView,
@@ -65,6 +66,7 @@ import {
 } from "./work-runtime-context-items.js";
 import {
   createCrpRuntime,
+  reconcileResumedContextLifecycle,
   resolveWorkShellCrpConfig,
   type WorkShellContextPacketResolver,
 } from "./work-runtime-crp.js";
@@ -489,6 +491,28 @@ export async function loadWorkCliBootstrap(
     command: "unclecode work",
     ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
   });
+  const crpConfig = resolveWorkShellCrpConfig(configExplanation);
+  let resumeIntegrityLines: readonly string[] = [];
+  if (crpConfig.enabled && resumedSession !== undefined) {
+    try {
+      resumeIntegrityLines = reconcileResumedContextLifecycle({
+        cwd,
+        sessionId: resumedSession.sessionId,
+        ...(resumedSession.lastSubmittedContextReceiptId
+          ? {
+              lastSubmittedContextReceiptId:
+                resumedSession.lastSubmittedContextReceiptId,
+            }
+          : {}),
+        ...(userHomeDir ? { userHomeDir } : {}),
+      }).warningLines;
+    } catch (error) {
+      throw new Error(
+        "Unable to resume safely: context integrity validation failed.",
+        { cause: error },
+      );
+    }
+  }
   const bootstrapContext = await ingestWorkspaceBootstrapContext({
     cwd,
     env,
@@ -500,7 +524,6 @@ export async function loadWorkCliBootstrap(
     bootstrapPacketItems: bootstrapContext.packetItems,
     bootstrapPacketWarnings: bootstrapContext.packetWarnings,
   });
-  const crpConfig = resolveWorkShellCrpConfig(configExplanation);
   const crpRuntime = createCrpRuntime(legacyContextPacketResolver, {
     sourceMetadata: contextPacketSourceMetadata,
     crpConfig,
@@ -508,6 +531,7 @@ export async function loadWorkCliBootstrap(
     ...(userHomeDir ? { userHomeDir } : {}),
     ...(bootstrapContext.packetItems ? { bootstrapPacketItems: bootstrapContext.packetItems } : {}),
     ...(bootstrapContext.packetWarnings ? { bootstrapPacketWarnings: bootstrapContext.packetWarnings } : {}),
+    workspaceRoot: cwd,
   });
 
   const resolveContextPacket: WorkShellContextPacketResolver = async (packetInput) => {
@@ -531,6 +555,7 @@ export async function loadWorkCliBootstrap(
       contextSummaryLines: [
         ...authIssueLines,
         ...bootstrapContext.summaryLines,
+        ...resumeIntegrityLines,
         ...(await buildWorkShellContextSummary({
           cwd,
           env,
@@ -551,6 +576,12 @@ export async function loadWorkCliBootstrap(
         : {}),
       ...(resumedSession?.initialSessionSummary
         ? { initialSessionSummary: resumedSession.initialSessionSummary }
+        : {}),
+      ...(resumedSession?.lastSubmittedContextReceiptId
+        ? {
+            initialLastSubmittedContextReceiptId:
+              resumedSession.lastSubmittedContextReceiptId,
+          }
         : {}),
       ...(resumedSession?.initialAgentConsole
         ? { initialAgentConsole: resumedSession.initialAgentConsole }
@@ -635,6 +666,12 @@ export async function loadWorkCliBootstrap(
         crpRuntime.contextLedger.resolveSuggestion(suggestionId, status),
       invalidateContextSuggestions: (receiptId) =>
         crpRuntime.contextLedger.invalidateSuggestions(receiptId),
+      ...(crpConfig.enabled
+        ? {
+            memoryLineage: crpRuntime.contextLedger.memoryLineage,
+            promoteScopedMemory,
+          }
+        : {}),
       refreshCondensedHistory: () =>
         crpRuntime.refreshCondensedHistory(),
     },

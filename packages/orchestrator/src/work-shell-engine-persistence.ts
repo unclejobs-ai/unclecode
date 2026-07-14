@@ -10,6 +10,7 @@ export type WorkShellSessionSnapshotInput = {
   summary: string;
   traceMode: WorkShellTraceMode;
   reasoningEffort?: ModeReasoningEffort | undefined;
+  lastSubmittedContextReceiptId?: string | undefined;
   entries?: readonly WorkShellChatEntry[] | undefined;
   agentConsole?: AgentConsoleSnapshot | undefined;
 };

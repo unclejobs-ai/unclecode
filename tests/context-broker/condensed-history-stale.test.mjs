@@ -122,7 +122,8 @@ test("CondensedHistoryProvider stores bounded raw compacted trace previews in lo
     turnIndex: 1,
   });
   const item = packet.included.find((entry) => entry.id === record.id);
-  assert.deepEqual(item?.metadata?.sourceEventPreviews, record.metadata.sourceEventPreviews);
+  assert.equal(item?.metadata?.kind, "condensed-history");
+  assert.equal("sourceEventPreviews" in item.metadata, false);
 });
 
 test("CondensedHistoryProvider masks sensitive compacted traces before storing preview metadata", async () => {

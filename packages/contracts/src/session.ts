@@ -11,6 +11,7 @@ export const SESSION_METADATA_FIELDS = [
   "model",
   "pendingAction",
   "postTurnSummary",
+  "lastSubmittedContextReceiptId",
   "taskSummary",
 ] as const;
 
@@ -24,6 +25,7 @@ export type SessionMetadata = {
   readonly model?: string | null;
   readonly pendingAction?: SessionPendingAction | null;
   readonly postTurnSummary?: JsonValue | null;
+  readonly lastSubmittedContextReceiptId?: string | null;
   readonly taskSummary?: string | null;
 };
 

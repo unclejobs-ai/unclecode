@@ -135,6 +135,7 @@ mod tests {
                 summary: "Mapped local context".to_string(),
                 trace_mode: None,
                 reasoning_effort: None,
+                last_submitted_context_receipt_id: None,
                 entries: vec![],
                 agent_console: None,
             })
@@ -175,6 +176,7 @@ mod tests {
                         .to_string(),
                 trace_mode: None,
                 reasoning_effort: None,
+                last_submitted_context_receipt_id: None,
                 entries: vec![],
                 agent_console: None,
             })

@@ -80,7 +80,7 @@ describe("context packet view", () => {
     assert.ok(lines.includes("- omo · 1 · .omo/ulw-loop/session/ledger.jsonl (raw audit ledger stays local)"));
     assert.ok(lines.includes("Warnings · 1 · omo.multiple-active: Multiple active OMO sessions detected."));
     assert.ok(lines.includes('Next answer · <unclecode_context_packet id="packet-test-1" version="1">'));
-    assert.ok(lines.includes("Controls · Esc close · /context refresh · Ctrl+O context"));
+    assert.ok(lines.includes("Controls · Esc close · /context refresh"));
     assert.equal(lines.some((line) => /\bPacket\b|provider packet|Next model-call packet/.test(line)), false);
   });
 
@@ -357,5 +357,61 @@ describe("context packet view", () => {
 
     const result = formatContextPacketIndicator(packet);
     assert.equal(result.includes("pinned"), false);
+  });
+
+  it("drops internal source fields at the public packet boundary", () => {
+    const internalItem = {
+      id: "condensed-history",
+      category: "condensed-history",
+      label: "Condensed history",
+      reason: "bounded summary",
+      preview: "Public summary",
+      content: "raw provider payload",
+      metadata: {
+        kind: "condensed-history",
+        sourceEventIds: ["trace-internal"],
+        summary: "internal summary",
+        recomputeReason: "token pressure",
+        compactedEventCount: 1,
+        recentEventCount: 2,
+        compression: {
+          method: "recent-window",
+          inputTokensEstimate: 10,
+          outputTokensEstimate: 4,
+        },
+        sourceEventPreviews: ["raw event"],
+      },
+      arbitraryInternalField: "must not escape",
+    };
+
+    const packet = createContextPacketView({
+      id: "packet-public-boundary",
+      generatedAt: "2026-07-13T00:00:00.000Z",
+      included: [internalItem],
+      excluded: [],
+      warnings: [],
+      preview: [],
+    });
+
+    assert.deepEqual(packet.included[0], {
+      id: "condensed-history",
+      category: "condensed-history",
+      label: "Condensed history",
+      reason: "bounded summary",
+      preview: "Public summary",
+      metadata: {
+        kind: "condensed-history",
+        sourceEventIds: ["trace-internal"],
+        summary: "internal summary",
+        recomputeReason: "token pressure",
+        compactedEventCount: 1,
+        recentEventCount: 2,
+        compression: {
+          method: "recent-window",
+          inputTokensEstimate: 10,
+          outputTokensEstimate: 4,
+        },
+      },
+    });
   });
 });
