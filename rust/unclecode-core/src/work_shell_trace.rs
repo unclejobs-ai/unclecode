@@ -41,7 +41,8 @@ fn resolve_work_shell_trace_event(input: &Value) -> Value {
 fn resolve_busy_status_action(event: &Value, line: &str) -> &'static str {
     match str_field(event, "type").unwrap_or_default() {
         "turn.completed" => "clear",
-        "turn.started" | "provider.calling" | "tool.started" => "set",
+        "turn.started" | "provider.calling" | "reasoning.delta" | "tool.started"
+        | "tool.completed" => "set",
         "orchestrator.step" if str_field(event, "status") == Some("running") => "set",
         _ => {
             let _ = line;
@@ -79,13 +80,16 @@ fn extract_current_turn_started_at(event: &Value) -> Option<i64> {
 }
 
 fn resolve_verbose_trace_entry(trace_mode: &str, event: &Value, line: &str) -> Option<Value> {
-    let _ = trace_mode;
     if line.is_empty() {
         return None;
     }
 
     match str_field(event, "type").unwrap_or_default() {
-        "policy.denied" | "tool.completed" => Some(json!({
+        "policy.denied" => Some(json!({
+            "role": "tool",
+            "text": line,
+        })),
+        "tool.completed" if trace_mode == "verbose" => Some(json!({
             "role": "tool",
             "text": line,
         })),
@@ -147,7 +151,7 @@ mod tests {
                 r#"{"event":{"type":"reasoning.delta"},"line":"✦ thinking· inspect repo","traceMode":"minimal"}"#,
             )
             .unwrap(),
-            r#"{"busyStatusAction":"none","traceEntryRole":"assistant"}"#
+            r#"{"busyStatus":"✦ thinking· inspect repo","busyStatusAction":"set","traceEntryRole":"assistant"}"#
         );
         assert_eq!(
             resolve_work_shell_trace_event_json(
@@ -173,27 +177,27 @@ mod tests {
     }
 
     #[test]
-    fn resolves_minimal_completed_tool_trace_entries() {
+    fn resolves_completed_tool_status_and_verbose_entries() {
         assert_eq!(
             resolve_work_shell_trace_event_json(
                 r#"{"event":{"type":"tool.completed","toolName":"write_file","isError":false},"line":"✓ write 12ms notes.txt","traceMode":"minimal"}"#,
             )
             .unwrap(),
-            r#"{"busyStatusAction":"none","traceEntry":{"role":"tool","text":"✓ write 12ms notes.txt"},"traceEntryRole":"tool"}"#
+            r#"{"busyStatus":"✓ write 12ms notes.txt","busyStatusAction":"set","traceEntryRole":"tool"}"#
         );
         assert_eq!(
             resolve_work_shell_trace_event_json(
                 r#"{"event":{"type":"tool.completed","toolName":"run_shell","isError":false},"line":"✓ bash 34ms cargo test -p unclecode-core","traceMode":"minimal"}"#,
             )
             .unwrap(),
-            r#"{"busyStatusAction":"none","traceEntry":{"role":"tool","text":"✓ bash 34ms cargo test -p unclecode-core"},"traceEntryRole":"tool"}"#
+            r#"{"busyStatus":"✓ bash 34ms cargo test -p unclecode-core","busyStatusAction":"set","traceEntryRole":"tool"}"#
         );
         assert_eq!(
             resolve_work_shell_trace_event_json(
                 r#"{"event":{"type":"tool.completed","toolName":"write_file","isError":false},"line":"✓ write 12ms notes.txt","traceMode":"verbose"}"#,
             )
             .unwrap(),
-            r#"{"busyStatusAction":"none","traceEntry":{"role":"tool","text":"✓ write 12ms notes.txt"},"traceEntryRole":"tool"}"#
+            r#"{"busyStatus":"✓ write 12ms notes.txt","busyStatusAction":"set","traceEntry":{"role":"tool","text":"✓ write 12ms notes.txt"},"traceEntryRole":"tool"}"#
         );
         assert_eq!(
             resolve_work_shell_trace_event_json(
