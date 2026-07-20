@@ -381,6 +381,13 @@ type WorkShellPromptTurnExecutionResult = {
   readonly replyPersisted: boolean;
 };
 
+function resolveApiBlockedAuthMessage(authLabel: string): string | undefined {
+  if (!authLabel.endsWith("-api-blocked")) {
+    return undefined;
+  }
+  return "OpenAI auth is not ready for model reasoning or tool calls. Use /auth key, then resend the request.";
+}
+
 export async function executeWorkShellPromptTurn<
   Attachment,
   Reasoning extends WorkShellReasoningConfig,
@@ -439,6 +446,13 @@ export async function executeWorkShellPromptTurn<
   recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string; contextReceiptId?: string; packetId?: string }) => void) | undefined;
 } & WorkShellMemoryLineageRuntime): Promise<WorkShellPromptTurnExecutionResult> {
   input.appendEntries({ role: "user", text: input.promptTurn.transcriptText });
+  const authGuard = resolveApiBlockedAuthMessage(input.state.authLabel);
+  if (authGuard) {
+    input.appendEntries({ role: "assistant", text: authGuard });
+    input.setState({ lastTurnDurationMs: 0 });
+    await input.persistSessionSnapshot("idle", input.promptTurn.sessionSummary).catch(() => undefined);
+    return { completed: false, replyPersisted: false };
+  }
   const turnStartedAt = Date.now();
   input.setState(createPromptTurnStartPatch({
     state: input.state,
