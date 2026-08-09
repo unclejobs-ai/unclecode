@@ -75,19 +75,35 @@ const TRUECOLOR_FOREGROUND_PATTERN = /\x1b\[38;2;(\d+);(\d+);(\d+)m/g;
 
 export { TRUECOLOR_FOREGROUND_PATTERN };
 
+const ANSI_NAMED_FOREGROUND_PATTERN = /\x1b\[(3[0-7]|9[0-7])m/g;
+
+export { ANSI_NAMED_FOREGROUND_PATTERN };
+
+/**
+ * The work shell paints with ANSI colour names so it inherits the user's
+ * terminal theme. Two things must hold on a live pane:
+ *
+ *  1. no truecolor foreground survives — a hardcoded pigment ignores the
+ *     user's theme and can land unreadable on their background;
+ *  2. an explicit foreground is still set — inheriting the terminal default
+ *     is what made typed input vanish on some themes.
+ *
+ * Contrast itself is no longer ours to assert: the terminal theme owns what
+ * "cyan" looks like. That is checked structurally in
+ * tests/contracts/work-shell-dark-palette-contrast.contract.test.mjs.
+ */
 export function assertReadableForegroundEscapes(ansiText, message, options = {}) {
-  const foregroundColors = [...ansiText.matchAll(TRUECOLOR_FOREGROUND_PATTERN)].map((match) => ({
-    red: Number.parseInt(match[1], 10),
-    green: Number.parseInt(match[2], 10),
-    blue: Number.parseInt(match[3], 10),
-  }));
+  const truecolor = [...ansiText.matchAll(TRUECOLOR_FOREGROUND_PATTERN)]
+    .map((match) => `${match[1]};${match[2]};${match[3]}`);
+  assert.deepEqual(
+    [...new Set(truecolor)],
+    [],
+    `${message} — found hardcoded truecolor foregrounds instead of ANSI colour names`,
+  );
   if (options.requireNonEmpty) {
-    assert.ok(foregroundColors.length > 0, "expected explicit truecolor foregrounds");
+    const named = [...ansiText.matchAll(ANSI_NAMED_FOREGROUND_PATTERN)];
+    assert.ok(named.length > 0, `${message} — expected explicit ANSI foregrounds`);
   }
-  const lowContrastColors = foregroundColors
-    .filter((color) => contrastRatio(color, { red: 255, green: 255, blue: 255 }) < 7)
-    .map((color) => `${color.red};${color.green};${color.blue}`);
-  assert.deepEqual([...new Set(lowContrastColors)], [], message);
 }
 
 export function contrastRatio(left, right) {

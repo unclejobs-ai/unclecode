@@ -56,7 +56,7 @@ function renderDebugFrame(element) {
 }
 
 test("WORK_SHELL_SPINNER_INTERVAL_MS matches DESIGN.md Motion timing", () => {
-  assert.equal(WORK_SHELL_SPINNER_INTERVAL_MS, 80);
+  assert.equal(WORK_SHELL_SPINNER_INTERVAL_MS, 100);
 });
 
 test("resolveWorkShellComposerHint prioritizes busy queue guidance over slash hints", () => {
@@ -185,7 +185,8 @@ test("prompt deck footer keeps context cost readable on dark terminals", async (
     await new Promise((resolve) => setTimeout(resolve, 100));
     const output = getOutput();
     assert.match(output, /▤ 44 ctx · ~2k/);
-    assert.equal(resolveReadableWorkShellTextColor("#21262d"), "#7f849c");
+    // Dark terminal: the old invisible border hex resolves to the muted tier.
+    assert.equal(resolveReadableWorkShellTextColor("#21262d"), "gray");
   } finally {
     instance.unmount();
     instance.cleanup();

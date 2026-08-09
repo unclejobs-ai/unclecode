@@ -8,7 +8,7 @@ import {
   buildEmbeddedWorkSessionUpdate,
   parseSelectedSessionIdFromArgs,
 } from "@unclecode/contracts";
-import { C } from "../../packages/tui/src/dashboard-primitives.tsx";
+import { DASHBOARD_PALETTES } from "../../packages/tui/src/dashboard-primitives.tsx";
 import {
   DASHBOARD_ACTIONS,
   createEmbeddedWorkPaneController,
@@ -66,51 +66,69 @@ test("DASHBOARD_ACTIONS includes all required CLI commands", () => {
   assert.ok(commands.includes("unclecode --help"), "help present");
 });
 
-test("dashboard palette uses readable cool context-cockpit chrome instead of orange", () => {
-  const paletteValues = [
-    C.accent,
-    C.accentBright,
-    C.accentDim,
-    C.headerBg,
-    C.headerFg,
-  ].join(" ");
+// The dashboard paints with ANSI colour names, like the work shell, so it
+// inherits the user's terminal theme. It used to hardcode a light palette
+// (bg #ffffff, text #0f172a), which rendered near-black text on dark
+// terminals. WCAG ratios are no longer ours to assert — the terminal theme
+// decides what "cyan" is — so the contract now covers palette structure.
 
-  assert.doesNotMatch(paletteValues, /#fb923c|#fdba74|#fed7aa/i);
-  assert.match(paletteValues, /#115e59|#075985|#bae6fd/i);
+const ANSI_COLOR_NAMES = new Set([
+  "black",
+  "red",
+  "green",
+  "yellow",
+  "blue",
+  "magenta",
+  "cyan",
+  "white",
+  "gray",
+  "grey",
+  "blackBright",
+  "redBright",
+  "greenBright",
+  "yellowBright",
+  "blueBright",
+  "magentaBright",
+  "cyanBright",
+  "whiteBright",
+]);
+
+test("dashboard palette names ANSI colours instead of hex", () => {
+  for (const [name, palette] of Object.entries(DASHBOARD_PALETTES)) {
+    for (const [slot, value] of Object.entries(palette)) {
+      assert.ok(
+        !value.startsWith("#"),
+        `${name}.${slot} is the hex literal ${value}; use an ANSI colour name`,
+      );
+      assert.ok(
+        ANSI_COLOR_NAMES.has(value),
+        `${name}.${slot} = ${value} is not an ANSI colour name Ink understands`,
+      );
+    }
+  }
 });
 
-test("dashboard palette foregrounds stay readable on a light terminal", () => {
-  const lightTerminalForegrounds = [
-    C.border,
-    C.borderActive,
-    C.borderSubtle,
-    C.text,
-    C.textSecondary,
-    C.textMuted,
-    C.textFaint,
-    C.accent,
-    C.accentBright,
-    C.accentDim,
-    C.warning,
-    C.error,
-    C.info,
-    C.success,
-  ];
-
-  for (const color of lightTerminalForegrounds) {
-    assert.ok(
-      contrastRatio(color, "#ffffff") >= 7,
-      `${color} should be strongly readable on a white terminal background`,
-    );
+test("dashboard chrome avoids the orange cockpit accent", () => {
+  for (const [name, palette] of Object.entries(DASHBOARD_PALETTES)) {
+    for (const slot of ["accent", "accentBright", "accentDim", "headerBg"]) {
+      assert.notEqual(palette[slot], "yellow", `${name}.${slot}`);
+      assert.notEqual(palette[slot], "redBright", `${name}.${slot}`);
+    }
   }
+});
 
-  assert.ok(contrastRatio(C.headerFg, C.headerBg) >= 4.5);
-  assert.ok(contrastRatio(C.pillFg, C.pillBg) >= 4.5);
-  assert.ok(contrastRatio(C.pillFg, "#ffffff") >= 7);
-  assert.ok(contrastRatio(C.headerFg, "#ffffff") >= 7);
-  assert.ok(contrastRatio(C.success, C.statusBg) >= 4.5);
-  assert.ok(contrastRatio(C.textMuted, C.tagBg) >= 4.5);
-  assert.ok(contrastRatio(C.accent, C.statusBg) >= 4.5);
+test("dashboard inverse pills keep their foreground off their own background", () => {
+  for (const [name, palette] of Object.entries(DASHBOARD_PALETTES)) {
+    assert.notEqual(palette.headerFg, palette.headerBg, `${name} header pill`);
+    assert.notEqual(palette.pillFg, palette.pillBg, `${name} key pill`);
+  }
+});
+
+test("dashboard text tiers stay distinguishable from chrome", () => {
+  for (const [name, palette] of Object.entries(DASHBOARD_PALETTES)) {
+    assert.notEqual(palette.text, palette.bg, `${name} body text on ground`);
+    assert.notEqual(palette.text, palette.textFaint, `${name} text tiers`);
+  }
 });
 
 test("shouldRenderEmbeddedWorkPaneFullscreen gives the work pane the full screen when embedded", () => {
@@ -252,7 +270,7 @@ test("TUI render entrypoints share one Dashboard element builder", () => {
   );
   assert.match(
     tuiEntrySource,
-    /renderEmbeddedWorkShellPaneDashboard\([\s\S]*render\(\s*createDashboardElement\(props\)\s*\)/,
+    /renderEmbeddedWorkShellPaneDashboard\([\s\S]*render\(\s*createDashboardElement\(props\)\s*,/,
   );
   assert.match(
     tuiEntrySource,

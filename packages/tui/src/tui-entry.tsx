@@ -8,10 +8,13 @@ import {
   createManagedWorkShellDashboardProps,
   type ManagedWorkShellDashboardInput,
 } from "./dashboard-render.js";
+import { enterAlternateScreen } from "./alt-screen.js";
 import type { WorkShellImageAttachment } from "./work-shell-attachments.js";
 import type { TuiShellHomeState } from "./shell-state.js";
+import { probeTerminalBackground } from "./terminal-theme.js";
 
 let rendererFallbackWarned = false;
+const DASHBOARD_RENDER_OPTIONS = { incrementalRendering: true } as const;
 
 function warnIfRequestedRendererFallsBack(): void {
   const plan = resolveTuiRendererPlan();
@@ -65,8 +68,19 @@ export async function renderEmbeddedWorkShellPaneDashboard(
   props: TuiRenderOptions<TuiShellHomeState>,
 ): Promise<void> {
   warnIfRequestedRendererFallsBack();
-  const instance = render(createDashboardElement(props));
-  await instance.waitUntilExit();
+  // Ask the terminal for its background before Ink claims stdin. The palette's
+  // primary text tier depends on the answer, and COLORFGBG is unset on most
+  // modern terminals.
+  await probeTerminalBackground();
+  // Probe first, then take the screen: the OSC 11 reply would otherwise be
+  // written into a buffer we are about to swap away.
+  const altScreen = enterAlternateScreen();
+  try {
+    const instance = render(createDashboardElement(props), DASHBOARD_RENDER_OPTIONS);
+    await instance.waitUntilExit();
+  } finally {
+    altScreen.restore();
+  }
 }
 
 export async function renderManagedWorkShellDashboard<
@@ -85,6 +99,12 @@ export async function renderTui(
   options?: TuiRenderOptions<TuiShellHomeState>,
 ): Promise<void> {
   warnIfRequestedRendererFallsBack();
-  const instance = render(createDashboardElement(options ?? {}));
-  await instance.waitUntilExit();
+  await probeTerminalBackground();
+  const altScreen = enterAlternateScreen();
+  try {
+    const instance = render(createDashboardElement(options ?? {}), DASHBOARD_RENDER_OPTIONS);
+    await instance.waitUntilExit();
+  } finally {
+    altScreen.restore();
+  }
 }

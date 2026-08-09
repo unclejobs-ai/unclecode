@@ -1,6 +1,15 @@
 import { Box, Text } from "ink";
 import React from "react";
 
+import {
+  buildDiffRows,
+  formatDiffRow,
+  formatDiffSummary,
+  parseUnifiedDiff,
+  resolveDiffGutterWidth,
+  summarizeDiff,
+} from "./diff-render.js";
+import { renderMermaidBlock } from "./mermaid-render.js";
 import { getDisplayWidth, wrapDisplayTextFast } from "./text-width.js";
 
 /**
@@ -17,6 +26,8 @@ import { getDisplayWidth, wrapDisplayTextFast } from "./text-width.js";
  */
 
 export type MarkdownTheme = {
+  readonly diffAdded?: string;
+  readonly diffRemoved?: string;
   readonly heading: string;
   readonly headingL2: string;
   readonly headingL3: string;
@@ -120,9 +131,9 @@ type LineKind =
 
 function classifyLine(line: string, inFence: boolean): { readonly line: LineKind; readonly fenceState: boolean } {
   const trimmed = line.trim();
-  if (trimmed === "") return { line: { kind: "blank" }, fenceState: inFence };
 
-  // Code fence
+  // Code fence. Checked before anything else so a closing fence is still
+  // recognised while inside a block.
   const fenceMatch = /^(`{3,}|~{3,})(\s*\w+)?/.exec(trimmed);
   if (fenceMatch) {
     if (inFence) {
@@ -131,9 +142,16 @@ function classifyLine(line: string, inFence: boolean): { readonly line: LineKind
     const lang = fenceMatch[2]?.trim() ?? "";
     return { line: { kind: "code-fence", lang }, fenceState: true };
   }
+
+  // Inside a fence every line is code — including empty ones. The blank check
+  // used to run first, so blank lines were pulled out of code blocks entirely:
+  // paragraph breaks inside a snippet vanished, and in a diff the missing
+  // context line shifted every following line number, making the gutter lie.
   if (inFence) {
     return { line: { kind: "code-line", text: line }, fenceState: true };
   }
+
+  if (trimmed === "") return { line: { kind: "blank" }, fenceState: false };
 
   // Heading
   const headingMatch = /^(#{1,6})\s+(.+)$/.exec(trimmed);
@@ -310,6 +328,36 @@ function renderTable(
   );
 }
 
+// Box-drawing, block, and arrow glyphs — the diagram's structure as opposed to
+// its labels. Drawn in the border tone so node text stays the loudest thing.
+const DIAGRAM_GLYPH_RE = /[─-╿▀-▟▲▶▼◀]/;
+
+/**
+ * Paint a diagram line so structure recedes and labels read first: border
+ * glyphs take the muted border tone, everything else the normal text tone.
+ */
+function renderDiagramLine(line: string, theme: MarkdownTheme, key: string): React.ReactNode {
+  const runs: { readonly text: string; readonly isGlyph: boolean }[] = [];
+  for (const char of line) {
+    const isGlyph = DIAGRAM_GLYPH_RE.test(char);
+    const last = runs[runs.length - 1];
+    if (last && last.isGlyph === isGlyph) {
+      runs[runs.length - 1] = { text: last.text + char, isGlyph };
+      continue;
+    }
+    runs.push({ text: char, isGlyph });
+  }
+  return (
+    <Text key={key}>
+      {runs.map((run, i) => (
+        <Text key={`${key}-r${i}`} color={run.isGlyph ? theme.tableBorder : theme.text}>
+          {run.text}
+        </Text>
+      ))}
+    </Text>
+  );
+}
+
 export function renderMarkdown(
   input: { readonly text: string; readonly width: number; readonly theme: MarkdownTheme },
 ): React.ReactNode {
@@ -323,6 +371,58 @@ export function renderMarkdown(
 
   const flushCode = (keyPrefix: string) => {
     if (codeLines.length === 0) return;
+
+    // A patch is a change, not source. Give it a line-number gutter and a
+    // marker column so changed lines are findable without reading them.
+    if (currentLang.toLowerCase() === "diff" || currentLang.toLowerCase() === "patch") {
+      const hunks = parseUnifiedDiff(codeLines.join("\n"));
+      if (hunks) {
+        const rows = buildDiffRows(hunks);
+        const gutterWidth = resolveDiffGutterWidth(rows);
+        const summary = formatDiffSummary(summarizeDiff(hunks));
+        nodes.push(
+          <Box key={`diff-${keyPrefix}`} flexDirection="column">
+            <Text color={theme.textMuted}>{`⎿ ${summary}`}</Text>
+            {rows.map((row, i) => (
+              <Text
+                key={`diff-${keyPrefix}-${i}`}
+                color={
+                  row.kind === "added"
+                    ? (theme.diffAdded ?? theme.text)
+                    : row.kind === "removed"
+                      ? (theme.diffRemoved ?? theme.textMuted)
+                      : theme.textMuted
+                }
+              >
+                {formatDiffRow(row, { gutterWidth, width })}
+              </Text>
+            ))}
+          </Box>,
+        );
+        codeLines = [];
+        currentLang = "";
+        return;
+      }
+    }
+
+    // A mermaid fence is a picture, not source. Draw it when we can parse it;
+    // unsupported diagram types fall through to normal code-block rendering.
+    if (currentLang.toLowerCase() === "mermaid") {
+      const diagram = renderMermaidBlock(codeLines.join("\n"), width);
+      if (diagram) {
+        nodes.push(
+          <Box key={`mermaid-${keyPrefix}`} flexDirection="column" marginTop={0} marginBottom={0}>
+            {diagram.map((line, i) =>
+              renderDiagramLine(line, theme, `mermaid-${keyPrefix}-${i}`),
+            )}
+          </Box>,
+        );
+        codeLines = [];
+        currentLang = "";
+        return;
+      }
+    }
+
     nodes.push(
       <Box key={`code-${keyPrefix}`} flexDirection="column" marginTop={0} marginBottom={0}>
         {currentLang.length > 0 ? (

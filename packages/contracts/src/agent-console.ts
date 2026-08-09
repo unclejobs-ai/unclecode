@@ -130,6 +130,13 @@ export type ToolActivityKind = (typeof TOOL_ACTIVITY_KINDS)[number];
 export const TOOL_ACTIVITY_STATUSES = ["running", "completed", "failed", "cancelled"] as const;
 export type ToolActivityStatus = (typeof TOOL_ACTIVITY_STATUSES)[number];
 
+/**
+ * Largest preview a snapshot will carry. Raw tool output is still excluded —
+ * this is a bounded excerpt so a console snapshot cannot grow with the size of
+ * a file a tool happened to print.
+ */
+export const MAX_TOOL_ACTIVITY_PREVIEW_CHARS = 4_000;
+
 /** Deliberately excludes raw tool output so console snapshots are resume-safe. */
 export type ToolActivity = {
   readonly id: string;
@@ -140,9 +147,25 @@ export type ToolActivity = {
   readonly status: ToolActivityStatus;
   readonly target?: string;
   readonly summary?: string;
+  /**
+   * Bounded excerpt of what the tool changed — a unified diff for write and
+   * patch tools. Present so the console can show the change itself rather than
+   * only "completed · 12ms"; capped at MAX_TOOL_ACTIVITY_PREVIEW_CHARS so the
+   * snapshot stays resume-safe.
+   */
+  readonly preview?: string;
   readonly startedAt: number;
   readonly completedAt?: number;
 };
+
+/** Clamp a preview to the snapshot budget, marking it when truncated. */
+export function boundToolActivityPreview(preview: string): string {
+  const normalized = preview.replace(/\s+$/, "");
+  if (normalized.length <= MAX_TOOL_ACTIVITY_PREVIEW_CHARS) {
+    return normalized;
+  }
+  return `${normalized.slice(0, MAX_TOOL_ACTIVITY_PREVIEW_CHARS)}\n… preview truncated`;
+}
 
 export type AgentConsoleSnapshot = {
   readonly profileId: ContextProfileId;
@@ -194,6 +217,9 @@ export function createAgentConsoleSnapshot(input: AgentConsoleSnapshot): AgentCo
       status: activity.status,
       ...(activity.target === undefined ? {} : { target: activity.target }),
       ...(activity.summary === undefined ? {} : { summary: activity.summary }),
+      ...(activity.preview === undefined
+        ? {}
+        : { preview: boundToolActivityPreview(activity.preview) }),
       startedAt: activity.startedAt,
       ...(activity.completedAt === undefined ? {} : { completedAt: activity.completedAt }),
     })),
@@ -486,6 +512,7 @@ function parseToolActivity(value: unknown): ToolActivity | undefined {
     || !isNonNegativeInteger(record.startedAt)
     || (hasOwn(record, "target") && !isNonEmptyString(record.target))
     || (hasOwn(record, "summary") && !isNonEmptyString(record.summary))
+    || (hasOwn(record, "preview") && !isNonEmptyString(record.preview))
     || (hasOwn(record, "completedAt") && !isNonNegativeInteger(record.completedAt))
   ) {
     return undefined;
@@ -500,6 +527,11 @@ function parseToolActivity(value: unknown): ToolActivity | undefined {
     status: record.status as ToolActivityStatus,
     ...(typeof record.target === "string" ? { target: record.target } : {}),
     ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
+    // Re-bound on the way in: a persisted snapshot could have been written by
+    // a build with a larger budget, or edited by hand.
+    ...(typeof record.preview === "string"
+      ? { preview: boundToolActivityPreview(record.preview) }
+      : {}),
     startedAt: record.startedAt,
     ...(typeof record.completedAt === "number" ? { completedAt: record.completedAt } : {}),
   };

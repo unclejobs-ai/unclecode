@@ -7,6 +7,7 @@ import type {
   ContextPacketView,
   ContextPacketViewActionReceipt,
   ContextPolicySuggestion,
+  ToolActivityKind,
   WorkNodeStatus,
 } from "@unclecode/contracts";
 import {
@@ -15,7 +16,16 @@ import {
   sanitizeWorkShellAssistantText,
 } from "@unclecode/orchestrator";
 
-import { getDisplayWidth, truncateForDisplayWidth, wrapDisplayTextFast } from "./text-width.js";
+import {
+  buildDiffRows,
+  formatDiffRow,
+  formatDiffSummary,
+  parseUnifiedDiff,
+  resolveDiffGutterWidth,
+  summarizeDiff,
+} from "./diff-render.js";
+import { detectTerminalBackground } from "./terminal-theme.js";
+import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
 import { renderMarkdown, type MarkdownTheme } from "./markdown-render.js";
 import {
   classifyWorkShellPanelLineFast,
@@ -60,82 +70,93 @@ export type WorkShellEntryPresentation = {
   readonly bodyColor: string;
 };
 
-// Terminal background detection — falls back to dark (the modern default).
-// COLORFGBG "fg;bg" where bg >= 7 means a light background. An explicit env
-// override lets users/tests force a theme. Read at call time (not module load)
-// so tests that set the env before calling see the right palette.
-function detectTerminalBackground(): "light" | "dark" {
-  const override = process.env.UNCLECODE_TERMINAL_BACKGROUND;
-  if (override === "dark" || override === "light") return override;
-  const colorfgbg = process.env.COLORFGBG;
-  if (colorfgbg) {
-    const parts = colorfgbg.split(";");
-    const bg = parts.length >= 2 ? Number.parseInt(parts[1] ?? "", 10) : NaN;
-    if (!Number.isNaN(bg)) return bg >= 7 ? "light" : "dark";
-  }
-  return "dark";
-}
 
-// Light-background palette (white/light terminals).
+/**
+ * Palette — ANSI colour names, not hex.
+ *
+ * The terminal owns the background and the sixteen base colours; a hardcoded
+ * hex palette fights whatever theme the user actually runs. Naming the slot
+ * ("cyan") instead of the pigment ("#94e2d5") makes UncleCode render in Tokyo
+ * Night on a Tokyo Night terminal and in Gruvbox on a Gruvbox one, and it
+ * degrades cleanly to sixteen colours and to none at all — chalk (under Ink)
+ * strips styling when NO_COLOR is set, and every status here is also carried
+ * by a distinct glyph (● ◐ ✕ ○ ▲), so nothing is encoded in colour alone.
+ *
+ * The previous palette mixed three systems at once — GitHub Dark neutrals,
+ * Catppuccin Mocha pastels, Tokyo Night greens — which put two grey
+ * temperatures and seven accent hues on one screen.
+ *
+ * Structure: three text tiers, one line tone, two accents, three status
+ * colours. The border* slots resolve to a single tone on purpose; chrome has
+ * one line weight, and depth comes from spacing rather than line contrast.
+ */
+
+// Light-background palette. Light themes darken the non-bright ANSI colours,
+// so the same slot names stay legible without a second set of pigments.
 const W_LIGHT = {
-  text: "#0d1117",
-  textMuted: "#475569",
-  textDim: "#334155",
-  border: "#30363d",
-  borderStrong: "#1e293b",
-  borderSoft: "#475569",
-  borderDefault: "#475569",
-  borderAccent: "#0750a4",
-  user: "#0750a4",
-  userBody: "#0d1117",
-  userBadgeText: "#0d1117",
-  userBadgeBg: "#ddf4ff",
-  assistant: "#0d1117",
-  assistantBody: "#0d1117",
-  assistantBadgeText: "#0d1117",
-  assistantBadgeBg: "#dafbe1",
-  assistantMuted: "#475569",
-  tool: "#116329",
-  toolSurface: "#ddf4ff",
-  toolAccent: "#116329",
-  toolMuted: "#475569",
-  warning: "#7a4b00",
-  success: "#116329",
-  error: "#a40e26",
-  spinner: "#873800",
+  text: "black",
+  textMuted: "gray",
+  textDim: "gray",
+  border: "gray",
+  borderStrong: "gray",
+  borderSoft: "gray",
+  borderDefault: "gray",
+  borderAccent: "blue",
+  user: "blue",
+  userBody: "black",
+  userBadgeText: "blue",
+  userBadgeBg: "white",
+  assistant: "cyan",
+  assistantBody: "black",
+  assistantBadgeText: "black",
+  assistantBadgeBg: "white",
+  assistantMuted: "gray",
+  tool: "cyan",
+  toolSurface: "white",
+  toolAccent: "cyan",
+  toolMuted: "gray",
+  warning: "yellow",
+  success: "green",
+  error: "red",
+  spinner: "cyan",
 } as const;
 
-// Dark-background palette (black/dark terminals). Tuned for OLED/true-black
-// backgrounds — high-contrast near-white text, vivid-but-not-neon accents.
-// Role hues stay consistent with light (blue=user, teal=assistant, green=tool)
-// but shifted brighter so every element is legible on #000.
+// Dark-background palette. Same slot names; the bright variants carry primary
+// text so it separates from the muted tier on a dark ground.
 const W_DARK = {
-  text: "#e6edf3",
-  textMuted: "#a6adc8",
-  textDim: "#7f849c",
-  border: "#30363d",
-  borderStrong: "#6c7086",
-  borderSoft: "#21262d",
-  borderDefault: "#45475a",
-  borderAccent: "#92abdf",
-  user: "#92abdf",
-  userBody: "#e6edf3",
-  userBadgeText: "#92abdf",
-  userBadgeBg: "#161b22",
-  assistant: "#94e2d5",
-  assistantBody: "#e6edf3",
-  assistantBadgeText: "#e6edf3",
-  assistantBadgeBg: "#161b22",
-  assistantMuted: "#a6adc8",
-  tool: "#9ece6a",
-  toolSurface: "#161b22",
-  toolAccent: "#73daca",
-  toolMuted: "#a6adc8",
-  warning: "#f9e2af",
-  success: "#a6e3a1",
-  error: "#f38ba8",
-  spinner: "#fab387",
+  text: "whiteBright",
+  textMuted: "white",
+  textDim: "gray",
+  border: "gray",
+  borderStrong: "gray",
+  borderSoft: "gray",
+  borderDefault: "gray",
+  borderAccent: "cyan",
+  user: "blue",
+  userBody: "whiteBright",
+  userBadgeText: "blue",
+  userBadgeBg: "black",
+  assistant: "cyan",
+  assistantBody: "whiteBright",
+  assistantBadgeText: "whiteBright",
+  assistantBadgeBg: "black",
+  assistantMuted: "white",
+  tool: "cyan",
+  toolSurface: "black",
+  toolAccent: "cyan",
+  toolMuted: "white",
+  warning: "yellow",
+  success: "green",
+  error: "red",
+  spinner: "cyan",
 } as const;
+
+/**
+ * Test seam. The contrast contract used to re-declare the dark palette's hex
+ * literals inside the test file, so the two could drift and the test would
+ * still pass while asserting colours the app no longer used.
+ */
+export const WORK_SHELL_PALETTES = { light: W_LIGHT, dark: W_DARK } as const;
 
 // Active palette — resolved at call time so tests/env overrides take effect
 // without a module reload. Every consumer reads from W (the Proxy), not the
@@ -161,7 +182,12 @@ function resolveMarkdownTheme(): MarkdownTheme {
     bullet: W.assistant,
     quote: W.textMuted,
     tableHeader: W.assistant,
-    tableBorder: W.borderSoft,
+    diffAdded: W.success,
+    diffRemoved: W.error,
+    // borderSoft (#21262d on dark) sits near 1:1 against the terminal ground,
+    // which erased table rules and diagram strokes entirely. borderStrong is
+    // the quietest tone that still resolves as a line.
+    tableBorder: W.borderStrong,
     link: W.user,
     text: W.text,
     textMuted: W.textMuted,
@@ -181,17 +207,8 @@ function renderChromeRule(input: {
   return <Text {...readableTextColorProps(color)}>{"─".repeat(width)}</Text>;
 }
 
-const WORK_SHELL_LEGACY_LIGHT_TEXT_COLORS = new Set([
-  "#e2e8f0",
-  "#e5eef7",
-  "#e6edf3",
-  "#f4f1ea",
-  "#f8fafc",
-  "#a6adc8",
-  "#0d1117",
-  "#475569",
-]);
-
+// Hex values the old palette used for de-emphasised text. They are the only
+// hexes that must land on the muted tier rather than primary text.
 const WORK_SHELL_LOW_CONTRAST_TEXT_COLORS = new Set([
   "#0d9488",
   "#94a3b8",
@@ -210,32 +227,27 @@ export function getWorkShellComposerTextColor(): string {
   return resolveReadableWorkShellTextColor(W.text) ?? W.text;
 }
 
-// Light-palette text colors from the Rust entry-presentation that are too
-// dark to read on a dark terminal. Any of these resolves to W.text (the
-// high-contrast palette foreground) so body text is always readable.
-const WORK_SHELL_RUST_LIGHT_BODY_COLORS = new Set([
-  "#334155",
-  "#475569",
-  "#1e293b",
-  "#0f172a",
-  "#0d1117",
-]);
-
+/**
+ * Bridge from hex to the ANSI palette.
+ *
+ * The Rust entry-presentation still hands back light-theme hex values, and any
+ * raw hex on screen defeats the point of naming colours — it would ignore the
+ * user's terminal theme and could land unreadable on their background. So no
+ * hex reaches the renderer: known-dim values become the muted tier and every
+ * other hex becomes primary text. ANSI names pass through untouched.
+ */
 export function resolveReadableWorkShellTextColor(color: string | undefined): string | undefined {
   if (!color) {
     return undefined;
   }
   const normalized = color.toLowerCase();
-  if (
-    WORK_SHELL_LEGACY_LIGHT_TEXT_COLORS.has(normalized) ||
-    WORK_SHELL_RUST_LIGHT_BODY_COLORS.has(normalized)
-  ) {
-    return W.text;
+  if (!normalized.startsWith("#")) {
+    return color;
   }
   if (WORK_SHELL_LOW_CONTRAST_TEXT_COLORS.has(normalized)) {
     return W.textDim;
   }
-  return color;
+  return W.text;
 }
 
 function readableTextColorProps(color: string | undefined): { readonly color?: string } {
@@ -484,15 +496,16 @@ export function resolveWorkShellComposerHint(input: {
 // Classic braille spinner — smooth rotation that reads as "loading".
 // The old single-dot frames (⠁⠂⠄⠠⠐⠈) were too subtle and looked broken.
 const WORK_SHELL_BUSY_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
-export const WORK_SHELL_SPINNER_INTERVAL_MS = 80;
+export const WORK_SHELL_SPINNER_INTERVAL_MS = 100;
 
 function pickBusySpinnerFrame(frame = 0): string {
   const count = WORK_SHELL_BUSY_SPINNER_FRAMES.length;
   return WORK_SHELL_BUSY_SPINNER_FRAMES[((frame % count) + count) % count] ?? WORK_SHELL_BUSY_SPINNER_FRAMES[0];
 }
 const STREAMING_CURSOR = "▌";
+/** Marks the user's turn, matching the composer's own prompt glyph. */
+const WORK_SHELL_PROMPT_GLYPH = "›";
 const BODY_CONTINUATION_INDENT = "   ";
-const WORK_SHELL_STATUS_GROUP_SEPARATOR = " │ ";
 const RUST_TEXT_CACHE_MAX_ENTRIES = 512;
 const rustBusyStatusCache = new Map<string, string>();
 const rustMarkdownDisplayCache = new Map<string, string>();
@@ -1082,8 +1095,15 @@ function looksLikeHiddenWorkerMeta(text: string): boolean {
 }
 
 export function shouldShowWorkShellConversationEntry(entry: WorkShellEntry): boolean {
-  if (entry.role === "tool" || isInternalTraceConversationText(entry.text)) {
+  if (isInternalTraceConversationText(entry.text)) {
     return false;
+  }
+  // Tool calls belong in the transcript, in the order they happened. They used
+  // to be dropped here and surfaced only in a hoisted panel above the
+  // conversation, which showed the last four calls detached from the reasoning
+  // that caused them — so the work never read as one downward flow.
+  if (entry.role === "tool") {
+    return entry.text.trim().length > 0;
   }
   if (entry.role === "system" && (isInternalSystemTraceText(entry.text) || looksLikeHiddenWorkerMeta(entry.text))) {
     return false;
@@ -1129,12 +1149,23 @@ export function resolveWorkShellBusyActivityColor(input: {
   return W.assistant;
 }
 
+/**
+ * Usable width of one chrome row. The work-shell frame is wrapped in
+ * `paddingX={2}`, so a row has four fewer columns than the terminal — not two.
+ * Header, rule, and the string formatter all derive from this one rule; when
+ * they drifted apart the header hint overflowed by exactly the two columns the
+ * padding claimed, wrapping "/ commands" onto a second line.
+ */
+export function resolveWorkShellChromeWidth(terminalColumns?: number): number {
+  return Math.max(32, (terminalColumns ?? process.stdout.columns ?? 96) - 4);
+}
+
 export function formatWorkShellHeaderLine(input: {
   readonly providerTitle: string;
   readonly headerHint: string;
   readonly terminalColumns?: number;
 }): string {
-  const width = Math.max(32, (input.terminalColumns ?? process.stdout.columns ?? 96) - 2);
+  const width = resolveWorkShellChromeWidth(input.terminalColumns);
   const leftWidth = getDisplayWidth(input.providerTitle);
   const rightWidth = getDisplayWidth(input.headerHint);
   const minGap = 2;
@@ -1157,6 +1188,44 @@ export function formatWorkShellHeaderLine(input: {
   return padDisplayLine(truncateForDisplayWidth(input.providerTitle, width), width);
 }
 
+/**
+ * Split a tool entry into its call line and its result lines.
+ *
+ * Producers put the invocation on the first line and the observation after it
+ * (`packages/orchestrator/src/mini-loop-agent.ts` pushes
+ * `observation.stdout || observation.stderr`). Rendering the whole blob as one
+ * muted block made the call and its output indistinguishable; separating them
+ * lets the call carry weight and the result recede.
+ *
+ * Result lines are capped: a tool that prints a thousand lines would otherwise
+ * push the conversation off screen.
+ */
+export function splitWorkShellToolEntry(
+  text: string,
+  width: number,
+  maxResultLines = 8,
+): { readonly call: string; readonly resultLines: readonly string[] } {
+  const normalized = text.trimEnd();
+  if (!normalized) {
+    return { call: "", resultLines: [] };
+  }
+  const [first = "", ...rest] = normalized.split("\n");
+  const call = truncateForDisplayWidth(first.trim(), Math.max(20, width - 4));
+  const body = rest.join("\n").trim();
+  if (!body) {
+    return { call, resultLines: [] };
+  }
+  const wrapped = formatWorkShellToolEntryLines(body, width - 4);
+  if (wrapped.length <= maxResultLines) {
+    return { call, resultLines: wrapped };
+  }
+  const shown = wrapped.slice(0, maxResultLines);
+  return {
+    call,
+    resultLines: [...shown, `… +${wrapped.length - shown.length} more lines`],
+  };
+}
+
 export function formatWorkShellToolEntryLines(text: string, width: number): readonly string[] {
   const normalized = text.trimEnd();
   if (!normalized) {
@@ -1174,6 +1243,8 @@ export function formatWorkShellFooterLine(input: {
   readonly contextIndicator?: string;
   readonly composerHint?: string;
   readonly width?: number;
+  readonly branch?: string;
+  readonly modelWindow?: number;
 }): string {
   return formatWorkShellFooterLineFast({
     ...input,
@@ -1237,56 +1308,16 @@ function resolveWorkShellComposerDockLayout(input: {
   };
 }
 
-// Estimate how many terminal lines a markdown text will occupy after
-// rendering. This is used to size the assistant rail (┃) so it spans
-// the full height of the reply. The estimate accounts for:
-// - explicit newlines (paragraph/heading/list breaks)
-// - wrapping within the content width
-// - extra lines from tables (border rows), code blocks, blockquotes
-// It's intentionally conservative — overestimating by 1-2 lines is fine
-// (the rail just extends slightly past the content), underestimating is
-// worse (rail stops short).
-function estimateMarkdownHeight(text: string, width: number): number {
-  const rawLines = text.split("\n");
-  let total = 0;
-  let inCodeBlock = false;
-  // Count table rows — each may wrap to multiple visual lines depending
-  // on column width constraints we can't predict without parsing.
-  let tableRowCount = 0;
-  for (const line of rawLines) {
-    if (line.startsWith("```")) {
-      inCodeBlock = !inCodeBlock;
-      total += 1;
-      continue;
-    }
-    if (inCodeBlock) {
-      total += 1;
-      continue;
-    }
-    const stripped = line.trim();
-    if (/^\|?[\s-:|]+\|[\s-:|]*$/.test(stripped) && stripped.includes("-")) {
-      continue;
-    }
-    if (stripped.startsWith("|") && stripped.endsWith("|")) {
-      // Table data/header row — count it, then estimate visual lines.
-      // Each cell may wrap. Be generous: assume 2 visual lines per row.
-      tableRowCount += 1;
-      total += 2;
-      continue;
-    }
-    if (stripped === "") {
-      total += 1;
-      continue;
-    }
-    const wrapped = wrapDisplayTextFast(stripped, Math.max(20, width));
-    total += Math.max(1, wrapped.length);
-  }
-  // Table borders: top + header-sep + bottom = 3 extra lines
-  if (tableRowCount > 0) {
-    total += 3;
-  }
-  return Math.max(1, total + 1);
+export function resolveWorkShellComposerAdditionalRows(input: {
+  readonly inputValue: string;
+  readonly terminalColumns?: number | undefined;
+}): number {
+  const dockWidth = getWorkShellDockWidth(input.terminalColumns);
+  const contentWidth = Math.max(20, dockWidth - 3);
+  const rows = wrapDisplayText(input.inputValue || " ", contentWidth).length;
+  return Math.max(0, rows - 1);
 }
+
 
 function renderWorkShellEntryBlock(input: {
   readonly entry: WorkShellEntry;
@@ -1304,7 +1335,11 @@ function renderWorkShellEntryBlock(input: {
   const mdTheme = resolveMarkdownTheme();
 
   if (input.entry.role === "user") {
-    const lines = wrapDisplayText(bodyText, Math.max(20, input.width - 4));
+    // The user's own turn is set in an inverted chip rather than prefixed with
+    // "◇ You ·". In a long transcript the eye needs to find where each turn
+    // began; a label competes with the words around it, a block of reversed
+    // ground does not. Continuation lines align under the chip's text.
+    const lines = wrapDisplayText(bodyText, Math.max(20, input.width - 6));
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
@@ -1313,8 +1348,14 @@ function renderWorkShellEntryBlock(input: {
       >
         {lines.map((line, lineIndex) => (
           <Text key={`user-${String(input.index)}-${String(lineIndex)}`}>
-            <Text color={W.user} bold>{lineIndex === 0 ? "│ " : "  "}</Text>
-            <WorkShellReadableText color={presentation.bodyColor}>{line}</WorkShellReadableText>
+            {lineIndex === 0
+              ? <Text color={W.user} bold inverse>{` ${WORK_SHELL_PROMPT_GLYPH} ${line} `}</Text>
+              : (
+                <>
+                  <Text>{BODY_CONTINUATION_INDENT}</Text>
+                  <WorkShellReadableText color={presentation.bodyColor}>{line}</WorkShellReadableText>
+                </>
+              )}
           </Text>
         ))}
       </Box>
@@ -1333,24 +1374,19 @@ function renderWorkShellEntryBlock(input: {
       : bodyText;
     const contentWidth = Math.max(20, input.width - 4);
     if (shouldUseCompactAssistantSurface({ text: input.entry.text, width: input.width })) {
-      // A thin colored left rail runs the full height of the reply so the
-      // assistant surface reads as one block, distinct from the user rail
-      // (│) and from plain system text. Content is indented to clear the rail.
-      // We estimate the rendered height so the rail spans every content line.
-      const estimatedHeight = estimateMarkdownHeight(renderText, contentWidth);
-      const railLines = Math.max(1, estimatedHeight);
+      // A single dot marks where the reply starts; the body is plain indented
+      // prose. The previous full-height ┃ rail had to predict the markdown's
+      // rendered height, and every miss showed — tables render one line per row
+      // but were estimated at two, so a long reply trailed dozens of empty rail
+      // rows below it. A one-line marker cannot be the wrong height.
       return (
         <Box
           key={`${input.entry.role}-${input.index}`}
           marginBottom={1}
-          flexDirection="row"
+          flexDirection="column"
         >
-          <Box flexDirection="column" marginRight={1}>
-            {Array.from({ length: railLines }, (_, i) => (
-              <Text key={`rail-${i}`} color={W.assistant} bold>{"┃"}</Text>
-            ))}
-          </Box>
-          <Box flexDirection="column" flexGrow={1}>
+          <Text color={W.assistant} bold>{presentation.badge} {presentation.label}</Text>
+          <Box flexDirection="column" paddingLeft={3}>
             {renderMarkdown({ text: renderText, width: contentWidth, theme: mdTheme })}
             {isStreamingEntry ? <Text color={W.assistant} bold>{STREAMING_CURSOR}</Text> : null}
           </Box>
@@ -1375,29 +1411,27 @@ function renderWorkShellEntryBlock(input: {
   }
 
   if (input.entry.role === "tool") {
-    const lines = formatWorkShellToolEntryLines(bodyText, input.width);
-    const toolHeight = Math.max(1, lines.length + 1);
+    // A tool call reads as one event in the transcript: a dot, the call, then
+    // its result hanging off a ⎿ underneath. The old form stacked a ▏ rail
+    // whose height was computed from the wrapped line count — the same
+    // predict-the-height trick that left dangling rails on assistant replies.
+    const { call, resultLines } = splitWorkShellToolEntry(bodyText, input.width);
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
         marginBottom={1}
-        flexDirection="row"
+        flexDirection="column"
       >
-        <Box flexDirection="column" marginRight={1}>
-          {Array.from({ length: toolHeight }, (_, i) => (
-            <Text key={`tool-rail-${i}`} color={W.toolAccent}>{"▏"}</Text>
-          ))}
-        </Box>
-        <Box flexDirection="column" flexGrow={1}>
-          <Text bold color={W.toolAccent}>{presentation.badge} {presentation.label}</Text>
-          <Box marginTop={lines.length > 0 ? 0 : 0} flexDirection="column">
-            {lines.map((line, lineIndex) => (
-              <Text key={`tool-${String(input.index)}-${String(lineIndex)}`} color={W.textMuted}>
-                {line}
-              </Text>
-            ))}
-          </Box>
-        </Box>
+        <Text>
+          <Text color={W.success} bold>{"● "}</Text>
+          <Text color={W.text} bold>{call}</Text>
+        </Text>
+        {resultLines.map((line, lineIndex) => (
+          <Text key={`tool-${String(input.index)}-${String(lineIndex)}`}>
+            <Text color={W.textDim}>{lineIndex === 0 ? "  ⎿ " : "    "}</Text>
+            <Text color={W.textMuted}>{line}</Text>
+          </Text>
+        ))}
       </Box>
     );
   }
@@ -1407,8 +1441,8 @@ function renderWorkShellEntryBlock(input: {
     // left-aligned meta line with a status glyph — distinct from the user (│)
     // and assistant (┃) rails by using no rail, only a glyph + dimmed text.
     const isInProgress = bodyText.endsWith("…") || bodyText.endsWith("...");
-    const statusIcon = isInProgress ? "◌" : "✓";
-    const statusColor = isInProgress ? W.warning : W.success;
+    ;
+    const statusColor = isInProgress ? W.warning : W.textDim;
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
@@ -1418,7 +1452,7 @@ function renderWorkShellEntryBlock(input: {
         flexDirection="column"
       >
         <Text>
-          <Text color={statusColor}>{`${statusIcon} `}</Text>
+          <Text color={statusColor}>{"· "}</Text>
           <Text color={W.textMuted} italic>{bodyText}</Text>
         </Text>
       </Box>
@@ -1437,26 +1471,61 @@ function renderWorkShellEntryBlock(input: {
   );
 }
 
-function renderWorkShellEmptyConversation(): React.ReactNode {
-  const actions = [
-    ["Start", "Type the task in plain language."],
-    ["Inspect", "Use /context before a risky edit."],
-    ["Recover", "Use Ctrl+O for saved sessions."],
-  ] as const;
+/**
+ * Two lines, not six. The Start/Inspect/Recover list restated what the hint
+ * and the composer's own key legend (`Enter send · / commands · Ctrl+V image`)
+ * already say, so an empty session opened onto a wall of onboarding.
+ */
+/**
+ * Openers for the empty screen, laid out in two columns.
+ *
+ * The trigger is its own bullet. omp's welcome panel lists `#`, `/`, `!`, `$`
+ * down the left edge, so the glyph you read is the character you type — the
+ * line documents itself and needs no "press" or "use". Prose that named the
+ * keys instead ("Use /context before a risky edit") spent a line each to say
+ * less.
+ */
+const WORK_SHELL_OPENERS: readonly (readonly [string, string])[] = [
+  ["/", "commands"],
+  ["@", "attach a file"],
+  ["!", "run a shell command"],
+  ["Ctrl+O", "saved sessions"],
+];
+
+const OPENER_GLYPH_COLUMN = 6;
+
+function renderWorkShellEmptyConversation(width = 96): React.ReactNode {
+  // Two columns when the row can hold them; one when it cannot. Each cell is
+  // glyph + label, so the column width is the widest of those.
+  const cellWidth = OPENER_GLYPH_COLUMN + 2 +
+    Math.max(...WORK_SHELL_OPENERS.map(([, label]) => getDisplayWidth(label)));
+  const columns = width >= cellWidth * 2 + 4 ? 2 : 1;
+  const rows: (readonly (readonly [string, string])[])[] = [];
+  for (let index = 0; index < WORK_SHELL_OPENERS.length; index += columns) {
+    rows.push(WORK_SHELL_OPENERS.slice(index, index + columns));
+  }
+
   return (
     <Box flexDirection="column" paddingLeft={1}>
       <Text>
-        <Text color={W.assistant} bold>{"◢ "}</Text>
+        <Text color={W.assistant} bold>{"● "}</Text>
         <Text color={W.text} bold>{"Ready for the next move"}</Text>
       </Text>
-      <Box marginTop={1} paddingLeft={2} flexDirection="column">
+      <Box paddingLeft={2} flexDirection="column">
         <Text color={W.textMuted}>{getWorkShellEmptyConversationHint()}</Text>
-        <Box marginTop={1} flexDirection="column" gap={0}>
-          {actions.map(([label, detail], index) => (
-            <Text key={label}>
-              <Text color={index === actions.length - 1 ? W.assistant : W.borderSoft}>{index === actions.length - 1 ? "─ " : "─ "}</Text>
-              <Text color={W.user} bold>{` ${label} `}</Text>
-              <Text color={W.textDim}>{`· ${detail}`}</Text>
+        <Box marginTop={1} flexDirection="column">
+          {rows.map((row, rowIndex) => (
+            <Text key={`openers-${String(rowIndex)}`}>
+              {row.map(([glyph, label], cellIndex) => (
+                <React.Fragment key={glyph}>
+                  <Text color={W.assistant} bold>{padDisplayLine(glyph, OPENER_GLYPH_COLUMN)}</Text>
+                  <Text color={W.textDim}>
+                    {cellIndex === row.length - 1
+                      ? `  ${label}`
+                      : padDisplayLine(`  ${label}`, cellWidth - OPENER_GLYPH_COLUMN + 4)}
+                  </Text>
+                </React.Fragment>
+              ))}
             </Text>
           ))}
         </Box>
@@ -1477,8 +1546,6 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
   readonly entries: readonly WorkShellEntry[];
   readonly streamingAssistantText?: string;
   readonly isBusy: boolean;
-  readonly busyStatus?: string;
-  readonly currentTurnStartedAt?: number;
   readonly panelPlacement: WorkShellPanelPlacement;
   readonly terminalColumns?: number;
 }) {
@@ -1486,96 +1553,28 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
     panelPlacement: props.panelPlacement,
     ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
   });
-  const [activityFrame, setActivityFrame] = React.useState(0);
-  const [activityNow, setActivityNow] = React.useState(() => Date.now());
-  React.useEffect(() => {
-    if (!props.isBusy) {
-      return;
-    }
-    setActivityFrame((f) => f + 1);
-    setActivityNow(Date.now());
-    const interval = setInterval(() => {
-      setActivityFrame((f) => f + 1);
-      setActivityNow(Date.now());
-    }, WORK_SHELL_SPINNER_INTERVAL_MS);
-    return () => { clearInterval(interval); };
-  }, [props.isBusy]);
   const entries = props.streamingAssistantText
     ? [
         ...props.entries.filter(shouldShowWorkShellConversationEntry),
         { role: "assistant", text: `${props.streamingAssistantText}${STREAMING_CURSOR}` } as const,
       ]
     : props.entries.filter(shouldShowWorkShellConversationEntry);
-  // Show the activity indicator whenever we're busy — even during streaming
-  // — so the user always sees feedback that the model is working. Previously
-  // the indicator vanished when streaming text arrived, making it look like
-  // the turn completed prematurely.
-  const showActivityIndicator = props.isBusy;
 
   return (
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "68%" : undefined} paddingRight={props.panelPlacement === "side" ? 1 : 0}>
       <Box flexDirection="column">
         {entries.length === 0 ? (
-          props.isBusy ? null : renderWorkShellEmptyConversation()
+          props.isBusy ? null : renderWorkShellEmptyConversation(conversationWidth)
         ) : entries.slice(-50).map((entry, index) => renderWorkShellEntryBlock({
           entry,
           index,
           width: conversationWidth,
         }))}
-        {showActivityIndicator ? (
-          <WorkShellActivityIndicator
-            frame={activityFrame}
-            {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
-            {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
-            nowMs={activityNow}
-            {...(props.streamingAssistantText ? { compact: true } : {})}
-          />
-        ) : null}
       </Box>
     </Box>
   );
 });
 
-const WorkShellActivityIndicator = React.memo(function WorkShellActivityIndicator(props: {
-  readonly frame: number;
-  readonly busyStatus?: string;
-  readonly currentTurnStartedAt?: number;
-  readonly nowMs: number;
-  readonly compact?: boolean;
-}) {
-  const spinner = pickBusySpinnerFrame(props.frame);
-  const label = resolveWorkShellBusyActivityPhrase(props.busyStatus ?? "");
-  const elapsedMs = props.currentTurnStartedAt !== undefined
-    ? Math.max(0, props.nowMs - props.currentTurnStartedAt)
-    : undefined;
-  const elapsedLabel = elapsedMs !== undefined ? ` · ${formatCompactDuration(elapsedMs)}` : "";
-  const activityColor = resolveWorkShellBusyActivityColor({
-    mode: "default",
-    isBusy: true,
-    ...(props.busyStatus ? { busyStatus: props.busyStatus } : {}),
-  });
-  // Compact mode (streaming): just spinner + elapsed, no label — the
-  // streaming text itself shows what's happening.
-  if (props.compact) {
-    return (
-      <Box marginTop={0} paddingLeft={1}>
-        <Text>
-          <Text color={activityColor} bold>{`${spinner} `}</Text>
-          <Text color={W.textDim}>{elapsedLabel.trim() || "streaming…"}</Text>
-        </Text>
-      </Box>
-    );
-  }
-  return (
-    <Box marginTop={1} paddingLeft={1}>
-      <Text>
-        <Text color={activityColor} bold>{`${spinner} `}</Text>
-        <Text color={W.text} bold>{label}</Text>
-        <Text color={W.textDim}>{elapsedLabel}</Text>
-      </Text>
-    </Box>
-  );
-});
 
 export function formatWorkShellLiveActivityLine(input: {
   readonly isBusy: boolean;
@@ -1656,20 +1655,19 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
 }) {
   const providerTitle = formatWorkShellProviderTitle(props.provider);
   const headerHint = props.headerHint ?? "work context · Ctrl+O sessions · / commands";
-  const width = Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 2);
-  const headerPrefix = "◢ ";
-  const leftWidth = getDisplayWidth(headerPrefix) + getDisplayWidth(providerTitle);
+  const width = resolveWorkShellChromeWidth(props.terminalColumns);
+  // No logo glyph. A bold wordmark is the mark; the ◢ that used to sit here
+  // read as decoration from another era and was the only ornament on a screen
+  // that otherwise earns its hierarchy from weight and spacing.
+  const leftWidth = getDisplayWidth(providerTitle);
   const rightWidth = getDisplayWidth(headerHint);
   const minGap = 2;
 
   if (leftWidth + minGap + rightWidth > width && leftWidth + minGap + 12 > width) {
     return (
       <Box flexDirection="column">
-        <Text>
-          <Text color={W.assistant} bold>{headerPrefix}</Text>
-          <Text color={W.text} bold>{truncateForDisplayWidth(providerTitle, width - getDisplayWidth(headerPrefix))}</Text>
-        </Text>
-        {renderChromeRule({ width: width - 2, color: W.borderSoft })}
+        <Text color={W.text} bold>{truncateForDisplayWidth(providerTitle, width)}</Text>
+        {renderChromeRule({ width, color: W.borderSoft })}
       </Box>
     );
   }
@@ -1684,15 +1682,29 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
   return (
     <Box flexDirection="column">
       <Text>
-        <Text color={W.assistant} bold>{headerPrefix}</Text>
         <Text color={W.text} bold>{providerTitle}</Text>
         <Text>{hintGap}</Text>
         <Text color={W.textDim}>{hintText}</Text>
       </Text>
-      {renderChromeRule({ width: width - 2, color: W.borderSoft })}
+      {renderChromeRule({ width, color: W.borderSoft })}
     </Box>
   );
 });
+
+function resolveWorkShellCompactBusyActivityPhrase(status: string): string {
+  const normalized = status.trim().replace(/\s+/g, " ");
+  const lower = normalized.toLowerCase();
+  if (!normalized) return "Working";
+  if (lower.includes("thinking") || lower.includes("reasoning")) return "Thinking";
+  if (lower.includes("context")) return "Preparing context";
+  if (lower.includes("queue")) return "Queued";
+  if (lower.includes("stream")) return "Receiving reply";
+  if (lower.includes("read") || lower.includes("search")) return "Reading context";
+  if (lower.includes("tool") || lower.includes("call")) return "Running tools";
+  if (lower.includes("verify") || lower.includes("test")) return "Checking result";
+  if (lower.includes("write") || lower.includes("edit")) return "Applying changes";
+  return truncateForDisplayWidth(normalized, 18);
+}
 
 const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   readonly model: string;
@@ -1705,37 +1717,87 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   readonly lastTurnDurationMs?: number;
   readonly terminalColumns?: number;
 }) {
+  const [activityFrame, setActivityFrame] = React.useState(0);
+  const [activityNow, setActivityNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    if (!props.isBusy) {
+      return;
+    }
+    setActivityFrame((frame) => frame + 1);
+    setActivityNow(Date.now());
+    const interval = setInterval(() => {
+      setActivityFrame((frame) => frame + 1);
+      setActivityNow(Date.now());
+    }, WORK_SHELL_SPINNER_INTERVAL_MS);
+    return () => { clearInterval(interval); };
+  }, [props.isBusy]);
+
   const sessionGroup = formatWorkShellSessionFactsGroup({
     model: props.model,
     mode: props.mode,
   });
   const authGroup = formatWorkShellAuthFactsGroup(props.authLabel);
-
   const isAuthWarning = /blocked|unavailable|not signed|needs refresh|lacks/i.test(props.authLabel);
   const authColor = isAuthWarning ? W.warning : W.textMuted;
-
-  // Status bar is an info strip, not a motion surface. The animated spinner
-  // lives in the conversation area (WorkShellActivityIndicator) so the user
-  // sees ONE spinner, not two competing ones. Here we use a static state mark.
-  const statusGlyph = props.isBusy ? "◆" : "◇";
+  const statusGlyph = props.isBusy ? pickBusySpinnerFrame(activityFrame) : "◇";
   const statusGlyphColor = props.isBusy ? W.spinner : W.user;
-
+  // "no reply yet" spent a slot to report nothing. On a fresh session the
+  // timing is simply omitted.
   const lastReplyTiming = props.lastTurnDurationMs === undefined
-    ? "no reply yet"
+    ? undefined
     : `last ${formatCompactDuration(props.lastTurnDurationMs)}`;
-  const idleDisplay = `Ready · ${lastReplyTiming}`;
+  const busyElapsed = props.currentTurnStartedAt === undefined
+    ? "starting"
+    : formatCompactDuration(Math.max(0, activityNow - props.currentTurnStartedAt));
+  const statusDisplay = props.isBusy
+    ? `${resolveWorkShellBusyActivityPhrase(props.busyStatus ?? "")} · ${busyElapsed}`
+    : lastReplyTiming === undefined
+      ? "Ready"
+      : `Ready · ${lastReplyTiming}`;
+  const isNarrow = props.terminalColumns !== undefined && props.terminalColumns < 72;
+  if (isNarrow) {
+    const compactStatus = isAuthWarning
+      ? `${props.model} · ${authGroup}`
+      : props.isBusy
+        ? `${props.model} · ${resolveWorkShellCompactBusyActivityPhrase(props.busyStatus ?? "")} · ${busyElapsed}`
+        : `${props.model} · ${statusDisplay}`;
+    const availableStatusWidth = Math.max(1, (props.terminalColumns ?? 72) - 6);
+    return (
+      <Box marginTop={1} paddingLeft={2}>
+        <Text>
+          <Text color={statusGlyphColor} bold>{`${statusGlyph} `}</Text>
+          <Text {...(props.isBusy
+            ? { color: W.assistant, bold: true }
+            : { color: W.textMuted })}>
+            {truncateForDisplayWidth(compactStatus, availableStatusWidth)}
+          </Text>
+        </Text>
+      </Box>
+    );
+  }
+
 
   return (
     <Box marginTop={1} paddingLeft={2}>
       <Text>
         <Text color={statusGlyphColor} bold>{`${statusGlyph} `}</Text>
         <Text color={W.text} bold>{sessionGroup}</Text>
-        <Text color={W.borderSoft}>{" · "}</Text>
-        <Text color={authColor} bold={isAuthWarning}>{authGroup}</Text>
-        <Text color={W.borderSoft}>{" · "}</Text>
+        {/*
+          Healthy auth is hidden. "OAuth · pi engine" never changes during a
+          session, so it was two of the six items on this row confirming that
+          nothing is wrong. It reappears the moment it needs action.
+        */}
+        {isAuthWarning ? (
+          <>
+            <Text color={W.textDim}>{" · "}</Text>
+            <Text color={authColor} bold>{authGroup}</Text>
+          </>
+        ) : null}
+        {/* borderSoft is invisible on dark ground, which fused the row into one run. */}
+        <Text color={W.textDim}>{" · "}</Text>
         <Text {...(props.isBusy
-          ? { color: W.spinner, bold: true }
-          : { color: W.textMuted })}>{props.isBusy ? "Busy" : idleDisplay}</Text>
+          ? { color: W.assistant, bold: true }
+          : { color: W.textMuted })}>{statusDisplay}</Text>
       </Text>
     </Box>
   );
@@ -1756,6 +1818,8 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   readonly isBusy?: boolean;
   readonly queuePaused?: boolean;
   readonly queuedCount?: number;
+  readonly branch?: string;
+  readonly modelWindow?: number;
 }) {
   const dockWidth = getWorkShellDockWidth(props.terminalColumns);
   const footerLine = formatWorkShellFooterLine({
@@ -1765,6 +1829,8 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
     mode: props.mode,
     authLabel: props.authLabel,
     ...(props.contextIndicator ? { contextIndicator: props.contextIndicator } : {}),
+    ...(props.branch ? { branch: props.branch } : {}),
+    ...(props.modelWindow !== undefined ? { modelWindow: props.modelWindow } : {}),
     width: dockWidth,
   });
   const dockLayout = resolveWorkShellComposerDockLayout({
@@ -1821,65 +1887,303 @@ export function formatWorkShellQueueIndicator(queuedCount: number, queuePaused =
   return `⋯ ${queuedCount} queued · /queue`;
 }
 
+const LEDGER_INDENT = "  ";
+const LEDGER_KIND_COLUMN = 7;
+/** Below this the metric column is dropped rather than wrapped to a second row. */
+const LEDGER_METRIC_MIN_WIDTH = 72;
+
+type LedgerRow = {
+  readonly glyph: string;
+  readonly label?: string;
+  readonly detail: string;
+  readonly metric?: string;
+};
+
+/**
+ * Lay out a group of ledger rows: status glyph, an optional fixed-width kind
+ * column, the action, then every metric starting at one shared column.
+ *
+ * The previous format chained everything with `·` and, under 120 columns,
+ * stacked the metadata onto a second indented line — four tool calls cost
+ * eight rows and the eye had no column to follow. Rows are measured as a group
+ * so the metric column sits just past the longest action rather than at the
+ * far right edge, which on a wide terminal opened a canyon of blank space.
+ */
+function composeLedgerRows(rows: readonly LedgerRow[], width: number): readonly string[] {
+  const lefts = rows.map((row) => {
+    const label = row.label === undefined
+      ? ""
+      : `${padDisplayLine(row.label, LEDGER_KIND_COLUMN)} `;
+    return `${LEDGER_INDENT}${row.glyph} ${label}${row.detail}`;
+  });
+
+  const metricWidth = Math.max(
+    0,
+    ...rows.map((row) => (row.metric === undefined ? 0 : getDisplayWidth(row.metric))),
+  );
+  if (metricWidth === 0 || width < LEDGER_METRIC_MIN_WIDTH) {
+    return lefts.map((left) => truncateForDisplayWidth(left, width));
+  }
+
+  const widestLeft = Math.max(0, ...lefts.map((left) => getDisplayWidth(left)));
+  const metricColumn = Math.min(widestLeft + 4, width - metricWidth);
+  return rows.map((row, index) => {
+    const left = truncateForDisplayWidth(lefts[index] ?? "", Math.max(12, metricColumn - 2));
+    if (row.metric === undefined) return left;
+    const gap = Math.max(2, metricColumn - getDisplayWidth(left));
+    return truncateForDisplayWidth(`${left}${" ".repeat(gap)}${row.metric}`, width);
+  });
+}
+
+/** Indent that marks a line as belonging to the call above it. */
+const LEDGER_PREVIEW_INDENT = "    ";
+
+/**
+ * Render a tool activity's diff preview as ledger lines.
+ *
+ * Returns nothing when the preview is not a parseable patch, so a tool that
+ * attached something else cannot spill raw text into the chrome.
+ */
+export function formatWorkShellActivityPreviewLines(
+  preview: string,
+  width: number,
+): readonly string[] {
+  const hunks = parseUnifiedDiff(preview);
+  if (!hunks) return [];
+  const rows = buildDiffRows(hunks, { contextLines: 2, maxRows: 14 });
+  if (rows.length === 0) return [];
+  const gutterWidth = resolveDiffGutterWidth(rows);
+  const bodyWidth = Math.max(20, width - LEDGER_PREVIEW_INDENT.length);
+  return [
+    `${LEDGER_PREVIEW_INDENT}⎿ ${formatDiffSummary(summarizeDiff(hunks))}`,
+    ...rows.map((row) => `${LEDGER_PREVIEW_INDENT}${formatDiffRow(row, { gutterWidth, width: bodyWidth })}`),
+  ];
+}
+
 export function formatWorkShellAgentConsoleActivityLines(
   agentConsole: AgentConsoleSnapshot | undefined,
+  width = 120,
 ): readonly string[] {
   if (!agentConsole) {
     return [];
   }
-  const prioritizedNodes = agentConsole.workGraph
-    ? [...agentConsole.workGraph.nodes].sort(
-        (left, right) => Number(isActiveWorkNodeStatus(right.status)) - Number(isActiveWorkNodeStatus(left.status)),
-      )
+
+  const displayWidth = Math.max(20, Math.trunc(width));
+  const runningActivity = agentConsole.activity
+    .filter((activity) => activity.status === "running")
+    .slice(-4);
+  // Finished calls now render inline in the transcript, in the order they
+  // happened. This block is the live edge: it fills with recently-settled calls
+  // only while nothing is running, so an idle screen still shows what just
+  // happened without duplicating the whole history above the conversation.
+  const terminalSlots = runningActivity.length > 0 ? 0 : 4;
+  const terminalActivity = terminalSlots > 0
+    ? agentConsole.activity
+        .filter((activity) => activity.status !== "running")
+        .slice(-terminalSlots)
+    : [];
+  const visibleActivity = new Set([...runningActivity, ...terminalActivity]);
+  const recentActivity = agentConsole.activity.filter((activity) => visibleActivity.has(activity));
+  const hiddenActivityCount = agentConsole.activity.length - recentActivity.length;
+  const toolRows = composeLedgerRows(recentActivity.map((activity): LedgerRow => {
+    const rawStatusDetail = activity.status === "running"
+      ? "running"
+      : activity.summary ?? activity.status;
+    const statusPrefix = `${activity.status} · `;
+    const statusDetail = rawStatusDetail.startsWith(statusPrefix)
+      ? rawStatusDetail.slice(statusPrefix.length)
+      : rawStatusDetail;
+    const target = activity.target && !activity.intent.includes(activity.target)
+      ? activity.target
+      : undefined;
+    return {
+      glyph: formatToolActivityStatus(activity.status),
+      label: formatToolActivityKind(activity.kind),
+      detail: [activity.intent, target].filter((value) => value !== undefined).join(" · "),
+      metric: statusDetail,
+    };
+  }), displayWidth);
+  // No section heading. The rows are self-describing, and a "Tools · 24" banner
+  // restated a count the trailing overflow line already carries.
+  // A write call's diff is the thing worth seeing; "completed · 12ms" is not.
+  // Rows are interleaved so each preview sits directly under the call it came
+  // from, indented so the call line stays the anchor.
+  const rowsWithPreviews = recentActivity.flatMap((activity, index) => {
+    const row = toolRows[index];
+    if (row === undefined) return [];
+    if (!activity.preview) return [row];
+    return [row, ...formatWorkShellActivityPreviewLines(activity.preview, displayWidth)];
+  });
+
+  const activityLines = recentActivity.length > 0
+    ? [
+        ...rowsWithPreviews,
+        ...(hiddenActivityCount > 0
+          ? [truncateForDisplayWidth(`  … +${hiddenActivityCount} earlier`, displayWidth)]
+          : []),
+      ]
     : [];
 
   const graph = agentConsole.workGraph;
-  const graphLines = graph
-    ? [
-        `Goal · ${graph.goal ?? graph.id}`,
-        ...prioritizedNodes.slice(0, 4).map((node) => {
-          const dependencies = node.dependsOn ?? [];
-          return `${formatWorkNodeStatus(node.status)} ${node.title || node.id}${dependencies.length > 0 ? ` · after ${dependencies.join(", ")}` : ""}`;
-        }),
-        ...(graph.nodes.length > 4 ? [`… ${graph.nodes.length - 4} more tasks`] : []),
-      ]
-    : [];
-  const activityLines = agentConsole.activity
-    .slice(-2)
-    .reverse()
-    .map((activity) => {
-      const status = activity.status === "running"
-        ? "running"
-        : activity.summary ?? activity.status;
-      const target = activity.target && !activity.intent.includes(activity.target)
-        ? ` · ${activity.target}`
-        : "";
-      return `Tool · ${activity.intent}${target} · ${status}`;
-    });
-  return [...graphLines, ...activityLines];
-}
-function isActiveWorkNodeStatus(status: WorkNodeStatus): boolean {
-  return status === "running" || status === "blocked" || status === "requires_action";
+  if (!graph) {
+    return activityLines;
+  }
+
+  const prioritizedNodes = [
+    ...graph.nodes.filter((node) => isActiveWorkNodeStatus(node.status)),
+    ...graph.nodes.filter((node) => !isActiveWorkNodeStatus(node.status)),
+  ];
+  const titleById = new Map(graph.nodes.map((node) => [node.id, node.title || node.id]));
+  const visibleNodes = prioritizedNodes.slice(0, 5);
+  const hiddenNodeCount = Math.max(0, graph.nodes.length - visibleNodes.length);
+  const completedCount = graph.nodes.filter((node) => node.status === "completed").length;
+  const taskRows = composeLedgerRows(visibleNodes.map((node): LedgerRow => {
+    const dependencies = node.dependsOn
+      .map((dependency) => titleById.get(dependency) ?? dependency);
+    const dependencyLabel = node.status === "blocked" || node.status === "requires_action"
+      ? "blocked by"
+      : "after";
+    const dependencyDetail = dependencies.length > 0
+      ? `${dependencyLabel} ${dependencies.join(", ")}`
+      : undefined;
+    return {
+      glyph: formatWorkNodeStatus(node.status),
+      detail: node.title || node.id,
+      ...(dependencyDetail ? { metric: dependencyDetail } : {}),
+    };
+  }), displayWidth);
+  // The task block keeps one heading — unlike tool rows it needs the goal and
+  // the completed/total ratio, which no individual row carries.
+  const graphLines = [
+    truncateForDisplayWidth(
+      `${graph.goal ?? graph.id} · ${completedCount}/${graph.nodes.length}`,
+      displayWidth,
+    ),
+    ...taskRows,
+    ...(hiddenNodeCount > 0
+      ? [truncateForDisplayWidth(`  … +${hiddenNodeCount} more`, displayWidth)]
+      : []),
+  ];
+
+  return [...activityLines, ...graphLines];
 }
 
+function isActiveWorkNodeStatus(status: WorkNodeStatus): boolean {
+  return status === "running"
+    || status === "blocked"
+    || status === "requires_action"
+    || status === "failed";
+}
+
+function formatToolActivityKind(kind: ToolActivityKind): string {
+  switch (kind) {
+    case "read":
+      return "Read";
+    case "search":
+      return "Search";
+    case "write":
+      return "Write";
+    case "delete":
+      return "Delete";
+    case "execute":
+      return "Bash";
+    case "interaction":
+      return "Ask";
+    case "other":
+      return "Tool";
+  }
+}
+
+// One quiet dot per row, filled by progress: hollow not started, half running,
+// filled done. Status lives in the glyph's weight and colour so the rest of the
+// row can stay monochrome instead of every finished call flooding green.
+function formatToolActivityStatus(status: "running" | "completed" | "failed" | "cancelled"): string {
+  switch (status) {
+    case "running":
+      return "◐";
+    case "completed":
+      return "●";
+    case "failed":
+      return "✕";
+    case "cancelled":
+      return "⊘";
+  }
+}
 
 function formatWorkNodeStatus(status: WorkNodeStatus): string {
   switch (status) {
     case "completed":
-      return "✓";
-    case "running":
       return "●";
+    case "running":
+      return "◐";
     case "failed":
-      return "×";
-    case "blocked":
     case "cancelled":
-      return "⊘";
+      return "✕";
+    case "blocked":
     case "requires_action":
-      return "!";
+      return "▲";
     default:
       return "○";
   }
 }
+
+const LEDGER_STATUS_COLORS: Readonly<Record<string, keyof typeof W_DARK>> = {
+  "✕": "error",
+  "▲": "warning",
+  "●": "success",
+  "◐": "assistant",
+  "⊘": "textDim",
+  "○": "textDim",
+};
+
+/** `  ● Read    intent…      12ms · 48 lines` — glyph, body, aligned metric. */
+const LEDGER_ROW_RE = /^ {2}([✕▲●◐⊘○]) (.*)$/;
+
+const WorkShellLedgerLine = React.memo(function WorkShellLedgerLine(props: {
+  readonly line: string;
+}): React.ReactNode {
+  // Diff preview rows hanging off a write call: `    ⎿ Added 3 lines…` and
+  // `     12 + text`. The marker follows the line-number gutter, so match the
+  // shape rather than scanning for a "+" that could sit inside the content.
+  if (props.line.startsWith(LEDGER_PREVIEW_INDENT)) {
+    const body = props.line.slice(LEDGER_PREVIEW_INDENT.length);
+    if (body.startsWith("⎿")) {
+      return <Text {...readableTextColorProps(W.textDim)}>{props.line}</Text>;
+    }
+    const marker = /^\s*\d*\s([+-])\s/.exec(body)?.[1];
+    const color = marker === "+" ? W.success : marker === "-" ? W.error : W.textMuted;
+    return <Text {...readableTextColorProps(color)}>{props.line}</Text>;
+  }
+
+  const row = LEDGER_ROW_RE.exec(props.line);
+  if (!row) {
+    // Task heading and the "… +N earlier" overflow line both read as chrome.
+    return <Text {...readableTextColorProps(W.textMuted)}>{props.line}</Text>;
+  }
+
+  // Only the glyph carries status colour. Colouring the whole row made a green
+  // "completed" tick shout as loudly as the action it described.
+  const glyph = row[1] ?? "";
+  const body = row[2] ?? "";
+  const glyphColor = W[LEDGER_STATUS_COLORS[glyph] ?? "textDim"];
+  const split = /^(.*?)(\s{2,})(\S.*)$/.exec(body);
+  return (
+    <Text>
+      <Text>{LEDGER_INDENT}</Text>
+      <Text {...readableTextColorProps(glyphColor)} bold>{glyph}</Text>
+      <Text>{" "}</Text>
+      {split
+        ? (
+          <>
+            <Text {...readableTextColorProps(W.text)}>{split[1] ?? ""}</Text>
+            <Text>{split[2] ?? ""}</Text>
+            <Text {...readableTextColorProps(W.textDim)}>{split[3] ?? ""}</Text>
+          </>
+        )
+        : <Text {...readableTextColorProps(W.text)}>{body}</Text>}
+    </Text>
+  );
+});
 
 export function WorkShellView(props: {
   readonly provider: string;
@@ -1910,6 +2214,8 @@ export function WorkShellView(props: {
   readonly contextInspectorDetailOffset?: number;
   readonly contextPacket?: ContextPacketView;
   readonly modelWindow?: number;
+  /** Checked-out branch, shown beside the path in the footer. */
+  readonly branch?: string;
   readonly terminalRows?: number;
   readonly currentTurnStartedAt?: number;
   readonly lastTurnDurationMs?: number;
@@ -1959,7 +2265,10 @@ export function WorkShellView(props: {
     latestSystemText: getLatestWorkShellSystemText(props.entries),
   });
   const queueIndicator = formatWorkShellQueueIndicator(props.queuedCount ?? 0, props.queuePaused ?? false);
-  const agentConsoleActivityLines = formatWorkShellAgentConsoleActivityLines(props.agentConsole);
+  const agentConsoleActivityLines = formatWorkShellAgentConsoleActivityLines(
+    props.agentConsole,
+    Math.max(20, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
+  );
   const shouldRenderContextInspectorOverlay =
     props.activePanel.title === "Context expanded" && props.contextPacket !== undefined;
 
@@ -1968,8 +2277,6 @@ export function WorkShellView(props: {
       entries={props.entries}
       {...(props.streamingAssistantText ? { streamingAssistantText: props.streamingAssistantText } : {})}
       isBusy={props.isBusy}
-      {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
-      {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
       panelPlacement={panelPlacement}
       {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
     />
@@ -1987,11 +2294,46 @@ export function WorkShellView(props: {
     />
   );
 
+  const composerDock = (
+    <WorkShellComposerDock
+      composer={props.composer}
+      {...(composerHint ? { composerHint } : {})}
+      inputValue={props.inputValue}
+      {...(props.cwd ? { cwd: props.cwd } : {})}
+      model={props.model}
+      reasoningLabel={props.reasoningLabel}
+      mode={props.mode}
+      authLabel={props.authLabel}
+      {...(props.contextIndicator ? { contextIndicator: props.contextIndicator } : {})}
+      {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+      {...(props.branch ? { branch: props.branch } : {})}
+      {...(props.modelWindow !== undefined ? { modelWindow: props.modelWindow } : {})}
+      {...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {})}
+      isBusy={props.isBusy}
+      {...(props.queuePaused !== undefined ? { queuePaused: props.queuePaused } : {})}
+      {...(props.queuedCount !== undefined ? { queuedCount: props.queuedCount } : {})}
+    />
+  );
+
   if (
     shouldRenderContextInspectorOverlay
     && panelDisplayMode === "overlay"
     && !shouldSuppressOverlayForInput
   ) {
+    // The base viewport budget reserves a one-line composer. Charge only the
+    // draft's wrapped continuation rows so the dock and desk share one physical
+    // terminal-height budget.
+    const contextDeskTerminalRows = props.terminalRows === undefined
+      ? undefined
+      : Math.max(
+          1,
+          props.terminalRows - resolveWorkShellComposerAdditionalRows({
+            inputValue: props.inputValue,
+            ...(props.terminalColumns !== undefined
+              ? { terminalColumns: props.terminalColumns }
+              : {}),
+          }),
+        );
     return (
       <Box flexDirection="column" paddingX={2}>
         <WorkShellHeaderBlock
@@ -2010,6 +2352,7 @@ export function WorkShellView(props: {
           {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
           {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
         />
+        {composerDock}
         {renderContextInspectorOverlay({
           packet: props.contextPacket,
           cursorIndex: props.contextInspectorCursor ?? -1,
@@ -2034,7 +2377,9 @@ export function WorkShellView(props: {
             ? { contextAdviceUnavailable: props.contextAdviceUnavailable }
             : {}),
           contextAdviceActionsEnabled: props.contextAdviceActionsEnabled ?? false,
-          ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
+          ...(contextDeskTerminalRows !== undefined
+            ? { terminalRows: contextDeskTerminalRows }
+            : {}),
         })}
       </Box>
     );
@@ -2061,12 +2406,7 @@ export function WorkShellView(props: {
       {agentConsoleActivityLines.length > 0 ? (
         <Box marginTop={1} flexDirection="column">
           {agentConsoleActivityLines.map((line, index) => (
-            <Text key={`${index}:${line}`} {...readableTextColorProps(W.textMuted)}>
-              {truncateForDisplayWidth(
-                line,
-                Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
-              )}
-            </Text>
+            <WorkShellLedgerLine key={`${index}:${line}`} line={line} />
           ))}
         </Box>
       ) : null}
@@ -2084,9 +2424,11 @@ export function WorkShellView(props: {
         <Box marginTop={1} flexDirection="column">
           {renderContextTurnReceipt({
             receipt: props.contextSubmittedReceipt,
-            width: Math.max(0, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
+            ...(props.contextPacketChange ? { change: props.contextPacketChange } : {}),
+            width: resolveWorkShellChromeWidth(props.terminalColumns),
             expanded: false,
             showPrimary: true,
+            palette: W,
           })}
         </Box>
       ) : null}
@@ -2095,22 +2437,7 @@ export function WorkShellView(props: {
           <Text {...readableTextColorProps(props.queuePaused ? W.warning : W.textMuted)}>{queueIndicator}</Text>
         </Box>
       ) : null}
-      <WorkShellComposerDock
-        composer={props.composer}
-        {...(composerHint ? { composerHint } : {})}
-        inputValue={props.inputValue}
-        {...(props.cwd ? { cwd: props.cwd } : {})}
-        model={props.model}
-        reasoningLabel={props.reasoningLabel}
-        mode={props.mode}
-        authLabel={props.authLabel}
-        {...(props.contextIndicator ? { contextIndicator: props.contextIndicator } : {})}
-        {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
-        {...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {})}
-        isBusy={props.isBusy}
-        {...(props.queuePaused !== undefined ? { queuePaused: props.queuePaused } : {})}
-        {...(props.queuedCount !== undefined ? { queuedCount: props.queuedCount } : {})}
-      />
+      {composerDock}
       {props.attachmentLines
         ? <WorkShellAttachmentBlock
             attachmentLines={props.attachmentLines}

@@ -46,3 +46,41 @@ export function renderDebugFrame(element, options = {}) {
     getOutput: () => output,
   };
 }
+
+/**
+ * Wait until the frame stops changing, rather than for a fixed delay.
+ *
+ * Ink paints asynchronously, so a `setTimeout(100)` is a bet that the render
+ * finished in time. As the work shell grew — tool calls now render inline in
+ * the transcript — that bet started losing under load, and these tests failed
+ * a different handful of assertions on every run. Polling for a settled frame
+ * makes them wait exactly as long as the render actually takes.
+ */
+export async function waitForSettledFrame(getOutput, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 2_000;
+  const quietMs = options.quietMs ?? 40;
+  const pollMs = options.pollMs ?? 10;
+  const deadline = Date.now() + timeoutMs;
+
+  const baseline = options.baseline;
+  let previous = getOutput();
+  let observedChange = baseline === undefined || previous !== baseline;
+  let stableSince = Date.now();
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    const current = getOutput();
+    if (current !== previous) {
+      previous = current;
+      stableSince = Date.now();
+      if (baseline === undefined || current !== baseline) {
+        observedChange = true;
+      }
+      continue;
+    }
+    // Require a non-empty frame; an empty one has simply not started yet.
+    if (observedChange && current.length > 0 && Date.now() - stableSince >= quietMs) {
+      return current;
+    }
+  }
+  return getOutput();
+}

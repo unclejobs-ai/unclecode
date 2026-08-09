@@ -1,4 +1,5 @@
 import {
+  boundToolActivityPreview,
   createAgentConsoleSnapshot,
   isCoalescibleToolActivity,
   parseAgentConsoleSnapshot,
@@ -156,20 +157,60 @@ function createCompletedActivity(input: {
   const completedAt = readTimestamp(input.trace, "completedAt") ?? Date.now();
   const durationMs = readTimestamp(input.trace, "durationMs") ?? Math.max(0, completedAt - input.startedAt);
   const failed = input.trace.isError === true;
+  const outputMetric = deriveToolOutputMetric(readNonEmptyString(input.trace, "output"));
+  const kind = input.current?.kind ?? classifyToolActivityKind(input.toolName);
 
   const target = input.current?.target ?? deriveToolTarget(input.input);
+  const preview = deriveToolActivityPreview({ kind, trace: input.trace, input: input.input });
   return {
     id: input.current?.id ?? `tool:${input.toolCallId}`,
     toolCallId: input.toolCallId,
     toolName: input.toolName,
-    kind: input.current?.kind ?? classifyToolActivityKind(input.toolName),
+    kind,
     intent: input.current?.intent ?? deriveToolIntent(input.toolName, input.input),
     status: failed ? "failed" : "completed",
     ...(target ? { target } : {}),
-    summary: `${failed ? "failed" : "completed"} · ${durationMs}ms`,
+    ...(preview ? { preview } : {}),
+    summary: [
+      failed ? "failed" : "completed",
+      `${durationMs}ms`,
+      ...(outputMetric ? [outputMetric] : []),
+    ].join(" · "),
     startedAt: input.startedAt,
     completedAt,
   };
+}
+
+const UNIFIED_DIFF_HUNK_RE = /^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/m;
+
+/**
+ * Pull a unified diff out of a completed write/patch call.
+ *
+ * Only patches are carried. A diff is what a reviewer needs to see and it is
+ * self-describing; arbitrary tool stdout is not, and carrying it would undo
+ * the reason raw output was excluded from snapshots in the first place. The
+ * tool's own input is checked first — patch tools receive the diff as an
+ * argument — then its output, for tools that echo the applied patch.
+ */
+function deriveToolActivityPreview(input: {
+  readonly kind: ToolActivityKind;
+  readonly trace: TraceRecord;
+  readonly input: TraceRecord | undefined;
+}): string | undefined {
+  if (input.kind !== "write" && input.kind !== "delete") {
+    return undefined;
+  }
+  const candidates = [
+    readNonEmptyString(input.input, "patch"),
+    readNonEmptyString(input.input, "diff"),
+    readNonEmptyString(input.trace, "output"),
+  ];
+  for (const candidate of candidates) {
+    if (candidate && UNIFIED_DIFF_HUNK_RE.test(candidate)) {
+      return boundToolActivityPreview(candidate);
+    }
+  }
+  return undefined;
 }
 
 function capToolActivity(activity: readonly ToolActivity[]): readonly ToolActivity[] {
@@ -218,6 +259,18 @@ function deriveToolTarget(input: TraceRecord | undefined): string | undefined {
   return readNonEmptyString(input, "path")
     ?? readNonEmptyString(input, "file")
     ?? readNonEmptyString(input, "url");
+}
+
+function deriveToolOutputMetric(output: string | undefined): string | undefined {
+  const normalized = output?.trim();
+  if (!normalized) {
+    return undefined;
+  }
+  if (/^\(no matches\)$/i.test(normalized)) {
+    return "no matches";
+  }
+  const lineCount = normalized.split(/\r?\n/).length;
+  return `${lineCount} ${lineCount === 1 ? "line" : "lines"}`;
 }
 
 function asRecord(value: unknown): TraceRecord | undefined {

@@ -25,6 +25,7 @@ import {
   type WorkShellPaneRuntimeState,
   type WorkShellSlashSuggestion,
 } from "./work-shell-hooks.js";
+import { getGitBranch } from "./facts.js";
 import { formatAuthLabelForDisplay } from "./work-shell-panels.js";
 import { getWorkShellComposerTextColor, WorkShellView } from "./work-shell-view.js";
 
@@ -143,6 +144,7 @@ export function WorkShellPane<
     slashSuggestionCount,
     selectedSlashCommand,
     contextAdviceKeyActionsEnabled,
+    contextUndoKeyActionsEnabled,
     submit,
     addClipboardAttachment,
     clearClipboardAttachments,
@@ -167,6 +169,9 @@ export function WorkShellPane<
     shouldBlockSlashSubmit: props.shouldBlockSlashSubmit,
   });
 
+  // Resolved once per cwd: `git branch --show-current` shells out, and the
+  // footer redraws on every keystroke.
+  const branch = React.useMemo(() => getGitBranch(props.cwd ?? process.cwd()), [props.cwd]);
   const { stdout } = useStdout();
   const captureClipboardImage = props.captureClipboardImage ?? defaultCaptureClipboardImage;
   const [terminalColumns, setTerminalColumns] = React.useState(() => resolveWorkShellPaneTerminalColumns(stdout));
@@ -402,11 +407,13 @@ export function WorkShellPane<
           terminalColumns={terminalColumns}
           textColor={getWorkShellComposerTextColor()}
           {...(isSecureApiKeyEntry ? { mask: "•" } : {})}
+          cursorVisible={!shouldSuppressComposerKeysForInspector}
           {...(shouldSuppressComposerKeysForInspector
             ? { suppressInspectorKeys: true }
             : {})}
           suppressInspectorMutationKeys={contextSourceActionsEnabled ?? false}
           suppressInspectorAdviceKeys={contextAdviceKeyActionsEnabled}
+          suppressInspectorUndoKey={contextUndoKeyActionsEnabled}
         />
       }
       inputValue={inputValue}
@@ -414,6 +421,7 @@ export function WorkShellPane<
       {...(selectedSlashCommand ? { selectedSlashCommand } : {})}
       terminalColumns={terminalColumns}
       cwd={props.cwd}
+      branch={branch}
       {...(queuedCount !== undefined ? { queuedCount } : {})}
       {...(queuePaused !== undefined ? { queuePaused } : {})}
       {...(isSecureApiKeyEntry
