@@ -609,6 +609,10 @@ function isNonNegativeFinite(value: unknown): value is number {
  * Rebuilds a bounded lifecycle list. A missing key is a legacy snapshot and
  * yields `[]`; a malformed entry rejects the whole snapshot even when the
  * bound would have discarded it, so a poisoned prefix cannot be laundered.
+ *
+ * Every untrusted entry is validated, but the ring holds at most `limit`
+ * parsed records live, so an oversized persisted list cannot inflate retained
+ * memory with projections that are about to be discarded.
  */
 function parseBoundedList<T>(
   record: Record<string, unknown>,
@@ -623,15 +627,22 @@ function parseBoundedList<T>(
   if (!Array.isArray(value)) {
     return undefined;
   }
-  const parsed: T[] = [];
+
+  const ring: T[] = [];
+  let oldest = 0;
   for (const entry of value) {
     const item = parseEntry(entry);
     if (item === undefined) {
       return undefined;
     }
-    parsed.push(item);
+    if (ring.length < limit) {
+      ring.push(item);
+      continue;
+    }
+    ring[oldest] = item;
+    oldest = (oldest + 1) % limit;
   }
-  return parsed.slice(-limit);
+  return oldest === 0 ? ring : [...ring.slice(oldest), ...ring.slice(0, oldest)];
 }
 
 function parseStringList(value: unknown): readonly string[] | undefined {

@@ -7,6 +7,7 @@ import type {
   ApprovalIntent,
   PolicyDecision as CanonicalPolicyDecision,
   ProviderId as CanonicalProviderId,
+  ExecutionTraceEvent,
   JobQueuedTraceEvent,
   JobSettledTraceEvent,
   JsonObject,
@@ -141,6 +142,95 @@ void sessionCenterRenderOptionsWorkspaceRoot;
 
 // --- Agent console lifecycle, usage, and control contracts ---
 
+/** Keys that a value of `T` must supply; optional keys collapse to `never`. */
+type RequiredKeys<T> = {
+  [K in keyof T]-?: {} extends Pick<T, K> ? never : K;
+}[keyof T];
+
+// Every lifecycle payload must actually be reachable through the union that
+// producers and reducers switch on.
+type JobQueuedIsTraceEventMember = Assert<
+  IsExact<
+    Extract<ExecutionTraceEvent, { type: "job.queued" }>,
+    JobQueuedTraceEvent
+  >
+>;
+type JobSettledIsTraceEventMember = Assert<
+  IsExact<
+    Extract<ExecutionTraceEvent, { type: "job.settled" }>,
+    JobSettledTraceEvent
+  >
+>;
+type AgentRunStartedIsTraceEventMember = Assert<
+  IsExact<
+    Extract<ExecutionTraceEvent, { type: "agent.run.started" }>,
+    AgentRunStartedTraceEvent
+  >
+>;
+type AgentRunSettledIsTraceEventMember = Assert<
+  IsExact<
+    Extract<ExecutionTraceEvent, { type: "agent.run.settled" }>,
+    AgentRunSettledTraceEvent
+  >
+>;
+type UsageRecordedIsTraceEventMember = Assert<
+  IsExact<
+    Extract<ExecutionTraceEvent, { type: "usage.recorded" }>,
+    UsageRecordedTraceEvent
+  >
+>;
+
+// Exact required-key sets: this fails both when a brief-required field turns
+// optional and when an optional field silently becomes mandatory.
+type JobQueuedRequiredFields = Assert<
+  IsExact<
+    RequiredKeys<JobQueuedTraceEvent>,
+    "type" | "level" | "eventId" | "jobId" | "jobType" | "label" | "queuedAt"
+  >
+>;
+type JobSettledRequiredFields = Assert<
+  IsExact<
+    RequiredKeys<JobSettledTraceEvent>,
+    "type" | "level" | "eventId" | "jobId" | "status" | "completedAt"
+  >
+>;
+type AgentRunStartedRequiredFields = Assert<
+  IsExact<
+    RequiredKeys<AgentRunStartedTraceEvent>,
+    | "type"
+    | "level"
+    | "eventId"
+    | "runId"
+    | "jobId"
+    | "displayName"
+    | "agentType"
+    | "startedAt"
+  >
+>;
+type AgentRunSettledRequiredFields = Assert<
+  IsExact<
+    RequiredKeys<AgentRunSettledTraceEvent>,
+    "type" | "level" | "eventId" | "runId" | "jobId" | "status" | "completedAt"
+  >
+>;
+type UsageRecordedRequiredFields = Assert<
+  IsExact<
+    RequiredKeys<UsageRecordedTraceEvent>,
+    "type" | "level" | "eventId" | "startedAt"
+  >
+>;
+
+void (null as unknown as JobQueuedIsTraceEventMember);
+void (null as unknown as JobSettledIsTraceEventMember);
+void (null as unknown as AgentRunStartedIsTraceEventMember);
+void (null as unknown as AgentRunSettledIsTraceEventMember);
+void (null as unknown as UsageRecordedIsTraceEventMember);
+void (null as unknown as JobQueuedRequiredFields);
+void (null as unknown as JobSettledRequiredFields);
+void (null as unknown as AgentRunStartedRequiredFields);
+void (null as unknown as AgentRunSettledRequiredFields);
+void (null as unknown as UsageRecordedRequiredFields);
+
 type AgentRunStartedRequiresJobId = Assert<
   IsExact<AgentRunStartedTraceEvent["jobId"], string>
 >;
@@ -160,7 +250,10 @@ type JobSettledStatusIsTerminal = Assert<
   IsExact<JobSettledTraceEvent["status"], TerminalAsyncJobStatus>
 >;
 type JobQueuedRequiresTypeAndLabel = Assert<
-  IsExact<[JobQueuedTraceEvent["jobType"], JobQueuedTraceEvent["label"]], [string, string]>
+  IsExact<
+    [JobQueuedTraceEvent["jobType"], JobQueuedTraceEvent["label"]],
+    [string, string]
+  >
 >;
 type ToolStartedScopeIsOptional = Assert<
   IsExact<
@@ -170,7 +263,10 @@ type ToolStartedScopeIsOptional = Assert<
 >;
 type ToolCompletedScopeIsOptional = Assert<
   IsExact<
-    [ToolCompletedTraceEvent["agentRunId"], ToolCompletedTraceEvent["asyncJobId"]],
+    [
+      ToolCompletedTraceEvent["agentRunId"],
+      ToolCompletedTraceEvent["asyncJobId"],
+    ],
     [string | undefined, string | undefined]
   >
 >;
@@ -182,7 +278,12 @@ type UsageCountersAreOptional = Assert<
       UsageRecordedTraceEvent["cacheReadTokens"],
       UsageRecordedTraceEvent["costUsd"],
     ],
-    [number | undefined, number | undefined, number | undefined, number | undefined]
+    [
+      number | undefined,
+      number | undefined,
+      number | undefined,
+      number | undefined,
+    ]
   >
 >;
 type UsageEventIdIsRequired = Assert<
@@ -195,7 +296,10 @@ type ControlPortSteerSignature = Assert<
   >
 >;
 type ControlPortCancelSignature = Assert<
-  IsExact<AgentControlPort["cancel"], (agentRunId: string) => Promise<AgentControlReceipt>>
+  IsExact<
+    AgentControlPort["cancel"],
+    (agentRunId: string) => Promise<AgentControlReceipt>
+  >
 >;
 type ControlPortContinueSignature = Assert<
   IsExact<

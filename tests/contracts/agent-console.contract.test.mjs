@@ -611,11 +611,17 @@ test("agent-console bounds persisted lifecycle summaries", () => {
 
   assert.equal(boundLifecycleSummary("short summary"), "short summary");
   assert.equal(boundLifecycleSummary(exact), exact);
-  assert.equal(boundLifecycleSummary(exact).length, MAX_LIFECYCLE_SUMMARY_CHARS);
+  assert.equal(
+    boundLifecycleSummary(exact).length,
+    MAX_LIFECYCLE_SUMMARY_CHARS,
+  );
 
   // One character over the budget must truncate and still fit the budget.
   assert.notEqual(boundLifecycleSummary(overBy1), overBy1);
-  assert.equal(boundLifecycleSummary(overBy1).length, MAX_LIFECYCLE_SUMMARY_CHARS);
+  assert.equal(
+    boundLifecycleSummary(overBy1).length,
+    MAX_LIFECYCLE_SUMMARY_CHARS,
+  );
   assert.match(boundLifecycleSummary(overBy1), /summary truncated$/);
 
   assert.equal(boundLifecycleSummary(long).length, MAX_LIFECYCLE_SUMMARY_CHARS);
@@ -639,8 +645,8 @@ test("agent-console bounds persisted lifecycle summaries", () => {
       ],
     })?.jobs.every(
       (job) =>
-        (job.summary?.length ?? 0) <= MAX_LIFECYCLE_SUMMARY_CHARS
-        && (job.errorSummary?.length ?? 0) <= MAX_LIFECYCLE_SUMMARY_CHARS,
+        (job.summary?.length ?? 0) <= MAX_LIFECYCLE_SUMMARY_CHARS &&
+        (job.errorSummary?.length ?? 0) <= MAX_LIFECYCLE_SUMMARY_CHARS,
     ),
   );
 
@@ -692,7 +698,7 @@ test("agent-console exposes lifecycle, control, and tab unions", () => {
   assert.deepEqual(AGENT_CONSOLE_TABS, ["agents", "jobs", "plan"]);
 });
 
-test("agent-console parser validates discarded lifecycle records before bounding", () => {
+test("agent-console parser bounds oversized lifecycle lists to the newest tail", () => {
   const validAgent = (index) => ({
     id: `run-${index}`,
     displayName: `Agent ${index}`,
@@ -700,31 +706,79 @@ test("agent-console parser validates discarded lifecycle records before bounding
     status: "completed",
     startedAt: index,
   });
-  const agents = Array.from({ length: 130 }, (_, index) => validAgent(index));
+  const validJob = (index) => ({
+    id: `job-${index}`,
+    type: "work-node",
+    label: `Job ${index}`,
+    status: "completed",
+    queuedAt: index,
+  });
+  const oversized = 5_000;
+  const agents = Array.from({ length: oversized }, (_, index) => validAgent(index));
+  const jobs = Array.from({ length: oversized }, (_, index) => validJob(index));
 
-  assert.equal(
-    parseAgentConsoleSnapshot({ profileId: "build", activity: [], agents, jobs: [] })
-      ?.agents.length,
-    128,
+  const parsed = parseAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents,
+    jobs,
+  });
+
+  // Only the newest 128 of 5000 survive, in order, for both projections.
+  assert.equal(parsed?.agents.length, 128);
+  assert.equal(parsed?.agents[0]?.id, `run-${oversized - 128}`);
+  assert.equal(parsed?.agents.at(-1)?.id, `run-${oversized - 1}`);
+  assert.deepEqual(
+    parsed?.agents.map((agent) => agent.startedAt),
+    Array.from({ length: 128 }, (_, index) => oversized - 128 + index),
   );
-  assert.equal(
-    parseAgentConsoleSnapshot({
-      profileId: "build",
-      activity: [],
-      // Malformed record inside the prefix that the 128-item cap discards.
-      agents: [{ ...validAgent(0), status: "thinking" }, ...agents.slice(1)],
-      jobs: [],
-    }),
-    undefined,
-  );
+  assert.equal(parsed?.jobs.length, 128);
+  assert.equal(parsed?.jobs[0]?.id, `job-${oversized - 128}`);
+  assert.equal(parsed?.jobs.at(-1)?.id, `job-${oversized - 1}`);
+});
+
+test("agent-console parser rejects a malformed record inside the discarded prefix", () => {
+  const validAgent = (index) => ({
+    id: `run-${index}`,
+    displayName: `Agent ${index}`,
+    agentType: "executor",
+    status: "completed",
+    startedAt: index,
+  });
+  const oversized = 5_000;
+  const agents = Array.from({ length: oversized }, (_, index) => validAgent(index));
+
+  // Index 0 and a deep interior index both sit far outside the retained tail.
+  for (const poisonedIndex of [0, 2_500]) {
+    const poisoned = agents.map((agent, index) =>
+      index === poisonedIndex ? { ...agent, status: "thinking" } : agent,
+    );
+    assert.equal(
+      parseAgentConsoleSnapshot({
+        profileId: "build",
+        activity: [],
+        agents: poisoned,
+        jobs: [],
+      }),
+      undefined,
+      `agent index ${poisonedIndex} must reject the snapshot`,
+    );
+  }
+
   assert.equal(
     parseAgentConsoleSnapshot({
       profileId: "build",
       activity: [],
       agents: [],
       jobs: [
-        { id: "job-0", type: "work-node", label: "Bad", status: "pending", queuedAt: 0 },
-        ...Array.from({ length: 130 }, (_, index) => ({
+        {
+          id: "job-0",
+          type: "work-node",
+          label: "Bad",
+          status: "pending",
+          queuedAt: 0,
+        },
+        ...Array.from({ length: 200 }, (_, index) => ({
           id: `job-${index + 1}`,
           type: "work-node",
           label: `Job ${index}`,
@@ -764,7 +818,10 @@ test("agent-console deduplicates usage event ids before capping", () => {
     agents: [],
     jobs: [],
     mainUsage: {
-      eventIds: Array.from({ length: 300 }, (_, index) => `usage-${index % 260}`),
+      eventIds: Array.from(
+        { length: 300 },
+        (_, index) => `usage-${index % 260}`,
+      ),
     },
   });
 
@@ -774,7 +831,12 @@ test("agent-console deduplicates usage event ids before capping", () => {
 
 test("agent-console snapshot factory copies nested manifest, decision, and graph arrays", () => {
   const policy = [
-    { id: "policy-1", label: "Repo rules", authority: "mandatory", digest: "abc" },
+    {
+      id: "policy-1",
+      label: "Repo rules",
+      authority: "mandatory",
+      digest: "abc",
+    },
   ];
   const options = [{ label: "Approve" }, { label: "Reject" }];
   const questions = [{ id: "approve", question: "Dispatch?", options }];
@@ -809,13 +871,24 @@ test("agent-console snapshot factory copies nested manifest, decision, and graph
       tokenEstimate: 10,
     },
     pendingDecision: { id: "decision-1", title: "Dispatch", questions },
-    workGraph: { id: "graph-1", goal: "Ship auth", constraints, approval: "approved", nodes },
+    workGraph: {
+      id: "graph-1",
+      goal: "Ship auth",
+      constraints,
+      approval: "approved",
+      nodes,
+    },
     activity: [],
     agents: [],
     jobs: [],
   });
 
-  policy.push({ id: "leak", label: "Leak", authority: "mandatory", digest: "zzz" });
+  policy.push({
+    id: "leak",
+    label: "Leak",
+    authority: "mandatory",
+    digest: "zzz",
+  });
   policy[0].label = "mutated";
   options.push({ label: "Leak" });
   questions.push({ id: "leak", question: "Leak?", options: [] });
@@ -833,8 +906,12 @@ test("agent-console snapshot factory copies nested manifest, decision, and graph
   assert.deepEqual(snapshot.workGraph?.constraints, ["No new dependencies"]);
   assert.equal(snapshot.workGraph?.nodes.length, 1);
   assert.deepEqual(snapshot.workGraph?.nodes[0]?.dependsOn, ["node-0"]);
-  assert.deepEqual(snapshot.workGraph?.nodes[0]?.fileOwnership, ["src/auth.ts"]);
-  assert.deepEqual(snapshot.workGraph?.nodes[0]?.acceptanceCriteria, ["Auth tests pass"]);
+  assert.deepEqual(snapshot.workGraph?.nodes[0]?.fileOwnership, [
+    "src/auth.ts",
+  ]);
+  assert.deepEqual(snapshot.workGraph?.nodes[0]?.acceptanceCriteria, [
+    "Auth tests pass",
+  ]);
   assert.deepEqual(snapshot.workGraph?.nodes[0]?.evidenceRefs, ["tool-call-1"]);
   assert.doesNotMatch(JSON.stringify(snapshot), /leak|mutated/);
 });
