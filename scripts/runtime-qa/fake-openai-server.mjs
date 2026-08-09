@@ -8,6 +8,12 @@ import {
   openAIToolCallShellOutput,
 } from "./constants.mjs";
 import { extractRuntimeQaUserRequest } from "./fake-gemini-server.mjs";
+import {
+  latestResponsesUserText,
+  respondWithResponsesContentStream,
+  respondWithResponsesToolCall,
+  responseItemText,
+} from "./fake-openai-responses.mjs";
 
 export function startOpenAIChatServer(onRequest, options = {}) {
   const streamChunkDelayMs = options.streamChunkDelayMs ?? 0;
@@ -21,15 +27,24 @@ export function startOpenAIChatServer(onRequest, options = {}) {
     req.on("end", () => {
       count += 1;
       const parsed = JSON.parse(body || "{}");
+      const isResponsesApi = req.url?.endsWith("/responses") ?? false;
       const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
+      const responseInput = Array.isArray(parsed.input) ? parsed.input : [];
       const lastMessage = messages.at(-1) ?? {};
-      const lastMessageRole = typeof lastMessage.role === "string" ? lastMessage.role : "";
-      const lastMessageContent = typeof lastMessage.content === "string" ? lastMessage.content : "";
-      const toolCallId = typeof lastMessage.tool_call_id === "string" ? lastMessage.tool_call_id : "";
+      const lastResponseItem = responseInput.at(-1) ?? {};
+      const lastMessageRole = isResponsesApi
+        ? lastResponseItem.type === "function_call_output" ? "tool" : lastResponseItem.role ?? ""
+        : typeof lastMessage.role === "string" ? lastMessage.role : "";
+      const lastMessageContent = isResponsesApi
+        ? responseItemText(lastResponseItem)
+        : typeof lastMessage.content === "string" ? lastMessage.content : "";
+      const toolCallId = isResponsesApi
+        ? typeof lastResponseItem.call_id === "string" ? lastResponseItem.call_id : ""
+        : typeof lastMessage.tool_call_id === "string" ? lastMessage.tool_call_id : "";
       const wantsStream = parsed.stream === true;
-      const userRequest = lastMessageRole === "user"
-        ? extractRuntimeQaUserRequest(lastMessageContent)
-        : "";
+      const userRequest = isResponsesApi
+        ? extractRuntimeQaUserRequest(latestResponsesUserText(responseInput))
+        : lastMessageRole === "user" ? extractRuntimeQaUserRequest(lastMessageContent) : "";
       onRequest({
         count,
         method: req.method,
@@ -38,7 +53,7 @@ export function startOpenAIChatServer(onRequest, options = {}) {
           && req.headers.authorization.startsWith("Bearer "),
         hasTools: JSON.stringify(parsed.tools ?? "").includes("run_shell"),
         stream: wantsStream,
-        messageCount: messages.length,
+        messageCount: isResponsesApi ? responseInput.length : messages.length,
         lastMessageRole,
         lastMessageContent,
         hasToolResult: lastMessageRole === "tool" && lastMessageContent.includes(openAIToolCallShellOutput),
@@ -51,10 +66,28 @@ export function startOpenAIChatServer(onRequest, options = {}) {
       // the fake Gemini server) so the count-based tool-call contract below
       // stays untouched for the tool-loop smokes.
       if (userRequest === openAIStreamPromptText) {
-        respondWithContentStream(res, {
-          chunkTexts: openAIStreamChunkTexts,
-          chunkDelayMs: streamChunkDelayMs,
-        });
+        if (isResponsesApi) {
+          respondWithResponsesContentStream(res, {
+            chunkTexts: openAIStreamChunkTexts,
+            chunkDelayMs: streamChunkDelayMs,
+          });
+        } else {
+          respondWithContentStream(res, {
+            chunkTexts: openAIStreamChunkTexts,
+            chunkDelayMs: streamChunkDelayMs,
+          });
+        }
+        return;
+      }
+      if (isResponsesApi) {
+        if (count === 1) {
+          respondWithResponsesToolCall(res);
+        } else {
+          respondWithResponsesContentStream(res, {
+            chunkTexts: [openAIToolCallFinalResponseText],
+            chunkDelayMs: 0,
+          });
+        }
         return;
       }
 

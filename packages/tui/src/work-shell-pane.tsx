@@ -255,6 +255,9 @@ export function WorkShellPane<
       && props.engine.moveContextInspectorCursor !== undefined,
     [activePanel.title, inputValue, props.engine],
   );
+  const shouldSuppressComposerKeysForTelemetry =
+    (activePanel.title === "Cache Telemetry" || activePanel.title === "Agent History")
+    && isRawComposerEmpty(inputValue);
   const attachmentLines = React.useMemo(() => {
     const lines = composerPreview.attachments.length > 0
       ? [
@@ -407,10 +410,13 @@ export function WorkShellPane<
           terminalColumns={terminalColumns}
           textColor={getWorkShellComposerTextColor()}
           {...(isSecureApiKeyEntry ? { mask: "•" } : {})}
-          cursorVisible={!shouldSuppressComposerKeysForInspector}
+          cursorVisible={
+            !shouldSuppressComposerKeysForInspector && !shouldSuppressComposerKeysForTelemetry
+          }
           {...(shouldSuppressComposerKeysForInspector
             ? { suppressInspectorKeys: true }
             : {})}
+          suppressTelemetryHotkeys={shouldSuppressComposerKeysForTelemetry}
           suppressInspectorMutationKeys={contextSourceActionsEnabled ?? false}
           suppressInspectorAdviceKeys={contextAdviceKeyActionsEnabled}
           suppressInspectorUndoKey={contextUndoKeyActionsEnabled}

@@ -2,6 +2,7 @@ import type {
   ContextPacketSourceCategory,
   ContextPacketViewItem,
   WorkGraph,
+  WorkNode,
 } from "@unclecode/contracts";
 
 export function estimateTokens(value: string): number {
@@ -49,18 +50,71 @@ export function buildWorkGraphContextItems(
       ...(goal ? { preview: goal } : {}),
       tokenEstimate: estimateTokens(`${summary} ${goal ?? ""}`),
     },
-    ...prioritizedNodes.slice(0, 4).map((node): ContextPacketViewItem => {
-      const title = node.title?.slice(0, 120) || node.id;
+    ...prioritizedNodes.slice(0, WORK_NODE_ITEM_LIMIT).map((node): ContextPacketViewItem => {
+      const title = condenseWorkNodeText(node.title, WORK_NODE_TITLE_LIMIT) || node.id;
+      const label = `${node.status} · ${title}`;
+      const preview = describeWorkNode(node, title);
       return {
         id: `goal-loop-${graph.id}-${node.id}`,
         category: "loop-trail",
-        label: `${node.status} · ${title}`,
+        label,
         reason: "current autonomous task state",
-        preview: `${node.dependsOn?.length ?? 0} dependencies · ${node.acceptanceCriteria?.length ?? 0} acceptance criteria`,
-        tokenEstimate: estimateTokens(`${node.status} ${title}`),
+        preview,
+        tokenEstimate: estimateTokens(`${label} ${preview}`),
+        metadata: {
+          kind: "work-node",
+          graphId: graph.id,
+          nodeId: node.id,
+          title,
+          ...(goal ? { goal } : {}),
+          constraints: [...(graph.constraints ?? [])],
+          status: node.status,
+          acceptanceCriteria: [...(node.acceptanceCriteria ?? [])],
+          evidenceRefs: [...node.evidenceRefs],
+        },
       };
     }),
   ];
+}
+
+const WORK_NODE_ITEM_LIMIT = 4;
+const WORK_NODE_TITLE_LIMIT = 120;
+const WORK_NODE_DETAIL_PREVIEW_LIMIT = 90;
+const WORK_NODE_LISTED_DETAIL_LIMIT = 2;
+
+function condenseWorkNodeText(value: string, limit: number): string {
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  return normalized.length <= limit ? normalized : `${normalized.slice(0, limit - 3)}...`;
+}
+
+function describeWorkNodeDetails(
+  values: readonly string[],
+): string | undefined {
+  const meaningful = values.filter((value) => value.trim().length > 0);
+  if (meaningful.length === 0) {
+    return undefined;
+  }
+  const listed = meaningful
+    .slice(0, WORK_NODE_LISTED_DETAIL_LIMIT)
+    .map((value) => condenseWorkNodeText(value, WORK_NODE_DETAIL_PREVIEW_LIMIT));
+  const remaining = meaningful.length - listed.length;
+  return remaining > 0 ? `${listed.join("; ")} (+${remaining} more)` : listed.join("; ");
+}
+
+/**
+ * Human-readable task preview. Counts alone ("2 acceptance criteria") tell the
+ * reader nothing actionable, so the row states what the task is, what would
+ * finish it, and what has been captured so far. The node's raw executor prompt
+ * is private and never appears here.
+ */
+function describeWorkNode(node: WorkNode, title: string): string {
+  const criteria = describeWorkNodeDetails(node.acceptanceCriteria ?? []);
+  const evidence = describeWorkNodeDetails(node.evidenceRefs);
+  return [
+    `Aim: ${title}`,
+    `Done when: ${criteria ?? "no acceptance criteria recorded yet"}`,
+    `Evidence: ${evidence ?? "nothing captured yet"}`,
+  ].join(" · ");
 }
 
 function isActiveGoalTaskStatus(

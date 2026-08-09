@@ -231,12 +231,28 @@ export type TerminalAsyncJobStatus = Extract<
  * replay idempotent — a provider turn contributes to either `mainUsage` or one
  * `AgentRun.usage`, never both.
  */
-export type AgentRunUsage = {
+export type AgentRunUsageRoute = {
+  readonly provider: string;
+  readonly model: string;
   readonly eventIds: readonly string[];
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly cacheReadTokens?: number;
+  readonly cacheWriteTokens?: number;
+  readonly cacheSavingsUsd?: number;
   readonly costUsd?: number;
+};
+
+export type AgentRunUsage = {
+  readonly eventIds: readonly string[];
+  /** Uncached input; cache reads and writes are tracked in their own buckets. */
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly cacheReadTokens?: number;
+  readonly cacheWriteTokens?: number;
+  readonly cacheSavingsUsd?: number;
+  readonly costUsd?: number;
+  readonly routes?: readonly AgentRunUsageRoute[];
 };
 
 /**
@@ -343,7 +359,10 @@ export function isCoalescibleToolActivity(activity: ToolActivity): boolean {
  * Drops any undeclared runtime fields (notably raw tool output) before a
  * console projection crosses the persistence boundary.
  */
-export function createAgentConsoleSnapshot(input: AgentConsoleSnapshot): AgentConsoleSnapshot {
+export function createAgentConsoleSnapshot(
+  input: Omit<AgentConsoleSnapshot, "agents" | "jobs"> &
+    Partial<Pick<AgentConsoleSnapshot, "agents" | "jobs">>,
+): AgentConsoleSnapshot {
   return {
     profileId: input.profileId,
     ...(input.manifest ? { manifest: copyPersistedPromptManifest(input.manifest) } : {}),
@@ -500,6 +519,20 @@ function copyAsyncJob(job: AsyncJob): AsyncJob {
       : { errorSummary: boundLifecycleSummary(job.errorSummary) }),
   };
 }
+function copyAgentRunUsageRoute(route: AgentRunUsageRoute): AgentRunUsageRoute {
+  return {
+    provider: route.provider,
+    model: route.model,
+    eventIds: [...new Set(route.eventIds)].slice(-MAX_PERSISTED_USAGE_EVENT_IDS),
+    ...(route.inputTokens === undefined ? {} : { inputTokens: route.inputTokens }),
+    ...(route.outputTokens === undefined ? {} : { outputTokens: route.outputTokens }),
+    ...(route.cacheReadTokens === undefined ? {} : { cacheReadTokens: route.cacheReadTokens }),
+    ...(route.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: route.cacheWriteTokens }),
+    ...(route.cacheSavingsUsd === undefined ? {} : { cacheSavingsUsd: route.cacheSavingsUsd }),
+    ...(route.costUsd === undefined ? {} : { costUsd: route.costUsd }),
+  };
+}
+
 
 function copyAgentRunUsage(usage: AgentRunUsage): AgentRunUsage {
   return {
@@ -509,6 +542,15 @@ function copyAgentRunUsage(usage: AgentRunUsage): AgentRunUsage {
     ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
     ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
     ...(usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
+    ...(usage.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: usage.cacheWriteTokens }),
+    ...(usage.cacheSavingsUsd === undefined ? {} : { cacheSavingsUsd: usage.cacheSavingsUsd }),
+    ...(usage.routes === undefined
+      ? {}
+      : {
+          routes: usage.routes
+            .slice(-MAX_PERSISTED_USAGE_ROUTES)
+            .map(copyAgentRunUsageRoute),
+        }),
     ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
   };
 }
@@ -519,6 +561,7 @@ const TOOL_ACTIVITY_KIND_SET = new Set<string>(TOOL_ACTIVITY_KINDS);
 const TOOL_ACTIVITY_STATUS_SET = new Set<string>(TOOL_ACTIVITY_STATUSES);
 const MAX_PERSISTED_AGENT_RUNS = 128;
 const MAX_PERSISTED_ASYNC_JOBS = 128;
+const MAX_PERSISTED_USAGE_ROUTES = 32;
 const MAX_PERSISTED_USAGE_EVENT_IDS = 256;
 const AGENT_RUN_STATUS_SET = new Set<string>(AGENT_RUN_STATUSES);
 const ASYNC_JOB_STATUS_SET = new Set<string>(ASYNC_JOB_STATUSES);
@@ -960,16 +1003,71 @@ function parseAsyncJob(value: unknown): AsyncJob | undefined {
   });
 }
 
+function parseAgentRunUsageRoute(value: unknown): AgentRunUsageRoute | undefined {
+  const record = asRecord(value);
+  const eventIds = parseStringList(record?.eventIds);
+  if (
+    !record
+    || typeof record.provider !== "string"
+    || record.provider.trim().length === 0
+    || typeof record.model !== "string"
+    || record.model.trim().length === 0
+    || !eventIds
+    || (hasOwn(record, "inputTokens") && !isNonNegativeInteger(record.inputTokens))
+    || (hasOwn(record, "outputTokens") && !isNonNegativeInteger(record.outputTokens))
+    || (hasOwn(record, "cacheReadTokens") && !isNonNegativeInteger(record.cacheReadTokens))
+    || (hasOwn(record, "cacheWriteTokens") && !isNonNegativeInteger(record.cacheWriteTokens))
+    || (hasOwn(record, "cacheSavingsUsd") && !isNonNegativeFinite(record.cacheSavingsUsd))
+    || (hasOwn(record, "costUsd") && !isNonNegativeFinite(record.costUsd))
+  ) {
+    return undefined;
+  }
+  return copyAgentRunUsageRoute({
+    provider: record.provider.trim(),
+    model: record.model.trim(),
+    eventIds,
+    ...(typeof record.inputTokens === "number" ? { inputTokens: record.inputTokens } : {}),
+    ...(typeof record.outputTokens === "number" ? { outputTokens: record.outputTokens } : {}),
+    ...(typeof record.cacheReadTokens === "number"
+      ? { cacheReadTokens: record.cacheReadTokens }
+      : {}),
+    ...(typeof record.cacheWriteTokens === "number"
+      ? { cacheWriteTokens: record.cacheWriteTokens }
+      : {}),
+    ...(typeof record.cacheSavingsUsd === "number"
+      ? { cacheSavingsUsd: record.cacheSavingsUsd }
+      : {}),
+    ...(typeof record.costUsd === "number" ? { costUsd: record.costUsd } : {}),
+  });
+}
+
+function parseAgentRunUsageRoutes(value: unknown): readonly AgentRunUsageRoute[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const routes: AgentRunUsageRoute[] = [];
+  for (const entry of value.slice(-MAX_PERSISTED_USAGE_ROUTES)) {
+    const route = parseAgentRunUsageRoute(entry);
+    if (!route) return undefined;
+    routes.push(route);
+  }
+  return routes;
+}
+
 function parseAgentRunUsage(value: unknown): AgentRunUsage | undefined {
   const record = asRecord(value);
   const eventIds = parseStringList(record?.eventIds);
+  const routes = record && hasOwn(record, "routes")
+    ? parseAgentRunUsageRoutes(record.routes)
+    : undefined;
   if (
     !record
     || !eventIds
     || (hasOwn(record, "inputTokens") && !isNonNegativeInteger(record.inputTokens))
     || (hasOwn(record, "outputTokens") && !isNonNegativeInteger(record.outputTokens))
     || (hasOwn(record, "cacheReadTokens") && !isNonNegativeInteger(record.cacheReadTokens))
+    || (hasOwn(record, "cacheWriteTokens") && !isNonNegativeInteger(record.cacheWriteTokens))
+    || (hasOwn(record, "cacheSavingsUsd") && !isNonNegativeFinite(record.cacheSavingsUsd))
     || (hasOwn(record, "costUsd") && !isNonNegativeFinite(record.costUsd))
+    || (hasOwn(record, "routes") && !routes)
   ) {
     return undefined;
   }
@@ -981,6 +1079,13 @@ function parseAgentRunUsage(value: unknown): AgentRunUsage | undefined {
     ...(typeof record.cacheReadTokens === "number"
       ? { cacheReadTokens: record.cacheReadTokens }
       : {}),
+    ...(typeof record.cacheWriteTokens === "number"
+      ? { cacheWriteTokens: record.cacheWriteTokens }
+      : {}),
+    ...(typeof record.cacheSavingsUsd === "number"
+      ? { cacheSavingsUsd: record.cacheSavingsUsd }
+      : {}),
     ...(typeof record.costUsd === "number" ? { costUsd: record.costUsd } : {}),
+    ...(routes === undefined ? {} : { routes }),
   });
 }

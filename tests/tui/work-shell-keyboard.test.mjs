@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { render } from "ink";
 import React from "react";
+import CursorContext from "../../node_modules/ink/build/components/CursorContext.js";
 
 import {
   Composer,
@@ -393,6 +394,51 @@ test("Work pane routes repeated Ctrl+O to work context without submitting text",
   assert.deepEqual(submittedLines, []);
 });
 
+test("Work pane keeps plain c and a keystrokes in the composer", async () => {
+  for (const word of ["cat", "agent"]) {
+    const { engine, submittedLines } = createWorkShellPaneEngine();
+    const { stdin, instance, getOutput } = renderWithInput(
+      React.createElement(WorkShellPane, {
+        provider: "OpenAI",
+        model: "gpt-5.4",
+        mode: "yolo",
+        engine,
+        cwd: "/Users/parkeungje/project/unclecode",
+        resolveComposerInput: async (value) => ({
+          prompt: value,
+          attachments: [],
+          transcriptText: value,
+        }),
+        getSuggestions: (value) =>
+          getWorkShellSlashSuggestions(value, {
+            provider: "openai",
+            currentModel: "gpt-5.4",
+          }),
+        onExit: () => {},
+        shouldBlockSlashSubmit: (line) =>
+          shouldBlockSlashSubmit(line, {
+            provider: "openai",
+            currentModel: "gpt-5.4",
+          }),
+        getReasoningLabel: () => "default medium",
+        isReasoningSupported: () => true,
+      }),
+    );
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      stdin.write(word);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      assert.deepEqual(submittedLines, []);
+      assert.match(getLastWorkFrame(getOutput()), new RegExp(`› ${word}(?:▏)?`));
+    } finally {
+      instance.unmount();
+      instance.cleanup();
+    }
+  }
+});
+
 test("Work pane submits an explicit model command from the composer and closes the picker", async () => {
   const { engine, submittedLines } = createWorkShellPaneEngine();
   const { stdin, instance, getOutput, clearOutput } = renderWithInput(
@@ -482,4 +528,38 @@ test("Work pane preserves split fast model command chunks before Enter", async (
   assert.doesNotMatch(output, /gpt-5\.4\/model/);
   const finalFrame = getLastWorkFrame(output);
   assert.doesNotMatch(finalFrame, /Model picker/);
+});
+
+test("Composer publishes the current Hangul cursor position in the same render", async () => {
+  const positions = [];
+  const cursorContext = {
+    setCursorPosition(position) {
+      positions.push(position);
+    },
+  };
+  const composerProps = {
+    onChange: () => {},
+    onSubmit: () => {},
+    terminalColumns: 20,
+  };
+  const renderComposer = (value) => React.createElement(
+    CursorContext.Provider,
+    { value: cursorContext },
+    React.createElement(Composer, { ...composerProps, value }),
+  );
+  const { instance } = renderWithInput(renderComposer(""));
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  positions.length = 0;
+  instance.rerender(renderComposer("한"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const finalPosition = positions.at(-1);
+  instance.unmount();
+  instance.cleanup();
+
+  assert.deepEqual(
+    finalPosition,
+    { x: 2, y: 0 },
+    "one double-width Hangul grapheme should publish the terminal cursor in column 2",
+  );
 });

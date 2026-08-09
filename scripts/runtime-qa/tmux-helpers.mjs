@@ -6,13 +6,14 @@ const runtimeTmuxSocketName = `unclecode-runtime-qa-${process.pid}`;
 const DEFAULT_PANE_WAIT_TIMEOUT_MS = 30_000;
 const PANE_POLL_INTERVAL_MS = 100;
 export const READY_LAST_STATUS_PATTERN = /Ready · last(?: reply)?(?: \d+(?:\.\d+)?s)?/;
+export const IDLE_COMPOSER_PATTERN = /Enter send · Shift\+Enter newline/;
 
 export function runtimeTmuxArgs(args) {
   return ["-f", "/dev/null", "-L", runtimeTmuxSocketName, ...args];
 }
 
 export function typedComposerLinePattern(line) {
-  return new RegExp(`(?:^|\\n)\\s*[›>]\\s*${escapeRegExp(line)}▏`, "u");
+  return new RegExp(`(?:^|\\n)\\s*[›>]\\s*${escapeRegExp(line)}(?:▏)?\\s*(?=\\n|$)`, "u");
 }
 
 export function runtimeTmuxEnvironment(env = process.env) {
@@ -62,9 +63,9 @@ export async function capturePane(session, paneFile) {
   return capture.stdout;
 }
 
-export async function waitForIdlePromptDeck(session, paneFile) {
+export async function waitForIdleComposer(session, paneFile) {
   await waitForPane(session, READY_LAST_STATUS_PATTERN, paneFile);
-  await waitForPane(session, /prompt deck/, paneFile);
+  await waitForPane(session, IDLE_COMPOSER_PATTERN, paneFile);
   await sleep(100);
   return capturePane(session, paneFile);
 }

@@ -14,6 +14,7 @@
     "@unclecode/lsp-bridge": "file:../../packages/lsp-bridge",
     "@unclecode/mcp-host": "file:../../packages/mcp-host",
     "@unclecode/orchestrator": "file:../../packages/orchestrator",
+    "@unclecode/pi-bridge": "file:../../packages/pi-bridge",
     "@unclecode/providers": "file:../../packages/providers",
     "@unclecode/runtime-broker": "file:../../packages/runtime-broker",
     "@unclecode/session-store": "file:../../packages/session-store",

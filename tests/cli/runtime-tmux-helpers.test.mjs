@@ -31,6 +31,7 @@ test("typed composer pattern waits for the actual input line instead of static c
   assert.doesNotMatch("Type a task, /context, or @file.", pattern);
   assert.doesNotMatch("\n  › /context  Inspect the context packet.", pattern);
   assert.match("\n  › /context▏", pattern);
+  assert.match("\n  › /context\n", pattern);
 });
 
 test("runtime QA tmux children stay interactive under CI runners", () => {

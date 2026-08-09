@@ -68,6 +68,8 @@ function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinComm
     "clear",
     "help",
     "context",
+    "cache",
+    "agents",
     "reload",
     "status",
     "sessions",

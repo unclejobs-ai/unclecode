@@ -86,6 +86,8 @@ test("loadResumedWorkSession restores persisted trace mode and reasoning overrid
       status: "completed",
       startedAt: 1,
     }],
+    agents: [],
+    jobs: [],
   });
 });
 

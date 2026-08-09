@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { createAgentOpsStore } from "@unclecode/agentops-db";
 import { createCrpRuntime } from "../../apps/unclecode-cli/src/work-runtime-crp.ts";
 import {
   createContextPacketView,
@@ -292,5 +293,156 @@ test("CRP runtime ledger reads stay project-scoped and track protected action st
   } finally {
     rmSync(workspaceRoot, { recursive: true, force: true });
     rmSync(otherRoot, { recursive: true, force: true });
+  }
+});
+
+test("runbook intent, constraints and evidence survive the work graph, the CRP store and packet selection", async () => {
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-crp-runbook-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+
+  try {
+    const runtime = createCrpTestRuntime(fakeHome);
+    const packet = await runtime.resolveContextPacket({
+      cwd: workspaceRoot,
+      sessionId: "work-crp-runbook",
+      contextSummaryLines: [],
+      bridgeLines: [],
+      memoryLines: [],
+      traceLines: [],
+      workGraph: {
+        id: "graph-desk",
+        goal: "Ship the context desk",
+        constraints: ["no new dependencies"],
+        approval: "approved",
+        nodes: [
+          {
+            id: "node-desk",
+            title: "Wire the desk",
+            prompt: "PRIVATE_PROMPT wire the Context Desk to the runbook lane",
+            status: "requires_action",
+            dependsOn: [],
+            fileOwnership: ["packages/tui/src/work-shell-view.tsx"],
+            acceptanceCriteria: ["Runbook lane renders"],
+            evidenceRefs: ["evidence/desk-render.txt"],
+          },
+        ],
+      },
+    });
+
+    const item = [...packet.included, ...packet.excluded].find(
+      (entry) => entry.id === "goal-loop-graph-desk-node-desk",
+    );
+    assert.deepEqual(item?.metadata, {
+      kind: "work-node",
+      graphId: "graph-desk",
+      nodeId: "node-desk",
+      title: "Wire the desk",
+      goal: "Ship the context desk",
+      constraints: ["no new dependencies"],
+      status: "requires_action",
+      acceptanceCriteria: ["Runbook lane renders"],
+      evidenceRefs: ["evidence/desk-render.txt"],
+    });
+    assert.match(item?.preview ?? "", /Aim: Wire the desk/);
+    assert.match(item?.preview ?? "", /Done when: Runbook lane renders/);
+    assert.match(item?.preview ?? "", /Evidence: evidence\/desk-render\.txt/);
+    assert.doesNotMatch(JSON.stringify(item), /PRIVATE_PROMPT|work-shell-view\.tsx/);
+
+    const replacementPacket = await runtime.resolveContextPacket({
+      cwd: workspaceRoot,
+      sessionId: "work-crp-runbook",
+      contextSummaryLines: [],
+      bridgeLines: [],
+      memoryLines: [],
+      traceLines: [],
+      workGraph: {
+        id: "graph-replacement",
+        goal: "Ship the replacement plan",
+        constraints: [],
+        approval: "approved",
+        nodes: [{
+          id: "node-replacement",
+          title: "Verify the replacement",
+          prompt: "PRIVATE_PROMPT verify replacement",
+          status: "ready",
+          dependsOn: [],
+          fileOwnership: [],
+          acceptanceCriteria: ["Only current work remains"],
+          evidenceRefs: [],
+        }],
+      },
+    });
+    const replacementItems = [...replacementPacket.included, ...replacementPacket.excluded];
+    assert.equal(
+      replacementItems.some((entry) => entry.id === "goal-loop-graph-desk-node-desk"),
+      false,
+      "work nodes from the previous graph must not survive into the next packet",
+    );
+    assert.ok(
+      replacementItems.some(
+        (entry) => entry.id === "goal-loop-graph-replacement-node-replacement",
+      ),
+    );
+  } finally {
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("a failed undo reports a human failure and keeps the action recoverable", async () => {
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-crp-undo-failure-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+  const storeHome = path.join(fakeHome, ".unclecode", "agentops");
+  const contextLine = "Critical source: src/context-desk.ts must stay visible";
+
+  try {
+    const runtime = createCrpTestRuntime(fakeHome);
+    const input = packetInput(workspaceRoot, "work-crp-undo-failure", contextLine);
+    await runtime.resolveContextPacket(input);
+
+    const hold = runtime.mutateContextSource({ kind: "hold-back", id: "workspace-context-1" });
+    assert.equal(hold?.canUndo, true);
+    assert.equal(hold?.succeeded, true);
+
+    const projectId = runtime.getProjectId();
+    const evictor = createAgentOpsStore({ home: storeHome });
+    try {
+      assert.equal(
+        evictor.deleteContextSourcesByIdPrefix({ projectId, idPrefix: "workspace-context-1" }),
+        1,
+      );
+    } finally {
+      evictor.close();
+    }
+
+    const failed = runtime.undoLastContextSourceAction();
+    assert.equal(failed?.action, "undo");
+    assert.match(failed?.message ?? "", /Could not undo hold-back on/);
+    assert.match(failed?.message ?? "", /Nothing changed, and the undo is still waiting/);
+    assert.equal(failed?.canUndo, true);
+    assert.equal(failed?.succeeded, false);
+    assert.equal(
+      runtime.listContextSourceActionReceipts().some((receipt) => receipt.action === "undo"),
+      false,
+      "a failed undo applies nothing, so it must stay out of the applied-mutation log",
+    );
+
+    // The source comes back on the next turn, and the retained entry still
+    // carries the state the hold-back replaced.
+    await runtime.resolveContextPacket(input);
+    const suppressor = createAgentOpsStore({ home: storeHome });
+    try {
+      suppressor.forgetContextSource(projectId, "workspace-context-1");
+    } finally {
+      suppressor.close();
+    }
+
+    const recovered = runtime.undoLastContextSourceAction();
+    assert.equal(recovered?.action, "undo");
+    assert.equal(recovered?.before?.includedInModel, false);
+    assert.equal(recovered?.after?.includedInModel, true);
+    assert.equal(recovered?.canUndo, false);
+    assert.equal(runtime.listContextSourceActionReceipts().at(-1), recovered);
+  } finally {
+    rmSync(workspaceRoot, { recursive: true, force: true });
   }
 });

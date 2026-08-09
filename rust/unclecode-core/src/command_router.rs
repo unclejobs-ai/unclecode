@@ -120,6 +120,18 @@ const WORK_SHELL_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
         aliases: &[],
     },
     BuiltinSlashCommand {
+        command: "/cache",
+        route: &["cache"],
+        description: "Inspect prompt-cache reuse, writes, and token savings.",
+        aliases: &[],
+    },
+    BuiltinSlashCommand {
+        command: "/agents",
+        route: &["agents"],
+        description: "Inspect current-session agent runs and costs.",
+        aliases: &[],
+    },
+    BuiltinSlashCommand {
         command: "/model",
         route: &["model"],
         description: "Show the current model and available model picks.",
@@ -465,6 +477,8 @@ fn work_shell_builtin_submit_command(line: &str) -> Option<Value> {
         "/clear" => Some(json!({ "kind": "clear" })),
         "/help" => Some(json!({ "kind": "help" })),
         "/context" | "/con" => Some(json!({ "kind": "context" })),
+        "/cache" => Some(json!({ "kind": "cache" })),
+        "/agents" => Some(json!({ "kind": "agents" })),
         "/reload" => Some(json!({ "kind": "reload" })),
         "/status" => Some(json!({ "kind": "status" })),
         "/sessions" => Some(json!({ "kind": "sessions" })),

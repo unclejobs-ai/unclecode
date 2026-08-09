@@ -10,7 +10,7 @@ import {
   pressEnter,
   runTmux,
   typeKeys,
-  waitForIdlePromptDeck,
+  waitForIdleComposer,
   waitForPane,
 } from "./tmux-helpers.mjs";
 
@@ -51,6 +51,11 @@ export async function runKoreanBusyTuiSmoke({ port, tmp, observations }) {
     const typedPromptLine = typedAnsiCapture.stdout
       .split(/\r?\n/)
       .find((line) => line.includes(koreanBusyPromptText)) ?? "";
+    assert.match(
+      typedPromptLine,
+      new RegExp(escapeRegExp(koreanBusyPromptText)),
+      "Korean prompt input should render before submission",
+    );
     assert.doesNotMatch(
       typedPromptLine,
       /\x1b\[7m/,
@@ -69,11 +74,10 @@ export async function runKoreanBusyTuiSmoke({ port, tmp, observations }) {
     );
 
     await waitForPane(session, new RegExp(escapeRegExp(koreanBusyResponseText)), paneFile);
-    const pane = await waitForIdlePromptDeck(session, paneFile);
+    const pane = await waitForIdleComposer(session, paneFile);
     const requestDelta = observations.length - beforeRequests;
 
     assert.equal(requestDelta, 1, `Korean busy QA should make one provider call, got ${requestDelta}`);
-    assert.match(pane, new RegExp(escapeRegExp(koreanBusyPromptText)));
     assert.match(pane, new RegExp(escapeRegExp(koreanBusyResponseText)));
     assert.match(busyPane, /preparing context|thinking|Working|Enter queues follow-up/);
     assert.doesNotMatch(

@@ -121,6 +121,7 @@ test("runtime QA stays split into inspectable modules", () => {
     "constants.mjs",
     "fake-anthropic-server.mjs",
     "fake-gemini-server.mjs",
+    "fake-openai-responses.mjs",
     "fake-openai-server.mjs",
     "provider-smokes.mjs",
     "report-evidence.mjs",

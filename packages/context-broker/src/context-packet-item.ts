@@ -4,18 +4,39 @@ import type {
   ContextSourceMetadata,
 } from "@unclecode/contracts";
 
+/**
+ * Project stored source metadata into its packet-view form. Every field is
+ * copied explicitly so the stored-only condensed-history `sourceEventPreviews`
+ * (raw trace text) can never reach the view, and so a future stored-only field
+ * has to be opted in rather than leaking by default.
+ */
 export function toContextPacketViewMetadata(
   metadata: ContextSourceMetadata,
 ): ContextPacketViewMetadata {
-  return {
-    kind: "condensed-history",
-    sourceEventIds: [...metadata.sourceEventIds],
-    summary: metadata.summary,
-    recomputeReason: metadata.recomputeReason,
-    compactedEventCount: metadata.compactedEventCount,
-    recentEventCount: metadata.recentEventCount,
-    compression: { ...metadata.compression },
-  };
+  switch (metadata.kind) {
+    case "condensed-history":
+      return {
+        kind: "condensed-history",
+        sourceEventIds: [...metadata.sourceEventIds],
+        summary: metadata.summary,
+        recomputeReason: metadata.recomputeReason,
+        compactedEventCount: metadata.compactedEventCount,
+        recentEventCount: metadata.recentEventCount,
+        compression: { ...metadata.compression },
+      };
+    case "work-node":
+      return {
+        kind: "work-node",
+        graphId: metadata.graphId,
+        nodeId: metadata.nodeId,
+        title: metadata.title,
+        ...(metadata.goal === undefined ? {} : { goal: metadata.goal }),
+        constraints: [...metadata.constraints],
+        status: metadata.status,
+        acceptanceCriteria: [...metadata.acceptanceCriteria],
+        evidenceRefs: [...metadata.evidenceRefs],
+      };
+  }
 }
 
 export function cloneContextPacketViewItem(item: ContextPacketViewItem): ContextPacketViewItem {
@@ -57,16 +78,6 @@ export function cloneContextPacketViewItem(item: ContextPacketViewItem): Context
     ...(item.previewKind === undefined ? {} : { previewKind: item.previewKind }),
     ...(item.metadata === undefined
       ? {}
-      : {
-          metadata: {
-            kind: "condensed-history",
-            sourceEventIds: [...item.metadata.sourceEventIds],
-            summary: item.metadata.summary,
-            recomputeReason: item.metadata.recomputeReason,
-            compactedEventCount: item.metadata.compactedEventCount,
-            recentEventCount: item.metadata.recentEventCount,
-            compression: { ...item.metadata.compression },
-          },
-        }),
+      : { metadata: toContextPacketViewMetadata(item.metadata) }),
   };
 }

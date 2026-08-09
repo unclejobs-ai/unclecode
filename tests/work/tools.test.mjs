@@ -4,61 +4,68 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { toolHandlers } from "@unclecode/orchestrator";
+import { createToolRuntime, resolveModeExecutionPolicyProfile } from "@unclecode/orchestrator";
 
-test("run_shell executes a simple command on the current platform", async () => {
-  const original = process.env.UNCLECODE_ALLOW_RUN_SHELL;
-  process.env.UNCLECODE_ALLOW_RUN_SHELL = "1";
+function runtime({ shell = false } = {}) {
+  return createToolRuntime({
+    policyProfile: resolveModeExecutionPolicyProfile({
+      mode: "default",
+      envShellOptIn: shell,
+    }),
+    runtimeMode: "local",
+  });
+}
 
-  try {
-    const result = await toolHandlers.run_shell({ command: "pwd" }, process.cwd());
+test("run_shell executes a simple command once execution policy grants shell", async () => {
+  const result = await runtime({ shell: true }).executor.execute({
+    toolName: "run_shell",
+    input: { command: "pwd" },
+    cwd: process.cwd(),
+  });
 
-    assert.match(result.content, /unclecode/);
-  } finally {
-    if (original === undefined) {
-      delete process.env.UNCLECODE_ALLOW_RUN_SHELL;
-    } else {
-      process.env.UNCLECODE_ALLOW_RUN_SHELL = original;
-    }
-  }
+  assert.equal(result.isError ?? false, false);
+  assert.match(result.content, /unclecode/);
 });
 
 test("run_shell aborts long-running Rust shell tools promptly", async () => {
-  const original = process.env.UNCLECODE_ALLOW_RUN_SHELL;
-  process.env.UNCLECODE_ALLOW_RUN_SHELL = "1";
   const abortController = new AbortController();
   const command = process.platform === "win32" ? "Start-Sleep -Seconds 10" : "sleep 10";
   const startedAt = Date.now();
 
-  try {
-    const result = toolHandlers.run_shell({ command }, process.cwd(), { signal: abortController.signal });
-    setTimeout(() => abortController.abort(), 50);
+  const pending = runtime({ shell: true }).executor.execute({
+    toolName: "run_shell",
+    input: { command },
+    cwd: process.cwd(),
+    signal: abortController.signal,
+  });
+  setTimeout(() => abortController.abort(), 50);
 
-    await assert.rejects(result, { name: "AbortError" });
-    assert.ok(Date.now() - startedAt < 3000, "abort should not wait for the shell command to finish");
-  } finally {
-    if (original === undefined) {
-      delete process.env.UNCLECODE_ALLOW_RUN_SHELL;
-    } else {
-      process.env.UNCLECODE_ALLOW_RUN_SHELL = original;
-    }
-  }
+  await assert.rejects(pending, { name: "AbortError" });
+  assert.ok(Date.now() - startedAt < 3000, "abort should not wait for the shell command to finish");
 });
 
-test("run_shell is blocked by default without explicit opt-in", async () => {
-  const original = process.env.UNCLECODE_ALLOW_RUN_SHELL;
+test("run_shell fails closed by default without ever reading process.env at call time", async () => {
+  const previous = process.env.UNCLECODE_ALLOW_RUN_SHELL;
+  const gated = runtime();
 
   try {
-    delete process.env.UNCLECODE_ALLOW_RUN_SHELL;
-    await assert.rejects(
-      () => toolHandlers.run_shell({ command: "pwd" }, process.cwd()),
-      /UNCLECODE_ALLOW_RUN_SHELL=1/,
-    );
+    // Setting the env var after construction must not retroactively grant shell.
+    process.env.UNCLECODE_ALLOW_RUN_SHELL = "1";
+
+    const result = await gated.executor.execute({
+      toolName: "run_shell",
+      input: { command: "pwd" },
+      cwd: process.cwd(),
+    });
+
+    assert.equal(result.isError, true);
+    assert.match(result.content, /UNCLECODE_ALLOW_RUN_SHELL=1/);
+    assert.doesNotMatch(result.content, /^\/.*unclecode/);
   } finally {
-    if (original === undefined) {
+    if (previous === undefined) {
       delete process.env.UNCLECODE_ALLOW_RUN_SHELL;
     } else {
-      process.env.UNCLECODE_ALLOW_RUN_SHELL = original;
+      process.env.UNCLECODE_ALLOW_RUN_SHELL = previous;
     }
   }
 });
@@ -71,7 +78,11 @@ test("read_file rejects sibling path escape attempts", async () => {
     writeFileSync(path.join(sibling), "secret", "utf8");
 
     await assert.rejects(
-      () => toolHandlers.read_file({ path: "../" + path.basename(sibling) }, root),
+      () => runtime().executor.execute({
+        toolName: "read_file",
+        input: { path: "../" + path.basename(sibling) },
+        cwd: root,
+      }),
       /Path escapes working directory/,
     );
   } finally {
@@ -91,7 +102,11 @@ test("read_file rejects symlink escape attempts", async () => {
     symlinkSync(outsideFile, linkPath);
 
     await assert.rejects(
-      () => toolHandlers.read_file({ path: "linked-secret.txt" }, root),
+      () => runtime().executor.execute({
+        toolName: "read_file",
+        input: { path: "linked-secret.txt" },
+        cwd: root,
+      }),
       /Path escapes working directory/,
     );
   } finally {
@@ -106,13 +121,25 @@ test("search_text does not execute shell payloads embedded in the query", async 
   try {
     writeFileSync(path.join(root, "note.txt"), "hello world", "utf8");
 
-    const result = await toolHandlers.search_text(
-      { query: '$(printf injected >&2)', path: '.' },
-      root,
-    );
+    const result = await runtime().executor.execute({
+      toolName: "search_text",
+      input: { query: '$(printf injected >&2)', path: '.' },
+      cwd: root,
+    });
 
     assert.doesNotMatch(result.content, /injected/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("unregistered tool names fail closed instead of reaching a handler", async () => {
+  const result = await runtime().executor.execute({
+    toolName: "definitely_not_a_tool",
+    input: {},
+    cwd: process.cwd(),
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content, /not a registered tool/);
 });

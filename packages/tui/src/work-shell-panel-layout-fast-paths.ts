@@ -44,7 +44,11 @@ function resolvePanelDisplayMode(panelTitle: string): WorkShellPanelDisplayMode 
   if (panelTitle === "Context") {
     return "hidden";
   }
-  if (panelTitle === "Context expanded") {
+  if (
+    panelTitle === "Context expanded"
+    || panelTitle === "Cache Telemetry"
+    || panelTitle === "Agent History"
+  ) {
     return "overlay";
   }
   return "bottom";

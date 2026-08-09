@@ -13,6 +13,10 @@ import {
   type TurnOrchestratorTraceListener,
 } from "./turn-orchestrator.js";
 import { runRustCommandSync } from "./rust-command.js";
+import {
+  runExecutorWithLifecycle,
+  type ExecutorLifecycleTraceEvent,
+} from "./work-agent-lifecycle.js";
 
 type ReasoningLike = {
   readonly effort: string;
@@ -38,7 +42,8 @@ export type OrchestratedWorkAgentTraceEvent<TraceEvent extends { readonly type: 
   | OrchestratorStepTraceEvent
   | WorkProposedTraceEvent
   | WorkApprovedTraceEvent
-  | WorkStatusTraceEvent;
+  | WorkStatusTraceEvent
+  | ExecutorLifecycleTraceEvent;
 
 export interface OrchestratedWorkTurnAgent<
   Attachment,
@@ -250,16 +255,6 @@ export class WorkAgent<
     this.reasoning = input.reasoning;
     this.model = input.model;
     this.runExecutableGuardianChecks = input.runExecutableGuardianChecks;
-    this.applyAutoModeShellPermission();
-  }
-
-  // YOLO / ultrawork are explicit full-autonomy opt-ins, so the agent may run
-  // shell commands (open files, run builds, etc.) without the extra
-  // UNCLECODE_ALLOW_RUN_SHELL env gate. Other modes keep the default gate.
-  private applyAutoModeShellPermission(): void {
-    if (this.mode === "yolo" || this.mode === "ultrawork") {
-      process.env.UNCLECODE_ALLOW_RUN_SHELL = "1";
-    }
   }
 
   clear(): void {
@@ -309,26 +304,6 @@ export class WorkAgent<
     return { tasks: staticTasks, usedLlm: plannerInvoked };
   }
 
-  private async runExecutorTurn(
-    prompt: string,
-    options: { readonly signal?: AbortSignal | undefined },
-  ): Promise<{ text: string }> {
-    if (!this.createExecutorAgent) {
-      return this.runInternalTurn(prompt, [], options);
-    }
-
-    const executor = await this.createExecutorAgent({
-      mode: this.mode,
-      model: this.model,
-      reasoning: this.reasoning,
-    });
-    executor.setTraceListener(this.traceListener ? (event) => this.emitTrace(event) : undefined);
-    try {
-      return await executor.runTurn(prompt, [], options);
-    } finally {
-      executor.clear();
-    }
-  }
 
   setTraceListener(listener?: ((event: OrchestratedWorkAgentTraceEvent<TraceEvent>) => void) | undefined): void {
     this.traceListener = listener;
@@ -345,9 +320,10 @@ export class WorkAgent<
     }
   }
 
+  // Shell autonomy for yolo/ultrawork is granted per agent instance by the
+  // execution policy profile, never through process.env.
   updateMode(mode: string): void {
     this.mode = mode;
-    this.applyAutoModeShellPermission();
     this.directAgent.updateMode?.(mode);
   }
 
@@ -365,7 +341,21 @@ export class WorkAgent<
         return { tasks, usedLlm };
       },
       executeComplexTask: async (task) => {
-        const result = await this.runExecutorTurn(task.prompt, options);
+        const result = await runExecutorWithLifecycle<Attachment, TraceEvent, Reasoning>({
+          taskId: task.id,
+          label: task.summary,
+          prompt: task.prompt,
+          options,
+          directAgent: this.directAgent,
+          createExecutorAgent: this.createExecutorAgent,
+          settings: { mode: this.mode, model: this.model, reasoning: this.reasoning },
+          ...(this.traceListener
+            ? {
+                onTrace: (event) => this.emitTrace(event),
+                directTraceListener: (event) => this.emitTrace(event),
+              }
+            : {}),
+        });
         return { id: task.id, summary: result.text, status: "completed" };
       },
       isComplexTaskSuccessful: (taskResult) => taskResult.status === "completed",

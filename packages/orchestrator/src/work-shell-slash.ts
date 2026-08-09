@@ -45,6 +45,8 @@ function getWorkShellCommandRegistry(
 
 const WORK_SHELL_QUICK_PICK_COMMANDS = [
   "/context",
+  "/cache",
+  "/agents",
   "/model",
   "/auth status",
   "/queue",

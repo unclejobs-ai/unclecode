@@ -59,6 +59,8 @@ test("session-store persists only the safe agent console projection", () => {
         startedAt: 1,
         summary: "raw output is omitted",
       }],
+      agents: [],
+      jobs: [],
     },
   });
   assert.equal("output" in checkpoint.agentConsole.activity[0], false);

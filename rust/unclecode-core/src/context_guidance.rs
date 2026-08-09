@@ -483,7 +483,10 @@ mod tests {
             .iter()
             .find(|source| source.get("authority").and_then(Value::as_str) == Some("mandatory"))
             .expect("mandatory source metadata");
-        assert_eq!(source.get("authority").and_then(Value::as_str), Some("mandatory"));
+        assert_eq!(
+            source.get("authority").and_then(Value::as_str),
+            Some("mandatory")
+        );
         assert!(source
             .get("sha256")
             .and_then(Value::as_str)
@@ -495,7 +498,10 @@ mod tests {
             .iter()
             .find(|source| source.get("label").and_then(Value::as_str) == Some("SKILL autopilot"))
             .expect("skill source metadata");
-        assert_eq!(skill.get("authority").and_then(Value::as_str), Some("profile-eligible"));
+        assert_eq!(
+            skill.get("authority").and_then(Value::as_str),
+            Some("profile-eligible")
+        );
         assert!(!guidance_sources
             .iter()
             .any(|source| source.to_string().contains("Keep moving.")));
@@ -524,7 +530,10 @@ mod tests {
 
         let output = build_workspace_guidance_json(&root, None, "[]").expect("guidance");
         let parsed: Value = serde_json::from_str(&output).expect("json");
-        assert_eq!(parsed.get("guidanceSources"), Some(&Value::Array(Vec::new())));
+        assert_eq!(
+            parsed.get("guidanceSources"),
+            Some(&Value::Array(Vec::new()))
+        );
 
         let _ = fs::remove_dir_all(root);
     }

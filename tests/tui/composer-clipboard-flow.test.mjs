@@ -275,7 +275,7 @@ test("exact /attach clipboard uses injectable capture and does not submit the sl
     stdin.write("\r");
     await waitForCondition(() => captureCalls === 1);
     await waitForCondition(() => getOutput().includes("[1/5]"));
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
   } finally {
     instance.unmount();
@@ -500,7 +500,7 @@ test("Composer injectable capture defaults are overridable without OS clipboard 
 
   const { stdin, instance } = renderWithInput(React.createElement(Harness));
   try {
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 100));
     stdin.write("\u0016");
     await waitForCondition(() => captureCalls === 1 && attached.length === 1);
   } finally {

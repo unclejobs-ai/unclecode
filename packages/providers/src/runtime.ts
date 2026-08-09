@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type {
   ClipboardImageAttachment,
   ExecutionTraceEvent,
@@ -5,11 +7,26 @@ import type {
   ToolMetadata,
 } from "@unclecode/contracts";
 
+import { estimateCostUsd } from "./model-pricing.js";
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 import type { ReasoningSupport } from "./types.js";
 
+/**
+ * Canonical provider usage. Input buckets are disjoint: `inputTokens` excludes
+ * tokens reported in `cacheReadTokens` and `cacheWriteTokens`.
+ */
+export type ProviderTokenUsage = {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens?: number;
+  readonly cacheWriteTokens?: number;
+};
+
 export type AgentTurnResult = {
   text: string;
+  steps?: number;
+  costUsd?: number;
+  usage?: ProviderTokenUsage;
 };
 
 export type ProviderToolTraceEvent = Extract<
@@ -194,19 +211,20 @@ export type ToolResult = {
   content: string;
 };
 
-export type ToolHandlerOptions = {
+export type ToolExecutionRequest = {
+  readonly toolName: string;
+  readonly input: Record<string, unknown>;
+  readonly cwd: string;
   readonly signal?: AbortSignal | undefined;
 };
 
-export type ToolHandler = (
-  input: Record<string, unknown>,
-  cwd: string,
-  options?: ToolHandlerOptions,
-) => Promise<ToolResult>;
+export type ToolExecutor = {
+  execute(request: ToolExecutionRequest): Promise<ToolResult>;
+};
 
 export type ToolRuntime = {
   readonly definitions: readonly ToolDefinition[];
-  readonly handlers: Readonly<Record<string, ToolHandler>>;
+  readonly executor: ToolExecutor;
 };
 
 export type ProviderQueryMessage =
@@ -236,7 +254,105 @@ export type ProviderQueryResult = {
   readonly content: string;
   readonly actions: ReadonlyArray<ProviderQueryAction>;
   readonly costUsd: number;
+  readonly usage?: ProviderTokenUsage;
 };
+
+function createProviderTokenUsage(
+  inputTokens: number,
+  outputTokens: number,
+  cacheReadTokens = 0,
+  cacheWriteTokens = 0,
+  inputIncludesCacheRead = false,
+): ProviderTokenUsage {
+  const normalizedCacheRead = Math.max(0, cacheReadTokens);
+  const normalizedCacheWrite = Math.max(0, cacheWriteTokens);
+  const normalizedInput = Math.max(0, inputTokens);
+  return {
+    inputTokens: inputIncludesCacheRead
+      ? Math.max(0, normalizedInput - normalizedCacheRead)
+      : normalizedInput,
+    outputTokens: Math.max(0, outputTokens),
+    ...(normalizedCacheRead > 0 ? { cacheReadTokens: normalizedCacheRead } : {}),
+    ...(normalizedCacheWrite > 0 ? { cacheWriteTokens: normalizedCacheWrite } : {}),
+  };
+}
+
+function mergeProviderTokenUsage(
+  current: ProviderTokenUsage,
+  next: ProviderTokenUsage,
+): ProviderTokenUsage {
+  const cacheReadTokens = (current.cacheReadTokens ?? 0) + (next.cacheReadTokens ?? 0);
+  const cacheWriteTokens = (current.cacheWriteTokens ?? 0) + (next.cacheWriteTokens ?? 0);
+  return {
+    inputTokens: current.inputTokens + next.inputTokens,
+    outputTokens: current.outputTokens + next.outputTokens,
+    ...(cacheReadTokens > 0 ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
+  };
+}
+
+function estimateProviderUsageCostUsd(
+  modelId: string,
+  usage: ProviderTokenUsage,
+): number {
+  try {
+    return estimateCostUsd({
+      modelId,
+      promptTokens:
+        usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0),
+      completionTokens: usage.outputTokens,
+    });
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Folds one model response cost into the running turn total. Unknown pricing
+ * arrives as 0 and non-finite or negative values are provider noise, so only
+ * real positive costs contribute.
+ */
+function accumulateResponseCostUsd(costUsd: number, responseCostUsd: number): number {
+  return Number.isFinite(responseCostUsd) && responseCostUsd > 0
+    ? costUsd + responseCostUsd
+    : costUsd;
+}
+
+function createAgentTurnResult(
+  text: string,
+  usage: ProviderTokenUsage,
+  costUsd: number,
+  steps: number,
+): AgentTurnResult {
+  const hasUsage = usage.inputTokens > 0
+    || usage.outputTokens > 0
+    || (usage.cacheReadTokens ?? 0) > 0
+    || (usage.cacheWriteTokens ?? 0) > 0;
+  return {
+    text,
+    steps,
+    ...(hasUsage ? { usage } : {}),
+    ...(costUsd > 0 ? { costUsd } : {}),
+  };
+}
+
+function createProviderQueryResult(
+  content: string,
+  actions: ReadonlyArray<ProviderQueryAction>,
+  costUsd: number,
+  usage: ProviderTokenUsage,
+): ProviderQueryResult {
+  const hasUsage = usage.inputTokens > 0
+    || usage.outputTokens > 0
+    || (usage.cacheReadTokens ?? 0) > 0
+    || (usage.cacheWriteTokens ?? 0) > 0;
+  return {
+    content,
+    actions,
+    costUsd,
+    ...(hasUsage ? { usage } : {}),
+  };
+}
 
 export type ProviderQueryOptions = {
   readonly tools?: readonly ToolDefinition[];
@@ -284,7 +400,14 @@ export type CreateRuntimeProviderArgs = {
 
 const EMPTY_TOOL_RUNTIME: ToolRuntime = {
   definitions: [],
-  handlers: {},
+  executor: {
+    async execute(request: ToolExecutionRequest): Promise<ToolResult> {
+      return {
+        isError: true,
+        content: `No tool runtime is registered for tool "${request.toolName}".`,
+      };
+    },
+  },
 };
 
 type RustRequestSpec = {
@@ -303,6 +426,21 @@ type RustOpenAIChatResponse = {
   readonly actions: RustProviderAction[];
   readonly promptTokens: number;
   readonly completionTokens: number;
+  readonly cacheReadTokens: number;
+  readonly costUsd: number;
+};
+
+type RustOpenAIChatCompletionResult = {
+  readonly content: string;
+  readonly reasoning: string;
+  readonly toolCalls: Array<{
+    readonly id: string;
+    readonly function: { readonly name: string; readonly arguments: string };
+  }>;
+  readonly actions: RustProviderAction[];
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly cacheReadTokens: number;
   readonly costUsd: number;
 };
 
@@ -372,6 +510,7 @@ export class OpenAIProvider implements LlmProvider {
   private readonly messages: OpenAIMessage[];
   private readonly runtime: "api" | "codex";
   private readonly openAIAccountId: string | null;
+  private readonly promptCacheKey: string;
 
   constructor(args: {
     apiKey: string;
@@ -396,6 +535,7 @@ export class OpenAIProvider implements LlmProvider {
     this.messages = [{ role: "system", content: this.systemPrompt }];
     this.runtime = args.runtime ?? "api";
     this.openAIAccountId = args.openAIAccountId ?? null;
+    this.promptCacheKey = createOpenAIPromptCacheKey(this.cwd, this.systemPrompt);
   }
 
   updateRuntimeSettings(settings: {
@@ -428,6 +568,8 @@ export class OpenAIProvider implements LlmProvider {
       function?: { name?: string; arguments?: string };
     }>;
     actions: RustProviderAction[];
+    usage: ProviderTokenUsage;
+    costUsd: number;
   }> {
     // Live streaming needs a fetch transport. When an explicit proxy is
     // configured we stay on the proxy-aware Rust transport instead, because
@@ -446,6 +588,12 @@ export class OpenAIProvider implements LlmProvider {
         toolsJson,
         includeTools: toolPolicy.includeTools,
         reasoningEffort: resolveRuntimeReasoningEffort(this.reasoning),
+        ...(isOfficialOpenAIRequestUrl(requestSpec.url)
+          ? {
+              promptCacheKey: this.promptCacheKey,
+              promptCacheRetention: resolveOpenAIPromptCacheRetention(this.model),
+            }
+          : {}),
       });
       try {
         response = await postOpenAIChatWithLiveStream({
@@ -490,6 +638,14 @@ export class OpenAIProvider implements LlmProvider {
         content: parsed.content,
         tool_calls: parsed.toolCalls,
         actions: parsed.actions,
+        usage: createProviderTokenUsage(
+          parsed.promptTokens,
+          parsed.completionTokens,
+          parsed.cacheReadTokens,
+          0,
+          true,
+        ),
+        costUsd: parsed.costUsd,
       };
     }
 
@@ -514,6 +670,14 @@ export class OpenAIProvider implements LlmProvider {
         function: { name: toolCall.name, arguments: toolCall.argumentsJson },
       })),
       actions: parsed.actions,
+      usage: createProviderTokenUsage(
+        parsed.promptTokens,
+        parsed.completionTokens,
+        parsed.cacheReadTokens,
+        0,
+        true,
+      ),
+      costUsd: parsed.costUsd,
     };
   }
 
@@ -524,6 +688,8 @@ export class OpenAIProvider implements LlmProvider {
       function?: { name?: string; arguments?: string };
     }>;
     actions: RustProviderAction[];
+    usage: ProviderTokenUsage;
+    costUsd: number;
   }> {
     const inputJson = buildOpenAIResponsesInput(this.messages);
     const toolsJson = buildOpenAIResponsesTools(this.toolRuntime.definitions);
@@ -536,6 +702,8 @@ export class OpenAIProvider implements LlmProvider {
       toolsJson,
       toolChoice: toolPolicy.toolChoice,
       reasoningEffort: resolveRuntimeReasoningEffort(this.reasoning),
+      promptCacheKey: this.promptCacheKey,
+      promptCacheRetention: "24h",
     });
     const response = await this.postCodexResponses(body, options.signal);
 
@@ -549,9 +717,12 @@ export class OpenAIProvider implements LlmProvider {
     for (const trace of parsed.traces) {
       emitProviderTrace(this.traceListener, trace);
     }
+    const usage = parsed.usage;
     return {
       ...parsed.message,
       actions: parsed.actions,
+      usage,
+      costUsd: estimateProviderUsageCostUsd(this.model, usage),
     };
   }
 
@@ -598,6 +769,9 @@ export class OpenAIProvider implements LlmProvider {
 
     try {
       let assistantText = "";
+      let usage = createProviderTokenUsage(0, 0);
+      let costUsd = 0;
+      let steps = 0;
 
       for (let i = 0; i < maxIterations; i += 1) {
         throwIfAborted(options.signal);
@@ -608,6 +782,9 @@ export class OpenAIProvider implements LlmProvider {
         assistantText = typeof message?.content === "string" ? message.content : "";
         const toolCalls = message?.tool_calls ?? [];
         const actions = message.actions;
+        steps += 1;
+        usage = mergeProviderTokenUsage(usage, message.usage);
+        costUsd = accumulateResponseCostUsd(costUsd, message.costUsd);
 
         const actionPlan = resolveProviderIterationActionPlan(i, actions.length, maxIterations, assistantText);
         const toolResultOutcomes = actionPlan.shouldDispatchTools
@@ -615,7 +792,7 @@ export class OpenAIProvider implements LlmProvider {
           "openai",
           actions,
           this.toolRuntime.definitions,
-          this.toolRuntime.handlers,
+          this.toolRuntime.executor,
           this.cwd,
           this.traceListener,
           options,
@@ -636,11 +813,16 @@ export class OpenAIProvider implements LlmProvider {
         );
         assistantText = turnStep.assistantText;
         if (turnStep.decision === "final" || turnStep.decision === "limit") {
-          return { text: turnStep.text };
+          return createAgentTurnResult(turnStep.text, usage, costUsd, steps);
         }
       }
 
-      return { text: resolveProviderLoopDecision(maxIterations - 1, 1, maxIterations, assistantText).text };
+      return createAgentTurnResult(
+        resolveProviderLoopDecision(maxIterations - 1, 1, maxIterations, assistantText).text,
+        usage,
+        costUsd,
+        steps,
+      );
     } catch (error) {
       if (isAbortError(error)) {
         this.messages.splice(rollbackLength);
@@ -671,15 +853,21 @@ export class OpenAIProvider implements LlmProvider {
 
     const toolsJson = buildOpenAIChatTools(tools);
     const toolPolicy = resolveProviderToolPolicy("openai-chat-query", tools);
+    const requestSpec = buildOpenAIRequestSpec("api", this.apiKey);
     const body = buildOpenAIChatBody({
       model,
       messagesJson,
       toolsJson,
       includeTools: toolPolicy.includeTools,
       reasoningEffort: resolveRuntimeReasoningEffort(reasoning),
+      ...(isOfficialOpenAIRequestUrl(requestSpec.url)
+        ? {
+            promptCacheKey: this.promptCacheKey,
+            promptCacheRetention: resolveOpenAIPromptCacheRetention(model),
+          }
+        : {}),
     });
 
-    const requestSpec = buildOpenAIRequestSpec("api", this.apiKey);
     const response = await this.postText(requestSpec.url, requestSpec.headers, body);
 
     if (!response.ok) {
@@ -688,7 +876,18 @@ export class OpenAIProvider implements LlmProvider {
 
     const parsed = parseOpenAIChatResponse(response.text, model);
 
-    return { content: parsed.content, actions: parsed.actions, costUsd: parsed.costUsd };
+    return createProviderQueryResult(
+      parsed.content,
+      parsed.actions,
+      parsed.costUsd,
+      createProviderTokenUsage(
+        parsed.promptTokens,
+        parsed.completionTokens,
+        parsed.cacheReadTokens,
+        0,
+        true,
+      ),
+    );
   }
 
   private async postText(
@@ -770,6 +969,9 @@ export class AnthropicProvider implements LlmProvider {
 
     try {
       let assistantText = "";
+      let usage = createProviderTokenUsage(0, 0);
+      let costUsd = 0;
+      let steps = 0;
 
       for (let i = 0; i < maxIterations; i += 1) {
         throwIfAborted(options.signal);
@@ -783,6 +985,17 @@ export class AnthropicProvider implements LlmProvider {
           ? parseAnthropicResponse(await this.requireInjectedClient().messages.create(request), this.model)
           : parseAnthropicResponseText(await this.postMessagesWithRust(JSON.stringify(request), options.signal), this.model);
         throwIfAborted(options.signal);
+        steps += 1;
+        usage = mergeProviderTokenUsage(
+          usage,
+          createProviderTokenUsage(
+            parsed.promptTokens,
+            parsed.completionTokens,
+            parsed.cacheReadTokens,
+            parsed.cacheWriteTokens,
+          ),
+        );
+        costUsd = accumulateResponseCostUsd(costUsd, parsed.costUsd);
 
         const actionPlan = resolveProviderIterationActionPlan(i, parsed.actions.length, maxIterations, parsed.content);
         const toolResultOutcomes = actionPlan.shouldDispatchTools
@@ -790,7 +1003,7 @@ export class AnthropicProvider implements LlmProvider {
           "anthropic",
           parsed.actions,
           this.toolRuntime.definitions,
-          this.toolRuntime.handlers,
+          this.toolRuntime.executor,
           this.cwd,
           this.traceListener,
           options,
@@ -811,13 +1024,16 @@ export class AnthropicProvider implements LlmProvider {
         );
         assistantText = turnStep.assistantText;
         if (turnStep.decision === "final" || turnStep.decision === "limit") {
-          return { text: turnStep.text };
+          return createAgentTurnResult(turnStep.text, usage, costUsd, steps);
         }
       }
 
-      return {
-        text: resolveProviderLoopDecision(maxIterations - 1, 1, maxIterations, assistantText).text,
-      };
+      return createAgentTurnResult(
+        resolveProviderLoopDecision(maxIterations - 1, 1, maxIterations, assistantText).text,
+        usage,
+        costUsd,
+        steps,
+      );
     } catch (error) {
       if (isAbortError(error)) {
         this.messages.splice(rollbackLength);
@@ -844,7 +1060,17 @@ export class AnthropicProvider implements LlmProvider {
       ? parseAnthropicResponse(await this.requireInjectedClient().messages.create(request), model)
       : parseAnthropicResponseText(await this.postMessagesWithRust(JSON.stringify(request)), model);
 
-    return { content: parsed.content, actions: parsed.actions, costUsd: parsed.costUsd };
+    return createProviderQueryResult(
+      parsed.content,
+      parsed.actions,
+      parsed.costUsd,
+      createProviderTokenUsage(
+        parsed.promptTokens,
+        parsed.completionTokens,
+        parsed.cacheReadTokens,
+        parsed.cacheWriteTokens,
+      ),
+    );
   }
 
   private async postMessagesWithRust(body: string, signal?: AbortSignal | undefined): Promise<string> {
@@ -919,6 +1145,7 @@ type RustGeminiResponse = {
   readonly actions: RustProviderAction[];
   readonly promptTokens: number;
   readonly completionTokens: number;
+  readonly cacheReadTokens: number;
   readonly costUsd: number;
   readonly modelContent: GeminiContent;
 };
@@ -928,6 +1155,8 @@ type RustAnthropicResponse = {
   readonly actions: RustProviderAction[];
   readonly promptTokens: number;
   readonly completionTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
   readonly costUsd: number;
   readonly assistantMessage: AnthropicMessage;
 };
@@ -988,6 +1217,9 @@ export class GeminiProvider implements LlmProvider {
 
     try {
       let assistantText = "";
+      let usage = createProviderTokenUsage(0, 0);
+      let costUsd = 0;
+      let steps = 0;
 
       for (let i = 0; i < maxIterations; i += 1) {
         throwIfAborted(options.signal);
@@ -1002,6 +1234,18 @@ export class GeminiProvider implements LlmProvider {
           ? parseGeminiResponse(await this.requireInjectedClient().models.generateContent(request), this.model)
           : parseGeminiResponseText(await this.postGenerateContentWithRust(this.model, request, options.signal), this.model);
         throwIfAborted(options.signal);
+        steps += 1;
+        usage = mergeProviderTokenUsage(
+          usage,
+          createProviderTokenUsage(
+            parsed.promptTokens,
+            parsed.completionTokens,
+            parsed.cacheReadTokens,
+            0,
+            true,
+          ),
+        );
+        costUsd = accumulateResponseCostUsd(costUsd, parsed.costUsd);
 
         const actionPlan = resolveProviderIterationActionPlan(i, parsed.actions.length, maxIterations, parsed.content);
         const toolResultOutcomes = actionPlan.shouldDispatchTools
@@ -1009,7 +1253,7 @@ export class GeminiProvider implements LlmProvider {
           "gemini",
           parsed.actions,
           this.toolRuntime.definitions,
-          this.toolRuntime.handlers,
+          this.toolRuntime.executor,
           this.cwd,
           this.traceListener,
           options,
@@ -1030,13 +1274,16 @@ export class GeminiProvider implements LlmProvider {
         );
         assistantText = turnStep.assistantText;
         if (turnStep.decision === "final" || turnStep.decision === "limit") {
-          return { text: turnStep.text };
+          return createAgentTurnResult(turnStep.text, usage, costUsd, steps);
         }
       }
 
-      return {
-        text: resolveProviderLoopDecision(maxIterations - 1, 1, maxIterations, assistantText).text,
-      };
+      return createAgentTurnResult(
+        resolveProviderLoopDecision(maxIterations - 1, 1, maxIterations, assistantText).text,
+        usage,
+        costUsd,
+        steps,
+      );
     } catch (error) {
       if (isAbortError(error)) {
         this.contents.splice(rollbackLength);
@@ -1066,7 +1313,18 @@ export class GeminiProvider implements LlmProvider {
       ? parseGeminiResponse(await this.requireInjectedClient().models.generateContent(request), model)
       : parseGeminiResponseText(await this.postGenerateContentWithRust(model, request), model);
 
-    return { content: parsed.content, actions: parsed.actions, costUsd: parsed.costUsd };
+    return createProviderQueryResult(
+      parsed.content,
+      parsed.actions,
+      parsed.costUsd,
+      createProviderTokenUsage(
+        parsed.promptTokens,
+        parsed.completionTokens,
+        parsed.cacheReadTokens,
+        0,
+        true,
+      ),
+    );
   }
 
   private async postGenerateContentWithRust(
@@ -1151,6 +1409,7 @@ function parseOpenAIResponsesMessage(
   };
   actions: RustProviderAction[];
   traces: ProviderToolTraceEvent[];
+  usage: ProviderTokenUsage;
 } {
   const raw = runRustCommandSync(
     ["rust", "provider", "openai-responses-message", model],
@@ -1181,12 +1440,37 @@ function parseOpenAIResponsesMessage(
       }>;
     },
     actions: parseProviderActions(Array.isArray(parsed.actions) ? parsed.actions : []),
+    usage: parseOpenAIResponsesUsage(sseText),
     traces: [
       ...assistantDeltaTraces,
       ...rustTraces,
     ],
   };
 }
+function parseOpenAIResponsesUsage(sseText: string): ProviderTokenUsage {
+  const payloads = parseSseDataJsonPayloads(sseText);
+  for (let index = payloads.length - 1; index >= 0; index -= 1) {
+    const payload = payloads[index];
+    const response = isRecord(payload?.response) ? payload.response : undefined;
+    const usage = response && isRecord(response.usage)
+      ? response.usage
+      : isRecord(payload?.usage)
+        ? payload.usage
+        : undefined;
+    if (!usage) {
+      continue;
+    }
+    const inputTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
+    const outputTokens = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
+    const details = isRecord(usage.input_tokens_details) ? usage.input_tokens_details : undefined;
+    const cacheReadTokens = details && typeof details.cached_tokens === "number"
+      ? details.cached_tokens
+      : 0;
+    return createProviderTokenUsage(inputTokens, outputTokens, cacheReadTokens, 0, true);
+  }
+  return createProviderTokenUsage(0, 0);
+}
+
 
 function parseOpenAIResponsesAssistantDeltaTraces(
   sseText: string,
@@ -1349,6 +1633,27 @@ function hasExplicitProxyConfig(): boolean {
     "ALL_PROXY",
     "all_proxy",
   ].some((key) => Boolean(process.env[key]?.trim()));
+}
+function createOpenAIPromptCacheKey(cwd: string, systemPrompt: string): string {
+  return `unclecode-${createHash("sha256")
+    .update(cwd)
+    .update("\0")
+    .update(systemPrompt)
+    .digest("hex")
+    .slice(0, 40)}`;
+}
+
+function resolveOpenAIPromptCacheRetention(model: string): "24h" | undefined {
+  const match = /^gpt-5\.(\d+)/i.exec(model.trim());
+  return match && Number(match[1]) >= 2 ? "24h" : undefined;
+}
+
+function isOfficialOpenAIRequestUrl(value: string): boolean {
+  try {
+    return new URL(value).hostname.toLowerCase() === "api.openai.com";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1827,6 +2132,7 @@ function parseOpenAIChatResponse(raw: string, model?: string): RustOpenAIChatRes
       })),
     promptTokens: parsed.promptTokens,
     completionTokens: parsed.completionTokens,
+    cacheReadTokens: typeof parsed.cacheReadTokens === "number" ? parsed.cacheReadTokens : 0,
     costUsd: parsed.costUsd,
     actions: parseProviderActions(Array.isArray(parsed.actions) ? parsed.actions : []),
   };
@@ -2030,11 +2336,18 @@ function runOpenAIChatQueryWithRust(input: {
   if (!isRecord(parsed) || typeof parsed.content !== "string" || !Array.isArray(parsed.actions)) {
     throw new Error("Rust OpenAI query returned an invalid response envelope.");
   }
-  return {
-    content: parsed.content,
-    actions: parseProviderActions(parsed.actions),
-    costUsd: typeof parsed.costUsd === "number" ? parsed.costUsd : 0,
-  };
+  return createProviderQueryResult(
+    parsed.content,
+    parseProviderActions(parsed.actions),
+    typeof parsed.costUsd === "number" ? parsed.costUsd : 0,
+    createProviderTokenUsage(
+      typeof parsed.promptTokens === "number" ? parsed.promptTokens : 0,
+      typeof parsed.completionTokens === "number" ? parsed.completionTokens : 0,
+      typeof parsed.cacheReadTokens === "number" ? parsed.cacheReadTokens : 0,
+      0,
+      true,
+    ),
+  );
 }
 
 function runOpenAIChatCompletionWithRust(input: {
@@ -2043,12 +2356,7 @@ function runOpenAIChatCompletionWithRust(input: {
   readonly messages: readonly OpenAIMessage[];
   readonly tools: readonly ToolDefinition[];
   readonly reasoningEffort?: string | undefined;
-}): {
-  readonly content: string;
-  readonly reasoning: string;
-  readonly toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>;
-  readonly actions: RustProviderAction[];
-} {
+}): RustOpenAIChatCompletionResult {
   const raw = runRustCommandSync(
     [
       "rust",
@@ -2071,12 +2379,7 @@ async function runOpenAIChatCompletionWithRustAsync(input: {
   readonly tools: readonly ToolDefinition[];
   readonly reasoningEffort?: string | undefined;
   readonly signal?: AbortSignal | undefined;
-}): Promise<{
-  readonly content: string;
-  readonly reasoning: string;
-  readonly toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>;
-  readonly actions: RustProviderAction[];
-}> {
+}): Promise<RustOpenAIChatCompletionResult> {
   const raw = (await runRustCommand(
     [
       "rust",
@@ -2093,14 +2396,16 @@ async function runOpenAIChatCompletionWithRustAsync(input: {
   return parseOpenAIChatCompletionRustResult(raw);
 }
 
-function parseOpenAIChatCompletionRustResult(raw: string): {
-  readonly content: string;
-  readonly reasoning: string;
-  readonly toolCalls: Array<{ id: string; function: { name: string; arguments: string } }>;
-  readonly actions: RustProviderAction[];
-} {
+function parseOpenAIChatCompletionRustResult(raw: string): RustOpenAIChatCompletionResult {
   const parsed = JSON.parse(raw) as unknown;
-  if (!isRecord(parsed) || typeof parsed.content !== "string" || !Array.isArray(parsed.toolCalls)) {
+  if (
+    !isRecord(parsed)
+    || typeof parsed.content !== "string"
+    || !Array.isArray(parsed.toolCalls)
+    || typeof parsed.promptTokens !== "number"
+    || typeof parsed.completionTokens !== "number"
+    || typeof parsed.costUsd !== "number"
+  ) {
     throw new Error("Rust OpenAI chat completion returned an invalid response envelope.");
   }
   return {
@@ -2118,6 +2423,10 @@ function parseOpenAIChatCompletionRustResult(raw: string): {
           },
         };
       }),
+    promptTokens: parsed.promptTokens,
+    completionTokens: parsed.completionTokens,
+    cacheReadTokens: typeof parsed.cacheReadTokens === "number" ? parsed.cacheReadTokens : 0,
+    costUsd: parsed.costUsd,
     actions: parseProviderActions(Array.isArray(parsed.actions) ? parsed.actions : []),
   };
 }
@@ -2192,6 +2501,8 @@ function buildOpenAIChatBody(input: {
   readonly toolsJson: string;
   readonly includeTools: boolean;
   readonly reasoningEffort?: string | undefined;
+  readonly promptCacheKey?: string | undefined;
+  readonly promptCacheRetention?: string | undefined;
 }): string {
   return runRustCommandSync(
     [
@@ -2201,6 +2512,8 @@ function buildOpenAIChatBody(input: {
       input.model,
       input.reasoningEffort ?? "-",
       input.includeTools ? "yes" : "no",
+      input.promptCacheKey ?? "-",
+      input.promptCacheRetention ?? "-",
     ],
     process.cwd(),
     process.env,
@@ -2250,6 +2563,8 @@ function buildOpenAICodexBody(input: {
   readonly toolsJson: string;
   readonly toolChoice: "auto" | "none";
   readonly reasoningEffort?: string | undefined;
+  readonly promptCacheKey?: string | undefined;
+  readonly promptCacheRetention?: string | undefined;
 }): string {
   return runRustCommandSync(
     [
@@ -2259,6 +2574,8 @@ function buildOpenAICodexBody(input: {
       input.model,
       input.reasoningEffort ?? "-",
       input.toolChoice,
+      input.promptCacheKey ?? "-",
+      input.promptCacheRetention ?? "-",
     ],
     process.cwd(),
     process.env,
@@ -2466,6 +2783,7 @@ function parseGeminiResponsePayload(responseJson: string, model?: string): RustG
     actions: parseProviderActions(parsed.actions),
     promptTokens: parsed.promptTokens,
     completionTokens: parsed.completionTokens,
+    cacheReadTokens: typeof parsed.cacheReadTokens === "number" ? parsed.cacheReadTokens : 0,
     costUsd: parsed.costUsd,
     modelContent: parsed.modelContent as GeminiContent,
   };
@@ -2487,7 +2805,7 @@ function buildAnthropicMessagesRequest(input: {
   if (
     !isRecord(parsed)
     || typeof parsed.model !== "string"
-    || typeof parsed.system !== "string"
+    || (parsed.system !== undefined && !Array.isArray(parsed.system))
     || !Array.isArray(parsed.messages)
     || !Array.isArray(parsed.tools)
   ) {
@@ -2530,6 +2848,8 @@ function parseAnthropicResponsePayload(responseJson: string, model?: string): Ru
     actions: parseProviderActions(parsed.actions),
     promptTokens: parsed.promptTokens,
     completionTokens: parsed.completionTokens,
+    cacheReadTokens: typeof parsed.cacheReadTokens === "number" ? parsed.cacheReadTokens : 0,
+    cacheWriteTokens: typeof parsed.cacheWriteTokens === "number" ? parsed.cacheWriteTokens : 0,
     costUsd: parsed.costUsd,
     assistantMessage: parsed.assistantMessage as AnthropicMessage,
   };
@@ -2686,17 +3006,17 @@ async function executeProviderToolDispatches(
   provider: RuntimeProviderName,
   actions: readonly RustProviderAction[],
   definitions: readonly ToolDefinition[],
-  handlers: Readonly<Record<string, ToolHandler>>,
+  executor: ToolExecutor,
   cwd: string,
   traceListener?: ProviderTraceListener,
   options: ProviderTurnOptions = {},
 ): Promise<ProviderToolResultOutcome[]> {
-  const dispatchPlan = buildProviderToolDispatchPlan(provider, actions, handlers);
+  const dispatchPlan = buildProviderToolDispatchPlan(provider, actions, definitions);
   const outcomes: ProviderToolResultOutcome[] = [...dispatchPlan.outcomes];
   for (const batch of buildProviderToolDispatchBatches(dispatchPlan.dispatches, definitions)) {
     throwIfAborted(options.signal);
     const executions = await Promise.all(batch.map((action) =>
-      executeProviderToolAction(provider, action, handlers, cwd, traceListener, options)
+      executeProviderToolAction(provider, action, executor, cwd, traceListener, options)
     ));
     outcomes.push(...executions.map((execution) => execution.outcome));
   }
@@ -2706,21 +3026,22 @@ async function executeProviderToolDispatches(
 async function executeProviderToolAction(
   provider: RuntimeProviderName,
   action: RustProviderAction,
-  handlers: Readonly<Record<string, ToolHandler>>,
+  executor: ToolExecutor,
   cwd: string,
   traceListener?: ProviderTraceListener,
   options: ProviderTurnOptions = {},
 ): Promise<ProviderToolExecutionResult> {
   throwIfAborted(options.signal);
-  const handler = handlers[action.tool];
-  if (!handler) {
-    throw new Error(`Rust dispatch plan selected missing handler: ${action.tool}`);
-  }
 
   const started = buildProviderToolExecutionStart(provider, action.tool, action.callId, action.input);
   emitProviderTrace(traceListener, started.trace);
   try {
-    const result = await handler(action.input, cwd, { signal: options.signal });
+    const result = await executor.execute({
+      toolName: action.tool,
+      input: action.input,
+      cwd,
+      signal: options.signal,
+    });
     throwIfAborted(options.signal);
     const execution = attachDisplayToolInput(
       buildProviderToolExecutionFinishResult(provider, action.tool, action.callId, started.startedAt, result),
@@ -2962,13 +3283,13 @@ function parseProviderToolExecutionResultPayload(
 function buildProviderToolDispatchPlan(
   provider: "openai" | "anthropic" | "gemini",
   actions: readonly RustProviderAction[],
-  handlers: Readonly<Record<string, ToolHandler>>,
+  definitions: readonly ToolDefinition[],
 ): ProviderToolDispatchPlan {
   const raw = runRustCommandSync(
     ["rust", "provider", "tool-dispatch-plan", provider],
     process.cwd(),
     process.env,
-    `${JSON.stringify(actions)}\0${JSON.stringify(Object.keys(handlers))}`,
+    `${JSON.stringify(actions)}\0${JSON.stringify(definitions.map((definition) => definition.name))}`,
   ).trim();
   const parsed = JSON.parse(raw) as unknown;
   if (!isRecord(parsed) || parsed.provider !== provider || !Array.isArray(parsed.dispatches) || !Array.isArray(parsed.outcomes)) {

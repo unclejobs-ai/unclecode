@@ -104,6 +104,7 @@ export type StartReplOptions = {
   mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
   ) => ContextPacketViewActionReceipt | undefined) | undefined;
+  undoContextSourceAction?: (() => ContextPacketViewActionReceipt | undefined) | undefined;
   previewContextPacket?: ((input: {
     readonly sessionId: string;
     readonly packet: ContextPacketView;
@@ -306,6 +307,9 @@ export function createManagedDashboardInput(
         : {}),
       ...(session.options.mutateContextSource !== undefined
         ? { mutateContextSource: session.options.mutateContextSource }
+        : {}),
+      ...(session.options.undoContextSourceAction !== undefined
+        ? { undoContextSourceAction: session.options.undoContextSourceAction }
         : {}),
       ...(session.options.previewContextPacket !== undefined
         ? { previewContextPacket: session.options.previewContextPacket }

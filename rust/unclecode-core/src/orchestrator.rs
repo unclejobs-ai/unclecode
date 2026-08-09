@@ -94,7 +94,10 @@ pub fn classify_work_intent(prompt: &str, mode: &str) -> &'static str {
         .any(|keyword| lower_prompt.contains(keyword))
             || routing_prompt.contains("점검")
             || routing_prompt.contains("조사");
-        if file_path_count >= 1 || yolo_complex_keyword || complex_keyword || ultrawork_complex_keyword
+        if file_path_count >= 1
+            || yolo_complex_keyword
+            || complex_keyword
+            || ultrawork_complex_keyword
         {
             return "complex";
         }
@@ -131,7 +134,15 @@ fn is_simple_info_question(prompt: &str) -> bool {
     }
     let lower = trimmed.to_lowercase();
     let korean_info = [
-        "뭐냐", "뭐야", "뭔지", "뭔가요", "무엇", "설명", "알려", "뜻이", "의미",
+        "뭐냐",
+        "뭐야",
+        "뭔지",
+        "뭔가요",
+        "무엇",
+        "설명",
+        "알려",
+        "뜻이",
+        "의미",
     ]
     .iter()
     .any(|marker| trimmed.contains(marker));
@@ -971,10 +982,7 @@ check packages/a.ts and rust/src/lib.rs please"#,
             tasks[0]["writePaths"],
             json!(["packages/a.ts", "rust/src/lib.rs"])
         );
-        assert!(!tasks[0]["goal"]
-            .as_str()
-            .unwrap()
-            .contains("CLAUDE.md"));
+        assert!(!tasks[0]["goal"].as_str().unwrap().contains("CLAUDE.md"));
     }
 
     #[test]
@@ -988,7 +996,10 @@ check packages/a.ts and rust/src/lib.rs please"#,
         assert_eq!(tasks.as_array().unwrap().len(), 2);
         assert_eq!(tasks[0]["goal"], "Ship parser support");
         assert_eq!(tasks[1]["dependsOn"], json!(["task-1"]));
-        assert_eq!(tasks[1]["acceptanceCriteria"], json!(["Integration passes"]));
+        assert_eq!(
+            tasks[1]["acceptanceCriteria"],
+            json!(["Integration passes"])
+        );
 
         assert_eq!(parse_plan_response_json("no json").unwrap(), "[]");
         assert_eq!(parse_plan_response_json("[invalid").unwrap(), "[]");

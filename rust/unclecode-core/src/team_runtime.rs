@@ -1,8 +1,10 @@
 use crate::sha256::sha256_hex;
 use serde_json::{json, Map, Value};
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,6 +20,7 @@ const PERSONA_IDS: &[&str] = &[
 ];
 const TEAM_GATE_LEVELS: &[&str] = &["strict", "warn", "off"];
 const TEAM_RUNTIME_MODES: &[&str] = &["local", "docker", "e2b", "openshell"];
+const TEAM_ISOLATION_MODES: &[&str] = &["shared", "worktree"];
 const TEAM_LANE_RUNTIMES: &[&str] = &[
     "openai",
     "anthropic",
@@ -60,6 +63,390 @@ pub struct TeamLockSweep {
     pub live: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedTeamWorktree {
+    pub worktree_path: PathBuf,
+    pub baseline_commit: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinalizedTeamWorktree {
+    pub change_patch_path: Option<PathBuf>,
+}
+
+pub fn prepare_team_worktree(
+    workspace_root: &Path,
+    run_root: &Path,
+    run_id: &str,
+    worker_id: &str,
+    baseline_commit: Option<&str>,
+) -> Result<PreparedTeamWorktree, String> {
+    validate_worktree_segment(run_id, "run id")?;
+    validate_worktree_segment(worker_id, "worker id")?;
+    if !run_root.is_dir() {
+        return Err(format!(
+            "Team run root does not exist: {}",
+            run_root.display()
+        ));
+    }
+    let repo_root_raw = run_git(workspace_root, &["rev-parse", "--show-toplevel"], None)?;
+    let repo_root_text = String::from_utf8(repo_root_raw)
+        .map_err(|_| "Git repository path is not valid UTF-8".to_string())?;
+    let repo_root = PathBuf::from(repo_root_text.trim());
+    let shared_baseline = baseline_commit.map(str::to_string);
+    let (head, tracked_patch, untracked) = if let Some(commit) = shared_baseline.as_deref() {
+        if commit.len() < 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("Shared isolated baseline commit is invalid".to_string());
+        }
+        let commit_object = format!("{commit}^{{commit}}");
+        run_git(&repo_root, &["cat-file", "-e", &commit_object], None)?;
+        (commit.to_string(), Vec::new(), String::new())
+    } else {
+        let head_raw = run_git(&repo_root, &["rev-parse", "HEAD"], None)?;
+        let head = String::from_utf8(head_raw)
+            .map_err(|_| "Git HEAD is not valid UTF-8".to_string())?
+            .trim()
+            .to_string();
+        let tracked_patch = run_git(&repo_root, &["diff", "--binary", "HEAD", "--"], None)?;
+        let untracked_raw = run_git(
+            &repo_root,
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+            None,
+        )?;
+        let untracked = String::from_utf8(untracked_raw).map_err(|_| {
+            "Untracked Git paths must be valid UTF-8 for worktree isolation".to_string()
+        })?;
+        (head, tracked_patch, untracked)
+    };
+    let repo_name = repo_root
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .ok_or("Cannot derive repository name for worktree isolation")?;
+    let isolation_root = repo_root
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".{repo_name}-unclecode-worktrees"))
+        .join(run_id);
+    let worktree_path = isolation_root.join(worker_id);
+    if worktree_path.exists() {
+        return Err(format!(
+            "Isolated worker path already exists: {}",
+            worktree_path.display()
+        ));
+    }
+    fs::create_dir_all(&isolation_root).map_err(|error| {
+        format!(
+            "Failed to create worktree isolation root {}: {error}",
+            isolation_root.display()
+        )
+    })?;
+
+    let worktree_text = worktree_path
+        .to_str()
+        .ok_or("Worktree path is not valid UTF-8")?
+        .to_string();
+    run_git(
+        &repo_root,
+        &["worktree", "add", "--detach", &worktree_text, &head],
+        None,
+    )?;
+    let setup_result = if shared_baseline.is_some() {
+        Ok(head.clone())
+    } else {
+        (|| {
+            if !tracked_patch.is_empty() {
+                run_git(
+                    &worktree_path,
+                    &["apply", "--whitespace=nowarn", "-"],
+                    Some(&tracked_patch),
+                )?;
+            }
+            for relative in untracked.split('\0').filter(|value| !value.is_empty()) {
+                let relative_path = Path::new(relative);
+                validate_relative_worktree_path(relative_path)?;
+                copy_workspace_entry(
+                    &repo_root.join(relative_path),
+                    &worktree_path.join(relative_path),
+                )?;
+            }
+            run_git(&worktree_path, &["add", "-A", "--", "."], None)?;
+            run_git(
+                &worktree_path,
+                &[
+                    "-c",
+                    "user.name=UncleCode",
+                    "-c",
+                    "user.email=unclecode@local",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "commit",
+                    "--allow-empty",
+                    "--no-gpg-sign",
+                    "-m",
+                    "UncleCode isolated worker baseline",
+                ],
+                None,
+            )?;
+            let baseline_raw = run_git(&worktree_path, &["rev-parse", "HEAD"], None)?;
+            String::from_utf8(baseline_raw)
+                .map_err(|_| "Isolated baseline commit is not valid UTF-8".to_string())
+                .map(|value| value.trim().to_string())
+        })()
+    };
+
+    match setup_result {
+        Ok(baseline_commit) => Ok(PreparedTeamWorktree {
+            worktree_path,
+            baseline_commit,
+        }),
+        Err(error) => {
+            let _ = run_git(
+                &repo_root,
+                &["worktree", "remove", "--force", &worktree_text],
+                None,
+            );
+            let _ = fs::remove_dir_all(&worktree_path);
+            let _ = fs::remove_dir(&isolation_root);
+            Err(error)
+        }
+    }
+}
+
+pub fn finalize_team_worktree(
+    workspace_root: &Path,
+    run_root: &Path,
+    worker_id: &str,
+    prepared: &PreparedTeamWorktree,
+) -> Result<FinalizedTeamWorktree, String> {
+    validate_worktree_segment(worker_id, "worker id")?;
+    run_git(&prepared.worktree_path, &["add", "-N", "--", "."], None)?;
+    let patch = run_git(
+        &prepared.worktree_path,
+        &[
+            "diff",
+            "--binary",
+            "--full-index",
+            &prepared.baseline_commit,
+            "--",
+        ],
+        None,
+    )?;
+    let change_patch_path = if patch.is_empty() {
+        None
+    } else {
+        let worker_root = run_root.join("workers").join(worker_id);
+        fs::create_dir_all(&worker_root).map_err(|error| {
+            format!(
+                "Failed to create worker artifact directory {}: {error}",
+                worker_root.display()
+            )
+        })?;
+        let patch_path = worker_root.join("changes.patch");
+        fs::write(&patch_path, patch).map_err(|error| {
+            format!(
+                "Failed to write isolated worker patch {}: {error}",
+                patch_path.display()
+            )
+        })?;
+        Some(patch_path)
+    };
+
+    let repo_root_raw = run_git(workspace_root, &["rev-parse", "--show-toplevel"], None)?;
+    let repo_root_text = String::from_utf8(repo_root_raw)
+        .map_err(|_| "Git repository path is not valid UTF-8".to_string())?;
+    let repo_root = PathBuf::from(repo_root_text.trim());
+    let worktree_text = prepared
+        .worktree_path
+        .to_str()
+        .ok_or("Worktree path is not valid UTF-8")?;
+    run_git(
+        &repo_root,
+        &["worktree", "remove", "--force", worktree_text],
+        None,
+    )?;
+    if let Some(run_isolation_root) = prepared.worktree_path.parent() {
+        let _ = fs::remove_dir(run_isolation_root);
+        if let Some(isolation_root) = run_isolation_root.parent() {
+            let _ = fs::remove_dir(isolation_root);
+        }
+    }
+    Ok(FinalizedTeamWorktree { change_patch_path })
+}
+
+pub fn prepare_team_worktree_json(input_json: &str) -> Result<String, String> {
+    let input: Value = serde_json::from_str(input_json)
+        .map_err(|error| format!("Invalid team worktree prepare JSON: {error}"))?;
+    let workspace_root = required_worktree_string(&input, "workspaceRoot")?;
+    let run_root = required_worktree_string(&input, "runRoot")?;
+    let run_id = required_worktree_string(&input, "runId")?;
+    let worker_id = required_worktree_string(&input, "workerId")?;
+    let baseline_commit = input.get("baselineCommit").and_then(Value::as_str);
+    let prepared = prepare_team_worktree(
+        Path::new(workspace_root),
+        Path::new(run_root),
+        run_id,
+        worker_id,
+        baseline_commit,
+    )?;
+    serde_json::to_string(&json!({
+        "worktreePath": prepared.worktree_path,
+        "baselineCommit": prepared.baseline_commit,
+    }))
+    .map_err(|error| error.to_string())
+}
+
+pub fn finalize_team_worktree_json(input_json: &str) -> Result<String, String> {
+    let input: Value = serde_json::from_str(input_json)
+        .map_err(|error| format!("Invalid team worktree finalize JSON: {error}"))?;
+    let workspace_root = required_worktree_string(&input, "workspaceRoot")?;
+    let run_root = required_worktree_string(&input, "runRoot")?;
+    let worker_id = required_worktree_string(&input, "workerId")?;
+    let worktree_path = required_worktree_string(&input, "worktreePath")?;
+    let baseline_commit = required_worktree_string(&input, "baselineCommit")?;
+    let finalized = finalize_team_worktree(
+        Path::new(workspace_root),
+        Path::new(run_root),
+        worker_id,
+        &PreparedTeamWorktree {
+            worktree_path: PathBuf::from(worktree_path),
+            baseline_commit: baseline_commit.to_string(),
+        },
+    )?;
+    serde_json::to_string(&json!({
+        "changePatchPath": finalized.change_patch_path,
+    }))
+    .map_err(|error| error.to_string())
+}
+
+fn required_worktree_string<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
+    string_field(input, key)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("Team worktree request missing `{key}`"))
+}
+
+fn validate_worktree_segment(value: &str, label: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value == "."
+        || value == ".."
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+        })
+    {
+        return Err(format!(
+            "Invalid team {label} for worktree isolation: {value}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_relative_worktree_path(path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!(
+            "Unsafe untracked path in workspace snapshot: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn copy_workspace_entry(source: &Path, target: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source)
+        .map_err(|error| format!("Failed to inspect {}: {error}", source.display()))?;
+    if metadata.file_type().is_symlink() {
+        let link = fs::read_link(source)
+            .map_err(|error| format!("Failed to read symlink {}: {error}", source.display()))?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(link, target)
+            .map_err(|error| format!("Failed to copy symlink {}: {error}", source.display()))?;
+        #[cfg(windows)]
+        {
+            let points_to_dir = source.metadata().is_ok_and(|metadata| metadata.is_dir());
+            if points_to_dir {
+                std::os::windows::fs::symlink_dir(link, target)
+            } else {
+                std::os::windows::fs::symlink_file(link, target)
+            }
+            .map_err(|error| format!("Failed to copy symlink {}: {error}", source.display()))?;
+        }
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        fs::create_dir_all(target)
+            .map_err(|error| format!("Failed to create {}: {error}", target.display()))?;
+        for entry in fs::read_dir(source)
+            .map_err(|error| format!("Failed to read {}: {error}", source.display()))?
+        {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "Failed to read directory entry in {}: {error}",
+                    source.display()
+                )
+            })?;
+            copy_workspace_entry(&entry.path(), &target.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
+    }
+    fs::copy(source, target)
+        .map_err(|error| format!("Failed to copy {}: {error}", source.display()))?;
+    Ok(())
+}
+
+fn run_git(cwd: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>, String> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Failed to start git in {}: {error}", cwd.display()))?;
+    if let Some(bytes) = input {
+        child
+            .stdin
+            .take()
+            .ok_or("Failed to open git stdin")?
+            .write_all(bytes)
+            .map_err(|error| format!("Failed to write git stdin: {error}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Failed to wait for git: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "git {} failed in {}{}",
+            args.join(" "),
+            cwd.display(),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        ));
+    }
+    Ok(output.stdout)
+}
+
 pub fn resolve_team_run_config_json(input_json: &str) -> Result<String, String> {
     let input: Value = serde_json::from_str(input_json)
         .map_err(|error| format!("Invalid team run config JSON: {error}"))?;
@@ -86,6 +473,11 @@ pub fn resolve_team_run_config_json(input_json: &str) -> Result<String, String> 
         TEAM_RUNTIME_MODES,
         "runtime",
     )?;
+    let isolation = validate_choice(
+        string_field(options, "isolation").unwrap_or("shared"),
+        TEAM_ISOLATION_MODES,
+        "isolation",
+    )?;
     let worker_timeout_ms = parse_worker_timeout(
         string_field(options, "workerTimeout").unwrap_or(DEFAULT_WORKER_TIMEOUT_MS),
     )?;
@@ -106,6 +498,7 @@ pub fn resolve_team_run_config_json(input_json: &str) -> Result<String, String> 
         "persona": persona,
         "gate": gate,
         "runtime": runtime,
+        "isolation": isolation,
         "workerTimeoutMs": worker_timeout_ms,
         "dataRoot": data_root,
         "createdBy": created_by,
@@ -621,6 +1014,7 @@ pub struct TeamRunRecordRequest {
     pub lanes_spec: String,
     pub gate: String,
     pub runtime: String,
+    pub isolation: String,
     pub workspace_root: PathBuf,
     pub created_by: String,
 }
@@ -632,12 +1026,15 @@ pub struct TeamRunRecordResult {
     pub lanes_summary: String,
     pub gate: String,
     pub runtime: String,
+    pub isolation: String,
 }
 
 pub fn start_team_run_record(input: TeamRunRecordRequest) -> Result<TeamRunRecordResult, String> {
     let persona = validate_choice(&input.persona, PERSONA_IDS, "persona")?.to_string();
     let gate = validate_choice(&input.gate, TEAM_GATE_LEVELS, "gate")?.to_string();
     let runtime = validate_choice(&input.runtime, TEAM_RUNTIME_MODES, "runtime")?.to_string();
+    let isolation =
+        validate_choice(&input.isolation, TEAM_ISOLATION_MODES, "isolation")?.to_string();
     let lanes = parse_team_lanes(&input.lanes_spec)?;
     let lane_count = lanes.len();
     let lanes_summary = format_lanes_summary(&lanes);
@@ -659,6 +1056,7 @@ pub fn start_team_run_record(input: TeamRunRecordRequest) -> Result<TeamRunRecor
         "lanes": lane_count,
         "gate": gate,
         "runtime": runtime,
+        "isolation": isolation,
         "createdAt": current_unix_millis(),
         "createdBy": input.created_by,
         "workspaceRoot": input.workspace_root.to_string_lossy(),
@@ -696,6 +1094,7 @@ pub fn start_team_run_record(input: TeamRunRecordRequest) -> Result<TeamRunRecor
         lanes_summary,
         gate: manifest_string(&manifest, "gate")?,
         runtime: manifest_string(&manifest, "runtime")?,
+        isolation: manifest_string(&manifest, "isolation")?,
     })
 }
 
@@ -775,6 +1174,13 @@ fn format_team_run_summary(run_root: &Path) -> Result<String, String> {
     lines.push(format!(
         "Runtime:   {}",
         manifest_string(&manifest, "runtime")?
+    ));
+    lines.push(format!(
+        "Isolation: {}",
+        manifest
+            .get("isolation")
+            .and_then(Value::as_str)
+            .unwrap_or("shared")
     ));
     lines.push(format!("Status:    {status}"));
     lines.push(format!("Steps:     {steps}"));
@@ -955,18 +1361,26 @@ fn current_tip_hash(run_root: &Path, checkpoints_path: &Path) -> Result<String, 
 
 struct AppendLock {
     path: PathBuf,
+    owner_record: String,
 }
 
 impl AppendLock {
     fn acquire(run_root: &Path) -> Result<Self, String> {
         let path = run_root.join(".append.lock");
+        let owner_record = append_lock_owner_record()?;
         for attempt in 0..=APPEND_LOCK_RETRIES {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut file) => {
-                    let _ = writeln!(file, "{}:{}", std::process::id(), current_unix_millis());
-                    return Ok(Self { path });
+                    if let Err(error) = file.write_all(owner_record.as_bytes()) {
+                        let _ = fs::remove_file(&path);
+                        return Err(format!("Failed to initialize {}: {error}", path.display()));
+                    }
+                    return Ok(Self { path, owner_record });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if reclaim_dead_append_lock(&path)? {
+                        continue;
+                    }
                     if attempt == APPEND_LOCK_RETRIES {
                         return Err(format!(
                             "appendTeamCheckpoint: could not acquire {} after {} retries",
@@ -987,8 +1401,133 @@ impl AppendLock {
 
 impl Drop for AppendLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if fs::read_to_string(&self.path).ok().as_deref() == Some(&self.owner_record) {
+            let _ = fs::remove_file(&self.path);
+        }
     }
+}
+
+fn append_lock_owner_record() -> Result<String, String> {
+    let pid = std::process::id();
+    let process_identity = read_append_lock_process_identity(pid)
+        .ok_or_else(|| format!("Failed to establish append lock process identity for PID {pid}"))?;
+    serde_json::to_string(&json!({
+        "pid": pid,
+        "processIdentity": process_identity,
+        "acquiredAt": current_unix_millis(),
+    }))
+    .map_err(|error| format!("Failed to encode append lock owner: {error}"))
+}
+
+fn reclaim_dead_append_lock(path: &Path) -> Result<bool, String> {
+    let raw = fs::read_to_string(path)
+        .map_err(|error| format!("Failed to inspect {}: {error}", path.display()))?;
+    let parsed = serde_json::from_str::<Value>(&raw).ok();
+    let pid = parsed
+        .as_ref()
+        .and_then(|value| value.get("pid"))
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok());
+    let expected_identity = parsed
+        .as_ref()
+        .and_then(|value| value.get("processIdentity"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let acquired_at = parsed
+        .as_ref()
+        .and_then(|value| value.get("acquiredAt"))
+        .and_then(Value::as_u64);
+    let (Some(pid), Some(expected_identity), Some(_)) = (pid, expected_identity, acquired_at)
+    else {
+        return Ok(false);
+    };
+    let owner_is_dead = if !is_append_lock_pid_alive(pid) {
+        true
+    } else {
+        read_append_lock_process_identity(pid).is_some_and(|current| current != expected_identity)
+    };
+    if !owner_is_dead {
+        return Ok(false);
+    }
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(format!("Failed to reclaim {}: {error}", path.display())),
+    }
+}
+
+fn is_append_lock_pid_alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        let result = unsafe { kill(pid as i32, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1)
+    }
+    #[cfg(windows)]
+    {
+        read_append_lock_process_identity(pid).is_some()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_append_lock_process_identity(pid: u32) -> Option<String> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat.rsplit_once(") ")?.1;
+    let start_ticks = fields.split_whitespace().nth(19)?;
+    Some(format!("linux:{start_ticks}"))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn read_append_lock_process_identity(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args([
+            "-ww",
+            "-p",
+            &pid.to_string(),
+            "-o",
+            "lstart=",
+            "-o",
+            "command=",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let identity = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!identity.is_empty()).then_some(identity)
+}
+
+#[cfg(windows)]
+fn read_append_lock_process_identity(pid: u32) -> Option<String> {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("(Get-Process -Id {pid} -ErrorAction Stop).StartTime.ToFileTimeUtc()"),
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let identity = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!identity.is_empty()).then_some(identity)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_append_lock_process_identity(_pid: u32) -> Option<String> {
+    None
 }
 
 fn hash_team_checkpoint_line(prev_hash: &str, line: &Value) -> String {
@@ -1427,6 +1966,34 @@ fn path_join(base: &str, child: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn append_lock_recovers_after_verified_owner_death() {
+        let root = std::env::temp_dir().join(format!(
+            "unclecode-append-lock-recovery-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let lock_path = root.join(".append.lock");
+        fs::write(
+            &lock_path,
+            serde_json::to_string(&json!({
+                "pid": i32::MAX as u32,
+                "processIdentity": "dead-owner",
+                "acquiredAt": current_unix_millis(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let lock = AppendLock::acquire(&root).unwrap();
+        let owner: Value = serde_json::from_str(&fs::read_to_string(&lock_path).unwrap()).unwrap();
+        assert_eq!(owner["pid"], std::process::id());
+        assert_ne!(owner["processIdentity"], "dead-owner");
+        drop(lock);
+        assert!(!lock_path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn resolves_team_run_config_defaults_and_env() {
@@ -1440,6 +2007,7 @@ mod tests {
         assert_eq!(parsed["persona"], "coder");
         assert_eq!(parsed["gate"], "strict");
         assert_eq!(parsed["runtime"], "local");
+        assert_eq!(parsed["isolation"], "shared");
         assert_eq!(parsed["workerTimeoutMs"], 600000);
         assert_eq!(parsed["dataRoot"], "/tmp/uc");
         assert_eq!(parsed["createdBy"], "park");
@@ -1450,7 +2018,7 @@ mod tests {
     fn resolves_team_run_config_options_and_fallbacks() {
         let parsed = serde_json::from_str::<Value>(
             &resolve_team_run_config_json(
-                r#"{"cwd":"/repo","env":{},"options":{"persona":"hardener","gate":"warn","runtime":"docker","workerTimeout":"42"}}"#,
+                r#"{"cwd":"/repo","env":{},"options":{"persona":"hardener","gate":"warn","runtime":"docker","isolation":"worktree","workerTimeout":"42"}}"#,
             )
             .unwrap(),
         )
@@ -1458,6 +2026,7 @@ mod tests {
         assert_eq!(parsed["persona"], "hardener");
         assert_eq!(parsed["gate"], "warn");
         assert_eq!(parsed["runtime"], "docker");
+        assert_eq!(parsed["isolation"], "worktree");
         assert_eq!(parsed["workerTimeoutMs"], 42);
         assert_eq!(parsed["dataRoot"], "/repo/.data");
         assert_eq!(parsed["createdBy"], "unclecode-cli");
@@ -1476,6 +2045,87 @@ mod tests {
                 .unwrap_err()
                 .contains("Invalid --worker-timeout")
         );
+        assert!(
+            resolve_team_run_config_json(r#"{"options":{"isolation":"container"}}"#)
+                .unwrap_err()
+                .contains("Unknown isolation")
+        );
+    }
+
+    #[test]
+    fn isolated_workers_share_one_immutable_baseline_and_return_worker_only_patches() {
+        let root = std::env::temp_dir().join(format!(
+            "unclecode-team-worktree-{}-{}",
+            std::process::id(),
+            current_unix_millis()
+        ));
+        let repo_root = root.join("repo");
+        let run_root = repo_root.join(".data/team-runs/tr_isolated");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&run_root).unwrap();
+        fs::write(repo_root.join(".gitignore"), ".data/\n").unwrap();
+        fs::write(repo_root.join("seed.txt"), "seed\n").unwrap();
+        run_git(&repo_root, &["init", "-q"], None).unwrap();
+        run_git(&repo_root, &["add", "."], None).unwrap();
+        run_git(
+            &repo_root,
+            &[
+                "-c",
+                "user.name=UncleCode Tests",
+                "-c",
+                "user.email=tests@unclecode.local",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            None,
+        )
+        .unwrap();
+        fs::write(repo_root.join("seed.txt"), "dirty baseline\n").unwrap();
+        fs::write(repo_root.join("baseline-new.txt"), "untracked baseline\n").unwrap();
+
+        let first =
+            prepare_team_worktree(&repo_root, &run_root, "tr_isolated", "w1", None).unwrap();
+        fs::write(repo_root.join("seed.txt"), "changed after baseline\n").unwrap();
+        let second = prepare_team_worktree(
+            &repo_root,
+            &run_root,
+            "tr_isolated",
+            "w2",
+            Some(&first.baseline_commit),
+        )
+        .unwrap();
+        assert_eq!(first.baseline_commit, second.baseline_commit);
+        assert_eq!(
+            fs::read_to_string(second.worktree_path.join("seed.txt")).unwrap(),
+            "dirty baseline\n"
+        );
+        assert_eq!(
+            fs::read_to_string(second.worktree_path.join("baseline-new.txt")).unwrap(),
+            "untracked baseline\n"
+        );
+
+        fs::write(first.worktree_path.join("collision.txt"), "w1\n").unwrap();
+        fs::write(second.worktree_path.join("collision.txt"), "w2\n").unwrap();
+        let first_path = first.worktree_path.clone();
+        let second_path = second.worktree_path.clone();
+        let first_finalized = finalize_team_worktree(&repo_root, &run_root, "w1", &first).unwrap();
+        let second_finalized =
+            finalize_team_worktree(&repo_root, &run_root, "w2", &second).unwrap();
+
+        assert!(!repo_root.join("collision.txt").exists());
+        assert!(!first_path.exists());
+        assert!(!second_path.exists());
+        for (finalized, expected) in [(first_finalized, "+w1"), (second_finalized, "+w2")] {
+            let patch = fs::read_to_string(finalized.change_patch_path.unwrap()).unwrap();
+            assert!(patch.contains("collision.txt"));
+            assert!(patch.contains(expected));
+            assert!(!patch.contains("seed.txt"));
+            assert!(!patch.contains("baseline-new.txt"));
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1859,6 +2509,7 @@ mod tests {
             lanes_spec: "codex,opencode:anthropic/claude-sonnet-4-6".to_string(),
             gate: "warn".to_string(),
             runtime: "local".to_string(),
+            isolation: "shared".to_string(),
             workspace_root: PathBuf::from("/tmp/repo"),
             created_by: "test".to_string(),
         })
@@ -1914,6 +2565,7 @@ mod tests {
             lanes_spec: "hermes::agent=codex".to_string(),
             gate: "warn".to_string(),
             runtime: "local".to_string(),
+            isolation: "shared".to_string(),
             workspace_root: PathBuf::from("/tmp/repo"),
             created_by: "test".to_string(),
         })

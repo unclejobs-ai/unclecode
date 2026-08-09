@@ -307,6 +307,7 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   forgetContextSourceAtCursor?(): Promise<void>;
   includeContextSourceAtCursor?(): Promise<void>;
   toggleContextInspectorExpanded?(): Promise<void>;
+  undoLastContextSourceAction?(): Promise<void>;
   acceptContextSuggestion?(suggestionId: string): Promise<void>;
   rejectContextSuggestion?(suggestionId: string): Promise<void>;
   // Optional because not every pane host wires trace plumbing — when
@@ -449,6 +450,7 @@ export function useWorkShellInputController(input: {
   readonly closeOverlay?: (() => void) | undefined;
   readonly contextSourceActionsEnabled?: boolean | undefined;
   readonly contextAdviceActionsEnabled?: boolean | undefined;
+  readonly contextUndoActionsEnabled?: boolean | undefined;
   readonly isComposerRawEmpty?: (() => boolean) | undefined;
   readonly acceptContextSuggestion?: (() => Promise<void>) | undefined;
   readonly rejectContextSuggestion?: (() => Promise<void>) | undefined;
@@ -463,6 +465,7 @@ export function useWorkShellInputController(input: {
   readonly includeContextSourceAtCursor?: (() => Promise<void>) | undefined;
   readonly toggleContextSourceDelivery?: (() => Promise<void>) | undefined;
   readonly toggleContextInspectorExpanded?: (() => Promise<void>) | undefined;
+  readonly undoContextSourceAction?: (() => Promise<void>) | undefined;
 }): { readonly submit: (value: string) => Promise<boolean> } {
   const escapeResetArmedAtRef = useRef<number | undefined>(undefined);
   useInput((value, key) => {
@@ -479,7 +482,21 @@ export function useWorkShellInputController(input: {
       }
       return;
     }
-
+    const telemetryPanelOpen =
+      input.activePanelTitle === "Cache Telemetry"
+      || input.activePanelTitle === "Agent History";
+    const telemetryHotkey = value.toLowerCase();
+    if (
+      telemetryPanelOpen
+      && !key.ctrl
+      && (input.isComposerRawEmpty?.() ?? isRawComposerEmpty(input.value))
+      && (telemetryHotkey === "c" || telemetryHotkey === "a")
+    ) {
+      escapeResetArmedAtRef.current = undefined;
+      input.replaceValue("");
+      void input.handleSubmit(telemetryHotkey === "c" ? "/cache" : "/agents").catch(() => undefined);
+      return;
+    }
     // Context Inspector (Sprint 2): when the overlay is open, intercept the
     // action keys before the composer can consume them. The slash picker
     // always wins (resolver returns "none" when input starts with "/").
@@ -502,6 +519,7 @@ export function useWorkShellInputController(input: {
         panelTitle: "Context expanded",
         actionsEnabled: input.contextSourceActionsEnabled ?? false,
         adviceActionsEnabled: input.contextAdviceActionsEnabled ?? false,
+        undoActionsEnabled: input.contextUndoActionsEnabled ?? false,
       });
       switch (inspectorAction.type) {
         case "move-cursor":
@@ -518,6 +536,10 @@ export function useWorkShellInputController(input: {
         case "toggle-delivery":
           escapeResetArmedAtRef.current = undefined;
           void input.toggleContextSourceDelivery?.().catch(() => undefined);
+          return;
+        case "undo":
+          escapeResetArmedAtRef.current = undefined;
+          void input.undoContextSourceAction?.().catch(() => undefined);
           return;
         case "accept-advice":
           escapeResetArmedAtRef.current = undefined;
@@ -882,6 +904,11 @@ export function useWorkShellPaneState<
     accept: input.engine.acceptContextSuggestion,
     reject: input.engine.rejectContextSuggestion,
   });
+  const contextUndoActionsAvailable = Boolean(
+    engineState.contextSourceActionsEnabled
+    && engineState.contextActionReceipt?.canUndo
+    && input.engine.undoLastContextSourceAction,
+  );
 
 
 
@@ -935,6 +962,7 @@ export function useWorkShellPaneState<
       : {}),
     contextSourceActionsEnabled: engineState.contextSourceActionsEnabled ?? false,
     contextAdviceActionsEnabled: contextAdviceActionsAvailable,
+    contextUndoActionsEnabled: contextUndoActionsAvailable,
     ...(contextAdviceActionsAvailable && selectedContextSuggestion
       ? {
           acceptContextSuggestion: async () => {
@@ -942,6 +970,13 @@ export function useWorkShellPaneState<
           },
           rejectContextSuggestion: async () => {
             await input.engine.rejectContextSuggestion?.(selectedContextSuggestion.id);
+          },
+        }
+      : {}),
+    ...(contextUndoActionsAvailable
+      ? {
+          undoContextSourceAction: async () => {
+            await input.engine.undoLastContextSourceAction?.();
           },
         }
       : {}),
@@ -993,6 +1028,7 @@ export function useWorkShellPaneState<
     slashSuggestionCount: slashSuggestions.length,
     selectedSlashCommand: selectedSuggestion?.command,
     contextAdviceKeyActionsEnabled: contextAdviceActionsAvailable,
+    contextUndoKeyActionsEnabled: contextUndoActionsAvailable,
     submit,
     addClipboardAttachment,
     clearClipboardAttachments,

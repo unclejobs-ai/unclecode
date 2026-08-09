@@ -144,7 +144,7 @@ void sessionCenterRenderOptionsWorkspaceRoot;
 
 /** Keys that a value of `T` must supply; optional keys collapse to `never`. */
 type RequiredKeys<T> = {
-  [K in keyof T]-?: {} extends Pick<T, K> ? never : K;
+  [K in keyof T]-?: Pick<T, K> extends Required<Pick<T, K>> ? K : never;
 }[keyof T];
 
 // Every lifecycle payload must actually be reachable through the union that
@@ -216,7 +216,7 @@ type AgentRunSettledRequiredFields = Assert<
 type UsageRecordedRequiredFields = Assert<
   IsExact<
     RequiredKeys<UsageRecordedTraceEvent>,
-    "type" | "level" | "eventId" | "startedAt"
+    "type" | "level" | "eventId" | "provider" | "model" | "startedAt"
   >
 >;
 
@@ -415,6 +415,8 @@ const usageRecorded: UsageRecordedTraceEvent = {
   type: "usage.recorded",
   level: "low-signal",
   eventId: "usage-1",
+  provider: "openai",
+  model: "gpt-5.6-sol",
   startedAt: 10,
 };
 

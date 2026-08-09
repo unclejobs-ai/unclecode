@@ -4,12 +4,17 @@ import {
   isCoalescibleToolActivity,
   parseAgentConsoleSnapshot,
   type AgentConsoleSnapshot,
+  type AgentRun,
+  type AgentRunUsage,
+  type AgentRunUsageRoute,
+  type AsyncJob,
   type ToolActivity,
   type WorkNodeStatus,
   type ToolActivityKind,
 } from "@unclecode/contracts";
 
 const MAX_TOOL_ACTIVITY = 80;
+const MAX_USAGE_ROUTES = 32;
 
 type TraceRecord = Record<string, unknown>;
 
@@ -21,11 +26,29 @@ export function applyTraceEventToAgentConsole(
   snapshot: AgentConsoleSnapshot,
   event: { readonly type: string },
 ): AgentConsoleSnapshot {
+  const lifecycleSnapshot = applyAgentLifecycleEvent(snapshot, event);
+  if (lifecycleSnapshot !== snapshot) {
+    return lifecycleSnapshot;
+  }
+
   const workSnapshot = applyWorkLifecycleEvent(snapshot, event);
   if (workSnapshot !== snapshot) {
     return workSnapshot;
   }
 
+  return applyToolLifecycleEvent(snapshot, event);
+}
+
+/**
+ * Projects one tool call into the bounded activity list and, when the call is
+ * owned by a subagent, points that run at what it is doing. Both writes land in
+ * a single projection so a run's `currentActivity` can never disagree with the
+ * activity row it was derived from.
+ */
+function applyToolLifecycleEvent(
+  snapshot: AgentConsoleSnapshot,
+  event: { readonly type: string },
+): AgentConsoleSnapshot {
   if (event.type !== "tool.started" && event.type !== "tool.completed") {
     return snapshot;
   }
@@ -44,9 +67,21 @@ export function applyTraceEventToAgentConsole(
   const current = existingIndex === -1 ? undefined : snapshot.activity[existingIndex];
   const startedAt = readTimestamp(trace, "startedAt") ?? current?.startedAt ?? Date.now();
   const input = asRecord(trace.input);
+  const scopedRunId = resolveToolAgentRunId(snapshot, trace);
+  // A call keeps the owner it was opened with. A later event claiming a
+  // different run is mis-routed, and honouring it would move the row and drag
+  // both runs' current activity onto a call neither of them made.
+  if (
+    scopedRunId !== undefined
+    && current?.agentRunId !== undefined
+    && scopedRunId !== current.agentRunId
+  ) {
+    return snapshot;
+  }
+  const agentRunId = scopedRunId ?? current?.agentRunId;
   const nextActivity = event.type === "tool.started"
-    ? createStartedActivity({ toolCallId, toolName, startedAt, input, current })
-    : createCompletedActivity({ toolCallId, toolName, startedAt, input, trace, current });
+    ? createStartedActivity({ toolCallId, toolName, startedAt, input, current, agentRunId })
+    : createCompletedActivity({ toolCallId, toolName, startedAt, input, trace, current, agentRunId });
 
   const activity = existingIndex === -1
     ? [...snapshot.activity, nextActivity]
@@ -55,7 +90,460 @@ export function applyTraceEventToAgentConsole(
   return createAgentConsoleSnapshot({
     ...snapshot,
     activity: capToolActivity(activity),
+    agents: withCurrentActivity(snapshot.agents, agentRunId, nextActivity.intent),
   });
+}
+
+/**
+ * Attribute a tool call to the run that made it. The run id is authoritative;
+ * an async job id is resolved through the job that owns the run, which is how
+ * background work reports calls it never tagged with a run id. Blank
+ * identifiers count as absent so a main-agent call is never mis-scoped.
+ */
+function resolveToolAgentRunId(
+  snapshot: AgentConsoleSnapshot,
+  trace: TraceRecord,
+): string | undefined {
+  const agentRunId = readNonEmptyString(trace, "agentRunId");
+  if (agentRunId) {
+    return agentRunId;
+  }
+  const asyncJobId = readNonEmptyString(trace, "asyncJobId");
+  return asyncJobId
+    ? snapshot.jobs.find((job) => job.id === asyncJobId)?.agentRunId
+    : undefined;
+}
+
+/**
+ * Point one active run at the intent it is working through. Only a run that is
+ * actually executing is touched: a queued run has not reached a tool call yet,
+ * a settled run must not be reanimated by a straggling event, and an unknown
+ * run id scopes nothing rather than fabricating an agent.
+ */
+function withCurrentActivity(
+  agents: readonly AgentRun[],
+  agentRunId: string | undefined,
+  currentActivity: string,
+): readonly AgentRun[] {
+  if (!agentRunId) {
+    return agents;
+  }
+  const index = agents.findIndex((agent) => agent.id === agentRunId);
+  const current = index === -1 ? undefined : agents[index];
+  if (
+    !current
+    || (current.status !== "running" && current.status !== "waiting")
+    || current.currentActivity === currentActivity
+  ) {
+    return agents;
+  }
+  return agents.map((agent, at) => at === index ? { ...agent, currentActivity } : agent);
+}
+
+function applyAgentLifecycleEvent(
+  snapshot: AgentConsoleSnapshot,
+  event: { readonly type: string },
+): AgentConsoleSnapshot {
+  const trace = asRecord(event);
+  if (!trace) {
+    return snapshot;
+  }
+
+  if (event.type === "usage.recorded") {
+    return applyUsageEvent(snapshot, trace);
+  }
+
+  if (event.type === "job.queued") {
+    const id = readNonEmptyString(trace, "jobId");
+    const type = readNonEmptyString(trace, "jobType");
+    const label = readNonEmptyString(trace, "label");
+    const queuedAt = readTimestamp(trace, "queuedAt");
+    if (!id || !type || !label || queuedAt === undefined) {
+      return snapshot;
+    }
+    // A job is queued once. A repeat is a replay or a stale re-emit; honouring
+    // it would reset a job that has since started or settled.
+    if (snapshot.jobs.some((job) => job.id === id)) {
+      return snapshot;
+    }
+    const agentRunId = readNonEmptyString(trace, "agentRunId");
+    const job: AsyncJob = {
+      id,
+      type,
+      label,
+      status: "queued",
+      ...(agentRunId ? { agentRunId } : {}),
+      queuedAt,
+    };
+    return createAgentConsoleSnapshot({
+      ...snapshot,
+      jobs: upsertById(snapshot.jobs, job),
+    });
+  }
+
+  if (event.type === "job.settled") {
+    const id = readNonEmptyString(trace, "jobId");
+    const completedAt = readTimestamp(trace, "completedAt");
+    const status = readJobTerminalStatus(trace.status);
+    const current = snapshot.jobs.find((job) => job.id === id);
+    if (!id || !current || completedAt === undefined || !status) {
+      return snapshot;
+    }
+    const startedAt = readTimestamp(trace, "startedAt");
+    // A job settles once, and never against a timeline that runs backwards: a
+    // supplied start cannot predate the queueing or an earlier recorded start,
+    // and completion cannot predate any bound the job already carries.
+    if (
+      readJobTerminalStatus(current.status)
+      || completedAt < current.queuedAt
+      || (current.startedAt !== undefined && completedAt < current.startedAt)
+      || (startedAt !== undefined
+        && (startedAt < current.queuedAt
+          || completedAt < startedAt
+          || (current.startedAt !== undefined && startedAt < current.startedAt)))
+    ) {
+      return snapshot;
+    }
+    const summary = readNonEmptyString(trace, "summary");
+    const errorSummary = readNonEmptyString(trace, "errorSummary");
+    const job: AsyncJob = {
+      ...current,
+      status,
+      ...(startedAt === undefined ? {} : { startedAt }),
+      completedAt,
+      ...(summary ? { summary } : {}),
+      ...(errorSummary ? { errorSummary } : {}),
+    };
+    return createAgentConsoleSnapshot({ ...snapshot, jobs: upsertById(snapshot.jobs, job) });
+  }
+
+  if (event.type === "agent.run.started") {
+    const id = readNonEmptyString(trace, "runId");
+    const displayName = readNonEmptyString(trace, "displayName");
+    const agentType = readNonEmptyString(trace, "agentType");
+    const startedAt = readTimestamp(trace, "startedAt");
+    if (!id || !displayName || !agentType || startedAt === undefined) {
+      return snapshot;
+    }
+    // A run id is issued once — a continuation is a new run. A repeat is a
+    // replay or a stale re-emit, and honouring it would resurrect a run that
+    // has already settled.
+    if (snapshot.agents.some((agent) => agent.id === id)) {
+      return snapshot;
+    }
+    const parentRunId = readNonEmptyString(trace, "parentRunId");
+    const continuationOf = readNonEmptyString(trace, "continuationOf");
+    const agent: AgentRun = {
+      id,
+      displayName,
+      agentType,
+      status: "running",
+      ...(parentRunId ? { parentRunId } : {}),
+      ...(continuationOf ? { continuationOf } : {}),
+      startedAt,
+    };
+    const jobId = readNonEmptyString(trace, "jobId");
+    // The job a run claims must be able to adopt it: a settled job cannot be
+    // reopened, a job already owned by another run cannot be stolen, and a run
+    // cannot predate the job that queued it. Rejecting the whole event keeps
+    // the run out of the snapshot instead of orphaning it beside a job that
+    // never took ownership.
+    const linkedJob = jobId === undefined
+      ? undefined
+      : snapshot.jobs.find((job) => job.id === jobId);
+    if (
+      linkedJob
+      && (readJobTerminalStatus(linkedJob.status)
+        || (linkedJob.agentRunId !== undefined && linkedJob.agentRunId !== id)
+        || linkedJob.queuedAt > startedAt)
+    ) {
+      return snapshot;
+    }
+    const jobs = jobId
+      ? snapshot.jobs.map((job) => job.id === jobId
+          ? { ...job, agentRunId: id, status: "running" as const, startedAt }
+          : job)
+      : snapshot.jobs;
+    return createAgentConsoleSnapshot({
+      ...snapshot,
+      agents: upsertById(snapshot.agents, agent),
+      jobs,
+    });
+  }
+
+  if (event.type !== "agent.run.settled") {
+    return snapshot;
+  }
+  const id = readNonEmptyString(trace, "runId");
+  const current = snapshot.agents.find((agent) => agent.id === id);
+  const completedAt = readTimestamp(trace, "completedAt");
+  const status = readAgentTerminalStatus(trace.status);
+  if (!id || !current || completedAt === undefined || !status) {
+    return snapshot;
+  }
+  // A run settles once, and never before it started.
+  if (readAgentTerminalStatus(current.status) || completedAt < current.startedAt) {
+    return snapshot;
+  }
+  const summary = readNonEmptyString(trace, "summary");
+  const errorSummary = readNonEmptyString(trace, "errorSummary");
+  // A settled run has no in-flight tool call, so the transient activity label
+  // is dropped instead of freezing at whatever tool happened to run last.
+  const { currentActivity, ...settled } = current;
+  const agent: AgentRun = {
+    ...settled,
+    status,
+    completedAt,
+    ...(summary ? { summary } : {}),
+    ...(errorSummary ? { errorSummary } : {}),
+  };
+  // The owning job settles in the same projection as its run, so the console
+  // can never render a finished agent beside a job that is still running. A
+  // link naming another run's job, or a job whose own timeline outlives the
+  // run, is mis-routed: reject the event rather than settle half of it.
+  const jobId = readNonEmptyString(trace, "jobId");
+  const linkedJob = jobId === undefined
+    ? undefined
+    : snapshot.jobs.find((job) => job.id === jobId);
+  if (
+    linkedJob
+    && ((linkedJob.agentRunId !== undefined && linkedJob.agentRunId !== id)
+      || linkedJob.queuedAt > completedAt
+      || (linkedJob.startedAt !== undefined && linkedJob.startedAt > completedAt))
+  ) {
+    return snapshot;
+  }
+  const linkedStatus = readJobTerminalStatus(trace.status);
+  return createAgentConsoleSnapshot({
+    ...snapshot,
+    agents: upsertById(snapshot.agents, agent),
+    jobs: linkedJob && linkedStatus
+      ? settleLinkedJob(snapshot.jobs, linkedJob, { status: linkedStatus, completedAt, summary, errorSummary })
+      : snapshot.jobs,
+  });
+}
+
+/**
+ * Settle the job that owns a run, inside the run's own projection. A job that
+ * already reached a terminal status keeps its own record instead of inheriting
+ * the run's.
+ */
+function settleLinkedJob(
+  jobs: readonly AsyncJob[],
+  current: AsyncJob,
+  settlement: {
+    readonly status: AsyncJob["status"];
+    readonly completedAt: number;
+    readonly summary: string | undefined;
+    readonly errorSummary: string | undefined;
+  },
+): readonly AsyncJob[] {
+  if (readJobTerminalStatus(current.status)) {
+    return jobs;
+  }
+  return upsertById(jobs, {
+    ...current,
+    status: settlement.status,
+    completedAt: settlement.completedAt,
+    ...(settlement.summary === undefined ? {} : { summary: settlement.summary }),
+    ...(settlement.errorSummary === undefined ? {} : { errorSummary: settlement.errorSummary }),
+  });
+}
+
+const USAGE_TOKEN_KEYS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const;
+const USAGE_MONEY_KEYS = ["cacheSavingsUsd", "costUsd"] as const;
+
+/**
+ * Gate a usage measurement before it reaches a ledger.
+ *
+ * Three things are settled before the write: which ledger already owns the
+ * event id, whether the scope on the wire is meaningful, and whether the
+ * resulting totals are still values a resume can reload. Each failure returns
+ * the caller's snapshot, so a bad measurement is inert rather than half-applied.
+ */
+function applyUsageEvent(
+  snapshot: AgentConsoleSnapshot,
+  trace: TraceRecord,
+): AgentConsoleSnapshot {
+  const eventId = readNonEmptyString(trace, "eventId");
+  if (!eventId) {
+    return snapshot;
+  }
+
+  // Only an omitted scope means the main session. `exactOptionalPropertyTypes`
+  // lets a producer leave `agentRunId` out; it never lets one set the property
+  // to undefined. So a present property that is not a usable run id is a broken
+  // producer, and charging main usage for it would book a subagent's spend
+  // against the session.
+  const agentRunId = readNonEmptyString(trace, "agentRunId");
+  if (Object.hasOwn(trace, "agentRunId") && !agentRunId) {
+    return snapshot;
+  }
+
+  // One provider event contributes to exactly one ledger. Every ledger is
+  // checked, not just the one this event points at, so a replay that arrives
+  // with a changed scope cannot double-count.
+  if (
+    snapshot.mainUsage?.eventIds.includes(eventId)
+    || snapshot.agents.some((agent) => agent.usage?.eventIds.includes(eventId))
+  ) {
+    return snapshot;
+  }
+
+  const scopedRun = agentRunId
+    ? snapshot.agents.find((agent) => agent.id === agentRunId)
+    : undefined;
+  if (agentRunId && !scopedRun) {
+    return snapshot;
+  }
+  const base = agentRunId ? scopedRun?.usage : snapshot.mainUsage;
+  if (!isStorableUsage(appendUsage(base, trace, eventId))) {
+    return snapshot;
+  }
+  return applyUsageRecordedEvent(snapshot, trace);
+}
+
+/**
+ * Every persisted total has to survive `parseAgentConsoleSnapshot`: token
+ * counts as safe integers, money as finite numbers. A total that has left
+ * either range cannot be written — clamping would invent spend and truncating
+ * would hide it — so the event that produced it is refused instead.
+ */
+function isStorableUsage(usage: AgentRunUsage): boolean {
+  for (const key of USAGE_TOKEN_KEYS) {
+    const total = usage[key];
+    if (total !== undefined && !Number.isSafeInteger(total)) {
+      return false;
+    }
+  }
+  for (const key of USAGE_MONEY_KEYS) {
+    const total = usage[key];
+    if (total !== undefined && !Number.isFinite(total)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function applyUsageRecordedEvent(
+  snapshot: AgentConsoleSnapshot,
+  trace: TraceRecord,
+): AgentConsoleSnapshot {
+  const eventId = readNonEmptyString(trace, "eventId");
+  if (!eventId) {
+    return snapshot;
+  }
+  const agentRunId = readNonEmptyString(trace, "agentRunId");
+  if (agentRunId) {
+    const current = snapshot.agents.find((agent) => agent.id === agentRunId);
+    if (!current || current.usage?.eventIds.includes(eventId)) {
+      return snapshot;
+    }
+    const usage = appendUsage(current.usage, trace, eventId);
+    return createAgentConsoleSnapshot({
+      ...snapshot,
+      agents: snapshot.agents.map((agent) => agent.id === agentRunId ? { ...agent, usage } : agent),
+    });
+  }
+  if (snapshot.mainUsage?.eventIds.includes(eventId)) {
+    return snapshot;
+  }
+  return createAgentConsoleSnapshot({
+    ...snapshot,
+    mainUsage: appendUsage(snapshot.mainUsage, trace, eventId),
+  });
+}
+
+function appendUsage(
+  current: AgentRunUsage | undefined,
+  trace: TraceRecord,
+  eventId: string,
+): AgentRunUsage {
+  const routes = appendUsageRoute(current?.routes ?? [], trace, eventId);
+  return {
+    eventIds: [...(current?.eventIds ?? []), eventId],
+    ...sumUsageCounter(current, trace, "inputTokens"),
+    ...sumUsageCounter(current, trace, "outputTokens"),
+    ...sumUsageCounter(current, trace, "cacheReadTokens"),
+    ...sumUsageCounter(current, trace, "cacheWriteTokens"),
+    ...sumUsageMoney(current, trace, "cacheSavingsUsd"),
+    ...sumUsageMoney(current, trace, "costUsd"),
+    ...(routes.length === 0 ? {} : { routes }),
+  };
+}
+
+function appendUsageRoute(
+  currentRoutes: readonly AgentRunUsageRoute[],
+  trace: TraceRecord,
+  eventId: string,
+): readonly AgentRunUsageRoute[] {
+  const provider = readNonEmptyString(trace, "provider");
+  const model = readNonEmptyString(trace, "model");
+  if (!provider || !model) return currentRoutes;
+
+  const routeIndex = currentRoutes.findIndex(
+    (route) => route.provider === provider && route.model === model,
+  );
+  const current = routeIndex === -1 ? undefined : currentRoutes[routeIndex];
+  const route: AgentRunUsageRoute = {
+    provider,
+    model,
+    eventIds: [...(current?.eventIds ?? []), eventId],
+    ...sumUsageCounter(current, trace, "inputTokens"),
+    ...sumUsageCounter(current, trace, "outputTokens"),
+    ...sumUsageCounter(current, trace, "cacheReadTokens"),
+    ...sumUsageCounter(current, trace, "cacheWriteTokens"),
+    ...sumUsageMoney(current, trace, "cacheSavingsUsd"),
+    ...sumUsageMoney(current, trace, "costUsd"),
+  };
+  if (routeIndex === -1) return [...currentRoutes, route].slice(-MAX_USAGE_ROUTES);
+  return currentRoutes.map((candidate, index) => index === routeIndex ? route : candidate);
+}
+
+function sumUsageCounter(
+  current: AgentRunUsage | AgentRunUsageRoute | undefined,
+  trace: TraceRecord,
+  key: "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens",
+): Partial<AgentRunUsageRoute> {
+  const value = trace[key];
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? { [key]: (current?.[key] ?? 0) + value }
+    : current?.[key] === undefined
+      ? {}
+      : { [key]: current[key] };
+}
+
+function sumUsageMoney(
+  current: AgentRunUsage | AgentRunUsageRoute | undefined,
+  trace: TraceRecord,
+  key: "cacheSavingsUsd" | "costUsd",
+): Partial<AgentRunUsageRoute> {
+  const value = trace[key];
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? { [key]: (current?.[key] ?? 0) + value }
+    : current?.[key] === undefined
+      ? {}
+      : { [key]: current[key] };
+}
+
+function upsertById<T extends { readonly id: string }>(items: readonly T[], item: T): readonly T[] {
+  const index = items.findIndex((candidate) => candidate.id === item.id);
+  return index === -1
+    ? [...items, item]
+    : items.map((candidate, candidateIndex) => candidateIndex === index ? item : candidate);
+}
+
+function readJobTerminalStatus(value: unknown): AsyncJob["status"] | undefined {
+  return value === "completed" || value === "failed" || value === "cancelled" || value === "interrupted"
+    ? value
+    : undefined;
+}
+
+function readAgentTerminalStatus(value: unknown): AgentRun["status"] | undefined {
+  return value === "completed" || value === "failed"
+    || value === "cancelled" || value === "interrupted"
+    ? value
+    : undefined;
 }
 
 function applyWorkLifecycleEvent(
@@ -132,6 +620,7 @@ function createStartedActivity(input: {
   readonly startedAt: number;
   readonly input: TraceRecord | undefined;
   readonly current: ToolActivity | undefined;
+  readonly agentRunId: string | undefined;
 }): ToolActivity {
   const target = input.current?.target ?? deriveToolTarget(input.input);
   return {
@@ -143,6 +632,7 @@ function createStartedActivity(input: {
     status: "running",
     ...(target ? { target } : {}),
     startedAt: input.startedAt,
+    ...(input.agentRunId ? { agentRunId: input.agentRunId } : {}),
   };
 }
 
@@ -153,6 +643,7 @@ function createCompletedActivity(input: {
   readonly input: TraceRecord | undefined;
   readonly trace: TraceRecord;
   readonly current: ToolActivity | undefined;
+  readonly agentRunId: string | undefined;
 }): ToolActivity {
   const completedAt = readTimestamp(input.trace, "completedAt") ?? Date.now();
   const durationMs = readTimestamp(input.trace, "durationMs") ?? Math.max(0, completedAt - input.startedAt);
@@ -178,6 +669,7 @@ function createCompletedActivity(input: {
     ].join(" · "),
     startedAt: input.startedAt,
     completedAt,
+    ...(input.agentRunId ? { agentRunId: input.agentRunId } : {}),
   };
 }
 

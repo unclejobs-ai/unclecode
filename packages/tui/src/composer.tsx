@@ -3,10 +3,10 @@ import {
   type ClipboardImageAttachment,
   type ClipboardImageResult,
 } from "@unclecode/orchestrator";
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useCursor, useInput, type DOMElement } from "ink";
 import React, { useEffect, useRef, useState } from "react";
 
-import { getDisplayWidth, segmentDisplayGraphemes } from "./text-width.js";
+import { getDisplayWidth, segmentDisplayGraphemes, truncateForDisplayWidth } from "./text-width.js";
 
 // `ClipboardImageResult` is re-exported only because it is part of
 // `handleComposerClipboardPaste`'s public signature (an internal test seam).
@@ -17,10 +17,8 @@ const COMPOSER_PASTE_THRESHOLD = 48;
 const PASTE_SETTLE_MS = 120;
 const BRACKETED_PASTE_ARTIFACT_PATTERN = /(?:\u001b\[(?:200|201|990)~|\[(?:200|201|990)~)/g;
 const NON_TEXT_CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
-const HANGUL_PATTERN = /[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/u;
-const HANGUL_JAMO_PATTERN = /^[\u1100-\u11ff\u3130-\u318f]+$/u;
 const COMPOSER_DEFAULT_VISIBLE_WIDTH = 72;
-const COMPOSER_CURSOR_GLYPH = "▏";
+const COMPOSER_MAX_VISIBLE_ROWS = 4;
 
 export function isRawComposerEmpty(value: string, pendingValue?: string): boolean {
   return (pendingValue ?? value).length === 0;
@@ -46,95 +44,6 @@ export function shouldTreatComposerChangeAsPaste(
   }
 
   return nextValue.includes("\n") && !previousValue.includes("\n");
-}
-
-function commonPrefixOffset(left: string, right: string): number {
-  let offset = 0;
-  const maxOffset = Math.min(left.length, right.length);
-  while (offset < maxOffset) {
-    const leftCodePoint = left.codePointAt(offset);
-    const rightCodePoint = right.codePointAt(offset);
-    if (leftCodePoint === undefined || leftCodePoint !== rightCodePoint) {
-      break;
-    }
-    offset += leftCodePoint > 0xffff ? 2 : 1;
-  }
-  return offset;
-}
-
-function graphemeBeforeCursor(value: string, cursorOffset: number): string {
-  const normalized = normalizeComposerCursorOffset(value, cursorOffset);
-  const previousOffset = previousComposerCursorOffset(value, normalized);
-  return value.slice(previousOffset, normalized);
-}
-
-function resolveHangulCompositionReplacement(input: {
-  readonly value: string;
-  readonly cursorOffset: number;
-  readonly sanitizedInput: string;
-}): {
-  readonly nextValue: string;
-  readonly nextCursorOffset: number;
-} | undefined {
-  if (
-    input.value.length === 0 ||
-    input.sanitizedInput.length === 0 ||
-    input.sanitizedInput.includes("\n") ||
-    !HANGUL_PATTERN.test(input.value) ||
-    !HANGUL_PATTERN.test(input.sanitizedInput)
-  ) {
-    return undefined;
-  }
-
-  const cursorOffset = normalizeComposerCursorOffset(input.value, input.cursorOffset);
-  const beforeCursor = graphemeBeforeCursor(input.value, cursorOffset);
-
-  if (beforeCursor.length > 0 && HANGUL_JAMO_PATTERN.test(beforeCursor)) {
-    const head = input.value.slice(0, cursorOffset - beforeCursor.length);
-    const tail = input.value.slice(cursorOffset);
-    const nextValue = `${head}${input.sanitizedInput}${tail}`;
-    return {
-      nextValue,
-      nextCursorOffset: head.length + input.sanitizedInput.length,
-    };
-  }
-
-  const head = input.value.slice(0, cursorOffset);
-  if (input.sanitizedInput.startsWith(head) && input.sanitizedInput.length > head.length) {
-    const inserted = input.sanitizedInput.slice(head.length);
-    const tail = input.value.slice(cursorOffset);
-    const overlap = commonPrefixOffset(inserted, tail);
-    const shorterLength = Math.min(inserted.length, tail.length);
-    const minimumOverlap =
-      shorterLength === 0 ? 0 : Math.max(1, Math.floor(shorterLength * 0.6));
-    if (tail.length === 0 || overlap >= minimumOverlap) {
-      const nextValue = `${head}${inserted}${tail.slice(overlap)}`;
-      return {
-        nextValue,
-        nextCursorOffset: head.length + inserted.length,
-      };
-    }
-  }
-
-  if (cursorOffset !== input.value.length) {
-    return undefined;
-  }
-
-  if (input.sanitizedInput.length <= 1) {
-    return undefined;
-  }
-
-  const prefixOffset = commonPrefixOffset(input.value, input.sanitizedInput);
-  const shorterLength = Math.min(input.value.length, input.sanitizedInput.length);
-  const minimumOverlap = Math.max(2, Math.floor(shorterLength * 0.6));
-  if (prefixOffset >= shorterLength || prefixOffset >= minimumOverlap) {
-    return {
-      nextValue: input.sanitizedInput,
-      nextCursorOffset: input.sanitizedInput.length,
-    };
-  }
-
-  return undefined;
 }
 
 export function applyComposerEdit(input: {
@@ -215,18 +124,6 @@ export function applyComposerEdit(input: {
     };
   }
 
-  const compositionReplacement = resolveHangulCompositionReplacement({
-    value: input.value,
-    cursorOffset,
-    sanitizedInput,
-  });
-  if (compositionReplacement) {
-    return {
-      ...compositionReplacement,
-      submitted: false,
-    };
-  }
-
   return {
     nextValue: `${input.value.slice(0, cursorOffset)}${sanitizedInput}${input.value.slice(cursorOffset)}`,
     nextCursorOffset: cursorOffset + sanitizedInput.length,
@@ -301,46 +198,112 @@ function maskComposerValue(value: string, mask?: string): string {
   return segmentDisplayGraphemes(value).map((grapheme) => (grapheme === "\n" ? "\n" : mask)).join("");
 }
 
-function getCursorPosition(value: string, cursorOffset: number): {
-  readonly lineIndex: number;
-  readonly columnIndex: number;
-} {
-  const clampedOffset = Math.max(0, Math.min(cursorOffset, value.length));
-  const beforeCursor = value.slice(0, clampedOffset);
-  const lines = beforeCursor.split("\n");
-  const lastLine = lines.at(-1) ?? "";
+export type ComposerViewportLayout = {
+  readonly lines: readonly string[];
+  readonly cursor: {
+    readonly row: number;
+    readonly column: number;
+  };
+  readonly hiddenAbove: number;
+  readonly hiddenBelow: number;
+};
+
+export function layoutComposerViewport(input: {
+  readonly value: string;
+  readonly cursorOffset: number;
+  readonly width: number;
+  readonly maxRows: number;
+}): ComposerViewportLayout {
+  const width = Math.max(1, Math.trunc(input.width));
+  const maxRows = Math.max(1, Math.trunc(input.maxRows));
+  const cursorOffset = normalizeComposerCursorOffset(input.value, input.cursorOffset);
+  const rows: string[][] = [[]];
+  let row = 0;
+  let column = 0;
+  let offset = 0;
+  let cursor = { row: 0, column: 0 };
+  let cursorResolved = false;
+
+  for (const grapheme of segmentDisplayGraphemes(input.value)) {
+    if (grapheme !== "\n") {
+      const graphemeWidth = Math.max(1, getDisplayWidth(grapheme));
+      if (column === width || column + graphemeWidth > width) {
+        rows.push([]);
+        row += 1;
+        column = 0;
+      }
+    }
+
+    if (offset === cursorOffset) {
+      cursor = { row, column };
+      cursorResolved = true;
+    }
+
+    if (grapheme === "\n") {
+      rows.push([]);
+      row += 1;
+      column = 0;
+    } else {
+      rows[row]?.push(grapheme);
+      column += Math.max(1, getDisplayWidth(grapheme));
+    }
+    offset += grapheme.length;
+  }
+
+  if (!cursorResolved) {
+    if (column === width) {
+      rows.push([]);
+      row += 1;
+      column = 0;
+    }
+    cursor = { row, column };
+  }
+
+  const firstVisibleRow = Math.min(
+    Math.max(0, rows.length - maxRows),
+    Math.max(0, cursor.row - Math.floor(maxRows / 2)),
+  );
+  const lines = rows.slice(firstVisibleRow, firstVisibleRow + maxRows).map((parts) => parts.join(""));
   return {
-    lineIndex: Math.max(0, lines.length - 1),
-    columnIndex: getDisplayWidth(lastLine),
+    lines,
+    cursor: {
+      row: cursor.row - firstVisibleRow,
+      column: cursor.column,
+    },
+    hiddenAbove: firstVisibleRow,
+    hiddenBelow: Math.max(0, rows.length - firstVisibleRow - lines.length),
   };
 }
 
-function splitLineAtDisplayColumn(line: string, displayColumn: number): {
-  readonly before: string;
-  readonly atCursor: string;
-  readonly after: string;
-} {
-  let width = 0;
-  let beforeEnd = 0;
-  for (const grapheme of segmentDisplayGraphemes(line)) {
-    const charWidth = getDisplayWidth(grapheme);
-    if (width >= displayColumn) {
-      const cursorEnd = beforeEnd + grapheme.length;
-      return {
-        before: line.slice(0, beforeEnd),
-        atCursor: grapheme,
-        after: line.slice(cursorEnd),
-      };
-    }
-    width += charWidth;
-    beforeEnd += grapheme.length;
+export function resolveComposerTerminalCursor(input: {
+  readonly origin: { readonly x: number; readonly y: number } | undefined;
+  readonly viewport: ComposerViewportLayout | null;
+  readonly visible: boolean;
+}): { readonly x: number; readonly y: number } | undefined {
+  if (!input.visible || !input.origin || !input.viewport) {
+    return undefined;
   }
-  return { before: line, atCursor: "", after: "" };
+  return {
+    x: input.origin.x + input.viewport.cursor.column,
+    y: input.origin.y + input.viewport.cursor.row + (input.viewport.hiddenAbove > 0 ? 1 : 0),
+  };
 }
 
 function padComposerLine(value: string, width: number): string {
   const padding = Math.max(0, width - getDisplayWidth(value));
   return `${value}${" ".repeat(padding)}`;
+}
+
+export function formatComposerOverflowLine(
+  direction: "above" | "below",
+  count: number,
+  width: number,
+): string {
+  const arrow = direction === "above" ? "↑" : "↓";
+  return padComposerLine(
+    truncateForDisplayWidth(`${arrow} ${count} more`, width),
+    width,
+  );
 }
 
 export function resolveComposerVisibleWidth(terminalColumns?: number): number {
@@ -375,42 +338,21 @@ export function handleComposerClipboardPaste(input: {
   return "fallthrough";
 }
 
-function renderComposerLine(
-  line: string,
-  cursorColumn: number | undefined,
-  terminalColumns?: number,
-  textColor?: string,
-): React.ReactNode {
-  const colorProps = textColor ? { color: textColor } : {};
-  const visibleWidth = resolveComposerVisibleWidth(terminalColumns);
-  if (cursorColumn === undefined) {
-    return <Text {...colorProps}>{padComposerLine(line.length > 0 ? line : " ", visibleWidth)}</Text>;
+function getComposerAbsolutePosition(
+  node: DOMElement | null,
+): { readonly x: number; readonly y: number } | undefined {
+  let current: DOMElement | undefined = node ?? undefined;
+  let x = 0;
+  let y = 0;
+  while (current?.parentNode) {
+    if (!current.yogaNode) {
+      return undefined;
+    }
+    x += current.yogaNode.getComputedLeft();
+    y += current.yogaNode.getComputedTop();
+    current = current.parentNode;
   }
-
-  const lineWidth = getDisplayWidth(line);
-  const cursorWidth = getDisplayWidth(COMPOSER_CURSOR_GLYPH);
-  if (cursorColumn >= lineWidth) {
-    const paddingWidth = Math.max(0, visibleWidth - lineWidth - cursorWidth);
-    return (
-      <Text {...colorProps}>
-        {line}
-        {COMPOSER_CURSOR_GLYPH}
-        {" ".repeat(paddingWidth)}
-      </Text>
-    );
-  }
-
-  const { before, atCursor, after } = splitLineAtDisplayColumn(line, cursorColumn);
-  const renderedWidth = getDisplayWidth(`${before}${atCursor}${after}`) + cursorWidth;
-  return (
-    <Text {...colorProps}>
-      {before}
-      {COMPOSER_CURSOR_GLYPH}
-      {atCursor}
-      {after}
-      {" ".repeat(Math.max(0, visibleWidth - renderedWidth))}
-    </Text>
-  );
+  return current ? { x, y } : undefined;
 }
 
 export function Composer(props: {
@@ -447,8 +389,19 @@ export function Composer(props: {
    */
   readonly suppressInspectorKeys?: boolean | undefined;
   readonly suppressInspectorMutationKeys?: boolean | undefined;
+  readonly suppressInspectorUndoKey?: boolean | undefined;
   readonly suppressInspectorAdviceKeys?: boolean | undefined;
+  /**
+   * Cache Telemetry and Agent History own A/C while their overlay is open.
+   * Suppress those action keys before the local draft ref can retain them
+   * during the asynchronous panel switch.
+   */
+  readonly suppressTelemetryHotkeys?: boolean | undefined;
+  readonly cursorVisible?: boolean | undefined;
 }) {
+  const { setCursorPosition } = useCursor();
+  const composerRef = useRef<DOMElement>(null);
+  const [terminalOrigin, setTerminalOrigin] = useState<{ readonly x: number; readonly y: number }>();
   const [isPasting, setIsPasting] = useState(false);
   const [cursorOffset, setCursorOffset] = useState(props.value.length);
   const cursorOffsetRef = useRef(props.value.length);
@@ -486,6 +439,12 @@ export function Composer(props: {
     },
     [],
   );
+  useEffect(() => {
+    const nextOrigin = getComposerAbsolutePosition(composerRef.current);
+    setTerminalOrigin((current) => (
+      current?.x === nextOrigin?.x && current?.y === nextOrigin?.y ? current : nextOrigin
+    ));
+  });
 
   const armPasteWindow = (text: string): void => {
     suppressNextSubmitRef.current = true;
@@ -533,9 +492,17 @@ export function Composer(props: {
       return;
     }
 
+    if (
+      latestProps.suppressTelemetryHotkeys
+      && isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current)
+      && (input.toLowerCase() === "a" || input.toLowerCase() === "c")
+    ) {
+      return;
+    }
+
     // While Context Desk owns an empty composer, keep its navigation and
-    // mutation keys out of the draft. Read-only panes still allow Space/P as
-    // ordinary text because those actions are unavailable.
+    // enabled action keys out of the draft. Read-only panes leave unavailable
+    // action letters available as ordinary text.
     if (
       latestProps.suppressInspectorKeys
       && isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current)
@@ -546,6 +513,9 @@ export function Composer(props: {
         return;
       }
       if (suppressMutationKeys && (input === " " || input === "p")) {
+        return;
+      }
+      if (latestProps.suppressInspectorUndoKey && input.toLowerCase() === "u") {
         return;
       }
       if (
@@ -613,21 +583,36 @@ export function Composer(props: {
   }, { isActive: true });
 
   const visibleValue = maskComposerValue(props.value, props.mask);
-  const cursorPosition = getCursorPosition(visibleValue, cursorOffset);
-  const lines = (visibleValue.length > 0 ? visibleValue : "").split("\n");
+  const normalizedCursorOffset = normalizeComposerCursorOffset(props.value, cursorOffset);
+  const visibleCursorOffset = props.mask
+    ? maskComposerValue(props.value.slice(0, normalizedCursorOffset), props.mask).length
+    : normalizedCursorOffset;
+  const visibleWidth = resolveComposerVisibleWidth(props.terminalColumns);
+  const viewport = layoutComposerViewport({
+    value: visibleValue,
+    cursorOffset: visibleCursorOffset,
+    width: visibleWidth,
+    maxRows: COMPOSER_MAX_VISIBLE_ROWS,
+  });
+  const terminalCursor = resolveComposerTerminalCursor({
+    origin: terminalOrigin,
+    viewport,
+    visible: props.cursorVisible ?? true,
+  });
+  setCursorPosition(terminalCursor);
+  const colorProps = props.textColor ? { color: props.textColor } : {};
 
   return (
-    <Box flexDirection="column">
-      {lines.map((line, index) => (
-        <Box key={index}>
-          {renderComposerLine(
-            line,
-            index === cursorPosition.lineIndex ? cursorPosition.columnIndex : undefined,
-            props.terminalColumns,
-            props.textColor,
-          )}
-        </Box>
+    <Box ref={composerRef} flexDirection="column">
+      {viewport.hiddenAbove > 0 ? (
+        <Text {...colorProps} dimColor>{formatComposerOverflowLine("above", viewport.hiddenAbove, visibleWidth)}</Text>
+      ) : null}
+      {viewport.lines.map((line, index) => (
+        <Text key={index} {...colorProps}>{padComposerLine(line.length > 0 ? line : " ", visibleWidth)}</Text>
       ))}
+      {viewport.hiddenBelow > 0 ? (
+        <Text {...colorProps} dimColor>{formatComposerOverflowLine("below", viewport.hiddenBelow, visibleWidth)}</Text>
+      ) : null}
     </Box>
   );
 }

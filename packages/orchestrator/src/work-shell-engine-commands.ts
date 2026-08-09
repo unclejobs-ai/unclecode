@@ -11,6 +11,8 @@ export type ResolvedWorkShellBuiltinCommand =
   | { readonly kind: "clear" }
   | { readonly kind: "help" }
   | { readonly kind: "context" }
+  | { readonly kind: "cache" }
+  | { readonly kind: "agents" }
   | { readonly kind: "reload" }
   | { readonly kind: "status" }
   | { readonly kind: "sessions" }
@@ -67,6 +69,8 @@ function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinComm
     "clear",
     "help",
     "context",
+    "cache",
+    "agents",
     "reload",
     "status",
     "sessions",

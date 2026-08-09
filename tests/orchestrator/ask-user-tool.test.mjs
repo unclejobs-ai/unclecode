@@ -23,10 +23,12 @@ const request = {
 test("ask_user reports unavailable before a Work Shell interaction host binds", async () => {
   const bridge = createWorkShellInteractionBridge();
   const runtime = createToolRuntime({ interactionBridge: bridge });
-  const handler = runtime.handlers.ask_user;
-
-  assert.ok(handler);
-  const result = await handler(request, "/repo");
+  assert.ok(runtime.definitions.some((tool) => tool.name === "ask_user"));
+  const result = await runtime.executor.execute({
+    toolName: "ask_user",
+    input: request,
+    cwd: "/repo",
+  });
 
   assert.deepEqual(JSON.parse(result.content), {
     status: "unavailable",
@@ -102,7 +104,7 @@ test("ask_user returns a real structured response from the bound interaction hos
     },
   });
 
-  const result = await runtime.handlers.ask_user(request, "/repo");
+  const result = await runtime.executor.execute({ toolName: "ask_user", input: request, cwd: "/repo" });
   assert.deepEqual(JSON.parse(result.content), {
     status: "answered",
     answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
@@ -118,7 +120,7 @@ test("ask_user reports unavailable when the bound interaction host throws synchr
     },
   });
 
-  const result = await runtime.handlers.ask_user(request, "/repo");
+  const result = await runtime.executor.execute({ toolName: "ask_user", input: request, cwd: "/repo" });
   assert.deepEqual(JSON.parse(result.content), {
     status: "unavailable",
     reason: "Work Shell interaction is unavailable.",
@@ -137,14 +139,18 @@ test("ask_user validates malformed decisions before they reach the UI host", asy
   });
 
   await assert.rejects(
-    () => runtime.handlers.ask_user({
-      ...request,
-      questions: [{
-        ...request.questions[0],
-        options: [{ label: "Other" }],
-        recommended: 1,
-      }],
-    }, "/repo"),
+    () => runtime.executor.execute({
+      toolName: "ask_user",
+      input: {
+        ...request,
+        questions: [{
+          ...request.questions[0],
+          options: [{ label: "Other" }],
+          recommended: 1,
+        }],
+      },
+      cwd: "/repo",
+    }),
     /must not use reserved label "Other"|recommended index/i,
   );
   assert.equal(hostCalled, false);

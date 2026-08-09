@@ -1,5 +1,8 @@
 import type { PersistedPromptManifest } from "./agent-console.js";
-import type { ContextSourceCompressionMetadata } from "./context-source-metadata.js";
+import type {
+  ContextSourceCompressionMetadata,
+  ContextSourceWorkNodeMetadata,
+} from "./context-source-metadata.js";
 
 export type ContextPacketSourceCategory =
   | "workspace"
@@ -93,6 +96,7 @@ export type ContextPacketViewActionReceipt = {
   readonly sourceId: string;
   readonly sourceLabel: string;
   readonly message: string;
+  readonly succeeded: boolean;
   readonly canUndo: boolean;
   readonly beforePacketId?: string | undefined;
   readonly afterPacketId?: string | undefined;
@@ -112,8 +116,17 @@ export type ContextPacketViewCondensedHistoryMetadata = {
   readonly compression: ContextSourceCompressionMetadata;
 };
 
+/**
+ * Work-node metadata is identical on both sides of the projection. Unlike
+ * condensed history — which keeps raw `sourceEventPreviews` out of the view —
+ * a work node has no stored-only field to strip, so the shape is shared
+ * instead of duplicated and cannot drift.
+ */
+export type ContextPacketViewWorkNodeMetadata = ContextSourceWorkNodeMetadata;
+
 export type ContextPacketViewMetadata =
-  ContextPacketViewCondensedHistoryMetadata;
+  | ContextPacketViewCondensedHistoryMetadata
+  | ContextPacketViewWorkNodeMetadata;
 
 export type ContextPacketViewItem = {
   readonly id: string;

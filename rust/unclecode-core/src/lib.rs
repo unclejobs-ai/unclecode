@@ -1,6 +1,7 @@
 pub mod aci;
 pub mod aci_edit;
 pub mod aci_patch;
+pub mod aci_safe;
 pub mod aci_search;
 pub mod anthropic_request;
 pub mod app_reasoning;

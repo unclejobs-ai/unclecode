@@ -2,20 +2,26 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::cli_team_background::{
+    background_restart_request, complete_background_job, format_background_job_status,
+    is_background_child, launch_background_job, terminate_background_job, wait_for_background_job,
+    BackgroundRunRequest,
+};
 use unclecode_core::http_transport::post_json_with_headers;
 use unclecode_core::sha256::sha256_hex;
 use unclecode_core::team_mini_loop::{run_team_mini_loop, TeamMiniLoopRequest};
 use unclecode_core::team_runtime::{
     abort_team_run, append_team_run_status_checkpoint, append_team_task_received_checkpoint,
     apply_team_system_prefix, build_team_worker_spawn_args_from_spec, build_team_worker_specs,
-    format_team_lane_doctor, format_team_run_inspect, format_team_run_status,
-    format_team_runs_list, format_team_worker_envelope, resolve_team_worker_options,
-    start_team_run_record, sweep_stale_team_locks, TeamRunRecordRequest, TeamRunRecordResult,
+    finalize_team_worktree, format_team_lane_doctor, format_team_run_inspect,
+    format_team_run_status, format_team_runs_list, format_team_worker_envelope,
+    prepare_team_worktree, resolve_team_worker_options, start_team_run_record,
+    sweep_stale_team_locks, PreparedTeamWorktree, TeamRunRecordRequest, TeamRunRecordResult,
     TeamWorkerOptionsRequest, TeamWorkerSpec,
 };
 
@@ -86,33 +92,7 @@ pub fn run_top_level_team_command(args: &[OsString]) -> Result<u8, String> {
                 print_team_help();
                 return Ok(0);
             }
-            let parsed = parse_run_args(&args[1..])?;
-            let result = start_team_run_record(TeamRunRecordRequest {
-                data_root: team_data_root(),
-                run_id: parsed.record.clone(),
-                objective: parsed.objective.join(" "),
-                persona: parsed.persona.clone(),
-                lanes_spec: parsed.lanes.clone(),
-                gate: parsed.gate.clone(),
-                runtime: parsed.runtime.clone(),
-                workspace_root: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                created_by: env::var("USER").unwrap_or_else(|_| "unclecode-cli".to_string()),
-            })?;
-            if parsed.quiet {
-                println!("{}", result.run_id);
-            } else {
-                println!("RUN_ID={}", result.run_id);
-                println!("RUN_ROOT={}", result.run_root.display());
-                println!(
-                    "persona={} lanes={} gate={} runtime={}",
-                    result.persona, result.lanes_summary, result.gate, result.runtime
-                );
-            }
-            if parsed.dispatch {
-                run_team_dispatch(&result, &parsed)
-            } else {
-                Ok(0)
-            }
+            run_team_start(&args[1..])
         }
         Some("worker") => {
             if args.iter().any(|arg| {
@@ -125,8 +105,14 @@ pub fn run_top_level_team_command(args: &[OsString]) -> Result<u8, String> {
             run_team_worker(&args[1..])
         }
         Some("status") => {
+            let data_root = team_data_root();
             let run_id = args.get(1).and_then(|arg| arg.to_str());
-            print!("{}", format_team_run_status(&team_data_root(), run_id)?);
+            print!("{}", format_team_run_status(&data_root, run_id)?);
+            if let Some(run_id) = run_id {
+                if let Some(background) = format_background_job_status(&data_root, run_id)? {
+                    print!("{background}");
+                }
+            }
             Ok(0)
         }
         Some("inspect") => {
@@ -141,12 +127,42 @@ pub fn run_top_level_team_command(args: &[OsString]) -> Result<u8, String> {
                 .and_then(|arg| arg.to_str())
                 .filter(|value| !value.is_empty())
                 .ok_or_else(team_usage)?;
-            let result = abort_team_run(&team_data_root(), run_id)?;
+            let data_root = team_data_root();
+            let terminated_pid = terminate_background_job(&data_root, run_id)?;
+            if terminated_pid.is_some() {
+                let run_root = data_root.join("team-runs").join(run_id);
+                sweep_stale_team_locks(&run_root, |_| false);
+                for lock_name in [".lock", ".append.lock"] {
+                    let lock_path = run_root.join(lock_name);
+                    match fs::remove_file(&lock_path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(format!(
+                                "Failed to clear terminated run lock {}: {error}",
+                                lock_path.display()
+                            ));
+                        }
+                    }
+                }
+            }
+            let result = abort_team_run(&data_root, run_id)?;
             if let Some(warning) = result.warning {
                 eprintln!("{warning}");
             }
             print!("{}", result.output);
+            if let Some(pid) = terminated_pid {
+                println!("Background PID {pid} cancelled");
+            }
             Ok(0)
+        }
+        Some("restart") => {
+            let run_id = args
+                .get(1)
+                .and_then(|arg| arg.to_str())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(team_usage)?;
+            restart_background_run(run_id)
         }
         Some("doctor") => {
             let report = format_team_lane_doctor(|key| env::var(key).ok(), binary_on_path);
@@ -160,7 +176,9 @@ pub fn run_top_level_team_command(args: &[OsString]) -> Result<u8, String> {
 fn is_native_team_surface(args: &[OsString]) -> bool {
     match args.first().and_then(|arg| arg.to_str()) {
         None | Some("--help") | Some("-h") | Some("help") | Some("ls") | Some("list")
-        | Some("status") | Some("inspect") | Some("abort") | Some("doctor") => true,
+        | Some("status") | Some("inspect") | Some("abort") | Some("restart") | Some("doctor") => {
+            true
+        }
         Some("run") => is_native_record_run_surface(&args[1..]),
         Some("worker") => is_native_worker_surface(&args[1..]),
         _ => false,
@@ -187,8 +205,10 @@ fn print_team_help() {
     println!("  unclecode team status [runId]");
     println!("  unclecode team inspect [--verify] <runId>");
     println!("  unclecode team abort <runId>");
+    println!("  unclecode team restart <runId>");
     println!("  unclecode team doctor");
     println!("  unclecode team run --dispatch [options] <objective...>");
+    println!("  unclecode team run --background [options] <objective...>");
     println!("  UNCLECODE_TEAM_WORKER_LIVE=0 unclecode team worker [options]");
     println!();
     println!(
@@ -203,7 +223,7 @@ fn print_team_worker_help() {
 }
 
 fn team_usage() -> String {
-    "Usage: unclecode team <run [options] <objective...>|ls|status [runId]|inspect [--verify] <runId>|abort <runId>|doctor>".to_string()
+    "Usage: unclecode team <run [options] <objective...>|ls|status [runId]|inspect [--verify] <runId>|abort <runId>|restart <runId>|doctor>".to_string()
 }
 
 struct RunArgs {
@@ -212,9 +232,11 @@ struct RunArgs {
     lanes: String,
     gate: String,
     runtime: String,
+    isolation: String,
     record: Option<String>,
     quiet: bool,
     dispatch: bool,
+    background: bool,
     worker_timeout_ms: u64,
 }
 
@@ -241,9 +263,11 @@ fn parse_run_args(args: &[OsString]) -> Result<RunArgs, String> {
     let mut lanes = "1".to_string();
     let mut gate = "strict".to_string();
     let mut runtime = "local".to_string();
+    let mut isolation = "shared".to_string();
     let mut record = None;
     let mut quiet = false;
     let mut dispatch = false;
+    let mut background = false;
     let mut worker_timeout_ms = 600_000;
     let mut index = 0;
 
@@ -267,6 +291,12 @@ fn parse_run_args(args: &[OsString]) -> Result<RunArgs, String> {
             index += 1;
             continue;
         }
+        if value == "--background" {
+            background = true;
+            dispatch = true;
+            index += 1;
+            continue;
+        }
         if value.starts_with("--dispatch=") {
             return Err(team_usage());
         }
@@ -284,6 +314,10 @@ fn parse_run_args(args: &[OsString]) -> Result<RunArgs, String> {
         }
         if let Some(next) = take_option_value("--runtime", value, args, &mut index)? {
             runtime = next;
+            continue;
+        }
+        if let Some(next) = take_option_value("--isolation", value, args, &mut index)? {
+            isolation = next;
             continue;
         }
         if let Some(next) = take_option_value("--record", value, args, &mut index)? {
@@ -313,11 +347,143 @@ fn parse_run_args(args: &[OsString]) -> Result<RunArgs, String> {
         lanes,
         gate,
         runtime,
+        isolation,
         record,
         quiet,
         dispatch,
+        background,
         worker_timeout_ms,
     })
+}
+
+fn run_team_start(args: &[OsString]) -> Result<u8, String> {
+    let parsed = parse_run_args(args)?;
+    let data_root = team_data_root();
+    if is_background_child() {
+        let run_id = parsed
+            .record
+            .as_deref()
+            .ok_or("Background coordinator is missing --record")?;
+        let run_root = data_root.join("team-runs").join(run_id);
+        wait_for_background_job(&run_root)?;
+        let result = TeamRunRecordResult {
+            run_id: run_id.to_string(),
+            run_root: run_root.clone(),
+            persona: parsed.persona.clone(),
+            lanes_summary: parsed.lanes.clone(),
+            gate: parsed.gate.clone(),
+            runtime: parsed.runtime.clone(),
+            isolation: parsed.isolation.clone(),
+        };
+        let outcome = run_team_dispatch(&result, &parsed);
+        if let Err(error) = complete_background_job(&run_root, &outcome) {
+            return match outcome {
+                Ok(_) => Err(error),
+                Err(dispatch_error) => Err(format!(
+                    "{dispatch_error}; failed to update background job: {error}"
+                )),
+            };
+        }
+        return outcome;
+    }
+
+    let workspace_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let request = background_request(&parsed);
+    let result = record_team_run(&data_root, parsed.record.clone(), &workspace_root, &request)?;
+    print_team_run_started(&result, parsed.quiet);
+    if parsed.background {
+        let current_exe = env::current_exe()
+            .map_err(|error| format!("Failed to resolve current exe: {error}"))?;
+        let launch = launch_background_job(
+            &current_exe,
+            &data_root,
+            &result.run_root,
+            &result.run_id,
+            &workspace_root,
+            request,
+        )?;
+        if !parsed.quiet {
+            println!("Background PID={}", launch.pid);
+            println!("STDOUT_LOG={}", launch.stdout_log.display());
+            println!("STDERR_LOG={}", launch.stderr_log.display());
+        }
+        return Ok(0);
+    }
+    if parsed.dispatch {
+        run_team_dispatch(&result, &parsed)
+    } else {
+        Ok(0)
+    }
+}
+
+fn restart_background_run(run_id: &str) -> Result<u8, String> {
+    let data_root = team_data_root();
+    let (request, workspace_root) = background_restart_request(&data_root, run_id)?;
+    let result = record_team_run(&data_root, None, &workspace_root, &request)?;
+    print_team_run_started(&result, request.quiet);
+    let current_exe =
+        env::current_exe().map_err(|error| format!("Failed to resolve current exe: {error}"))?;
+    let launch = launch_background_job(
+        &current_exe,
+        &data_root,
+        &result.run_root,
+        &result.run_id,
+        &workspace_root,
+        request.clone(),
+    )?;
+    if !request.quiet {
+        println!("Restarted from {run_id}");
+        println!("Background PID={}", launch.pid);
+        println!("STDOUT_LOG={}", launch.stdout_log.display());
+        println!("STDERR_LOG={}", launch.stderr_log.display());
+    }
+    Ok(0)
+}
+
+fn background_request(parsed: &RunArgs) -> BackgroundRunRequest {
+    BackgroundRunRequest {
+        objective: parsed.objective.join(" "),
+        persona: parsed.persona.clone(),
+        lanes: parsed.lanes.clone(),
+        gate: parsed.gate.clone(),
+        runtime: parsed.runtime.clone(),
+        isolation: parsed.isolation.clone(),
+        quiet: parsed.quiet,
+        worker_timeout_ms: parsed.worker_timeout_ms,
+    }
+}
+
+fn record_team_run(
+    data_root: &Path,
+    run_id: Option<String>,
+    workspace_root: &Path,
+    request: &BackgroundRunRequest,
+) -> Result<TeamRunRecordResult, String> {
+    start_team_run_record(TeamRunRecordRequest {
+        data_root: data_root.to_path_buf(),
+        run_id,
+        objective: request.objective.clone(),
+        persona: request.persona.clone(),
+        lanes_spec: request.lanes.clone(),
+        gate: request.gate.clone(),
+        runtime: request.runtime.clone(),
+        isolation: request.isolation.clone(),
+        workspace_root: workspace_root.to_path_buf(),
+        created_by: env::var("USER").unwrap_or_else(|_| "unclecode-cli".to_string()),
+    })
+}
+
+fn print_team_run_started(result: &TeamRunRecordResult, quiet: bool) {
+    if quiet {
+        println!("{}", result.run_id);
+        return;
+    }
+    println!("RUN_ID={}", result.run_id);
+    println!("RUN_ROOT={}", result.run_root.display());
+    println!(
+        "persona={} lanes={} gate={} runtime={} isolation={}",
+        result.persona, result.lanes_summary, result.gate, result.runtime, result.isolation
+    );
 }
 
 fn run_team_worker(args: &[OsString]) -> Result<u8, String> {
@@ -379,18 +545,66 @@ fn run_team_dispatch(result: &TeamRunRecordResult, parsed: &RunArgs) -> Result<u
 
     let command =
         env::current_exe().map_err(|error| format!("Failed to resolve current exe: {error}"))?;
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let workspace_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let env_vars = env::vars_os().collect::<Vec<_>>();
-    let mut handles = Vec::with_capacity(workers.len());
+    let mut launches: Vec<(TeamWorkerSpec, PathBuf, Option<PreparedTeamWorktree>)> =
+        Vec::with_capacity(workers.len());
+    let mut baseline_commit: Option<String> = None;
     for worker in workers {
+        if result.isolation == "worktree" {
+            match prepare_team_worktree(
+                &workspace_root,
+                &result.run_root,
+                &result.run_id,
+                &worker.worker_id,
+                baseline_commit.as_deref(),
+            ) {
+                Ok(prepared) => {
+                    if baseline_commit.is_none() {
+                        baseline_commit = Some(prepared.baseline_commit.clone());
+                    }
+                    launches.push((worker, prepared.worktree_path.clone(), Some(prepared)));
+                }
+                Err(error) => {
+                    for (prepared_worker, _, prepared) in &launches {
+                        if let Some(prepared) = prepared {
+                            let _ = finalize_team_worktree(
+                                &workspace_root,
+                                &result.run_root,
+                                &prepared_worker.worker_id,
+                                prepared,
+                            );
+                        }
+                    }
+                    append_team_run_status_checkpoint(&result.run_root, "errored")?;
+                    return Err(error);
+                }
+            }
+        } else {
+            launches.push((worker, workspace_root.clone(), None));
+        }
+    }
+
+    let mut handles = Vec::with_capacity(launches.len());
+    for (worker, worker_cwd, prepared) in launches {
         let command = command.clone();
-        let cwd = cwd.clone();
         let env_vars = env_vars.clone();
         let run_id = result.run_id.clone();
         let run_root = result.run_root.clone();
+        let source_workspace = workspace_root.clone();
         let timeout_ms = parsed.worker_timeout_ms;
         handles.push(thread::spawn(move || {
-            run_worker_process(command, cwd, env_vars, run_id, run_root, worker, timeout_ms)
+            run_worker_with_isolation(
+                command,
+                worker_cwd,
+                source_workspace,
+                env_vars,
+                run_id,
+                run_root,
+                worker,
+                timeout_ms,
+                prepared,
+            )
         }));
     }
 
@@ -411,13 +625,17 @@ fn run_team_dispatch(result: &TeamRunRecordResult, parsed: &RunArgs) -> Result<u
         for outcome in &outcomes {
             print_worker_output(outcome);
             println!(
-                "  {} {:<22} {:<9} exit={} {}ms",
+                "  {} {:<22} {:<9} exit={} {}ms isolation={}",
                 outcome.worker_id,
                 outcome.persona,
                 outcome.status,
                 outcome.exit_code,
-                outcome.duration_ms
+                outcome.duration_ms,
+                outcome.isolation,
             );
+            if let Some(patch_path) = outcome.change_patch_path.as_deref() {
+                println!("    patch={}", patch_path.display());
+            }
         }
         if sweep.swept > 0 {
             println!(
@@ -1062,6 +1280,61 @@ struct WorkerOutcome {
     stdout_truncated: bool,
     stderr_truncated: bool,
     duration_ms: u128,
+    isolation: &'static str,
+    change_patch_path: Option<PathBuf>,
+}
+
+fn run_worker_with_isolation(
+    command: PathBuf,
+    cwd: PathBuf,
+    workspace_root: PathBuf,
+    env_vars: Vec<(OsString, OsString)>,
+    run_id: String,
+    run_root: PathBuf,
+    worker: TeamWorkerSpec,
+    timeout_ms: u64,
+    prepared: Option<PreparedTeamWorktree>,
+) -> Result<WorkerOutcome, String> {
+    let worker_id = worker.worker_id.clone();
+    let mut outcome = match run_worker_process(
+        command,
+        cwd,
+        env_vars,
+        run_id,
+        run_root.clone(),
+        worker,
+        timeout_ms,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if let Some(prepared) = prepared.as_ref() {
+                let _ = finalize_team_worktree(&workspace_root, &run_root, &worker_id, prepared);
+            }
+            return Err(error);
+        }
+    };
+    let Some(prepared) = prepared else {
+        return Ok(outcome);
+    };
+    outcome.isolation = "worktree";
+    match finalize_team_worktree(&workspace_root, &run_root, &worker_id, &prepared) {
+        Ok(finalized) => {
+            outcome.change_patch_path = finalized.change_patch_path;
+        }
+        Err(error) => {
+            outcome.status = "failed";
+            if outcome.exit_code == 0 {
+                outcome.exit_code = -1;
+            }
+            if !outcome.stderr.is_empty() && !outcome.stderr.ends_with('\n') {
+                outcome.stderr.push('\n');
+            }
+            outcome
+                .stderr
+                .push_str(&format!("Failed to finalize isolated worktree: {error}\n"));
+        }
+    }
+    Ok(outcome)
 }
 
 fn run_worker_process(
@@ -1143,6 +1416,8 @@ fn run_worker_process(
         stderr,
         stdout_truncated,
         stderr_truncated,
+        isolation: "shared",
+        change_patch_path: None,
         duration_ms: started.elapsed().as_millis(),
     })
 }
@@ -1329,5 +1604,21 @@ fn is_executable_file(path: &std::path::Path) -> bool {
     #[cfg(not(unix))]
     {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_run_implies_dispatch() {
+        let parsed = parse_run_args(&[
+            OsString::from("--background"),
+            OsString::from("keep working"),
+        ])
+        .expect("--background should be accepted");
+
+        assert!(parsed.dispatch);
     }
 }

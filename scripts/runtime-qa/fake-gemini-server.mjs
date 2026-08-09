@@ -41,7 +41,6 @@ export function startGeminiServer(onRequest) {
         hasConfig: Object.hasOwn(parsed, "config"),
         hasModel: Object.hasOwn(parsed, "model"),
         hasTools: JSON.stringify(parsed.tools ?? "").includes("run_shell"),
-        hasToolConfig: JSON.stringify(parsed.toolConfig ?? "").includes("AUTO"),
         hasFunctionResponse: functionResponseText.length > 0,
         functionResponseText,
         functionResponseId: typeof functionResponse?.id === "string" ? functionResponse.id : "",
@@ -90,14 +89,16 @@ export function startGeminiServer(onRequest) {
       responseParts ??= [{ text }];
       const respond = () => {
         const response = JSON.stringify({
-          candidates: [{ content: { parts: responseParts } }],
+          candidates: [{ content: { parts: responseParts }, finishReason: "STOP" }],
           usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 4 },
         });
+        const streaming = req.url?.includes(":streamGenerateContent") ?? false;
+        const payload = streaming ? `data: ${response}\n\n` : response;
         res.writeHead(200, {
-          "content-type": "application/json",
-          "content-length": Buffer.byteLength(response),
+          "content-type": streaming ? "text/event-stream" : "application/json",
+          "content-length": Buffer.byteLength(payload),
         });
-        res.end(response);
+        res.end(payload);
       };
       if (currentUserRequest === koreanBusyPromptText || currentUserRequest === realUseFirstPromptText) {
         setTimeout(respond, 1200);

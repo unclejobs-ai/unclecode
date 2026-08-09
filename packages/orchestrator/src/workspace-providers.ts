@@ -10,12 +10,11 @@ import {
   type RuntimeReasoningConfig,
 } from "@unclecode/providers";
 
-import { toolDefinitions, toolHandlers } from "./tools.js";
+import { createToolRuntime } from "./tools.js";
 
-const toolRuntime = {
-  definitions: toolDefinitions,
-  handlers: toolHandlers,
-} as const;
+// Workspace providers are the ambient, non-interactive entry points, so there
+// is no interaction bridge to confirm prompts with: the executor fails closed.
+const toolRuntime = createToolRuntime({});
 
 export type {
   LlmProvider,

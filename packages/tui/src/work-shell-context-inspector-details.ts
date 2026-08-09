@@ -46,7 +46,7 @@ function getCondensedHistoryWarningLine(item: ContextPacketViewItem): string | u
 
 function getCondensedHistoryDetailLines(
   item: ContextPacketViewItem,
-  metadata: ContextPacketViewMetadata,
+  metadata: Extract<ContextPacketViewMetadata, { kind: "condensed-history" }>,
 ): readonly string[] {
   const modelSuffix = metadata.compression.model === undefined ? "" : ` · ${metadata.compression.model}`;
   const warningLine = getCondensedHistoryWarningLine(item);
@@ -59,11 +59,29 @@ function getCondensedHistoryDetailLines(
   ];
 }
 
+function getWorkNodeDetailLines(
+  metadata: Extract<ContextPacketViewMetadata, { kind: "work-node" }>,
+): readonly string[] {
+  return [
+    `Goal · ${metadata.goal ?? metadata.title}`,
+    `Status · ${metadata.status.replaceAll("_", " ")}`,
+    ...(metadata.constraints.length === 0
+      ? []
+      : [`Must hold · ${metadata.constraints.join(" · ")}`]),
+    ...(metadata.acceptanceCriteria.length === 0
+      ? []
+      : [`Accepted when · ${metadata.acceptanceCriteria.join(" · ")}`]),
+    `Evidence · ${metadata.evidenceRefs.length} of ${metadata.acceptanceCriteria.length} collected`,
+  ];
+}
+
 function getMetadataDetailLines(
   item: ContextPacketViewItem,
   metadata: ContextPacketViewMetadata,
 ): readonly string[] {
-  return getCondensedHistoryDetailLines(item, metadata);
+  return metadata.kind === "work-node"
+    ? getWorkNodeDetailLines(metadata)
+    : getCondensedHistoryDetailLines(item, metadata);
 }
 
 export function getContextItemDetailLines(item: ContextPacketViewItem): readonly string[] {

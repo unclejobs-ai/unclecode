@@ -95,7 +95,8 @@ pub fn resolve_read_only_mode_guard_json(input_json: &str) -> Result<String, Str
     let prompt = string_field(&input, "prompt").unwrap_or("");
     let message = if mode == "search" && detect_edit_intent(prompt) {
         Value::String(
-            "Search mode is read-only. Switch with /mode set yolo, then resend your edit request.".to_string(),
+            "Search mode is read-only. Switch with /mode set yolo, then resend your edit request."
+                .to_string(),
         )
     } else if mode == "plan" && detect_edit_intent(prompt) {
         Value::String(

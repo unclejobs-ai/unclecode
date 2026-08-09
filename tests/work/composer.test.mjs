@@ -24,35 +24,35 @@ test("sanitizeComposerInput strips bracketed paste control artifacts", () => {
   assert.equal(sanitizeComposerInput("look [990~here"), "look here");
 });
 
-test("applyComposerEdit composes Hangul jamo at mid-cursor without duplicating tail", () => {
+test("applyComposerEdit inserts committed Hangul text at the cursor without changing the tail", () => {
   assert.deepEqual(
     applyComposerEdit({
-      value: "앞 ㅎ 뒤",
-      cursorOffset: "앞 ㅎ".length,
-      input: "하",
+      value: "앞 뒤",
+      cursorOffset: "앞 ".length,
+      input: "중간 ",
       key: {},
       allowLineBreaks: false,
     }),
     {
-      nextValue: "앞 하 뒤",
-      nextCursorOffset: "앞 하".length,
+      nextValue: "앞 중간 뒤",
+      nextCursorOffset: "앞 중간 ".length,
       submitted: false,
     },
   );
 });
 
-test("applyComposerEdit merges prefix-anchored Hangul IME updates in the middle of a line", () => {
+test("applyComposerEdit appends a shorter Korean paste that overlaps the draft", () => {
   assert.deepEqual(
     applyComposerEdit({
-      value: "시작 중간 끝",
-      cursorOffset: "시작 ".length,
-      input: "시작 중",
+      value: "안녕하세요",
+      cursorOffset: "안녕하세요".length,
+      input: "안녕",
       key: {},
       allowLineBreaks: false,
     }),
     {
-      nextValue: "시작 중간 끝",
-      nextCursorOffset: "시작 중".length,
+      nextValue: "안녕하세요안녕",
+      nextCursorOffset: "안녕하세요안녕".length,
       submitted: false,
     },
   );

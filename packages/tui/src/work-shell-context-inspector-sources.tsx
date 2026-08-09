@@ -1,3 +1,4 @@
+import type { ContextPacketSourceCounts } from "@unclecode/contracts";
 import { Box, Text } from "ink";
 import React from "react";
 
@@ -27,14 +28,12 @@ function renderContextInspectorSourceRow(input: {
   const expanded = input.expandedId === item.id;
   const sourceCount = Math.max(1, Math.trunc(item.sourceCount ?? 1));
   const label = sanitizeContextPreview(item.label);
-  const statusLabel = row.heldBack ? "held" : "sent";
   const pinned = !row.heldBack && (item.salience ?? 0) >= 1;
   const tokenLabel = formatContextTokenEstimate(item.tokenEstimate);
   const parts = [
     label,
-    ...(sourceCount > 1 ? [`${sourceCount}`] : []),
-    statusLabel,
-    ...(pinned ? ["pinned"] : []),
+    ...(sourceCount > 1 ? [`${sourceCount} sources`] : []),
+    ...(pinned ? ["[pin]"] : []),
     tokenLabel,
   ];
   const body = truncateForDisplayWidth(
@@ -87,14 +86,20 @@ function buildContextInspectorViewportPlan(input: {
 
   for (let start = 0; start <= anchor; start += 1) {
     let groupHeaderCount = 0;
+    let stageHeaderCount = 0;
     for (let end = start + 1; end <= input.rows.length; end += 1) {
       const current = input.rows[end - 1];
       const previous = end - 2 >= start ? input.rows[end - 2] : undefined;
-      if (
+      const stageChanged = current !== undefined
+        && (previous === undefined || current.heldBack !== previous.heldBack);
+      if (stageChanged) {
+        stageHeaderCount += 1;
+        groupHeaderCount += 1;
+      } else if (
         current
-        && (!previous
-          || resolveContextSourceGroup(current.item.category)
-          !== resolveContextSourceGroup(previous.item.category))
+        && previous
+        && resolveContextSourceGroup(current.item.category)
+          !== resolveContextSourceGroup(previous.item.category)
       ) {
         groupHeaderCount += 1;
       }
@@ -102,7 +107,11 @@ function buildContextInspectorViewportPlan(input: {
         continue;
       }
       const hiddenMarkerCount = (start > 0 ? 1 : 0) + (end < input.rows.length ? 1 : 0);
-      const structuralRows = 2 + (end - start) + groupHeaderCount + hiddenMarkerCount;
+      const structuralRows = 2
+        + (end - start)
+        + groupHeaderCount
+        + stageHeaderCount
+        + hiddenMarkerCount;
       if (structuralRows + detailReserve > input.maxRows) {
         continue;
       }
@@ -118,21 +127,30 @@ function buildContextInspectorViewportPlan(input: {
   }
 
   const visibleRows = input.rows.slice(bestStart, bestEnd);
-  const groupHeaderCount = visibleRows.reduce((count, row, index) => {
+  let groupHeaderCount = 0;
+  let stageHeaderCount = 0;
+  for (let index = 0; index < visibleRows.length; index += 1) {
+    const row = visibleRows[index];
     const previous = index > 0 ? visibleRows[index - 1] : undefined;
-    return count + (
-      !previous
-      || resolveContextSourceGroup(row.item.category)
-      !== resolveContextSourceGroup(previous.item.category)
-        ? 1
-        : 0
-    );
-  }, 0);
+    if (!row) {
+      continue;
+    }
+    if (!previous || row.heldBack !== previous.heldBack) {
+      stageHeaderCount += 1;
+      groupHeaderCount += 1;
+    } else if (
+      resolveContextSourceGroup(row.item.category)
+        !== resolveContextSourceGroup(previous.item.category)
+    ) {
+      groupHeaderCount += 1;
+    }
+  }
   const hiddenBefore = bestStart;
   const hiddenAfter = input.rows.length - bestEnd;
   const structuralRows = 2
     + visibleRows.length
     + groupHeaderCount
+    + stageHeaderCount
     + (hiddenBefore > 0 ? 1 : 0)
     + (hiddenAfter > 0 ? 1 : 0);
   return {
@@ -149,23 +167,49 @@ function renderGroupedVisibleRows(input: {
   readonly allRows: readonly ContextInspectorSourceRow[];
   readonly visibleRows: readonly ContextInspectorSourceRow[];
   readonly cursorIndex: number;
+  readonly sourceCounts?: ContextPacketSourceCounts | undefined;
   readonly expandedId?: string | null | undefined;
   readonly maxDetailLines: number;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
 }): React.ReactNode {
   const nodes: React.ReactNode[] = [];
+  const sentCount = input.sourceCounts?.included
+    ?? input.allRows.reduce((count, row) => count + (row.heldBack ? 0 : 1), 0);
+  const heldCount = input.sourceCounts?.excluded
+    ?? input.allRows.reduce((count, row) => count + (row.heldBack ? 1 : 0), 0);
+  let previousHeldBack: boolean | undefined;
   let previousGroup: ContextInspectorHumanGroup | undefined;
   for (const row of input.visibleRows) {
+    if (row.heldBack !== previousHeldBack) {
+      previousHeldBack = row.heldBack;
+      previousGroup = undefined;
+      nodes.push(
+        <Text key={`context-stage-${row.heldBack ? "held" : "sent"}-${row.sourceIndex}`}>
+          <Text color={row.heldBack ? input.palette.textMuted : input.palette.user} bold>
+            {row.heldBack ? "Held back" : "In next request"}
+          </Text>
+          <Text color={input.palette.textDim}>
+            {` · ${row.heldBack ? heldCount : sentCount}`}
+          </Text>
+        </Text>,
+      );
+    }
     const group = resolveContextSourceGroup(row.item.category);
     if (group !== previousGroup) {
       previousGroup = group;
-      const groupCount = input.allRows.filter(
-        (candidate) => resolveContextSourceGroup(candidate.item.category) === group,
-      ).length;
+      const groupCount = input.allRows.reduce(
+        (count, candidate) => count + (
+          candidate.heldBack === row.heldBack
+          && resolveContextSourceGroup(candidate.item.category) === group
+            ? 1
+            : 0
+        ),
+        0,
+      );
       nodes.push(
-        <Text key={`context-group-${group}-${row.sourceIndex}`}>
-          <Text color={input.palette.assistant} bold>{group}</Text>
+        <Text key={`context-group-${group}-${row.heldBack ? "held" : "sent"}-${row.sourceIndex}`}>
+          <Text color={input.palette.assistant} bold>{`  ${group}`}</Text>
           <Text color={input.palette.textDim}>{` · ${groupCount}`}</Text>
         </Text>,
       );
@@ -241,6 +285,7 @@ export function renderContextInspectorGroupedViewport(input: {
   readonly rows: readonly ContextInspectorSourceRow[];
   readonly maxRows: number;
   readonly cursorIndex: number;
+  readonly sourceCounts?: ContextPacketSourceCounts | undefined;
   readonly expandedId?: string | null | undefined;
   readonly detailContent?: string | undefined;
   readonly detailOffset?: number | undefined;
@@ -248,7 +293,6 @@ export function renderContextInspectorGroupedViewport(input: {
   readonly palette: ContextInspectorPalette;
   readonly actionsEnabled: boolean;
 }): React.ReactNode {
-  void input.actionsEnabled;
   const detailRow = input.expandedId
     ? input.rows.find((row) => row.item.id === input.expandedId)
     : undefined;
@@ -270,9 +314,8 @@ export function renderContextInspectorGroupedViewport(input: {
   });
   return (
     <Box marginTop={1} flexDirection="column">
-      <Text color={input.palette.borderDefault}>{"─".repeat(Math.min(64, Math.max(24, input.width - 4)))}</Text>
       {input.rows.length === 0 ? (
-        <Text color={input.palette.textMuted}>{"  none"}</Text>
+        <Text color={input.palette.textMuted}>{"No context sources yet."}</Text>
       ) : (
         <>
           {visible.hiddenBefore > 0 ? (
@@ -282,6 +325,7 @@ export function renderContextInspectorGroupedViewport(input: {
             allRows: input.rows,
             visibleRows: visible.rows,
             cursorIndex: input.cursorIndex,
+            ...(input.sourceCounts ? { sourceCounts: input.sourceCounts } : {}),
             ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
             maxDetailLines: visible.detailLineLimit,
             width: input.width,

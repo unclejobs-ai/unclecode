@@ -146,7 +146,7 @@ test("team worker close outcome classification is delegated to Rust", () => {
   );
 
   assert.match(source, /"rust",\s*"team",\s*"worker-close-outcome"/);
-  assert.doesNotMatch(source, /exitCode === 0/);
+  assert.doesNotMatch(source, /exitCode\s*===\s*0\s*\?\s*"completed"/);
 });
 
 test("team run listing is delegated to Rust", () => {

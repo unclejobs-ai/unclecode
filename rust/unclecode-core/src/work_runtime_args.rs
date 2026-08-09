@@ -94,6 +94,7 @@ fn parse_work_runtime_args(argv: &[String], cwd: &str) -> Value {
     let mut model: Option<String> = None;
     let mut reasoning: Option<&str> = None;
     let mut session_id: Option<String> = None;
+    let mut engine: Option<&str> = None;
     let mut prompt_parts = Vec::new();
     let mut show_help = false;
     let mut show_tools = false;
@@ -140,6 +141,14 @@ fn parse_work_runtime_args(argv: &[String], cwd: &str) -> Value {
                 session_id = argv.get(index + 1).cloned();
                 index += 1;
             }
+            "--engine" => {
+                match argv.get(index + 1).map(String::as_str) {
+                    Some("native") => engine = Some("native"),
+                    Some("pi") => engine = Some("pi"),
+                    _ => {}
+                }
+                index += 1;
+            }
             _ => {
                 prompt_parts.push(arg.to_string());
             }
@@ -164,6 +173,9 @@ fn parse_work_runtime_args(argv: &[String], cwd: &str) -> Value {
     if let Some(session_id) = session_id {
         result["sessionId"] = json!(session_id);
     }
+    if let Some(engine) = engine {
+        result["engine"] = json!(engine);
+    }
     if !prompt_parts.is_empty() {
         result["prompt"] = json!(prompt_parts.join(" "));
     }
@@ -183,6 +195,7 @@ fn build_work_command_args(prompt_parts: &[String], options: &Value) -> Vec<Stri
     push_option_arg(&mut forwarded_args, options, "model", "--model");
     push_option_arg(&mut forwarded_args, options, "reasoning", "--reasoning");
     push_option_arg(&mut forwarded_args, options, "sessionId", "--session-id");
+    push_option_arg(&mut forwarded_args, options, "engine", "--engine");
     forwarded_args.extend(prompt_parts.iter().cloned());
     forwarded_args
 }
@@ -284,6 +297,29 @@ mod tests {
         assert_eq!(parsed["prompt"], "fix auth");
         assert_eq!(parsed["showHelp"], false);
         assert_eq!(parsed["showTools"], true);
+    }
+
+    #[test]
+    fn parses_engine_flag_and_ignores_unknown_values() {
+        let parsed = serde_json::from_str::<Value>(
+            &parse_work_runtime_args_json(
+                r#"{"cwd":"/repo","argv":["--engine","pi","summarize"]}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed["engine"], "pi");
+        assert_eq!(parsed["prompt"], "summarize");
+
+        let invalid = serde_json::from_str::<Value>(
+            &parse_work_runtime_args_json(
+                r#"{"cwd":"/repo","argv":["--engine","bogus","summarize"]}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(invalid.get("engine").is_none());
+        assert_eq!(invalid["prompt"], "summarize");
     }
 
     #[test]

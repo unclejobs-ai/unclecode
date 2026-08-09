@@ -42,20 +42,30 @@ export function startAnthropicMessagesServer(onRequest) {
         finalAnswerGatedByToolResult: toolResultContent.includes(anthropicToolCallShellOutput),
       });
 
+      const content = count === 1
+        ? [{
+          type: "tool_use",
+          id: anthropicToolCallId,
+          name: "run_shell",
+          input: { command: `printf ${anthropicToolCallShellOutput}` },
+        }]
+        : [{ type: "text", text: anthropicToolCallFinalResponseText }];
+      const stopReason = count === 1 ? "tool_use" : "end_turn";
+      if (parsed.stream === true) {
+        respondWithAnthropicStream(res, {
+          id: `msg_runtime_anthropic_${count}`,
+          content,
+          stopReason,
+        });
+        return;
+      }
       const response = JSON.stringify({
         id: `msg_runtime_anthropic_${count}`,
         type: "message",
         role: "assistant",
         model: "claude-sonnet-4-6",
-        content: count === 1
-          ? [{
-            type: "tool_use",
-            id: anthropicToolCallId,
-            name: "run_shell",
-            input: { command: `printf ${anthropicToolCallShellOutput}` },
-          }]
-          : [{ type: "text", text: anthropicToolCallFinalResponseText }],
-        stop_reason: count === 1 ? "tool_use" : "end_turn",
+        content,
+        stop_reason: stopReason,
         usage: { input_tokens: 10, output_tokens: 4 },
       });
       res.writeHead(200, {
@@ -95,4 +105,72 @@ function anthropicMessageText(message) {
     })
     .filter((text) => text.length > 0)
     .join("\n");
+}
+
+function respondWithAnthropicStream(res, { id, content, stopReason }) {
+  res.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache",
+    connection: "close",
+  });
+  writeAnthropicEvent(res, "message_start", {
+    type: "message_start",
+    message: {
+      id,
+      type: "message",
+      role: "assistant",
+      model: "claude-sonnet-4-6",
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 0 },
+    },
+  });
+  const block = content[0];
+  if (block.type === "tool_use") {
+    writeAnthropicEvent(res, "content_block_start", {
+      type: "content_block_start",
+      index: 0,
+      content_block: {
+        type: "tool_use",
+        id: block.id,
+        name: block.name,
+        input: {},
+      },
+    });
+    writeAnthropicEvent(res, "content_block_delta", {
+      type: "content_block_delta",
+      index: 0,
+      delta: {
+        type: "input_json_delta",
+        partial_json: JSON.stringify(block.input),
+      },
+    });
+  } else {
+    writeAnthropicEvent(res, "content_block_start", {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" },
+    });
+    writeAnthropicEvent(res, "content_block_delta", {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: block.text },
+    });
+  }
+  writeAnthropicEvent(res, "content_block_stop", {
+    type: "content_block_stop",
+    index: 0,
+  });
+  writeAnthropicEvent(res, "message_delta", {
+    type: "message_delta",
+    delta: { stop_reason: stopReason, stop_sequence: null },
+    usage: { output_tokens: 4 },
+  });
+  writeAnthropicEvent(res, "message_stop", { type: "message_stop" });
+  res.end();
+}
+
+function writeAnthropicEvent(res, event, payload) {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
 }

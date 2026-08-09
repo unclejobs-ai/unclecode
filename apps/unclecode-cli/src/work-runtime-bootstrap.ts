@@ -56,6 +56,13 @@ import {
 import { runWorkspaceGuardianChecks } from "./guardian-checks.js";
 import type { GuardianLspBridge } from "./guardian-check-types.js";
 import { createRuntimeCodingAgent } from "./runtime-coding-agent.js";
+import { resolveDefaultWorkEngine, resolveWorkShellAuthLabel } from "./work-engine-auth.js";
+import {
+  createPiBridgeProvider,
+  resolveCodexOAuthBridgeArgs,
+  resolvePiProviderBaseUrl,
+} from "@unclecode/pi-bridge";
+import type { ToolRuntime } from "@unclecode/providers";
 import {
   buildContextLineItems,
   buildContextSummaryItems,
@@ -70,6 +77,9 @@ import {
   resolveWorkShellCrpConfig,
   type WorkShellContextPacketResolver,
 } from "./work-runtime-crp.js";
+
+const WORK_PI_TURN_STEP_LIMIT = 16;
+const WORK_PI_TURN_COST_LIMIT_USD = 2;
 
 export type WorkCliBootstrapInput = {
   argv: readonly string[];
@@ -98,13 +108,6 @@ async function runInlineCommand(input: {
     ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
     ...(input.onProgress ? { onProgress: input.onProgress } : {}),
   });
-}
-
-function workShellAuthLabelForStatus(
-  authLabel: string,
-  authStatus: RustOpenAIAuthStatus | undefined,
-): string {
-  return workShellAuthLabelWithApiBlocked(authLabel, authStatus);
 }
 
 async function buildWorkShellContextSummary(input: {
@@ -326,9 +329,10 @@ export async function loadWorkCliBootstrap(
 ): Promise<WorkCliBootstrapResult> {
   const env = input.env ?? process.env;
   const userHomeDir = input.userHomeDir ?? env.HOME;
-  const { cwd, provider, model, reasoning, sessionId, prompt } = parseArgs([
+  const { cwd, provider, model, reasoning, sessionId, prompt, engine } = parseArgs([
     ...input.argv,
   ]);
+  const activeEngine = engine ?? resolveDefaultWorkEngine(env);
   const resumedSession = sessionId
     ? await loadResumedWorkSession({ cwd, sessionId, env })
     : undefined;
@@ -387,26 +391,60 @@ export async function loadWorkCliBootstrap(
     guidanceSystemPrompt: guidance.systemPromptAppendix,
   });
   let executorApiKey = config.apiKey;
+  const codexOAuthAvailable = () => Boolean(resolveCodexOAuthBridgeArgs({
+    provider: resolveRuntimeProvider(config.provider),
+    apiKey: config.apiKey,
+    openAIRuntime: config.openAIRuntime,
+  }));
   const createConfiguredCodingAgent = (
     apiKey: string,
     model: string,
     reasoning: typeof config.reasoning,
+    mode: string,
   ) => createRuntimeCodingAgent({
     provider: resolveRuntimeProvider(config.provider),
     apiKey,
     model,
     cwd,
     reasoning,
+    mode,
     ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
     ...(config.openAIRuntime ? { openAIRuntime: config.openAIRuntime } : {}),
     ...(config.openAIAccountId !== undefined
       ? { openAIAccountId: config.openAIAccountId }
+      : {}),
+    ...(activeEngine === "pi"
+      ? {
+          providerOverrideFactory: ({ toolRuntime }: { toolRuntime: ToolRuntime }) => {
+            const runtimeProviderName = resolveRuntimeProvider(config.provider);
+            const codexOAuth = resolveCodexOAuthBridgeArgs({
+              provider: runtimeProviderName,
+              apiKey,
+              openAIRuntime: config.openAIRuntime,
+            });
+            const baseUrl = resolvePiProviderBaseUrl(runtimeProviderName);
+            return createPiBridgeProvider({
+              provider: runtimeProviderName,
+              apiKey,
+              model,
+              cwd,
+              reasoning,
+              ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
+              toolRuntime,
+              toolLoopMax: WORK_PI_TURN_STEP_LIMIT,
+              costLimitUsd: WORK_PI_TURN_COST_LIMIT_USD,
+              ...(codexOAuth ?? {}),
+              ...(baseUrl ? { baseUrl } : {}),
+            });
+          },
+        }
       : {}),
   });
   const directAgent = await createConfiguredCodingAgent(
     config.apiKey,
     config.model,
     config.reasoning,
+    config.mode,
   );
 
   const agent = new WorkAgent({
@@ -416,6 +454,7 @@ export async function loadWorkCliBootstrap(
         executorApiKey,
         settings.model,
         settings.reasoning,
+        settings.mode,
       );
       return executor;
     },
@@ -447,7 +486,12 @@ export async function loadWorkCliBootstrap(
 
     directAgent.refreshAuthToken(resolved.status === "ok" ? resolved.bearerToken : "");
     return {
-      authLabel: workShellAuthLabelForStatus(status.activeSource, status),
+      authLabel: resolveWorkShellAuthLabel({
+        engine: activeEngine,
+        configuredLabel: status.activeSource,
+        authStatus: status,
+        codexOAuthAvailable: codexOAuthAvailable(),
+      }),
       authIssueLines: deriveAuthIssueLines({
         ...(status ? { authStatus: status } : {}),
         ...(config.authIssueMessage
@@ -467,7 +511,12 @@ export async function loadWorkCliBootstrap(
     ...(authStatus ? { authStatus } : {}),
     ...(config.authIssueMessage ? { authIssueMessage: config.authIssueMessage } : {}),
   });
-  const authLabel = workShellAuthLabelForStatus(config.authLabel, authStatus);
+  const authLabel = resolveWorkShellAuthLabel({
+    engine: activeEngine,
+    configuredLabel: config.authLabel,
+    ...(authStatus ? { authStatus } : {}),
+    codexOAuthAvailable: codexOAuthAvailable(),
+  });
 
   const refreshHomeState = () =>
     buildTuiHomeState({
@@ -650,6 +699,7 @@ export async function loadWorkCliBootstrap(
         }),
       recordTurn: (turn) => recorder.recordTurn(turn),
       mutateContextSource: crpRuntime.mutateContextSource,
+      undoContextSourceAction: crpRuntime.undoLastContextSourceAction,
       previewContextPacket: ({ sessionId, packet, profile }) =>
         crpRuntime.contextLedger.previewPacket({ sessionId, packet, profile }),
       revalidateContextPacket: ({ preview, packet }) =>

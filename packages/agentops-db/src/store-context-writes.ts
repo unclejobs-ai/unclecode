@@ -53,6 +53,20 @@ function redactContextSourceMetadata(metadata: ContextSourceMetadata): ContextSo
             : { model: redactAgentOpsSecrets(metadata.compression.model) }),
         },
       };
+    case "work-node":
+      return {
+        kind: "work-node",
+        graphId: redactAgentOpsSecrets(metadata.graphId),
+        nodeId: redactAgentOpsSecrets(metadata.nodeId),
+        title: redactAgentOpsSecrets(metadata.title),
+        ...(metadata.goal === undefined
+          ? {}
+          : { goal: redactAgentOpsSecrets(metadata.goal) }),
+        constraints: metadata.constraints.map(redactAgentOpsSecrets),
+        status: metadata.status,
+        acceptanceCriteria: metadata.acceptanceCriteria.map(redactAgentOpsSecrets),
+        evidenceRefs: metadata.evidenceRefs.map(redactAgentOpsSecrets),
+      };
   }
 }
 

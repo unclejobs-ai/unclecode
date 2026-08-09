@@ -177,7 +177,7 @@ test("summarizeRuntimeReport includes fresh tool-call evidence", () => {
       idleStableVerified: true,
       latencyWithinBudget: true,
       contextPacketTransparency: true,
-      contextPaneExcerpt: "Included in next answer\nHeld back locally\nWarnings · none",
+      contextPaneExcerpt: "UncleCode Context Desk\nSources · 30 included · 98 held back · 1 warning\nwarning · context.sources.bounded",
     },
     slashLatencyTuiSmoke: {
       latencyWithinBudget: true,

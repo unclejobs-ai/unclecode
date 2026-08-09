@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { WorkAgent } from "@unclecode/orchestrator";
+import { runExecutorWithLifecycle } from "../../packages/orchestrator/src/work-agent-lifecycle.ts";
 
 const supportedReasoning = {
   effort: "medium",
@@ -64,12 +65,15 @@ test("WorkAgent keeps simple turns on the direct single-call path", async () => 
   assert.equal(traces.filter((event) => event.type === "orchestrator.step").length, 0);
 });
 
-test("WorkAgent enables run_shell only in full-autonomy modes (yolo/ultrawork)", () => {
+test("WorkAgent never mutates UNCLECODE_ALLOW_RUN_SHELL and forwards mode changes", () => {
+  const modeUpdates = [];
   const directAgent = {
     clear() {},
     updateRuntimeSettings() {},
     setTraceListener() {},
-    updateMode() {},
+    updateMode(mode) {
+      modeUpdates.push(mode);
+    },
     async runTurn() {
       return { text: "" };
     },
@@ -77,16 +81,29 @@ test("WorkAgent enables run_shell only in full-autonomy modes (yolo/ultrawork)",
   const prev = process.env.UNCLECODE_ALLOW_RUN_SHELL;
   try {
     delete process.env.UNCLECODE_ALLOW_RUN_SHELL;
+
     new WorkAgent({ directAgent, mode: "default", reasoning: supportedReasoning, model: "gpt-5.4" });
-    assert.notEqual(process.env.UNCLECODE_ALLOW_RUN_SHELL, "1", "non-auto mode keeps the shell gate");
+    assert.equal(
+      process.env.UNCLECODE_ALLOW_RUN_SHELL,
+      undefined,
+      "default mode leaves the process env untouched",
+    );
 
     new WorkAgent({ directAgent, mode: "yolo", reasoning: supportedReasoning, model: "gpt-5.4" });
-    assert.equal(process.env.UNCLECODE_ALLOW_RUN_SHELL, "1", "yolo unlocks run_shell");
+    assert.equal(
+      process.env.UNCLECODE_ALLOW_RUN_SHELL,
+      undefined,
+      "yolo grants shell per instance, never through process.env",
+    );
 
-    delete process.env.UNCLECODE_ALLOW_RUN_SHELL;
     const planAgent = new WorkAgent({ directAgent, mode: "plan", reasoning: supportedReasoning, model: "gpt-5.4" });
     planAgent.updateMode("ultrawork");
-    assert.equal(process.env.UNCLECODE_ALLOW_RUN_SHELL, "1", "switching to ultrawork unlocks run_shell");
+    assert.equal(
+      process.env.UNCLECODE_ALLOW_RUN_SHELL,
+      undefined,
+      "switching to ultrawork grants shell per instance, never through process.env",
+    );
+    assert.deepEqual(modeUpdates, ["ultrawork"], "mode changes reach the direct agent");
   } finally {
     if (prev === undefined) {
       delete process.env.UNCLECODE_ALLOW_RUN_SHELL;
@@ -122,12 +139,42 @@ test("WorkAgent plans goal tasks, runs isolated executors, and emits truthful li
     async createExecutorAgent() {
       executorCount += 1;
       const executorId = executorCount;
+      let traceListener;
       return {
         clear() {},
         updateRuntimeSettings() {},
-        setTraceListener() {},
+        setTraceListener(listener) {
+          traceListener = listener;
+        },
         async runTurn(prompt) {
           executorCalls.push([executorId, prompt]);
+          traceListener?.({
+            type: "tool.started",
+            level: "default",
+            toolCallId: `tool-${executorId}`,
+            toolName: "read",
+            intent: "Inspect executor input",
+            startedAt: 100 + executorId,
+          });
+          traceListener?.({
+            type: "tool.completed",
+            level: "default",
+            toolCallId: `tool-${executorId}`,
+            toolName: "read",
+            intent: "Inspect executor input",
+            status: "completed",
+            startedAt: 100 + executorId,
+            completedAt: 110 + executorId,
+          });
+          traceListener?.({
+            type: "usage.recorded",
+            level: "low-signal",
+            eventId: `usage-${executorId}`,
+            inputTokens: 1_000,
+            outputTokens: 100,
+            cacheReadTokens: 750,
+            startedAt: 100 + executorId,
+          });
           return { text: `executor:${executorId}` };
         },
       };
@@ -159,6 +206,26 @@ test("WorkAgent plans goal tasks, runs isolated executors, and emits truthful li
       ["task-2", "running"],
       ["task-2", "completed"],
     ],
+  );
+  const queuedJobs = traces.filter((event) => event.type === "job.queued");
+  const startedRuns = traces.filter((event) => event.type === "agent.run.started");
+  const settledRuns = traces.filter((event) => event.type === "agent.run.settled");
+  const usageEvents = traces.filter((event) => event.type === "usage.recorded");
+  assert.equal(queuedJobs.length, 2);
+  assert.deepEqual(startedRuns.map((event) => event.displayName), [
+    "Implement auth refactor",
+    "Verify session integration",
+  ]);
+  assert.deepEqual(settledRuns.map((event) => event.status), ["completed", "completed"]);
+  assert.deepEqual(
+    usageEvents.map((event) => event.agentRunId),
+    startedRuns.map((event) => event.runId),
+  );
+  assert.deepEqual(
+    traces
+      .filter((event) => event.type === "tool.started" || event.type === "tool.completed")
+      .map((event) => event.agentRunId),
+    [startedRuns[0].runId, startedRuns[0].runId, startedRuns[1].runId, startedRuns[1].runId],
   );
   assert.ok(
     traces.some(
@@ -222,4 +289,73 @@ test("WorkAgent includes executable guardian checks in review and synthesis prom
   assert.match(reviewCall ?? "", /check PASS/);
   assert.ok(synthesisCall, "synthesis includes executable checks");
   assert.match(synthesisCall ?? "", /lint PASS/);
+});
+
+test("executor factory failure settles the run and job as failed", async () => {
+  const traces = [];
+  const directAgent = {
+    clear() {},
+    setTraceListener() {},
+    async runTurn() {
+      return { text: "unused" };
+    },
+  };
+
+  await assert.rejects(
+    runExecutorWithLifecycle({
+      taskId: "factory-failure",
+      label: "Factory failure",
+      prompt: "run",
+      options: {},
+      directAgent,
+      createExecutorAgent: async () => {
+        throw new Error("factory failed");
+      },
+      settings: { mode: "default", model: "gpt-5.6-sol", reasoning: supportedReasoning },
+      onTrace: (event) => traces.push(event),
+    }),
+    /factory failed/,
+  );
+
+  assert.deepEqual(
+    traces
+      .filter((event) => event.type === "agent.run.settled" || event.type === "job.settled")
+      .map((event) => event.status),
+    ["failed", "failed"],
+  );
+});
+
+test("aborted executor settles the run and job as cancelled", async () => {
+  const traces = [];
+  const controller = new AbortController();
+  const executor = {
+    clear() {},
+    setTraceListener() {},
+    async runTurn() {
+      controller.abort();
+      const error = new Error("cancelled");
+      error.name = "AbortError";
+      throw error;
+    },
+  };
+
+  await assert.rejects(
+    runExecutorWithLifecycle({
+      taskId: "cancelled",
+      label: "Cancelled run",
+      prompt: "run",
+      options: { signal: controller.signal },
+      directAgent: executor,
+      settings: { mode: "default", model: "gpt-5.6-sol", reasoning: supportedReasoning },
+      onTrace: (event) => traces.push(event),
+    }),
+    /cancelled/,
+  );
+
+  assert.deepEqual(
+    traces
+      .filter((event) => event.type === "agent.run.settled" || event.type === "job.settled")
+      .map((event) => event.status),
+    ["cancelled", "cancelled"],
+  );
 });

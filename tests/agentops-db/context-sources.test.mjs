@@ -277,6 +277,132 @@ test("upsertContextSource redacts secrets before persistence and selection", () 
   assert.doesNotMatch(JSON.stringify(record), /AIza|abcdefghijklmnop|user:pass|ghp_/);
 });
 
+test("work-node metadata round-trips through selection with secrets redacted", () => {
+  const home = makeHome();
+  const store = createAgentOpsStore({ home });
+  const project = seedProject(store);
+
+  store.upsertContextSource({
+    id: "goal-loop-graph-1-node-1",
+    projectId: project.id,
+    category: "loop-trail",
+    label: "requires_action · Wire the desk",
+    content: "Aim: wire the Context Desk to the runbook lane",
+    reason: "current autonomous task state",
+    salience: 0.93,
+    tokenEstimate: 24,
+    metadata: {
+      kind: "work-node",
+      graphId: "graph-1",
+      nodeId: "node-1",
+      title: "Wire the desk using ghp_abcdefghijklmnopqrstuvwxyz123456",
+      goal: "Ship the context desk",
+      constraints: ["no new dependencies"],
+      status: "requires_action",
+      acceptanceCriteria: ["Runbook lane renders"],
+      evidenceRefs: ["evidence/desk-render.txt"],
+    },
+  });
+
+  const result = store.selectContextSources({
+    projectId: project.id,
+    tokenBudget: 1000,
+    turnIndex: 1,
+  });
+  const record = result.selected.find((entry) => entry.id === "goal-loop-graph-1-node-1");
+
+  assert.deepEqual(record.metadata, {
+    kind: "work-node",
+    graphId: "graph-1",
+    nodeId: "node-1",
+    title: "Wire the desk using [REDACTED]",
+    goal: "Ship the context desk",
+    constraints: ["no new dependencies"],
+    status: "requires_action",
+    acceptanceCriteria: ["Runbook lane renders"],
+    evidenceRefs: ["evidence/desk-render.txt"],
+  });
+  assert.doesNotMatch(JSON.stringify(record), /ghp_/);
+});
+
+test("stored metadata parsing accepts work-node rows and still drops malformed ones", () => {
+  const home = makeHome();
+  const store = createAgentOpsStore({ home });
+  const project = seedProject(store);
+
+  const condensed = {
+    kind: "condensed-history",
+    sourceEventIds: ["trace-a"],
+    summary: "one earlier trace line summarized",
+    recomputeReason: "history exceeded recent-window threshold",
+    compactedEventCount: 1,
+    recentEventCount: 2,
+    compression: { method: "masking", inputTokensEstimate: 10, outputTokensEstimate: 5 },
+  };
+  const workNode = {
+    kind: "work-node",
+    graphId: "graph-1",
+    nodeId: "node-1",
+    title: "Wire the desk",
+    constraints: [],
+    status: "running",
+    acceptanceCriteria: ["Runbook lane renders"],
+    evidenceRefs: ["evidence/desk-render.txt"],
+  };
+  const rows = [
+    ["keep-condensed", JSON.stringify(condensed), true],
+    ["keep-work-node", JSON.stringify(workNode), true],
+    ["drop-unknown-kind", JSON.stringify({ ...workNode, kind: "mystery" }), false],
+    ["drop-unknown-status", JSON.stringify({ ...workNode, status: "almost-done" }), false],
+    ["drop-missing-evidence", JSON.stringify({ ...workNode, evidenceRefs: undefined }), false],
+    ["drop-missing-title", JSON.stringify({ ...workNode, title: undefined }), false],
+    ["drop-missing-constraints", JSON.stringify({ ...workNode, constraints: undefined }), false],
+    ["drop-non-string-goal", JSON.stringify({ ...workNode, goal: 7 }), false],
+    ["drop-non-string-criterion", JSON.stringify({ ...workNode, acceptanceCriteria: ["ok", 3] }), false],
+    ["drop-missing-compression", JSON.stringify({ ...condensed, compression: undefined }), false],
+    ["drop-unparseable", "{not json", false],
+  ];
+
+  for (const [id] of rows) {
+    store.upsertContextSource({
+      id,
+      projectId: project.id,
+      category: "loop-trail",
+      label: id,
+      reason: "t",
+      salience: 0.9,
+      tokenEstimate: 10,
+    });
+  }
+  store.close();
+
+  // Metadata written by an older or corrupted writer: bypass the typed writer
+  // so the reader's validation is what is under test.
+  const db = new DatabaseSync(join(home, "agentops.db"));
+  for (const [id, json] of rows) {
+    db.prepare(
+      "UPDATE context_sources SET metadata_json = ? WHERE project_id = ? AND id = ?",
+    ).run(json, project.id, id);
+  }
+  db.close();
+
+  const reopened = createAgentOpsStore({ home });
+  const selection = reopened.selectContextSources({
+    projectId: project.id,
+    tokenBudget: 10_000,
+    turnIndex: 1,
+  });
+  const byId = new Map(
+    [...selection.selected, ...selection.heldBack].map((record) => [record.id, record]),
+  );
+
+  for (const [id, , parses] of rows) {
+    assert.equal(byId.get(id)?.metadata !== undefined, parses, `${id} metadata acceptance`);
+  }
+  assert.deepEqual(byId.get("keep-work-node").metadata, workNode);
+  assert.equal(byId.get("keep-condensed").metadata.kind, "condensed-history");
+});
+
 test("provider upserts preserve user forget and pin state", () => {
   const home = makeHome();
   const store = createAgentOpsStore({ home });

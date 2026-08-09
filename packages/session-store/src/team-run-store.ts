@@ -54,6 +54,7 @@ export type CreateTeamRunInput = {
   readonly lanes: number;
   readonly gate: TeamRunManifest["gate"];
   readonly runtime: TeamRunManifest["runtime"];
+  readonly isolation?: TeamRunManifest["isolation"];
   readonly workspaceRoot: string;
   readonly createdBy: string;
   readonly env?: Readonly<Record<string, string>>;
@@ -123,6 +124,7 @@ export function createTeamRun(input: CreateTeamRunInput): TeamRunRef {
     lanes: input.lanes,
     gate: input.gate,
     runtime: input.runtime,
+    isolation: input.isolation ?? "shared",
     createdAt: Date.now(),
     createdBy: input.createdBy,
     workspaceRoot: input.workspaceRoot,

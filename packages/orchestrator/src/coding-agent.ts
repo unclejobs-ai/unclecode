@@ -1,3 +1,4 @@
+import { estimateCacheSavingsUsd } from "@unclecode/providers";
 import type { ExecutionTraceEvent } from "@unclecode/contracts";
 import { runRustCommandSync } from "./rust-command.js";
 
@@ -6,9 +7,20 @@ type ProviderRouteTraceEvent = Extract<ExecutionTraceEvent, { type: "provider.ro
 type TurnStartedTraceEvent = Extract<ExecutionTraceEvent, { type: "turn.started" }>;
 type ProviderCallingTraceEvent = Extract<ExecutionTraceEvent, { type: "provider.calling" }>;
 type TurnCompletedTraceEvent = Extract<ExecutionTraceEvent, { type: "turn.completed" }>;
+type UsageRecordedTraceEvent = Extract<ExecutionTraceEvent, { type: "usage.recorded" }>;
+
+let usageEventSequence = 0;
 
 export type AgentTurnResult = {
-  text: string;
+  readonly text: string;
+  readonly usage?: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly cacheReadTokens?: number;
+    readonly cacheWriteTokens?: number;
+  };
+  readonly steps?: number;
+  readonly costUsd?: number;
 };
 
 export type AgentTurnOptions = {
@@ -16,7 +28,9 @@ export type AgentTurnOptions = {
 };
 
 export type CodingAgentTraceEvent<ToolTraceEvent extends { readonly type: string }> =
-  | Extract<ExecutionTraceEvent, { type: "turn.started" | "provider.route" | "provider.calling" | "turn.completed" }>
+  | Extract<ExecutionTraceEvent, {
+      type: "turn.started" | "provider.route" | "provider.calling" | "turn.completed" | "usage.recorded";
+    }>
   | ToolTraceEvent;
 
 export interface CodingAgentProvider<
@@ -86,7 +100,43 @@ export class CodingAgent<
     const result = await this.provider.runTurn(prompt, attachments, options);
     const completedAt = Date.now();
     this.emitTrace(this.buildTurnCompletedTrace(result.text, turnStartedAt, completedAt));
+    const usageTrace = this.buildUsageRecordedTrace(result, turnStartedAt);
+    if (usageTrace) {
+      this.emitTrace(usageTrace);
+    }
     return result;
+  }
+
+  private buildUsageRecordedTrace(
+    result: AgentTurnResult,
+    startedAt: number,
+  ): UsageRecordedTraceEvent | undefined {
+    const usage = result.usage;
+    if (!usage && result.costUsd === undefined) {
+      return undefined;
+    }
+    const cacheSavingsUsd = usage
+      ? estimateCacheSavingsUsd({
+          provider: this.providerName,
+          modelId: this.model,
+          cacheReadTokens: usage.cacheReadTokens ?? 0,
+          cacheWriteTokens: usage.cacheWriteTokens ?? 0,
+        })
+      : 0;
+    return {
+      type: "usage.recorded",
+      level: "low-signal",
+      eventId: `usage:${this.providerName}:${startedAt}:${++usageEventSequence}`,
+      provider: this.providerName,
+      model: this.model,
+      ...(usage?.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+      ...(usage?.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+      ...(usage?.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
+      ...(usage?.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: usage.cacheWriteTokens }),
+      ...(cacheSavingsUsd > 0 ? { cacheSavingsUsd } : {}),
+      ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }),
+      startedAt,
+    };
   }
 
   private buildTurnStartedTrace(prompt: string, startedAt: number): TurnStartedTraceEvent {

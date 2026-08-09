@@ -2,6 +2,7 @@ import type {
   ContextPacketChangeClassification,
   ContextPacketReceipt,
   ContextPacketView,
+  ContextPacketViewAction,
   ContextPacketViewActionReceipt,
 } from "@unclecode/contracts";
 import { Text } from "ink";
@@ -49,8 +50,13 @@ function formatContextWindow(modelWindow: number): string {
   return `${thousands >= 10 ? Math.round(thousands) : thousands.toFixed(1)}k`;
 }
 
+/**
+ * The lifecycle headline for the packet. Packet ids, receipt ids and turn ids
+ * used to be the whole message here; they proved nothing to a reader and hid
+ * the only two facts that matter — what state the next request is in, and how
+ * much of the window it will take.
+ */
 export function formatContextInspectorPacketProofLines(input: {
-  readonly packet: ContextPacketView;
   readonly previewReceipt?: ContextPacketReceipt | undefined;
   readonly submittedReceipt?: ContextPacketReceipt | undefined;
   readonly packetChange?: ContextPacketChangeClassification | undefined;
@@ -58,16 +64,12 @@ export function formatContextInspectorPacketProofLines(input: {
   readonly width: number;
 }): readonly string[] {
   if (input.packetChange?.kind === "meaning-change") {
-    const beforePacketId = input.previewReceipt?.packetId
-      ?? input.submittedReceipt?.packetId
-      ?? "unknown";
+    const dropped = input.packetChange.removedSourceIds.length;
+    const added = input.packetChange.addedSourceIds.length;
     return [
+      truncateForDisplayWidth("Context changed · review before sending", input.width),
       truncateForDisplayWidth(
-        `PACKET CHANGED ${beforePacketId} -> ${input.packet.id}`,
-        input.width,
-      ),
-      truncateForDisplayWidth(
-        `Review required · ${input.packetChange.reason}`,
+        `${dropped} ${dropped === 1 ? "source" : "sources"} dropped · ${added} added · ${input.packetChange.reason}`,
         input.width,
       ),
     ];
@@ -76,14 +78,15 @@ export function formatContextInspectorPacketProofLines(input: {
   if (input.previewReceipt?.state === "previewed") {
     const estimate = formatContextReceiptTokenEstimate(input.previewReceipt);
     return [truncateForDisplayWidth(
-      `NEXT REQUEST ${input.previewReceipt.packetId} previewed ${estimate} / ${formatContextWindow(input.modelWindow)}`,
+      `Next request · ready to send · ${estimate} / ${formatContextWindow(input.modelWindow)}`,
       input.width,
     )];
   }
 
   if (input.submittedReceipt?.state === "submitted") {
+    const sent = input.submittedReceipt.sourceRefs.filter((source) => source.includedInModel).length;
     return [truncateForDisplayWidth(
-      `SUBMITTED ${input.submittedReceipt.packetId} ${input.submittedReceipt.turnId ?? "turn unknown"}`,
+      `Last request · sent · ${sent} ${sent === 1 ? "source" : "sources"} · ${formatContextReceiptTokenEstimate(input.submittedReceipt)}`,
       input.width,
     )];
   }
@@ -92,7 +95,6 @@ export function formatContextInspectorPacketProofLines(input: {
 }
 
 export function renderContextInspectorPacketProof(input: {
-  readonly packet: ContextPacketView;
   readonly previewReceipt?: ContextPacketReceipt | undefined;
   readonly submittedReceipt?: ContextPacketReceipt | undefined;
   readonly packetChange?: ContextPacketChangeClassification | undefined;
@@ -145,37 +147,35 @@ export function renderContextInspectorBudgetLine(input: {
   );
 }
 
-export function renderContextInspectorManifestLine(input: {
-  readonly packet: ContextPacketView;
-  readonly palette: ContextInspectorPalette;
-  readonly width: number;
-}): React.ReactNode {
-  const manifest = input.packet.manifest;
-  if (!manifest) {
-    return null;
-  }
-  const policyLabel = `${manifest.policy.length} policy ${manifest.policy.length === 1 ? "source" : "sources"}`;
-  const body = truncateForDisplayWidth(
-    `${manifest.profileId} · ${policyLabel} · ${manifest.id}`,
-    Math.max(24, input.width - 10),
-  );
-  return (
-    <Text>
-      <Text color={input.palette.assistant} bold>{"Prompt"}</Text>
-      <Text color={input.palette.borderSoft}>{" · "}</Text>
-      <Text color={input.palette.textMuted}>{body}</Text>
-    </Text>
-  );
-}
+const CONTEXT_ACTION_LABELS: Readonly<Record<ContextPacketViewAction, string>> = {
+  pin: "Pinned",
+  unpin: "Unpinned",
+  "hold-back": "Held back",
+  include: "Included",
+  preview: "Previewed",
+  refresh: "Refreshed",
+  compare: "Compared",
+  undo: "Undone",
+};
 
-function formatReceiptPacketTransition(receipt: ContextPacketViewActionReceipt): string {
-  if (receipt.beforePacketId && receipt.afterPacketId) {
-    return `${receipt.beforePacketId} -> ${receipt.afterPacketId}`;
+/**
+ * What the action actually did to the packet, in tokens. The before/after
+ * packet ids this used to print told the reader nothing about the effect.
+ */
+function formatContextActionEffect(receipt: ContextPacketViewActionReceipt): string | undefined {
+  const { before, after } = receipt;
+  if (!before || !after) {
+    return undefined;
   }
-  if (receipt.afterPacketId) {
-    return `next ${receipt.afterPacketId}`;
+  if (before.includedInModel !== after.includedInModel) {
+    const tokens = formatContextTokenEstimate(after.tokenEstimate);
+    return after.includedInModel ? `${tokens} now sent` : `${tokens} no longer sent`;
   }
-  return "packet proof pending";
+  const delta = after.tokenEstimate - before.tokenEstimate;
+  if (delta === 0) {
+    return undefined;
+  }
+  return `${delta > 0 ? "+" : "−"}${formatContextTokenEstimate(Math.abs(delta))}`;
 }
 
 export function renderContextInspectorReceipt(input: {
@@ -186,10 +186,35 @@ export function renderContextInspectorReceipt(input: {
   if (!input.receipt) {
     return null;
   }
-  const transition = formatReceiptPacketTransition(input.receipt);
-  const undo = input.receipt.canUndo ? "undo ready" : "undo unavailable";
+  if (!input.receipt.succeeded) {
+    const maxWidth = Math.max(32, input.width - 12);
+    const status = input.receipt.canUndo ? "undo still ready" : "undo unavailable";
+    const separatorsWidth = 6;
+    const messageWidth = Math.max(
+      8,
+      maxWidth - "Not changed".length - status.length - separatorsWidth,
+    );
+    const body = [
+      "Not changed",
+      truncateForDisplayWidth(input.receipt.message, messageWidth),
+      status,
+    ].join(" · ");
+    return (
+      <Text>
+        <Text color={input.palette.warning} bold>{"Proof"}</Text>
+        <Text color={input.palette.borderSoft}>{" · "}</Text>
+        <Text color={input.palette.text}>{body}</Text>
+      </Text>
+    );
+  }
+  const effect = formatContextActionEffect(input.receipt);
   const body = truncateForDisplayWidth(
-    `${transition} · ${undo} · ${input.receipt.message}`,
+    [
+      CONTEXT_ACTION_LABELS[input.receipt.action],
+      input.receipt.sourceLabel,
+      ...(effect ? [effect] : []),
+      input.receipt.canUndo ? "undo ready" : "undo unavailable",
+    ].join(" · "),
     Math.max(32, input.width - 12),
   );
   return (

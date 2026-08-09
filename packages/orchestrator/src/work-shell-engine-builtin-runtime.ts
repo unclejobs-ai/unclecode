@@ -181,6 +181,12 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
       });
       return;
     }
+    case "cache":
+      input.setState({ panel: { title: "Cache Telemetry", lines: [] } });
+      return;
+    case "agents":
+      input.setState({ panel: { title: "Agent History", lines: [] } });
+      return;
     case "reload":
       {
         const result = createReloadBuiltinResult(input.line);

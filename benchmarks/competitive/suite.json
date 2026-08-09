@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "name": "UncleCode Competitive Coding Agent Benchmark",
+  "methodology": "Each system receives the same isolated fixture, prompt, model target, timeout, and deterministic post-run checks. Scores come from files and executable behavior, never self-reported answers.",
+  "tasks": [
+    {
+      "id": "repository-instruction-adherence",
+      "description": "Honor a repository-local instruction without touching unrelated input.",
+      "prompt": "Complete the task defined by the repository instructions. Verify the result before finishing.",
+      "timeoutMs": 180000,
+      "files": {
+        "AGENTS.md": "# Benchmark instruction\n\nFor this benchmark only, create `result.txt` with the exact UTF-8 content `LOCAL_RULE_OK` followed by one newline. Do not modify any existing file.\n",
+        "anchor.txt": "UNCHANGED\n"
+      },
+      "checks": [
+        {
+          "kind": "fileEquals",
+          "path": "result.txt",
+          "value": "LOCAL_RULE_OK\n"
+        },
+        {
+          "kind": "fileEquals",
+          "path": "anchor.txt",
+          "value": "UNCHANGED\n"
+        }
+      ]
+    },
+    {
+      "id": "cross-file-clean-rename",
+      "description": "Rename a public symbol across files without leaving an alias or stale callsite.",
+      "prompt": "Rename the exported `sum` function to `add`, update every caller, leave no compatibility alias or stale `sum` identifier, and run the provided test.",
+      "timeoutMs": 240000,
+      "files": {
+        "math.mjs": "export function sum(left, right) {\n  return left + right;\n}\n",
+        "app.mjs": "import { sum } from './math.mjs';\n\nexport const total = sum(20, 22);\n",
+        "test.mjs": "import assert from 'node:assert/strict';\nimport { add } from './math.mjs';\nimport { total } from './app.mjs';\n\nassert.equal(add(2, 3), 5);\nassert.equal(total, 42);\n"
+      },
+      "checks": [
+        {
+          "kind": "command",
+          "command": "node",
+          "args": ["test.mjs"]
+        },
+        {
+          "kind": "fileMatches",
+          "path": "math.mjs",
+          "pattern": "export\\s+function\\s+add\\b"
+        },
+        {
+          "kind": "fileNotMatches",
+          "path": "math.mjs",
+          "pattern": "\\bsum\\b"
+        },
+        {
+          "kind": "fileNotMatches",
+          "path": "app.mjs",
+          "pattern": "\\bsum\\b"
+        }
+      ]
+    },
+    {
+      "id": "unicode-bug-fix",
+      "description": "Fix a Unicode correctness bug while preserving the existing ASCII contract.",
+      "prompt": "Fix the slug implementation so the provided regression test passes. Preserve letters and decimal digits from every Unicode script, keep the ASCII behavior, add no dependency, and run the test.",
+      "timeoutMs": 240000,
+      "files": {
+        "slug.mjs": "export function slug(value) {\n  return value\n    .trim()\n    .toLowerCase()\n    .replace(/[^a-z0-9]+/g, '-')\n    .replace(/^-|-$/g, '');\n}\n",
+        "test.mjs": "import assert from 'node:assert/strict';\nimport { slug } from './slug.mjs';\n\nassert.equal(slug('Hello, World!'), 'hello-world');\nassert.equal(slug('한글 입력'), '한글-입력');\nassert.equal(slug('Version ２０２６'), 'version-２０２６');\n"
+      },
+      "checks": [
+        {
+          "kind": "command",
+          "command": "node",
+          "args": ["test.mjs"]
+        },
+        {
+          "kind": "fileNotMatches",
+          "path": "slug.mjs",
+          "pattern": "\\[\\^a-z0-9\\]"
+        }
+      ]
+    }
+  ]
+}

@@ -20,6 +20,7 @@ import {
 function runtime(webSearch) {
   return createToolRuntime({
     interactionBridge: createWorkShellInteractionBridge(),
+    runtimeMode: "yolo",
     ...(webSearch ? { webSearch } : {}),
   });
 }
@@ -33,7 +34,7 @@ test("web_search definition and handler are registered together via createToolRu
   });
   const definition = tools.definitions.find((tool) => tool.name === "web_search");
   assert.ok(definition, "web_search definition missing");
-  assert.equal(typeof tools.handlers.web_search, "function");
+  assert.equal(typeof tools.executor.execute, "function");
   assert.equal(definition.input_schema.type, "object");
   assert.deepEqual(definition.input_schema.required, ["query"]);
   assert.equal(definition.input_schema.properties.query.type, "string");
@@ -54,7 +55,7 @@ test("web_search definition and handler are registered together via createToolRu
 
 test("web_search without active provider credentials returns deterministic missing-auth error", async () => {
   const tools = runtime();
-  const result = await tools.handlers.web_search({ query: "latest typescript release" }, "/repo");
+  const result = await tools.executor.execute({ toolName: "web_search", input: { query: "latest typescript release" }, cwd: "/repo" });
   assert.equal(result.isError, true);
   assert.match(result.content, /api key|auth|credential|unavailable/i);
   assert.doesNotMatch(result.content, /https?:\/\//i);
@@ -483,7 +484,7 @@ test("createWebSearchAdapter/handler uses the active provider only", async () =>
   assert.equal(adapter.provider, "anthropic");
   const viaAdapter = await adapter.search({ query: "one provider" });
   const viaHandler = await handler({ query: "one provider" }, "/repo");
-  const viaRuntime = await tools.handlers.web_search({ query: "one provider" }, "/repo");
+  const viaRuntime = await tools.executor.execute({ toolName: "web_search", input: { query: "one provider" }, cwd: "/repo" });
   assert.equal(viaAdapter.isError, false);
   assert.equal(viaHandler.isError, false);
   assert.equal(viaRuntime.isError, false);

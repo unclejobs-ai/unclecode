@@ -81,6 +81,7 @@ export type WorkShellContextInspectorAction =
   | { readonly type: "move-cursor"; readonly direction: -1 | 1 }
   | { readonly type: "toggle-pin" }
   | { readonly type: "toggle-delivery" }
+  | { readonly type: "undo" }
   | { readonly type: "accept-advice" }
   | { readonly type: "reject-advice" }
   | { readonly type: "expand" };
@@ -95,6 +96,7 @@ export function resolveWorkShellContextInspectorAction(input: {
   readonly panelTitle: string;
   readonly actionsEnabled?: boolean;
   readonly adviceActionsEnabled?: boolean;
+  readonly undoActionsEnabled?: boolean;
 }): WorkShellContextInspectorAction {
   // The slash command picker takes priority — never steal keys while the
   // user is typing a `/` command, even if the overlay is visible behind it.
@@ -118,6 +120,9 @@ export function resolveWorkShellContextInspectorAction(input: {
   }
   if (input.value === " ") {
     return input.actionsEnabled ? { type: "toggle-delivery" } : { type: "none" };
+  }
+  if (input.value.toLowerCase() === "u") {
+    return input.undoActionsEnabled ? { type: "undo" } : { type: "none" };
   }
   if (input.value.toLowerCase() === "a") {
     return input.adviceActionsEnabled ? { type: "accept-advice" } : { type: "none" };

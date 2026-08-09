@@ -233,7 +233,7 @@ test("context token labels distinguish estimated, exact, and unknown totals", ()
   assert.equal(formatContextTokenEstimate(0, "unknown"), "unknown token estimate");
 });
 
-test("context inspector delivery state follows grouped cursor identity after packet reordering", () => {
+test("context inspector delivery state follows staging-first cursor identity", () => {
   const packet = {
     included: [{
       id: "runtime-sent",
@@ -249,9 +249,9 @@ test("context inspector delivery state follows grouped cursor identity after pac
     }],
   };
   const rows = buildContextInspectorRows(packet);
-  assert.equal(rows[0].item.id, "workspace-held");
-  assert.equal(isContextInspectorSourceHeldBack(packet, 0), true);
-  assert.equal(isContextInspectorSourceHeldBack(packet, 1), false);
+  assert.equal(rows[0].item.id, "runtime-sent");
+  assert.equal(isContextInspectorSourceHeldBack(packet, 0), false);
+  assert.equal(isContextInspectorSourceHeldBack(packet, 1), true);
 });
 
 const palette = {
@@ -288,5 +288,5 @@ test("context inspector maps CRP categories to human groups and never renders ra
 test("context inspector viewport uses one physical terminalRows budget", () => {
   assert.equal(computeContextOverlayViewportMaxRows({ terminalRows: 40 }), 15);
   assert.equal(computeContextOverlayViewportMaxRows({ terminalRows: 24 }), 6);
-  assert.equal(computeContextOverlayViewportMaxRows({}), 12);
+  assert.equal(computeContextOverlayViewportMaxRows({}), 24);
 });

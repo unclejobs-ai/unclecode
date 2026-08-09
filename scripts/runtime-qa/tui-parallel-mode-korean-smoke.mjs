@@ -9,7 +9,7 @@ import {
   repoRoot,
 } from "./constants.mjs";
 import { escapeRegExp, run, shellQuote } from "./cli-helpers.mjs";
-import { calculatePaneWidth, pressEnter, runTmux, typeKeys, waitForIdlePromptDeck, waitForPane } from "./tmux-helpers.mjs";
+import { calculatePaneWidth, pressEnter, runTmux, typeKeys, waitForIdleComposer, waitForPane } from "./tmux-helpers.mjs";
 
 const HANGUL_PATTERN = /[\u3131-\uD79D]/u;
 
@@ -41,14 +41,18 @@ export async function runParallelModeKoreanTuiSmoke({ port, tmp, observations })
     await runTmux(["new-session", "-d", "-x", "100", "-y", "30", "-s", session, command]);
     await waitForPane(session, /prompt deck|UncleCode · Gemini|집중 작업 모드|ultrawork/, paneFile);
     await typeKeys(session, parallelModeKoreanPromptText);
-    await waitForPane(session, new RegExp(parallelModeKoreanPromptText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), paneFile);
+    const typedPane = await waitForPane(
+      session,
+      new RegExp(parallelModeKoreanPromptText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      paneFile,
+    );
     await pressEnter(session);
     await waitForPane(session, /병렬 모드/, paneFile);
-    const pane = await waitForIdlePromptDeck(session, paneFile);
+    const pane = await waitForIdleComposer(session, paneFile);
     const requestDelta = observations.length - beforeRequests;
 
     assert.ok(requestDelta >= 1, `parallel-mode Korean QA should call provider, got ${requestDelta}`);
-    assert.match(pane, new RegExp(parallelModeKoreanPromptText));
+    assert.match(typedPane, new RegExp(escapeRegExp(parallelModeKoreanPromptText)));
     assert.match(pane, HANGUL_PATTERN, "assistant pane should contain Korean text");
     assert.match(pane, new RegExp(escapeRegExp(parallelModeKoreanCleanResponseText)));
     assert.doesNotMatch(pane, /\[\{"id":/);

@@ -1,6 +1,8 @@
 import { isModeReasoningEffort, type ModeReasoningEffort } from "@unclecode/contracts";
 import { runRustCommandSync, toolDefinitions } from "@unclecode/orchestrator";
 
+export type WorkEngine = "native" | "pi";
+
 export type ParsedArgs = {
   cwd: string;
   provider?: "anthropic" | "gemini" | "openai";
@@ -8,6 +10,7 @@ export type ParsedArgs = {
   reasoning?: ModeReasoningEffort;
   sessionId?: string;
   prompt?: string;
+  engine?: WorkEngine;
   showHelp: boolean;
   showTools: boolean;
 };
@@ -26,6 +29,7 @@ export function printHelp(): void {
   process.stdout.write(`  --model  Override the model for the chosen provider\n`);
   process.stdout.write(`  --reasoning  Override reasoning effort: none, low, medium, high, xhigh, max\n`);
   process.stdout.write(`  --session-id  Resume a persisted work session id\n`);
+  process.stdout.write(`  --engine  pi (default, pi-mono runtime + OAuth) or native (legacy provider runtime)\n`);
 }
 
 export function printTools(): void {
@@ -90,6 +94,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
   if (typeof parsed.sessionId === "string") {
     result.sessionId = parsed.sessionId;
+  }
+  if (parsed.engine === "native" || parsed.engine === "pi") {
+    result.engine = parsed.engine;
   }
   if (typeof parsed.prompt === "string") {
     result.prompt = parsed.prompt;

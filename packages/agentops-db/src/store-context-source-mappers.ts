@@ -1,11 +1,14 @@
 import {
   CONTEXT_PACKET_VIEW_BADGE_TONES,
   CONTEXT_SOURCE_COMPRESSION_METHODS,
+  WORK_NODE_STATUSES,
   type ContextPacketViewBadge,
   type ContextSourceCategory,
+  type ContextSourceCompressionMetadata,
   type ContextSourceCompressionMethod,
   type ContextSourceMetadata,
   type ContextSourceRecord,
+  type WorkNodeStatus,
 } from "@unclecode/contracts";
 
 import {
@@ -127,8 +130,18 @@ function parseContextSourceMetadata(value: string | null): ContextSourceMetadata
 
 function isContextSourceMetadata(value: unknown): value is ContextSourceMetadata {
   if (!isPlainRecord(value)) return false;
-  if (value.kind !== "condensed-history") return false;
-  const sourceEventPreviews = optionalStringArrayProperty(value, "sourceEventPreviews");
+  switch (value.kind) {
+    case "condensed-history":
+      return isCondensedHistoryMetadata(value);
+    case "work-node":
+      return isWorkNodeMetadata(value);
+    default:
+      return false;
+  }
+}
+
+function isCondensedHistoryMetadata(value: Readonly<Record<string, unknown>>): boolean {
+  const sourceEventPreviews = stringArrayProperty(value, "sourceEventPreviews");
   return (
     Array.isArray(value.sourceEventIds) &&
     value.sourceEventIds.every((entry) => typeof entry === "string") &&
@@ -142,9 +155,23 @@ function isContextSourceMetadata(value: unknown): value is ContextSourceMetadata
   );
 }
 
+function isWorkNodeMetadata(value: Readonly<Record<string, unknown>>): boolean {
+  const goal = stringProperty(value, "goal");
+  return (
+    stringProperty(value, "graphId") !== undefined &&
+    stringProperty(value, "nodeId") !== undefined &&
+    stringProperty(value, "title") !== undefined &&
+    (!("goal" in value) || goal !== undefined) &&
+    stringArrayProperty(value, "constraints") !== undefined &&
+    workNodeStatusProperty(value, "status") !== undefined &&
+    stringArrayProperty(value, "acceptanceCriteria") !== undefined &&
+    stringArrayProperty(value, "evidenceRefs") !== undefined
+  );
+}
+
 function isContextSourceCompressionMetadata(
   value: unknown,
-): value is ContextSourceMetadata["compression"] {
+): value is ContextSourceCompressionMetadata {
   if (!isPlainRecord(value)) return false;
   const model = stringProperty(value, "model");
   return (
@@ -169,12 +196,11 @@ function numberProperty(value: Readonly<Record<string, unknown>>, key: string): 
   return typeof candidate === "number" ? candidate : undefined;
 }
 
-function optionalStringArrayProperty(
+function stringArrayProperty(
   value: Readonly<Record<string, unknown>>,
   key: string,
 ): readonly string[] | undefined {
   const candidate = value[key];
-  if (candidate === undefined) return undefined;
   return Array.isArray(candidate) && candidate.every((entry) => typeof entry === "string")
     ? candidate
     : undefined;
@@ -192,4 +218,12 @@ function compressionMethodProperty(
     case "masking":
       return method;
   }
+}
+
+function workNodeStatusProperty(
+  value: Readonly<Record<string, unknown>>,
+  key: string,
+): WorkNodeStatus | undefined {
+  const status = stringProperty(value, key);
+  return WORK_NODE_STATUSES.find((candidate) => candidate === status);
 }

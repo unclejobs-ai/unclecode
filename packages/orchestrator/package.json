@@ -8,6 +8,7 @@
     "@unclecode/config-core": "file:../config-core",
     "@unclecode/context-broker": "file:../context-broker",
     "@unclecode/contracts": "file:../contracts",
+    "@unclecode/policy-engine": "file:../policy-engine",
     "@unclecode/providers": "file:../providers",
     "@unclecode/session-store": "file:../session-store",
     "dotenv": "^17.4.0",

@@ -368,10 +368,14 @@ export type UsageRecordedTraceEvent = {
   readonly type: "usage.recorded";
   readonly level: "low-signal";
   readonly eventId: string;
+  readonly provider: string;
+  readonly model: string;
   readonly agentRunId?: string;
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly cacheReadTokens?: number;
+  readonly cacheWriteTokens?: number;
+  readonly cacheSavingsUsd?: number;
   readonly costUsd?: number;
   readonly startedAt: number;
 };

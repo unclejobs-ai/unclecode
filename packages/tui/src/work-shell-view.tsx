@@ -44,6 +44,10 @@ import {
 } from "./work-shell-context-inspector.js";
 import { renderContextTurnReceipt } from "./work-shell-context-receipt.js";
 import { resolveContextSourceMeta } from "./work-shell-context-inspector-model.js";
+import {
+  renderAgentHistoryOverlay,
+  renderCacheTelemetryOverlay,
+} from "./work-shell-telemetry.js";
 
 export type { WorkShellPanelDisplayMode } from "./work-shell-view-fast-paths.js";
 
@@ -1311,11 +1315,18 @@ function resolveWorkShellComposerDockLayout(input: {
 export function resolveWorkShellComposerAdditionalRows(input: {
   readonly inputValue: string;
   readonly terminalColumns?: number | undefined;
+  readonly attachmentCount?: number | undefined;
 }): number {
   const dockWidth = getWorkShellDockWidth(input.terminalColumns);
   const contentWidth = Math.max(20, dockWidth - 3);
-  const rows = wrapDisplayText(input.inputValue || " ", contentWidth).length;
-  return Math.max(0, rows - 1);
+  const attachmentBadge = input.attachmentCount === undefined
+    ? ""
+    : ` [${input.attachmentCount}/5]`;
+  const composerRows = wrapDisplayText(
+    `${input.inputValue || " "}${attachmentBadge}`,
+    contentWidth,
+  ).length;
+  return Math.max(0, composerRows - 1);
 }
 
 
@@ -2271,6 +2282,10 @@ export function WorkShellView(props: {
   );
   const shouldRenderContextInspectorOverlay =
     props.activePanel.title === "Context expanded" && props.contextPacket !== undefined;
+  const shouldRenderCacheTelemetryOverlay =
+    props.activePanel.title === "Cache Telemetry" && props.agentConsole !== undefined;
+  const shouldRenderAgentHistoryOverlay =
+    props.activePanel.title === "Agent History" && props.agentConsole !== undefined;
 
   const conversation = (
     <WorkShellConversationBlock
@@ -2332,6 +2347,9 @@ export function WorkShellView(props: {
             ...(props.terminalColumns !== undefined
               ? { terminalColumns: props.terminalColumns }
               : {}),
+            ...(props.attachmentCount !== undefined
+              ? { attachmentCount: props.attachmentCount }
+              : {}),
           }),
         );
     return (
@@ -2384,6 +2402,49 @@ export function WorkShellView(props: {
       </Box>
     );
   }
+  if (
+    panelDisplayMode === "overlay"
+    && !shouldSuppressOverlayForInput
+    && props.agentConsole
+    && (shouldRenderCacheTelemetryOverlay || shouldRenderAgentHistoryOverlay)
+  ) {
+    const overlayWidth = Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4);
+    return (
+      <Box flexDirection="column" paddingX={2}>
+        <WorkShellHeaderBlock
+          provider={props.provider}
+          {...(props.headerHint ? { headerHint: props.headerHint } : {})}
+          {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+        />
+        <WorkShellStatusBlock
+          model={props.model}
+          reasoningLabel={props.reasoningLabel}
+          mode={props.mode}
+          authLabel={props.authLabel}
+          isBusy={props.isBusy}
+          {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
+          {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
+          {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
+          {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+        />
+        {composerDock}
+        {shouldRenderCacheTelemetryOverlay
+          ? renderCacheTelemetryOverlay({
+              snapshot: props.agentConsole,
+              width: overlayWidth,
+              borderColor: panelBorderColor,
+              palette: W,
+            })
+          : renderAgentHistoryOverlay({
+              snapshot: props.agentConsole,
+              width: overlayWidth,
+              borderColor: panelBorderColor,
+              palette: W,
+            })}
+      </Box>
+    );
+  }
+
 
   return (
     <Box flexDirection="column" paddingX={2}>

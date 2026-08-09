@@ -9,6 +9,7 @@
     { "path": "packages/session-store" },
     { "path": "packages/runtime-broker" },
     { "path": "packages/providers" },
+    { "path": "packages/pi-bridge" },
     { "path": "packages/mcp-host" },
     { "path": "packages/memory-bus" },
     { "path": "packages/snapshot-store" },

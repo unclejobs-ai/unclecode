@@ -6,13 +6,14 @@
  * coordinator does not interpret worker stdout.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import type {
   PersonaId,
   TeamGateLevel,
+  TeamIsolationMode,
   TeamRunManifest,
   TeamRunStatus,
   TeamRuntimeMode,
@@ -29,6 +30,45 @@ import { TeamBinding } from "./team-binding.js";
 import { sweepStaleLocks } from "./disk-ownership-registry.js";
 import { runRustCommandSync } from "./rust-command.js";
 
+export function buildWindowsTreeKillArgs(pid: number): readonly string[] {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new Error(`Invalid worker PID: ${pid}`);
+  }
+  return ["/PID", String(pid), "/T", "/F"];
+}
+
+function killWorkerProcessTree(
+  child: ChildProcess,
+  signal: NodeJS.Signals,
+): void {
+  if (child.pid === undefined) {
+    child.kill(signal);
+    return;
+  }
+  if (process.platform === "win32") {
+    const taskkill = spawn("taskkill", buildWindowsTreeKillArgs(child.pid), {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    taskkill.once("error", () => {
+      child.kill(signal);
+    });
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+  } catch (error) {
+    if (
+      typeof error !== "object"
+      || error === null
+      || !("code" in error)
+      || error.code !== "ESRCH"
+    ) {
+      child.kill(signal);
+    }
+  }
+}
+
 export type TeamRunnerOptions = {
   readonly dataRoot: string;
   readonly objective: string;
@@ -36,6 +76,7 @@ export type TeamRunnerOptions = {
   readonly lanes?: number;
   readonly gate?: TeamGateLevel;
   readonly runtime?: TeamRuntimeMode;
+  readonly isolation?: TeamIsolationMode;
   readonly workspaceRoot: string;
   readonly createdBy: string;
   readonly runId?: string;
@@ -69,6 +110,7 @@ export type DispatchOptions = {
   readonly workerCommand: WorkerCommand;
   readonly workers: ReadonlyArray<WorkerSpec>;
   readonly extraEnv?: Readonly<Record<string, string>>;
+  readonly isolation?: TeamIsolationMode;
   readonly cwd?: string;
   readonly onStdout?: (workerId: string, line: string) => void;
   readonly onStderr?: (workerId: string, line: string) => void;
@@ -81,11 +123,13 @@ export type WorkerOutcome = {
   readonly status: "completed" | "failed" | "killed";
   readonly exitCode: number;
   readonly signal: NodeJS.Signals | null;
+  readonly isolation: TeamIsolationMode;
   readonly stdout: string;
   readonly stderr: string;
   readonly stdoutTruncated: boolean;
   readonly stderrTruncated: boolean;
   readonly durationMs: number;
+  readonly changePatchPath?: string;
 };
 
 const WORKER_STREAM_CAP_BYTES = 1_000_000;
@@ -105,6 +149,7 @@ export function startTeamRun(options: TeamRunnerOptions): TeamRunnerHandle {
     lanes: options.lanes ?? 1,
     gate: options.gate ?? "strict",
     runtime: options.runtime ?? "local",
+    isolation: options.isolation ?? "shared",
     workspaceRoot: options.workspaceRoot,
     createdBy: options.createdBy,
     ...(options.runId !== undefined ? { runId: options.runId } : {}),
@@ -156,6 +201,8 @@ export function startTeamRun(options: TeamRunnerOptions): TeamRunnerHandle {
         persona: options.persona,
         objective: options.objective,
         lanes: options.lanes ?? 1,
+        workspaceRoot: options.workspaceRoot,
+        isolation: options.isolation ?? "shared",
         dispatch: dispatchOptions,
       });
     },
@@ -171,6 +218,8 @@ async function runDispatch(input: {
   readonly persona: PersonaId;
   readonly objective: string;
   readonly lanes: number;
+  readonly workspaceRoot: string;
+  readonly isolation: TeamIsolationMode;
   readonly dispatch: DispatchOptions;
 }): Promise<DispatchResult> {
   const sweep = sweepStaleLocks(input.runRoot);
@@ -190,21 +239,87 @@ async function runDispatch(input: {
     bindingEnv: input.binding.envForChild(),
     ...(input.dispatch.extraEnv !== undefined ? { extraEnv: input.dispatch.extraEnv } : {}),
   });
+  const isolation = input.dispatch.isolation ?? input.isolation;
+  const workspaces: Array<{
+    readonly spec: WorkerSpec;
+    readonly cwd: string;
+    readonly prepared?: PreparedWorkerWorktree;
+  }> = [];
+  let baselineCommit: string | undefined;
+  try {
+    for (const spec of input.dispatch.workers) {
+      if (isolation === "worktree") {
+        const prepared = prepareWorkerWorktree({
+          workspaceRoot: input.workspaceRoot,
+          runRoot: input.runRoot,
+          runId: input.runId,
+          workerId: spec.workerId,
+          ...(baselineCommit !== undefined ? { baselineCommit } : {}),
+        });
+        if (baselineCommit === undefined) baselineCommit = prepared.baselineCommit;
+        workspaces.push({ spec, cwd: prepared.worktreePath, prepared });
+      } else {
+        workspaces.push({
+          spec,
+          cwd: input.dispatch.cwd ?? input.workspaceRoot,
+        });
+      }
+    }
+  } catch (error) {
+    for (const workspace of workspaces) {
+      if (workspace.prepared === undefined) continue;
+      try {
+        finalizeWorkerWorktree({
+          workspaceRoot: input.workspaceRoot,
+          runRoot: input.runRoot,
+          workerId: workspace.spec.workerId,
+          prepared: workspace.prepared,
+        });
+      } catch {
+        // Preserve the original setup error; worktree preparation performs its own rollback.
+      }
+    }
+    throw error;
+  }
 
   const outcomes = await Promise.all(
-    input.dispatch.workers.map((rawSpec) =>
-      runWorker({
-        spec: rawSpec,
+    workspaces.map(async (workspace) => {
+      const outcome = await runWorker({
+        spec: workspace.spec,
         command: input.dispatch.workerCommand,
         env: childEnv,
-        cwd: input.dispatch.cwd ?? process.cwd(),
+        cwd: workspace.cwd,
+        isolation,
         ...(input.dispatch.onStdout !== undefined ? { onStdout: input.dispatch.onStdout } : {}),
         ...(input.dispatch.onStderr !== undefined ? { onStderr: input.dispatch.onStderr } : {}),
         ...(input.dispatch.perWorkerTimeoutMs !== undefined
           ? { timeoutMs: input.dispatch.perWorkerTimeoutMs }
           : {}),
-      }),
-    ),
+      });
+      if (workspace.prepared === undefined) return outcome;
+      try {
+        const finalized = finalizeWorkerWorktree({
+          workspaceRoot: input.workspaceRoot,
+          runRoot: input.runRoot,
+          workerId: workspace.spec.workerId,
+          prepared: workspace.prepared,
+        });
+        return {
+          ...outcome,
+          ...(finalized.changePatchPath !== undefined
+            ? { changePatchPath: finalized.changePatchPath }
+            : {}),
+        };
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return {
+          ...outcome,
+          status: "failed" as const,
+          exitCode: outcome.exitCode === 0 ? -1 : outcome.exitCode,
+          stderr: `${outcome.stderr}${outcome.stderr.endsWith("\n") || outcome.stderr.length === 0 ? "" : "\n"}Failed to finalize isolated worktree: ${detail}\n`,
+        };
+      }
+    }),
   );
 
   const finalStatus = resolveDispatchStatus(outcomes);
@@ -222,11 +337,74 @@ async function runDispatch(input: {
   return { status: finalStatus, outcomes, sweep };
 }
 
+type PreparedWorkerWorktree = {
+  readonly worktreePath: string;
+  readonly baselineCommit: string;
+};
+
+function prepareWorkerWorktree(input: {
+  readonly workspaceRoot: string;
+  readonly runRoot: string;
+  readonly runId: string;
+  readonly workerId: string;
+  readonly baselineCommit?: string;
+}): PreparedWorkerWorktree {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "team", "worktree-prepare"],
+      input.workspaceRoot,
+      JSON.stringify(input),
+    ),
+  ) as unknown;
+  if (
+    !isRecord(parsed)
+    || typeof parsed.worktreePath !== "string"
+    || typeof parsed.baselineCommit !== "string"
+  ) {
+    throw new Error("Rust team worktree prepare returned invalid payload");
+  }
+  return {
+    worktreePath: parsed.worktreePath,
+    baselineCommit: parsed.baselineCommit,
+  };
+}
+
+function finalizeWorkerWorktree(input: {
+  readonly workspaceRoot: string;
+  readonly runRoot: string;
+  readonly workerId: string;
+  readonly prepared: PreparedWorkerWorktree;
+}): { readonly changePatchPath?: string } {
+  const parsed = JSON.parse(
+    runRustCommandSync(
+      ["rust", "team", "worktree-finalize"],
+      input.workspaceRoot,
+      JSON.stringify({
+        workspaceRoot: input.workspaceRoot,
+        runRoot: input.runRoot,
+        workerId: input.workerId,
+        worktreePath: input.prepared.worktreePath,
+        baselineCommit: input.prepared.baselineCommit,
+      }),
+    ),
+  ) as unknown;
+  if (
+    !isRecord(parsed)
+    || (parsed.changePatchPath !== null && typeof parsed.changePatchPath !== "string")
+  ) {
+    throw new Error("Rust team worktree finalize returned invalid payload");
+  }
+  return parsed.changePatchPath === null
+    ? {}
+    : { changePatchPath: parsed.changePatchPath };
+}
+
 function runWorker(input: {
   readonly spec: WorkerSpec;
   readonly command: WorkerCommand;
   readonly env: Record<string, string>;
   readonly cwd: string;
+  readonly isolation: TeamIsolationMode;
   readonly onStdout?: (workerId: string, line: string) => void;
   readonly onStderr?: (workerId: string, line: string) => void;
   readonly timeoutMs?: number;
@@ -238,6 +416,7 @@ function runWorker(input: {
       cwd: input.cwd,
       env: input.env,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
     });
 
     const stdoutBuf = createCappedBuffer(WORKER_STREAM_CAP_BYTES);
@@ -280,7 +459,7 @@ function runWorker(input: {
     if (input.timeoutMs && input.timeoutMs > 0) {
       timer = setTimeout(() => {
         killedByTimeout = true;
-        child.kill("SIGKILL");
+        killWorkerProcessTree(child, "SIGKILL");
       }, input.timeoutMs);
       if (typeof timer.unref === "function") timer.unref();
     }
@@ -293,6 +472,7 @@ function runWorker(input: {
       resolve({
         workerId: input.spec.workerId,
         persona: input.spec.persona,
+        isolation: input.isolation,
         status,
         exitCode,
         signal,

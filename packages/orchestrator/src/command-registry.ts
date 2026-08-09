@@ -158,6 +158,16 @@ export function createWorkShellCommandRegistry(extraEntries: readonly Registered
       metadata: builtinLocal("Inspect the context packet for the next answer.", ["/con"]),
     },
     {
+      command: "/cache",
+      routeTo: ["cache"],
+      metadata: builtinLocal("Inspect prompt-cache reuse, writes, and token savings."),
+    },
+    {
+      command: "/agents",
+      routeTo: ["agents"],
+      metadata: builtinLocal("Inspect current-session agent runs and costs."),
+    },
+    {
       command: "/model",
       routeTo: ["model"],
       metadata: builtinLocal("Show the current model and available model picks."),

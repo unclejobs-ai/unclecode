@@ -1394,6 +1394,7 @@ fn format_auth_label_for_display(auth_label: &str) -> String {
     match auth_label {
         "oauth-file-api-blocked" => "OAuth file · API blocked".to_string(),
         "oauth-env-api-blocked" => "OAuth env · API blocked".to_string(),
+        "oauth-pi" => "OAuth · pi engine".to_string(),
         "oauth-file" => "Browser OAuth · file".to_string(),
         "oauth-env" => "Browser OAuth · env".to_string(),
         "api-key-file" => "API key · file".to_string(),
@@ -1425,6 +1426,9 @@ fn format_auth_status_blurb(auth_label: Option<&str>, browser_oauth_available: b
         } else {
             "Use /auth login (device when available) or /auth key.".to_string()
         };
+    }
+    if auth_label == "oauth-pi" {
+        return "Codex OAuth ready through the pi engine.".to_string();
     }
     if auth_label.starts_with("oauth-") {
         if auth_label.ends_with("-api-blocked") {

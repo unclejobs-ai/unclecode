@@ -6,6 +6,7 @@ import { fullTuiResponseText, repoRoot, yoloGreetingResponseText } from "./const
 import { assertReadableForegroundEscapes, run, shellQuote, sleep } from "./cli-helpers.mjs";
 import {
   calculatePaneWidth,
+  IDLE_COMPOSER_PATTERN,
   READY_LAST_STATUS_PATTERN,
   runTmux,
   submitLine,
@@ -50,7 +51,7 @@ export async function runFullTuiSmoke({ port, tmp }) {
     writeFileSync(ansiPaneFile, ansiCapture.stdout);
 
     assert.match(pane, new RegExp(fullTuiResponseText));
-    assert.match(pane, /prompt deck/);
+    assert.match(pane, IDLE_COMPOSER_PATTERN);
     assert.match(pane, READY_LAST_STATUS_PATTERN);
     assert.doesNotMatch(pane, /Work context · session state/);
     assert.doesNotMatch(pane, /│ ▌ UNCLECODE_FULL_TUI_QA_OK/);

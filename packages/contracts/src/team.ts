@@ -34,6 +34,10 @@ export const TEAM_RUNTIME_MODES = ["local", "docker", "e2b", "openshell"] as con
 
 export type TeamRuntimeMode = (typeof TEAM_RUNTIME_MODES)[number];
 
+export const TEAM_ISOLATION_MODES = ["shared", "worktree"] as const;
+
+export type TeamIsolationMode = (typeof TEAM_ISOLATION_MODES)[number];
+
 /**
  * Per-lane runtime backend. Distinct from TeamRuntimeMode (sandbox container).
  * - SDK trio: openai/anthropic/gemini — in-process provider
@@ -141,6 +145,7 @@ export type TeamRunManifest = {
   readonly lanes: number;
   readonly gate: TeamGateLevel;
   readonly runtime: TeamRuntimeMode;
+  readonly isolation?: TeamIsolationMode;
   readonly createdAt: number;
   readonly createdBy: string;
   readonly workspaceRoot: string;

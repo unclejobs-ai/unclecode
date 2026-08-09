@@ -66,6 +66,7 @@ import type {
   ContextPacketChangeClassification,
   ContextPacketReceipt,
   ContextPacketView,
+  ContextPacketViewAction,
   ContextPacketViewActionReceipt,
   ContextPacketViewItem,
   ContextProfileId,
@@ -525,6 +526,7 @@ export type WorkShellEngineInput<
   mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
   ) => ContextPacketViewActionReceipt | undefined) | undefined;
+  readonly undoContextSourceAction?: (() => ContextPacketViewActionReceipt | undefined) | undefined;
   readonly previewContextPacket?: ((input: {
     readonly sessionId: string;
     readonly packet: ContextPacketView;
@@ -553,6 +555,21 @@ export type WorkShellEngineInput<
 type PendingDecision = {
   readonly request: AskUserQuestionRequest;
   settle(result: AskUserQuestionResult): void;
+};
+
+/**
+ * One navigable row of the Context Desk source list. `actions` mirrors the
+ * capability list the packet item advertises, so a key the desk does not
+ * offer for a source can never mutate it.
+ */
+type InspectorSource = {
+  readonly id: string;
+  readonly label: string;
+  readonly category: string;
+  readonly detail: string;
+  readonly pinned: boolean;
+  readonly heldBack: boolean;
+  readonly actions?: readonly ContextPacketViewAction[] | undefined;
 };
 
 export class WorkShellEngine<
@@ -675,6 +692,7 @@ export class WorkShellEngine<
   private readonly mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
   ) => ContextPacketViewActionReceipt | undefined) | undefined;
+  private readonly undoContextSourceAction?: (() => ContextPacketViewActionReceipt | undefined) | undefined;
   private readonly previewContextPacket?: ((input: {
     readonly sessionId: string;
     readonly packet: ContextPacketView;
@@ -703,6 +721,7 @@ export class WorkShellEngine<
   private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
   private readonly queueDrainSkipTurnEpochs = new Set<number>();
   private readonly pendingContextSuggestionInvalidations = new Set<string>();
+  private contextSuggestionAcceptanceInFlight = false;
   private queuedCountCache = 0;
   private currentContextSummaryLines: readonly string[];
   private lastSessionSummary: string;
@@ -758,6 +777,7 @@ export class WorkShellEngine<
     this.onExit = input.onExit;
     this.recordTurn = input.recordTurn;
     this.mutateContextSource = input.mutateContextSource;
+    this.undoContextSourceAction = input.undoContextSourceAction;
     this.previewContextPacket = input.previewContextPacket;
     this.revalidateContextPacket = input.revalidateContextPacket;
     this.submitContextPacketReceipt = input.submitContextPacketReceipt;
@@ -980,16 +1000,20 @@ export class WorkShellEngine<
    * cursor. Pin sets salience to 1.0 (always include); unpin restores 0.5.
    * After the SQL write we re-select from the store and re-render so the
    * overlay reflects the new ranking immediately.
+   *
+   * A source that does not advertise the action the desk would show is left
+   * untouched: the key the user pressed is not offered for that row.
    */
   async toggleContextInspectorPin(): Promise<void> {
     const source = this.resolveInspectorSourceAtCursor();
     if (!source || !this.mutateContextSource) {
       return;
     }
-    await this.mutateInspectorContextSource({
-      kind: source.pinned ? "unpin" : "pin",
-      id: source.id,
-    });
+    const kind = source.pinned ? "unpin" : "pin";
+    if (source.actions !== undefined && !source.actions.includes(kind)) {
+      return;
+    }
+    await this.mutateInspectorContextSource({ kind, id: source.id });
   }
 
   /**
@@ -999,6 +1023,9 @@ export class WorkShellEngine<
   async forgetContextSourceAtCursor(): Promise<void> {
     const source = this.resolveInspectorSourceAtCursor();
     if (!source || !this.mutateContextSource) {
+      return;
+    }
+    if (source.actions !== undefined && !source.actions.includes("hold-back")) {
       return;
     }
     await this.mutateInspectorContextSource({ kind: "forget", id: source.id });
@@ -1013,36 +1040,54 @@ export class WorkShellEngine<
     if (!source || !this.mutateContextSource) {
       return;
     }
+    if (source.actions !== undefined && !source.actions.includes("include")) {
+      return;
+    }
     await this.mutateInspectorContextSource({ kind: "include", id: source.id });
   }
+
+  async undoLastContextSourceAction(): Promise<void> {
+    if (!this.undoContextSourceAction || !this.state.contextActionReceipt?.canUndo) {
+      return;
+    }
+    const beforePacketId = this.state.contextPacket?.id;
+    const receipt = this.undoContextSourceAction();
+    if (!receipt) {
+      return;
+    }
+    const packet = await this.refreshContextPacket(true);
+    this.captureContextPacketPreview(packet);
+    const remappedCursor = this.resolveInspectorCursorForSourceId(receipt.sourceId);
+    this.setState({
+      contextActionReceipt: {
+        ...receipt,
+        ...(beforePacketId !== undefined ? { beforePacketId } : {}),
+        ...(packet !== undefined ? { afterPacketId: packet.id } : {}),
+      },
+      contextInspectorCursor: remappedCursor,
+    });
+  }
+
+  /**
+   * Apply one piece of advice. The effect runs first and the `accepted`
+   * resolution is persisted only once it lands, so a failed hold-back /
+   * refresh / summarize leaves the advice `proposed` and retryable behind the
+   * bounded unavailable line. Only one acceptance may be in flight: applying
+   * advice rewrites the packet every other proposal was measured against.
+   */
   async acceptContextSuggestion(suggestionId: string): Promise<void> {
+    const resolveContextSuggestion = this.resolveContextSuggestion;
     const suggestion = this.state.contextPolicySuggestions.find(
       (candidate) => candidate.id === suggestionId && candidate.status === "proposed",
     );
-    if (!suggestion || !this.resolveContextSuggestion) {
+    if (!suggestion || !resolveContextSuggestion || this.contextSuggestionAcceptanceInFlight) {
       return;
     }
-
-
+    this.contextSuggestionAcceptanceInFlight = true;
     try {
-      const resolved = this.resolveContextSuggestion(suggestion.id, "accepted");
-      this.setState({
-        contextPolicySuggestions: this.state.contextPolicySuggestions.map((candidate) =>
-          candidate.id === resolved.id ? resolved : candidate
-        ),
-        contextAdviceUnavailable: undefined,
-      });
-      if (suggestion.action !== "keep") {
-        const retired = this.invalidateProposedContextSuggestions(
-          suggestion.packetReceiptId,
-        );
-        if (!retired) {
-          throw new Error("Context suggestion retirement is unavailable.");
-        }
-      }
       switch (suggestion.action) {
         case "keep":
-          return;
+          break;
         case "hold-back":
           if (!this.mutateContextSource) {
             throw new Error("Context source mutation is unavailable.");
@@ -1067,10 +1112,27 @@ export class WorkShellEngine<
           break;
         }
       }
+      const resolved = resolveContextSuggestion(suggestion.id, "accepted");
+      this.setState({
+        contextPolicySuggestions: this.state.contextPolicySuggestions.map((candidate) =>
+          candidate.id === resolved.id ? resolved : candidate
+        ),
+        contextAdviceUnavailable: undefined,
+      });
+      if (suggestion.action !== "keep") {
+        const retired = this.invalidateProposedContextSuggestions(
+          suggestion.packetReceiptId,
+        );
+        if (!retired) {
+          throw new Error("Context suggestion retirement is unavailable.");
+        }
+      }
     } catch {
       this.setState({
         contextAdviceUnavailable: "Context optimizer unavailable; reply kept.",
       });
+    } finally {
+      this.contextSuggestionAcceptanceInFlight = false;
     }
   }
 
@@ -1226,18 +1288,13 @@ export class WorkShellEngine<
 
   /**
    * Build the navigable source list for the inspector from the current
-   * context packet: included sources first (sorted by salience desc), then
-   * held-back sources. Each entry carries a `pinned` flag (salience === 1.0)
-   * so the pin toggle and cursor glyph render correctly.
+   * context packet. The Context Desk renders every "In next request" row
+   * above the "Held back" block, so stage decides the order first; within a
+   * stage the existing group order and source index apply. Each entry carries
+   * a `pinned` flag (salience === 1.0) so the pin toggle and cursor glyph
+   * render correctly, plus the capability list that gates its mutations.
    */
-  private resolveInspectorSourceList(): readonly {
-    readonly id: string;
-    readonly label: string;
-    readonly category: string;
-    readonly detail: string;
-    readonly pinned: boolean;
-    readonly heldBack: boolean;
-  }[] {
+  private resolveInspectorSourceList(): readonly InspectorSource[] {
     const packet = this.state.contextPacket;
     if (!packet) {
       return [];
@@ -1259,6 +1316,7 @@ export class WorkShellEngine<
         detail: content,
         pinned: (item.salience ?? 0) >= 1,
         heldBack: heldBack || item.includedInModel === false,
+        ...(item.actions !== undefined ? { actions: item.actions } : {}),
         order,
       };
     };
@@ -1268,29 +1326,20 @@ export class WorkShellEngine<
     ];
     return [...unsorted]
       .sort((left, right) => {
+        if (left.heldBack !== right.heldBack) {
+          return left.heldBack ? 1 : -1;
+        }
         const leftGroup = groupRank(left.category);
         const rightGroup = groupRank(right.category);
         if (leftGroup !== rightGroup) {
           return leftGroup - rightGroup;
-        }
-        if (left.heldBack !== right.heldBack) {
-          return left.heldBack ? 1 : -1;
         }
         return left.order - right.order;
       })
       .map(({ order: _order, ...entry }) => entry);
   }
 
-  private resolveInspectorSourceAtCursor():
-    | {
-      readonly id: string;
-      readonly label: string;
-      readonly category: string;
-      readonly detail: string;
-      readonly pinned: boolean;
-      readonly heldBack: boolean;
-    }
-    | undefined {
+  private resolveInspectorSourceAtCursor(): InspectorSource | undefined {
     const sources = this.resolveInspectorSourceList();
     const cursor = this.state.contextInspectorCursor;
     if (cursor < 0 || cursor >= sources.length) {
@@ -2138,6 +2187,12 @@ export class WorkShellEngine<
       && this.submitContextPacketReceipt !== undefined;
   }
 
+  /**
+   * Mint (or reuse) the preview receipt for a candidate packet. The last
+   * submitted receipt stays on state: it is the "before" side the Context
+   * Desk compares the new preview against, and dropping it here blanked the
+   * compare view every time the desk refreshed.
+   */
   private captureContextPacketPreview(packet: ContextPacketView | undefined): void {
     if (!packet || !this.previewContextPacket) {
       return;
@@ -2147,10 +2202,17 @@ export class WorkShellEngine<
       packet,
       profile: this.resolveContextLifecycleProfile(),
     });
+    const submittedReceipt = this.state.contextSubmittedReceipt;
+    const packetChange = submittedReceipt && this.revalidateContextPacket
+      ? this.revalidateContextPacket({
+          sessionId: this.sessionId,
+          preview: submittedReceipt,
+          packet,
+        })
+      : undefined;
     this.setState({
       contextPreviewReceipt: receipt,
-      contextSubmittedReceipt: undefined,
-      contextPacketChange: undefined,
+      contextPacketChange: packetChange,
     });
   }
 

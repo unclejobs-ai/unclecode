@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "jsx": "react-jsx",
@@ -23,6 +24,7 @@
       "@unclecode/session-store": ["packages/session-store/src/index.ts"],
       "@unclecode/runtime-broker": ["packages/runtime-broker/src/index.ts"],
       "@unclecode/providers": ["packages/providers/src/index.ts"],
+      "@unclecode/pi-bridge": ["packages/pi-bridge/src/index.ts"],
       "@unclecode/mcp-host": ["packages/mcp-host/src/index.ts"],
       "@unclecode/orchestrator": ["packages/orchestrator/src/index.ts"],
       "@unclecode/tui": ["packages/tui/src/index.tsx"]

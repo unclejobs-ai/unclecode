@@ -73,7 +73,10 @@ mod tests {
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["entries"].as_array().map(|entries| entries.len()), Some(0));
+        assert_eq!(
+            parsed["entries"].as_array().map(|entries| entries.len()),
+            Some(0)
+        );
         assert_eq!(parsed["patch"]["bridgeLines"][0], "bridge-1");
     }
 }

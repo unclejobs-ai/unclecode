@@ -97,7 +97,9 @@ export function computeContextOverlayViewportMaxRows(input: {
 }): number {
   const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
   if (input.terminalRows === undefined) {
-    return 12;
+    // No physical height was supplied, so do not discard user evidence based
+    // on an invented small terminal. Known terminals use the hard budget below.
+    return 24;
   }
   const reservedRows = Math.max(0, Math.trunc(input.reservedRows ?? 0));
   return clamp(
@@ -138,14 +140,14 @@ export function buildContextInspectorRows(packet: ContextPacketView): readonly C
       heldBack: true,
     })),
   ];
-  const ranked = [...unsorted].sort((left, right) => {
+  const ranked = unsorted.sort((left, right) => {
+    if (left.heldBack !== right.heldBack) {
+      return left.heldBack ? 1 : -1;
+    }
     const leftGroup = CONTEXT_INSPECTOR_GROUP_ORDER.indexOf(resolveContextSourceGroup(left.item.category));
     const rightGroup = CONTEXT_INSPECTOR_GROUP_ORDER.indexOf(resolveContextSourceGroup(right.item.category));
     if (leftGroup !== rightGroup) {
       return leftGroup - rightGroup;
-    }
-    if (left.heldBack !== right.heldBack) {
-      return left.heldBack ? 1 : -1;
     }
     return left.sourceIndex - right.sourceIndex;
   });

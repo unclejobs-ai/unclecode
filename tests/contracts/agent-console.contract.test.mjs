@@ -264,6 +264,15 @@ test("agent-console resume parser round-trips every safe lifecycle field", () =>
       outputTokens: 90,
       cacheReadTokens: 24,
       costUsd: 0.25,
+      routes: [{
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        eventIds: ["usage-main-1"],
+        inputTokens: 300,
+        outputTokens: 90,
+        cacheReadTokens: 24,
+        costUsd: 0.25,
+      }],
     },
   });
 
@@ -310,6 +319,15 @@ test("agent-console resume parser round-trips every safe lifecycle field", () =>
     outputTokens: 90,
     cacheReadTokens: 24,
     costUsd: 0.25,
+    routes: [{
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      eventIds: ["usage-main-1"],
+      inputTokens: 300,
+      outputTokens: 90,
+      cacheReadTokens: 24,
+      costUsd: 0.25,
+    }],
   });
   assert.equal(parsed?.activity[0]?.agentRunId, "run-1");
   assert.doesNotMatch(JSON.stringify(parsed), /must disappear/);
@@ -714,7 +732,9 @@ test("agent-console parser bounds oversized lifecycle lists to the newest tail",
     queuedAt: index,
   });
   const oversized = 5_000;
-  const agents = Array.from({ length: oversized }, (_, index) => validAgent(index));
+  const agents = Array.from({ length: oversized }, (_, index) =>
+    validAgent(index),
+  );
   const jobs = Array.from({ length: oversized }, (_, index) => validJob(index));
 
   const parsed = parseAgentConsoleSnapshot({
@@ -746,7 +766,9 @@ test("agent-console parser rejects a malformed record inside the discarded prefi
     startedAt: index,
   });
   const oversized = 5_000;
-  const agents = Array.from({ length: oversized }, (_, index) => validAgent(index));
+  const agents = Array.from({ length: oversized }, (_, index) =>
+    validAgent(index),
+  );
 
   // Index 0 and a deep interior index both sit far outside the retained tail.
   for (const poisonedIndex of [0, 2_500]) {

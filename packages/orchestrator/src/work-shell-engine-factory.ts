@@ -160,6 +160,9 @@ export function createWorkShellEngine<
     ...(input.mutateContextSource !== undefined
       ? { mutateContextSource: input.mutateContextSource }
       : {}),
+    ...(input.undoContextSourceAction !== undefined
+      ? { undoContextSourceAction: input.undoContextSourceAction }
+      : {}),
     ...(input.previewContextPacket !== undefined
       ? { previewContextPacket: input.previewContextPacket }
       : {}),

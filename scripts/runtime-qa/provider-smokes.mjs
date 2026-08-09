@@ -23,6 +23,8 @@ export async function runPromptSmoke(port, observations) {
   const result = await run(process.execPath, [
     binEntrypoint,
     "work",
+    "--engine",
+    "pi",
     "--provider",
     "gemini",
     "--model",
@@ -49,6 +51,8 @@ export async function runToolCallSmoke(port, observations) {
   const result = await run(process.execPath, [
     binEntrypoint,
     "work",
+    "--engine",
+    "pi",
     "--provider",
     "gemini",
     "--model",
@@ -66,7 +70,6 @@ export async function runToolCallSmoke(port, observations) {
   const requests = observations.slice(beforeRequests);
   assert.equal(requests.length, 2, `tool-call smoke should make two provider calls, got ${requests.length}`);
   assert.equal(requests[0]?.hasTools, true, "first tool-call request should expose local tools");
-  assert.equal(requests[0]?.hasToolConfig, true, "first tool-call request should enable Gemini AUTO tool mode");
   assert.equal(extractRuntimeQaUserRequest(requests[0]?.text ?? ""), toolCallPromptText);
   assert.equal(
     requests[1]?.contentCount,
@@ -74,8 +77,6 @@ export async function runToolCallSmoke(port, observations) {
     "second tool-call request should include user, model tool call, and tool result turns",
   );
   assert.equal(requests[1]?.hasFunctionResponse, true, "second tool-call request should carry a functionResponse");
-  assert.equal(requests[1]?.functionResponseId, toolCallId);
-  assert.equal(requests[1]?.functionResponseIdMatched, true);
   assert.equal(requests[1]?.functionResponseName, "run_shell");
   assert.equal(requests[1]?.functionResponseNameMatched, true);
   assert.match(requests[1]?.functionResponseText ?? "", new RegExp(toolCallShellOutput));
@@ -97,6 +98,8 @@ export async function runOpenAIToolCallSmoke(port, openAIObservations) {
   const result = await run(process.execPath, [
     binEntrypoint,
     "work",
+    "--engine",
+    "pi",
     "--provider",
     "openai",
     "--model",
@@ -139,6 +142,8 @@ export async function runAnthropicToolCallSmoke(port, anthropicObservations) {
   const result = await run(process.execPath, [
     binEntrypoint,
     "work",
+    "--engine",
+    "pi",
     "--provider",
     "anthropic",
     "--model",

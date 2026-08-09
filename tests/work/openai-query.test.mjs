@@ -3,6 +3,7 @@ import test from "node:test";
 import { Worker } from "node:worker_threads";
 
 import { OpenAIProvider } from "@unclecode/orchestrator";
+import { OpenAIProvider as BaseOpenAIProvider } from "@unclecode/providers";
 
 const UNSUPPORTED_REASONING = {
   effort: "unsupported",
@@ -407,4 +408,125 @@ test("OpenAIProvider.query uses Rust one-shot chat query when fetch is not injec
     await waitForWorkerMessage(worker, "closed");
     await worker.terminate();
   }
+});
+
+test("OpenAIProvider.runTurn reports one step and the response cost for a single model response", async () => {
+  const provider = new OpenAIProvider({
+    apiKey: "sk-test-123",
+    model: "gpt-5.6-luna",
+    cwd: process.cwd(),
+    reasoning: UNSUPPORTED_REASONING,
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return {
+          choices: [{ message: { content: "single done" } }],
+          usage: { prompt_tokens: 500, completion_tokens: 500 },
+        };
+      },
+    }),
+  });
+
+  const result = await provider.runTurn("do one thing");
+
+  assert.equal(result.text, "single done");
+  // GPT-5.6 Luna: $1.00/M input + $6.00/M output → $0.0035 for 500 + 500 tokens.
+  assert.deepEqual(
+    { steps: result.steps, costUsd: result.costUsd },
+    { steps: 1, costUsd: 0.0035 },
+  );
+});
+
+test("OpenAIProvider.runTurn still counts the step but omits costUsd when pricing is unknown", async () => {
+  const provider = new OpenAIProvider({
+    apiKey: "sk-test-123",
+    model: "no-such-model",
+    cwd: process.cwd(),
+    reasoning: UNSUPPORTED_REASONING,
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return {
+          choices: [{ message: { content: "unpriced" } }],
+          usage: { prompt_tokens: 500, completion_tokens: 500 },
+        };
+      },
+    }),
+  });
+
+  const result = await provider.runTurn("do one thing");
+
+  assert.equal(result.steps, 1);
+  assert.ok(
+    !Object.hasOwn(result, "costUsd"),
+    "unknown pricing must stay absent instead of reporting a manufactured costUsd: 0",
+  );
+});
+
+test("OpenAIProvider.runTurn sums step count and cost across a two-response tool loop", async () => {
+  const seenInputs = [];
+  let callCount = 0;
+  const provider = new BaseOpenAIProvider({
+    apiKey: "sk-test-123",
+    model: "gpt-5.6-luna",
+    cwd: process.cwd(),
+    reasoning: UNSUPPORTED_REASONING,
+    toolRuntime: {
+      definitions: [
+        {
+          name: "capture_args",
+          description: "capture args",
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+      executor: {
+        async execute({ input }) {
+          seenInputs.push(input);
+          return { content: "tool-ok" };
+        },
+      },
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        callCount += 1;
+        if (callCount === 1) {
+          return {
+            choices: [
+              {
+                message: {
+                  content: "running",
+                  tool_calls: [
+                    {
+                      id: "call_1",
+                      type: "function",
+                      function: {
+                        name: "capture_args",
+                        arguments: JSON.stringify({ command: "echo ok" }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+            usage: { prompt_tokens: 500, completion_tokens: 500 },
+          };
+        }
+        return {
+          choices: [{ message: { content: "loop done" } }],
+          usage: { prompt_tokens: 500, completion_tokens: 500 },
+        };
+      },
+    }),
+  });
+
+  const result = await provider.runTurn("use the tool");
+
+  assert.equal(result.text, "loop done");
+  assert.deepEqual(seenInputs, [{ command: "echo ok" }]);
+  // Two $0.0035 model responses: the loop must sum usage, not overwrite it.
+  assert.deepEqual(
+    { steps: result.steps, costUsd: result.costUsd },
+    { steps: 2, costUsd: 0.007 },
+  );
 });

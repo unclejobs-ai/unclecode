@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { join, resolve, dirname } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { setTimeout as sleep } from "node:timers/promises";
 
-import { listTeamRuns, startTeamRun } from "@unclecode/orchestrator";
+import { buildWindowsTreeKillArgs, listTeamRuns, startTeamRun } from "@unclecode/orchestrator";
 import { readTeamCheckpoints, verifyTeamRunChain } from "@unclecode/session-store";
 
 // Place tmp dirs inside the workspace so spawned worker scripts can resolve
@@ -47,6 +49,10 @@ function makeRun() {
   const dataRoot = mkdtempSync(join(PROJECT_ROOT, ".test-tmp-dispatch-"));
   return dataRoot;
 }
+
+test("Windows worker termination targets the entire descendant tree", () => {
+  assert.deepEqual(buildWindowsTreeKillArgs(4321), ["/PID", "4321", "/T", "/F"]);
+});
 
 test("dispatch spawns N workers, publishes running+accepted, chain verifies", async () => {
   const dataRoot = makeRun();
@@ -110,6 +116,82 @@ test("dispatch spawns N workers, publishes running+accepted, chain verifies", as
   }
 });
 
+test("worktree isolation keeps concurrent worker edits separate and returns patches", async () => {
+  const repoRoot = mkdtempSync(join(PROJECT_ROOT, ".test-tmp-worktree-"));
+  const isolationRoot = join(
+    dirname(repoRoot),
+    `.${basename(repoRoot)}-unclecode-worktrees`,
+  );
+  const dataRoot = join(repoRoot, ".data");
+  const workerPath = join(repoRoot, "isolated-worker.mjs");
+  try {
+    writeFileSync(join(repoRoot, ".gitignore"), ".data/\n");
+    writeFileSync(
+      workerPath,
+      `import { readFileSync, writeFileSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
+const args = process.argv.slice(2);
+const workerId = args[args.indexOf("--worker-id") + 1];
+writeFileSync("collision.txt", workerId);
+await sleep(workerId === "w1" ? 80 : 20);
+process.stdout.write(\`\${workerId}:\${readFileSync("collision.txt", "utf8")}\\n\`);
+`,
+    );
+    execFileSync("git", ["init", "-q"], { cwd: repoRoot });
+    execFileSync("git", ["add", "."], { cwd: repoRoot });
+    execFileSync(
+      "git",
+      ["-c", "user.name=UncleCode Tests", "-c", "user.email=tests@unclecode.local", "commit", "-qm", "fixture"],
+      { cwd: repoRoot },
+    );
+
+    const handle = startTeamRun({
+      dataRoot,
+      runId: "tr_isolated",
+      objective: "isolated collision test",
+      persona: "coder",
+      lanes: 2,
+      gate: "warn",
+      runtime: "local",
+      isolation: "worktree",
+      workspaceRoot: repoRoot,
+      createdBy: "tests",
+    });
+    handle.start();
+
+    let result;
+    try {
+      result = await handle.dispatch({
+        workerCommand: { command: process.execPath, args: [workerPath] },
+        workers: [
+          { workerId: "w1", persona: "coder", task: "write one", runtime: "openai" },
+          { workerId: "w2", persona: "coder", task: "write two", runtime: "openai" },
+        ],
+        perWorkerTimeoutMs: 30_000,
+      });
+    } finally {
+      handle.release();
+    }
+
+    assert.equal(result.status, "accepted");
+    assert.equal(existsSync(join(repoRoot, "collision.txt")), false, "parent workspace stays untouched");
+    for (const outcome of result.outcomes) {
+      assert.equal(outcome.isolation, "worktree");
+      assert.match(outcome.stdout, new RegExp(`${outcome.workerId}:${outcome.workerId}`));
+      assert.ok(outcome.changePatchPath, `${outcome.workerId} returns a patch artifact`);
+      assert.match(readFileSync(outcome.changePatchPath, "utf8"), /collision\.txt/);
+    }
+  } finally {
+    try {
+      execFileSync("git", ["worktree", "prune"], { cwd: repoRoot });
+    } catch {
+      // The repository may not have been initialized if fixture setup failed.
+    }
+    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(isolationRoot, { recursive: true, force: true });
+  }
+});
+
 test("dispatch reports errored when a worker exits non-zero", async () => {
   const dataRoot = makeRun();
   try {
@@ -145,6 +227,53 @@ process.exit(7);
     assert.equal(result.status, "errored");
     assert.equal(result.outcomes[0].status, "failed");
     assert.equal(result.outcomes[0].exitCode, 7);
+  } finally {
+    rmSync(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("worker timeout kills descendant processes before returning", {
+  skip: process.platform === "win32",
+}, async () => {
+  const dataRoot = makeRun();
+  try {
+    const markerPath = join(dataRoot, "descendant-survived.txt");
+    const workerPath = join(dataRoot, "worker-with-descendant.mjs");
+    writeFileSync(
+      workerPath,
+      `#!/usr/bin/env node
+import { spawn } from "node:child_process";
+const marker = process.env.DESCENDANT_MARKER;
+spawn(process.execPath, ["-e", \`setTimeout(() => require("node:fs").writeFileSync(\${JSON.stringify(marker)}, "alive"), 300)\`], {
+  stdio: "ignore",
+});
+setInterval(() => {}, 1_000);
+`,
+      { mode: 0o755 },
+    );
+
+    const handle = startTeamRun({
+      dataRoot,
+      objective: "timeout descendant test",
+      persona: "coder",
+      lanes: 1,
+      gate: "warn",
+      runtime: "local",
+      workspaceRoot: dataRoot,
+      createdBy: "tests",
+    });
+    handle.start();
+    const result = await handle.dispatch({
+      workerCommand: { command: process.execPath, args: [workerPath] },
+      workers: [{ workerId: "w1", persona: "coder", task: "timeout" }],
+      extraEnv: { DESCENDANT_MARKER: markerPath },
+      perWorkerTimeoutMs: 100,
+    });
+    handle.release();
+
+    assert.equal(result.outcomes[0].status, "killed");
+    await sleep(500);
+    assert.equal(existsSync(markerPath), false);
   } finally {
     rmSync(dataRoot, { recursive: true, force: true });
   }

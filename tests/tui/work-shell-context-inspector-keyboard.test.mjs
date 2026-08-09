@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 
-import { render } from "ink";
+import { render, Text } from "ink";
 import React from "react";
 
 import {
@@ -10,7 +10,14 @@ import {
   resolveWorkShellContextInspectorAction,
   useWorkShellInputController,
 } from "../../packages/tui/src/index.tsx";
-import { getVisibleContextPolicySuggestions } from "../../packages/tui/src/work-shell-context-advice.tsx";
+import {
+  getSelectedVisibleContextPolicySuggestion,
+  getVisibleContextPolicySuggestions,
+} from "../../packages/tui/src/work-shell-context-advice.tsx";
+import {
+  buildContextInspectorControls,
+  resolveContextInspectorSourceCapabilities,
+} from "../../packages/tui/src/work-shell-context-inspector.tsx";
 import { areContextAdviceActionsAvailable } from "../../packages/tui/src/work-shell-hooks.ts";
 
 function createInkInput() {
@@ -47,7 +54,10 @@ function createWritableError() {
 function renderWithInput(element) {
   const stdin = createInkInput();
   const stdout = createWritableOutput();
-  stdout.on("data", () => {});
+  let output = "";
+  stdout.on("data", (chunk) => {
+    output += chunk.toString();
+  });
   const instance = render(element, {
     stdin,
     stdout,
@@ -56,7 +66,7 @@ function renderWithInput(element) {
     patchConsole: false,
     exitOnCtrlC: false,
   });
-  return { stdin, instance };
+  return { stdin, instance, getOutput: () => output };
 }
 
 async function waitForCondition(predicate, timeoutMs = 5_000) {
@@ -86,6 +96,7 @@ function ContextInputControllerHarness(props) {
     activePanelTitle: "Context expanded",
     contextSourceActionsEnabled: props.actionsEnabled,
     contextAdviceActionsEnabled: props.adviceActionsEnabled,
+    contextUndoActionsEnabled: props.undoEnabled,
     ...(props.isComposerRawEmpty
       ? { isComposerRawEmpty: props.isComposerRawEmpty }
       : {}),
@@ -97,9 +108,85 @@ function ContextInputControllerHarness(props) {
     toggleContextInspectorPin: async () => props.onPin(),
     toggleContextSourceDelivery: async () => props.onToggleDelivery(),
     toggleContextInspectorExpanded: props.onExpand,
+    undoContextSourceAction: async () => props.onUndo?.(),
   });
-  return null;
+  return React.createElement(Text, null, "ready");
 }
+function TelemetryInputControllerHarness(props) {
+  const [value, setValue] = React.useState("");
+  React.useEffect(() => {
+    props.onValueChange(value);
+  }, [props.onValueChange, value]);
+  useWorkShellInputController({
+    value,
+    replaceValue: setValue,
+    slashSuggestionCount: 0,
+    setSelectedSlashIndex: () => {},
+    isBusy: false,
+    currentMode: "yolo",
+    onExit: () => {},
+    openEngineSessions: () => {},
+    cycleMode: () => {},
+    shouldBlockSlashSubmit: () => false,
+    handleSubmit: props.onSubmit,
+    hasOverlayOpen: true,
+    activePanelTitle: props.activePanelTitle,
+  });
+  return React.createElement(Text, null, `draft:${value}`);
+}
+
+test("telemetry panel hotkeys switch views without entering composer text", async () => {
+  for (const [activePanelTitle, key, expectedCommand] of [
+    ["Cache Telemetry", "A", "/agents"],
+    ["Agent History", "C", "/cache"],
+  ]) {
+    const submissions = [];
+    const values = [];
+    const view = renderWithInput(
+      React.createElement(TelemetryInputControllerHarness, {
+        activePanelTitle,
+        onSubmit: async (command) => submissions.push(command),
+        onValueChange: (value) => values.push(value),
+      }),
+    );
+
+    try {
+      view.stdin.write(key);
+      await waitForCondition(() => submissions.length === 1);
+      assert.deepEqual(submissions, [expectedCommand]);
+      await waitForCondition(() => values.length > 0);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(values.at(-1), "");
+    } finally {
+      view.instance.unmount();
+      view.instance.cleanup();
+    }
+  }
+});
+
+test("composer suppresses telemetry action keys while a telemetry overlay is open", async () => {
+  for (const key of ["A", "C", "a", "c"]) {
+    const changes = [];
+    const view = renderWithInput(
+      React.createElement(Composer, {
+        value: "",
+        onChange: (value) => changes.push(value),
+        onSubmit: async () => {},
+        suppressTelemetryHotkeys: true,
+      }),
+    );
+
+    try {
+      view.stdin.write(key);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.deepEqual(changes, []);
+    } finally {
+      view.instance.unmount();
+      view.instance.cleanup();
+    }
+  }
+});
+
 
 test("context inspector resolver uses human navigation and action keys", () => {
   assert.deepEqual(resolveWorkShellContextInspectorAction({
@@ -126,6 +213,18 @@ test("context inspector resolver uses human navigation and action keys", () => {
     panelTitle: "Context expanded",
     actionsEnabled: true,
   }), { type: "toggle-pin" });
+  assert.deepEqual(resolveWorkShellContextInspectorAction({
+    value: "u",
+    key: {},
+    panelTitle: "Context expanded",
+    undoActionsEnabled: true,
+  }), { type: "undo" });
+  assert.deepEqual(resolveWorkShellContextInspectorAction({
+    value: "u",
+    key: {},
+    panelTitle: "Context expanded",
+    undoActionsEnabled: false,
+  }), { type: "none" });
   assert.deepEqual(resolveWorkShellContextInspectorAction({
     value: " ",
     key: {},
@@ -186,6 +285,145 @@ test("optimizer actions require both callbacks and a visible selected suggestion
   }), true);
 });
 
+test("the selected source's advice stays actionable past the visible window", () => {
+  const suggestions = Array.from({ length: 6 }, (_, index) => ({
+    id: `suggestion-${index}`,
+    packetReceiptId: "receipt-1",
+    sourceId: `source-${index}`,
+    action: "keep",
+    reasonCode: "mandatory-guidance",
+    reasonText: "Keep mandatory guidance.",
+    status: "proposed",
+    createdAt: "2026-07-13T00:00:00.000Z",
+  }));
+  const visible = getVisibleContextPolicySuggestions(suggestions, "source-5");
+
+  assert.equal(visible.length, 4);
+  assert.deepEqual(
+    visible.map((suggestion) => suggestion.sourceId),
+    ["source-0", "source-1", "source-2", "source-5"],
+  );
+  assert.equal(
+    getSelectedVisibleContextPolicySuggestion({ suggestions, selectedSourceId: "source-5" })?.id,
+    "suggestion-5",
+  );
+  assert.equal(areContextAdviceActionsAvailable({
+    enabled: true,
+    selectedSuggestion: getSelectedVisibleContextPolicySuggestion({
+      suggestions,
+      selectedSourceId: "source-5",
+    }),
+    accept: async () => {},
+    reject: async () => {},
+  }), true);
+  // A resolved suggestion is not pulled forward; only proposed advice is actionable.
+  assert.equal(
+    getSelectedVisibleContextPolicySuggestion({
+      suggestions: suggestions.map((suggestion, index) =>
+        index === 5 ? { ...suggestion, status: "accepted" } : suggestion),
+      selectedSourceId: "source-5",
+    }),
+    undefined,
+  );
+});
+
+test("source controls follow the selected item's declared actions", () => {
+  const pinned = resolveContextInspectorSourceCapabilities({
+    id: "pinned-guidance",
+    category: "workspace",
+    label: "AGENTS.md",
+    reason: "workspace guidance",
+    salience: 1,
+    actions: ["unpin", "hold-back", "preview"],
+  });
+  const held = resolveContextInspectorSourceCapabilities({
+    id: "held-trail",
+    category: "loop-trail",
+    label: "session loop trail",
+    reason: "held locally",
+    includedInModel: false,
+    actions: ["include", "preview"],
+  });
+  const frozen = resolveContextInspectorSourceCapabilities({
+    id: "system-frame",
+    category: "system",
+    label: "provider system prompt",
+    reason: "provider requirement",
+    actions: ["preview"],
+  });
+
+  assert.deepEqual(pinned, { pin: false, unpin: true, delivery: "hold-back" });
+  assert.deepEqual(held, { pin: false, unpin: false, delivery: "include" });
+  assert.deepEqual(frozen, { pin: false, unpin: false, delivery: undefined });
+
+  assert.equal(
+    buildContextInspectorControls({
+      capabilities: pinned,
+      actionsEnabled: true,
+      expanded: false,
+      undoAvailable: true,
+    }),
+    "↑↓ move · Enter details · Space hold back · P unpin · U undo · Esc close",
+  );
+  assert.equal(
+    buildContextInspectorControls({
+      capabilities: held,
+      actionsEnabled: true,
+      expanded: false,
+      undoAvailable: false,
+    }),
+    "↑↓ move · Enter details · Space include · Esc close",
+  );
+  assert.equal(
+    buildContextInspectorControls({
+      capabilities: frozen,
+      actionsEnabled: true,
+      expanded: false,
+      undoAvailable: false,
+    }),
+    "↑↓ move · Enter details · Esc close",
+  );
+  assert.equal(
+    buildContextInspectorControls({
+      capabilities: frozen,
+      actionsEnabled: true,
+      expanded: true,
+      undoAvailable: false,
+    }),
+    "↑↓ scroll · Enter back · Esc close",
+  );
+});
+
+test("sources without a declared action list keep their state-derived controls", () => {
+  const unpinnedInPacket = resolveContextInspectorSourceCapabilities({
+    id: "bridge-1",
+    category: "bridge",
+    label: "recent Q&A",
+    reason: "session bridge",
+    salience: 0.7,
+    includedInModel: true,
+  });
+  const heldInPacket = resolveContextInspectorSourceCapabilities({
+    id: "loop-1",
+    category: "loop-trail",
+    label: "session loop trail",
+    reason: "raw trail stays local",
+    includedInModel: false,
+  });
+
+  assert.deepEqual(unpinnedInPacket, { pin: true, unpin: false, delivery: "hold-back" });
+  assert.deepEqual(heldInPacket, { pin: true, unpin: false, delivery: "include" });
+  assert.equal(
+    buildContextInspectorControls({
+      capabilities: resolveContextInspectorSourceCapabilities(undefined),
+      actionsEnabled: true,
+      expanded: false,
+      undoAvailable: false,
+    }),
+    "↑↓ move · Enter details · Esc close",
+  );
+});
+
 
 test("context inspector input controller dispatches only enabled human actions", async () => {
   const readOnlyCalls = [];
@@ -216,6 +454,8 @@ test("context inspector input controller dispatches only enabled human actions",
       onExpand: () => writableCalls.push("expand"),
       onAccept: () => writableCalls.push("accept"),
       onReject: () => writableCalls.push("reject"),
+      undoEnabled: true,
+      onUndo: () => writableCalls.push("undo"),
     }),
   );
   writable.stdin.write(" ");
@@ -228,9 +468,11 @@ test("context inspector input controller dispatches only enabled human actions",
   await waitForCondition(() => writableCalls.includes("accept"));
   writable.stdin.write("r");
   await waitForCondition(() => writableCalls.includes("reject"));
+  writable.stdin.write("u");
+  await waitForCondition(() => writableCalls.includes("undo"));
   writable.instance.unmount();
   writable.instance.cleanup();
-  assert.deepEqual(writableCalls, ["delivery", "pin", "expand", "accept", "reject"]);
+  assert.deepEqual(writableCalls, ["delivery", "pin", "expand", "accept", "reject", "undo"]);
 });
 test("context advice keys never steal whitespace or locally pending drafts", async () => {
   const calls = [];
@@ -308,7 +550,7 @@ test("composer only suppresses context mutation keys when actions are enabled", 
 
 test("composer suppresses optimizer keys only while advice actions are enabled", async () => {
   const changes = [];
-  const { stdin, instance } = renderWithInput(
+  const { stdin, instance, getOutput } = renderWithInput(
     React.createElement(Composer, {
       value: "",
       onChange: (value) => changes.push(value),
@@ -370,5 +612,41 @@ test("composer preserves optimizer letters after a whitespace-only draft", async
     instance.unmount();
     instance.cleanup();
   }
+});
+
+test("composer suppresses the undo key only while undo is available", async () => {
+  const activeChanges = [];
+  const active = renderWithInput(
+    React.createElement(Composer, {
+      value: "",
+      onChange: (value) => activeChanges.push(value),
+      onSubmit: async () => {},
+      suppressInspectorKeys: true,
+      suppressInspectorMutationKeys: true,
+      suppressInspectorUndoKey: true,
+    }),
+  );
+  active.stdin.write("u");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  active.instance.unmount();
+  active.instance.cleanup();
+  assert.deepEqual(activeChanges, []);
+
+  const inactiveChanges = [];
+  const inactive = renderWithInput(
+    React.createElement(Composer, {
+      value: "",
+      onChange: (value) => inactiveChanges.push(value),
+      onSubmit: async () => {},
+      suppressInspectorKeys: true,
+      suppressInspectorMutationKeys: false,
+      suppressInspectorUndoKey: false,
+    }),
+  );
+  inactive.stdin.write("u");
+  await waitForCondition(() => inactiveChanges.includes("u"));
+  inactive.instance.unmount();
+  inactive.instance.cleanup();
+  assert.deepEqual(inactiveChanges, ["u"]);
 });
 

@@ -343,6 +343,8 @@ test("work-shell command helpers classify builtins, local commands, and reusable
   assert.deepEqual(resolveWorkShellBuiltinCommand("/minimal"), { kind: "trace-mode", traceMode: "minimal" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/auth key"), { kind: "auth-key" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/queue"), { kind: "queue" });
+  assert.deepEqual(resolveWorkShellBuiltinCommand("/cache"), { kind: "cache" });
+  assert.deepEqual(resolveWorkShellBuiltinCommand("/agents"), { kind: "agents" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/queue clear"), { kind: "queue-clear" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/cancel"), { kind: "cancel" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/harness"), { kind: "harness" });
@@ -2414,6 +2416,19 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
     undefined,
     "reasoning.delta stays out of the conversation transcript",
   );
+  assert.equal(
+    resolveBusyStatusFromTraceEvent(
+      { type: "reasoning.delta" },
+      "✦ thinking· inspect repo before editing",
+    ),
+    "✦ thinking· inspect repo before editing",
+    "reasoning.delta surfaces on the active status row instead",
+  );
+  assert.equal(
+    resolveBusyStatusFromTraceEvent({ type: "reasoning.delta" }, ""),
+    null,
+    "an empty reasoning.delta leaves the active status row alone",
+  );
   assert.deepEqual(
     resolveVerboseTraceEntry({
       traceMode: "minimal",
@@ -2810,6 +2825,44 @@ test("WorkShellEngine applies GPT-5.6 model and reasoning updates together", asy
   assert.equal(engine.getState().panel.title, "Status");
   assert.ok(engine.getState().panel.lines.includes("model:gpt-5.6-luna"));
   assert.ok(engine.getState().panel.lines.includes("reasoning:none"));
+});
+
+test("WorkShellEngine opens cache telemetry and agent history locally", async () => {
+  const { engine, calls } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/cache");
+  assert.equal(engine.getState().panel.title, "Cache Telemetry");
+  await engine.handleSubmit("/agents");
+  assert.equal(engine.getState().panel.title, "Agent History");
+  assert.equal(calls.turns.length, 0);
+});
+
+test("WorkShellEngine projects provider cache usage into the session ledger", async () => {
+  const { engine, emitTrace } = createEngine();
+
+  await engine.initialize();
+  emitTrace({
+    type: "usage.recorded",
+    eventId: "usage-1",
+    inputTokens: 1_000,
+    outputTokens: 200,
+    cacheReadTokens: 750,
+    cacheWriteTokens: 50,
+    cacheSavingsUsd: 0.004,
+    costUsd: 0.01,
+    startedAt: 100,
+  });
+
+  assert.deepEqual(engine.getState().agentConsole.mainUsage, {
+    eventIds: ["usage-1"],
+    inputTokens: 1_000,
+    outputTokens: 200,
+    cacheReadTokens: 750,
+    cacheWriteTokens: 50,
+    cacheSavingsUsd: 0.004,
+    costUsd: 0.01,
+  });
 });
 
 test("WorkShellEngine preserves GPT-5.6 reasoning overrides across model switches", async () => {
@@ -3499,6 +3552,7 @@ test("WorkShellEngine applies accepted advice and never applies rejected advice"
           sourceLabel: "auth.ts",
           message: "Held back auth.ts",
           canUndo: true,
+          succeeded: true,
         };
       },
     },
@@ -3515,7 +3569,9 @@ test("WorkShellEngine applies accepted advice and never applies rejected advice"
   assert.deepEqual(mutations, [{ kind: "forget", id: "pinned-auth" }]);
   assert.equal(accepted.getState().contextPolicySuggestions[0]?.status, "accepted");
   assert.equal(accepted.getState().contextActionReceipt?.action, "hold-back");
+  // Both compare sides survive the desk-side refresh the hold-back triggered.
   assert.notEqual(accepted.getState().contextPreviewReceipt?.packetId, submittedPacketId);
+  assert.equal(accepted.getState().contextSubmittedReceipt?.packetId, submittedPacketId);
 
   const rejected = createHarness().engine;
   await rejected.initialize();
@@ -3525,7 +3581,8 @@ test("WorkShellEngine applies accepted advice and never applies rejected advice"
   assert.deepEqual(mutations, [{ kind: "forget", id: "pinned-auth" }]);
   assert.equal(rejected.getState().contextPolicySuggestions[0]?.status, "rejected");
 });
-test("WorkShellEngine closes packet-changing advice before awaiting refresh", async () => {
+
+test("WorkShellEngine applies one packet-changing advice at a time and closes the rest after it lands", async () => {
   const refreshGate = Promise.withResolvers();
   const resolutions = [];
   const mutations = [];
@@ -3583,17 +3640,34 @@ test("WorkShellEngine closes packet-changing advice before awaiting refresh", as
   const secondAcceptance = harness.engine.acceptContextSuggestion("suggestion-second");
   await Promise.resolve();
 
+  // Nothing is recorded as accepted until the hold-back actually lands, and a
+  // second accept cannot start against the packet the first is rewriting.
+  assert.deepEqual(resolutions, []);
+  assert.deepEqual(mutations, [{ kind: "forget", id: "pinned-auth" }]);
+  assert.equal(
+    harness.engine.getState().contextPolicySuggestions.find(
+      ({ id }) => id === "suggestion-second",
+    )?.status,
+    "proposed",
+  );
+
+  refreshGate.resolve();
+  await Promise.all([firstAcceptance, secondAcceptance]);
+
   assert.deepEqual(resolutions, [{ id: "suggestion-first", status: "accepted" }]);
   assert.deepEqual(mutations, [{ kind: "forget", id: "pinned-auth" }]);
+  assert.equal(
+    harness.engine.getState().contextPolicySuggestions.find(
+      ({ id }) => id === "suggestion-first",
+    )?.status,
+    "accepted",
+  );
   assert.equal(
     harness.engine.getState().contextPolicySuggestions.find(
       ({ id }) => id === "suggestion-second",
     )?.status,
     "stale",
   );
-
-  refreshGate.resolve();
-  await Promise.all([firstAcceptance, secondAcceptance]);
 });
 
 test("WorkShellEngine forces condensed-history refresh for accepted summarize advice", async () => {
@@ -3632,10 +3706,70 @@ test("WorkShellEngine forces condensed-history refresh for accepted summarize ad
   await engine.handleSubmit("summarize advice");
   await engine.acceptContextSuggestion("suggestion-summarize-history");
 
-  assert.match(effects[0] ?? "", /^resolve:accepted$/);
-  assert.equal(effects[1], "stale:preview-1");
-  assert.equal(effects[2], "summarize");
+  // The summarize effect lands before the acceptance is persisted, and the
+  // rest of that receipt's advice is retired afterwards.
+  assert.deepEqual(effects, ["summarize", "resolve:accepted", "stale:preview-1"]);
   assert.equal(engine.getState().contextPolicySuggestions[0]?.status, "accepted");
+});
+
+test("WorkShellEngine keeps advice proposed and retryable when its effect fails", async () => {
+  const effects = [];
+  let summarizeFailures = 1;
+  const suggestion = (status = "proposed") => ({
+    id: "suggestion-summarize-retry",
+    packetReceiptId: "preview-1",
+    sourceId: "pinned-auth",
+    action: "summarize",
+    reasonCode: "stale-condensed-history",
+    reasonText: "Condensed history is stale.",
+    status,
+    createdAt: "2026-07-14T00:00:01.000Z",
+    ...(status === "proposed" ? {} : { resolvedAt: "2026-07-14T00:00:02.000Z" }),
+  });
+  const { engine } = createLifecycleLedgerHarness({
+    engineOverrides: {
+      async generateContextSuggestions() {
+        return [suggestion()];
+      },
+      resolveContextSuggestion(_id, status) {
+        effects.push(`resolve:${status}`);
+        return suggestion(status);
+      },
+      async refreshCondensedHistory() {
+        if (summarizeFailures > 0) {
+          summarizeFailures -= 1;
+          effects.push("summarize:failed");
+          throw new Error("condensed history rebuild failed");
+        }
+        effects.push("summarize:ok");
+      },
+      invalidateContextSuggestions(receiptId) {
+        effects.push(`stale:${receiptId}`);
+        return 1;
+      },
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("summarize advice");
+
+  // A failed effect must not leave the advice looking applied.
+  await engine.acceptContextSuggestion("suggestion-summarize-retry");
+  assert.deepEqual(effects, ["summarize:failed"]);
+  assert.equal(engine.getState().contextPolicySuggestions[0]?.status, "proposed");
+  assert.equal(
+    engine.getState().contextAdviceUnavailable,
+    "Context optimizer unavailable; reply kept.",
+  );
+
+  // Still actionable: the same key applies it once the effect succeeds.
+  await engine.acceptContextSuggestion("suggestion-summarize-retry");
+  assert.deepEqual(
+    effects,
+    ["summarize:failed", "summarize:ok", "resolve:accepted", "stale:preview-1"],
+  );
+  assert.equal(engine.getState().contextPolicySuggestions[0]?.status, "accepted");
+  assert.equal(engine.getState().contextAdviceUnavailable, undefined);
 });
 
 
@@ -3799,9 +3933,30 @@ test("WorkShellEngine preserves the last submitted receipt across later previews
   const {
     engine,
     calls,
+    ledgerRevalidations,
     ledgerSubmissions,
     setPacket,
-  } = createLifecycleLedgerHarness();
+  } = createLifecycleLedgerHarness({
+    revalidate: ({ preview, packet: nextPacket }) => {
+      const before = new Set(
+        preview.sourceRefs
+          .filter((source) => source.includedInModel)
+          .map((source) => source.sourceId),
+      );
+      const after = new Set(nextPacket.included.map((source) => source.id));
+      const removedSourceIds = [...before].filter((sourceId) => !after.has(sourceId));
+      const addedSourceIds = [...after].filter((sourceId) => !before.has(sourceId));
+      return {
+        kind: removedSourceIds.length > 0 ? "meaning-change" : "unchanged",
+        removedSourceIds,
+        addedSourceIds,
+        protectedSourceIds: [],
+        reason: removedSourceIds.length > 0
+          ? "A source from the last request was removed."
+          : "Packet source selection is unchanged.",
+      };
+    },
+  });
 
   await engine.initialize();
   setPacket(createLifecyclePacket({ id: "packet-last-submitted-1" }));
@@ -3809,13 +3964,43 @@ test("WorkShellEngine preserves the last submitted receipt across later previews
   const submittedReceiptId = ledgerSubmissions[0]?.receiptId;
   assert.equal(typeof submittedReceiptId, "string");
 
-  setPacket(createLifecyclePacket({ id: "packet-last-submitted-preview" }));
+  setPacket(createLifecyclePacket({
+    id: "packet-last-submitted-preview",
+    included: [{
+      id: "replacement-source",
+      category: "workspace",
+      label: "replacement.ts",
+      reason: "replacement source",
+      preview: "export function replacement() {}",
+      tokenEstimate: 10,
+      salience: 1,
+      includedInModel: true,
+    }],
+  }));
   await engine.handleSubmit("/context");
+  // Compare needs both sides: the freshly previewed candidate and the packet
+  // the provider last saw.
   assert.equal(
     engine.getState().contextPreviewReceipt?.packetId,
     "packet-last-submitted-preview",
   );
-  assert.equal(engine.getState().contextSubmittedReceipt, undefined);
+  assert.equal(engine.getState().contextSubmittedReceipt?.id, submittedReceiptId);
+  assert.equal(
+    engine.getState().contextSubmittedReceipt?.packetId,
+    "packet-last-submitted-1",
+  );
+  assert.equal(
+    ledgerRevalidations.at(-1)?.previewId,
+    submittedReceiptId,
+    "the visible comparison must use the packet the provider last saw",
+  );
+  assert.deepEqual(engine.getState().contextPacketChange, {
+    kind: "meaning-change",
+    removedSourceIds: ["pinned-auth"],
+    addedSourceIds: ["replacement-source"],
+    protectedSourceIds: [],
+    reason: "A source from the last request was removed.",
+  });
 
   const snapshotCountBeforeModelChange = calls.snapshots.length;
   await engine.handleSubmit("/model gpt-4.1-mini");
@@ -4141,6 +4326,7 @@ test("WorkShellEngine context inspector actions mutate the selected CRP source",
         sourceLabel: "AGENTS.md",
         message: `${action.kind} AGENTS.md`,
         canUndo: true,
+        succeeded: true,
         before,
         after: {
           category: "workspace",
@@ -4148,6 +4334,30 @@ test("WorkShellEngine context inspector actions mutate the selected CRP source",
           includedInModel,
           salience,
           tokenEstimate: 12,
+        },
+      };
+    },
+    undoContextSourceAction() {
+      const before = {
+        category: "workspace",
+        label: "AGENTS.md",
+        includedInModel,
+        salience,
+        tokenEstimate: 12,
+      };
+      includedInModel = false;
+      return {
+        id: "receipt-undo",
+        action: "undo",
+        sourceId: "workspace-guidance",
+        sourceLabel: "AGENTS.md",
+        message: "undid include AGENTS.md",
+        canUndo: false,
+        succeeded: true,
+        before,
+        after: {
+          ...before,
+          includedInModel,
         },
       };
     },
@@ -4178,6 +4388,11 @@ test("WorkShellEngine context inspector actions mutate the selected CRP source",
   await engine.includeContextSourceAtCursor();
   assert.deepEqual(mutations.at(-1), { kind: "include", id: "workspace-guidance" });
   assert.equal(engine.getState().contextPacket?.included[0]?.includedInModel, true);
+
+  await engine.undoLastContextSourceAction();
+  assert.equal(engine.getState().contextPacket?.excluded[0]?.includedInModel, false);
+  assert.equal(engine.getState().contextActionReceipt?.action, "undo");
+  assert.equal(engine.getState().contextActionReceipt?.canUndo, false);
 });
 
 test("WorkShellEngine loads local source details on Enter and scrolls without moving the source cursor", async () => {
@@ -4377,6 +4592,7 @@ test("WorkShellEngine preserves selected source identity across include/hold ref
         sourceLabel: `${action.id}.md`,
         message: `${action.kind} ${action.id}.md`,
         canUndo: true,
+        succeeded: true,
       };
     },
   });
@@ -4410,6 +4626,144 @@ test("WorkShellEngine preserves selected source identity across include/hold ref
   // Include fixture pins salience to 1.0; the next Enter must still target alpha.
   await engine.toggleContextInspectorPin();
   assert.deepEqual(mutations.at(-1), { kind: "unpin", id: "alpha" });
+});
+
+test("WorkShellEngine numeric source cursor follows the desk stage-then-group order", async () => {
+  const mutations = [];
+  const packet = {
+    id: "packet-stage-order",
+    version: 1,
+    generatedAt: "2026-07-14T00:00:00.000Z",
+    title: "Next answer context",
+    included: [
+      {
+        id: "sent-workspace",
+        category: "workspace",
+        label: "AGENTS.md",
+        reason: "repo instructions loaded",
+        preview: "Keep diffs small.",
+        tokenEstimate: 10,
+        includedInModel: true,
+      },
+      {
+        id: "sent-runtime",
+        category: "runtime",
+        label: "Runtime probe",
+        reason: "live runtime state",
+        preview: "Runtime is idle.",
+        tokenEstimate: 6,
+        includedInModel: true,
+      },
+    ],
+    excluded: [{
+      id: "held-workspace",
+      category: "workspace",
+      label: "LEGACY.md",
+      reason: "over budget",
+      preview: "Legacy notes.",
+      tokenEstimate: 40,
+      includedInModel: false,
+    }],
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: 2, excluded: 1, warnings: 0 },
+    tokenEstimate: 16,
+  };
+  const { engine } = createEngine({
+    resolveContextPacket: async () => packet,
+    mutateContextSource(action) {
+      mutations.push(action);
+      return undefined;
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+
+  // The desk draws every "In next request" row above the "Held back" block, so
+  // row 1 is the other sent source — not the held source that shares row 0's
+  // category group.
+  engine.moveContextInspectorCursor(1);
+  await engine.forgetContextSourceAtCursor();
+  assert.deepEqual(mutations.at(-1), { kind: "forget", id: "sent-runtime" });
+
+  engine.moveContextInspectorCursor(1);
+  await engine.includeContextSourceAtCursor();
+  assert.deepEqual(mutations.at(-1), { kind: "include", id: "held-workspace" });
+});
+
+test("WorkShellEngine ignores source keys the selected row does not offer", async () => {
+  const mutations = [];
+  const packet = {
+    id: "packet-capability",
+    version: 1,
+    generatedAt: "2026-07-14T00:00:00.000Z",
+    title: "Next answer context",
+    included: [
+      {
+        id: "provider-system-prompt-configured",
+        category: "provider-system-prompt",
+        label: "Configured prompt",
+        reason: "prompt guidance active",
+        preview: "Prompt sections are active.",
+        tokenEstimate: 22,
+        includedInModel: true,
+        actions: ["preview"],
+      },
+      {
+        id: "workspace-notes",
+        category: "workspace",
+        label: "NOTES.md",
+        reason: "repo instructions loaded",
+        preview: "Keep diffs small.",
+        tokenEstimate: 12,
+        includedInModel: true,
+        actions: ["hold-back", "preview"],
+      },
+    ],
+    excluded: [{
+      id: "sealed-transcript",
+      category: "runtime",
+      label: "Sealed transcript",
+      reason: "held back by policy",
+      preview: "Transcript stays local.",
+      tokenEstimate: 30,
+      includedInModel: false,
+      actions: ["preview", "compare"],
+    }],
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: 2, excluded: 1, warnings: 0 },
+    tokenEstimate: 34,
+  };
+  const { engine } = createEngine({
+    resolveContextPacket: async () => packet,
+    mutateContextSource(action) {
+      mutations.push(action);
+      return undefined;
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+
+  // Row 0 only offers preview: pin and hold-back keys leave the packet alone.
+  await engine.toggleContextInspectorPin();
+  await engine.forgetContextSourceAtCursor();
+  assert.deepEqual(mutations, []);
+
+  // Row 1 offers hold-back but not pin.
+  engine.moveContextInspectorCursor(1);
+  await engine.forgetContextSourceAtCursor();
+  assert.deepEqual(mutations, [{ kind: "forget", id: "workspace-notes" }]);
+  await engine.toggleContextInspectorPin();
+  assert.deepEqual(mutations, [{ kind: "forget", id: "workspace-notes" }]);
+
+  // Row 2 is held back and never re-includable.
+  engine.moveContextInspectorCursor(1);
+  await engine.includeContextSourceAtCursor();
+  assert.deepEqual(mutations, [{ kind: "forget", id: "workspace-notes" }]);
+  assert.equal(engine.getState().contextPacket?.excluded[0]?.includedInModel, false);
 });
 
 test("WorkShellEngine reuses the previewed /context packet for the next chat turn", async () => {

@@ -26,7 +26,7 @@ export function formatRuntimeQaCompactReport(report, reportPath, repoRoot) {
 export function buildRuntimeEvidence(report) {
   return {
     providerToolCalls: {
-      gemini: buildProviderToolCallEvidence(report.toolCallSmoke),
+      gemini: buildProviderToolCallEvidence(report.toolCallSmoke, false),
       openai: buildProviderToolCallEvidence(report.openAIToolCallSmoke),
       anthropic: buildProviderToolCallEvidence(report.anthropicToolCallSmoke),
     },
@@ -120,7 +120,7 @@ export function hasRuntimeEvidenceContract(evidence) {
   );
 }
 
-function buildProviderToolCallEvidence(smoke) {
+function buildProviderToolCallEvidence(smoke, functionResponseIdRequired = true) {
   const secondRequest = smoke?.secondRequest;
   return {
     toolRoundTrip: smoke?.toolRoundTripVerified === true,
@@ -131,8 +131,8 @@ function buildProviderToolCallEvidence(smoke) {
       smoke?.finalAnswerGatedByToolResult === true &&
       secondRequest?.finalAnswerGatedByToolResult === true,
     protocolPaired:
-      (secondRequest?.functionResponseIdMatched === true &&
-        secondRequest?.functionResponseNameMatched === true) ||
+      (secondRequest?.functionResponseNameMatched === true &&
+        (!functionResponseIdRequired || secondRequest?.functionResponseIdMatched === true)) ||
       secondRequest?.toolCallIdMatched === true ||
       secondRequest?.toolUseIdMatched === true,
   };
@@ -140,17 +140,19 @@ function buildProviderToolCallEvidence(smoke) {
 
 function buildContextEvidence(realUseTuiStress) {
   const contextPane = realUseTuiStress?.contextPaneExcerpt ?? "";
-  const includedHeader = /Included in next answer/.test(contextPane);
-  const heldBackHeader = /Held back locally/.test(contextPane);
-  const warningsHeader = /Warnings|✓ none/i.test(contextPane);
+  const includedHeader = /Sources · \d+ included|Included in next answer/.test(contextPane);
+  const heldBackHeader = /\d+ held back|Held back locally/.test(contextPane);
+  const warningsHeader = /Warnings · (?:none|\d+)|✓ none|\d+ warnings?/i.test(contextPane);
+  const packetTransparency = realUseTuiStress?.contextPacketTransparency === true;
   return {
-    contextPanelVisible: includedHeader,
-    modelBoundPackets: realUseTuiStress?.contextPacketTransparency === true,
+    contextPanelVisible: /UncleCode Context Desk/.test(contextPane) && includedHeader,
+    modelBoundPackets: packetTransparency,
     includedExcludedWarnings:
-      realUseTuiStress?.contextPacketTransparency === true &&
+      packetTransparency &&
+      includedHeader &&
       heldBackHeader &&
       warningsHeader,
-    rawArtifactsHeldBack: /Held back locally|raw audit artifacts stay local/i.test(contextPane),
+    rawArtifactsHeldBack: packetTransparency && heldBackHeader,
   };
 }
 

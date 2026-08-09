@@ -223,14 +223,33 @@ pub fn parse_anthropic_response_json_for_model(
         .get("output_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let cache_read_tokens = usage
+        .get("cache_read_input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_write_tokens = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let billable_input_tokens = prompt_tokens
+        .saturating_add(cache_read_tokens)
+        .saturating_add(cache_write_tokens);
 
     serde_json::to_string(&json!({
         "content": content,
         "actions": actions,
         "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
+        "cacheReadTokens": cache_read_tokens,
+        "cacheWriteTokens": cache_write_tokens,
         "costUsd": model
-            .map(|model| estimate_cost_usd(model, prompt_tokens as f64, completion_tokens as f64))
+            .map(|model| {
+                estimate_cost_usd(
+                    model,
+                    billable_input_tokens as f64,
+                    completion_tokens as f64,
+                )
+            })
             .unwrap_or(0.0),
         "assistantMessage": {
             "role": "assistant",
@@ -246,19 +265,71 @@ pub fn build_anthropic_messages_request_json(
     messages_json: &str,
     tools_json: &str,
 ) -> Result<String, String> {
-    let messages: Value = serde_json::from_str(messages_json)
+    let mut messages: Value = serde_json::from_str(messages_json)
         .map_err(|error| format!("Invalid Anthropic messages JSON: {error}"))?;
     let tools: Value = serde_json::from_str(tools_json)
         .map_err(|error| format!("Invalid Anthropic tools JSON: {error}"))?;
 
-    serde_json::to_string(&json!({
+    let mut breakpoints = 0;
+    if let Some(messages) = messages.as_array_mut() {
+        for message in messages.iter_mut().rev() {
+            if apply_anthropic_message_cache_control(message) {
+                breakpoints += 1;
+                if breakpoints == 2 {
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut request = json!({
         "model": model,
         "max_tokens": 2048,
-        "system": system,
         "messages": messages,
         "tools": tools
-    }))
-    .map_err(|error| error.to_string())
+    });
+    if !system.trim().is_empty() {
+        request["system"] = json!([{
+            "type": "text",
+            "text": system,
+            "cache_control": { "type": "ephemeral" }
+        }]);
+    }
+
+    serde_json::to_string(&request).map_err(|error| error.to_string())
+}
+
+fn apply_anthropic_message_cache_control(message: &mut Value) -> bool {
+    let Some(content) = message.get_mut("content") else {
+        return false;
+    };
+    if let Some(text) = content.as_str().map(str::to_string) {
+        if text.is_empty() {
+            return false;
+        }
+        *content = json!([{
+            "type": "text",
+            "text": text,
+            "cache_control": { "type": "ephemeral" }
+        }]);
+        return true;
+    }
+    let Some(blocks) = content.as_array_mut() else {
+        return false;
+    };
+    let Some(block) = blocks.iter_mut().rev().find(|block| {
+        !matches!(
+            block.get("type").and_then(Value::as_str),
+            Some("thinking" | "redacted_thinking")
+        )
+    }) else {
+        return false;
+    };
+    let Some(block) = block.as_object_mut() else {
+        return false;
+    };
+    block.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
+    true
 }
 
 #[cfg(test)]
@@ -365,7 +436,7 @@ mod tests {
                     {"type":"text","text":"running"},
                     {"type":"tool_use","id":"tu_1","name":"run_shell","input":{"command":"echo hi"}}
                 ],
-                "usage":{"input_tokens":2,"output_tokens":3}
+                "usage":{"input_tokens":2,"output_tokens":3,"cache_read_input_tokens":5,"cache_creation_input_tokens":7}
             }"#,
             Some("claude-sonnet-4-6"),
         )
@@ -378,7 +449,9 @@ mod tests {
         assert_eq!(parsed["assistantMessage"]["role"], "assistant");
         assert_eq!(parsed["promptTokens"], 2);
         assert_eq!(parsed["completionTokens"], 3);
-        assert!(parsed["costUsd"].as_f64().unwrap_or(0.0) > 0.0);
+        assert_eq!(parsed["cacheReadTokens"], 5);
+        assert_eq!(parsed["cacheWriteTokens"], 7);
+        assert!((parsed["costUsd"].as_f64().unwrap_or(0.0) - 0.000_087).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -386,14 +459,36 @@ mod tests {
         let output = build_anthropic_messages_request_json(
             "claude-sonnet-4-6",
             "system",
-            r#"[{"role":"user","content":"hi"}]"#,
+            r#"[{"role":"user","content":"first"},{"role":"assistant","content":[{"type":"text","text":"answer"}]},{"role":"user","content":"latest"}]"#,
             r#"[{"name":"run_shell"}]"#,
         )
         .unwrap();
 
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["system"][0]["text"], "system");
+        assert_eq!(parsed["system"][0]["cache_control"]["type"], "ephemeral");
+        assert!(parsed["messages"][0]["content"].is_string());
         assert_eq!(
-            output,
-            r#"{"max_tokens":2048,"messages":[{"content":"hi","role":"user"}],"model":"claude-sonnet-4-6","system":"system","tools":[{"name":"run_shell"}]}"#
+            parsed["messages"][1]["content"][0]["cache_control"]["type"],
+            "ephemeral"
         );
+        assert_eq!(
+            parsed["messages"][2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn omits_empty_anthropic_system_blocks() {
+        let output = build_anthropic_messages_request_json(
+            "claude-sonnet-4-6",
+            "",
+            r#"[{"role":"user","content":"hello"}]"#,
+            "[]",
+        )
+        .unwrap();
+
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert!(parsed.get("system").is_none());
     }
 }
