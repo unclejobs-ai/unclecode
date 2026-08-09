@@ -156,6 +156,8 @@ export type ToolActivity = {
   readonly preview?: string;
   readonly startedAt: number;
   readonly completedAt?: number;
+  /** Set when the tool ran inside a subagent so the inspector can scope rows. */
+  readonly agentRunId?: string;
 };
 
 /** Clamp a preview to the snapshot budget, marking it when truncated. */
@@ -167,12 +169,141 @@ export function boundToolActivityPreview(preview: string): string {
   return `${normalized.slice(0, MAX_TOOL_ACTIVITY_PREVIEW_CHARS)}\n… preview truncated`;
 }
 
+/**
+ * Largest lifecycle summary a snapshot will carry. Agent and job summaries are
+ * operator-facing prose, so they are clamped instead of persisting whatever a
+ * worker happened to return.
+ */
+export const MAX_LIFECYCLE_SUMMARY_CHARS = 400;
+
+/** Clamp a lifecycle summary to the snapshot budget, marking it when truncated. */
+export function boundLifecycleSummary(summary: string): string {
+  const normalized = summary.replace(/\s+$/, "");
+  if (normalized.length <= MAX_LIFECYCLE_SUMMARY_CHARS) {
+    return normalized;
+  }
+  return `${normalized.slice(0, MAX_LIFECYCLE_SUMMARY_CHARS)} … summary truncated`;
+}
+
+export const AGENT_RUN_STATUSES = [
+  "queued",
+  "running",
+  "waiting",
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+] as const;
+export type AgentRunStatus = (typeof AGENT_RUN_STATUSES)[number];
+
+export type TerminalAgentRunStatus = Extract<
+  AgentRunStatus,
+  "completed" | "failed" | "cancelled" | "interrupted"
+>;
+
+export const ASYNC_JOB_STATUSES = [
+  "queued",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+] as const;
+export type AsyncJobStatus = (typeof ASYNC_JOB_STATUSES)[number];
+
+export type TerminalAsyncJobStatus = Extract<
+  AsyncJobStatus,
+  "completed" | "failed" | "cancelled" | "interrupted"
+>;
+
+/**
+ * Deduplicated usage ledger. `eventIds` is the identity set that makes usage
+ * replay idempotent — a provider turn contributes to either `mainUsage` or one
+ * `AgentRun.usage`, never both.
+ */
+export type AgentRunUsage = {
+  readonly eventIds: readonly string[];
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly cacheReadTokens?: number;
+  readonly costUsd?: number;
+};
+
+/**
+ * Safe projection of one agent run. Deliberately excludes the worker system
+ * prompt, raw assignment text, and provider frames; `transcriptRef` points at
+ * the filtered transcript instead of inlining it.
+ */
+export type AgentRun = {
+  readonly id: string;
+  readonly displayName: string;
+  readonly agentType: string;
+  readonly status: AgentRunStatus;
+  readonly currentActivity?: string;
+  readonly parentRunId?: string;
+  readonly continuationOf?: string;
+  readonly transcriptRef?: string;
+  readonly startedAt: number;
+  readonly completedAt?: number;
+  readonly summary?: string;
+  readonly errorSummary?: string;
+  readonly usage?: AgentRunUsage;
+};
+
+/** Background unit of work; at most one owning agent run. */
+export type AsyncJob = {
+  readonly id: string;
+  readonly type: string;
+  readonly label: string;
+  readonly status: AsyncJobStatus;
+  readonly agentRunId?: string;
+  readonly queuedAt: number;
+  readonly startedAt?: number;
+  readonly completedAt?: number;
+  readonly summary?: string;
+  readonly errorSummary?: string;
+};
+
+export const AGENT_CONTROL_RECEIPT_STATUSES = [
+  "accepted",
+  "not_delivered",
+  "rejected",
+] as const;
+export type AgentControlReceiptStatus = (typeof AGENT_CONTROL_RECEIPT_STATUSES)[number];
+
+export type AgentControlReceipt = {
+  readonly status: AgentControlReceiptStatus;
+  readonly message: string;
+};
+
+/**
+ * Operator control surface for a running agent.
+ *
+ * - `steer` appends to a per-agent FIFO mailbox delivered at the next safe
+ *   boundary; it never mutates an in-flight tool call, and a steer that
+ *   arrives after settlement resolves `not_delivered` rather than vanishing.
+ * - `cancel` aborts the agent runtime and its owned active job.
+ * - `continue` starts a new run carrying prior lineage; it does not resurrect
+ *   a disposed provider session.
+ */
+export type AgentControlPort = {
+  steer(agentRunId: string, message: string): Promise<AgentControlReceipt>;
+  cancel(agentRunId: string): Promise<AgentControlReceipt>;
+  continue(agentRunId: string, message?: string): Promise<AgentControlReceipt>;
+};
+
+export const AGENT_CONSOLE_TABS = ["agents", "jobs", "plan"] as const;
+export type AgentConsoleTab = (typeof AGENT_CONSOLE_TABS)[number];
+
 export type AgentConsoleSnapshot = {
   readonly profileId: ContextProfileId;
   readonly manifest?: PersistedPromptManifest;
   readonly pendingDecision?: AskUserQuestionRequest;
   readonly workGraph?: WorkGraph;
   readonly activity: readonly ToolActivity[];
+  readonly agents: readonly AgentRun[];
+  readonly jobs: readonly AsyncJob[];
+  readonly mainUsage?: AgentRunUsage;
 };
 
 export type AgentConsoleJournalEvent =
@@ -222,7 +353,92 @@ export function createAgentConsoleSnapshot(input: AgentConsoleSnapshot): AgentCo
         : { preview: boundToolActivityPreview(activity.preview) }),
       startedAt: activity.startedAt,
       ...(activity.completedAt === undefined ? {} : { completedAt: activity.completedAt }),
+      ...(activity.agentRunId === undefined ? {} : { agentRunId: activity.agentRunId }),
     })),
+    // A snapshot written before the lifecycle projection existed carries
+    // neither array; treat that as empty rather than throwing on resume.
+    agents: (input.agents ?? []).slice(-MAX_PERSISTED_AGENT_RUNS).map(copyAgentRun),
+    jobs: (input.jobs ?? []).slice(-MAX_PERSISTED_ASYNC_JOBS).map(copyAsyncJob),
+    ...(input.mainUsage ? { mainUsage: copyAgentRunUsage(input.mainUsage) } : {}),
+  };
+}
+
+/**
+ * Resume normalization: a run or job that was active when the process died
+ * cannot be reattached, so it settles as `interrupted` instead of rendering a
+ * phantom running count. Settled records are left exactly as persisted, and
+ * the caller's snapshot is never mutated.
+ */
+export function markUnrecoverableAgentConsoleWorkInterrupted(
+  snapshot: AgentConsoleSnapshot,
+  now = Date.now(),
+): AgentConsoleSnapshot {
+  let changed = false;
+  const agents = (snapshot.agents ?? []).map((agent) => {
+    if (agent.status !== "queued" && agent.status !== "running" && agent.status !== "waiting") {
+      return agent;
+    }
+    changed = true;
+    return { ...agent, status: "interrupted" as const, completedAt: now };
+  });
+  const jobs = (snapshot.jobs ?? []).map((job) => {
+    if (job.status !== "queued" && job.status !== "running") {
+      return job;
+    }
+    changed = true;
+    return { ...job, status: "interrupted" as const, completedAt: now };
+  });
+
+  if (!changed) {
+    return snapshot;
+  }
+  return createAgentConsoleSnapshot({ ...snapshot, agents, jobs });
+}
+
+function copyAgentRun(run: AgentRun): AgentRun {
+  return {
+    id: run.id,
+    displayName: run.displayName,
+    agentType: run.agentType,
+    status: run.status,
+    ...(run.currentActivity === undefined ? {} : { currentActivity: run.currentActivity }),
+    ...(run.parentRunId === undefined ? {} : { parentRunId: run.parentRunId }),
+    ...(run.continuationOf === undefined ? {} : { continuationOf: run.continuationOf }),
+    ...(run.transcriptRef === undefined ? {} : { transcriptRef: run.transcriptRef }),
+    startedAt: run.startedAt,
+    ...(run.completedAt === undefined ? {} : { completedAt: run.completedAt }),
+    ...(run.summary === undefined ? {} : { summary: boundLifecycleSummary(run.summary) }),
+    ...(run.errorSummary === undefined
+      ? {}
+      : { errorSummary: boundLifecycleSummary(run.errorSummary) }),
+    ...(run.usage === undefined ? {} : { usage: copyAgentRunUsage(run.usage) }),
+  };
+}
+
+function copyAsyncJob(job: AsyncJob): AsyncJob {
+  return {
+    id: job.id,
+    type: job.type,
+    label: job.label,
+    status: job.status,
+    ...(job.agentRunId === undefined ? {} : { agentRunId: job.agentRunId }),
+    queuedAt: job.queuedAt,
+    ...(job.startedAt === undefined ? {} : { startedAt: job.startedAt }),
+    ...(job.completedAt === undefined ? {} : { completedAt: job.completedAt }),
+    ...(job.summary === undefined ? {} : { summary: boundLifecycleSummary(job.summary) }),
+    ...(job.errorSummary === undefined
+      ? {}
+      : { errorSummary: boundLifecycleSummary(job.errorSummary) }),
+  };
+}
+
+function copyAgentRunUsage(usage: AgentRunUsage): AgentRunUsage {
+  return {
+    eventIds: usage.eventIds.slice(-MAX_PERSISTED_USAGE_EVENT_IDS),
+    ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+    ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+    ...(usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
+    ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
   };
 }
 
@@ -230,6 +446,11 @@ const MAX_PERSISTED_TOOL_ACTIVITY = 80;
 const WORK_NODE_STATUS_SET = new Set<string>(WORK_NODE_STATUSES);
 const TOOL_ACTIVITY_KIND_SET = new Set<string>(TOOL_ACTIVITY_KINDS);
 const TOOL_ACTIVITY_STATUS_SET = new Set<string>(TOOL_ACTIVITY_STATUSES);
+const MAX_PERSISTED_AGENT_RUNS = 128;
+const MAX_PERSISTED_ASYNC_JOBS = 128;
+const MAX_PERSISTED_USAGE_EVENT_IDS = 256;
+const AGENT_RUN_STATUS_SET = new Set<string>(AGENT_RUN_STATUSES);
+const ASYNC_JOB_STATUS_SET = new Set<string>(ASYNC_JOB_STATUSES);
 
 /**
  * Validates the durable console projection at the resume boundary. The parser
@@ -247,14 +468,23 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     ? parseAskUserQuestionRequest(record.pendingDecision)
     : undefined;
   const workGraph = hasOwn(record, "workGraph") ? parseWorkGraph(record.workGraph) : undefined;
+  const mainUsage = hasOwn(record, "mainUsage") ? parseAgentRunUsage(record.mainUsage) : undefined;
   const activityValue = record.activity;
 
   if (
     (hasOwn(record, "manifest") && !manifest)
     || (hasOwn(record, "pendingDecision") && !pendingDecision)
     || (hasOwn(record, "workGraph") && !workGraph)
+    || (hasOwn(record, "mainUsage") && !mainUsage)
     || !Array.isArray(activityValue)
   ) {
+    return undefined;
+  }
+
+  // Absent lifecycle fields are a legacy snapshot, not a malformed one.
+  const agents = parseBoundedList(record, "agents", parseAgentRun, MAX_PERSISTED_AGENT_RUNS);
+  const jobs = parseBoundedList(record, "jobs", parseAsyncJob, MAX_PERSISTED_ASYNC_JOBS);
+  if (!agents || !jobs) {
     return undefined;
   }
 
@@ -272,6 +502,9 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     ...(pendingDecision ? { pendingDecision } : {}),
     ...(workGraph ? { workGraph } : {}),
     activity,
+    agents,
+    jobs,
+    ...(mainUsage ? { mainUsage } : {}),
   });
 }
 
@@ -295,6 +528,38 @@ function isNonEmptyString(value: unknown): value is string {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isNonNegativeFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/**
+ * Rebuilds a bounded lifecycle list. A missing key is a legacy snapshot and
+ * yields `[]`; a present-but-malformed entry rejects the whole snapshot.
+ */
+function parseBoundedList<T>(
+  record: Record<string, unknown>,
+  key: string,
+  parseEntry: (value: unknown) => T | undefined,
+  limit: number,
+): readonly T[] | undefined {
+  if (!hasOwn(record, key)) {
+    return [];
+  }
+  const value = record[key];
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const parsed: T[] = [];
+  for (const entry of value.slice(-limit)) {
+    const item = parseEntry(entry);
+    if (item === undefined) {
+      return undefined;
+    }
+    parsed.push(item);
+  }
+  return parsed;
 }
 
 function parseStringList(value: unknown): readonly string[] | undefined {
@@ -514,6 +779,7 @@ function parseToolActivity(value: unknown): ToolActivity | undefined {
     || (hasOwn(record, "summary") && !isNonEmptyString(record.summary))
     || (hasOwn(record, "preview") && !isNonEmptyString(record.preview))
     || (hasOwn(record, "completedAt") && !isNonNegativeInteger(record.completedAt))
+    || (hasOwn(record, "agentRunId") && !isNonEmptyString(record.agentRunId))
   ) {
     return undefined;
   }
@@ -534,5 +800,104 @@ function parseToolActivity(value: unknown): ToolActivity | undefined {
       : {}),
     startedAt: record.startedAt,
     ...(typeof record.completedAt === "number" ? { completedAt: record.completedAt } : {}),
+    ...(typeof record.agentRunId === "string" ? { agentRunId: record.agentRunId } : {}),
   };
+}
+
+function parseAgentRun(value: unknown): AgentRun | undefined {
+  const record = asRecord(value);
+  const usage = record && hasOwn(record, "usage") ? parseAgentRunUsage(record.usage) : undefined;
+  if (
+    !record
+    || !isNonEmptyString(record.id)
+    || !isNonEmptyString(record.displayName)
+    || !isNonEmptyString(record.agentType)
+    || typeof record.status !== "string"
+    || !AGENT_RUN_STATUS_SET.has(record.status)
+    || !isNonNegativeInteger(record.startedAt)
+    || (hasOwn(record, "currentActivity") && !isNonEmptyString(record.currentActivity))
+    || (hasOwn(record, "parentRunId") && !isNonEmptyString(record.parentRunId))
+    || (hasOwn(record, "continuationOf") && !isNonEmptyString(record.continuationOf))
+    || (hasOwn(record, "transcriptRef") && !isNonEmptyString(record.transcriptRef))
+    || (hasOwn(record, "completedAt") && !isNonNegativeInteger(record.completedAt))
+    || (hasOwn(record, "summary") && !isNonEmptyString(record.summary))
+    || (hasOwn(record, "errorSummary") && !isNonEmptyString(record.errorSummary))
+    || (hasOwn(record, "usage") && !usage)
+  ) {
+    return undefined;
+  }
+
+  return copyAgentRun({
+    id: record.id,
+    displayName: record.displayName,
+    agentType: record.agentType,
+    status: record.status as AgentRunStatus,
+    ...(typeof record.currentActivity === "string" ? { currentActivity: record.currentActivity } : {}),
+    ...(typeof record.parentRunId === "string" ? { parentRunId: record.parentRunId } : {}),
+    ...(typeof record.continuationOf === "string" ? { continuationOf: record.continuationOf } : {}),
+    ...(typeof record.transcriptRef === "string" ? { transcriptRef: record.transcriptRef } : {}),
+    startedAt: record.startedAt,
+    ...(typeof record.completedAt === "number" ? { completedAt: record.completedAt } : {}),
+    ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
+    ...(typeof record.errorSummary === "string" ? { errorSummary: record.errorSummary } : {}),
+    ...(usage ? { usage } : {}),
+  });
+}
+
+function parseAsyncJob(value: unknown): AsyncJob | undefined {
+  const record = asRecord(value);
+  if (
+    !record
+    || !isNonEmptyString(record.id)
+    || !isNonEmptyString(record.type)
+    || !isNonEmptyString(record.label)
+    || typeof record.status !== "string"
+    || !ASYNC_JOB_STATUS_SET.has(record.status)
+    || !isNonNegativeInteger(record.queuedAt)
+    || (hasOwn(record, "agentRunId") && !isNonEmptyString(record.agentRunId))
+    || (hasOwn(record, "startedAt") && !isNonNegativeInteger(record.startedAt))
+    || (hasOwn(record, "completedAt") && !isNonNegativeInteger(record.completedAt))
+    || (hasOwn(record, "summary") && !isNonEmptyString(record.summary))
+    || (hasOwn(record, "errorSummary") && !isNonEmptyString(record.errorSummary))
+  ) {
+    return undefined;
+  }
+
+  return copyAsyncJob({
+    id: record.id,
+    type: record.type,
+    label: record.label,
+    status: record.status as AsyncJobStatus,
+    ...(typeof record.agentRunId === "string" ? { agentRunId: record.agentRunId } : {}),
+    queuedAt: record.queuedAt,
+    ...(typeof record.startedAt === "number" ? { startedAt: record.startedAt } : {}),
+    ...(typeof record.completedAt === "number" ? { completedAt: record.completedAt } : {}),
+    ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
+    ...(typeof record.errorSummary === "string" ? { errorSummary: record.errorSummary } : {}),
+  });
+}
+
+function parseAgentRunUsage(value: unknown): AgentRunUsage | undefined {
+  const record = asRecord(value);
+  const eventIds = parseStringList(record?.eventIds);
+  if (
+    !record
+    || !eventIds
+    || (hasOwn(record, "inputTokens") && !isNonNegativeInteger(record.inputTokens))
+    || (hasOwn(record, "outputTokens") && !isNonNegativeInteger(record.outputTokens))
+    || (hasOwn(record, "cacheReadTokens") && !isNonNegativeInteger(record.cacheReadTokens))
+    || (hasOwn(record, "costUsd") && !isNonNegativeFinite(record.costUsd))
+  ) {
+    return undefined;
+  }
+
+  return copyAgentRunUsage({
+    eventIds,
+    ...(typeof record.inputTokens === "number" ? { inputTokens: record.inputTokens } : {}),
+    ...(typeof record.outputTokens === "number" ? { outputTokens: record.outputTokens } : {}),
+    ...(typeof record.cacheReadTokens === "number"
+      ? { cacheReadTokens: record.cacheReadTokens }
+      : {}),
+    ...(typeof record.costUsd === "number" ? { costUsd: record.costUsd } : {}),
+  });
 }

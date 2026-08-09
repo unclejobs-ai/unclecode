@@ -1,12 +1,26 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
+  AGENT_CONSOLE_TABS,
+  AGENT_CONTROL_RECEIPT_STATUSES,
+  AGENT_RUN_STATUSES,
+  ASYNC_JOB_STATUSES,
+  MAX_LIFECYCLE_SUMMARY_CHARS,
+  boundLifecycleSummary,
   createAgentConsoleSnapshot,
   isAskUserQuestionAnswered,
   isCoalescibleToolActivity,
   isWorkGraphDispatchable,
+  markUnrecoverableAgentConsoleWorkInterrupted,
+  parseAgentConsoleSnapshot,
 } from "@unclecode/contracts";
+
+const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+const workspaceRoot = path.resolve(testDirectory, "../..");
 
 function activity(kind, status = "completed") {
   return {
@@ -152,6 +166,8 @@ test("agent-console resume parser keeps declared evidence and rejects raw tool o
         summary: "exit 0",
       },
     ],
+    agents: [],
+    jobs: [],
   });
   assert.equal(
     parseAgentConsoleSnapshot({
@@ -192,4 +208,430 @@ test("agent-console resume parser accepts goal metadata before a prompt manifest
     "Auth tests pass",
   ]);
   assert.equal(parsed?.workGraph?.nodes[0]?.manifestId, undefined);
+});
+
+test("agent-console resume parser restores lifecycle records without raw prompts", () => {
+  const parsed = parseAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [
+      {
+        id: "tool:1",
+        toolCallId: "call-1",
+        toolName: "read_file",
+        kind: "read",
+        intent: "Reading source",
+        status: "running",
+        startedAt: 10,
+        agentRunId: "run-1",
+      },
+    ],
+    agents: [
+      {
+        id: "run-1",
+        displayName: "ExecutionMap",
+        agentType: "executor",
+        status: "running",
+        startedAt: 10,
+        rawPrompt: "must disappear",
+      },
+    ],
+    jobs: [
+      {
+        id: "job-1",
+        type: "work-node",
+        label: "Map execution",
+        status: "running",
+        agentRunId: "run-1",
+        queuedAt: 9,
+        startedAt: 10,
+      },
+    ],
+    mainUsage: { eventIds: ["usage-main-1"], costUsd: 0.25 },
+  });
+
+  assert.equal(parsed?.agents[0]?.id, "run-1");
+  assert.equal(parsed?.agents[0]?.displayName, "ExecutionMap");
+  assert.equal(parsed?.agents[0]?.agentType, "executor");
+  assert.equal(parsed?.agents[0]?.status, "running");
+  assert.equal(parsed?.agents[0]?.startedAt, 10);
+  assert.equal("rawPrompt" in (parsed?.agents[0] ?? {}), false);
+  assert.doesNotMatch(JSON.stringify(parsed), /must disappear/);
+
+  assert.equal(parsed?.jobs[0]?.id, "job-1");
+  assert.equal(parsed?.jobs[0]?.type, "work-node");
+  assert.equal(parsed?.jobs[0]?.label, "Map execution");
+  assert.equal(parsed?.jobs[0]?.status, "running");
+  assert.equal(parsed?.jobs[0]?.agentRunId, "run-1");
+  assert.equal(parsed?.jobs[0]?.queuedAt, 9);
+  assert.equal(parsed?.jobs[0]?.startedAt, 10);
+
+  assert.equal(parsed?.activity[0]?.agentRunId, "run-1");
+  assert.deepEqual(parsed?.mainUsage, {
+    eventIds: ["usage-main-1"],
+    costUsd: 0.25,
+  });
+});
+
+test("agent-console resume parser defaults legacy snapshots to empty lifecycle arrays", () => {
+  const parsed = parseAgentConsoleSnapshot({
+    profileId: "explore",
+    activity: [activity("read")],
+  });
+
+  assert.deepEqual(parsed?.agents, []);
+  assert.deepEqual(parsed?.jobs, []);
+  assert.equal(parsed?.mainUsage, undefined);
+  assert.equal(parsed?.activity[0]?.agentRunId, undefined);
+});
+
+test("agent-console resume parser rejects malformed lifecycle records", () => {
+  const base = {
+    profileId: "build",
+    activity: [],
+    agents: [
+      {
+        id: "run-1",
+        displayName: "ExecutionMap",
+        agentType: "executor",
+        status: "running",
+        startedAt: 10,
+      },
+    ],
+    jobs: [],
+  };
+
+  assert.notEqual(parseAgentConsoleSnapshot(base), undefined);
+  assert.equal(
+    parseAgentConsoleSnapshot({
+      ...base,
+      agents: [{ ...base.agents[0], status: "thinking" }],
+    }),
+    undefined,
+  );
+  assert.equal(
+    parseAgentConsoleSnapshot({
+      ...base,
+      agents: [{ ...base.agents[0], startedAt: -1 }],
+    }),
+    undefined,
+  );
+  assert.equal(
+    parseAgentConsoleSnapshot({
+      ...base,
+      agents: [{ ...base.agents[0], completedAt: 1.5 }],
+    }),
+    undefined,
+  );
+  assert.equal(
+    parseAgentConsoleSnapshot({
+      ...base,
+      jobs: [
+        {
+          id: "job-1",
+          type: "work-node",
+          label: "Map execution",
+          status: "pending",
+          queuedAt: 9,
+        },
+      ],
+    }),
+    undefined,
+  );
+  assert.equal(
+    parseAgentConsoleSnapshot({ ...base, agents: "not-an-array" }),
+    undefined,
+  );
+  assert.equal(
+    parseAgentConsoleSnapshot({ ...base, mainUsage: { eventIds: [""] } }),
+    undefined,
+  );
+});
+
+test("agent-console snapshot factory copies and bounds lifecycle projections", () => {
+  const agents = Array.from({ length: 200 }, (_, index) => ({
+    id: `run-${index}`,
+    displayName: `Agent ${index}`,
+    agentType: "executor",
+    status: "completed",
+    startedAt: index,
+    completedAt: index + 1,
+  }));
+  const jobs = Array.from({ length: 200 }, (_, index) => ({
+    id: `job-${index}`,
+    type: "work-node",
+    label: `Job ${index}`,
+    status: "completed",
+    queuedAt: index,
+  }));
+  const eventIds = Array.from({ length: 300 }, (_, index) => `usage-${index}`);
+
+  const snapshot = createAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents,
+    jobs,
+    mainUsage: { eventIds, inputTokens: 12, costUsd: 0.5 },
+  });
+
+  assert.equal(snapshot.agents.length, 128);
+  assert.equal(snapshot.agents[0]?.id, "run-72");
+  assert.equal(snapshot.jobs.length, 128);
+  assert.equal(snapshot.jobs[0]?.id, "job-72");
+  assert.equal(snapshot.mainUsage?.eventIds.length, 256);
+  assert.equal(snapshot.mainUsage?.eventIds[0], "usage-44");
+
+  agents.push({
+    id: "run-late",
+    displayName: "Late",
+    agentType: "executor",
+    status: "running",
+    startedAt: 999,
+  });
+  eventIds.push("usage-late");
+  assert.equal(snapshot.agents.length, 128);
+  assert.equal(snapshot.agents.at(-1)?.id, "run-199");
+  assert.equal(snapshot.mainUsage?.eventIds.at(-1), "usage-299");
+});
+
+test("agent-console snapshot factory drops undeclared lifecycle fields", () => {
+  const snapshot = createAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents: [
+      {
+        id: "run-1",
+        displayName: "ExecutionMap",
+        agentType: "executor",
+        status: "running",
+        startedAt: 10,
+        rawPrompt: "must disappear",
+        apiKey: "sk-secret",
+      },
+    ],
+    jobs: [
+      {
+        id: "job-1",
+        type: "work-node",
+        label: "Map execution",
+        status: "queued",
+        queuedAt: 9,
+        providerPayload: { messages: ["must disappear"] },
+      },
+    ],
+  });
+
+  assert.deepEqual(snapshot.agents, [
+    {
+      id: "run-1",
+      displayName: "ExecutionMap",
+      agentType: "executor",
+      status: "running",
+      startedAt: 10,
+    },
+  ]);
+  assert.deepEqual(snapshot.jobs, [
+    {
+      id: "job-1",
+      type: "work-node",
+      label: "Map execution",
+      status: "queued",
+      queuedAt: 9,
+    },
+  ]);
+  assert.doesNotMatch(JSON.stringify(snapshot), /must disappear|sk-secret/);
+});
+
+test("agent-console resume marks unrecoverable active work interrupted", () => {
+  const snapshot = createAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents: [
+      {
+        id: "run-queued",
+        displayName: "Queued",
+        agentType: "executor",
+        status: "queued",
+        startedAt: 1,
+      },
+      {
+        id: "run-running",
+        displayName: "Running",
+        agentType: "executor",
+        status: "running",
+        startedAt: 2,
+      },
+      {
+        id: "run-waiting",
+        displayName: "Waiting",
+        agentType: "reviewer",
+        status: "waiting",
+        startedAt: 3,
+      },
+      {
+        id: "run-failed",
+        displayName: "Failed",
+        agentType: "executor",
+        status: "failed",
+        startedAt: 4,
+        completedAt: 5,
+        errorSummary: "boom",
+      },
+    ],
+    jobs: [
+      {
+        id: "job-queued",
+        type: "work-node",
+        label: "Queued",
+        status: "queued",
+        queuedAt: 1,
+      },
+      {
+        id: "job-running",
+        type: "work-node",
+        label: "Running",
+        status: "running",
+        queuedAt: 2,
+        startedAt: 3,
+      },
+      {
+        id: "job-cancelled",
+        type: "work-node",
+        label: "Cancelled",
+        status: "cancelled",
+        queuedAt: 4,
+        completedAt: 6,
+      },
+    ],
+  });
+  const before = JSON.stringify(snapshot);
+
+  const resumed = markUnrecoverableAgentConsoleWorkInterrupted(snapshot, 42);
+
+  assert.notEqual(resumed, snapshot);
+  assert.deepEqual(
+    resumed.agents.map((agent) => [agent.id, agent.status, agent.completedAt]),
+    [
+      ["run-queued", "interrupted", 42],
+      ["run-running", "interrupted", 42],
+      ["run-waiting", "interrupted", 42],
+      ["run-failed", "failed", 5],
+    ],
+  );
+  assert.equal(resumed.agents[3]?.errorSummary, "boom");
+  assert.deepEqual(
+    resumed.jobs.map((job) => [job.id, job.status, job.completedAt]),
+    [
+      ["job-queued", "interrupted", 42],
+      ["job-running", "interrupted", 42],
+      ["job-cancelled", "cancelled", 6],
+    ],
+  );
+  assert.equal(JSON.stringify(snapshot), before);
+});
+
+test("agent-console resume returns the same snapshot when no active work exists", () => {
+  const snapshot = createAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents: [
+      {
+        id: "run-done",
+        displayName: "Done",
+        agentType: "executor",
+        status: "completed",
+        startedAt: 1,
+        completedAt: 2,
+      },
+    ],
+    jobs: [
+      {
+        id: "job-done",
+        type: "work-node",
+        label: "Done",
+        status: "completed",
+        queuedAt: 1,
+        completedAt: 2,
+      },
+    ],
+  });
+
+  assert.equal(
+    markUnrecoverableAgentConsoleWorkInterrupted(snapshot, 42),
+    snapshot,
+  );
+});
+
+test("agent-console bounds persisted lifecycle summaries", () => {
+  const long = "x".repeat(MAX_LIFECYCLE_SUMMARY_CHARS + 500);
+
+  assert.equal(boundLifecycleSummary("short summary"), "short summary");
+  assert.ok(boundLifecycleSummary(long).length < long.length);
+  assert.match(boundLifecycleSummary(long), /summary truncated$/);
+
+  const parsed = parseAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents: [
+      {
+        id: "run-1",
+        displayName: "ExecutionMap",
+        agentType: "executor",
+        status: "failed",
+        startedAt: 1,
+        completedAt: 2,
+        summary: long,
+        errorSummary: long,
+      },
+    ],
+    jobs: [],
+  });
+
+  assert.equal(parsed?.agents[0]?.summary, boundLifecycleSummary(long));
+  assert.equal(parsed?.agents[0]?.errorSummary, boundLifecycleSummary(long));
+});
+
+test("agent-console exposes lifecycle, control, and tab unions", () => {
+  assert.deepEqual(AGENT_RUN_STATUSES, [
+    "queued",
+    "running",
+    "waiting",
+    "completed",
+    "failed",
+    "cancelled",
+    "interrupted",
+  ]);
+  assert.deepEqual(ASYNC_JOB_STATUSES, [
+    "queued",
+    "running",
+    "completed",
+    "failed",
+    "cancelled",
+    "interrupted",
+  ]);
+  assert.deepEqual(AGENT_CONTROL_RECEIPT_STATUSES, [
+    "accepted",
+    "not_delivered",
+    "rejected",
+  ]);
+  assert.deepEqual(AGENT_CONSOLE_TABS, ["agents", "jobs", "plan"]);
+});
+
+test("agent-console declares the async control port before runtime adapters", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/contracts/src/agent-console.ts"),
+    "utf8",
+  );
+
+  assert.match(
+    source,
+    /steer\(agentRunId: string, message: string\): Promise<AgentControlReceipt>;/,
+  );
+  assert.match(
+    source,
+    /cancel\(agentRunId: string\): Promise<AgentControlReceipt>;/,
+  );
+  assert.match(
+    source,
+    /continue\(agentRunId: string, message\?: string\): Promise<AgentControlReceipt>;/,
+  );
 });
