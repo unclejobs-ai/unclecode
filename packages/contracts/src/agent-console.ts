@@ -176,13 +176,23 @@ export function boundToolActivityPreview(preview: string): string {
  */
 export const MAX_LIFECYCLE_SUMMARY_CHARS = 400;
 
-/** Clamp a lifecycle summary to the snapshot budget, marking it when truncated. */
+const LIFECYCLE_SUMMARY_TRUNCATION_MARKER = " … summary truncated";
+
+/**
+ * Clamp a lifecycle summary to the snapshot budget, marking it when truncated.
+ * The marker is charged against the budget, so the result never exceeds
+ * `MAX_LIFECYCLE_SUMMARY_CHARS`.
+ */
 export function boundLifecycleSummary(summary: string): string {
   const normalized = summary.replace(/\s+$/, "");
   if (normalized.length <= MAX_LIFECYCLE_SUMMARY_CHARS) {
     return normalized;
   }
-  return `${normalized.slice(0, MAX_LIFECYCLE_SUMMARY_CHARS)} … summary truncated`;
+  const kept = normalized.slice(
+    0,
+    MAX_LIFECYCLE_SUMMARY_CHARS - LIFECYCLE_SUMMARY_TRUNCATION_MARKER.length,
+  );
+  return `${kept}${LIFECYCLE_SUMMARY_TRUNCATION_MARKER}`;
 }
 
 export const AGENT_RUN_STATUSES = [
@@ -336,9 +346,11 @@ export function isCoalescibleToolActivity(activity: ToolActivity): boolean {
 export function createAgentConsoleSnapshot(input: AgentConsoleSnapshot): AgentConsoleSnapshot {
   return {
     profileId: input.profileId,
-    ...(input.manifest ? { manifest: input.manifest } : {}),
-    ...(input.pendingDecision ? { pendingDecision: input.pendingDecision } : {}),
-    ...(input.workGraph ? { workGraph: input.workGraph } : {}),
+    ...(input.manifest ? { manifest: copyPersistedPromptManifest(input.manifest) } : {}),
+    ...(input.pendingDecision
+      ? { pendingDecision: copyAskUserQuestionRequest(input.pendingDecision) }
+      : {}),
+    ...(input.workGraph ? { workGraph: copyWorkGraph(input.workGraph) } : {}),
     activity: input.activity.map((activity) => ({
       id: activity.id,
       toolCallId: activity.toolCallId,
@@ -360,6 +372,63 @@ export function createAgentConsoleSnapshot(input: AgentConsoleSnapshot): AgentCo
     agents: (input.agents ?? []).slice(-MAX_PERSISTED_AGENT_RUNS).map(copyAgentRun),
     jobs: (input.jobs ?? []).slice(-MAX_PERSISTED_ASYNC_JOBS).map(copyAsyncJob),
     ...(input.mainUsage ? { mainUsage: copyAgentRunUsage(input.mainUsage) } : {}),
+  };
+}
+
+function copyPersistedPromptManifest(manifest: PersistedPromptManifest): PersistedPromptManifest {
+  return {
+    id: manifest.id,
+    profileId: manifest.profileId,
+    createdAt: manifest.createdAt,
+    packetId: manifest.packetId,
+    policy: manifest.policy.map((source) => ({
+      id: source.id,
+      label: source.label,
+      authority: source.authority,
+      digest: source.digest,
+    })),
+    includedSourceCount: manifest.includedSourceCount,
+    excludedSourceCount: manifest.excludedSourceCount,
+    tokenEstimate: manifest.tokenEstimate,
+  };
+}
+
+function copyAskUserQuestionRequest(request: AskUserQuestionRequest): AskUserQuestionRequest {
+  return {
+    id: request.id,
+    ...(request.title === undefined ? {} : { title: request.title }),
+    questions: request.questions.map((question) => ({
+      id: question.id,
+      question: question.question,
+      options: question.options.map((option) => ({
+        label: option.label,
+        ...(option.description === undefined ? {} : { description: option.description }),
+      })),
+      ...(question.multi === undefined ? {} : { multi: question.multi }),
+      ...(question.recommended === undefined ? {} : { recommended: question.recommended }),
+    })),
+  };
+}
+
+function copyWorkGraph(graph: WorkGraph): WorkGraph {
+  return {
+    id: graph.id,
+    ...(graph.goal === undefined ? {} : { goal: graph.goal }),
+    ...(graph.constraints === undefined ? {} : { constraints: [...graph.constraints] }),
+    approval: graph.approval,
+    nodes: graph.nodes.map((node) => ({
+      id: node.id,
+      title: node.title,
+      prompt: node.prompt,
+      status: node.status,
+      dependsOn: [...node.dependsOn],
+      fileOwnership: [...node.fileOwnership],
+      ...(node.manifestId === undefined ? {} : { manifestId: node.manifestId }),
+      ...(node.acceptanceCriteria === undefined
+        ? {}
+        : { acceptanceCriteria: [...node.acceptanceCriteria] }),
+      evidenceRefs: [...node.evidenceRefs],
+    })),
   };
 }
 
@@ -434,7 +503,9 @@ function copyAsyncJob(job: AsyncJob): AsyncJob {
 
 function copyAgentRunUsage(usage: AgentRunUsage): AgentRunUsage {
   return {
-    eventIds: usage.eventIds.slice(-MAX_PERSISTED_USAGE_EVENT_IDS),
+    // Stable-deduplicate before capping so duplicate-heavy input cannot evict
+    // distinct replay identities from the tail.
+    eventIds: [...new Set(usage.eventIds)].slice(-MAX_PERSISTED_USAGE_EVENT_IDS),
     ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
     ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
     ...(usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
@@ -536,7 +607,8 @@ function isNonNegativeFinite(value: unknown): value is number {
 
 /**
  * Rebuilds a bounded lifecycle list. A missing key is a legacy snapshot and
- * yields `[]`; a present-but-malformed entry rejects the whole snapshot.
+ * yields `[]`; a malformed entry rejects the whole snapshot even when the
+ * bound would have discarded it, so a poisoned prefix cannot be laundered.
  */
 function parseBoundedList<T>(
   record: Record<string, unknown>,
@@ -552,14 +624,14 @@ function parseBoundedList<T>(
     return undefined;
   }
   const parsed: T[] = [];
-  for (const entry of value.slice(-limit)) {
+  for (const entry of value) {
     const item = parseEntry(entry);
     if (item === undefined) {
       return undefined;
     }
     parsed.push(item);
   }
-  return parsed;
+  return parsed.slice(-limit);
 }
 
 function parseStringList(value: unknown): readonly string[] | undefined {

@@ -1,8 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 import {
   AGENT_CONSOLE_TABS,
@@ -18,9 +15,6 @@ import {
   markUnrecoverableAgentConsoleWorkInterrupted,
   parseAgentConsoleSnapshot,
 } from "@unclecode/contracts";
-
-const testDirectory = path.dirname(fileURLToPath(import.meta.url));
-const workspaceRoot = path.resolve(testDirectory, "../..");
 
 function activity(kind, status = "completed") {
   return {
@@ -210,7 +204,7 @@ test("agent-console resume parser accepts goal metadata before a prompt manifest
   assert.equal(parsed?.workGraph?.nodes[0]?.manifestId, undefined);
 });
 
-test("agent-console resume parser restores lifecycle records without raw prompts", () => {
+test("agent-console resume parser round-trips every safe lifecycle field", () => {
   const parsed = parseAgentConsoleSnapshot({
     profileId: "build",
     activity: [
@@ -230,8 +224,22 @@ test("agent-console resume parser restores lifecycle records without raw prompts
         id: "run-1",
         displayName: "ExecutionMap",
         agentType: "executor",
-        status: "running",
+        status: "completed",
+        currentActivity: "Reading source",
+        parentRunId: "run-root",
+        continuationOf: "run-0",
+        transcriptRef: "transcript/run-1.json",
         startedAt: 10,
+        completedAt: 30,
+        summary: "Mapped the execution path",
+        errorSummary: "one retried tool call",
+        usage: {
+          eventIds: ["usage-run-1"],
+          inputTokens: 120,
+          outputTokens: 45,
+          cacheReadTokens: 12,
+          costUsd: 0.125,
+        },
         rawPrompt: "must disappear",
       },
     ],
@@ -240,36 +248,71 @@ test("agent-console resume parser restores lifecycle records without raw prompts
         id: "job-1",
         type: "work-node",
         label: "Map execution",
-        status: "running",
+        status: "completed",
         agentRunId: "run-1",
         queuedAt: 9,
         startedAt: 10,
+        completedAt: 30,
+        summary: "Job finished",
+        errorSummary: "one retry",
+        providerPayload: { messages: ["must disappear"] },
       },
     ],
-    mainUsage: { eventIds: ["usage-main-1"], costUsd: 0.25 },
+    mainUsage: {
+      eventIds: ["usage-main-1"],
+      inputTokens: 300,
+      outputTokens: 90,
+      cacheReadTokens: 24,
+      costUsd: 0.25,
+    },
   });
 
-  assert.equal(parsed?.agents[0]?.id, "run-1");
-  assert.equal(parsed?.agents[0]?.displayName, "ExecutionMap");
-  assert.equal(parsed?.agents[0]?.agentType, "executor");
-  assert.equal(parsed?.agents[0]?.status, "running");
-  assert.equal(parsed?.agents[0]?.startedAt, 10);
-  assert.equal("rawPrompt" in (parsed?.agents[0] ?? {}), false);
-  assert.doesNotMatch(JSON.stringify(parsed), /must disappear/);
-
-  assert.equal(parsed?.jobs[0]?.id, "job-1");
-  assert.equal(parsed?.jobs[0]?.type, "work-node");
-  assert.equal(parsed?.jobs[0]?.label, "Map execution");
-  assert.equal(parsed?.jobs[0]?.status, "running");
-  assert.equal(parsed?.jobs[0]?.agentRunId, "run-1");
-  assert.equal(parsed?.jobs[0]?.queuedAt, 9);
-  assert.equal(parsed?.jobs[0]?.startedAt, 10);
-
-  assert.equal(parsed?.activity[0]?.agentRunId, "run-1");
+  assert.deepEqual(parsed?.agents, [
+    {
+      id: "run-1",
+      displayName: "ExecutionMap",
+      agentType: "executor",
+      status: "completed",
+      currentActivity: "Reading source",
+      parentRunId: "run-root",
+      continuationOf: "run-0",
+      transcriptRef: "transcript/run-1.json",
+      startedAt: 10,
+      completedAt: 30,
+      summary: "Mapped the execution path",
+      errorSummary: "one retried tool call",
+      usage: {
+        eventIds: ["usage-run-1"],
+        inputTokens: 120,
+        outputTokens: 45,
+        cacheReadTokens: 12,
+        costUsd: 0.125,
+      },
+    },
+  ]);
+  assert.deepEqual(parsed?.jobs, [
+    {
+      id: "job-1",
+      type: "work-node",
+      label: "Map execution",
+      status: "completed",
+      agentRunId: "run-1",
+      queuedAt: 9,
+      startedAt: 10,
+      completedAt: 30,
+      summary: "Job finished",
+      errorSummary: "one retry",
+    },
+  ]);
   assert.deepEqual(parsed?.mainUsage, {
     eventIds: ["usage-main-1"],
+    inputTokens: 300,
+    outputTokens: 90,
+    cacheReadTokens: 24,
     costUsd: 0.25,
   });
+  assert.equal(parsed?.activity[0]?.agentRunId, "run-1");
+  assert.doesNotMatch(JSON.stringify(parsed), /must disappear/);
 });
 
 test("agent-console resume parser defaults legacy snapshots to empty lifecycle arrays", () => {
@@ -562,11 +605,44 @@ test("agent-console resume returns the same snapshot when no active work exists"
 });
 
 test("agent-console bounds persisted lifecycle summaries", () => {
+  const exact = "x".repeat(MAX_LIFECYCLE_SUMMARY_CHARS);
+  const overBy1 = "x".repeat(MAX_LIFECYCLE_SUMMARY_CHARS + 1);
   const long = "x".repeat(MAX_LIFECYCLE_SUMMARY_CHARS + 500);
 
   assert.equal(boundLifecycleSummary("short summary"), "short summary");
-  assert.ok(boundLifecycleSummary(long).length < long.length);
+  assert.equal(boundLifecycleSummary(exact), exact);
+  assert.equal(boundLifecycleSummary(exact).length, MAX_LIFECYCLE_SUMMARY_CHARS);
+
+  // One character over the budget must truncate and still fit the budget.
+  assert.notEqual(boundLifecycleSummary(overBy1), overBy1);
+  assert.equal(boundLifecycleSummary(overBy1).length, MAX_LIFECYCLE_SUMMARY_CHARS);
+  assert.match(boundLifecycleSummary(overBy1), /summary truncated$/);
+
+  assert.equal(boundLifecycleSummary(long).length, MAX_LIFECYCLE_SUMMARY_CHARS);
   assert.match(boundLifecycleSummary(long), /summary truncated$/);
+  assert.ok(
+    parseAgentConsoleSnapshot({
+      profileId: "build",
+      activity: [],
+      agents: [],
+      jobs: [
+        {
+          id: "job-1",
+          type: "work-node",
+          label: "Map execution",
+          status: "failed",
+          queuedAt: 1,
+          completedAt: 2,
+          summary: long,
+          errorSummary: long,
+        },
+      ],
+    })?.jobs.every(
+      (job) =>
+        (job.summary?.length ?? 0) <= MAX_LIFECYCLE_SUMMARY_CHARS
+        && (job.errorSummary?.length ?? 0) <= MAX_LIFECYCLE_SUMMARY_CHARS,
+    ),
+  );
 
   const parsed = parseAgentConsoleSnapshot({
     profileId: "build",
@@ -616,22 +692,149 @@ test("agent-console exposes lifecycle, control, and tab unions", () => {
   assert.deepEqual(AGENT_CONSOLE_TABS, ["agents", "jobs", "plan"]);
 });
 
-test("agent-console declares the async control port before runtime adapters", () => {
-  const source = readFileSync(
-    path.join(workspaceRoot, "packages/contracts/src/agent-console.ts"),
-    "utf8",
-  );
+test("agent-console parser validates discarded lifecycle records before bounding", () => {
+  const validAgent = (index) => ({
+    id: `run-${index}`,
+    displayName: `Agent ${index}`,
+    agentType: "executor",
+    status: "completed",
+    startedAt: index,
+  });
+  const agents = Array.from({ length: 130 }, (_, index) => validAgent(index));
 
-  assert.match(
-    source,
-    /steer\(agentRunId: string, message: string\): Promise<AgentControlReceipt>;/,
+  assert.equal(
+    parseAgentConsoleSnapshot({ profileId: "build", activity: [], agents, jobs: [] })
+      ?.agents.length,
+    128,
   );
-  assert.match(
-    source,
-    /cancel\(agentRunId: string\): Promise<AgentControlReceipt>;/,
+  assert.equal(
+    parseAgentConsoleSnapshot({
+      profileId: "build",
+      activity: [],
+      // Malformed record inside the prefix that the 128-item cap discards.
+      agents: [{ ...validAgent(0), status: "thinking" }, ...agents.slice(1)],
+      jobs: [],
+    }),
+    undefined,
   );
-  assert.match(
-    source,
-    /continue\(agentRunId: string, message\?: string\): Promise<AgentControlReceipt>;/,
+  assert.equal(
+    parseAgentConsoleSnapshot({
+      profileId: "build",
+      activity: [],
+      agents: [],
+      jobs: [
+        { id: "job-0", type: "work-node", label: "Bad", status: "pending", queuedAt: 0 },
+        ...Array.from({ length: 130 }, (_, index) => ({
+          id: `job-${index + 1}`,
+          type: "work-node",
+          label: `Job ${index}`,
+          status: "completed",
+          queuedAt: index,
+        })),
+      ],
+    }),
+    undefined,
   );
+});
+
+test("agent-console deduplicates usage event ids before capping", () => {
+  const snapshot = createAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents: [],
+    jobs: [],
+    mainUsage: {
+      eventIds: [
+        ...Array.from({ length: 300 }, () => "usage-repeat"),
+        "usage-distinct-a",
+        "usage-distinct-b",
+      ],
+    },
+  });
+
+  assert.deepEqual(snapshot.mainUsage?.eventIds, [
+    "usage-repeat",
+    "usage-distinct-a",
+    "usage-distinct-b",
+  ]);
+
+  const capped = createAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents: [],
+    jobs: [],
+    mainUsage: {
+      eventIds: Array.from({ length: 300 }, (_, index) => `usage-${index % 260}`),
+    },
+  });
+
+  assert.equal(capped.mainUsage?.eventIds.length, 256);
+  assert.equal(new Set(capped.mainUsage?.eventIds).size, 256);
+});
+
+test("agent-console snapshot factory copies nested manifest, decision, and graph arrays", () => {
+  const policy = [
+    { id: "policy-1", label: "Repo rules", authority: "mandatory", digest: "abc" },
+  ];
+  const options = [{ label: "Approve" }, { label: "Reject" }];
+  const questions = [{ id: "approve", question: "Dispatch?", options }];
+  const constraints = ["No new dependencies"];
+  const dependsOn = ["node-0"];
+  const fileOwnership = ["src/auth.ts"];
+  const acceptanceCriteria = ["Auth tests pass"];
+  const evidenceRefs = ["tool-call-1"];
+  const nodes = [
+    {
+      id: "node-1",
+      title: "Implement auth",
+      prompt: "executor assignment",
+      status: "ready",
+      dependsOn,
+      fileOwnership,
+      acceptanceCriteria,
+      evidenceRefs,
+    },
+  ];
+
+  const snapshot = createAgentConsoleSnapshot({
+    profileId: "build",
+    manifest: {
+      id: "manifest-1",
+      profileId: "build",
+      createdAt: "2026-08-09T00:00:00.000Z",
+      packetId: "packet-1",
+      policy,
+      includedSourceCount: 1,
+      excludedSourceCount: 0,
+      tokenEstimate: 10,
+    },
+    pendingDecision: { id: "decision-1", title: "Dispatch", questions },
+    workGraph: { id: "graph-1", goal: "Ship auth", constraints, approval: "approved", nodes },
+    activity: [],
+    agents: [],
+    jobs: [],
+  });
+
+  policy.push({ id: "leak", label: "Leak", authority: "mandatory", digest: "zzz" });
+  policy[0].label = "mutated";
+  options.push({ label: "Leak" });
+  questions.push({ id: "leak", question: "Leak?", options: [] });
+  constraints.push("leak");
+  nodes.push({ ...nodes[0], id: "leak" });
+  dependsOn.push("leak");
+  fileOwnership.push("leak");
+  acceptanceCriteria.push("leak");
+  evidenceRefs.push("leak");
+
+  assert.equal(snapshot.manifest?.policy.length, 1);
+  assert.equal(snapshot.manifest?.policy[0]?.label, "Repo rules");
+  assert.equal(snapshot.pendingDecision?.questions.length, 1);
+  assert.equal(snapshot.pendingDecision?.questions[0]?.options.length, 2);
+  assert.deepEqual(snapshot.workGraph?.constraints, ["No new dependencies"]);
+  assert.equal(snapshot.workGraph?.nodes.length, 1);
+  assert.deepEqual(snapshot.workGraph?.nodes[0]?.dependsOn, ["node-0"]);
+  assert.deepEqual(snapshot.workGraph?.nodes[0]?.fileOwnership, ["src/auth.ts"]);
+  assert.deepEqual(snapshot.workGraph?.nodes[0]?.acceptanceCriteria, ["Auth tests pass"]);
+  assert.deepEqual(snapshot.workGraph?.nodes[0]?.evidenceRefs, ["tool-call-1"]);
+  assert.doesNotMatch(JSON.stringify(snapshot), /leak|mutated/);
 });

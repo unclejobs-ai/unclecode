@@ -335,7 +335,8 @@ export type AgentRunStartedTraceEvent = {
   readonly level: "high-signal";
   readonly eventId: string;
   readonly runId: string;
-  readonly jobId?: string;
+  /** Required: every agent run is owned by exactly one job. */
+  readonly jobId: string;
   readonly displayName: string;
   readonly agentType: string;
   readonly parentRunId?: string;
@@ -348,7 +349,7 @@ export type AgentRunSettledTraceEvent = {
   readonly level: "high-signal";
   readonly eventId: string;
   readonly runId: string;
-  readonly jobId?: string;
+  readonly jobId: string;
   readonly status: TerminalAgentRunStatus;
   readonly startedAt?: number;
   readonly completedAt: number;
