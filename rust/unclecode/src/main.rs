@@ -580,7 +580,7 @@ struct NativeModuleRebuildResult {
 fn probe_better_sqlite3(repo_root: &Path) -> Result<NativeModuleProbeResult, String> {
     let output = Command::new(node_binary())
         .arg("-e")
-        .arg("require('better-sqlite3')")
+        .arg("const Database = require('better-sqlite3'); const database = new Database(':memory:'); database.close();")
         .current_dir(repo_root)
         .envs(env::vars_os())
         .env(
@@ -5122,6 +5122,35 @@ mod tests {
         ));
         assert!(!is_better_sqlite3_native_version_mismatch(
             "NODE_MODULE_VERSION mismatch in another native module"
+        ));
+    }
+
+    #[test]
+    fn better_sqlite3_probe_exercises_lazy_native_binding() {
+        let temp_dir = env::temp_dir().join(format!(
+            "unclecode-better-sqlite-probe-{}",
+            std::process::id()
+        ));
+        let module_dir = temp_dir.join("node_modules").join("better-sqlite3");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&module_dir).expect("fake better-sqlite3 module");
+        std::fs::write(
+            module_dir.join("index.js"),
+            r#"module.exports = class Database {
+                constructor() {
+                    throw new Error("The module '/fake/better_sqlite3.node' was compiled against a different Node.js version using NODE_MODULE_VERSION 127. This version of Node.js requires NODE_MODULE_VERSION 137.");
+                }
+                close() {}
+            };"#,
+        )
+        .expect("fake better-sqlite3 source");
+
+        let result = probe_better_sqlite3(&temp_dir).expect("native module probe");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        assert!(!result.success, "probe must instantiate the native binding");
+        assert!(is_better_sqlite3_native_version_mismatch(
+            &result.combined_output()
         ));
     }
 
