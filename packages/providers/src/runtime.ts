@@ -561,7 +561,11 @@ export class OpenAIProvider implements LlmProvider {
     this.apiKey = apiKey.trim();
   }
 
-  private async requestOpenApiMessage(options: ProviderTurnOptions = {}): Promise<{
+  private async requestOpenApiMessage(
+    model: string,
+    reasoning: RuntimeReasoningConfig,
+    options: ProviderTurnOptions = {},
+  ): Promise<{
     content?: string | null;
     tool_calls?: Array<{
       id?: string;
@@ -583,15 +587,15 @@ export class OpenAIProvider implements LlmProvider {
       const toolsJson = buildOpenAIChatTools(this.toolRuntime.definitions);
       const toolPolicy = resolveProviderToolPolicy("openai-chat-live", this.toolRuntime.definitions);
       const body = buildOpenAIChatBody({
-        model: this.model,
+        model,
         messagesJson: JSON.stringify(this.messages),
         toolsJson,
         includeTools: toolPolicy.includeTools,
-        reasoningEffort: resolveRuntimeReasoningEffort(this.reasoning),
+        reasoningEffort: resolveRuntimeReasoningEffort(reasoning),
         ...(isOfficialOpenAIRequestUrl(requestSpec.url)
           ? {
               promptCacheKey: this.promptCacheKey,
-              promptCacheRetention: resolveOpenAIPromptCacheRetention(this.model),
+              promptCacheRetention: resolveOpenAIPromptCacheRetention(model),
             }
           : {}),
       });
@@ -601,7 +605,7 @@ export class OpenAIProvider implements LlmProvider {
           url: resolveOpenAIChatUrl(requestSpec.url),
           headers: requestSpec.headers,
           body: enableOpenAIChatStreamBody(body),
-          model: this.model,
+          model,
           traceListener: this.traceListener,
           maxAttempts: this.fetchImpl ? 1 : 3,
           ...(options.signal ? { signal: options.signal } : {}),
@@ -622,16 +626,16 @@ export class OpenAIProvider implements LlmProvider {
     if (!response) {
       const parsed = await runOpenAIChatCompletionWithRustAsync({
         apiKey: this.apiKey,
-        model: this.model,
+        model,
         messages: this.messages,
         tools: this.toolRuntime.definitions,
-        reasoningEffort: resolveRuntimeReasoningEffort(this.reasoning),
+        reasoningEffort: resolveRuntimeReasoningEffort(reasoning),
         signal: options.signal,
       });
       if (parsed.reasoning.length > 0) {
         emitProviderTrace(
           this.traceListener,
-          buildProviderReasoningDeltaTrace("openai", this.model, "text", parsed.reasoning),
+          buildProviderReasoningDeltaTrace("openai", model, "text", parsed.reasoning),
         );
       }
       return {
@@ -653,14 +657,14 @@ export class OpenAIProvider implements LlmProvider {
       throw new Error(buildProviderRequestError("openai", response.status, response.text, response.attempts));
     }
 
-    const parsed = parseOpenAIChatResponse(response.text, this.model);
+    const parsed = parseOpenAIChatResponse(response.text, model);
     // When the response was consumed as a live stream, reasoning deltas were
     // already emitted incrementally — re-emitting the aggregate would
     // duplicate the trace.
     if (!response.streamed && parsed.reasoning.length > 0) {
       emitProviderTrace(
         this.traceListener,
-        buildProviderReasoningDeltaTrace("openai", this.model, "text", parsed.reasoning),
+        buildProviderReasoningDeltaTrace("openai", model, "text", parsed.reasoning),
       );
     }
     return {
@@ -681,7 +685,11 @@ export class OpenAIProvider implements LlmProvider {
     };
   }
 
-  private async requestCodexMessage(options: ProviderTurnOptions = {}): Promise<{
+  private async requestCodexMessage(
+    model: string,
+    reasoning: RuntimeReasoningConfig,
+    options: ProviderTurnOptions = {},
+  ): Promise<{
     content?: string | null;
     tool_calls?: Array<{
       id?: string;
@@ -696,22 +704,22 @@ export class OpenAIProvider implements LlmProvider {
     const toolPolicy = resolveProviderToolPolicy("openai-codex-live", this.toolRuntime.definitions);
 
     const body = buildOpenAICodexBody({
-      model: this.model,
+      model,
       instructions: this.systemPrompt,
       inputJson,
       toolsJson,
       toolChoice: toolPolicy.toolChoice,
-      reasoningEffort: resolveRuntimeReasoningEffort(this.reasoning),
+      reasoningEffort: resolveRuntimeReasoningEffort(reasoning),
       promptCacheKey: this.promptCacheKey,
       promptCacheRetention: "24h",
     });
-    const response = await this.postCodexResponses(body, options.signal);
+    const response = await this.postCodexResponses(model, body, options.signal);
 
     if (!response.ok) {
       throw new Error(buildProviderRequestError("openai", response.status, response.text, response.attempts));
     }
 
-    const parsed = parseOpenAIResponsesMessage(response.text, this.model, {
+    const parsed = parseOpenAIResponsesMessage(response.text, model, {
       includeStreamingTraces: !response.streamed,
     });
     for (const trace of parsed.traces) {
@@ -722,11 +730,15 @@ export class OpenAIProvider implements LlmProvider {
       ...parsed.message,
       actions: parsed.actions,
       usage,
-      costUsd: estimateProviderUsageCostUsd(this.model, usage),
+      costUsd: estimateProviderUsageCostUsd(model, usage),
     };
   }
 
-  private async postCodexResponses(body: string, signal?: AbortSignal | undefined): Promise<OpenAIResponsesHttpResponse> {
+  private async postCodexResponses(
+    model: string,
+    body: string,
+    signal?: AbortSignal | undefined,
+  ): Promise<OpenAIResponsesHttpResponse> {
     const requestSpec = buildOpenAIRequestSpec("codex", this.apiKey, this.openAIAccountId);
     const fetchImpl = this.fetchImpl ?? resolveGlobalFetchImpl();
 
@@ -737,7 +749,7 @@ export class OpenAIProvider implements LlmProvider {
           url: requestSpec.url,
           headers: requestSpec.headers,
           body,
-          model: this.model,
+          model,
           traceListener: this.traceListener,
           maxAttempts: this.fetchImpl ? 1 : 3,
           ...(signal ? { signal } : {}),
@@ -764,6 +776,8 @@ export class OpenAIProvider implements LlmProvider {
     options: ProviderTurnOptions = {},
   ): Promise<AgentTurnResult> {
     const maxIterations = getProviderToolLoopMax();
+    const model = this.model;
+    const reasoning = this.reasoning;
     const rollbackLength = this.messages.length;
     startProviderTurnState("openai", this.messages, prompt, attachments);
 
@@ -776,8 +790,8 @@ export class OpenAIProvider implements LlmProvider {
       for (let i = 0; i < maxIterations; i += 1) {
         throwIfAborted(options.signal);
         const message = this.runtime === "codex"
-          ? await this.requestCodexMessage(options)
-          : await this.requestOpenApiMessage(options);
+          ? await this.requestCodexMessage(model, reasoning, options)
+          : await this.requestOpenApiMessage(model, reasoning, options);
         throwIfAborted(options.signal);
         assistantText = typeof message?.content === "string" ? message.content : "";
         const toolCalls = message?.tool_calls ?? [];
@@ -964,6 +978,7 @@ export class AnthropicProvider implements LlmProvider {
     options: ProviderTurnOptions = {},
   ): Promise<AgentTurnResult> {
     const maxIterations = getProviderToolLoopMax();
+    const model = this.model;
     const rollbackLength = this.messages.length;
     startProviderTurnState("anthropic", this.messages, prompt, attachments);
 
@@ -976,14 +991,14 @@ export class AnthropicProvider implements LlmProvider {
       for (let i = 0; i < maxIterations; i += 1) {
         throwIfAborted(options.signal);
         const request = buildAnthropicMessagesRequest({
-          model: this.model,
+          model,
           system: this.systemPrompt,
           messages: this.messages,
           tools: this.toolRuntime.definitions,
         });
         const parsed = this.usesInjectedClient
-          ? parseAnthropicResponse(await this.requireInjectedClient().messages.create(request), this.model)
-          : parseAnthropicResponseText(await this.postMessagesWithRust(JSON.stringify(request), options.signal), this.model);
+          ? parseAnthropicResponse(await this.requireInjectedClient().messages.create(request), model)
+          : parseAnthropicResponseText(await this.postMessagesWithRust(JSON.stringify(request), options.signal), model);
         throwIfAborted(options.signal);
         steps += 1;
         usage = mergeProviderTokenUsage(
@@ -1212,6 +1227,7 @@ export class GeminiProvider implements LlmProvider {
     options: ProviderTurnOptions = {},
   ): Promise<AgentTurnResult> {
     const maxIterations = getProviderToolLoopMax();
+    const model = this.model;
     const rollbackLength = this.contents.length;
     startProviderTurnState("gemini", this.contents, prompt, attachments);
 
@@ -1224,15 +1240,15 @@ export class GeminiProvider implements LlmProvider {
       for (let i = 0; i < maxIterations; i += 1) {
         throwIfAborted(options.signal);
         const request = buildGeminiGenerateContentRequest({
-          model: this.model,
+          model,
           systemInstruction: this.systemPrompt,
           contents: this.contents,
           functionDeclarations: buildGeminiFunctionDeclarations(this.toolRuntime.definitions),
           includeTools: resolveProviderToolPolicy("gemini-live", this.toolRuntime.definitions).includeTools,
         });
         const parsed = this.usesInjectedClient
-          ? parseGeminiResponse(await this.requireInjectedClient().models.generateContent(request), this.model)
-          : parseGeminiResponseText(await this.postGenerateContentWithRust(this.model, request, options.signal), this.model);
+          ? parseGeminiResponse(await this.requireInjectedClient().models.generateContent(request), model)
+          : parseGeminiResponseText(await this.postGenerateContentWithRust(model, request, options.signal), model);
         throwIfAborted(options.signal);
         steps += 1;
         usage = mergeProviderTokenUsage(

@@ -315,6 +315,8 @@ npm run unclecode
 npm run unclecode -- work
 ```
 
+직접 대화는 선택한 제공자와 모델을 그대로 쓴다. 작업을 위임하는 executor 턴만 OMP의 `kimi-code/k3`로 고정되며, UncleCode 환경 변수나 런타임 모델 변경으로 다른 모델에 재라우팅되지 않는다. 워크 셸에서 `/auth`를 입력하면 OMP가 발견한 전체 로그인 카탈로그를 열어 검색할 수 있다. Enter는 자격 증명을 가져오지 않고 OMP 소유의 `omp auth-broker login <provider>` 명령만 넘긴다.
+
 레거시 네이티브 제공자 루프가 필요한 경우에만 엔진을 명시한다:
 
 ```bash

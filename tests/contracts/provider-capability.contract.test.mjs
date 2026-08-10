@@ -12,6 +12,7 @@ test("provider-capability fixtures expose canonical provider metadata", () => {
     "ollama",
     "copilot",
     "zai",
+    "omp",
   ]);
 
   assert.deepEqual(PROVIDER_CAPABILITIES.anthropic, {
@@ -41,4 +42,19 @@ test("provider-capability fixtures expose canonical provider metadata", () => {
     PROVIDER_CAPABILITIES.copilot.defaultModel,
     "openai/gpt-4.1-mini",
   );
+
+  // OMP is a delegated work-executor route: it owns its own credentials, picks
+  // no model on UncleCode's behalf, and runs each turn in a fresh session. So it
+  // exposes no UncleCode env keys at all — no bearer token, and no model
+  // override — and no cross-turn session memory.
+  assert.deepEqual(PROVIDER_CAPABILITIES.omp, {
+    id: "omp",
+    label: "OMP",
+    transport: "native",
+    defaultModel: "kimi-code/k3",
+    envKeys: [],
+    supportsToolCalls: true,
+    supportsSessionMemory: false,
+    supportsPromptCaching: true,
+  });
 });

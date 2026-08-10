@@ -538,7 +538,8 @@ test("AnthropicProvider.runTurn sends Rust-built tool_result blocks after tool c
     },
     { content: [{ type: "text", text: "done" }] },
   ]);
-  const provider = new BaseAnthropicProvider({
+  let provider;
+  provider = new BaseAnthropicProvider({
     apiKey: "sk-ant-test",
     model: "claude-sonnet-4-6",
     cwd: process.cwd(),
@@ -558,6 +559,7 @@ test("AnthropicProvider.runTurn sends Rust-built tool_result blocks after tool c
       executor: {
         async execute({ input }) {
           assert.deepEqual(input, { command: "echo ok" });
+          provider.updateRuntimeSettings({ model: "claude-opus-4-6" });
           return { content: "ok", isError: false };
         },
       },
@@ -567,6 +569,10 @@ test("AnthropicProvider.runTurn sends Rust-built tool_result blocks after tool c
   const result = await provider.runTurn("use tool");
 
   assert.equal(result.text, "done");
+  assert.deepEqual(captured.map((request) => request.model), [
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-6",
+  ]);
   assert.deepEqual(captured[1].messages[2], {
     role: "user",
     content: [

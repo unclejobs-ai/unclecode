@@ -1,4 +1,4 @@
-import { MODE_REASONING_EFFORTS, type ModeReasoningEffort, type ProviderId } from "@unclecode/contracts";
+import { MODE_REASONING_EFFORTS, PROVIDER_IDS, type ModeReasoningEffort, type ProviderId } from "@unclecode/contracts";
 
 import { ProviderCapabilityMismatchError } from "./errors.js";
 import { runRustCommandSync } from "./rust-command.js";
@@ -161,14 +161,12 @@ export function getGenericModelRegistry(providerId: ProviderId, env: NodeJS.Proc
   };
 }
 
+/**
+ * Derived from `PROVIDER_IDS` rather than a hand-written list: a duplicated
+ * literal set silently rejected `omp` once it joined the public provider set.
+ */
 function isProviderId(value: string | undefined): value is ProviderId {
-  return value === "anthropic"
-    || value === "gemini"
-    || value === "openai"
-    || value === "groq"
-    || value === "ollama"
-    || value === "copilot"
-    || value === "zai";
+  return value !== undefined && (PROVIDER_IDS as readonly string[]).includes(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

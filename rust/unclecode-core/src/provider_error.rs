@@ -1,5 +1,5 @@
-use crate::http_transport::{describe_proxy_policy, resolve_proxy_policy};
-use crate::model_registry::resolve_provider_route;
+use crate::http_transport::describe_proxy_policy;
+use crate::model_registry::{provider_route_proxy_policy, resolve_provider_route};
 
 pub fn provider_request_error_message(
     provider: &str,
@@ -8,7 +8,7 @@ pub fn provider_request_error_message(
     attempts: Option<usize>,
 ) -> Result<String, String> {
     let route = resolve_provider_route(provider, None)?;
-    let proxy = resolve_proxy_policy(&route.endpoint_url)?;
+    let proxy = provider_route_proxy_policy(&route)?;
     let body = response_body.trim();
     let mut lines = vec![
         format!("{} request failed with status {}", route.label, status),

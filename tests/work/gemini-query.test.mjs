@@ -487,7 +487,8 @@ test("GeminiProvider.runTurn sends Rust-built functionResponse parts after tool 
     },
     { candidates: [{ content: { parts: [{ text: "done" }] } }] },
   ]);
-  const provider = new BaseGeminiProvider({
+  let provider;
+  provider = new BaseGeminiProvider({
     apiKey: "g-test",
     model: "gemini-3.1-flash",
     cwd: process.cwd(),
@@ -507,6 +508,7 @@ test("GeminiProvider.runTurn sends Rust-built functionResponse parts after tool 
       executor: {
         async execute({ input }) {
           assert.deepEqual(input, { command: "echo ok" });
+          provider.updateRuntimeSettings({ model: "gemini-3.1-pro" });
           return { content: "ok", isError: false };
         },
       },
@@ -516,6 +518,10 @@ test("GeminiProvider.runTurn sends Rust-built functionResponse parts after tool 
   const result = await provider.runTurn("use tool");
 
   assert.equal(result.text, "done");
+  assert.deepEqual(captured.map((request) => request.model), [
+    "gemini-3.1-flash",
+    "gemini-3.1-flash",
+  ]);
   assert.ok(captured[0].config.tools[0].functionDeclarations.some(
     (declaration) => declaration.name === "run_shell",
   ));

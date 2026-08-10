@@ -80,7 +80,8 @@ use unclecode_core::model_pricing::{estimate_cost_usd, model_price};
 use unclecode_core::model_registry::{
     detect_provider_for_model, openai_compat_policy_json, openai_model_registry,
     openai_reasoning_support, provider_capability_json, provider_label, provider_model_catalog,
-    provider_route_json, provider_runtime_decision_json, resolve_provider_route,
+    provider_route_json, provider_route_proxy_policy, provider_runtime_decision_json,
+    resolve_provider_route,
 };
 use unclecode_core::openai_query::{run_openai_chat_completion_json, run_openai_chat_query_json};
 use unclecode_core::orchestrator::{
@@ -3748,7 +3749,7 @@ fn run_native_model_command(args: &[OsString]) -> Result<u8, String> {
             );
             println!("defaultModel={}", route.default_model);
             println!("endpointUrl={}", route.endpoint_url);
-            let proxy = resolve_proxy_policy(&route.endpoint_url)?;
+            let proxy = provider_route_proxy_policy(&route)?;
             println!(
                 "proxyUrl={}",
                 proxy
@@ -3773,7 +3774,7 @@ fn run_native_model_command(args: &[OsString]) -> Result<u8, String> {
                 .and_then(|arg| arg.to_str())
                 .ok_or("Usage: unclecode rust model provider-route-json <provider-id|auto> [model-id]")?;
             let route = resolve_provider_route(provider, args.get(2).and_then(|arg| arg.to_str()))?;
-            let proxy = resolve_proxy_policy(&route.endpoint_url)?;
+            let proxy = provider_route_proxy_policy(&route)?;
             println!("{}", provider_route_json(&route, &proxy)?);
             Ok(0)
         }

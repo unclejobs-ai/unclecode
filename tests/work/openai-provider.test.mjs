@@ -1286,7 +1286,9 @@ test("OpenAIProvider emits tool trace events for visible tool use", async () => 
 
   const traces = [];
   let callCount = 0;
-  const provider = new OpenAIProvider({
+  const requestModels = [];
+  let provider;
+  provider = new OpenAIProvider({
     apiKey: "sk-test-123",
     model: "gpt-5.4",
     cwd: workspaceRoot,
@@ -1295,10 +1297,13 @@ test("OpenAIProvider emits tool trace events for visible tool use", async () => 
       source: "mode-default",
       support: { status: "supported", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high"] },
     },
-    fetchImpl: async () => ({
+    fetchImpl: async (_url, init) => {
+      requestModels.push(JSON.parse(init.body).model);
+      return {
       ok: true,
       async json() {
         callCount += 1;
+        if (callCount === 1) provider.updateRuntimeSettings({ model: "gpt-5.6-sol" });
         if (callCount === 1) {
           return {
             choices: [
@@ -1330,13 +1335,15 @@ test("OpenAIProvider emits tool trace events for visible tool use", async () => 
           ],
         };
       },
-    }),
+    };
+    },
   });
 
   provider.setTraceListener((event) => traces.push(event));
   const result = await provider.runTurn("read the file");
 
   assert.equal(result.text, "done");
+  assert.deepEqual(requestModels, ["gpt-5.4", "gpt-5.4"]);
   assert.equal(traces[0]?.type, "tool.started");
   assert.equal(traces[0]?.toolName, "read_file");
   assert.equal(typeof traces[0]?.startedAt, "number");

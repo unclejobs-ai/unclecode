@@ -28,6 +28,10 @@ import type { ModelRegistry, OpenAIAuthStatus, ReasoningSupport, ResolveOpenAIAu
 
 export * from "./runtime.js";
 export * from "./model-pricing.js";
+export * from "./omp-install.js";
+export * from "./omp-auth-catalog.js";
+export * from "./omp-worker-entry.js";
+export * from "./omp-worker-provider.js";
 export type { OpenAICompatPolicy, ProviderRoute } from "./model-registry.js";
 export type { ProviderId };
 export type { ModelRegistry, OpenAIAuthStatus, ReasoningSupport, ResolveOpenAIAuthInput, ResolvedOpenAIAuth } from "./types.js";

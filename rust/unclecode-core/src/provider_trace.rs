@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::model_registry::{provider_route_proxy_policy, resolve_provider_route};
 use crate::redaction::redact_secrets;
-use crate::{http_transport::resolve_proxy_policy, model_registry::resolve_provider_route};
 
 pub fn provider_turn_started_trace_json(
     provider: &str,
@@ -30,7 +30,7 @@ pub fn provider_route_trace_json(
     let model = model.trim();
     let trace = match resolve_provider_route(provider, Some(model)) {
         Ok(route) => {
-            let proxy = resolve_proxy_policy(&route.endpoint_url)?;
+            let proxy = provider_route_proxy_policy(&route)?;
             json!({
                 "type": "provider.route",
                 "level": "default",
