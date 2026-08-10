@@ -128,7 +128,19 @@ const WORK_SHELL_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand {
         command: "/agents",
         route: &["agents"],
-        description: "Inspect current-session agent runs and costs.",
+        description: "에이전트 실행 상태와 transcript를 엽니다",
+        aliases: &[],
+    },
+    BuiltinSlashCommand {
+        command: "/jobs",
+        route: &["jobs"],
+        description: "백그라운드 job 상태를 엽니다",
+        aliases: &[],
+    },
+    BuiltinSlashCommand {
+        command: "/todo",
+        route: &["todo"],
+        description: "현재 WorkGraph 진행 상태를 엽니다",
         aliases: &[],
     },
     BuiltinSlashCommand {
@@ -355,6 +367,11 @@ pub fn route_work_shell_submit_json(
             json!({ "kind": "inline-command", "line": line, "slashCommand": slash_route.route })
         } else if let Some(local_command) = work_shell_local_submit_command(&line) {
             json!({ "kind": "local-command", "line": line, "localCommand": local_command })
+        } else if is_work_shell_console_invalid_form(&line) {
+            // Marked, not swallowed: TypeScript still gets its turn at
+            // extension commands above, and only the terminal
+            // nothing-matched leaf becomes a silent no-op.
+            json!({ "kind": "chat", "line": line, "consoleInvalid": true })
         } else {
             json!({ "kind": "chat", "line": line })
         }
@@ -471,14 +488,72 @@ fn normalize_submit_line(input: &str) -> String {
     input.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The one place that decides which Agent Console tab a slash command opens.
+/// The idle builtin route and the busy steer decision both read this map, so a
+/// console command can never resolve to one tab while the shell is idle and to
+/// a different one mid-turn.
+pub fn work_shell_agent_console_tab(line: &str) -> Option<&'static str> {
+    match line {
+        "/agents" => Some("agents"),
+        "/jobs" => Some("jobs"),
+        "/todo" => Some("plan"),
+        _ => None,
+    }
+}
+
+/// A console-like line that cannot open a console: a form that would have
+/// unique-prefix matched a console command before console commands became
+/// exact-only (`/tod`, `/job`, `/agen`), or an exact console command carrying
+/// arguments (`/agents extra`). Both mean the operator is mid-word or mistyped
+/// an argument. There is nothing to run and nothing worth saying, so callers
+/// fail them closed silently instead of echoing unknown-command guidance.
+///
+/// A prefix that could also mean a runnable command (`/a`, `/auth`) is not
+/// covered — that keeps the ordinary unknown-command guidance intact. The
+/// console tab map above stays the only place naming these commands.
+pub fn is_work_shell_console_invalid_form(line: &str) -> bool {
+    if work_shell_agent_console_tab(line).is_some() {
+        return false;
+    }
+    let Some(token) = line.split_whitespace().next() else {
+        return false;
+    };
+    if work_shell_agent_console_tab(token).is_some() {
+        return true;
+    }
+    if token.strip_prefix('/').unwrap_or("").len() < 3 {
+        return false;
+    }
+    let console_matches = WORK_SHELL_SLASH_COMMANDS
+        .iter()
+        .filter(|entry| work_shell_agent_console_tab(entry.command).is_some())
+        .filter(|entry| entry.command.starts_with(token))
+        .count();
+    if console_matches != 1 {
+        return false;
+    }
+    !WORK_SHELL_SLASH_COMMANDS
+        .iter()
+        .filter(|entry| work_shell_agent_console_tab(entry.command).is_none())
+        .any(|entry| {
+            entry.command.starts_with(token)
+                || entry
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.starts_with(token))
+        })
+}
+
 fn work_shell_builtin_submit_command(line: &str) -> Option<Value> {
+    if let Some(tab) = work_shell_agent_console_tab(line) {
+        return Some(json!({ "kind": "agent-console", "tab": tab }));
+    }
     match line {
         "/exit" => Some(json!({ "kind": "exit" })),
         "/clear" => Some(json!({ "kind": "clear" })),
         "/help" => Some(json!({ "kind": "help" })),
         "/context" | "/con" => Some(json!({ "kind": "context" })),
         "/cache" => Some(json!({ "kind": "cache" })),
-        "/agents" => Some(json!({ "kind": "agents" })),
         "/reload" => Some(json!({ "kind": "reload" })),
         "/status" => Some(json!({ "kind": "status" })),
         "/sessions" => Some(json!({ "kind": "sessions" })),
@@ -722,8 +797,14 @@ fn resolve_builtin(
         return None;
     }
 
+    // Console commands are exact-only. `/agent`, `/job`, and `/tod` would
+    // otherwise prefix-resolve to `agents`/`jobs`/`todo` routes the CLI cannot
+    // run, so they are dropped from the candidate pool here. The console tab
+    // classifier stays the single owner of which commands those are — there is
+    // no second list to drift.
     let matches = commands
         .iter()
+        .filter(|entry| work_shell_agent_console_tab(entry.command).is_none())
         .filter(|entry| {
             normalize_slash_input(entry.command).starts_with(input)
                 || entry
@@ -1177,6 +1258,148 @@ mod tests {
             .unwrap(),
             Value::Null
         );
+    }
+
+    #[test]
+    fn routes_agent_console_commands_to_one_builtin_shape() {
+        assert_eq!(
+            work_shell_builtin_submit_command("/agents"),
+            Some(json!({ "kind": "agent-console", "tab": "agents" })),
+        );
+        assert_eq!(
+            work_shell_builtin_submit_command("/jobs"),
+            Some(json!({ "kind": "agent-console", "tab": "jobs" })),
+        );
+        assert_eq!(
+            work_shell_builtin_submit_command("/todo"),
+            Some(json!({ "kind": "agent-console", "tab": "plan" })),
+        );
+        assert_eq!(work_shell_agent_console_tab("/queue"), None);
+        assert_eq!(work_shell_agent_console_tab("/agents extra"), None);
+    }
+
+    #[test]
+    fn routes_agent_console_submits_as_builtins() {
+        for (line, tab) in [("/agents", "agents"), ("/jobs", "jobs"), ("/todo", "plan")] {
+            let route = serde_json::from_str::<Value>(
+                &route_work_shell_submit_json(line, false, "default", true).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(route["kind"], "builtin");
+            assert_eq!(route["line"], line);
+            assert_eq!(
+                route["command"],
+                json!({ "kind": "agent-console", "tab": tab })
+            );
+        }
+    }
+
+    #[test]
+    fn lists_agent_console_commands_in_the_work_shell_slash_table() {
+        for command in ["/agents", "/jobs", "/todo"] {
+            assert_eq!(
+                route_work_shell_slash_command(command),
+                SlashRoute {
+                    kind: SlashRouteKind::Matched,
+                    route: vec![command.trim_start_matches('/').to_string()],
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_agent_console_commands_out_of_prefix_routing() {
+        for prefix in ["/agent", "/agen", "/job", "/tod"] {
+            assert_eq!(
+                route_work_shell_slash_command(prefix),
+                SlashRoute {
+                    kind: SlashRouteKind::Fallback,
+                    route: Vec::new(),
+                },
+                "{prefix} must not prefix-resolve to a console route"
+            );
+            assert_eq!(work_shell_builtin_submit_command(prefix), None);
+            assert_eq!(
+                serde_json::from_str::<Value>(
+                    &route_work_shell_submit_json(prefix, false, "default", true).unwrap(),
+                )
+                .unwrap()["kind"],
+                "chat",
+                "{prefix} must not become an inline command"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_argument_bearing_console_lines_closed() {
+        for line in ["/agents extra", "/jobs 1", "/todo now"] {
+            assert_eq!(work_shell_agent_console_tab(line), None);
+            assert_eq!(work_shell_builtin_submit_command(line), None);
+            assert_eq!(
+                route_work_shell_slash_command(line),
+                SlashRoute {
+                    kind: SlashRouteKind::Fallback,
+                    route: Vec::new(),
+                }
+            );
+            assert_eq!(
+                serde_json::from_str::<Value>(
+                    &route_work_shell_submit_json(line, false, "default", true).unwrap(),
+                )
+                .unwrap()["kind"],
+                "chat"
+            );
+        }
+    }
+
+    #[test]
+    fn marks_console_like_invalid_forms_as_silent_no_ops() {
+        for line in [
+            "/agent",
+            "/agen",
+            "/age",
+            "/job",
+            "/tod",
+            "/agents extra",
+            "/jobs extra",
+            "/todo extra",
+        ] {
+            assert!(
+                is_work_shell_console_invalid_form(line),
+                "{line} must be a console-invalid form"
+            );
+            let route = serde_json::from_str::<Value>(
+                &route_work_shell_submit_json(line, false, "default", true).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(route["kind"], "chat");
+            assert_eq!(
+                route["consoleInvalid"], true,
+                "{line} must be marked console-invalid"
+            );
+        }
+
+        for line in [
+            "/agents",
+            "/jobs",
+            "/todo",
+            "/a",
+            "/auth",
+            "/definitely-unknown",
+            "finish cleanup",
+        ] {
+            assert!(
+                !is_work_shell_console_invalid_form(line),
+                "{line} must keep ordinary handling"
+            );
+        }
+
+        let unknown = serde_json::from_str::<Value>(
+            &route_work_shell_submit_json("/definitely-unknown", false, "default", true).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(unknown["kind"], "chat");
+        assert_eq!(unknown["consoleInvalid"], Value::Null);
     }
 
     #[test]

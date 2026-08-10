@@ -368,6 +368,9 @@ test("resolveWorkShellSlashCommand maps supported operational and prompt surface
   assert.deepEqual(resolveWorkShellSlashCommand("/auth logout"), ["auth", "logout"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/browser"), ["auth", "login", "--browser"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/reload"), ["reload"]);
+  assert.deepEqual(resolveWorkShellSlashCommand("/agents"), ["agents"]);
+  assert.deepEqual(resolveWorkShellSlashCommand("/jobs"), ["jobs"]);
+  assert.deepEqual(resolveWorkShellSlashCommand("/todo"), ["todo"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/model"), ["model"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/model list"), ["model", "list"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/mcp list"), ["mcp", "list"]);
@@ -941,7 +944,7 @@ test("shared input decision helpers stay available through shared seams", () => 
       shouldBlockSlashSubmit: true,
       selectedSlashCommand: "/auth status",
     }),
-    { type: "submit-suggestion", line: "/auth status", clearInput: true },
+    { type: "submit", line: "/auth", clearInput: true },
   );
   assert.deepEqual(
     resolveWorkShellSubmitAction({

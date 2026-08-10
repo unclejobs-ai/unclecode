@@ -47,6 +47,8 @@ const WORK_SHELL_QUICK_PICK_COMMANDS = [
   "/context",
   "/cache",
   "/agents",
+  "/jobs",
+  "/todo",
   "/model",
   "/auth status",
   "/queue",

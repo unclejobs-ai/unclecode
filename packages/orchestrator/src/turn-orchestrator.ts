@@ -15,6 +15,81 @@ export type ComplexPlanTask = {
   readonly writePaths?: readonly string[];
 };
 
+/** A plan task carrying everything an executor needs to run it unattended. */
+export type PlannedWorkTask = ComplexPlanTask & {
+  readonly prompt: string;
+  readonly goal: string;
+  readonly constraints: readonly string[];
+  readonly acceptanceCriteria: readonly string[];
+  readonly dependsOn: readonly string[];
+  readonly writePaths: readonly string[];
+};
+
+/**
+ * The single validity rule for a goal-task plan: ids are unique and every
+ * dependency is declared earlier in the list. Returns the violation so callers
+ * can refuse a plan *before* it produces lifecycle records, rather than
+ * discovering it once the scheduler is already running.
+ */
+export function findGoalTaskPlanViolation(
+  tasks: readonly ComplexPlanTask[],
+): string | undefined {
+  const seen = new Set<string>();
+  for (const [index, task] of tasks.entries()) {
+    if (seen.has(task.id)) {
+      return `Goal task plan contains duplicate task ids: ${task.id}`;
+    }
+    seen.add(task.id);
+    for (const dependencyId of task.dependsOn ?? []) {
+      const dependencyIndex = tasks.findIndex((candidate) => candidate.id === dependencyId);
+      if (dependencyIndex < 0 || dependencyIndex >= index) {
+        return `Goal task ${task.id} has an invalid dependency: ${dependencyId}`;
+      }
+    }
+  }
+  return undefined;
+}
+
+export function parsePlannedWorkTasks(raw: string): readonly PlannedWorkTask[] {
+  const parsed: unknown = JSON.parse(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error("Rust orchestrator returned invalid complex tasks.");
+  }
+  return parsed.map((item) => {
+    const record = typeof item === "object" && item !== null
+      ? item as Record<string, unknown>
+      : undefined;
+    if (
+      !record
+      || typeof record.id !== "string"
+      || typeof record.summary !== "string"
+      || typeof record.prompt !== "string"
+      || typeof record.goal !== "string"
+      || !isStringArray(record.constraints)
+      || !isStringArray(record.acceptanceCriteria)
+      || record.acceptanceCriteria.length === 0
+      || !isStringArray(record.dependsOn)
+      || !isStringArray(record.writePaths)
+    ) {
+      throw new Error("Rust orchestrator returned invalid complex task entries.");
+    }
+    return {
+      id: record.id,
+      summary: record.summary,
+      prompt: record.prompt,
+      goal: record.goal,
+      constraints: record.constraints,
+      acceptanceCriteria: record.acceptanceCriteria,
+      dependsOn: record.dependsOn,
+      writePaths: record.writePaths,
+    };
+  });
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
 export type GuardianReviewResult = {
   readonly summary: string;
 };
@@ -137,24 +212,24 @@ export async function runGoalTaskExecutorPool<Task extends ComplexPlanTask, Resu
   readonly maxWorkers: number;
   readonly executeTask: (task: Task) => Promise<Result>;
   readonly isSuccessful: (result: Result) => boolean;
+  /**
+   * Reports the WorkGraph status of a finished result. Without it a result is
+   * only ever completed or failed, so a run the operator cancelled would be
+   * reported as a failure it never was. Dependency gating still follows
+   * `isSuccessful`: a cancelled task blocks its dependents.
+   */
+  readonly resolveResultStatus?:
+    | ((result: Result) => Extract<WorkNodeStatus, "completed" | "failed" | "cancelled">)
+    | undefined;
   readonly createFailedResult?: ((task: Task, error: unknown) => Result) | undefined;
   readonly createBlockedResult?: ((task: Task) => Result) | undefined;
   readonly ownershipRegistry?: FileOwnershipRegistry | undefined;
   readonly onTrace?: TurnOrchestratorTraceListener | undefined;
   readonly onStatus?: ((task: Task, status: WorkNodeStatus) => void) | undefined;
 }): Promise<readonly Result[]> {
-  const taskById = new Map(input.tasks.map((task) => [task.id, task]));
-  if (taskById.size !== input.tasks.length) {
-    throw new Error("Goal task plan contains duplicate task ids.");
-  }
-
-  for (const [index, task] of input.tasks.entries()) {
-    for (const dependencyId of task.dependsOn ?? []) {
-      const dependencyIndex = input.tasks.findIndex((candidate) => candidate.id === dependencyId);
-      if (dependencyIndex < 0 || dependencyIndex >= index) {
-        throw new Error(`Goal task ${task.id} has an invalid dependency: ${dependencyId}`);
-      }
-    }
+  const violation = findGoalTaskPlanViolation(input.tasks);
+  if (violation) {
+    throw new Error(violation);
   }
 
   const pending = new Set(input.tasks.map((task) => task.id));
@@ -203,7 +278,10 @@ export async function runGoalTaskExecutorPool<Task extends ComplexPlanTask, Resu
         input.onStatus?.(task, "running");
         try {
           const result = await input.executeTask(task);
-          input.onStatus?.(task, input.isSuccessful(result) ? "completed" : "failed");
+          input.onStatus?.(
+            task,
+            input.resolveResultStatus?.(result) ?? (input.isSuccessful(result) ? "completed" : "failed"),
+          );
           return result;
         } catch (error) {
           input.onStatus?.(task, "failed");
@@ -242,6 +320,9 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
   ) => Promise<{ readonly tasks: readonly Task[]; readonly usedLlm: boolean }>;
   readonly executeComplexTask: (task: Task) => Promise<Result>;
   readonly isComplexTaskSuccessful?: ((result: Result) => boolean) | undefined;
+  readonly resolveComplexTaskStatus?:
+    | ((result: Result) => Extract<WorkNodeStatus, "completed" | "failed" | "cancelled">)
+    | undefined;
   readonly createFailedComplexTaskResult?: ((task: Task, error: unknown) => Result) | undefined;
   readonly createBlockedComplexTaskResult?: ((task: Task) => Result) | undefined;
   readonly runGuardianReview?: ((input: {
@@ -327,6 +408,9 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
             maxWorkers: input.maxWorkers ?? 1,
             executeTask: deps.executeComplexTask,
             isSuccessful: deps.isComplexTaskSuccessful,
+            ...(deps.resolveComplexTaskStatus
+              ? { resolveResultStatus: deps.resolveComplexTaskStatus }
+              : {}),
             ...(deps.createFailedComplexTaskResult
               ? { createFailedResult: deps.createFailedComplexTaskResult }
               : {}),
@@ -370,6 +454,11 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
               }));
               return result;
             } catch (error) {
+              // A cancelled turn is not a guardian verdict; reporting one would
+              // put a failure the guardian never reached into the trace.
+              if (error instanceof Error && error.name === "AbortError") {
+                throw error;
+              }
               const reviewerCompletedAt = Date.now();
               const message = error instanceof Error ? error.message : String(error);
               input.onTrace?.(resolveOrchestratorTraceEvent({

@@ -417,7 +417,7 @@ fn queue_panel(input: &Value) -> Value {
             "Queue paused after interrupt · send a new message to resume or /queue clear to drop."
                 .to_string()
         } else {
-            "Slash commands are not queued while busy; /cancel interrupts the active turn."
+            "/queue, /queue clear, /cancel, /agents, /jobs, /todo work while busy; other slash commands are not queued."
                 .to_string()
         },
         "/queue clear drops queued follow-ups without stopping the active turn.".to_string(),

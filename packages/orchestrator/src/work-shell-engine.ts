@@ -8,6 +8,7 @@ import {
   createQueueBuiltinResult,
   resolveLastCompletedTurn,
 } from "./work-shell-engine-builtins.js";
+import { isAgentConsoleTab } from "./work-shell-engine-commands.js";
 import { resolveWorkerBudget } from "./work-agent.js";
 import {
   executeInlineCommandSubmit,
@@ -50,6 +51,24 @@ import {
 } from "./work-shell-engine-state.js";
 import { runWorkShellContextAdviceEffects } from "./work-shell-engine-post-turns.js";
 import { applyWorkShellTraceEvent } from "./work-shell-engine-trace.js";
+import { applyTraceEventToAgentConsole } from "./work-shell-agent-console.js";
+import { isExecutorScopedTraceEvent } from "./work-agent-lifecycle.js";
+import {
+  clampAgentConsoleView,
+  closeAgentConsoleView,
+  createAgentConsoleViewState,
+  isSettledAgentRun,
+  isSettledAsyncJob,
+  mergeAgentConsoleLifecycle,
+  moveAgentConsoleCursor,
+  openAgentConsoleView,
+  requestAgentConsoleCancel,
+  resolveAgentConsoleSelection,
+  selectAgentConsoleTab,
+  settleAgentConsoleControl,
+  toggleAgentConsoleInspector,
+  type AgentConsoleViewState,
+} from "./work-shell-agent-console-state.js";
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 import {
   createAgentConsoleSnapshot,
@@ -63,6 +82,10 @@ import {
 import type { WorkShellInteractionBridge } from "./work-shell-interaction-bridge.js";
 import type {
   AgentConsoleSnapshot,
+  AgentConsoleTab,
+  AgentControlPort,
+  AgentControlReceipt,
+  AgentRun,
   ContextPacketChangeClassification,
   ContextPacketReceipt,
   ContextPacketView,
@@ -76,6 +99,9 @@ import type {
   SubmitContextPacketReceiptInput,
   WorkGraph,
 } from "@unclecode/contracts";
+import type { WorkAgentControlRuntime } from "./work-agent-run-controller.js";
+import type { WorkAgentTurnResult } from "./work-agent.js";
+import type { WorkShellSessionSnapshotInput } from "./work-shell-engine-persistence.js";
 import type {
   MemoryLineageAdapter,
   PromoteScopedMemoryInput,
@@ -184,6 +210,7 @@ type BusySubmitDecision =
   | { readonly action: "clear_queue"; readonly line: string; readonly message: string }
   | { readonly action: "cancel_turn"; readonly line: string; readonly message: string }
   | { readonly action: "reject_slash"; readonly line: string; readonly message: string }
+  | { readonly action: "open_agent_console"; readonly line: string; readonly tab: AgentConsoleTab }
   | { readonly action: "queue"; readonly line: string; readonly displayIndex: number; readonly message: string };
 
 function parseBusySubmitDecision(stdout: string): BusySubmitDecision {
@@ -202,6 +229,9 @@ function parseBusySubmitDecision(stdout: string): BusySubmitDecision {
   }
   if (parsed.action === "reject_slash" && typeof parsed.line === "string" && typeof parsed.message === "string") {
     return { action: "reject_slash", line: parsed.line, message: parsed.message };
+  }
+  if (parsed.action === "open_agent_console" && typeof parsed.line === "string" && isAgentConsoleTab(parsed.tab)) {
+    return { action: "open_agent_console", line: parsed.line, tab: parsed.tab };
   }
   if (
     parsed.action === "queue"
@@ -350,7 +380,12 @@ export type WorkShellEngineOptions<Reasoning extends WorkShellReasoningConfig> =
 
 export type WorkShellTraceMode = "minimal" | "verbose";
 
-export type WorkShellComposerMode = "default" | "api-key-entry";
+/**
+ * `agent-steer` routes the composer line to the selected agent run's control
+ * mailbox instead of opening a provider turn, so a steer can never be
+ * mistaken for chat.
+ */
+export type WorkShellComposerMode = "default" | "api-key-entry" | "agent-steer";
 
 export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly entries: readonly WorkShellChatEntry[];
@@ -393,14 +428,21 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly contextInspectorDetailContent?: string | undefined;
   readonly contextInspectorDetailOffset: number;
   readonly agentConsole: AgentConsoleSnapshot;
+  readonly agentConsoleView: AgentConsoleViewState;
 };
 
 export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkShellReasoningConfig> {
   clear(): void;
-  runTurn(prompt: string, attachments?: readonly Attachment[], options?: { readonly signal?: AbortSignal | undefined }): Promise<{ text: string }>;
+  runTurn(prompt: string, attachments?: readonly Attachment[], options?: { readonly signal?: AbortSignal | undefined }): Promise<WorkAgentTurnResult>;
   updateRuntimeSettings(settings: { reasoning?: Reasoning | undefined; model?: string | undefined }): void;
   updateMode?(mode: string): void;
   setTraceListener(listener?: ((event: TraceEvent) => void) | undefined): void;
+  /**
+   * Operator control surface for the runs this agent dispatched. Absent for
+   * agents that never open background runs; the engine then reports controls
+   * as undelivered instead of pretending they were queued.
+   */
+  getAgentControlRuntime?(): WorkAgentControlRuntime | undefined;
 }
 
 export type WorkShellEngineInput<
@@ -572,6 +614,18 @@ type InspectorSource = {
   readonly actions?: readonly ContextPacketViewAction[] | undefined;
 };
 
+/**
+ * One publication per animation frame is all a terminal renderer can show, so
+ * a lifecycle burst is folded into a single subscriber fan-out. Durable writes
+ * are far more expensive than a render and coalesce on their own, longer
+ * window.
+ */
+const AGENT_CONSOLE_PUBLISH_INTERVAL_MS = 16;
+const AGENT_CONSOLE_PERSIST_INTERVAL_MS = 50;
+
+const AGENT_RUN_UNKNOWN_MESSAGE = "That agent run is no longer in the console.";
+const AGENT_CONTROLS_UNAVAILABLE_MESSAGE = "Agent controls are unavailable in this session.";
+
 export class WorkShellEngine<
   Attachment,
   Reasoning extends WorkShellReasoningConfig,
@@ -737,6 +791,19 @@ export class WorkShellEngine<
     | undefined;
   private state: WorkShellEngineState<Reasoning>;
   private pendingDecision: PendingDecision | undefined;
+  /**
+   * Lifecycle events reduce here first, in arrival order, so a burst is
+   * folded against every prior event before any subscriber sees it. Cleared
+   * once the pending snapshot has been fanned out.
+   */
+  private pendingAgentConsole: AgentConsoleSnapshot | undefined;
+  private agentConsolePublishTimer: NodeJS.Timeout | undefined;
+  private agentConsolePersistTimer: NodeJS.Timeout | undefined;
+  /**
+   * Tail of the ordered durable-write chain. Never rejects: a failed write is
+   * absorbed here so the next checkpoint still runs.
+   */
+  private sessionSnapshotWriteQueue: Promise<void> = Promise.resolve();
 
   constructor(input: WorkShellEngineInput<Attachment, Reasoning, TraceEvent>) {
     this.agent = input.agent;
@@ -864,14 +931,34 @@ export class WorkShellEngine<
       ask: (request, signal) => this.openDecision(request, signal),
     });
     this.clearResumedPendingDecision();
+    // A lifecycle burst is one render, not one render per event: the console
+    // reduction, the busy status, the trace buffer, and any verbose trace entry
+    // are all staged and fanned out once per publish window.
     this.agent.setTraceListener((event) => {
+      this.reduceAgentConsoleTraceEvent(event);
+      // An executor-scoped trace belongs to a delegated run, so the console
+      // reduction above is its only destination. Letting it through here would
+      // stream a sub-agent's `assistant.delta` into the operator's transcript
+      // and drive this shell's busy clock from a turn the operator never
+      // started.
+      if (isExecutorScopedTraceEvent(event)) {
+        return;
+      }
       applyWorkShellTraceEvent({
         state: this.state,
         event,
         formatAgentTraceLine: this.formatAgentTraceLine,
-        setState: (patch) => this.setState(patch),
-        appendEntries: (...entries) => this.appendEntries(...entries),
-        pushTraceLine: (line) => this.pushTraceLine(line),
+        setState: (patch) => this.stageTraceState(patch),
+        appendEntries: (...entries) => this.stageTraceState(
+          appendWorkShellEntries(this.state, ...entries),
+        ),
+        pushTraceLine: (line) => this.stageTraceState(createWorkShellTraceLinePatch({
+          state: this.state,
+          line,
+          preservePanel: false,
+          contextSummaryLines: this.currentContextSummaryLines,
+          buildContextPanel: this.buildContextPanel,
+        })),
       });
     });
 
@@ -900,8 +987,307 @@ export class WorkShellEngine<
 
   dispose(): void {
     this.agent.setTraceListener(undefined);
+    this.flushAgentConsole();
+    this.clearAgentConsoleTimers();
+    this.agent.getAgentControlRuntime?.()?.clear("Work Shell closed.");
     this.settlePendingDecision({ status: "unavailable", reason: "Work Shell closed." });
     this.interactionBridge?.unbind("Work Shell closed.");
+  }
+
+  // ---------------------------------------------------------------------
+  // Agent Console: navigation, operator controls, and coalesced lifecycle
+  // publication. Console view state is engine-owned so every mutation
+  // re-renders through the same subscriber fan-out as the rest of the shell.
+  // ---------------------------------------------------------------------
+
+  openAgentConsole(tab?: AgentConsoleTab): void {
+    this.setState({
+      agentConsoleView: openAgentConsoleView(
+        this.state.agentConsoleView,
+        this.state.agentConsole,
+        tab,
+      ),
+    });
+  }
+
+  closeAgentConsole(): void {
+    this.setState({ agentConsoleView: closeAgentConsoleView(this.state.agentConsoleView) });
+  }
+
+  selectAgentConsoleTab(tab: AgentConsoleTab): void {
+    this.setState({
+      agentConsoleView: selectAgentConsoleTab(
+        this.state.agentConsoleView,
+        this.state.agentConsole,
+        tab,
+      ),
+    });
+  }
+
+  moveAgentConsoleCursor(delta: number): void {
+    this.setState({
+      agentConsoleView: moveAgentConsoleCursor(
+        this.state.agentConsoleView,
+        this.state.agentConsole,
+        delta,
+      ),
+    });
+  }
+
+  toggleAgentConsoleInspector(): void {
+    this.setState({
+      agentConsoleView: toggleAgentConsoleInspector(this.state.agentConsoleView),
+    });
+  }
+
+  /**
+   * Operator control surface for the console. Every call validates the live
+   * snapshot before it reaches the agent runtime, so a control can never be
+   * delivered to a run the console no longer shows or that already settled.
+   */
+  getAgentControlPort(): AgentControlPort {
+    return {
+      steer: async (agentRunId, message) => {
+        const trimmed = message.trim();
+        if (!trimmed) {
+          return { status: "rejected", message: "Type something to send to the agent." };
+        }
+        const run = this.state.agentConsole.agents.find((agent) => agent.id === agentRunId);
+        if (!run) {
+          return { status: "rejected", message: AGENT_RUN_UNKNOWN_MESSAGE };
+        }
+        if (isSettledAgentRun(run)) {
+          return { status: "rejected", message: `${run.displayName} has already finished.` };
+        }
+        const runtime = this.agent.getAgentControlRuntime?.();
+        if (!runtime) {
+          return { status: "not_delivered", message: AGENT_CONTROLS_UNAVAILABLE_MESSAGE };
+        }
+        return runtime.steer(agentRunId, trimmed);
+      },
+      cancel: async (agentRunId) => {
+        const run = this.state.agentConsole.agents.find((agent) => agent.id === agentRunId);
+        if (!run) {
+          return { status: "rejected", message: AGENT_RUN_UNKNOWN_MESSAGE };
+        }
+        if (isSettledAgentRun(run)) {
+          return { status: "rejected", message: `${run.displayName} has already finished.` };
+        }
+        const runtime = this.agent.getAgentControlRuntime?.();
+        if (!runtime) {
+          return { status: "not_delivered", message: AGENT_CONTROLS_UNAVAILABLE_MESSAGE };
+        }
+        return runtime.cancel(agentRunId);
+      },
+      continue: async (agentRunId, message) => {
+        // A continuation carries lineage, so it is started from the persisted
+        // safe record rather than from an id the caller happens to hold.
+        const run = this.state.agentConsole.agents.find((agent) => agent.id === agentRunId);
+        if (!run) {
+          return { status: "rejected", message: AGENT_RUN_UNKNOWN_MESSAGE };
+        }
+        const runtime = this.agent.getAgentControlRuntime?.();
+        if (!runtime) {
+          return { status: "not_delivered", message: AGENT_CONTROLS_UNAVAILABLE_MESSAGE };
+        }
+        return message === undefined
+          ? runtime.continueRun(run)
+          : runtime.continueRun(run, message);
+      },
+    };
+  }
+
+  /** Enter the steer composer for the selected live run. */
+  beginAgentSteer(): void {
+    const view = this.state.agentConsoleView;
+    const selection = resolveAgentConsoleSelection(view, this.state.agentConsole);
+    if (!view.open || selection?.tab !== "agents" || isSettledAgentRun(selection.run)) {
+      this.setState({
+        agentConsoleView: settleAgentConsoleControl(view, {
+          status: "rejected",
+          message: "Select a running agent to steer.",
+        }),
+      });
+      return;
+    }
+    this.setState({
+      composerMode: "agent-steer",
+      agentConsoleView: settleAgentConsoleControl(view),
+    });
+  }
+
+  /** Arm the cancel confirmation for the selected run. */
+  requestAgentCancel(): void {
+    this.setState({
+      agentConsoleView: requestAgentConsoleCancel(
+        this.state.agentConsoleView,
+        this.state.agentConsole,
+      ),
+    });
+  }
+
+  async confirmAgentCancel(confirm: boolean): Promise<void> {
+    const control = this.state.agentConsoleView.control;
+    if (control.kind !== "confirm-cancel") {
+      return;
+    }
+    // Leaving the confirmation before awaiting is what makes cancel one-shot:
+    // a second confirmation finds a browsing console and never reaches the
+    // runtime.
+    this.setState({ agentConsoleView: settleAgentConsoleControl(this.state.agentConsoleView) });
+    if (!confirm) {
+      return;
+    }
+    const receipt = await this.getAgentControlPort().cancel(control.agentRunId);
+    this.setState({
+      agentConsoleView: settleAgentConsoleControl(this.state.agentConsoleView, receipt),
+    });
+  }
+
+  async continueSelectedAgent(): Promise<void> {
+    const selection = resolveAgentConsoleSelection(
+      this.state.agentConsoleView,
+      this.state.agentConsole,
+    );
+    if (selection?.tab !== "agents") {
+      this.setState({
+        agentConsoleView: settleAgentConsoleControl(this.state.agentConsoleView, {
+          status: "rejected",
+          message: "Select an agent run to continue.",
+        }),
+      });
+      return;
+    }
+    const receipt = await this.getAgentControlPort().continue(selection.run.id);
+    this.setState({
+      agentConsoleView: settleAgentConsoleControl(this.state.agentConsoleView, receipt),
+    });
+  }
+
+  /**
+   * Deliver a composer line as control input. The steer composer always exits,
+   * so a rejected or undeliverable steer cannot strand the operator in a mode
+   * whose target has gone away.
+   */
+  private async submitAgentSteer(value: string): Promise<void> {
+    const selection = resolveAgentConsoleSelection(
+      this.state.agentConsoleView,
+      this.state.agentConsole,
+    );
+    const receipt: AgentControlReceipt = selection?.tab === "agents"
+      ? await this.getAgentControlPort().steer(selection.run.id, value)
+      : { status: "rejected", message: "Select an agent run to steer." };
+    this.setState({
+      composerMode: "default",
+      agentConsoleView: settleAgentConsoleControl(this.state.agentConsoleView, receipt),
+    });
+  }
+
+  /**
+   * Fold one lifecycle event into the private pending snapshot. The reduction
+   * is synchronous so `getState()` and every control validate against the
+   * newest projection; only the subscriber fan-out and the durable write are
+   * coalesced. Rebasing on the live snapshot first is what keeps a decision or
+   * manifest that arrived mid-window from being reduced away.
+   */
+  private reduceAgentConsoleTraceEvent(event: { readonly type: string }): void {
+    const pending = this.pendingAgentConsole;
+    const base = pending === undefined
+      ? this.state.agentConsole
+      : mergeAgentConsoleLifecycle(pending, this.state.agentConsole);
+    const next = applyTraceEventToAgentConsole(base, event);
+    if (next === base) {
+      return;
+    }
+    this.pendingAgentConsole = next;
+    this.stageState({
+      agentConsole: next,
+      agentConsoleView: clampAgentConsoleView(this.state.agentConsoleView, next),
+    });
+    this.scheduleAgentConsolePublish();
+    this.scheduleAgentConsolePersist();
+  }
+
+  /** Commit a trace-driven patch without fanning out; publish on the window. */
+  private stageTraceState(patch: Partial<WorkShellEngineState<Reasoning>>): void {
+    this.stageState(patch);
+    this.scheduleAgentConsolePublish();
+  }
+
+  private scheduleAgentConsolePublish(): void {
+    if (this.agentConsolePublishTimer !== undefined) {
+      return;
+    }
+    this.agentConsolePublishTimer = setTimeout(() => {
+      this.agentConsolePublishTimer = undefined;
+      this.publishStagedTraceState();
+    }, AGENT_CONSOLE_PUBLISH_INTERVAL_MS);
+    this.agentConsolePublishTimer.unref();
+  }
+
+  private scheduleAgentConsolePersist(): void {
+    if (this.agentConsolePersistTimer !== undefined) {
+      return;
+    }
+    this.agentConsolePersistTimer = setTimeout(() => {
+      this.agentConsolePersistTimer = undefined;
+      void this.persistAgentConsoleSnapshot();
+    }, AGENT_CONSOLE_PERSIST_INTERVAL_MS);
+    this.agentConsolePersistTimer.unref();
+  }
+
+  private publishStagedTraceState(): void {
+    const pending = this.pendingAgentConsole;
+    if (pending === undefined) {
+      // Only non-console trace effects were staged (busy status, trace buffer).
+      this.setState({});
+      return;
+    }
+    this.pendingAgentConsole = undefined;
+    this.setState({ agentConsole: mergeAgentConsoleLifecycle(pending, this.state.agentConsole) });
+  }
+
+  /** Publish and durably record whatever the coalescing windows still hold. */
+  private flushAgentConsole(): void {
+    const hadPendingWrite = this.agentConsolePersistTimer !== undefined;
+    if (this.agentConsolePublishTimer !== undefined || this.pendingAgentConsole !== undefined) {
+      this.publishStagedTraceState();
+    }
+    if (hadPendingWrite) {
+      void this.persistAgentConsoleSnapshot();
+    }
+  }
+
+  private clearAgentConsoleTimers(): void {
+    if (this.agentConsolePublishTimer !== undefined) {
+      clearTimeout(this.agentConsolePublishTimer);
+      this.agentConsolePublishTimer = undefined;
+    }
+    if (this.agentConsolePersistTimer !== undefined) {
+      clearTimeout(this.agentConsolePersistTimer);
+      this.agentConsolePersistTimer = undefined;
+    }
+  }
+
+  /**
+   * A console-driven checkpoint reports whether background work is still
+   * outstanding. A failed write leaves the in-memory projection untouched and
+   * stays out of the transcript: the next lifecycle event schedules another
+   * attempt, and storage errors are not operator-facing prose.
+   */
+  private async persistAgentConsoleSnapshot(): Promise<void> {
+    const snapshot = this.state.agentConsole;
+    const active = snapshot.agents.some((agent) => !isSettledAgentRun(agent))
+      || snapshot.jobs.some((job) => !isSettledAsyncJob(job));
+    try {
+      await this.enqueueSessionSnapshotWrite(this.buildSessionSnapshotInput({
+        state: active ? "running" : "idle",
+        summary: this.lastSessionSummary,
+        traceMode: this.state.traceMode,
+      }));
+    } catch {
+      /* durable-write failure is retried by the next lifecycle event */
+    }
   }
 
   async openSessionsPanel(): Promise<void> {
@@ -921,6 +1307,15 @@ export class WorkShellEngine<
   }
 
   cancelSensitiveInput(): void {
+    // The steer composer is a console control, not sensitive auth input: it
+    // exits locally instead of running the secure-entry cancellation path.
+    if (this.state.composerMode === "agent-steer") {
+      this.setState({
+        composerMode: "default",
+        agentConsoleView: settleAgentConsoleControl(this.state.agentConsoleView),
+      });
+      return;
+    }
     const result = resolveSensitiveInputCancelState({
       composerMode: this.state.composerMode,
       options: this.options,
@@ -1566,11 +1961,42 @@ export class WorkShellEngine<
     value: string,
     pendingAttachments?: readonly Attachment[],
   ): Promise<void> {
+    // The steer composer owns the whole submit: an empty line still leaves the
+    // mode rather than falling through into the chat router.
+    if (this.state.composerMode === "agent-steer") {
+      await this.submitAgentSteer(value);
+      return;
+    }
     const line = value.trim();
     if (!line) {
       return;
     }
     if (this.pendingDecision) {
+      // A pending decision must not lock the operator out of the console. Rust
+      // stays the authority on what a slash line means mid-turn, so the line is
+      // classified once here; only `open_agent_console` is handled early, and
+      // every other action — including ordinary answers — falls through to the
+      // decision untouched.
+      //
+      // Classification is a console convenience, never a gate on answering. If
+      // it fails, the operator still gets their answer through: dropping the
+      // line here would strand the run behind a question nothing can settle,
+      // and the console command that failed was never the point of the line.
+      let decision: BusySubmitDecision | undefined;
+      try {
+        decision = await this.resolveBusySubmitDecision(line);
+      } catch {
+        this.appendEntries({
+          role: "system",
+          text: this.formatWorkShellError(
+            "Console commands are unavailable. This line was read as an answer to the pending decision.",
+          ),
+        });
+      }
+      if (decision?.action === "open_agent_console") {
+        this.openAgentConsole(decision.tab);
+        return;
+      }
       this.handlePendingDecisionReply(line);
       return;
     }
@@ -1832,6 +2258,11 @@ export class WorkShellEngine<
       case "cancel_turn":
         this.interruptTurn();
         return;
+      // Console access is read-only over the running turn: open it now, never
+      // queue it, and leave the transcript alone.
+      case "open_agent_console":
+        this.openAgentConsole(decision.tab);
+        return;
       case "reject_slash":
         this.appendEntries({ role: "system", text: decision.message });
         return;
@@ -1950,6 +2381,7 @@ export class WorkShellEngine<
       updateRuntimeSettings: (settings) => this.agent.updateRuntimeSettings(settings),
       onExit: this.onExit,
       openSessionsPanel: () => this.openSessionsPanel(),
+      openAgentConsole: (tab) => this.openAgentConsole(tab),
       reloadContextState: () => this.reloadContextState(),
       refreshContextPacket: async () => {
         const packet = await this.refreshContextPacket(true);
@@ -2023,11 +2455,16 @@ export class WorkShellEngine<
     this.setState(appendWorkShellEntries(this.state, ...entries));
   }
 
-  private async persistSessionSnapshot(
-    state: "running" | "idle" | "requires_action",
-    summary: string,
-    traceMode = this.state.traceMode,
-  ): Promise<void> {
+  /**
+   * Build the durable checkpoint payload from the live shell state. Shared by
+   * the turn lifecycle and the console's own coalesced writes so both persist
+   * the same reasoning override, receipt pointer, and console projection.
+   */
+  private buildSessionSnapshotInput(input: {
+    readonly state: "running" | "idle" | "requires_action";
+    readonly summary: string;
+    readonly traceMode: WorkShellTraceMode;
+  }): WorkShellSessionSnapshotInput {
     const overrideReasoningEffort =
       this.state.reasoning.support.status === "supported" &&
       this.state.reasoning.source === "override" &&
@@ -2036,23 +2473,51 @@ export class WorkShellEngine<
         this.state.reasoning.effort === "high")
         ? this.state.reasoning.effort
         : undefined;
-    this.lastSessionSummary = summary;
-    if (state === "idle") {
-      this.lastCompletedTurnSnapshot = resolveLastCompletedTurn(this.state.entries);
-    }
-    await this.persistWorkShellSessionSnapshot(createWorkShellSessionSnapshotInput({
+    return createWorkShellSessionSnapshotInput({
       cwd: this.options.cwd,
       sessionId: this.sessionId,
       model: this.state.model,
       mode: this.state.mode,
-      state,
-      summary,
-      traceMode,
+      state: input.state,
+      summary: input.summary,
+      traceMode: input.traceMode,
       reasoningEffort: overrideReasoningEffort,
       lastSubmittedContextReceiptId: this.lastSubmittedContextReceiptId,
       entries: this.state.entries,
       agentConsole: this.state.agentConsole,
-    }));
+    });
+  }
+
+  private async persistSessionSnapshot(
+    state: "running" | "idle" | "requires_action",
+    summary: string,
+    traceMode = this.state.traceMode,
+  ): Promise<void> {
+    this.lastSessionSummary = summary;
+    if (state === "idle") {
+      this.lastCompletedTurnSnapshot = resolveLastCompletedTurn(this.state.entries);
+    }
+    await this.enqueueSessionSnapshotWrite(
+      this.buildSessionSnapshotInput({ state, summary, traceMode }),
+    );
+  }
+
+  /**
+   * Every durable checkpoint goes through one ordered queue. A snapshot
+   * describes a point in time, so letting an older in-flight write finish after
+   * a newer one would roll durable session state backwards. The rejection stays
+   * caller-visible (turn code still reports `replyPersisted: false`) while the
+   * queue itself absorbs it and stays usable for the next write.
+   */
+  private enqueueSessionSnapshotWrite(input: WorkShellSessionSnapshotInput): Promise<void> {
+    const write = this.sessionSnapshotWriteQueue.then(
+      () => this.persistWorkShellSessionSnapshot(input),
+    );
+    this.sessionSnapshotWriteQueue = write.then(
+      () => undefined,
+      () => undefined,
+    );
+    return write;
   }
 
   private async persistSessionSnapshotForEpoch(
@@ -2475,8 +2940,17 @@ export class WorkShellEngine<
     this.setState({ queuedCount: count });
   }
 
-  private setState(patch: Partial<WorkShellEngineState<Reasoning>>): void {
+  /**
+   * Commit a patch without fanning out. The Agent Console stages every
+   * lifecycle reduction this way so `getState()` and the control validations
+   * see the newest projection while renders stay on the coalescing window.
+   */
+  private stageState(patch: Partial<WorkShellEngineState<Reasoning>>): void {
     this.state = { ...this.state, ...patch };
+  }
+
+  private setState(patch: Partial<WorkShellEngineState<Reasoning>>): void {
+    this.stageState(patch);
     for (const subscriber of this.subscribers) {
       subscriber(this.state);
     }

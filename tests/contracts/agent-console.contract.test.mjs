@@ -264,15 +264,17 @@ test("agent-console resume parser round-trips every safe lifecycle field", () =>
       outputTokens: 90,
       cacheReadTokens: 24,
       costUsd: 0.25,
-      routes: [{
-        provider: "openai",
-        model: "gpt-5.6-sol",
-        eventIds: ["usage-main-1"],
-        inputTokens: 300,
-        outputTokens: 90,
-        cacheReadTokens: 24,
-        costUsd: 0.25,
-      }],
+      routes: [
+        {
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          eventIds: ["usage-main-1"],
+          inputTokens: 300,
+          outputTokens: 90,
+          cacheReadTokens: 24,
+          costUsd: 0.25,
+        },
+      ],
     },
   });
 
@@ -319,15 +321,17 @@ test("agent-console resume parser round-trips every safe lifecycle field", () =>
     outputTokens: 90,
     cacheReadTokens: 24,
     costUsd: 0.25,
-    routes: [{
-      provider: "openai",
-      model: "gpt-5.6-sol",
-      eventIds: ["usage-main-1"],
-      inputTokens: 300,
-      outputTokens: 90,
-      cacheReadTokens: 24,
-      costUsd: 0.25,
-    }],
+    routes: [
+      {
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        eventIds: ["usage-main-1"],
+        inputTokens: 300,
+        outputTokens: 90,
+        cacheReadTokens: 24,
+        costUsd: 0.25,
+      },
+    ],
   });
   assert.equal(parsed?.activity[0]?.agentRunId, "run-1");
   assert.doesNotMatch(JSON.stringify(parsed), /must disappear/);
@@ -406,6 +410,103 @@ test("agent-console resume parser rejects malformed lifecycle records", () => {
     parseAgentConsoleSnapshot({ ...base, mainUsage: { eventIds: [""] } }),
     undefined,
   );
+  assert.equal(
+    parseAgentConsoleSnapshot({
+      ...base,
+      mainUsage: {
+        eventIds: ["usage-1"],
+        inputTokens: 10,
+        routes: [
+          {
+            provider: "openai",
+            model: "model-a",
+            eventIds: ["usage-1"],
+            inputTokens: 5,
+          },
+          {
+            provider: "anthropic",
+            model: "model-b",
+            eventIds: ["usage-1"],
+            inputTokens: 5,
+          },
+        ],
+      },
+    }),
+    undefined,
+    "one provider event cannot belong to two routes",
+  );
+  assert.equal(
+    parseAgentConsoleSnapshot({
+      ...base,
+      mainUsage: {
+        eventIds: ["usage-1", "usage-2"],
+        inputTokens: 10,
+        routes: [
+          {
+            provider: "openai",
+            model: "model-a",
+            eventIds: ["usage-1"],
+            inputTokens: 8,
+          },
+          {
+            provider: "anthropic",
+            model: "model-b",
+            eventIds: ["usage-2"],
+            inputTokens: 8,
+          },
+        ],
+      },
+    }),
+    undefined,
+    "route totals cannot exceed the aggregate ledger",
+  );
+});
+
+test("agent-console resume parser tolerates accumulated money rounding", () => {
+  const eventIds = Array.from(
+    { length: 10_000 },
+    (_, index) => `usage-${index}`,
+  );
+  const firstRouteIds = eventIds.slice(0, 5_000);
+  const secondRouteIds = eventIds.slice(5_000);
+  let aggregateCost = 0;
+  let firstRouteCost = 0;
+  let secondRouteCost = 0;
+  for (let index = 0; index < eventIds.length; index += 1) aggregateCost += 0.1;
+  for (let index = 0; index < firstRouteIds.length; index += 1)
+    firstRouteCost += 0.1;
+  for (let index = 0; index < secondRouteIds.length; index += 1)
+    secondRouteCost += 0.1;
+
+  const parsed = parseAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents: [],
+    jobs: [],
+    mainUsage: {
+      eventIds,
+      costUsd: aggregateCost,
+      routes: [
+        {
+          provider: "openai",
+          model: "model-a",
+          eventIds: firstRouteIds,
+          costUsd: firstRouteCost,
+        },
+        {
+          provider: "anthropic",
+          model: "model-b",
+          eventIds: secondRouteIds,
+          costUsd: secondRouteCost,
+        },
+      ],
+    },
+  });
+
+  assert.ok(
+    parsed,
+    "positive usage sums can differ only by floating-point grouping",
+  );
 });
 
 test("agent-console snapshot factory copies and bounds lifecycle projections", () => {
@@ -438,8 +539,8 @@ test("agent-console snapshot factory copies and bounds lifecycle projections", (
   assert.equal(snapshot.agents[0]?.id, "run-72");
   assert.equal(snapshot.jobs.length, 128);
   assert.equal(snapshot.jobs[0]?.id, "job-72");
-  assert.equal(snapshot.mainUsage?.eventIds.length, 256);
-  assert.equal(snapshot.mainUsage?.eventIds[0], "usage-44");
+  assert.equal(snapshot.mainUsage?.eventIds.length, 300);
+  assert.equal(snapshot.mainUsage?.eventIds[0], "usage-0");
 
   agents.push({
     id: "run-late",
@@ -452,6 +553,100 @@ test("agent-console snapshot factory copies and bounds lifecycle projections", (
   assert.equal(snapshot.agents.length, 128);
   assert.equal(snapshot.agents.at(-1)?.id, "run-199");
   assert.equal(snapshot.mainUsage?.eventIds.at(-1), "usage-299");
+});
+
+test("agent-console snapshot factory retains active work and trims settled history first", () => {
+  const agentStatus = (index) =>
+    index === 0
+      ? "running"
+      : index === 1
+        ? "queued"
+        : index === 2
+          ? "waiting"
+          : "completed";
+  const agents = Array.from({ length: 200 }, (_, index) => ({
+    id: `run-${index}`,
+    displayName: `Agent ${index}`,
+    agentType: "executor",
+    status: agentStatus(index),
+    startedAt: index,
+    ...(agentStatus(index) === "completed" ? { completedAt: index + 1 } : {}),
+  }));
+  const jobs = Array.from({ length: 200 }, (_, index) => ({
+    id: `job-${index}`,
+    type: "work-node",
+    label: `Job ${index}`,
+    status: index === 0 ? "running" : index === 1 ? "queued" : "completed",
+    queuedAt: index,
+  }));
+
+  const snapshot = createAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents,
+    jobs,
+  });
+
+  // The three oldest runs are still live, so the bound is paid for out of
+  // settled history: the 72 oldest completed runs go instead.
+  assert.equal(snapshot.agents.length, 128);
+  assert.deepEqual(
+    snapshot.agents.slice(0, 4).map((agent) => agent.id),
+    ["run-0", "run-1", "run-2", "run-75"],
+  );
+  assert.equal(snapshot.agents.at(-1)?.id, "run-199");
+  assert.deepEqual(
+    snapshot.agents
+      .filter((agent) => agent.status !== "completed")
+      .map((agent) => agent.id),
+    ["run-0", "run-1", "run-2"],
+  );
+  const startedAts = snapshot.agents.map((agent) => agent.startedAt);
+  assert.deepEqual(
+    startedAts,
+    [...startedAts].sort((left, right) => left - right),
+    "display order is preserved",
+  );
+
+  assert.equal(snapshot.jobs.length, 128);
+  assert.deepEqual(
+    snapshot.jobs.slice(0, 3).map((job) => job.id),
+    ["job-0", "job-1", "job-74"],
+  );
+  assert.equal(snapshot.jobs.at(-1)?.id, "job-199");
+});
+
+test("agent-console snapshot factory never discards live work to honour the bound", () => {
+  const settled = Array.from({ length: 10 }, (_, index) => ({
+    id: `run-done-${index}`,
+    displayName: `Done ${index}`,
+    agentType: "executor",
+    status: "completed",
+    startedAt: index,
+    completedAt: index + 1,
+  }));
+  const live = Array.from({ length: 130 }, (_, index) => ({
+    id: `run-live-${index}`,
+    displayName: `Live ${index}`,
+    agentType: "executor",
+    status: "running",
+    startedAt: 100 + index,
+  }));
+
+  const snapshot = createAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents: [...settled, ...live],
+    jobs: [],
+  });
+
+  // 130 live runs cannot fit in 128 slots. Overflowing is explicit; erasing a
+  // run the operator can still steer or cancel would not be.
+  assert.equal(snapshot.agents.length, 130);
+  assert.deepEqual(
+    snapshot.agents.map((agent) => agent.id),
+    live.map((agent) => agent.id),
+  );
 });
 
 test("agent-console snapshot factory drops undeclared lifecycle fields", () => {
@@ -622,6 +817,90 @@ test("agent-console resume returns the same snapshot when no active work exists"
   );
 });
 
+test("agent-console resume cancels in-flight tool activity and clears stale intent", () => {
+  const snapshot = createAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [
+      { ...activity("read", "running"), startedAt: 5 },
+      {
+        ...activity("write"),
+        startedAt: 6,
+        completedAt: 7,
+        summary: "completed · 2ms",
+      },
+    ],
+    agents: [
+      {
+        id: "run-1",
+        displayName: "Runner",
+        agentType: "executor",
+        status: "running",
+        currentActivity: "Reading session state",
+        startedAt: 1,
+      },
+    ],
+    jobs: [
+      {
+        id: "job-1",
+        type: "work-node",
+        label: "Run",
+        status: "running",
+        agentRunId: "run-1",
+        queuedAt: 1,
+        startedAt: 2,
+      },
+    ],
+  });
+
+  const resumed = markUnrecoverableAgentConsoleWorkInterrupted(snapshot, 42);
+
+  assert.deepEqual(
+    resumed.activity.map((entry) => [
+      entry.id,
+      entry.status,
+      entry.completedAt,
+    ]),
+    [
+      ["read-1", "cancelled", 42],
+      ["write-1", "completed", 7],
+    ],
+  );
+  const cancelledSummary = resumed.activity[0]?.summary ?? "";
+  assert.match(cancelledSummary, /interrupted/);
+  assert.ok(
+    cancelledSummary.length > 0 &&
+      cancelledSummary.length <= MAX_LIFECYCLE_SUMMARY_CHARS,
+    "an unrecoverable tool row carries a bounded summary",
+  );
+  assert.equal(resumed.activity[1]?.summary, "completed · 2ms");
+  assert.equal(resumed.agents[0]?.status, "interrupted");
+  assert.ok(
+    !("currentActivity" in (resumed.agents[0] ?? {})),
+    "an interrupted run keeps no in-flight tool label",
+  );
+  assert.equal(resumed.jobs[0]?.status, "interrupted");
+});
+
+test("agent-console resume normalizes an in-flight tool row with no active run", () => {
+  const snapshot = createAgentConsoleSnapshot({
+    profileId: "explore",
+    activity: [activity("execute", "running")],
+    agents: [],
+    jobs: [],
+  });
+
+  const resumed = markUnrecoverableAgentConsoleWorkInterrupted(snapshot, 7);
+
+  assert.notEqual(resumed, snapshot);
+  assert.equal(resumed.activity[0]?.status, "cancelled");
+  assert.equal(resumed.activity[0]?.completedAt, 7);
+  assert.equal(
+    snapshot.activity[0]?.status,
+    "running",
+    "the caller's snapshot is never mutated",
+  );
+});
+
 test("agent-console bounds persisted lifecycle summaries", () => {
   const exact = "x".repeat(MAX_LIFECYCLE_SUMMARY_CHARS);
   const overBy1 = "x".repeat(MAX_LIFECYCLE_SUMMARY_CHARS + 1);
@@ -757,6 +1036,92 @@ test("agent-console parser bounds oversized lifecycle lists to the newest tail",
   assert.equal(parsed?.jobs.at(-1)?.id, `job-${oversized - 1}`);
 });
 
+test("agent-console parser keeps active records the newest-tail bound would discard", () => {
+  const oversized = 300;
+  const agents = Array.from({ length: oversized }, (_, index) => ({
+    id: `run-${index}`,
+    displayName: `Agent ${index}`,
+    agentType: "executor",
+    status: index === 0 ? "running" : "completed",
+    startedAt: index,
+  }));
+  const jobs = Array.from({ length: oversized }, (_, index) => ({
+    id: `job-${index}`,
+    type: "work-node",
+    label: `Job ${index}`,
+    status: index === 0 ? "queued" : "completed",
+    queuedAt: index,
+  }));
+
+  const parsed = parseAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents,
+    jobs,
+  });
+
+  // The one live record survives the discarded prefix; the remaining 127 slots
+  // hold the newest settled history, in persisted order.
+  assert.equal(parsed?.agents.length, 128);
+  assert.deepEqual(
+    parsed?.agents.slice(0, 2).map((agent) => agent.id),
+    ["run-0", `run-${oversized - 127}`],
+  );
+  assert.equal(parsed?.agents.at(-1)?.id, `run-${oversized - 1}`);
+  assert.equal(parsed?.jobs.length, 128);
+  assert.deepEqual(
+    parsed?.jobs.slice(0, 2).map((job) => job.id),
+    ["job-0", `job-${oversized - 127}`],
+  );
+  assert.equal(parsed?.jobs.at(-1)?.id, `job-${oversized - 1}`);
+});
+
+test("agent-console parser rejects persisted data with more active records than the bound", () => {
+  const runningAgents = (count) =>
+    Array.from({ length: count }, (_, index) => ({
+      id: `run-${index}`,
+      displayName: `Agent ${index}`,
+      agentType: "executor",
+      status: "running",
+      startedAt: index,
+    }));
+
+  assert.equal(
+    parseAgentConsoleSnapshot({
+      profileId: "build",
+      activity: [],
+      agents: runningAgents(129),
+      jobs: [],
+    }),
+    undefined,
+    "more live runs than the bound is corrupt persisted data, not history to trim",
+  );
+  assert.equal(
+    parseAgentConsoleSnapshot({
+      profileId: "build",
+      activity: [],
+      agents: runningAgents(128),
+      jobs: [],
+    })?.agents.length,
+    128,
+  );
+  assert.equal(
+    parseAgentConsoleSnapshot({
+      profileId: "build",
+      activity: [],
+      agents: [],
+      jobs: Array.from({ length: 129 }, (_, index) => ({
+        id: `job-${index}`,
+        type: "work-node",
+        label: `Job ${index}`,
+        status: "queued",
+        queuedAt: index,
+      })),
+    }),
+    undefined,
+  );
+});
+
 test("agent-console parser rejects a malformed record inside the discarded prefix", () => {
   const validAgent = (index) => ({
     id: `run-${index}`,
@@ -813,7 +1178,7 @@ test("agent-console parser rejects a malformed record inside the discarded prefi
   );
 });
 
-test("agent-console deduplicates usage event ids before capping", () => {
+test("agent-console deduplicates usage event ids without evicting replay identities", () => {
   const snapshot = createAgentConsoleSnapshot({
     profileId: "build",
     activity: [],
@@ -834,7 +1199,7 @@ test("agent-console deduplicates usage event ids before capping", () => {
     "usage-distinct-b",
   ]);
 
-  const capped = createAgentConsoleSnapshot({
+  const preserved = createAgentConsoleSnapshot({
     profileId: "build",
     activity: [],
     agents: [],
@@ -847,8 +1212,8 @@ test("agent-console deduplicates usage event ids before capping", () => {
     },
   });
 
-  assert.equal(capped.mainUsage?.eventIds.length, 256);
-  assert.equal(new Set(capped.mainUsage?.eventIds).size, 256);
+  assert.equal(preserved.mainUsage?.eventIds.length, 260);
+  assert.equal(new Set(preserved.mainUsage?.eventIds).size, 260);
 });
 
 test("agent-console snapshot factory copies nested manifest, decision, and graph arrays", () => {

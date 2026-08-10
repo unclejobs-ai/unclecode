@@ -388,10 +388,59 @@ export function createAgentConsoleSnapshot(
     })),
     // A snapshot written before the lifecycle projection existed carries
     // neither array; treat that as empty rather than throwing on resume.
-    agents: (input.agents ?? []).slice(-MAX_PERSISTED_AGENT_RUNS).map(copyAgentRun),
-    jobs: (input.jobs ?? []).slice(-MAX_PERSISTED_ASYNC_JOBS).map(copyAsyncJob),
+    agents: boundLifecycleRecords(input.agents ?? [], MAX_PERSISTED_AGENT_RUNS, isActiveAgentRun)
+      .map(copyAgentRun),
+    jobs: boundLifecycleRecords(input.jobs ?? [], MAX_PERSISTED_ASYNC_JOBS, isActiveAsyncJob)
+      .map(copyAsyncJob),
     ...(input.mainUsage ? { mainUsage: copyAgentRunUsage(input.mainUsage) } : {}),
   };
+}
+
+/**
+ * One definition of "still live", shared by the snapshot factory, the resume
+ * parser, and resume normalization. The three have to agree exactly: a record
+ * one of them counts as history and another counts as live would be trimmed
+ * away while still running, or resurrected on resume.
+ */
+function isActiveAgentRun(run: AgentRun): boolean {
+  return run.status === "queued" || run.status === "running" || run.status === "waiting";
+}
+
+function isActiveAsyncJob(job: AsyncJob): boolean {
+  return job.status === "queued" || job.status === "running";
+}
+
+/**
+ * Bound a lifecycle projection without losing work that is still live.
+ *
+ * The cap exists so settled history cannot grow with session length, so
+ * history is what pays for it: the oldest settled records are discarded first
+ * and every active record is kept, because a run or job the operator can still
+ * steer, cancel, or resume has to stay addressable. Relative order is
+ * preserved, so the console renders the sequence it persisted.
+ *
+ * When active records alone exceed the cap the list overflows rather than
+ * erasing live work. The producer caps concurrency; an overflow here is a
+ * visible symptom instead of an agent that silently disappeared.
+ */
+function boundLifecycleRecords<T>(
+  records: readonly T[],
+  limit: number,
+  isActive: (record: T) => boolean,
+): readonly T[] {
+  if (records.length <= limit) {
+    return records;
+  }
+  let discardable = records.length - limit;
+  const retained: T[] = [];
+  for (const record of records) {
+    if (discardable > 0 && !isActive(record)) {
+      discardable -= 1;
+      continue;
+    }
+    retained.push(record);
+  }
+  return retained;
 }
 
 function copyPersistedPromptManifest(manifest: PersistedPromptManifest): PersistedPromptManifest {
@@ -451,11 +500,17 @@ function copyWorkGraph(graph: WorkGraph): WorkGraph {
   };
 }
 
+/** Fixed, bounded summary for a tool call resume can no longer settle. */
+const INTERRUPTED_TOOL_ACTIVITY_SUMMARY = "cancelled · interrupted before the tool reported";
+
 /**
  * Resume normalization: a run or job that was active when the process died
  * cannot be reattached, so it settles as `interrupted` instead of rendering a
- * phantom running count. Settled records are left exactly as persisted, and
- * the caller's snapshot is never mutated.
+ * phantom running count, and it drops the tool label it was working through
+ * because nothing is in flight any more. A tool call that never reported is
+ * cancelled for the same reason — no completion will ever arrive for it.
+ * Settled records are left exactly as persisted, and the caller's snapshot is
+ * never mutated.
  */
 export function markUnrecoverableAgentConsoleWorkInterrupted(
   snapshot: AgentConsoleSnapshot,
@@ -463,24 +518,37 @@ export function markUnrecoverableAgentConsoleWorkInterrupted(
 ): AgentConsoleSnapshot {
   let changed = false;
   const agents = (snapshot.agents ?? []).map((agent) => {
-    if (agent.status !== "queued" && agent.status !== "running" && agent.status !== "waiting") {
+    if (!isActiveAgentRun(agent)) {
       return agent;
     }
     changed = true;
-    return { ...agent, status: "interrupted" as const, completedAt: now };
+    const { currentActivity, ...settled } = agent;
+    return { ...settled, status: "interrupted" as const, completedAt: now };
   });
   const jobs = (snapshot.jobs ?? []).map((job) => {
-    if (job.status !== "queued" && job.status !== "running") {
+    if (!isActiveAsyncJob(job)) {
       return job;
     }
     changed = true;
     return { ...job, status: "interrupted" as const, completedAt: now };
   });
+  const activity = snapshot.activity.map((entry) => {
+    if (entry.status !== "running") {
+      return entry;
+    }
+    changed = true;
+    return {
+      ...entry,
+      status: "cancelled" as const,
+      summary: INTERRUPTED_TOOL_ACTIVITY_SUMMARY,
+      completedAt: now,
+    };
+  });
 
   if (!changed) {
     return snapshot;
   }
-  return createAgentConsoleSnapshot({ ...snapshot, agents, jobs });
+  return createAgentConsoleSnapshot({ ...snapshot, activity, agents, jobs });
 }
 
 function copyAgentRun(run: AgentRun): AgentRun {
@@ -519,11 +587,15 @@ function copyAsyncJob(job: AsyncJob): AsyncJob {
       : { errorSummary: boundLifecycleSummary(job.errorSummary) }),
   };
 }
+/**
+ * Keep every per-route replay identity for the same reason as the aggregate
+ * ledger; route eviction would make provider/model attribution diverge.
+ */
 function copyAgentRunUsageRoute(route: AgentRunUsageRoute): AgentRunUsageRoute {
   return {
     provider: route.provider,
     model: route.model,
-    eventIds: [...new Set(route.eventIds)].slice(-MAX_PERSISTED_USAGE_EVENT_IDS),
+    eventIds: [...new Set(route.eventIds)],
     ...(route.inputTokens === undefined ? {} : { inputTokens: route.inputTokens }),
     ...(route.outputTokens === undefined ? {} : { outputTokens: route.outputTokens }),
     ...(route.cacheReadTokens === undefined ? {} : { cacheReadTokens: route.cacheReadTokens }),
@@ -534,24 +606,20 @@ function copyAgentRunUsageRoute(route: AgentRunUsageRoute): AgentRunUsageRoute {
 }
 
 
+/**
+ * Replay identities intentionally live for the full session. Evicting an older
+ * id would let a resumed trace charge lifetime totals a second time.
+ */
 function copyAgentRunUsage(usage: AgentRunUsage): AgentRunUsage {
   return {
-    // Stable-deduplicate before capping so duplicate-heavy input cannot evict
-    // distinct replay identities from the tail.
-    eventIds: [...new Set(usage.eventIds)].slice(-MAX_PERSISTED_USAGE_EVENT_IDS),
+    eventIds: [...new Set(usage.eventIds)],
     ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
     ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
     ...(usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
     ...(usage.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: usage.cacheWriteTokens }),
     ...(usage.cacheSavingsUsd === undefined ? {} : { cacheSavingsUsd: usage.cacheSavingsUsd }),
-    ...(usage.routes === undefined
-      ? {}
-      : {
-          routes: usage.routes
-            .slice(-MAX_PERSISTED_USAGE_ROUTES)
-            .map(copyAgentRunUsageRoute),
-        }),
     ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
+    ...(usage.routes === undefined ? {} : { routes: usage.routes.map(copyAgentRunUsageRoute) }),
   };
 }
 
@@ -561,8 +629,6 @@ const TOOL_ACTIVITY_KIND_SET = new Set<string>(TOOL_ACTIVITY_KINDS);
 const TOOL_ACTIVITY_STATUS_SET = new Set<string>(TOOL_ACTIVITY_STATUSES);
 const MAX_PERSISTED_AGENT_RUNS = 128;
 const MAX_PERSISTED_ASYNC_JOBS = 128;
-const MAX_PERSISTED_USAGE_ROUTES = 32;
-const MAX_PERSISTED_USAGE_EVENT_IDS = 256;
 const AGENT_RUN_STATUS_SET = new Set<string>(AGENT_RUN_STATUSES);
 const ASYNC_JOB_STATUS_SET = new Set<string>(ASYNC_JOB_STATUSES);
 
@@ -596,8 +662,20 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
   }
 
   // Absent lifecycle fields are a legacy snapshot, not a malformed one.
-  const agents = parseBoundedList(record, "agents", parseAgentRun, MAX_PERSISTED_AGENT_RUNS);
-  const jobs = parseBoundedList(record, "jobs", parseAsyncJob, MAX_PERSISTED_ASYNC_JOBS);
+  const agents = parseBoundedList(
+    record,
+    "agents",
+    parseAgentRun,
+    MAX_PERSISTED_AGENT_RUNS,
+    isActiveAgentRun,
+  );
+  const jobs = parseBoundedList(
+    record,
+    "jobs",
+    parseAsyncJob,
+    MAX_PERSISTED_ASYNC_JOBS,
+    isActiveAsyncJob,
+  );
   if (!agents || !jobs) {
     return undefined;
   }
@@ -653,15 +731,22 @@ function isNonNegativeFinite(value: unknown): value is number {
  * yields `[]`; a malformed entry rejects the whole snapshot even when the
  * bound would have discarded it, so a poisoned prefix cannot be laundered.
  *
- * Every untrusted entry is validated, but the ring holds at most `limit`
- * parsed records live, so an oversized persisted list cannot inflate retained
- * memory with projections that are about to be discarded.
+ * Every untrusted entry is validated, but only the newest `limit` records and
+ * the active records evicted from that window are held live, so an oversized
+ * persisted list cannot inflate retained memory with projections that are
+ * about to be discarded. Active records outlive the window because the bound
+ * is charged to settled history, exactly as it is when the snapshot is built.
+ *
+ * A list whose active records alone exceed the bound is rejected outright: the
+ * writer caps concurrent work, so that shape is corrupt persisted data, and
+ * quietly dropping live records would hide work an operator can still act on.
  */
 function parseBoundedList<T>(
   record: Record<string, unknown>,
   key: string,
   parseEntry: (value: unknown) => T | undefined,
   limit: number,
+  isActive: (item: T) => boolean,
 ): readonly T[] | undefined {
   if (!hasOwn(record, key)) {
     return [];
@@ -672,20 +757,38 @@ function parseBoundedList<T>(
   }
 
   const ring: T[] = [];
+  const evictedActive: T[] = [];
+  let activeCount = 0;
   let oldest = 0;
   for (const entry of value) {
     const item = parseEntry(entry);
     if (item === undefined) {
       return undefined;
     }
+    if (isActive(item)) {
+      activeCount += 1;
+      if (activeCount > limit) {
+        return undefined;
+      }
+    }
     if (ring.length < limit) {
       ring.push(item);
       continue;
     }
+    const displaced = ring[oldest];
+    if (displaced !== undefined && isActive(displaced)) {
+      evictedActive.push(displaced);
+    }
     ring[oldest] = item;
     oldest = (oldest + 1) % limit;
   }
-  return oldest === 0 ? ring : [...ring.slice(oldest), ...ring.slice(0, oldest)];
+
+  const newest = oldest === 0 ? ring : [...ring.slice(oldest), ...ring.slice(0, oldest)];
+  return boundLifecycleRecords(
+    evictedActive.length === 0 ? newest : [...evictedActive, ...newest],
+    limit,
+    isActive,
+  );
 }
 
 function parseStringList(value: unknown): readonly string[] | undefined {
@@ -1044,12 +1147,70 @@ function parseAgentRunUsageRoute(value: unknown): AgentRunUsageRoute | undefined
 function parseAgentRunUsageRoutes(value: unknown): readonly AgentRunUsageRoute[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const routes: AgentRunUsageRoute[] = [];
-  for (const entry of value.slice(-MAX_PERSISTED_USAGE_ROUTES)) {
+  for (const entry of value) {
     const route = parseAgentRunUsageRoute(entry);
     if (!route) return undefined;
     routes.push(route);
   }
   return routes;
+}
+
+const USAGE_ROUTE_TOKEN_KEYS = [
+  "inputTokens",
+  "outputTokens",
+  "cacheReadTokens",
+  "cacheWriteTokens",
+] as const;
+const USAGE_ROUTE_MONEY_KEYS = ["cacheSavingsUsd", "costUsd"] as const;
+
+function usageRoutesMatchAggregate(
+  aggregate: Record<string, unknown>,
+  aggregateEventIds: readonly string[],
+  routes: readonly AgentRunUsageRoute[],
+): boolean {
+  const aggregateIds = new Set(aggregateEventIds);
+  const routedIds = new Set<string>();
+  const routeKeys = new Set<string>();
+  for (const route of routes) {
+    const routeKey = `${route.provider}\0${route.model}`;
+    if (routeKeys.has(routeKey)) return false;
+    routeKeys.add(routeKey);
+    for (const eventId of route.eventIds) {
+      if (!aggregateIds.has(eventId) || routedIds.has(eventId)) return false;
+      routedIds.add(eventId);
+    }
+  }
+
+  const allEventsAttributed = routedIds.size === aggregateIds.size;
+  for (const key of USAGE_ROUTE_TOKEN_KEYS) {
+    const aggregateTotal = typeof aggregate[key] === "number" ? aggregate[key] : 0;
+    let routeTotal = 0;
+    for (const route of routes) routeTotal += route[key] ?? 0;
+    if (
+      !Number.isSafeInteger(routeTotal)
+      || (allEventsAttributed ? routeTotal !== aggregateTotal : routeTotal > aggregateTotal)
+    ) {
+      return false;
+    }
+  }
+  for (const key of USAGE_ROUTE_MONEY_KEYS) {
+    const aggregateTotal = typeof aggregate[key] === "number" ? aggregate[key] : 0;
+    let routeTotal = 0;
+    for (const route of routes) routeTotal += route[key] ?? 0;
+    const operationCount = aggregateIds.size + routes.length;
+    const tolerance = Number.EPSILON
+      * Math.max(1, Math.abs(aggregateTotal), Math.abs(routeTotal))
+      * Math.max(4, operationCount);
+    if (
+      !Number.isFinite(routeTotal)
+      || (allEventsAttributed
+        ? Math.abs(routeTotal - aggregateTotal) > tolerance
+        : routeTotal - aggregateTotal > tolerance)
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function parseAgentRunUsage(value: unknown): AgentRunUsage | undefined {
@@ -1071,6 +1232,10 @@ function parseAgentRunUsage(value: unknown): AgentRunUsage | undefined {
   ) {
     return undefined;
   }
+  if (routes && !usageRoutesMatchAggregate(record, eventIds, routes)) {
+    return undefined;
+  }
+
 
   return copyAgentRunUsage({
     eventIds,

@@ -8,13 +8,13 @@ import {
   type AgentRunUsage,
   type AgentRunUsageRoute,
   type AsyncJob,
+  type TerminalAgentRunStatus,
   type ToolActivity,
   type WorkNodeStatus,
   type ToolActivityKind,
 } from "@unclecode/contracts";
 
 const MAX_TOOL_ACTIVITY = 80;
-const MAX_USAGE_ROUTES = 32;
 
 type TraceRecord = Record<string, unknown>;
 
@@ -65,6 +65,12 @@ function applyToolLifecycleEvent(
 
   const existingIndex = snapshot.activity.findIndex((activity) => activity.toolCallId === toolCallId);
   const current = existingIndex === -1 ? undefined : snapshot.activity[existingIndex];
+  // A tool call reports its outcome once. A late start or a repeated
+  // completion would rewrite a row the console has already settled — and drag
+  // the owning run's current activity back onto it — so both are dropped.
+  if (current && current.status !== "running") {
+    return snapshot;
+  }
   const startedAt = readTimestamp(trace, "startedAt") ?? current?.startedAt ?? Date.now();
   const input = asRecord(trace.input);
   const scopedRunId = resolveToolAgentRunId(snapshot, trace);
@@ -184,9 +190,20 @@ function applyAgentLifecycleEvent(
   if (event.type === "job.settled") {
     const id = readNonEmptyString(trace, "jobId");
     const completedAt = readTimestamp(trace, "completedAt");
-    const status = readJobTerminalStatus(trace.status);
+    const status = readTerminalStatus(trace.status);
     const current = snapshot.jobs.find((job) => job.id === id);
     if (!id || !current || completedAt === undefined || !status) {
+      return snapshot;
+    }
+    // A job an agent run owns settles only with that run, in the run's own
+    // projection: honouring a standalone settlement here would leave a finished
+    // job beside a run the console still shows as live. The event cannot be
+    // trusted to name its owner — a foreign, matching, or absent `agentRunId`
+    // all describe the same split — so the job's own link is what decides. A
+    // job that never opened a run still settles on its own, which is how work
+    // that was queued and then blocked or cancelled before dispatch reaches a
+    // terminal status at all.
+    if (current.agentRunId !== undefined) {
       return snapshot;
     }
     const startedAt = readTimestamp(trace, "startedAt");
@@ -194,7 +211,7 @@ function applyAgentLifecycleEvent(
     // supplied start cannot predate the queueing or an earlier recorded start,
     // and completion cannot predate any bound the job already carries.
     if (
-      readJobTerminalStatus(current.status)
+      readTerminalStatus(current.status)
       || completedAt < current.queuedAt
       || (current.startedAt !== undefined && completedAt < current.startedAt)
       || (startedAt !== undefined
@@ -242,32 +259,34 @@ function applyAgentLifecycleEvent(
       ...(continuationOf ? { continuationOf } : {}),
       startedAt,
     };
+    // Every run owns exactly one job, and that link travels on the event. The
+    // named job has to exist and has to be able to adopt this run: a settled
+    // job cannot be reopened, a job already owned by another run cannot be
+    // stolen, and a run cannot predate the job that queued it. Anything else
+    // is mis-routed, so the whole event is rejected rather than registering a
+    // run beside a job that never took ownership.
     const jobId = readNonEmptyString(trace, "jobId");
-    // The job a run claims must be able to adopt it: a settled job cannot be
-    // reopened, a job already owned by another run cannot be stolen, and a run
-    // cannot predate the job that queued it. Rejecting the whole event keeps
-    // the run out of the snapshot instead of orphaning it beside a job that
-    // never took ownership.
     const linkedJob = jobId === undefined
       ? undefined
       : snapshot.jobs.find((job) => job.id === jobId);
     if (
-      linkedJob
-      && (readJobTerminalStatus(linkedJob.status)
-        || (linkedJob.agentRunId !== undefined && linkedJob.agentRunId !== id)
-        || linkedJob.queuedAt > startedAt)
+      !linkedJob
+      || readTerminalStatus(linkedJob.status)
+      || (linkedJob.agentRunId !== undefined && linkedJob.agentRunId !== id)
+      || linkedJob.queuedAt > startedAt
     ) {
       return snapshot;
     }
-    const jobs = jobId
-      ? snapshot.jobs.map((job) => job.id === jobId
-          ? { ...job, agentRunId: id, status: "running" as const, startedAt }
-          : job)
-      : snapshot.jobs;
     return createAgentConsoleSnapshot({
       ...snapshot,
       agents: upsertById(snapshot.agents, agent),
-      jobs,
+      // Keyed on the resolved record, so no other job can be reached from here.
+      jobs: upsertById(snapshot.jobs, {
+        ...linkedJob,
+        agentRunId: id,
+        status: "running" as const,
+        startedAt,
+      }),
     });
   }
 
@@ -277,12 +296,12 @@ function applyAgentLifecycleEvent(
   const id = readNonEmptyString(trace, "runId");
   const current = snapshot.agents.find((agent) => agent.id === id);
   const completedAt = readTimestamp(trace, "completedAt");
-  const status = readAgentTerminalStatus(trace.status);
+  const status = readTerminalStatus(trace.status);
   if (!id || !current || completedAt === undefined || !status) {
     return snapshot;
   }
   // A run settles once, and never before it started.
-  if (readAgentTerminalStatus(current.status) || completedAt < current.startedAt) {
+  if (readTerminalStatus(current.status) || completedAt < current.startedAt) {
     return snapshot;
   }
   const summary = readNonEmptyString(trace, "summary");
@@ -297,29 +316,33 @@ function applyAgentLifecycleEvent(
     ...(summary ? { summary } : {}),
     ...(errorSummary ? { errorSummary } : {}),
   };
-  // The owning job settles in the same projection as its run, so the console
-  // can never render a finished agent beside a job that is still running. A
-  // link naming another run's job, or a job whose own timeline outlives the
-  // run, is mis-routed: reject the event rather than settle half of it.
+  // A run settles with the job it owns, in the same projection, so the console
+  // can never render a finished agent beside a job that is still running. The
+  // link has to name that exact job: an absent, unknown, unowned, or
+  // foreign-owned job means ownership was never established, and a job whose
+  // own timeline outlives the run is mis-routed. Reject the event rather than
+  // settle half of it.
   const jobId = readNonEmptyString(trace, "jobId");
   const linkedJob = jobId === undefined
     ? undefined
     : snapshot.jobs.find((job) => job.id === jobId);
   if (
-    linkedJob
-    && ((linkedJob.agentRunId !== undefined && linkedJob.agentRunId !== id)
-      || linkedJob.queuedAt > completedAt
-      || (linkedJob.startedAt !== undefined && linkedJob.startedAt > completedAt))
+    !linkedJob
+    || linkedJob.agentRunId !== id
+    || linkedJob.queuedAt > completedAt
+    || (linkedJob.startedAt !== undefined && linkedJob.startedAt > completedAt)
   ) {
     return snapshot;
   }
-  const linkedStatus = readJobTerminalStatus(trace.status);
   return createAgentConsoleSnapshot({
     ...snapshot,
     agents: upsertById(snapshot.agents, agent),
-    jobs: linkedJob && linkedStatus
-      ? settleLinkedJob(snapshot.jobs, linkedJob, { status: linkedStatus, completedAt, summary, errorSummary })
-      : snapshot.jobs,
+    jobs: settleLinkedJob(snapshot.jobs, linkedJob, {
+      status,
+      completedAt,
+      summary,
+      errorSummary,
+    }),
   });
 }
 
@@ -338,7 +361,7 @@ function settleLinkedJob(
     readonly errorSummary: string | undefined;
   },
 ): readonly AsyncJob[] {
-  if (readJobTerminalStatus(current.status)) {
+  if (readTerminalStatus(current.status)) {
     return jobs;
   }
   return upsertById(jobs, {
@@ -369,6 +392,10 @@ function applyUsageEvent(
   if (!eventId) {
     return snapshot;
   }
+  if (!readNonEmptyString(trace, "provider") || !readNonEmptyString(trace, "model")) {
+    return snapshot;
+  }
+
 
   // Only an omitted scope means the main session. `exactOptionalPropertyTypes`
   // lets a producer leave `agentRunId` out; it never lets one set the property
@@ -496,7 +523,7 @@ function appendUsageRoute(
     ...sumUsageMoney(current, trace, "cacheSavingsUsd"),
     ...sumUsageMoney(current, trace, "costUsd"),
   };
-  if (routeIndex === -1) return [...currentRoutes, route].slice(-MAX_USAGE_ROUTES);
+  if (routeIndex === -1) return [...currentRoutes, route];
   return currentRoutes.map((candidate, index) => index === routeIndex ? route : candidate);
 }
 
@@ -533,13 +560,11 @@ function upsertById<T extends { readonly id: string }>(items: readonly T[], item
     : items.map((candidate, candidateIndex) => candidateIndex === index ? item : candidate);
 }
 
-function readJobTerminalStatus(value: unknown): AsyncJob["status"] | undefined {
-  return value === "completed" || value === "failed" || value === "cancelled" || value === "interrupted"
-    ? value
-    : undefined;
-}
-
-function readAgentTerminalStatus(value: unknown): AgentRun["status"] | undefined {
+/**
+ * Runs and jobs share one terminal vocabulary, so one reader keeps a run and
+ * the job it owns from settling on different words for the same outcome.
+ */
+function readTerminalStatus(value: unknown): TerminalAgentRunStatus | undefined {
   return value === "completed" || value === "failed"
     || value === "cancelled" || value === "interrupted"
     ? value
@@ -586,14 +611,28 @@ function applyWorkLifecycleEvent(
   }
   const nodeId = readNonEmptyString(trace, "nodeId");
   const status = readWorkNodeStatus(trace.status);
-  if (!nodeId || !status || !graph.nodes.some((node) => node.id === nodeId)) {
+  const node = nodeId === undefined
+    ? undefined
+    : graph.nodes.find((candidate) => candidate.id === nodeId);
+  // A node reports each outcome once. A terminal node is finished work, so a
+  // straggling start from a runner that has already been torn down — or a
+  // repeated terminal event — must not rewrite the plan after the fact.
+  if (
+    !node
+    || !status
+    || node.status === status
+    || node.status === "completed"
+    || node.status === "failed"
+    || node.status === "cancelled"
+  ) {
     return snapshot;
   }
   return createAgentConsoleSnapshot({
     ...snapshot,
     workGraph: {
       ...graph,
-      nodes: graph.nodes.map((node) => node.id === nodeId ? { ...node, status } : node),
+      nodes: graph.nodes.map((candidate) =>
+        candidate.id === node.id ? { ...candidate, status } : candidate),
     },
   });
 }

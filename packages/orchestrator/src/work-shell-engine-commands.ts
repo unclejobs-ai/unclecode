@@ -1,3 +1,5 @@
+import { AGENT_CONSOLE_TABS, type AgentConsoleTab } from "@unclecode/contracts";
+
 import type {
   WorkShellLoadedSkill,
   WorkShellMemoryScope,
@@ -6,13 +8,22 @@ import type {
 } from "./work-shell-engine.js";
 import { runRustCommandSync } from "./rust-command.js";
 
+/**
+ * Every seam that accepts a Rust-issued console tab funnels through this
+ * guard, so an absent or unknown tab is refused instead of silently opening
+ * whichever tab the console happens to remember.
+ */
+export function isAgentConsoleTab(value: unknown): value is AgentConsoleTab {
+  return (AGENT_CONSOLE_TABS as readonly unknown[]).includes(value);
+}
+
 export type ResolvedWorkShellBuiltinCommand =
   | { readonly kind: "exit" }
   | { readonly kind: "clear" }
   | { readonly kind: "help" }
   | { readonly kind: "context" }
   | { readonly kind: "cache" }
-  | { readonly kind: "agents" }
+  | { readonly kind: "agent-console"; readonly tab: AgentConsoleTab }
   | { readonly kind: "reload" }
   | { readonly kind: "status" }
   | { readonly kind: "sessions" }
@@ -23,7 +34,17 @@ export type ResolvedWorkShellBuiltinCommand =
   | { readonly kind: "cancel" }
   | { readonly kind: "harness" }
   | { readonly kind: "auth-key" }
-  | { readonly kind: "unknown-slash"; readonly line: string; readonly suggestion?: string }
+  | {
+      readonly kind: "unknown-slash";
+      readonly line: string;
+      readonly suggestion?: string;
+      /**
+       * Set when Rust classified the line as a console-like form that can
+       * never run. The runtime returns without touching the transcript: a
+       * half-typed `/tod` is a keystroke, not a command worth narrating.
+       */
+      readonly consoleInvalid?: boolean;
+    }
   | { readonly kind: "trace-mode"; readonly traceMode: "verbose" | "minimal" }
   | { readonly kind: "reasoning"; readonly line: string }
   | { readonly kind: "model"; readonly line: string }
@@ -48,9 +69,12 @@ function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinComm
   if (!value || typeof value !== "object") {
     return false;
   }
-  const command = value as { kind?: unknown; traceMode?: unknown; line?: unknown; skillName?: unknown; suggestion?: unknown };
+  const command = value as { kind?: unknown; tab?: unknown; traceMode?: unknown; line?: unknown; skillName?: unknown; suggestion?: unknown; consoleInvalid?: unknown };
   if (typeof command.kind !== "string") {
     return false;
+  }
+  if (command.kind === "agent-console") {
+    return isAgentConsoleTab(command.tab);
   }
   if (command.kind === "trace-mode") {
     return command.traceMode === "verbose" || command.traceMode === "minimal";
@@ -59,7 +83,9 @@ function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinComm
     return typeof command.line === "string";
   }
   if (command.kind === "unknown-slash") {
-    return typeof command.line === "string" && (command.suggestion === undefined || typeof command.suggestion === "string");
+    return typeof command.line === "string"
+      && (command.suggestion === undefined || typeof command.suggestion === "string")
+      && (command.consoleInvalid === undefined || typeof command.consoleInvalid === "boolean");
   }
   if (command.kind === "skill") {
     return typeof command.line === "string" && (command.skillName === undefined || typeof command.skillName === "string");
@@ -70,7 +96,6 @@ function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinComm
     "help",
     "context",
     "cache",
-    "agents",
     "reload",
     "status",
     "sessions",

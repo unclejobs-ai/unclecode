@@ -4,6 +4,13 @@ export type RegisteredSlashCommand = {
   readonly command: string;
   readonly routeTo: readonly string[];
   readonly metadata: CommandMetadata;
+  /**
+   * Exact-only commands are reachable by their full name and aliases, never by
+   * a unique prefix. The Agent Console commands use it so `/agent`, `/job`, and
+   * `/tod` fail closed instead of resolving to a route the CLI cannot run.
+   * `command_router::resolve_builtin` enforces the same rule on the Rust side.
+   */
+  readonly exactOnly?: boolean;
 };
 
 export class CommandRegistry {
@@ -41,7 +48,8 @@ export class CommandRegistry {
     }
 
     const prefixMatches = this.entries.filter((entry) =>
-      entry.command.startsWith(normalized) || entry.metadata.aliases?.some((alias) => normalizeSlashInput(alias).startsWith(normalized)),
+      !entry.exactOnly
+      && (entry.command.startsWith(normalized) || entry.metadata.aliases?.some((alias) => normalizeSlashInput(alias).startsWith(normalized))),
     );
 
     return prefixMatches.length === 1 ? prefixMatches[0]?.routeTo : undefined;
@@ -165,7 +173,20 @@ export function createWorkShellCommandRegistry(extraEntries: readonly Registered
     {
       command: "/agents",
       routeTo: ["agents"],
-      metadata: builtinLocal("Inspect current-session agent runs and costs."),
+      metadata: builtinLocal("에이전트 실행 상태와 transcript를 엽니다"),
+      exactOnly: true,
+    },
+    {
+      command: "/jobs",
+      routeTo: ["jobs"],
+      metadata: builtinLocal("백그라운드 job 상태를 엽니다"),
+      exactOnly: true,
+    },
+    {
+      command: "/todo",
+      routeTo: ["todo"],
+      metadata: builtinLocal("현재 WorkGraph 진행 상태를 엽니다"),
+      exactOnly: true,
     },
     {
       command: "/model",

@@ -139,10 +139,48 @@ test("runtime coding agent emits cache usage with estimated savings", async () =
   await agent.runTurn("reuse the stable prompt prefix");
 
   const usage = events.find((event) => event.type === "usage.recorded");
+  assert.equal(usage?.provider, "openai");
+  assert.equal(usage?.model, "gpt-5.6-sol");
   assert.equal(usage?.inputTokens, 1_000);
   assert.equal(usage?.outputTokens, 200);
   assert.equal(usage?.cacheReadTokens, 750);
   assert.equal(usage?.cacheWriteTokens, 0);
   assert.equal(usage?.costUsd, 0.01);
   assert.ok(usage?.cacheSavingsUsd > 0);
+});
+
+test("runtime coding agent keeps one model route when settings change mid-turn", async () => {
+  const events = [];
+  let resolveTurn;
+  const pendingTurn = new Promise((resolve) => {
+    resolveTurn = resolve;
+  });
+  const agent = new RuntimeCodingAgent(
+    createAgentOptions({
+      model: "model-a",
+      providerOverride: {
+        ...createStubProvider(),
+        runTurn: () => pendingTurn,
+      },
+    }),
+  );
+  agent.setTraceListener((event) => events.push(event));
+
+  const result = agent.runTurn("keep the dispatched model");
+  agent.updateRuntimeSettings({ model: "model-b" });
+  resolveTurn({
+    text: "done",
+    usage: { inputTokens: 10, outputTokens: 2 },
+    costUsd: 0.001,
+  });
+  await result;
+
+  const routed = events.filter((event) =>
+    event.type === "turn.started"
+    || event.type === "provider.route"
+    || event.type === "provider.calling"
+    || event.type === "turn.completed"
+    || event.type === "usage.recorded"
+  );
+  assert.deepEqual(routed.map((event) => event.model), routed.map(() => "model-a"));
 });

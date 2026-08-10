@@ -344,7 +344,7 @@ test("work-shell command helpers classify builtins, local commands, and reusable
   assert.deepEqual(resolveWorkShellBuiltinCommand("/auth key"), { kind: "auth-key" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/queue"), { kind: "queue" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/cache"), { kind: "cache" });
-  assert.deepEqual(resolveWorkShellBuiltinCommand("/agents"), { kind: "agents" });
+  assert.deepEqual(resolveWorkShellBuiltinCommand("/agents"), { kind: "agent-console", tab: "agents" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/queue clear"), { kind: "queue-clear" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/cancel"), { kind: "cancel" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/harness"), { kind: "harness" });
@@ -2827,15 +2827,32 @@ test("WorkShellEngine applies GPT-5.6 model and reasoning updates together", asy
   assert.ok(engine.getState().panel.lines.includes("reasoning:none"));
 });
 
-test("WorkShellEngine opens cache telemetry and agent history locally", async () => {
+test("WorkShellEngine opens cache telemetry locally", async () => {
   const { engine, calls } = createEngine();
 
   await engine.initialize();
   await engine.handleSubmit("/cache");
   assert.equal(engine.getState().panel.title, "Cache Telemetry");
-  await engine.handleSubmit("/agents");
-  assert.equal(engine.getState().panel.title, "Agent History");
   assert.equal(calls.turns.length, 0);
+});
+
+test("WorkShellEngine opens the agent console tab an idle slash command names", async () => {
+  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"]]) {
+    const { engine, calls } = createEngine();
+
+    await engine.initialize();
+    const entriesBefore = engine.getState().entries.length;
+    await engine.handleSubmit(line);
+
+    assert.equal(engine.getState().agentConsoleView.open, true, `${line} must open the console`);
+    assert.equal(engine.getState().agentConsoleView.tab, tab);
+    assert.equal(
+      engine.getState().entries.length,
+      entriesBefore,
+      `${line} must not write a conversation entry`,
+    );
+    assert.equal(calls.turns.length, 0);
+  }
 });
 
 test("WorkShellEngine projects provider cache usage into the session ledger", async () => {
@@ -2845,6 +2862,8 @@ test("WorkShellEngine projects provider cache usage into the session ledger", as
   emitTrace({
     type: "usage.recorded",
     eventId: "usage-1",
+    provider: "openai",
+    model: "gpt-5.6-sol",
     inputTokens: 1_000,
     outputTokens: 200,
     cacheReadTokens: 750,
@@ -2862,6 +2881,17 @@ test("WorkShellEngine projects provider cache usage into the session ledger", as
     cacheWriteTokens: 50,
     cacheSavingsUsd: 0.004,
     costUsd: 0.01,
+    routes: [{
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      eventIds: ["usage-1"],
+      inputTokens: 1_000,
+      outputTokens: 200,
+      cacheReadTokens: 750,
+      cacheWriteTokens: 50,
+      cacheSavingsUsd: 0.004,
+      costUsd: 0.01,
+    }],
   });
 });
 
@@ -4239,6 +4269,72 @@ test("WorkShellEngine binds ask_user to a durable composer decision", async () =
   assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
   assert.ok(calls.snapshots.some((snapshot) => snapshot.state === "requires_action"));
   assert.ok(calls.snapshots.some((snapshot) => snapshot.state === "running"));
+});
+
+test("WorkShellEngine still settles a pending decision when console routing throws", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  const { engine, calls } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+    },
+  });
+  await engine.initialize();
+
+  const result = interactionBridge.ask({
+    id: "decision-1",
+    title: "Execution choice",
+    questions: [{
+      id: "strategy",
+      question: "Choose execution strategy.",
+      options: [{ label: "Safe" }, { label: "Fast" }],
+      recommended: 0,
+    }],
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-1");
+
+  // Classifying the line is a console convenience. When it blows up, the
+  // answer the operator typed is still an answer: swallowing it would leave
+  // the run parked behind a question nothing can settle.
+  let routeCalls = 0;
+  engine.resolveBusySubmitDecision = async () => {
+    routeCalls += 1;
+    throw new Error("rust steer busy-submit exited 1");
+  };
+  const replies = [];
+  const handleReply = engine.handlePendingDecisionReply.bind(engine);
+  engine.handlePendingDecisionReply = (value) => {
+    replies.push(value);
+    handleReply(value);
+  };
+  const entriesBefore = engine.getState().entries.length;
+
+  await engine.handleSubmit("2");
+
+  assert.equal(routeCalls, 1, "the classifier is consulted exactly once");
+  assert.deepEqual(replies, ["2"], "the original line settles the decision exactly once");
+  assert.deepEqual(await result, {
+    status: "answered",
+    answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
+  assert.equal(engine.getState().queuedCount, 0, "a failed route must not queue the answer");
+  assert.deepEqual(calls.turns, [], "a failed route must not open a provider turn");
+  assert.equal(engine.getState().isBusy, false);
+
+  // The failure is reported once, in the shell's own error voice, and the raw
+  // command failure never reaches the operator.
+  const added = engine.getState().entries.slice(entriesBefore);
+  assert.equal(added.length, 1, "the failure is reported once, not per question");
+  assert.equal(added[0]?.role, "system");
+  assert.match(added[0]?.text ?? "", /^ERR:Console commands are unavailable\./);
+  assert.doesNotMatch(added[0]?.text ?? "", /busy-submit/);
 });
 
 test("WorkShellEngine clears orphaned resumed decisions before accepting new input", async () => {
@@ -5707,6 +5803,233 @@ test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
   assert.ok(engine.getState().entries.some((entry) => /Running queued follow-up #1: second/.test(entry.text)));
 });
 
+function createBusyEngine() {
+  let releaseTurn;
+  const prompts = [];
+  const { engine, calls } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        prompts.push(prompt);
+        if (prompt === "first") {
+          await new Promise((resolve) => {
+            releaseTurn = resolve;
+          });
+        }
+        return { text: `reply:${prompt}` };
+      },
+    },
+  });
+  return { engine, calls, prompts, release: () => releaseTurn?.() };
+}
+
+test("WorkShellEngine opens the agent console during a busy turn without queueing it", async () => {
+  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"]]) {
+    const { engine, prompts, release } = createBusyEngine();
+
+    await engine.initialize();
+    const firstTurn = engine.handleSubmit("first");
+    while (
+      !engine.getState().isBusy
+      || !engine.getState().entries.some((entry) => entry.text === "first")
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    const entriesBefore = engine.getState().entries.map((entry) => entry.text);
+
+    await engine.handleSubmit(line);
+
+    assert.equal(engine.getState().agentConsoleView.open, true, `${line} must open while busy`);
+    assert.equal(engine.getState().agentConsoleView.tab, tab);
+    assert.equal(engine.getState().queuedCount, 0, `${line} must not be queued`);
+    assert.deepEqual(
+      engine.getState().entries.map((entry) => entry.text),
+      entriesBefore,
+      `${line} must not write a conversation entry`,
+    );
+    assert.equal(engine.getState().isBusy, true);
+
+    release();
+    await firstTurn;
+    assert.deepEqual(prompts, ["first"]);
+  }
+});
+
+test("WorkShellEngine still refuses unrelated slash commands during a busy turn", async () => {
+  const { engine, release } = createBusyEngine();
+
+  await engine.initialize();
+  const firstTurn = engine.handleSubmit("first");
+  while (!engine.getState().isBusy) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  await engine.handleSubmit("/model gpt-5.4");
+
+  assert.equal(engine.getState().agentConsoleView.open, false);
+  assert.equal(engine.getState().queuedCount, 0);
+  const rejection = engine.getState().entries.at(-1);
+  assert.equal(rejection?.role, "system");
+  assert.match(rejection?.text ?? "", /not queued/);
+  assert.match(rejection?.text ?? "", /\/agents/);
+  assert.match(rejection?.text ?? "", /\/jobs/);
+  assert.match(rejection?.text ?? "", /\/todo/);
+
+  release();
+  await firstTurn;
+});
+
+test("WorkShellEngine opens the agent console while a busy turn waits on a decision", async () => {
+  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"]]) {
+    const interactionBridge = createWorkShellInteractionBridge();
+    const prompts = [];
+    let releaseTurn;
+    let decision;
+    let settled;
+    const { engine } = createEngine({
+      options: {
+        provider: "openai",
+        model: "gpt-5.4",
+        mode: "default",
+        authLabel: "api-key-env",
+        reasoning: supportedReasoning,
+        cwd: "/repo",
+        contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+        interactionBridge,
+      },
+      agent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn(prompt) {
+          prompts.push(prompt);
+          // The turn stays in flight while it waits on the operator, so the
+          // shell is genuinely busy with a decision open — the exact state the
+          // console has to stay reachable in.
+          decision = interactionBridge.ask({
+            id: "decision-1",
+            title: "Execution choice",
+            questions: [{
+              id: "strategy",
+              question: "Choose execution strategy.",
+              options: [{ label: "Safe" }, { label: "Fast" }],
+              recommended: 0,
+            }],
+          });
+          void decision.then((value) => {
+            settled = value;
+          });
+          await new Promise((resolve) => {
+            releaseTurn = resolve;
+          });
+          return { text: `reply:${prompt}` };
+        },
+      },
+    });
+    await engine.initialize();
+
+    const firstTurn = engine.handleSubmit("first");
+    while (
+      !engine.getState().isBusy
+      || engine.getState().agentConsole.pendingDecision?.id !== "decision-1"
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    assert.equal(engine.getState().isBusy, true, `${line} needs a busy turn to be meaningful`);
+
+    const classified = [];
+    const classify = engine.resolveBusySubmitDecision.bind(engine);
+    engine.resolveBusySubmitDecision = async (value) => {
+      classified.push(value);
+      return classify(value);
+    };
+    const entriesBefore = engine.getState().entries.map((entry) => entry.text);
+
+    await engine.handleSubmit(line);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(classified, [line], `${line} must consult the Rust classifier once`);
+    assert.equal(engine.getState().isBusy, true, `${line} must not end the turn`);
+    assert.equal(engine.getState().agentConsoleView.open, true, `${line} must open the console`);
+    assert.equal(engine.getState().agentConsoleView.tab, tab);
+    assert.equal(
+      engine.getState().agentConsole.pendingDecision?.id,
+      "decision-1",
+      `${line} must leave the decision pending`,
+    );
+    assert.equal(settled, undefined, `${line} must not answer the decision`);
+    assert.equal(engine.getState().queuedCount, 0, `${line} must not queue`);
+    assert.deepEqual(engine.getState().entries.map((entry) => entry.text), entriesBefore);
+
+    await engine.handleSubmit("2");
+    assert.deepEqual(await decision, {
+      status: "answered",
+      answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
+    });
+    assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
+    assert.deepEqual(
+      classified,
+      [line, "2"],
+      "an ordinary answer must be classified once and still answer the decision",
+    );
+    assert.equal(engine.getState().queuedCount, 0, "the answer must not be queued either");
+
+    releaseTurn();
+    await firstTurn;
+    assert.deepEqual(prompts, ["first"]);
+  }
+});
+
+test("WorkShellEngine treats every console-like invalid slash form as a silent no-op", async () => {
+  for (const line of [
+    "/agent",
+    "/agen",
+    "/age",
+    "/job",
+    "/tod",
+    "/agents extra",
+    "/jobs extra",
+    "/todo extra",
+  ]) {
+    const { engine, calls } = createEngine();
+
+    await engine.initialize();
+    const entriesBefore = engine.getState().entries.map((entry) => entry.text);
+    const panelBefore = engine.getState().panel;
+
+    await engine.handleSubmit(line);
+
+    assert.equal(engine.getState().agentConsoleView.open, false, `${line} must not open the console`);
+    assert.deepEqual(calls.inline, [], `${line} must not run an inline command`);
+    assert.deepEqual(calls.turns, [], `${line} must not reach the provider`);
+    assert.equal(engine.getState().queuedCount, 0, `${line} must not touch the queue`);
+    assert.deepEqual(
+      engine.getState().entries.map((entry) => entry.text),
+      entriesBefore,
+      `${line} must leave no transcript residue`,
+    );
+    assert.equal(engine.getState().panel, panelBefore, `${line} must not replace the panel`);
+  }
+});
+
+test("WorkShellEngine keeps the established guidance for an ordinary unknown slash command", async () => {
+  const { engine, calls } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/definitely-unknown");
+
+  assert.equal(engine.getState().panel.title, "Command");
+  assert.ok(
+    engine.getState().entries.some((entry) => /^Unknown command \/definitely-unknown/.test(entry.text)),
+    "an unrelated unknown slash keeps its user-visible guidance",
+  );
+  assert.deepEqual(calls.inline, []);
+  assert.deepEqual(calls.turns, []);
+  assert.equal(engine.getState().agentConsoleView.open, false);
+});
+
 test("WorkShellEngine binds queued follow-up chat to a fresh context packet", async () => {
   let releaseFirst;
   let packetCalls = 0;
@@ -6066,4 +6389,626 @@ test("parseAgentPlanResponse extracts valid tasks from agent JSON output", async
   assert.deepEqual(parseAgentPlanResponse("no json here"), []);
   assert.deepEqual(parseAgentPlanResponse("[invalid json"), []);
   assert.deepEqual(parseAgentPlanResponse('["not objects"]'), []);
+});
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function createAgentConsoleEngine(overrides = {}) {
+  const control = { steer: [], cancel: [], continued: [], cleared: [] };
+  const runtime = {
+    async steer(agentRunId, message) {
+      control.steer.push({ agentRunId, message });
+      return { status: "accepted", message: "Steer queued." };
+    },
+    async cancel(agentRunId) {
+      control.cancel.push(agentRunId);
+      return { status: "accepted", message: "Cancelling." };
+    },
+    async continueRun(source, message) {
+      control.continued.push({ source, message });
+      return { status: "accepted", message: "Continuation started." };
+    },
+    clear(reason) {
+      control.cleared.push(reason);
+    },
+  };
+  const { calls, input } = createEngineInput(overrides);
+  if (overrides.agentControlRuntime !== false) {
+    input.agent = { ...input.agent, getAgentControlRuntime: () => runtime };
+  }
+  delete input.agentControlRuntime;
+  const engine = new WorkShellEngine(input);
+  return {
+    engine,
+    calls,
+    control,
+    emitTrace(event) {
+      return calls.traceListener?.(event);
+    },
+  };
+}
+
+/**
+ * Stands a run up with the job that owns it. Ownership is strict: a run can
+ * only start against a job that was queued first, so the fixture queues that
+ * job in the same burst and names it on the run.
+ */
+function emitRunStarted(emitTrace, runId, extra = {}) {
+  const startedAt = extra.startedAt ?? 20;
+  const jobId = extra.jobId ?? `${runId}-job`;
+  emitTrace({
+    type: "job.queued",
+    jobId,
+    jobType: "executor",
+    label: `Work for ${runId}`,
+    queuedAt: startedAt,
+  });
+  emitTrace({
+    type: "agent.run.started",
+    runId,
+    jobId,
+    displayName: `Executor ${runId}`,
+    agentType: "executor",
+    startedAt,
+    ...extra,
+  });
+}
+
+/** Settles a run with the exact job `emitRunStarted` gave it. */
+function emitRunSettled(emitTrace, runId, extra = {}) {
+  emitTrace({
+    type: "agent.run.settled",
+    runId,
+    jobId: `${runId}-job`,
+    status: "completed",
+    completedAt: 40,
+    ...extra,
+  });
+}
+
+test("WorkShellEngine opens and closes the agent console without touching the console snapshot", async () => {
+  const { engine } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  const snapshotBefore = engine.getState().agentConsole;
+  engine.openAgentConsole("jobs");
+
+  assert.equal(engine.getState().agentConsole, snapshotBefore);
+  assert.equal(engine.getState().agentConsoleView.open, true);
+  assert.equal(engine.getState().agentConsoleView.tab, "jobs");
+  assert.equal(engine.getState().agentConsoleView.cursor, 0);
+
+  engine.selectAgentConsoleTab("plan");
+  assert.equal(engine.getState().agentConsoleView.tab, "plan");
+  const inspectorVisible = engine.getState().agentConsoleView.inspectorVisible;
+  engine.toggleAgentConsoleInspector();
+  assert.equal(engine.getState().agentConsoleView.inspectorVisible, !inspectorVisible);
+
+  engine.closeAgentConsole();
+  assert.equal(engine.getState().agentConsoleView.open, false);
+  assert.equal(engine.getState().agentConsole, snapshotBefore);
+});
+
+test("WorkShellEngine refuses a steer for a missing, settled, or empty target before reaching the runtime", async () => {
+  const { engine, control, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  emitRunStarted(emitTrace, "run-1");
+  emitRunSettled(emitTrace, "run-1", { summary: "Executor completed." });
+  emitRunStarted(emitTrace, "run-live", { startedAt: 50 });
+
+  const port = engine.getAgentControlPort();
+  assert.equal((await port.steer("run-missing", "focus")).status, "rejected");
+  assert.equal((await port.steer("run-1", "focus")).status, "rejected");
+  assert.equal((await port.steer("run-live", "   ")).status, "rejected");
+  assert.deepEqual(control.steer, []);
+
+  engine.openAgentConsole("agents");
+  engine.beginAgentSteer();
+  assert.equal(engine.getState().composerMode, "default");
+  assert.equal(engine.getState().agentConsoleView.receipt?.status, "rejected");
+  assert.deepEqual(control.steer, []);
+});
+
+test("WorkShellEngine reports agent controls as undelivered when the agent exposes no runtime", async () => {
+  const { engine, calls, emitTrace } = createAgentConsoleEngine({ agentControlRuntime: false });
+  await engine.initialize();
+
+  emitRunStarted(emitTrace, "run-1");
+  const receipt = await engine.getAgentControlPort().steer("run-1", "focus");
+
+  assert.equal(receipt.status, "not_delivered");
+  assert.deepEqual(calls.turns, []);
+});
+
+test("WorkShellEngine delivers a trimmed steer as control input and leaves the steer composer", async () => {
+  const { engine, calls, control, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  emitRunStarted(emitTrace, "run-1");
+  engine.openAgentConsole("agents");
+  engine.beginAgentSteer();
+  assert.equal(engine.getState().composerMode, "agent-steer");
+
+  await engine.handleSubmit("   narrow the diff   ");
+
+  assert.deepEqual(control.steer, [{ agentRunId: "run-1", message: "narrow the diff" }]);
+  assert.equal(engine.getState().composerMode, "default");
+  assert.deepEqual(engine.getState().agentConsoleView.receipt, {
+    status: "accepted",
+    message: "Steer queued.",
+  });
+  // A steer submit is control input: it never opens a provider turn or a chat entry.
+  assert.deepEqual(calls.turns, []);
+  assert.equal(engine.getState().entries.some((entry) => entry.text.includes("narrow the diff")), false);
+});
+
+test("WorkShellEngine cancels a selected run exactly once and only after confirmation", async () => {
+  const { engine, control, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  emitRunStarted(emitTrace, "run-1");
+  engine.openAgentConsole("agents");
+
+  engine.requestAgentCancel();
+  assert.deepEqual(engine.getState().agentConsoleView.control, {
+    kind: "confirm-cancel",
+    agentRunId: "run-1",
+  });
+
+  await engine.confirmAgentCancel(false);
+  assert.deepEqual(control.cancel, []);
+  assert.deepEqual(engine.getState().agentConsoleView.control, { kind: "browse" });
+
+  engine.requestAgentCancel();
+  await Promise.all([engine.confirmAgentCancel(true), engine.confirmAgentCancel(true)]);
+
+  assert.deepEqual(control.cancel, ["run-1"]);
+  assert.deepEqual(engine.getState().agentConsoleView.control, { kind: "browse" });
+  assert.equal(engine.getState().agentConsoleView.receipt?.status, "accepted");
+});
+
+test("WorkShellEngine continues a selected run with the persisted safe console record", async () => {
+  const { engine, control, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  emitRunStarted(emitTrace, "run-1");
+  emitRunSettled(emitTrace, "run-1", { summary: "Executor completed." });
+  engine.openAgentConsole("agents");
+
+  await engine.continueSelectedAgent();
+
+  assert.equal(control.continued.length, 1);
+  assert.deepEqual(control.continued[0]?.source, engine.getState().agentConsole.agents[0]);
+  assert.equal(control.continued[0]?.source.summary, "Executor completed.");
+  assert.equal(control.continued[0]?.source.transcriptRef, undefined);
+  assert.equal(engine.getState().agentConsoleView.receipt?.status, "accepted");
+});
+
+test("WorkShellEngine coalesces a lifecycle burst into one publication and one durable write", async () => {
+  const { engine, calls, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  const publications = [];
+  engine.subscribe((state) => publications.push(state.agentConsole));
+  const snapshotsBefore = calls.snapshots.length;
+
+  emitTrace({ type: "job.queued", jobId: "job-1", jobType: "executor", label: "Plan step", queuedAt: 10 });
+  emitRunStarted(emitTrace, "run-1", { jobId: "job-1" });
+  emitTrace({
+    type: "agent.run.settled",
+    runId: "run-1",
+    status: "completed",
+    completedAt: 40,
+    jobId: "job-1",
+    summary: "Executor completed.",
+  });
+
+  // Nothing is visible yet: the whole burst folded into the private pending
+  // snapshot before any window elapsed.
+  assert.equal(publications.length, 0);
+  assert.equal(calls.snapshots.length, snapshotsBefore);
+
+  // Longer than both coalescing windows; each trace event blocks on a Rust
+  // decision call, so the windows cannot be probed individually by wall clock.
+  await delay(200);
+
+  assert.equal(publications.length, 1);
+  const published = publications[0];
+  // Every event in the burst reduced against its predecessor, in order.
+  assert.equal(published.agents.length, 1);
+  assert.equal(published.agents[0]?.status, "completed");
+  assert.equal(published.jobs.length, 1);
+  assert.equal(published.jobs[0]?.status, "completed");
+  assert.equal(published.jobs[0]?.agentRunId, "run-1");
+  assert.equal(published.jobs[0]?.startedAt, 20);
+
+  assert.equal(calls.snapshots.length, snapshotsBefore + 1);
+  assert.equal(calls.snapshots.at(-1)?.state, "idle");
+  assert.equal(calls.snapshots.at(-1)?.agentConsole?.agents[0]?.status, "completed");
+
+  engine.dispose();
+});
+
+test("WorkShellEngine persists a running console while agent or job work is still active", async () => {
+  const { engine, calls, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  const snapshotsBefore = calls.snapshots.length;
+  emitTrace({ type: "job.queued", jobId: "job-1", jobType: "executor", label: "Plan step", queuedAt: 10 });
+  emitRunStarted(emitTrace, "run-1", { jobId: "job-1" });
+
+  await delay(90);
+
+  assert.equal(calls.snapshots.length, snapshotsBefore + 1);
+  assert.equal(calls.snapshots.at(-1)?.state, "running");
+  assert.equal(calls.snapshots.at(-1)?.agentConsole?.agents[0]?.status, "running");
+
+  engine.dispose();
+});
+
+test("WorkShellEngine flushes the pending console snapshot on dispose and clears background runs", async () => {
+  const { engine, calls, control, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  const publications = [];
+  engine.subscribe((state) => publications.push(state.agentConsole));
+  const snapshotsBefore = calls.snapshots.length;
+
+  emitTrace({ type: "job.queued", jobId: "job-1", jobType: "executor", label: "Plan step", queuedAt: 10 });
+  emitRunStarted(emitTrace, "run-1", { jobId: "job-1" });
+  assert.equal(publications.length, 0);
+
+  engine.dispose();
+
+  assert.equal(publications.length, 1);
+  assert.equal(publications[0]?.agents[0]?.id, "run-1");
+  assert.deepEqual(control.cleared, ["Work Shell closed."]);
+
+  await delay(10);
+  assert.equal(calls.snapshots.length, snapshotsBefore + 1);
+  assert.equal(calls.snapshots.at(-1)?.state, "running");
+
+  await delay(90);
+  assert.equal(publications.length, 1);
+  assert.equal(calls.snapshots.length, snapshotsBefore + 1);
+});
+
+test("WorkShellEngine keeps the console snapshot when a durable write fails and never leaks the failure text", async () => {
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    async persistWorkShellSessionSnapshot() {
+      throw new Error("ENOSPC: no space left on device, write '/tmp/.state/sessions/work.jsonl'");
+    },
+  });
+  await engine.initialize();
+
+  emitRunStarted(emitTrace, "run-1");
+  await delay(90);
+
+  assert.equal(engine.getState().agentConsole.agents.length, 1);
+  assert.equal(engine.getState().agentConsole.agents[0]?.id, "run-1");
+  assert.equal(
+    engine.getState().entries.some((entry) => entry.text.includes("ENOSPC")),
+    false,
+  );
+
+  engine.dispose();
+});
+
+test("WorkShellEngine treats a cleared work turn as cancellation, not assistant output", async () => {
+  const bridged = [];
+  const memories = [];
+  const recorded = [];
+  const prompts = [];
+  const { engine, calls } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      updateMode() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        prompts.push(prompt);
+        return { text: "Work turn cancelled by the operator.", cancelled: true };
+      },
+    },
+    async publishContextBridge({ summary }) {
+      bridged.push(summary);
+      return { bridgeId: "bridge-cancelled", line: summary };
+    },
+    async writeScopedMemory({ scope, summary }) {
+      memories.push(summary);
+      return { memoryId: `${scope}:${summary}` };
+    },
+    recordTurn(turn) {
+      recorded.push(turn);
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("run the plan");
+
+  assert.deepEqual(prompts, ["run the plan"]);
+  const entries = engine.getState().entries;
+  assert.equal(entries.some((entry) => entry.role === "assistant"), false);
+  assert.ok(entries.some(
+    (entry) => entry.role === "system" && entry.text.includes("Work turn cancelled by the operator."),
+  ));
+  assert.deepEqual(bridged, []);
+  assert.deepEqual(memories, []);
+  assert.deepEqual(recorded.map((turn) => turn.status), ["cancelled"]);
+  assert.equal(engine.getState().isBusy, false);
+  assert.equal(engine.getState().streamingAssistantText, undefined);
+  assert.equal(calls.snapshots.at(-1)?.state, "idle");
+});
+
+async function waitFor(predicate, label) {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (predicate()) {
+      return;
+    }
+    await delay(5);
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+}
+
+function emitToolStarted(emitTrace, toolCallId, extra = {}) {
+  emitTrace({
+    type: "tool.started",
+    toolCallId,
+    toolName: "read_file",
+    input: { i: "Reading session state", path: "state.json" },
+    startedAt: 30,
+    ...extra,
+  });
+}
+
+function emitToolCompleted(emitTrace, toolCallId, extra = {}) {
+  emitTrace({
+    type: "tool.completed",
+    toolCallId,
+    toolName: "read_file",
+    status: "completed",
+    startedAt: 30,
+    completedAt: 40,
+    durationMs: 10,
+    ...extra,
+  });
+}
+
+test("WorkShellEngine keeps a tool lifecycle burst out of the subscriber fan-out until the publish window", async () => {
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    formatAgentTraceLine(event) {
+      if (event.type === "tool.started") return "→ read state.json";
+      if (event.type === "tool.completed") return `✓ read ${event.toolCallId}`;
+      return "";
+    },
+  });
+  await engine.initialize();
+
+  const notifications = [];
+  engine.subscribe((state) => notifications.push(state));
+
+  emitRunStarted(emitTrace, "run-1", { jobId: "job-1" });
+  emitToolStarted(emitTrace, "call-1", { agentRunId: "run-1", asyncJobId: "job-1" });
+  emitToolCompleted(emitTrace, "call-1", { agentRunId: "run-1", asyncJobId: "job-1" });
+  // The operator's own tool call rides the same burst. It is the only one of
+  // the two whose line may move the shell's busy status or reach the
+  // transcript, and it still has to wait for the publish window to do it.
+  emitToolStarted(emitTrace, "call-main");
+  emitToolCompleted(emitTrace, "call-main");
+  emitTrace({
+    type: "agent.run.settled",
+    runId: "run-1",
+    jobId: "job-1",
+    status: "completed",
+    completedAt: 50,
+    summary: "Executor completed.",
+  });
+
+  // Busy status and the tool trace entry are lifecycle effects too: none of
+  // them may reach a subscriber before the publish window closes.
+  assert.equal(notifications.length, 0);
+  assert.equal(engine.getState().busyStatus, "→ read state.json");
+  assert.equal(engine.getState().agentConsole.activity.length, 2);
+
+  await delay(200);
+
+  assert.equal(notifications.length, 1);
+  const published = notifications[0];
+  assert.equal(published.agentConsole.activity.length, 2);
+  assert.equal(published.agentConsole.activity[0]?.status, "completed");
+  assert.equal(published.agentConsole.activity[1]?.status, "completed");
+  assert.equal(published.agentConsole.agents[0]?.status, "completed");
+  assert.equal(published.agentConsole.agents[0]?.currentActivity, undefined);
+  assert.ok(published.entries.some((entry) => entry.role === "tool" && entry.text === "✓ read call-main"));
+  assert.ok(
+    !published.entries.some((entry) => entry.text === "✓ read call-1"),
+    "a delegated run's tool output belongs to the console, never to the transcript",
+  );
+});
+
+test("WorkShellEngine keeps executor-scoped turn traces off the main transcript and busy clock", async () => {
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    formatAgentTraceLine(event) {
+      if (event.type === "turn.started") return `thinking ${event.prompt}`;
+      if (event.type === "turn.completed") return `done ${event.durationMs}`;
+      return "";
+    },
+  });
+  await engine.initialize();
+  // Verbose is the strictest setting: every formatted line it sees becomes a
+  // transcript entry, so nothing can hide behind a quiet formatter.
+  await engine.handleSubmit("/verbose");
+  assert.equal(engine.getState().traceMode, "verbose");
+
+  const entriesBefore = engine.getState().entries.length;
+  const scope = { agentRunId: "run-1", asyncJobId: "job-1" };
+
+  emitRunStarted(emitTrace, "run-1", { jobId: "job-1" });
+  emitTrace({
+    type: "turn.started",
+    provider: "openai",
+    model: "gpt-5.4",
+    prompt: "map the runtime",
+    startedAt: 0,
+    ...scope,
+  });
+  emitTrace({ type: "assistant.delta", delta: "executor thinking out loud", ...scope });
+  emitTrace({ type: "turn.completed", durationMs: 12, ...scope });
+  await delay(200);
+
+  assert.equal(engine.getState().isBusy, false, "a delegated turn is not the operator's turn");
+  assert.equal(engine.getState().busyStatus, undefined);
+  assert.equal(engine.getState().currentTurnStartedAt, undefined);
+  assert.equal(
+    engine.getState().streamingAssistantText,
+    undefined,
+    "an executor never streams into the main transcript",
+  );
+  assert.deepEqual(engine.getState().traceLines, []);
+  assert.deepEqual(
+    engine.getState().entries.slice(entriesBefore).map((entry) => entry.text),
+    [],
+    "no executor-scoped line may reach the operator's transcript",
+  );
+  // Scoping decides who owns a trace, not whether the console spine reduces
+  // it: the run and its job are still there.
+  assert.equal(engine.getState().agentConsole.agents[0]?.id, "run-1");
+  assert.equal(engine.getState().agentConsole.jobs[0]?.agentRunId, "run-1");
+
+  // The skip is scoped, not a blanket mute: the operator's own turn still
+  // drives the shell exactly as it did before.
+  emitTrace({
+    type: "turn.started",
+    provider: "openai",
+    model: "gpt-5.4",
+    prompt: "inspect repo",
+    startedAt: 0,
+  });
+  await delay(200);
+
+  assert.match(engine.getState().busyStatus ?? "", /thinking/i);
+  assert.doesNotMatch(
+    engine.getState().busyStatus ?? "",
+    /map the runtime/,
+    "the delegated prompt never reaches the operator's status line",
+  );
+  assert.ok(engine.getState().traceLines.some((line) => /thinking inspect repo/.test(line)));
+});
+
+test("WorkShellEngine reduces lifecycle events from the newest decision and manifest state", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+    },
+  });
+  await engine.initialize();
+
+  emitToolStarted(emitTrace, "call-1");
+
+  const answer = interactionBridge.ask({
+    id: "decision-1",
+    title: "Execution choice",
+    questions: [{
+      id: "strategy",
+      question: "Choose execution strategy.",
+      options: [{ label: "Safe" }, { label: "Fast" }],
+      recommended: 0,
+    }],
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-1");
+
+  // The next lifecycle event must reduce from the newest mixed state, not from
+  // the pending snapshot captured before the decision opened.
+  emitToolCompleted(emitTrace, "call-1");
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-1");
+  assert.equal(engine.getState().agentConsole.activity[0]?.status, "completed");
+
+  await delay(200);
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-1");
+  assert.equal(engine.getState().agentConsole.activity[0]?.status, "completed");
+
+  await engine.handleSubmit("2");
+  assert.deepEqual(await answer, {
+    status: "answered",
+    answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
+
+  // A settled decision must not be resurrected by a later lifecycle reduction.
+  emitRunStarted(emitTrace, "run-late", { startedAt: 60 });
+  assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
+  assert.equal(engine.getState().agentConsole.agents[0]?.id, "run-late");
+  await delay(200);
+  assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
+});
+
+test("WorkShellEngine serializes checkpoint writes so an older snapshot cannot overwrite a newer one", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  // A console lifecycle write ("running") starts first and stays in flight.
+  emitRunStarted(emitTrace, "run-1");
+  await waitFor(() => writes.length === 2, "the console lifecycle checkpoint");
+  assert.equal(writes[1]?.snapshot.state, "running");
+
+  // A newer turn write is requested while the older one is unresolved.
+  const modePersist = engine.setMode("analyze");
+  await delay(60);
+  assert.equal(writes.length, 2);
+
+  writes[1].resolve();
+  await waitFor(() => writes.length === 3, "the queued mode checkpoint");
+  assert.equal(writes[2]?.snapshot.state, "idle");
+  writes[2].resolve();
+  await modePersist;
+
+  // Durable order matches request order, so the newer idle state wins.
+  assert.deepEqual(writes.map((write) => write.snapshot.state), ["idle", "running", "idle"]);
+
+  // A failed write must not wedge the queue.
+  const failing = engine.setMode("search");
+  await waitFor(() => writes.length === 4, "the failing checkpoint");
+  writes[3].reject(new Error("ENOSPC: no space left on device"));
+  await failing;
+
+  const recovered = engine.setMode("default");
+  await waitFor(() => writes.length === 5, "the checkpoint after a failure");
+  writes[4].resolve();
+  await recovered;
+  assert.equal(writes[4]?.snapshot.mode, "default");
+  assert.equal(
+    engine.getState().entries.some((entry) => entry.text.includes("ENOSPC")),
+    false,
+  );
+  // Dispose flushes the still-pending console write through the same queue.
+  emitRunStarted(emitTrace, "run-2", { startedAt: 70 });
+  engine.dispose();
+  await waitFor(() => writes.length === 6, "the dispose flush checkpoint");
+  assert.equal(writes[5]?.snapshot.state, "running");
+  assert.equal(writes[5]?.snapshot.agentConsole?.agents.length, 2);
+  writes[5].resolve();
 });

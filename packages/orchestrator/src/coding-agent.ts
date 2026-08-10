@@ -93,14 +93,15 @@ export class CodingAgent<
 
   async runTurn(prompt: string, attachments: readonly Attachment[] = [], options: AgentTurnOptions = {}): Promise<AgentTurnResult> {
     const turnStartedAt = Date.now();
-    this.emitTrace(this.buildTurnStartedTrace(prompt, turnStartedAt));
-    this.emitTrace(this.buildProviderRouteTrace(turnStartedAt));
-    this.emitTrace(this.buildProviderCallingTrace(turnStartedAt));
+    const model = this.model;
+    this.emitTrace(this.buildTurnStartedTrace(prompt, turnStartedAt, model));
+    this.emitTrace(this.buildProviderRouteTrace(turnStartedAt, model));
+    this.emitTrace(this.buildProviderCallingTrace(turnStartedAt, model));
 
     const result = await this.provider.runTurn(prompt, attachments, options);
     const completedAt = Date.now();
-    this.emitTrace(this.buildTurnCompletedTrace(result.text, turnStartedAt, completedAt));
-    const usageTrace = this.buildUsageRecordedTrace(result, turnStartedAt);
+    this.emitTrace(this.buildTurnCompletedTrace(result.text, turnStartedAt, completedAt, model));
+    const usageTrace = this.buildUsageRecordedTrace(result, turnStartedAt, model);
     if (usageTrace) {
       this.emitTrace(usageTrace);
     }
@@ -110,6 +111,7 @@ export class CodingAgent<
   private buildUsageRecordedTrace(
     result: AgentTurnResult,
     startedAt: number,
+    model: string,
   ): UsageRecordedTraceEvent | undefined {
     const usage = result.usage;
     if (!usage && result.costUsd === undefined) {
@@ -118,7 +120,7 @@ export class CodingAgent<
     const cacheSavingsUsd = usage
       ? estimateCacheSavingsUsd({
           provider: this.providerName,
-          modelId: this.model,
+          modelId: model,
           cacheReadTokens: usage.cacheReadTokens ?? 0,
           cacheWriteTokens: usage.cacheWriteTokens ?? 0,
         })
@@ -128,7 +130,7 @@ export class CodingAgent<
       level: "low-signal",
       eventId: `usage:${this.providerName}:${startedAt}:${++usageEventSequence}`,
       provider: this.providerName,
-      model: this.model,
+      model,
       ...(usage?.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
       ...(usage?.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
       ...(usage?.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
@@ -139,14 +141,14 @@ export class CodingAgent<
     };
   }
 
-  private buildTurnStartedTrace(prompt: string, startedAt: number): TurnStartedTraceEvent {
+  private buildTurnStartedTrace(prompt: string, startedAt: number, model: string): TurnStartedTraceEvent {
     try {
       return parseLifecycleTrace(runRustCommandSync([
         "rust",
         "provider",
         "turn-started-trace",
         this.providerName,
-        this.model,
+        model,
         String(startedAt),
       ], process.cwd(), prompt), "turn.started");
     } catch {
@@ -154,21 +156,21 @@ export class CodingAgent<
         type: "turn.started",
         level: "low-signal",
         provider: this.providerName,
-        model: this.model,
+        model,
         prompt,
         startedAt,
       };
     }
   }
 
-  private buildProviderRouteTrace(startedAt: number): ProviderRouteTraceEvent {
+  private buildProviderRouteTrace(startedAt: number, model: string): ProviderRouteTraceEvent {
     try {
       return parseProviderRouteTrace(runRustCommandSync([
         "rust",
         "provider",
         "route-trace",
         this.providerName,
-        this.model,
+        model,
         String(startedAt),
       ], process.cwd()));
     } catch (error) {
@@ -176,21 +178,21 @@ export class CodingAgent<
         type: "provider.route",
         level: "default",
         provider: this.providerName,
-        model: this.model,
+        model,
         error: error instanceof Error ? error.message : String(error),
         startedAt,
       };
     }
   }
 
-  private buildProviderCallingTrace(startedAt: number): ProviderCallingTraceEvent {
+  private buildProviderCallingTrace(startedAt: number, model: string): ProviderCallingTraceEvent {
     try {
       return parseLifecycleTrace(runRustCommandSync([
         "rust",
         "provider",
         "calling-trace",
         this.providerName,
-        this.model,
+        model,
         String(startedAt),
       ], process.cwd()), "provider.calling");
     } catch {
@@ -198,20 +200,20 @@ export class CodingAgent<
         type: "provider.calling",
         level: "default",
         provider: this.providerName,
-        model: this.model,
+        model,
         startedAt,
       };
     }
   }
 
-  private buildTurnCompletedTrace(text: string, startedAt: number, completedAt: number): TurnCompletedTraceEvent {
+  private buildTurnCompletedTrace(text: string, startedAt: number, completedAt: number, model: string): TurnCompletedTraceEvent {
     try {
       return parseLifecycleTrace(runRustCommandSync([
         "rust",
         "provider",
         "turn-completed-trace",
         this.providerName,
-        this.model,
+        model,
         String(startedAt),
         String(completedAt),
       ], process.cwd(), text), "turn.completed");
@@ -220,7 +222,7 @@ export class CodingAgent<
         type: "turn.completed",
         level: "low-signal",
         provider: this.providerName,
-        model: this.model,
+        model,
         text,
         startedAt,
         completedAt,

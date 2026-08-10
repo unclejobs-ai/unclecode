@@ -34,7 +34,7 @@ import type {
 } from "./work-shell-engine.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 import type { WorkShellSubmitRoute } from "./work-shell-engine-submit.js";
-import type { ContextPacketView } from "@unclecode/contracts";
+import type { AgentConsoleTab, ContextPacketView } from "@unclecode/contracts";
 
 type WorkShellBuiltinCommand = Extract<
   WorkShellSubmitRoute,
@@ -123,6 +123,7 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
   }) => void;
   onExit: () => void;
   openSessionsPanel: () => Promise<void>;
+  openAgentConsole: (tab: AgentConsoleTab) => void;
   reloadContextState: () => Promise<void>;
   refreshContextPacket?: (() => Promise<ContextPacketView | undefined>) | undefined;
   queuedCount?: (() => number) | undefined;
@@ -184,8 +185,10 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
     case "cache":
       input.setState({ panel: { title: "Cache Telemetry", lines: [] } });
       return;
-    case "agents":
-      input.setState({ panel: { title: "Agent History", lines: [] } });
+    // The console is an inspector, not a chat turn: it opens the view and
+    // leaves the transcript untouched, exactly like /context.
+    case "agent-console":
+      input.openAgentConsole(input.builtinCommand.tab);
       return;
     case "reload":
       {
@@ -364,6 +367,13 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
       return;
     }
     case "unknown-slash": {
+      // Rust marked this line as a console-like form that can never run: a
+      // half-typed `/tod`, or `/agents extra`. There is nothing to execute and
+      // nothing worth narrating, so the transcript and the panel stay as they
+      // were. Ordinary unknown commands keep their guidance below.
+      if (input.builtinCommand.consoleInvalid) {
+        return;
+      }
       const suggestion = input.builtinCommand.suggestion;
       const commandToken = input.builtinCommand.line.trim().split(/\s+/, 1)[0] ?? input.builtinCommand.line;
       const message = suggestion

@@ -4,6 +4,7 @@ import test from "node:test";
 import { applyTraceEventToAgentConsole } from "@unclecode/orchestrator";
 
 const initialConsole = Object.freeze({ profileId: "build", activity: [], agents: [], jobs: [] });
+const TEST_USAGE_ROUTE = { provider: "openai", model: "gpt-5.6-sol" };
 
 test("tool activity reducer records a safe lifecycle without raw tool output", () => {
   const running = applyTraceEventToAgentConsole(initialConsole, {
@@ -164,6 +165,7 @@ test("agent lifecycle reducer correlates queued jobs, runs, and terminal status"
   const settled = applyTraceEventToAgentConsole(running, {
     type: "agent.run.settled",
     runId: "agent-1",
+    jobId: "job-1",
     status: "completed",
     completedAt: 180,
     summary: "Cache path verified",
@@ -190,9 +192,17 @@ test("agent lifecycle reducer correlates queued jobs, runs, and terminal status"
 });
 
 test("usage reducer attributes cache telemetry once per provider event", () => {
-  const running = applyTraceEventToAgentConsole(initialConsole, {
+  const queued = applyTraceEventToAgentConsole(initialConsole, {
+    type: "job.queued",
+    jobId: "job-1",
+    jobType: "research",
+    label: "Audit prompt cache",
+    queuedAt: 90,
+  });
+  const running = applyTraceEventToAgentConsole(queued, {
     type: "agent.run.started",
     runId: "agent-1",
+    jobId: "job-1",
     displayName: "CacheScout",
     agentType: "scout",
     startedAt: 100,
@@ -281,6 +291,40 @@ test("usage reducer attributes cache telemetry once per provider event", () => {
       ["anthropic", "claude-sonnet-4-6", 300, 200],
     ],
   );
+  assert.equal(switchedModel.mainUsage?.inputTokens, 1_300);
+  assert.equal(switchedModel.mainUsage?.cacheReadTokens, 700);
+  assert.equal(switchedModel.mainUsage?.costUsd, 0.015);
+});
+
+test("usage reducer rejects live measurements without provider and model", () => {
+  const missingRoute = applyTraceEventToAgentConsole(initialConsole, {
+    type: "usage.recorded",
+    eventId: "usage-unattributed",
+    inputTokens: 10,
+    costUsd: 0.001,
+  });
+  assert.strictEqual(missingRoute, initialConsole);
+});
+
+test("usage reducer retains every replay identity behind lifetime totals", () => {
+  let snapshot = initialConsole;
+  for (let index = 0; index < 300; index += 1) {
+    snapshot = applyTraceEventToAgentConsole(snapshot, {
+      type: "usage.recorded",
+      ...TEST_USAGE_ROUTE,
+      eventId: `usage-long-${index}`,
+      inputTokens: 1,
+    });
+  }
+  const replayed = applyTraceEventToAgentConsole(snapshot, {
+    type: "usage.recorded",
+    ...TEST_USAGE_ROUTE,
+    eventId: "usage-long-0",
+    inputTokens: 1,
+  });
+  assert.strictEqual(replayed, snapshot);
+  assert.equal(snapshot.mainUsage?.eventIds.length, 300);
+  assert.equal(snapshot.mainUsage?.inputTokens, 300);
 });
 
 const queuedRuntimeJob = {
@@ -300,8 +344,11 @@ const startedRuntimeRun = {
   agentType: "executor",
   startedAt: 20,
 };
+// Every run owns exactly one job, so a run event only means anything against a
+// console that already queued the job the run claims.
+const queuedRuntimeConsole = applyTraceEventToAgentConsole(initialConsole, queuedRuntimeJob);
 
-test("agent lifecycle reducer settles the linked job atomically and ignores unknown job links", () => {
+test("agent lifecycle reducer settles the linked job atomically and rejects unresolvable links", () => {
   const queued = applyTraceEventToAgentConsole(initialConsole, queuedRuntimeJob);
   const running = applyTraceEventToAgentConsole(queued, startedRuntimeRun);
   const cancelled = applyTraceEventToAgentConsole(running, {
@@ -326,19 +373,24 @@ test("agent lifecycle reducer settles the linked job atomically and ignores unkn
     runId: "run-9",
     jobId: "job-missing",
   });
-  assert.deepEqual(orphanRun.jobs, []);
-  assert.equal(orphanRun.agents[0]?.id, "run-9");
+  assert.strictEqual(
+    orphanRun,
+    initialConsole,
+    "a run whose job link resolves to nothing is never registered",
+  );
 
-  const orphanSettled = applyTraceEventToAgentConsole(orphanRun, {
-    type: "agent.run.settled",
-    eventId: "event-run-3",
-    runId: "run-9",
-    jobId: "job-missing",
-    status: "completed",
-    completedAt: 40,
-  });
-  assert.deepEqual(orphanSettled.jobs, []);
-  assert.equal(orphanSettled.agents[0]?.status, "completed");
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(running, {
+      type: "agent.run.settled",
+      eventId: "event-run-3",
+      runId: "run-1",
+      jobId: "job-missing",
+      status: "completed",
+      completedAt: 40,
+    }),
+    running,
+    "a settlement whose job link resolves to nothing settles neither side",
+  );
 });
 
 test("lifecycle reducer replays every lifecycle event as the same snapshot reference", () => {
@@ -584,9 +636,10 @@ test("tool reducer scopes activity and current intent to the owning agent run", 
 });
 
 test("usage reducer ignores zero, negative, and non-finite counters", () => {
-  const running = applyTraceEventToAgentConsole(initialConsole, startedRuntimeRun);
+  const running = applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun);
   const noisy = applyTraceEventToAgentConsole(running, {
     type: "usage.recorded",
+    ...TEST_USAGE_ROUTE,
     eventId: "usage-noisy",
     agentRunId: "run-1",
     inputTokens: 0,
@@ -596,10 +649,14 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
     cacheSavingsUsd: Number.POSITIVE_INFINITY,
     costUsd: 0,
   });
-  assert.deepEqual(noisy.agents[0]?.usage, { eventIds: ["usage-noisy"] });
+  assert.deepEqual(noisy.agents[0]?.usage, {
+    eventIds: ["usage-noisy"],
+    routes: [{ ...TEST_USAGE_ROUTE, eventIds: ["usage-noisy"] }],
+  });
 
   const real = applyTraceEventToAgentConsole(noisy, {
     type: "usage.recorded",
+    ...TEST_USAGE_ROUTE,
     eventId: "usage-real",
     agentRunId: "run-1",
     inputTokens: 12,
@@ -609,10 +666,17 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
     eventIds: ["usage-noisy", "usage-real"],
     inputTokens: 12,
     costUsd: 0.5,
+    routes: [{
+      ...TEST_USAGE_ROUTE,
+      eventIds: ["usage-noisy", "usage-real"],
+      inputTokens: 12,
+      costUsd: 0.5,
+    }],
   });
 
   const zeroed = applyTraceEventToAgentConsole(real, {
     type: "usage.recorded",
+    ...TEST_USAGE_ROUTE,
     eventId: "usage-zero",
     agentRunId: "run-1",
     inputTokens: 0,
@@ -622,11 +686,18 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
     eventIds: ["usage-noisy", "usage-real", "usage-zero"],
     inputTokens: 12,
     costUsd: 0.5,
+    routes: [{
+      ...TEST_USAGE_ROUTE,
+      eventIds: ["usage-noisy", "usage-real", "usage-zero"],
+      inputTokens: 12,
+      costUsd: 0.5,
+    }],
   });
 
   assert.strictEqual(
     applyTraceEventToAgentConsole(real, {
       type: "usage.recorded",
+      ...TEST_USAGE_ROUTE,
       eventId: "usage-orphan",
       agentRunId: "run-absent",
       inputTokens: 5,
@@ -637,6 +708,7 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
   assert.strictEqual(
     applyTraceEventToAgentConsole(real, {
       type: "usage.recorded",
+      ...TEST_USAGE_ROUTE,
       agentRunId: "run-1",
       inputTokens: 5,
     }),
@@ -646,11 +718,12 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
 });
 
 test("lifecycle reducer bounds oversized summaries before persistence", () => {
-  const running = applyTraceEventToAgentConsole(initialConsole, startedRuntimeRun);
+  const running = applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun);
   const settled = applyTraceEventToAgentConsole(running, {
     type: "agent.run.settled",
     eventId: "event-run-2",
     runId: "run-1",
+    jobId: "job-1",
     status: "failed",
     completedAt: 60,
     summary: "s".repeat(900),
@@ -706,14 +779,16 @@ test("agent lifecycle reducer refuses to start a run against a job that cannot a
     "a run cannot start before the job that queued it existed",
   );
 
-  const unlinked = applyTraceEventToAgentConsole(queued, {
-    ...startedRuntimeRun,
-    eventId: "event-run-4",
-    runId: "run-4",
-    jobId: "job-absent",
-  });
-  assert.equal(unlinked.agents[0]?.id, "run-4", "an unknown job link still registers the run");
-  assert.equal(unlinked.jobs[0]?.status, "queued");
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(queued, {
+      ...startedRuntimeRun,
+      eventId: "event-run-4",
+      runId: "run-4",
+      jobId: "job-absent",
+    }),
+    queued,
+    "an unknown job link registers nothing",
+  );
 });
 
 test("agent lifecycle reducer settles only the job owned by the finishing run", () => {
@@ -763,7 +838,7 @@ test("agent lifecycle reducer settles only the job owned by the finishing run", 
       completedAt: 60,
     }),
     linked,
-    "a run cannot settle a job queued after the run finished",
+    "a run cannot settle a job that never took its ownership",
   );
 
   const settled = applyTraceEventToAgentConsole(linked, {
@@ -778,9 +853,20 @@ test("agent lifecycle reducer settles only the job owned by the finishing run", 
   assert.equal(settled.jobs[1]?.status, "running", "another run's job is untouched");
 });
 
+// A persisted job may carry a recorded start with no run link at all, which
+// `parseAgentConsoleSnapshot` accepts. Standalone settlement is the only way
+// such a job can reach a terminal status, so it is where the timeline bounds
+// still bite.
+const resumedUnownedJobConsole = Object.freeze({
+  profileId: "build",
+  activity: [],
+  agents: [],
+  jobs: [
+    { id: "job-1", type: "work-node", label: "Map runtime", status: "running", queuedAt: 10, startedAt: 20 },
+  ],
+});
+
 test("job lifecycle reducer rejects settlements whose timeline runs backwards", () => {
-  const queued = applyTraceEventToAgentConsole(initialConsole, queuedRuntimeJob);
-  const running = applyTraceEventToAgentConsole(queued, startedRuntimeRun);
   const backwards = [
     { eventId: "event-job-2", startedAt: 5, completedAt: 30, why: "a start cannot precede the queueing" },
     { eventId: "event-job-3", startedAt: 15, completedAt: 30, why: "a start cannot precede a recorded start" },
@@ -790,18 +876,18 @@ test("job lifecycle reducer rejects settlements whose timeline runs backwards", 
   ];
   for (const { why, ...timeline } of backwards) {
     assert.strictEqual(
-      applyTraceEventToAgentConsole(running, {
+      applyTraceEventToAgentConsole(resumedUnownedJobConsole, {
         type: "job.settled",
         jobId: "job-1",
         status: "completed",
         ...timeline,
       }),
-      running,
+      resumedUnownedJobConsole,
       why,
     );
   }
 
-  const settled = applyTraceEventToAgentConsole(running, {
+  const settled = applyTraceEventToAgentConsole(resumedUnownedJobConsole, {
     type: "job.settled",
     eventId: "event-job-7",
     jobId: "job-1",
@@ -811,6 +897,124 @@ test("job lifecycle reducer rejects settlements whose timeline runs backwards", 
   });
   assert.equal(settled.jobs[0]?.status, "completed");
   assert.equal(settled.jobs[0]?.completedAt, 40);
+});
+
+test("job lifecycle reducer refuses standalone settlement of a job an agent run owns", () => {
+  const queued = applyTraceEventToAgentConsole(queuedRuntimeConsole, {
+    ...queuedRuntimeJob,
+    eventId: "event-job-2",
+    jobId: "job-2",
+    label: "Sweep cache",
+    queuedAt: 11,
+  });
+  const running = applyTraceEventToAgentConsole(queued, startedRuntimeRun);
+  assert.equal(running.jobs[0]?.agentRunId, "run-1");
+
+  // A standalone settlement cannot be trusted to name the owner, so the job's
+  // own link is what decides: every flavour is refused while run-1 owns job-1.
+  const standalone = [
+    { eventId: "event-job-3", agentRunId: "run-99", why: "a foreign owner cannot settle run-1's job" },
+    { eventId: "event-job-4", agentRunId: "run-1", why: "even the true owner settles its job only through agent.run.settled" },
+    { eventId: "event-job-5", why: "a settlement naming no owner cannot settle an owned job" },
+  ];
+  for (const { why, ...event } of standalone) {
+    assert.strictEqual(
+      applyTraceEventToAgentConsole(running, {
+        type: "job.settled",
+        jobId: "job-1",
+        status: "failed",
+        startedAt: 20,
+        completedAt: 30,
+        errorSummary: "Sweep aborted",
+        ...event,
+      }),
+      running,
+      why,
+    );
+  }
+  assert.equal(running.agents[0]?.status, "running", "the owning run stays steerable");
+  assert.equal(running.jobs[0]?.status, "running", "the owned job stays with its run");
+
+  const unowned = applyTraceEventToAgentConsole(running, {
+    type: "job.settled",
+    eventId: "event-job-6",
+    jobId: "job-2",
+    status: "cancelled",
+    completedAt: 30,
+    summary: "Blocked by dependency.",
+  });
+  assert.equal(
+    unowned.jobs[1]?.status,
+    "cancelled",
+    "a queued job that never opened a run still settles on its own",
+  );
+  assert.equal(unowned.jobs[1]?.completedAt, 30);
+  assert.equal(unowned.jobs[1]?.summary, "Blocked by dependency.");
+  assert.equal(unowned.agents[0]?.status, "running", "settling an unowned job leaves every run alone");
+
+  const settled = applyTraceEventToAgentConsole(running, {
+    type: "agent.run.settled",
+    eventId: "event-run-2",
+    runId: "run-1",
+    jobId: "job-1",
+    status: "completed",
+    completedAt: 30,
+  });
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(settled, {
+      type: "job.settled",
+      eventId: "event-job-7",
+      jobId: "job-1",
+      agentRunId: "run-1",
+      status: "failed",
+      completedAt: 90,
+    }),
+    settled,
+    "an owned job that settled with its run stays terminal",
+  );
+});
+
+test("job lifecycle reducer keeps a job-first settlement from splitting its run", () => {
+  const running = applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun);
+
+  const jobFirst = applyTraceEventToAgentConsole(running, {
+    type: "job.settled",
+    eventId: "event-job-2",
+    jobId: "job-1",
+    agentRunId: "run-1",
+    status: "completed",
+    startedAt: 20,
+    completedAt: 30,
+    summary: "Runtime mapped.",
+  });
+  assert.strictEqual(
+    jobFirst,
+    running,
+    "a job.settled that lands ahead of its run settles neither side",
+  );
+
+  const settled = applyTraceEventToAgentConsole(jobFirst, {
+    type: "agent.run.settled",
+    eventId: "event-run-2",
+    runId: "run-1",
+    jobId: "job-1",
+    status: "completed",
+    startedAt: 20,
+    completedAt: 30,
+    summary: "Runtime mapped.",
+  });
+  assert.equal(settled.agents[0]?.status, "completed");
+  assert.equal(
+    settled.jobs[0]?.status,
+    settled.agents[0]?.status,
+    "the later run settlement carries its job to the same terminal status",
+  );
+  assert.equal(
+    settled.jobs[0]?.completedAt,
+    settled.agents[0]?.completedAt,
+    "run and job share one completion timestamp",
+  );
+  assert.equal(settled.jobs[0]?.summary, "Runtime mapped.");
 });
 
 test("tool reducer keeps a call's established agent owner", () => {
@@ -887,18 +1091,25 @@ test("usage reducer routes one provider event id to exactly one ledger", () => {
 
   const scoped = applyTraceEventToAgentConsole(ready, {
     type: "usage.recorded",
+    ...TEST_USAGE_ROUTE,
     eventId: "usage-1",
     agentRunId: "run-1",
     inputTokens: 10,
   });
   assert.strictEqual(
-    applyTraceEventToAgentConsole(scoped, { type: "usage.recorded", eventId: "usage-1", inputTokens: 10 }),
+    applyTraceEventToAgentConsole(scoped, {
+      type: "usage.recorded",
+      ...TEST_USAGE_ROUTE,
+      eventId: "usage-1",
+      inputTokens: 10,
+    }),
     scoped,
     "a run-scoped event id cannot be re-charged to main usage",
   );
   assert.strictEqual(
     applyTraceEventToAgentConsole(scoped, {
       type: "usage.recorded",
+      ...TEST_USAGE_ROUTE,
       eventId: "usage-1",
       agentRunId: "run-2",
       inputTokens: 10,
@@ -909,12 +1120,14 @@ test("usage reducer routes one provider event id to exactly one ledger", () => {
 
   const main = applyTraceEventToAgentConsole(ready, {
     type: "usage.recorded",
+    ...TEST_USAGE_ROUTE,
     eventId: "usage-2",
     inputTokens: 7,
   });
   assert.strictEqual(
     applyTraceEventToAgentConsole(main, {
       type: "usage.recorded",
+      ...TEST_USAGE_ROUTE,
       eventId: "usage-2",
       agentRunId: "run-1",
       inputTokens: 7,
@@ -925,13 +1138,14 @@ test("usage reducer routes one provider event id to exactly one ledger", () => {
 });
 
 test("usage reducer rejects a present but malformed scope instead of charging main usage", () => {
-  const running = applyTraceEventToAgentConsole(initialConsole, startedRuntimeRun);
+  const running = applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun);
 
   const malformedScopes = ["   ", "", 42, null, {}, undefined];
   for (const [index, agentRunId] of malformedScopes.entries()) {
     assert.strictEqual(
       applyTraceEventToAgentConsole(running, {
         type: "usage.recorded",
+        ...TEST_USAGE_ROUTE,
         eventId: `usage-bad-${index}`,
         agentRunId,
         inputTokens: 5,
@@ -943,13 +1157,19 @@ test("usage reducer rejects a present but malformed scope instead of charging ma
 
   const absent = applyTraceEventToAgentConsole(running, {
     type: "usage.recorded",
+    ...TEST_USAGE_ROUTE,
     eventId: "usage-absent",
     inputTokens: 5,
   });
-  assert.deepEqual(absent.mainUsage, { eventIds: ["usage-absent"], inputTokens: 5 });
+  assert.deepEqual(absent.mainUsage, {
+    eventIds: ["usage-absent"],
+    inputTokens: 5,
+    routes: [{ ...TEST_USAGE_ROUTE, eventIds: ["usage-absent"], inputTokens: 5 }],
+  });
 
   const explicitlyUndefined = applyTraceEventToAgentConsole(running, {
     type: "usage.recorded",
+    ...TEST_USAGE_ROUTE,
     eventId: "usage-undefined",
     agentRunId: undefined,
     inputTokens: 5,
@@ -964,11 +1184,12 @@ test("usage reducer rejects a present but malformed scope instead of charging ma
 });
 
 test("usage reducer still books a settled run's closing measurement", () => {
-  const running = applyTraceEventToAgentConsole(initialConsole, startedRuntimeRun);
+  const running = applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun);
   const settled = applyTraceEventToAgentConsole(running, {
     type: "agent.run.settled",
     eventId: "event-run-2",
     runId: "run-1",
+    jobId: "job-1",
     status: "completed",
     completedAt: 60,
   });
@@ -978,6 +1199,7 @@ test("usage reducer still books a settled run's closing measurement", () => {
   // settles, and dropping it would systematically understate subagent spend.
   const closing = applyTraceEventToAgentConsole(settled, {
     type: "usage.recorded",
+    ...TEST_USAGE_ROUTE,
     eventId: "usage-closing",
     agentRunId: "run-1",
     inputTokens: 42,
@@ -987,17 +1209,24 @@ test("usage reducer still books a settled run's closing measurement", () => {
     eventIds: ["usage-closing"],
     inputTokens: 42,
     costUsd: 0.02,
+    routes: [{
+      ...TEST_USAGE_ROUTE,
+      eventIds: ["usage-closing"],
+      inputTokens: 42,
+      costUsd: 0.02,
+    }],
   });
   assert.equal(closing.agents[0]?.status, "completed");
   assert.equal(closing.mainUsage, undefined, "a settled run's usage never falls through to main");
 });
 
 test("usage reducer refuses measurements it could not persist", () => {
-  const running = applyTraceEventToAgentConsole(initialConsole, startedRuntimeRun);
+  const running = applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun);
 
   assert.strictEqual(
     applyTraceEventToAgentConsole(running, {
       type: "usage.recorded",
+      ...TEST_USAGE_ROUTE,
       eventId: "usage-huge",
       agentRunId: "run-1",
       inputTokens: Number.MAX_SAFE_INTEGER + 2,
@@ -1008,6 +1237,7 @@ test("usage reducer refuses measurements it could not persist", () => {
 
   const near = applyTraceEventToAgentConsole(running, {
     type: "usage.recorded",
+    ...TEST_USAGE_ROUTE,
     eventId: "usage-near",
     agentRunId: "run-1",
     inputTokens: Number.MAX_SAFE_INTEGER - 1,
@@ -1017,6 +1247,7 @@ test("usage reducer refuses measurements it could not persist", () => {
   assert.strictEqual(
     applyTraceEventToAgentConsole(near, {
       type: "usage.recorded",
+      ...TEST_USAGE_ROUTE,
       eventId: "usage-tip",
       agentRunId: "run-1",
       inputTokens: 10,
@@ -1027,6 +1258,7 @@ test("usage reducer refuses measurements it could not persist", () => {
 
   const heavy = applyTraceEventToAgentConsole(running, {
     type: "usage.recorded",
+    ...TEST_USAGE_ROUTE,
     eventId: "usage-heavy",
     agentRunId: "run-1",
     costUsd: 1e308,
@@ -1036,6 +1268,7 @@ test("usage reducer refuses measurements it could not persist", () => {
   assert.strictEqual(
     applyTraceEventToAgentConsole(heavy, {
       type: "usage.recorded",
+      ...TEST_USAGE_ROUTE,
       eventId: "usage-heavier",
       agentRunId: "run-1",
       costUsd: 1e308,
@@ -1047,10 +1280,241 @@ test("usage reducer refuses measurements it could not persist", () => {
   assert.strictEqual(
     applyTraceEventToAgentConsole(running, {
       type: "usage.recorded",
+      ...TEST_USAGE_ROUTE,
       eventId: "usage-main-huge",
       inputTokens: Number.MAX_SAFE_INTEGER + 2,
     }),
     running,
     "main usage is held to the same bounds",
   );
+});
+
+test("tool reducer keeps a settled call terminal", () => {
+  const started = applyTraceEventToAgentConsole(
+    applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun),
+    {
+      type: "tool.started",
+      toolCallId: "call-1",
+      toolName: "read_file",
+      input: { path: "src/a.ts", i: "Reading runtime entry" },
+      startedAt: 30,
+      agentRunId: "run-1",
+    },
+  );
+  const completed = applyTraceEventToAgentConsole(started, {
+    type: "tool.completed",
+    toolCallId: "call-1",
+    toolName: "read_file",
+    input: { path: "src/a.ts", i: "Reading runtime entry" },
+    startedAt: 30,
+    completedAt: 40,
+    durationMs: 10,
+    isError: false,
+    output: "one line",
+    agentRunId: "run-1",
+  });
+  assert.equal(completed.activity[0]?.status, "completed");
+  assert.equal(completed.activity[0]?.summary, "completed · 10ms · 1 line");
+
+  const stale = [
+    {
+      type: "tool.started",
+      toolCallId: "call-1",
+      toolName: "read_file",
+      input: { path: "src/a.ts", i: "Reading runtime entry" },
+      startedAt: 50,
+      agentRunId: "run-1",
+      why: "a settled call cannot reopen as running",
+    },
+    {
+      type: "tool.completed",
+      toolCallId: "call-1",
+      toolName: "read_file",
+      input: { path: "src/a.ts", i: "Reading runtime entry" },
+      startedAt: 30,
+      completedAt: 90,
+      durationMs: 60,
+      isError: true,
+      agentRunId: "run-1",
+      why: "a duplicate completion cannot re-time or re-grade the call",
+    },
+  ];
+  for (const { why, ...event } of stale) {
+    assert.strictEqual(applyTraceEventToAgentConsole(completed, event), completed, why);
+  }
+
+  const failed = applyTraceEventToAgentConsole(completed, {
+    type: "tool.completed",
+    toolCallId: "call-2",
+    toolName: "run_shell",
+    input: { command: "npm test" },
+    startedAt: 41,
+    completedAt: 45,
+    isError: true,
+    agentRunId: "run-1",
+  });
+  assert.equal(failed.activity[1]?.status, "failed");
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(failed, {
+      type: "tool.completed",
+      toolCallId: "call-2",
+      toolName: "run_shell",
+      input: { command: "npm test" },
+      startedAt: 41,
+      completedAt: 46,
+      isError: false,
+      agentRunId: "run-1",
+    }),
+    failed,
+    "a failed call cannot be rewritten as a success",
+  );
+});
+
+test("work lifecycle reducer keeps terminal node statuses monotonic", () => {
+  const proposed = applyTraceEventToAgentConsole(initialConsole, {
+    type: "work.proposed",
+    graphId: "goal-1",
+    graph: {
+      id: "goal-1",
+      approval: "pending",
+      nodes: [{
+        id: "task-1",
+        title: "Implement auth",
+        prompt: "private executor assignment",
+        status: "ready",
+        dependsOn: [],
+        fileOwnership: ["src/auth.ts"],
+        evidenceRefs: [],
+      }],
+    },
+  });
+  const running = applyTraceEventToAgentConsole(proposed, {
+    type: "work.status",
+    graphId: "goal-1",
+    nodeId: "task-1",
+    status: "running",
+  });
+  assert.equal(running.workGraph?.nodes[0]?.status, "running");
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(running, {
+      type: "work.status",
+      graphId: "goal-1",
+      nodeId: "task-1",
+      status: "running",
+    }),
+    running,
+    "a repeated status projects nothing",
+  );
+
+  const completed = applyTraceEventToAgentConsole(running, {
+    type: "work.status",
+    graphId: "goal-1",
+    nodeId: "task-1",
+    status: "completed",
+  });
+  assert.equal(completed.workGraph?.nodes[0]?.status, "completed");
+
+  for (const status of ["running", "ready", "blocked", "completed", "failed", "cancelled"]) {
+    assert.strictEqual(
+      applyTraceEventToAgentConsole(completed, {
+        type: "work.status",
+        graphId: "goal-1",
+        nodeId: "task-1",
+        status,
+      }),
+      completed,
+      `a completed node cannot move to ${status}`,
+    );
+  }
+
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(completed, {
+      type: "work.status",
+      graphId: "goal-1",
+      nodeId: "task-absent",
+      status: "running",
+    }),
+    completed,
+    "an unknown node changes nothing",
+  );
+});
+
+test("agent lifecycle reducer accepts run events only against the job the run owns", () => {
+  const queued = applyTraceEventToAgentConsole(queuedRuntimeConsole, {
+    ...queuedRuntimeJob,
+    eventId: "event-job-2",
+    jobId: "job-2",
+    label: "Sweep cache",
+    queuedAt: 11,
+  });
+  const { jobId, ...unlinkedRun } = startedRuntimeRun;
+
+  const rejectedStarts = [
+    { ...unlinkedRun, eventId: "event-run-a", runId: "run-a", why: "a run start with no job link is rejected" },
+    { ...startedRuntimeRun, eventId: "event-run-b", runId: "run-b", jobId: "job-absent", why: "a run start naming an unknown job is rejected" },
+    { ...startedRuntimeRun, eventId: "event-run-c", runId: "run-c", jobId: "   ", why: "a blank job link is no link at all" },
+  ];
+  for (const { why, ...event } of rejectedStarts) {
+    assert.strictEqual(applyTraceEventToAgentConsole(queued, event), queued, why);
+  }
+
+  const running = applyTraceEventToAgentConsole(queued, startedRuntimeRun);
+  assert.equal(running.jobs[0]?.agentRunId, "run-1");
+  assert.deepEqual(
+    running.jobs[1],
+    queued.jobs[1],
+    "a run start leaves every job but its own untouched",
+  );
+
+  const rejectedSettlements = [
+    { eventId: "event-run-d", why: "a settlement with no job link is rejected" },
+    { eventId: "event-run-e", jobId: "job-absent", why: "a settlement naming an unknown job is rejected" },
+    { eventId: "event-run-f", jobId: "job-2", why: "a merely queued job the run never owned cannot be settled" },
+  ];
+  for (const { why, ...settlement } of rejectedSettlements) {
+    assert.strictEqual(
+      applyTraceEventToAgentConsole(running, {
+        type: "agent.run.settled",
+        runId: "run-1",
+        status: "completed",
+        completedAt: 40,
+        ...settlement,
+      }),
+      running,
+      why,
+    );
+  }
+
+  const lateOwnedJob = applyTraceEventToAgentConsole(running, {
+    ...queuedRuntimeJob,
+    eventId: "event-job-3",
+    jobId: "job-late",
+    label: "Deferred audit",
+    queuedAt: 500,
+    agentRunId: "run-1",
+  });
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(lateOwnedJob, {
+      type: "agent.run.settled",
+      eventId: "event-run-g",
+      runId: "run-1",
+      jobId: "job-late",
+      status: "completed",
+      completedAt: 40,
+    }),
+    lateOwnedJob,
+    "an owned job queued after the run finished is mis-routed",
+  );
+
+  const settled = applyTraceEventToAgentConsole(running, {
+    type: "agent.run.settled",
+    eventId: "event-run-h",
+    runId: "run-1",
+    jobId: "job-1",
+    status: "completed",
+    completedAt: 40,
+  });
+  assert.equal(settled.agents[0]?.status, "completed");
+  assert.equal(settled.jobs[0]?.status, "completed");
+  assert.deepEqual(settled.jobs[1], queued.jobs[1], "another job never settles with a foreign run");
 });
