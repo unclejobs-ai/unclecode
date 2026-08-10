@@ -13,6 +13,7 @@ import {
   typedComposerLinePattern,
   waitForPane,
 } from "../../scripts/runtime-qa/tmux-helpers.mjs";
+import { startAgentConsoleControlServer } from "../../scripts/runtime-qa/agent-console-smoke-server.mjs";
 
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -35,10 +36,28 @@ test("typed composer pattern waits for the actual input line instead of static c
 });
 
 test("runtime QA tmux children stay interactive under CI runners", () => {
-  const source = { CI: "1", NO_COLOR: "1", PATH: "/bin" };
+  const source = { CI: "1", NO_COLOR: "1", PATH: "/bin", SHELL: "/bin/zsh" };
 
-  assert.deepEqual(runtimeTmuxEnvironment(source), { PATH: "/bin" });
-  assert.deepEqual(source, { CI: "1", NO_COLOR: "1", PATH: "/bin" });
+  assert.deepEqual(runtimeTmuxEnvironment(source), { PATH: "/bin", SHELL: "/bin/sh" });
+  assert.deepEqual(source, { CI: "1", NO_COLOR: "1", PATH: "/bin", SHELL: "/bin/zsh" });
+});
+
+test("Agent Console smoke waits for each executor lane to reach its boundary", async () => {
+  const server = await startAgentConsoleControlServer();
+  try {
+    const responsePromise = fetch(`http://127.0.0.1:${server.port}/omp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "AGENT_CONSOLE_QA_LANE_BETA" }),
+    });
+
+    await server.waitForLane("beta", 1_000);
+    server.releaseLane("beta");
+    const response = await responsePromise;
+    assert.equal(response.ok, true);
+  } finally {
+    await server.close();
+  }
 });
 
 test("runtime QA tmux commands use an isolated socket", () => {

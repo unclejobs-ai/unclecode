@@ -195,3 +195,10 @@ export async function runYoloGreetingTuiSmoke({ port, tmp, observations }) {
     await runTmux(["kill-session", "-t", session], { allowFailure: true });
   }
 }
+
+/**
+ * The Agent Console gate keeps its own module because it scripts a whole
+ * two-executor work turn rather than a single provider reply, but it is a basic
+ * TUI smoke: re-exporting it here keeps one import site for the catalog.
+ */
+export { runAgentConsoleTuiSmoke } from "./tui-agent-console-smoke.mjs";

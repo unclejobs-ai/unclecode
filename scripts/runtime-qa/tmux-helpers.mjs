@@ -20,6 +20,7 @@ export function runtimeTmuxEnvironment(env = process.env) {
   const sanitized = { ...env };
   delete sanitized.CI;
   delete sanitized.NO_COLOR;
+  sanitized.SHELL = "/bin/sh";
   return sanitized;
 }
 

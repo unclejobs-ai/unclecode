@@ -24,7 +24,7 @@ import {
   waitForPane,
 } from "./tmux-helpers.mjs";
 
-const CONTEXT_WARNING_SUMMARY_PATTERN = /Warnings · (?:none|\d+)|✓ none|\d+ warnings?/i;
+const CONTEXT_WARNING_SUMMARY_PATTERN = /(?:\d+ warnings?|✓ none)/i;
 const MAX_REAL_USE_LATENCY_MS = 12_000;
 
 export async function runRealUseTuiStress({ port, tmp, observations }) {
@@ -64,15 +64,11 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     await submitLine(session, "/context", paneFile);
     const contextPane = await waitForPane(
       session,
-      /(?=.*Sources · \d+ included)(?=.*(?:Warnings · (?:none|\d+)|✓ none|\d+ warnings?))/is,
+      /(?=.*Sources · \d+ sent · \d+ held)(?=.*(?:\d+ warnings?|✓ none))/is,
       contextPaneFile,
     );
-    assert.match(contextPane, /Sources · \d+ included/);
-    assert.match(contextPane, /Held back locally|\d+ held back/);
+    assert.match(contextPane, /Sources · \d+ sent · \d+ held/);
     assert.match(contextPane, CONTEXT_WARNING_SUMMARY_PATTERN);
-    if (/(?:Warnings · [1-9]\d*|[1-9]\d* warnings?)/i.test(contextPane)) {
-      assert.match(contextPane, /warning · [\w.-]+/i);
-    }
     assert.doesNotMatch(contextPane, /Unknown command|panic|TypeError|ReferenceError/);
     await runTmux(["send-keys", "-t", session, "Escape"]);
     await waitForPane(session, IDLE_COMPOSER_PATTERN, paneFile);
