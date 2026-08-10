@@ -9,6 +9,7 @@ import React from "react";
 import type { TuiRenderOptions } from "./index.js";
 import type { TuiShellHomeState } from "./shell-state.js";
 import type { WorkShellImageAttachment } from "./work-shell-attachments.js";
+import type { OmpAuthCatalogPort } from "./work-shell-auth-provider-picker-model.js";
 import type { WorkShellPaneRuntimeState } from "./work-shell-hooks.js";
 import {
   EmbeddedWorkShellPane,
@@ -102,7 +103,9 @@ export type ManagedWorkShellDashboardInput<
   readonly paneRuntime: Omit<
     CreateWorkShellEngineInput<Attachment, Reasoning, TraceEvent>,
     "onExit"
-  >;
+  > & {
+    readonly ompAuthCatalog?: OmpAuthCatalogPort | undefined;
+  };
   readonly getReasoningLabel: (reasoning: Reasoning) => string;
   readonly isReasoningSupported: (reasoning: Reasoning) => boolean;
 };
@@ -147,6 +150,9 @@ export function createManagedWorkShellDashboardProps<
         resolveComposerInput: input.paneRuntime.resolveComposerInput,
         getSuggestions: runtime.getSuggestions,
         browserOAuthAvailable: runtime.browserOAuthAvailable,
+        ...(input.paneRuntime.ompAuthCatalog
+          ? { ompAuthCatalog: input.paneRuntime.ompAuthCatalog }
+          : {}),
         shouldBlockSlashSubmit: runtime.shouldBlockSlashSubmit,
         getReasoningLabel: input.getReasoningLabel,
         isReasoningSupported: input.isReasoningSupported,

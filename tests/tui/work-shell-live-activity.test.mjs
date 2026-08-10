@@ -4,7 +4,7 @@ import { stripVTControlCharacters } from "node:util";
 
 import React from "react";
 
-import { renderDebugFrame } from "./work-shell-render-harness.mjs";
+import { renderDebugFrame, waitForSettledFrame } from "./work-shell-render-harness.mjs";
 import { getDisplayWidth } from "../../packages/tui/src/text-width.ts";
 
 // Force light terminal background for the render tests below — they were
@@ -14,6 +14,8 @@ process.env.UNCLECODE_TERMINAL_BACKGROUND = "light";
 import {
   formatWorkShellLiveActivityLine,
   formatWorkShellPanelEmptyLines,
+  formatWorkShellStatusActivityFacts,
+  resolveWorkShellActivityNow,
   WorkShellView,
   resolveReadableWorkShellTextColor,
   shouldSuppressWorkShellPassivePanel,
@@ -393,4 +395,258 @@ test("idle transient slash pickers are hidden after command submit", () => {
     }),
     false,
   );
+});
+
+// Task 9: the one status row the shell owns now reports how much delegated
+// work is live, and its elapsed label is anchored to a monotonic clock so an
+// NTP correction cannot make a running turn look younger than it is.
+
+function agentRun(id, overrides = {}) {
+  return {
+    id,
+    displayName: id,
+    agentType: "scout",
+    status: "running",
+    startedAt: 1_000,
+    ...overrides,
+  };
+}
+
+function asyncJob(id, overrides = {}) {
+  return {
+    id,
+    type: "work-node",
+    label: id,
+    status: "running",
+    queuedAt: 900,
+    startedAt: 1_000,
+    ...overrides,
+  };
+}
+
+function consoleSnapshot(overrides = {}) {
+  return { profileId: "build", activity: [], agents: [], jobs: [], ...overrides };
+}
+
+function statusProps(overrides = {}) {
+  return {
+    provider: "openai",
+    model: "gpt-5.4",
+    reasoningLabel: "medium",
+    reasoningSupported: true,
+    mode: "default",
+    authLabel: "Saved OAuth",
+    entries: [],
+    isBusy: false,
+    activePanel: { title: "", lines: [] },
+    composer: React.createElement("span", null, ""),
+    inputValue: "",
+    slashSuggestionCount: 0,
+    terminalColumns: 120,
+    cwd: "/tmp/unclecode-status-workspace",
+    ...overrides,
+  };
+}
+
+const SPINNER = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u;
+
+function spinnerLines(frame) {
+  return frame.split("\n").filter((line) => SPINNER.test(line));
+}
+
+async function renderStatusFrame(overrides) {
+  const columns = overrides.terminalColumns ?? 120;
+  const { instance, getOutput } = renderDebugFrame(
+    React.createElement(WorkShellView, statusProps(overrides)),
+    { columns, rows: 40 },
+  );
+  await waitForSettledFrame(getOutput);
+  const frame = getLastWorkShellFrame(getOutput());
+  instance.unmount();
+  instance.cleanup();
+  return frame;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
+test("status activity facts order counts, activity and elapsed and drop every zero", () => {
+  assert.equal(
+    formatWorkShellStatusActivityFacts({
+      activeAgents: 4,
+      activeJobs: 4,
+      activity: "Reading context",
+      elapsed: "16s",
+    }),
+    "4 agents · 4 jobs · Reading context · 16s",
+  );
+  assert.equal(
+    formatWorkShellStatusActivityFacts({
+      activeAgents: 0,
+      activeJobs: 0,
+      activity: "Ready",
+      elapsed: "last 1.2s",
+    }),
+    "Ready · last 1.2s",
+  );
+  assert.equal(
+    formatWorkShellStatusActivityFacts({ activeAgents: 1, activeJobs: 1, activity: "Working" }),
+    "1 agent · 1 job · Working",
+  );
+  assert.equal(
+    formatWorkShellStatusActivityFacts({ activeAgents: 0, activeJobs: 2, activity: "Working" }),
+    "2 jobs · Working",
+  );
+});
+
+test("the shell clock reads display time from a monotonic anchor, not the wall clock", () => {
+  assert.equal(resolveWorkShellActivityNow({ wall: 1_000, monotonic: 5_000 }, 5_250), 1_250);
+  assert.equal(resolveWorkShellActivityNow({ wall: 1_000, monotonic: 5_000 }, 5_000), 1_000);
+});
+
+test("the busy status row states live agent and job counts before activity and elapsed", async () => {
+  const frame = await renderStatusFrame({
+    isBusy: true,
+    busyStatus: "read src/app.ts",
+    currentTurnStartedAt: Date.now() - 16_200,
+    agentConsole: consoleSnapshot({
+      agents: [
+        agentRun("r1"),
+        agentRun("r2"),
+        agentRun("r3", { status: "waiting" }),
+        agentRun("r4"),
+        agentRun("r5", { status: "completed", completedAt: 2_000 }),
+      ],
+      jobs: [
+        asyncJob("j1"),
+        asyncJob("j2"),
+        asyncJob("j3"),
+        asyncJob("j4", { status: "queued" }),
+        asyncJob("j5", { status: "completed", completedAt: 2_000 }),
+      ],
+    }),
+  });
+
+  const lines = spinnerLines(frame);
+  assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
+  assert.match(
+    lines[0],
+    /gpt-5\.4 · 작업 모드 · 4 agents · 4 jobs · Reading context · \d+s\s*$/u,
+  );
+});
+
+test("the status row counts a job and its owning agent once", async () => {
+  const frame = await renderStatusFrame({
+    agentConsole: consoleSnapshot({
+      agents: [agentRun("r1")],
+      jobs: [asyncJob("j1", { agentRunId: "r1" })],
+    }),
+  });
+
+  const lines = spinnerLines(frame);
+  assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
+  assert.match(lines[0], /1 job · Working/u);
+  assert.doesNotMatch(lines[0], /1 agent/u);
+});
+
+test("the status row omits agent and job counts once nothing is live", async () => {
+  const frame = await renderStatusFrame({
+    isBusy: true,
+    busyStatus: "read src/app.ts",
+    currentTurnStartedAt: Date.now() - 3_200,
+    agentConsole: consoleSnapshot({
+      agents: [agentRun("r1", { status: "completed", completedAt: 2_000 })],
+      jobs: [asyncJob("j1", { status: "cancelled", completedAt: 2_000 })],
+    }),
+  });
+
+  const lines = spinnerLines(frame);
+  assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
+  assert.match(lines[0], /gpt-5\.4 · 작업 모드 · Reading context · 3\.\ds\s*$/u);
+  assert.doesNotMatch(lines[0], /agent|job/u);
+});
+
+test("delegated work alone keeps the status row live while the main turn is idle", async () => {
+  const frame = await renderStatusFrame({
+    isBusy: false,
+    agentConsole: consoleSnapshot({
+      agents: [agentRun("r1"), agentRun("r2")],
+      jobs: [asyncJob("j1", { status: "queued" })],
+    }),
+  });
+
+  const lines = spinnerLines(frame);
+  assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
+  assert.match(lines[0], /gpt-5\.4 · 작업 모드 · 2 agents · 1 job · Working\s*$/u);
+  assert.doesNotMatch(frame, /◇ gpt-5\.4/u, "the idle glyph must yield to the busy spinner");
+});
+
+test("an auth warning keeps its slot beside the live counts", async () => {
+  const frame = await renderStatusFrame({
+    authLabel: "OAuth · needs API key",
+    isBusy: true,
+    busyStatus: "read src/app.ts",
+    currentTurnStartedAt: Date.now() - 2_100,
+    agentConsole: consoleSnapshot({ agents: [agentRun("r1")] }),
+  });
+
+  const lines = spinnerLines(frame);
+  assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
+  assert.match(
+    lines[0],
+    /gpt-5\.4 · 작업 모드 · OAuth · needs API key · 1 agent · Reading context · \d\.\ds\s*$/u,
+  );
+});
+
+test("a formatted auth warning remains visible in the narrow status row", async () => {
+  const frame = await renderStatusFrame({
+    authLabel: "OAuth · needs API key",
+    isBusy: true,
+    busyStatus: "read src/app.ts",
+    currentTurnStartedAt: Date.now() - 2_100,
+    terminalColumns: 52,
+    agentConsole: consoleSnapshot({ agents: [agentRun("r1")] }),
+  });
+
+  const lines = spinnerLines(frame);
+  assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
+  assert.match(lines[0], /gpt-5\.4 · OAuth · needs API key/u);
+});
+
+test("elapsed labels keep advancing when the wall clock jumps back", async () => {
+  const realNow = Date.now;
+  const start = realNow();
+  const { instance, getOutput } = renderDebugFrame(
+    React.createElement(WorkShellView, statusProps({
+      isBusy: true,
+      busyStatus: "read src/app.ts",
+      currentTurnStartedAt: start - 30_000,
+    })),
+    { columns: 120, rows: 40 },
+  );
+
+  const readElapsedSeconds = () => {
+    const line = spinnerLines(getLastWorkShellFrame(getOutput()))[0] ?? "";
+    const match = /·\s+(\d+)s\s*$/u.exec(line);
+    assert.ok(match, `expected a whole-second elapsed label, received: ${JSON.stringify(line)}`);
+    return Number(match[1]);
+  };
+
+  try {
+    await waitForSettledFrame(getOutput);
+    const before = readElapsedSeconds();
+    // A backwards NTP correction. Nothing about the turn changed.
+    Date.now = () => start - 600_000;
+    await delay(1_200);
+    const after = readElapsedSeconds();
+    assert.ok(
+      after > before,
+      `elapsed froze after the wall-clock correction: ${before}s then ${after}s`,
+    );
+  } finally {
+    Date.now = realNow;
+    instance.unmount();
+    instance.cleanup();
+  }
 });

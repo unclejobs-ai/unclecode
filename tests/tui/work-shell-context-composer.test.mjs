@@ -255,7 +255,7 @@ test("Context Desk keeps the composer dock mounted and the draft visible", async
   );
 
   try {
-    await waitForCondition(() => getFrame().includes("UncleCode Context Desk"), "the Context Desk");
+    await waitForCondition(() => getFrame().includes("Context Desk ·"), "the Context Desk");
 
     const idle = getFrame();
     assert.match(idle, /prompt deck/, "the composer dock divider must survive the desk overlay");
@@ -273,7 +273,7 @@ test("Context Desk keeps the composer dock mounted and the draft visible", async
     );
 
     const drafting = getFrame();
-    assert.match(drafting, /UncleCode Context Desk/, "the desk stays open while the user drafts");
+    assert.match(drafting, /Context Desk ·/, "the desk stays open while the user drafts");
     assert.match(drafting, /prompt deck/);
   } finally {
     instance.unmount();
@@ -288,7 +288,7 @@ test("context source, advice, and undo keys act only on an empty composer", asyn
   );
 
   try {
-    await waitForCondition(() => getFrame().includes("UncleCode Context Desk"), "the Context Desk");
+    await waitForCondition(() => getFrame().includes("Context Desk ·"), "the Context Desk");
 
     // Empty composer: the desk owns the action keys and they never become text.
     stdin.write("p");
@@ -324,7 +324,7 @@ test("context source, advice, and undo keys act only on an empty composer", asyn
       callsWhenDraftStarted,
       "no context mutation, advice, or undo callback may fire while a draft is pending",
     );
-    assert.match(getFrame(), /UncleCode Context Desk/, "the desk stays open while the user drafts");
+    assert.match(getFrame(), /Context Desk ·/, "the desk stays open while the user drafts");
   } finally {
     instance.unmount();
     instance.cleanup();
@@ -386,7 +386,7 @@ test("Context Desk and composer dock both fit a 52x40 terminal", async () => {
   );
 
   try {
-    await waitForCondition(() => getFrame().includes("UncleCode Context Desk"), "the Context Desk");
+    await waitForCondition(() => getFrame().includes("Context Desk ·"), "the Context Desk");
 
     const frame = getFrame();
     assert.match(frame, /prompt deck/, "the desk must not claim the whole frame");
@@ -442,10 +442,10 @@ test("Context Desk yields rows to a wrapped multiline composer", async () => {
   );
 
   try {
-    await waitForCondition(() => getFrame().includes("UncleCode Context Desk"), "the Context Desk");
+    await waitForCondition(() => getFrame().includes("Context Desk ·"), "the Context Desk");
     const frame = getFrame();
     assert.match(frame, /first line keeps the active request/);
-    assert.match(frame, /Preview · source 0/);
+    assert.match(frame, /Selected · source 0/);
     assert.ok(
       frame.split("\n").length <= 40,
       `wrapped draft plus Context Desk must fit 40 rows, got ${frame.split("\n").length}`,
@@ -480,12 +480,12 @@ test("the composer dock is drawn above the Context Desk on a crowded 52x40 frame
   );
 
   try {
-    await waitForCondition(() => getFrame().includes("UncleCode Context Desk"), "the Context Desk");
+    await waitForCondition(() => getFrame().includes("Context Desk ·"), "the Context Desk");
 
     const frame = getFrame();
     assert.equal(composerLine(frame), `${PROMPT_GLYPH} budget check`);
     const dockAt = frame.indexOf("prompt deck");
-    const deskAt = frame.indexOf("UncleCode Context Desk");
+    const deskAt = frame.indexOf("Context Desk ·");
     assert.ok(dockAt >= 0, "the composer dock must survive an advice-heavy desk");
     assert.ok(
       dockAt < deskAt,

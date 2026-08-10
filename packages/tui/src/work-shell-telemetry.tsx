@@ -23,6 +23,12 @@ type UsageTotals = {
   readonly cacheReadTokens: number;
   readonly cacheWriteTokens: number;
   readonly cacheSavingsUsd: number;
+  /**
+   * Set when a route reused cache but UncleCode has no price table for its
+   * model, so the savings estimate is absent rather than zero. OMP fronts
+   * arbitrary upstreams, so this is the normal case for a worker route.
+   */
+  readonly cacheSavingsUnknown: boolean;
   readonly costUsd: number;
   readonly eventCount: number;
 };
@@ -42,6 +48,7 @@ const EMPTY_TOTALS: UsageTotals = {
   cacheReadTokens: 0,
   cacheWriteTokens: 0,
   cacheSavingsUsd: 0,
+  cacheSavingsUnknown: false,
   costUsd: 0,
   eventCount: 0,
 };
@@ -62,7 +69,13 @@ export function renderCacheTelemetryOverlay(input: TelemetryOverlayInput): React
   const statCells = [
     { label: "CACHE STATE", value: state, color: stateColor },
     { label: "REUSE", value: formatPercent(reuseRatio), color: input.palette.assistant },
-    { label: "SAVED · EST", value: formatUsd(totals.cacheSavingsUsd), color: input.palette.success },
+    {
+      label: "SAVED · EST",
+      value: formatSavings(totals),
+      color: totals.cacheSavingsUnknown && totals.cacheSavingsUsd === 0
+        ? input.palette.textMuted
+        : input.palette.success,
+    },
     { label: "COST · EST", value: formatUsd(totals.costUsd), color: input.palette.text },
   ];
   const ledgers = buildUsageLedgerRows(input.snapshot);
@@ -149,7 +162,7 @@ export function renderAgentHistoryOverlay(input: TelemetryOverlayInput): React.R
             <Text color={input.palette.textMuted}>No delegated agent runs in this session.</Text>
             {input.snapshot.mainUsage ? renderMainRun(input.snapshot.mainUsage, input.palette) : null}
           </Box>
-        ) : agents.map((agent) => renderAgentRow(agent, contentWidth, input.palette))}
+        ) : agents.map((agent) => renderAgentRow(agent, contentWidth, input.palette, compact))}
       </Box>
 
       {input.snapshot.jobs.length > 0 ? (
@@ -190,24 +203,52 @@ function renderTelemetryHeader(
     : <Box justifyContent="space-between">{titleText}{controls}</Box>;
 }
 
+/**
+ * A delegated run is only auditable if it names the route it spent on. An OMP
+ * worker and a hosted turn look identical from tokens alone, so every route the
+ * run touched is listed under it with the cache evidence that produced those
+ * tokens. At narrow widths the route and its cache counters take separate lines
+ * rather than truncating one of the two values away.
+ */
 function renderAgentRow(
   agent: AgentRun,
   width: number,
   palette: ContextInspectorPalette,
+  compact: boolean,
 ): React.ReactNode {
   const usage = normalizeUsage(agent.usage);
   const detail = agent.currentActivity ?? agent.summary ?? agent.errorSummary;
-  const labelWidth = Math.max(12, Math.min(28, width - 42));
+  // The run line is fixed-width columns, so at a narrow terminal the budget has
+  // to shrink or ink wraps the cost onto an orphan line that reads like another
+  // run. Sizes below keep glyph + name + type + tokens + cost inside `width`.
+  const labelWidth = compact
+    ? Math.max(8, Math.min(28, width - 30))
+    : Math.max(12, Math.min(28, width - 42));
+  const typeWidth = compact ? 8 : 12;
+  const tokenWidth = compact ? 6 : 8;
+  const bound = Math.max(16, width - 4);
   return (
     <Box key={agent.id} flexDirection="column" marginBottom={detail ? 1 : 0}>
       <Text>
         <Text color={resolveStatusColor(agent.status, palette)}>{statusGlyph(agent.status)}</Text>
         <Text color={palette.text} bold>{` ${padDisplay(truncateForDisplayWidth(agent.displayName, labelWidth), labelWidth)} `}</Text>
-        <Text color={palette.textMuted}>{`${padDisplay(agent.agentType, 12)} `}</Text>
-        <Text color={palette.assistant}>{`${padDisplay(formatTokens(usage.inputTokens), 8)} in `}</Text>
+        <Text color={palette.textMuted}>{`${padDisplay(agent.agentType, typeWidth)} `}</Text>
+        <Text color={palette.assistant}>{`${padDisplay(formatTokens(usage.inputTokens), tokenWidth)} in `}</Text>
         <Text color={palette.success}>{formatUsd(usage.costUsd)}</Text>
       </Text>
-      {detail ? <Text color={palette.textMuted}>{`  └ ${truncateForDisplayWidth(detail, Math.max(16, width - 4))}`}</Text> : null}
+      {(agent.usage?.routes ?? []).map((route, index) => compact
+        ? (
+          <Box key={`${agent.id}:route:${index}`} flexDirection="column">
+            <Text color={palette.textMuted}>{`  ├ ${truncateForDisplayWidth(`${route.provider}/${route.model}`, bound)}`}</Text>
+            <Text color={palette.assistant}>{`  │ ${truncateForDisplayWidth(formatRouteCache(route), bound)}`}</Text>
+          </Box>
+        )
+        : (
+          <Text key={`${agent.id}:route:${index}`} color={palette.textMuted}>
+            {`  ├ ${truncateForDisplayWidth(`${route.provider}/${route.model}  ·  ${formatRouteCache(route)}`, bound)}`}
+          </Text>
+        ))}
+      {detail ? <Text color={palette.textMuted}>{`  └ ${truncateForDisplayWidth(detail, bound)}`}</Text> : null}
     </Box>
   );
 }
@@ -224,6 +265,13 @@ function renderMainRun(usage: AgentRunUsage, palette: ContextInspectorPalette): 
   );
 }
 
+/**
+ * One route's evidence. Cache read and cache write are the pair that explains a
+ * reuse ratio, so they share a line of their own instead of competing with the
+ * provider/model column for a single row's width budget — truncating the route
+ * would erase the only thing that tells an OMP worker turn apart from a hosted
+ * one, and dropping the write counter would hide what the reuse cost to build.
+ */
 function renderUsageLedgerRow(
   row: UsageLedgerRow,
   compact: boolean,
@@ -233,29 +281,38 @@ function renderUsageLedgerRow(
   const route = row.provider && row.model ? `${row.provider}/${row.model}` : "provider/model unavailable";
   const glyph = row.active ? "◐" : "●";
   const glyphColor = row.active ? palette.warning : palette.textMuted;
+  const cacheEvidence = formatRouteCache(row.usage);
+  const savings = `${formatSavings(row.usage)} saved`;
+  const savingsColor = row.usage.cacheSavingsUnknown && row.usage.cacheSavingsUsd === 0
+    ? palette.textMuted
+    : palette.success;
   if (compact) {
     return (
       <Box key={row.id} flexDirection="column" marginBottom={1}>
         <Text><Text color={glyphColor}>{glyph}</Text><Text color={palette.text} bold>{` ${row.label}`}</Text></Text>
         <Text color={palette.textMuted}>{`  ${truncateForDisplayWidth(route, Math.max(12, contentWidth - 2))}`}</Text>
+        <Text color={palette.assistant}>{`  ${truncateForDisplayWidth(cacheEvidence, Math.max(12, contentWidth - 2))}`}</Text>
         <Text>
-          <Text color={palette.assistant}>{`  ${formatTokens(row.usage.cacheReadTokens)} cache`}</Text>
-          <Text color={palette.textMuted}>{`  ·  ${formatTokens(row.usage.inputTokens)} input  ·  `}</Text>
-          <Text color={palette.success}>{`${formatUsd(row.usage.cacheSavingsUsd)} saved`}</Text>
+          <Text color={palette.textMuted}>{`  ${formatTokens(row.usage.inputTokens)} input  ·  `}</Text>
+          <Text color={savingsColor}>{savings}</Text>
         </Text>
       </Box>
     );
   }
-  const routeWidth = Math.max(14, Math.min(34, contentWidth - 58));
+  const routeWidth = Math.max(14, Math.min(34, contentWidth - 51));
   return (
-    <Text key={row.id}>
-      <Text color={glyphColor}>{glyph}</Text>
-      <Text color={palette.text} bold>{` ${padDisplay(row.label, 18)} `}</Text>
-      <Text color={palette.textMuted}>{`${padDisplay(route, routeWidth)}  `}</Text>
-      <Text color={palette.assistant}>{`${padDisplay(formatTokens(row.usage.cacheReadTokens), 8)} cache `}</Text>
-      <Text color={palette.textMuted}>{`${padDisplay(formatTokens(row.usage.inputTokens), 8)} input `}</Text>
-      <Text color={palette.success}>{formatUsd(row.usage.cacheSavingsUsd)}</Text>
-    </Text>
+    <Box key={row.id} flexDirection="column">
+      <Text>
+        <Text color={glyphColor}>{glyph}</Text>
+        <Text color={palette.text} bold>{` ${padDisplay(row.label, 18)} `}</Text>
+        <Text color={palette.textMuted}>{`${padDisplay(route, routeWidth)}  `}</Text>
+        <Text color={palette.textMuted}>{`${padDisplay(formatTokens(row.usage.inputTokens), 8)} input `}</Text>
+        <Text color={savingsColor}>{savings}</Text>
+      </Text>
+      <Text color={palette.assistant}>
+        {`  ${truncateForDisplayWidth(cacheEvidence, Math.max(12, contentWidth - 2))}`}
+      </Text>
+    </Box>
   );
 }
 
@@ -320,6 +377,7 @@ function normalizeUsage(usage: AgentRunUsage | AgentRunUsageRoute | undefined): 
     cacheReadTokens: usage?.cacheReadTokens ?? 0,
     cacheWriteTokens: usage?.cacheWriteTokens ?? 0,
     cacheSavingsUsd: usage?.cacheSavingsUsd ?? 0,
+    cacheSavingsUnknown: hasUnpricedCacheReads(usage),
     costUsd: usage?.costUsd ?? 0,
     eventCount: usage?.eventIds.length ?? 0,
   };
@@ -332,9 +390,44 @@ function addUsage(left: UsageTotals, right: UsageTotals): UsageTotals {
     cacheReadTokens: left.cacheReadTokens + right.cacheReadTokens,
     cacheWriteTokens: left.cacheWriteTokens + right.cacheWriteTokens,
     cacheSavingsUsd: left.cacheSavingsUsd + right.cacheSavingsUsd,
+    cacheSavingsUnknown: left.cacheSavingsUnknown || right.cacheSavingsUnknown,
     costUsd: left.costUsd + right.costUsd,
     eventCount: left.eventCount + right.eventCount,
   };
+}
+
+function formatRouteCache(
+  usage: { readonly cacheReadTokens?: number; readonly cacheWriteTokens?: number },
+): string {
+  return `${formatTokens(usage.cacheReadTokens ?? 0)} cache read  ·  ${formatTokens(usage.cacheWriteTokens ?? 0)} cache write`;
+}
+
+/**
+ * Reuse that no price table can value. A producer omits `cacheSavingsUsd`
+ * entirely when it cannot estimate one, so absence next to a non-zero cache read
+ * is the signal — and a parent ledger is only as priced as its routes, since one
+ * priced route would otherwise mask an unpriced sibling behind a defined sum.
+ */
+function hasUnpricedCacheReads(usage: AgentRunUsage | AgentRunUsageRoute | undefined): boolean {
+  if (!usage) {
+    return false;
+  }
+  const routes = "routes" in usage ? usage.routes : undefined;
+  if (routes && routes.length > 0) {
+    return routes.some(hasUnpricedCacheReads);
+  }
+  return (usage.cacheReadTokens ?? 0) > 0 && usage.cacheSavingsUsd === undefined;
+}
+
+/**
+ * `$0.00` claims the reuse saved nothing; `n/a` admits the estimate is missing.
+ * A partial total is reported as a floor rather than an exact figure.
+ */
+function formatSavings(totals: UsageTotals): string {
+  if (!totals.cacheSavingsUnknown) {
+    return formatUsd(totals.cacheSavingsUsd);
+  }
+  return totals.cacheSavingsUsd > 0 ? `${formatUsd(totals.cacheSavingsUsd)}+` : "n/a";
 }
 
 function compareAgents(left: AgentRun, right: AgentRun): number {

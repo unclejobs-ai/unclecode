@@ -7,9 +7,14 @@ import {
   useRef,
   useState,
 } from "react";
-import { runRustCommandSync } from "@unclecode/orchestrator";
+import {
+  runRustCommandSync,
+  type AgentConsoleViewState,
+  type WorkShellComposerMode,
+} from "@unclecode/orchestrator";
 import type {
   AgentConsoleSnapshot,
+  AgentConsoleTab,
   ContextPacketChangeClassification,
   ContextPacketReceipt,
   ContextPacketView,
@@ -40,6 +45,14 @@ import {
   resolveWorkShellInputAction,
   resolveWorkShellSubmitAction,
 } from "./work-shell-input.js";
+import {
+  dispatchAgentConsoleAction,
+  resolveAgentConsoleInputDecision,
+  type AgentConsoleControls,
+  type AgentConsoleInputContext,
+  type AgentConsoleInputDecision,
+  type AgentConsoleKeyState,
+} from "./work-shell-agent-console-input.js";
 import type { WorkShellEntry, WorkShellPanel } from "./work-shell-view.js";
 
 export type WorkShellComposerPreview<Attachment = never> = {
@@ -266,7 +279,7 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly bridgeLines: readonly string[];
   readonly memoryLines: readonly string[];
   readonly authLauncherLines?: readonly string[];
-  readonly composerMode?: "default" | "api-key-entry";
+  readonly composerMode?: WorkShellComposerMode;
   readonly panel: WorkShellPanel;
   readonly queuedCount?: number | undefined;
   readonly queuePaused?: boolean | undefined;
@@ -287,6 +300,7 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   // budget meter scales with the active model instead of an env var.
   readonly modelWindow?: number | undefined;
   readonly agentConsole?: AgentConsoleSnapshot | undefined;
+  readonly agentConsoleView?: AgentConsoleViewState | undefined;
 };
 
 export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
@@ -310,6 +324,18 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   undoLastContextSourceAction?(): Promise<void>;
   acceptContextSuggestion?(suggestionId: string): Promise<void>;
   rejectContextSuggestion?(suggestionId: string): Promise<void>;
+  // Agent Console (Sprint 3) — keyboard controls for the Alt+A console.
+  // `openAgentConsole` is the capability probe: a host that does not wire it
+  // keeps Alt+A as ordinary typing instead of gaining a dead key.
+  openAgentConsole?(tab?: AgentConsoleTab): void;
+  closeAgentConsole?(): void;
+  selectAgentConsoleTab?(tab: AgentConsoleTab): void;
+  moveAgentConsoleCursor?(delta: number): void;
+  toggleAgentConsoleInspector?(): void;
+  beginAgentSteer?(): void;
+  requestAgentCancel?(): void;
+  confirmAgentCancel?(confirm: boolean): Promise<void>;
+  continueSelectedAgent?(): Promise<void>;
   // Optional because not every pane host wires trace plumbing — when
   // absent, the hook silently drops the event. In practice WorkShellEngine
   // always implements this since commit b891c19's follow-up.
@@ -426,6 +452,50 @@ export function useWorkShellSlashState(input: {
   };
 }
 
+function agentConsoleKeyMask(key: AgentConsoleKeyState): number {
+  return (key.meta ? 1 : 0)
+    | (key.ctrl ? 2 : 0)
+    | (key.shift ? 4 : 0)
+    | (key.tab ? 8 : 0)
+    | (key.return ? 16 : 0)
+    | (key.escape ? 32 : 0)
+    | (key.upArrow ? 64 : 0)
+    | (key.downArrow ? 128 : 0);
+}
+
+/**
+ * The live console one decision was resolved against. The view is immutable,
+ * so every fresh decision reads one coherent console state even when the
+ * previous key changed tabs, control mode, or composer mode.
+ */
+type AgentConsoleDecisionScope = {
+  readonly view: AgentConsoleViewState | undefined;
+  readonly composerMode: WorkShellComposerMode;
+};
+
+/**
+ * The console keyboard seam handed to the controller, to the Composer's
+ * suppression gate, and to the pane's submit routing. Every Composer key asks
+ * the suppression gate before its own short-circuits, so `decide` can cache one
+ * normalized physical event: dispatch and suppression share the decision, and
+ * the Composer consumes the cache before Ink emits the next event.
+ */
+export type WorkShellAgentConsoleKeyboard = {
+  readonly steering: boolean;
+  readonly buildContext: (
+    value: string,
+    key: AgentConsoleKeyState,
+    composerEmpty: boolean,
+  ) => AgentConsoleInputContext;
+  readonly decide: (
+    value: string,
+    key: AgentConsoleKeyState,
+    composerEmpty: boolean,
+    phase: "dispatch" | "suppress",
+  ) => AgentConsoleInputDecision;
+  readonly controls: AgentConsoleControls;
+};
+
 export function useWorkShellInputController(input: {
   readonly value: string;
   readonly replaceValue: (value: string) => void;
@@ -466,6 +536,11 @@ export function useWorkShellInputController(input: {
   readonly toggleContextSourceDelivery?: (() => Promise<void>) | undefined;
   readonly toggleContextInspectorExpanded?: (() => Promise<void>) | undefined;
   readonly undoContextSourceAction?: (() => Promise<void>) | undefined;
+  // Agent Console (Sprint 3): present only when the engine wires the console
+  // controls. `buildContext` is the single place the per-keystroke ownership
+  // context is assembled, so the Composer's suppression and this dispatch can
+  // never drift apart.
+  readonly agentConsole?: WorkShellAgentConsoleKeyboard | undefined;
 }): { readonly submit: (value: string) => Promise<boolean> } {
   const escapeResetArmedAtRef = useRef<number | undefined>(undefined);
   useInput((value, key) => {
@@ -481,6 +556,27 @@ export function useWorkShellInputController(input: {
         input.onRequestSessionsView();
       }
       return;
+    }
+    // Agent Console (Sprint 3): the console takes the frame ahead of every
+    // panel overlay, so it is asked before the telemetry hotkeys, the Context
+    // Inspector, and the general Rust resolver. Only `pass` lets the shell's
+    // downstream handlers see the keystroke at all.
+    if (input.agentConsole) {
+      const decision = input.agentConsole.decide(
+        value,
+        key,
+        input.isComposerRawEmpty?.() ?? isRawComposerEmpty(input.value),
+        "dispatch",
+      );
+      if (decision.kind !== "pass") {
+        escapeResetArmedAtRef.current = undefined;
+        if (decision.kind === "dispatch") {
+          dispatchAgentConsoleAction(decision.action, input.agentConsole.controls);
+        }
+        // `consume` swallows the key outright; `compose` leaves it to the
+        // Composer. Either way nothing behind the console may act on it.
+        return;
+      }
     }
     const telemetryPanelOpen =
       input.activePanelTitle === "Cache Telemetry"
@@ -632,6 +728,26 @@ export function useWorkShellInputController(input: {
 
   const submit = useCallback(
     async (value: string): Promise<boolean> => {
+      // The steer composer routes to the agent's control mailbox, not to the
+      // chat router. The generic resolver would turn an empty (or busy-turn)
+      // line into a `noop`, and the engine would never get the chance to
+      // reject it and leave the mode — stranding the operator in a composer
+      // whose Enter does nothing.
+      const liveAgentConsole = input.agentConsole?.buildContext(
+        value,
+        {},
+        isRawComposerEmpty(value),
+      );
+      if (
+        liveAgentConsole?.open === true
+        && liveAgentConsole.composerMode === "agent-steer"
+      ) {
+        input.replaceValue("");
+        await input.handleSubmit(value);
+        // No provider turn opened and no attachment was delivered, so the
+        // pane must keep its pending clipboard badge intact.
+        return false;
+      }
       const typedLine = value.trim();
       const submitValue =
         input.activeSlashInput && (typedLine.length === 0 || !typedLine.startsWith("/"))
@@ -678,6 +794,7 @@ export function useWorkShellInputController(input: {
       input.closeSlashPicker,
       input.selectedSlashCommand,
       input.shouldBlockSlashSubmit,
+      input.agentConsole?.buildContext,
     ],
   );
 
@@ -909,6 +1026,148 @@ export function useWorkShellPaneState<
     && engineState.contextActionReceipt?.canUndo
     && input.engine.undoLastContextSourceAction,
   );
+  const agentConsoleDecisionCacheRef = useRef<{
+    readonly value: string;
+    readonly keyMask: number;
+    readonly composerEmpty: boolean;
+    readonly decision: AgentConsoleInputDecision;
+  } | undefined>(undefined);
+
+  // Agent Console (Sprint 3). The seam exists only when the engine wires the
+  // controls AND publishes a view, so a pane without console support keeps
+  // Alt+A as ordinary typing instead of gaining a dead key.
+  const agentConsoleView = engineState.agentConsoleView;
+  const agentConsoleComposerMode = engineState.composerMode ?? "default";
+  const agentConsoleWired = agentConsoleView !== undefined
+    && input.engine.openAgentConsole !== undefined;
+  // The one definition of "the steer composer is live". The controller's
+  // submit routing, the pane's submit routing, the cursor, and the panel
+  // suppressions all read this, so none of them can disagree.
+  const agentConsoleSteering = agentConsoleWired
+    && agentConsoleView.open
+    && agentConsoleComposerMode === "agent-steer";
+  // Leaving the steer composer, by `Esc` or by closing the console, has to
+  // take the draft with it: a half-typed message addressed to an agent must
+  // never be left behind as a chat prompt one Enter away from the provider.
+  const leaveAgentSteerComposer = () => {
+    input.engine.cancelSensitiveInput?.();
+    setInputValue("");
+  };
+  const buildAgentConsoleContextForScope = (
+    scope: AgentConsoleDecisionScope,
+    value: string,
+    key: AgentConsoleKeyState,
+    composerEmpty: boolean,
+  ): AgentConsoleInputContext => ({
+    value,
+    key,
+    composerEmpty,
+    open: scope.view?.open ?? false,
+    tab: scope.view?.tab ?? "agents",
+    control: scope.view?.control.kind ?? "browse",
+    composerMode: scope.composerMode,
+    // A sticky picker panel keeps its keys even with an empty composer, so
+    // the panel-derived slash input counts too.
+    slashPickerActive:
+      activeSlashInput !== undefined || value.trim().startsWith("/"),
+  });
+  const buildAgentConsoleContext = (
+    value: string,
+    key: AgentConsoleKeyState,
+    composerEmpty: boolean,
+  ): AgentConsoleInputContext => {
+    const liveState = input.engine.getState();
+    return buildAgentConsoleContextForScope(
+      {
+        view: liveState.agentConsoleView ?? agentConsoleView,
+        composerMode: liveState.composerMode ?? "default",
+      },
+      value,
+      key,
+      composerEmpty,
+    );
+  };
+  const decideAgentConsoleInput = (
+    value: string,
+    key: AgentConsoleKeyState,
+    composerEmpty: boolean,
+    phase: "dispatch" | "suppress",
+  ): AgentConsoleInputDecision => {
+    const keyMask = agentConsoleKeyMask(key);
+    // One engine read feeds the fresh decision and its resolver context.
+    const liveState = input.engine.getState();
+    const scope: AgentConsoleDecisionScope = {
+      view: liveState.agentConsoleView ?? agentConsoleView,
+      composerMode: liveState.composerMode ?? "default",
+    };
+    const cached = agentConsoleDecisionCacheRef.current;
+    // The controller computes and caches; Composer consumes. A standalone
+    // suppression check never leaves a decision behind for another event.
+    if (
+      phase === "suppress"
+      && cached
+      && cached.value === value
+      && cached.keyMask === keyMask
+      && cached.composerEmpty === composerEmpty
+    ) {
+      agentConsoleDecisionCacheRef.current = undefined;
+      return cached.decision;
+    }
+    if (phase === "suppress") {
+      agentConsoleDecisionCacheRef.current = undefined;
+    }
+    const decision = resolveAgentConsoleInputDecision(
+      buildAgentConsoleContextForScope(scope, value, key, composerEmpty),
+    );
+    if (phase === "dispatch") {
+      const next = { value, keyMask, composerEmpty, decision };
+      agentConsoleDecisionCacheRef.current = next;
+      queueMicrotask(() => {
+        if (agentConsoleDecisionCacheRef.current === next) {
+          agentConsoleDecisionCacheRef.current = undefined;
+        }
+      });
+    }
+    return decision;
+  };
+  const agentConsoleKeyboard: WorkShellAgentConsoleKeyboard | undefined =
+    agentConsoleView && agentConsoleWired
+      ? {
+          steering: agentConsoleSteering,
+          buildContext: buildAgentConsoleContext,
+          decide: decideAgentConsoleInput,
+          controls: {
+            open: () => input.engine.openAgentConsole?.(),
+            close: () => {
+              if (input.engine.getState().composerMode === "agent-steer") {
+                leaveAgentSteerComposer();
+              }
+              input.engine.closeAgentConsole?.();
+            },
+            selectTab: (tab) => input.engine.selectAgentConsoleTab?.(tab),
+            moveCursor: (delta) => input.engine.moveAgentConsoleCursor?.(delta),
+            toggleInspector: () => input.engine.toggleAgentConsoleInspector?.(),
+            beginSteer: () => input.engine.beginAgentSteer?.(),
+            cancelSteer: leaveAgentSteerComposer,
+            requestCancel: () => input.engine.requestAgentCancel?.(),
+            confirmCancel: (confirmed) => {
+              void input.engine.confirmAgentCancel?.(confirmed).catch(() => undefined);
+            },
+            continueRun: () => {
+              void input.engine.continueSelectedAgent?.().catch(() => undefined);
+            },
+          },
+        }
+      : undefined;
+  const suppressAgentConsoleKey = agentConsoleKeyboard
+    ? (value: string, key: AgentConsoleKeyState, composerEmpty: boolean) => {
+      const kind = agentConsoleKeyboard.decide(value, key, composerEmpty, "suppress").kind;
+      return kind === "dispatch" || kind === "consume";
+    }
+    : undefined;
+  const agentConsoleOwnsKeyboard = agentConsoleWired
+    && agentConsoleView.open
+    && !agentConsoleSteering;
 
 
 
@@ -1017,6 +1276,7 @@ export function useWorkShellPaneState<
     ...(input.engine.toggleContextInspectorExpanded
       ? { toggleContextInspectorExpanded: async () => { await input.engine.toggleContextInspectorExpanded?.(); } }
       : {}),
+    ...(agentConsoleKeyboard ? { agentConsole: agentConsoleKeyboard } : {}),
   });
 
   return {
@@ -1029,6 +1289,9 @@ export function useWorkShellPaneState<
     selectedSlashCommand: selectedSuggestion?.command,
     contextAdviceKeyActionsEnabled: contextAdviceActionsAvailable,
     contextUndoKeyActionsEnabled: contextUndoActionsAvailable,
+    ...(suppressAgentConsoleKey ? { suppressAgentConsoleKey } : {}),
+    agentConsoleOwnsKeyboard,
+    agentConsoleSteering,
     submit,
     addClipboardAttachment,
     clearClipboardAttachments,

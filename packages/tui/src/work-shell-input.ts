@@ -69,8 +69,9 @@ export function resolveWorkShellSubmitAction(input: {
 /**
  * Context Inspector (Sprint 2) — keyboard action resolver for the /context
  * overlay. Pure TS (no Rust): the decision is a handful of key comparisons
- * and does not need the ux contract's state machine. Kept here next to the
- * other resolvers so the input-handling seam stays in one file.
+ * and does not need the ux contract's state machine. It runs after the Agent
+ * Console resolver in `work-shell-agent-console-input.ts`, which owns the
+ * keyboard while the console overlay is open.
  *
  * Fires ONLY when the context overlay is the active panel. The slash command
  * picker always wins: when the composer input starts with `/`, every key

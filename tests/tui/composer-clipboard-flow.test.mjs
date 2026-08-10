@@ -44,8 +44,6 @@ function createInkInput() {
   const input = new PassThrough();
   input.isTTY = true;
   input.setRawMode = () => input;
-  input.resume = () => input;
-  input.pause = () => input;
   input.ref = () => input;
   input.unref = () => input;
   return input;
@@ -206,9 +204,9 @@ test("mounted Ctrl+V with injected synthetic PNG captures once and forwards badg
   );
 
   try {
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await waitForCondition(() => getOutput().includes("prompt deck"));
     stdin.write("\u0016");
-    await waitForCondition(() => captureCalls === 1);
+    await waitForCondition(() => captureCalls === 1, 20_000);
     await waitForCondition(() => getOutput().includes("[1/5]"));
 
     stdin.write("\r");

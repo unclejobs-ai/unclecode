@@ -59,7 +59,40 @@ export function segmentDisplayGraphemes(value: string): readonly string[] {
   return Array.from(graphemeSegmenter.segment(value), (item) => item.segment);
 }
 
+/**
+ * Ink measures with `string-width`, which gives any RGI emoji cluster two
+ * cells. Code-point ranges cannot express that: U+1F680 and U+26A0 sit outside
+ * the wide blocks, and a keycap is a narrow digit plus a mark. Matching on the
+ * cluster keeps this module dependency-free and in step with the renderer.
+ */
+function createRgiEmojiPattern(): RegExp | undefined {
+  try {
+    return new RegExp("^\\p{RGI_Emoji}$", "v");
+  } catch {
+    return undefined;
+  }
+}
+
+const rgiEmojiPattern = createRgiEmojiPattern();
+/** `1⃣` without the VS16 qualifier still renders two cells. */
+const unqualifiedKeycapPattern = /^[\d#*]\u20e3$/;
+const extendedPictographicPattern = /\p{Extended_Pictographic}/gu;
+
+function isDoubleWidthEmojiCluster(grapheme: string): boolean {
+  // Real clusters are short; a pathological run is not worth regex time.
+  if (grapheme.length > 50) return false;
+  if (rgiEmojiPattern?.test(grapheme) === true) return true;
+  if (unqualifiedKeycapPattern.test(grapheme)) return true;
+  if (!grapheme.includes("\u200d")) return false;
+  return (grapheme.match(extendedPictographicPattern)?.length ?? 0) >= 2;
+}
+
 function getGraphemeWidth(grapheme: string): number {
+  // A lone Latin-1 code unit can never be an emoji cluster, and that is almost
+  // every grapheme on a render path that runs per frame.
+  if ((grapheme.length > 1 || grapheme.charCodeAt(0) >= 0xa9) && isDoubleWidthEmojiCluster(grapheme)) {
+    return 2;
+  }
   let width = 0;
   let hasWideCodePoint = false;
   let visibleCodePointCount = 0;

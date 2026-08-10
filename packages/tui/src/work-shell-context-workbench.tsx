@@ -84,67 +84,27 @@ function renderWorkbenchRows(input: {
   );
 }
 
-function findLargestIncludedSource(
-  rows: readonly ContextInspectorSourceRow[],
-): ContextInspectorSourceRow | undefined {
-  let largest: ContextInspectorSourceRow | undefined;
-  for (const row of rows) {
-    if (
-      !row.heldBack
-      && (row.item.tokenEstimate ?? -1) > (largest?.item.tokenEstimate ?? -1)
-    ) {
-      largest = row;
-    }
-  }
-  return largest;
-}
 
 function renderPreflightOverview(input: {
   readonly packet: ContextPacketView;
-  readonly rows: readonly ContextInspectorSourceRow[];
   readonly suggestion: ContextInspectorSuggestion;
-  readonly policySuggestionCount: number;
-  readonly showAdviceCount: boolean;
   readonly unavailable?: string | undefined;
-  readonly compact?: boolean | undefined;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
 }): React.ReactNode {
-  const largest = findLargestIncludedSource(input.rows);
-  const largestLine = largest
-    ? `Largest · ${sanitizeContextPreview(largest.item.label)} · ${formatContextTokenEstimate(largest.item.tokenEstimate)}`
-    : "Largest · none";
-  const warning = input.packet.warnings[0]?.message ?? input.unavailable;
-  const preflightMessage = input.packet.warnings.length > 0
-    ? `Review ${input.packet.warnings.length} ${input.packet.warnings.length === 1 ? "warning" : "warnings"} before sending.`
-    : input.suggestion.message;
-  const tone = input.suggestion.tone === "warning"
+  const issue = input.packet.warnings[0]?.message ?? input.unavailable;
+  const message = issue
+    ? `Review · ${issue}`
+    : `Ready · ${input.suggestion.message}`;
+  const color = issue
     ? input.palette.warning
     : input.suggestion.tone === "success"
       ? input.palette.success
       : input.palette.user;
   return (
-    <Box flexDirection="column">
-      <Text color={tone} bold>{"Preflight"}</Text>
-      <Text color={input.palette.text}>
-        {truncateForDisplayWidth(preflightMessage, Math.max(18, input.width))}
-      </Text>
-      {!input.compact ? (
-        <Text color={input.palette.textMuted}>
-          {truncateForDisplayWidth(largestLine, Math.max(18, input.width))}
-        </Text>
-      ) : null}
-      {input.showAdviceCount && input.policySuggestionCount > 0 ? (
-        <Text color={input.palette.assistant}>
-          {`Advice · ${input.policySuggestionCount} ${input.policySuggestionCount === 1 ? "suggestion" : "suggestions"}`}
-        </Text>
-      ) : null}
-      {warning ? (
-        <Text color={input.palette.warning}>
-          {truncateForDisplayWidth(`Warning · ${warning}`, Math.max(18, input.width))}
-        </Text>
-      ) : null}
-    </Box>
+    <Text color={color} bold>
+      {truncateForDisplayWidth(message, Math.max(18, input.width))}
+    </Text>
   );
 }
 
@@ -176,13 +136,13 @@ function formatCompareTokenDelta(
   }
   const delta = next.tokenEstimate - last.tokenEstimate;
   if (delta === 0) {
-    return "Same size as the last request";
+    return undefined;
   }
   const magnitude = formatContextReceiptTokenEstimate({
     tokenEstimate: Math.abs(delta),
     tokenEstimateState: "estimated",
   });
-  return `${magnitude} ${delta > 0 ? "larger" : "smaller"} than the last request`;
+  return `${magnitude} ${delta > 0 ? "larger" : "smaller"}`;
 }
 
 /**
@@ -203,44 +163,36 @@ function buildContextCompareRows(input: {
   }
   const added = input.packetChange?.addedSourceIds ?? [];
   const removed = input.packetChange?.removedSourceIds ?? [];
+  const delta = formatCompareTokenDelta(previewReceipt, submittedReceipt);
+  if (added.length === 0 && removed.length === 0 && delta === undefined) {
+    return [];
+  }
   const visibleAdded = added.slice(0, 2);
   const visibleRemoved = removed.slice(0, 2);
   const hiddenCount = added.length + removed.length - visibleAdded.length - visibleRemoved.length;
-  const delta = formatCompareTokenDelta(previewReceipt, submittedReceipt);
+  const changes = [
+    ...visibleAdded.map((sourceId) => `+ ${resolveSourceLabel(input.packet, sourceId, previewReceipt)}`),
+    ...visibleRemoved.map((sourceId) => `− ${resolveSourceLabel(input.packet, sourceId, submittedReceipt)}`),
+    ...(hiddenCount > 0 ? [`${hiddenCount} more`] : []),
+    ...(delta ? [delta] : []),
+  ];
+  const tone = removed.length > 0 ? "warning" : "success";
   return [
     {
       key: "compare-head",
-      label: "Compare",
+      label: "Since last send",
       text: truncateForDisplayWidth(
-        " · next request vs last sent",
-        Math.max(18, input.width - 8),
+        ` · ${changes[0] ?? "context changed"}`,
+        Math.max(18, input.width - 16),
       ),
-      tone: "muted",
+      tone,
     },
-    ...visibleAdded.map((sourceId): WorkbenchRow => ({
-      key: `compare-added-${sourceId}`,
-      text: truncateForDisplayWidth(
-        `+ ${resolveSourceLabel(input.packet, sourceId, previewReceipt)}`,
-        input.width,
-      ),
-      tone: "success",
-    })),
-    ...visibleRemoved.map((sourceId): WorkbenchRow => ({
-      key: `compare-removed-${sourceId}`,
-      text: truncateForDisplayWidth(
-        `- ${resolveSourceLabel(input.packet, sourceId, submittedReceipt)}`,
-        input.width,
-      ),
-      tone: "warning",
-    })),
-    ...(added.length === 0 && removed.length === 0
-      ? [{ key: "compare-none", text: "No source changes", tone: "muted" } as const]
-      : []),
-    ...(delta === undefined
-      ? []
-      : [{ key: "compare-delta", text: delta, tone: "muted" } as const]),
-    ...(hiddenCount > 0
-      ? [{ key: "compare-more", text: `… ${hiddenCount} more changes`, tone: "dim" } as const]
+    ...(changes.length > 1
+      ? [{
+          key: "compare-rest",
+          text: truncateForDisplayWidth(changes.slice(1).join(" · "), input.width),
+          tone,
+        } as const]
       : []),
   ];
 }
@@ -387,7 +339,7 @@ function renderSelectedPreview(input: {
   if (!input.row) {
     return (
       <Box marginTop={marginTop} flexDirection="column">
-        <Text color={input.palette.textMuted}>{"Preview · select a source"}</Text>
+        <Text color={input.palette.textMuted}>{"Selected · choose a source"}</Text>
       </Box>
     );
   }
@@ -396,11 +348,11 @@ function renderSelectedPreview(input: {
   return (
     <Box marginTop={marginTop} flexDirection="column">
       <Text>
-        <Text color={input.palette.user} bold>{"Preview"}</Text>
+        <Text color={input.palette.user} bold>{"Selected"}</Text>
         <Text color={input.palette.textMuted}>
           {truncateForDisplayWidth(
             ` · ${sanitizeContextPreview(input.row.item.label)}`,
-            Math.max(18, input.width - 8),
+            Math.max(18, input.width - 9),
           )}
         </Text>
       </Text>
@@ -437,27 +389,19 @@ export function renderContextInspectorWorkbench(input: {
   const isWide = input.width >= 116 && !input.expandedId;
   const isMedium = input.width >= 76 && !input.expandedId;
   const isStacked = !isMedium;
-  const overviewWidth = isWide ? 30 : input.width;
   const previewWidth = isWide
-    ? Math.max(36, Math.floor(input.width * 0.30))
-    : Math.max(30, Math.min(Math.floor(input.width * 0.54), input.width - 38));
-  const sourceWidth = isWide
-    ? Math.max(36, input.width - overviewWidth - previewWidth - 4)
-    : isMedium
-      ? Math.max(36, input.width - previewWidth - 2)
-      : input.width;
-  const asideWidth = isMedium ? previewWidth : input.width;
-
+    ? Math.max(42, Math.floor(input.width * 0.38))
+    : Math.max(30, Math.min(Math.floor(input.width * 0.46), input.width - 38));
+  const sourceWidth = isMedium
+    ? Math.max(36, input.width - previewWidth - 2)
+    : input.width;
+  const asideWidth = isMedium ? Math.max(28, previewWidth - 2) : input.width;
   const receiptRows = input.actionReceipt ? 1 : 0;
   const contentRows = Math.max(
     1,
     input.maxRows - (input.expandedId ? 0 : WORKBENCH_MARGIN_ROWS) - receiptRows,
   );
-  const hasOverviewWarning = Boolean(
-    input.packet.warnings[0]?.message ?? input.adviceUnavailable,
-  );
-  let overviewRows = 3 + (hasOverviewWarning ? 1 : 0);
-  let denseOverview = false;
+  const overviewRows = 1;
   let denseAdvice = false;
   let adviceRows = computeWorkShellContextAdviceRows({
     suggestions: input.policySuggestions,
@@ -469,7 +413,7 @@ export function renderContextInspectorWorkbench(input: {
   let runbook = buildContextRunbookRows({
     nodes: findContextWorkNodes(input.packet),
     compact: isStacked,
-    width: sourceWidth,
+    width: asideWidth,
   });
   let compare = buildContextCompareRows({
     packet: input.packet,
@@ -478,25 +422,16 @@ export function renderContextInspectorWorkbench(input: {
     ...(input.packetChange ? { packetChange: input.packetChange } : {}),
     width: asideWidth,
   });
-  let previewLines = isWide ? 4 : isMedium ? 2 : 1;
+  let previewLines = isWide ? 4 : isMedium ? 3 : 2;
   let sourceRows: number;
 
   if (input.expandedId) {
     sourceRows = contentRows;
   } else if (isStacked) {
-    let minimumSourceRows = MIN_SOURCE_ROWS;
-    const requiredRows = () => (
-      overviewRows
-      + runbook.length
-      + compare.length
-      + adviceRows
-      + previewLines
-      + 1
-      + minimumSourceRows
-    );
-    if (requiredRows() > contentRows) {
-      denseOverview = true;
-      overviewRows = 2 + (hasOverviewWarning ? 1 : 0);
+    if (
+      overviewRows + runbook.length + compare.length + adviceRows
+      + previewLines + 2 + MIN_SOURCE_ROWS > contentRows
+    ) {
       denseAdvice = true;
       adviceRows = computeWorkShellContextAdviceRows({
         suggestions: input.policySuggestions,
@@ -506,43 +441,36 @@ export function renderContextInspectorWorkbench(input: {
         compact: true,
         dense: true,
       });
-      if (runbook.length > 0 && (adviceRows > 0 || compare.length > 0)) {
-        runbook = runbook.filter(
-          (row) => row.key === "runbook-head" || row.key === "runbook-evidence",
-        );
-      }
-      compare = compare.slice(0, 2);
+      runbook = runbook.slice(0, 2);
     }
-    while (requiredRows() > contentRows && compare.length > 0) {
+    while (
+      overviewRows + runbook.length + compare.length + adviceRows
+      + previewLines + 2 + MIN_SOURCE_ROWS > contentRows
+      && compare.length > 0
+    ) {
       compare = compare.slice(0, -1);
     }
-    if (requiredRows() > contentRows && runbook.length > 1) {
-      runbook = runbook.slice(0, 1);
+    while (
+      overviewRows + runbook.length + adviceRows
+      + previewLines + 2 + MIN_SOURCE_ROWS > contentRows
+      && runbook.length > 0
+    ) {
+      runbook = runbook.slice(0, -1);
     }
-    if (requiredRows() > contentRows && previewLines > 0) {
+    if (
+      overviewRows + adviceRows + previewLines + 2 + MIN_SOURCE_ROWS > contentRows
+    ) {
       previewLines = 0;
     }
-    if (requiredRows() > contentRows) {
-      minimumSourceRows = 1;
-    }
-    const fixedRows = requiredRows() - minimumSourceRows;
-    sourceRows = Math.max(minimumSourceRows, contentRows - fixedRows);
+    const fixedRows = overviewRows + runbook.length + compare.length + adviceRows + previewLines + 2;
+    sourceRows = Math.max(1, contentRows - fixedRows);
   } else {
     const columnRows = Math.max(
       MIN_SOURCE_ROWS,
-      contentRows - (isMedium && !isWide ? overviewRows + 1 : 0),
+      contentRows - overviewRows - 1,
     );
-    if (runbook.length + MIN_SOURCE_ROWS > columnRows) {
-      runbook = runbook.filter(
-        (row) =>
-          row.key === "runbook-head"
-          || row.key === "runbook-status"
-          || row.key === "runbook-evidence",
-      );
-    }
-    sourceRows = Math.max(1, columnRows - runbook.length);
-    const asideRows = () => compare.length + adviceRows + previewLines + 2;
-    if (asideRows() > columnRows) {
+    sourceRows = Math.max(1, columnRows - 1);
+    if (compare.length + adviceRows + runbook.length + previewLines + 2 > columnRows) {
       denseAdvice = true;
       adviceRows = computeWorkShellContextAdviceRows({
         suggestions: input.policySuggestions,
@@ -551,13 +479,22 @@ export function renderContextInspectorWorkbench(input: {
         actionsEnabled: input.adviceActionsEnabled,
         dense: true,
       });
-      compare = compare.slice(0, 2);
-      previewLines = Math.min(previewLines, 1);
+      runbook = runbook.slice(0, 3);
+      previewLines = Math.min(previewLines, 2);
     }
-    while (asideRows() > columnRows && compare.length > 0) {
+    while (
+      compare.length + adviceRows + runbook.length + previewLines + 2 > columnRows
+      && runbook.length > 0
+    ) {
+      runbook = runbook.slice(0, -1);
+    }
+    while (
+      compare.length + adviceRows + previewLines + 2 > columnRows
+      && compare.length > 0
+    ) {
       compare = compare.slice(0, -1);
     }
-    if (asideRows() > columnRows) {
+    if (adviceRows + previewLines + 2 > columnRows) {
       previewLines = 0;
     }
   }
@@ -587,13 +524,9 @@ export function renderContextInspectorWorkbench(input: {
   });
   const overview = renderPreflightOverview({
     packet: input.packet,
-    rows: input.rows,
     suggestion: input.suggestion,
-    policySuggestionCount: input.policySuggestions.length,
-    showAdviceCount: advice === null,
     ...(input.adviceUnavailable ? { unavailable: input.adviceUnavailable } : {}),
-    compact: denseOverview,
-    width: overviewWidth,
+    width: input.width,
     palette: input.palette,
   });
   const runbookBlock = renderWorkbenchRows({ rows: runbook, palette: input.palette });
@@ -607,42 +540,30 @@ export function renderContextInspectorWorkbench(input: {
   });
   return (
     <Box marginTop={input.expandedId ? 0 : 1} flexDirection="column">
-      {input.expandedId ? sourceRegion : isWide ? (
-        <Box flexDirection="row">
-          <Box width={overviewWidth} flexDirection="column">{overview}</Box>
-          <Box width={sourceWidth} paddingLeft={2} flexDirection="column">
-            {runbookBlock}
-            {sourceRegion}
-          </Box>
-          <Box width={previewWidth} paddingLeft={2} flexDirection="column">
-            {compareBlock}
-            {advice}
-            {preview}
-          </Box>
-        </Box>
-      ) : isMedium ? (
+      {input.expandedId ? sourceRegion : (
         <>
           {overview}
-          <Box marginTop={1} flexDirection="row">
-            <Box width={sourceWidth} flexDirection="column">
-              {runbookBlock}
-              {sourceRegion}
+          {isMedium ? (
+            <Box flexDirection="row">
+              <Box width={sourceWidth} flexDirection="column">
+                {sourceRegion}
+              </Box>
+              <Box width={previewWidth} paddingLeft={2} flexDirection="column">
+                {preview}
+                {advice}
+                {runbookBlock}
+                {compareBlock}
+              </Box>
             </Box>
-            <Box width={previewWidth} paddingLeft={2} flexDirection="column">
-              {compareBlock}
-              {advice}
+          ) : (
+            <>
               {preview}
-            </Box>
-          </Box>
-        </>
-      ) : (
-        <>
-          {overview}
-          {compareBlock}
-          {advice}
-          {runbookBlock}
-          {sourceRegion}
-          {preview}
+              {sourceRegion}
+              {advice}
+              {runbookBlock}
+              {compareBlock}
+            </>
+          )}
         </>
       )}
       {renderContextInspectorReceipt({

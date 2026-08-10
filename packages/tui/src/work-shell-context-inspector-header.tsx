@@ -64,15 +64,10 @@ export function formatContextInspectorPacketProofLines(input: {
   readonly width: number;
 }): readonly string[] {
   if (input.packetChange?.kind === "meaning-change") {
-    const dropped = input.packetChange.removedSourceIds.length;
-    const added = input.packetChange.addedSourceIds.length;
-    return [
-      truncateForDisplayWidth("Context changed · review before sending", input.width),
-      truncateForDisplayWidth(
-        `${dropped} ${dropped === 1 ? "source" : "sources"} dropped · ${added} added · ${input.packetChange.reason}`,
-        input.width,
-      ),
-    ];
+    return [truncateForDisplayWidth(
+      "Review before sending · context changed",
+      input.width,
+    )];
   }
 
   if (input.previewReceipt?.state === "previewed") {
@@ -126,22 +121,22 @@ export function renderContextInspectorBudgetLine(input: {
   readonly palette: ContextInspectorPalette;
   readonly modelWindow: number;
 }): React.ReactNode {
-  const budgetCells = 10;
   const budgetWindow = input.modelWindow > 0 ? input.modelWindow : 200_000;
   const tokenEstimateState = input.packet.tokenEstimateState ?? "estimated";
-  const filled = tokenEstimateState === "unknown" ? 0 : computeContextMeterFill(input.packet.tokenEstimate, budgetWindow);
-  const meter = `${"●".repeat(filled)}${"·".repeat(Math.max(0, budgetCells - filled))}`;
-  const windowLabel = budgetWindow >= 1_000_000
-    ? `${(budgetWindow / 1_000_000).toFixed(1)}M`
-    : `${Math.round(budgetWindow / 1000)}k`;
+  const windowLabel = formatContextWindow(budgetWindow);
   const tokenLabel = formatContextTokenEstimate(input.packet.tokenEstimate, tokenEstimateState);
+  const warnings = input.packet.sourceCounts.warnings;
   return (
     <Text>
-      <Text color={input.palette.success} bold>{"● "}</Text>
-      <Text color={input.palette.text} bold>{"Sources"}</Text>
-      <Text color={input.palette.textMuted}>{` · ${input.packet.sourceCounts.included} included · ${input.packet.sourceCounts.excluded} held back · ${input.packet.sourceCounts.warnings} warnings`}</Text>
-      <Text color={input.palette.textMuted}>{"  budget "}</Text>
-      <Text color={filled >= 8 ? input.palette.warning : input.palette.success} bold>{meter}</Text>
+      <Text color={input.palette.assistant} bold>{"Sources"}</Text>
+      <Text color={input.palette.textMuted}>
+        {` · ${input.packet.sourceCounts.included} sent · ${input.packet.sourceCounts.excluded} held`}
+      </Text>
+      {warnings > 0 ? (
+        <Text color={input.palette.warning}>
+          {` · ${warnings} ${warnings === 1 ? "warning" : "warnings"}`}
+        </Text>
+      ) : null}
       <Text color={input.palette.textMuted}>{` · ${tokenLabel} / ${windowLabel}`}</Text>
     </Text>
   );

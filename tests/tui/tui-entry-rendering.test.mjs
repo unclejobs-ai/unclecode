@@ -81,9 +81,12 @@ function captureBusyDashboardOutput() {
   });
 }
 
-test("busy dashboard updates do not repaint unchanged conversation rows", async () => {
+test("busy dashboard redraws one complete owned frame instead of stacking incremental fragments", async () => {
   const output = await captureBusyDashboardOutput();
   const conversationWrites = output.match(/STATIC CONVERSATION/g) ?? [];
 
-  assert.equal(conversationWrites.length, 1);
+  assert.ok(
+    conversationWrites.length > 1,
+    "a changing frame must repaint its stable rows so the terminal never depends on incremental cursor history",
+  );
 });

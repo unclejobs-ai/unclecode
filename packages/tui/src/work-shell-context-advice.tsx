@@ -10,7 +10,7 @@ import {
   type ContextInspectorPalette,
 } from "./work-shell-context-inspector-model.js";
 import { formatContextReceiptTokenEstimate } from "./work-shell-context-receipt.js";
-import { truncateForDisplayWidth, wrapDisplayTextFast } from "./text-width.js";
+import { truncateForDisplayWidth } from "./text-width.js";
 
 export const MAX_VISIBLE_CONTEXT_SUGGESTIONS = 4;
 
@@ -67,21 +67,17 @@ export function computeWorkShellContextAdviceRows(input: {
   if (input.suggestions.length === 0 && !input.unavailable) {
     return 0;
   }
-  const visibleWindow = getVisibleContextPolicySuggestions(input.suggestions, input.selectedSourceId);
-  const selectedSuggestion = input.actionsEnabled
+  const selected = input.actionsEnabled
     ? getSelectedVisibleContextPolicySuggestion(input)
     : undefined;
-  const visible = input.dense
-    ? selectedSuggestion ? [selectedSuggestion] : visibleWindow.slice(0, 1)
-    : input.compact
-      ? selectedSuggestion ? [selectedSuggestion] : visibleWindow.slice(0, 2)
-      : visibleWindow;
-  const selectedDetailRows = selectedSuggestion === undefined ? 0 : input.dense ? 1 : 3;
-  return (input.compact ? 1 : 2)
+  const visibleLimit = input.dense || input.compact ? 1 : 2;
+  const visibleCount = Math.min(visibleLimit, input.suggestions.length);
+  return 1
     + (input.unavailable ? 1 : 0)
-    + visible.length
-    + selectedDetailRows
-    + (!input.dense && input.suggestions.length > visible.length ? 1 : 0);
+    + visibleCount
+    + (selected && !input.dense ? 1 : 0)
+    + (selected?.status === "proposed" && input.actionsEnabled ? 1 : 0)
+    + (!input.dense && input.suggestions.length > visibleCount ? 1 : 0);
 }
 
 function resolveSourceLabel(
@@ -127,63 +123,54 @@ export function renderWorkShellContextAdvice(input: {
   const selectedSuggestion = input.actionsEnabled
     ? getSelectedVisibleContextPolicySuggestion(input)
     : undefined;
-  const selectedSuggestionId = selectedSuggestion?.id;
   const visibleWindow = getVisibleContextPolicySuggestions(input.suggestions, input.selectedSourceId);
-  const visible = input.dense
-    ? selectedSuggestion ? [selectedSuggestion] : visibleWindow.slice(0, 1)
-    : input.compact
-      ? selectedSuggestion ? [selectedSuggestion] : visibleWindow.slice(0, 2)
-      : visibleWindow;
+  const prioritized = selectedSuggestion
+    ? [selectedSuggestion, ...visibleWindow.filter((suggestion) => suggestion.id !== selectedSuggestion.id)]
+    : visibleWindow;
+  const visibleLimit = input.dense || input.compact ? 1 : 2;
+  const visible = prioritized.slice(0, visibleLimit);
   return (
     <Box marginTop={input.compact ? 0 : 1} flexDirection="column">
       <Text>
-        <Text color={input.palette.assistant} bold>{"Context optimizer"}</Text>
-        <Text color={input.palette.textMuted}>{" · advice for this packet"}</Text>
+        <Text color={input.palette.assistant} bold>{"Suggestions"}</Text>
+        <Text color={input.palette.textMuted}>{` · ${input.suggestions.length}`}</Text>
       </Text>
       {input.unavailable ? (
         <Text color={input.palette.warning}>
-          {truncateForDisplayWidth(
-            `  ${input.unavailable}`,
-            Math.max(16, input.width - 4),
-          )}
+          {truncateForDisplayWidth(input.unavailable, Math.max(16, input.width))}
         </Text>
       ) : null}
       {visible.map((suggestion) => {
-        const selected = suggestion.id === selectedSuggestionId;
+        const selected = suggestion.id === selectedSuggestion?.id;
         const savings = suggestion.estimatedTokenSaving === undefined
-          ? "Savings unknown"
-          : `Save ${formatContextReceiptTokenEstimate({
+          ? "saving unknown"
+          : `save ${formatContextReceiptTokenEstimate({
               tokenEstimate: suggestion.estimatedTokenSaving,
               tokenEstimateState: "estimated",
             })}`;
-        const status = suggestion.status === "proposed"
-          ? savings
-          : suggestion.status;
-        const reasonLines = selected && !input.dense
-          ? wrapDisplayTextFast(suggestion.reasonText, Math.max(16, input.width - 2)).slice(0, 2)
-          : [];
+        const status = suggestion.status === "proposed" ? savings : suggestion.status;
         return (
           <React.Fragment key={suggestion.id}>
             <Text color={selected ? input.palette.text : input.palette.textMuted} bold={selected}>
               {truncateForDisplayWidth(
-                `${selected ? ">" : "·"} ${ACTION_LABELS[suggestion.action]} · ${resolveSourceLabel(input.packet, suggestion)} · ${status}`,
+                `${selected ? "›" : "·"} ${ACTION_LABELS[suggestion.action]} · ${resolveSourceLabel(input.packet, suggestion)} · ${status}`,
                 Math.max(16, input.width),
               )}
             </Text>
-            {reasonLines.map((line, index) => (
-              <Text key={`${suggestion.id}-reason-${index}`} color={input.palette.textMuted}>
-                {`  ${line}`}
+            {selected && !input.dense ? (
+              <Text color={input.palette.textMuted}>
+                {truncateForDisplayWidth(`Why · ${suggestion.reasonText}`, Math.max(16, input.width))}
               </Text>
-            ))}
+            ) : null}
             {selected && suggestion.status === "proposed" && input.actionsEnabled ? (
-              <Text color={input.palette.user}>{"  [A] accept · [R] reject"}</Text>
+              <Text color={input.palette.user}>{"A accept · R reject"}</Text>
             ) : null}
           </React.Fragment>
         );
       })}
       {!input.dense && input.suggestions.length > visible.length ? (
         <Text color={input.palette.textMuted}>
-          {`  … ${input.suggestions.length - visible.length} more suggestions`}
+          {`… ${input.suggestions.length - visible.length} more`}
         </Text>
       ) : null}
     </Box>

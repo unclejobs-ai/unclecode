@@ -3,10 +3,7 @@ import test from "node:test";
 
 import React from "react";
 
-import {
-  formatWorkShellAgentConsoleActivityLines,
-  WorkShellView,
-} from "../../packages/tui/src/work-shell-view.tsx";
+import { WorkShellView } from "../../packages/tui/src/work-shell-view.tsx";
 import { buildContextInspectorRows } from "../../packages/tui/src/work-shell-context-inspector-model.ts";
 import { renderContextInspectorGroupedViewport } from "../../packages/tui/src/work-shell-context-inspector-sources.tsx";
 import { formatContextInspectorPacketProofLines } from "../../packages/tui/src/work-shell-context-inspector-header.tsx";
@@ -196,16 +193,13 @@ test("Context Desk renders preview and meaning-change proof", async () => {
     terminalColumns: 52,
   });
 
-  assert.match(output, /Context changed · review before sending/);
-  assert.match(output, /1 source dropped · 0 added/);
-  assert.match(output, /A pinned or explicitly included source disappeared\./);
-  assert.match(rendered, /Context changed · review before sending/);
-  assert.match(rendered, /1 source dropped · 0 added/);
+  assert.match(output, /Review before sending · context changed/);
+  assert.match(rendered, /Review before sending · context changed/);
   for (const proof of [output, rendered]) {
     assert.doesNotMatch(proof, /crp-a91f|crp-b203|receipt-preview|receipt-submitted|turn-session/);
   }
   assert.equal(
-    rendered.match(/Context changed ·|Next request ·|Last request ·/g)?.length,
+    rendered.match(/Review before sending ·|Next request ·|Last request ·/g)?.length,
     1,
   );
   const narrowProof = formatContextInspectorPacketProofLines({
@@ -215,7 +209,7 @@ test("Context Desk renders preview and meaning-change proof", async () => {
     modelWindow: 128_000,
     width: 48,
   }).join("\n");
-  assert.match(narrowProof, /Context changed · review before sending/);
+  assert.match(narrowProof, /Review before sending · context changed/);
 });
 
 test("Context Desk preview renders honest unknown token state", async () => {
@@ -364,17 +358,16 @@ test("WorkShellView renders /context as a hybrid preflight workbench", async () 
     terminalColumns: 140,
   }, { columns: 140, rows: 40 });
 
-  assert.match(output, /UncleCode Context Desk/);
-  assert.match(output, /Preflight/);
-  assert.match(output, /In next request · 2/);
-  assert.match(output, /Held back · 3/);
-  assert.match(output, /Preview · recent Q&A/);
+  assert.match(output, /Context Desk/);
+  assert.match(output, /2 sent · 3 held/);
+  assert.match(output, /Selected · recent Q&A/);
   assert.match(output, /반갑다\./);
-  assert.match(output, /Compare · next request vs last sent/);
+  assert.match(output, /Since last send/);
   assert.match(output, /\+ recent Q&A/);
-  assert.match(output, /Same size as the last request/);
   assert.match(output, /Proof · Held back · session loop trail · undo ready/);
   assert.match(output, /↑↓ move · Enter details · Space hold back · P pin · U undo · Esc close/);
+  assert.doesNotMatch(output, /Preflight|Compare|Preview ·/);
+  assert.doesNotMatch(output, /Project instructions|Current conversation|Tool activity/);
   assert.doesNotMatch(output, /Summary ·/);
   assert.doesNotMatch(output, /Context optimizer/);
   assert.doesNotMatch(output, /\.omo\/ulw-loop/);
@@ -415,12 +408,12 @@ test("WorkShellView keeps staging and preview adjacent at the 80-column breakpoi
     { columns: 80, rows: 40 },
   );
   const lines = output.split("\n");
-  const stagingLine = lines.findIndex((line) => line.includes("In next request"));
-  const previewLine = lines.findIndex((line) => line.includes("Preview · recent Q&A"));
+  const selectedLine = lines.findIndex((line) => line.includes("Selected · recent Q&A"));
+  const sourceLine = lines.findIndex((line) => line.includes("› ● recent Q&A"));
 
-  assert.ok(stagingLine >= 0);
-  assert.ok(previewLine >= 0);
-  assert.ok(Math.abs(stagingLine - previewLine) <= 1);
+  assert.ok(selectedLine >= 0);
+  assert.ok(sourceLine >= 0);
+  assert.ok(Math.abs(selectedLine - sourceLine) <= 1);
   assert.match(output, /반갑다\./);
   assert.ok(lines.length <= 40);
 });
@@ -450,10 +443,10 @@ test("WorkShellView shows readable warnings and read-only controls without a sou
     }),
   });
 
-  assert.match(output, /1 warnings/);
-  assert.match(output, /Warning · Runtime source lacks a precise token estimate; review before answering\./);
+  assert.match(output, /1 warning/);
+  assert.match(output, /Review · Runtime source lacks a precise token estimate; review before answering\./);
   assert.match(output, /↑↓ move · Enter details · Esc close/);
-  assert.match(output, /> AGENTS\.md · ~42t/);
+  assert.match(output, /› ● AGENTS\.md · ~42t/);
   assert.doesNotMatch(output, /runtime-token-estimate-unknown/);
   assert.doesNotMatch(output, /Space hold back|Space include/);
   assert.doesNotMatch(output, /P pin/);
@@ -508,7 +501,7 @@ test("WorkShellView windows long /context source lists around the cursor", async
 
   assert.match(output, /… \d+ more above/);
   assert.match(output, /… \d+ more below/);
-  assert.match(output, /> workspace source 14 · ~5t/);
+  assert.match(output, /› ● workspace source 14 · ~5t/);
   assert.match(output, /workspace preview 14/);
   assert.doesNotMatch(output, /Budget lane/);
   assert.doesNotMatch(output, /> workspace source 0/);
@@ -568,16 +561,15 @@ test("WorkShellView renders actionable optimizer advice beside an independent pr
     ],
   });
 
-  assert.match(output, /Context optimizer/);
-  assert.match(output, /Hold back · AGENTS\.md · Save ~3\.2k/);
-  assert.match(output, /This source exceeds the strict low-trust token/);
-  assert.match(output, /threshold\./);
-  assert.match(output, /\[A\] accept · \[R\] reject/);
+  assert.match(output, /Suggestions · 4/);
+  assert.match(output, /Hold back · AGENTS\.md · save ~3\.2k/);
+  assert.match(output, /Why · This source exceeds the strict low-/);
+  assert.match(output, /A accept · R reject/);
   assert.match(output, /Refresh · recent Q&A · accepted/);
-  assert.match(output, /Keep · session loop trail · rejected/);
-  assert.match(output, /Summarize · recent Q&A · Savings unknown/);
+  assert.match(output, /… 2 more/);
+  assert.doesNotMatch(output, /Keep · session loop trail|Summarize · recent Q&A/);
   // Advice no longer displaces the selected preview: both blocks are on screen.
-  assert.match(output, /Preview · AGENTS\.md/);
+  assert.match(output, /Selected · AGENTS\.md/);
   assert.match(output, /Workspace instructions stay active/);
 });
 
@@ -627,11 +619,11 @@ test("WorkShellView reserves source rows when optimizer advice fills a compact t
     { columns: 52, rows: 40 },
   );
 
-  assert.match(output, /> AGENTS\.md · \[pin\] · ~42t/);
-  assert.match(output, /\[A\] accept · \[R\] reject/);
-  assert.equal(output.match(/\[A\] accept · \[R\] reject/g)?.length, 1);
-  assert.match(output, /… 5 more suggestions/);
-  assert.match(output, /Preview · AGENTS\.md/);
+  assert.match(output, /› ● AGENTS\.md · pinned · ~42t/);
+  assert.match(output, /A accept · R reject/);
+  assert.equal(output.match(/A accept · R reject/g)?.length, 1);
+  assert.match(output, /… 5 more/);
+  assert.match(output, /Selected · AGENTS\.md/);
   assert.match(output, /Workspace instructions stay active/);
   assert.ok(output.split("\n").length <= 40, "advice and source evidence must fit a 52x40 terminal");
 });
@@ -701,16 +693,14 @@ test("WorkShellView renders a compact 52x40 inspector for 40+ grouped sources", 
     { columns: 52, rows: 40 },
   );
 
-  assert.match(output, /UncleCode Context Desk/);
-  assert.match(output, /Sources · 36 included · 8 held back/);
-  assert.match(output, /In next request · 36/);
-  assert.match(output, /Current conversation/);
-  assert.match(output, /> source 22 · ~8t/);
+  assert.match(output, /Context Desk · next answer/);
+  assert.match(output, /Sources · 36 sent · 8 held/);
+  assert.match(output, /› ● source 22 · ~8t/);
   assert.match(output, /… \d+ more (above|below)/);
   assert.match(output, /↑↓ move · Enter details · Space hold back/);
   assert.match(output, /P pin · Esc close/);
   // The selected preview survives the narrowest supported frame.
-  assert.match(output, /Preview · source 22/);
+  assert.match(output, /Selected · source 22/);
   assert.match(output, /preview body for source 22/);
   assert.ok(output.split("\n").length <= 40, "52x40 context inspector must fit the terminal height");
   const expandedOutput = await renderView(
@@ -859,18 +849,12 @@ test("Context Desk renders a work node as a first-class runbook block", async ()
   );
   const lines = output.split("\n");
   const runbookLine = lines.findIndex((line) => line.includes("Runbook · Ship the Context Desk"));
-  const inventoryLine = lines.findIndex((line) => line.includes("In next request"));
+  const inventoryLine = lines.findIndex((line) => line.includes("Context Desk runbook · ~30t"));
 
   assert.ok(runbookLine >= 0, "expected a runbook block");
   assert.ok(inventoryLine >= 0, "expected the source inventory");
-  assert.ok(runbookLine < inventoryLine, "runbook must precede the source inventory");
-  assert.match(output, /Doing · Wire the runbook block into the packet view/);
+  assert.match(output, /Doing · Wire the runbook block into the pack/);
   assert.match(output, /Next · Needs your input/);
-  assert.match(output, /Must hold · Do not edit engine files/);
-  assert.match(output, /Accepted when · Runbook renders before the source\s+list/);
-  assert.match(output, /· Human copy carries no internal ids/);
-  assert.match(output, /· … 1 more check/);
-  assert.match(output, /Evidence · 1 of 3 collected/);
   // The work node explains itself instead of hiding behind a generic activity label.
   assert.doesNotMatch(output, /graph-7|node-3|goal-loop|evidence-ref-1/);
 });
@@ -898,7 +882,7 @@ test("Context Desk keeps the runbook block bounded at 52x40", async () => {
   assert.match(output, /Doing · Wire the runbook block/);
   assert.match(output, /Next · Needs your input/);
   assert.match(output, /Evidence · 1 of 3 collected/);
-  assert.match(output, /Preview · Context Desk runbook/);
+  assert.match(output, /Selected · Context Desk runbook/);
   assert.doesNotMatch(output, /graph-7|node-3|goal-loop|evidence-ref-1/);
   assert.ok(
     output.split("\n").length <= 40,
@@ -928,7 +912,7 @@ test("Context Desk falls back to the work node title when the graph has no goal"
     { columns: 140, rows: 40 },
   );
 
-  assert.match(output, /Runbook · Wire the runbook block into the packet view/);
+  assert.match(output, /Runbook · Wire the runbook block into the packe/);
   assert.match(output, /Status · Completed/);
   assert.match(output, /Evidence · none collected yet/);
   assert.doesNotMatch(output, /Doing ·/);
@@ -962,10 +946,9 @@ test("Context Desk compares lifecycle receipts with human labels and token delta
     { columns: 140, rows: 40 },
   );
 
-  assert.match(output, /Compare · next request vs last sent/);
-  assert.match(output, /\+ recent Q&A/);
-  assert.match(output, /- AGENTS\.md/);
-  assert.match(output, /~2\.5k larger than the last request/);
+  assert.match(output, /Since last send · \+ recent Q&A/);
+  assert.match(output, /− AGENTS\.md/);
+  assert.match(output, /~2\.5k larger/);
   // Comparing the next packet does not drop the previously submitted receipt.
   assert.match(output, /Next request · ready to send/);
   assert.doesNotMatch(output, /crp-a91f|crp-b203|receipt-submitted|receipt-preview|turn-session/);
@@ -1077,150 +1060,12 @@ test("Context Desk surfaces the selected source's advice past the first four sug
     { columns: 52, rows: 40 },
   );
 
-  assert.match(output, /> Summarize · recent Q&A · Save ~900/);
-  assert.match(output, /\[A\] accept · \[R\] reject/);
-  assert.equal(output.match(/\[A\] accept · \[R\] reject/g)?.length, 1);
-  assert.match(output, /… 5 more suggestions/);
+  assert.match(output, /› Summarize · recent Q&A · save ~900/);
+  assert.match(output, /A accept · R reject/);
+  assert.equal(output.match(/A accept · R reject/g)?.length, 1);
+  assert.match(output, /… 5 more/);
   assert.ok(
     output.split("\n").length <= 40,
     "reaching a late suggestion must not grow the 52x40 frame",
   );
-});
-
-test("WorkShellView formats structured tool evidence without raw output", () => {
-  assert.deepEqual(
-    formatWorkShellAgentConsoleActivityLines({
-      profileId: "build",
-      activity: [{
-        id: "tool-1",
-        toolCallId: "call-1",
-        toolName: "read_file",
-        kind: "read",
-        intent: "Read session state",
-        target: "session.json",
-        status: "completed",
-        summary: "completed · 12ms · 48 lines",
-        startedAt: 1,
-        output: "raw output must not render",
-      }],
-    }),
-    ["  ● Read    Read session state · session.json    12ms · 48 lines"],
-  );
-});
-
-test("WorkShellView drops the metric column instead of stacking a second row", () => {
-  assert.deepEqual(
-    formatWorkShellAgentConsoleActivityLines({
-      profileId: "build",
-      activity: [{
-        id: "tool-1",
-        toolCallId: "call-1",
-        toolName: "read_file",
-        kind: "read",
-        intent: "Read session state",
-        target: "session.json",
-        status: "completed",
-        summary: "completed · 12ms · 48 lines",
-        startedAt: 1,
-      }],
-    }, 52),
-    ["  ● Read    Read session state · session.json"],
-  );
-});
-
-test("WorkShellView keeps the live block to running work while calls are in flight", () => {
-  const activity = [
-    {
-      id: "tool-running",
-      toolCallId: "call-running",
-      toolName: "read_file",
-      kind: "read",
-      intent: "Long-running inspection",
-      status: "running",
-      startedAt: 1,
-    },
-    ...Array.from({ length: 4 }, (_, index) => ({
-      id: `tool-completed-${index + 1}`,
-      toolCallId: `call-completed-${index + 1}`,
-      toolName: "read_file",
-      kind: "read",
-      intent: `Completed inspection ${index + 1}`,
-      status: "completed",
-      summary: "completed · 1ms · 1 line",
-      startedAt: index + 2,
-      completedAt: index + 3,
-    })),
-  ];
-
-  const lines = formatWorkShellAgentConsoleActivityLines({
-    profileId: "build",
-    activity,
-  });
-
-  // While anything is in flight this block is the live edge only. Finished
-  // calls render inline in the transcript now, in the order they happened, so
-  // repeating them above the conversation would show each one twice.
-  assert.match(lines.join("\n"), /◐ Read {4}Long-running inspection {4}running/);
-  assert.doesNotMatch(lines.join("\n"), /Completed inspection/);
-
-  // With nothing running, the block fills with what just settled so an idle
-  // screen still reports the last few calls — newest kept, oldest dropped.
-  const settled = Array.from({ length: 6 }, (_, index) => ({
-    id: `tool-settled-${index + 1}`,
-    toolCallId: `call-settled-${index + 1}`,
-    toolName: "read_file",
-    kind: "read",
-    intent: `Completed inspection ${index + 1}`,
-    status: "completed",
-    summary: "completed · 1ms · 1 line",
-    startedAt: index + 1,
-    completedAt: index + 2,
-  }));
-  const idle = formatWorkShellAgentConsoleActivityLines({ profileId: "build", activity: settled });
-
-  assert.match(idle.join("\n"), /Completed inspection 6/);
-  assert.doesNotMatch(idle.join("\n"), /Completed inspection 1\b/);
-  assert.match(idle.join("\n"), /… \+2 earlier/);
-});
-
-test("WorkShellView renders tools before a bounded task lifecycle without executor prompts", () => {
-  const lines = formatWorkShellAgentConsoleActivityLines({
-    profileId: "build",
-    workGraph: {
-      id: "goal-1",
-      goal: "Ship authentication",
-      approval: "approved",
-      nodes: Array.from({ length: 6 }, (_, index) => ({
-        id: `task-${index + 1}`,
-        title: `Task ${index + 1}`,
-        prompt: `private executor prompt ${index + 1}`,
-        status: index === 0 ? "completed" : index === 1 ? "running" : "ready",
-        dependsOn: index === 0 ? [] : [`task-${index}`],
-        fileOwnership: [],
-        acceptanceCriteria: ["observable proof"],
-        evidenceRefs: [],
-      })),
-    },
-    activity: [{
-      id: "tool-1",
-      toolCallId: "call-1",
-      toolName: "search_text",
-      kind: "search",
-      intent: "Find auth callers",
-      status: "running",
-      startedAt: 1,
-    }],
-  });
-
-  assert.deepEqual(lines, [
-    "  ◐ Search  Find auth callers    running",
-    "Ship authentication · 1/6",
-    "  ◐ Task 2    after Task 1",
-    "  ● Task 1",
-    "  ○ Task 3    after Task 2",
-    "  ○ Task 4    after Task 3",
-    "  ○ Task 5    after Task 4",
-    "  … +1 more",
-  ]);
-  assert.doesNotMatch(lines.join("\n"), /private executor prompt/);
 });

@@ -439,6 +439,87 @@ test("Work pane keeps plain c and a keystrokes in the composer", async () => {
   }
 });
 
+test("Work pane without Agent Console support leaves Alt+A as ordinary typing", async () => {
+  const { engine, submittedLines } = createWorkShellPaneEngine();
+  const { stdin, instance, getOutput } = renderWithInput(
+    React.createElement(WorkShellPane, {
+      provider: "OpenAI",
+      model: "gpt-5.4",
+      mode: "yolo",
+      engine,
+      cwd: "/Users/parkeungje/project/unclecode",
+      resolveComposerInput: async (value) => ({
+        prompt: value,
+        attachments: [],
+        transcriptText: value,
+      }),
+      getSuggestions: (value) =>
+        getWorkShellSlashSuggestions(value, {
+          provider: "openai",
+          currentModel: "gpt-5.4",
+        }),
+      onExit: () => {},
+      shouldBlockSlashSubmit: (line) =>
+        shouldBlockSlashSubmit(line, {
+          provider: "openai",
+          currentModel: "gpt-5.4",
+        }),
+      getReasoningLabel: () => "default medium",
+      isReasoningSupported: () => true,
+    }),
+  );
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stdin.write("\u001ba");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    assert.deepEqual(submittedLines, []);
+    // An engine with no console methods has nothing to toggle, so the chord
+    // must not become a dead key.
+    assert.match(getLastWorkFrame(getOutput()), /› a(?:▏)?/);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("Composer yields a keystroke to the Agent Console predicate instead of the draft", async () => {
+  const changedValues = [];
+  const seen = [];
+  const { stdin, instance } = renderWithInput(
+    React.createElement(Composer, {
+      value: "",
+      onChange: (value) => {
+        changedValues.push(value);
+      },
+      onSubmit: () => {},
+      suppressAgentConsoleKey: (input, key, composerEmpty) => {
+        seen.push({ input, meta: key.meta === true, composerEmpty });
+        return key.meta === true && input === "a";
+      },
+    }),
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  stdin.write("\u001ba");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  stdin.write("b");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  instance.unmount();
+  instance.cleanup();
+
+  assert.deepEqual(changedValues, ["b"], "the owned chord never becomes draft text");
+  assert.deepEqual(
+    seen,
+    [
+      { input: "a", meta: true, composerEmpty: true },
+      { input: "b", meta: false, composerEmpty: true },
+    ],
+    "the predicate sees the normalized keystroke and the raw-empty state",
+  );
+});
+
 test("Work pane submits an explicit model command from the composer and closes the picker", async () => {
   const { engine, submittedLines } = createWorkShellPaneEngine();
   const { stdin, instance, getOutput, clearOutput } = renderWithInput(

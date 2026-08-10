@@ -134,11 +134,11 @@ export function renderContextInspectorOverlay(input: {
   return (
     <Box marginTop={1} borderStyle="round" borderColor={input.borderColor} paddingX={1} flexDirection="column">
       <Text>
-        <Text color={palette.assistant} bold>{"UncleCode Context Desk"}</Text>
+        <Text color={palette.assistant} bold>{"Context Desk"}</Text>
         <Text color={palette.textDim}>
           {input.width < 76
-            ? " · model preflight"
-            : " · preflight what the model will see"}
+            ? " · next answer"
+            : " · what reaches the next answer"}
         </Text>
       </Text>
       <Box marginTop={input.expandedId ? 0 : 1} flexDirection="column">

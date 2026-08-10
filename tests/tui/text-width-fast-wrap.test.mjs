@@ -32,3 +32,32 @@ test("truncateForDisplayWidth avoids splitting Hangul and emoji graphemes", () =
   assert.equal(truncateForDisplayWidth("🙂테스트", 3), "🙂");
   assert.equal(getDisplayWidth(truncateForDisplayWidth("🙂테스트", 3)), 2);
 });
+
+/**
+ * Ink measures with `string-width`, which counts any RGI emoji cluster as two
+ * cells. Undercounting one here makes every bounded row a cell too generous,
+ * so ink wraps the row the layout believed it had trimmed.
+ */
+test("getDisplayWidth counts RGI emoji clusters the way ink's renderer does", () => {
+  assert.equal(getDisplayWidth("\u{1F680}"), 2, "rocket");
+  assert.equal(getDisplayWidth("\u26A0\uFE0F"), 2, "warning with emoji presentation");
+  assert.equal(getDisplayWidth("\u2699\uFE0F"), 2, "gear with emoji presentation");
+  assert.equal(getDisplayWidth("\u23F3"), 2, "hourglass");
+  assert.equal(getDisplayWidth("\u{1F468}\u200D\u{1F469}\u200D\u{1F467}"), 2, "zwj family");
+  assert.equal(getDisplayWidth("\u{1F1F0}\u{1F1F7}"), 2, "regional-indicator flag");
+  assert.equal(getDisplayWidth("1\uFE0F\u20E3"), 2, "qualified keycap");
+  assert.equal(getDisplayWidth("1\u20E3"), 2, "unqualified keycap");
+
+  // Text-presentation glyphs and the console's own status set stay one cell,
+  // so widening emoji must not widen the chrome.
+  assert.equal(getDisplayWidth("\u2714"), 1, "heavy check without VS16");
+  assert.equal(getDisplayWidth("\u25D0\u25CF\u25B2\u2715\u25CB\u2298"), 6, "ledger glyphs");
+  assert.equal(getDisplayWidth("\u203A\u23BF\u2502"), 3, "console chrome glyphs");
+});
+
+test("emoji-bearing text truncates and wraps on the widened measurement", () => {
+  assert.equal(getDisplayWidth(truncateForDisplayWidth("\u{1F680}\u{1F680}\u{1F680}", 4)), 4);
+  for (const line of wrapDisplayTextFast("\u{1F680} ship \u26A0\uFE0F check \u23F3 wait", 10)) {
+    assert.ok(getDisplayWidth(line) <= 10, `line exceeds width: "${line}"`);
+  }
+});

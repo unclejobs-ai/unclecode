@@ -18,6 +18,7 @@ import { loadWorkShellDashboardProps } from "../../apps/unclecode-cli/src/work-r
 import { createManagedDashboardInput } from "../../apps/unclecode-cli/src/work-runtime-dashboard.ts";
 import { createAgentOpsStore } from "@unclecode/agentops-db";
 import { persistWorkShellSessionSnapshot } from "@unclecode/orchestrator";
+import { createManagedWorkShellDashboardProps } from "../../packages/tui/src/index.tsx";
 import {
   formatContextPacketPromptPrefix,
   listScopedMemoryEntries,
@@ -1084,6 +1085,10 @@ test("goal context projection states missing acceptance criteria and evidence in
 });
 
 test("managed dashboard preserves the resumed submitted receipt identity", () => {
+  const ompAuthCatalog = {
+    list: async () => ({ ok: true, providers: [] }),
+    signIn: async () => ({ ok: true, command: "omp auth-broker login kimi-code" }),
+  };
   const managed = createManagedDashboardInput({
     agent: {},
     options: {
@@ -1105,6 +1110,7 @@ test("managed dashboard preserves the resumed submitted receipt identity", () =>
       contextSummaryLines: [],
       homeState: {},
       initialLastSubmittedContextReceiptId: "receipt-resumed-submitted",
+      ompAuthCatalog,
     },
   }, {
     resolveWorkShellInlineCommand: async () => ({ lines: [], failed: false }),
@@ -1114,4 +1120,12 @@ test("managed dashboard preserves the resumed submitted receipt identity", () =>
     managed.paneRuntime.initialLastSubmittedContextReceiptId,
     "receipt-resumed-submitted",
   );
+
+  const dashboard = createManagedWorkShellDashboardProps(managed);
+  const embeddedPane = dashboard.renderWorkPane({
+    openSessions() {},
+    syncHomeState() {},
+  });
+  const pane = embeddedPane.props.buildPane({ onExit() {} });
+  assert.equal(pane.ompAuthCatalog, ompAuthCatalog);
 });

@@ -2,28 +2,21 @@ import { Box, Text } from "ink";
 import React from "react";
 import type {
   AgentConsoleSnapshot,
+  AgentControlReceiptStatus,
   ContextPacketChangeClassification,
   ContextPacketReceipt,
   ContextPacketView,
   ContextPacketViewActionReceipt,
   ContextPolicySuggestion,
-  ToolActivityKind,
-  WorkNodeStatus,
 } from "@unclecode/contracts";
 import {
   resolveWorkShellSlashArgHint,
   runRustCommandSync,
   sanitizeWorkShellAssistantText,
+  type AgentConsoleViewState,
 } from "@unclecode/orchestrator";
 
-import {
-  buildDiffRows,
-  formatDiffRow,
-  formatDiffSummary,
-  parseUnifiedDiff,
-  resolveDiffGutterWidth,
-  summarizeDiff,
-} from "./diff-render.js";
+import type { GitFacts } from "./facts.js";
 import { detectTerminalBackground } from "./terminal-theme.js";
 import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
 import { renderMarkdown, type MarkdownTheme } from "./markdown-render.js";
@@ -39,6 +32,7 @@ import {
   type WorkShellPanelLineClass,
   type WorkShellPanelPlacement,
 } from "./work-shell-view-fast-paths.js";
+
 import {
   renderContextInspectorOverlay,
 } from "./work-shell-context-inspector.js";
@@ -48,7 +42,29 @@ import {
   renderAgentHistoryOverlay,
   renderCacheTelemetryOverlay,
 } from "./work-shell-telemetry.js";
+import {
+  formatAgentConsoleTotalCost,
+  hasActiveAgentConsoleWork,
+  selectActiveAgentConsoleCounts,
+  type AgentConsoleActiveCounts,
+} from "./work-shell-agent-console-model.js";
+import { flattenRowText, formatCount } from "./work-shell-agent-console-format.js";
+import {
+  WorkShellAgentConsoleHud,
+  WorkShellAgentConsoleOverlay,
+} from "./work-shell-agent-console-view.js";
+import { renderOmpAuthProviderPicker } from "./work-shell-auth-provider-picker.js";
+import {
+  resolveOmpAuthPickerQuery,
+  shouldShowOmpAuthPicker,
+  type OmpAuthPickerCatalog,
+} from "./work-shell-auth-provider-picker-model.js";
 
+function readWorkShellMonotonicMilliseconds(): number {
+  return typeof globalThis.performance?.now === "function"
+    ? globalThis.performance.now()
+    : Date.now();
+}
 export type { WorkShellPanelDisplayMode } from "./work-shell-view-fast-paths.js";
 
 export type WorkShellEntryRole = "user" | "assistant" | "tool" | "system";
@@ -1249,6 +1265,8 @@ export function formatWorkShellFooterLine(input: {
   readonly width?: number;
   readonly branch?: string;
   readonly modelWindow?: number;
+  readonly gitFacts?: GitFacts;
+  readonly cost?: string;
 }): string {
   return formatWorkShellFooterLineFast({
     ...input,
@@ -1717,6 +1735,88 @@ function resolveWorkShellCompactBusyActivityPhrase(status: string): string {
   return truncateForDisplayWidth(normalized, 18);
 }
 
+/**
+ * One sampled clock for the whole shell. The spinner needs frame-rate ticks
+ * while a turn is in flight; a delegated agent only needs its elapsed label to
+ * advance, so background-only work ticks once a second instead of repainting
+ * the frame ten times for the same digit.
+ */
+const WORK_SHELL_BACKGROUND_CLOCK_INTERVAL_MS = 1_000;
+
+export type WorkShellClockAnchor = {
+  readonly wall: number;
+  readonly monotonic: number;
+};
+
+export function resolveWorkShellActivityNow(
+  anchor: WorkShellClockAnchor,
+  monotonicNow: number,
+): number {
+  return anchor.wall + Math.max(0, monotonicNow - anchor.monotonic);
+}
+
+export type WorkShellActivityClock = {
+  readonly activityFrame: number;
+  readonly activityNow: number;
+  readonly monotonicNow: number;
+};
+
+function useWorkShellActivityClock(input: {
+  readonly isBusy: boolean;
+  readonly backgroundActive: boolean;
+}): WorkShellActivityClock {
+  const running = input.isBusy || input.backgroundActive;
+  const intervalMs = input.isBusy
+    ? WORK_SHELL_SPINNER_INTERVAL_MS
+    : WORK_SHELL_BACKGROUND_CLOCK_INTERVAL_MS;
+  const [clock, setClock] = React.useState<WorkShellActivityClock>(() => ({
+    activityFrame: 0,
+    activityNow: Date.now(),
+    monotonicNow: readWorkShellMonotonicMilliseconds(),
+  }));
+  React.useEffect(() => {
+    if (!running) return;
+    const interval = setInterval(() => {
+      const sampledAt = readWorkShellMonotonicMilliseconds();
+      setClock((previous) => ({
+        activityFrame: previous.activityFrame + 1,
+        activityNow: resolveWorkShellActivityNow(
+          { wall: previous.activityNow, monotonic: previous.monotonicNow },
+          sampledAt,
+        ),
+        monotonicNow: sampledAt,
+      }));
+    }, intervalMs);
+    return () => { clearInterval(interval); };
+  }, [intervalMs, running]);
+  return clock;
+}
+
+/**
+ * `4 agents · 4 jobs · Reading context · 16s` — the live half of the status row.
+ *
+ * Counts come first because they change what the operator does next; a zero
+ * count is omitted rather than reported, so a solo session reads exactly as it
+ * did before delegation existed.
+ */
+export function formatWorkShellStatusActivityFacts(input: {
+  readonly activeAgents?: number;
+  readonly activeJobs?: number;
+  readonly activity: string;
+  readonly elapsed?: string;
+}): string {
+  const agents = input.activeAgents ?? 0;
+  const jobs = input.activeJobs ?? 0;
+  return [
+    agents > 0 ? formatCount(agents, "agent", "agents") : undefined,
+    jobs > 0 ? formatCount(jobs, "job", "jobs") : undefined,
+    input.activity,
+    input.elapsed,
+  ]
+    .filter((fact): fact is string => fact !== undefined && fact.length > 0)
+    .join(" · ");
+}
+
 const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   readonly model: string;
   readonly reasoningLabel: string;
@@ -1727,57 +1827,69 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   readonly currentTurnStartedAt?: number;
   readonly lastTurnDurationMs?: number;
   readonly terminalColumns?: number;
+  readonly clock: WorkShellActivityClock;
+  /**
+   * Live delegated work. Non-zero counts make this row busy even when the main
+   * turn is idle, because something the operator started is still running.
+   */
+  readonly activeCounts?: AgentConsoleActiveCounts;
 }) {
-  const [activityFrame, setActivityFrame] = React.useState(0);
-  const [activityNow, setActivityNow] = React.useState(() => Date.now());
-  React.useEffect(() => {
-    if (!props.isBusy) {
-      return;
-    }
-    setActivityFrame((frame) => frame + 1);
-    setActivityNow(Date.now());
-    const interval = setInterval(() => {
-      setActivityFrame((frame) => frame + 1);
-      setActivityNow(Date.now());
-    }, WORK_SHELL_SPINNER_INTERVAL_MS);
-    return () => { clearInterval(interval); };
-  }, [props.isBusy]);
+  const { activityFrame, activityNow } = props.clock;
+  const activeAgents = props.activeCounts?.agents ?? 0;
+  const activeJobs = props.activeCounts?.jobs ?? 0;
+  const backgroundBusy = activeAgents > 0 || activeJobs > 0;
+  const busy = props.isBusy || backgroundBusy;
 
   const sessionGroup = formatWorkShellSessionFactsGroup({
     model: props.model,
     mode: props.mode,
   });
   const authGroup = formatWorkShellAuthFactsGroup(props.authLabel);
-  const isAuthWarning = /blocked|unavailable|not signed|needs refresh|lacks/i.test(props.authLabel);
+  const isAuthWarning = /blocked|unavailable|not signed|needs refresh|needs API key|lacks/i.test(props.authLabel);
   const authColor = isAuthWarning ? W.warning : W.textMuted;
-  const statusGlyph = props.isBusy ? pickBusySpinnerFrame(activityFrame) : "◇";
-  const statusGlyphColor = props.isBusy ? W.spinner : W.user;
+  const statusGlyph = busy ? pickBusySpinnerFrame(activityFrame) : "◇";
+  const statusGlyphColor = busy ? W.spinner : W.user;
   // "no reply yet" spent a slot to report nothing. On a fresh session the
   // timing is simply omitted.
   const lastReplyTiming = props.lastTurnDurationMs === undefined
     ? undefined
     : `last ${formatCompactDuration(props.lastTurnDurationMs)}`;
+  // Only a main turn has an elapsed anchor. Delegated runs carry their own
+  // per-agent labels in the HUD below, so this slot stays empty for them
+  // rather than reporting the previous turn's clock as if it were still live.
   const busyElapsed = props.currentTurnStartedAt === undefined
     ? "starting"
     : formatCompactDuration(Math.max(0, activityNow - props.currentTurnStartedAt));
-  const statusDisplay = props.isBusy
-    ? `${resolveWorkShellBusyActivityPhrase(props.busyStatus ?? "")} · ${busyElapsed}`
-    : lastReplyTiming === undefined
-      ? "Ready"
-      : `Ready · ${lastReplyTiming}`;
+  const activity = props.isBusy
+    ? resolveWorkShellBusyActivityPhrase(props.busyStatus ?? "")
+    : backgroundBusy
+      ? "Working"
+      : "Ready";
+  const elapsed = props.isBusy ? busyElapsed : backgroundBusy ? undefined : lastReplyTiming;
+  const statusDisplay = formatWorkShellStatusActivityFacts({
+    activeAgents,
+    activeJobs,
+    activity,
+    ...(elapsed === undefined ? {} : { elapsed }),
+  });
   const isNarrow = props.terminalColumns !== undefined && props.terminalColumns < 72;
   if (isNarrow) {
     const compactStatus = isAuthWarning
       ? `${props.model} · ${authGroup}`
-      : props.isBusy
-        ? `${props.model} · ${resolveWorkShellCompactBusyActivityPhrase(props.busyStatus ?? "")} · ${busyElapsed}`
-        : `${props.model} · ${statusDisplay}`;
+      : `${props.model} · ${formatWorkShellStatusActivityFacts({
+        activeAgents,
+        activeJobs,
+        activity: props.isBusy
+          ? resolveWorkShellCompactBusyActivityPhrase(props.busyStatus ?? "")
+          : activity,
+        ...(elapsed === undefined ? {} : { elapsed }),
+      })}`;
     const availableStatusWidth = Math.max(1, (props.terminalColumns ?? 72) - 6);
     return (
       <Box marginTop={1} paddingLeft={2}>
         <Text>
           <Text color={statusGlyphColor} bold>{`${statusGlyph} `}</Text>
-          <Text {...(props.isBusy
+          <Text {...(busy
             ? { color: W.assistant, bold: true }
             : { color: W.textMuted })}>
             {truncateForDisplayWidth(compactStatus, availableStatusWidth)}
@@ -1806,13 +1918,72 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
         ) : null}
         {/* borderSoft is invisible on dark ground, which fused the row into one run. */}
         <Text color={W.textDim}>{" · "}</Text>
-        <Text {...(props.isBusy
+        <Text {...(busy
           ? { color: W.assistant, bold: true }
           : { color: W.textMuted })}>{statusDisplay}</Text>
       </Text>
     </Box>
   );
 });
+
+/** An outcome needs a glyph as well as a tone: colour alone says nothing. */
+const WORK_SHELL_CONTROL_RECEIPT_GLYPHS: Readonly<Record<AgentControlReceiptStatus, string>> = {
+  accepted: "✔",
+  not_delivered: "⊘",
+  rejected: "✕",
+};
+
+const WORK_SHELL_CONTROL_RECEIPT_LABELS: Readonly<Record<AgentControlReceiptStatus, string>> = {
+  accepted: "Control accepted",
+  not_delivered: "Control not delivered",
+  rejected: "Control rejected",
+};
+
+/**
+ * The two Agent Console states the keyboard owns but nothing painted: an armed
+ * cancel confirmation, and the outcome of the control that just ran.
+ *
+ * Both read straight from view state, which is what keeps them honest — the
+ * reducer retires a receipt on every revision that does not carry a new one, so
+ * a settled console cannot leave a stale question or a stale answer on screen.
+ * Receipt messages are engine prose and may carry provider errors, paths, or
+ * credentials. The chrome renders only the bounded status vocabulary.
+ */
+function renderWorkShellAgentConsoleControl(input: {
+  readonly snapshot: AgentConsoleSnapshot;
+  readonly view: AgentConsoleViewState;
+  readonly width: number;
+}): React.ReactNode {
+  const { control, receipt } = input.view;
+  if (control.kind !== "confirm-cancel" && receipt === undefined) {
+    return null;
+  }
+  const bound = Math.max(24, input.width - 2);
+  const target = control.kind === "confirm-cancel"
+    ? input.snapshot.agents.find((agent) => agent.id === control.agentRunId)
+    : undefined;
+  return (
+    <Box paddingLeft={2} flexDirection="column">
+      {control.kind === "confirm-cancel" ? (
+        <Text color={W.warning} bold>
+          {truncateForDisplayWidth(
+            `⚠ Cancel ${flattenRowText(target?.displayName ?? control.agentRunId)}?`
+            + " y confirm · n keep running · Esc dismiss",
+            bound,
+          )}
+        </Text>
+      ) : null}
+      {receipt ? (
+        <Text color={receipt.status === "accepted" ? W.assistant : W.warning}>
+          {truncateForDisplayWidth(
+            `${WORK_SHELL_CONTROL_RECEIPT_GLYPHS[receipt.status]} ${WORK_SHELL_CONTROL_RECEIPT_LABELS[receipt.status]}`,
+            bound,
+          )}
+        </Text>
+      ) : null}
+    </Box>
+  );
+}
 
 const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   readonly composer: React.ReactNode;
@@ -1831,6 +2002,8 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   readonly queuedCount?: number;
   readonly branch?: string;
   readonly modelWindow?: number;
+  readonly gitFacts?: GitFacts;
+  readonly cost?: string;
 }) {
   const dockWidth = getWorkShellDockWidth(props.terminalColumns);
   const footerLine = formatWorkShellFooterLine({
@@ -1841,6 +2014,8 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
     authLabel: props.authLabel,
     ...(props.contextIndicator ? { contextIndicator: props.contextIndicator } : {}),
     ...(props.branch ? { branch: props.branch } : {}),
+    ...(props.gitFacts ? { gitFacts: props.gitFacts } : {}),
+    ...(props.cost ? { cost: props.cost } : {}),
     ...(props.modelWindow !== undefined ? { modelWindow: props.modelWindow } : {}),
     width: dockWidth,
   });
@@ -1873,7 +2048,7 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   return (
     <Box marginTop={1} flexDirection="column">
       {props.composerHint ? (
-        <Text {...hintColorProps}>{props.composerHint}</Text>
+        <Text {...hintColorProps}>{truncateForDisplayWidth(props.composerHint, dockWidth)}</Text>
       ) : null}
       <Text {...readableTextColorProps(W.borderSoft)}>{formatWorkShellPromptDeckDivider(dockWidth)}</Text>
       <Box minHeight={1} paddingLeft={1}>
@@ -1898,303 +2073,6 @@ export function formatWorkShellQueueIndicator(queuedCount: number, queuePaused =
   return `⋯ ${queuedCount} queued · /queue`;
 }
 
-const LEDGER_INDENT = "  ";
-const LEDGER_KIND_COLUMN = 7;
-/** Below this the metric column is dropped rather than wrapped to a second row. */
-const LEDGER_METRIC_MIN_WIDTH = 72;
-
-type LedgerRow = {
-  readonly glyph: string;
-  readonly label?: string;
-  readonly detail: string;
-  readonly metric?: string;
-};
-
-/**
- * Lay out a group of ledger rows: status glyph, an optional fixed-width kind
- * column, the action, then every metric starting at one shared column.
- *
- * The previous format chained everything with `·` and, under 120 columns,
- * stacked the metadata onto a second indented line — four tool calls cost
- * eight rows and the eye had no column to follow. Rows are measured as a group
- * so the metric column sits just past the longest action rather than at the
- * far right edge, which on a wide terminal opened a canyon of blank space.
- */
-function composeLedgerRows(rows: readonly LedgerRow[], width: number): readonly string[] {
-  const lefts = rows.map((row) => {
-    const label = row.label === undefined
-      ? ""
-      : `${padDisplayLine(row.label, LEDGER_KIND_COLUMN)} `;
-    return `${LEDGER_INDENT}${row.glyph} ${label}${row.detail}`;
-  });
-
-  const metricWidth = Math.max(
-    0,
-    ...rows.map((row) => (row.metric === undefined ? 0 : getDisplayWidth(row.metric))),
-  );
-  if (metricWidth === 0 || width < LEDGER_METRIC_MIN_WIDTH) {
-    return lefts.map((left) => truncateForDisplayWidth(left, width));
-  }
-
-  const widestLeft = Math.max(0, ...lefts.map((left) => getDisplayWidth(left)));
-  const metricColumn = Math.min(widestLeft + 4, width - metricWidth);
-  return rows.map((row, index) => {
-    const left = truncateForDisplayWidth(lefts[index] ?? "", Math.max(12, metricColumn - 2));
-    if (row.metric === undefined) return left;
-    const gap = Math.max(2, metricColumn - getDisplayWidth(left));
-    return truncateForDisplayWidth(`${left}${" ".repeat(gap)}${row.metric}`, width);
-  });
-}
-
-/** Indent that marks a line as belonging to the call above it. */
-const LEDGER_PREVIEW_INDENT = "    ";
-
-/**
- * Render a tool activity's diff preview as ledger lines.
- *
- * Returns nothing when the preview is not a parseable patch, so a tool that
- * attached something else cannot spill raw text into the chrome.
- */
-export function formatWorkShellActivityPreviewLines(
-  preview: string,
-  width: number,
-): readonly string[] {
-  const hunks = parseUnifiedDiff(preview);
-  if (!hunks) return [];
-  const rows = buildDiffRows(hunks, { contextLines: 2, maxRows: 14 });
-  if (rows.length === 0) return [];
-  const gutterWidth = resolveDiffGutterWidth(rows);
-  const bodyWidth = Math.max(20, width - LEDGER_PREVIEW_INDENT.length);
-  return [
-    `${LEDGER_PREVIEW_INDENT}⎿ ${formatDiffSummary(summarizeDiff(hunks))}`,
-    ...rows.map((row) => `${LEDGER_PREVIEW_INDENT}${formatDiffRow(row, { gutterWidth, width: bodyWidth })}`),
-  ];
-}
-
-export function formatWorkShellAgentConsoleActivityLines(
-  agentConsole: AgentConsoleSnapshot | undefined,
-  width = 120,
-): readonly string[] {
-  if (!agentConsole) {
-    return [];
-  }
-
-  const displayWidth = Math.max(20, Math.trunc(width));
-  const runningActivity = agentConsole.activity
-    .filter((activity) => activity.status === "running")
-    .slice(-4);
-  // Finished calls now render inline in the transcript, in the order they
-  // happened. This block is the live edge: it fills with recently-settled calls
-  // only while nothing is running, so an idle screen still shows what just
-  // happened without duplicating the whole history above the conversation.
-  const terminalSlots = runningActivity.length > 0 ? 0 : 4;
-  const terminalActivity = terminalSlots > 0
-    ? agentConsole.activity
-        .filter((activity) => activity.status !== "running")
-        .slice(-terminalSlots)
-    : [];
-  const visibleActivity = new Set([...runningActivity, ...terminalActivity]);
-  const recentActivity = agentConsole.activity.filter((activity) => visibleActivity.has(activity));
-  const hiddenActivityCount = agentConsole.activity.length - recentActivity.length;
-  const toolRows = composeLedgerRows(recentActivity.map((activity): LedgerRow => {
-    const rawStatusDetail = activity.status === "running"
-      ? "running"
-      : activity.summary ?? activity.status;
-    const statusPrefix = `${activity.status} · `;
-    const statusDetail = rawStatusDetail.startsWith(statusPrefix)
-      ? rawStatusDetail.slice(statusPrefix.length)
-      : rawStatusDetail;
-    const target = activity.target && !activity.intent.includes(activity.target)
-      ? activity.target
-      : undefined;
-    return {
-      glyph: formatToolActivityStatus(activity.status),
-      label: formatToolActivityKind(activity.kind),
-      detail: [activity.intent, target].filter((value) => value !== undefined).join(" · "),
-      metric: statusDetail,
-    };
-  }), displayWidth);
-  // No section heading. The rows are self-describing, and a "Tools · 24" banner
-  // restated a count the trailing overflow line already carries.
-  // A write call's diff is the thing worth seeing; "completed · 12ms" is not.
-  // Rows are interleaved so each preview sits directly under the call it came
-  // from, indented so the call line stays the anchor.
-  const rowsWithPreviews = recentActivity.flatMap((activity, index) => {
-    const row = toolRows[index];
-    if (row === undefined) return [];
-    if (!activity.preview) return [row];
-    return [row, ...formatWorkShellActivityPreviewLines(activity.preview, displayWidth)];
-  });
-
-  const activityLines = recentActivity.length > 0
-    ? [
-        ...rowsWithPreviews,
-        ...(hiddenActivityCount > 0
-          ? [truncateForDisplayWidth(`  … +${hiddenActivityCount} earlier`, displayWidth)]
-          : []),
-      ]
-    : [];
-
-  const graph = agentConsole.workGraph;
-  if (!graph) {
-    return activityLines;
-  }
-
-  const prioritizedNodes = [
-    ...graph.nodes.filter((node) => isActiveWorkNodeStatus(node.status)),
-    ...graph.nodes.filter((node) => !isActiveWorkNodeStatus(node.status)),
-  ];
-  const titleById = new Map(graph.nodes.map((node) => [node.id, node.title || node.id]));
-  const visibleNodes = prioritizedNodes.slice(0, 5);
-  const hiddenNodeCount = Math.max(0, graph.nodes.length - visibleNodes.length);
-  const completedCount = graph.nodes.filter((node) => node.status === "completed").length;
-  const taskRows = composeLedgerRows(visibleNodes.map((node): LedgerRow => {
-    const dependencies = node.dependsOn
-      .map((dependency) => titleById.get(dependency) ?? dependency);
-    const dependencyLabel = node.status === "blocked" || node.status === "requires_action"
-      ? "blocked by"
-      : "after";
-    const dependencyDetail = dependencies.length > 0
-      ? `${dependencyLabel} ${dependencies.join(", ")}`
-      : undefined;
-    return {
-      glyph: formatWorkNodeStatus(node.status),
-      detail: node.title || node.id,
-      ...(dependencyDetail ? { metric: dependencyDetail } : {}),
-    };
-  }), displayWidth);
-  // The task block keeps one heading — unlike tool rows it needs the goal and
-  // the completed/total ratio, which no individual row carries.
-  const graphLines = [
-    truncateForDisplayWidth(
-      `${graph.goal ?? graph.id} · ${completedCount}/${graph.nodes.length}`,
-      displayWidth,
-    ),
-    ...taskRows,
-    ...(hiddenNodeCount > 0
-      ? [truncateForDisplayWidth(`  … +${hiddenNodeCount} more`, displayWidth)]
-      : []),
-  ];
-
-  return [...activityLines, ...graphLines];
-}
-
-function isActiveWorkNodeStatus(status: WorkNodeStatus): boolean {
-  return status === "running"
-    || status === "blocked"
-    || status === "requires_action"
-    || status === "failed";
-}
-
-function formatToolActivityKind(kind: ToolActivityKind): string {
-  switch (kind) {
-    case "read":
-      return "Read";
-    case "search":
-      return "Search";
-    case "write":
-      return "Write";
-    case "delete":
-      return "Delete";
-    case "execute":
-      return "Bash";
-    case "interaction":
-      return "Ask";
-    case "other":
-      return "Tool";
-  }
-}
-
-// One quiet dot per row, filled by progress: hollow not started, half running,
-// filled done. Status lives in the glyph's weight and colour so the rest of the
-// row can stay monochrome instead of every finished call flooding green.
-function formatToolActivityStatus(status: "running" | "completed" | "failed" | "cancelled"): string {
-  switch (status) {
-    case "running":
-      return "◐";
-    case "completed":
-      return "●";
-    case "failed":
-      return "✕";
-    case "cancelled":
-      return "⊘";
-  }
-}
-
-function formatWorkNodeStatus(status: WorkNodeStatus): string {
-  switch (status) {
-    case "completed":
-      return "●";
-    case "running":
-      return "◐";
-    case "failed":
-    case "cancelled":
-      return "✕";
-    case "blocked":
-    case "requires_action":
-      return "▲";
-    default:
-      return "○";
-  }
-}
-
-const LEDGER_STATUS_COLORS: Readonly<Record<string, keyof typeof W_DARK>> = {
-  "✕": "error",
-  "▲": "warning",
-  "●": "success",
-  "◐": "assistant",
-  "⊘": "textDim",
-  "○": "textDim",
-};
-
-/** `  ● Read    intent…      12ms · 48 lines` — glyph, body, aligned metric. */
-const LEDGER_ROW_RE = /^ {2}([✕▲●◐⊘○]) (.*)$/;
-
-const WorkShellLedgerLine = React.memo(function WorkShellLedgerLine(props: {
-  readonly line: string;
-}): React.ReactNode {
-  // Diff preview rows hanging off a write call: `    ⎿ Added 3 lines…` and
-  // `     12 + text`. The marker follows the line-number gutter, so match the
-  // shape rather than scanning for a "+" that could sit inside the content.
-  if (props.line.startsWith(LEDGER_PREVIEW_INDENT)) {
-    const body = props.line.slice(LEDGER_PREVIEW_INDENT.length);
-    if (body.startsWith("⎿")) {
-      return <Text {...readableTextColorProps(W.textDim)}>{props.line}</Text>;
-    }
-    const marker = /^\s*\d*\s([+-])\s/.exec(body)?.[1];
-    const color = marker === "+" ? W.success : marker === "-" ? W.error : W.textMuted;
-    return <Text {...readableTextColorProps(color)}>{props.line}</Text>;
-  }
-
-  const row = LEDGER_ROW_RE.exec(props.line);
-  if (!row) {
-    // Task heading and the "… +N earlier" overflow line both read as chrome.
-    return <Text {...readableTextColorProps(W.textMuted)}>{props.line}</Text>;
-  }
-
-  // Only the glyph carries status colour. Colouring the whole row made a green
-  // "completed" tick shout as loudly as the action it described.
-  const glyph = row[1] ?? "";
-  const body = row[2] ?? "";
-  const glyphColor = W[LEDGER_STATUS_COLORS[glyph] ?? "textDim"];
-  const split = /^(.*?)(\s{2,})(\S.*)$/.exec(body);
-  return (
-    <Text>
-      <Text>{LEDGER_INDENT}</Text>
-      <Text {...readableTextColorProps(glyphColor)} bold>{glyph}</Text>
-      <Text>{" "}</Text>
-      {split
-        ? (
-          <>
-            <Text {...readableTextColorProps(W.text)}>{split[1] ?? ""}</Text>
-            <Text>{split[2] ?? ""}</Text>
-            <Text {...readableTextColorProps(W.textDim)}>{split[3] ?? ""}</Text>
-          </>
-        )
-        : <Text {...readableTextColorProps(W.text)}>{body}</Text>}
-    </Text>
-  );
-});
 
 export function WorkShellView(props: {
   readonly provider: string;
@@ -2225,8 +2103,12 @@ export function WorkShellView(props: {
   readonly contextInspectorDetailOffset?: number;
   readonly contextPacket?: ContextPacketView;
   readonly modelWindow?: number;
-  /** Checked-out branch, shown beside the path in the footer. */
+  /**
+   * Checked-out branch, for callers with no structured read. `gitFacts` wins.
+   */
   readonly branch?: string;
+  /** Workspace facts synced outside render by the pane's one Git effect. */
+  readonly gitFacts?: GitFacts;
   readonly terminalRows?: number;
   readonly currentTurnStartedAt?: number;
   readonly lastTurnDurationMs?: number;
@@ -2243,7 +2125,29 @@ export function WorkShellView(props: {
   readonly queuedCount?: number;
   readonly queuePaused?: boolean;
   readonly agentConsole?: AgentConsoleSnapshot;
+  /**
+   * Engine-owned Agent Console navigation. Absent (or closed) keeps the shell
+   * on the quiet default HUD; Task 8 supplies the keyboard that opens it.
+   */
+  readonly agentConsoleView?: AgentConsoleViewState;
+  /** `/auth` OMP provider catalog, injected at the pane boundary. */
+  readonly ompAuthCatalog?: OmpAuthPickerCatalog;
+  readonly ompAuthPickerCursor?: number;
+  readonly ompAuthSignInReceipt?: string;
 }) {
+  // Hooks run before any early-return branch, so the clock keeps one identity
+  // across every frame the shell can render.
+  const clock = useWorkShellActivityClock({
+    isBusy: props.isBusy,
+    backgroundActive: props.agentConsole !== undefined
+      && hasActiveAgentConsoleWork(props.agentConsole),
+  });
+  const activeCounts = props.agentConsole === undefined
+    ? undefined
+    : selectActiveAgentConsoleCounts(props.agentConsole);
+  const sessionCost = props.agentConsole === undefined
+    ? undefined
+    : formatAgentConsoleTotalCost(props.agentConsole);
   const composerHint = resolveWorkShellComposerHint({
     ...(props.composerHintOverride ? { composerHintOverride: props.composerHintOverride } : {}),
     isBusy: props.isBusy,
@@ -2276,16 +2180,19 @@ export function WorkShellView(props: {
     latestSystemText: getLatestWorkShellSystemText(props.entries),
   });
   const queueIndicator = formatWorkShellQueueIndicator(props.queuedCount ?? 0, props.queuePaused ?? false);
-  const agentConsoleActivityLines = formatWorkShellAgentConsoleActivityLines(
-    props.agentConsole,
-    Math.max(20, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
-  );
+  const agentConsoleOpen = props.agentConsole !== undefined && props.agentConsoleView?.open === true;
   const shouldRenderContextInspectorOverlay =
     props.activePanel.title === "Context expanded" && props.contextPacket !== undefined;
   const shouldRenderCacheTelemetryOverlay =
     props.activePanel.title === "Cache Telemetry" && props.agentConsole !== undefined;
   const shouldRenderAgentHistoryOverlay =
     props.activePanel.title === "Agent History" && props.agentConsole !== undefined;
+  // `/auth` leads with the OMP credential catalog. The Rust auth-picker lines
+  // stay behind the explicit subcommands (`/auth status`, `/auth login`, …).
+  const shouldRenderOmpAuthPicker =
+    props.activePanel.title === "Auth"
+    && props.ompAuthCatalog !== undefined
+    && shouldShowOmpAuthPicker(props.inputValue);
 
   const conversation = (
     <WorkShellConversationBlock
@@ -2297,7 +2204,17 @@ export function WorkShellView(props: {
     />
   );
 
-  const panel = (
+  const panel = shouldRenderOmpAuthPicker && props.ompAuthCatalog !== undefined ? (
+    renderOmpAuthProviderPicker({
+      catalog: props.ompAuthCatalog,
+      query: resolveOmpAuthPickerQuery(props.inputValue),
+      cursor: props.ompAuthPickerCursor ?? 0,
+      width: Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
+      borderColor: panelBorderColor,
+      palette: W,
+      ...(props.ompAuthSignInReceipt ? { signInReceipt: props.ompAuthSignInReceipt } : {}),
+    })
+  ) : (
     <WorkShellPanelBlock
       title={props.activePanel.title}
       lines={props.activePanel.lines}
@@ -2322,6 +2239,8 @@ export function WorkShellView(props: {
       {...(props.contextIndicator ? { contextIndicator: props.contextIndicator } : {})}
       {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
       {...(props.branch ? { branch: props.branch } : {})}
+      {...(props.gitFacts ? { gitFacts: props.gitFacts } : {})}
+      {...(sessionCost ? { cost: sessionCost } : {})}
       {...(props.modelWindow !== undefined ? { modelWindow: props.modelWindow } : {})}
       {...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {})}
       isBusy={props.isBusy}
@@ -2329,6 +2248,48 @@ export function WorkShellView(props: {
       {...(props.queuedCount !== undefined ? { queuedCount: props.queuedCount } : {})}
     />
   );
+
+  // The Agent Console is keyboard-owned rather than panel-title driven, so it
+  // takes the frame ahead of every `/`-command overlay once it is open.
+  if (agentConsoleOpen && props.agentConsole && props.agentConsoleView) {
+    return (
+      <Box flexDirection="column" paddingX={2}>
+        <WorkShellHeaderBlock
+          provider={props.provider}
+          {...(props.headerHint ? { headerHint: props.headerHint } : {})}
+          {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+        />
+        <WorkShellStatusBlock
+          model={props.model}
+          reasoningLabel={props.reasoningLabel}
+          mode={props.mode}
+          authLabel={props.authLabel}
+          isBusy={props.isBusy}
+          {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
+          {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
+          {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
+          {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+          clock={clock}
+          {...(activeCounts ? { activeCounts } : {})}
+        />
+        {composerDock}
+        <WorkShellAgentConsoleOverlay
+          snapshot={props.agentConsole}
+          view={props.agentConsoleView}
+          terminalColumns={props.terminalColumns ?? process.stdout.columns ?? 96}
+          width={resolveWorkShellChromeWidth(props.terminalColumns)}
+          borderColor={panelBorderColor}
+          palette={W}
+          now={clock.activityNow}
+        />
+        {renderWorkShellAgentConsoleControl({
+          snapshot: props.agentConsole,
+          view: props.agentConsoleView,
+          width: resolveWorkShellChromeWidth(props.terminalColumns),
+        })}
+      </Box>
+    );
+  }
 
   if (
     shouldRenderContextInspectorOverlay
@@ -2369,6 +2330,8 @@ export function WorkShellView(props: {
           {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
           {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
           {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+          clock={clock}
+          {...(activeCounts ? { activeCounts } : {})}
         />
         {composerDock}
         {renderContextInspectorOverlay({
@@ -2426,6 +2389,8 @@ export function WorkShellView(props: {
           {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
           {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
           {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+          clock={clock}
+          {...(activeCounts ? { activeCounts } : {})}
         />
         {composerDock}
         {shouldRenderCacheTelemetryOverlay
@@ -2445,7 +2410,6 @@ export function WorkShellView(props: {
     );
   }
 
-
   return (
     <Box flexDirection="column" paddingX={2}>
       <WorkShellHeaderBlock
@@ -2463,13 +2427,16 @@ export function WorkShellView(props: {
         {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
         {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
         {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+        clock={clock}
+        {...(activeCounts ? { activeCounts } : {})}
       />
-      {agentConsoleActivityLines.length > 0 ? (
-        <Box marginTop={1} flexDirection="column">
-          {agentConsoleActivityLines.map((line, index) => (
-            <WorkShellLedgerLine key={`${index}:${line}`} line={line} />
-          ))}
-        </Box>
+      {props.agentConsole ? (
+        <WorkShellAgentConsoleHud
+          snapshot={props.agentConsole}
+          width={resolveWorkShellChromeWidth(props.terminalColumns)}
+          palette={W}
+          now={clock.activityNow}
+        />
       ) : null}
       {getWorkShellPanelAnchor(panelDisplayMode) === "with-conversation" ? (
         <Box marginTop={1}>

@@ -128,32 +128,18 @@ export function buildContextInspectorGroupedRows(
 }
 
 export function buildContextInspectorRows(packet: ContextPacketView): readonly ContextInspectorSourceRow[] {
-  const unsorted: ContextInspectorSourceRow[] = [
-    ...packet.included.map((item, index) => ({
+  return [
+    ...packet.included.map((item) => ({
       item,
-      sourceIndex: index,
       heldBack: item.includedInModel === false,
     })),
-    ...packet.excluded.map((item, index) => ({
+    ...packet.excluded.map((item) => ({
       item,
-      sourceIndex: packet.included.length + index,
       heldBack: true,
     })),
-  ];
-  const ranked = unsorted.sort((left, right) => {
-    if (left.heldBack !== right.heldBack) {
-      return left.heldBack ? 1 : -1;
-    }
-    const leftGroup = CONTEXT_INSPECTOR_GROUP_ORDER.indexOf(resolveContextSourceGroup(left.item.category));
-    const rightGroup = CONTEXT_INSPECTOR_GROUP_ORDER.indexOf(resolveContextSourceGroup(right.item.category));
-    if (leftGroup !== rightGroup) {
-      return leftGroup - rightGroup;
-    }
-    return left.sourceIndex - right.sourceIndex;
-  });
-  return ranked.map((row, index) => ({
+  ].map((row, sourceIndex) => ({
     ...row,
-    sourceIndex: index,
+    sourceIndex,
   }));
 }
 

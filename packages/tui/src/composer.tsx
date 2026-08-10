@@ -7,6 +7,7 @@ import { Box, Text, useCursor, useInput, type DOMElement } from "ink";
 import React, { useEffect, useRef, useState } from "react";
 
 import { getDisplayWidth, segmentDisplayGraphemes, truncateForDisplayWidth } from "./text-width.js";
+import type { AgentConsoleKeyState } from "./work-shell-agent-console-input.js";
 
 // `ClipboardImageResult` is re-exported only because it is part of
 // `handleComposerClipboardPaste`'s public signature (an internal test seam).
@@ -397,6 +398,19 @@ export function Composer(props: {
    * during the asynchronous panel switch.
    */
   readonly suppressTelemetryHotkeys?: boolean | undefined;
+  /**
+   * Agent Console (Sprint 3): the console's key ownership is state-dependent
+   * (toggle chord, browse keys, cancel confirmation, steer mode), so the
+   * Composer asks the console's own resolver instead of carrying a second
+   * copy of the key map. Returning true keeps the keystroke out of the draft.
+   */
+  readonly suppressAgentConsoleKey?:
+    | ((
+      input: string,
+      key: AgentConsoleKeyState,
+      composerEmpty: boolean,
+    ) => boolean)
+    | undefined;
   readonly cursorVisible?: boolean | undefined;
 }) {
   const { setCursorPosition } = useCursor();
@@ -466,6 +480,17 @@ export function Composer(props: {
 
   useInput((input, key) => {
     const latestProps = propsRef.current;
+    // The Agent Console takes the frame ahead of every panel overlay, so its
+    // ownership question is asked first.
+    if (
+      latestProps.suppressAgentConsoleKey?.(
+        input,
+        key,
+        isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current),
+      )
+    ) {
+      return;
+    }
     if (
       key.upArrow ||
       key.downArrow ||
@@ -477,7 +502,7 @@ export function Composer(props: {
       return;
     }
 
-    if (key.ctrl && input === "v") {
+    if ((key.ctrl && input === "v") || input === "\u0016") {
       const outcome = handleComposerClipboardPaste({
         capture: latestProps.captureClipboardImage ?? defaultCaptureClipboardImage,
         onClipboardImage: latestProps.onClipboardImage,
@@ -491,6 +516,7 @@ export function Composer(props: {
     if (key.ctrl) {
       return;
     }
+
 
     if (
       latestProps.suppressTelemetryHotkeys

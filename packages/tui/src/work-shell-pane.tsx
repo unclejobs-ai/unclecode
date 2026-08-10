@@ -25,9 +25,15 @@ import {
   type WorkShellPaneRuntimeState,
   type WorkShellSlashSuggestion,
 } from "./work-shell-hooks.js";
-import { getGitBranch } from "./facts.js";
+import { useGitFacts } from "./facts.js";
+import { hasActiveAgentConsoleWork } from "./work-shell-agent-console-model.js";
 import { formatAuthLabelForDisplay } from "./work-shell-panels.js";
 import { getWorkShellComposerTextColor, WorkShellView } from "./work-shell-view.js";
+import { useOmpAuthProviderPicker } from "./work-shell-auth-provider-picker-state.js";
+import {
+  shouldShowOmpAuthPicker,
+  type OmpAuthCatalogPort,
+} from "./work-shell-auth-provider-picker-model.js";
 
 export type WorkShellPaneProps<
   Attachment extends WorkShellImageAttachment,
@@ -46,6 +52,11 @@ export type WorkShellPaneProps<
     value: string,
   ) => readonly WorkShellSlashSuggestion[];
   readonly browserOAuthAvailable?: boolean | undefined;
+  /**
+   * OMP credential catalog for the `/auth` surface, injected by the app. Left
+   * undefined, `/auth` keeps its existing panel rather than inventing rows.
+   */
+  readonly ompAuthCatalog?: OmpAuthCatalogPort | undefined;
   readonly onExit: () => void;
   readonly onRequestSessionsView?: (() => void) | undefined;
   readonly onSyncHomeState?: ((homeState: Partial<TuiShellHomeState>) => void) | undefined;
@@ -145,6 +156,9 @@ export function WorkShellPane<
     selectedSlashCommand,
     contextAdviceKeyActionsEnabled,
     contextUndoKeyActionsEnabled,
+    suppressAgentConsoleKey,
+    agentConsoleOwnsKeyboard,
+    agentConsoleSteering,
     submit,
     addClipboardAttachment,
     clearClipboardAttachments,
@@ -169,9 +183,6 @@ export function WorkShellPane<
     shouldBlockSlashSubmit: props.shouldBlockSlashSubmit,
   });
 
-  // Resolved once per cwd: `git branch --show-current` shells out, and the
-  // footer redraws on every keystroke.
-  const branch = React.useMemo(() => getGitBranch(props.cwd ?? process.cwd()), [props.cwd]);
   const { stdout } = useStdout();
   const captureClipboardImage = props.captureClipboardImage ?? defaultCaptureClipboardImage;
   const [terminalColumns, setTerminalColumns] = React.useState(() => resolveWorkShellPaneTerminalColumns(stdout));
@@ -220,7 +231,15 @@ export function WorkShellPane<
     queuedCount,
     queuePaused,
     agentConsole,
+    agentConsoleView,
   } = engineState;
+  // `git status` forks a child process, so it is synced outside render and
+  // refreshed only while the main turn or a delegated run could still be
+  // touching files. The footer reads state, never Git.
+  const gitFacts = useGitFacts(
+    props.cwd ?? process.cwd(),
+    isBusy || (agentConsole !== undefined && hasActiveAgentConsoleWork(agentConsole)),
+  );
   const isSecureApiKeyEntry = engineState.composerMode === "api-key-entry";
   // Most recent rejection reason from the clipboard capture or cap gate.
   // Surfaces in the attachment preview area so the user sees one line of
@@ -245,18 +264,29 @@ export function WorkShellPane<
     () => formatAuthLabelForDisplay(authLabel),
     [authLabel],
   );
+  const authPickerActive =
+    activePanel.title === "Auth" && shouldShowOmpAuthPicker(inputValue);
+  const authPicker = useOmpAuthProviderPicker({
+    ...(props.ompAuthCatalog ? { port: props.ompAuthCatalog } : {}),
+    active: authPickerActive,
+    inputValue,
+  });
   // Context Inspector (Sprint 2): when the /context overlay is open and the
   // composer is empty, yield the action keys to the inspector. The controller
   // dispatches the engine action; the Composer skips inserting the char.
+  // The steer composer outranks both panels: the controller has already
+  // stopped them acting, so their suppressions must not eat the steer text.
   const shouldSuppressComposerKeysForInspector = React.useMemo(
     () =>
-      activePanel.title === "Context expanded"
+      !agentConsoleSteering
+      && activePanel.title === "Context expanded"
       && isRawComposerEmpty(inputValue)
       && props.engine.moveContextInspectorCursor !== undefined,
-    [activePanel.title, inputValue, props.engine],
+    [agentConsoleSteering, activePanel.title, inputValue, props.engine],
   );
   const shouldSuppressComposerKeysForTelemetry =
-    (activePanel.title === "Cache Telemetry" || activePanel.title === "Agent History")
+    !agentConsoleSteering
+    && (activePanel.title === "Cache Telemetry" || activePanel.title === "Agent History")
     && isRawComposerEmpty(inputValue);
   const attachmentLines = React.useMemo(() => {
     const lines = composerPreview.attachments.length > 0
@@ -348,14 +378,34 @@ export function WorkShellPane<
       {...(contextPacket ? { contextPacket } : {})}
       {...(modelWindow !== undefined ? { modelWindow } : {})}
       {...(agentConsole ? { agentConsole } : {})}
+      {...(agentConsoleView ? { agentConsoleView } : {})}
       {...(attachmentLines ? { attachmentLines } : {})}
       {...(pendingClipboardAttachmentCount > 0 ? { attachmentCount: pendingClipboardAttachmentCount } : {})}
       {...{ terminalRows }}
+      {...(authPickerActive && authPicker.catalog ? { ompAuthCatalog: authPicker.catalog } : {})}
+      ompAuthPickerCursor={authPicker.cursor}
+      {...(authPickerActive && authPicker.signInReceipt ? { ompAuthSignInReceipt: authPicker.signInReceipt } : {})}
       composer={
         <Composer
           value={inputValue}
           onChange={handleComposerChange}
           onSubmit={async (line) => {
+            // The steer composer routes to an agent's control mailbox, which
+            // carries no attachments and understands no composer command. Its
+            // line must reach the engine verbatim — an empty one included,
+            // because that is a real (rejected) steer that exits the mode —
+            // so it goes before the /attach handling, the /auth catalog, and
+            // the attachment-only rewrite that would otherwise speak for the
+            // operator.
+            const liveState = props.engine.getState();
+            const liveAgentConsoleSteering = props.engine.openAgentConsole !== undefined
+              && liveState.agentConsoleView?.open === true
+              && liveState.composerMode === "agent-steer";
+            if (liveAgentConsoleSteering) {
+              await submit(line);
+              return;
+            }
+
             const normalized = normalizeComposerSlashLine(line);
 
             if (isExactAttachClipboardCommand(normalized)) {
@@ -375,6 +425,12 @@ export function WorkShellPane<
             if (isAttachClipboardNearMiss(normalized)) {
               setLastClipboardError(ATTACH_CLIPBOARD_USAGE);
               setInputValue("");
+              return;
+            }
+
+            // The /auth catalog owns Enter for a provider row; `/auth status`
+            // and friends fall through to the engine untouched.
+            if (await authPicker.submit(normalized)) {
               return;
             }
 
@@ -411,8 +467,11 @@ export function WorkShellPane<
           textColor={getWorkShellComposerTextColor()}
           {...(isSecureApiKeyEntry ? { mask: "•" } : {})}
           cursorVisible={
-            !shouldSuppressComposerKeysForInspector && !shouldSuppressComposerKeysForTelemetry
+            !shouldSuppressComposerKeysForInspector
+            && !shouldSuppressComposerKeysForTelemetry
+            && !agentConsoleOwnsKeyboard
           }
+          {...(suppressAgentConsoleKey ? { suppressAgentConsoleKey } : {})}
           {...(shouldSuppressComposerKeysForInspector
             ? { suppressInspectorKeys: true }
             : {})}
@@ -427,7 +486,7 @@ export function WorkShellPane<
       {...(selectedSlashCommand ? { selectedSlashCommand } : {})}
       terminalColumns={terminalColumns}
       cwd={props.cwd}
-      branch={branch}
+      gitFacts={gitFacts}
       {...(queuedCount !== undefined ? { queuedCount } : {})}
       {...(queuePaused !== undefined ? { queuePaused } : {})}
       {...(isSecureApiKeyEntry

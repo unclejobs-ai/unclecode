@@ -1062,7 +1062,7 @@ test("work-shell input decision helpers are exported from the shared tui package
       shouldBlockSlashSubmit: true,
       selectedSlashCommand: "/auth status",
     }),
-    { type: "submit-suggestion", line: "/auth status", clearInput: true },
+    { type: "submit", line: "/auth", clearInput: true },
   );
   assert.deepEqual(
     resolveWorkShellInputAction({
@@ -1095,7 +1095,7 @@ test("work-shell input decision helpers are exported from the shared tui package
       shouldBlockSlashSubmit: true,
       selectedSlashCommand: "/auth status",
     }),
-    { type: "submit-suggestion", line: "/auth status", clearInput: true },
+    { type: "submit", line: "/auth", clearInput: true },
   );
   assert.deepEqual(
     resolveWorkShellSubmitAction({

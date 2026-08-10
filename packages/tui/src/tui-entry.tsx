@@ -14,7 +14,10 @@ import type { TuiShellHomeState } from "./shell-state.js";
 import { probeTerminalBackground } from "./terminal-theme.js";
 
 let rendererFallbackWarned = false;
-const DASHBOARD_RENDER_OPTIONS = { incrementalRendering: true } as const;
+// The shell owns an alternate screen, so repaint the complete frame. Ink's
+// incremental cursor history drifts after responsive row/width changes and
+// leaves old prompt docks and status rows stacked in the viewport.
+const DASHBOARD_RENDER_OPTIONS = { incrementalRendering: false } as const;
 
 function warnIfRequestedRendererFallsBack(): void {
   const plan = resolveTuiRendererPlan();

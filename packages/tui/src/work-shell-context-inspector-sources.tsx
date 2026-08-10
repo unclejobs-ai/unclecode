@@ -7,8 +7,6 @@ import {
   type ContextInspectorVisibleRows,
   getContextItemDetailLines,
   formatContextTokenEstimate,
-  resolveContextSourceGroup,
-  type ContextInspectorHumanGroup,
   type ContextInspectorPalette,
   type ContextInspectorSourceRow,
 } from "./work-shell-context-inspector-model.js";
@@ -33,12 +31,12 @@ function renderContextInspectorSourceRow(input: {
   const parts = [
     label,
     ...(sourceCount > 1 ? [`${sourceCount} sources`] : []),
-    ...(pinned ? ["[pin]"] : []),
+    ...(row.heldBack ? ["held"] : pinned ? ["pinned"] : []),
     tokenLabel,
   ];
   const body = truncateForDisplayWidth(
     parts.join(" · "),
-    Math.max(20, input.width - 4),
+    Math.max(18, input.width - 6),
   );
   const detailLines = expanded
     ? getContextItemDetailLines(item)
@@ -54,7 +52,8 @@ function renderContextInspectorSourceRow(input: {
   return (
     <Box key={`context-source-${row.sourceIndex}-${item.id}`} flexDirection="column">
       <Text>
-        <Text color={selected ? palette.user : palette.textDim} bold>{selected ? "> " : "  "}</Text>
+        <Text color={selected ? palette.user : palette.textDim} bold>{selected ? "› " : "  "}</Text>
+        <Text color={statusColor} bold>{row.heldBack ? "○ " : "● "}</Text>
         <Text color={selected ? palette.text : statusColor} bold={selected}>{body}</Text>
       </Text>
       {detailLines.map((line, index) => (
@@ -85,33 +84,12 @@ function buildContextInspectorViewportPlan(input: {
   let bestCenterDistance = Number.POSITIVE_INFINITY;
 
   for (let start = 0; start <= anchor; start += 1) {
-    let groupHeaderCount = 0;
-    let stageHeaderCount = 0;
     for (let end = start + 1; end <= input.rows.length; end += 1) {
-      const current = input.rows[end - 1];
-      const previous = end - 2 >= start ? input.rows[end - 2] : undefined;
-      const stageChanged = current !== undefined
-        && (previous === undefined || current.heldBack !== previous.heldBack);
-      if (stageChanged) {
-        stageHeaderCount += 1;
-        groupHeaderCount += 1;
-      } else if (
-        current
-        && previous
-        && resolveContextSourceGroup(current.item.category)
-          !== resolveContextSourceGroup(previous.item.category)
-      ) {
-        groupHeaderCount += 1;
-      }
       if (end <= anchor) {
         continue;
       }
       const hiddenMarkerCount = (start > 0 ? 1 : 0) + (end < input.rows.length ? 1 : 0);
-      const structuralRows = 2
-        + (end - start)
-        + groupHeaderCount
-        + stageHeaderCount
-        + hiddenMarkerCount;
+      const structuralRows = (end - start) + hiddenMarkerCount;
       if (structuralRows + detailReserve > input.maxRows) {
         continue;
       }
@@ -127,30 +105,9 @@ function buildContextInspectorViewportPlan(input: {
   }
 
   const visibleRows = input.rows.slice(bestStart, bestEnd);
-  let groupHeaderCount = 0;
-  let stageHeaderCount = 0;
-  for (let index = 0; index < visibleRows.length; index += 1) {
-    const row = visibleRows[index];
-    const previous = index > 0 ? visibleRows[index - 1] : undefined;
-    if (!row) {
-      continue;
-    }
-    if (!previous || row.heldBack !== previous.heldBack) {
-      stageHeaderCount += 1;
-      groupHeaderCount += 1;
-    } else if (
-      resolveContextSourceGroup(row.item.category)
-        !== resolveContextSourceGroup(previous.item.category)
-    ) {
-      groupHeaderCount += 1;
-    }
-  }
   const hiddenBefore = bestStart;
   const hiddenAfter = input.rows.length - bestEnd;
-  const structuralRows = 2
-    + visibleRows.length
-    + groupHeaderCount
-    + stageHeaderCount
+  const structuralRows = visibleRows.length
     + (hiddenBefore > 0 ? 1 : 0)
     + (hiddenAfter > 0 ? 1 : 0);
   return {
@@ -163,67 +120,22 @@ function buildContextInspectorViewportPlan(input: {
   };
 }
 
-function renderGroupedVisibleRows(input: {
-  readonly allRows: readonly ContextInspectorSourceRow[];
+function renderVisibleSourceRows(input: {
   readonly visibleRows: readonly ContextInspectorSourceRow[];
   readonly cursorIndex: number;
-  readonly sourceCounts?: ContextPacketSourceCounts | undefined;
   readonly expandedId?: string | null | undefined;
   readonly maxDetailLines: number;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
 }): React.ReactNode {
-  const nodes: React.ReactNode[] = [];
-  const sentCount = input.sourceCounts?.included
-    ?? input.allRows.reduce((count, row) => count + (row.heldBack ? 0 : 1), 0);
-  const heldCount = input.sourceCounts?.excluded
-    ?? input.allRows.reduce((count, row) => count + (row.heldBack ? 1 : 0), 0);
-  let previousHeldBack: boolean | undefined;
-  let previousGroup: ContextInspectorHumanGroup | undefined;
-  for (const row of input.visibleRows) {
-    if (row.heldBack !== previousHeldBack) {
-      previousHeldBack = row.heldBack;
-      previousGroup = undefined;
-      nodes.push(
-        <Text key={`context-stage-${row.heldBack ? "held" : "sent"}-${row.sourceIndex}`}>
-          <Text color={row.heldBack ? input.palette.textMuted : input.palette.user} bold>
-            {row.heldBack ? "Held back" : "In next request"}
-          </Text>
-          <Text color={input.palette.textDim}>
-            {` · ${row.heldBack ? heldCount : sentCount}`}
-          </Text>
-        </Text>,
-      );
-    }
-    const group = resolveContextSourceGroup(row.item.category);
-    if (group !== previousGroup) {
-      previousGroup = group;
-      const groupCount = input.allRows.reduce(
-        (count, candidate) => count + (
-          candidate.heldBack === row.heldBack
-          && resolveContextSourceGroup(candidate.item.category) === group
-            ? 1
-            : 0
-        ),
-        0,
-      );
-      nodes.push(
-        <Text key={`context-group-${group}-${row.heldBack ? "held" : "sent"}-${row.sourceIndex}`}>
-          <Text color={input.palette.assistant} bold>{`  ${group}`}</Text>
-          <Text color={input.palette.textDim}>{` · ${groupCount}`}</Text>
-        </Text>,
-      );
-    }
-    nodes.push(renderContextInspectorSourceRow({
-      row,
-      cursorIndex: input.cursorIndex,
-      ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
-      maxDetailLines: input.maxDetailLines,
-      width: input.width,
-      palette: input.palette,
-    }));
-  }
-  return nodes;
+  return input.visibleRows.map((row) => renderContextInspectorSourceRow({
+    row,
+    cursorIndex: input.cursorIndex,
+    ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
+    maxDetailLines: input.maxDetailLines,
+    width: input.width,
+    palette: input.palette,
+  }));
 }
 
 function renderContextInspectorDetailReader(input: {
@@ -321,11 +233,9 @@ export function renderContextInspectorGroupedViewport(input: {
           {visible.hiddenBefore > 0 ? (
             <Text color={input.palette.textDim}>{`  … ${visible.hiddenBefore} more above`}</Text>
           ) : null}
-          {renderGroupedVisibleRows({
-            allRows: input.rows,
+          {renderVisibleSourceRows({
             visibleRows: visible.rows,
             cursorIndex: input.cursorIndex,
-            ...(input.sourceCounts ? { sourceCounts: input.sourceCounts } : {}),
             ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
             maxDetailLines: visible.detailLineLimit,
             width: input.width,
