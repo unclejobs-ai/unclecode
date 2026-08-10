@@ -31,6 +31,7 @@ export async function runWorkspaceGuardianChecks(
     changedFiles?: readonly string[];
     lspBridge?: GuardianLspBridge;
     lspTimeoutMs?: number;
+    signal?: AbortSignal;
     lspMaxDiagnostics?: number;
   },
   deps?: {
@@ -39,6 +40,8 @@ export async function runWorkspaceGuardianChecks(
     platform?: NodeJS.Platform;
   },
 ): Promise<GuardianExecutableCheckResult> {
+  // A cancelled turn must not start a check at all, let alone leave one running.
+  input.signal?.throwIfAborted();
   const readFile = deps?.readFile ?? readFileCallback;
   const runExecFile = deps?.execFile ?? execFile;
   const platform = deps?.platform ?? process.platform;
@@ -56,6 +59,7 @@ export async function runWorkspaceGuardianChecks(
     readFile,
     changedFiles: input.changedFiles ?? [],
     timeoutMs: input.lspTimeoutMs ?? timeoutMs,
+    ...(input.signal ? { signal: input.signal } : {}),
     ...(input.lspBridge ? { lspBridge: input.lspBridge } : {}),
     ...(input.lspMaxDiagnostics !== undefined ? { maxDiagnostics: input.lspMaxDiagnostics } : {}),
   });
@@ -85,12 +89,14 @@ export async function runWorkspaceGuardianChecks(
   const checks: GuardianExecutableCheck[] = [];
 
   for (const script of selectedScripts) {
+    input.signal?.throwIfAborted();
     const startedAt = Date.now();
     try {
       await runExecFile(command, ["run", script, "--silent"], {
         cwd: input.cwd,
         ...(input.env ? { env: input.env } : {}),
         timeout: timeoutMs,
+        ...(input.signal ? { signal: input.signal } : {}),
       });
       const durationMs = Date.now() - startedAt;
       checks.push({
@@ -99,6 +105,10 @@ export async function runWorkspaceGuardianChecks(
         summary: `${script} PASS (${durationMs}ms)`,
       });
     } catch (error) {
+      // Cancellation is not a check result; surfacing it as FAIL would invent a
+      // verdict the check never reached, and the error that raced the abort is
+      // not the story either.
+      input.signal?.throwIfAborted();
       const durationMs = Date.now() - startedAt;
       const detail = extractFailureDetail(error);
       checks.push({

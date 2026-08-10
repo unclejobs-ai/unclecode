@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { runWorkspaceGuardianChecks } from "../../apps/unclecode-cli/src/guardian-checks.ts";
+import { runLspGuardianChecks } from "../../apps/unclecode-cli/src/guardian-lsp-checks.ts";
 
 test("runWorkspaceGuardianChecks runs bounded scripts from package.json and reports pass/fail summaries", async () => {
   const execCalls = [];
@@ -514,4 +515,402 @@ test("runWorkspaceGuardianChecks treats shared tui controller contracts as both 
   assert.equal(result.checks.length, 3);
   assert.equal(result.checks[1]?.name, "test:contracts");
   assert.equal(result.checks[2]?.name, "test:tui");
+});
+
+test("runWorkspaceGuardianChecks hands its abort signal to every script it runs", async () => {
+  const controller = new AbortController();
+  const seenSignals = [];
+
+  const result = await runWorkspaceGuardianChecks(
+    {
+      cwd: "/repo",
+      env: {},
+      scripts: ["lint", "check"],
+      signal: controller.signal,
+    },
+    {
+      readFile: async () => JSON.stringify({ scripts: { lint: "biome check .", check: "tsc" } }),
+      execFile: async (_command, _args, options) => {
+        seenSignals.push(options.signal);
+        return { stdout: "", stderr: "" };
+      },
+      platform: "darwin",
+    },
+  );
+
+  assert.deepEqual(seenSignals, [controller.signal, controller.signal]);
+  assert.equal(result.checks.length, 2);
+});
+
+test("an aborted guardian check propagates instead of being recorded as a failure", async () => {
+  const controller = new AbortController();
+  const execCalls = [];
+
+  // One script, so nothing but the catch itself can stop the abort becoming a
+  // FAIL entry in the returned summary.
+  await assert.rejects(
+    runWorkspaceGuardianChecks(
+      {
+        cwd: "/repo",
+        env: {},
+        scripts: ["lint"],
+        signal: controller.signal,
+      },
+      {
+        readFile: async () => JSON.stringify({ scripts: { lint: "biome check ." } }),
+        execFile: async (_command, args) => {
+          execCalls.push(args[1]);
+          // A real child process dies with the signal; mirror that here.
+          controller.abort();
+          const error = new Error("child aborted");
+          error.name = "AbortError";
+          throw error;
+        },
+        platform: "darwin",
+      },
+    ),
+    (error) => error === controller.signal.reason,
+    "an abort is not a check failure and must not be summarised as one",
+  );
+
+  assert.deepEqual(execCalls, ["lint"]);
+});
+
+test("runWorkspaceGuardianChecks refuses to start once its signal is already aborted", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const execCalls = [];
+  let readCalls = 0;
+
+  await assert.rejects(
+    runWorkspaceGuardianChecks(
+      {
+        cwd: "/repo",
+        env: {},
+        scripts: ["lint"],
+        signal: controller.signal,
+      },
+      {
+        readFile: async () => {
+          readCalls += 1;
+          return JSON.stringify({ scripts: { lint: "biome check ." } });
+        },
+        execFile: async (_command, args) => {
+          execCalls.push(args[1]);
+          return { stdout: "", stderr: "" };
+        },
+        platform: "darwin",
+      },
+    ),
+    (error) => error.name === "AbortError",
+  );
+
+  assert.deepEqual(execCalls, [], "no script runs for an already-cancelled turn");
+  assert.equal(readCalls, 0, "a cancelled turn does not even read the workspace manifest");
+});
+
+/** LSP checks resolve real paths, so these need a workspace on disk. */
+function createLspWorkspace() {
+  const workspace = mkdtempSync(join(tmpdir(), "uc-guardian-lsp-"));
+  writeFileSync(join(workspace, "package.json"), JSON.stringify({ scripts: {} }));
+  mkdirSync(join(workspace, "src"));
+  writeFileSync(join(workspace, "src", "a.ts"), "const a = 1;\n");
+  writeFileSync(join(workspace, "src", "b.ts"), "const b = 2;\n");
+  return workspace;
+}
+
+const LSP_DEPS = {
+  readFile: async () => "const ok = true;\n",
+  execFile: async () => ({ stdout: "", stderr: "" }),
+  platform: "darwin",
+};
+
+test("the guardian signal reaches every LSP diagnostic check", async () => {
+  const workspace = createLspWorkspace();
+  const controller = new AbortController();
+  const lspCalls = [];
+  try {
+    const result = await runWorkspaceGuardianChecks(
+      {
+        cwd: workspace,
+        env: {},
+        scripts: [],
+        changedFiles: ["src/a.ts", "src/b.ts"],
+        signal: controller.signal,
+        lspBridge: {
+          async checkAfterEdit(input) {
+            lspCalls.push(input);
+            return { status: "pass", summary: "clean" };
+          },
+        },
+      },
+      LSP_DEPS,
+    );
+
+    assert.deepEqual(lspCalls.map((call) => call.path), ["src/a.ts", "src/b.ts"]);
+    assert.deepEqual(
+      lspCalls.map((call) => call.options?.signal),
+      [controller.signal, controller.signal],
+    );
+    assert.deepEqual(result.checks.map((check) => check.name), ["lsp:src/a.ts", "lsp:src/b.ts"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("an aborted LSP check propagates instead of being recorded as unavailable", async () => {
+  const workspace = createLspWorkspace();
+  const controller = new AbortController();
+  const lspCalls = [];
+  try {
+    await assert.rejects(
+      runWorkspaceGuardianChecks(
+        {
+          cwd: workspace,
+          env: {},
+          scripts: [],
+          changedFiles: ["src/a.ts", "src/b.ts"],
+          signal: controller.signal,
+          lspBridge: {
+            async checkAfterEdit(input) {
+              lspCalls.push(input.path);
+              controller.abort();
+              const error = new Error("lsp aborted");
+              error.name = "AbortError";
+              throw error;
+            },
+          },
+        },
+        LSP_DEPS,
+      ),
+      (error) => error === controller.signal.reason,
+      "a cancelled diagnostic is not an UNAVAILABLE verdict",
+    );
+
+    assert.deepEqual(lspCalls, ["src/a.ts"], "the remaining files are never diagnosed");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a signal-deaf LSP bridge still cannot diagnose past a cancellation", async () => {
+  const workspace = createLspWorkspace();
+  const controller = new AbortController();
+  const lspCalls = [];
+  try {
+    await assert.rejects(
+      runWorkspaceGuardianChecks(
+        {
+          cwd: workspace,
+          env: {},
+          scripts: [],
+          changedFiles: ["src/a.ts", "src/b.ts"],
+          signal: controller.signal,
+          lspBridge: {
+            async checkAfterEdit(input) {
+              lspCalls.push(input.path);
+              // Ignores the signal entirely and returns a clean verdict.
+              controller.abort();
+              return { status: "pass", summary: "clean" };
+            },
+          },
+        },
+        LSP_DEPS,
+      ),
+      (error) => error.name === "AbortError",
+    );
+
+    assert.deepEqual(lspCalls, ["src/a.ts"], "the loop stops before the next file");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("an already-cancelled turn runs no LSP diagnostics at all", async () => {
+  const workspace = createLspWorkspace();
+  const controller = new AbortController();
+  controller.abort();
+  const lspCalls = [];
+  try {
+    await assert.rejects(
+      runWorkspaceGuardianChecks(
+        {
+          cwd: workspace,
+          env: {},
+          scripts: [],
+          changedFiles: ["src/a.ts"],
+          signal: controller.signal,
+          lspBridge: {
+            async checkAfterEdit(input) {
+              lspCalls.push(input.path);
+              return { status: "pass", summary: "clean" };
+            },
+          },
+        },
+        LSP_DEPS,
+      ),
+      (error) => error.name === "AbortError",
+    );
+
+    assert.deepEqual(lspCalls, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a script failure racing an abort reports the abort, not the failure", async () => {
+  const controller = new AbortController();
+
+  await assert.rejects(
+    runWorkspaceGuardianChecks(
+      {
+        cwd: "/repo",
+        env: {},
+        scripts: ["lint"],
+        signal: controller.signal,
+      },
+      {
+        readFile: async () => JSON.stringify({ scripts: { lint: "biome check ." } }),
+        execFile: async () => {
+          controller.abort();
+          const error = new Error("Command failed");
+          error.stdout = "";
+          error.stderr = "exit 1";
+          throw error;
+        },
+        platform: "darwin",
+      },
+    ),
+    (error) => error === controller.signal.reason,
+    "a cancelled script is never recorded as FAIL, and never reports the racing error",
+  );
+});
+
+test("an abort during changed-file prework emits no diagnostic", async () => {
+  const workspace = createLspWorkspace();
+  const controller = new AbortController();
+  const lspCalls = [];
+  try {
+    await assert.rejects(
+      runWorkspaceGuardianChecks(
+        {
+          cwd: workspace,
+          env: {},
+          scripts: [],
+          changedFiles: ["src/a.ts"],
+          signal: controller.signal,
+          lspBridge: {
+            async checkAfterEdit(input) {
+              lspCalls.push(input.path);
+              return { status: "pass", summary: "clean" };
+            },
+          },
+        },
+        {
+          ...LSP_DEPS,
+          readFile: async (path) => {
+            if (path.endsWith("package.json")) {
+              return JSON.stringify({ scripts: {} });
+            }
+            // The turn is cleared while the changed file itself is being read.
+            controller.abort();
+            return "const ok = true;\n";
+          },
+        },
+      ),
+      (error) => error === controller.signal.reason,
+    );
+
+    assert.deepEqual(lspCalls, [], "no diagnostic starts after the read boundary aborts");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a signal-deaf bridge resolving after abort on the last file records nothing", async () => {
+  const workspace = createLspWorkspace();
+  const controller = new AbortController();
+  try {
+    await assert.rejects(
+      runWorkspaceGuardianChecks(
+        {
+          cwd: workspace,
+          env: {},
+          scripts: [],
+          // A single file: only a post-result check can stop this.
+          changedFiles: ["src/a.ts"],
+          signal: controller.signal,
+          lspBridge: {
+            async checkAfterEdit() {
+              controller.abort();
+              return { status: "pass", summary: "clean" };
+            },
+          },
+        },
+        LSP_DEPS,
+      ),
+      (error) => error === controller.signal.reason,
+      "a verdict produced after cancellation is discarded, not returned",
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("an abort during path resolution never starts the changed-file read", async () => {
+  const workspace = createLspWorkspace();
+  const controller = new AbortController();
+  let readCalls = 0;
+  const lspCalls = [];
+  try {
+    const pending = runLspGuardianChecks({
+      cwd: workspace,
+      readFile: async () => {
+        readCalls += 1;
+        return "const ok = true;\n";
+      },
+      changedFiles: ["src/a.ts"],
+      lspBridge: {
+        async checkAfterEdit(input) {
+          lspCalls.push(input.path);
+          return { status: "pass", summary: "clean" };
+        },
+      },
+      timeoutMs: 1_000,
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    await assert.rejects(pending, (error) => error === controller.signal.reason);
+    assert.equal(readCalls, 0, "a cleared turn never starts changed-file IO after path resolution");
+    assert.deepEqual(lspCalls, []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a real LSP failure is still reported rather than propagated", async () => {
+  const workspace = createLspWorkspace();
+  try {
+    const result = await runWorkspaceGuardianChecks(
+      {
+        cwd: workspace,
+        env: {},
+        scripts: [],
+        changedFiles: ["src/a.ts"],
+        signal: new AbortController().signal,
+        lspBridge: {
+          async checkAfterEdit() {
+            throw new Error("language server missing");
+          },
+        },
+      },
+      LSP_DEPS,
+    );
+
+    assert.equal(result.checks[0]?.status, "failed");
+    assert.match(result.summary, /lsp:src\/a\.ts UNAVAILABLE · language server missing/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });

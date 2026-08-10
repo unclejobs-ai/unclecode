@@ -6,7 +6,7 @@ export type ExecFileResult = {
 export type ExecFileLike = (
   command: string,
   args: readonly string[],
-  options: { cwd: string; env?: NodeJS.ProcessEnv; timeout?: number },
+  options: { cwd: string; env?: NodeJS.ProcessEnv; timeout?: number; signal?: AbortSignal },
 ) => Promise<ExecFileResult>;
 
 export type ReadFileLike = (path: string, encoding: BufferEncoding) => Promise<string>;
@@ -18,6 +18,7 @@ export type GuardianLspBridge = {
     readonly options?: {
       readonly timeoutMs?: number;
       readonly maxDiagnostics?: number;
+      readonly signal?: AbortSignal;
     };
   }): Promise<{
     readonly status: "pass" | "fail" | "skipped" | "unavailable";

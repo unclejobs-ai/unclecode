@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { LspBridge, formatLspCheckEvidence } from "@unclecode/lsp-bridge";
+import { LspBridge, formatLspCheckEvidence, spawnLspClientStub } from "@unclecode/lsp-bridge";
 
 function makeStubClient(id, exts, diagnostics = []) {
   return {
@@ -170,4 +170,282 @@ test("LspBridge.shutdownAll empties the registered list", async () => {
   bridge.register(makeStubClient("py", [".py"]));
   await bridge.shutdownAll();
   assert.equal(bridge.list().length, 0);
+});
+
+test("LspBridge.checkAfterEdit stops an in-flight check when its signal aborts", async () => {
+  const bridge = new LspBridge();
+  bridge.register(makeHangingClient("ts", [".ts"]));
+  const controller = new AbortController();
+  const startedAt = Date.now();
+
+  const pending = bridge.checkAfterEdit({
+    path: "src/a.ts",
+    content: "let x = 1;",
+    // A timeout far beyond the test budget: only the abort can end this.
+    options: { timeoutMs: 60_000, signal: controller.signal },
+  });
+  controller.abort();
+
+  await assert.rejects(pending, (error) => error === controller.signal.reason);
+  assert.ok(Date.now() - startedAt < 5_000, "the abort ends the check without waiting out the timeout");
+});
+
+test("LspBridge.checkAfterEdit refuses to poll a client once its signal is aborted", async () => {
+  const polled = [];
+  const bridge = new LspBridge();
+  bridge.register({
+    id: "ts",
+    handlesExtension: (ext) => ext === ".ts",
+    async notifyDidChange() {},
+    async pollDiagnostics() {
+      polled.push("ts");
+      return [];
+    },
+    async shutdown() {},
+  });
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    bridge.checkAfterEdit({
+      path: "src/a.ts",
+      content: "let x = 1;",
+      options: { signal: controller.signal },
+    }),
+    (error) => error === controller.signal.reason,
+  );
+  assert.deepEqual(polled, [], "a cancelled check never reaches a client");
+});
+
+test("LspBridge.checkAfterEdit hands the signal to the underlying client", async () => {
+  const seen = [];
+  const bridge = new LspBridge();
+  bridge.register({
+    id: "ts",
+    handlesExtension: (ext) => ext === ".ts",
+    async notifyDidChange(input) {
+      seen.push(["notifyDidChange", input.signal]);
+    },
+    async pollDiagnostics(input) {
+      seen.push(["pollDiagnostics", input.signal]);
+      return [];
+    },
+    async shutdown() {},
+  });
+  const controller = new AbortController();
+
+  await bridge.checkAfterEdit({
+    path: "src/a.ts",
+    content: "let x = 1;",
+    options: { signal: controller.signal },
+  });
+
+  assert.deepEqual(seen, [
+    ["notifyDidChange", controller.signal],
+    ["pollDiagnostics", controller.signal],
+  ]);
+});
+
+test("a client that observes its signal stops the underlying diagnostic work", async () => {
+  const observed = [];
+  const polling = Promise.withResolvers();
+  const controller = new AbortController();
+  const bridge = new LspBridge();
+  bridge.register({
+    id: "ts",
+    handlesExtension: (ext) => ext === ".ts",
+    async notifyDidChange() {},
+    async pollDiagnostics(input) {
+      // The real transport cancels its own work; nothing outside it can.
+      const { promise, reject } = Promise.withResolvers();
+      input.signal?.addEventListener("abort", () => {
+        observed.push("client saw the abort");
+        reject(input.signal?.reason);
+      }, { once: true });
+      polling.resolve();
+      return await promise;
+    },
+    async shutdown() {},
+  });
+
+  const pending = bridge.checkAfterEdit({
+    path: "src/a.ts",
+    content: "let x = 1;",
+    options: { timeoutMs: 60_000, signal: controller.signal },
+  });
+  // Abort only once the client is genuinely inside its diagnostic call.
+  await polling.promise;
+  controller.abort();
+
+  await assert.rejects(pending, (error) => error === controller.signal.reason);
+  assert.deepEqual(observed, ["client saw the abort"]);
+});
+
+test("an abort raised inside notifyDidChange never polls the client", async () => {
+  const polled = [];
+  const controller = new AbortController();
+  const bridge = new LspBridge();
+  bridge.register({
+    id: "ts",
+    handlesExtension: (ext) => ext === ".ts",
+    async notifyDidChange() {
+      // Signal-deaf: aborts and then resolves normally.
+      controller.abort();
+    },
+    async pollDiagnostics() {
+      polled.push("ts");
+      return [];
+    },
+    async shutdown() {},
+  });
+  const startedAt = Date.now();
+
+  await assert.rejects(
+    bridge.checkAfterEdit({
+      path: "src/a.ts",
+      content: "let x = 1;",
+      // A pre-aborted wrapper must reject outright, never arm this timer.
+      options: { timeoutMs: 60_000, signal: controller.signal },
+    }),
+    (error) => error === controller.signal.reason,
+  );
+  assert.deepEqual(polled, []);
+  assert.ok(Date.now() - startedAt < 5_000, "the pre-aborted wrapper does not wait out its timeout");
+});
+
+test("a client failure racing an abort reports the abort, not the failure", async () => {
+  const controller = new AbortController();
+  const bridge = new LspBridge();
+  bridge.register({
+    id: "ts",
+    handlesExtension: (ext) => ext === ".ts",
+    async notifyDidChange() {},
+    async pollDiagnostics() {
+      controller.abort();
+      throw new Error("language server crashed");
+    },
+    async shutdown() {},
+  });
+
+  await assert.rejects(
+    bridge.checkAfterEdit({
+      path: "src/a.ts",
+      content: "let x = 1;",
+      options: { signal: controller.signal },
+    }),
+    (error) => error === controller.signal.reason,
+    "a cancelled check reports cancellation, never the error that raced it",
+  );
+});
+
+test("spawnLspClientStub honours a cancelled signal instead of spawning", async () => {
+  const client = spawnLspClientStub({
+    id: "ts",
+    // Deliberately unrunnable: a compliant client rejects before it ever spawns.
+    command: "definitely-not-a-real-language-server",
+    extensions: [".ts"],
+  });
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    client.notifyDidChange({ path: "src/a.ts", content: "let x = 1;", signal: controller.signal }),
+    (error) => error === controller.signal.reason,
+  );
+  await assert.rejects(
+    client.pollDiagnostics({ path: "src/a.ts", timeoutMs: 10, signal: controller.signal }),
+    (error) => error === controller.signal.reason,
+  );
+  await client.shutdown();
+});
+
+test("LspBridge.checkAfterEdit rejects a pre-aborted no-client check", async () => {
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    new LspBridge().checkAfterEdit({
+      path: "src/a.ts",
+      content: "let x = 1;",
+      options: { signal: controller.signal },
+    }),
+    (error) => error === controller.signal.reason,
+  );
+});
+
+test("LspBridge.checkAfterEdit rejects a pre-aborted unmatched check", async () => {
+  const bridge = new LspBridge();
+  bridge.register(makeStubClient("python", [".py"]));
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    bridge.checkAfterEdit({
+      path: "src/a.ts",
+      content: "let x = 1;",
+      options: { signal: controller.signal },
+    }),
+    (error) => error === controller.signal.reason,
+  );
+});
+
+test("an abort after didChange settles never starts diagnostics", async () => {
+  const controller = new AbortController();
+  const polled = [];
+  const bridge = new LspBridge();
+  bridge.register({
+    id: "ts",
+    handlesExtension: (ext) => ext === ".ts",
+    notifyDidChange() {
+      return {
+        then(resolve) {
+          resolve();
+          controller.abort();
+        },
+      };
+    },
+    async pollDiagnostics() {
+      polled.push("ts");
+      return [];
+    },
+    async shutdown() {},
+  });
+
+  await assert.rejects(
+    bridge.checkAfterEdit({
+      path: "src/a.ts",
+      content: "let x = 1;",
+      options: { signal: controller.signal },
+    }),
+    (error) => error === controller.signal.reason,
+  );
+  assert.deepEqual(polled, [], "diagnostics never start after the didChange boundary aborts");
+});
+
+test("an abort after diagnostics settle discards the stale result", async () => {
+  const controller = new AbortController();
+  const bridge = new LspBridge();
+  bridge.register({
+    id: "ts",
+    handlesExtension: (ext) => ext === ".ts",
+    async notifyDidChange() {},
+    pollDiagnostics() {
+      return {
+        then(resolve) {
+          resolve([]);
+          controller.abort();
+        },
+      };
+    },
+    async shutdown() {},
+  });
+
+  await assert.rejects(
+    bridge.checkAfterEdit({
+      path: "src/a.ts",
+      content: "let x = 1;",
+      options: { signal: controller.signal },
+    }),
+    (error) => error === controller.signal.reason,
+  );
 });

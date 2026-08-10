@@ -30,6 +30,8 @@ export type LspDiagnostic = {
 export type LspBridgeOptions = {
   readonly timeoutMs?: number;
   readonly maxDiagnostics?: number;
+  /** Ends an in-flight check without waiting out `timeoutMs`. */
+  readonly signal?: AbortSignal;
 };
 
 export type LspCheckStatus = "pass" | "fail" | "skipped" | "unavailable";
@@ -54,8 +56,21 @@ export type LspCheckResult = {
 export interface LspClient {
   readonly id: string;
   readonly handlesExtension: (ext: string) => boolean;
-  notifyDidChange(input: { path: string; content: string }): Promise<void>;
-  pollDiagnostics(input: { path: string; timeoutMs: number }): Promise<ReadonlyArray<LspDiagnostic>>;
+  /**
+   * `signal` is the turn's cancellation scope. A client that honours it stops
+   * its own transport work; an outer race can only stop waiting, not stop the
+   * language server.
+   */
+  notifyDidChange(input: {
+    path: string;
+    content: string;
+    signal?: AbortSignal | undefined;
+  }): Promise<void>;
+  pollDiagnostics(input: {
+    path: string;
+    timeoutMs: number;
+    signal?: AbortSignal | undefined;
+  }): Promise<ReadonlyArray<LspDiagnostic>>;
   shutdown(): Promise<void>;
 }
 
@@ -87,6 +102,8 @@ export class LspBridge {
     readonly content: string;
     readonly options?: LspBridgeOptions;
   }): Promise<LspCheckResult> {
+    const signal = input.options?.signal;
+    signal?.throwIfAborted();
     const ext = extname(input.path).toLowerCase();
     if (this.clients.length === 0) {
       return {
@@ -118,17 +135,22 @@ export class LspBridge {
     const clientResults: LspClientCheckResult[] = [];
 
     for (const client of matched) {
+      signal?.throwIfAborted();
       try {
         await withTimeout(
-          client.notifyDidChange({ path: input.path, content: input.content }),
+          client.notifyDidChange({ path: input.path, content: input.content, signal }),
           timeoutMs,
           `${client.id} didChange`,
+          signal,
         );
+        signal?.throwIfAborted();
         const diagnostics = await withTimeout(
-          client.pollDiagnostics({ path: input.path, timeoutMs }),
+          client.pollDiagnostics({ path: input.path, timeoutMs, signal }),
           timeoutMs,
           `${client.id} diagnostics`,
+          signal,
         );
+        signal?.throwIfAborted();
         const remaining = Math.max(0, maxDiagnostics - collected.length);
         const limited = diagnostics.slice(0, remaining);
         collected.push(...limited);
@@ -141,6 +163,10 @@ export class LspBridge {
             : `${client.id} reported no diagnostics`,
         });
       } catch (error) {
+        // A cancelled check has no verdict, and the error that raced the abort
+        // is not the story: report the cancellation itself. Only a real client
+        // fault degrades into "unavailable" evidence.
+        signal?.throwIfAborted();
         clientResults.push({
           clientId: client.id,
           status: "unavailable",
@@ -151,6 +177,7 @@ export class LspBridge {
       if (collected.length >= maxDiagnostics) break;
     }
 
+    signal?.throwIfAborted();
     const status = resolveCheckStatus(clientResults);
     return {
       path: input.path,
@@ -204,36 +231,45 @@ function summarizeCheckStatus(
   return "no diagnostics";
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const timeout = setTimeout(() => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+  signal?: AbortSignal | undefined,
+): Promise<T> {
+  // Never arm a timer for a turn that is already cancelled: an `abort` listener
+  // added to an aborted signal never fires, so the wrapper would wait out the
+  // full timeout before anyone noticed.
+  if (signal?.aborted) {
+    // The wrapped call is already in flight and nobody will await it now;
+    // absorb its outcome so an abandoned rejection cannot surface as an
+    // unhandled rejection.
+    promise.catch(() => {});
+    return Promise.reject(signal.reason);
+  }
+  const { promise: bounded, resolve, reject } = Promise.withResolvers<T>();
+  let settled = false;
+  const finish = (apply: () => void): void => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", onAbort);
+    apply();
+  };
+  const onAbort = (): void => finish(() => reject(signal?.reason));
+  const timeout = setTimeout(
+    () => finish(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`))),
+    timeoutMs,
+  );
+  signal?.addEventListener("abort", onAbort, { once: true });
 
-    promise.then(
-      (value) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        clearTimeout(timeout);
-        resolve(value);
-      },
-      (error: unknown) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        clearTimeout(timeout);
-        reject(error);
-      },
-    );
-  });
+  promise.then(
+    (value) => finish(() => resolve(value)),
+    (error: unknown) => finish(() => reject(error)),
+  );
+  return bounded;
 }
 
 export type LspSpawnConfig = {
@@ -257,15 +293,17 @@ export function spawnLspClientStub(config: LspSpawnConfig): LspClient {
     handlesExtension(ext: string) {
       return exts.has(ext.toLowerCase());
     },
-    async notifyDidChange() {
+    async notifyDidChange(input) {
+      input.signal?.throwIfAborted();
       if (!alive) return;
       if (!child) {
         child = spawn(config.command, [...(config.args ?? [])], { stdio: ["pipe", "pipe", "pipe"] });
       }
     },
-    async pollDiagnostics() {
+    async pollDiagnostics(input) {
       // Phase 2 will wire real JSON-RPC; stub returns empty so the loop
       // does not block on a not-yet-connected language server.
+      input.signal?.throwIfAborted();
       return [];
     },
     async shutdown() {
