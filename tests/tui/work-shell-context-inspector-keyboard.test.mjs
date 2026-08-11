@@ -70,9 +70,13 @@ async function waitForCondition(predicate, timeoutMs = 5_000) {
 
 function ContextInputControllerHarness(props) {
   const [value, setValue] = React.useState(props.initialValue ?? "");
+  const replaceValue = (nextValue) => {
+    props.onReplace?.(nextValue);
+    setValue(nextValue);
+  };
   useWorkShellInputController({
     value,
-    replaceValue: setValue,
+    replaceValue,
     slashSuggestionCount: 0,
     setSelectedSlashIndex: () => {},
     isBusy: false,
@@ -84,71 +88,93 @@ function ContextInputControllerHarness(props) {
     handleSubmit: async () => {},
     hasOverlayOpen: true,
     activePanelTitle: "Context expanded",
+    contextDeskPane: props.pane ?? "sources",
     contextSourceActionsEnabled: props.actionsEnabled,
     contextAdviceActionsEnabled: props.adviceActionsEnabled,
-    ...(props.isComposerRawEmpty
-      ? { isComposerRawEmpty: props.isComposerRawEmpty }
-      : {}),
     acceptContextSuggestion: async () => props.onAccept?.(),
     rejectContextSuggestion: async () => props.onReject?.(),
     contextInspectorExpanded: props.expandedId,
-    moveContextInspectorCursor: props.onMove,
-    moveContextInspectorDetailOffset: props.onScroll ?? (() => {}),
-    toggleContextInspectorPin: async () => props.onPin(),
-    toggleContextSourceDelivery: async () => props.onToggleDelivery(),
-    toggleContextInspectorExpanded: props.onExpand,
+    cycleContextDeskPane: () => props.onCycle?.(),
+    moveContextInspectorCursor: (direction) => props.onMove?.(direction),
+    moveContextDeskPreviewOffset: (direction) => props.onPreviewScroll?.(direction),
+    moveContextInspectorDetailOffset: (direction) => props.onDetailScroll?.(direction),
+    enterContextDesk: async () => props.onEnter?.(),
+    toggleContextInspectorPin: async () => props.onPin?.(),
+    toggleContextSourceDelivery: async () => props.onToggleDelivery?.(),
+    closeOverlay: () => props.onClose?.(),
+    ...(props.onRequestSessionsView
+      ? { onRequestSessionsView: props.onRequestSessionsView }
+      : {}),
   });
-  return null;
+  return props.mountComposer
+    ? React.createElement(Composer, {
+        value,
+        onChange: (nextValue) => {
+          props.onComposerChange?.(nextValue);
+          setValue(nextValue);
+        },
+        onSubmit: async () => {},
+        suppressInspectorKeys: true,
+        suppressInspectorMutationKeys: true,
+        suppressInspectorAdviceKeys: true,
+      })
+    : null;
 }
 
-test("context inspector resolver uses human navigation and action keys", () => {
+test("context desk resolver routes navigation by pane and consumes gated keys", () => {
   assert.deepEqual(resolveWorkShellContextInspectorAction({
     value: "",
     key: { downArrow: true },
     panelTitle: "Context expanded",
+    pane: "sources",
     actionsEnabled: false,
-  }), { type: "move-cursor", direction: 1 });
+  }), { type: "move-source", direction: 1 });
+  assert.deepEqual(resolveWorkShellContextInspectorAction({
+    value: "",
+    key: { upArrow: true },
+    panelTitle: "Context expanded",
+    pane: "preview",
+  }), { type: "move-preview", direction: -1 });
+  assert.deepEqual(resolveWorkShellContextInspectorAction({
+    value: "",
+    key: { downArrow: true },
+    panelTitle: "Context expanded",
+    pane: "details",
+  }), { type: "move-details", direction: 1 });
+  assert.deepEqual(resolveWorkShellContextInspectorAction({
+    value: "",
+    key: { tab: true },
+    panelTitle: "Context expanded",
+    pane: "details",
+  }), { type: "cycle-pane" });
   assert.deepEqual(resolveWorkShellContextInspectorAction({
     value: "",
     key: { return: true },
     panelTitle: "Context expanded",
-    actionsEnabled: false,
-  }), { type: "expand" });
+    pane: "preview",
+  }), { type: "enter" });
   assert.deepEqual(resolveWorkShellContextInspectorAction({
-    value: " ",
+    value: "",
+    key: { escape: true },
+    panelTitle: "Context expanded",
+    pane: "details",
+  }), { type: "close" });
+  for (const value of [" ", "p", "a", "r"]) {
+    assert.deepEqual(resolveWorkShellContextInspectorAction({
+      value,
+      key: {},
+      panelTitle: "Context expanded",
+      pane: "sources",
+      actionsEnabled: false,
+      adviceActionsEnabled: false,
+    }), { type: "consume" });
+  }
+  assert.deepEqual(resolveWorkShellContextInspectorAction({
+    value: "P",
     key: {},
     panelTitle: "Context expanded",
+    pane: "sources",
     actionsEnabled: true,
-  }), { type: "toggle-delivery" });
-  assert.deepEqual(resolveWorkShellContextInspectorAction({
-    value: "p",
-    key: {},
-    panelTitle: "Context expanded",
-    actionsEnabled: true,
-  }), { type: "toggle-pin" });
-  assert.deepEqual(resolveWorkShellContextInspectorAction({
-    value: " ",
-    key: {},
-    panelTitle: "Context expanded",
-    actionsEnabled: false,
-  }), { type: "none" });
-  assert.deepEqual(resolveWorkShellContextInspectorAction({
-    value: "a",
-    key: {},
-    panelTitle: "Context expanded",
-    adviceActionsEnabled: true,
-  }), { type: "accept-advice" });
-  assert.deepEqual(resolveWorkShellContextInspectorAction({
-    value: "r",
-    key: {},
-    panelTitle: "Context expanded",
-    adviceActionsEnabled: true,
-  }), { type: "reject-advice" });
-  assert.deepEqual(resolveWorkShellContextInspectorAction({
-    value: "a",
-    key: {},
-    panelTitle: "Context expanded",
-    adviceActionsEnabled: false,
   }), { type: "none" });
 });
 test("optimizer actions require both callbacks and a visible selected suggestion", () => {
@@ -195,7 +221,7 @@ test("context inspector input controller dispatches only enabled human actions",
       onMove: () => {},
       onPin: () => readOnlyCalls.push("pin"),
       onToggleDelivery: () => readOnlyCalls.push("delivery"),
-      onExpand: () => readOnlyCalls.push("expand"),
+      onEnter: () => readOnlyCalls.push("enter"),
     }),
   );
   readOnly.stdin.write(" ");
@@ -213,7 +239,7 @@ test("context inspector input controller dispatches only enabled human actions",
       onMove: () => {},
       onPin: () => writableCalls.push("pin"),
       onToggleDelivery: () => writableCalls.push("delivery"),
-      onExpand: () => writableCalls.push("expand"),
+      onEnter: () => writableCalls.push("enter"),
       onAccept: () => writableCalls.push("accept"),
       onReject: () => writableCalls.push("reject"),
     }),
@@ -223,94 +249,134 @@ test("context inspector input controller dispatches only enabled human actions",
   writable.stdin.write("p");
   await waitForCondition(() => writableCalls.includes("pin"));
   writable.stdin.write("\r");
-  await waitForCondition(() => writableCalls.includes("expand"));
+  await waitForCondition(() => writableCalls.includes("enter"));
   writable.stdin.write("a");
   await waitForCondition(() => writableCalls.includes("accept"));
   writable.stdin.write("r");
   await waitForCondition(() => writableCalls.includes("reject"));
   writable.instance.unmount();
   writable.instance.cleanup();
-  assert.deepEqual(writableCalls, ["delivery", "pin", "expand", "accept", "reject"]);
+  assert.deepEqual(writableCalls, ["delivery", "pin", "enter", "accept", "reject"]);
 });
-test("context advice keys never steal whitespace or locally pending drafts", async () => {
+test("context desk actions own nonempty, whitespace, and leading-slash drafts", async () => {
   const calls = [];
-  const whitespace = renderWithInput(
+  for (const [initialValue, label] of [["draft", "draft"], [" ", "whitespace"]]) {
+    const view = renderWithInput(
+      React.createElement(ContextInputControllerHarness, {
+        initialValue,
+        adviceActionsEnabled: true,
+        onAccept: () => calls.push(label),
+      }),
+    );
+    view.stdin.write("a");
+    await waitForCondition(() => calls.includes(label));
+    view.instance.unmount();
+    view.instance.cleanup();
+  }
+
+  const slash = renderWithInput(
     React.createElement(ContextInputControllerHarness, {
-      initialValue: " ",
-      adviceActionsEnabled: true,
-      onAccept: () => calls.push("whitespace"),
+      initialValue: "/model",
+      onCycle: () => calls.push("slash-tab"),
     }),
   );
-  whitespace.stdin.write("a");
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  whitespace.instance.unmount();
-  whitespace.instance.cleanup();
+  slash.stdin.write("\t");
+  await waitForCondition(() => calls.includes("slash-tab"));
+  slash.instance.unmount();
+  slash.instance.cleanup();
 
-  const pending = renderWithInput(
-    React.createElement(ContextInputControllerHarness, {
-      adviceActionsEnabled: true,
-      isComposerRawEmpty: () => false,
-      onAccept: () => calls.push("pending"),
-    }),
-  );
-  pending.stdin.write("a");
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  pending.instance.unmount();
-  pending.instance.cleanup();
-
-  assert.deepEqual(calls, []);
+  assert.deepEqual(calls, ["draft", "whitespace", "slash-tab"]);
 });
 
-
-test("expanded context details route arrow keys to scrolling instead of source movement", async () => {
+test("unexpanded Details routes arrows to the complete details surface", async () => {
   const calls = [];
   const view = renderWithInput(
     React.createElement(ContextInputControllerHarness, {
-      actionsEnabled: true,
-      expandedId: "configured-prompt",
+      pane: "details",
       onMove: () => calls.push("move"),
-      onScroll: (direction) => calls.push(`scroll:${direction}`),
-      onPin: () => {},
-      onToggleDelivery: () => {},
-      onExpand: async () => {},
+      onPreviewScroll: () => calls.push("preview"),
+      onDetailScroll: (direction) => calls.push(`details:${direction}`),
     }),
   );
-
   try {
     view.stdin.write("\u001b[B");
     await waitForCondition(() => calls.length > 0);
-    assert.deepEqual(calls, ["scroll:1"]);
+    assert.deepEqual(calls, ["details:1"]);
   } finally {
     view.instance.unmount();
     view.instance.cleanup();
   }
 });
 
-test("composer only suppresses context mutation keys when actions are enabled", async () => {
+test("disabled Context mutation keys are consumed before a nonempty composer", async () => {
+  const changes = [];
+  const view = renderWithInput(
+    React.createElement(ContextInputControllerHarness, {
+      initialValue: "draft",
+      actionsEnabled: false,
+      adviceActionsEnabled: false,
+      mountComposer: true,
+      onComposerChange: (value) => changes.push(value),
+    }),
+  );
+  try {
+    view.stdin.write("p");
+    view.stdin.write(" ");
+    view.stdin.write("a");
+    view.stdin.write("r");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.deepEqual(changes, []);
+  } finally {
+    view.instance.unmount();
+    view.instance.cleanup();
+  }
+});
+
+test("Ctrl+O opens Session Desk without clearing the controlled Work draft", async () => {
+  const calls = [];
+  const view = renderWithInput(
+    React.createElement(ContextInputControllerHarness, {
+      initialValue: "preserve this draft",
+      onRequestSessionsView: () => calls.push("sessions"),
+      onReplace: (value) => calls.push(`replace:${value}`),
+    }),
+  );
+  try {
+    view.stdin.write("\u000f");
+    await waitForCondition(() => calls.includes("sessions"));
+    assert.deepEqual(calls, ["sessions"]);
+  } finally {
+    view.instance.unmount();
+    view.instance.cleanup();
+  }
+});
+
+test("composer suppresses Context mutation keys even with a nonempty draft", async () => {
   const changes = [];
   const { stdin, instance } = renderWithInput(
     React.createElement(Composer, {
-      value: "",
+      value: "draft",
       onChange: (value) => changes.push(value),
       onSubmit: async () => {},
       suppressInspectorKeys: true,
-      suppressInspectorMutationKeys: false,
+      suppressInspectorMutationKeys: true,
     }),
   );
-
-  stdin.write("p");
-  await waitForCondition(() => changes.includes("p"));
-  instance.unmount();
-  instance.cleanup();
-
-  assert.deepEqual(changes, ["p"]);
+  try {
+    stdin.write("p");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(changes, []);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
 });
 
 test("composer suppresses optimizer keys only while advice actions are enabled", async () => {
   const changes = [];
   const { stdin, instance } = renderWithInput(
     React.createElement(Composer, {
-      value: "",
+      value: "draft",
       onChange: (value) => changes.push(value),
       onSubmit: async () => {},
       suppressInspectorKeys: true,
@@ -327,7 +393,7 @@ test("composer suppresses optimizer keys only while advice actions are enabled",
   assert.deepEqual(changes, []);
 });
 
-test("composer does not suppress a mutation letter after locally pending text", async () => {
+test("composer suppresses a Context mutation after locally pending text", async () => {
   const changes = [];
   const { stdin, instance } = renderWithInput(
     React.createElement(Composer, {
@@ -338,18 +404,18 @@ test("composer does not suppress a mutation letter after locally pending text", 
       suppressInspectorMutationKeys: true,
     }),
   );
-
   try {
-    stdin.write("a");
+    stdin.write("x");
+    await waitForCondition(() => changes.includes("x"));
     stdin.write("p");
-    await waitForCondition(() => changes.includes("ap"));
-    assert.equal(changes.at(-1), "ap");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(changes.at(-1), "x");
   } finally {
     instance.unmount();
     instance.cleanup();
   }
 });
-test("composer preserves optimizer letters after a whitespace-only draft", async () => {
+test("composer suppresses optimizer letters after a whitespace-only draft", async () => {
   const changes = [];
   const { stdin, instance } = renderWithInput(
     React.createElement(Composer, {
@@ -361,11 +427,10 @@ test("composer preserves optimizer letters after a whitespace-only draft", async
       suppressInspectorAdviceKeys: true,
     }),
   );
-
   try {
     stdin.write("a");
-    await waitForCondition(() => changes.includes(" a"));
-    assert.equal(changes.at(-1), " a");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(changes, []);
   } finally {
     instance.unmount();
     instance.cleanup();

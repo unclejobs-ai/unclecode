@@ -230,8 +230,10 @@ test("Work model picker submits the visibly selected model instead of hidden con
   try {
     await new Promise((resolve) => setTimeout(resolve, 100));
     stdin.write("\u001b[A");
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.match(getLastWorkFrame(getOutput()), /› \/model gpt-test-8/);
+    await waitForCondition(
+      () => /› \/model gpt-test-8/.test(getLastWorkFrame(getOutput())),
+      2_000,
+    );
     stdin.write("\r");
     await waitForCondition(() => submittedLines.length === 1, 2_000);
     assert.deepEqual(submittedLines, ["/model gpt-test-8"]);
@@ -482,4 +484,62 @@ test("Work pane preserves split fast model command chunks before Enter", async (
   assert.doesNotMatch(output, /gpt-5\.4\/model/);
   const finalFrame = getLastWorkFrame(output);
   assert.doesNotMatch(finalFrame, /Model picker/);
+});
+
+test("Work pane async image fallback respects a newer controlled draft", async () => {
+  const { engine } = createWorkShellPaneEngine();
+  const changedValues = [];
+  let setExternalValue;
+  let resolveImagePreview;
+  const imagePreview = new Promise((resolve) => {
+    resolveImagePreview = resolve;
+  });
+
+  function ControlledWorkPane() {
+    const [value, setValue] = React.useState("");
+    React.useEffect(() => {
+      setExternalValue = setValue;
+    }, []);
+    return React.createElement(WorkShellPane, {
+      provider: "OpenAI",
+      model: "gpt-5.4",
+      mode: "yolo",
+      engine,
+      cwd: "/tmp/unclecode-test-workspace",
+      inputValue: value,
+      onInputValueChange: (nextValue) => {
+        changedValues.push(nextValue);
+        setValue(nextValue);
+      },
+      resolveComposerInput: () => imagePreview,
+      getSuggestions: () => [],
+      onExit: () => {},
+      shouldBlockSlashSubmit: () => false,
+      getReasoningLabel: () => "default medium",
+      isReasoningSupported: () => true,
+    });
+  }
+
+  const { stdin, instance, getOutput } = renderWithInput(
+    React.createElement(ControlledWorkPane),
+  );
+
+  try {
+    await waitForCondition(() => typeof setExternalValue === "function");
+    stdin.write("/tmp/clipboard.png");
+    await waitForCondition(() => changedValues.at(-1) === "");
+    setExternalValue("parent draft");
+    await waitForCondition(() => getLastWorkFrame(getOutput()).includes("parent draft"));
+    resolveImagePreview({
+      prompt: "/tmp/clipboard.png",
+      attachments: [],
+      transcriptText: "/tmp/clipboard.png",
+    });
+    await waitForCondition(() => changedValues.at(-1) === "parent draft");
+
+    assert.equal(changedValues.at(-1), "parent draft");
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
 });

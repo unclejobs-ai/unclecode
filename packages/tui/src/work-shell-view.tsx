@@ -33,7 +33,10 @@ import {
   renderContextInspectorOverlay,
 } from "./work-shell-context-inspector.js";
 import { renderContextTurnReceipt } from "./work-shell-context-receipt.js";
-import { resolveContextSourceMeta } from "./work-shell-context-inspector-model.js";
+import {
+  resolveContextSourceMeta,
+  type ContextDeskPane,
+} from "./work-shell-context-inspector-model.js";
 
 export type { WorkShellPanelDisplayMode } from "./work-shell-view-fast-paths.js";
 
@@ -1656,7 +1659,7 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
 }) {
   const providerTitle = formatWorkShellProviderTitle(props.provider);
   const headerHint = props.headerHint ?? "work context · Ctrl+O sessions · / commands";
-  const width = Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 2);
+  const width = Math.max(1, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4);
   const headerPrefix = "◢ ";
   const leftWidth = getDisplayWidth(headerPrefix) + getDisplayWidth(providerTitle);
   const rightWidth = getDisplayWidth(headerHint);
@@ -1908,6 +1911,8 @@ export function WorkShellView(props: {
   readonly contextInspectorExpanded?: string | null;
   readonly contextInspectorDetailContent?: string;
   readonly contextInspectorDetailOffset?: number;
+  readonly contextDeskPane?: ContextDeskPane;
+  readonly contextDeskPreviewOffset?: number;
   readonly contextPacket?: ContextPacketView;
   readonly modelWindow?: number;
   readonly terminalRows?: number;
@@ -2020,8 +2025,12 @@ export function WorkShellView(props: {
           ...(props.contextInspectorDetailOffset !== undefined
             ? { detailOffset: props.contextInspectorDetailOffset }
             : {}),
-          width: Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
-          borderColor: panelBorderColor,
+          ...(props.contextDeskPane !== undefined ? { pane: props.contextDeskPane } : {}),
+          ...(props.contextDeskPreviewOffset !== undefined
+            ? { previewOffset: props.contextDeskPreviewOffset }
+            : {}),
+          width: Math.max(0, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
+          maxRows: Math.max(0, (props.terminalRows ?? process.stdout.rows ?? 30) - 6),
           palette: W,
           modelWindow: props.modelWindow ?? 200000,
           actionsEnabled: props.contextSourceActionsEnabled ?? false,
@@ -2034,8 +2043,21 @@ export function WorkShellView(props: {
             ? { contextAdviceUnavailable: props.contextAdviceUnavailable }
             : {}),
           contextAdviceActionsEnabled: props.contextAdviceActionsEnabled ?? false,
-          ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
+          activityLines: agentConsoleActivityLines,
         })}
+        <Text {...readableTextColorProps(W.borderSoft)}>
+          {formatWorkShellFooterLine({
+            ...(props.cwd ? { cwd: props.cwd } : {}),
+            model: props.model,
+            reasoningLabel: props.reasoningLabel,
+            mode: props.mode,
+            authLabel: props.authLabel,
+            ...(props.contextIndicator
+              ? { contextIndicator: props.contextIndicator }
+              : {}),
+            width: getWorkShellDockWidth(props.terminalColumns),
+          })}
+        </Text>
       </Box>
     );
   }
@@ -2117,34 +2139,7 @@ export function WorkShellView(props: {
             {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
           />
         : null}
-      {panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput && shouldRenderContextInspectorOverlay ? (
-        renderContextInspectorOverlay({
-          packet: props.contextPacket,
-          cursorIndex: props.contextInspectorCursor ?? -1,
-          ...(props.contextInspectorExpanded !== undefined ? { expandedId: props.contextInspectorExpanded } : {}),
-          ...(props.contextInspectorDetailContent !== undefined
-            ? { detailContent: props.contextInspectorDetailContent }
-            : {}),
-          ...(props.contextInspectorDetailOffset !== undefined
-            ? { detailOffset: props.contextInspectorDetailOffset }
-            : {}),
-          width: Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
-          borderColor: panelBorderColor,
-          palette: W,
-          modelWindow: props.modelWindow ?? 200000,
-          actionsEnabled: props.contextSourceActionsEnabled ?? false,
-          ...(props.contextActionReceipt ? { actionReceipt: props.contextActionReceipt } : {}),
-          ...(props.contextPreviewReceipt ? { previewReceipt: props.contextPreviewReceipt } : {}),
-          ...(props.contextSubmittedReceipt ? { submittedReceipt: props.contextSubmittedReceipt } : {}),
-          ...(props.contextPacketChange ? { packetChange: props.contextPacketChange } : {}),
-          contextPolicySuggestions: props.contextPolicySuggestions ?? [],
-          ...(props.contextAdviceUnavailable
-            ? { contextAdviceUnavailable: props.contextAdviceUnavailable }
-            : {}),
-          contextAdviceActionsEnabled: props.contextAdviceActionsEnabled ?? false,
-          ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
-        })
-      ) : panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput ? (
+      {panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput ? (
         <Box marginTop={1} borderStyle="single" borderColor={panelBorderColor} paddingX={1} flexDirection="column">
           <Box flexDirection="column">
             <Text>

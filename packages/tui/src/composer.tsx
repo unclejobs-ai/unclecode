@@ -533,25 +533,22 @@ export function Composer(props: {
       return;
     }
 
-    // While Context Desk owns an empty composer, keep its navigation and
-    // mutation keys out of the draft. Read-only panes still allow Space/P as
-    // ordinary text because those actions are unavailable.
-    if (
-      latestProps.suppressInspectorKeys
-      && isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current)
-    ) {
-      const suppressMutationKeys =
-        latestProps.suppressInspectorMutationKeys ?? latestProps.suppressInspectorKeys;
-      if (key.return) {
+    // Context Desk owns its control keys regardless of draft contents or
+    // whether the selected action is currently available.
+    if (latestProps.suppressInspectorKeys) {
+      if (key.return || key.tab || key.upArrow || key.downArrow) {
         return;
       }
-      if (suppressMutationKeys && (input === " " || input === "p")) {
-        return;
-      }
-      if (
-        latestProps.suppressInspectorAdviceKeys
-        && (input.toLowerCase() === "a" || input.toLowerCase() === "r")
-      ) {
+      const containsOnlyInspectorControls =
+        input.length > 0
+        && [...input].every(
+          (character) =>
+            character === " "
+            || character === "p"
+            || character.toLowerCase() === "a"
+            || character.toLowerCase() === "r",
+        );
+      if (containsOnlyInspectorControls) {
         return;
       }
     }

@@ -26,6 +26,7 @@ export function createEmbeddedWorkShellDashboardProps(input: {
   readonly renderWorkPane: NonNullable<
     TuiRenderOptions<TuiShellHomeState>["renderWorkPane"]
   >;
+  readonly disposeWorkPane?: TuiRenderOptions<TuiShellHomeState>["disposeWorkPane"];
 }): TuiRenderOptions<TuiShellHomeState> {
   return {
     workspaceRoot: input.workspaceRoot,
@@ -46,6 +47,7 @@ export function createEmbeddedWorkShellDashboardProps(input: {
     initialView: "work",
     contextLines: input.contextLines,
     renderWorkPane: input.renderWorkPane,
+    ...(input.disposeWorkPane ? { disposeWorkPane: input.disposeWorkPane } : {}),
   };
 }
 
@@ -64,6 +66,11 @@ export function createEmbeddedWorkShellPaneDashboardProps<
     readonly onExit: () => void;
   }) => EmbeddedWorkShellPaneProps<Attachment, State>;
 }): TuiRenderOptions<TuiShellHomeState> {
+  let retainedPane: EmbeddedWorkShellPaneProps<Attachment, State> | undefined;
+  const buildRetainedPane = (buildInput: { readonly onExit: () => void }) => {
+    retainedPane ??= input.buildPane(buildInput);
+    return retainedPane;
+  };
   return createEmbeddedWorkShellDashboardProps({
     workspaceRoot: input.workspaceRoot,
     homeState: input.homeState,
@@ -76,16 +83,23 @@ export function createEmbeddedWorkShellPaneDashboardProps<
     ...(input.launchWorkSession
       ? { launchWorkSession: input.launchWorkSession }
       : {}),
-    renderWorkPane: ({ openSessions, syncHomeState }) => (
+    renderWorkPane: ({ openSessions, syncHomeState, workDraft, setWorkDraft }) => (
       <EmbeddedWorkShellPane<Attachment, State>
-        buildPane={input.buildPane}
+        buildPane={buildRetainedPane}
         onRequestSessionsView={openSessions}
         onSyncHomeState={syncHomeState}
+        inputValue={workDraft}
+        onInputValueChange={setWorkDraft}
         {...(input.refreshHomeState
           ? { refreshHomeState: input.refreshHomeState }
           : {})}
       />
     ),
+    disposeWorkPane: () => {
+      const pane = retainedPane;
+      retainedPane = undefined;
+      pane?.engine.dispose();
+    },
   });
 }
 

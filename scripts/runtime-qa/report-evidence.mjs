@@ -140,9 +140,9 @@ function buildProviderToolCallEvidence(smoke) {
 
 function buildContextEvidence(realUseTuiStress) {
   const contextPane = realUseTuiStress?.contextPaneExcerpt ?? "";
-  const includedHeader = /Included in next answer/.test(contextPane);
-  const heldBackHeader = /Held back locally/.test(contextPane);
-  const warningsHeader = /Warnings|✓ none/i.test(contextPane);
+  const includedHeader = /Sources/.test(contextPane);
+  const heldBackHeader = /\d+ groups · \d+ in · \d+ held/.test(contextPane);
+  const warningsHeader = /Warnings/i.test(contextPane);
   return {
     contextPanelVisible: includedHeader,
     modelBoundPackets: realUseTuiStress?.contextPacketTransparency === true,
@@ -150,7 +150,7 @@ function buildContextEvidence(realUseTuiStress) {
       realUseTuiStress?.contextPacketTransparency === true &&
       heldBackHeader &&
       warningsHeader,
-    rawArtifactsHeldBack: /Held back locally|raw audit artifacts stay local/i.test(contextPane),
+    rawArtifactsHeldBack: /\d+ held|raw audit artifacts stay local/i.test(contextPane),
   };
 }
 

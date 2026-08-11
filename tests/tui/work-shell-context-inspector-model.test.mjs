@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import * as contextInspectorModel from "../../packages/tui/src/work-shell-context-inspector-model.ts";
+
 import {
   buildContextInspectorOverview,
   buildContextInspectorRows,
@@ -9,7 +11,6 @@ import {
   getContextItemDetailLines,
   getContextItemPreview,
   resolveContextSourceMeta,
-  computeContextOverlayViewportMaxRows,
   isContextInspectorSourceHeldBack,
 } from "../../packages/tui/src/work-shell-context-inspector-model.ts";
 
@@ -285,8 +286,48 @@ test("context inspector maps CRP categories to human groups and never renders ra
   assert.equal(resolveContextSourceMeta("totally-unknown", palette).label, "Other context");
 });
 
-test("context inspector viewport uses one physical terminalRows budget", () => {
-  assert.equal(computeContextOverlayViewportMaxRows({ terminalRows: 40 }), 15);
-  assert.equal(computeContextOverlayViewportMaxRows({ terminalRows: 24 }), 6);
-  assert.equal(computeContextOverlayViewportMaxRows({}), 12);
+test("context desk layout allocates the approved split and emergency panes", () => {
+  assert.equal(
+    typeof contextInspectorModel.computeContextDeskLayout,
+    "function",
+    "the Context Desk needs one pure body layout helper",
+  );
+  const computeLayout = contextInspectorModel.computeContextDeskLayout;
+
+  for (const { bodyWidth, bodyRows, sourceRange } of [
+    { bodyWidth: 116, bodyRows: 35, sourceRange: [32, 44] },
+    { bodyWidth: 76, bodyRows: 25, sourceRange: [24, 31] },
+    { bodyWidth: 48, bodyRows: 35, sourceRange: [18, 21] },
+  ]) {
+    const layout = computeLayout({ bodyWidth, bodyRows, pane: "sources" });
+    assert.equal(layout.mode, "split");
+    assert.ok(
+      layout.sources.width >= sourceRange[0] && layout.sources.width <= sourceRange[1],
+      `Sources width ${layout.sources.width} must fit ${sourceRange.join("-")} at ${bodyWidth} columns`,
+    );
+    assert.equal(layout.sources.rows, bodyRows);
+    assert.equal(layout.preview.width, layout.details.width);
+    assert.equal(layout.sources.width + layout.gutter + layout.preview.width, bodyWidth);
+    assert.equal(layout.preview.rows + layout.details.rows, bodyRows);
+    assert.ok(layout.preview.rows >= 7);
+    assert.ok(layout.details.rows >= 9);
+    assert.ok(layout.sources.contentWidth < layout.sources.width);
+    assert.ok(layout.preview.contentRows < layout.preview.rows);
+  }
+
+  const narrow = computeLayout({ bodyWidth: 47, bodyRows: 35, pane: "preview" });
+  assert.equal(narrow.mode, "emergency");
+  assert.equal(narrow.pane, "preview");
+  assert.equal(narrow.focused.width, 47);
+  assert.equal(narrow.focused.rows, 35);
+
+  const short = computeLayout({ bodyWidth: 76, bodyRows: 16, pane: "details" });
+  assert.equal(short.mode, "emergency");
+  assert.equal(short.pane, "details");
+  assert.equal(short.focused.rows, 16);
+
+  assert.deepEqual(
+    computeLayout({ bodyWidth: 36, bodyRows: 3, pane: "sources" }),
+    { mode: "too-small", bodyWidth: 36, bodyRows: 3 },
+  );
 });

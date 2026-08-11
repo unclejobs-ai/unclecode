@@ -116,6 +116,8 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     // in the overlay; -1 means "no selection". Only one source expands at a
     // time. See docs/design/context-inspector-redesign.md §C/§E.
     contextInspectorCursor: -1,
+    contextDeskPane: "sources",
+    contextDeskPreviewOffset: 0,
     contextInspectorExpanded: null,
     contextInspectorDetailContent: undefined,
     contextInspectorDetailOffset: 0,

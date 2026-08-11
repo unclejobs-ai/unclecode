@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { Text, render, useInput } from "ink";
+import React from "react";
+import * as tui from "../../packages/tui/src/index.tsx";
 
 import {
+  Dashboard,
   appendActivityEntry,
   buildActivityInspectorModel,
   buildHistoryContextSummaryLines,
@@ -1011,4 +1016,243 @@ test("dashboard shell keeps normal action runs out of prompt detail mode", () =>
 
   assert.ok(actionRunBranch);
   assert.match(actionRunBranch, /detailOpen: false/);
+});
+
+function createDashboardInput() {
+  const input = new PassThrough();
+  input.isTTY = true;
+  input.setRawMode = () => input;
+  input.resume = () => input;
+  input.pause = () => input;
+  input.ref = () => input;
+  input.unref = () => input;
+  return input;
+}
+
+function createDashboardOutput(columns = 100, rows = 30) {
+  const output = new PassThrough();
+  let captured = "";
+  output.columns = columns;
+  output.rows = rows;
+  output.isTTY = true;
+  output.getColorDepth = () => 1;
+  output.hasColors = () => false;
+  output.on("data", (chunk) => {
+    captured += chunk.toString();
+  });
+  output.readCaptured = () => captured;
+  output.clearCaptured = () => {
+    captured = "";
+  };
+  return output;
+}
+
+function createDashboardError() {
+  const error = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+  });
+  error.columns = 100;
+  error.rows = 30;
+  error.isTTY = true;
+  error.getColorDepth = () => 1;
+  error.hasColors = () => false;
+  return error;
+}
+
+async function waitForDashboard(condition, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("Timed out waiting for Dashboard state");
+}
+
+function EmbeddedDraftProbe({ controls }) {
+  useInput((input, key) => {
+    if (input.includes("\u000f") || (key.ctrl && input.toLowerCase() === "o")) {
+      controls.openSessions();
+      return;
+    }
+    if (input.length > 0) {
+      controls.setWorkDraft(`${controls.workDraft}${input}`);
+    }
+  });
+  return React.createElement(Text, null, `WORK DRAFT · ${controls.workDraft}`);
+}
+
+test("Session Desk recognizes both raw and parsed Ctrl+O", () => {
+  assert.equal(tui.isSessionDeskToggleInput("\u000f", {}), true);
+  assert.equal(tui.isSessionDeskToggleInput("o", { ctrl: true }), true);
+  assert.equal(tui.isSessionDeskToggleInput("o", {}), false);
+});
+
+test("Dashboard preserves Work draft and Session selection through symmetric Ctrl+O", async () => {
+  const stdin = createDashboardInput();
+  const stdout = createDashboardOutput();
+  const stderr = createDashboardError();
+  const resumed = [];
+  const sessions = [
+    {
+      sessionId: "session-newest",
+      state: "idle",
+      updatedAt: "2026-08-09T12:00:00.000Z",
+      model: "gpt-5.4",
+      taskSummary: "Newest session",
+    },
+    {
+      sessionId: "session-selected",
+      state: "idle",
+      updatedAt: "2026-08-09T11:00:00.000Z",
+      model: "gpt-5.4",
+      taskSummary: "Selected session",
+    },
+  ];
+  const instance = render(
+    React.createElement(Dashboard, {
+      workspaceRoot,
+      initialView: "work",
+      sessions,
+      renderWorkPane: (controls) =>
+        React.createElement(EmbeddedDraftProbe, { controls }),
+      openEmbeddedWorkSession: async (args) => {
+        resumed.push(args);
+        return {
+          selectedSessionId: args.at(-1),
+        };
+      },
+    }),
+    {
+      stdin,
+      stdout,
+      stderr,
+      debug: true,
+      patchConsole: false,
+      exitOnCtrlC: false,
+    },
+  );
+
+  try {
+    stdout.clearCaptured();
+    stdin.write("preserve me");
+    await waitForDashboard(() =>
+      stdout.readCaptured().includes("WORK DRAFT · preserve me"),
+    );
+
+    stdout.clearCaptured();
+    stdin.write("\u000f");
+    await waitForDashboard(() => stdout.readCaptured().includes("History"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const capturedSessionDesk = stdout.readCaptured();
+    const finalFrameStart = capturedSessionDesk.lastIndexOf(" work context");
+    const finalSessionDeskFrame =
+      finalFrameStart >= 0
+        ? capturedSessionDesk.slice(finalFrameStart)
+        : capturedSessionDesk;
+    assert.equal(
+      finalSessionDeskFrame.match(/History · 2 saved/g)?.length,
+      1,
+      "Dashboard status belongs only in the canonical footer",
+    );
+
+    stdout.clearCaptured();
+    stdin.write("j");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    stdout.clearCaptured();
+    stdin.write("\u000f");
+    await waitForDashboard(() =>
+      stdout.readCaptured().includes("WORK DRAFT · preserve me"),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    stdout.clearCaptured();
+    stdin.write("\u000f");
+    await waitForDashboard(() => stdout.readCaptured().includes("History"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stdin.write("\r");
+    await waitForDashboard(() => resumed.length === 1);
+    assert.deepEqual(resumed, [["--session-id", "session-selected"]]);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("Session Desk Ctrl+O uses the available Work launch path", async () => {
+  const stdin = createDashboardInput();
+  const stdout = createDashboardOutput();
+  const stderr = createDashboardError();
+  const launched = [];
+  const instance = render(
+    React.createElement(Dashboard, {
+      workspaceRoot,
+      initialView: "sessions",
+      sessions: [],
+      launchWorkSession: async (args) => {
+        launched.push(args);
+      },
+    }),
+    {
+      stdin,
+      stdout,
+      stderr,
+      debug: true,
+      patchConsole: false,
+      exitOnCtrlC: false,
+    },
+  );
+
+  try {
+    stdin.write("\u000f");
+    await waitForDashboard(() => launched.length === 1);
+    assert.deepEqual(launched, [[]]);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("Dashboard disposes the retained Work pane only on actual unmount", async () => {
+  const stdin = createDashboardInput();
+  const stdout = createDashboardOutput();
+  const stderr = createDashboardError();
+  let firstDisposeCount = 0;
+  let latestDisposeCount = 0;
+  const dashboard = (disposeWorkPane) =>
+    React.createElement(Dashboard, {
+      workspaceRoot,
+      initialView: "sessions",
+      sessions: [],
+      disposeWorkPane,
+    });
+  const instance = render(
+    dashboard(() => {
+      firstDisposeCount += 1;
+    }),
+    {
+      stdin,
+      stdout,
+      stderr,
+      debug: true,
+      patchConsole: false,
+      exitOnCtrlC: false,
+    },
+  );
+
+  instance.rerender(
+    dashboard(() => {
+      latestDisposeCount += 1;
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(firstDisposeCount, 0);
+  assert.equal(latestDisposeCount, 0);
+
+  instance.unmount();
+  instance.cleanup();
+  assert.equal(firstDisposeCount, 0);
+  assert.equal(latestDisposeCount, 1);
 });

@@ -39,6 +39,7 @@ import {
   resolveWorkShellContextInspectorAction,
   resolveWorkShellInputAction,
   resolveWorkShellSubmitAction,
+  type ContextDeskPane,
 } from "./work-shell-input.js";
 import type { WorkShellEntry, WorkShellPanel } from "./work-shell-view.js";
 
@@ -129,7 +130,10 @@ export interface WorkShellStateSource<State> {
   dispose(): void;
 }
 
-export function useWorkShellEngineState<State>(engine: WorkShellStateSource<State>): State {
+export function useWorkShellEngineState<State>(
+  engine: WorkShellStateSource<State>,
+  disposeOnUnmount = true,
+): State {
   const [state, setState] = useState(() => engine.getState());
 
   useEffect(() => {
@@ -138,9 +142,11 @@ export function useWorkShellEngineState<State>(engine: WorkShellStateSource<Stat
     void engine.initialize();
     return () => {
       unsubscribe();
-      engine.dispose();
+      if (disposeOnUnmount) {
+        engine.dispose();
+      }
     };
-  }, [engine]);
+  }, [disposeOnUnmount, engine]);
 
   return state;
 }
@@ -213,7 +219,7 @@ export function shouldReportWorkShellOverlayOpen(input: {
   readonly panelTitle: string;
   readonly inputValue: string;
 }): boolean {
-  return input.panelTitle === "Context expanded" && input.inputValue.trim().length === 0;
+  return input.panelTitle === "Context expanded";
 }
 
 export type WorkShellSlashSuggestion = {
@@ -271,6 +277,8 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   readonly queuedCount?: number | undefined;
   readonly queuePaused?: boolean | undefined;
   readonly contextInspectorCursor?: number | undefined;
+  readonly contextDeskPane?: ContextDeskPane | undefined;
+  readonly contextDeskPreviewOffset?: number | undefined;
   readonly contextInspectorExpanded?: string | null | undefined;
   readonly contextInspectorDetailContent?: string | undefined;
   readonly contextInspectorDetailOffset?: number | undefined;
@@ -302,6 +310,9 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   // All are optional so test harnesses / legacy panes that never open the
   // overlay don't need stubs.
   moveContextInspectorCursor?(direction: number): void;
+  moveContextDeskPreviewOffset?(direction: number): void;
+  cycleContextDeskPane?(): void;
+  enterContextDesk?(): Promise<void>;
   moveContextInspectorDetailOffset?(direction: number): void;
   toggleContextInspectorPin?(): Promise<void>;
   forgetContextSourceAtCursor?(): Promise<void>;
@@ -447,6 +458,7 @@ export function useWorkShellInputController(input: {
   readonly interruptTurn?: (() => void) | undefined;
   readonly cancelSensitiveInput?: (() => void) | undefined;
   readonly closeOverlay?: (() => void) | undefined;
+  readonly contextDeskPane?: ContextDeskPane | undefined;
   readonly contextSourceActionsEnabled?: boolean | undefined;
   readonly contextAdviceActionsEnabled?: boolean | undefined;
   readonly isComposerRawEmpty?: (() => boolean) | undefined;
@@ -457,6 +469,9 @@ export function useWorkShellInputController(input: {
   // keyboard actions. All optional — only dispatched when the overlay is open
   // and the engine wires them.
   readonly moveContextInspectorCursor?: ((direction: number) => void) | undefined;
+  readonly moveContextDeskPreviewOffset?: ((direction: number) => void) | undefined;
+  readonly cycleContextDeskPane?: (() => void) | undefined;
+  readonly enterContextDesk?: (() => Promise<void>) | undefined;
   readonly moveContextInspectorDetailOffset?: ((direction: number) => void) | undefined;
   readonly toggleContextInspectorPin?: (() => Promise<void>) | undefined;
   readonly forgetContextSourceAtCursor?: (() => Promise<void>) | undefined;
@@ -467,49 +482,51 @@ export function useWorkShellInputController(input: {
   const escapeResetArmedAtRef = useRef<number | undefined>(undefined);
   useInput((value, key) => {
     const ctrlOCount = value.split("\u000f").length - 1;
-    if (
-      input.onRequestSessionsView &&
-      (ctrlOCount > 0 || (key.ctrl && value.toLowerCase() === "o"))
-    ) {
+    const sessionsRequestCount = Math.max(
+      ctrlOCount,
+      key.ctrl && value.toLowerCase() === "o" ? 1 : 0,
+    );
+    if (input.onRequestSessionsView && sessionsRequestCount > 0) {
       escapeResetArmedAtRef.current = undefined;
-      input.replaceValue("");
-      const requestCount = Math.max(1, ctrlOCount);
-      for (let index = 0; index < requestCount; index += 1) {
+      for (let index = 0; index < sessionsRequestCount; index += 1) {
         input.onRequestSessionsView();
       }
       return;
     }
 
-    // Context Inspector (Sprint 2): when the overlay is open, intercept the
-    // action keys before the composer can consume them. The slash picker
-    // always wins (resolver returns "none" when input starts with "/").
-    // We check the composer value AFTER the key arrives — if the composer
-    // already has text, don't steal keys. But for navigation keys (arrows,
-    // Enter) we always intercept since those aren't text input.
-    const isNavigationKey = key.upArrow || key.downArrow || key.return;
+    // Context Desk owns its controls before the composer or slash picker.
     if (
       input.hasOverlayOpen
       && input.activePanelTitle === "Context expanded"
-      && !input.value.trim().startsWith("/")
-      && (
-        isNavigationKey
-        || (input.isComposerRawEmpty?.() ?? isRawComposerEmpty(input.value))
-      )
     ) {
       const inspectorAction = resolveWorkShellContextInspectorAction({
         value,
         key,
         panelTitle: "Context expanded",
+        pane: input.contextDeskPane ?? "sources",
         actionsEnabled: input.contextSourceActionsEnabled ?? false,
         adviceActionsEnabled: input.contextAdviceActionsEnabled ?? false,
       });
       switch (inspectorAction.type) {
-        case "move-cursor":
-          if (input.contextInspectorExpanded) {
-            input.moveContextInspectorDetailOffset?.(inspectorAction.direction);
-          } else {
-            input.moveContextInspectorCursor?.(inspectorAction.direction);
-          }
+        case "move-source":
+          input.moveContextInspectorCursor?.(inspectorAction.direction);
+          return;
+        case "move-preview":
+          input.moveContextDeskPreviewOffset?.(inspectorAction.direction);
+          return;
+        case "move-details":
+          input.moveContextInspectorDetailOffset?.(inspectorAction.direction);
+          return;
+        case "cycle-pane":
+          input.cycleContextDeskPane?.();
+          return;
+        case "enter":
+          void input.enterContextDesk?.().catch(() => undefined);
+          return;
+        case "close":
+          input.closeOverlay?.();
+          return;
+        case "consume":
           return;
         case "toggle-pin":
           escapeResetArmedAtRef.current = undefined;
@@ -527,10 +544,9 @@ export function useWorkShellInputController(input: {
           escapeResetArmedAtRef.current = undefined;
           void input.rejectContextSuggestion?.().catch(() => undefined);
           return;
-        case "expand":
-          input.toggleContextInspectorExpanded?.();
-          return;
         case "none":
+          break;
+        default:
           break;
       }
     }
@@ -686,21 +702,35 @@ export function useWorkShellPaneState<
   ) => Promise<WorkShellComposerPreview<Attachment>>;
   readonly getSuggestions: (value: string) => readonly WorkShellSlashSuggestion[];
   readonly browserOAuthAvailable?: boolean;
+  readonly inputValue?: string | undefined;
+  readonly onInputValueChange?: ((value: string) => void) | undefined;
   readonly onExit: () => void;
   readonly onRequestSessionsView?: (() => void) | undefined;
   readonly onSyncHomeState?: ((homeState: Partial<TuiShellHomeState>) => void) | undefined;
   readonly refreshHomeState?: (() => Promise<TuiShellHomeState>) | undefined;
+  readonly disposeEngineOnUnmount?: boolean | undefined;
   readonly shouldBlockSlashSubmit: (line: string) => boolean;
 }) {
-  const [inputValue, setInputValueState] = useState("");
-  const pendingInputValueRef = useRef("");
+  const [uncontrolledInputValue, setUncontrolledInputValue] = useState(
+    input.inputValue ?? "",
+  );
+  const inputValue = input.inputValue ?? uncontrolledInputValue;
+  const lastRenderedInputValueRef = useRef(inputValue);
+  const pendingInputValueRef = useRef(inputValue);
+  if (inputValue !== lastRenderedInputValueRef.current) {
+    lastRenderedInputValueRef.current = inputValue;
+    pendingInputValueRef.current = inputValue;
+  }
   const setInputValue = useCallback((value: SetStateAction<string>): void => {
     const nextValue = typeof value === "function"
       ? value(pendingInputValueRef.current)
       : value;
     pendingInputValueRef.current = nextValue;
-    setInputValueState(nextValue);
-  }, []);
+    input.onInputValueChange?.(nextValue);
+    if (input.inputValue === undefined) {
+      setUncontrolledInputValue(nextValue);
+    }
+  }, [input.inputValue, input.onInputValueChange]);
   // Clipboard-pasted attachments live alongside the input value but
   // outside the text-derived `resolveComposerInput` flow. They are kept
   // in pane state so they survive every keystroke and only flush on
@@ -774,7 +804,10 @@ export function useWorkShellPaneState<
       return remaining.length === current.length ? current : remaining;
     });
   }, []);
-  const engineState = useWorkShellEngineState(input.engine);
+  const engineState = useWorkShellEngineState(
+    input.engine,
+    input.disposeEngineOnUnmount ?? true,
+  );
   const enginePanelKey = getWorkShellPanelDismissKey(engineState.panel);
   const ignoreNextSlashDismissResetRef = useRef(false);
   const [dismissedSlashPickerPanelTitle, setDismissedSlashPickerPanelTitle] = useState<string | undefined>(undefined);
@@ -825,6 +858,9 @@ export function useWorkShellPaneState<
     fallbackPanel,
     getSuggestions: input.getSuggestions,
   });
+  const displayedActivePanel = engineState.panel.title === "Context expanded"
+    ? engineState.panel
+    : activePanel;
   const isStickySlashPicker =
     activeSlashInput !== undefined && !inputValue.trim().startsWith("/");
   useEffect(() => {
@@ -911,7 +947,7 @@ export function useWorkShellPaneState<
       panelTitle: engineState.panel.title,
       inputValue,
     }),
-    activePanelTitle: activePanel.title,
+    activePanelTitle: displayedActivePanel.title,
     closeSlashPicker: (panelTitle) => {
       if (isStickySlashPicker) {
         setDismissedSlashPickerPanelKey(enginePanelKey);
@@ -934,6 +970,7 @@ export function useWorkShellPaneState<
       ? { closeOverlay: () => input.engine.closeOverlay?.() }
       : {}),
     contextSourceActionsEnabled: engineState.contextSourceActionsEnabled ?? false,
+    contextDeskPane: engineState.contextDeskPane ?? "sources",
     contextAdviceActionsEnabled: contextAdviceActionsAvailable,
     ...(contextAdviceActionsAvailable && selectedContextSuggestion
       ? {
@@ -950,6 +987,15 @@ export function useWorkShellPaneState<
     // controller's useInput can dispatch overlay keyboard actions.
     ...(input.engine.moveContextInspectorCursor
       ? { moveContextInspectorCursor: (direction: number) => { void input.engine.moveContextInspectorCursor?.(direction); } }
+      : {}),
+    ...(input.engine.moveContextDeskPreviewOffset
+      ? { moveContextDeskPreviewOffset: (direction: number) => { input.engine.moveContextDeskPreviewOffset?.(direction); } }
+      : {}),
+    ...(input.engine.cycleContextDeskPane
+      ? { cycleContextDeskPane: () => { input.engine.cycleContextDeskPane?.(); } }
+      : {}),
+    ...(input.engine.enterContextDesk
+      ? { enterContextDesk: async () => { await input.engine.enterContextDesk?.(); } }
       : {}),
     ...(input.engine.moveContextInspectorDetailOffset
       ? { moveContextInspectorDetailOffset: (direction: number) => { input.engine.moveContextInspectorDetailOffset?.(direction); } }
@@ -989,7 +1035,7 @@ export function useWorkShellPaneState<
     setInputValue,
     engineState,
     composerPreview,
-    activePanel,
+    activePanel: displayedActivePanel,
     slashSuggestionCount: slashSuggestions.length,
     selectedSlashCommand: selectedSuggestion?.command,
     contextAdviceKeyActionsEnabled: contextAdviceActionsAvailable,

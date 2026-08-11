@@ -31,6 +31,7 @@ import {
   createSessionCenterFocusForView,
   handleResearchDraftInput,
   isSessionCenterImplicitSubmitInput,
+  isSessionDeskToggleInput,
   handleSessionCenterInput,
   resolveWorkPaneNavigationMode,
   shouldCaptureDashboardInput,
@@ -188,6 +189,7 @@ export function Dashboard(props: DashboardProps) {
   const [runtime, setRuntime] = useState({ node: "", platform: "", arch: "" });
   const [terminalColumns, setTerminalColumns] = useState(() => resolveTerminalColumns(stdout));
   const [researchDraft, setResearchDraft] = useState("");
+  const [workDraft, setWorkDraft] = useState("");
   const [contextLines, setContextLines] = useState(props.contextLines ?? []);
   const initialHomeState = {
     modeLabel: props.modeLabel ?? "default",
@@ -247,6 +249,12 @@ export function Dashboard(props: DashboardProps) {
       stdout.off("resize", updateTerminalColumns);
     };
   }, [stdout]);
+
+  const disposeWorkPaneRef = React.useRef(props.disposeWorkPane);
+  disposeWorkPaneRef.current = props.disposeWorkPane;
+  useEffect(() => () => {
+    disposeWorkPaneRef.current?.();
+  }, []);
 
   const selectedSession = model.primarySessions[centerState.sessionIndex];
   const selectedAction = model.utilityActions[centerState.actionIndex];
@@ -342,7 +350,6 @@ export function Dashboard(props: DashboardProps) {
     hasSelectedApproval: Boolean(selectedApproval),
     hasEmbeddedWorkPane: Boolean(props.renderWorkPane),
   });
-  const screenStatus = shellState.view === "work" ? workflowStatus : sessionCenterStatus;
   const footerStatus = shellState.view === "work" ? workflowStatus : sessionCenterStatus;
   const layout = getDashboardLayout(terminalColumns);
   const syncHomeState = useCallback((homeState: Partial<TuiShellHomeState>) => {
@@ -573,6 +580,11 @@ export function Dashboard(props: DashboardProps) {
 
     if (shouldReturnToWorkOnEscape(shellState.view, key, centerState, Boolean(selectedApproval))) {
       dispatch({ type: "view.changed", view: "work" });
+      return;
+    }
+
+    if (shellState.view === "sessions" && isSessionDeskToggleInput(input, key)) {
+      openWorkPane();
       return;
     }
 
@@ -866,6 +878,8 @@ export function Dashboard(props: DashboardProps) {
     return props.renderWorkPane({
       openSessions: openContextView,
       syncHomeState,
+      workDraft,
+      setWorkDraft,
     });
   }
 
@@ -875,9 +889,6 @@ export function Dashboard(props: DashboardProps) {
 
       <Box marginY={1}><SectionDivider width={layout.dividerWidth} /></Box>
       <ViewTabs activeView={shellState.view} />
-      <Box marginTop={1}>
-        <Text color={C.textSecondary}>{screenStatus}</Text>
-      </Box>
       <Box marginY={1}><SectionDivider label={getSessionCenterSectionLabel(shellState.view)} width={layout.dividerWidth} /></Box>
 
       {shellState.view === "sessions" ? (

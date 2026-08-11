@@ -106,7 +106,7 @@ export async function runReasoningCleanupTuiSmoke({ tmp, observations }) {
       `UNCLECODE_MODE=default`,
       `OPENAI_API_KEY=local-provider-test-key`,
       `NO_PROXY=127.0.0.1,localhost`,
-      `${shellQuote(process.execPath)} bin/unclecode.cjs tui --provider openai --model gpt-5.5`,
+      `${shellQuote(process.execPath)} bin/unclecode.cjs tui --provider openai --model gpt-5.6-sol`,
     ].join(" "),
     `echo EXIT:$?`,
     `sleep 20`,

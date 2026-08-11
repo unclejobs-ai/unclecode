@@ -40,6 +40,13 @@ export function createSessionCenterFocusForView(
   };
 }
 
+export function isSessionDeskToggleInput(
+  input: string,
+  key: { readonly ctrl?: boolean | undefined },
+): boolean {
+  return input.includes("\u000f") || (key.ctrl === true && input.toLowerCase() === "o");
+}
+
 export function handleDashboardInput(
   input: string,
   key: {

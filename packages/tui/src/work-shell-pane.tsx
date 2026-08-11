@@ -10,7 +10,6 @@ import type { TuiShellHomeState } from "./shell-state.js";
 import {
   Composer,
   handleComposerClipboardPaste,
-  isRawComposerEmpty,
 } from "./composer.js";
 import {
   buildAttachmentPreviewLines,
@@ -49,6 +48,9 @@ export type WorkShellPaneProps<
   readonly onRequestSessionsView?: (() => void) | undefined;
   readonly onSyncHomeState?: ((homeState: Partial<TuiShellHomeState>) => void) | undefined;
   readonly refreshHomeState?: (() => Promise<TuiShellHomeState>) | undefined;
+  readonly inputValue?: string | undefined;
+  readonly onInputValueChange?: ((value: string) => void) | undefined;
+  readonly disposeEngineOnUnmount?: boolean | undefined;
   readonly shouldBlockSlashSubmit: (line: string) => boolean;
   readonly getReasoningLabel: (reasoning: State["reasoning"]) => string;
   readonly isReasoningSupported: (reasoning: State["reasoning"]) => boolean;
@@ -156,6 +158,11 @@ export function WorkShellPane<
     ...(props.browserOAuthAvailable !== undefined
       ? { browserOAuthAvailable: props.browserOAuthAvailable }
       : {}),
+    ...(props.inputValue !== undefined ? { inputValue: props.inputValue } : {}),
+    ...(props.onInputValueChange
+      ? { onInputValueChange: props.onInputValueChange }
+      : {}),
+    disposeEngineOnUnmount: props.disposeEngineOnUnmount ?? true,
     onExit: props.onExit,
     ...(props.onRequestSessionsView
       ? { onRequestSessionsView: props.onRequestSessionsView }
@@ -207,6 +214,8 @@ export function WorkShellPane<
     contextPolicySuggestions,
     contextAdviceUnavailable,
     contextInspectorCursor,
+    contextDeskPane,
+    contextDeskPreviewOffset,
     contextInspectorExpanded,
     contextInspectorDetailContent,
     contextInspectorDetailOffset,
@@ -240,15 +249,13 @@ export function WorkShellPane<
     () => formatAuthLabelForDisplay(authLabel),
     [authLabel],
   );
-  // Context Inspector (Sprint 2): when the /context overlay is open and the
-  // composer is empty, yield the action keys to the inspector. The controller
-  // dispatches the engine action; the Composer skips inserting the char.
+  // Context Desk owns its controls before composer or slash input, even when
+  // the preserved Work draft is nonempty.
   const shouldSuppressComposerKeysForInspector = React.useMemo(
     () =>
-      activePanel.title === "Context expanded"
-      && isRawComposerEmpty(inputValue)
+      engineState.panel.title === "Context expanded"
       && props.engine.moveContextInspectorCursor !== undefined,
-    [activePanel.title, inputValue, props.engine],
+    [engineState.panel.title, props.engine],
   );
   const attachmentLines = React.useMemo(() => {
     const lines = composerPreview.attachments.length > 0
@@ -334,6 +341,8 @@ export function WorkShellPane<
       {...(contextAdviceUnavailable ? { contextAdviceUnavailable } : {})}
       contextAdviceActionsEnabled={contextAdviceKeyActionsEnabled}
       {...(contextInspectorCursor !== undefined ? { contextInspectorCursor } : {})}
+      {...(contextDeskPane !== undefined ? { contextDeskPane } : {})}
+      {...(contextDeskPreviewOffset !== undefined ? { contextDeskPreviewOffset } : {})}
       {...(contextInspectorExpanded !== undefined ? { contextInspectorExpanded } : {})}
       {...(contextInspectorDetailContent !== undefined ? { contextInspectorDetailContent } : {})}
       {...(contextInspectorDetailOffset !== undefined ? { contextInspectorDetailOffset } : {})}

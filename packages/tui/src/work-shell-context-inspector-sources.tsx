@@ -39,11 +39,11 @@ function renderContextInspectorSourceRow(input: {
   ];
   const body = truncateForDisplayWidth(
     parts.join(" · "),
-    Math.max(20, input.width - 4),
+    Math.max(1, input.width - 2),
   );
   const detailLines = expanded
     ? getContextItemDetailLines(item)
-      .flatMap((line) => wrapDisplayTextFast(line, Math.max(24, input.width - 8)))
+      .flatMap((line) => wrapDisplayTextFast(line, Math.max(1, input.width - 6)))
       .slice(0, input.maxDetailLines)
     : [];
   const statusColor = row.heldBack
@@ -73,6 +73,7 @@ function buildContextInspectorViewportPlan(input: {
   readonly cursorIndex: number;
   readonly maxRows: number;
   readonly expandedId?: string | null | undefined;
+  readonly chromeRows?: number;
 }): ContextInspectorVisibleRows & { readonly detailLineLimit: number } {
   if (input.rows.length === 0) {
     return { rows: [], hiddenBefore: 0, hiddenAfter: 0, detailLineLimit: 0 };
@@ -84,6 +85,7 @@ function buildContextInspectorViewportPlan(input: {
   let bestEnd = anchor + 1;
   let bestCount = 0;
   let bestCenterDistance = Number.POSITIVE_INFINITY;
+  let bestHasBothMarkers = false;
 
   for (let start = 0; start <= anchor; start += 1) {
     let groupHeaderCount = 0;
@@ -102,17 +104,27 @@ function buildContextInspectorViewportPlan(input: {
         continue;
       }
       const hiddenMarkerCount = (start > 0 ? 1 : 0) + (end < input.rows.length ? 1 : 0);
-      const structuralRows = 2 + (end - start) + groupHeaderCount + hiddenMarkerCount;
+      const structuralRows = (input.chromeRows ?? 2)
+        + (end - start) + groupHeaderCount + hiddenMarkerCount;
       if (structuralRows + detailReserve > input.maxRows) {
         continue;
       }
       const count = end - start;
       const centerDistance = Math.abs((start + end - 1) / 2 - anchor);
-      if (count > bestCount || (count === bestCount && centerDistance < bestCenterDistance)) {
+      const hasBothMarkers = start > 0 && end < input.rows.length;
+      if (
+        (hasBothMarkers && !bestHasBothMarkers)
+        || (
+          hasBothMarkers === bestHasBothMarkers
+          && (count > bestCount
+            || (count === bestCount && centerDistance < bestCenterDistance))
+        )
+      ) {
         bestStart = start;
         bestEnd = end;
         bestCount = count;
         bestCenterDistance = centerDistance;
+        bestHasBothMarkers = hasBothMarkers;
       }
     }
   }
@@ -130,7 +142,7 @@ function buildContextInspectorViewportPlan(input: {
   }, 0);
   const hiddenBefore = bestStart;
   const hiddenAfter = input.rows.length - bestEnd;
-  const structuralRows = 2
+  const structuralRows = (input.chromeRows ?? 2)
     + visibleRows.length
     + groupHeaderCount
     + (hiddenBefore > 0 ? 1 : 0)
@@ -165,8 +177,7 @@ function renderGroupedVisibleRows(input: {
       ).length;
       nodes.push(
         <Text key={`context-group-${group}-${row.sourceIndex}`}>
-          <Text color={input.palette.assistant} bold>{group}</Text>
-          <Text color={input.palette.textDim}>{` · ${groupCount}`}</Text>
+          {truncateForDisplayWidth(`${group} · ${groupCount}`, input.width)}
         </Text>,
       );
     }
@@ -191,11 +202,11 @@ function renderContextInspectorDetailReader(input: {
   readonly palette: ContextInspectorPalette;
 }): React.ReactNode {
   const summaryLines = getContextItemDetailLines(input.row.item)
-    .flatMap((line) => wrapDisplayTextFast(line, Math.max(24, input.width - 8)));
+    .flatMap((line) => wrapDisplayTextFast(line, Math.max(1, input.width - 4)));
   const contentLines = input.content?.trim()
     ? input.content
       .split(/\r?\n/u)
-      .flatMap((line) => wrapDisplayTextFast(line.length > 0 ? line : " ", Math.max(24, input.width - 8)))
+      .flatMap((line) => wrapDisplayTextFast(line.length > 0 ? line : " ", Math.max(1, input.width - 4)))
     : [];
   const lines = [
     ...summaryLines,
@@ -216,7 +227,7 @@ function renderContextInspectorDetailReader(input: {
   return (
     <Box marginTop={1} flexDirection="column">
       <Text color={input.palette.borderDefault}>
-        {"─".repeat(Math.min(64, Math.max(24, input.width - 4)))}
+        {"─".repeat(Math.max(1, input.width))}
       </Text>
       <Text>
         <Text color={input.palette.assistant} bold>{"Detail"}</Text>
@@ -247,6 +258,7 @@ export function renderContextInspectorGroupedViewport(input: {
   readonly width: number;
   readonly palette: ContextInspectorPalette;
   readonly actionsEnabled: boolean;
+  readonly compact?: boolean | undefined;
 }): React.ReactNode {
   void input.actionsEnabled;
   const detailRow = input.expandedId
@@ -267,16 +279,19 @@ export function renderContextInspectorGroupedViewport(input: {
     cursorIndex: input.cursorIndex,
     maxRows: input.maxRows,
     ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
+    chromeRows: input.compact ? 0 : 2,
   });
   return (
-    <Box marginTop={1} flexDirection="column">
-      <Text color={input.palette.borderDefault}>{"─".repeat(Math.min(64, Math.max(24, input.width - 4)))}</Text>
+    <Box marginTop={input.compact ? 0 : 1} flexDirection="column" flexShrink={0}>
+      {input.compact ? null : (
+        <Text color={input.palette.borderDefault}>{"─".repeat(Math.max(1, input.width))}</Text>
+      )}
       {input.rows.length === 0 ? (
-        <Text color={input.palette.textMuted}>{"  none"}</Text>
+        <Text color={input.palette.textMuted}>{"No context sources"}</Text>
       ) : (
         <>
           {visible.hiddenBefore > 0 ? (
-            <Text color={input.palette.textDim}>{`  … ${visible.hiddenBefore} more above`}</Text>
+            <Text color={input.palette.textDim}>{`… ${visible.hiddenBefore} more above`}</Text>
           ) : null}
           {renderGroupedVisibleRows({
             allRows: input.rows,
@@ -288,7 +303,7 @@ export function renderContextInspectorGroupedViewport(input: {
             palette: input.palette,
           })}
           {visible.hiddenAfter > 0 ? (
-            <Text color={input.palette.textDim}>{`  … ${visible.hiddenAfter} more below`}</Text>
+            <Text color={input.palette.textDim}>{`… ${visible.hiddenAfter} more below`}</Text>
           ) : null}
         </>
       )}

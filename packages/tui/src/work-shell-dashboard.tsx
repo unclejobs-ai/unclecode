@@ -27,6 +27,8 @@ export function EmbeddedWorkShellPane<
   readonly onRequestSessionsView?: (() => void) | undefined;
   readonly onSyncHomeState?: ((homeState: Partial<TuiShellHomeState>) => void) | undefined;
   readonly refreshHomeState?: (() => Promise<TuiShellHomeState>) | undefined;
+  readonly inputValue?: string | undefined;
+  readonly onInputValueChange?: ((value: string) => void) | undefined;
 }) {
   const { exit } = useApp();
   const pane = useMemo(() => props.buildPane({ onExit: exit }), [props.buildPane, exit]);
@@ -34,6 +36,11 @@ export function EmbeddedWorkShellPane<
   return (
     <WorkShellPane<Attachment, State>
       {...pane}
+      disposeEngineOnUnmount={false}
+      {...(props.inputValue !== undefined ? { inputValue: props.inputValue } : {})}
+      {...(props.onInputValueChange
+        ? { onInputValueChange: props.onInputValueChange }
+        : {})}
       onExit={exit}
       {...(props.onRequestSessionsView
         ? { onRequestSessionsView: props.onRequestSessionsView }

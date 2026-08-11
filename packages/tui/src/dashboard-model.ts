@@ -41,7 +41,10 @@ export type TuiRenderOptions<
   readonly renderWorkPane?: ((controls: {
     openSessions: () => void;
     syncHomeState: (homeState: Partial<HomeState>) => void;
+    workDraft: string;
+    setWorkDraft: (value: string) => void;
   }) => ReactNode) | undefined;
+  readonly disposeWorkPane?: (() => void) | undefined;
   readonly sessions?: HomeState["sessions"];
   readonly contextLines?: readonly string[];
   readonly bridgeLines?: readonly string[];

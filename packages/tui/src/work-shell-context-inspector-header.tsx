@@ -178,25 +178,26 @@ function formatReceiptPacketTransition(receipt: ContextPacketViewActionReceipt):
   return "packet proof pending";
 }
 
+export function formatContextInspectorActionReceiptLine(
+  receipt: ContextPacketViewActionReceipt | undefined,
+  width: number,
+): string | undefined {
+  if (!receipt) {
+    return undefined;
+  }
+  const transition = formatReceiptPacketTransition(receipt);
+  const undo = receipt.canUndo ? "undo ready" : "undo unavailable";
+  return truncateForDisplayWidth(
+    `Proof · ${transition} · ${undo} · ${receipt.message}`,
+    Math.max(1, width),
+  );
+}
+
 export function renderContextInspectorReceipt(input: {
   readonly receipt?: ContextPacketViewActionReceipt | undefined;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
 }): React.ReactNode {
-  if (!input.receipt) {
-    return null;
-  }
-  const transition = formatReceiptPacketTransition(input.receipt);
-  const undo = input.receipt.canUndo ? "undo ready" : "undo unavailable";
-  const body = truncateForDisplayWidth(
-    `${transition} · ${undo} · ${input.receipt.message}`,
-    Math.max(32, input.width - 12),
-  );
-  return (
-    <Text>
-      <Text color={input.palette.success} bold>{"Proof"}</Text>
-      <Text color={input.palette.borderSoft}>{" · "}</Text>
-      <Text color={input.palette.text}>{body}</Text>
-    </Text>
-  );
+  const line = formatContextInspectorActionReceiptLine(input.receipt, input.width);
+  return line ? <Text color={input.palette.success} bold>{line}</Text> : null;
 }

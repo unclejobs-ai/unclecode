@@ -29,6 +29,25 @@ function renderContextInspectorWarning(input: {
   );
 }
 
+export function formatContextInspectorWarningLines(input: {
+  readonly packet: ContextPacketView;
+  readonly width: number;
+}): readonly string[] {
+  if (input.packet.warnings.length === 0) {
+    return ["✓ Warnings · none"];
+  }
+  return [
+    `Warnings · ${input.packet.warnings.length}`,
+    ...input.packet.warnings.flatMap((warning) => [
+      truncateForDisplayWidth(
+        `${warning.severity} · ${warning.code}`,
+        Math.max(1, input.width),
+      ),
+      ...wrapDisplayTextFast(warning.message, Math.max(1, input.width - 2))
+        .map((line) => `· ${line}`),
+    ]),
+  ];
+}
 export function renderContextInspectorWarnings(input: {
   readonly packet: ContextPacketView;
   readonly width: number;

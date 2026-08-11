@@ -177,7 +177,7 @@ test("summarizeRuntimeReport includes fresh tool-call evidence", () => {
       idleStableVerified: true,
       latencyWithinBudget: true,
       contextPacketTransparency: true,
-      contextPaneExcerpt: "Included in next answer\nHeld back locally\nWarnings · none",
+      contextPaneExcerpt: "Sources\n1 groups · 10 in · 0 held\nWarnings · none",
     },
     slashLatencyTuiSmoke: {
       latencyWithinBudget: true,

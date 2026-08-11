@@ -10,6 +10,9 @@ import {
 import { buildContextInspectorRows } from "../../packages/tui/src/work-shell-context-inspector-model.ts";
 import { renderContextInspectorGroupedViewport } from "../../packages/tui/src/work-shell-context-inspector-sources.tsx";
 import { formatContextInspectorPacketProofLines } from "../../packages/tui/src/work-shell-context-inspector-header.tsx";
+import { getDisplayWidth } from "../../packages/tui/src/text-width.ts";
+import { formatWorkShellContextAdviceLines } from "../../packages/tui/src/work-shell-context-advice.tsx";
+import { windowContextDeskLines } from "../../packages/tui/src/work-shell-context-inspector.tsx";
 import {
   formatContextTurnReceiptLine,
   renderContextTurnReceipt,
@@ -48,6 +51,24 @@ async function renderView(overrides, frameOptions = {}) {
   instance.unmount();
   instance.cleanup();
   return output;
+}
+
+function assertFrameFits(output, columns, rows, label) {
+  const lines = output.split("\n");
+  assert.ok(lines.length <= rows, `${label} rendered ${lines.length} rows into ${rows}`);
+  for (const [index, line] of lines.entries()) {
+    assert.ok(
+      getDisplayWidth(line) <= columns,
+      `${label} row ${index + 1} is ${getDisplayWidth(line)} columns wide in ${columns}: ${line}`,
+    );
+  }
+}
+
+function flattenFrameText(output) {
+  return output
+    .replace(/[┌┐└┘│─]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
 }
 
 function packet(overrides = {}) {
@@ -106,6 +127,51 @@ function packet(overrides = {}) {
     },
     ...overrides,
   };
+}
+
+function crowdedPacket(overrides = {}) {
+  const categories = [
+    "workspace-guidance",
+    "bridge",
+    "memory",
+    "attachment",
+    "runtime",
+    "loop-trail",
+    "mystery-provider",
+  ];
+  const included = Array.from({ length: 36 }, (_, index) => ({
+    id: `src-included-${index}`,
+    category: categories[index % categories.length],
+    label: index === 22
+      ? "매우 긴 한글 컨텍스트 소스 이름과 넓은 표시 문자"
+      : `source ${index}`,
+    reason: "fixture source",
+    preview: index === 22
+      ? "선택한 소스의 미리보기는 폭을 넘지 않고 명시적으로 스크롤되어야 한다. ".repeat(8)
+      : `preview body for source ${index} should stay off collapsed siblings`,
+    tokenEstimate: 8,
+    includedInModel: true,
+    salience: index === 22 ? 0.9 : 0.5,
+  }));
+  const excluded = Array.from({ length: 8 }, (_, index) => ({
+    id: `src-held-${index}`,
+    category: categories[(index + 3) % categories.length],
+    label: `held source ${index}`,
+    reason: "held fixture",
+    preview: `held preview ${index}`,
+    tokenEstimate: 4,
+    includedInModel: false,
+  }));
+  return packet({
+    included,
+    excluded,
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: included.length, excluded: excluded.length, warnings: 0 },
+    tokenEstimate: 320,
+    manifest: undefined,
+    ...overrides,
+  });
 }
 
 function receipt(overrides = {}) {
@@ -175,9 +241,11 @@ test("Context Desk renders preview and meaning-change proof", async () => {
   });
 
   for (const proof of [output, rendered]) {
-    assert.match(proof, /PACKET CHANGED/);
-    assert.match(proof, /crp-a91f -> crp-b203/);
-    assert.match(proof, /review required/i);
+    const proofText = flattenFrameText(proof);
+    assert.match(proofText, /PACKET CHANGED/);
+    assert.match(proofText, /crp-a91f/);
+    assert.match(proofText, /-> crp-b203/);
+    assert.match(proofText, /review required/i);
   }
   assert.equal(rendered.match(/PACKET CHANGED|NEXT REQUEST|SUBMITTED/g)?.length, 1);
   const narrowProof = formatContextInspectorPacketProofLines({
@@ -303,27 +371,28 @@ test("WorkShellView renders /context as an interactive source inspector", async 
       afterPacketId: "packet-test",
     },
     contextPacket: packet(),
+    contextIndicator: "▤ 10 ctx · ~201t",
   });
+  const interactiveText = flattenFrameText(output);
 
-  assert.match(output, /UncleCode Context Desk/);
-  assert.match(output, /Sources · 2 included · 3 held back/);
-  assert.match(output, /Summary ·/);
-  assert.match(output, /반갑다\. 컨텍스트 인스펙터에서 선택한 행은 펼쳐져야 한다\./);
-  assert.match(output, /Detail · recent Q&A/);
-  assert.match(output, /↑↓ scroll · Enter back · Space send\/hold · P pin · Esc close/);
-  assert.doesNotMatch(output, /Project instructions/);
-  assert.doesNotMatch(output, /Tool activity/);
-  assert.doesNotMatch(output, /session loop trail/);
+  assert.doesNotMatch(output, /UncleCode Context Desk/);
+  assert.doesNotMatch(output, /\bFocus ·/);
+  assert.match(output, /Sources/);
+  assert.match(output, /Preview/);
+  assert.match(output, /Details \/ Actions/);
+  assert.match(interactiveText, /반갑다\. 컨텍스트 인스펙터에서 선택한 행은 펼쳐져야 한다\./);
+  assert.match(interactiveText, /Detail · recent Q&A/);
+  assert.match(interactiveText, /Proof · packet-before -> packet-test/);
+  assert.match(interactiveText, /hold-back session loop trail/);
+  assert.match(output, /Enter back/);
+  assert.match(output, /p pin/);
   assert.doesNotMatch(output, /\.omo\/ulw-loop/);
   assert.doesNotMatch(output, /\bbridge\b/);
-  assert.doesNotMatch(output, /(?<!session )loop trail/);
   assert.doesNotMatch(output, /^\s*Groups\s*$/m);
-  assert.doesNotMatch(output, /Keys ·/);
-  assert.doesNotMatch(output, /Actions ·/);
-  assert.doesNotMatch(output, /Prompt ·/);
-  assert.doesNotMatch(output, /Workbench/);
-  assert.doesNotMatch(output, /Budget lane/);
-  assert.doesNotMatch(output, /Preflight/);
+  assert.doesNotMatch(output, /Workbench|Budget lane|Preflight/);
+  assert.match(output, /tmp\/unclecode-test-workspace/);
+  assert.equal(output.match(/▤ 10 ctx · ~201t/g)?.length, 1);
+  assert.doesNotMatch(output, /› /);
 });
 
 test("WorkShellView hides source mutation keys when no provider prompt mutator is wired", async () => {
@@ -353,11 +422,9 @@ test("WorkShellView hides source mutation keys when no provider prompt mutator i
 
   assert.match(output, /Warnings · 1/);
   assert.match(output, /warning · runtime-token-estimate-unknown/);
-  assert.match(output, /· Runtime source lacks a precise token estimate; review before answering\./);
-  assert.match(output, /↑↓ move · Enter details · Space send\/hold · P pin · Esc close/);
+  assert.match(output, /Runtime source lacks a precise token estimate/);
   assert.match(output, /> AGENTS\.md · sent · ~42t/);
-  assert.doesNotMatch(output, /Keys ·/);
-  assert.doesNotMatch(output, /Actions ·/);
+  assert.doesNotMatch(output, /Space send\/hold|p pin|A accept|R reject/);
   assert.doesNotMatch(output, /source actions unavailable/);
 });
 
@@ -409,13 +476,59 @@ test("WorkShellView windows long /context source lists around the cursor", async
 
   assert.match(output, /… \d+ more above/);
   assert.match(output, /… \d+ more below/);
-  assert.match(output, /> workspace source 14 · sent · ~5t/);
-  assert.doesNotMatch(output, /workspace preview 14/);
+  assert.match(output, /> workspace source 14/);
+  assert.match(output, /Project instructions · sent · ~5t/);
+  assert.match(output, /workspace preview 14/);
   assert.doesNotMatch(output, /Budget lane/);
-  assert.doesNotMatch(output, /↓ Included in next answer[\s\S]*workspace source 0/);
 });
 
-test("WorkShellView renders actionable optimizer advice without source content", async () => {
+test("Context line window keeps body content at one and two rows", () => {
+  const lines = ["first", "second", "third", "fourth"];
+
+  assert.deepEqual(windowContextDeskLines(lines, 1, 1), ["second"]);
+  assert.deepEqual(windowContextDeskLines(lines, 1, 2), [
+    "… 1 lines above",
+    "second",
+  ]);
+  assert.deepEqual(windowContextDeskLines(lines, 1, 3), [
+    "… 1 lines above",
+    "second",
+    "… 2 lines below",
+  ]);
+  assert.deepEqual(windowContextDeskLines(lines, 99, 3), [
+    "… 2 lines above",
+    "third",
+    "fourth",
+  ]);
+});
+
+test("Context advice formatter wraps every fixed and dynamic line", () => {
+  const suggestions = Array.from({ length: 5 }, (_, index) => ({
+    id: `suggestion-${index}`,
+    packetReceiptId: "receipt-submitted",
+    sourceId: index === 0 ? "workspace-1" : `source-${index}`,
+    action: "hold-back",
+    reasonCode: "low-trust-token-hotspot",
+    reasonText: "This reason needs wrapping.",
+    estimatedTokenSaving: 3_200,
+    status: "proposed",
+    createdAt: "2026-07-13T00:00:01.000Z",
+  }));
+  const lines = formatWorkShellContextAdviceLines({
+    packet: packet(),
+    suggestions,
+    unavailable: "Optimizer temporarily unavailable",
+    selectedSourceId: "workspace-1",
+    actionsEnabled: true,
+    width: 12,
+  });
+
+  assert.ok(lines.some((line) => line.includes("accept")));
+  assert.ok(lines.some((line) => line.includes("more")));
+  assert.ok(lines.every((line) => getDisplayWidth(line) <= 12));
+});
+
+test("WorkShellView renders actionable optimizer advice beside the source preview", async () => {
   const contextPacket = packet();
   const output = await renderView({
     contextPacket,
@@ -471,12 +584,9 @@ test("WorkShellView renders actionable optimizer advice without source content",
 
   assert.match(output, /Context optimizer/);
   assert.match(output, /Hold back · AGENTS\.md · Save ~3\.2k/);
-  assert.match(output, /strict low-trust token threshold/);
+  assert.match(flattenFrameText(output), /strict low-trust token threshold/);
   assert.match(output, /\[A\] accept · \[R\] reject/);
-  assert.match(output, /Refresh · recent Q&A · accepted/);
-  assert.match(output, /Keep · session loop trail · rejected/);
-  assert.match(output, /Summarize · recent Q&A · Savings unknown/);
-  assert.doesNotMatch(output, /Workspace instructions stay active/);
+  assert.match(output, /… \d+ lines below/);
 });
 test("WorkShellView reserves source rows when optimizer advice fills a compact terminal", async () => {
   const output = await renderView(
@@ -502,11 +612,11 @@ test("WorkShellView reserves source rows when optimizer advice fills a compact t
     { columns: 52, rows: 40 },
   );
 
-  assert.match(output, /> AGENTS\.md · sent · pinned/);
+  assert.match(output, /> AGENTS\.md/);
   assert.match(output, /\[A\] accept · \[R\] reject/);
   assert.equal(output.match(/\[A\] accept · \[R\] reject/g)?.length, 1);
-  assert.match(output, /… 2 more suggestions/);
-  assert.ok(output.split("\n").length <= 40, "advice and source evidence must fit a 52x40 terminal");
+  assert.match(output, /… \d+ lines below/);
+  assertFrameFits(output, 52, 40, "52x40 optimizer advice");
 });
 
 
@@ -520,134 +630,162 @@ test("WorkShellView renders optimizer failure as a bounded non-fatal state", asy
 
   assert.match(output, /Context optimizer/);
   assert.match(output, /Context optimizer unavailable; reply kept\./);
-  assert.doesNotMatch(output, /\[A\] accept/);
+  assert.doesNotMatch(output, /A accept/);
 });
 
-test("WorkShellView renders a compact 52x40 inspector for 40+ grouped sources", async () => {
-  const categories = [
-    "workspace-guidance",
-    "bridge",
-    "memory",
-    "attachment",
-    "runtime",
-    "loop-trail",
-    "mystery-provider",
-  ];
-  const included = Array.from({ length: 36 }, (_, index) => ({
-    id: `src-included-${index}`,
-    category: categories[index % categories.length],
-    label: `source ${index}`,
-    reason: "fixture source",
-    preview: `preview body for source ${index} should stay off collapsed siblings`,
-    tokenEstimate: 8,
-    includedInModel: true,
-    salience: index === 22 ? 0.9 : 0.5,
-  }));
-  const excluded = Array.from({ length: 8 }, (_, index) => ({
-    id: `src-held-${index}`,
-    category: categories[(index + 3) % categories.length],
-    label: `held source ${index}`,
-    reason: "held fixture",
-    preview: `held preview ${index}`,
-    tokenEstimate: 4,
-    includedInModel: false,
-  }));
-  const contextPacket = packet({
-    included,
-    excluded,
-    warnings: [],
-    preview: [],
-    sourceCounts: { included: included.length, excluded: excluded.length, warnings: 0 },
-    tokenEstimate: 320,
-    manifest: undefined,
+test("Context Desk renders split panes at narrow, medium, and wide terminal sizes", async () => {
+  const contextPacket = crowdedPacket();
+  const selectedIndex = buildContextInspectorRows(contextPacket)
+    .findIndex((row) => row.item.id === "src-included-22");
+  assert.ok(selectedIndex >= 0, "expected the wide-label source in grouped rows");
+
+  for (const [columns, rows] of [[120, 40], [80, 30], [52, 40]]) {
+    const output = await renderView(
+      {
+        terminalColumns: columns,
+        terminalRows: rows,
+        contextSourceActionsEnabled: true,
+        contextInspectorCursor: selectedIndex,
+        contextPacket,
+      },
+      { columns, rows },
+    );
+
+    assert.match(output, /Sources/);
+    assert.match(output, /Preview/);
+    assert.match(output, /Details \/ Actions/);
+    assert.match(output, /매우 긴 한글/);
+    assert.match(output, /p pin/);
+    assert.doesNotMatch(output, /UncleCode Context Desk/);
+    assert.doesNotMatch(output, /\bFocus ·/);
+    assertFrameFits(output, columns, rows, `${columns}x${rows} Context Desk`);
+  }
+
+  const wideOutput = await renderView(
+    {
+      terminalColumns: 120,
+      terminalRows: 40,
+      contextInspectorCursor: selectedIndex,
+      contextPacket,
+    },
+    { columns: 120, rows: 40 },
+  );
+  assert.equal(
+    wideOutput.match(/◇ gpt-5\.4/g)?.length,
+    1,
+    "the shared Work status rail must render once",
+  );
+});
+
+test("Context Desk emergency mode renders only the focused pane and remains bounded", async () => {
+  const contextPacket = crowdedPacket();
+  const selectedIndex = buildContextInspectorRows(contextPacket)
+    .findIndex((row) => row.item.id === "src-included-22");
+
+  for (const [pane, visibleLabel, hiddenLabels] of [
+    ["sources", /Sources · 1\/3/, [/Preview/, /Details \/ Actions/]],
+    ["preview", /Preview · 2\/3/, [/Sources · 1\/3/, /Details \/ Actions/]],
+    ["details", /Details \/ Actions · 3\/3/, [/Sources · 1\/3/, /Preview · 2\/3/]],
+  ]) {
+    const output = await renderView(
+      {
+        terminalColumns: 80,
+        terminalRows: 20,
+        contextDeskPane: pane,
+        contextInspectorCursor: selectedIndex,
+        contextPacket,
+      },
+      { columns: 80, rows: 20 },
+    );
+    assert.match(output, visibleLabel);
+    for (const hiddenLabel of hiddenLabels) {
+      assert.doesNotMatch(output, hiddenLabel);
+    }
+    assertFrameFits(output, 80, 20, `80x20 ${pane} emergency pane`);
+    if (pane === "preview") {
+      assert.match(output, /↑↓ scroll · Enter details/);
+    } else if (pane === "details") {
+      assert.match(output, /↑↓ scroll · Enter back/);
+    }
+  }
+
+  const verticalEmergency = await renderView(
+    {
+      terminalColumns: 40,
+      terminalRows: 12,
+      contextDeskPane: "preview",
+      contextInspectorCursor: selectedIndex,
+      contextPacket,
+    },
+    { columns: 40, rows: 12 },
+  );
+  assert.match(verticalEmergency, /Preview · 2\/3/);
+  assert.doesNotMatch(verticalEmergency, /Sources · 1\/3/);
+  assert.match(verticalEmergency, /↑↓ scroll · Enter details/);
+  assertFrameFits(verticalEmergency, 40, 12, "40x12 Preview emergency pane");
+
+  const tooSmall = await renderView(
+    {
+      terminalColumns: 40,
+      terminalRows: 7,
+      contextDeskPane: "sources",
+      contextInspectorCursor: selectedIndex,
+      contextPacket,
+    },
+    { columns: 40, rows: 7 },
+  );
+  assert.match(tooSmall, /Terminal too small · Esc close/);
+  assertFrameFits(tooSmall, 40, 7, "sub-four-row Context Desk");
+});
+
+test("Context Desk bounds safety details, overflow markers, and agent activity", async () => {
+  const contextPacket = crowdedPacket({
+    warnings: [{
+      code: "safety-0",
+      severity: "warning",
+      message: "SAFETY WARNING SENTINEL must remain above ordinary activity.",
+    }],
+    sourceCounts: { included: 36, excluded: 8, warnings: 1 },
   });
-  const selectedIndex = buildContextInspectorRows(contextPacket).findIndex((row) => row.item.id === "src-included-22");
-  assert.ok(selectedIndex >= 0, "expected src-included-22 in grouped rows");
+  const selectedIndex = buildContextInspectorRows(contextPacket)
+    .findIndex((row) => row.item.id === "src-included-22");
   const output = await renderView(
     {
       terminalColumns: 52,
       terminalRows: 40,
-      contextSourceActionsEnabled: true,
       contextInspectorCursor: selectedIndex,
-      contextPacket,
-    },
-    { columns: 52, rows: 40 },
-  );
-
-  assert.match(output, /UncleCode Context Desk/);
-  assert.match(output, /Sources · 36 included · 8 held back/);
-  assert.match(output, /Current conversation/);
-  assert.match(output, /Saved memory/);
-  assert.match(output, new RegExp(`Focus · #${selectedIndex + 1}/44`));
-  assert.match(output, /> source 22 · sent · ~8t/);
-  assert.match(output, /… \d+ more (above|below)/);
-  assert.match(output, /↑↓ move · Enter details · Space send\/hold/);
-  assert.match(output, /P pin · Esc close/);
-  assert.ok(output.split("\n").length <= 40, "52x40 context inspector must fit the terminal height");
-  const expandedOutput = await renderView(
-    {
-      terminalColumns: 52,
-      terminalRows: 40,
-      contextSourceActionsEnabled: true,
-      contextInspectorCursor: selectedIndex,
-      contextInspectorExpanded: "src-included-22",
-      contextPacket,
-      contextInspectorDetailContent: [
-        "# Configured prompt",
-        "Rule one stays local.",
-        "Rule two is inspectable.",
-        "Rule three is not sent by the detail view.",
-        "Rule four remains visible.",
-        "Rule five proves Enter opens a real detail reader.",
-      ].join("\n"),
       contextInspectorDetailOffset: 0,
-    },
-    { columns: 52, rows: 40 },
-  );
-  assert.match(expandedOutput, /preview body for source 22/);
-  assert.match(expandedOutput, /Rule five proves Enter opens a real/);
-  assert.match(expandedOutput, /detail reader\./);
-  assert.match(expandedOutput, /↑↓ scroll · Enter back/);
-  assert.doesNotMatch(expandedOutput, /source 21/);
-  assert.ok(
-    expandedOutput.split("\n").length <= 40,
-    "expanded 52x40 context detail must fit the terminal height",
-  );
-  const middleScrolledOutput = await renderView(
-    {
-      terminalColumns: 52,
-      terminalRows: 40,
-      contextSourceActionsEnabled: true,
-      contextInspectorCursor: selectedIndex,
-      contextInspectorExpanded: "src-included-22",
       contextPacket,
-      contextInspectorDetailContent: Array.from(
-        { length: 60 },
-        (_, index) => `Local detail line ${index + 1}`,
-      ).join("\n"),
-      contextInspectorDetailOffset: 8,
+      agentConsole: {
+        profileId: "build",
+        workGraph: {
+          id: "graph-1",
+          goal: "bounded activity",
+          nodes: Array.from({ length: 7 }, (_, index) => ({
+            id: `node-${index}`,
+            title: index === 0 ? "AGENT ACTIVITY SENTINEL" : `activity task ${index}`,
+            status: index === 0 ? "running" : "pending",
+            dependsOn: [],
+          })),
+        },
+        activity: [],
+      },
     },
     { columns: 52, rows: 40 },
   );
-  assert.match(middleScrolledOutput, /… 8 lines above/);
-  assert.match(middleScrolledOutput, /lines below/);
+  const safetyText = flattenFrameText(output);
+
+  assert.match(safetyText, /SAFETY WARNING SENTINEL/);
+  assert.equal(safetyText.match(/AGENT ACTIVITY SENTINEL/g)?.length, 1);
   assert.ok(
-    middleScrolledOutput.split("\n").length <= 40,
-    "middle-scrolled context detail must reserve rows for both overflow markers",
+    safetyText.indexOf("SAFETY WARNING SENTINEL") < safetyText.indexOf("AGENT ACTIVITY SENTINEL"),
+    "safety-critical details must render before ordinary agent activity",
   );
-  // Group headers live only in the scrolled viewport; offscreen groups are not duplicated in a summary block.
-  assert.doesNotMatch(output, /^\s*Groups\s*$/m);
-  assert.doesNotMatch(output, /preview body for source 22/);
-  assert.doesNotMatch(output, /preview body for source 21/);
-  assert.doesNotMatch(output, /\bbridge\b/);
-  assert.doesNotMatch(output, /(?<!session )loop trail/);
-  assert.doesNotMatch(output, /\bruntime\b/);
-  assert.doesNotMatch(output, /mystery-provider/);
-  assert.doesNotMatch(output, /Workbench/);
-  assert.doesNotMatch(output, /Budget lane/);
-  assert.doesNotMatch(output, /Preflight/);
-  assert.doesNotMatch(output, /↓ Included in next answer/);
-  assert.doesNotMatch(output, /Held back locally/);
+  assert.ok(
+    (output.match(/…/g) ?? []).length >= 3,
+    "Sources, Preview, Details, and activity must expose hidden overflow",
+  );
+  assertFrameFits(output, 52, 40, "bounded Context details");
 });
 
 test("detail viewport reserves rows for both overflow markers", async () => {

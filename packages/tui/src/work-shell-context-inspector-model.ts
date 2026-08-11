@@ -41,6 +41,87 @@ export type ContextInspectorPalette = {
   readonly success: string;
 };
 
+export type ContextDeskPane = "sources" | "preview" | "details";
+
+export type ContextDeskPaneAllocation = {
+  readonly width: number;
+  readonly rows: number;
+  readonly contentWidth: number;
+  readonly contentRows: number;
+};
+
+export type ContextDeskLayout =
+  | {
+      readonly mode: "too-small";
+      readonly bodyWidth: number;
+      readonly bodyRows: number;
+    }
+  | {
+      readonly mode: "emergency";
+      readonly pane: ContextDeskPane;
+      readonly focused: ContextDeskPaneAllocation;
+    }
+  | {
+      readonly mode: "split";
+      readonly gutter: 1;
+      readonly sources: ContextDeskPaneAllocation;
+      readonly preview: ContextDeskPaneAllocation;
+      readonly details: ContextDeskPaneAllocation;
+    };
+
+function clampContextDeskSize(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function createContextDeskPaneAllocation(width: number, rows: number): ContextDeskPaneAllocation {
+  return {
+    width,
+    rows,
+    contentWidth: Math.max(1, width - 4),
+    contentRows: Math.max(0, rows - 3),
+  };
+}
+
+export function computeContextDeskLayout(input: {
+  readonly bodyWidth: number;
+  readonly bodyRows: number;
+  readonly pane: ContextDeskPane;
+}): ContextDeskLayout {
+  const bodyWidth = Math.max(0, Math.trunc(input.bodyWidth));
+  const bodyRows = Math.max(0, Math.trunc(input.bodyRows));
+  if (bodyRows < 4) {
+    return { mode: "too-small", bodyWidth, bodyRows };
+  }
+  if (bodyWidth < 48 || bodyRows < 17) {
+    return {
+      mode: "emergency",
+      pane: input.pane,
+      focused: createContextDeskPaneAllocation(bodyWidth, bodyRows),
+    };
+  }
+
+  const gutter = 1;
+  const sourcesWidth = bodyWidth >= 88
+    ? clampContextDeskSize(Math.round(bodyWidth * 0.36), 32, 44)
+    : bodyWidth >= 64
+      ? clampContextDeskSize(Math.round(bodyWidth * 0.32), 24, 31)
+      : clampContextDeskSize(Math.round(bodyWidth * 0.38), 18, 21);
+  const rightWidth = bodyWidth - sourcesWidth - gutter;
+  const previewRows = clampContextDeskSize(
+    Math.round(bodyRows * 0.45),
+    7,
+    bodyRows - 9,
+  );
+
+  return {
+    mode: "split",
+    gutter,
+    sources: createContextDeskPaneAllocation(sourcesWidth, bodyRows),
+    preview: createContextDeskPaneAllocation(rightWidth, previewRows),
+    details: createContextDeskPaneAllocation(rightWidth, bodyRows - previewRows),
+  };
+}
+
 export type ContextInspectorSourceRow = {
   readonly item: ContextPacketViewItem;
   readonly sourceIndex: number;
@@ -91,21 +172,6 @@ export function resolveContextSourceMeta(category: string, palette: ContextInspe
   };
 }
 
-export function computeContextOverlayViewportMaxRows(input: {
-  readonly terminalRows?: number;
-  readonly reservedRows?: number;
-}): number {
-  const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
-  if (input.terminalRows === undefined) {
-    return 12;
-  }
-  const reservedRows = Math.max(0, Math.trunc(input.reservedRows ?? 0));
-  return clamp(
-    Math.trunc(input.terminalRows) - 25 - reservedRows,
-    reservedRows > 0 ? 2 : 6,
-    24,
-  );
-}
 
 export function buildContextInspectorGroupedRows(
   rows: readonly ContextInspectorSourceRow[],

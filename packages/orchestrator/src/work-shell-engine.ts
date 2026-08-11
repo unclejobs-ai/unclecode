@@ -351,6 +351,8 @@ export type WorkShellTraceMode = "minimal" | "verbose";
 
 export type WorkShellComposerMode = "default" | "api-key-entry";
 
+export type ContextDeskPane = "sources" | "preview" | "details";
+
 export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly entries: readonly WorkShellChatEntry[];
   readonly streamingAssistantText?: string | undefined;
@@ -388,6 +390,8 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   // (null = none). Owned by the engine so every mutation re-renders via the
   // existing subscriber fan-out.
   readonly contextInspectorCursor: number;
+  readonly contextDeskPane: ContextDeskPane;
+  readonly contextDeskPreviewOffset: number;
   readonly contextInspectorExpanded: string | null;
   readonly contextInspectorDetailContent?: string | undefined;
   readonly contextInspectorDetailOffset: number;
@@ -703,6 +707,7 @@ export class WorkShellEngine<
   private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
   private readonly queueDrainSkipTurnEpochs = new Set<number>();
   private readonly pendingContextSuggestionInvalidations = new Set<string>();
+  private initialized = false;
   private queuedCountCache = 0;
   private currentContextSummaryLines: readonly string[];
   private lastSessionSummary: string;
@@ -840,6 +845,10 @@ export class WorkShellEngine<
   }
 
   async initialize(): Promise<void> {
+    if (this.initialized) {
+      return;
+    }
+    this.initialized = true;
     this.interactionBridge?.bind({
       ask: (request, signal) => this.openDecision(request, signal),
     });
@@ -879,6 +888,10 @@ export class WorkShellEngine<
   }
 
   dispose(): void {
+    if (!this.initialized) {
+      return;
+    }
+    this.initialized = false;
     this.agent.setTraceListener(undefined);
     this.settlePendingDecision({ status: "unavailable", reason: "Work Shell closed." });
     this.interactionBridge?.unbind("Work Shell closed.");
@@ -944,6 +957,8 @@ export class WorkShellEngine<
     this.setState({
       panel,
       contextInspectorCursor: -1,
+      contextDeskPane: "sources",
+      contextDeskPreviewOffset: 0,
       contextInspectorExpanded: null,
       contextInspectorDetailContent: undefined,
       contextInspectorDetailOffset: 0,
@@ -971,7 +986,11 @@ export class WorkShellEngine<
     const base = current < 0 || current >= sources.length ? 0 : current;
     const next = (base + (direction >= 0 ? 1 : -1) + sources.length) % sources.length;
     if (next !== current) {
-      this.setState({ contextInspectorCursor: next });
+      this.setState({
+        contextInspectorCursor: next,
+        contextDeskPreviewOffset: 0,
+        contextInspectorDetailOffset: 0,
+      });
     }
   }
 
@@ -1214,8 +1233,59 @@ export class WorkShellEngine<
     });
   }
 
+  cycleContextDeskPane(): void {
+    if (this.state.panel.title !== "Context expanded") {
+      return;
+    }
+    const panes: readonly ContextDeskPane[] = ["sources", "preview", "details"];
+    const index = panes.indexOf(this.state.contextDeskPane);
+    this.setState({ contextDeskPane: panes[(index + 1) % panes.length] ?? "sources" });
+  }
+
+  moveContextDeskPreviewOffset(direction: number): void {
+    if (this.state.panel.title !== "Context expanded") {
+      return;
+    }
+    const next = Math.max(0, this.state.contextDeskPreviewOffset + (direction >= 0 ? 1 : -1));
+    if (next !== this.state.contextDeskPreviewOffset) {
+      this.setState({ contextDeskPreviewOffset: next });
+    }
+  }
+
+  async enterContextDesk(): Promise<void> {
+    if (this.state.panel.title !== "Context expanded") {
+      return;
+    }
+    switch (this.state.contextDeskPane) {
+      case "preview":
+        this.setState({ contextDeskPane: "details" });
+        return;
+      case "details":
+        this.setState({
+          contextDeskPane: "sources",
+          contextInspectorExpanded: null,
+          contextInspectorDetailContent: undefined,
+          contextInspectorDetailOffset: 0,
+        });
+        return;
+      case "sources": {
+        const source = this.resolveInspectorSourceAtCursor();
+        if (!source) {
+          return;
+        }
+        await this.toggleContextInspectorExpanded();
+        if (
+          this.state.panel.title === "Context expanded"
+          && this.resolveInspectorSourceAtCursor()?.id === source.id
+        ) {
+          this.setState({ contextDeskPane: "details" });
+        }
+      }
+    }
+  }
+
   moveContextInspectorDetailOffset(direction: number): void {
-    if (this.state.contextInspectorExpanded === null) {
+    if (this.state.panel.title !== "Context expanded") {
       return;
     }
     const next = Math.max(0, this.state.contextInspectorDetailOffset + (direction >= 0 ? 1 : -1));
@@ -2163,6 +2233,8 @@ export class WorkShellEngine<
         lines: buildWorkShellContextPacketPreviewLines(packet),
       },
       contextInspectorCursor: 0,
+      contextDeskPane: "sources",
+      contextDeskPreviewOffset: 0,
       contextInspectorExpanded: null,
       contextInspectorDetailContent: undefined,
       contextInspectorDetailOffset: 0,

@@ -4227,6 +4227,126 @@ test("WorkShellEngine loads local source details on Enter and scrolls without mo
   assert.equal(engine.getState().contextInspectorDetailOffset, 0);
 });
 
+test("WorkShellEngine owns Context pane focus and independent scroll offsets", async () => {
+  const packet = {
+    id: "packet-context-desk-focus",
+    version: 1,
+    generatedAt: "2026-08-09T00:00:00.000Z",
+    title: "Next answer context",
+    included: [
+      {
+        id: "source-a",
+        category: "workspace",
+        label: "A.md",
+        reason: "first source",
+        preview: "first preview",
+        includedInModel: true,
+      },
+      {
+        id: "source-b",
+        category: "workspace",
+        label: "B.md",
+        reason: "second source",
+        preview: "second preview",
+        includedInModel: true,
+      },
+    ],
+    excluded: [],
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: 2, excluded: 0, warnings: 0 },
+    tokenEstimate: 0,
+  };
+  const { engine } = createEngine({
+    resolveContextPacket: async () => packet,
+    resolveContextSourceDetail: async (sourceId) => `Detail for ${sourceId}`,
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  assert.equal(engine.getState().contextDeskPane, "sources");
+  assert.equal(engine.getState().contextDeskPreviewOffset, 0);
+
+  engine.cycleContextDeskPane();
+  assert.equal(engine.getState().contextDeskPane, "preview");
+  engine.moveContextDeskPreviewOffset(1);
+  engine.moveContextDeskPreviewOffset(1);
+  assert.equal(engine.getState().contextDeskPreviewOffset, 2);
+
+  engine.cycleContextDeskPane();
+  assert.equal(engine.getState().contextDeskPane, "details");
+  assert.equal(engine.getState().contextInspectorExpanded, null);
+  engine.moveContextInspectorDetailOffset(1);
+  assert.equal(engine.getState().contextInspectorDetailOffset, 1);
+
+  engine.cycleContextDeskPane();
+  assert.equal(engine.getState().contextDeskPane, "sources");
+  engine.moveContextInspectorCursor(1);
+  assert.equal(engine.getState().contextInspectorCursor, 1);
+  assert.equal(engine.getState().contextDeskPreviewOffset, 0);
+  assert.equal(engine.getState().contextInspectorDetailOffset, 0);
+
+  await engine.enterContextDesk();
+  assert.equal(engine.getState().contextDeskPane, "details");
+  assert.equal(engine.getState().contextInspectorExpanded, "source-b");
+
+  engine.cycleContextDeskPane();
+  engine.cycleContextDeskPane();
+  assert.equal(engine.getState().contextDeskPane, "preview");
+  await engine.enterContextDesk();
+  assert.equal(engine.getState().contextDeskPane, "details");
+  assert.equal(engine.getState().contextInspectorExpanded, "source-b");
+
+  await engine.enterContextDesk();
+  assert.equal(engine.getState().contextDeskPane, "sources");
+  assert.equal(engine.getState().contextInspectorExpanded, null);
+
+  engine.cycleContextDeskPane();
+  engine.cycleContextDeskPane();
+  assert.equal(engine.getState().contextDeskPane, "details");
+  await engine.enterContextDesk();
+  assert.equal(engine.getState().contextDeskPane, "sources");
+  assert.equal(engine.getState().contextInspectorExpanded, null);
+});
+
+test("WorkShellEngine keeps Sources focused when Enter has no selected source", async () => {
+  const { engine } = createEngine({
+    resolveContextPacket: async () => ({
+      id: "packet-empty-context-desk",
+      version: 1,
+      generatedAt: "2026-08-09T00:00:00.000Z",
+      title: "Next answer context",
+      included: [],
+      excluded: [],
+      warnings: [],
+      preview: [],
+      sourceCounts: { included: 0, excluded: 0, warnings: 0 },
+      tokenEstimate: 0,
+    }),
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  await engine.enterContextDesk();
+
+  assert.equal(engine.getState().contextDeskPane, "sources");
+  assert.equal(engine.getState().contextInspectorExpanded, null);
+});
+
+test("WorkShellEngine initialize is idempotent across retained Dashboard remounts", async () => {
+  const { engine } = createEngine();
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  engine.cycleContextDeskPane();
+  engine.moveContextDeskPreviewOffset(1);
+
+  await engine.initialize();
+
+  assert.equal(engine.getState().panel.title, "Context expanded");
+  assert.equal(engine.getState().contextDeskPane, "preview");
+  assert.equal(engine.getState().contextDeskPreviewOffset, 1);
+});
+
 test("WorkShellEngine clears local detail when the next source has no resolver content", async () => {
   const packet = {
     id: "packet-detail-switch",

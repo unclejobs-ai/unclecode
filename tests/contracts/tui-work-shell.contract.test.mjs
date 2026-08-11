@@ -482,8 +482,8 @@ test("getWorkShellPanelPlacement keeps long-session panels near the composer by 
       panelTitle: "Context expanded",
       inputValue: "plain text",
     }),
-    false,
-    "hidden context overlays must not steal Esc from composer input",
+    true,
+    "Context Desk must own controls while preserving a nonempty Work draft",
   );
   assert.equal(
     shouldReportWorkShellOverlayOpen({
@@ -1150,6 +1150,8 @@ test("work-shell lifecycle/composer helpers are exported from the shared tui pac
 });
 
 test("embedded work-shell dashboard helper maps dashboard props through the shared tui seam", () => {
+  let paneBuildCount = 0;
+  let engineDisposeCount = 0;
   const props = createEmbeddedWorkShellPaneDashboardProps({
     workspaceRoot: "/repo",
     homeState: {
@@ -1163,34 +1165,39 @@ test("embedded work-shell dashboard helper maps dashboard props through the shar
       memoryLines: ["Memory initial"],
     },
     contextLines: ["Loaded guidance: AGENTS.md"],
-    buildPane: () => ({
-      provider: "openai",
-      model: "gpt-5.4",
-      mode: "default",
-      engine: {
-        getState: () => ({
-          entries: [],
-          authLabel: "api-key-env",
-          reasoning: { support: { status: "supported" } },
-          isBusy: false,
-          currentPanel: { title: "Context", lines: [] },
+    buildPane: () => {
+      paneBuildCount += 1;
+      return {
+        provider: "openai",
+        model: "gpt-5.4",
+        mode: "default",
+        engine: {
+          getState: () => ({
+            entries: [],
+            authLabel: "api-key-env",
+            reasoning: { support: { status: "supported" } },
+            isBusy: false,
+            currentPanel: { title: "Context", lines: [] },
+          }),
+          initialize() {},
+          dispose() {
+            engineDisposeCount += 1;
+          },
+          subscribe: () => () => {},
+          submit: async () => {},
+        },
+        cwd: "/repo",
+        resolveComposerInput: async () => ({
+          prompt: "",
+          attachments: [],
+          transcriptText: "",
         }),
-        initialize() {},
-        dispose() {},
-        subscribe: () => () => {},
-        submit: async () => {},
-      },
-      cwd: "/repo",
-      resolveComposerInput: async () => ({
-        prompt: "",
-        attachments: [],
-        transcriptText: "",
-      }),
-      getSuggestions: () => [],
-      shouldBlockSlashSubmit: () => false,
-      getReasoningLabel: () => "medium (mode-default)",
-      isReasoningSupported: () => true,
-    }),
+        getSuggestions: () => [],
+        shouldBlockSlashSubmit: () => false,
+        getReasoningLabel: () => "medium (mode-default)",
+        isReasoningSupported: () => true,
+      };
+    },
   });
 
   assert.equal(props.workspaceRoot, "/repo");
@@ -1200,6 +1207,7 @@ test("embedded work-shell dashboard helper maps dashboard props through the shar
 
   let sessionsOpened = false;
   let syncedHomeState = undefined;
+  let nextDraft = undefined;
   const element = props.renderWorkPane({
     openSessions() {
       sessionsOpened = true;
@@ -1207,12 +1215,48 @@ test("embedded work-shell dashboard helper maps dashboard props through the shar
     syncHomeState(homeState) {
       syncedHomeState = homeState;
     },
+    workDraft: "preserved draft",
+    setWorkDraft(value) {
+      nextDraft = value;
+    },
   });
   element.props.onRequestSessionsView();
   element.props.onSyncHomeState({ authLabel: "oauth-file" });
+  element.props.onInputValueChange("next draft");
+  const firstPane = element.props.buildPane({ onExit() {} });
+  const secondPane = element.props.buildPane({ onExit() {} });
 
   assert.equal(sessionsOpened, true);
   assert.deepEqual(syncedHomeState, { authLabel: "oauth-file" });
+  assert.equal(element.props.inputValue, "preserved draft");
+  assert.equal(nextDraft, "next draft");
+  assert.strictEqual(firstPane, secondPane);
+  assert.equal(typeof props.disposeWorkPane, "function");
+  assert.equal(
+    paneBuildCount,
+    1,
+    "the engine-backed pane must survive Session Desk unmounts",
+  );
+  props.disposeWorkPane();
+  assert.equal(
+    engineDisposeCount,
+    1,
+    "Dashboard unmount must dispose the retained engine exactly once",
+  );
+
+  const rebuiltElement = props.renderWorkPane({
+    openSessions() {},
+    syncHomeState() {},
+    workDraft: "",
+    setWorkDraft() {},
+  });
+  const rebuiltPane = rebuiltElement.props.buildPane({ onExit() {} });
+  assert.notStrictEqual(rebuiltPane, firstPane);
+  assert.equal(
+    paneBuildCount,
+    2,
+    "a disposed Dashboard pane must not be reused",
+  );
 });
 
 test("work-shell panel helpers are exported from the shared tui package seam", () => {

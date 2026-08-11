@@ -10,7 +10,7 @@ import {
   type ContextInspectorPalette,
 } from "./work-shell-context-inspector-model.js";
 import { formatContextReceiptTokenEstimate } from "./work-shell-context-receipt.js";
-import { truncateForDisplayWidth } from "./text-width.js";
+import { wrapDisplayTextFast } from "./text-width.js";
 
 export const MAX_VISIBLE_CONTEXT_SUGGESTIONS = 4;
 
@@ -69,6 +69,56 @@ function resolveSourceLabel(
   return sanitizeContextPreview(source?.label ?? sourceId);
 }
 
+export function formatWorkShellContextAdviceLines(input: {
+  readonly packet: ContextPacketView;
+  readonly suggestions: readonly ContextPolicySuggestion[];
+  readonly unavailable?: string | undefined;
+  readonly selectedSourceId?: string | undefined;
+  readonly actionsEnabled: boolean;
+  readonly width: number;
+}): readonly string[] {
+  if (input.suggestions.length === 0 && !input.unavailable) {
+    return [];
+  }
+  const selectedSuggestion = input.actionsEnabled
+    ? getSelectedVisibleContextPolicySuggestion(input)
+    : undefined;
+  const visible = getVisibleContextPolicySuggestions(input.suggestions);
+  const width = Math.max(1, input.width);
+  return [
+    ...wrapDisplayTextFast("Context optimizer · receipt-scoped advice", width),
+    ...(input.unavailable
+      ? wrapDisplayTextFast(input.unavailable, width)
+      : []),
+    ...visible.flatMap((suggestion) => {
+      const selected = suggestion.id === selectedSuggestion?.id;
+      const savings = suggestion.estimatedTokenSaving === undefined
+        ? "Savings unknown"
+        : `Save ${formatContextReceiptTokenEstimate({
+            tokenEstimate: suggestion.estimatedTokenSaving,
+            tokenEstimateState: "estimated",
+          })}`;
+      const status = suggestion.status === "proposed" ? savings : suggestion.status;
+      return [
+        ...wrapDisplayTextFast(
+          `${selected ? ">" : "·"} ${ACTION_LABELS[suggestion.action]} · ${resolveSourceLabel(input.packet, suggestion.sourceId)} · ${status}`,
+          width,
+        ),
+        ...wrapDisplayTextFast(suggestion.reasonText, width),
+        ...(selected && suggestion.status === "proposed" && input.actionsEnabled
+          ? wrapDisplayTextFast("[A] accept · [R] reject", width)
+          : []),
+      ];
+    }),
+    ...(input.suggestions.length > visible.length
+      ? wrapDisplayTextFast(
+          `… ${input.suggestions.length - visible.length} more suggestions`,
+          width,
+        )
+      : []),
+  ];
+}
+
 export function renderWorkShellContextAdvice(input: {
   readonly packet: ContextPacketView;
   readonly suggestions: readonly ContextPolicySuggestion[];
@@ -78,65 +128,18 @@ export function renderWorkShellContextAdvice(input: {
   readonly palette: ContextInspectorPalette;
   readonly width: number;
 }): React.ReactNode {
-  if (input.suggestions.length === 0 && !input.unavailable) {
-    return null;
-  }
-
-  const selectedSuggestion = input.actionsEnabled
-    ? getSelectedVisibleContextPolicySuggestion(input)
-    : undefined;
-  const selectedSuggestionId = selectedSuggestion?.id;
-  const visible = getVisibleContextPolicySuggestions(input.suggestions);
-  return (
+  const lines = formatWorkShellContextAdviceLines(input);
+  return lines.length > 0 ? (
     <Box marginTop={1} flexDirection="column">
-      <Text>
-        <Text color={input.palette.assistant} bold>{"Context optimizer"}</Text>
-        <Text color={input.palette.textMuted}>{" · receipt-scoped advice"}</Text>
-      </Text>
-      {input.unavailable ? (
-        <Text color={input.palette.warning}>
-          {truncateForDisplayWidth(
-            `  ${input.unavailable}`,
-            Math.max(16, input.width - 4),
-          )}
+      {lines.map((line, index) => (
+        <Text
+          key={`${index}:${line}`}
+          color={index === 0 ? input.palette.assistant : input.palette.textMuted}
+          bold={index === 0}
+        >
+          {line}
         </Text>
-      ) : null}
-      {visible.map((suggestion) => {
-        const selected = suggestion.id === selectedSuggestionId;
-        const savings = suggestion.estimatedTokenSaving === undefined
-          ? "Savings unknown"
-          : `Save ${formatContextReceiptTokenEstimate({
-              tokenEstimate: suggestion.estimatedTokenSaving,
-              tokenEstimateState: "estimated",
-            })}`;
-        const status = suggestion.status === "proposed"
-          ? savings
-          : suggestion.status;
-        return (
-          <React.Fragment key={suggestion.id}>
-            <Text color={selected ? input.palette.text : input.palette.textMuted}>
-              {truncateForDisplayWidth(
-                `  ${selected ? ">" : "·"} ${ACTION_LABELS[suggestion.action]} · ${resolveSourceLabel(input.packet, suggestion.sourceId)} · ${status}`,
-                Math.max(16, input.width - 4),
-              )}
-            </Text>
-            <Text color={input.palette.textMuted}>
-              {truncateForDisplayWidth(
-                `    ${suggestion.reasonText}`,
-                Math.max(16, input.width - 4),
-              )}
-            </Text>
-            {selected && suggestion.status === "proposed" && input.actionsEnabled ? (
-              <Text color={input.palette.user}>{"    [A] accept · [R] reject"}</Text>
-            ) : null}
-          </React.Fragment>
-        );
-      })}
-      {input.suggestions.length > visible.length ? (
-        <Text color={input.palette.textMuted}>
-          {`  … ${input.suggestions.length - visible.length} more suggestions`}
-        </Text>
-      ) : null}
+      ))}
     </Box>
-  );
+  ) : null;
 }
