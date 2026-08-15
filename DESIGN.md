@@ -92,19 +92,22 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Work shell header
 
-- Structure: provider title (bold, `--text-secondary`), shortcut hint (caption/muted), strong divider.
-- Variants: default provider, narrow terminal truncation.
+- Structure: provider title (left, bold) + right-aligned session facts `model · mode` (muted); one rule line below. An auth chip is appended to the facts only when auth is in a warning state.
+- Default chrome carries no shortcut hint; an explicitly injected hint may still override the right side for tests and callers.
+- Variants: default provider, auth warning chip, narrow terminal truncation (session facts drop first, then the title truncates).
 - Spacing: `--space-2` inline gap, one divider row.
-- States: default, truncated.
+- States: default, auth warning, truncated.
 - Accessibility: text must remain useful without color.
 - Motion: none.
 
 ### Work shell status line
 
-- Structure: grouped facts — session (`model · mode`, bold), auth, activity — separated by muted `│`.
-- Variants: idle, busy, interrupted idle, queue paused, parallel/ultrawork (sky accent on activity).
+- Structure: contextual single row. Idle renders `◇ Ready · last Xs` alone (`◇ Ready` before reply timing exists); model/mode moved to the header.
+- Busy and background work expand the row into activity facts (agents, jobs, humanized tool activity, elapsed) without the session group. Auth warnings surface as the header chip, never here.
+- Variants: idle, busy, interrupted idle, queue paused, parallel/ultrawork (sky accent on activity), narrow (model retained because the header dropped the facts).
 - Spacing: inline separators with muted text; avoid repeating footer facts here.
-- States: default, loading/busy, paused, warning.
+- States: default, loading/busy, paused.
+- Scope note: the pure formatter `formatWorkShellUsageLine` (`Ready · last reply 1.5s`, frozen by contract tests) is a separate usage-summary format, not the status-line assembly above.
 - Accessibility: spinner is supplementary; text must carry the state.
 - Motion: single spinner only while busy. Never duplicate activity spinners elsewhere.
 - Busy detail: humanize file paths and raw tool names; keep specific progress phrases like `thinking inspect repo` when they add signal.
@@ -132,7 +135,9 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Empty conversation
 
-- Structure: framed ready state, one concise explanation, three action hints.
+- Structure: framed ready-state heading, one concise explanation line, three starter prompts, one opener hint row.
+- Starter prompts: three example tasks as `1 …`/`2 …`/`3 …` rows (number in assistant accent, body muted); keys `1`-`3` prefill the composer with the matching prompt.
+- Opener hint row: `/ commands · @ attach a file · ! shell · ? keys` (single dim line, wraps naturally at narrow widths).
 - Variants: default, narrow terminal wrapped layout.
 - Spacing: `--space-4` internal padding equivalent.
 - States: empty.
@@ -151,11 +156,24 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Composer dock
 
-- Structure: hint row (accent follows state: user slash, assistant busy, warning queue), muted `─ prompt deck ─` divider, `›` input prefix, footer context row (cwd + one chip).
+- Structure: hint row (accent follows state: user slash, assistant busy, warning queue), unlabeled soft divider (pure `─` rule above the input area, no label text), `›` input prefix, footer context row (cwd + one chip).
+- Placeholder: empty input renders a dim ghost placeholder (`Describe a task · / for commands`) that disappears as soon as typing starts.
 - Variants: default, slash command accent, secure entry, attachment count, queue paused hint, parallel busy accent.
 - Spacing: one hint row above, one prompt row, one footer row; no double border above/below input.
 - States: default, focus by input, secure input, attachment cap warning, queued.
 - Accessibility: hints must expose keyboard actions.
+- Motion: none.
+
+### Decision bar
+
+- Structure: `◆` glyph plus title (fallback `Decision required`) directly above the composer dock while a decision is pending.
+- Single question: numbered options with the `(recommended)` marker when present, plus hint `1-N answer · Esc cancel · or type`.
+- One-key answer: `1`-`9` submits the matching option, `Esc` cancels; typing a full answer stays valid.
+- Multi-question: one compact line `◆ <title> · N questions · type answers · /cancel`; no one-key binding.
+- Variants: single question, multi question.
+- Spacing: one row above the composer dock; replaces the passive decision panel for that frame (option lines render exactly once).
+- States: pending, answered, cancelled (the bar disappears once the decision settles).
+- Accessibility: options carry textual numbers; color is never the only signal.
 - Motion: none.
 
 ### Dashboard panels
@@ -167,16 +185,28 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 - Accessibility: status labels accompany colored dots.
 - Motion: spinner only for active work.
 
+### Work shell keys
+
+Single-character shortcuts for discovery and pending decisions. They fire only while the composer is empty, no overlay, desk, console, or slash picker is open, and the composer is not in secure entry; otherwise the character is typed. Ctrl-combos always keep their global bindings.
+
+| Key | Context | Action |
+| --- | --- | --- |
+| `?` | Default chrome | Opens the `/help` panel |
+| `1`-`3` | Empty conversation | Prefills the composer with starter prompt N |
+| `1`-`9` | Decision bar (single question) | Answers with option N |
+| `Esc` | Decision bar | Cancels the pending decision |
+
 ## 5.1 Region show/hide matrix
 
 Default work shell: show answers and high-signal state; hide orchestration noise. `/verbose` moves trace-class content to the context overlay only — never the conversation rail.
 
 | Region | Show (default) | Hide (default) | Notes |
 | --- | --- | --- | --- |
-| **Header** | Provider title, shortcut hint, divider | Duplicate model/mode/auth from status/footer | Bold title + muted hint |
-| **Status strip** | `model · mode`, auth label, single spinner + elapsed + humanized busy detail | Raw file paths, duplicate spinners | Parallel/ultrawork: sky accent on activity |
+| **Header** | Provider title (bold), right-aligned `model · mode` facts (muted), auth chip on warning, divider | Default shortcut hint, duplicate model/mode/auth in status or footer | Facts drop first when narrow |
+| **Status strip** | Idle `◇ Ready · last Xs` alone; busy: single spinner + elapsed + humanized activity detail | `model · mode` and auth label (moved to the header), raw file paths, duplicate spinners | Parallel/ultrawork: sky accent on activity |
 | **Conversation** | User messages, final assistant synthesis, streaming partial text, `policy.denied` (minimal) | Reasoning deltas, tool traces, subtask JSON, worker meta, internal routing | User: `◇ You · body`; assistant: badge + quiet indent |
-| **Composer** | Hint row, prompt deck, `›` prefix, cwd · context chip footer | Raw paths in hints, double borders | Tint follows slash / busy / queue state |
+| **Empty state** | Ready heading, concise explanation, starter prompts `1`-`3`, opener hint row `/ commands · @ attach a file · ! shell · ? keys` | Orphan chrome, non-actionable filler | Starter keys prefill the composer |
+| **Composer** | Hint row, ghost placeholder, unlabeled soft divider, `›` prefix, cwd · context chip footer | Raw paths in hints, double borders, divider label text | Tint follows slash / busy / queue state |
 | **Footer** | cwd + one context chip | Model, mode, auth repetition | Never duplicate status strip |
 | **Slash picker** | Matching commands + Korean descriptions for `/context`, `/mode` | Unrelated commands | Selected row uses user accent + bold |
 | **Context overlay** (`/context`, `/verbose`) | Sources fact line, included/excluded/warning groups, trace lines when verbose | Full raw configs, duplicate conversation entries | 64-char summary truncation |
