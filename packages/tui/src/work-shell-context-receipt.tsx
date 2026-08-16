@@ -34,11 +34,13 @@ export function formatContextTurnReceiptLine(receipt: ContextPacketReceipt): str
   const heldCount = receipt.sourceRefs.filter((source) => !source.includedInModel).length;
   const sentCount = receipt.sourceRefs.length - heldCount;
   const tokenEstimate = formatContextReceiptTokenEstimate(receipt);
+  // Compact proof: `▤ N sent[ · M held][ · ~Xk tok]`. The `Context proof`
+  // label, a zero `held`, and an unknown token count add noise without
+  // information — the full breakdown stays one `/context` away.
   return [
-    "▤ Context proof",
-    `${sentCount} sent`,
-    `${heldCount} held`,
-    tokenEstimate === "unknown" ? "tokens unknown" : `${tokenEstimate} tok`,
+    `▤ ${sentCount} sent`,
+    ...(heldCount > 0 ? [`${heldCount} held`] : []),
+    ...(tokenEstimate !== "unknown" ? [`${tokenEstimate} tok`] : []),
   ].join(" · ");
 }
 

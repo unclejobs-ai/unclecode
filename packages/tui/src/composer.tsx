@@ -390,8 +390,33 @@ export function Composer(props: {
    */
   readonly suppressInspectorKeys?: boolean | undefined;
   readonly suppressInspectorMutationKeys?: boolean | undefined;
+  readonly suppressInspectorPinKey?: boolean | undefined;
+  readonly suppressInspectorDeliveryKey?: boolean | undefined;
   readonly suppressInspectorUndoKey?: boolean | undefined;
   readonly suppressInspectorAdviceKeys?: boolean | undefined;
+  /**
+   * Context Desk Enter: the desk resolves Enter to its expansion action, so it
+   * only earns the key on a host that actually wired an expansion handler.
+   * Defaults to `suppressInspectorKeys` so a caller that still passes only the
+   * blanket inspector flag keeps the previous blanket-Enter behaviour.
+   */
+  readonly suppressInspectorExpandKey?: boolean | undefined;
+  /**
+   * Context Desk (Pure Yazi): `h`/`j`/`k`/`l` walk panes and rows, so while the
+   * open desk owns an empty composer they must not also land in the draft.
+   * Arrow and Page keys never insert text, so only the letters need this.
+   *
+   * This is the both-axes default for a host that wires the desk as one unit.
+   * The runtime wires the two movements independently, so a host that only has
+   * one of them must split them with the two props below — otherwise the axis
+   * it never wired reaches neither the desk nor the draft and the letter just
+   * disappears.
+   */
+  readonly suppressInspectorNavigationKeys?: boolean | undefined;
+  /** `h`/`l` pane walk. Defaults to `suppressInspectorNavigationKeys`. */
+  readonly suppressInspectorPaneNavigationKeys?: boolean | undefined;
+  /** `j`/`k` row walk. Defaults to `suppressInspectorNavigationKeys`. */
+  readonly suppressInspectorCursorNavigationKeys?: boolean | undefined;
   /**
    * Cache Telemetry and Agent History own A/C while their overlay is open.
    * Suppress those action keys before the local draft ref can retain them
@@ -411,6 +436,23 @@ export function Composer(props: {
       composerEmpty: boolean,
     ) => boolean)
     | undefined;
+  /**
+   * Work shell action keys (empty-screen starter prompts, decision replies,
+   * the `?` keymap): when the shell's shared ownership predicate claims the
+   * single character, it must act elsewhere — never as draft text. Returning
+   * true keeps the keystroke out of the draft at the same evaluation point
+   * as `suppressAgentConsoleKey`.
+   */
+  readonly suppressShellActionKeys?:
+    | ((input: string, composerEmpty: boolean) => boolean)
+    | undefined;
+  /**
+   * Ghost hint painted onto the empty input row. Shown only while the draft is
+   * empty, unmasked, and not settling a paste, so the first keystroke replaces
+   * it with real text. Rendered dim over the same padded row (and the same
+   * terminal-cursor math) the blank draft used, so layout is unchanged.
+   */
+  readonly placeholder?: string | undefined;
   readonly cursorVisible?: boolean | undefined;
 }) {
   const { setCursorPosition } = useCursor();
@@ -491,6 +533,17 @@ export function Composer(props: {
     ) {
       return;
     }
+    // Shell action keys (starter prefill, decision one-key replies, `?`
+    // keymap) resolve through the same shared predicate the input controller
+    // dispatches on, so an owned character is never also draft text.
+    if (
+      latestProps.suppressShellActionKeys?.(
+        input,
+        isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current),
+      )
+    ) {
+      return;
+    }
     if (
       key.upArrow ||
       key.downArrow ||
@@ -535,18 +588,44 @@ export function Composer(props: {
     ) {
       const suppressMutationKeys =
         latestProps.suppressInspectorMutationKeys ?? latestProps.suppressInspectorKeys;
-      if (key.return) {
+      // Enter belongs to the desk only where an expansion handler exists.
+      // Swallowing it on a host that cannot expand would drop the keystroke
+      // between the desk and the composer's own submit.
+      const suppressExpandKey =
+        latestProps.suppressInspectorExpandKey ?? latestProps.suppressInspectorKeys;
+      if (key.return && suppressExpandKey) {
         return;
       }
-      if (suppressMutationKeys && (input === " " || input === "p")) {
+      // Each axis answers for its own handler: a desk that walks rows but not
+      // panes must hand `h`/`l` back as ordinary text.
+      const suppressPaneNavigationKeys =
+        latestProps.suppressInspectorPaneNavigationKeys
+        ?? latestProps.suppressInspectorNavigationKeys;
+      const suppressCursorNavigationKeys =
+        latestProps.suppressInspectorCursorNavigationKeys
+        ?? latestProps.suppressInspectorNavigationKeys;
+      if (suppressPaneNavigationKeys && (input === "h" || input === "l")) {
         return;
       }
-      if (latestProps.suppressInspectorUndoKey && input.toLowerCase() === "u") {
+      if (suppressCursorNavigationKeys && (input === "j" || input === "k")) {
+        return;
+      }
+      const suppressPinKey =
+        latestProps.suppressInspectorPinKey ?? suppressMutationKeys;
+      const suppressDeliveryKey =
+        latestProps.suppressInspectorDeliveryKey ?? suppressMutationKeys;
+      if (
+        (suppressPinKey && input === "p")
+        || (suppressDeliveryKey && input === " ")
+      ) {
+        return;
+      }
+      if (latestProps.suppressInspectorUndoKey && input === "u") {
         return;
       }
       if (
         latestProps.suppressInspectorAdviceKeys
-        && (input.toLowerCase() === "a" || input.toLowerCase() === "r")
+        && (input === "a" || input === "r")
       ) {
         return;
       }
@@ -627,6 +706,14 @@ export function Composer(props: {
   });
   setCursorPosition(terminalCursor);
   const colorProps = props.textColor ? { color: props.textColor } : {};
+  // The placeholder replaces the padded blank row of an empty draft (mask and
+  // paste windows keep their own presentation), never the typed text.
+  const placeholderLine = props.placeholder !== undefined
+    && props.value.length === 0
+    && props.mask === undefined
+    && !isPasting
+    ? props.placeholder
+    : undefined;
 
   return (
     <Box ref={composerRef} flexDirection="column">
@@ -634,7 +721,15 @@ export function Composer(props: {
         <Text {...colorProps} dimColor>{formatComposerOverflowLine("above", viewport.hiddenAbove, visibleWidth)}</Text>
       ) : null}
       {viewport.lines.map((line, index) => (
-        <Text key={index} {...colorProps}>{padComposerLine(line.length > 0 ? line : " ", visibleWidth)}</Text>
+        placeholderLine !== undefined && line.length === 0 ? (
+          <Text
+            key={index}
+            {...colorProps}
+            dimColor
+          >{padComposerLine(truncateForDisplayWidth(placeholderLine, visibleWidth), visibleWidth)}</Text>
+        ) : (
+          <Text key={index} {...colorProps}>{padComposerLine(line.length > 0 ? line : " ", visibleWidth)}</Text>
+        )
       ))}
       {viewport.hiddenBelow > 0 ? (
         <Text {...colorProps} dimColor>{formatComposerOverflowLine("below", viewport.hiddenBelow, visibleWidth)}</Text>

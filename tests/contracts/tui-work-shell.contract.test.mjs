@@ -119,7 +119,7 @@ test("work-shell hotspot re-exports extracted helper owner seams instead of regr
   assert.match(viewSource, /export function getWorkShellEntryPresentation\(/);
   assert.match(viewSource, /function WorkShellSectionDivider\(/);
   assert.doesNotMatch(viewSource, /Ctrl\+O context/);
-  assert.match(viewSource, /Ctrl\+O sessions/);
+  assert.doesNotMatch(viewSource, /Ctrl\+O sessions/);
   assert.doesNotMatch(
     viewSource,
     /<Text bold color="white">Conversation<\/Text>/,
@@ -182,7 +182,47 @@ test("TUI exports the read-only context turn receipt formatter", () => {
     createdAt: "2026-07-13T00:00:00.000Z",
   });
 
-  assert.equal(line, "▤ Context proof · 1 sent · 0 held · tokens unknown");
+  // Compact proof (Task 14): the label is gone, a zero `held` and an unknown
+  // token estimate are omitted — the values themselves still travel for the
+  // same inputs the long form used to pin.
+  assert.equal(line, "▤ 1 sent");
+
+  // Segment omission rules: `held` survives when sources are held back, and a
+  // known estimate keeps its `~Xk tok` segment.
+  const held = formatContextTurnReceiptLine({
+    id: "receipt-held",
+    projectId: "project-1",
+    sessionId: "session-1",
+    turnId: "turn-2",
+    packetId: "crp-held",
+    state: "submitted",
+    profile: "build",
+    tokenEstimate: 24_000,
+    tokenEstimateState: "estimated",
+    sourceCount: 3,
+    sourceRefs: [
+      {
+        sourceId: "rules",
+        category: "workspace-guidance",
+        salience: 1,
+        includedInModel: true,
+      },
+      {
+        sourceId: "memory-1",
+        category: "memory",
+        salience: 0.8,
+        includedInModel: true,
+      },
+      {
+        sourceId: "held-1",
+        category: "loop-trail",
+        salience: 0.4,
+        includedInModel: false,
+      },
+    ],
+    createdAt: "2026-07-13T00:00:00.000Z",
+  });
+  assert.equal(held, "▤ 2 sent · 1 held · ~24k tok");
 });
 
 test("formatWorkShellProviderTitle humanizes known providers for the unified work tab", () => {
@@ -398,6 +438,10 @@ test("getWorkShellComposerHint keeps slash discovery guidance inside the shared 
     getWorkShellComposerHint("/unknown", 0),
     "No matches · try /model, /auth, /context, /queue",
   );
+  // The empty composer is the only surface that advertises slash discovery.
+  // Pre-redesign it carried `/ commands` alongside the paste affordance; the
+  // redesign dropped the discovery half and kept only `Ctrl+V image`. A typed
+  // draft keeps the shorter help below.
   assert.equal(
     getWorkShellComposerHint("", 0),
     "Enter send · Shift+Enter newline · / commands · Ctrl+V image",

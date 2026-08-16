@@ -10,7 +10,7 @@ import {
   type ContextInspectorPalette,
 } from "./work-shell-context-inspector-model.js";
 import { formatContextReceiptTokenEstimate } from "./work-shell-context-receipt.js";
-import { truncateForDisplayWidth } from "./text-width.js";
+import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
 
 export const MAX_VISIBLE_CONTEXT_SUGGESTIONS = 4;
 
@@ -46,18 +46,30 @@ export function getVisibleContextPolicySuggestions(
 }
 
 export function getSelectedVisibleContextPolicySuggestion(input: {
+  readonly packet?: ContextPacketView | undefined;
   readonly suggestions: readonly ContextPolicySuggestion[];
   readonly selectedSourceId?: string | undefined;
 }): ContextPolicySuggestion | undefined {
-  return getVisibleContextPolicySuggestions(input.suggestions, input.selectedSourceId).find(
-    (suggestion) =>
-      suggestion.status === "proposed"
-      && suggestion.sourceId === input.selectedSourceId,
+  const suggestion = getVisibleContextPolicySuggestions(input.suggestions, input.selectedSourceId).find(
+    (candidate) =>
+      candidate.status === "proposed"
+      && candidate.sourceId === input.selectedSourceId,
   );
+  if (!suggestion || !input.packet || suggestion.action === "keep") {
+    return suggestion;
+  }
+  const source = input.packet.included.find((item) => item.id === suggestion.sourceId)
+    ?? input.packet.excluded.find((item) => item.id === suggestion.sourceId);
+  if (!source || source.actions === undefined) {
+    return source ? suggestion : undefined;
+  }
+  const requiredAction = suggestion.action === "hold-back" ? "hold-back" : "refresh";
+  return source.actions.includes(requiredAction) ? suggestion : undefined;
 }
 
 export function computeWorkShellContextAdviceRows(input: {
   readonly suggestions: readonly ContextPolicySuggestion[];
+  readonly packet?: ContextPacketView | undefined;
   readonly unavailable?: string | undefined;
   readonly selectedSourceId?: string | undefined;
   readonly actionsEnabled: boolean;
@@ -149,17 +161,22 @@ export function renderWorkShellContextAdvice(input: {
               tokenEstimateState: "estimated",
             })}`;
         const status = suggestion.status === "proposed" ? savings : suggestion.status;
+        const actionPrefix = `${selected ? "›" : "·"} ${ACTION_LABELS[suggestion.action]} · `;
+        const statusSuffix = ` · ${status}`;
+        const sourceLabel = resolveSourceLabel(input.packet, suggestion);
+        const labelWidth = Math.max(
+          0,
+          input.width - getDisplayWidth(actionPrefix) - getDisplayWidth(statusSuffix),
+        );
+        const body = `${actionPrefix}${truncateForDisplayWidth(sourceLabel, labelWidth)}${statusSuffix}`;
         return (
           <React.Fragment key={suggestion.id}>
             <Text color={selected ? input.palette.text : input.palette.textMuted} bold={selected}>
-              {truncateForDisplayWidth(
-                `${selected ? "›" : "·"} ${ACTION_LABELS[suggestion.action]} · ${resolveSourceLabel(input.packet, suggestion)} · ${status}`,
-                Math.max(16, input.width),
-              )}
+              {truncateForDisplayWidth(body, Math.max(1, input.width))}
             </Text>
             {selected && !input.dense ? (
               <Text color={input.palette.textMuted}>
-                {truncateForDisplayWidth(`Why · ${suggestion.reasonText}`, Math.max(16, input.width))}
+                {truncateForDisplayWidth(`Why · ${sanitizeContextPreview(suggestion.reasonText)}`, Math.max(16, input.width))}
               </Text>
             ) : null}
             {selected && suggestion.status === "proposed" && input.actionsEnabled ? (

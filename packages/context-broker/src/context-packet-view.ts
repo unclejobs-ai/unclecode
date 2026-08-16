@@ -2,7 +2,9 @@ import type {
   ContextPacketView,
   ContextPacketViewItem,
   ContextPacketViewWarning,
+  ContextProviderManifest,
   CreateContextPacketViewInput,
+  PersistedPromptManifest,
 } from "@unclecode/contracts";
 
 import {
@@ -16,9 +18,54 @@ function cloneItems(items: readonly ContextPacketViewItem[]): readonly ContextPa
   return items.map(cloneContextPacketViewItem);
 }
 
+/**
+ * Project warnings by name. Callers pass diagnostic records straight out of
+ * their own stores, which routinely carry a store handle or project id beside
+ * the three public fields; a spread would serialize those into the packet.
+ */
 function cloneWarnings(warnings: readonly ContextPacketViewWarning[]): readonly ContextPacketViewWarning[] {
-  return warnings.map((warning) => ({ ...warning }));
+  return warnings.map((warning) => ({
+    code: warning.code,
+    message: warning.message,
+    severity: warning.severity,
+  }));
 }
+
+/**
+ * Project a provider manifest onto the packet.
+ *
+ * Callers hand us whatever object their registry holds — often the live
+ * provider itself, carrying a `sync` closure, a store handle and credentials.
+ * Only the four public manifest fields are copied out, by name, so provider
+ * internals cannot ride along into a serialized packet, and `categories` is
+ * copied so a later mutation of the caller's registry cannot rewrite history.
+ */
+function cloneContextProviderManifest(manifest: ContextProviderManifest): ContextProviderManifest {
+  return {
+    providerId: manifest.providerId,
+    categories: [...manifest.categories],
+    refresh: manifest.refresh,
+    trustTier: manifest.trustTier,
+  };
+}
+function clonePersistedPromptManifest(manifest: PersistedPromptManifest): PersistedPromptManifest {
+  return {
+    id: manifest.id,
+    profileId: manifest.profileId,
+    createdAt: manifest.createdAt,
+    packetId: manifest.packetId,
+    policy: manifest.policy.map((source) => ({
+      id: source.id,
+      label: source.label,
+      authority: source.authority,
+      digest: source.digest,
+    })),
+    includedSourceCount: manifest.includedSourceCount,
+    excludedSourceCount: manifest.excludedSourceCount,
+    tokenEstimate: manifest.tokenEstimate,
+  };
+}
+
 
 function getItemSourceCount(item: ContextPacketViewItem): number {
   return Math.max(1, Math.trunc(item.sourceCount ?? 1));
@@ -44,7 +91,12 @@ export function createContextPacketView(input: CreateContextPacketViewInput): Co
     },
     tokenEstimate: included.reduce((total, item) => total + Math.max(0, item.tokenEstimate ?? 0), 0),
     tokenEstimateState: resolveContextPacketTokenEstimateState(input, included),
-    ...(input.manifest ? { manifest: input.manifest } : {}),
+    ...(input.manifest ? { manifest: clonePersistedPromptManifest(input.manifest) } : {}),
+    // Absent, not `undefined`: a packet built without providers must have no
+    // own `registry` property so existing consumers stay byte-compatible.
+    ...(input.registry === undefined
+      ? {}
+      : { registry: { providers: input.registry.providers.map(cloneContextProviderManifest) } }),
   };
   return {
     ...packetWithoutPreview,

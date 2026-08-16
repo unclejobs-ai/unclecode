@@ -421,14 +421,14 @@ export function createCrpRuntime(
           projectId: activeState.projectId,
           tokenBudget: bootstrap.crpConfig.tokenBudget,
           turnIndex: activeState.turnIndex,
+          providers: activeState.registry.listProviders(),
           ...(bootstrap.bootstrapPacketWarnings !== undefined
             ? { warnings: bootstrap.bootstrapPacketWarnings }
             : {}),
         }),
       );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`[crp] fallback to legacy resolver: ${message}\n`);
+    } catch {
+      process.stderr.write("[crp] Context refresh unavailable; using previous context.\n");
       return legacy(input);
     }
   };

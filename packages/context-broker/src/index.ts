@@ -28,6 +28,7 @@ export {
   formatContextPacketIndicator,
   formatContextPacketPromptPrefix,
 } from "./context-packet-view.js";
+export { getDisplayWidth, truncateForDisplayWidth, wrapDisplayTextFast } from "./display-width.js";
 export { CONTEXT_PROFILES, resolveContextProfile } from "./context-profiles.js";
 export {
   attachPromptManifestToPacket,

@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { createAgentOpsStore } from "@unclecode/agentops-db";
 import { createCrpRuntime } from "../../apps/unclecode-cli/src/work-runtime-crp.ts";
+import { createBuiltinProviderRegistry } from "../../packages/context-broker/src/crp-providers.ts";
 import {
   createContextPacketView,
   formatContextPacketPromptPrefix,
@@ -443,6 +444,140 @@ test("a failed undo reports a human failure and keeps the action recoverable", a
     assert.equal(recovered?.canUndo, false);
     assert.equal(runtime.listContextSourceActionReceipts().at(-1), recovered);
   } finally {
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("a resolved CRP packet carries the live built-in provider registry as sanitized manifests", async () => {
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-crp-runtime-registry-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+
+  try {
+    const runtime = createCrpTestRuntime(fakeHome);
+    const packet = await runtime.resolveContextPacket(
+      packetInput(workspaceRoot, "work-crp-registry", "Context Desk needs provider attribution"),
+    );
+
+    assert.ok(packet.registry, "a production CRP packet must carry the provider registry");
+    const providers = packet.registry.providers;
+    assert.ok(Array.isArray(providers) && providers.length > 0, "registry providers must be nonempty");
+    assert.equal(providers.length, 6, "the projection must carry exactly the six built-in providers");
+
+    for (const provider of providers) {
+      assert.equal(typeof provider.providerId, "string", "every projected manifest must carry a provider id");
+      assert.ok(provider.providerId.length > 0, "every projected manifest must carry a non-empty provider id");
+    }
+
+    const byId = new Map(providers.map((provider) => [provider.providerId, provider]));
+    assert.equal(byId.size, providers.length, "projected provider ids must be unique");
+    assert.deepEqual(
+      [...byId.keys()].sort(),
+      ["bridge", "condensed-history", "loop-trail", "memory", "runtime", "workspace-guidance"],
+    );
+    assert.deepEqual(byId.get("workspace-guidance").categories, ["workspace-guidance", "workspace"]);
+    assert.deepEqual(byId.get("bridge").categories, ["bridge"]);
+    assert.deepEqual(byId.get("loop-trail").categories, ["loop-trail"]);
+    assert.deepEqual(byId.get("memory").categories, ["memory"]);
+    assert.deepEqual(byId.get("condensed-history").categories, ["condensed-history"]);
+    assert.deepEqual(byId.get("runtime").categories, ["runtime"]);
+
+    for (const provider of providers) {
+      assert.deepEqual(
+        Object.keys(provider).sort(),
+        ["categories", "providerId", "refresh", "trustTier"],
+        `provider ${provider.providerId} must expose manifest fields only`,
+      );
+      assert.equal(typeof provider.sync, "undefined");
+      assert.equal(provider.trustTier, "builtin");
+      assert.ok(["on-turn", "on-change", "manual"].includes(provider.refresh));
+    }
+
+    // The live built-in registry itself must wire exactly these six providers;
+    // a silently dropped registration must fail here even if the packet
+    // projection above is rebuilt from another source.
+    const registryStore = createAgentOpsStore({ home: path.join(fakeHome, ".unclecode", "agentops") });
+    try {
+      const liveProviders = createBuiltinProviderRegistry(
+        registryStore,
+        runtime.getProjectId(),
+        async () => [],
+      ).listProviders();
+      const liveIds = liveProviders.map((provider) => provider.providerId);
+      assert.deepEqual(
+        [...liveIds].sort(),
+        ["bridge", "condensed-history", "loop-trail", "memory", "runtime", "workspace-guidance"],
+        "createBuiltinProviderRegistry must register exactly the six built-in providers",
+      );
+      for (const provider of liveProviders) {
+        assert.equal(typeof provider.providerId, "string");
+        assert.ok(provider.providerId.length > 0, "a live built-in provider must carry a non-empty id");
+      }
+    } finally {
+      registryStore.close();
+    }
+
+    // Every packet item attributed to a live provider must resolve inside the manifest.
+    for (const item of packet.included) {
+      const attributed = item.provenance?.providerId;
+      if (typeof attributed === "string" && byId.has(attributed)) {
+        assert.ok(byId.get(attributed).categories.length > 0);
+      }
+    }
+
+    const serialized = JSON.stringify(packet.registry);
+    assert.equal(serialized.includes(fakeHome), false, "the registry must not leak store paths");
+    assert.equal(/"(sync|store|projectId|listScopedMemoryLines)"/.test(serialized), false);
+  } finally {
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("CRP runtime fallback hides provider and selection diagnostics", async () => {
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-crp-runtime-fallback-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+  const injectedPath = "/tmp/fake-project/.unclecode/credentials/openai.json";
+  const injectedCredential = "sk-injected-for-test";
+  const injectedDiagnostic =
+    `${injectedPath} credential=${injectedCredential}\n\u001b[31mprovider selection failed\u001b[0m\r`;
+  const expectedStderr = "[crp] Context refresh unavailable; using previous context.\n";
+  let stderr = "";
+  let selectionFailureAttempted = false;
+  const originalWrite = process.stderr.write;
+  process.stderr.write = (chunk) => {
+    stderr += typeof chunk === "string" ? chunk : chunk.toString();
+    return true;
+  };
+
+  try {
+    const runtime = createCrpRuntime(
+      async () => createLegacyPacket(),
+      {
+        sourceMetadata: [],
+        crpConfig: { enabled: true, tokenBudget: 10_000, modelWindow: 200_000 },
+        userHomeDir: fakeHome,
+        storeHome: path.join(fakeHome, ".unclecode", "agentops"),
+        recordPerformanceSample: (sample) => {
+          if (sample.label === "packet-select") {
+            selectionFailureAttempted = true;
+            throw new Error(injectedDiagnostic);
+          }
+        },
+      },
+    );
+
+    const packet = await runtime.resolveContextPacket(
+      packetInput(workspaceRoot, "work-crp-runtime-fallback", "context refresh fallback"),
+    );
+
+    assert.equal(selectionFailureAttempted, true);
+    assert.equal(packet.id, "legacy-context-packet");
+    assert.deepEqual(packet.preview, formatContextPacketPromptPrefix(packet).split("\n"));
+    assert.equal(stderr, expectedStderr);
+    assert.equal(stderr.includes(injectedPath), false);
+    assert.equal(stderr.includes(injectedCredential), false);
+    assert.doesNotMatch(stderr, /\u001b|\r/);
+  } finally {
+    process.stderr.write = originalWrite;
     rmSync(workspaceRoot, { recursive: true, force: true });
   }
 });

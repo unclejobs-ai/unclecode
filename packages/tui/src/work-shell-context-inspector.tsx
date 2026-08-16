@@ -1,4 +1,6 @@
 import type {
+  ContextDeskCollection,
+  ContextDeskPane,
   ContextPacketChangeClassification,
   ContextPacketReceipt,
   ContextPacketView,
@@ -9,6 +11,7 @@ import type {
 import { Box, Text } from "ink";
 import React from "react";
 
+import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
 import {
   renderContextInspectorBudgetLine,
   renderContextInspectorPacketProof,
@@ -17,6 +20,8 @@ import {
   buildContextInspectorOverview,
   buildContextInspectorRows,
   computeContextOverlayViewportMaxRows,
+  filterContextDeskRows,
+  resolveContextDeskSelectedRow,
   type ContextInspectorPalette,
 } from "./work-shell-context-inspector-model.js";
 
@@ -33,6 +38,7 @@ export type ContextInspectorSourceCapabilities = {
   readonly pin: boolean;
   readonly unpin: boolean;
   readonly delivery: "hold-back" | "include" | undefined;
+  readonly preview: boolean;
 };
 
 /**
@@ -45,7 +51,7 @@ export function resolveContextInspectorSourceCapabilities(
   item?: ContextPacketViewItem | undefined,
 ): ContextInspectorSourceCapabilities {
   if (!item) {
-    return { pin: false, unpin: false, delivery: undefined };
+    return { pin: false, unpin: false, delivery: undefined, preview: false };
   }
   if (item.actions === undefined) {
     const held = item.includedInModel === false;
@@ -54,6 +60,7 @@ export function resolveContextInspectorSourceCapabilities(
       pin: !pinned,
       unpin: pinned,
       delivery: held ? "include" : "hold-back",
+      preview: true,
     };
   }
   return {
@@ -64,7 +71,38 @@ export function resolveContextInspectorSourceCapabilities(
       : item.actions.includes("hold-back")
         ? "hold-back"
         : undefined,
+    preview: item.actions.includes("preview"),
   };
+}
+
+type ContextInspectorControlSegment = {
+  readonly text: string;
+  /** Copy the pane cannot be navigated without; never dropped to fit. */
+  readonly required?: boolean;
+};
+
+/**
+ * Fit the control copy onto one physical row. Optional segments drop from the
+ * tail inward — a narrow desk advertises fewer keys rather than half a key
+ * name — and the closing truncation guarantees the row even when the required
+ * copy alone outgrows the pane. Callers that pass no width get the full copy.
+ */
+function joinContextInspectorControls(
+  segments: readonly ContextInspectorControlSegment[],
+  width: number | undefined,
+): string {
+  const render = (list: readonly ContextInspectorControlSegment[]) =>
+    list.map((segment) => segment.text).join(" · ");
+  if (width === undefined) {
+    return render(segments);
+  }
+  const kept = segments.slice();
+  for (let index = kept.length - 1; index >= 0 && getDisplayWidth(render(kept)) > width; index -= 1) {
+    if (kept[index]?.required !== true) {
+      kept.splice(index, 1);
+    }
+  }
+  return truncateForDisplayWidth(render(kept), width);
 }
 
 export function buildContextInspectorControls(input: {
@@ -72,28 +110,70 @@ export function buildContextInspectorControls(input: {
   readonly actionsEnabled: boolean;
   readonly expanded: boolean;
   readonly undoAvailable: boolean;
+  readonly pane?: ContextDeskPane | undefined;
+  /** Painted pane width in cells; omit for the unabridged copy. */
+  readonly width?: number | undefined;
 }): string {
-  const navigation = input.expanded
-    ? "↑↓ scroll · Enter back"
-    : "↑↓ move · Enter details";
-  if (!input.actionsEnabled) {
-    return `${navigation} · Esc close`;
+  if (!input.expanded && input.pane === "groups") {
+    return joinContextInspectorControls([
+      { text: "↑↓ collection", required: true },
+      { text: "←→ pane", required: true },
+      { text: "Esc close", required: true },
+    ], input.width);
+  }
+  if (!input.expanded && input.pane === "preview") {
+    return joinContextInspectorControls([
+      { text: "↑↓ scroll", required: true },
+      { text: "←→ pane", required: true },
+      { text: "Esc close", required: true },
+    ], input.width);
   }
   const { capabilities } = input;
-  return [
-    navigation,
-    ...(capabilities.delivery === undefined
-      ? []
-      : [capabilities.delivery === "include" ? "Space include" : "Space hold back"]),
-    ...(capabilities.unpin ? ["P unpin"] : capabilities.pin ? ["P pin"] : []),
-    ...(input.undoAvailable ? ["U undo"] : []),
-    "Esc close",
-  ].join(" · ");
+  const actionable = input.actionsEnabled;
+  const firstSegment: ContextInspectorControlSegment = {
+    text: input.expanded
+      ? "↑↓ scroll · Enter back"
+      : capabilities.preview
+        ? "↑↓ move · Enter details"
+        : "↑↓ move",
+    required: true,
+  };
+  const optionalSegments: readonly ContextInspectorControlSegment[] = [
+    ...(actionable && capabilities.delivery !== undefined
+      ? [{ text: capabilities.delivery === "include" ? "Space include" : "Space hold back" }]
+      : []),
+    ...(actionable && capabilities.unpin
+      ? [{ text: "P unpin" }]
+      : actionable && capabilities.pin
+        ? [{ text: "P pin" }]
+        : []),
+    ...(actionable && input.undoAvailable ? [{ text: "U undo" }] : []),
+  ];
+  const exitSegment: ContextInspectorControlSegment = { text: "Esc close", required: true };
+  if (input.expanded) {
+    return joinContextInspectorControls([firstSegment, exitSegment], input.width);
+  }
+  const paneSegment: ContextInspectorControlSegment = { text: "←→ pane", required: true };
+  const legacy = [firstSegment, ...optionalSegments, exitSegment, paneSegment];
+  if (
+    input.width === undefined
+    || getDisplayWidth(legacy.map((segment) => segment.text).join(" · ")) <= input.width
+  ) {
+    return joinContextInspectorControls(legacy, input.width);
+  }
+  // Once the full legacy copy cannot fit, keep exit and pane discovery ahead
+  // of mutation keys so the two navigation paths survive narrow frames.
+  return joinContextInspectorControls(
+    [firstSegment, paneSegment, exitSegment, ...optionalSegments],
+    input.width,
+  );
 }
 
 export function renderContextInspectorOverlay(input: {
   readonly packet: ContextPacketView;
   readonly cursorIndex: number;
+  readonly activePane?: ContextDeskPane | undefined;
+  readonly activeCollection?: ContextDeskCollection | undefined;
   readonly expandedId?: string | null;
   readonly detailContent?: string | undefined;
   readonly detailOffset?: number | undefined;
@@ -111,6 +191,8 @@ export function renderContextInspectorOverlay(input: {
   readonly contextAdviceActionsEnabled?: boolean | undefined;
   readonly terminalRows?: number;
 }): React.ReactNode {
+  const activePane = input.activePane ?? "sources";
+  const activeCollection = input.activeCollection ?? "all";
   const rows = buildContextInspectorRows(input.packet);
   const overview = buildContextInspectorOverview({
     packet: input.packet,
@@ -123,12 +205,20 @@ export function renderContextInspectorOverlay(input: {
     reservedRows: 0,
   });
   const { palette } = input;
-  const selectedItem = rows.find((row) => row.sourceIndex === input.cursorIndex)?.item;
+  // The cursor is an offset into the active collection's filtered rows; with
+  // the default "all" collection that is the canonical grouped row order.
+  const filteredRows = filterContextDeskRows(rows, activeCollection);
+  const selectedRow = resolveContextDeskSelectedRow(filteredRows, input.cursorIndex);
+  // The overlay box spends 4 cells on its border and padding, so the copy the
+  // panes actually paint into is narrower than the width handed to the desk.
+  const contentWidth = Math.max(24, input.width - 4);
   const controls = buildContextInspectorControls({
-    capabilities: resolveContextInspectorSourceCapabilities(selectedItem),
+    capabilities: resolveContextInspectorSourceCapabilities(selectedRow?.item),
     actionsEnabled: input.actionsEnabled,
     expanded: Boolean(input.expandedId),
     undoAvailable: input.actionReceipt?.canUndo ?? false,
+    pane: activePane,
+    width: contentWidth,
   });
 
   return (
@@ -136,9 +226,12 @@ export function renderContextInspectorOverlay(input: {
       <Text>
         <Text color={palette.assistant} bold>{"Context Desk"}</Text>
         <Text color={palette.textDim}>
-          {input.width < 76
-            ? " · next answer"
-            : " · what reaches the next answer"}
+          {truncateForDisplayWidth(
+            input.width < 76
+              ? " · next answer"
+              : " · what reaches the next answer",
+            Math.max(4, contentWidth - getDisplayWidth("Context Desk")),
+          )}
         </Text>
       </Text>
       <Box marginTop={input.expandedId ? 0 : 1} flexDirection="column">
@@ -146,10 +239,11 @@ export function renderContextInspectorOverlay(input: {
           packet: input.packet,
           palette,
           modelWindow: input.modelWindow,
+          contentWidth,
         })}
         {renderContextInspectorPacketProof({
           modelWindow: input.modelWindow,
-          width: input.width,
+          width: contentWidth,
           palette,
           ...(input.previewReceipt ? { previewReceipt: input.previewReceipt } : {}),
           ...(input.submittedReceipt ? { submittedReceipt: input.submittedReceipt } : {}),
@@ -160,6 +254,8 @@ export function renderContextInspectorOverlay(input: {
           rows,
           suggestion: overview.suggestion,
           cursorIndex: input.cursorIndex,
+          activePane,
+          activeCollection,
           ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
           ...(input.detailContent !== undefined ? { detailContent: input.detailContent } : {}),
           ...(input.detailOffset !== undefined ? { detailOffset: input.detailOffset } : {}),

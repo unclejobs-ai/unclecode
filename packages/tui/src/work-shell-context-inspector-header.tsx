@@ -120,24 +120,34 @@ export function renderContextInspectorBudgetLine(input: {
   readonly packet: ContextPacketView;
   readonly palette: ContextInspectorPalette;
   readonly modelWindow: number;
+  /** Painted row width; omit for the unabridged helper output. */
+  readonly contentWidth?: number | undefined;
 }): React.ReactNode {
   const budgetWindow = input.modelWindow > 0 ? input.modelWindow : 200_000;
   const tokenEstimateState = input.packet.tokenEstimateState ?? "estimated";
   const windowLabel = formatContextWindow(budgetWindow);
   const tokenLabel = formatContextTokenEstimate(input.packet.tokenEstimate, tokenEstimateState);
   const warnings = input.packet.sourceCounts.warnings;
+  const fullLine = [
+    "Sources",
+    `${input.packet.sourceCounts.included} sent`,
+    `${input.packet.sourceCounts.excluded} held`,
+    ...(warnings > 0 ? [`${warnings} ${warnings === 1 ? "warning" : "warnings"}`] : []),
+    `${tokenLabel} / ${windowLabel}`,
+  ].join(" · ");
+  const paintedLine = input.contentWidth === undefined
+    ? fullLine
+    : truncateForDisplayWidth(fullLine, Math.max(1, Math.trunc(input.contentWidth)));
+  const sourceLabel = input.contentWidth === undefined
+    ? "Sources"
+    : truncateForDisplayWidth("Sources", Math.max(1, Math.trunc(input.contentWidth)));
+  const remainder = paintedLine.startsWith("Sources")
+    ? paintedLine.slice("Sources".length)
+    : "";
   return (
     <Text>
-      <Text color={input.palette.assistant} bold>{"Sources"}</Text>
-      <Text color={input.palette.textMuted}>
-        {` · ${input.packet.sourceCounts.included} sent · ${input.packet.sourceCounts.excluded} held`}
-      </Text>
-      {warnings > 0 ? (
-        <Text color={input.palette.warning}>
-          {` · ${warnings} ${warnings === 1 ? "warning" : "warnings"}`}
-        </Text>
-      ) : null}
-      <Text color={input.palette.textMuted}>{` · ${tokenLabel} / ${windowLabel}`}</Text>
+      <Text color={input.palette.assistant} bold>{sourceLabel}</Text>
+      <Text color={input.palette.textMuted}>{remainder}</Text>
     </Text>
   );
 }

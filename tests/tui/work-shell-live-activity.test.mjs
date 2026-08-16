@@ -50,7 +50,7 @@ test("formatWorkShellLiveActivityLine surfaces a live progress line while busy",
   assert.match(withStatus, /Reading context/);
 });
 
-test("busy WorkShellView renders one inline activity in the status strip", async () => {
+test("busy WorkShellView renders one inline activity in the composer dock", async () => {
   const { instance, getOutput } = renderDebugFrame(
     React.createElement(WorkShellView, {
       provider: "gemini",
@@ -77,11 +77,23 @@ test("busy WorkShellView renders one inline activity in the status strip", async
   instance.unmount();
   instance.cleanup();
 
-  const spinnerLines = frame
-    .split("\n")
-    .filter((line) => /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u.test(line));
+  const rows = frame.split("\n");
+  const spinnerLines = rows.filter((line) => /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u.test(line));
   assert.equal(spinnerLines.length, 1, `expected one motion surface, received:\n${frame}`);
-  assert.match(spinnerLines[0], /gemini-2\.5-flash.*Thinking through the next step.*\d+(?:\.\d+)?(?:ms|s)/u);
+  assert.match(spinnerLines[0], /Thinking through the next step · \d+(?:\.\d+)?(?:ms|s)/u);
+  // The activity row is pinned directly above the dock's hint row — the busy
+  // display rides with the input, and the top status row is idle-only.
+  const activityIndex = rows.indexOf(spinnerLines[0]);
+  const hintIndex = rows.findIndex((row) => row.includes("Enter queues follow-up"));
+  assert.ok(hintIndex > activityIndex, `activity row should sit above the hint row, received:\n${frame}`);
+  // User entries also carry a `◇` badge, so the idle row is asserted by its
+  // text: no `◇ Ready` while the busy dock row owns the frame.
+  assert.doesNotMatch(frame, /◇ Ready/u, "the idle status row must not render while busy");
+  // Identity lives in the header; the busy row carries live state only.
+  const headerLine = rows.find((line) => line.includes("UncleCode"));
+  assert.ok(headerLine !== undefined, "the header wordmark line should render");
+  assert.match(headerLine, /gemini-2\.5-flash/u);
+  assert.doesNotMatch(spinnerLines[0], /gemini-2\.5-flash/u);
   assert.doesNotMatch(frame, /\bBusy\b/u);
 });
 
@@ -117,8 +129,11 @@ test("busy status remains one readable row in a narrow terminal", async () => {
     .split("\n")
     .find((line) => /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u.test(line));
   assert.ok(statusLine, `expected an inline status row, received:\n${frame}`);
-  assert.match(statusLine, /gemini-2\.5-flash.*Thinking.*\d+(?:\.\d+)?(?:ms|s)/u);
+  // Task 9: the narrow busy row lives in the dock without the model — the
+  // header still carries the identity facts it can fit.
+  assert.match(statusLine, /Thinking.*\d+(?:\.\d+)?(?:ms|s)/u);
   assert.ok(getDisplayWidth(statusLine) <= 52, `status row exceeded terminal width: ${statusLine}`);
+  assert.match(frame, /gemini-2\.5-flash/u, "the header keeps the model visible when it fits");
 });
 
 test("streaming WorkShellView keeps a visible cursor after partial assistant text", async () => {
@@ -178,7 +193,7 @@ test("busy WorkShellView keeps the idle empty-state card hidden", async () => {
   instance.unmount();
   instance.cleanup();
 
-  assert.match(output, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+gemini-2\.5-flash.*Preparing context/u);
+  assert.match(output, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+Preparing context/u);
   assert.doesNotMatch(output, /\bBusy\b/u);
   assert.doesNotMatch(output, /Ready for the next move/);
   assert.doesNotMatch(
@@ -188,7 +203,7 @@ test("busy WorkShellView keeps the idle empty-state card hidden", async () => {
   );
 });
 
-test("status row surfaces auth only when it needs action", async () => {
+test("the shell surfaces auth only when it needs action", async () => {
   const { instance, getOutput } = renderDebugFrame(
     React.createElement(WorkShellView, {
       provider: "openai",
@@ -247,10 +262,19 @@ test("WorkShellView render keeps the light-terminal status frame visible", async
   instance.cleanup();
 
   assert.match(output, /UncleCode · OpenAI/);
-  // Status row carries identity and state only. Healthy auth is deliberately
-  // absent: "Saved OAuth" never changes mid-session, so it spent a slot
-  // confirming nothing was wrong. See the warning case below.
-  assert.match(output, /gpt-5\.4 · YOLO 모드 · Ready/);
+  // Identity (model · mode) lives in the header now, so the status row is
+  // state only: a fresh session reads as one slim "◇ Ready" line. Healthy
+  // auth is deliberately absent everywhere: "Saved OAuth" never changes
+  // mid-session, so it spent a slot confirming nothing was wrong. See the
+  // warning case below.
+  const statusFrame = getLastWorkShellFrame(output);
+  const headerLine = statusFrame.split("\n").find((line) => line.includes("UncleCode"));
+  assert.ok(headerLine !== undefined, "the header wordmark line should render");
+  assert.match(headerLine, /gpt-5\.4 · YOLO 모드/u);
+  const idleLine = statusFrame.split("\n").find((line) => line.includes("◇"));
+  assert.ok(idleLine !== undefined, "the idle status row should render");
+  assert.match(idleLine, /◇ Ready\s*$/u);
+  assert.doesNotMatch(idleLine, /gpt-5\.4|YOLO 모드/u);
   assert.doesNotMatch(output, /Saved OAuth/);
   // A fresh session reports no timing rather than the words "no reply yet".
   assert.doesNotMatch(output, /no reply yet/);
@@ -260,7 +284,17 @@ test("WorkShellView render keeps the light-terminal status frame visible", async
   // key legend already carry it.
   assert.doesNotMatch(output, /Type the task in plain language/);
   assert.doesNotMatch(output, /Use Ctrl\+O for saved sessions/);
-  assert.match(output, /prompt deck/);
+  // The composer dock keeps its unlabeled soft rule — a full `─` row directly
+  // above the `›` input row. (The header rule is also a `─` row, so the
+  // adjacent glyph row is what identifies the dock's own divider.)
+  const statusRows = statusFrame.split("\n");
+  const dockDividerRow = statusRows.findIndex(
+    (row, index) => /^─+$/.test(row.trim()) && (statusRows[index + 1] ?? "").trimStart().startsWith("›"),
+  );
+  assert.ok(dockDividerRow > 0, "the composer dock divider should render below the status row");
+  // The dock activity row is busy-only: an idle frame carries no spinner
+  // glyph anywhere (one spinner per surface, and idle has none at all).
+  assert.doesNotMatch(statusFrame, SPINNER, "idle frames must not render a spinner glyph");
 });
 
 test("WorkShellView renders an intentional empty state for blank panels", async () => {
@@ -397,9 +431,9 @@ test("idle transient slash pickers are hidden after command submit", () => {
   );
 });
 
-// Task 9: the one status row the shell owns now reports how much delegated
-// work is live, and its elapsed label is anchored to a monotonic clock so an
-// NTP correction cannot make a running turn look younger than it is.
+// Task 9: the live activity row the dock owns reports how much delegated work
+// is running, and its elapsed label is anchored to a monotonic clock so an NTP
+// correction cannot make a running turn look younger than it is.
 
 function agentRun(id, overrides = {}) {
   return {
@@ -532,8 +566,9 @@ test("the busy status row states live agent and job counts before activity and e
   assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
   assert.match(
     lines[0],
-    /gpt-5\.4 · 작업 모드 · 4 agents · 4 jobs · Reading context · \d+s\s*$/u,
+    /4 agents · 4 jobs · Reading context · \d+s\s*$/u,
   );
+  assert.doesNotMatch(lines[0], /gpt-5\.4|작업 모드/u, "identity belongs to the header, not the busy row");
 });
 
 test("the status row counts a job and its owning agent once", async () => {
@@ -563,7 +598,7 @@ test("the status row omits agent and job counts once nothing is live", async () 
 
   const lines = spinnerLines(frame);
   assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
-  assert.match(lines[0], /gpt-5\.4 · 작업 모드 · Reading context · 3\.\ds\s*$/u);
+  assert.match(lines[0], /Reading context · 3\.\ds\s*$/u);
   assert.doesNotMatch(lines[0], /agent|job/u);
 });
 
@@ -578,11 +613,11 @@ test("delegated work alone keeps the status row live while the main turn is idle
 
   const lines = spinnerLines(frame);
   assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
-  assert.match(lines[0], /gpt-5\.4 · 작업 모드 · 2 agents · 1 job · Working\s*$/u);
-  assert.doesNotMatch(frame, /◇ gpt-5\.4/u, "the idle glyph must yield to the busy spinner");
+  assert.match(lines[0], /2 agents · 1 job · Working\s*$/u);
+  assert.doesNotMatch(lines[0], /◇/u, "the idle glyph must yield to the busy spinner");
 });
 
-test("an auth warning keeps its slot beside the live counts", async () => {
+test("an auth warning rides the header while the busy row counts live work", async () => {
   const frame = await renderStatusFrame({
     authLabel: "OAuth · needs API key",
     isBusy: true,
@@ -595,11 +630,19 @@ test("an auth warning keeps its slot beside the live counts", async () => {
   assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
   assert.match(
     lines[0],
-    /gpt-5\.4 · 작업 모드 · OAuth · needs API key · 1 agent · Reading context · \d\.\ds\s*$/u,
+    /1 agent · Reading context · \d\.\ds\s*$/u,
+  );
+  assert.doesNotMatch(lines[0], /needs API key/u, "the warning chip belongs to the header now");
+  const headerLine = frame.split("\n").find((line) => line.includes("UncleCode"));
+  assert.ok(headerLine !== undefined, "the header wordmark line should render");
+  assert.match(
+    headerLine,
+    /gpt-5\.4 · 작업 모드 · OAuth · needs API key/u,
+    "the auth warning chip should ride after the session facts on the header row",
   );
 });
 
-test("a formatted auth warning remains visible in the narrow status row", async () => {
+test("a formatted auth warning remains visible in the narrow header while the busy row lives in the dock", async () => {
   const frame = await renderStatusFrame({
     authLabel: "OAuth · needs API key",
     isBusy: true,
@@ -611,7 +654,11 @@ test("a formatted auth warning remains visible in the narrow status row", async 
 
   const lines = spinnerLines(frame);
   assert.equal(lines.length, 1, `expected exactly one motion surface, received:\n${frame}`);
-  assert.match(lines[0], /gpt-5\.4 · OAuth · needs API key/u);
+  // Task 9: the narrow busy row moved to the dock and no longer repeats the
+  // model or auth; the header keeps carrying the warning chip.
+  assert.match(lines[0], /1 agent · Reading context/u);
+  assert.doesNotMatch(lines[0], /gpt-5\.4|OAuth/u);
+  assert.match(frame, /OAuth · needs API key/u, "the header chip keeps the warning visible");
 });
 
 test("elapsed labels keep advancing when the wall clock jumps back", async () => {
@@ -649,4 +696,71 @@ test("elapsed labels keep advancing when the wall clock jumps back", async () =>
     instance.unmount();
     instance.cleanup();
   }
+});
+
+// Task 10: the running turn's trace tail rides the composer dock — dim rows
+// directly under the activity line and above the hint row, newest line last,
+// one truncated row per line. The transcript's own trace filtering is
+// unchanged: these raw lines never enter the conversation rail.
+
+test("busy WorkShellView streams the newest trace lines above the prompt row", async () => {
+  const traceLines = [
+    "→ read packages/tui/src/work-shell-view.tsx",
+    "→ search \"traceLines\" in packages/tui/src",
+    "✓ edit packages/tui/src/work-shell-pane.tsx",
+  ];
+  const frame = await renderStatusFrame({
+    isBusy: true,
+    busyStatus: "read src/app.ts",
+    currentTurnStartedAt: Date.now() - 1_000,
+    liveToolTraceLines: traceLines,
+  });
+
+  const rows = frame.split("\n");
+  const activityIndex = rows.findIndex((row) => SPINNER.test(row));
+  assert.ok(activityIndex >= 0, `expected the dock activity row, received:\n${frame}`);
+  const promptIndex = rows.findIndex((row) => row.trimStart().startsWith("›"));
+  assert.ok(promptIndex > activityIndex, `the prompt row should sit below the activity row, received:\n${frame}`);
+  const feedIndexes = traceLines.map((line) => rows.findIndex((row) => row.includes(line)));
+  for (const [position, feedIndex] of feedIndexes.entries()) {
+    assert.ok(
+      feedIndex > activityIndex,
+      `trace line ${position} should render below the activity row, received:\n${frame}`,
+    );
+    assert.ok(
+      feedIndex < promptIndex,
+      `trace line ${position} should render above the › row, received:\n${frame}`,
+    );
+    if (position > 0) {
+      assert.ok(
+        feedIndex > feedIndexes[position - 1],
+        `trace lines should keep chronological order (newest last), received:\n${frame}`,
+      );
+    }
+  }
+});
+
+test("idle WorkShellView renders no tool trace feed", async () => {
+  const frame = await renderStatusFrame({
+    liveToolTraceLines: ["→ read src/app.ts"],
+  });
+
+  assert.doesNotMatch(frame, /→ read src\/app\.ts/u, "the feed is busy-only");
+  assert.doesNotMatch(frame, SPINNER, "idle frames must not render a spinner glyph");
+});
+
+test("an over-width trace line truncates to a single dock row", async () => {
+  const frame = await renderStatusFrame({
+    terminalColumns: 52,
+    isBusy: true,
+    busyStatus: "read src/app.ts",
+    currentTurnStartedAt: Date.now() - 1_000,
+    liveToolTraceLines: [`→ read ${"packages/tui/src/work-shell-".repeat(8)}pane.tsx`],
+  });
+
+  const feedRows = frame.split("\n").filter((row) => row.includes("→ read packages/tui/src"));
+  assert.equal(feedRows.length, 1, `expected one truncated feed row, received:\n${frame}`);
+  assert.ok(getDisplayWidth(feedRows[0]) <= 52, `feed row exceeded terminal width: ${feedRows[0]}`);
+  assert.match(feedRows[0], /…/u, "truncation should leave an ellipsis");
+  assert.doesNotMatch(frame, /pane\.tsx/u, "the truncated tail must not wrap onto a second row");
 });

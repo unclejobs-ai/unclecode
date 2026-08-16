@@ -103,7 +103,12 @@ function ContextInputControllerHarness(props) {
     acceptContextSuggestion: async () => props.onAccept?.(),
     rejectContextSuggestion: async () => props.onReject?.(),
     contextInspectorExpanded: props.expandedId,
+    ...(props.pane !== undefined
+      ? { contextInspectorPane: props.pane }
+      : {}),
     moveContextInspectorCursor: props.onMove,
+    moveContextInspectorPane: props.onMovePane ?? (() => {}),
+    moveContextInspectorPage: props.onMovePage ?? (() => {}),
     moveContextInspectorDetailOffset: props.onScroll ?? (() => {}),
     toggleContextInspectorPin: async () => props.onPin(),
     toggleContextSourceDelivery: async () => props.onToggleDelivery(),
@@ -249,6 +254,17 @@ test("context inspector resolver uses human navigation and action keys", () => {
     panelTitle: "Context expanded",
     adviceActionsEnabled: false,
   }), { type: "none" });
+  for (const value of ["U", "A", "R"]) {
+    assert.deepEqual(resolveWorkShellContextInspectorAction({
+      value,
+      key: {},
+      panelTitle: "Context expanded",
+      actionsEnabled: true,
+      adviceActionsEnabled: true,
+      undoActionsEnabled: true,
+    }), { type: "none" }, `${value} stays composer text`);
+  }
+
 });
 test("optimizer actions require both callbacks and a visible selected suggestion", () => {
   const suggestions = Array.from({ length: 5 }, (_, index) => ({
@@ -352,9 +368,9 @@ test("source controls follow the selected item's declared actions", () => {
     actions: ["preview"],
   });
 
-  assert.deepEqual(pinned, { pin: false, unpin: true, delivery: "hold-back" });
-  assert.deepEqual(held, { pin: false, unpin: false, delivery: "include" });
-  assert.deepEqual(frozen, { pin: false, unpin: false, delivery: undefined });
+  assert.deepEqual(pinned, { pin: false, unpin: true, delivery: "hold-back", preview: true });
+  assert.deepEqual(held, { pin: false, unpin: false, delivery: "include", preview: true });
+  assert.deepEqual(frozen, { pin: false, unpin: false, delivery: undefined, preview: true });
 
   assert.equal(
     buildContextInspectorControls({
@@ -363,7 +379,7 @@ test("source controls follow the selected item's declared actions", () => {
       expanded: false,
       undoAvailable: true,
     }),
-    "↑↓ move · Enter details · Space hold back · P unpin · U undo · Esc close",
+    "↑↓ move · Enter details · Space hold back · P unpin · U undo · Esc close · ←→ pane",
   );
   assert.equal(
     buildContextInspectorControls({
@@ -372,7 +388,7 @@ test("source controls follow the selected item's declared actions", () => {
       expanded: false,
       undoAvailable: false,
     }),
-    "↑↓ move · Enter details · Space include · Esc close",
+    "↑↓ move · Enter details · Space include · Esc close · ←→ pane",
   );
   assert.equal(
     buildContextInspectorControls({
@@ -381,7 +397,7 @@ test("source controls follow the selected item's declared actions", () => {
       expanded: false,
       undoAvailable: false,
     }),
-    "↑↓ move · Enter details · Esc close",
+    "↑↓ move · Enter details · Esc close · ←→ pane",
   );
   assert.equal(
     buildContextInspectorControls({
@@ -411,8 +427,8 @@ test("sources without a declared action list keep their state-derived controls",
     includedInModel: false,
   });
 
-  assert.deepEqual(unpinnedInPacket, { pin: true, unpin: false, delivery: "hold-back" });
-  assert.deepEqual(heldInPacket, { pin: true, unpin: false, delivery: "include" });
+  assert.deepEqual(unpinnedInPacket, { pin: true, unpin: false, delivery: "hold-back", preview: true });
+  assert.deepEqual(heldInPacket, { pin: true, unpin: false, delivery: "include", preview: true });
   assert.equal(
     buildContextInspectorControls({
       capabilities: resolveContextInspectorSourceCapabilities(undefined),
@@ -420,7 +436,7 @@ test("sources without a declared action list keep their state-derived controls",
       expanded: false,
       undoAvailable: false,
     }),
-    "↑↓ move · Enter details · Esc close",
+    "↑↓ move · Esc close · ←→ pane",
   );
 });
 
@@ -470,6 +486,10 @@ test("context inspector input controller dispatches only enabled human actions",
   await waitForCondition(() => writableCalls.includes("reject"));
   writable.stdin.write("u");
   await waitForCondition(() => writableCalls.includes("undo"));
+  for (const key of ["U", "A", "R"]) {
+    writable.stdin.write(key);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
   writable.instance.unmount();
   writable.instance.cleanup();
   assert.deepEqual(writableCalls, ["delivery", "pin", "expand", "accept", "reject", "undo"]);
@@ -527,6 +547,45 @@ test("expanded context details route arrow keys to scrolling instead of source m
     view.instance.cleanup();
   }
 });
+test("context inspector catches a rejected async expand and keeps dispatching desk keys", async () => {
+  const calls = [];
+  const unhandledReasons = [];
+  const onUnhandledRejection = (reason) => {
+    unhandledReasons.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandledRejection);
+  const view = renderWithInput(
+    React.createElement(ContextInputControllerHarness, {
+      onExpand: () => {
+        calls.push("expand");
+        return Promise.reject(new Error("expand failed"));
+      },
+      onMove: (direction) => calls.push(`move:${direction}`),
+    }),
+  );
+
+  try {
+    view.stdin.write("\r");
+    await waitForCondition(() => calls.includes("expand"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    view.stdin.write("\u001b[B");
+    await waitForCondition(() => calls.includes("move:1"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.deepEqual(calls, ["expand", "move:1"]);
+    assert.deepEqual(
+      unhandledReasons,
+      [],
+      "a rejected expansion must be handled inside desk dispatch",
+    );
+  } finally {
+    view.instance.unmount();
+    view.instance.cleanup();
+    process.off("unhandledRejection", onUnhandledRejection);
+  }
+});
+
 
 test("composer only suppresses context mutation keys when actions are enabled", async () => {
   const changes = [];
@@ -614,6 +673,32 @@ test("composer preserves optimizer letters after a whitespace-only draft", async
   }
 });
 
+test("uppercase context action letters stay composer text", async () => {
+  for (const key of ["U", "A", "R"]) {
+    const changes = [];
+    const view = renderWithInput(
+      React.createElement(Composer, {
+        value: "",
+        onChange: (value) => changes.push(value),
+        onSubmit: async () => {},
+        suppressInspectorKeys: true,
+        suppressInspectorMutationKeys: true,
+        suppressInspectorUndoKey: true,
+        suppressInspectorAdviceKeys: true,
+      }),
+    );
+
+    try {
+      view.stdin.write(key);
+      await waitForCondition(() => changes.includes(key));
+      assert.equal(changes.at(-1), key);
+    } finally {
+      view.instance.unmount();
+      view.instance.cleanup();
+    }
+  }
+});
+
 test("composer suppresses the undo key only while undo is available", async () => {
   const activeChanges = [];
   const active = renderWithInput(
@@ -650,3 +735,236 @@ test("composer suppresses the undo key only while undo is available", async () =
   assert.deepEqual(inactiveChanges, ["u"]);
 });
 
+
+// Pure Yazi navigation (Context Desk): h/l + left/right switch panes, j/k +
+// up/down move the cursor, PgUp/PgDn page. Every entry is `[label, keystroke
+// patch, expected action]` so the resolver and the controller are asserted
+// against one shared table.
+const PURE_YAZI_NAVIGATION_CASES = [
+  ["h switches to the previous pane", { value: "h" }, { type: "move-pane", direction: -1 }],
+  ["l switches to the next pane", { value: "l" }, { type: "move-pane", direction: 1 }],
+  ["left arrow switches to the previous pane", { key: { leftArrow: true } }, { type: "move-pane", direction: -1 }],
+  ["right arrow switches to the next pane", { key: { rightArrow: true } }, { type: "move-pane", direction: 1 }],
+  ["k moves the cursor up", { value: "k" }, { type: "move-cursor", direction: -1 }],
+  ["j moves the cursor down", { value: "j" }, { type: "move-cursor", direction: 1 }],
+  ["up arrow moves the cursor up", { key: { upArrow: true } }, { type: "move-cursor", direction: -1 }],
+  ["down arrow moves the cursor down", { key: { downArrow: true } }, { type: "move-cursor", direction: 1 }],
+  ["pageUp pages backward", { key: { pageUp: true } }, { type: "move-page", direction: -1 }],
+  ["pageDown pages forward", { key: { pageDown: true } }, { type: "move-page", direction: 1 }],
+];
+
+test("context inspector resolver maps Pure Yazi pane, cursor, and page keys", () => {
+  // Navigation is read-only, so it resolves whether or not the mutation and
+  // optimizer capabilities are live — and it outranks the mutation letters.
+  for (const capabilities of [
+    { actionsEnabled: false, adviceActionsEnabled: false, undoActionsEnabled: false },
+    { actionsEnabled: true, adviceActionsEnabled: true, undoActionsEnabled: true },
+  ]) {
+    for (const [label, patch, expected] of PURE_YAZI_NAVIGATION_CASES) {
+      assert.deepEqual(
+        resolveWorkShellContextInspectorAction({
+          value: patch.value ?? "",
+          key: patch.key ?? {},
+          panelTitle: "Context expanded",
+          ...capabilities,
+        }),
+        expected,
+        `${label} (actionsEnabled=${capabilities.actionsEnabled})`,
+      );
+    }
+  }
+});
+
+test("context inspector resolver keeps Pure Yazi keys inert outside the overlay, under the slash picker, and over pending drafts", () => {
+  for (const [label, patch] of PURE_YAZI_NAVIGATION_CASES) {
+    assert.deepEqual(
+      resolveWorkShellContextInspectorAction({
+        value: patch.value ?? "",
+        key: patch.key ?? {},
+        panelTitle: "Cache Telemetry",
+        actionsEnabled: true,
+        adviceActionsEnabled: true,
+        undoActionsEnabled: true,
+      }),
+      { type: "none" },
+      `${label} outside the context overlay`,
+    );
+  }
+  for (const value of ["/", "/context", "/ctx l"]) {
+    assert.deepEqual(
+      resolveWorkShellContextInspectorAction({
+        value,
+        key: {},
+        panelTitle: "Context expanded",
+        actionsEnabled: true,
+        adviceActionsEnabled: true,
+        undoActionsEnabled: true,
+      }),
+      { type: "none" },
+      `slash picker keeps ${JSON.stringify(value)} inert`,
+    );
+  }
+  // Every alias — letters, arrows, and page keys alike — must resolve to none
+  // while the composer holds locally pending text. `value` stays the current
+  // key payload (as production passes it); the pending draft is signalled by
+  // the `composerEmpty: false` capability flag. Navigation gets no exemption
+  // from draft protection.
+  for (const [label, patch] of PURE_YAZI_NAVIGATION_CASES) {
+    assert.deepEqual(
+      resolveWorkShellContextInspectorAction({
+        value: patch.value ?? "",
+        key: patch.key ?? {},
+        panelTitle: "Context expanded",
+        actionsEnabled: true,
+        adviceActionsEnabled: true,
+        undoActionsEnabled: true,
+        composerEmpty: false,
+      }),
+      { type: "none" },
+      `${label} stays inert over a locally pending draft`,
+    );
+  }
+});
+
+test("context inspector controller dispatches Pure Yazi pane, cursor, and page callbacks", async () => {
+  const calls = [];
+  const view = renderWithInput(
+    React.createElement(ContextInputControllerHarness, {
+      actionsEnabled: true,
+      adviceActionsEnabled: true,
+      undoEnabled: true,
+      onMove: (direction) => calls.push(`cursor:${direction}`),
+      onMovePane: (direction) => calls.push(`pane:${direction}`),
+      onMovePage: (direction) => calls.push(`page:${direction}`),
+      onPin: () => calls.push("pin"),
+      onToggleDelivery: () => calls.push("delivery"),
+      onExpand: () => calls.push("expand"),
+      onAccept: () => calls.push("accept"),
+      onReject: () => calls.push("reject"),
+      onUndo: () => calls.push("undo"),
+    }),
+  );
+
+  const sequence = [
+    ["h", "pane:-1"],
+    ["l", "pane:1"],
+    ["\u001b[D", "pane:-1"],
+    ["\u001b[C", "pane:1"],
+    ["k", "cursor:-1"],
+    ["j", "cursor:1"],
+    ["\u001b[A", "cursor:-1"],
+    ["\u001b[B", "cursor:1"],
+    ["\u001b[5~", "page:-1"],
+    ["\u001b[6~", "page:1"],
+  ];
+
+  try {
+    const expected = [];
+    for (const [keystroke, expectation] of sequence) {
+      view.stdin.write(keystroke);
+      expected.push(expectation);
+      await waitForCondition(() => calls.length >= expected.length);
+      assert.deepEqual(calls, expected, `keystroke ${JSON.stringify(keystroke)}`);
+    }
+  } finally {
+    view.instance.unmount();
+    view.instance.cleanup();
+  }
+});
+
+// Terminal byte sequence that produces each table entry's Ink keystroke, so
+// the controller test drives the same shared table through real stdin input.
+function pureYaziKeystroke(patch) {
+  if (patch.value !== undefined) return patch.value;
+  if (patch.key.leftArrow) return "\u001b[D";
+  if (patch.key.rightArrow) return "\u001b[C";
+  if (patch.key.upArrow) return "\u001b[A";
+  if (patch.key.downArrow) return "\u001b[B";
+  if (patch.key.pageUp) return "\u001b[5~";
+  if (patch.key.pageDown) return "\u001b[6~";
+  throw new Error("Pure Yazi navigation case has no keystroke mapping");
+}
+
+test("context inspector controller keeps every Pure Yazi alias out of a protected composer", async () => {
+  for (const [stateLabel, protection] of [
+    ["slash picker open", { initialValue: "/context" }],
+    ["locally pending draft", { isComposerRawEmpty: () => false }],
+  ]) {
+    const calls = [];
+    const view = renderWithInput(
+      React.createElement(ContextInputControllerHarness, {
+        actionsEnabled: true,
+        adviceActionsEnabled: true,
+        undoEnabled: true,
+        ...protection,
+        onMove: (direction) => calls.push(`cursor:${direction}`),
+        onMovePane: (direction) => calls.push(`pane:${direction}`),
+        onMovePage: (direction) => calls.push(`page:${direction}`),
+        onPin: () => calls.push("pin"),
+        onToggleDelivery: () => calls.push("delivery"),
+        onExpand: () => calls.push("expand"),
+        onAccept: () => calls.push("accept"),
+        onReject: () => calls.push("reject"),
+        onUndo: () => calls.push("undo"),
+      }),
+    );
+
+    try {
+      // Every navigation alias — letters, arrows, and page keys — must leave
+      // pane, cursor, and page callbacks untouched while the composer is
+      // protected. Asserting after each keystroke names the leaking alias.
+      for (const [label, patch] of PURE_YAZI_NAVIGATION_CASES) {
+        view.stdin.write(pureYaziKeystroke(patch));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        assert.deepEqual(calls, [], `${label} must stay inert with the ${stateLabel}`);
+      }
+      // The mutation letters and space stay composer text as well.
+      for (const keystroke of ["p", "u", "a", "r", " "]) {
+        view.stdin.write(keystroke);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.deepEqual(calls, [], stateLabel);
+    } finally {
+      view.instance.unmount();
+      view.instance.cleanup();
+    }
+  }
+});
+
+
+// An expanded source owns the detail scrollback, but only while the Sources
+// pane is active. Once the cursor crosses into Groups, j/k belong to the group
+// list again — the expansion must not keep swallowing them.
+test("an expanded source only owns j/k while the sources pane is active", async () => {
+  for (const [label, paneProps, expected] of [
+    ["groups pane", { pane: "groups" }, ["cursor:1", "cursor:-1"]],
+    ["sources pane", { pane: "sources" }, ["scroll:1", "scroll:-1"]],
+    ["legacy pane-blind host", {}, ["scroll:1", "scroll:-1"]],
+  ]) {
+    const calls = [];
+    const view = renderWithInput(
+      React.createElement(ContextInputControllerHarness, {
+        actionsEnabled: true,
+        expandedId: "configured-prompt",
+        ...paneProps,
+        onMove: (direction) => calls.push(`cursor:${direction}`),
+        onScroll: (direction) => calls.push(`scroll:${direction}`),
+        onPin: () => {},
+        onToggleDelivery: () => {},
+        onExpand: async () => {},
+      }),
+    );
+
+    try {
+      view.stdin.write("j");
+      await waitForCondition(() => calls.length >= 1);
+      view.stdin.write("k");
+      await waitForCondition(() => calls.length >= 2);
+      assert.deepEqual(calls, expected, label);
+    } finally {
+      view.instance.unmount();
+      view.instance.cleanup();
+    }
+  }
+});

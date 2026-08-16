@@ -28,7 +28,12 @@ import {
 import { useGitFacts } from "./facts.js";
 import { hasActiveAgentConsoleWork } from "./work-shell-agent-console-model.js";
 import { formatAuthLabelForDisplay } from "./work-shell-panels.js";
-import { getWorkShellComposerTextColor, WorkShellView } from "./work-shell-view.js";
+import {
+  getWorkShellComposerTextColor,
+  resolveWorkShellComposerAdditionalRows,
+  WORK_SHELL_COMPOSER_PLACEHOLDER,
+  WorkShellView,
+} from "./work-shell-view.js";
 import { useOmpAuthProviderPicker } from "./work-shell-auth-provider-picker-state.js";
 import {
   shouldShowOmpAuthPicker,
@@ -89,6 +94,19 @@ const ATTACH_CLIPBOARD_COMMAND = "/attach clipboard";
 const ATTACH_CLIPBOARD_USAGE =
   "Use /attach clipboard to capture the current clipboard image.";
 
+/** Masked entry: Enter commits the key, it never reaches the transcript. */
+const SECURE_API_KEY_COMPOSER_HINT = "Enter saves · Esc cancels";
+/**
+ * Shown only while the Context Desk holds an empty composer. Both variants
+ * deliberately omit "Enter send": on this state Enter either opens the
+ * selected source's details or does nothing at all, never a submit. The
+ * details promise is reserved for a host that wired an expansion handler.
+ */
+const CONTEXT_DESK_COMPOSER_HINT =
+  "Context Desk · h/j/k/l move · Enter details · Esc close · type to draft";
+const CONTEXT_DESK_NO_EXPAND_COMPOSER_HINT =
+  "Context Desk · h/j/k/l move · Esc close · type to draft";
+
 export function normalizeComposerSlashLine(value: string): string {
   return value.trim().replace(/\s+/g, " ");
 }
@@ -146,17 +164,38 @@ export function WorkShellPane<
   State extends WorkShellPaneRuntimeState,
 >(props: WorkShellPaneProps<Attachment, State>) {
   const standaloneImageResolveRequestIdRef = React.useRef(0);
+  // Terminal size is measured ahead of the pane-state hook so the Task 11
+  // scrollback step can share the same rows the view renders from.
+  const { stdout } = useStdout();
+  const [terminalColumns, setTerminalColumns] = React.useState(() => resolveWorkShellPaneTerminalColumns(stdout));
+  const [terminalRows, setTerminalRows] = React.useState(() => resolveWorkShellPaneTerminalRows(stdout));
+  React.useEffect(() => {
+    const updateTerminalSize = () => {
+      setTerminalColumns(resolveWorkShellPaneTerminalColumns(stdout));
+      setTerminalRows(resolveWorkShellPaneTerminalRows(stdout));
+    };
+    updateTerminalSize();
+    stdout.on("resize", updateTerminalSize);
+    return () => {
+      stdout.off("resize", updateTerminalSize);
+    };
+  }, [stdout]);
   const {
     inputValue,
     setInputValue,
     engineState,
+    transcriptScrollOffset,
     composerPreview,
     activePanel,
     slashSuggestionCount,
     selectedSlashCommand,
     contextAdviceKeyActionsEnabled,
+    contextPinKeyActionsEnabled,
+    contextDeliveryKeyActionsEnabled,
     contextUndoKeyActionsEnabled,
+    contextExpandActionsEnabled,
     suppressAgentConsoleKey,
+    suppressShellActionKeys,
     agentConsoleOwnsKeyboard,
     agentConsoleSteering,
     submit,
@@ -181,27 +220,32 @@ export function WorkShellPane<
       ? { refreshHomeState: props.refreshHomeState }
       : {}),
     shouldBlockSlashSubmit: props.shouldBlockSlashSubmit,
+    terminalRows,
   });
 
-  const { stdout } = useStdout();
   const captureClipboardImage = props.captureClipboardImage ?? defaultCaptureClipboardImage;
-  const [terminalColumns, setTerminalColumns] = React.useState(() => resolveWorkShellPaneTerminalColumns(stdout));
-  const [terminalRows, setTerminalRows] = React.useState(() => resolveWorkShellPaneTerminalRows(stdout));
-  React.useEffect(() => {
-    const updateTerminalSize = () => {
-      setTerminalColumns(resolveWorkShellPaneTerminalColumns(stdout));
-      setTerminalRows(resolveWorkShellPaneTerminalRows(stdout));
-    };
-    updateTerminalSize();
-    stdout.on("resize", updateTerminalSize);
-    return () => {
-      stdout.off("resize", updateTerminalSize);
-    };
-  }, [stdout]);
 
   React.useEffect(() => {
     props.engine.updateTerminalColumns?.(terminalColumns);
   }, [terminalColumns, props.engine]);
+
+  React.useEffect(() => {
+    const contextDeskTerminalRows = Math.max(
+      1,
+      terminalRows - resolveWorkShellComposerAdditionalRows({
+        inputValue,
+        terminalColumns,
+        attachmentCount: pendingClipboardAttachmentCount,
+      }),
+    );
+    props.engine.updateTerminalRows?.(contextDeskTerminalRows);
+  }, [
+    inputValue,
+    pendingClipboardAttachmentCount,
+    props.engine,
+    terminalColumns,
+    terminalRows,
+  ]);
 
   const {
     entries,
@@ -214,6 +258,7 @@ export function WorkShellPane<
     busyStatus,
     currentTurnStartedAt,
     lastTurnDurationMs,
+    traceLines,
     contextIndicator,
     contextActionReceipt,
     contextPreviewReceipt,
@@ -223,6 +268,9 @@ export function WorkShellPane<
     contextPolicySuggestions,
     contextAdviceUnavailable,
     contextInspectorCursor,
+    contextInspectorOpen,
+    contextInspectorPane,
+    contextInspectorCollection,
     contextInspectorExpanded,
     contextInspectorDetailContent,
     contextInspectorDetailOffset,
@@ -256,6 +304,12 @@ export function WorkShellPane<
     () => props.getReasoningLabel(reasoning),
     [props.getReasoningLabel, reasoning],
   );
+  // Task 10: the dock's live tool feed carries only the trace tail — what the
+  // running turn touched most recently. The transcript's own trace filtering
+  // is untouched; these raw lines never enter the conversation rail.
+  const liveToolTraceLines = traceLines !== undefined && traceLines.length > 0
+    ? traceLines.slice(-3)
+    : undefined;
   const reasoningSupported = React.useMemo(
     () => props.isReasoningSupported(reasoning),
     [props.isReasoningSupported, reasoning],
@@ -276,18 +330,60 @@ export function WorkShellPane<
   // dispatches the engine action; the Composer skips inserting the char.
   // The steer composer outranks both panels: the controller has already
   // stopped them acting, so their suppressions must not eat the steer text.
+  // Ownership is engine state, not a panel title: the desk can own the
+  // keyboard while the title is stale, and a title match must not claim keys
+  // for a desk the engine has closed. The title stays as the fallback for
+  // hosts that have not wired `contextInspectorOpen` yet.
+  const contextDeskOpen = contextInspectorOpen
+    ?? activePanel.title === "Context expanded";
+  // Navigation ownership is per-axis because the runtime wires the two moves
+  // independently: claiming `h`/`l` for a desk that never wired pane movement
+  // dispatches into an absent handler and the letter reaches neither the desk
+  // nor the draft.
+  const canMoveDeskCursor = props.engine.moveContextInspectorCursor !== undefined;
+  const canMoveDeskPane = props.engine.moveContextInspectorPane !== undefined;
+  // Enter ownership is the final callback-and-row capability computed by the
+  // hook from the canonical active collection and selected source.
+  const canExpandDeskSource = contextExpandActionsEnabled;
   const shouldSuppressComposerKeysForInspector = React.useMemo(
     () =>
       !agentConsoleSteering
-      && activePanel.title === "Context expanded"
+      && contextDeskOpen
       && isRawComposerEmpty(inputValue)
-      && props.engine.moveContextInspectorCursor !== undefined,
-    [agentConsoleSteering, activePanel.title, inputValue, props.engine],
+      && (
+        canMoveDeskCursor
+        || canMoveDeskPane
+        || canExpandDeskSource
+        || contextPinKeyActionsEnabled
+        || contextDeliveryKeyActionsEnabled
+      ),
+    [
+      agentConsoleSteering,
+      canExpandDeskSource,
+      contextDeliveryKeyActionsEnabled,
+      contextPinKeyActionsEnabled,
+      canMoveDeskCursor,
+      canMoveDeskPane,
+      contextDeskOpen,
+      inputValue,
+    ],
   );
   const shouldSuppressComposerKeysForTelemetry =
     !agentConsoleSteering
     && (activePanel.title === "Cache Telemetry" || activePanel.title === "Agent History")
     && isRawComposerEmpty(inputValue);
+  // The dock hint has to name whoever holds the keys. While the desk owns an
+  // empty composer Enter never sends, so the shell's normal help would be a
+  // promise the composer cannot keep. A draft hands the keys straight back,
+  // and with them the normal help.
+  const contextDeskComposerHint = canExpandDeskSource
+    ? CONTEXT_DESK_COMPOSER_HINT
+    : CONTEXT_DESK_NO_EXPAND_COMPOSER_HINT;
+  const composerHintOverride = isSecureApiKeyEntry
+    ? SECURE_API_KEY_COMPOSER_HINT
+    : shouldSuppressComposerKeysForInspector
+      ? contextDeskComposerHint
+      : undefined;
   const attachmentLines = React.useMemo(() => {
     const lines = composerPreview.attachments.length > 0
       ? [
@@ -362,6 +458,7 @@ export function WorkShellPane<
       {...(busyStatus ? { busyStatus } : {})}
       {...(currentTurnStartedAt !== undefined ? { currentTurnStartedAt } : {})}
       {...(lastTurnDurationMs !== undefined ? { lastTurnDurationMs } : {})}
+      {...(liveToolTraceLines ? { liveToolTraceLines } : {})}
       activePanel={activePanel}
       {...(contextActionReceipt ? { contextActionReceipt } : {})}
       {...(contextPreviewReceipt ? { contextPreviewReceipt } : {})}
@@ -372,6 +469,8 @@ export function WorkShellPane<
       {...(contextAdviceUnavailable ? { contextAdviceUnavailable } : {})}
       contextAdviceActionsEnabled={contextAdviceKeyActionsEnabled}
       {...(contextInspectorCursor !== undefined ? { contextInspectorCursor } : {})}
+      {...(contextInspectorPane !== undefined ? { contextInspectorPane } : {})}
+      {...(contextInspectorCollection !== undefined ? { contextInspectorCollection } : {})}
       {...(contextInspectorExpanded !== undefined ? { contextInspectorExpanded } : {})}
       {...(contextInspectorDetailContent !== undefined ? { contextInspectorDetailContent } : {})}
       {...(contextInspectorDetailOffset !== undefined ? { contextInspectorDetailOffset } : {})}
@@ -382,6 +481,7 @@ export function WorkShellPane<
       {...(attachmentLines ? { attachmentLines } : {})}
       {...(pendingClipboardAttachmentCount > 0 ? { attachmentCount: pendingClipboardAttachmentCount } : {})}
       {...{ terminalRows }}
+      {...(transcriptScrollOffset > 0 ? { transcriptScrollOffset } : {})}
       {...(authPickerActive && authPicker.catalog ? { ompAuthCatalog: authPicker.catalog } : {})}
       ompAuthPickerCursor={authPicker.cursor}
       {...(authPickerActive && authPicker.signInReceipt ? { ompAuthSignInReceipt: authPicker.signInReceipt } : {})}
@@ -465,6 +565,7 @@ export function WorkShellPane<
           }}
           terminalColumns={terminalColumns}
           textColor={getWorkShellComposerTextColor()}
+          placeholder={WORK_SHELL_COMPOSER_PLACEHOLDER}
           {...(isSecureApiKeyEntry ? { mask: "•" } : {})}
           cursorVisible={
             !shouldSuppressComposerKeysForInspector
@@ -472,13 +573,25 @@ export function WorkShellPane<
             && !agentConsoleOwnsKeyboard
           }
           {...(suppressAgentConsoleKey ? { suppressAgentConsoleKey } : {})}
+          suppressShellActionKeys={suppressShellActionKeys}
           {...(shouldSuppressComposerKeysForInspector
             ? { suppressInspectorKeys: true }
             : {})}
           suppressTelemetryHotkeys={shouldSuppressComposerKeysForTelemetry}
-          suppressInspectorMutationKeys={contextSourceActionsEnabled ?? false}
+          suppressInspectorMutationKeys={false}
+          suppressInspectorPinKey={contextPinKeyActionsEnabled}
+          suppressInspectorDeliveryKey={contextDeliveryKeyActionsEnabled}
           suppressInspectorAdviceKeys={contextAdviceKeyActionsEnabled}
           suppressInspectorUndoKey={contextUndoKeyActionsEnabled}
+          suppressInspectorExpandKey={
+            shouldSuppressComposerKeysForInspector && canExpandDeskSource
+          }
+          suppressInspectorPaneNavigationKeys={
+            shouldSuppressComposerKeysForInspector && canMoveDeskPane
+          }
+          suppressInspectorCursorNavigationKeys={
+            shouldSuppressComposerKeysForInspector && canMoveDeskCursor
+          }
         />
       }
       inputValue={inputValue}
@@ -489,9 +602,7 @@ export function WorkShellPane<
       gitFacts={gitFacts}
       {...(queuedCount !== undefined ? { queuedCount } : {})}
       {...(queuePaused !== undefined ? { queuePaused } : {})}
-      {...(isSecureApiKeyEntry
-        ? { composerHintOverride: "Enter saves · Esc cancels" }
-        : {})}
+      {...(composerHintOverride ? { composerHintOverride } : {})}
     />
   );
 }

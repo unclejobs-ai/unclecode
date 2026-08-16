@@ -3,6 +3,9 @@ import React from "react";
 import type {
   AgentConsoleSnapshot,
   AgentControlReceiptStatus,
+  AskUserQuestionRequest,
+  ContextDeskCollection,
+  ContextDeskPane,
   ContextPacketChangeClassification,
   ContextPacketReceipt,
   ContextPacketView,
@@ -403,9 +406,18 @@ export function shouldSuppressWorkShellPassivePanel(input: {
   readonly inputValue: string;
   readonly isBusy: boolean;
   readonly latestSystemText?: string | undefined;
+  /**
+   * The decision bar is rendering the pending AskUserQuestion above the
+   * composer, so the passive "Decision" panel must not repeat its option
+   * lines in the same frame.
+   */
+  readonly decisionBarActive?: boolean | undefined;
 }): boolean {
   if (input.panelDisplayMode !== "bottom") {
     return false;
+  }
+  if (input.decisionBarActive && input.panelTitle === "Decision") {
+    return true;
   }
   const hasComposerInput = input.inputValue.trim().length > 0;
   if (input.panelTitle === "Session status") {
@@ -482,6 +494,9 @@ export function getWorkShellComposerHint(
       ? `↑↓ select · Enter run · Esc cancel${argSuffix}`
       : "No matches · try /model, /auth, /context, /queue";
   }
+  // The empty composer is the only surface that advertises slash discovery.
+  // Once a draft exists the operator has already found the composer, so the
+  // shorter help keeps the hint row narrow.
   if (trimmed.length === 0) {
     return "Enter send · Shift+Enter newline · / commands · Ctrl+V image";
   }
@@ -490,6 +505,15 @@ export function getWorkShellComposerHint(
 
 export function resolveWorkShellComposerHint(input: {
   readonly composerHintOverride?: string;
+  /**
+   * Decision bar: while a pending AskUserQuestion is promoted above the
+   * composer, Esc means "cancel the decision" — not the busy hint's
+   * "interrupt". Pass the single question's option count for one-key
+   * replies, or `true` when the decision needs typed multi-question
+   * answers. Evaluated ahead of `isBusy` because a pending decision only
+   * exists mid-turn.
+   */
+  readonly decisionPending?: boolean | number | undefined;
   readonly isBusy: boolean;
   readonly queuePaused?: boolean;
   readonly queuedCount?: number;
@@ -499,6 +523,13 @@ export function resolveWorkShellComposerHint(input: {
 }): string | undefined {
   if (input.composerHintOverride) {
     return input.composerHintOverride;
+  }
+  if (input.decisionPending) {
+    if (typeof input.decisionPending === "number") {
+      const range = input.decisionPending > 1 ? `1-${input.decisionPending}` : "1";
+      return `${range} answer · Esc cancels decision · or type`;
+    }
+    return "type answers · Esc cancels decision · /cancel";
   }
   if (input.isBusy) {
     return "Enter queues follow-up · Ctrl+C/Esc interrupt · /queue";
@@ -1055,13 +1086,11 @@ function padDisplayLine(value: string, width: number): string {
   return `${value}${" ".repeat(padding)}`;
 }
 
-function formatWorkShellPromptDeckDivider(width: number): string {
-  const label = " prompt deck ";
-  const labelWidth = getDisplayWidth(label);
-  // Consistent thin rule with the label set in flush-left, mirroring the
-  // header rule. Width is padded so the rule reaches the right edge.
-  const dashCount = Math.max(0, width - labelWidth);
-  return `${label}${"─".repeat(dashCount)}`;
+function formatWorkShellComposerDockDivider(width: number): string {
+  // A pure soft rule. The `›` prompt row directly below announces the input
+  // area, so the rule carries no label. Width is padded so the rule reaches
+  // the right edge.
+  return "─".repeat(Math.max(0, width));
 }
 
 function prefixWrappedDisplayText(prefix: string, text: string, width: number): readonly string[] {
@@ -1305,7 +1334,8 @@ function resolveWorkShellComposerDockAccentRole(input: {
   if (input.isBusy || (input.queuedCount ?? 0) > 0) {
     return "assistant";
   }
-  return "borderStrong";
+  // Idle: same accent as the hero ● so the eye lands on one cyan anchor.
+  return "assistant";
 }
 
 function resolveWorkShellComposerDockLayout(input: {
@@ -1506,36 +1536,68 @@ function renderWorkShellEntryBlock(input: {
  * already say, so an empty session opened onto a wall of onboarding.
  */
 /**
- * Openers for the empty screen, laid out in two columns.
+ * Openers for the empty screen, laid out as one dim line.
  *
  * The trigger is its own bullet. omp's welcome panel lists `#`, `/`, `!`, `$`
  * down the left edge, so the glyph you read is the character you type — the
  * line documents itself and needs no "press" or "use". Prose that named the
  * keys instead ("Use /context before a risky edit") spent a line each to say
- * less.
+ * less. `Ctrl+O` is deliberately absent (sessions surface through `?` →
+ * `/help`); the work shell contract asserts the view never advertises it.
  */
-const WORK_SHELL_OPENERS: readonly (readonly [string, string])[] = [
-  ["/", "commands"],
-  ["@", "attach a file"],
-  ["!", "run a shell command"],
-  ["Ctrl+O", "saved sessions"],
+const WORK_SHELL_OPENERS = "/ commands · @ attach a file · ! shell · ? keys";
+
+/**
+ * Example tasks shown on the empty screen. Each leading digit is also a
+ * hotkey: pressing `1`-`3` with an empty composer prefills the matching
+ * prompt so the first screen answers "what do I type" with one keystroke.
+ * The work shell input controller reads this same list (work-shell-hooks.ts)
+ * so the rendered digit and the prefilled text can never drift apart.
+ */
+export const WORK_SHELL_STARTER_PROMPTS: readonly string[] = [
+  "Explain this codebase and how it is organized",
+  "Find the cause of a failing test and propose a fix",
+  "Draft a plan for the next change",
 ];
 
-const OPENER_GLYPH_COLUMN = 6;
+/**
+ * `unclecode` ASCII wordmark for the empty screen (Task 13 branding). Verbatim
+ * `npx --yes figlet -f standard unclecode` output: 6 rows, every row padded to
+ * the same 47-column display width (figlet's standard font is ASCII by
+ * construction, so string length == display width; the trailing row is the
+ * font's own blank descender line and doubles as the gap before the heading).
+ * Rows render in a single dim color (`W.textDim`, palette §2 — no gradients);
+ * below wordmark width + 4 columns of container width the art is skipped so a
+ * narrow terminal never wraps or shreds it.
+ */
+export const WORK_SHELL_WORDMARK: readonly string[] = [
+  "                   _                    _      ",
+  "  _   _ _ __   ___| | ___  ___ ___   __| | ___ ",
+  " | | | | '_ \\ / __| |/ _ \\/ __/ _ \\ / _` |/ _ \\",
+  " | |_| | | | | (__| |  __/ (_| (_) | (_| |  __/",
+  "  \\__,_|_| |_|\\___|_|\\___|\\___\\___/ \\__,_|\\___|",
+  "                                               ",
+];
+const WORK_SHELL_WORDMARK_WIDTH = WORK_SHELL_WORDMARK[0]?.length ?? 0;
 
-function renderWorkShellEmptyConversation(width = 96): React.ReactNode {
-  // Two columns when the row can hold them; one when it cannot. Each cell is
-  // glyph + label, so the column width is the widest of those.
-  const cellWidth = OPENER_GLYPH_COLUMN + 2 +
-    Math.max(...WORK_SHELL_OPENERS.map(([, label]) => getDisplayWidth(label)));
-  const columns = width >= cellWidth * 2 + 4 ? 2 : 1;
-  const rows: (readonly (readonly [string, string])[])[] = [];
-  for (let index = 0; index < WORK_SHELL_OPENERS.length; index += columns) {
-    rows.push(WORK_SHELL_OPENERS.slice(index, index + columns));
-  }
+/**
+ * Ghost hint the pane hands the Composer for the empty draft. It names the two
+ * first-move affordances (plain task prose, `/` commands) without spending a
+ * chrome row: the dim text sits inside the input row and the first keystroke
+ * replaces it.
+ */
+export const WORK_SHELL_COMPOSER_PLACEHOLDER = "Describe a task · / for commands";
 
+function renderWorkShellEmptyConversation(conversationWidth: number): React.ReactNode {
+  // Width gate: the art needs its 47 columns plus 2 columns of breathing room
+  // on each side. Narrower containers skip it entirely (no wrapping, no
+  // shredding) and keep the pre-Task-13 text-only empty state.
+  const showWordmark = conversationWidth >= WORK_SHELL_WORDMARK_WIDTH + 4;
   return (
     <Box flexDirection="column" paddingLeft={1}>
+      {showWordmark ? WORK_SHELL_WORDMARK.map((row, index) => (
+        <Text key={`wordmark-${index}`} {...readableTextColorProps(W.textDim)}>{row}</Text>
+      )) : null}
       <Text>
         <Text color={W.assistant} bold>{"● "}</Text>
         <Text color={W.text} bold>{"Ready for the next move"}</Text>
@@ -1543,21 +1605,14 @@ function renderWorkShellEmptyConversation(width = 96): React.ReactNode {
       <Box paddingLeft={2} flexDirection="column">
         <Text color={W.textMuted}>{getWorkShellEmptyConversationHint()}</Text>
         <Box marginTop={1} flexDirection="column">
-          {rows.map((row, rowIndex) => (
-            <Text key={`openers-${String(rowIndex)}`}>
-              {row.map(([glyph, label], cellIndex) => (
-                <React.Fragment key={glyph}>
-                  <Text color={W.assistant} bold>{padDisplayLine(glyph, OPENER_GLYPH_COLUMN)}</Text>
-                  <Text color={W.textDim}>
-                    {cellIndex === row.length - 1
-                      ? `  ${label}`
-                      : padDisplayLine(`  ${label}`, cellWidth - OPENER_GLYPH_COLUMN + 4)}
-                  </Text>
-                </React.Fragment>
-              ))}
+          {WORK_SHELL_STARTER_PROMPTS.map((prompt, index) => (
+            <Text key={prompt}>
+              <Text color={W.assistant} bold>{`${index + 1}  `}</Text>
+              <Text color={W.textDim}>{prompt}</Text>
             </Text>
           ))}
         </Box>
+        <Text color={W.textDim}>{WORK_SHELL_OPENERS}</Text>
       </Box>
     </Box>
   );
@@ -1571,12 +1626,72 @@ export function getWorkShellThinkingDetailLines(input: {
   return [];
 }
 
+/**
+ * Approximate how many transcript entries the terminal can show at once.
+ * Entry height varies with body length; three rows per entry (badge or chip
+ * line, body, breathing room) matches the observed average, and ten rows are
+ * reserved for the shell chrome (header, status strip, composer dock, and the
+ * scroll indicator itself). The approximation only has to be stable, not
+ * exact: it sizes the scrolled window and the PageUp/PageDown step, and both
+ * read it so a page never moves by a different amount than it shows.
+ */
+const WORK_SHELL_TRANSCRIPT_RESERVED_ROWS = 10;
+const WORK_SHELL_TRANSCRIPT_ROWS_PER_ENTRY = 3;
+
+export function getWorkShellTranscriptEntryCapacity(terminalRows?: number): number {
+  const rows = terminalRows ?? process.stdout.rows ?? 24;
+  return Math.max(
+    3,
+    Math.floor((rows - WORK_SHELL_TRANSCRIPT_RESERVED_ROWS) / WORK_SHELL_TRANSCRIPT_ROWS_PER_ENTRY),
+  );
+}
+
+/**
+ * Task 11 scrollback window. The offset counts entries hidden *below* the
+ * window ("entries from the bottom"); 0 is bottom-follow. At 0 the window is
+ * the historical last-50 slice, so the unscrolled frame is byte-identical to
+ * the pre-scrollback render (the existing render tests guard that). Once
+ * scrolled, the window is the rows-derived capacity anchored `scrollOffset`
+ * entries above the newest entry. `entriesAbove` feeds the indicator row.
+ */
+export function resolveWorkShellTranscriptWindow(input: {
+  readonly entries: readonly WorkShellEntry[];
+  readonly terminalRows?: number | undefined;
+  readonly scrollOffset: number;
+}): {
+  readonly window: readonly WorkShellEntry[];
+  readonly entriesAbove: number;
+  readonly scrolled: boolean;
+} {
+  if (input.scrollOffset <= 0 || input.entries.length === 0) {
+    return {
+      window: input.entries.slice(-50),
+      entriesAbove: Math.max(0, input.entries.length - 50),
+      scrolled: false,
+    };
+  }
+  const capacity = getWorkShellTranscriptEntryCapacity(input.terminalRows);
+  const end = Math.min(
+    input.entries.length,
+    Math.max(capacity, input.entries.length - input.scrollOffset),
+  );
+  const start = Math.max(0, end - capacity);
+  return {
+    window: input.entries.slice(start, end),
+    entriesAbove: start,
+    scrolled: true,
+  };
+}
+
 const WorkShellConversationBlock = React.memo(function WorkShellConversationBlock(props: {
   readonly entries: readonly WorkShellEntry[];
   readonly streamingAssistantText?: string;
   readonly isBusy: boolean;
   readonly panelPlacement: WorkShellPanelPlacement;
   readonly terminalColumns?: number;
+  readonly terminalRows?: number;
+  /** Task 11 scrollback: entries hidden below the window; 0 = bottom-follow. */
+  readonly scrollOffset?: number;
 }) {
   const conversationWidth = getWorkShellConversationWidth({
     panelPlacement: props.panelPlacement,
@@ -1588,17 +1703,25 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
         { role: "assistant", text: `${props.streamingAssistantText}${STREAMING_CURSOR}` } as const,
       ]
     : props.entries.filter(shouldShowWorkShellConversationEntry);
+  const transcriptWindow = resolveWorkShellTranscriptWindow({
+    entries,
+    ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
+    scrollOffset: props.scrollOffset ?? 0,
+  });
 
   return (
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "68%" : undefined} paddingRight={props.panelPlacement === "side" ? 1 : 0}>
       <Box flexDirection="column">
         {entries.length === 0 ? (
           props.isBusy ? null : renderWorkShellEmptyConversation(conversationWidth)
-        ) : entries.slice(-50).map((entry, index) => renderWorkShellEntryBlock({
+        ) : transcriptWindow.window.map((entry, index) => renderWorkShellEntryBlock({
           entry,
           index,
           width: conversationWidth,
         }))}
+        {transcriptWindow.scrolled ? (
+          <Text color={W.textDim}>{`↑ ${transcriptWindow.entriesAbove} entries above · PageUp/PageDown scroll · Esc newest`}</Text>
+        ) : null}
       </Box>
     </Box>
   );
@@ -1677,22 +1800,96 @@ const WorkShellAttachmentBlock = React.memo(function WorkShellAttachmentBlock(pr
   );
 });
 
+/**
+ * Auth only earns a slot when it needs action. Healthy labels ("Saved OAuth")
+ * never change mid-session, so both the header chip and the status row hide
+ * them and reappear the moment the wording turns actionable.
+ */
+function isWorkShellAuthWarning(authLabel: string): boolean {
+  return /blocked|unavailable|not signed|needs refresh|needs API key|lacks/i.test(authLabel);
+}
+
 const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
   readonly provider: string;
+  readonly model: string;
+  readonly mode: string;
+  readonly authLabel: string;
   readonly headerHint?: string;
   readonly terminalColumns?: number;
 }) {
   const providerTitle = formatWorkShellProviderTitle(props.provider);
-  const headerHint = props.headerHint ?? "work context · Ctrl+O sessions · / commands";
   const width = resolveWorkShellChromeWidth(props.terminalColumns);
   // No logo glyph. A bold wordmark is the mark; the ◢ that used to sit here
   // read as decoration from another era and was the only ornament on a screen
   // that otherwise earns its hierarchy from weight and spacing.
   const leftWidth = getDisplayWidth(providerTitle);
-  const rightWidth = getDisplayWidth(headerHint);
   const minGap = 2;
+  const authSeparator = " · ";
 
-  if (leftWidth + minGap + rightWidth > width && leftWidth + minGap + 12 > width) {
+  // A caller-supplied hint always wins (tests and narrow-viewport hosts inject
+  // one); the shell's own right side is the session's identity — model · mode —
+  // with the auth chip riding after it only when auth needs action.
+  let rightText: string;
+  let authChip: string | undefined;
+  let wordmarkOnly = false;
+  if (props.headerHint !== undefined) {
+    // An injected hint still passes through the truncation ladder: a hint
+    // sized for a wide host must not wrap the header onto a second line at
+    // narrow widths (the wrap bug the resize-reflow tests pin down). If even
+    // twelve columns cannot fit next to the wordmark, the shared fallback
+    // below renders the wordmark alone over the rule.
+    rightText = leftWidth + minGap + getDisplayWidth(props.headerHint) <= width
+      ? props.headerHint
+      : truncateForDisplayWidth(props.headerHint, Math.max(12, width - leftWidth - minGap));
+    authChip = undefined;
+  } else {
+    const sessionFacts = formatWorkShellSessionFactsGroup({
+      model: props.model,
+      mode: props.mode,
+    });
+    const chip = isWorkShellAuthWarning(props.authLabel)
+      ? formatWorkShellAuthFactsGroup(props.authLabel)
+      : undefined;
+    const chipWidth = chip === undefined
+      ? 0
+      : getDisplayWidth(authSeparator) + getDisplayWidth(chip);
+    const fits = (rightWidth: number): boolean => leftWidth + minGap + rightWidth <= width;
+    if (chip === undefined) {
+      // Healthy auth stays silent: the right side is the identity alone, whole
+      // when it fits and truncated against the wordmark when it does not.
+      rightText = fits(getDisplayWidth(sessionFacts))
+        ? sessionFacts
+        : truncateForDisplayWidth(sessionFacts, Math.max(12, width - leftWidth - minGap));
+      authChip = undefined;
+    } else if (fits(chipWidth)) {
+      // Warnings beat identity facts: the chip rides the header whenever it
+      // can, and the facts truncate around it — down to nothing — instead of
+      // evicting it. The old ladder dropped the chip first, hiding it at every
+      // width from 72 to 92 columns whenever the model id ran long.
+      rightText = fits(getDisplayWidth(sessionFacts) + chipWidth)
+        ? sessionFacts
+        : truncateForDisplayWidth(sessionFacts, Math.max(0, width - leftWidth - minGap - chipWidth));
+      authChip = chip;
+    } else {
+      // Pathological width: the chip cannot stand next to the wordmark at all,
+      // so the row falls back to the wordmark alone over the rule — the only
+      // regime where a warning chip may be dropped (the narrow status row
+      // still carries auth below 72 columns).
+      rightText = "";
+      authChip = undefined;
+      wordmarkOnly = true;
+    }
+  }
+
+  // The chip's leading separator only exists when there are facts to separate
+  // it from; a chip riding alone must not dangle a leading " · ".
+  const chipSeparatorWidth = authChip === undefined || rightText.length === 0
+    ? 0
+    : getDisplayWidth(authSeparator);
+  const rightWidth = getDisplayWidth(rightText) + chipSeparatorWidth
+    + (authChip === undefined ? 0 : getDisplayWidth(authChip));
+
+  if (wordmarkOnly || (leftWidth + minGap + rightWidth > width && leftWidth + minGap + 12 > width)) {
     return (
       <Box flexDirection="column">
         <Text color={W.text} bold>{truncateForDisplayWidth(providerTitle, width)}</Text>
@@ -1701,19 +1898,22 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
     );
   }
 
-  const hintText = leftWidth + minGap + rightWidth <= width
-    ? headerHint
-    : truncateForDisplayWidth(headerHint, Math.max(12, width - leftWidth - minGap));
-  const hintGap = leftWidth + minGap + getDisplayWidth(hintText) <= width
-    ? " ".repeat(Math.max(minGap, width - leftWidth - getDisplayWidth(hintText)))
+  const gap = leftWidth + minGap + rightWidth <= width
+    ? " ".repeat(Math.max(minGap, width - leftWidth - rightWidth))
     : " ".repeat(minGap);
 
   return (
     <Box flexDirection="column">
       <Text>
         <Text color={W.text} bold>{providerTitle}</Text>
-        <Text>{hintGap}</Text>
-        <Text color={W.textDim}>{hintText}</Text>
+        <Text>{gap}</Text>
+        {rightText.length > 0 ? <Text color={W.textDim}>{rightText}</Text> : null}
+        {authChip === undefined ? null : (
+          <>
+            {chipSeparatorWidth > 0 ? <Text color={W.textDim}>{authSeparator}</Text> : null}
+            <Text color={W.warning} bold>{authChip}</Text>
+          </>
+        )}
       </Text>
       {renderChromeRule({ width, color: W.borderSoft })}
     </Box>
@@ -1840,15 +2040,20 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   const backgroundBusy = activeAgents > 0 || activeJobs > 0;
   const busy = props.isBusy || backgroundBusy;
 
-  const sessionGroup = formatWorkShellSessionFactsGroup({
-    model: props.model,
-    mode: props.mode,
-  });
+  // The busy row moved down into the composer dock (pinned directly above its
+  // hint row) so live progress rides next to the input even in a long
+  // conversation. The top row is idle-only: a busy frame that still painted
+  // here would put two spinners on one screen (DESIGN.md §6 "one spinner per
+  // surface"). Because every WorkShellView branch renders this block with the
+  // same liveness inputs, the null return covers them all.
+  if (busy) {
+    return null;
+  }
+
   const authGroup = formatWorkShellAuthFactsGroup(props.authLabel);
-  const isAuthWarning = /blocked|unavailable|not signed|needs refresh|needs API key|lacks/i.test(props.authLabel);
-  const authColor = isAuthWarning ? W.warning : W.textMuted;
+  const isAuthWarning = isWorkShellAuthWarning(props.authLabel);
   const statusGlyph = busy ? pickBusySpinnerFrame(activityFrame) : "◇";
-  const statusGlyphColor = busy ? W.spinner : W.user;
+  const statusGlyphColor = busy ? W.spinner : W.assistant;
   // "no reply yet" spent a slot to report nothing. On a fresh session the
   // timing is simply omitted.
   const lastReplyTiming = props.lastTurnDurationMs === undefined
@@ -1886,7 +2091,7 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
       })}`;
     const availableStatusWidth = Math.max(1, (props.terminalColumns ?? 72) - 6);
     return (
-      <Box marginTop={1} paddingLeft={2}>
+      <Box marginTop={1} paddingLeft={1}>
         <Text>
           <Text color={statusGlyphColor} bold>{`${statusGlyph} `}</Text>
           <Text {...(busy
@@ -1899,25 +2104,13 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
     );
   }
 
-
+  // Wide hosts carry identity (model · mode) and the auth warning chip in the
+  // header, so this row is state only: "◇ Ready · last 1.5s" when idle,
+  // "⠋ Reading context · 16s" when something is live.
   return (
-    <Box marginTop={1} paddingLeft={2}>
+    <Box marginTop={1} paddingLeft={1}>
       <Text>
         <Text color={statusGlyphColor} bold>{`${statusGlyph} `}</Text>
-        <Text color={W.text} bold>{sessionGroup}</Text>
-        {/*
-          Healthy auth is hidden. "OAuth · pi engine" never changes during a
-          session, so it was two of the six items on this row confirming that
-          nothing is wrong. It reappears the moment it needs action.
-        */}
-        {isAuthWarning ? (
-          <>
-            <Text color={W.textDim}>{" · "}</Text>
-            <Text color={authColor} bold>{authGroup}</Text>
-          </>
-        ) : null}
-        {/* borderSoft is invisible on dark ground, which fused the row into one run. */}
-        <Text color={W.textDim}>{" · "}</Text>
         <Text {...(busy
           ? { color: W.assistant, bold: true }
           : { color: W.textMuted })}>{statusDisplay}</Text>
@@ -1985,6 +2178,81 @@ function renderWorkShellAgentConsoleControl(input: {
   );
 }
 
+/**
+ * The pending AskUserQuestion, promoted to an interactive bar directly above
+ * the composer dock. A single question renders its numbered options for
+ * one-key replies (digits `1`-`9`, the recommended option keeps the same
+ * `(recommended)` marker the decision lines use); anything wider stays a
+ * one-line pointer because multi-question requests need typed
+ * `question-id: n` answers. The engine clears `pendingDecision` on settle,
+ * so the bar disappears the frame the decision is answered or cancelled.
+ */
+const WorkShellDecisionBar = React.memo(function WorkShellDecisionBar(props: {
+  readonly request: AskUserQuestionRequest;
+  /**
+   * Engine feedback for a rejected typed reply (`Input needed · …`). That
+   * line normally lives in the passive "Decision" panel, which this bar
+   * suppresses — so without threading it here the rejection is silent.
+   */
+  readonly inputNeededLine?: string | undefined;
+  readonly terminalColumns?: number | undefined;
+}) {
+  const title = props.request.title?.trim() || "Decision required";
+  const singleQuestion = props.request.questions.length === 1
+    ? props.request.questions[0]
+    : undefined;
+  const feedbackLine = props.inputNeededLine
+    ? truncateForDisplayWidth(
+      props.inputNeededLine,
+      Math.max(20, getWorkShellDockWidth(props.terminalColumns) - 3),
+    )
+    : undefined;
+  if (!singleQuestion) {
+    return (
+      <Box marginTop={1} paddingLeft={1} flexDirection="column">
+        <Text>
+          <Text color={W.assistant} bold>{"◆ "}</Text>
+          <Text color={W.text} bold>{title}</Text>
+          <Text color={W.textDim}>
+            {` · ${props.request.questions.length} questions · type answers · /cancel`}
+          </Text>
+        </Text>
+        {feedbackLine ? (
+          <Box paddingLeft={2}>
+            <Text color={W.warning}>{feedbackLine}</Text>
+          </Box>
+        ) : null}
+      </Box>
+    );
+  }
+  const optionCount = singleQuestion.options.length;
+  const keyRange = optionCount > 1 ? `1-${optionCount}` : "1";
+  return (
+    <Box marginTop={1} paddingLeft={1} flexDirection="column">
+      <Text>
+        <Text color={W.assistant} bold>{"◆ "}</Text>
+        <Text color={W.text} bold>{title}</Text>
+      </Text>
+      <Box paddingLeft={2} flexDirection="column">
+        {singleQuestion.options.map((option, index) => (
+          <Text key={`${index}-${option.label}`}>
+            <Text color={W.assistant} bold>{`${index + 1}. `}</Text>
+            <Text color={W.textDim}>
+              {singleQuestion.recommended === index
+                ? `${option.label} (recommended)`
+                : option.label}
+            </Text>
+          </Text>
+        ))}
+        <Text color={W.textDim}>{`${keyRange} answer · Esc cancel · or type`}</Text>
+        {feedbackLine ? (
+          <Text color={W.warning}>{feedbackLine}</Text>
+        ) : null}
+      </Box>
+    </Box>
+  );
+});
+
 const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   readonly composer: React.ReactNode;
   readonly composerHint?: string;
@@ -2004,6 +2272,21 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   readonly modelWindow?: number;
   readonly gitFacts?: GitFacts;
   readonly cost?: string;
+  readonly busyStatus?: string;
+  readonly currentTurnStartedAt?: number;
+  readonly clock: WorkShellActivityClock;
+  /**
+   * Live delegated work — the same counts the status row gates on, so the
+   * dock's activity row and the (idle-only) top row can never disagree about
+   * what "busy" means.
+   */
+  readonly activeCounts?: AgentConsoleActiveCounts;
+  /**
+   * Task 10: the engine trace tail (max 3 lines) — what the running turn is
+   * doing right now. Rendered dim below the activity row under the same busy
+   * gate, one truncated row per line. Idle frames render no feed rows.
+   */
+  readonly liveToolTraceLines?: readonly string[];
 }) {
   const dockWidth = getWorkShellDockWidth(props.terminalColumns);
   const footerLine = formatWorkShellFooterLine({
@@ -2044,13 +2327,59 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
       : dockLayout.accentColorRole === "assistant"
         ? { color: W.assistant }
         : readableTextColorProps(W.textMuted);
+  const { activityFrame, activityNow } = props.clock;
+  const activeAgents = props.activeCounts?.agents ?? 0;
+  const activeJobs = props.activeCounts?.jobs ?? 0;
+  const backgroundBusy = activeAgents > 0 || activeJobs > 0;
+  // Same liveness rule the status block owns — a main turn OR live delegated
+  // work — reusing its counts so the dock never invents a second definition.
+  const busy = props.isBusy === true || backgroundBusy;
+  // The busy half of the old status row, relocated to sit directly above the
+  // hint row: spinner + activity phrase + elapsed, with agent/job counts
+  // first when delegated work is live. Idle frames render nothing here, which
+  // keeps the braille spinner off the idle screen the tmux smoke pins.
+  const activityLine = busy
+    ? truncateForDisplayWidth(
+        formatWorkShellStatusActivityFacts({
+          activeAgents,
+          activeJobs,
+          activity: props.isBusy
+            ? resolveWorkShellBusyActivityPhrase(props.busyStatus ?? "")
+            : "Working",
+          ...(props.isBusy
+            ? {
+                elapsed: props.currentTurnStartedAt === undefined
+                  ? "starting"
+                  : formatCompactDuration(Math.max(0, activityNow - props.currentTurnStartedAt)),
+              }
+            : {}),
+        }),
+        Math.max(12, dockWidth - 2),
+      )
+    : undefined;
 
   return (
     <Box marginTop={1} flexDirection="column">
+      {activityLine !== undefined ? (
+        <Text>
+          <Text color={W.spinner} bold>{`${pickBusySpinnerFrame(activityFrame)} `}</Text>
+          <Text color={W.assistant} bold>{activityLine}</Text>
+        </Text>
+      ) : null}
+      {/* The turn's trace tail, dim and one truncated row per line, directly
+          under the activity row: which tools are running, where the user is
+          looking. Idle frames render no feed rows (same gate as the spinner). */}
+      {busy && props.liveToolTraceLines !== undefined
+        ? props.liveToolTraceLines.map((line, index) => (
+          <Text key={`${index}-${line}`} {...readableTextColorProps(W.textDim)}>
+            {truncateForDisplayWidth(line, Math.max(12, dockWidth - 2))}
+          </Text>
+        ))
+        : null}
       {props.composerHint ? (
         <Text {...hintColorProps}>{truncateForDisplayWidth(props.composerHint, dockWidth)}</Text>
       ) : null}
-      <Text {...readableTextColorProps(W.borderSoft)}>{formatWorkShellPromptDeckDivider(dockWidth)}</Text>
+      <Text {...readableTextColorProps(W.borderSoft)}>{formatWorkShellComposerDockDivider(dockWidth)}</Text>
       <Box minHeight={1} paddingLeft={1}>
         <Text color={accent} bold>{"› "}</Text>
         {props.composer}
@@ -2086,6 +2415,11 @@ export function WorkShellView(props: {
   readonly streamingAssistantText?: string;
   readonly isBusy: boolean;
   readonly busyStatus?: string;
+  // Task 10: the engine trace tail (max 3 lines), shown dim in the composer
+  // dock while busy so the running turn's tools read next to the input. The
+  // transcript's own entry filtering is unchanged — these raw lines never
+  // enter the conversation rail.
+  readonly liveToolTraceLines?: readonly string[];
   readonly activePanel: WorkShellPanel;
   readonly contextActionReceipt?: ContextPacketViewActionReceipt;
   readonly contextPreviewReceipt?: ContextPacketReceipt;
@@ -2098,6 +2432,11 @@ export function WorkShellView(props: {
   // Context Inspector (Sprint 2): cursor index into the navigable source list
   // (-1 = none) and the source id whose full content is expanded.
   readonly contextInspectorCursor?: number;
+  // Context Desk (Pure Yazi): which of the three panes has focus and which
+  // collection the sources pane is filtered to. Both are forwarded straight
+  // to the renderer so the desk never re-derives them.
+  readonly contextInspectorPane?: ContextDeskPane;
+  readonly contextInspectorCollection?: ContextDeskCollection;
   readonly contextInspectorExpanded?: string | null;
   readonly contextInspectorDetailContent?: string;
   readonly contextInspectorDetailOffset?: number;
@@ -2110,6 +2449,8 @@ export function WorkShellView(props: {
   /** Workspace facts synced outside render by the pane's one Git effect. */
   readonly gitFacts?: GitFacts;
   readonly terminalRows?: number;
+  /** Task 11 scrollback: transcript entries hidden below the window. */
+  readonly transcriptScrollOffset?: number;
   readonly currentTurnStartedAt?: number;
   readonly lastTurnDurationMs?: number;
   readonly attachmentLines?: readonly string[];
@@ -2148,8 +2489,30 @@ export function WorkShellView(props: {
   const sessionCost = props.agentConsole === undefined
     ? undefined
     : formatAgentConsoleTotalCost(props.agentConsole);
+  // Decision bar: the pending AskUserQuestion rides the agent console
+  // snapshot. A single question promotes its options above the composer; a
+  // wider request stays a one-line pointer (its answers must be typed).
+  const pendingDecisionRequest = props.agentConsole?.pendingDecision;
+  // A rejected typed reply parks its feedback (`Input needed · …`) in the
+  // passive "Decision" panel — the very panel the bar suppresses. Surface
+  // that line inside the bar so the rejection is never silent. Pure derive:
+  // no matching line means nothing changes.
+  const decisionInputNeededLine = props.activePanel.title === "Decision"
+    ? props.activePanel.lines.find((line) => /^Input needed /.test(line))
+    : undefined;
+  const decisionSingleQuestion = pendingDecisionRequest?.questions.length === 1
+    ? pendingDecisionRequest.questions[0]
+    : undefined;
+  const decisionBarActive = pendingDecisionRequest !== undefined;
   const composerHint = resolveWorkShellComposerHint({
     ...(props.composerHintOverride ? { composerHintOverride: props.composerHintOverride } : {}),
+    ...(decisionBarActive
+      ? {
+          decisionPending: decisionSingleQuestion
+            ? decisionSingleQuestion.options.length
+            : true,
+        }
+      : {}),
     isBusy: props.isBusy,
     ...(props.queuePaused !== undefined ? { queuePaused: props.queuePaused } : {}),
     ...(props.queuedCount !== undefined ? { queuedCount: props.queuedCount } : {}),
@@ -2178,6 +2541,7 @@ export function WorkShellView(props: {
     inputValue: props.inputValue,
     isBusy: props.isBusy,
     latestSystemText: getLatestWorkShellSystemText(props.entries),
+    decisionBarActive,
   });
   const queueIndicator = formatWorkShellQueueIndicator(props.queuedCount ?? 0, props.queuePaused ?? false);
   const agentConsoleOpen = props.agentConsole !== undefined && props.agentConsoleView?.open === true;
@@ -2201,6 +2565,10 @@ export function WorkShellView(props: {
       isBusy={props.isBusy}
       panelPlacement={panelPlacement}
       {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+      {...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {})}
+      {...(props.transcriptScrollOffset !== undefined
+        ? { scrollOffset: props.transcriptScrollOffset }
+        : {})}
     />
   );
 
@@ -2244,6 +2612,13 @@ export function WorkShellView(props: {
       {...(props.modelWindow !== undefined ? { modelWindow: props.modelWindow } : {})}
       {...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {})}
       isBusy={props.isBusy}
+      {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
+      {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
+      {...(props.liveToolTraceLines && props.liveToolTraceLines.length > 0
+        ? { liveToolTraceLines: props.liveToolTraceLines }
+        : {})}
+      clock={clock}
+      {...(activeCounts ? { activeCounts } : {})}
       {...(props.queuePaused !== undefined ? { queuePaused: props.queuePaused } : {})}
       {...(props.queuedCount !== undefined ? { queuedCount: props.queuedCount } : {})}
     />
@@ -2256,6 +2631,9 @@ export function WorkShellView(props: {
       <Box flexDirection="column" paddingX={2}>
         <WorkShellHeaderBlock
           provider={props.provider}
+          model={props.model}
+          mode={props.mode}
+          authLabel={props.authLabel}
           {...(props.headerHint ? { headerHint: props.headerHint } : {})}
           {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
         />
@@ -2317,6 +2695,9 @@ export function WorkShellView(props: {
       <Box flexDirection="column" paddingX={2}>
         <WorkShellHeaderBlock
           provider={props.provider}
+          model={props.model}
+          mode={props.mode}
+          authLabel={props.authLabel}
           {...(props.headerHint ? { headerHint: props.headerHint } : {})}
           {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
         />
@@ -2337,6 +2718,12 @@ export function WorkShellView(props: {
         {renderContextInspectorOverlay({
           packet: props.contextPacket,
           cursorIndex: props.contextInspectorCursor ?? -1,
+          ...(props.contextInspectorPane !== undefined
+            ? { activePane: props.contextInspectorPane }
+            : {}),
+          ...(props.contextInspectorCollection !== undefined
+            ? { activeCollection: props.contextInspectorCollection }
+            : {}),
           ...(props.contextInspectorExpanded !== undefined ? { expandedId: props.contextInspectorExpanded } : {}),
           ...(props.contextInspectorDetailContent !== undefined
             ? { detailContent: props.contextInspectorDetailContent }
@@ -2376,6 +2763,9 @@ export function WorkShellView(props: {
       <Box flexDirection="column" paddingX={2}>
         <WorkShellHeaderBlock
           provider={props.provider}
+          model={props.model}
+          mode={props.mode}
+          authLabel={props.authLabel}
           {...(props.headerHint ? { headerHint: props.headerHint } : {})}
           {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
         />
@@ -2414,6 +2804,9 @@ export function WorkShellView(props: {
     <Box flexDirection="column" paddingX={2}>
       <WorkShellHeaderBlock
         provider={props.provider}
+        model={props.model}
+        mode={props.mode}
+        authLabel={props.authLabel}
         {...(props.headerHint ? { headerHint: props.headerHint } : {})}
         {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
       />
@@ -2465,6 +2858,17 @@ export function WorkShellView(props: {
           <Text {...readableTextColorProps(props.queuePaused ? W.warning : W.textMuted)}>{queueIndicator}</Text>
         </Box>
       ) : null}
+      {pendingDecisionRequest ? (
+        <WorkShellDecisionBar
+          request={pendingDecisionRequest}
+          {...(decisionInputNeededLine
+            ? { inputNeededLine: decisionInputNeededLine }
+            : {})}
+          {...(props.terminalColumns !== undefined
+            ? { terminalColumns: props.terminalColumns }
+            : {})}
+        />
+      ) : null}
       {composerDock}
       {props.attachmentLines
         ? <WorkShellAttachmentBlock
@@ -2476,6 +2880,12 @@ export function WorkShellView(props: {
         renderContextInspectorOverlay({
           packet: props.contextPacket,
           cursorIndex: props.contextInspectorCursor ?? -1,
+          ...(props.contextInspectorPane !== undefined
+            ? { activePane: props.contextInspectorPane }
+            : {}),
+          ...(props.contextInspectorCollection !== undefined
+            ? { activeCollection: props.contextInspectorCollection }
+            : {}),
           ...(props.contextInspectorExpanded !== undefined ? { expandedId: props.contextInspectorExpanded } : {}),
           ...(props.contextInspectorDetailContent !== undefined
             ? { detailContent: props.contextInspectorDetailContent }

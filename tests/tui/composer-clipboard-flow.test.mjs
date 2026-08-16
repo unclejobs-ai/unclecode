@@ -204,7 +204,7 @@ test("mounted Ctrl+V with injected synthetic PNG captures once and forwards badg
   );
 
   try {
-    await waitForCondition(() => getOutput().includes("prompt deck"));
+    await waitForCondition(() => getOutput().includes("UncleCode · OpenAI"));
     stdin.write("\u0016");
     await waitForCondition(() => captureCalls === 1, 20_000);
     await waitForCondition(() => getOutput().includes("[1/5]"));
@@ -459,7 +459,7 @@ test("attachment pasted during an in-flight submit remains queued for the next t
     clearOutput();
     stdin.write("\r");
     await waitForCondition(() => submitted.length === 2);
-    await waitForCondition(() => getOutput().includes("prompt deck") && !getOutput().includes("[1/5]"));
+    await waitForCondition(() => getOutput().includes("UncleCode · OpenAI") && !getOutput().includes("[1/5]"));
     assert.deepEqual(submitted, [
       {
         line: "Please inspect the attached image.",

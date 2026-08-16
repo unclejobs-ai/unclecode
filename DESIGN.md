@@ -102,14 +102,15 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Work shell status line
 
-- Structure: contextual single row. Idle renders `◇ Ready · last Xs` alone (`◇ Ready` before reply timing exists); model/mode moved to the header.
-- Busy and background work expand the row into activity facts (agents, jobs, humanized tool activity, elapsed) without the session group. Auth warnings surface as the header chip, never here.
-- Variants: idle, busy, interrupted idle, queue paused, parallel/ultrawork (sky accent on activity), narrow (model retained because the header dropped the facts).
+- Structure: idle-only single row directly below the header. Idle renders `◇ Ready · last Xs` alone (`◇ Ready` before reply timing exists); model/mode moved to the header.
+- Busy placement: while a main turn or background agents/jobs are live, this row renders nothing — the busy display (spinner, activity phrase, elapsed, agent/job counts) is the composer dock's live activity row, pinned directly above the dock's hint row. One spinner per surface; a busy frame never paints both.
+- Interrupted idle and queue paused are idle-class states (no turn active), so they keep the top row (`◇ Ready …`) alongside their composer hint copy.
+- Variants: idle, interrupted idle, queue paused, narrow (model retained because the header dropped the facts).
 - Spacing: inline separators with muted text; avoid repeating footer facts here.
-- States: default, loading/busy, paused.
+- States: default, paused.
 - Scope note: the pure formatter `formatWorkShellUsageLine` (`Ready · last reply 1.5s`, frozen by contract tests) is a separate usage-summary format, not the status-line assembly above.
 - Accessibility: spinner is supplementary; text must carry the state.
-- Motion: single spinner only while busy. Never duplicate activity spinners elsewhere.
+- Motion: none here; the spinner lives in the dock's activity row.
 - Busy detail: humanize file paths and raw tool names; keep specific progress phrases like `thinking inspect repo` when they add signal.
 
 ### Work shell footer
@@ -135,7 +136,8 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Empty conversation
 
-- Structure: framed ready-state heading, one concise explanation line, three starter prompts, one opener hint row.
+- Structure: ASCII wordmark (dim, width-gated) → heading → starter prompts → hint line; one concise explanation line sits between the heading and the starters, one opener hint row closes the block.
+- ASCII wordmark: figlet-standard `unclecode` block, single dim color, rendered only when the conversation container fits the art width plus two columns of margin each side — narrower terminals skip the art and keep the text-only block.
 - Starter prompts: three example tasks as `1 …`/`2 …`/`3 …` rows (number in assistant accent, body muted); keys `1`-`3` prefill the composer with the matching prompt.
 - Opener hint row: `/ commands · @ attach a file · ! shell · ? keys` (single dim line, wraps naturally at narrow widths).
 - Variants: default, narrow terminal wrapped layout.
@@ -156,13 +158,14 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Composer dock
 
-- Structure: hint row (accent follows state: user slash, assistant busy, warning queue), unlabeled soft divider (pure `─` rule above the input area, no label text), `›` input prefix, footer context row (cwd + one chip).
+- Structure: live activity row (busy only), hint row (accent follows state: user slash, assistant busy, warning queue), unlabeled soft divider (pure `─` rule above the input area, no label text), `›` input prefix, footer context row (cwd + one chip).
+- Live activity row: while a main turn or background agents/jobs are live, the row directly above the hint carries `⠙ <activity phrase> · <elapsed>` plus `N agents · M jobs` when delegated work is meaningful — the busy display the top status row used to own. Idle frames render no activity row (and no spinner glyph anywhere).
 - Placeholder: empty input renders a dim ghost placeholder (`Describe a task · / for commands`) that disappears as soon as typing starts.
-- Variants: default, slash command accent, secure entry, attachment count, queue paused hint, parallel busy accent.
-- Spacing: one hint row above, one prompt row, one footer row; no double border above/below input.
-- States: default, focus by input, secure input, attachment cap warning, queued.
+- Variants: default, slash command accent, secure entry, attachment count, queue paused hint, parallel busy accent, busy live activity row.
+- Spacing: one activity row (busy only) above one hint row, one prompt row, one footer row; no double border above/below input.
+- States: default, focus by input, secure input, attachment cap warning, queued, busy.
 - Accessibility: hints must expose keyboard actions.
-- Motion: none.
+- Motion: single spinner in the activity row, only while busy; never duplicated elsewhere.
 
 ### Decision bar
 
@@ -187,7 +190,7 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Work shell keys
 
-Single-character shortcuts for discovery and pending decisions. They fire only while the composer is empty, no overlay, desk, console, or slash picker is open, and the composer is not in secure entry; otherwise the character is typed. Ctrl-combos always keep their global bindings.
+Single-character shortcuts for discovery and pending decisions. They fire only while the composer is empty, no overlay, desk, console, or slash picker is open, and the composer is not in secure entry; otherwise the character is typed. Ctrl-combos always keep their global bindings. The transcript scrollback keys are the one non-character exception: `PageUp`/`PageDown` are not print keys, so they also work with a draft in the composer, and an overlay that pages on its own (the Context Desk) keeps its meaning while it is open.
 
 | Key | Context | Action |
 | --- | --- | --- |
@@ -195,6 +198,8 @@ Single-character shortcuts for discovery and pending decisions. They fire only w
 | `1`-`3` | Empty conversation | Prefills the composer with starter prompt N |
 | `1`-`9` | Decision bar (single question) | Answers with option N |
 | `Esc` | Decision bar | Cancels the pending decision |
+| `PageUp`/`PageDown` | Transcript longer than the window | Scrolls the transcript one visible window (no-op at the top/bottom or on a short conversation); a dim `↑ N entries above · PageUp/PageDown scroll · Esc newest` row marks the transcript/dock boundary while scrolled |
+| `Esc` | Transcript scrolled up | Returns to the newest entry (added to Esc's other meanings — interrupt, overlay close, and decision cancel still win) |
 
 ## 5.1 Region show/hide matrix
 
@@ -203,10 +208,10 @@ Default work shell: show answers and high-signal state; hide orchestration noise
 | Region | Show (default) | Hide (default) | Notes |
 | --- | --- | --- | --- |
 | **Header** | Provider title (bold), right-aligned `model · mode` facts (muted), auth chip on warning, divider | Default shortcut hint, duplicate model/mode/auth in status or footer | Facts drop first when narrow |
-| **Status strip** | Idle `◇ Ready · last Xs` alone; busy: single spinner + elapsed + humanized activity detail | `model · mode` and auth label (moved to the header), raw file paths, duplicate spinners | Parallel/ultrawork: sky accent on activity |
-| **Conversation** | User messages, final assistant synthesis, streaming partial text, `policy.denied` (minimal) | Reasoning deltas, tool traces, subtask JSON, worker meta, internal routing | User: `◇ You · body`; assistant: badge + quiet indent |
+| **Status strip** | Idle `◇ Ready · last Xs` alone (interrupted idle / queue paused stay here — no turn active) | The entire row while busy (moved to the composer dock activity row), `model · mode` and auth label (moved to the header), raw file paths, duplicate spinners | Top row is idle-only; busy lives above the composer hint |
+| **Conversation** | User messages, final assistant synthesis, streaming partial text, `policy.denied` (minimal) | Reasoning deltas, raw tool trace lines (they surface only as the busy dock feed), subtask JSON, worker meta, internal routing | User: `◇ You · body`; assistant: badge + quiet indent; the default transcript keeps tool entries only |
 | **Empty state** | Ready heading, concise explanation, starter prompts `1`-`3`, opener hint row `/ commands · @ attach a file · ! shell · ? keys` | Orphan chrome, non-actionable filler | Starter keys prefill the composer |
-| **Composer** | Hint row, ghost placeholder, unlabeled soft divider, `›` prefix, cwd · context chip footer | Raw paths in hints, double borders, divider label text | Tint follows slash / busy / queue state |
+| **Composer** | Busy: live activity row (spinner + elapsed + agent/job counts) plus a dim tool-trace tail (max 3 lines, dock-width truncated) directly above the hint row; hint row, ghost placeholder, unlabeled soft divider, `›` prefix, cwd · context chip footer | Activity row and tool-trace feed while idle (idle screens carry no spinner glyph), raw paths in hints, double borders, divider label text | Tint follows slash / busy / queue state |
 | **Footer** | cwd + one context chip | Model, mode, auth repetition | Never duplicate status strip |
 | **Slash picker** | Matching commands + Korean descriptions for `/context`, `/mode` | Unrelated commands | Selected row uses user accent + bold |
 | **Context overlay** (`/context`, `/verbose`) | Sources fact line, included/excluded/warning groups, trace lines when verbose | Full raw configs, duplicate conversation entries | 64-char summary truncation |

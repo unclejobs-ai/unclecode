@@ -120,10 +120,17 @@ function createWorkShellPaneEngine(overrides = {}) {
         submittedLines.push(line);
         state = {
           ...state,
-          panel: {
-            title: "Model picker",
-            lines: ["Model · gpt-5.4"],
-          },
+          // /help opens the Rust-owned help panel; every other submit keeps
+          // the Model picker behavior the existing tests assert against.
+          panel: line === "/help"
+            ? {
+                title: "Work-first shell",
+                lines: ["Composer is live.", "/ starts commands. Tab completes."],
+              }
+            : {
+                title: "Model picker",
+                lines: ["Model · gpt-5.4"],
+              },
         };
         for (const listener of listeners) {
           listener(state);
@@ -133,6 +140,36 @@ function createWorkShellPaneEngine(overrides = {}) {
       openSessionsPanel: async () => {},
     },
   };
+}
+
+function renderKeyboardWorkPane(engine) {
+  return renderWithInput(
+    React.createElement(WorkShellPane, {
+      provider: "OpenAI",
+      model: "gpt-5.4",
+      mode: "yolo",
+      engine,
+      cwd: "/tmp/unclecode-test-workspace",
+      resolveComposerInput: async (value) => ({
+        prompt: value,
+        attachments: [],
+        transcriptText: value,
+      }),
+      getSuggestions: (value) =>
+        getWorkShellSlashSuggestions(value, {
+          provider: "openai",
+          currentModel: "gpt-5.4",
+        }),
+      onExit: () => {},
+      shouldBlockSlashSubmit: (line) =>
+        shouldBlockSlashSubmit(line, {
+          provider: "openai",
+          currentModel: "gpt-5.4",
+        }),
+      getReasoningLabel: () => "default medium",
+      isReasoningSupported: () => true,
+    }),
+  );
 }
 
 function WorkShellInputControllerHarness(props) {
@@ -609,6 +646,78 @@ test("Work pane preserves split fast model command chunks before Enter", async (
   assert.doesNotMatch(output, /gpt-5\.4\/model/);
   const finalFrame = getLastWorkFrame(output);
   assert.doesNotMatch(finalFrame, /Model picker/);
+});
+
+test("Work pane opens the help panel when ? is pressed on an empty composer", async () => {
+  const { engine, submittedLines } = createWorkShellPaneEngine();
+  const { stdin, instance, getOutput } = renderKeyboardWorkPane(engine);
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stdin.write("?");
+    await waitForCondition(() => submittedLines.length === 1);
+    await waitForCondition(() =>
+      getLastWorkFrame(getOutput()).includes("Work-first shell")
+    );
+    const frame = getLastWorkFrame(getOutput());
+
+    // The keymap dispatches through the same route as typing "/help" +
+    // Enter, so the engine's slash handling owns the panel that opens.
+    assert.deepEqual(submittedLines, ["/help"]);
+    assert.match(frame, /Work-first shell/);
+    assert.match(frame, /Composer is live\./);
+    // The keymap character never lands in the draft.
+    assert.doesNotMatch(frame, /› \?/);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("Work pane types ? into the composer with a draft or during api-key entry", async () => {
+  // A non-empty draft owns the keyboard outright, so `?` is ordinary text.
+  {
+    const { engine, submittedLines } = createWorkShellPaneEngine();
+    const { stdin, instance, getOutput } = renderKeyboardWorkPane(engine);
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      stdin.write("x");
+      await waitForCondition(() => /› x/.test(getLastWorkFrame(getOutput())));
+      stdin.write("?");
+      await waitForCondition(() => /› x\?/.test(getLastWorkFrame(getOutput())));
+      const frame = getLastWorkFrame(getOutput());
+
+      assert.match(frame, /› x\?/);
+      assert.deepEqual(submittedLines, []);
+    } finally {
+      instance.unmount();
+      instance.cleanup();
+    }
+  }
+
+  // Sensitive entry must receive every character exactly as typed.
+  {
+    const { engine, submittedLines } = createWorkShellPaneEngine({
+      composerMode: "api-key-entry",
+    });
+    const { stdin, instance, getOutput } = renderKeyboardWorkPane(engine);
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      stdin.write("?");
+      await waitForCondition(() => /› •/.test(getLastWorkFrame(getOutput())));
+      const frame = getLastWorkFrame(getOutput());
+
+      // Exactly one masked character: the keymap never claims it here.
+      assert.match(frame, /› •/);
+      assert.doesNotMatch(frame, /› ••/);
+      assert.deepEqual(submittedLines, []);
+    } finally {
+      instance.unmount();
+      instance.cleanup();
+    }
+  }
 });
 
 test("Composer publishes the current Hangul cursor position in the same render", async () => {

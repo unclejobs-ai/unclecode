@@ -120,6 +120,12 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     contextInspectorExpanded: null,
     contextInspectorDetailContent: undefined,
     contextInspectorDetailOffset: 0,
+    // Context Desk (Pure Yazi): the desk starts closed, and `/context` is what
+    // hands it the keyboard. Focus defaults to the sources pane over the
+    // all-sources collection every time it opens.
+    contextInspectorOpen: false,
+    contextInspectorPane: "sources",
+    contextInspectorCollection: "all",
     agentConsole: createAgentConsoleSnapshot({
       profileId: input.options.contextProfile ?? input.options.initialAgentConsole?.profileId ?? "build",
       ...(input.options.initialAgentConsole

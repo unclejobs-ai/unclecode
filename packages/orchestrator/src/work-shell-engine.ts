@@ -40,7 +40,9 @@ import { createWorkShellSessionSnapshotInput } from "./work-shell-engine-persist
 import {
   buildWorkShellContextPacketPreviewLines,
   composeWorkShellTurnPromptFromPacket,
+  computeContextOverlayViewportMaxRows,
   formatWorkShellContextPacketIndicator,
+  resolveWorkShellContextDetailLayout,
 } from "./work-shell-context-packet.js";
 import {
   appendWorkShellEntries,
@@ -71,7 +73,11 @@ import {
 } from "./work-shell-agent-console-state.js";
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 import {
+  CONTEXT_DESK_COLLECTIONS,
+  CONTEXT_DESK_GROUPS,
+  CONTEXT_DESK_PANES,
   createAgentConsoleSnapshot,
+  resolveContextDeskGroup,
   type AskUserQuestionRequest,
   type AskUserQuestionResult,
 } from "@unclecode/contracts";
@@ -86,6 +92,9 @@ import type {
   AgentControlPort,
   AgentControlReceipt,
   AgentRun,
+  ContextDeskCollection,
+  ContextDeskGroupId,
+  ContextDeskPane,
   ContextPacketChangeClassification,
   ContextPacketReceipt,
   ContextPacketView,
@@ -106,6 +115,7 @@ import type {
   MemoryLineageAdapter,
   PromoteScopedMemoryInput,
 } from "@unclecode/context-broker";
+import { wrapDisplayTextFast } from "@unclecode/context-broker";
 
 type PromiseResolvers<Value> = {
   readonly promise: Promise<Value>;
@@ -419,6 +429,7 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly queuedCount: number;
   readonly queuePaused: boolean;
   readonly terminalColumns: number;
+  readonly terminalRows?: number | undefined;
   // Context Inspector (Sprint 2): cursor highlight index into the navigable
   // source list (-1 = none) and the source id whose full content is expanded
   // (null = none). Owned by the engine so every mutation re-renders via the
@@ -427,6 +438,13 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly contextInspectorExpanded: string | null;
   readonly contextInspectorDetailContent?: string | undefined;
   readonly contextInspectorDetailOffset: number;
+  // Context Desk (Pure Yazi): whether the three-pane desk overlay owns the
+  // keyboard. Every desk key and mutation gates on this flag rather than on
+  // the panel title, because a collapsed context panel can carry the same
+  // title as the open overlay.
+  readonly contextInspectorOpen: boolean;
+  readonly contextInspectorPane: ContextDeskPane;
+  readonly contextInspectorCollection: ContextDeskCollection;
   readonly agentConsole: AgentConsoleSnapshot;
   readonly agentConsoleView: AgentConsoleViewState;
 };
@@ -608,11 +626,39 @@ type InspectorSource = {
   readonly id: string;
   readonly label: string;
   readonly category: string;
+  readonly group: ContextDeskGroupId;
+  readonly item: ContextPacketViewItem;
   readonly detail: string;
   readonly pinned: boolean;
   readonly heldBack: boolean;
   readonly actions?: readonly ContextPacketViewAction[] | undefined;
 };
+
+/**
+ * The engine owns desk navigation but not the terminal geometry, so a page
+ * key jumps a fixed block of rows and clamps at the ends of whatever list the
+ * active pane is showing. Clamping (never wrapping) is what makes PgUp/PgDn
+ * reliable as "go to the top/bottom of this collection" on short lists.
+ */
+const CONTEXT_DESK_PAGE_ROWS = 10;
+
+/**
+ * Rank of one desk group in the descriptor table — the row order the desk
+ * renderer draws, so the engine's cursor and the rendered list agree row for
+ * row. `CONTEXT_DESK_COLLECTIONS` is deliberately not the table used for this:
+ * it prefixes `all` and appends the two delivery buckets, and it has no entry
+ * at all for a group projection this build does not recognise. An unknown
+ * group ranks at `CONTEXT_DESK_GROUPS.length` — behind every canonical one,
+ * exactly like the renderer.
+ *
+ * A `Map`, not an object literal, because the lookup key is an arbitrary
+ * runtime string: a packet can carry a group from an older broker, and an
+ * object index would resolve a name like `constructor` off `Object.prototype`
+ * instead of missing. This mirrors the category table in `@unclecode/contracts`.
+ */
+const CONTEXT_DESK_GROUP_RANK: ReadonlyMap<string, number> = new Map(
+  CONTEXT_DESK_GROUPS.map((group, index) => [group.id, index] as const),
+);
 
 /**
  * One publication per animation frame is all a terminal renderer can show, so
@@ -781,6 +827,9 @@ export class WorkShellEngine<
   private lastSessionSummary: string;
   private lastSubmittedContextReceiptId: string | undefined;
   private drainingQueue = false;
+  private contextSourceMutationQueue: Promise<void> = Promise.resolve();
+  private cachedContextPacket: ContextPacketView | undefined;
+  private cachedInspectorSourceList: readonly InspectorSource[] = [];
   private activeTurnEpoch = 0;
   private activeTurnAbortController: AbortController | undefined;
   private queueAutoDrainPaused = false;
@@ -884,6 +933,13 @@ export class WorkShellEngine<
     if (this.state.panel.title === WORK_BOARD_PANEL_TITLE) {
       this.setState({ panel: this.createWorkBoardPanel(this.workBoardQueuedItemsSnapshot) });
       void this.rebuildWorkBoardPanel();
+    }
+  }
+
+  updateTerminalRows(rows: number): void {
+    const terminalRows = Math.max(1, Math.floor(rows));
+    if (this.state.terminalRows !== terminalRows) {
+      this.setState({ terminalRows });
     }
   }
 
@@ -1354,10 +1410,13 @@ export class WorkShellEngine<
       return;
     }
 
-    // Closing the overlay also resets the inspector cursor/expanded state so
-    // the next open starts fresh.
+    // Closing the overlay hands the keyboard back and resets the inspector
+    // cursor/expanded state so the next open starts fresh. The pane and
+    // collection are left alone: `/context` restores those defaults on open,
+    // and keeping them here lets the closed state stay inspectable.
     this.setState({
       panel,
+      contextInspectorOpen: false,
       contextInspectorCursor: -1,
       contextInspectorExpanded: null,
       contextInspectorDetailContent: undefined,
@@ -1366,27 +1425,246 @@ export class WorkShellEngine<
   }
 
   /**
-   * Context Inspector (Sprint 2) — move the cursor within the navigable
-   * source list. `direction` is -1 (up) or +1 (down). Wraps around the list
-   * bounds. Clamped to -1 when the overlay is not open or the packet has no
-   * sources.
+   * Context Desk — move focus across the Groups → Sources → Preview panes.
+   * `direction` is -1 (left) or +1 (right). The tuple has hard edges: neither
+   * end wraps, so holding a pane key parks focus on groups or preview instead
+   * of cycling the user past the pane they were aiming for.
    */
-  moveContextInspectorCursor(direction: number): void {
-    if (this.state.panel.title !== "Context expanded") {
+  moveContextInspectorPane(direction: number): void {
+    if (!this.state.contextInspectorOpen) {
       return;
     }
-    const sources = this.resolveInspectorSourceList();
+    const current = CONTEXT_DESK_PANES.indexOf(this.state.contextInspectorPane);
+    const index = Math.min(
+      CONTEXT_DESK_PANES.length - 1,
+      Math.max(0, current + (direction >= 0 ? 1 : -1)),
+    );
+    const pane = CONTEXT_DESK_PANES[index];
+    if (pane !== undefined && pane !== this.state.contextInspectorPane) {
+      this.setState({ contextInspectorPane: pane });
+    }
+  }
+
+  /**
+   * Context Desk — the vertical key for whichever pane holds focus.
+   * `direction` is -1 (up) or +1 (down): groups walks the collection menu and
+   * reanchors the selection, sources walks the active collection, and preview
+   * scrolls the selected row's body — expanded or not — without disturbing the
+   * selection behind it.
+   */
+  moveContextInspectorCursor(direction: number): void {
+    if (!this.state.contextInspectorOpen) {
+      return;
+    }
+    const step = direction >= 0 ? 1 : -1;
+    switch (this.state.contextInspectorPane) {
+      case "groups":
+        this.selectContextDeskCollectionAt(
+          CONTEXT_DESK_COLLECTIONS.indexOf(this.state.contextInspectorCollection) + step,
+        );
+        return;
+      case "preview":
+        this.moveContextInspectorDetailOffset(step);
+        return;
+      case "sources":
+        this.moveContextDeskSelection(
+          (index, length) => (index + step + length) % length,
+          step >= 0 ? "first" : "last",
+        );
+    }
+  }
+
+  /**
+   * Context Desk — the page key for whichever pane holds focus. A page is a
+   * fixed block of rows that clamps at the ends of the active list, so a page
+   * key on a short collection is a jump to its first or last row.
+   */
+  moveContextInspectorPage(direction: number): void {
+    if (!this.state.contextInspectorOpen) {
+      return;
+    }
+    const step = (direction >= 0 ? 1 : -1) * CONTEXT_DESK_PAGE_ROWS;
+    switch (this.state.contextInspectorPane) {
+      case "groups":
+        this.selectContextDeskCollectionAt(
+          CONTEXT_DESK_COLLECTIONS.indexOf(this.state.contextInspectorCollection) + step,
+        );
+        return;
+      case "preview":
+        this.scrollContextDeskPreview(step);
+        return;
+      case "sources":
+        // Enter expands a row in place without moving focus, so a page key
+        // that arrives over an open detail belongs to that detail. Walking the
+        // list behind it would move a selection the user cannot currently see.
+        if (this.state.contextInspectorExpanded !== null) {
+          this.scrollContextDeskPreview(step);
+          return;
+        }
+        this.moveContextDeskSelection(
+          (index, length) => Math.min(length - 1, Math.max(0, index + step)),
+          step >= 0 ? "first" : "last",
+        );
+    }
+  }
+
+  /**
+   * Focus one collection of the desk menu and reanchor the sources pane on its
+   * first row. `index` is clamped, so the menu never wraps from DELIVERY back
+   * to the all-sources row. An empty collection — `other` usually owns no
+   * source — clears the selection rather than borrowing a row from elsewhere,
+   * which is what keeps the source keys inert while it is focused.
+   */
+  private selectContextDeskCollectionAt(index: number): void {
+    const collection = CONTEXT_DESK_COLLECTIONS[
+      Math.min(CONTEXT_DESK_COLLECTIONS.length - 1, Math.max(0, index))
+    ];
+    if (collection === undefined || collection === this.state.contextInspectorCollection) {
+      return;
+    }
+    const previousId = this.resolveInspectorSourceAtCursor()?.id;
+    const anchor = this.resolveContextDeskCollectionSources(collection)[0];
+    this.setState({
+      contextInspectorCollection: collection,
+      contextInspectorCursor: anchor === undefined ? -1 : 0,
+      ...this.resolveExpansionIdentityReset(previousId, anchor?.id),
+    });
+  }
+
+  /**
+   * Move the selection inside the active collection. The cursor is an index
+   * into the collection the sources pane is actually drawing, so row N of the
+   * rendered list is always cursor N; `all` makes that the full grouped list,
+   * which is the pre-desk behaviour.
+   *
+   * `unselectedTarget` is the row this key enters the list on when nothing is
+   * selected yet — the state a desk lands in when a refresh brings rows in
+   * behind an empty collection. `-1` is "nothing selected", not "row zero", so
+   * it is resolved here instead of being clamped into `resolveIndex`: that
+   * would spend the key travelling *out of* row 0 and skip the row the user
+   * was aiming for. A cursor that already points at a row keeps the caller's
+   * own wrap or clamp.
+   */
+  private moveContextDeskSelection(
+    resolveIndex: (index: number, length: number) => number,
+    unselectedTarget: "first" | "last",
+  ): void {
+    const sources = this.resolveContextDeskCollectionSources(
+      this.state.contextInspectorCollection,
+    );
     if (sources.length === 0) {
       if (this.state.contextInspectorCursor !== -1) {
         this.setState({ contextInspectorCursor: -1 });
       }
       return;
     }
+    const previousId = this.resolveInspectorSourceAtCursor()?.id;
     const current = this.state.contextInspectorCursor;
-    const base = current < 0 || current >= sources.length ? 0 : current;
-    const next = (base + (direction >= 0 ? 1 : -1) + sources.length) % sources.length;
+    const next = current < 0
+      ? (unselectedTarget === "first" ? 0 : sources.length - 1)
+      : resolveIndex(current >= sources.length ? 0 : current, sources.length);
     if (next !== current) {
-      this.setState({ contextInspectorCursor: next });
+      this.setState({
+        contextInspectorCursor: next,
+        ...this.resolveExpansionIdentityReset(previousId, sources[next]?.id),
+      });
+    }
+  }
+
+  /**
+   * Scroll the selected preview or expanded detail by `step` physical lines.
+   * Expanded details use the same formatter, wrapping width, and row budget as
+   * the renderer, so the engine's bottom clamp is the first marker-free page.
+   */
+  private scrollContextDeskPreview(step: number): void {
+    const selected = this.resolveInspectorSourceAtCursor();
+    if (selected === undefined) {
+      return;
+    }
+    const expanded = this.state.contextInspectorExpanded === selected.id;
+    let maxOffset: number;
+    if (expanded) {
+      const frameWidth = Math.max(32, this.state.terminalColumns - 4);
+      const detailWidth = Math.max(24, frameWidth - 4);
+      const receiptRows = this.state.contextActionReceipt === undefined ? 0 : 1;
+      const maxRows = Math.max(
+        1,
+        computeContextOverlayViewportMaxRows({
+          ...(this.state.terminalRows === undefined
+            ? {}
+            : { terminalRows: this.state.terminalRows }),
+        }) - 1 - receiptRows,
+      );
+      maxOffset = resolveWorkShellContextDetailLayout({
+        item: selected.item,
+        ...(this.state.contextInspectorDetailContent === undefined
+          ? {}
+          : { content: this.state.contextInspectorDetailContent }),
+        width: detailWidth,
+        maxRows,
+      }).maxOffset;
+    } else {
+      const body = selected.detail;
+      const newlineCount = body.split("\n").length;
+      const contentWidth = Math.max(24, this.state.terminalColumns - 4);
+      const previewWidth = this.state.terminalColumns >= 96
+        ? Math.min(58, Math.max(44, Math.floor(this.state.terminalColumns * 0.4) + 2)) - 2
+        : this.state.terminalColumns >= 76
+          ? Math.floor(contentWidth * 0.46) - 2
+          : contentWidth;
+      maxOffset = newlineCount > 1
+        ? newlineCount - 1
+        : Math.max(0, wrapDisplayTextFast(body, previewWidth).length - 1);
+    }
+    const offset = Math.min(
+      maxOffset,
+      Math.max(0, this.state.contextInspectorDetailOffset + step),
+    );
+    if (offset !== this.state.contextInspectorDetailOffset) {
+      this.setState({ contextInspectorDetailOffset: offset });
+    }
+  }
+
+  /**
+   * The expansion, its resolved body and its scroll offset all belong to one
+   * source id, so every move that can re-resolve the selection funnels through
+   * here. Returns the patch that retires them when the row under the cursor
+   * changed, and `undefined` when the same source is still selected — which is
+   * what lets an expansion survive a reorder that keeps it in view.
+   */
+  private resolveExpansionIdentityReset(
+    previousSourceId: string | undefined,
+    nextSourceId: string | undefined,
+  ): Partial<WorkShellEngineState<Reasoning>> | undefined {
+    if (previousSourceId !== undefined && previousSourceId === nextSourceId) {
+      return undefined;
+    }
+    return {
+      contextInspectorExpanded: null,
+      contextInspectorDetailContent: undefined,
+      contextInspectorDetailOffset: 0,
+    };
+  }
+
+  /**
+   * The rows of one desk collection, in the same order the full source list
+   * uses. `all` is every row, the DELIVERY pair splits on stage, and every
+   * other collection is a group filter.
+   */
+  private resolveContextDeskCollectionSources(
+    collection: ContextDeskCollection,
+    packet: ContextPacketView | undefined = this.state.contextPacket,
+  ): readonly InspectorSource[] {
+    const sources = this.resolveInspectorSourceList(packet);
+    switch (collection) {
+      case "all":
+        return sources;
+      case "sent":
+        return sources.filter((source) => !source.heldBack);
+      case "held":
+        return sources.filter((source) => source.heldBack);
+      default:
+        return sources.filter((source) => source.group === collection);
     }
   }
 
@@ -1400,6 +1678,39 @@ export class WorkShellEngine<
    * untouched: the key the user pressed is not offered for that row.
    */
   async toggleContextInspectorPin(): Promise<void> {
+    return this.enqueueContextSourceMutation(() => this.toggleContextInspectorPinImpl());
+  }
+
+  /**
+   * Context Inspector (Sprint 2) — forget the source under the cursor
+   * (included_in_model = 0). The source moves to the "Held back" section.
+   */
+  async forgetContextSourceAtCursor(): Promise<void> {
+    return this.enqueueContextSourceMutation(() => this.forgetContextSourceAtCursorImpl());
+  }
+
+  /**
+   * Context Inspector (Sprint 2) — re-include a held-back source
+   * (included_in_model = 1). The source moves back into "Included".
+   */
+  async includeContextSourceAtCursor(): Promise<void> {
+    return this.enqueueContextSourceMutation(() => this.includeContextSourceAtCursorImpl());
+  }
+
+  async undoLastContextSourceAction(): Promise<void> {
+    return this.enqueueContextSourceMutation(() => this.undoLastContextSourceActionImpl());
+  }
+
+  private enqueueContextSourceMutation(operation: () => Promise<void>): Promise<void> {
+    const result = this.contextSourceMutationQueue.then(operation);
+    this.contextSourceMutationQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private async toggleContextInspectorPinImpl(): Promise<void> {
     const source = this.resolveInspectorSourceAtCursor();
     if (!source || !this.mutateContextSource) {
       return;
@@ -1411,11 +1722,7 @@ export class WorkShellEngine<
     await this.mutateInspectorContextSource({ kind, id: source.id });
   }
 
-  /**
-   * Context Inspector (Sprint 2) — forget the source under the cursor
-   * (included_in_model = 0). The source moves to the "Held back" section.
-   */
-  async forgetContextSourceAtCursor(): Promise<void> {
+  private async forgetContextSourceAtCursorImpl(): Promise<void> {
     const source = this.resolveInspectorSourceAtCursor();
     if (!source || !this.mutateContextSource) {
       return;
@@ -1426,11 +1733,7 @@ export class WorkShellEngine<
     await this.mutateInspectorContextSource({ kind: "forget", id: source.id });
   }
 
-  /**
-   * Context Inspector (Sprint 2) — re-include a held-back source
-   * (included_in_model = 1). The source moves back into "Included".
-   */
-  async includeContextSourceAtCursor(): Promise<void> {
+  private async includeContextSourceAtCursorImpl(): Promise<void> {
     const source = this.resolveInspectorSourceAtCursor();
     if (!source || !this.mutateContextSource) {
       return;
@@ -1441,11 +1744,12 @@ export class WorkShellEngine<
     await this.mutateInspectorContextSource({ kind: "include", id: source.id });
   }
 
-  async undoLastContextSourceAction(): Promise<void> {
+  private async undoLastContextSourceActionImpl(): Promise<void> {
     if (!this.undoContextSourceAction || !this.state.contextActionReceipt?.canUndo) {
       return;
     }
     const beforePacketId = this.state.contextPacket?.id;
+    const previousSourceId = this.resolveInspectorSourceAtCursor()?.id;
     const receipt = this.undoContextSourceAction();
     if (!receipt) {
       return;
@@ -1453,6 +1757,9 @@ export class WorkShellEngine<
     const packet = await this.refreshContextPacket(true);
     this.captureContextPacketPreview(packet);
     const remappedCursor = this.resolveInspectorCursorForSourceId(receipt.sourceId);
+    const remappedSourceId = this.resolveContextDeskCollectionSources(
+      this.state.contextInspectorCollection,
+    )[remappedCursor]?.id;
     this.setState({
       contextActionReceipt: {
         ...receipt,
@@ -1460,7 +1767,25 @@ export class WorkShellEngine<
         ...(packet !== undefined ? { afterPacketId: packet.id } : {}),
       },
       contextInspectorCursor: remappedCursor,
+      ...this.resolveExpansionIdentityReset(previousSourceId, remappedSourceId),
     });
+  }
+
+  private canApplyContextSuggestion(suggestion: ContextPolicySuggestion): boolean {
+    if (suggestion.action === "keep") {
+      return true;
+    }
+    const packet = this.state.contextPacket;
+    const source = packet?.included.find((item) => item.id === suggestion.sourceId)
+      ?? packet?.excluded.find((item) => item.id === suggestion.sourceId);
+    if (!source) {
+      return false;
+    }
+    if (source.actions === undefined) {
+      return true;
+    }
+    const requiredAction = suggestion.action === "hold-back" ? "hold-back" : "refresh";
+    return source.actions.includes(requiredAction);
   }
 
   /**
@@ -1476,6 +1801,12 @@ export class WorkShellEngine<
       (candidate) => candidate.id === suggestionId && candidate.status === "proposed",
     );
     if (!suggestion || !resolveContextSuggestion || this.contextSuggestionAcceptanceInFlight) {
+      return;
+    }
+    if (!this.canApplyContextSuggestion(suggestion)) {
+      this.setState({
+        contextAdviceUnavailable: "This suggestion is not available for the selected source.",
+      });
       return;
     }
     this.contextSuggestionAcceptanceInFlight = true;
@@ -1600,13 +1931,22 @@ export class WorkShellEngine<
     }
     const beforePacketId = this.state.contextPacket?.id;
     const selectedSourceId = action.id;
+    const previousSourceId = this.resolveInspectorSourceAtCursor()?.id;
     const receipt = this.mutateContextSource(action);
     const packet = await this.refreshContextPacket(true);
     this.captureContextPacketPreview(packet);
     const remappedCursor = this.resolveInspectorCursorForSourceId(selectedSourceId);
+    // The cursor index can survive a mutation that moved a different row under
+    // it — a hold-back drops the selected row out of a filtered collection and
+    // the row below slides into the same slot — so identity, not the index,
+    // decides whether the expansion travelled with the selection.
+    const remappedSourceId = this.resolveContextDeskCollectionSources(
+      this.state.contextInspectorCollection,
+    )[remappedCursor]?.id;
+    const expansionReset = this.resolveExpansionIdentityReset(previousSourceId, remappedSourceId);
     if (!receipt) {
-      if (remappedCursor !== this.state.contextInspectorCursor) {
-        this.setState({ contextInspectorCursor: remappedCursor });
+      if (remappedCursor !== this.state.contextInspectorCursor || expansionReset !== undefined) {
+        this.setState({ contextInspectorCursor: remappedCursor, ...expansionReset });
       }
       return;
     }
@@ -1617,27 +1957,32 @@ export class WorkShellEngine<
         ...(packet !== undefined ? { afterPacketId: packet.id } : {}),
       },
       contextInspectorCursor: remappedCursor,
+      ...expansionReset,
     });
   }
 
   /**
    * Keep the numeric cursor as compatibility output, but re-anchor it to the
-   * same source id after include/hold refresh reorders the navigable list.
+   * same source id after include/hold refresh reorders the navigable list. The
+   * search runs over the active collection because that is what the cursor
+   * indexes; a hold-back that moves a row out of the focused collection falls
+   * back to the nearest surviving row.
    */
-  private resolveInspectorCursorForSourceId(sourceId: string): number {
-    const sources = this.resolveInspectorSourceList();
+  private resolveInspectorCursorForSourceId(
+    sourceId: string | undefined,
+    sources = this.resolveContextDeskCollectionSources(this.state.contextInspectorCollection),
+    fallbackCursor = this.state.contextInspectorCursor,
+  ): number {
     if (sources.length === 0) {
       return -1;
     }
-    const index = sources.findIndex((source) => source.id === sourceId);
-    if (index >= 0) {
-      return index;
+    if (sourceId !== undefined) {
+      const index = sources.findIndex((source) => source.id === sourceId);
+      if (index >= 0) {
+        return index;
+      }
     }
-    const current = this.state.contextInspectorCursor;
-    if (current < 0) {
-      return 0;
-    }
-    return Math.min(current, sources.length - 1);
+    return fallbackCursor < 0 ? -1 : Math.min(fallbackCursor, sources.length - 1);
   }
 
   /**
@@ -1647,6 +1992,9 @@ export class WorkShellEngine<
   async toggleContextInspectorExpanded(): Promise<void> {
     const source = this.resolveInspectorSourceAtCursor();
     if (!source) {
+      return;
+    }
+    if (source.actions !== undefined && !source.actions.includes("preview")) {
       return;
     }
     if (this.state.contextInspectorExpanded === source.id) {
@@ -1659,7 +2007,7 @@ export class WorkShellEngine<
     }
     const content = await this.resolveContextSourceDetail?.(source.id);
     if (
-      this.state.panel.title !== "Context expanded"
+      !this.state.contextInspectorOpen
       || this.resolveInspectorSourceAtCursor()?.id !== source.id
     ) {
       return;
@@ -1671,76 +2019,87 @@ export class WorkShellEngine<
     });
   }
 
+  /**
+   * Scroll the preview body one line. This is the pane's own key, not the
+   * expansion's: a collapsed row scrolls its preview text in place, so the
+   * offset advances without the row ever becoming expanded. Inert while the
+   * desk is closed.
+   */
   moveContextInspectorDetailOffset(direction: number): void {
-    if (this.state.contextInspectorExpanded === null) {
+    if (!this.state.contextInspectorOpen) {
       return;
     }
-    const next = Math.max(0, this.state.contextInspectorDetailOffset + (direction >= 0 ? 1 : -1));
-    if (next !== this.state.contextInspectorDetailOffset) {
-      this.setState({ contextInspectorDetailOffset: next });
-    }
+    this.scrollContextDeskPreview(direction >= 0 ? 1 : -1);
   }
 
   /**
-   * Build the navigable source list for the inspector from the current
-   * context packet. The Context Desk renders every "In next request" row
-   * above the "Held back" block, so stage decides the order first; within a
-   * stage the existing group order and source index apply. Each entry carries
-   * a `pinned` flag (salience === 1.0) so the pin toggle and cursor glyph
-   * render correctly, plus the capability list that gates its mutations.
+   * Build the navigable source list for the desk from the current context
+   * packet. The desk renders every "In next request" row above the "Held back"
+   * block, so stage decides the order first; within a stage rows follow the
+   * canonical desk group order and then their packet index, which is exactly
+   * the order the Groups pane advertises. Each entry carries its desk group
+   * (so a collection is a filter, not a second grouping pass), a `pinned` flag
+   * (salience === 1.0) for the pin toggle and cursor glyph, plus the
+   * capability list that gates its mutations.
    */
-  private resolveInspectorSourceList(): readonly InspectorSource[] {
-    const packet = this.state.contextPacket;
-    if (!packet) {
-      return [];
+  private resolveInspectorSourceList(
+    packet: ContextPacketView | undefined = this.state.contextPacket,
+  ): readonly InspectorSource[] {
+    if (packet === this.cachedContextPacket) {
+      return this.cachedInspectorSourceList;
     }
-    const groupRank = (category: string): number => {
-      if (/^(workspace-guidance|workspace|provider-system-prompt)/i.test(category) || /^system$/i.test(category)) return 0;
-      if (/^(bridge|condensed-history)/i.test(category)) return 1;
-      if (/^memory/i.test(category)) return 2;
-      if (/^attachment/i.test(category)) return 3;
-      if (/^(loop-trail|runtime|live)/i.test(category)) return 4;
-      return 5;
-    };
-    const toEntry = (item: ContextPacketViewItem, heldBack: boolean, order: number) => {
-      const content = item.preview ?? item.label;
-      return {
-        id: item.id,
-        label: item.label,
-        category: item.category,
-        detail: content,
-        pinned: (item.salience ?? 0) >= 1,
-        heldBack: heldBack || item.includedInModel === false,
-        ...(item.actions !== undefined ? { actions: item.actions } : {}),
-        order,
-      };
-    };
+    if (!packet) {
+      this.cachedContextPacket = undefined;
+      this.cachedInspectorSourceList = [];
+      return this.cachedInspectorSourceList;
+    }
+    const toEntry = (item: ContextPacketViewItem, heldBack: boolean, order: number) => ({
+      id: item.id,
+      label: item.label,
+      category: item.category,
+      group: item.group ?? resolveContextDeskGroup(item.category),
+      item,
+      detail: item.preview ?? item.label,
+      pinned: (item.salience ?? 0) >= 1,
+      heldBack: heldBack || item.includedInModel === false,
+      ...(item.actions !== undefined ? { actions: item.actions } : {}),
+      order,
+    });
     const unsorted = [
       ...packet.included.map((item, index) => toEntry(item, false, index)),
       ...packet.excluded.map((item, index) => toEntry(item, true, packet.included.length + index)),
     ];
-    return [...unsorted]
+    this.cachedInspectorSourceList = unsorted
       .sort((left, right) => {
         if (left.heldBack !== right.heldBack) {
           return left.heldBack ? 1 : -1;
         }
-        const leftGroup = groupRank(left.category);
-        const rightGroup = groupRank(right.category);
-        if (leftGroup !== rightGroup) {
-          return leftGroup - rightGroup;
-        }
-        return left.order - right.order;
+        const groupOrder =
+          (CONTEXT_DESK_GROUP_RANK.get(left.group) ?? CONTEXT_DESK_GROUPS.length)
+          - (CONTEXT_DESK_GROUP_RANK.get(right.group) ?? CONTEXT_DESK_GROUPS.length);
+        return groupOrder !== 0 ? groupOrder : left.order - right.order;
       })
       .map(({ order: _order, ...entry }) => entry);
+    this.cachedContextPacket = packet;
+    return this.cachedInspectorSourceList;
   }
 
+  /**
+   * The row the desk keys act on: the cursor indexes the collection the
+   * sources pane is drawing. A closed desk has no selection at all, so every
+   * mutation and the Enter/expand key go inert the moment the overlay hands
+   * the keyboard back — even while a collapsed panel keeps the overlay's
+   * title.
+   */
   private resolveInspectorSourceAtCursor(): InspectorSource | undefined {
-    const sources = this.resolveInspectorSourceList();
-    const cursor = this.state.contextInspectorCursor;
-    if (cursor < 0 || cursor >= sources.length) {
+    if (!this.state.contextInspectorOpen) {
       return undefined;
     }
-    return sources[cursor];
+    const sources = this.resolveContextDeskCollectionSources(
+      this.state.contextInspectorCollection,
+    );
+    const cursor = this.state.contextInspectorCursor;
+    return cursor < 0 || cursor >= sources.length ? undefined : sources[cursor];
   }
 
   interruptTurn(): void {
@@ -1946,6 +2305,37 @@ export class WorkShellEngine<
     });
   }
 
+  /**
+   * One-key reply for the decision bar. `handlePendingDecisionReply` is void,
+   * so the range is validated up front: a pending decision with exactly one
+   * question and an in-range option index settles through the same reply
+   * path as a typed line, everything else is a no-op that keeps the decision
+   * pending (multi-question requests need typed `id: n` answers).
+   */
+  answerPendingDecisionByIndex(index: number): boolean {
+    const pending = this.pendingDecision;
+    const question = pending?.request.questions.length === 1
+      ? pending.request.questions[0]
+      : undefined;
+    if (!pending || !question) {
+      return false;
+    }
+    if (!Number.isSafeInteger(index) || index < 1 || index > question.options.length) {
+      return false;
+    }
+    this.handlePendingDecisionReply(String(index));
+    return true;
+  }
+
+  /** Esc on the decision bar: `/cancel` through the same settle guard. */
+  cancelPendingDecision(): boolean {
+    if (!this.pendingDecision) {
+      return false;
+    }
+    this.handlePendingDecisionReply("/cancel");
+    return true;
+  }
+
   private settlePendingDecision(result: AskUserQuestionResult): void {
     this.pendingDecision?.settle(result);
   }
@@ -2016,6 +2406,22 @@ export class WorkShellEngine<
       return;
     }
 
+    // Submitting a turn retires the Context Desk right away: the review is
+    // over, so the desk yields the conversation space through the same close
+    // path Esc uses. Scoped to operator-initiated turn starts — builtin
+    // panels such as /reload keep the desk open, and queued replays never
+    // touch it. The ledger guard matters: without a ledger an unforced packet
+    // refresh reuses the packet the desk is showing only while the desk-open
+    // flag is still up, so those engines close the desk after preparation
+    // (below) instead and keep the previewed-packet reuse contract intact.
+    if (
+      !this.drainingQueue
+      && (route.kind === "chat" || route.kind === "prompt-command")
+      && this.hasContextLifecycleLedger()
+    ) {
+      this.closeOverlay();
+    }
+
     const turnEpoch = route.kind === "chat" || route.kind === "prompt-command"
       ? this.activeTurnEpoch + 1
       : this.activeTurnEpoch;
@@ -2057,6 +2463,8 @@ export class WorkShellEngine<
           }
           const contextPacket = prepared.packet;
           const contextReceipt = prepared.receipt;
+          // Starting a turn collapses the context panel, so the desk is no
+          // longer on screen and must stop owning the keyboard with it.
           this.setState({
             panel: this.buildContextPanel(
               this.currentContextSummaryLines,
@@ -2064,6 +2472,11 @@ export class WorkShellEngine<
               this.state.memoryLines,
               this.state.traceLines,
             ),
+            contextInspectorOpen: false,
+            contextInspectorCursor: -1,
+            contextInspectorExpanded: null,
+            contextInspectorDetailContent: undefined,
+            contextInspectorDetailOffset: 0,
           });
           const executionResult = await executeWorkShellPromptCommandSubmit({
             transcriptText: route.line,
@@ -2167,6 +2580,8 @@ export class WorkShellEngine<
             contextPacket = prepared.packet;
             contextReceipt = prepared.receipt;
           }
+          // Starting a turn collapses the context panel, so the desk is no
+          // longer on screen and must stop owning the keyboard with it.
           this.setState({
             panel: this.buildContextPanel(
               this.currentContextSummaryLines,
@@ -2174,6 +2589,11 @@ export class WorkShellEngine<
               this.state.memoryLines,
               this.state.traceLines,
             ),
+            contextInspectorOpen: false,
+            contextInspectorCursor: -1,
+            contextInspectorExpanded: null,
+            contextInspectorDetailContent: undefined,
+            contextInspectorDetailOffset: 0,
           });
           const executionResult = await executeWorkShellChatSubmit({
             line: route.line,
@@ -2403,6 +2823,19 @@ export class WorkShellEngine<
       clearLastCompletedTurn: () => {
         this.lastCompletedTurnSnapshot = undefined;
       },
+    });
+    if (builtinCommand.kind !== "context") {
+      return;
+    }
+    // `/context` is the desk's only entry point, so it hands the keyboard over
+    // and restores the default focus: the sources pane over the all-sources
+    // collection. Without a resolved packet there is no desk to open — the
+    // builtin fell back to the collapsed context panel — so the flag stays
+    // down and every desk key remains inert.
+    this.setState({
+      contextInspectorOpen: this.state.contextPacket !== undefined,
+      contextInspectorPane: "sources",
+      contextInspectorCollection: "all",
     });
   }
 
@@ -2689,6 +3122,9 @@ export class WorkShellEngine<
         title: "Context expanded",
         lines: buildWorkShellContextPacketPreviewLines(packet),
       },
+      contextInspectorOpen: true,
+      contextInspectorPane: "sources",
+      contextInspectorCollection: "all",
       contextInspectorCursor: 0,
       contextInspectorExpanded: null,
       contextInspectorDetailContent: undefined,
@@ -2895,9 +3331,21 @@ export class WorkShellEngine<
     forceRefresh = false,
     isCurrentTurn?: () => boolean,
   ): Promise<ContextPacketView | undefined> {
-    if (!this.resolveContextPacket || (!forceRefresh && this.state.panel.title === "Context expanded" && this.state.contextPacket)) {
+    // While the desk owns the keyboard the rows must not shift underfoot, so
+    // an unforced refresh reuses the packet the desk is showing. The open flag
+    // decides that, not the panel title: a collapsed panel may carry the same
+    // title and must still refresh normally.
+    if (
+      !this.resolveContextPacket
+      || (!forceRefresh && this.state.contextInspectorOpen && this.state.contextPacket)
+    ) {
       return this.state.contextPacket;
     }
+    const deskWasVisible = this.state.contextInspectorOpen;
+    const previousSourceId = deskWasVisible
+      ? this.resolveInspectorSourceAtCursor()?.id
+      : undefined;
+    const previousCursor = this.state.contextInspectorCursor;
     const packet = await this.resolveContextPacket({
       cwd: this.options.cwd,
       sessionId: this.sessionId,
@@ -2910,9 +3358,25 @@ export class WorkShellEngine<
     if (isCurrentTurn && !isCurrentTurn()) {
       return undefined;
     }
+    const deskVisible = deskWasVisible && this.state.contextInspectorOpen;
+    const activeSources = deskVisible
+      ? this.resolveContextDeskCollectionSources(this.state.contextInspectorCollection, packet)
+      : undefined;
+    const remappedCursor = activeSources === undefined
+      ? undefined
+      : this.resolveInspectorCursorForSourceId(previousSourceId, activeSources, previousCursor);
+    const remappedSourceId = remappedCursor === undefined || activeSources === undefined
+      ? undefined
+      : activeSources[remappedCursor]?.id;
     this.setState({
       contextPacket: packet,
       contextIndicator: formatWorkShellContextPacketIndicator(packet),
+      ...(remappedCursor !== undefined
+        ? {
+            contextInspectorCursor: remappedCursor,
+            ...this.resolveExpansionIdentityReset(previousSourceId, remappedSourceId),
+          }
+        : {}),
       ...(packet.manifest
         ? {
             agentConsole: {

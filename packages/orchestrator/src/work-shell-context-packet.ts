@@ -1,10 +1,15 @@
-import type { ContextPacketView } from "@unclecode/contracts";
+import type {
+  ContextPacketView,
+  ContextPacketViewItem,
+  ContextPacketViewMetadata,
+} from "@unclecode/contracts";
 import {
   buildWorkShellCompactContextPacketPreviewLines,
   composeWorkShellTurnPromptFromPacket,
   formatContextPacketIndicator,
   formatContextPacketPromptPrefix,
   formatContextPacketUsedReceipt,
+  wrapDisplayTextFast,
 } from "@unclecode/context-broker";
 
 export {
@@ -14,5 +19,138 @@ export {
   formatContextPacketPromptPrefix as formatWorkShellContextPacketPromptPrefix,
   formatContextPacketUsedReceipt as formatWorkShellContextPacketUsedReceipt,
 };
+
+export function sanitizeContextPreview(value: string): string {
+  return value
+    .replace(/\.omo\/[^\s)]+/g, "session loop trail")
+    .replace(/\.omo\b/g, "session storage")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+export function formatContextItemBadgeSummary(item: ContextPacketViewItem): string {
+  const badges = item.badges ?? [];
+  return badges.map((badge) => `[${badge.label}]`).join(" ");
+}
+
+export function getContextItemPreview(item: ContextPacketViewItem): string {
+  const preview = item.preview?.trim();
+  const badgeSummary = formatContextItemBadgeSummary(item);
+  const badgeSuffix = badgeSummary.length > 0 ? ` · ${badgeSummary}` : "";
+  if (preview && preview.length > 0) {
+    return sanitizeContextPreview(`${preview}${badgeSuffix}`);
+  }
+  const reason = item.reason.trim();
+  return sanitizeContextPreview(`${reason.length > 0 ? reason : item.label}${badgeSuffix}`);
+}
+
+function formatTraceIdPreview(sourceEventIds: readonly string[]): string {
+  const visible = sourceEventIds.slice(0, 4).join(", ");
+  const hiddenCount = sourceEventIds.length - Math.min(sourceEventIds.length, 4);
+  return hiddenCount > 0 ? `${visible}, +${hiddenCount} more` : visible;
+}
+
+function getCondensedHistoryWarningLine(item: ContextPacketViewItem): string | undefined {
+  const state = item.freshness?.state;
+  if (state !== "stale" && state !== "expired") {
+    return undefined;
+  }
+  const turnLastSeen = item.freshness?.turnLastSeen;
+  const turnSuffix = typeof turnLastSeen === "number" ? ` · last seen turn ${turnLastSeen}` : "";
+  return `Warning · compressed summary is ${state}; refresh before relying on it${turnSuffix}`;
+}
+
+function getCondensedHistoryDetailLines(
+  item: ContextPacketViewItem,
+  metadata: Extract<ContextPacketViewMetadata, { kind: "condensed-history" }>,
+): readonly string[] {
+  const modelSuffix = metadata.compression.model === undefined ? "" : ` · ${metadata.compression.model}`;
+  const warningLine = getCondensedHistoryWarningLine(item);
+  return [
+    ...(warningLine === undefined ? [] : [warningLine]),
+    `Compression · ${metadata.compression.method}${modelSuffix} · ${metadata.compactedEventCount} compacted · ${metadata.recentEventCount} recent kept · ~${metadata.compression.inputTokensEstimate}t in / ~${metadata.compression.outputTokensEstimate}t out`,
+    `Summary · ${metadata.summary}`,
+    `Reason · ${metadata.recomputeReason}`,
+    `Provenance · ${metadata.sourceEventIds.length} trace ids · ${formatTraceIdPreview(metadata.sourceEventIds)}`,
+  ];
+}
+
+function getWorkNodeDetailLines(
+  metadata: Extract<ContextPacketViewMetadata, { kind: "work-node" }>,
+): readonly string[] {
+  return [
+    `Goal · ${metadata.goal ?? metadata.title}`,
+    `Status · ${metadata.status.replaceAll("_", " ")}`,
+    ...(metadata.constraints.length === 0
+      ? []
+      : [`Must hold · ${metadata.constraints.join(" · ")}`]),
+    ...(metadata.acceptanceCriteria.length === 0
+      ? []
+      : [`Accepted when · ${metadata.acceptanceCriteria.join(" · ")}`]),
+    `Evidence · ${metadata.evidenceRefs.length} of ${metadata.acceptanceCriteria.length} collected`,
+  ];
+}
+
+function getMetadataDetailLines(
+  item: ContextPacketViewItem,
+  metadata: ContextPacketViewMetadata,
+): readonly string[] {
+  return metadata.kind === "work-node"
+    ? getWorkNodeDetailLines(metadata)
+    : getCondensedHistoryDetailLines(item, metadata);
+}
+
+export function getContextItemDetailLines(item: ContextPacketViewItem): readonly string[] {
+  return [
+    getContextItemPreview(item),
+    ...(item.metadata === undefined ? [] : getMetadataDetailLines(item, item.metadata)),
+  ];
+}
+
+export function computeContextOverlayViewportMaxRows(input: {
+  readonly terminalRows?: number | undefined;
+  readonly reservedRows?: number | undefined;
+}): number {
+  if (input.terminalRows === undefined) {
+    return 24;
+  }
+  const reservedRows = Math.max(0, Math.trunc(input.reservedRows ?? 0));
+  return Math.min(
+    24,
+    Math.max(
+      reservedRows > 0 ? 2 : 6,
+      Math.trunc(input.terminalRows) - 25 - reservedRows,
+    ),
+  );
+}
+
+export function resolveWorkShellContextDetailLayout(input: {
+  readonly item: ContextPacketViewItem;
+  readonly content?: string | undefined;
+  readonly width: number;
+  readonly maxRows: number;
+}): {
+  readonly lines: readonly string[];
+  readonly maxOffset: number;
+} {
+  const lineWidth = Math.max(24, input.width - 8);
+  const summaryLines = getContextItemDetailLines(input.item)
+    .flatMap((line) => wrapDisplayTextFast(line, lineWidth));
+  const contentLines = input.content?.trim()
+    ? input.content
+      .split(/\r?\n/u)
+      .flatMap((line) => wrapDisplayTextFast(line.length > 0 ? line : " ", lineWidth))
+    : [];
+  const lines = [
+    ...summaryLines,
+    ...(contentLines.length > 0 ? ["", "Local source content", ...contentLines] : []),
+  ];
+  const availableRows = Math.max(1, input.maxRows - 3);
+  const bottomPageSize = Math.max(1, availableRows - 1);
+  return {
+    lines,
+    maxOffset: Math.max(0, lines.length - bottomPageSize),
+  };
+}
 
 export type { ContextPacketView };
