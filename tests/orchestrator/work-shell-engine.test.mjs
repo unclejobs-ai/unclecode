@@ -7010,9 +7010,11 @@ test("WorkShellEngine keeps a tool lifecycle burst out of the subscriber fan-out
   });
 
   // Busy status and the tool trace entry are lifecycle effects too: none of
-  // them may reach a subscriber before the publish window closes.
+  // them may reach a subscriber before the publish window closes. The busy
+  // line is the operator's own tool completion — the delegated run's
+  // completion (call-1) never reaches the shell status.
   assert.equal(notifications.length, 0);
-  assert.equal(engine.getState().busyStatus, "→ read state.json");
+  assert.equal(engine.getState().busyStatus, "✓ read call-main");
   assert.equal(engine.getState().agentConsole.activity.length, 2);
 
   await delay(200);
@@ -7024,7 +7026,12 @@ test("WorkShellEngine keeps a tool lifecycle burst out of the subscriber fan-out
   assert.equal(published.agentConsole.activity[1]?.status, "completed");
   assert.equal(published.agentConsole.agents[0]?.status, "completed");
   assert.equal(published.agentConsole.agents[0]?.currentActivity, undefined);
-  assert.ok(published.entries.some((entry) => entry.role === "tool" && entry.text === "✓ read call-main"));
+  // Completed-tool lines are live status (and verbose transcript), not
+  // minimal transcript entries — for either scope.
+  assert.ok(
+    !published.entries.some((entry) => entry.text === "✓ read call-main"),
+    "minimal trace mode keeps completed-tool lines out of the transcript",
+  );
   assert.ok(
     !published.entries.some((entry) => entry.text === "✓ read call-1"),
     "a delegated run's tool output belongs to the console, never to the transcript",
