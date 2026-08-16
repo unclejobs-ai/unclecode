@@ -875,6 +875,66 @@ test("work-shell composer dock chrome decisions stay local for keystroke latency
   );
 });
 
+test("work-shell composer row budget wraps without a sync Rust spawn on keystrokes", () => {
+  const source = readFileSync(
+    path.join(workspaceRoot, "packages/tui/src/work-shell-view.tsx"),
+    "utf8",
+  );
+
+  // Scope to the function body: the view keeps the Rust wrap for settled
+  // transcript rows, but the composer row budget runs on every keystroke and
+  // must use the pure-TS wrap only.
+  const functionStart = source.indexOf(
+    "export function resolveWorkShellComposerAdditionalRows",
+  );
+  assert.ok(
+    functionStart >= 0,
+    "resolveWorkShellComposerAdditionalRows must stay exported from the view",
+  );
+  // Skip past the parameter object literal so brace counting starts at the
+  // function body, not the closing `}` of the `input: { ... }` type.
+  const signatureEnd = source.indexOf("):", functionStart);
+  assert.ok(
+    signatureEnd > functionStart,
+    "could not find the composer row budget signature end",
+  );
+  const bodyStart = source.indexOf("{", signatureEnd);
+  let depth = 0;
+  let functionEnd = -1;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        functionEnd = index;
+        break;
+      }
+    }
+  }
+  assert.ok(
+    functionEnd > bodyStart,
+    "could not isolate the composer row budget function body",
+  );
+  const functionBody = source.slice(functionStart, functionEnd);
+
+  assert.match(
+    functionBody,
+    /wrapDisplayTextFast\(/,
+    "the composer row budget must wrap with the pure-TS fast wrap",
+  );
+  assert.doesNotMatch(
+    functionBody,
+    /wrapDisplayText\(/,
+    "the composer row budget must not call the sync Rust wrap (wrapDisplayText spawns per call)",
+  );
+  assert.doesNotMatch(
+    functionBody,
+    /runRustCommandSync|wrap-display/,
+    "no sync Rust process spawn may live on the keystroke path",
+  );
+});
+
 test("work-shell slash render chrome avoids sync Rust helpers on first picker paint", () => {
   const source = readFileSync(
     path.join(workspaceRoot, "packages/tui/src/work-shell-view.tsx"),

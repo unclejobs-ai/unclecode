@@ -21,7 +21,7 @@ import {
 
 import type { GitFacts } from "./facts.js";
 import { detectTerminalBackground } from "./terminal-theme.js";
-import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
+import { getDisplayWidth, truncateForDisplayWidth, wrapDisplayTextFast } from "./text-width.js";
 import { renderMarkdown, type MarkdownTheme } from "./markdown-render.js";
 import {
   classifyWorkShellPanelLineFast,
@@ -1406,7 +1406,12 @@ export function resolveWorkShellComposerAdditionalRows(input: {
   const attachmentBadge = input.attachmentCount === undefined
     ? ""
     : ` [${input.attachmentCount}/5]`;
-  const composerRows = wrapDisplayText(
+  // Keystroke path: this runs on every input change to size the transcript
+  // window, so it must not spawn the sync Rust wrap (wrapDisplayText). The
+  // pure-TS wrap keeps composer typing free of process spawns; the row count
+  // it returns only gates layout height, where the fast wrap's greedy
+  // behavior matches the Rust wrap for counting purposes.
+  const composerRows = wrapDisplayTextFast(
     `${input.inputValue || " "}${attachmentBadge}`,
     contentWidth,
   ).length;
@@ -1507,7 +1512,7 @@ function renderWorkShellEntryBlock(input: {
         >
           <Text color={W.assistant} bold>{presentation.badge} {presentation.label}</Text>
           <Box flexDirection="column" paddingLeft={3}>
-            {renderMarkdown({ text: renderText, width: contentWidth, theme: mdTheme })}
+            {renderMarkdown({ text: renderText, width: contentWidth, theme: mdTheme, isStreamingText: isStreamingEntry })}
             {isStreamingEntry ? <Text color={W.assistant} bold>{STREAMING_CURSOR}</Text> : null}
           </Box>
         </Box>
@@ -1523,7 +1528,7 @@ function renderWorkShellEntryBlock(input: {
         flexDirection="column"
       >
         <Box marginTop={0} flexDirection="column">
-          {renderMarkdown({ text: renderText, width: contentWidth, theme: mdTheme })}
+          {renderMarkdown({ text: renderText, width: contentWidth, theme: mdTheme, isStreamingText: isStreamingEntry })}
           {isStreamingEntry ? <Text color={W.assistant} bold>{STREAMING_CURSOR}</Text> : null}
         </Box>
       </Box>

@@ -27,10 +27,23 @@ function createFakeStdout({ columns = 100, isTTY = true } = {}) {
   };
 }
 
-test("shouldClearTerminalOnResize only fires when the terminal narrows", () => {
+test("shouldClearTerminalOnResize only fires when the terminal narrows in columns", () => {
   assert.equal(shouldClearTerminalOnResize(100, 72), true);
   assert.equal(shouldClearTerminalOnResize(72, 100), false);
   assert.equal(shouldClearTerminalOnResize(100, 100), false);
+});
+
+test("row-only resizes never clear the screen on ink 6.8", () => {
+  // The predicate is deliberately columns-only. Row-only shrink must not
+  // clear: ink 6.8 resets nothing when only rows decrease, so a static
+  // non-fullscreen frame (the boot screen) never repaints after an external
+  // clear and the screen stays blank until the next state change. Verified
+  // against a real terminal emulator (tmux): 100x40 -> 100x30 blanked a
+  // static two-row frame. Row-only grow has the same hazard as any grow —
+  // ink skips unchanged rows, so a clear would erase rows never rewritten.
+  // These equal-columns cases document that invariant.
+  assert.equal(shouldClearTerminalOnResize(100, 100), false);
+  assert.equal(shouldClearTerminalOnResize(72, 72), false);
 });
 
 test("clearTerminalScreen writes screen+scrollback clear only on a TTY", () => {
