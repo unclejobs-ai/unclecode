@@ -86,7 +86,7 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 - Do not use raw string length for visual centering or truncation.
 - Do not let passive panels crowd the composer while the user is typing.
-- Dense trace/tool details belong in context/trace surfaces, not the main conversation.
+- Compact tool entries and reasoning summaries are first-class conversation content; dense trace detail (raw output, verbose expansion) stays in trace/context surfaces.
 
 ## 5. Components
 
@@ -125,14 +125,18 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 ### Conversation entry
 
 - Structure: role badge and wrapped body; continuation lines use a quiet indent only — no repeated rail glyph (`▌`) spam.
-- Variants: user, assistant compact, assistant expanded, system, tool diagnostics.
+- Variants: user, assistant compact, assistant expanded, system, tool call, reasoning summary.
 - Spacing: one row between entries; user entries use `badge label · body` on the first line when short.
-- States: default, streaming assistant, filtered tool trace.
+- States: default, streaming assistant, filtered orchestration noise.
 - Accessibility: role labels are textual; color is not the only role signal.
 - Motion: streaming cursor only when assistant text is live.
 - Badge copy: do not append redundant `message` / `reply` suffixes beside role badges.
 - System feedback: muted body (`text-muted`), dim glyph prefix, no standalone unstyled float.
-- Hidden transcript: reasoning deltas, tool traces, subtask JSON, worker meta, and internal turn routing lines stay out of the default conversation surface.
+- Tool entry: first rendered row `● <verb> <key argument>` (bold; status-success, or status-error when the tool failed); first result row `  ⎿ <summary>`, remaining result rows indented 4 spaces — all result rows text-muted. Verbs map read_file→read, write_file→write, run_shell→bash, search_text→search, apply_patch→patch; other tool names pass through. The key argument picks the display input's path, else command, else query.
+- Tool entry detail: result rows carry the output metric (`N lines`, or the first error line when the tool failed), an output excerpt of at most 6 per-row-truncated lines, `+N −M` line stats only when the output contains a unified diff, and `· {ms}ms` duration on the last metric row. Rendered height is capped at 8 rows; overflow collapses into exactly one `… +N more lines` row per entry.
+- Tool entry ownership: stored entry text is glyph-less plain rows — `<verb> <key argument>` first, then plain metric/excerpt rows. The renderer owns `● ` (first row) and `  ⎿ ` (first result row); glyphs appearing in both layers are a bug.
+- Reasoning entry: one dim `✻ `-prefixed entry per turn, at most 6 rows, appended before that turn's assistant answer; it renders plain dim (text-muted) without markdown parsing. Live reasoning keeps churning on the dock activity row — the transcript keeps only the settled summary.
+- Hidden transcript: live reasoning deltas (superseded by the settled `✻` summary), raw verbose trace lines, subtask JSON, worker meta, and internal turn routing lines stay out of the default conversation surface.
 
 ### Empty conversation
 
@@ -158,11 +162,12 @@ Terminal spacing is row/column based. Map spacing to a 4px mental model for cros
 
 ### Composer dock
 
-- Structure: live activity row (busy only), hint row (accent follows state: user slash, assistant busy, warning queue), unlabeled soft divider (pure `─` rule above the input area, no label text), `›` input prefix, footer context row (cwd + one chip).
+- Structure: live activity row (busy only), dim live trace feed (busy only), hint row (accent follows state: user slash, assistant busy, warning queue), unlabeled soft divider (pure `─` rule above the input area, no label text), `›` input prefix, footer context row (cwd + one chip).
 - Live activity row: while a main turn or background agents/jobs are live, the row directly above the hint carries `⠙ <activity phrase> · <elapsed>` plus `N agents · M jobs` when delegated work is meaningful — the busy display the top status row used to own. Idle frames render no activity row (and no spinner glyph anywhere).
+- Live trace feed: while busy, up to three dim `→ …` progress lines (dock-width truncated) sit between the activity row and the hint row, sourced from the always-on `liveTraceLines` state — the feed renders in every trace mode, default and `/minimal` included; idle frames render no feed. Deep trace expansion stays with the context overlay.
 - Placeholder: empty input renders a dim ghost placeholder (`Describe a task · / for commands`) that disappears as soon as typing starts.
-- Variants: default, slash command accent, secure entry, attachment count, queue paused hint, parallel busy accent, busy live activity row.
-- Spacing: one activity row (busy only) above one hint row, one prompt row, one footer row; no double border above/below input.
+- Variants: default, slash command accent, secure entry, attachment count, queue paused hint, parallel busy accent, busy live activity row, busy live trace feed.
+- Spacing: one activity row and up to three trace feed rows (busy only) above one hint row, one prompt row, one footer row; no double border above/below input.
 - States: default, focus by input, secure input, attachment cap warning, queued, busy.
 - Accessibility: hints must expose keyboard actions.
 - Motion: single spinner in the activity row, only while busy; never duplicated elsewhere.
@@ -198,23 +203,23 @@ Single-character shortcuts for discovery and pending decisions. They fire only w
 | `1`-`3` | Empty conversation | Prefills the composer with starter prompt N |
 | `1`-`9` | Decision bar (single question) | Answers with option N |
 | `Esc` | Decision bar | Cancels the pending decision |
-| `PageUp`/`PageDown` | Transcript longer than the window | Scrolls the transcript one visible window (no-op at the top/bottom or on a short conversation); a dim `↑ N entries above · PageUp/PageDown scroll · Esc newest` row marks the transcript/dock boundary while scrolled |
+| `PageUp`/`PageDown` | Transcript longer than the window | Scrolls the transcript one visible window, measured in entries weighted by rendered rows so multi-row tool entries page accurately (no-op at the top/bottom or on a short conversation); a dim `↑ N entries above · PageUp/PageDown scroll · Esc newest` row marks the transcript/dock boundary while scrolled |
 | `Esc` | Transcript scrolled up | Returns to the newest entry (added to Esc's other meanings — interrupt, overlay close, and decision cancel still win) |
 
 ## 5.1 Region show/hide matrix
 
-Default work shell: show answers and high-signal state; hide orchestration noise. `/verbose` moves trace-class content to the context overlay only — never the conversation rail.
+Default work shell: show answers, compact tool entries, and reasoning summaries as first-class transcript content; hide orchestration noise. `/verbose` keeps its deep-trace expansion in the context overlay — the conversation rail carries compact entries only.
 
 | Region | Show (default) | Hide (default) | Notes |
 | --- | --- | --- | --- |
 | **Header** | Provider title (bold), right-aligned `model · mode` facts (muted), auth chip on warning, divider | Default shortcut hint, duplicate model/mode/auth in status or footer | Facts drop first when narrow |
 | **Status strip** | Idle `◇ Ready · last Xs` alone (interrupted idle / queue paused stay here — no turn active) | The entire row while busy (moved to the composer dock activity row), `model · mode` and auth label (moved to the header), raw file paths, duplicate spinners | Top row is idle-only; busy lives above the composer hint |
-| **Conversation** | User messages, final assistant synthesis, streaming partial text, `policy.denied` (minimal) | Reasoning deltas, raw tool trace lines (they surface only as the busy dock feed), subtask JSON, worker meta, internal routing | User: `◇ You · body`; assistant: badge + quiet indent; the default transcript keeps tool entries only |
+| **Conversation** | User messages, final assistant synthesis, streaming partial text, compact tool entries (`● verb …` + `⎿` result summary, 8-row cap), reasoning summary (`✻`, one per turn, max 6 rows), `policy.denied` (minimal) | Live reasoning deltas (the settled `✻` entry replaces them), raw verbose trace lines, subtask JSON, worker meta, internal routing | User: `◇ You · body`; assistant: badge + quiet indent; tool and reasoning entries render in every trace mode; verbose depth lives in the context overlay |
 | **Empty state** | Ready heading, concise explanation, starter prompts `1`-`3`, opener hint row `/ commands · @ attach a file · ! shell · ? keys` | Orphan chrome, non-actionable filler | Starter keys prefill the composer |
-| **Composer** | Busy: live activity row (spinner + elapsed + agent/job counts) plus a dim tool-trace tail (max 3 lines, dock-width truncated) directly above the hint row; hint row, ghost placeholder, unlabeled soft divider, `›` prefix, cwd · context chip footer | Activity row and tool-trace feed while idle (idle screens carry no spinner glyph), raw paths in hints, double borders, divider label text | Tint follows slash / busy / queue state |
+| **Composer** | Busy: live activity row (spinner + elapsed + agent/job counts) plus a dim `→ …` live trace feed (max 3 lines, dock-width truncated, from `liveTraceLines` in every trace mode including default and `/minimal`) directly above the hint row; hint row, ghost placeholder, unlabeled soft divider, `›` prefix, cwd · context chip footer | Activity row and trace feed while idle (idle screens carry no spinner glyph), raw paths in hints, double borders, divider label text | Tint follows slash / busy / queue state |
 | **Footer** | cwd + one context chip | Model, mode, auth repetition | Never duplicate status strip |
 | **Slash picker** | Matching commands + Korean descriptions for `/context`, `/mode` | Unrelated commands | Selected row uses user accent + bold |
-| **Context overlay** (`/context`, `/verbose`) | Sources fact line, included/excluded/warning groups, trace lines when verbose | Full raw configs, duplicate conversation entries | 64-char summary truncation |
+| **Context overlay** (`/context`, `/verbose`) | Sources fact line, included/excluded/warning groups, trace lines when verbose | Full raw configs, duplicate conversation entries | 64-char summary truncation; verbose-only deep expansion of tool traces (the rail keeps compact entries) |
 | **Dashboard panels** | Session Center facts when navigated | Passive while composing | Not mixed into chat rail |
 
 Implementation reference: `packages/tui/src/work-shell-view.tsx`, `work-shell-panels.ts`, `work-shell-engine-turns.ts` (sanitization).
@@ -236,6 +241,13 @@ Implementation reference: `packages/tui/src/work-shell-view.tsx`, `work-shell-pa
 - Interrupt and cancel must update visible state immediately even if provider cleanup finishes later.
 - Preserve reduced-motion friendliness by avoiding decorative animation.
 
+### Rendering stability
+
+- Frames render incrementally by default: keystrokes and streaming updates repaint only changed rows; unchanged rows are never re-emitted.
+- Resize handling is asymmetric by design: a full clear and repaint runs only when the terminal shrinks (rows or columns decrease); growth reflows via incremental relayout with no clear.
+- The keystroke path must not spawn processes synchronously — no synchronous width/wrap subprocess calls while typing.
+- Settled transcript entries are never re-parsed while a later entry streams; markdown rendering is cached by text, width, and theme.
+
 ## 7. Depth & Surface
 
 ### Strategy
@@ -252,7 +264,7 @@ Use mixed terminal-native depth: borders for structure, tonal badges for role id
 ### Rules
 
 - Borders are structural, not decorative. Avoid boxing every message.
-- Tool traces are diagnostic depth and should stay out of the main transcript unless explicitly requested.
+- Tool traces are first-class transcript entries in compact form (`●` call line, `⎿` result rows); diagnostic depth — raw output and verbose expansion — stays in the context overlay.
 - Empty, loading, and error states must be intentionally composed, never blank areas.
 
 ## 8. Korean product copy (우리)
