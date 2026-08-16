@@ -57,6 +57,7 @@ import {
   getWorkShellPanelDisplayMode,
   getWorkShellPanelPlacement,
   getWorkShellThinkingDetailLines,
+  isWorkShellToolErrorEntry,
   isWorkShellWarningLine,
   normalizeMarkdownDisplayText,
   parseWorkShellPanelFactLine,
@@ -73,12 +74,15 @@ import {
   shouldShowWorkShellConversationEntry,
   shouldUseSlowComposerPreview,
   sliceByDisplayWidth,
+  splitWorkShellToolEntry,
   truncateForDisplayWidth,
   useWorkShellDashboardHomeSync,
   useWorkShellInputController,
   useWorkShellPaneState,
   useWorkShellSlashState,
 } from "../../packages/tui/src/index.tsx";
+
+import { formatWorkShellToolDetailEntry } from "../../packages/orchestrator/src/work-shell-engine-trace.ts";
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(testDirectory, "../..");
@@ -295,6 +299,50 @@ test("getWorkShellEntryPresentation keeps user, assistant, tool, and system role
     borderColor: "#30363d",
     bodyColor: "#0d1117",
   });
+  // Tool detail presentation (additive, tool role only — the presentation
+  // object above is unchanged): multi-row tool entries assemble glyph-less and
+  // the renderer owns the glyphs and the outcome color. Pinned here so the
+  // tool role's presentation policy cannot drift away from its contract.
+  const toolDetailSuccess = formatWorkShellToolDetailEntry({
+    type: "tool.completed",
+    toolName: "read_file",
+    input: { path: "src/index.ts" },
+    isError: false,
+    output: "export function main() {\n  return 42;\n}\n",
+    durationMs: 12,
+  });
+  const toolDetailError = formatWorkShellToolDetailEntry({
+    type: "tool.completed",
+    toolName: "run_shell",
+    input: { command: "npm test" },
+    isError: true,
+    output: "Error: ENOENT no such file or directory\n    at run (node:1)\n",
+    durationMs: 8,
+  });
+  assert.ok(
+    !toolDetailSuccess.includes("●") && !toolDetailSuccess.includes("⎿"),
+    "stored tool detail text must stay glyph-less; the renderer owns ● and ⎿",
+  );
+  assert.ok(!toolDetailError.includes("●") && !toolDetailError.includes("⎿"));
+  assert.equal(
+    isWorkShellToolErrorEntry(toolDetailSuccess),
+    false,
+    "a successful call reads green: its first metric row is a success shape",
+  );
+  assert.equal(
+    isWorkShellToolErrorEntry(toolDetailError),
+    true,
+    "a failed call reads red: its first metric row is the raw first error line",
+  );
+  assert.deepEqual(splitWorkShellToolEntry(toolDetailSuccess, 100), {
+    call: "read src/index.ts",
+    resultLines: [
+      "3 lines · 12ms",
+      "export function main() {",
+      "  return 42;",
+      "}",
+    ],
+  });
   assert.deepEqual(getWorkShellEntryPresentation("system"), {
     label: "System · state",
     badge: "·",
@@ -310,6 +358,63 @@ test("getWorkShellEntryPresentation keeps user, assistant, tool, and system role
   assert.equal(
     getWorkShellEmptyConversationHint(),
     "Type a task, /context to see what gets sent, @file to attach.",
+  );
+});
+
+test("formatWorkShellToolDetailEntry assembles capped glyph-less rows that survive the transcript filter", () => {
+  // Verb row: TS verb constant + the display input's key argument
+  // (path > command > query), no glyph — the renderer owns those.
+  const detail = formatWorkShellToolDetailEntry({
+    type: "tool.completed",
+    toolName: "run_shell",
+    toolCallId: "call-pin",
+    input: { command: "cargo test -p unclecode-core", query: "ignored" },
+    isError: false,
+    output: "running 3 tests\ntest a ... ok\ntest b ... ok\ntest c ... ok",
+    startedAt: 1,
+    completedAt: 1201,
+    durationMs: 1200,
+  });
+  assert.equal(detail.split("\n")[0], "bash cargo test -p unclecode-core");
+  assert.equal(detail.split("\n")[1], "4 lines · 1200ms");
+
+  // Hard cap: 8 rows including exactly one overflow ellipsis row.
+  const overflowing = formatWorkShellToolDetailEntry({
+    type: "tool.completed",
+    toolName: "read_file",
+    toolCallId: "call-pin-long",
+    input: { path: "big.txt" },
+    isError: false,
+    output: `@@ -1 +1 @@\n-a\n${Array.from({ length: 20 }, (_, index) => `+line-${index}`).join("\n")}\n`,
+    durationMs: 5,
+  });
+  const overflowingRows = overflowing.split("\n");
+  assert.equal(overflowingRows.length, 8);
+  assert.equal(
+    overflowingRows.filter((row) => row.startsWith("… +")).length,
+    1,
+  );
+  assert.equal(overflowingRows.at(-1), "… +2 more lines");
+
+  // The stored rows pass the transcript kill filter — the hidden-trace pins
+  // elsewhere in this contract still hold for the old one-liners.
+  assert.equal(
+    shouldShowWorkShellConversationEntry({ role: "tool", text: detail }),
+    true,
+  );
+  assert.equal(
+    shouldShowWorkShellConversationEntry({
+      role: "tool",
+      text: "→ read package.json",
+    }),
+    false,
+  );
+
+  // The render-side splitter never stacks a second ellipsis on the assembly's.
+  const split = splitWorkShellToolEntry(overflowing, 100);
+  assert.equal(
+    split.resultLines.filter((row) => row.startsWith("… +")).length,
+    1,
   );
 });
 

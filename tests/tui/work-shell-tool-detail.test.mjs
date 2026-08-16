@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { stripVTControlCharacters } from "node:util";
 
+import chalk from "chalk";
 import React from "react";
 
 import { renderDebugFrame, waitForSettledFrame } from "./work-shell-render-harness.mjs";
@@ -9,6 +10,10 @@ import { renderDebugFrame, waitForSettledFrame } from "./work-shell-render-harne
 // Force light terminal background for the render smoke below — authored
 // against the light palette like the other work-shell render tests.
 process.env.UNCLECODE_TERMINAL_BACKGROUND = "light";
+// Raise the shared chalk instance so Ink's Text color props emit real ANSI
+// codes in the debug frame (the CI environment is not a TTY, so chalk would
+// otherwise default to level 0 and strip every color assertion of meaning).
+chalk.level = 3;
 
 import { formatWorkShellToolDetailEntry } from "../../packages/orchestrator/src/work-shell-engine-trace.ts";
 import {
@@ -16,6 +21,7 @@ import {
   deriveToolOutputMetric,
 } from "../../packages/orchestrator/src/work-shell-agent-console.ts";
 import {
+  isWorkShellToolErrorEntry,
   shouldShowWorkShellConversationEntry,
   splitWorkShellToolEntry,
   WorkShellView,
@@ -281,6 +287,140 @@ test("deriveToolOutputMetric keeps its exported shape", () => {
 
 test("a rendered frame shows the renderer-owned glyphs around the assembled rows", async () => {
   const text = formatWorkShellToolDetailEntry(READ_EVENT);
+  const output = await renderWorkShellFrame([
+    { role: "user", text: "read it" },
+    { role: "tool", text },
+  ]);
+
+  const frameStart = output.lastIndexOf("UncleCode ·");
+  const frame = stripVTControlCharacters(frameStart >= 0 ? output.slice(frameStart) : output);
+  assert.match(frame, /● read src\/index\.ts/u);
+  assert.match(frame, /⎿ 3 lines · 12ms/u);
+  assert.match(frame, /export function main\(\) \{/u);
+  // The stored text is glyph-less; the glyphs above are renderer-owned, so
+  // exactly one ● appears per tool entry in the frame.
+  assert.equal(frame.split("●").length - 1, 1);
+  // Same ownership discipline for the result glyph: one call row, one ⎿ row.
+  assert.equal(frame.split("⎿").length - 1, 1);
+});
+
+test("isWorkShellToolErrorEntry reads the failure off the glyph-less metric rows", () => {
+  // Success assemblies: the first metric row always carries a success shape
+  // (line metric, diff stats, bare duration), so the renderer keeps green.
+  for (const event of [READ_EVENT, BASH_EVENT, WRITE_DIFF_EVENT]) {
+    assert.equal(
+      isWorkShellToolErrorEntry(formatWorkShellToolDetailEntry(event)),
+      false,
+      `success assembly misread as error: ${event.toolName}`,
+    );
+  }
+  assert.equal(isWorkShellToolErrorEntry("bash echo\n8ms"), false, "duration-only metric is a success shape");
+  assert.equal(isWorkShellToolErrorEntry("read a.ts"), false, "verb-only entry has no metric row to read");
+  // Error assembly: the first metric row is the raw first error line.
+  assert.equal(isWorkShellToolErrorEntry(formatWorkShellToolDetailEntry(ERROR_EVENT)), true);
+  assert.equal(isWorkShellToolErrorEntry("bash npm test\ncustom failure text · 8ms"), true);
+});
+
+test("the tool call glyph carries the outcome color: green success, red error", async () => {
+  const successFrame = await renderWorkShellFrame([
+    { role: "tool", text: formatWorkShellToolDetailEntry(READ_EVENT) },
+  ]);
+  assert.match(
+    successFrame,
+    /\u001b\[1m\u001b\[32m● /u,
+    "the success ● must be bold green",
+  );
+
+  const errorFrame = await renderWorkShellFrame([
+    { role: "tool", text: formatWorkShellToolDetailEntry(ERROR_EVENT) },
+  ]);
+  assert.match(
+    errorFrame,
+    /\u001b\[1m\u001b\[31m● /u,
+    "the failed call's ● must flip to bold red",
+  );
+  // The error heuristic is renderer-owned: the stored entry text itself never
+  // claims failure, only the first metric row's shape does.
+  assert.ok(!formatWorkShellToolDetailEntry(ERROR_EVENT).includes("●"));
+});
+
+test("a rendered tool entry carries at most one overflow ellipsis row", async () => {
+  // WRITE_DIFF_EVENT's assembly already folds overflow into one `… +N more
+  // lines` row; the render cap must not stack a second one on top of it.
+  const output = await renderWorkShellFrame([
+    { role: "tool", text: formatWorkShellToolDetailEntry(WRITE_DIFF_EVENT) },
+  ]);
+  const frameStart = output.lastIndexOf("UncleCode ·");
+  const frame = stripVTControlCharacters(frameStart >= 0 ? output.slice(frameStart) : output);
+  const ellipsisRows = frame.split("\n").filter((line) => line.trim().startsWith("… +"));
+  assert.equal(ellipsisRows.length, 1);
+
+  // A body already carrying an overflow row inside the render cap's shown
+  // prefix (a run_shell whose output embeds another run's ellipsis rows) must
+  // fold into ONE ellipsis: the shown prefix drops the inner row, the appended
+  // row counts everything left out — including it.
+  const nestedOverflowBody = [
+    "outer line 1",
+    "outer line 2",
+    "… +40 more lines",
+    "outer line 4",
+    "outer line 5",
+    "outer line 6",
+    "outer line 7",
+    "outer line 8",
+    "outer line 9",
+    "outer line 10",
+  ].join("\n");
+  const merged = splitWorkShellToolEntry(`bash run nested\n${nestedOverflowBody}`, 100);
+  // 7 surviving content rows + the one merged ellipsis row.
+  assert.equal(merged.resultLines.length, 8);
+  assert.equal(merged.resultLines.filter((line) => line.startsWith("… +")).length, 1);
+  assert.equal(merged.resultLines.at(-1), "… +3 more lines");
+  assert.ok(!merged.resultLines.slice(0, -1).some((line) => line.startsWith("… +")));
+  // Narrow widths wrap the WRITE_DIFF_EVENT assembly past the render cap the
+  // same way — still exactly one ellipsis row out of the splitter.
+  const narrow = splitWorkShellToolEntry(
+    formatWorkShellToolDetailEntry({
+      ...BASH_EVENT,
+      output: Array.from({ length: 8 }, (_, index) => `w${index} ${"x".repeat(40)}`).join("\n"),
+    }),
+    30,
+  );
+  assert.ok(narrow.resultLines.length > 8, "narrow wrapping must actually trip the render cap here");
+  assert.equal(narrow.resultLines.filter((line) => line.startsWith("… +")).length, 1);
+  assert.match(narrow.resultLines.at(-1), /^… \+\d+ more lines$/u);
+});
+
+test("a ✻ reasoning entry renders as a single dim block without markdown parsing", async () => {
+  const reasoningText = "✻ thinking about *emphasis*, `inline code`, and # headings";
+  const output = await renderWorkShellFrame([
+    { role: "assistant", text: reasoningText },
+  ]);
+  const frameStart = output.lastIndexOf("UncleCode ·");
+  const rawFrame = frameStart >= 0 ? output.slice(frameStart) : output;
+  const frame = stripVTControlCharacters(rawFrame);
+
+  // The frame keeps the ✻ line verbatim...
+  assert.ok(frame.includes("✻ thinking about"));
+  // ...with its markdown syntax intact — the markdown renderer would have
+  // consumed the asterisks/backticks/hash, the dim branch must not.
+  assert.ok(frame.includes("*emphasis*"), "markdown emphasis syntax must survive unstyled");
+  assert.ok(frame.includes("`inline code`"), "inline code syntax must survive unstyled");
+  assert.ok(frame.includes("# headings"), "heading syntax must survive unstyled");
+
+  // Dim single tone: the whole ✻ row is one muted (gray) span, with no bold
+  // or accent escapes inside it that markdown styling would have produced.
+  const reasoningRow = rawFrame.split("\n").find((line) => line.includes("✻ thinking"));
+  assert.match(reasoningRow, /\u001b\[90m[^\u001b]*\u001b\[39m/u);
+  assert.ok(!/\u001b\[(1|32|36)m/u.test(reasoningRow), "the ✻ row must stay single-tone muted");
+});
+
+/**
+ * Render the work shell with the given transcript entries and resolve the
+ * settled frame. Returns the RAW frame (ANSI intact) — color assertions need
+ * it; content assertions strip with stripVTControlCharacters.
+ */
+async function renderWorkShellFrame(entries) {
   const { instance, getOutput } = renderDebugFrame(
     React.createElement(WorkShellView, {
       provider: "openai",
@@ -289,10 +429,7 @@ test("a rendered frame shows the renderer-owned glyphs around the assembled rows
       reasoningSupported: true,
       mode: "Work",
       authLabel: "env-key",
-      entries: [
-        { role: "user", text: "read it" },
-        { role: "tool", text },
-      ],
+      entries,
       isBusy: false,
       activePanel: { title: "Session status", lines: ["Work context ready."] },
       composer: React.createElement("span", null, ""),
@@ -305,13 +442,5 @@ test("a rendered frame shows the renderer-owned glyphs around the assembled rows
   const output = await waitForSettledFrame(getOutput);
   instance.unmount();
   instance.cleanup();
-
-  const frameStart = output.lastIndexOf("UncleCode ·");
-  const frame = stripVTControlCharacters(frameStart >= 0 ? output.slice(frameStart) : output);
-  assert.match(frame, /● read src\/index\.ts/u);
-  assert.match(frame, /⎿ 3 lines · 12ms/u);
-  assert.match(frame, /export function main\(\) \{/u);
-  // The stored text is glyph-less; the glyphs above are renderer-owned, so
-  // exactly one ● appears per tool entry in the frame.
-  assert.equal(frame.split("●").length - 1, 1);
-});
+  return output;
+}
