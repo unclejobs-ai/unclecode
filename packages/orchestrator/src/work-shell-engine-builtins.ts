@@ -792,12 +792,27 @@ export function resolveActivePromptPreview(
   return undefined;
 }
 
+/**
+ * Mirror of `WORK_SHELL_REASONING_ENTRY_PREFIX` in work-shell-engine-trace.ts.
+ * Duplicated rather than imported: this module sits below the trace/state
+ * modules in the import graph (panels imports builtins, state imports
+ * panels), so importing the constant would close an import cycle. The
+ * reasoning-summary tests pin both spellings to the same `✻ ` prefix.
+ */
+const WORK_SHELL_REASONING_ENTRY_PREFIX = "✻ ";
+
 export function resolveLastCompletedTurn(
   entries: readonly WorkShellChatEntry[],
 ): { readonly user: string; readonly assistant: string } | undefined {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (entry?.role !== "assistant") {
+      continue;
+    }
+    // A ✻ reasoning summary is the turn's thinking, not its answer: without
+    // this guard an answer-less turn would hand its reasoning to the queue
+    // preview and idle snapshot as if it were the last reply.
+    if (entry.text.startsWith(WORK_SHELL_REASONING_ENTRY_PREFIX)) {
       continue;
     }
     const assistant = entry.text.trim();

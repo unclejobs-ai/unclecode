@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { stripVTControlCharacters } from "node:util";
 
 import chalk from "chalk";
@@ -15,7 +16,11 @@ process.env.UNCLECODE_TERMINAL_BACKGROUND = "light";
 // otherwise default to level 0 and strip every color assertion of meaning).
 chalk.level = 3;
 
-import { formatWorkShellToolDetailEntry } from "../../packages/orchestrator/src/work-shell-engine-trace.ts";
+import {
+  applyWorkShellTraceEvent,
+  formatWorkShellToolDetailEntry,
+} from "../../packages/orchestrator/src/work-shell-engine-trace.ts";
+import { createInitialWorkShellEngineState } from "../../packages/orchestrator/src/work-shell-engine-state.ts";
 import {
   countUnifiedDiffLines,
   deriveToolOutputMetric,
@@ -444,3 +449,91 @@ async function renderWorkShellFrame(entries) {
   instance.cleanup();
   return output;
 }
+
+/** Minimal engine state for driving applyWorkShellTraceEvent outside a live engine. */
+function createTraceDriverState(overrides = {}) {
+  return {
+    ...createInitialWorkShellEngineState({
+      options: {
+        provider: "openai",
+        model: "gpt-5.4",
+        mode: "default",
+        authLabel: "api-key-env",
+        reasoning: {
+          effort: "high",
+          source: "mode-default",
+          support: { status: "supported", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high"] },
+        },
+        cwd: "/repo",
+        contextSummaryLines: [],
+      },
+      contextSummaryLines: [],
+      buildContextPanel: () => ({ title: "Context", lines: [] }),
+    }),
+    ...overrides,
+  };
+}
+
+test("the engine's flushed ✻ entry survives the kill filter and renders dim ahead of the answer", async () => {
+  // Drive the real engine accumulation path: reasoning deltas, then the
+  // first assistant delta that flushes the settled summary.
+  let state = createTraceDriverState({ isBusy: true });
+  const flushedEntries = [];
+  const apply = (event) => {
+    applyWorkShellTraceEvent({
+      state,
+      event,
+      formatAgentTraceLine: (candidate) =>
+        candidate.type === "reasoning.delta" ? `✦ thinking· ${candidate.delta ?? ""}` : "",
+      setState: (patch) => {
+        state = { ...state, ...patch };
+      },
+      appendEntries: (...next) => {
+        flushedEntries.push(...next);
+        state = { ...state, entries: [...state.entries, ...next] };
+      },
+      pushTraceLine() {},
+    });
+  };
+  apply({ type: "reasoning.delta", kind: "text", delta: "weigh *options* before answering" });
+  apply({ type: "assistant.delta", delta: "Answer." });
+
+  assert.equal(flushedEntries.length, 1, "the flush appends exactly one entry");
+  const reasoningEntry = flushedEntries[0];
+  assert.equal(reasoningEntry.role, "assistant");
+  assert.ok(reasoningEntry.text.startsWith("✻ "), "the engine owns the ✻ prefix the view renders dim");
+  // ✻ sits outside the kill filter's glyph class, so the summary is shown.
+  assert.equal(shouldShowWorkShellConversationEntry(reasoningEntry), true);
+
+  const output = await renderWorkShellFrame([
+    ...flushedEntries,
+    { role: "assistant", text: "Answer." },
+  ]);
+  const frameStart = output.lastIndexOf("UncleCode ·");
+  const rawFrame = frameStart >= 0 ? output.slice(frameStart) : output;
+  const frame = stripVTControlCharacters(rawFrame);
+
+  const reasoningRowIndex = frame.split("\n").findIndex((line) => line.includes("✻ weigh"));
+  const answerRowIndex = frame.split("\n").findIndex((line) => line.includes("Answer."));
+  assert.ok(reasoningRowIndex >= 0, "the flushed ✻ row must render");
+  assert.ok(answerRowIndex > reasoningRowIndex, "the ✻ row lands above the answer row");
+  // Markdown syntax survives unstyled — the dim branch, not the parser, owns it.
+  assert.ok(frame.includes("*options*"));
+
+  const reasoningRow = rawFrame.split("\n").find((line) => line.includes("✻ weigh"));
+  assert.match(reasoningRow, /\u001b\[90m[^\u001b]*\u001b\[39m/u, "the ✻ row is muted");
+  assert.ok(!/\u001b\[(1|32|36)m/u.test(reasoningRow), "the ✻ row stays single-tone dim");
+});
+
+test("the transcript kill filter's glyph class stays ✻-free", () => {
+  const source = readFileSync(
+    new URL("../../packages/tui/src/work-shell-view.tsx", import.meta.url),
+    "utf8",
+  );
+  const glyphClass = source.match(/\[✓✖→·★↔↗📎\]/u)?.[0];
+  assert.ok(glyphClass, "the kill filter glyph class must stay findable in the view source");
+  assert.ok(
+    !glyphClass.includes("✻"),
+    "✻ belongs to the reasoning summary render branch, never to the kill filter",
+  );
+});

@@ -400,6 +400,14 @@ export type WorkShellComposerMode = "default" | "api-key-entry" | "agent-steer";
 export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly entries: readonly WorkShellChatEntry[];
   readonly streamingAssistantText?: string | undefined;
+  /**
+   * Per-turn reasoning accumulation: `reasoning.delta` events (both `text`
+   * and `summary` kinds) append here, capped at 2000 chars. It flushes as
+   * ONE `✻ `-prefixed assistant summary entry at the first assistant delta
+   * or turn completion — whichever arrives first — and resets after the
+   * flush and at every turn end (success, failure, cancel, interrupt).
+   */
+  readonly streamingReasoningText?: string | undefined;
   readonly model: string;
   readonly mode: string;
   readonly reasoning: Reasoning;
@@ -2125,6 +2133,7 @@ export class WorkShellEngine<
       busyStatus: undefined,
       currentTurnStartedAt: undefined,
       streamingAssistantText: undefined,
+      streamingReasoningText: undefined,
       queuePaused: this.queueAutoDrainPaused,
       ...(lastTurnDurationMs !== undefined ? { lastTurnDurationMs } : {}),
     });

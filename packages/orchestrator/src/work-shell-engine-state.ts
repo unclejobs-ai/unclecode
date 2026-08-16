@@ -79,6 +79,7 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
   return {
     entries: input.options.initialEntries ? [...input.options.initialEntries] : [...decision.entries],
     streamingAssistantText: undefined,
+    streamingReasoningText: undefined,
     model: decision.model,
     mode: decision.mode,
     reasoning: decision.reasoning,

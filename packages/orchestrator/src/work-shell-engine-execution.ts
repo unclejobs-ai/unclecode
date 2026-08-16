@@ -383,6 +383,7 @@ export function resolvePromptTurnFinalizePatch<Reasoning extends WorkShellReason
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
     streamingAssistantText: undefined,
+    streamingReasoningText: undefined,
   };
 }
 
@@ -544,6 +545,7 @@ export async function executeWorkShellPromptTurn<
       input.appendEntries({ role: "system", text: turnResult.cancelledText });
       input.setState({
         streamingAssistantText: undefined,
+        streamingReasoningText: undefined,
         lastTurnDurationMs: turnResult.lastTurnDurationMs,
       });
       await input.persistSessionSnapshot("idle", turnResult.cancelledText).catch(() => undefined);
@@ -561,6 +563,7 @@ export async function executeWorkShellPromptTurn<
     input.setState({
       ...successPayload.patch,
       streamingAssistantText: undefined,
+      streamingReasoningText: undefined,
       ...(input.contextReceipt !== undefined ? { contextSubmittedReceipt: input.contextReceipt } : {}),
     });
     if (!postTurnEffects.skipped) {
@@ -600,6 +603,7 @@ export async function executeWorkShellPromptTurn<
     input.setState({
       ...failurePayload.patch,
       streamingAssistantText: undefined,
+      streamingReasoningText: undefined,
       ...(input.contextReceipt !== undefined ? { contextSubmittedReceipt: input.contextReceipt } : {}),
     });
     await input.persistSessionSnapshot("requires_action", input.promptTurn.failureSummary).catch(() => undefined);

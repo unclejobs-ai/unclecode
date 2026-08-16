@@ -27,6 +27,7 @@ import {
   resolveModelBuiltinResult,
   resolveQueueBlockedReason,
   resolveReasoningBuiltinResult,
+  resolveLastCompletedTurn,
   buildWorkShellQueueBuiltinInput,
 } from "../../packages/orchestrator/src/work-shell-engine-builtins.ts";
 import { executeWorkShellBuiltinSubmit } from "../../packages/orchestrator/src/work-shell-engine-builtin-runtime.ts";
@@ -1443,12 +1444,14 @@ test("work-shell execution helpers assemble start, success, failure, finalize, a
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
     streamingAssistantText: undefined,
+    streamingReasoningText: undefined,
   });
   assert.deepEqual(resolvePromptTurnFinalizePatch(), {
     isBusy: false,
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
     streamingAssistantText: undefined,
+    streamingReasoningText: undefined,
   });
 });
 
@@ -2591,6 +2594,218 @@ test("assistant delta trace accumulates streaming assistant text without transcr
   assert.deepEqual(patches, [{ streamingAssistantText: "Hello" }]);
   assert.deepEqual(liveEntries, []);
   assert.deepEqual(liveTraceLines, []);
+});
+
+/**
+ * Drive applyWorkShellTraceEvent the way the engine does: the trace listener
+ * stages each patch synchronously, so every event sees the previous event's
+ * streaming state. The returned apply() threads that staging forward.
+ */
+function createTraceEventDriver(overrides = {}) {
+  let state = createState({ isBusy: true, ...overrides });
+  const entries = [];
+  const apply = (event) => {
+    applyWorkShellTraceEvent({
+      state,
+      event,
+      formatAgentTraceLine: (candidate) => {
+        if (candidate.type === "reasoning.delta") return `✦ thinking· ${candidate.delta ?? ""}`;
+        if (candidate.type === "turn.completed") return `done ${candidate.durationMs ?? 0}`;
+        return "";
+      },
+      setState: (patch) => {
+        state = { ...state, ...patch };
+      },
+      appendEntries: (...next) => {
+        entries.push(...next);
+        state = { ...state, entries: [...state.entries, ...next] };
+      },
+      pushTraceLine() {},
+    });
+  };
+  return { apply, get state() { return state; }, entries };
+}
+
+test("reasoning deltas accumulate per turn without transcript noise or busy-status drift", () => {
+  const driver = createTraceEventDriver();
+
+  driver.apply({ type: "reasoning.delta", kind: "text", delta: "inspect the repo" });
+  driver.apply({ type: "reasoning.delta", kind: "summary", delta: "\nthen edit notes.txt" });
+
+  assert.equal(driver.state.streamingReasoningText, "inspect the repo\nthen edit notes.txt");
+  assert.deepEqual(driver.entries, [], "reasoning never appends live transcript entries");
+  // The dock activity row keeps its existing behavior: the LAST reasoning
+  // line stays the busy phrase — accumulation did not disturb it.
+  assert.match(driver.state.busyStatus ?? "", /✦ thinking· \nthen edit notes\.txt/u);
+});
+
+test("the accumulated reasoning flushes as ONE ✻ entry at the first assistant delta", () => {
+  const driver = createTraceEventDriver();
+
+  driver.apply({ type: "reasoning.delta", kind: "text", delta: "inspect the repo" });
+  driver.apply({ type: "reasoning.delta", kind: "summary", delta: "\nthen edit notes.txt" });
+  driver.apply({ type: "assistant.delta", delta: "He" });
+  driver.apply({ type: "assistant.delta", delta: "llo" });
+
+  assert.deepEqual(
+    driver.entries,
+    [{ role: "assistant", text: "✻ inspect the repo\nthen edit notes.txt" }],
+    "exactly one ✻ entry flushes — later assistant deltas never add a second",
+  );
+  assert.equal(driver.state.streamingReasoningText, undefined, "the buffer resets after the flush");
+  assert.equal(driver.state.streamingAssistantText, "Hello", "the answer text still streams normally");
+});
+
+test("the ✻ summary carries at most the first 6 rows of the accumulated reasoning", () => {
+  const driver = createTraceEventDriver();
+  driver.apply({
+    type: "reasoning.delta",
+    kind: "text",
+    delta: ["row 1", "row 2", "row 3", "row 4", "row 5", "row 6", "row 7", "row 8"].join("\n"),
+  });
+  driver.apply({ type: "assistant.delta", delta: "Answer." });
+
+  assert.equal(driver.entries.length, 1);
+  assert.deepEqual(
+    driver.entries[0].text.split("\n"),
+    ["✻ row 1", "row 2", "row 3", "row 4", "row 5", "row 6"],
+    "rows past the 6th are dropped by the hard cap",
+  );
+});
+
+test("the reasoning buffer stops at 2000 characters even against a runaway stream", () => {
+  const driver = createTraceEventDriver();
+
+  driver.apply({ type: "reasoning.delta", kind: "text", delta: "x".repeat(1500) });
+  driver.apply({ type: "reasoning.delta", kind: "summary", delta: "y".repeat(900) });
+  driver.apply({ type: "reasoning.delta", kind: "text", delta: "z".repeat(50) });
+
+  assert.equal(driver.state.streamingReasoningText?.length, 2000);
+  assert.ok(driver.state.streamingReasoningText?.endsWith("y"), "the cap keeps the earliest 2000 chars");
+});
+
+test("turn.completed flushes the reasoning when no assistant delta ever arrived", () => {
+  const driver = createTraceEventDriver();
+
+  driver.apply({ type: "reasoning.delta", kind: "text", delta: "thought about it, decided to stay quiet" });
+  driver.apply({ type: "turn.completed", durationMs: 42 });
+
+  assert.deepEqual(driver.entries, [
+    { role: "assistant", text: "✻ thought about it, decided to stay quiet" },
+  ]);
+  assert.equal(driver.state.streamingReasoningText, undefined);
+  assert.equal(driver.state.busyStatus, undefined, "turn completion still clears the busy row");
+});
+
+test("turns without visible reasoning never grow a ✻ entry", () => {
+  const quiet = createTraceEventDriver();
+  quiet.apply({ type: "assistant.delta", delta: "Hi" });
+  quiet.apply({ type: "turn.completed", durationMs: 7 });
+  assert.deepEqual(quiet.entries, [], "no accumulation means no entry at either flush trigger");
+
+  const blank = createTraceEventDriver();
+  blank.apply({ type: "reasoning.delta", kind: "text", delta: "   " });
+  blank.apply({ type: "reasoning.delta", kind: "summary", delta: "\n \n" });
+  blank.apply({ type: "turn.completed", durationMs: 7 });
+  assert.deepEqual(blank.entries, [], "a whitespace-only accumulation is empty, not blank-row noise");
+  assert.equal(blank.state.streamingReasoningText, undefined, "the flush still resets the buffer");
+});
+
+test("the reasoning buffer resets between turns", () => {
+  const driver = createTraceEventDriver();
+
+  driver.apply({ type: "reasoning.delta", kind: "text", delta: "first turn thinking" });
+  driver.apply({ type: "turn.completed", durationMs: 5 });
+  driver.apply({ type: "reasoning.delta", kind: "text", delta: "second turn thinking" });
+  driver.apply({ type: "turn.completed", durationMs: 6 });
+
+  assert.deepEqual(driver.entries, [
+    { role: "assistant", text: "✻ first turn thinking" },
+    { role: "assistant", text: "✻ second turn thinking" },
+  ], "each turn's summary carries only that turn's reasoning");
+});
+
+test("WorkShellEngine lands the ✻ reasoning summary in front of the assistant reply", async () => {
+  const { engine, calls } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener(listener) {
+        calls.traceListener = listener;
+      },
+      async runTurn() {
+        const emit = calls.traceListener;
+        emit?.({
+          type: "reasoning.delta",
+          level: "default",
+          provider: "openai",
+          model: "gpt-5.4",
+          kind: "text",
+          itemId: "rs_1",
+          delta: "inspect repo before editing",
+        });
+        emit?.({
+          type: "assistant.delta",
+          level: "default",
+          provider: "openai",
+          model: "gpt-5.4",
+          itemId: "msg_1",
+          delta: "All clear.",
+        });
+        return { text: "All clear." };
+      },
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("check the repo");
+
+  const texts = engine.getState().entries.map((entry) => entry.text);
+  const reasoningIndex = texts.findIndex((text) => text.startsWith("✻ "));
+  const answerIndex = texts.indexOf("All clear.");
+  assert.ok(reasoningIndex >= 0, "the turn's reasoning summary must land in the transcript");
+  assert.ok(
+    answerIndex > reasoningIndex,
+    "the ✻ summary lands in front of the assistant reply it preceded",
+  );
+  assert.equal(
+    texts.filter((text) => text.startsWith("✻ ")).length,
+    1,
+    "exactly one ✻ entry per turn",
+  );
+  assert.equal(texts[reasoningIndex], "✻ inspect repo before editing");
+  assert.equal(engine.getState().streamingReasoningText, undefined, "the turn end resets the buffer");
+});
+
+test("resolveLastCompletedTurn skips ✻ reasoning entries so thinking never poses as the reply", () => {
+  // The reasoning summary behind a real answer is invisible to the snapshot.
+  assert.deepEqual(
+    resolveLastCompletedTurn([
+      { role: "user", text: "fix the bug" },
+      { role: "assistant", text: "✻ plan the fix" },
+      { role: "assistant", text: "Fixed in a.ts" },
+    ]),
+    { user: "fix the bug", assistant: "Fixed in a.ts" },
+  );
+  // An answer-less turn: the ✻ summary is not the reply, so the turn
+  // contributes nothing to the queue preview / idle snapshot.
+  assert.equal(
+    resolveLastCompletedTurn([
+      { role: "user", text: "fix the bug" },
+      { role: "assistant", text: "✻ plan the fix" },
+    ]),
+    undefined,
+  );
+  // An earlier turn's real answer is still reachable through the skipped one.
+  assert.deepEqual(
+    resolveLastCompletedTurn([
+      { role: "user", text: "earlier ask" },
+      { role: "assistant", text: "earlier answer" },
+      { role: "user", text: "fix the bug" },
+      { role: "assistant", text: "✻ plan the fix" },
+    ]),
+    { user: "earlier ask", assistant: "earlier answer" },
+  );
 });
 
 test("work-shell snapshot and context loaders stay available through their helper seams", async () => {

@@ -22,6 +22,85 @@ function isAssistantDeltaTraceEvent(event: { readonly type: string }): event is 
     typeof (event as { readonly delta?: unknown }).delta === "string";
 }
 
+type ReasoningDeltaTraceEvent = {
+  readonly type: "reasoning.delta";
+  readonly kind?: unknown;
+  readonly delta?: unknown;
+};
+
+function isReasoningDeltaTraceEvent(event: { readonly type: string }): event is ReasoningDeltaTraceEvent {
+  return event.type === "reasoning.delta";
+}
+
+/**
+ * Prefix the engine puts on a turn's settled reasoning summary entry. Chosen
+ * to sit outside the transcript kill filter's glyph class in the view
+ * (`✓✖→·★↔↗📎`), so the summary survives into the conversation and the
+ * view's dim render branch can claim it. No live chatter: the entry appears
+ * once per turn, ahead of the answer (or alone for an answer-less turn).
+ */
+export const WORK_SHELL_REASONING_ENTRY_PREFIX = "✻ ";
+
+/** State-size guard for one turn's accumulated reasoning buffer. */
+const WORK_SHELL_REASONING_ACCUMULATION_MAX_CHARS = 2000;
+
+/** Row cap for the settled summary the ✻ entry carries. */
+const WORK_SHELL_REASONING_SUMMARY_MAX_ROWS = 6;
+
+/**
+ * Accumulate one reasoning delta into the per-turn buffer. Both `text` and
+ * `summary` reasoning kinds contribute to the same buffer — they are two
+ * spellings of the turn's thinking, not two summaries. Returns undefined
+ * when the delta adds nothing (empty delta, foreign kind, or a buffer
+ * already at the cap) so no state patch is staged for it.
+ */
+export function appendWorkShellStreamingReasoningDelta<
+  Reasoning extends WorkShellReasoningConfig,
+>(input: {
+  readonly state: WorkShellEngineState<Reasoning>;
+  readonly event: ReasoningDeltaTraceEvent;
+}): Partial<WorkShellEngineState<Reasoning>> | undefined {
+  if (input.event.kind !== "text" && input.event.kind !== "summary") {
+    return undefined;
+  }
+  if (typeof input.event.delta !== "string" || input.event.delta.length === 0) {
+    return undefined;
+  }
+  const current = input.state.streamingReasoningText ?? "";
+  if (current.length >= WORK_SHELL_REASONING_ACCUMULATION_MAX_CHARS) {
+    return undefined;
+  }
+  return {
+    streamingReasoningText: `${current}${input.event.delta}`.slice(
+      0,
+      WORK_SHELL_REASONING_ACCUMULATION_MAX_CHARS,
+    ),
+  };
+}
+
+/**
+ * Resolve the settled ✻ reasoning entry for an accumulated buffer: the first
+ * {@link WORK_SHELL_REASONING_SUMMARY_MAX_ROWS} newline rows of the
+ * accumulated text under the ✻ prefix. An empty (or whitespace-only)
+ * accumulation resolves to no entry — a turn without visible thinking stays
+ * out of the transcript entirely.
+ */
+export function resolveWorkShellReasoningSummaryEntry(
+  streamingReasoningText: string | undefined,
+): WorkShellChatEntry | undefined {
+  const accumulated = streamingReasoningText?.trim();
+  if (accumulated === undefined || accumulated.length === 0) {
+    return undefined;
+  }
+  const rows = accumulated
+    .split(/\r?\n/)
+    .slice(0, WORK_SHELL_REASONING_SUMMARY_MAX_ROWS);
+  return {
+    role: "assistant",
+    text: `${WORK_SHELL_REASONING_ENTRY_PREFIX}${rows.join("\n")}`,
+  };
+}
+
 function resolveWorkShellTraceEventDecision(input: {
   readonly event: { readonly type: string; readonly status?: string; readonly startedAt?: unknown };
   readonly line: string;
@@ -253,7 +332,25 @@ export function applyWorkShellTraceEvent<
   appendEntries: (...entries: readonly WorkShellChatEntry[]) => void;
   pushTraceLine: (line: string) => void;
 }): void {
+  // Settle the turn's reasoning as ONE ✻ transcript entry: flush at the
+  // first assistant delta or at turn completion, whichever arrives first.
+  // The flush runs before the assistant text/state lands so the summary
+  // always sits in front of the answer it preceded — and stands alone for
+  // an answer-less turn (the turn.completed trigger).
+  const flushStreamingReasoning = (): void => {
+    const reasoningEntry = resolveWorkShellReasoningSummaryEntry(
+      input.state.streamingReasoningText,
+    );
+    if (input.state.streamingReasoningText !== undefined) {
+      input.setState({ streamingReasoningText: undefined });
+    }
+    if (reasoningEntry !== undefined) {
+      input.appendEntries(reasoningEntry);
+    }
+  };
+
   if (isAssistantDeltaTraceEvent(input.event)) {
+    flushStreamingReasoning();
     if (input.event.delta.length === 0) {
       return;
     }
@@ -261,6 +358,19 @@ export function applyWorkShellTraceEvent<
       streamingAssistantText: `${input.state.streamingAssistantText ?? ""}${input.event.delta}`,
     });
     return;
+  }
+
+  // Reasoning deltas accumulate in ADDITION to the busy-status handling
+  // below: the dock activity row keeps showing the live busy phrase while
+  // the buffer quietly builds toward the one settled summary entry.
+  if (isReasoningDeltaTraceEvent(input.event)) {
+    const reasoningPatch = appendWorkShellStreamingReasoningDelta({
+      state: input.state,
+      event: input.event,
+    });
+    if (reasoningPatch !== undefined) {
+      input.setState(reasoningPatch);
+    }
   }
 
   const line = input.formatAgentTraceLine(input.event);
@@ -271,6 +381,12 @@ export function applyWorkShellTraceEvent<
   });
   if (busyPatch) {
     input.setState(busyPatch);
+  }
+
+  // turn.completed is the answer-less fallback trigger: flush whatever the
+  // turn accumulated before any other end-of-turn effects append entries.
+  if (input.event.type === "turn.completed") {
+    flushStreamingReasoning();
   }
 
   if (line.trim().length > 0 && input.state.traceMode === "verbose") {
