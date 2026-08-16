@@ -244,6 +244,9 @@ function createEngineInput(overrides = {}) {
         if (event.type === "orchestrator.step") return `${event.role} ${event.summary}`;
         if (event.type === "bridge.published") return `bridge ${event.summary}`;
         if (event.type === "memory.written") return `memory ${event.summary}`;
+        if (event.type === "reasoning.delta") return `✦ thinking· ${event.delta}`;
+        if (event.type === "tool.started") return `→ read ${event.input?.path ?? ""}`;
+        if (event.type === "tool.completed") return `✓ read ${event.durationMs ?? 0}ms`;
         return "";
       },
       formatWorkShellError(message) {
@@ -1603,6 +1606,67 @@ test("work-shell chat runtime short-circuits edit requests in search mode with a
   ]);
 });
 
+test("work-shell chat runtime blocks API-unready auth before provider invocation", async () => {
+  const entries = [];
+  const snapshots = [];
+  const statePatches = [];
+  let agentCalls = 0;
+  const state = createState({
+    model: "gpt-5.6-luna",
+    reasoning: supportedReasoning,
+    authLabel: "oauth-file-api-blocked",
+  });
+
+  await executeWorkShellChatSubmit({
+    line: "inspect the repository",
+    resolveComposerInput: async () => ({
+      prompt: "inspect the repository",
+      transcriptText: "inspect the repository",
+      attachments: [],
+    }),
+    state,
+    options: {
+      provider: "openai",
+      model: "gpt-5.6-luna",
+      mode: "default",
+      authLabel: "oauth-file-api-blocked",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: [],
+    },
+    sessionId: "work-auth-blocked",
+    buildStatusPanel: () => ({ title: "Status", lines: [] }),
+    runAgentTurn: async () => {
+      agentCalls += 1;
+      return { text: "should not run" };
+    },
+    publishContextBridge: async () => ({ bridgeId: "unused", line: "unused" }),
+    writeScopedMemory: async () => ({ memoryId: "unused" }),
+    listScopedMemoryLines: async () => [],
+    applyAuthIssueLines() {},
+    formatWorkShellError: (message) => message,
+    formatAgentTraceLine: () => "",
+    appendEntries: (...nextEntries) => {
+      entries.push(...nextEntries);
+    },
+    setState(patch) {
+      statePatches.push(patch);
+    },
+    pushTraceLine() {},
+    persistSessionSnapshot: async (state, summary) => {
+      snapshots.push({ state, summary });
+    },
+  });
+
+  assert.deepEqual(statePatches, [{ lastTurnDurationMs: 0 }]);
+  assert.equal(agentCalls, 0);
+  assert.deepEqual(entries.map((entry) => entry.role), ["user", "assistant"]);
+  assert.match(entries[1]?.text ?? "", /\/auth key/);
+  assert.deepEqual(snapshots, [
+    { state: "idle", summary: "Chat: inspect the repository" },
+  ]);
+});
+
 test("work-shell lifecycle helpers load initial state, session panels, and overlay/cancel transitions", async () => {
   const options = {
     provider: "openai",
@@ -2390,29 +2454,23 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
     undefined,
     "tool.started stays out of the default conversation transcript",
   );
-  assert.deepEqual(
+  assert.equal(
     resolveVerboseTraceEntry({
       traceMode: "minimal",
       event: { type: "tool.completed", toolName: "write_file" },
       line: "✓ wrote notes.txt · 7 lines",
     }),
-    {
-      role: "tool",
-      text: "✓ wrote notes.txt · 7 lines",
-    },
-    "a completed file mutation remains visible in minimal mode",
+    undefined,
+    "completed file mutations use live status without polluting the conversation transcript",
   );
-  assert.deepEqual(
+  assert.equal(
     resolveVerboseTraceEntry({
       traceMode: "minimal",
       event: { type: "tool.completed", toolName: "read_file" },
       line: "Read src/index.ts · 18 lines",
     }),
-    {
-      role: "tool",
-      text: "Read src/index.ts · 18 lines",
-    },
-    "a completed read remains visible for the later activity projection to coalesce",
+    undefined,
+    "completed reads use live status without polluting the conversation transcript",
   );
   assert.equal(
     resolveVerboseTraceEntry({
@@ -2474,21 +2532,22 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
   assert.equal(livePatches.length, 1);
   assert.equal(liveEntries.length, 0);
   assert.deepEqual(liveTraceLines, ["calling openai gpt-5.4"]);
+  const completedPatches = [];
   const completedEntries = [];
   applyWorkShellTraceEvent({
     state: createState({ traceMode: "minimal", isBusy: true }),
     event: { type: "tool.completed", toolName: "run_shell" },
     formatAgentTraceLine: () => "✓ $ npm test -- work · 34ms",
-    setState() {},
+    setState: (patch) => {
+      completedPatches.push(patch);
+    },
     appendEntries: (...entries) => {
       completedEntries.push(...entries);
     },
     pushTraceLine() {},
   });
-  assert.deepEqual(completedEntries, [{
-    role: "tool",
-    text: "✓ $ npm test -- work · 34ms",
-  }]);
+  assert.match(completedPatches[0]?.busyStatus ?? "", /npm test -- work/);
+  assert.deepEqual(completedEntries, []);
 });
 
 test("assistant delta trace accumulates streaming assistant text without transcript noise", () => {
@@ -5605,6 +5664,42 @@ test("WorkShellEngine keeps a lightweight busy status even outside verbose trace
   assert.match(engine.getState().busyStatus ?? "", /thinking/i);
   assert.equal(typeof engine.getState().currentTurnStartedAt, "number");
   assert.equal(engine.getState().traceLines.length, 0);
+
+  emitTrace({
+    type: "reasoning.delta",
+    provider: "openai",
+    model: "gpt-5.6-luna",
+    kind: "summary",
+    delta: "inspect repo before editing",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.match(engine.getState().busyStatus ?? "", /inspect repo before editing/i);
+
+  emitTrace({
+    type: "tool.started",
+    provider: "openai",
+    toolName: "read_file",
+    toolCallId: "call-visible-1",
+    input: { path: "README.md" },
+    startedAt: 1,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.match(engine.getState().busyStatus ?? "", /read.*README\.md/i);
+
+  emitTrace({
+    type: "tool.completed",
+    provider: "openai",
+    toolName: "read_file",
+    toolCallId: "call-visible-1",
+    isError: false,
+    content: "ok",
+    startedAt: 1,
+    durationMs: 5,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.match(engine.getState().busyStatus ?? "", /read/i);
+  assert.deepEqual(engine.getState().entries, []);
+  assert.deepEqual(engine.getState().traceLines, []);
 });
 
 test("WorkShellEngine soft-interrupts a busy turn and ignores late assistant output", async () => {
