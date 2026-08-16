@@ -169,7 +169,7 @@ npm run qa:runtime                           # tmux 실부트 체인 + 신규 �
 **Files:** Modify `packages/tui/src/tui-entry.tsx`(옵션), `packages/tui/src/terminal-resize-clear.ts`(축소 판정 rows 추가 — **확대 클리어 금지**), `packages/tui/src/work-shell-view.tsx`(`resolveWorkShellComposerAdditionalRows` :1363-1378의 `wrapDisplayText`(:1306-1316 경유) → `wrapDisplayTextFast`; `renderMarkdown` 호출부 캐시), `packages/tui/src/markdown-render.tsx`(`renderMarkdown` (text,width,theme) LRU), `tests/tui/tui-entry-rendering.test.mjs`(재스펙), `tests/tui/text-width-fast-wrap.test.mjs`(회귀), `tests/contracts/tui-work-shell.contract.test.mjs`(composer 경로 동기 Rust wrap 금지 소스 단언 추가 — 기존 panel-line-class 패턴 준용).
 
 **Acceptance Criteria:**
-- [ ] `incrementalRendering: true` 재활성화. 리사이즈 대응: **축소(행 또는 열 감소) 시에만** 전체 클리어 후 재편인트(`terminal-resize-clear.ts` 축소 판정에 rows 추가; 확대 방향은 클리어하지 않음 — Ink log-update 미변경 행 스킵/전체 재편인트 분기 조건과 정합). `tui-entry-rendering.test.mjs` 재작성: (a) **축소** 후 최종 프레임에 크롬 잔류/이중 행 없음, (b) **행 확대** 후에도 최종 프레임 정합(클리어 없이 증분), (c) 스트리밍 2회 publish 시 안정 행(헤더 워드마크 등)이 재출력되지 않음(증분 프레임 증명), (d) 최종 프레임 정합. `work-shell-resize-reflow.test.mjs`·terminal-resize-clear 회귀 없음. `tests/contracts/tui-dashboard.contract.test.mjs`·`tests/contracts/unclecode-cli.contract.test.mjs`도 tui-entry를 렌더에 사용 — `test:contracts`로 회귀 확인(명시 실행).
+- [ ] `incrementalRendering` 결정은 ink 6.8.0 제약을 따른다(수정 조항 참조 — **false 유지**, tui-entry 주석 + 플래그 상태를 고정하는 핀 테스트, ink ^7 범프 후 반전 안내). 리사이즈 클리어는 **열 축소 시에만**(rows 추가 금지 — 수정 조항: row 축소 클리어가 정적 프레임을 영구 블랭크시킴, 실 tmux 검증). `tui-entry-rendering.test.mjs` 재작성(VT100 미니 에뮬레이터로 자식 출력 재생·실화면 단언): (a) 스트리밍 연속 publish에서 **행 스태킹 0**(드리프트 계열 직접 포획, 플래그 반전 시 실패 — 뮤테이션 검증), (b) 열 축소 → 클리어 + 단일 정합 프레임, (c) 행 축소 → 클리어 없이 정적 프레임 생존·정합, (d) 행 확대 → 클리어 없이 정합. `work-shell-resize-reflow.test.mjs`·terminal-resize-clear 회귀 없음. `tests/contracts/tui-dashboard.contract.test.mjs`·`tests/contracts/unclecode-cli.contract.test.mjs`도 tui-entry를 렌더에 사용 — `test:contracts`로 회귀 확인(명시 실행).
 - [ ] 키 입력 경로 동기 프로세스 spawn 제거: `resolveWorkShellComposerAdditionalRows`가 `wrapDisplayTextFast` 사용; 뷰 소스에 해당 경로의 `wrap-display` Rust 호출 부재(계약 소스 단언 추가). `text-width-fast-wrap` 동등성 회귀 없음. (스트리밍 제외 규칙 `shouldSkipRustTextCacheStore`는 work-shell-view.tsx:570-572에 있음 — 캐시가 이 규칙을 존중.)
 - [ ] `renderMarkdown` (text,width,theme) LRU 캐시: 동일 키 재호출이 재파싱하지 않음(호출 카운터/스파이 단언), 스트리밍 텍스트는 캐시 미적용(기존 제외 규칙 유지).
 - [ ] 동결 불변: 스피너 인터벌 100ms, 단일 스피너, 컴포저 힌트, 부트/레디 마커. 통과: `npm run test:tui` + contracts(위 2개 계약 파일 포함 전체).
@@ -195,11 +195,28 @@ npm run qa:runtime                           # tmux 실부트 체인 + 신규 �
 **Steps:**
 1. 스모크 작성(real-use 스모크 구조 복제) → 등록 → `npm run qa:runtime`.
 
+### Task 9: 트랜스크립트 블록 시각 구분 (사용자 3차 리다이렉트)
+
+**Goal:** 트랜스크립트의 각 블록(유저 턴, 어시스턴트 답변+툴 묶음, 리저닝)이 터미널에서 빈 행으로 명확히 구분되게 한다 — 사용자 첨부 벤치마크(블록 사이 여백 + 헤더 강조) 형태.
+
+**Dependencies:** Task 6 (같은 view 렌더 경로 순서).
+
+**Files:** Modify `packages/tui/src/work-shell-view.tsx` (`WorkShellConversationBlock` 엔트리 렌더 사이 빈 행 — `measureWorkShellEntryRows`의 여백 1이 실제 빈 행으로 대응), `tests/tui/work-shell-tool-detail.test.mjs` 또는 `tests/tui/work-shell-scrollback.test.mjs`(구분 단언), `DESIGN.md` §5 Conversation entry Spacing 문구(이미 "one row between entries" 명시 — 렌더 정합 확인).
+
+**Acceptance Criteria:**
+- [ ] 렌더된 트랜스크립트 프레임에서 서로 다른 엔트리 사이에 정확히 1개의 빈 행이 존재(마지막 엔트리 뒤 제외) — 하니스 프레임 행 검사로 단언(엔트리 마지막 행과 다음 엔트리 첫 행 사이 공백 행).
+- [ ] 스크롤 가중치 정합: `measureWorkShellEntryRows`의 `+1` 여백이 빈 행과 일치(단일 행 엔트리 2개 → 프레임에 엔트리 2행 + 빈 1행; 가중 합 = 프레임 행 수) — 직접 단언.
+- [ ] at-rest/스크롤 프레임 회귀 없음: `npm run test:tui` 통과(스크롤백·tool-detail·live-activity 스위트 포함), 동결 인디케이터 문자열 불변.
+
+**Steps:**
+1. 컨테이션 블록 엔트티 사이 빈 행 렌더(마지막 제외).
+2. 프레임·가중 정합 단언 추가·실행.
+
 ### Task 8: 최종 검증
 
 **Goal:** 전체 Verification Strategy를 실행해 개편이 회귀 없음을 증명한다.
 
-**Dependencies:** Task 6, Task 7.
+**Dependencies:** Task 6, Task 7, Task 9.
 
 **Files:** None (실행만; 증거는 `.glm-hammer/evidence/e2e.md`로 갱신).
 
@@ -250,4 +267,17 @@ npm run qa:runtime                           # tmux 실부트 체인 + 신규 �
 
 ## Plan Amendment Log
 
-(없음)
+### 2026-08-16 — 사용자 리다이렉트 3: 블록 시각 구분 (Task 9 추가)
+
+사용자 피드백(원문 요지): "이런식으로 터미널에서 뭔가 구분되어야지" + 벤치마크 스크린샷(블록 사이 빈 행, 굵은 컬러 헤더로 시작하는 어시스턴트 턴, 들여쓴 툴 결과). 1차 벤치마크(●/⎿ 툴 블록)는 Task 2/3으로 구현 완료 — 이번 추가는 **엔트리 사이 빈 행**으로 블록 경계를 명확히 하는 것(스크롤 가중 `measureWorkShellEntryRows`의 `+1` 여백이 이미 이 행을 예산으로 계산 중이므로 렌더만 정합시키면 됨). `tasks.total` 8→9, Task 8 의존성에 Task 9 추가. 기존 태스크 기준 변경 없음(추가만).
+
+### 2026-08-16 — 플랜 결함 정정: ink 6.8.0 증분 렌더 버그 (Task 6 기준 보정, 검증 동일)
+
+Task 6 워커의 3중 실증(하니스 바이트 캡처·tmux 바이트 재생·실대시보드 tmux 부팅): ink 6.8.0의 증분 log-update는 후행 개행 프레임에서 커서 복귀가 1행 부족(`cursorUp(previousVisible - 1)`)해 변경 프레임마다 +1행 드리프트 → 행 스태킹. 상류 수정은 ink v7.0.0(#910, `c32da0b`)뿐이며 repo는 `ink ^6.8.0` 핀(메이저 범프는 태스크 권한 밖). 또한 ink 6.8은 row-only 축소에서 자체 리셋이 없어 외부 클리어가 정적(비-풀스크린) 프레임을 영구 블랭크시킴(실 tmux 확인).
+
+기준 보정(결과 동일 — 플리커/점프 감소를 위한 실현 가능한 최대치):
+- `incrementalRendering`은 **false 유지**(주석 + 플래그 고정 핀 테스트; ink ^7 범프 시 반전 안내). ec75b09의 원래 반려판정과 부합.
+- 리사이즈 클리어는 **열 축소만 유지**(rows 추가 제거 — 블랭크 회귀).
+- 스트리밍 증분 단언은 "안정 행 미재출력"(ink 6.8에서 드리프트 경로에서만 통과) → **VT100 재생 기반 "행 스태킹 0" 실화면 단언**으로 대체(동일 결함 계열을 정확히 포획, 뮤테이션 검증됨).
+- 본 태스크가 전달하는 플리커 완화: 키 입력 경로 동기 Rust spawn 제거(타이핑 정지 현상 제거) + renderMarkdown LRU(스트리밍 중 전체 재파싱 제거). 완전한 증분 렌더링은 **ink ^7.0.0 범프 후속 과제**(사용자 승인 필요 — 메이저 의존성 변경)로 기록.
+

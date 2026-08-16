@@ -89,6 +89,7 @@ try {
         "busy state avoids a duplicate lower activity row below the conversation",
         "ultrawork Korean parallel-mode question strips planner JSON and English meta leaks",
         "single-session real-use TUI stress covers context, reasoning, busy queue drain, idle stability, and resize",
+        "PageUp scrollback indicator appears in the real boot chain and Escape returns to newest",
         "context expanded overlay uses readable foreground colors on light terminals",
         "slash commander first paint, warm reopen, filter, and model picker stay within latency budgets",
         "model-bound context packets expose included/excluded/warnings sections during real TUI turns",
