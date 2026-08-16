@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
+import { stripVTControlCharacters } from "node:util";
 
 import { render } from "ink";
 import React from "react";
@@ -371,6 +372,68 @@ test("PageUp shows older entries when multi-row tool entries fill the transcript
       scrolled,
       new RegExp(`↑ ${TRANSCRIPT_ENTRY_COUNT - 2 * capacity} entries above · PageUp/PageDown scroll · Esc newest`),
     );
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("a scrolled window separates entries with exactly one blank row and closes the weight budget on the indicator", async () => {
+  const entries = createScrollbackEntries();
+  const capacity = getWorkShellTranscriptEntryCapacity(entries, TERMINAL_ROWS);
+  const { engine } = createWorkShellPaneEngine();
+  const { stdin, instance, getOutput } = renderScrollbackPane(engine);
+
+  try {
+    assert.ok(await waitForNewestEntry(getOutput));
+    stdin.write(KEY_PAGE_UP);
+    assert.ok(
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("entries above")),
+    );
+    const frame = stripVTControlCharacters(getLastWorkFrame(getOutput()));
+    const frameRows = frame.split("\n");
+    const window = resolveWorkShellTranscriptWindow({
+      entries,
+      terminalRows: TERMINAL_ROWS,
+      scrollOffset: capacity,
+    }).window;
+
+    // Every window entry renders as one row (the sb-* texts never wrap at the
+    // test width), so consecutive entries must sit exactly one blank row apart:
+    // the frame check the scroll weight's `+1` margin is written against.
+    const entryRowIndexes = window.map(
+      (entry) => frameRows.findIndex((row) => row.includes(entry.text)),
+    );
+    for (const [index, rowIndex] of entryRowIndexes.entries()) {
+      assert.ok(rowIndex >= 0, `window entry ${window[index].text} must render in the scrolled frame`);
+      if (index === 0) {
+        continue;
+      }
+      const previousRow = entryRowIndexes[index - 1];
+      assert.equal(
+        rowIndex - previousRow,
+        2,
+        `exactly one blank row must separate ${window[index - 1].text} from ${window[index].text}`,
+      );
+      assert.equal(frameRows[previousRow + 1].trim(), "", "the separating row must be empty");
+    }
+
+    // The last window entry adds no trailing blank: the scroll indicator sits
+    // directly beneath it, inside the conversation block.
+    const lastEntryRow = entryRowIndexes[entryRowIndexes.length - 1];
+    const indicatorRow = frameRows.findIndex((row) => row.includes("entries above"));
+    assert.equal(indicatorRow, lastEntryRow + 1);
+
+    // Weight consistency, direct assertion: the frame span from the window's
+    // first entry row through the indicator row equals the sum of
+    // measureWorkShellEntryRows over the window. The per-entry `+1` margin is
+    // spent on the blank separators, and the indicator row closes the final
+    // entry's budget — render and weight math agree row for row.
+    const weightSum = window.reduce(
+      (total, entry) => total + measureWorkShellEntryRows(entry),
+      0,
+    );
+    assert.equal(indicatorRow - entryRowIndexes[0] + 1, weightSum);
   } finally {
     instance.unmount();
     instance.cleanup();

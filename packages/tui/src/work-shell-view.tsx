@@ -1423,8 +1423,20 @@ function renderWorkShellEntryBlock(input: {
   readonly entry: WorkShellEntry;
   readonly index: number;
   readonly width: number;
+  /**
+   * Task 9 block separation: every entry except the last one in the rendered
+   * window closes with a one-row margin, so consecutive transcript blocks are
+   * separated by exactly one blank row. The last window entry renders no
+   * trailing blank — the row that follows it inside the conversation block
+   * (the scroll indicator when scrolled) sits directly beneath it, which is
+   * also what `measureWorkShellEntryRows` budgets: its `+1` margin is the
+   * between-entries blank, and the final entry's budget closes on the
+   * indicator row instead of an empty line.
+   */
+  readonly isLastWindowEntry?: boolean;
 }): React.ReactNode {
   const presentation = getWorkShellEntryPresentation(input.entry.role);
+  const bottomMargin = input.isLastWindowEntry === true ? 0 : 1;
   // For assistant replies, skip the Rust markdown *stripper* — we render
   // markdown structure natively now (headings, code, lists, tables). We still
   // sanitize the text (removes leaked plan JSON etc.) but keep all markdown
@@ -1443,7 +1455,7 @@ function renderWorkShellEntryBlock(input: {
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
-        marginBottom={1}
+        marginBottom={bottomMargin}
         flexDirection="column"
       >
         {lines.map((line, lineIndex) => (
@@ -1472,7 +1484,7 @@ function renderWorkShellEntryBlock(input: {
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
-        marginBottom={1}
+        marginBottom={bottomMargin}
         flexDirection="column"
       >
         {lines.map((line, lineIndex) => (
@@ -1507,7 +1519,7 @@ function renderWorkShellEntryBlock(input: {
       return (
         <Box
           key={`${input.entry.role}-${input.index}`}
-          marginBottom={1}
+          marginBottom={bottomMargin}
           flexDirection="column"
         >
           <Text color={W.assistant} bold>{presentation.badge} {presentation.label}</Text>
@@ -1521,7 +1533,7 @@ function renderWorkShellEntryBlock(input: {
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
-        marginBottom={1}
+        marginBottom={bottomMargin}
         borderStyle="single"
         borderColor={presentation.borderColor}
         paddingX={1}
@@ -1548,7 +1560,7 @@ function renderWorkShellEntryBlock(input: {
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
-        marginBottom={1}
+        marginBottom={bottomMargin}
         flexDirection="column"
       >
         <Text>
@@ -1576,7 +1588,7 @@ function renderWorkShellEntryBlock(input: {
       <Box
         key={`${input.entry.role}-${input.index}`}
         marginTop={0}
-        marginBottom={0}
+        marginBottom={bottomMargin}
         paddingLeft={2}
         flexDirection="column"
       >
@@ -1591,7 +1603,7 @@ function renderWorkShellEntryBlock(input: {
   return (
     <Box
       key={`${input.entry.role}-${input.index}`}
-      marginBottom={0}
+      marginBottom={bottomMargin}
       paddingLeft={3}
       flexDirection="column"
     >
@@ -1698,7 +1710,13 @@ export function getWorkShellThinkingDetailLines(input: {
 
 /**
  * How many terminal rows one transcript entry will claim: its text row count
- * plus the one-row margin the entry blocks render with (`marginBottom={1}`).
+ * plus the one-row margin that separates it from the entry rendered after it
+ * (`marginBottom={1}` on every entry block except the last window entry). The
+ * blank rows those margins produce are what make consecutive blocks read as
+ * separate turns; the last entry adds no trailing blank, and its budgeted
+ * margin closes on the row that follows the window inside the conversation
+ * block (the scroll indicator row when scrolled) — so the weight never
+ * over- or under-counts the rendered frame.
  *
  * Tool entries assembled by `formatWorkShellToolDetailEntry` are multi-row by
  * design, so a flat "N rows per entry" window math under-counted them and the
@@ -1827,6 +1845,7 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
           entry,
           index,
           width: conversationWidth,
+          isLastWindowEntry: index === transcriptWindow.window.length - 1,
         }))}
         {transcriptWindow.scrolled ? (
           <Text color={W.textDim}>{`↑ ${transcriptWindow.entriesAbove} entries above · PageUp/PageDown scroll · Esc newest`}</Text>

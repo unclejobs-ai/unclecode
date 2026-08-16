@@ -326,6 +326,83 @@ test("isWorkShellToolErrorEntry reads the failure off the glyph-less metric rows
   assert.equal(isWorkShellToolErrorEntry("bash npm test\ncustom failure text · 8ms"), true);
 });
 
+test("consecutive transcript blocks sit exactly one blank row apart with no trailing blank after the last", async () => {
+  const text = formatWorkShellToolDetailEntry(READ_EVENT);
+  const output = await renderWorkShellFrame([
+    { role: "user", text: "read it" },
+    { role: "assistant", text: "short reply one" },
+    { role: "tool", text },
+    { role: "assistant", text: "✻ settled thinking line" },
+  ]);
+  const frameStart = output.lastIndexOf("UncleCode ·");
+  const frame = stripVTControlCharacters(frameStart >= 0 ? output.slice(frameStart) : output);
+  const frameRows = frame.split("\n");
+
+  const userRow = frameRows.findIndex((row) => row.includes("read it"));
+  const badgeRow = frameRows.findIndex((row) => row.includes("◈ UncleCode"));
+  const toolRow = frameRows.findIndex((row) => row.includes("● read src/index.ts"));
+  const reasoningRow = frameRows.findIndex((row) => row.includes("✻ settled thinking"));
+  const hintRow = frameRows.findIndex((row) => row.includes("Enter send"));
+  assert.ok(userRow >= 0, "the user chip row must render");
+  assert.ok(badgeRow >= 0, "the assistant badge row must render");
+  assert.ok(toolRow >= 0, "the tool call row must render");
+  assert.ok(reasoningRow >= 0, "the ✻ reasoning row must render");
+  assert.ok(hintRow >= 0, "the composer hint row must render");
+
+  // Block extents at the test width: the compact assistant reply is badge +
+  // one body row; the READ_EVENT assembly renders one call row plus its four
+  // result rows.
+  const assistantLastRow = badgeRow + 1;
+  assert.ok(frameRows[assistantLastRow].includes("short reply one"));
+  const toolLastRow = toolRow + 4;
+  assert.ok(frameRows[toolLastRow].includes("}"));
+
+  // Between one entry's last rendered row and the next entry's first row
+  // there is exactly one empty line — user turn, assistant reply, tool call,
+  // reasoning summary all read as separate blocks.
+  for (const [blockLastRow, nextBlockFirstRow] of [
+    [userRow, badgeRow],
+    [assistantLastRow, toolRow],
+    [toolLastRow, reasoningRow],
+  ]) {
+    assert.equal(
+      nextBlockFirstRow - blockLastRow,
+      2,
+      "consecutive entries must be separated by exactly one row",
+    );
+    assert.equal(frameRows[blockLastRow + 1].trim(), "", "the separating row must be empty");
+  }
+
+  // The last entry contributes no trailing blank: exactly one blank row (the
+  // composer dock's own top margin) stands between it and the hint row.
+  assert.equal(hintRow - reasoningRow, 2);
+  assert.equal(frameRows[reasoningRow + 1].trim(), "");
+});
+
+test("two single-row entries render as two entry rows plus one separating blank row", async () => {
+  const output = await renderWorkShellFrame([
+    { role: "user", text: "first turn" },
+    { role: "user", text: "second turn" },
+  ]);
+  const frameStart = output.lastIndexOf("UncleCode ·");
+  const frame = stripVTControlCharacters(frameStart >= 0 ? output.slice(frameStart) : output);
+  const frameRows = frame.split("\n");
+
+  const firstRow = frameRows.findIndex((row) => row.includes("first turn"));
+  const secondRow = frameRows.findIndex((row) => row.includes("second turn"));
+  const hintRow = frameRows.findIndex((row) => row.includes("Enter send"));
+  assert.ok(firstRow >= 0 && secondRow >= 0);
+
+  // The frame shape the scroll weight budget is written against: 2 single-row
+  // entries → 2 entry rows + exactly 1 blank row between them.
+  assert.equal(secondRow - firstRow, 2);
+  assert.equal(frameRows[firstRow + 1].trim(), "");
+
+  // And nothing after the last entry beyond the dock's own single margin row.
+  assert.equal(hintRow - secondRow, 2);
+  assert.equal(frameRows[secondRow + 1].trim(), "");
+});
+
 test("the tool call glyph carries the outcome color: green success, red error", async () => {
   const successFrame = await renderWorkShellFrame([
     { role: "tool", text: formatWorkShellToolDetailEntry(READ_EVENT) },
