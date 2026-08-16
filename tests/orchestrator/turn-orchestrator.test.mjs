@@ -6,6 +6,7 @@ import {
   classifyWorkIntent,
   createTurnOrchestrator,
   runBoundedExecutorPool,
+  findGoalTaskPlanViolation,
   runGoalTaskExecutorPool,
 } from "../../packages/orchestrator/src/index.ts";
 
@@ -417,4 +418,66 @@ test("runGoalTaskExecutorPool honors dependencies and blocks dependents after fa
   assert.ok(statuses.some(([id, status]) => id === "task-2" && status === "blocked"));
   assert.ok(statuses.some(([id, status]) => id === "task-4" && status === "blocked"));
   assert.equal(statuses.some(([id, status]) => id === "task-2" && status === "running"), false);
+});
+
+test("runGoalTaskExecutorPool reports cancelled results as cancelled while still blocking dependents", async () => {
+  const statuses = [];
+  const tasks = [
+    { id: "task-1", summary: "cancelled", dependsOn: [] },
+    { id: "task-2", summary: "dependent", dependsOn: ["task-1"] },
+    { id: "task-3", summary: "independent", dependsOn: [] },
+  ];
+
+  const results = await runGoalTaskExecutorPool({
+    tasks,
+    maxWorkers: 2,
+    async executeTask(task) {
+      return { id: task.id, status: task.id === "task-1" ? "cancelled" : "completed" };
+    },
+    isSuccessful: (result) => result.status === "completed",
+    resolveResultStatus: (result) => result.status,
+    createBlockedResult: (task) => ({ id: task.id, status: "blocked" }),
+    onStatus: (task, status) => statuses.push([task.id, status]),
+  });
+
+  assert.deepEqual(results, [
+    { id: "task-1", status: "cancelled" },
+    { id: "task-2", status: "blocked" },
+    { id: "task-3", status: "completed" },
+  ]);
+  assert.ok(
+    statuses.some(([id, status]) => id === "task-1" && status === "cancelled"),
+    "a cancelled run is not reported as a WorkGraph failure",
+  );
+  assert.equal(statuses.some(([, status]) => status === "failed"), false);
+  assert.ok(statuses.some(([id, status]) => id === "task-2" && status === "blocked"));
+});
+
+test("findGoalTaskPlanViolation is the one rule the scheduler enforces", async () => {
+  const task = (id, dependsOn = []) => ({ id, summary: `S ${id}`, dependsOn });
+
+  assert.equal(findGoalTaskPlanViolation([task("a"), task("b", ["a"])]), undefined);
+  assert.match(findGoalTaskPlanViolation([task("a"), task("a")]) ?? "", /duplicate/i);
+  assert.match(findGoalTaskPlanViolation([task("a"), task("b", ["ghost"])]) ?? "", /dependency/i);
+  assert.match(findGoalTaskPlanViolation([task("a", ["b"]), task("b")]) ?? "", /dependency/i);
+
+  // The pool keeps rejecting the same plans, through the same rule.
+  await assert.rejects(
+    runGoalTaskExecutorPool({
+      tasks: [task("a"), task("a")],
+      maxWorkers: 1,
+      executeTask: async () => ({ status: "completed" }),
+      isSuccessful: () => true,
+    }),
+    /duplicate/i,
+  );
+  await assert.rejects(
+    runGoalTaskExecutorPool({
+      tasks: [task("a", ["b"]), task("b")],
+      maxWorkers: 1,
+      executeTask: async () => ({ status: "completed" }),
+      isSuccessful: () => true,
+    }),
+    /dependency/i,
+  );
 });

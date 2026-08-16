@@ -9,32 +9,56 @@ import type {
 
 import {
   createTurnOrchestrator,
-  type ComplexPlanTask,
+  parsePlannedWorkTasks,
+  type PlannedWorkTask,
   type TurnOrchestratorTraceListener,
 } from "./turn-orchestrator.js";
 import { runRustCommandSync } from "./rust-command.js";
+import {
+  BLOCKED_BY_DEPENDENCY_SUMMARY,
+  WORK_TURN_CANCELLED_SUMMARY,
+  WorkAgentRunController,
+  type WorkAgentControlRuntime,
+  type WorkAgentExecutorSettings,
+  type WorkAgentTurnEpoch,
+  type WorkAgentRunControllerTraceEvent,
+} from "./work-agent-run-controller.js";
 
 type ReasoningLike = {
   readonly effort: string;
 };
 
-type PlannedWorkTask = ComplexPlanTask & {
-  readonly prompt: string;
-  readonly goal: string;
-  readonly constraints: readonly string[];
-  readonly acceptanceCriteria: readonly string[];
-  readonly dependsOn: readonly string[];
-  readonly writePaths: readonly string[];
-};
-
 type PlannedWorkResult = {
   readonly id: string;
   readonly summary: string;
-  readonly status: Extract<WorkNodeStatus, "completed" | "failed" | "blocked">;
+  readonly status: Extract<WorkNodeStatus, "completed" | "failed" | "cancelled" | "blocked">;
 };
 
+/**
+ * What a WorkAgent turn hands back. `cancelled` is the engine boundary's typed
+ * signal: it is present only when the operator cleared the turn, so a consumer
+ * never has to recognise cancellation by matching the assistant text.
+ */
+export type WorkAgentTurnResult = {
+  readonly text: string;
+  readonly cancelled?: true;
+};
+
+const CLEARED_TURN_RESULT: WorkAgentTurnResult = { text: WORK_TURN_CANCELLED_SUMMARY, cancelled: true };
+
+/** What an executable guardian check is told about a finished plan. */
+type GuardianCheckRequest = {
+  readonly prompt: string;
+  readonly mode: string;
+  readonly tasks: readonly PlannedWorkTask[];
+  readonly results: readonly PlannedWorkResult[];
+  readonly changedFiles: readonly string[];
+  readonly signal: AbortSignal;
+};
+type GuardianCheckRunner = (input: GuardianCheckRequest) => Promise<{ readonly summary: string }>;
+
 export type OrchestratedWorkAgentTraceEvent<TraceEvent extends { readonly type: string }> =
-  | TraceEvent
+  | WorkAgentRunControllerTraceEvent<TraceEvent>
   | OrchestratorStepTraceEvent
   | WorkProposedTraceEvent
   | WorkApprovedTraceEvent
@@ -58,58 +82,15 @@ export function parseAgentPlanResponse(text: string): readonly PlannedWorkTask[]
   );
 }
 
-function parsePlannedWorkTasks(raw: string): readonly PlannedWorkTask[] {
-  const parsed: unknown = JSON.parse(raw);
-  if (!Array.isArray(parsed)) {
-    throw new Error("Rust orchestrator returned invalid complex tasks.");
-  }
-  return parsed.map((item) => {
-    const record = typeof item === "object" && item !== null
-      ? item as Record<string, unknown>
-      : undefined;
-    if (
-      !record
-      || typeof record.id !== "string"
-      || typeof record.summary !== "string"
-      || typeof record.prompt !== "string"
-      || typeof record.goal !== "string"
-      || !isStringArray(record.constraints)
-      || !isStringArray(record.acceptanceCriteria)
-      || record.acceptanceCriteria.length === 0
-      || !isStringArray(record.dependsOn)
-      || !isStringArray(record.writePaths)
-    ) {
-      throw new Error("Rust orchestrator returned invalid complex task entries.");
-    }
-    return {
-      id: record.id,
-      summary: record.summary,
-      prompt: record.prompt,
-      goal: record.goal,
-      constraints: record.constraints,
-      acceptanceCriteria: record.acceptanceCriteria,
-      dependsOn: record.dependsOn,
-      writePaths: record.writePaths,
-    };
-  });
-}
-
-function isStringArray(value: unknown): value is readonly string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
-}
-
 function buildComplexTasks(prompt: string): readonly PlannedWorkTask[] {
   return parsePlannedWorkTasks(
     runRustCommandSync(["rust", "orchestrator", "complex-tasks"], process.cwd(), prompt),
   );
 }
 
-function buildPlannerPrompt(prompt: string): string {
-  return runRustCommandSync(
-    ["rust", "orchestrator", "planner-prompt"],
-    process.cwd(),
-    JSON.stringify({ prompt }),
-  ).trimEnd();
+/** Every work prompt is built by the Rust orchestrator and trimmed for the provider. */
+function buildRustPrompt(command: string, payload: unknown): string {
+  return runRustCommandSync(["rust", "orchestrator", command], process.cwd(), JSON.stringify(payload)).trimEnd();
 }
 
 function buildGuardianReviewPrompt(input: {
@@ -117,11 +98,7 @@ function buildGuardianReviewPrompt(input: {
   readonly results: readonly { readonly summary: string }[];
   readonly executableChecks?: string | undefined;
 }): string {
-  return runRustCommandSync(
-    ["rust", "orchestrator", "guardian-review-prompt"],
-    process.cwd(),
-    JSON.stringify(input),
-  ).trimEnd();
+  return buildRustPrompt("guardian-review-prompt", input);
 }
 
 function buildSynthesisPrompt(input: {
@@ -131,11 +108,7 @@ function buildSynthesisPrompt(input: {
   readonly results: readonly { readonly summary: string }[];
   readonly guardianSummary?: string | undefined;
 }): string {
-  return runRustCommandSync(
-    ["rust", "orchestrator", "synthesis-prompt"],
-    process.cwd(),
-    JSON.stringify(input),
-  ).trimEnd();
+  return buildRustPrompt("synthesis-prompt", input);
 }
 
 function resolveAgentTraceEvent(input: Record<string, unknown>): OrchestratorStepTraceEvent {
@@ -201,15 +174,9 @@ function createWorkGraph(tasks: readonly PlannedWorkTask[], startedAt: number): 
   };
 }
 
-type ExecutorAgentFactory<
-  Attachment,
-  TraceEvent extends { readonly type: string },
-  Reasoning extends ReasoningLike,
-> = (settings: {
-  readonly mode: string;
-  readonly model: string;
-  readonly reasoning: Reasoning;
-}) => Promise<OrchestratedWorkTurnAgent<Attachment, TraceEvent, Reasoning>>;
+type ExecutorAgentFactory<Attachment, TraceEvent extends { readonly type: string }, Reasoning extends ReasoningLike> = (
+  settings: WorkAgentExecutorSettings<Reasoning>,
+) => Promise<OrchestratedWorkTurnAgent<Attachment, TraceEvent, Reasoning>>;
 
 export class WorkAgent<
   Attachment,
@@ -221,14 +188,9 @@ export class WorkAgent<
   private mode: string;
   private reasoning: Reasoning;
   private model: string;
-  private readonly runExecutableGuardianChecks?: ((input: {
-    readonly prompt: string;
-    readonly mode: string;
-    readonly tasks: readonly PlannedWorkTask[];
-    readonly results: readonly PlannedWorkResult[];
-    readonly changedFiles: readonly string[];
-  }) => Promise<{ readonly summary: string }>) | undefined;
+  private readonly runExecutableGuardianChecks?: GuardianCheckRunner | undefined;
   private traceListener: ((event: OrchestratedWorkAgentTraceEvent<TraceEvent>) => void) | undefined;
+  private readonly runController: WorkAgentRunController<Attachment, TraceEvent, Reasoning>;
 
   constructor(input: {
     directAgent: OrchestratedWorkTurnAgent<Attachment, TraceEvent, Reasoning>;
@@ -236,13 +198,7 @@ export class WorkAgent<
     mode: string;
     reasoning: Reasoning;
     model: string;
-    runExecutableGuardianChecks?: ((input: {
-      readonly prompt: string;
-      readonly mode: string;
-      readonly tasks: readonly PlannedWorkTask[];
-      readonly results: readonly PlannedWorkResult[];
-      readonly changedFiles: readonly string[];
-    }) => Promise<{ readonly summary: string }>) | undefined;
+    runExecutableGuardianChecks?: GuardianCheckRunner | undefined;
   }) {
     this.directAgent = input.directAgent;
     this.createExecutorAgent = input.createExecutorAgent;
@@ -250,34 +206,71 @@ export class WorkAgent<
     this.reasoning = input.reasoning;
     this.model = input.model;
     this.runExecutableGuardianChecks = input.runExecutableGuardianChecks;
-    this.applyAutoModeShellPermission();
+    this.runController = new WorkAgentRunController({
+      directAgent: input.directAgent,
+      ...(input.createExecutorAgent ? { createExecutorAgent: input.createExecutorAgent } : {}),
+      resolveSettings: () => ({ mode: this.mode, model: this.model, reasoning: this.reasoning }),
+      // The same ceiling `runParallelTasks` gets, resolved per call so a mode
+      // switch moves the operator's continuation budget with it.
+      resolveWorkerBudget: () => (this.createExecutorAgent ? resolveWorkerBudget(this.mode) : 1),
+      emitTrace: (event) => this.emitTrace(event),
+      isTracing: () => this.traceListener !== undefined,
+    });
   }
 
-  // YOLO / ultrawork are explicit full-autonomy opt-ins, so the agent may run
-  // shell commands (open files, run builds, etc.) without the extra
-  // UNCLECODE_ALLOW_RUN_SHELL env gate. Other modes keep the default gate.
-  private applyAutoModeShellPermission(): void {
-    if (this.mode === "yolo" || this.mode === "ultrawork") {
-      process.env.UNCLECODE_ALLOW_RUN_SHELL = "1";
-    }
+  getAgentControlRuntime(): WorkAgentControlRuntime {
+    return this.runController.getControlRuntime();
   }
 
   clear(): void {
     this.directAgent.clear();
+    this.runController.clear("Work agent cleared.");
   }
 
-  private async runInternalTurn(
+  /**
+   * A main-session turn: its output belongs to the shell transcript, so it runs
+   * under the unscoped listener that is already installed. It still takes the
+   * shared agent's slot — a continuation the controller dispatched onto that
+   * same agent must not have its scoped listener swapped out from under it, and
+   * this turn must not inherit that scope either.
+   */
+  private runMainTurn(
+    prompt: string,
+    attachments: readonly Attachment[],
+    options: { readonly signal?: AbortSignal | undefined },
+  ): Promise<{ text: string }> {
+    return this.runController.withDirectAgent(() =>
+      this.directAgent.runTurn(prompt, attachments, options));
+  }
+
+  private runInternalTurn(
     prompt: string,
     attachments: readonly Attachment[] = [],
     options: { readonly signal?: AbortSignal | undefined } = {},
   ): Promise<{ text: string }> {
-    const outerListener = this.traceListener;
-    this.directAgent.setTraceListener(undefined);
-    try {
-      return await this.directAgent.runTurn(prompt, attachments, options);
-    } finally {
-      this.directAgent.setTraceListener(outerListener ? (event) => this.emitTrace(event) : undefined);
-    }
+    // Swapping the listener is only safe while holding the shared agent's slot:
+    // otherwise this turn would overwrite a live executor's scoped listener and
+    // then hand the unscoped shell listener back under it.
+    return this.runController.withDirectAgent(async () => {
+      const outerListener = this.traceListener;
+      // Planner and guardian turns stay invisible as provider brackets, but
+      // their spend is real: forward usage only, unscoped, so it lands on the
+      // main ledger instead of vanishing.
+      this.directAgent.setTraceListener(
+        outerListener
+          ? (event) => {
+              if (event.type === "usage.recorded") {
+                this.emitTrace(event);
+              }
+            }
+          : undefined,
+      );
+      try {
+        return await this.directAgent.runTurn(prompt, attachments, options);
+      } finally {
+        this.directAgent.setTraceListener(outerListener ? (event) => this.emitTrace(event) : undefined);
+      }
+    });
   }
 
   private async planTasks(
@@ -289,7 +282,7 @@ export class WorkAgent<
     let plannerInvoked = false;
 
     try {
-      const planPrompt = buildPlannerPrompt(prompt);
+      const planPrompt = buildRustPrompt("planner-prompt", { prompt });
       const plannerStartedAt = Date.now();
       onTrace?.(resolveAgentTraceEvent({
         kind: "planner-running",
@@ -302,32 +295,16 @@ export class WorkAgent<
       if (parsed.length >= 2) {
         return { tasks: parsed, usedLlm: true };
       }
-    } catch {
+    } catch (error) {
+      // A cancelled turn must not fall back to a static plan and keep working;
+      // only a genuine planning failure earns the deterministic fallback.
+      if (signal?.aborted) {
+        throw error;
+      }
       // A deterministic end-to-end task keeps the turn actionable when planning fails.
     }
 
     return { tasks: staticTasks, usedLlm: plannerInvoked };
-  }
-
-  private async runExecutorTurn(
-    prompt: string,
-    options: { readonly signal?: AbortSignal | undefined },
-  ): Promise<{ text: string }> {
-    if (!this.createExecutorAgent) {
-      return this.runInternalTurn(prompt, [], options);
-    }
-
-    const executor = await this.createExecutorAgent({
-      mode: this.mode,
-      model: this.model,
-      reasoning: this.reasoning,
-    });
-    executor.setTraceListener(this.traceListener ? (event) => this.emitTrace(event) : undefined);
-    try {
-      return await executor.runTurn(prompt, [], options);
-    } finally {
-      executor.clear();
-    }
   }
 
   setTraceListener(listener?: ((event: OrchestratedWorkAgentTraceEvent<TraceEvent>) => void) | undefined): void {
@@ -345,41 +322,73 @@ export class WorkAgent<
     }
   }
 
+  // Shell autonomy for yolo/ultrawork is granted per agent instance by the
+  // execution policy profile, never through process.env.
   updateMode(mode: string): void {
     this.mode = mode;
-    this.applyAutoModeShellPermission();
     this.directAgent.updateMode?.(mode);
   }
 
-  async runTurn(prompt: string, attachments: readonly Attachment[] = [], options: { readonly signal?: AbortSignal | undefined } = {}): Promise<{ text: string }> {
+  /**
+   * Every phase of a turn — attachment, simple, research, planning, executor,
+   * guardian, synthesis — runs inside one epoch. A clear stops whichever phase
+   * is live and yields a single typed outcome; a plain parent abort keeps its
+   * ordinary `AbortError` semantics.
+   */
+  async runTurn(prompt: string, attachments: readonly Attachment[] = [], options: { readonly signal?: AbortSignal | undefined } = {}): Promise<WorkAgentTurnResult> {
+    const epoch = this.runController.beginTurn(options.signal);
+    try {
+      const result = await this.runTurnInEpoch(prompt, attachments, epoch);
+      return epoch.isCleared() ? CLEARED_TURN_RESULT : result;
+    } catch (error) {
+      if (epoch.isCleared()) {
+        return CLEARED_TURN_RESULT;
+      }
+      throw error;
+    } finally {
+      epoch.release();
+    }
+  }
+
+  private async runTurnInEpoch(prompt: string, attachments: readonly Attachment[], epoch: WorkAgentTurnEpoch): Promise<WorkAgentTurnResult> {
+    const turnSignal = epoch.signal;
+    const turnOptions = { signal: turnSignal };
     if (attachments.length > 0) {
-      return this.directAgent.runTurn(prompt, attachments, options);
+      return await this.runMainTurn(prompt, attachments, turnOptions);
     }
 
-    let activeGraphId: string | undefined;
+    // Empty until the plan is accepted; the controller refuses any dispatch
+    // naming a job the plan never queued, so no second guard is needed here.
+    let activeGraphId = "";
     const orchestrator = createTurnOrchestrator<PlannedWorkTask, PlannedWorkResult>({
-      runSimpleTurn: (simplePrompt) => this.directAgent.runTurn(simplePrompt, attachments, options),
-      runResearchTurn: (researchPrompt) => this.directAgent.runTurn(researchPrompt, attachments, options),
+      runSimpleTurn: (simplePrompt) => this.runMainTurn(simplePrompt, attachments, turnOptions),
+      runResearchTurn: (researchPrompt) => this.runMainTurn(researchPrompt, attachments, turnOptions),
       planComplexTurn: async (complexPrompt, planOptions) => {
-        const { tasks, usedLlm } = await this.planTasks(complexPrompt, planOptions?.onTrace, options.signal);
+        const { tasks, usedLlm } = await this.planTasks(complexPrompt, planOptions?.onTrace, turnSignal);
         return { tasks, usedLlm };
       },
       executeComplexTask: async (task) => {
-        const result = await this.runExecutorTurn(task.prompt, options);
-        return { id: task.id, summary: result.text, status: "completed" };
+        const outcome = await this.runController.runTask({
+          graphId: activeGraphId,
+          task,
+          signal: turnSignal,
+        });
+        return { id: task.id, summary: outcome.text, status: outcome.status };
       },
       isComplexTaskSuccessful: (taskResult) => taskResult.status === "completed",
+      // Cancelled is not failed; only the dependency gate treats them alike.
+      resolveComplexTaskStatus: ({ status }) => (status === "blocked" ? "failed" : status),
       createFailedComplexTaskResult: (task, error) => ({
         id: task.id,
         summary: `Executor failed: ${error instanceof Error ? error.message : String(error)}`,
         status: "failed",
       }),
-      createBlockedComplexTaskResult: (task) => ({
-        id: task.id,
-        summary: "Blocked because a dependency failed.",
-        status: "blocked",
-      }),
+      createBlockedComplexTaskResult: (task) => {
+        this.runController.settleBlockedJob(activeGraphId, task.id);
+        return { id: task.id, summary: BLOCKED_BY_DEPENDENCY_SUMMARY, status: "blocked" };
+      },
       runGuardianReview: async ({ prompt: originalPrompt, tasks, results }) => {
+        turnSignal.throwIfAborted();
         const changedFiles = extractChangedFilesFromTasks(tasks);
         const executableChecks = await this.loadExecutableGuardianSummary({
           prompt: originalPrompt,
@@ -387,13 +396,17 @@ export class WorkAgent<
           tasks,
           results,
           changedFiles,
+          signal: turnSignal,
         });
+        // The checks can run for minutes; a clear that landed while they ran
+        // must not still spend a review turn.
+        turnSignal.throwIfAborted();
         const reviewPrompt = buildGuardianReviewPrompt({
           prompt: originalPrompt,
           results,
           ...(executableChecks ? { executableChecks } : {}),
         });
-        const review = await this.runInternalTurn(reviewPrompt, [], options);
+        const review = await this.runInternalTurn(reviewPrompt, [], turnOptions);
         return {
           summary: executableChecks
             ? `${review.text}\n\nExecutable checks:\n${executableChecks}`
@@ -425,6 +438,7 @@ export class WorkAgent<
           graphId: graph.id,
           startedAt: Date.now(),
         });
+        this.runController.queuePlannedJobs(graph.id, tasks, startedAt);
       },
       onTaskStatus: (task, status) => {
         if (!activeGraphId) {
@@ -445,6 +459,9 @@ export class WorkAgent<
     if (result.kind !== "complex") {
       return { text: result.text };
     }
+    if (epoch.isCleared()) {
+      return CLEARED_TURN_RESULT;
+    }
 
     const reviewerStartedAt = Date.now();
     this.emitTrace(resolveAgentTraceEvent({
@@ -461,7 +478,7 @@ export class WorkAgent<
       ...(result.guardian ? { guardianSummary: result.guardian.summary } : {}),
     });
 
-    const synthesis = await this.directAgent.runTurn(synthesisPrompt, [], options);
+    const synthesis = await this.runMainTurn(synthesisPrompt, [], turnOptions);
     const reviewerCompletedAt = Date.now();
     this.emitTrace(resolveAgentTraceEvent({
       kind: "synthesis-completed",
@@ -473,13 +490,9 @@ export class WorkAgent<
     return { text: synthesis.text };
   }
 
-  private async loadExecutableGuardianSummary(input: {
-    readonly prompt: string;
-    readonly mode: string;
-    readonly tasks: readonly PlannedWorkTask[];
-    readonly results: readonly PlannedWorkResult[];
-    readonly changedFiles: readonly string[];
-  }): Promise<string | undefined> {
+  private async loadExecutableGuardianSummary(
+    input: GuardianCheckRequest,
+  ): Promise<string | undefined> {
     if (!this.runExecutableGuardianChecks) {
       return undefined;
     }
@@ -487,6 +500,10 @@ export class WorkAgent<
     try {
       return (await this.runExecutableGuardianChecks(input)).summary;
     } catch (error) {
+      // A cancelled check has no verdict. Report the cancellation itself, not
+      // whatever error raced it, and never degrade it into an "unavailable"
+      // note the reviewer would read as a real result.
+      input.signal?.throwIfAborted();
       return `Executable checks unavailable: ${error instanceof Error ? error.message : String(error)}`;
     }
   }

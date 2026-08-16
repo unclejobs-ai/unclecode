@@ -41,6 +41,7 @@ import {
 } from "@unclecode/orchestrator";
 import type { WorkShellInteractionBridge } from "@unclecode/orchestrator";
 import type {
+  OmpAuthCatalogClient,
   ProviderInputAttachment,
   ProviderName,
   ProviderToolTraceEvent,
@@ -98,12 +99,18 @@ export type StartReplOptions = {
   launchWorkSession?: TuiRenderOptions<TuiShellHomeState>["launchWorkSession"];
   saveApiKeyAuth?: ((raw: string) => Promise<readonly string[]>) | undefined;
   browserOAuthAvailable?: boolean | undefined;
+  /**
+   * OMP-owned OAuth provider catalog and sign-in handoff for the `/auth`
+   * picker. Injected so the TUI never reaches into provider infrastructure.
+   */
+  ompAuthCatalog?: OmpAuthCatalogClient | undefined;
   /** Optional agentops recorder callback. Non-blocking. Fired after every prompt turn. */
   recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string; contextReceiptId?: string; packetId?: string }) => void) | undefined;
   /** Context Inspector (Sprint 2): SQL mutation callback for the /context overlay. */
   mutateContextSource?: ((
     action: { readonly kind: "pin" | "unpin" | "forget" | "include"; readonly id: string },
   ) => ContextPacketViewActionReceipt | undefined) | undefined;
+  undoContextSourceAction?: (() => ContextPacketViewActionReceipt | undefined) | undefined;
   previewContextPacket?: ((input: {
     readonly sessionId: string;
     readonly packet: ContextPacketView;
@@ -301,11 +308,17 @@ export function createManagedDashboardInput(
         : {}),
       ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
       browserOAuthAvailable: Boolean(session.options.browserOAuthAvailable),
+      ...(session.options.ompAuthCatalog !== undefined
+        ? { ompAuthCatalog: session.options.ompAuthCatalog }
+        : {}),
       ...(session.options.recordTurn !== undefined
         ? { recordTurn: session.options.recordTurn }
         : {}),
       ...(session.options.mutateContextSource !== undefined
         ? { mutateContextSource: session.options.mutateContextSource }
+        : {}),
+      ...(session.options.undoContextSourceAction !== undefined
+        ? { undoContextSourceAction: session.options.undoContextSourceAction }
         : {}),
       ...(session.options.previewContextPacket !== undefined
         ? { previewContextPacket: session.options.previewContextPacket }

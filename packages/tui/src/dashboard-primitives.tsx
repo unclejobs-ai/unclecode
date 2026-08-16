@@ -1,34 +1,71 @@
 import { Box, Text } from "ink";
 import React from "react";
 
+import { detectTerminalBackground } from "./terminal-theme.js";
 import { getDisplayWidth } from "./text-width.js";
 
-export const C = {
-  bg: "#ffffff",
-  surface: "#f8fafc",
-  border: "#334155",
-  borderActive: "#075985",
-  borderSubtle: "#475569",
-  text: "#0f172a",
-  textSecondary: "#1e293b",
-  textMuted: "#334155",
-  textFaint: "#475569",
-  accent: "#115e59",
-  accentBright: "#075985",
-  accentDim: "#115e59",
-  warning: "#713f12",
-  error: "#991b1b",
-  info: "#075985",
-  success: "#166534",
-  statusBg: "#dcfce7",
-  statusBgWarning: "#fef3c7",
-  statusBgError: "#fee2e2",
-  tagBg: "#e2e8f0",
-  pillBg: "#dbeafe",
-  pillFg: "#082f49",
-  headerBg: "#bae6fd",
-  headerFg: "#082f49",
+/**
+ * Dashboard palette — ANSI colour names, matching the work shell.
+ *
+ * This was a hardcoded light palette (`bg: #ffffff`, `text: #0f172a`), so on a
+ * dark terminal the session screens painted near-black text and white blocks.
+ * Naming the slot instead of the pigment lets both surfaces inherit whatever
+ * theme the user runs, and keeps one visual language across the app.
+ *
+ * Surfaces resolve to the terminal's own ground rather than a painted panel:
+ * the terminal owns the background, and filling it fights every theme.
+ */
+const C_DARK = {
+  bg: "black",
+  surface: "black",
+  border: "gray",
+  borderActive: "cyan",
+  borderSubtle: "gray",
+  text: "whiteBright",
+  textSecondary: "white",
+  textMuted: "white",
+  textFaint: "gray",
+  accent: "cyan",
+  accentBright: "cyan",
+  accentDim: "cyan",
+  warning: "yellow",
+  error: "red",
+  info: "blue",
+  success: "green",
+  statusBg: "black",
+  statusBgWarning: "black",
+  statusBgError: "black",
+  tagBg: "black",
+  pillBg: "blue",
+  pillFg: "black",
+  headerBg: "cyan",
+  headerFg: "black",
 } as const;
+
+const C_LIGHT = {
+  ...C_DARK,
+  bg: "white",
+  surface: "white",
+  text: "black",
+  textSecondary: "black",
+  textMuted: "gray",
+  textFaint: "gray",
+  statusBg: "white",
+  statusBgWarning: "white",
+  statusBgError: "white",
+  tagBg: "white",
+  pillFg: "white",
+  headerFg: "white",
+} as const;
+
+export const C = new Proxy({} as typeof C_DARK, {
+  get(_target, prop: keyof typeof C_DARK) {
+    return (detectTerminalBackground() === "dark" ? C_DARK : C_LIGHT)[prop];
+  },
+});
+
+/** Test seam so the contract asserts the real palettes, not copies. */
+export const DASHBOARD_PALETTES = { light: C_LIGHT, dark: C_DARK } as const;
 
 export const B = {
   tl: "╭", tr: "╮", bl: "╰", br: "╯",

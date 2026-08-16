@@ -1,5 +1,6 @@
-use crate::http_transport::resolve_proxy_policy;
-use crate::model_registry::{provider_route_json, resolve_provider_route};
+use crate::model_registry::{
+    provider_route_json, provider_route_proxy_policy, resolve_provider_route,
+};
 use crate::ux_panels::build_ux_panel_json;
 use serde_json::{json, Value};
 
@@ -34,7 +35,7 @@ pub(crate) fn build_status_panel_input(input: &Value) -> Result<Value, String> {
     let mut panel_input = input.clone();
     if let Some(object) = panel_input.as_object_mut() {
         match resolve_provider_route(provider, Some(model)) {
-            Ok(route) => match resolve_proxy_policy(&route.endpoint_url)
+            Ok(route) => match provider_route_proxy_policy(&route)
                 .and_then(|proxy| provider_route_json(&route, &proxy))
                 .and_then(|raw| {
                     serde_json::from_str::<Value>(&raw).map_err(|error| error.to_string())

@@ -41,13 +41,11 @@ fn resolve_work_shell_trace_event(input: &Value) -> Value {
 fn resolve_busy_status_action(event: &Value, line: &str) -> &'static str {
     match str_field(event, "type").unwrap_or_default() {
         "turn.completed" => "clear",
-        "turn.started" | "provider.calling" | "reasoning.delta" | "tool.started"
-        | "tool.completed" => "set",
+        "turn.completed" => "clear",
+        "turn.started" | "provider.calling" | "tool.started" | "tool.completed" => "set",
+        "reasoning.delta" if !line.is_empty() => "set",
         "orchestrator.step" if str_field(event, "status") == Some("running") => "set",
-        _ => {
-            let _ = line;
-            "none"
-        }
+        _ => "none",
     }
 }
 

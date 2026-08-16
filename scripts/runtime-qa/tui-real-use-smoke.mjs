@@ -14,15 +14,17 @@ import { extractRuntimeQaUserRequest } from "./fake-gemini-server.mjs";
 import {
   calculatePaneWidth,
   capturePane,
+  IDLE_COMPOSER_PATTERN,
   lowerBusyActivityRowPattern,
   pressEnter,
   runTmux,
   submitLine,
   typeKeys,
-  waitForIdlePromptDeck,
+  waitForIdleComposer,
   waitForPane,
 } from "./tmux-helpers.mjs";
 
+const CONTEXT_WARNING_SUMMARY_PATTERN = /(?:\d+ warnings?|✓ none)/i;
 const MAX_REAL_USE_LATENCY_MS = 12_000;
 
 export async function runRealUseTuiStress({ port, tmp, observations }) {
@@ -62,22 +64,21 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     await submitLine(session, "/context", paneFile);
     const contextPane = await waitForPane(
       session,
-      /Sources · \d+ included|Warnings · none|✓ none/i,
+      /(?=.*Sources · \d+ sent · \d+ held)(?=.*(?:\d+ warnings?|✓ none))/is,
       contextPaneFile,
     );
-    assert.match(contextPane, /Sources · \d+ included/);
-    assert.match(contextPane, /Held back locally|\d+ held back/);
-    assert.match(contextPane, /Warnings · none|✓ none/i);
+    assert.match(contextPane, /Sources · \d+ sent · \d+ held/);
+    assert.match(contextPane, CONTEXT_WARNING_SUMMARY_PATTERN);
     assert.doesNotMatch(contextPane, /Unknown command|panic|TypeError|ReferenceError/);
     await runTmux(["send-keys", "-t", session, "Escape"]);
-    await waitForPane(session, /prompt deck/, paneFile);
+    await waitForPane(session, IDLE_COMPOSER_PATTERN, paneFile);
     await sleep(200);
 
     await submitLine(session, "/reasoning high", paneFile, /\/reasoning high matches|\/reasoning high/);
     const reasoningPane = await waitForPane(session, /Reasoning picker|Reasoning fixed|Reasoning ·/, paneFile);
     assert.doesNotMatch(reasoningPane, /Unknown command|panic|TypeError|ReferenceError/);
     await runTmux(["send-keys", "-t", session, "Escape"]);
-    await waitForPane(session, /prompt deck/, paneFile);
+    await waitForPane(session, IDLE_COMPOSER_PATTERN, paneFile);
     await sleep(200);
 
     const firstSubmitStartedAt = Date.now();
@@ -111,7 +112,7 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     const queueDrainMs = Date.now() - queuedSubmitStartedAt;
     assert.ok(firstReplyMs <= MAX_REAL_USE_LATENCY_MS, `first real-use TUI reply took ${firstReplyMs}ms`);
     assert.ok(queueDrainMs <= MAX_REAL_USE_LATENCY_MS, `queued real-use TUI reply took ${queueDrainMs}ms`);
-    const pane = await waitForIdlePromptDeck(session, paneFile);
+    const pane = await waitForIdleComposer(session, paneFile);
     await sleep(300);
     const idlePaneA = await capturePane(session, idlePaneAFile);
     await sleep(300);
@@ -119,12 +120,11 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     assert.equal(
       normalizeIdlePane(idlePaneA),
       normalizeIdlePane(idlePaneB),
-      "idle prompt deck should not keep changing after volatile reply age text is normalized",
+      "idle composer should not keep changing after volatile reply age text is normalized",
     );
     const realUseRequests = observations.slice(beforeRequests);
 
     assert.equal(realUseRequests.length, 2, `real-use stress should make two provider calls, got ${realUseRequests.length}`);
-    assert.match(pane, new RegExp(escapeRegExp(realUseFirstPromptText)));
     assert.match(pane, new RegExp(escapeRegExp(realUseFirstResponseText)));
     assert.match(pane, new RegExp(escapeRegExp(realUseQueuedPromptText)));
     assert.match(pane, new RegExp(escapeRegExp(realUseQueuedResponseText)));

@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import React from "react";
+import { renderContextInspectorOverlay } from "../../packages/tui/src/work-shell-context-inspector.tsx";
+import { renderDebugFrame, waitForSettledFrame } from "../tui/work-shell-render-harness.mjs";
+
+import { CONTEXT_DESK_GROUPS } from "@unclecode/contracts";
 
 import {
   WorkShellEngine,
@@ -127,6 +132,8 @@ import {
   parallelModeKoreanCleanResponseText,
   parallelModeKoreanLeakyResponseText,
 } from "../../scripts/runtime-qa/constants.mjs";
+import { wrapDisplayTextFast } from "../../packages/tui/src/text-width.ts";
+
 import {
   appendWorkShellEntries,
   createInitialWorkShellEngineState,
@@ -346,6 +353,8 @@ test("work-shell command helpers classify builtins, local commands, and reusable
   assert.deepEqual(resolveWorkShellBuiltinCommand("/minimal"), { kind: "trace-mode", traceMode: "minimal" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/auth key"), { kind: "auth-key" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/queue"), { kind: "queue" });
+  assert.deepEqual(resolveWorkShellBuiltinCommand("/cache"), { kind: "cache" });
+  assert.deepEqual(resolveWorkShellBuiltinCommand("/agents"), { kind: "agent-console", tab: "agents" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/queue clear"), { kind: "queue-clear" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/cancel"), { kind: "cancel" });
   assert.deepEqual(resolveWorkShellBuiltinCommand("/harness"), { kind: "harness" });
@@ -2472,6 +2481,19 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
     undefined,
     "reasoning.delta stays out of the conversation transcript",
   );
+  assert.equal(
+    resolveBusyStatusFromTraceEvent(
+      { type: "reasoning.delta" },
+      "✦ thinking· inspect repo before editing",
+    ),
+    "✦ thinking· inspect repo before editing",
+    "reasoning.delta surfaces on the active status row instead",
+  );
+  assert.equal(
+    resolveBusyStatusFromTraceEvent({ type: "reasoning.delta" }, ""),
+    null,
+    "an empty reasoning.delta leaves the active status row alone",
+  );
   assert.deepEqual(
     resolveVerboseTraceEntry({
       traceMode: "minimal",
@@ -2869,6 +2891,74 @@ test("WorkShellEngine applies GPT-5.6 model and reasoning updates together", asy
   assert.equal(engine.getState().panel.title, "Status");
   assert.ok(engine.getState().panel.lines.includes("model:gpt-5.6-luna"));
   assert.ok(engine.getState().panel.lines.includes("reasoning:none"));
+});
+
+test("WorkShellEngine opens cache telemetry locally", async () => {
+  const { engine, calls } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/cache");
+  assert.equal(engine.getState().panel.title, "Cache Telemetry");
+  assert.equal(calls.turns.length, 0);
+});
+
+test("WorkShellEngine opens the agent console tab an idle slash command names", async () => {
+  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"]]) {
+    const { engine, calls } = createEngine();
+
+    await engine.initialize();
+    const entriesBefore = engine.getState().entries.length;
+    await engine.handleSubmit(line);
+
+    assert.equal(engine.getState().agentConsoleView.open, true, `${line} must open the console`);
+    assert.equal(engine.getState().agentConsoleView.tab, tab);
+    assert.equal(
+      engine.getState().entries.length,
+      entriesBefore,
+      `${line} must not write a conversation entry`,
+    );
+    assert.equal(calls.turns.length, 0);
+  }
+});
+
+test("WorkShellEngine projects provider cache usage into the session ledger", async () => {
+  const { engine, emitTrace } = createEngine();
+
+  await engine.initialize();
+  emitTrace({
+    type: "usage.recorded",
+    eventId: "usage-1",
+    provider: "openai",
+    model: "gpt-5.6-sol",
+    inputTokens: 1_000,
+    outputTokens: 200,
+    cacheReadTokens: 750,
+    cacheWriteTokens: 50,
+    cacheSavingsUsd: 0.004,
+    costUsd: 0.01,
+    startedAt: 100,
+  });
+
+  assert.deepEqual(engine.getState().agentConsole.mainUsage, {
+    eventIds: ["usage-1"],
+    inputTokens: 1_000,
+    outputTokens: 200,
+    cacheReadTokens: 750,
+    cacheWriteTokens: 50,
+    cacheSavingsUsd: 0.004,
+    costUsd: 0.01,
+    routes: [{
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      eventIds: ["usage-1"],
+      inputTokens: 1_000,
+      outputTokens: 200,
+      cacheReadTokens: 750,
+      cacheWriteTokens: 50,
+      cacheSavingsUsd: 0.004,
+      costUsd: 0.01,
+    }],
+  });
 });
 
 test("WorkShellEngine preserves GPT-5.6 reasoning overrides across model switches", async () => {
@@ -3558,6 +3648,7 @@ test("WorkShellEngine applies accepted advice and never applies rejected advice"
           sourceLabel: "auth.ts",
           message: "Held back auth.ts",
           canUndo: true,
+          succeeded: true,
         };
       },
     },
@@ -3574,7 +3665,9 @@ test("WorkShellEngine applies accepted advice and never applies rejected advice"
   assert.deepEqual(mutations, [{ kind: "forget", id: "pinned-auth" }]);
   assert.equal(accepted.getState().contextPolicySuggestions[0]?.status, "accepted");
   assert.equal(accepted.getState().contextActionReceipt?.action, "hold-back");
+  // Both compare sides survive the desk-side refresh the hold-back triggered.
   assert.notEqual(accepted.getState().contextPreviewReceipt?.packetId, submittedPacketId);
+  assert.equal(accepted.getState().contextSubmittedReceipt?.packetId, submittedPacketId);
 
   const rejected = createHarness().engine;
   await rejected.initialize();
@@ -3584,7 +3677,8 @@ test("WorkShellEngine applies accepted advice and never applies rejected advice"
   assert.deepEqual(mutations, [{ kind: "forget", id: "pinned-auth" }]);
   assert.equal(rejected.getState().contextPolicySuggestions[0]?.status, "rejected");
 });
-test("WorkShellEngine closes packet-changing advice before awaiting refresh", async () => {
+
+test("WorkShellEngine applies one packet-changing advice at a time and closes the rest after it lands", async () => {
   const refreshGate = Promise.withResolvers();
   const resolutions = [];
   const mutations = [];
@@ -3642,17 +3736,34 @@ test("WorkShellEngine closes packet-changing advice before awaiting refresh", as
   const secondAcceptance = harness.engine.acceptContextSuggestion("suggestion-second");
   await Promise.resolve();
 
+  // Nothing is recorded as accepted until the hold-back actually lands, and a
+  // second accept cannot start against the packet the first is rewriting.
+  assert.deepEqual(resolutions, []);
+  assert.deepEqual(mutations, [{ kind: "forget", id: "pinned-auth" }]);
+  assert.equal(
+    harness.engine.getState().contextPolicySuggestions.find(
+      ({ id }) => id === "suggestion-second",
+    )?.status,
+    "proposed",
+  );
+
+  refreshGate.resolve();
+  await Promise.all([firstAcceptance, secondAcceptance]);
+
   assert.deepEqual(resolutions, [{ id: "suggestion-first", status: "accepted" }]);
   assert.deepEqual(mutations, [{ kind: "forget", id: "pinned-auth" }]);
+  assert.equal(
+    harness.engine.getState().contextPolicySuggestions.find(
+      ({ id }) => id === "suggestion-first",
+    )?.status,
+    "accepted",
+  );
   assert.equal(
     harness.engine.getState().contextPolicySuggestions.find(
       ({ id }) => id === "suggestion-second",
     )?.status,
     "stale",
   );
-
-  refreshGate.resolve();
-  await Promise.all([firstAcceptance, secondAcceptance]);
 });
 
 test("WorkShellEngine forces condensed-history refresh for accepted summarize advice", async () => {
@@ -3691,10 +3802,70 @@ test("WorkShellEngine forces condensed-history refresh for accepted summarize ad
   await engine.handleSubmit("summarize advice");
   await engine.acceptContextSuggestion("suggestion-summarize-history");
 
-  assert.match(effects[0] ?? "", /^resolve:accepted$/);
-  assert.equal(effects[1], "stale:preview-1");
-  assert.equal(effects[2], "summarize");
+  // The summarize effect lands before the acceptance is persisted, and the
+  // rest of that receipt's advice is retired afterwards.
+  assert.deepEqual(effects, ["summarize", "resolve:accepted", "stale:preview-1"]);
   assert.equal(engine.getState().contextPolicySuggestions[0]?.status, "accepted");
+});
+
+test("WorkShellEngine keeps advice proposed and retryable when its effect fails", async () => {
+  const effects = [];
+  let summarizeFailures = 1;
+  const suggestion = (status = "proposed") => ({
+    id: "suggestion-summarize-retry",
+    packetReceiptId: "preview-1",
+    sourceId: "pinned-auth",
+    action: "summarize",
+    reasonCode: "stale-condensed-history",
+    reasonText: "Condensed history is stale.",
+    status,
+    createdAt: "2026-07-14T00:00:01.000Z",
+    ...(status === "proposed" ? {} : { resolvedAt: "2026-07-14T00:00:02.000Z" }),
+  });
+  const { engine } = createLifecycleLedgerHarness({
+    engineOverrides: {
+      async generateContextSuggestions() {
+        return [suggestion()];
+      },
+      resolveContextSuggestion(_id, status) {
+        effects.push(`resolve:${status}`);
+        return suggestion(status);
+      },
+      async refreshCondensedHistory() {
+        if (summarizeFailures > 0) {
+          summarizeFailures -= 1;
+          effects.push("summarize:failed");
+          throw new Error("condensed history rebuild failed");
+        }
+        effects.push("summarize:ok");
+      },
+      invalidateContextSuggestions(receiptId) {
+        effects.push(`stale:${receiptId}`);
+        return 1;
+      },
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("summarize advice");
+
+  // A failed effect must not leave the advice looking applied.
+  await engine.acceptContextSuggestion("suggestion-summarize-retry");
+  assert.deepEqual(effects, ["summarize:failed"]);
+  assert.equal(engine.getState().contextPolicySuggestions[0]?.status, "proposed");
+  assert.equal(
+    engine.getState().contextAdviceUnavailable,
+    "Context optimizer unavailable; reply kept.",
+  );
+
+  // Still actionable: the same key applies it once the effect succeeds.
+  await engine.acceptContextSuggestion("suggestion-summarize-retry");
+  assert.deepEqual(
+    effects,
+    ["summarize:failed", "summarize:ok", "resolve:accepted", "stale:preview-1"],
+  );
+  assert.equal(engine.getState().contextPolicySuggestions[0]?.status, "accepted");
+  assert.equal(engine.getState().contextAdviceUnavailable, undefined);
 });
 
 
@@ -3858,9 +4029,30 @@ test("WorkShellEngine preserves the last submitted receipt across later previews
   const {
     engine,
     calls,
+    ledgerRevalidations,
     ledgerSubmissions,
     setPacket,
-  } = createLifecycleLedgerHarness();
+  } = createLifecycleLedgerHarness({
+    revalidate: ({ preview, packet: nextPacket }) => {
+      const before = new Set(
+        preview.sourceRefs
+          .filter((source) => source.includedInModel)
+          .map((source) => source.sourceId),
+      );
+      const after = new Set(nextPacket.included.map((source) => source.id));
+      const removedSourceIds = [...before].filter((sourceId) => !after.has(sourceId));
+      const addedSourceIds = [...after].filter((sourceId) => !before.has(sourceId));
+      return {
+        kind: removedSourceIds.length > 0 ? "meaning-change" : "unchanged",
+        removedSourceIds,
+        addedSourceIds,
+        protectedSourceIds: [],
+        reason: removedSourceIds.length > 0
+          ? "A source from the last request was removed."
+          : "Packet source selection is unchanged.",
+      };
+    },
+  });
 
   await engine.initialize();
   setPacket(createLifecyclePacket({ id: "packet-last-submitted-1" }));
@@ -3868,13 +4060,43 @@ test("WorkShellEngine preserves the last submitted receipt across later previews
   const submittedReceiptId = ledgerSubmissions[0]?.receiptId;
   assert.equal(typeof submittedReceiptId, "string");
 
-  setPacket(createLifecyclePacket({ id: "packet-last-submitted-preview" }));
+  setPacket(createLifecyclePacket({
+    id: "packet-last-submitted-preview",
+    included: [{
+      id: "replacement-source",
+      category: "workspace",
+      label: "replacement.ts",
+      reason: "replacement source",
+      preview: "export function replacement() {}",
+      tokenEstimate: 10,
+      salience: 1,
+      includedInModel: true,
+    }],
+  }));
   await engine.handleSubmit("/context");
+  // Compare needs both sides: the freshly previewed candidate and the packet
+  // the provider last saw.
   assert.equal(
     engine.getState().contextPreviewReceipt?.packetId,
     "packet-last-submitted-preview",
   );
-  assert.equal(engine.getState().contextSubmittedReceipt, undefined);
+  assert.equal(engine.getState().contextSubmittedReceipt?.id, submittedReceiptId);
+  assert.equal(
+    engine.getState().contextSubmittedReceipt?.packetId,
+    "packet-last-submitted-1",
+  );
+  assert.equal(
+    ledgerRevalidations.at(-1)?.previewId,
+    submittedReceiptId,
+    "the visible comparison must use the packet the provider last saw",
+  );
+  assert.deepEqual(engine.getState().contextPacketChange, {
+    kind: "meaning-change",
+    removedSourceIds: ["pinned-auth"],
+    addedSourceIds: ["replacement-source"],
+    protectedSourceIds: [],
+    reason: "A source from the last request was removed.",
+  });
 
   const snapshotCountBeforeModelChange = calls.snapshots.length;
   await engine.handleSubmit("/model gpt-4.1-mini");
@@ -4115,6 +4337,169 @@ test("WorkShellEngine binds ask_user to a durable composer decision", async () =
   assert.ok(calls.snapshots.some((snapshot) => snapshot.state === "running"));
 });
 
+test("WorkShellEngine answers and cancels a pending decision by one-key methods", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  const { engine } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+    },
+  });
+  await engine.initialize();
+
+  const result = interactionBridge.ask({
+    id: "decision-one-key",
+    title: "Execution choice",
+    questions: [{
+      id: "strategy",
+      question: "Choose execution strategy.",
+      options: [{ label: "Safe" }, { label: "Fast" }, { label: "Deep" }],
+      recommended: 0,
+    }],
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-one-key");
+
+  // Out-of-range indices are rejected up front (handlePendingDecisionReply
+  // is void, so the range check is the only guard) and keep the decision
+  // pending for a later reply.
+  assert.equal(engine.answerPendingDecisionByIndex(0), false);
+  assert.equal(engine.answerPendingDecisionByIndex(99), false);
+  assert.equal(engine.answerPendingDecisionByIndex(1.5), false);
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-one-key");
+  assert.equal((await Promise.race([result, Promise.resolve("pending")])), "pending");
+
+  assert.equal(engine.answerPendingDecisionByIndex(2), true);
+
+  assert.deepEqual(await result, {
+    status: "answered",
+    answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
+  // A settled decision cannot be settled twice: the pending identity guard
+  // makes both one-key methods no-ops after the fact.
+  assert.equal(engine.answerPendingDecisionByIndex(1), false);
+  assert.equal(engine.cancelPendingDecision(), false);
+});
+
+test("WorkShellEngine one-key decision methods refuse multi-question and absent decisions", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  const { engine } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+    },
+  });
+  await engine.initialize();
+
+  assert.equal(engine.answerPendingDecisionByIndex(1), false);
+  assert.equal(engine.cancelPendingDecision(), false);
+
+  const result = interactionBridge.ask({
+    id: "decision-multi",
+    title: "Scope",
+    questions: [
+      {
+        id: "depth",
+        question: "How deep?",
+        options: [{ label: "Shallow" }, { label: "Deep" }],
+      },
+      {
+        id: "breadth",
+        question: "How wide?",
+        options: [{ label: "Narrow" }, { label: "Wide" }],
+      },
+    ],
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-multi");
+  // Multi-question decisions need typed `question-id: n` replies; digits
+  // must stay ordinary input instead of half-answering.
+  assert.equal(engine.answerPendingDecisionByIndex(1), false);
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-multi");
+
+  assert.equal(engine.cancelPendingDecision(), true);
+
+  assert.deepEqual(await result, { status: "cancelled" });
+  assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
+});
+
+test("WorkShellEngine still settles a pending decision when console routing throws", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  const { engine, calls } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+    },
+  });
+  await engine.initialize();
+
+  const result = interactionBridge.ask({
+    id: "decision-1",
+    title: "Execution choice",
+    questions: [{
+      id: "strategy",
+      question: "Choose execution strategy.",
+      options: [{ label: "Safe" }, { label: "Fast" }],
+      recommended: 0,
+    }],
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-1");
+
+  // Classifying the line is a console convenience. When it blows up, the
+  // answer the operator typed is still an answer: swallowing it would leave
+  // the run parked behind a question nothing can settle.
+  let routeCalls = 0;
+  engine.resolveBusySubmitDecision = async () => {
+    routeCalls += 1;
+    throw new Error("rust steer busy-submit exited 1");
+  };
+  const replies = [];
+  const handleReply = engine.handlePendingDecisionReply.bind(engine);
+  engine.handlePendingDecisionReply = (value) => {
+    replies.push(value);
+    handleReply(value);
+  };
+  const entriesBefore = engine.getState().entries.length;
+
+  await engine.handleSubmit("2");
+
+  assert.equal(routeCalls, 1, "the classifier is consulted exactly once");
+  assert.deepEqual(replies, ["2"], "the original line settles the decision exactly once");
+  assert.deepEqual(await result, {
+    status: "answered",
+    answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
+  assert.equal(engine.getState().queuedCount, 0, "a failed route must not queue the answer");
+  assert.deepEqual(calls.turns, [], "a failed route must not open a provider turn");
+  assert.equal(engine.getState().isBusy, false);
+
+  // The failure is reported once, in the shell's own error voice, and the raw
+  // command failure never reaches the operator.
+  const added = engine.getState().entries.slice(entriesBefore);
+  assert.equal(added.length, 1, "the failure is reported once, not per question");
+  assert.equal(added[0]?.role, "system");
+  assert.match(added[0]?.text ?? "", /^ERR:Console commands are unavailable\./);
+  assert.doesNotMatch(added[0]?.text ?? "", /busy-submit/);
+});
+
 test("WorkShellEngine clears orphaned resumed decisions before accepting new input", async () => {
   const { engine } = createEngine({
     options: {
@@ -4200,6 +4585,7 @@ test("WorkShellEngine context inspector actions mutate the selected CRP source",
         sourceLabel: "AGENTS.md",
         message: `${action.kind} AGENTS.md`,
         canUndo: true,
+        succeeded: true,
         before,
         after: {
           category: "workspace",
@@ -4207,6 +4593,30 @@ test("WorkShellEngine context inspector actions mutate the selected CRP source",
           includedInModel,
           salience,
           tokenEstimate: 12,
+        },
+      };
+    },
+    undoContextSourceAction() {
+      const before = {
+        category: "workspace",
+        label: "AGENTS.md",
+        includedInModel,
+        salience,
+        tokenEstimate: 12,
+      };
+      includedInModel = false;
+      return {
+        id: "receipt-undo",
+        action: "undo",
+        sourceId: "workspace-guidance",
+        sourceLabel: "AGENTS.md",
+        message: "undid include AGENTS.md",
+        canUndo: false,
+        succeeded: true,
+        before,
+        after: {
+          ...before,
+          includedInModel,
         },
       };
     },
@@ -4237,6 +4647,11 @@ test("WorkShellEngine context inspector actions mutate the selected CRP source",
   await engine.includeContextSourceAtCursor();
   assert.deepEqual(mutations.at(-1), { kind: "include", id: "workspace-guidance" });
   assert.equal(engine.getState().contextPacket?.included[0]?.includedInModel, true);
+
+  await engine.undoLastContextSourceAction();
+  assert.equal(engine.getState().contextPacket?.excluded[0]?.includedInModel, false);
+  assert.equal(engine.getState().contextActionReceipt?.action, "undo");
+  assert.equal(engine.getState().contextActionReceipt?.canUndo, false);
 });
 
 test("WorkShellEngine loads local source details on Enter and scrolls without moving the source cursor", async () => {
@@ -4267,6 +4682,7 @@ test("WorkShellEngine loads local source details on Enter and scrolls without mo
         ? "# Configured prompt\nRule one.\nRule two.\nRule three."
         : undefined,
   });
+  engine.updateTerminalRows(32);
 
   await engine.initialize();
   await engine.handleSubmit("/context");
@@ -4436,6 +4852,7 @@ test("WorkShellEngine preserves selected source identity across include/hold ref
         sourceLabel: `${action.id}.md`,
         message: `${action.kind} ${action.id}.md`,
         canUndo: true,
+        succeeded: true,
       };
     },
   });
@@ -4469,6 +4886,144 @@ test("WorkShellEngine preserves selected source identity across include/hold ref
   // Include fixture pins salience to 1.0; the next Enter must still target alpha.
   await engine.toggleContextInspectorPin();
   assert.deepEqual(mutations.at(-1), { kind: "unpin", id: "alpha" });
+});
+
+test("WorkShellEngine numeric source cursor follows the desk stage-then-group order", async () => {
+  const mutations = [];
+  const packet = {
+    id: "packet-stage-order",
+    version: 1,
+    generatedAt: "2026-07-14T00:00:00.000Z",
+    title: "Next answer context",
+    included: [
+      {
+        id: "sent-workspace",
+        category: "workspace",
+        label: "AGENTS.md",
+        reason: "repo instructions loaded",
+        preview: "Keep diffs small.",
+        tokenEstimate: 10,
+        includedInModel: true,
+      },
+      {
+        id: "sent-runtime",
+        category: "runtime",
+        label: "Runtime probe",
+        reason: "live runtime state",
+        preview: "Runtime is idle.",
+        tokenEstimate: 6,
+        includedInModel: true,
+      },
+    ],
+    excluded: [{
+      id: "held-workspace",
+      category: "workspace",
+      label: "LEGACY.md",
+      reason: "over budget",
+      preview: "Legacy notes.",
+      tokenEstimate: 40,
+      includedInModel: false,
+    }],
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: 2, excluded: 1, warnings: 0 },
+    tokenEstimate: 16,
+  };
+  const { engine } = createEngine({
+    resolveContextPacket: async () => packet,
+    mutateContextSource(action) {
+      mutations.push(action);
+      return undefined;
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+
+  // The desk draws every "In next request" row above the "Held back" block, so
+  // row 1 is the other sent source — not the held source that shares row 0's
+  // category group.
+  engine.moveContextInspectorCursor(1);
+  await engine.forgetContextSourceAtCursor();
+  assert.deepEqual(mutations.at(-1), { kind: "forget", id: "sent-runtime" });
+
+  engine.moveContextInspectorCursor(1);
+  await engine.includeContextSourceAtCursor();
+  assert.deepEqual(mutations.at(-1), { kind: "include", id: "held-workspace" });
+});
+
+test("WorkShellEngine ignores source keys the selected row does not offer", async () => {
+  const mutations = [];
+  const packet = {
+    id: "packet-capability",
+    version: 1,
+    generatedAt: "2026-07-14T00:00:00.000Z",
+    title: "Next answer context",
+    included: [
+      {
+        id: "provider-system-prompt-configured",
+        category: "provider-system-prompt",
+        label: "Configured prompt",
+        reason: "prompt guidance active",
+        preview: "Prompt sections are active.",
+        tokenEstimate: 22,
+        includedInModel: true,
+        actions: ["preview"],
+      },
+      {
+        id: "workspace-notes",
+        category: "workspace",
+        label: "NOTES.md",
+        reason: "repo instructions loaded",
+        preview: "Keep diffs small.",
+        tokenEstimate: 12,
+        includedInModel: true,
+        actions: ["hold-back", "preview"],
+      },
+    ],
+    excluded: [{
+      id: "sealed-transcript",
+      category: "runtime",
+      label: "Sealed transcript",
+      reason: "held back by policy",
+      preview: "Transcript stays local.",
+      tokenEstimate: 30,
+      includedInModel: false,
+      actions: ["preview", "compare"],
+    }],
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: 2, excluded: 1, warnings: 0 },
+    tokenEstimate: 34,
+  };
+  const { engine } = createEngine({
+    resolveContextPacket: async () => packet,
+    mutateContextSource(action) {
+      mutations.push(action);
+      return undefined;
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+
+  // Row 0 only offers preview: pin and hold-back keys leave the packet alone.
+  await engine.toggleContextInspectorPin();
+  await engine.forgetContextSourceAtCursor();
+  assert.deepEqual(mutations, []);
+
+  // Row 1 offers hold-back but not pin.
+  engine.moveContextInspectorCursor(1);
+  await engine.forgetContextSourceAtCursor();
+  assert.deepEqual(mutations, [{ kind: "forget", id: "workspace-notes" }]);
+  await engine.toggleContextInspectorPin();
+  assert.deepEqual(mutations, [{ kind: "forget", id: "workspace-notes" }]);
+
+  // Row 2 is held back and never re-includable.
+  engine.moveContextInspectorCursor(1);
+  await engine.includeContextSourceAtCursor();
+  assert.deepEqual(mutations, [{ kind: "forget", id: "workspace-notes" }]);
+  assert.equal(engine.getState().contextPacket?.excluded[0]?.includedInModel, false);
 });
 
 test("WorkShellEngine reuses the previewed /context packet for the next chat turn", async () => {
@@ -5448,6 +6003,233 @@ test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
   assert.ok(engine.getState().entries.some((entry) => /Running queued follow-up #1: second/.test(entry.text)));
 });
 
+function createBusyEngine() {
+  let releaseTurn;
+  const prompts = [];
+  const { engine, calls } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        prompts.push(prompt);
+        if (prompt === "first") {
+          await new Promise((resolve) => {
+            releaseTurn = resolve;
+          });
+        }
+        return { text: `reply:${prompt}` };
+      },
+    },
+  });
+  return { engine, calls, prompts, release: () => releaseTurn?.() };
+}
+
+test("WorkShellEngine opens the agent console during a busy turn without queueing it", async () => {
+  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"]]) {
+    const { engine, prompts, release } = createBusyEngine();
+
+    await engine.initialize();
+    const firstTurn = engine.handleSubmit("first");
+    while (
+      !engine.getState().isBusy
+      || !engine.getState().entries.some((entry) => entry.text === "first")
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    const entriesBefore = engine.getState().entries.map((entry) => entry.text);
+
+    await engine.handleSubmit(line);
+
+    assert.equal(engine.getState().agentConsoleView.open, true, `${line} must open while busy`);
+    assert.equal(engine.getState().agentConsoleView.tab, tab);
+    assert.equal(engine.getState().queuedCount, 0, `${line} must not be queued`);
+    assert.deepEqual(
+      engine.getState().entries.map((entry) => entry.text),
+      entriesBefore,
+      `${line} must not write a conversation entry`,
+    );
+    assert.equal(engine.getState().isBusy, true);
+
+    release();
+    await firstTurn;
+    assert.deepEqual(prompts, ["first"]);
+  }
+});
+
+test("WorkShellEngine still refuses unrelated slash commands during a busy turn", async () => {
+  const { engine, release } = createBusyEngine();
+
+  await engine.initialize();
+  const firstTurn = engine.handleSubmit("first");
+  while (!engine.getState().isBusy) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  await engine.handleSubmit("/model gpt-5.4");
+
+  assert.equal(engine.getState().agentConsoleView.open, false);
+  assert.equal(engine.getState().queuedCount, 0);
+  const rejection = engine.getState().entries.at(-1);
+  assert.equal(rejection?.role, "system");
+  assert.match(rejection?.text ?? "", /not queued/);
+  assert.match(rejection?.text ?? "", /\/agents/);
+  assert.match(rejection?.text ?? "", /\/jobs/);
+  assert.match(rejection?.text ?? "", /\/todo/);
+
+  release();
+  await firstTurn;
+});
+
+test("WorkShellEngine opens the agent console while a busy turn waits on a decision", async () => {
+  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"]]) {
+    const interactionBridge = createWorkShellInteractionBridge();
+    const prompts = [];
+    let releaseTurn;
+    let decision;
+    let settled;
+    const { engine } = createEngine({
+      options: {
+        provider: "openai",
+        model: "gpt-5.4",
+        mode: "default",
+        authLabel: "api-key-env",
+        reasoning: supportedReasoning,
+        cwd: "/repo",
+        contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+        interactionBridge,
+      },
+      agent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn(prompt) {
+          prompts.push(prompt);
+          // The turn stays in flight while it waits on the operator, so the
+          // shell is genuinely busy with a decision open — the exact state the
+          // console has to stay reachable in.
+          decision = interactionBridge.ask({
+            id: "decision-1",
+            title: "Execution choice",
+            questions: [{
+              id: "strategy",
+              question: "Choose execution strategy.",
+              options: [{ label: "Safe" }, { label: "Fast" }],
+              recommended: 0,
+            }],
+          });
+          void decision.then((value) => {
+            settled = value;
+          });
+          await new Promise((resolve) => {
+            releaseTurn = resolve;
+          });
+          return { text: `reply:${prompt}` };
+        },
+      },
+    });
+    await engine.initialize();
+
+    const firstTurn = engine.handleSubmit("first");
+    while (
+      !engine.getState().isBusy
+      || engine.getState().agentConsole.pendingDecision?.id !== "decision-1"
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    assert.equal(engine.getState().isBusy, true, `${line} needs a busy turn to be meaningful`);
+
+    const classified = [];
+    const classify = engine.resolveBusySubmitDecision.bind(engine);
+    engine.resolveBusySubmitDecision = async (value) => {
+      classified.push(value);
+      return classify(value);
+    };
+    const entriesBefore = engine.getState().entries.map((entry) => entry.text);
+
+    await engine.handleSubmit(line);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(classified, [line], `${line} must consult the Rust classifier once`);
+    assert.equal(engine.getState().isBusy, true, `${line} must not end the turn`);
+    assert.equal(engine.getState().agentConsoleView.open, true, `${line} must open the console`);
+    assert.equal(engine.getState().agentConsoleView.tab, tab);
+    assert.equal(
+      engine.getState().agentConsole.pendingDecision?.id,
+      "decision-1",
+      `${line} must leave the decision pending`,
+    );
+    assert.equal(settled, undefined, `${line} must not answer the decision`);
+    assert.equal(engine.getState().queuedCount, 0, `${line} must not queue`);
+    assert.deepEqual(engine.getState().entries.map((entry) => entry.text), entriesBefore);
+
+    await engine.handleSubmit("2");
+    assert.deepEqual(await decision, {
+      status: "answered",
+      answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
+    });
+    assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
+    assert.deepEqual(
+      classified,
+      [line, "2"],
+      "an ordinary answer must be classified once and still answer the decision",
+    );
+    assert.equal(engine.getState().queuedCount, 0, "the answer must not be queued either");
+
+    releaseTurn();
+    await firstTurn;
+    assert.deepEqual(prompts, ["first"]);
+  }
+});
+
+test("WorkShellEngine treats every console-like invalid slash form as a silent no-op", async () => {
+  for (const line of [
+    "/agent",
+    "/agen",
+    "/age",
+    "/job",
+    "/tod",
+    "/agents extra",
+    "/jobs extra",
+    "/todo extra",
+  ]) {
+    const { engine, calls } = createEngine();
+
+    await engine.initialize();
+    const entriesBefore = engine.getState().entries.map((entry) => entry.text);
+    const panelBefore = engine.getState().panel;
+
+    await engine.handleSubmit(line);
+
+    assert.equal(engine.getState().agentConsoleView.open, false, `${line} must not open the console`);
+    assert.deepEqual(calls.inline, [], `${line} must not run an inline command`);
+    assert.deepEqual(calls.turns, [], `${line} must not reach the provider`);
+    assert.equal(engine.getState().queuedCount, 0, `${line} must not touch the queue`);
+    assert.deepEqual(
+      engine.getState().entries.map((entry) => entry.text),
+      entriesBefore,
+      `${line} must leave no transcript residue`,
+    );
+    assert.equal(engine.getState().panel, panelBefore, `${line} must not replace the panel`);
+  }
+});
+
+test("WorkShellEngine keeps the established guidance for an ordinary unknown slash command", async () => {
+  const { engine, calls } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/definitely-unknown");
+
+  assert.equal(engine.getState().panel.title, "Command");
+  assert.ok(
+    engine.getState().entries.some((entry) => /^Unknown command \/definitely-unknown/.test(entry.text)),
+    "an unrelated unknown slash keeps its user-visible guidance",
+  );
+  assert.deepEqual(calls.inline, []);
+  assert.deepEqual(calls.turns, []);
+  assert.equal(engine.getState().agentConsoleView.open, false);
+});
+
 test("WorkShellEngine binds queued follow-up chat to a fresh context packet", async () => {
   let releaseFirst;
   let packetCalls = 0;
@@ -5807,4 +6589,2267 @@ test("parseAgentPlanResponse extracts valid tasks from agent JSON output", async
   assert.deepEqual(parseAgentPlanResponse("no json here"), []);
   assert.deepEqual(parseAgentPlanResponse("[invalid json"), []);
   assert.deepEqual(parseAgentPlanResponse('["not objects"]'), []);
+});
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function createAgentConsoleEngine(overrides = {}) {
+  const control = { steer: [], cancel: [], continued: [], cleared: [] };
+  const runtime = {
+    async steer(agentRunId, message) {
+      control.steer.push({ agentRunId, message });
+      return { status: "accepted", message: "Steer queued." };
+    },
+    async cancel(agentRunId) {
+      control.cancel.push(agentRunId);
+      return { status: "accepted", message: "Cancelling." };
+    },
+    async continueRun(source, message) {
+      control.continued.push({ source, message });
+      return { status: "accepted", message: "Continuation started." };
+    },
+    clear(reason) {
+      control.cleared.push(reason);
+    },
+  };
+  const { calls, input } = createEngineInput(overrides);
+  if (overrides.agentControlRuntime !== false) {
+    input.agent = { ...input.agent, getAgentControlRuntime: () => runtime };
+  }
+  delete input.agentControlRuntime;
+  const engine = new WorkShellEngine(input);
+  return {
+    engine,
+    calls,
+    control,
+    emitTrace(event) {
+      return calls.traceListener?.(event);
+    },
+  };
+}
+
+/**
+ * Stands a run up with the job that owns it. Ownership is strict: a run can
+ * only start against a job that was queued first, so the fixture queues that
+ * job in the same burst and names it on the run.
+ */
+function emitRunStarted(emitTrace, runId, extra = {}) {
+  const startedAt = extra.startedAt ?? 20;
+  const jobId = extra.jobId ?? `${runId}-job`;
+  emitTrace({
+    type: "job.queued",
+    jobId,
+    jobType: "executor",
+    label: `Work for ${runId}`,
+    queuedAt: startedAt,
+  });
+  emitTrace({
+    type: "agent.run.started",
+    runId,
+    jobId,
+    displayName: `Executor ${runId}`,
+    agentType: "executor",
+    startedAt,
+    ...extra,
+  });
+}
+
+/** Settles a run with the exact job `emitRunStarted` gave it. */
+function emitRunSettled(emitTrace, runId, extra = {}) {
+  emitTrace({
+    type: "agent.run.settled",
+    runId,
+    jobId: `${runId}-job`,
+    status: "completed",
+    completedAt: 40,
+    ...extra,
+  });
+}
+
+test("WorkShellEngine opens and closes the agent console without touching the console snapshot", async () => {
+  const { engine } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  const snapshotBefore = engine.getState().agentConsole;
+  engine.openAgentConsole("jobs");
+
+  assert.equal(engine.getState().agentConsole, snapshotBefore);
+  assert.equal(engine.getState().agentConsoleView.open, true);
+  assert.equal(engine.getState().agentConsoleView.tab, "jobs");
+  assert.equal(engine.getState().agentConsoleView.cursor, 0);
+
+  engine.selectAgentConsoleTab("plan");
+  assert.equal(engine.getState().agentConsoleView.tab, "plan");
+  const inspectorVisible = engine.getState().agentConsoleView.inspectorVisible;
+  engine.toggleAgentConsoleInspector();
+  assert.equal(engine.getState().agentConsoleView.inspectorVisible, !inspectorVisible);
+
+  engine.closeAgentConsole();
+  assert.equal(engine.getState().agentConsoleView.open, false);
+  assert.equal(engine.getState().agentConsole, snapshotBefore);
+});
+
+test("WorkShellEngine refuses a steer for a missing, settled, or empty target before reaching the runtime", async () => {
+  const { engine, control, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  emitRunStarted(emitTrace, "run-1");
+  emitRunSettled(emitTrace, "run-1", { summary: "Executor completed." });
+  emitRunStarted(emitTrace, "run-live", { startedAt: 50 });
+
+  const port = engine.getAgentControlPort();
+  assert.equal((await port.steer("run-missing", "focus")).status, "rejected");
+  assert.equal((await port.steer("run-1", "focus")).status, "rejected");
+  assert.equal((await port.steer("run-live", "   ")).status, "rejected");
+  assert.deepEqual(control.steer, []);
+
+  engine.openAgentConsole("agents");
+  engine.beginAgentSteer();
+  assert.equal(engine.getState().composerMode, "default");
+  assert.equal(engine.getState().agentConsoleView.receipt?.status, "rejected");
+  assert.deepEqual(control.steer, []);
+});
+
+test("WorkShellEngine reports agent controls as undelivered when the agent exposes no runtime", async () => {
+  const { engine, calls, emitTrace } = createAgentConsoleEngine({ agentControlRuntime: false });
+  await engine.initialize();
+
+  emitRunStarted(emitTrace, "run-1");
+  const receipt = await engine.getAgentControlPort().steer("run-1", "focus");
+
+  assert.equal(receipt.status, "not_delivered");
+  assert.deepEqual(calls.turns, []);
+});
+
+test("WorkShellEngine delivers a trimmed steer as control input and leaves the steer composer", async () => {
+  const { engine, calls, control, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  emitRunStarted(emitTrace, "run-1");
+  engine.openAgentConsole("agents");
+  engine.beginAgentSteer();
+  assert.equal(engine.getState().composerMode, "agent-steer");
+
+  await engine.handleSubmit("   narrow the diff   ");
+
+  assert.deepEqual(control.steer, [{ agentRunId: "run-1", message: "narrow the diff" }]);
+  assert.equal(engine.getState().composerMode, "default");
+  assert.deepEqual(engine.getState().agentConsoleView.receipt, {
+    status: "accepted",
+    message: "Steer queued.",
+  });
+  // A steer submit is control input: it never opens a provider turn or a chat entry.
+  assert.deepEqual(calls.turns, []);
+  assert.equal(engine.getState().entries.some((entry) => entry.text.includes("narrow the diff")), false);
+});
+
+test("WorkShellEngine cancels a selected run exactly once and only after confirmation", async () => {
+  const { engine, control, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  emitRunStarted(emitTrace, "run-1");
+  engine.openAgentConsole("agents");
+
+  engine.requestAgentCancel();
+  assert.deepEqual(engine.getState().agentConsoleView.control, {
+    kind: "confirm-cancel",
+    agentRunId: "run-1",
+  });
+
+  await engine.confirmAgentCancel(false);
+  assert.deepEqual(control.cancel, []);
+  assert.deepEqual(engine.getState().agentConsoleView.control, { kind: "browse" });
+
+  engine.requestAgentCancel();
+  await Promise.all([engine.confirmAgentCancel(true), engine.confirmAgentCancel(true)]);
+
+  assert.deepEqual(control.cancel, ["run-1"]);
+  assert.deepEqual(engine.getState().agentConsoleView.control, { kind: "browse" });
+  assert.equal(engine.getState().agentConsoleView.receipt?.status, "accepted");
+});
+
+test("WorkShellEngine continues a selected run with the persisted safe console record", async () => {
+  const { engine, control, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  emitRunStarted(emitTrace, "run-1");
+  emitRunSettled(emitTrace, "run-1", { summary: "Executor completed." });
+  engine.openAgentConsole("agents");
+
+  await engine.continueSelectedAgent();
+
+  assert.equal(control.continued.length, 1);
+  assert.deepEqual(control.continued[0]?.source, engine.getState().agentConsole.agents[0]);
+  assert.equal(control.continued[0]?.source.summary, "Executor completed.");
+  assert.equal(control.continued[0]?.source.transcriptRef, undefined);
+  assert.equal(engine.getState().agentConsoleView.receipt?.status, "accepted");
+});
+
+test("WorkShellEngine coalesces a lifecycle burst into one publication and one durable write", async () => {
+  const { engine, calls, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  const publications = [];
+  engine.subscribe((state) => publications.push(state.agentConsole));
+  const snapshotsBefore = calls.snapshots.length;
+
+  emitTrace({ type: "job.queued", jobId: "job-1", jobType: "executor", label: "Plan step", queuedAt: 10 });
+  emitRunStarted(emitTrace, "run-1", { jobId: "job-1" });
+  emitTrace({
+    type: "agent.run.settled",
+    runId: "run-1",
+    status: "completed",
+    completedAt: 40,
+    jobId: "job-1",
+    summary: "Executor completed.",
+  });
+
+  // Nothing is visible yet: the whole burst folded into the private pending
+  // snapshot before any window elapsed.
+  assert.equal(publications.length, 0);
+  assert.equal(calls.snapshots.length, snapshotsBefore);
+
+  // Longer than both coalescing windows; each trace event blocks on a Rust
+  // decision call, so the windows cannot be probed individually by wall clock.
+  await delay(200);
+
+  assert.equal(publications.length, 1);
+  const published = publications[0];
+  // Every event in the burst reduced against its predecessor, in order.
+  assert.equal(published.agents.length, 1);
+  assert.equal(published.agents[0]?.status, "completed");
+  assert.equal(published.jobs.length, 1);
+  assert.equal(published.jobs[0]?.status, "completed");
+  assert.equal(published.jobs[0]?.agentRunId, "run-1");
+  assert.equal(published.jobs[0]?.startedAt, 20);
+
+  assert.equal(calls.snapshots.length, snapshotsBefore + 1);
+  assert.equal(calls.snapshots.at(-1)?.state, "idle");
+  assert.equal(calls.snapshots.at(-1)?.agentConsole?.agents[0]?.status, "completed");
+
+  engine.dispose();
+});
+
+test("WorkShellEngine persists a running console while agent or job work is still active", async () => {
+  const { engine, calls, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  const snapshotsBefore = calls.snapshots.length;
+  emitTrace({ type: "job.queued", jobId: "job-1", jobType: "executor", label: "Plan step", queuedAt: 10 });
+  emitRunStarted(emitTrace, "run-1", { jobId: "job-1" });
+
+  await delay(90);
+
+  assert.equal(calls.snapshots.length, snapshotsBefore + 1);
+  assert.equal(calls.snapshots.at(-1)?.state, "running");
+  assert.equal(calls.snapshots.at(-1)?.agentConsole?.agents[0]?.status, "running");
+
+  engine.dispose();
+});
+
+test("WorkShellEngine flushes the pending console snapshot on dispose and clears background runs", async () => {
+  const { engine, calls, control, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  const publications = [];
+  engine.subscribe((state) => publications.push(state.agentConsole));
+  const snapshotsBefore = calls.snapshots.length;
+
+  emitTrace({ type: "job.queued", jobId: "job-1", jobType: "executor", label: "Plan step", queuedAt: 10 });
+  emitRunStarted(emitTrace, "run-1", { jobId: "job-1" });
+  assert.equal(publications.length, 0);
+
+  engine.dispose();
+
+  assert.equal(publications.length, 1);
+  assert.equal(publications[0]?.agents[0]?.id, "run-1");
+  assert.deepEqual(control.cleared, ["Work Shell closed."]);
+
+  await delay(10);
+  assert.equal(calls.snapshots.length, snapshotsBefore + 1);
+  assert.equal(calls.snapshots.at(-1)?.state, "running");
+
+  await delay(90);
+  assert.equal(publications.length, 1);
+  assert.equal(calls.snapshots.length, snapshotsBefore + 1);
+});
+
+test("WorkShellEngine keeps the console snapshot when a durable write fails and never leaks the failure text", async () => {
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    async persistWorkShellSessionSnapshot() {
+      throw new Error("ENOSPC: no space left on device, write '/tmp/.state/sessions/work.jsonl'");
+    },
+  });
+  await engine.initialize();
+
+  emitRunStarted(emitTrace, "run-1");
+  await delay(90);
+
+  assert.equal(engine.getState().agentConsole.agents.length, 1);
+  assert.equal(engine.getState().agentConsole.agents[0]?.id, "run-1");
+  assert.equal(
+    engine.getState().entries.some((entry) => entry.text.includes("ENOSPC")),
+    false,
+  );
+
+  engine.dispose();
+});
+
+test("WorkShellEngine treats a cleared work turn as cancellation, not assistant output", async () => {
+  const bridged = [];
+  const memories = [];
+  const recorded = [];
+  const prompts = [];
+  const { engine, calls } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      updateMode() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        prompts.push(prompt);
+        return { text: "Work turn cancelled by the operator.", cancelled: true };
+      },
+    },
+    async publishContextBridge({ summary }) {
+      bridged.push(summary);
+      return { bridgeId: "bridge-cancelled", line: summary };
+    },
+    async writeScopedMemory({ scope, summary }) {
+      memories.push(summary);
+      return { memoryId: `${scope}:${summary}` };
+    },
+    recordTurn(turn) {
+      recorded.push(turn);
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("run the plan");
+
+  assert.deepEqual(prompts, ["run the plan"]);
+  const entries = engine.getState().entries;
+  assert.equal(entries.some((entry) => entry.role === "assistant"), false);
+  assert.ok(entries.some(
+    (entry) => entry.role === "system" && entry.text.includes("Work turn cancelled by the operator."),
+  ));
+  assert.deepEqual(bridged, []);
+  assert.deepEqual(memories, []);
+  assert.deepEqual(recorded.map((turn) => turn.status), ["cancelled"]);
+  assert.equal(engine.getState().isBusy, false);
+  assert.equal(engine.getState().streamingAssistantText, undefined);
+  assert.equal(calls.snapshots.at(-1)?.state, "idle");
+});
+
+async function waitFor(predicate, label) {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (predicate()) {
+      return;
+    }
+    await delay(5);
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+}
+
+function emitToolStarted(emitTrace, toolCallId, extra = {}) {
+  emitTrace({
+    type: "tool.started",
+    toolCallId,
+    toolName: "read_file",
+    input: { i: "Reading session state", path: "state.json" },
+    startedAt: 30,
+    ...extra,
+  });
+}
+
+function emitToolCompleted(emitTrace, toolCallId, extra = {}) {
+  emitTrace({
+    type: "tool.completed",
+    toolCallId,
+    toolName: "read_file",
+    status: "completed",
+    startedAt: 30,
+    completedAt: 40,
+    durationMs: 10,
+    ...extra,
+  });
+}
+
+test("WorkShellEngine keeps a tool lifecycle burst out of the subscriber fan-out until the publish window", async () => {
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    formatAgentTraceLine(event) {
+      if (event.type === "tool.started") return "→ read state.json";
+      if (event.type === "tool.completed") return `✓ read ${event.toolCallId}`;
+      return "";
+    },
+  });
+  await engine.initialize();
+
+  const notifications = [];
+  engine.subscribe((state) => notifications.push(state));
+
+  emitRunStarted(emitTrace, "run-1", { jobId: "job-1" });
+  emitToolStarted(emitTrace, "call-1", { agentRunId: "run-1", asyncJobId: "job-1" });
+  emitToolCompleted(emitTrace, "call-1", { agentRunId: "run-1", asyncJobId: "job-1" });
+  // The operator's own tool call rides the same burst. It is the only one of
+  // the two whose line may move the shell's busy status or reach the
+  // transcript, and it still has to wait for the publish window to do it.
+  emitToolStarted(emitTrace, "call-main");
+  emitToolCompleted(emitTrace, "call-main");
+  emitTrace({
+    type: "agent.run.settled",
+    runId: "run-1",
+    jobId: "job-1",
+    status: "completed",
+    completedAt: 50,
+    summary: "Executor completed.",
+  });
+
+  // Busy status and the tool trace entry are lifecycle effects too: none of
+  // them may reach a subscriber before the publish window closes. The busy
+  // line is the operator's own tool completion — the delegated run's
+  // completion (call-1) never reaches the shell status.
+  assert.equal(notifications.length, 0);
+  assert.equal(engine.getState().busyStatus, "✓ read call-main");
+  assert.equal(engine.getState().agentConsole.activity.length, 2);
+
+  await delay(200);
+
+  assert.equal(notifications.length, 1);
+  const published = notifications[0];
+  assert.equal(published.agentConsole.activity.length, 2);
+  assert.equal(published.agentConsole.activity[0]?.status, "completed");
+  assert.equal(published.agentConsole.activity[1]?.status, "completed");
+  assert.equal(published.agentConsole.agents[0]?.status, "completed");
+  assert.equal(published.agentConsole.agents[0]?.currentActivity, undefined);
+  // Completed-tool lines are live status (and verbose transcript), not
+  // minimal transcript entries — for either scope.
+  assert.ok(
+    !published.entries.some((entry) => entry.text === "✓ read call-main"),
+    "minimal trace mode keeps completed-tool lines out of the transcript",
+  );
+  assert.ok(
+    !published.entries.some((entry) => entry.text === "✓ read call-1"),
+    "a delegated run's tool output belongs to the console, never to the transcript",
+  );
+});
+
+test("WorkShellEngine keeps executor-scoped turn traces off the main transcript and busy clock", async () => {
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    formatAgentTraceLine(event) {
+      if (event.type === "turn.started") return `thinking ${event.prompt}`;
+      if (event.type === "turn.completed") return `done ${event.durationMs}`;
+      return "";
+    },
+  });
+  await engine.initialize();
+  // Verbose is the strictest setting: every formatted line it sees becomes a
+  // transcript entry, so nothing can hide behind a quiet formatter.
+  await engine.handleSubmit("/verbose");
+  assert.equal(engine.getState().traceMode, "verbose");
+
+  const entriesBefore = engine.getState().entries.length;
+  const scope = { agentRunId: "run-1", asyncJobId: "job-1" };
+
+  emitRunStarted(emitTrace, "run-1", { jobId: "job-1" });
+  emitTrace({
+    type: "turn.started",
+    provider: "openai",
+    model: "gpt-5.4",
+    prompt: "map the runtime",
+    startedAt: 0,
+    ...scope,
+  });
+  emitTrace({ type: "assistant.delta", delta: "executor thinking out loud", ...scope });
+  emitTrace({ type: "turn.completed", durationMs: 12, ...scope });
+  await delay(200);
+
+  assert.equal(engine.getState().isBusy, false, "a delegated turn is not the operator's turn");
+  assert.equal(engine.getState().busyStatus, undefined);
+  assert.equal(engine.getState().currentTurnStartedAt, undefined);
+  assert.equal(
+    engine.getState().streamingAssistantText,
+    undefined,
+    "an executor never streams into the main transcript",
+  );
+  assert.deepEqual(engine.getState().traceLines, []);
+  assert.deepEqual(
+    engine.getState().entries.slice(entriesBefore).map((entry) => entry.text),
+    [],
+    "no executor-scoped line may reach the operator's transcript",
+  );
+  // Scoping decides who owns a trace, not whether the console spine reduces
+  // it: the run and its job are still there.
+  assert.equal(engine.getState().agentConsole.agents[0]?.id, "run-1");
+  assert.equal(engine.getState().agentConsole.jobs[0]?.agentRunId, "run-1");
+
+  // The skip is scoped, not a blanket mute: the operator's own turn still
+  // drives the shell exactly as it did before.
+  emitTrace({
+    type: "turn.started",
+    provider: "openai",
+    model: "gpt-5.4",
+    prompt: "inspect repo",
+    startedAt: 0,
+  });
+  await delay(200);
+
+  assert.match(engine.getState().busyStatus ?? "", /thinking/i);
+  assert.doesNotMatch(
+    engine.getState().busyStatus ?? "",
+    /map the runtime/,
+    "the delegated prompt never reaches the operator's status line",
+  );
+  assert.ok(engine.getState().traceLines.some((line) => /thinking inspect repo/.test(line)));
+});
+
+test("WorkShellEngine reduces lifecycle events from the newest decision and manifest state", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+    },
+  });
+  await engine.initialize();
+
+  emitToolStarted(emitTrace, "call-1");
+
+  const answer = interactionBridge.ask({
+    id: "decision-1",
+    title: "Execution choice",
+    questions: [{
+      id: "strategy",
+      question: "Choose execution strategy.",
+      options: [{ label: "Safe" }, { label: "Fast" }],
+      recommended: 0,
+    }],
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-1");
+
+  // The next lifecycle event must reduce from the newest mixed state, not from
+  // the pending snapshot captured before the decision opened.
+  emitToolCompleted(emitTrace, "call-1");
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-1");
+  assert.equal(engine.getState().agentConsole.activity[0]?.status, "completed");
+
+  await delay(200);
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-1");
+  assert.equal(engine.getState().agentConsole.activity[0]?.status, "completed");
+
+  await engine.handleSubmit("2");
+  assert.deepEqual(await answer, {
+    status: "answered",
+    answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
+
+  // A settled decision must not be resurrected by a later lifecycle reduction.
+  emitRunStarted(emitTrace, "run-late", { startedAt: 60 });
+  assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
+  assert.equal(engine.getState().agentConsole.agents[0]?.id, "run-late");
+  await delay(200);
+  assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
+});
+
+test("WorkShellEngine serializes checkpoint writes so an older snapshot cannot overwrite a newer one", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  // A console lifecycle write ("running") starts first and stays in flight.
+  emitRunStarted(emitTrace, "run-1");
+  await waitFor(() => writes.length === 2, "the console lifecycle checkpoint");
+  assert.equal(writes[1]?.snapshot.state, "running");
+
+  // A newer turn write is requested while the older one is unresolved.
+  const modePersist = engine.setMode("analyze");
+  await delay(60);
+  assert.equal(writes.length, 2);
+
+  writes[1].resolve();
+  await waitFor(() => writes.length === 3, "the queued mode checkpoint");
+  assert.equal(writes[2]?.snapshot.state, "idle");
+  writes[2].resolve();
+  await modePersist;
+
+  // Durable order matches request order, so the newer idle state wins.
+  assert.deepEqual(writes.map((write) => write.snapshot.state), ["idle", "running", "idle"]);
+
+  // A failed write must not wedge the queue.
+  const failing = engine.setMode("search");
+  await waitFor(() => writes.length === 4, "the failing checkpoint");
+  writes[3].reject(new Error("ENOSPC: no space left on device"));
+  await failing;
+
+  const recovered = engine.setMode("default");
+  await waitFor(() => writes.length === 5, "the checkpoint after a failure");
+  writes[4].resolve();
+  await recovered;
+  assert.equal(writes[4]?.snapshot.mode, "default");
+  assert.equal(
+    engine.getState().entries.some((entry) => entry.text.includes("ENOSPC")),
+    false,
+  );
+  // Dispose flushes the still-pending console write through the same queue.
+  emitRunStarted(emitTrace, "run-2", { startedAt: 70 });
+  engine.dispose();
+  await waitFor(() => writes.length === 6, "the dispose flush checkpoint");
+  assert.equal(writes[5]?.snapshot.state, "running");
+  assert.equal(writes[5]?.snapshot.agentConsole?.agents.length, 2);
+  writes[5].resolve();
+});
+
+// ---------------------------------------------------------------------------
+// Context Desk — "Pure Yazi" three-pane redesign (Groups → Sources → Preview).
+// ---------------------------------------------------------------------------
+
+// The groups pane walks the desk collections in CONTEXT_DESK_GROUPS descriptor
+// order and closes with the DELIVERY block. Empty collections stay navigable so
+// the pane and the rendered rows never disagree about which rows exist.
+const CONTEXT_DESK_COLLECTION_WALK = [
+  "all",
+  "guidance",
+  "conversation",
+  "memory",
+  "tools",
+  "attachments",
+  "other",
+  "sent",
+  "held",
+];
+
+function createContextDeskPacket() {
+  return {
+    id: "packet-context-desk",
+    version: 1,
+    generatedAt: "2026-08-11T00:00:00.000Z",
+    title: "Next answer context",
+    included: [
+      {
+        id: "guidance-agents",
+        category: "workspace",
+        label: "AGENTS.md",
+        reason: "repo instructions loaded",
+        preview: "Keep diffs small.",
+        tokenEstimate: 12,
+        includedInModel: true,
+      },
+      {
+        id: "conversation-history",
+        category: "condensed-history",
+        label: "Condensed history",
+        reason: "earlier turns summarized",
+        preview: "Three turns condensed.",
+        tokenEstimate: 20,
+        includedInModel: true,
+      },
+      {
+        id: "memory-note",
+        category: "memory",
+        label: "Project memory",
+        reason: "scoped memory recalled",
+        preview: "Prefer narrow diffs.",
+        tokenEstimate: 8,
+        includedInModel: true,
+      },
+      {
+        id: "tools-runtime",
+        category: "runtime",
+        label: "Runtime probe",
+        reason: "live runtime state",
+        preview: "Runtime is idle.",
+        tokenEstimate: 6,
+        includedInModel: true,
+      },
+      {
+        id: "attachments-image",
+        category: "attachment",
+        label: "screenshot.png",
+        reason: "attached this turn",
+        preview: "Image attached.",
+        tokenEstimate: 30,
+        includedInModel: true,
+      },
+    ],
+    // Guidance spans both delivery stages: the collection must gather the sent
+    // AGENTS.md row and this held-back prompt row together.
+    excluded: [
+      {
+        id: "held-guidance-prompt",
+        category: "provider-system-prompt",
+        label: "Configured prompt",
+        reason: "held back by policy",
+        preview: "Prompt text stays local.",
+        tokenEstimate: 22,
+        includedInModel: false,
+      },
+    ],
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: 5, excluded: 1, warnings: 0 },
+    tokenEstimate: 76,
+  };
+}
+
+function createContextDeskEngine(overrides = {}) {
+  const mutations = [];
+  const packet = createContextDeskPacket();
+  const { engine } = createEngine({
+    resolveContextPacket: async () => packet,
+    mutateContextSource(action) {
+      mutations.push(action);
+      return undefined;
+    },
+    ...overrides,
+  });
+
+  return {
+    engine,
+    mutations,
+    // Identity probe for the current selection. The pin key targets whatever
+    // source the desk has selected, and this fixture never re-ranks (the
+    // mutation is a no-op and the packet is static), so the recorded id names
+    // the selection without moving it. `undefined` means nothing is selected.
+    selectedSourceId: async () => {
+      const before = mutations.length;
+      await engine.toggleContextInspectorPin();
+      return mutations.length > before ? mutations.at(-1)?.id : undefined;
+    },
+  };
+}
+
+test("WorkShellEngine /context opens the Context Desk on the sources pane with the all-sources collection", async () => {
+  const { engine, mutations } = createContextDeskEngine();
+
+  await engine.initialize();
+  assert.equal(engine.getState().contextInspectorOpen, false);
+
+  await engine.handleSubmit("/context");
+
+  const opened = engine.getState();
+  assert.equal(opened.contextInspectorOpen, true);
+  assert.equal(opened.contextInspectorPane, "sources");
+  assert.equal(opened.contextInspectorCollection, "all");
+  assert.equal(opened.contextInspectorCursor, 0);
+  assert.equal(opened.contextInspectorExpanded, null);
+
+  // The default selection is the first source of the all-sources collection.
+  await engine.toggleContextInspectorPin();
+  assert.deepEqual(mutations, [{ kind: "pin", id: "guidance-agents" }]);
+});
+
+test("WorkShellEngine closing the Context Desk clears the open flag and reopening restores the default pane and collection", async () => {
+  const { engine } = createContextDeskEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+
+  engine.moveContextInspectorPane(-1);
+  engine.moveContextInspectorCursor(1);
+  assert.equal(engine.getState().contextInspectorPane, "groups");
+  assert.equal(engine.getState().contextInspectorCollection, "guidance");
+
+  engine.closeOverlay();
+  assert.equal(engine.getState().contextInspectorOpen, false);
+  assert.equal(engine.getState().contextInspectorCursor, -1);
+  assert.equal(engine.getState().contextInspectorExpanded, null);
+
+  await engine.handleSubmit("/context");
+  const reopened = engine.getState();
+  assert.equal(reopened.contextInspectorOpen, true);
+  assert.equal(reopened.contextInspectorPane, "sources");
+  assert.equal(reopened.contextInspectorCollection, "all");
+});
+
+test("WorkShellEngine closes the Context Desk when the operator submits a turn", async () => {
+  const { engine } = createContextDeskEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  assert.equal(engine.getState().panel.title, "Context expanded");
+  assert.equal(engine.getState().contextInspectorOpen, true);
+
+  // A turn submit retires the desk, so it stops owning the keyboard once the
+  // turn starts. (Builtin reloads keep the desk open — pinned separately
+  // above; this ledger-less engine closes after packet preparation, which is
+  // what keeps the previewed-packet reuse contract intact.)
+  await engine.handleSubmit("ship the reviewed change");
+
+  const submitted = engine.getState();
+  assert.equal(submitted.panel.title, "Context");
+  assert.equal(submitted.contextInspectorOpen, false);
+  assert.equal(submitted.contextInspectorCursor, -1);
+  assert.equal(submitted.contextInspectorExpanded, null);
+});
+
+test("WorkShellEngine retires the Context Desk before the ledger resolves the turn packet", async () => {
+  let releaseResolve;
+  const gate = new Promise((resolve) => {
+    releaseResolve = resolve;
+  });
+  const { engine, setResolveGate } = createLifecycleLedgerHarness();
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  assert.equal(engine.getState().panel.title, "Context expanded");
+  assert.equal(engine.getState().contextInspectorOpen, true);
+
+  setResolveGate(() => gate);
+  const turn = engine.handleSubmit("ship the reviewed change");
+
+  // While packet resolution is still parked on the gate, the desk has already
+  // left the screen: on ledger engines the submit retires it up front instead
+  // of waiting out the prepare cycle.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(engine.getState().panel.title, "Context");
+  assert.equal(engine.getState().contextInspectorOpen, false);
+
+  releaseResolve();
+  await turn;
+  assert.equal(engine.getState().contextInspectorOpen, false);
+  assert.equal(engine.getState().contextInspectorCursor, -1);
+});
+
+test("WorkShellEngine Context Desk pane movement clamps at the groups and preview edges", async () => {
+  const { engine } = createContextDeskEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+
+  const panes = [engine.getState().contextInspectorPane];
+  for (const direction of [-1, -1, 1, 1, 1, 1]) {
+    engine.moveContextInspectorPane(direction);
+    panes.push(engine.getState().contextInspectorPane);
+  }
+
+  // Groups is the left edge and preview the right edge: neither wraps.
+  assert.deepEqual(panes, [
+    "sources",
+    "groups",
+    "groups",
+    "sources",
+    "preview",
+    "preview",
+    "preview",
+  ]);
+});
+
+test("WorkShellEngine groups-pane movement walks every desk collection and reanchors the sources selection", async () => {
+  const { engine, mutations, selectedSourceId } = createContextDeskEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  engine.moveContextInspectorPane(-1);
+
+  const walked = [engine.getState().contextInspectorCollection];
+  for (let step = 1; step < CONTEXT_DESK_COLLECTION_WALK.length; step += 1) {
+    engine.moveContextInspectorCursor(1);
+    walked.push(engine.getState().contextInspectorCollection);
+  }
+  // `other` owns no fixture source, yet the groups pane still stops on it.
+  assert.deepEqual(walked, CONTEXT_DESK_COLLECTION_WALK);
+
+  for (let step = 1; step < CONTEXT_DESK_COLLECTION_WALK.length; step += 1) {
+    engine.moveContextInspectorCursor(-1);
+  }
+  assert.equal(engine.getState().contextInspectorCollection, "all");
+
+  // Selecting a group reanchors the sources pane on that group's first source.
+  engine.moveContextInspectorCursor(1); // guidance
+  engine.moveContextInspectorCursor(1); // conversation
+  engine.moveContextInspectorCursor(1); // memory
+  engine.moveContextInspectorCursor(1); // tools
+  assert.equal(engine.getState().contextInspectorCollection, "tools");
+  engine.moveContextInspectorPane(1);
+  assert.equal(await selectedSourceId(), "tools-runtime");
+
+  // An empty collection leaves nothing selected, so source keys do nothing.
+  engine.moveContextInspectorPane(-1);
+  engine.moveContextInspectorCursor(1); // attachments
+  engine.moveContextInspectorCursor(1); // other
+  assert.equal(engine.getState().contextInspectorCollection, "other");
+  engine.moveContextInspectorPane(1);
+  assert.equal(engine.getState().contextInspectorCursor, -1);
+  assert.equal(await selectedSourceId(), undefined);
+
+  // The delivery collections reanchor the same way as the group collections.
+  engine.moveContextInspectorPane(-1);
+  engine.moveContextInspectorCursor(1); // sent
+  engine.moveContextInspectorCursor(1); // held
+  assert.equal(engine.getState().contextInspectorCollection, "held");
+  engine.moveContextInspectorPane(1);
+  assert.equal(await selectedSourceId(), "held-guidance-prompt");
+
+  assert.deepEqual(mutations.map((mutation) => mutation.id), [
+    "tools-runtime",
+    "held-guidance-prompt",
+  ]);
+});
+
+test("WorkShellEngine sources-pane movement never leaves the active desk collection", async () => {
+  const { engine, selectedSourceId } = createContextDeskEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+
+  engine.moveContextInspectorPane(-1);
+  engine.moveContextInspectorCursor(1);
+  assert.equal(engine.getState().contextInspectorCollection, "guidance");
+  engine.moveContextInspectorPane(1);
+
+  const visited = [await selectedSourceId()];
+  for (const direction of [1, 1, 1, -1, -1]) {
+    engine.moveContextInspectorCursor(direction);
+    visited.push(await selectedSourceId());
+  }
+
+  assert.equal(visited.length, 6);
+  assert.equal(visited[0], "guidance-agents");
+  // Two members means the first move must actually move.
+  assert.notEqual(visited[1], visited[0]);
+  for (const id of visited) {
+    assert.ok(
+      id === "guidance-agents" || id === "held-guidance-prompt",
+      `sources pane selected ${id}, which is outside the guidance collection`,
+    );
+  }
+});
+
+test("WorkShellEngine Context Desk page movement jumps to the active collection bounds", async () => {
+  const { engine, selectedSourceId } = createContextDeskEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+
+  engine.moveContextInspectorPane(-1);
+  engine.moveContextInspectorCursor(1);
+  engine.moveContextInspectorPane(1);
+  assert.equal(await selectedSourceId(), "guidance-agents");
+
+  // A page is at least one row and paging clamps instead of wrapping, so a
+  // page down inside the two-source guidance collection lands on its last row
+  // and stays there; a page up returns to the first row and stays there.
+  engine.moveContextInspectorPage(1);
+  assert.equal(await selectedSourceId(), "held-guidance-prompt");
+  engine.moveContextInspectorPage(1);
+  assert.equal(await selectedSourceId(), "held-guidance-prompt");
+  engine.moveContextInspectorPage(-1);
+  assert.equal(await selectedSourceId(), "guidance-agents");
+  engine.moveContextInspectorPage(-1);
+  assert.equal(await selectedSourceId(), "guidance-agents");
+});
+
+test("WorkShellEngine Context Desk keys stay inert when the desk is closed behind a panel titled like the desk", async () => {
+  const { engine, mutations } = createContextDeskEngine({
+    // A collapsed context panel whose title collides with the desk overlay
+    // title. Desk navigation must key off contextInspectorOpen, never off the
+    // panel title alone.
+    buildContextPanel() {
+      return { title: "Context expanded", lines: ["Loaded guidance: AGENTS.md"] };
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  engine.closeOverlay();
+
+  const closed = engine.getState();
+  assert.equal(closed.contextInspectorOpen, false);
+  assert.equal(closed.panel.title, "Context expanded");
+  assert.ok(closed.contextPacket, "the resolved packet stays cached after the desk closes");
+  assert.equal(closed.contextInspectorCursor, -1);
+
+  const paneBeforeKeys = closed.contextInspectorPane;
+  const collectionBeforeKeys = closed.contextInspectorCollection;
+
+  engine.moveContextInspectorCursor(1);
+  engine.moveContextInspectorCursor(-1);
+  assert.equal(engine.getState().contextInspectorCursor, -1);
+
+  engine.moveContextInspectorPane(1);
+  engine.moveContextInspectorPane(-1);
+  engine.moveContextInspectorPage(1);
+  engine.moveContextInspectorPage(-1);
+  await engine.toggleContextInspectorPin();
+  await engine.forgetContextSourceAtCursor();
+  await engine.includeContextSourceAtCursor();
+  await engine.toggleContextInspectorExpanded();
+
+  const after = engine.getState();
+  assert.equal(after.contextInspectorOpen, false);
+  assert.equal(after.contextInspectorCursor, -1);
+  assert.equal(after.contextInspectorPane, paneBeforeKeys);
+  assert.equal(after.contextInspectorCollection, collectionBeforeKeys);
+  assert.equal(after.contextInspectorExpanded, null);
+  assert.deepEqual(mutations, []);
+});
+
+test("WorkShellEngine groups-pane reanchoring to a different source clears the previous expansion", async () => {
+  const { engine, selectedSourceId } = createContextDeskEngine({
+    resolveContextSourceDetail: async (sourceId) =>
+      sourceId === "guidance-agents"
+        ? "# AGENTS.md\nKeep diffs small.\nPrefer narrow changes."
+        : undefined,
+  });
+  engine.updateTerminalRows(32);
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+
+  // Expand the all-collection anchor and scroll it, so both the expansion and
+  // its local detail are demonstrably attached to that one source.
+  await engine.toggleContextInspectorExpanded();
+  const expandedSourceId = engine.getState().contextInspectorExpanded;
+  assert.equal(expandedSourceId, "guidance-agents");
+  assert.match(engine.getState().contextInspectorDetailContent ?? "", /Prefer narrow changes\./);
+  engine.moveContextInspectorDetailOffset(1);
+  assert.equal(engine.getState().contextInspectorDetailOffset, 1);
+
+  // Walk the groups pane past `guidance` — which still owns the expanded row —
+  // and stop on `conversation`, whose only member is a different source.
+  engine.moveContextInspectorPane(-1);
+  engine.moveContextInspectorCursor(1); // guidance
+  engine.moveContextInspectorCursor(1); // conversation
+  assert.equal(engine.getState().contextInspectorCollection, "conversation");
+  engine.moveContextInspectorPane(1);
+
+  // Snapshot before probing identity: the probe pins the selection, and the
+  // continuity claim is about the state the reanchor itself left behind.
+  const afterReanchor = engine.getState();
+  assert.notEqual(await selectedSourceId(), expandedSourceId);
+  assert.equal(await selectedSourceId(), "conversation-history");
+
+  // PREVIEW must follow the newly selected source rather than keep rendering
+  // the old one's expansion and scrolled detail.
+  assert.equal(afterReanchor.contextInspectorExpanded, null);
+  assert.equal(afterReanchor.contextInspectorDetailContent, undefined);
+  assert.equal(afterReanchor.contextInspectorDetailOffset, 0);
+});
+
+test("WorkShellEngine preview-pane focus scrolls the ordinary selected preview without expanding the row", async () => {
+  // The preview pane renders the selected row's own preview text whenever the
+  // row is collapsed, and the desk footer advertises "↑↓ scroll" for exactly
+  // that state. A preview long enough to overflow any plausible viewport makes
+  // the scroll observable no matter how the offset is clamped.
+  const base = createContextDeskPacket();
+  const scrollablePreview = Array.from(
+    { length: 24 },
+    (_, line) => `AGENTS.md line ${line + 1}`,
+  ).join("\n");
+  const packet = {
+    ...base,
+    included: base.included.map((item, index) =>
+      index === 0 ? { ...item, preview: scrollablePreview } : item
+    ),
+  };
+  // No `resolveContextSourceDetail`: the pane must scroll on the packet's own
+  // preview, without any resolved detail body to fall back on.
+  const { engine, selectedSourceId } = createContextDeskEngine({
+    resolveContextPacket: async () => packet,
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+
+  // An ordinary, unexpanded source is selected before focus reaches PREVIEW.
+  assert.equal(engine.getState().contextInspectorPane, "sources");
+  assert.equal(engine.getState().contextInspectorExpanded, null);
+  assert.equal(await selectedSourceId(), "guidance-agents");
+  assert.equal(engine.getState().contextInspectorCursor, 0);
+
+  engine.moveContextInspectorPane(1);
+  assert.equal(engine.getState().contextInspectorPane, "preview");
+
+  engine.moveContextInspectorCursor(1);
+  const afterLineDown = engine.getState();
+  // The scroll belongs to the pane, not to an expansion: neither an expanded
+  // id nor a resolved detail body may be required to make the body move.
+  assert.equal(afterLineDown.contextInspectorExpanded, null);
+  assert.equal(afterLineDown.contextInspectorDetailContent, undefined);
+  assert.equal(afterLineDown.contextInspectorDetailOffset, 1);
+  // Scrolling the preview never moves the sources selection.
+  assert.equal(afterLineDown.contextInspectorCursor, 0);
+
+  engine.moveContextInspectorCursor(-1);
+  assert.equal(engine.getState().contextInspectorDetailOffset, 0);
+
+  // A page is a block of rows, so a page down on a 24-line preview has to
+  // travel further than the single-line key did.
+  engine.moveContextInspectorPage(1);
+  const afterPageDown = engine.getState();
+  assert.equal(afterPageDown.contextInspectorExpanded, null);
+  assert.ok(
+    afterPageDown.contextInspectorDetailOffset > 1,
+    `preview page down left the offset at ${afterPageDown.contextInspectorDetailOffset}`,
+  );
+
+  engine.moveContextInspectorPage(-1);
+  assert.equal(engine.getState().contextInspectorDetailOffset, 0);
+  assert.equal(engine.getState().contextInspectorCursor, 0);
+});
+
+/**
+ * A desk whose delivery stage actually moves. Holding a row back drops it out
+ * of the `sent` collection — which is what makes the filtered collection the
+ * sharp case: the cursor cannot stay on the row it was pointing at, so any
+ * state keyed to that row has to travel with it. `undo` puts the row back.
+ */
+function createDeliveryDeskEngine() {
+  const base = createContextDeskPacket();
+  const rows = [...base.included, ...base.excluded];
+  const heldIds = new Set(["held-guidance-prompt"]);
+  const mutations = [];
+  let lastDeliveryMutation;
+  let revision = 0;
+
+  const buildPacket = () => {
+    revision += 1;
+    const included = rows
+      .filter((item) => !heldIds.has(item.id))
+      .map((item) => ({ ...item, includedInModel: true }));
+    const excluded = rows
+      .filter((item) => heldIds.has(item.id))
+      .map((item) => ({ ...item, includedInModel: false }));
+    return {
+      ...base,
+      id: `packet-delivery-${revision}`,
+      included,
+      excluded,
+      sourceCounts: { included: included.length, excluded: excluded.length, warnings: 0 },
+    };
+  };
+
+  const { engine } = createEngine({
+    resolveContextPacket: async () => buildPacket(),
+    resolveContextSourceDetail: async (sourceId) =>
+      [`# ${sourceId}`, ...Array.from({ length: 6 }, (_, line) => `${sourceId} body ${line + 1}`)]
+        .join("\n"),
+    mutateContextSource(action) {
+      mutations.push(action);
+      if (action.kind === "forget") {
+        heldIds.add(action.id);
+        lastDeliveryMutation = action;
+      }
+      if (action.kind === "include") {
+        heldIds.delete(action.id);
+        lastDeliveryMutation = action;
+      }
+      return {
+        id: `receipt-${mutations.length}`,
+        action: action.kind === "forget" ? "hold-back" : action.kind,
+        sourceId: action.id,
+        sourceLabel: action.id,
+        message: `${action.kind} ${action.id}`,
+        canUndo: true,
+        succeeded: true,
+      };
+    },
+    undoContextSourceAction() {
+      const undone = lastDeliveryMutation;
+      if (undone === undefined) {
+        return undefined;
+      }
+      if (undone.kind === "forget") {
+        heldIds.delete(undone.id);
+      } else {
+        heldIds.add(undone.id);
+      }
+      lastDeliveryMutation = undefined;
+      return {
+        id: "receipt-delivery-undo",
+        action: "undo",
+        sourceId: undone.id,
+        sourceLabel: undone.id,
+        message: `undid ${undone.kind} ${undone.id}`,
+        canUndo: false,
+        succeeded: true,
+      };
+    },
+  });
+
+  return {
+    engine,
+    mutations,
+    // Same identity probe the other desk tests use: pin targets the selected
+    // row, and pinning never re-ranks this fixture, so the recorded id names
+    // the selection without moving it.
+    selectedSourceId: async () => {
+      const before = mutations.length;
+      await engine.toggleContextInspectorPin();
+      return mutations.length > before ? mutations.at(-1)?.id : undefined;
+    },
+    // Focus the DELIVERY `sent` collection through the groups pane and hand
+    // focus back to the sources pane on its first row.
+    focusSentCollection: () => {
+      engine.moveContextInspectorPane(-1);
+      for (
+        let step = 0;
+        step < CONTEXT_DESK_COLLECTION_WALK.length
+          && engine.getState().contextInspectorCollection !== "sent";
+        step += 1
+      ) {
+        engine.moveContextInspectorCursor(1);
+      }
+      engine.moveContextInspectorPane(1);
+    },
+  };
+}
+
+test("WorkShellEngine holding back the selected row in a filtered collection clears the expansion the cursor no longer targets", async () => {
+  const { engine, selectedSourceId, focusSentCollection } = createDeliveryDeskEngine();
+  engine.updateTerminalRows(32);
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  focusSentCollection();
+  assert.equal(engine.getState().contextInspectorCollection, "sent");
+
+  // Expand and scroll the first sent row, so both the expansion and its local
+  // offset are demonstrably attached to that one source.
+  await engine.toggleContextInspectorExpanded();
+  const expandedSourceId = engine.getState().contextInspectorExpanded;
+  assert.equal(expandedSourceId, "guidance-agents");
+  assert.match(engine.getState().contextInspectorDetailContent ?? "", /guidance-agents body 1/);
+  engine.moveContextInspectorDetailOffset(1);
+  assert.equal(engine.getState().contextInspectorDetailOffset, 1);
+
+  // Space on a sent row holds it back, which drops it out of `sent` entirely.
+  await engine.forgetContextSourceAtCursor();
+
+  // Snapshot before probing identity: the probe pins the selection, and the
+  // claim is about the state the mutation itself left behind.
+  const afterHold = engine.getState();
+  assert.equal(afterHold.contextInspectorCollection, "sent");
+  assert.equal(
+    engine.getState().contextPacket?.excluded.some((item) => item.id === expandedSourceId),
+    true,
+    "the held-back row must actually leave the sent collection",
+  );
+  assert.notEqual(await selectedSourceId(), expandedSourceId);
+  assert.equal(await selectedSourceId(), "conversation-history");
+
+  // The cursor now targets a different row, so PREVIEW must not keep rendering
+  // the departed row's body at the departed row's scroll offset.
+  assert.equal(afterHold.contextInspectorExpanded, null);
+  assert.equal(afterHold.contextInspectorDetailContent, undefined);
+  assert.equal(afterHold.contextInspectorDetailOffset, 0);
+});
+
+test("WorkShellEngine undoing a hold-back clears the expansion the restored cursor no longer targets", async () => {
+  const { engine, selectedSourceId, focusSentCollection } = createDeliveryDeskEngine();
+  engine.updateTerminalRows(32);
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  focusSentCollection();
+  assert.equal(engine.getState().contextInspectorCollection, "sent");
+
+  // Hold back the first sent row with nothing expanded; the cursor reanchors
+  // onto the row that took its place.
+  await engine.forgetContextSourceAtCursor();
+  assert.equal(engine.getState().contextActionReceipt?.canUndo, true);
+  assert.equal(await selectedSourceId(), "conversation-history");
+
+  // Expand and scroll the replacement row.
+  await engine.toggleContextInspectorExpanded();
+  const expandedSourceId = engine.getState().contextInspectorExpanded;
+  assert.equal(expandedSourceId, "conversation-history");
+  assert.match(engine.getState().contextInspectorDetailContent ?? "", /conversation-history body 1/);
+  engine.moveContextInspectorDetailOffset(1);
+  assert.equal(engine.getState().contextInspectorDetailOffset, 1);
+
+  // Undo restores the held-back row, and the undo refresh remaps the cursor
+  // back onto it — off the row that is still expanded.
+  await engine.undoLastContextSourceAction();
+
+  const afterUndo = engine.getState();
+  assert.equal(afterUndo.contextActionReceipt?.action, "undo");
+  assert.notEqual(await selectedSourceId(), expandedSourceId);
+  assert.equal(await selectedSourceId(), "guidance-agents");
+
+  assert.equal(afterUndo.contextInspectorExpanded, null);
+  assert.equal(afterUndo.contextInspectorDetailContent, undefined);
+  assert.equal(afterUndo.contextInspectorDetailOffset, 0);
+});
+
+test("WorkShellEngine page keys scroll the expanded detail instead of walking the sources cursor behind it", async () => {
+  // Enter expands a row without leaving the sources pane, and the line keys
+  // already hand the expanded row its own scroll from there. PgDn/PgUp are the
+  // same gesture at page granularity, so they must page the open detail rather
+  // than move a selection the user cannot currently see.
+  const detailBody = [
+    "# AGENTS.md",
+    ...Array.from({ length: 23 }, (_, line) => `AGENTS.md body ${line + 1}`),
+  ].join("\n");
+  const { engine, selectedSourceId } = createContextDeskEngine({
+    resolveContextSourceDetail: async (sourceId) =>
+      sourceId === "guidance-agents" ? detailBody : undefined,
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+
+  const opened = engine.getState();
+  assert.equal(opened.contextInspectorPane, "sources");
+  assert.equal(opened.contextInspectorCursor, 0);
+  // A page has to be able to move this cursor, otherwise the "cursor stays
+  // put" claim below would hold for the wrong reason.
+  assert.equal(
+    (opened.contextPacket?.included.length ?? 0) + (opened.contextPacket?.excluded.length ?? 0),
+    6,
+    "the all-sources collection must be shorter than a page and longer than one row",
+  );
+
+  await engine.toggleContextInspectorExpanded();
+  assert.equal(engine.getState().contextInspectorExpanded, "guidance-agents");
+  assert.equal(engine.getState().contextInspectorDetailContent, detailBody);
+  assert.equal(engine.getState().contextInspectorDetailOffset, 0);
+  // The pane never moved: Enter expands in place, so PgDn arrives with focus
+  // still nominally on `sources`.
+  assert.equal(engine.getState().contextInspectorPane, "sources");
+
+  engine.moveContextInspectorPage(1);
+  const afterPageDown = engine.getState();
+  assert.ok(
+    afterPageDown.contextInspectorDetailOffset > 1,
+    `page down left the expanded detail at offset ${afterPageDown.contextInspectorDetailOffset}`,
+  );
+  assert.equal(afterPageDown.contextInspectorCursor, 0);
+  assert.equal(afterPageDown.contextInspectorExpanded, "guidance-agents");
+  assert.equal(afterPageDown.contextInspectorDetailContent, detailBody);
+
+  engine.moveContextInspectorPage(-1);
+  const afterPageUp = engine.getState();
+  assert.equal(afterPageUp.contextInspectorDetailOffset, 0);
+  assert.equal(afterPageUp.contextInspectorCursor, 0);
+  assert.equal(afterPageUp.contextInspectorExpanded, "guidance-agents");
+
+  // The row under the open detail is still the row the detail belongs to.
+  assert.equal(await selectedSourceId(), "guidance-agents");
+});
+
+test("WorkShellEngine page keys move the expanded detail by a page from wherever it is already scrolled", async () => {
+  // Paging an open detail is relative motion, not a jump to a fixed anchor:
+  // PgDn from a mid-body offset has to advance a page from *there*, and PgUp
+  // has to give that same page back, clamping at the top rather than
+  // underflowing. A body far longer than a page keeps the downward move off
+  // the bottom clamp, so the observed delta names the page size itself.
+  const detailBody = [
+    "# AGENTS.md",
+    ...Array.from({ length: 59 }, (_, line) => `AGENTS.md body ${line + 1}`),
+  ].join("\n");
+  const { engine, selectedSourceId } = createContextDeskEngine({
+    resolveContextSourceDetail: async (sourceId) =>
+      sourceId === "guidance-agents" ? detailBody : undefined,
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+
+  const opened = engine.getState();
+  assert.equal(opened.contextInspectorPane, "sources");
+  assert.equal(opened.contextInspectorCursor, 0);
+  // A page must be able to walk this collection, otherwise "the cursor stayed
+  // put" would hold for the wrong reason.
+  assert.equal(
+    (opened.contextPacket?.included.length ?? 0) + (opened.contextPacket?.excluded.length ?? 0),
+    6,
+    "the all-sources collection must be shorter than a page and longer than one row",
+  );
+
+  await engine.toggleContextInspectorExpanded();
+  assert.equal(engine.getState().contextInspectorExpanded, "guidance-agents");
+  assert.equal(engine.getState().contextInspectorDetailContent, detailBody);
+
+  // Scroll the open detail to a known, non-zero starting offset with the line
+  // key, which already belongs to the expansion. Enter never left `sources`,
+  // so the page keys arrive with focus still nominally on the source list.
+  const startOffset = 3;
+  for (let line = 0; line < startOffset; line += 1) {
+    engine.moveContextInspectorDetailOffset(1);
+  }
+  assert.equal(engine.getState().contextInspectorDetailOffset, startOffset);
+  assert.equal(engine.getState().contextInspectorPane, "sources");
+
+  engine.moveContextInspectorPage(1);
+  const afterPageDown = engine.getState();
+  const pageSize = afterPageDown.contextInspectorDetailOffset - startOffset;
+  assert.ok(
+    pageSize > 1,
+    `page down from offset ${startOffset} left the expanded detail at `
+      + `${afterPageDown.contextInspectorDetailOffset}`,
+  );
+  // The body is long enough that a page cannot have hit the bottom clamp.
+  assert.ok(
+    afterPageDown.contextInspectorDetailOffset < detailBody.split("\n").length - 1,
+    "the fixture body must outrun a single page so the delta is a true page",
+  );
+  assert.equal(afterPageDown.contextInspectorCursor, 0);
+  assert.equal(afterPageDown.contextInspectorExpanded, "guidance-agents");
+  assert.equal(afterPageDown.contextInspectorDetailContent, detailBody);
+
+  // PgUp is the same page in reverse: back to exactly where PgDn started.
+  engine.moveContextInspectorPage(-1);
+  const afterPageUp = engine.getState();
+  assert.equal(afterPageUp.contextInspectorDetailOffset, startOffset);
+  assert.equal(afterPageUp.contextInspectorCursor, 0);
+  assert.equal(afterPageUp.contextInspectorExpanded, "guidance-agents");
+
+  // A second PgUp has less than a page left above it, so it clamps at the top
+  // of the body instead of running the offset negative.
+  engine.moveContextInspectorPage(-1);
+  const afterTopClamp = engine.getState();
+  assert.equal(afterTopClamp.contextInspectorDetailOffset, Math.max(0, startOffset - pageSize));
+  assert.equal(afterTopClamp.contextInspectorCursor, 0);
+  assert.equal(afterTopClamp.contextInspectorExpanded, "guidance-agents");
+  assert.equal(afterTopClamp.contextInspectorDetailContent, detailBody);
+
+  // Every page key acted on the detail, never on the list hidden behind it.
+  assert.equal(await selectedSourceId(), "guidance-agents");
+});
+
+/**
+ * A desk parked on the unselected sentinel with rows underneath it.
+ *
+ * `/context` anchors the cursor on row 0, and every reanchor path clamps a
+ * negative cursor back to 0, so the only way to observe the sentinel over a
+ * *populated* collection is to reach it while the packet is empty — the
+ * sources key clears the cursor to -1 when the active collection draws no
+ * rows — and then let `/reload` re-resolve a populated packet. That reload is
+ * the refresh that rewrites the packet without also rewriting the cursor,
+ * which is the state a user lands in when context arrives while the desk is
+ * already open and nothing is selected.
+ */
+async function createSentinelDeskEngine() {
+  const populated = createContextDeskPacket();
+  let packet = {
+    ...populated,
+    id: "packet-context-desk-empty",
+    included: [],
+    excluded: [],
+    sourceCounts: { included: 0, excluded: 0, warnings: 0 },
+    tokenEstimate: 0,
+  };
+  const harness = createContextDeskEngine({
+    resolveContextPacket: async () => packet,
+  });
+
+  await harness.engine.initialize();
+  await harness.engine.handleSubmit("/context");
+  // An empty collection has no row to hold, so the sources key retires the
+  // opening anchor to the sentinel instead of pointing past the last row.
+  harness.engine.moveContextInspectorCursor(1);
+  packet = populated;
+  await harness.engine.handleSubmit("/reload");
+  return harness;
+}
+
+test("WorkShellEngine desk sources keys resolve the unselected sentinel to the first row going down and the last row going up", async () => {
+  const down = await createSentinelDeskEngine();
+
+  const parked = down.engine.getState();
+  assert.equal(parked.contextInspectorOpen, true);
+  assert.equal(parked.contextInspectorPane, "sources");
+  assert.equal(parked.contextInspectorCollection, "all");
+  assert.equal(
+    parked.contextInspectorCursor,
+    -1,
+    "the desk must be parked on the unselected sentinel for this claim to mean anything",
+  );
+  assert.equal(
+    (parked.contextPacket?.included.length ?? 0) + (parked.contextPacket?.excluded.length ?? 0),
+    6,
+    "the active collection must be populated while the cursor is the sentinel",
+  );
+  // -1 is "nothing selected", not "row zero": no source key may act yet.
+  assert.equal(await down.selectedSourceId(), undefined);
+
+  // Down out of the sentinel enters the list at its first row. Treating -1 as
+  // if it were already row 0 steps over that row and lands on the second.
+  down.engine.moveContextInspectorCursor(1);
+  assert.equal(down.engine.getState().contextInspectorCursor, 0);
+  assert.equal(await down.selectedSourceId(), "guidance-agents");
+
+  // Up out of the sentinel enters the list from the other end: the last row.
+  const up = await createSentinelDeskEngine();
+  assert.equal(up.engine.getState().contextInspectorCursor, -1);
+
+  up.engine.moveContextInspectorCursor(-1);
+  assert.equal(up.engine.getState().contextInspectorCursor, 5);
+  assert.equal(await up.selectedSourceId(), "held-guidance-prompt");
+});
+
+/**
+ * A group id this build does not recognise — the projection a packet can carry
+ * across a broker version change, the same way `resolveContextDeskGroup`
+ * already absorbs an unknown *category*. Within each delivery stage,
+ * `CONTEXT_DESK_GROUPS` sorts an unknown group after every canonical group,
+ * while `CONTEXT_DESK_COLLECTIONS` has no legacy collection for it.
+ */
+const LEGACY_DESK_GROUP = "legacy-broker-group";
+
+/**
+ * Packet rows in no useful order: two delivery stages interleaved across five
+ * canonical desk groups, two rows sharing `guidance` so the packet-index
+ * tiebreak stays observable, one row whose category is unknown (and therefore
+ * resolves to `other`), and one row whose *group* is unknown.
+ */
+const SHUFFLED_DESK_ROWS = [
+  { id: "sent-attachments-shot", stage: "sent", category: "attachment", deskGroup: "attachments" },
+  { id: "held-tools-runtime", stage: "held", category: "runtime", deskGroup: "tools" },
+  {
+    id: "sent-legacy-broker",
+    stage: "sent",
+    category: "workspace-guidance",
+    group: LEGACY_DESK_GROUP,
+    deskGroup: LEGACY_DESK_GROUP,
+  },
+  { id: "sent-memory-note", stage: "sent", category: "memory", deskGroup: "memory" },
+  {
+    id: "held-guidance-prompt",
+    stage: "held",
+    category: "provider-system-prompt",
+    deskGroup: "guidance",
+  },
+  { id: "sent-guidance-agents", stage: "sent", category: "workspace", deskGroup: "guidance" },
+  { id: "sent-tools-trail", stage: "sent", category: "loop-trail", deskGroup: "tools" },
+  { id: "held-conversation-bridge", stage: "held", category: "bridge", deskGroup: "conversation" },
+  { id: "sent-conversation-user", stage: "sent", category: "user", deskGroup: "conversation" },
+  { id: "sent-guidance-system", stage: "sent", category: "system", deskGroup: "guidance" },
+  { id: "sent-other-telemetry", stage: "sent", category: "telemetry", deskGroup: "other" },
+];
+
+/**
+ * The order the Sources pane draws, spelled out: every sent row before every
+ * held row, then the `CONTEXT_DESK_GROUPS` descriptor order inside each stage
+ * (guidance → conversation → memory → tools → attachments → other, with the
+ * unrecognised group behind all of them), then packet index — which is what
+ * keeps `sent-guidance-agents` ahead of `sent-guidance-system`.
+ */
+const SHUFFLED_DESK_WALK = [
+  "sent-guidance-agents",
+  "sent-guidance-system",
+  "sent-conversation-user",
+  "sent-memory-note",
+  "sent-tools-trail",
+  "sent-attachments-shot",
+  "sent-other-telemetry",
+  "sent-legacy-broker",
+  "held-guidance-prompt",
+  "held-conversation-bridge",
+  "held-tools-runtime",
+];
+
+function createShuffledDeskPacket() {
+  const toItem = (row) => ({
+    id: row.id,
+    category: row.category,
+    label: row.id,
+    reason: "shuffled desk fixture row",
+    preview: `Preview for ${row.id}.`,
+    tokenEstimate: 4,
+    includedInModel: row.stage === "sent",
+    ...(row.group !== undefined ? { group: row.group } : {}),
+  });
+  const included = SHUFFLED_DESK_ROWS.filter((row) => row.stage === "sent").map(toItem);
+  const excluded = SHUFFLED_DESK_ROWS.filter((row) => row.stage === "held").map(toItem);
+  return {
+    id: "packet-context-desk-shuffled",
+    version: 1,
+    generatedAt: "2026-08-11T00:00:00.000Z",
+    title: "Next answer context",
+    included,
+    excluded,
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: included.length, excluded: excluded.length, warnings: 0 },
+    tokenEstimate: (included.length + excluded.length) * 4,
+  };
+}
+
+test("WorkShellEngine desk source navigation orders shuffled packet rows stage-first and then by CONTEXT_DESK_GROUPS", async () => {
+  const packet = createShuffledDeskPacket();
+  const { engine, selectedSourceId } = createContextDeskEngine({
+    resolveContextPacket: async () => packet,
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  assert.equal(engine.getState().contextInspectorCollection, "all");
+  assert.equal(engine.getState().contextInspectorCursor, 0);
+
+  // Walking the all-sources collection one row at a time and naming the
+  // selection at each stop is the navigable order the cursor indexes.
+  const walk = [await selectedSourceId()];
+  for (let step = 1; step < SHUFFLED_DESK_ROWS.length; step += 1) {
+    engine.moveContextInspectorCursor(1);
+    walk.push(await selectedSourceId());
+  }
+  assert.deepEqual(walk, SHUFFLED_DESK_WALK);
+
+  const rowById = new Map(SHUFFLED_DESK_ROWS.map((row) => [row.id, row]));
+  const stages = walk.map((id) => rowById.get(id)?.stage);
+  assert.equal(stages.includes("sent") && stages.includes("held"), true);
+  assert.ok(
+    stages.lastIndexOf("sent") < stages.indexOf("held"),
+    `held rows interleaved with sent rows: ${stages.join(" ")}`,
+  );
+
+  // The group runs are read back off the descriptor table rather than the
+  // collection list, so the two cannot silently swap places: a run repeats
+  // whenever a group is split, and an unrecognised group belongs at the end.
+  const canonicalGroupIds = CONTEXT_DESK_GROUPS.map((group) => group.id);
+  const observedGroupRun = (stage) => {
+    const run = [];
+    for (const id of walk) {
+      const row = rowById.get(id);
+      if (row?.stage !== stage) {
+        continue;
+      }
+      if (run.at(-1) !== row.deskGroup) {
+        run.push(row.deskGroup);
+      }
+    }
+    return run;
+  };
+  const expectedGroupRun = (stage) => {
+    const present = new Set(
+      SHUFFLED_DESK_ROWS.filter((row) => row.stage === stage).map((row) => row.deskGroup),
+    );
+    return [
+      ...canonicalGroupIds.filter((id) => present.has(id)),
+      ...(present.has(LEGACY_DESK_GROUP) ? [LEGACY_DESK_GROUP] : []),
+    ];
+  };
+  assert.deepEqual(observedGroupRun("sent"), expectedGroupRun("sent"));
+  assert.deepEqual(observedGroupRun("held"), expectedGroupRun("held"));
+
+  // Ranking a group the build does not know against CONTEXT_DESK_GROUPS places
+  // it after every canonical group within its delivery stage.
+  assert.equal(walk.indexOf("sent-legacy-broker"), walk.indexOf("sent-other-telemetry") + 1);
+});
+
+test("WorkShellEngine refresh reorders by source id and clears expansion when source disappears", async () => {
+  const makeItem = (id) => ({
+    id,
+    category: "workspace",
+    label: id,
+    reason: "refresh identity",
+    preview: `${id} preview`,
+    tokenEstimate: 4,
+    includedInModel: true,
+  });
+  let packet = {
+    id: "packet-refresh-1",
+    version: 1,
+    generatedAt: "2026-08-11T00:00:00.000Z",
+    title: "Next answer context",
+    included: [makeItem("alpha"), makeItem("beta")],
+    excluded: [],
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: 2, excluded: 0, warnings: 0 },
+    tokenEstimate: 8,
+  };
+  const { engine } = createEngine({
+    resolveContextPacket: async () => packet,
+    resolveContextSourceDetail: async (sourceId) => `detail:${sourceId}`,
+  });
+
+  const snapshot = () => {
+    const state = engine.getState();
+    const rows = [...(state.contextPacket?.included ?? []), ...(state.contextPacket?.excluded ?? [])];
+    return {
+      selectedId: rows[state.contextInspectorCursor]?.id,
+      expandedId: state.contextInspectorExpanded,
+      detail: state.contextInspectorDetailContent,
+      offset: state.contextInspectorDetailOffset,
+    };
+  };
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  await engine.toggleContextInspectorExpanded();
+  const snapshots = [snapshot()];
+
+  packet = {
+    ...packet,
+    id: "packet-refresh-2",
+    included: [makeItem("beta"), makeItem("alpha")],
+  };
+  await engine.handleSubmit("/reload");
+  snapshots.push(snapshot());
+
+  packet = {
+    ...packet,
+    id: "packet-refresh-3",
+    included: [makeItem("beta")],
+    sourceCounts: { included: 1, excluded: 0, warnings: 0 },
+    tokenEstimate: 4,
+  };
+  await engine.handleSubmit("/reload");
+  snapshots.push(snapshot());
+
+  assert.deepEqual(snapshots, [
+    { selectedId: "alpha", expandedId: "alpha", detail: "detail:alpha", offset: 0 },
+    { selectedId: "alpha", expandedId: "alpha", detail: "detail:alpha", offset: 0 },
+    { selectedId: "beta", expandedId: null, detail: undefined, offset: 0 },
+  ]);
+});
+
+test("WorkShellEngine serializes deferred rapid pin toggles before Undo", async () => {
+  let pinned = false;
+  let lastMutation;
+  let packetRevision = 0;
+  const mutations = [];
+  const undoCalls = [];
+  const pendingResolvers = [];
+  const makePacket = () => ({
+    id: `packet-pin-${++packetRevision}`,
+    version: 1,
+    generatedAt: "2026-08-11T00:00:00.000Z",
+    title: "Next answer context",
+    included: [{
+      id: "alpha",
+      category: "workspace",
+      label: "Alpha",
+      reason: "pin identity",
+      preview: "Alpha preview",
+      tokenEstimate: 4,
+      salience: pinned ? 1 : 0.5,
+      includedInModel: true,
+      actions: ["pin", "unpin", "preview"],
+    }],
+    excluded: [],
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: 1, excluded: 0, warnings: 0 },
+    tokenEstimate: 4,
+  });
+  const { engine } = createEngine({
+    resolveContextPacket: async () =>
+      new Promise((resolve) => {
+        pendingResolvers.push(() => resolve(makePacket()));
+      }),
+    mutateContextSource(action) {
+      mutations.push(action);
+      lastMutation = action;
+      pinned = action.kind === "pin";
+      return {
+        id: `receipt-${mutations.length}`,
+        action: action.kind,
+        sourceId: action.id,
+        sourceLabel: "Alpha",
+        message: `${action.kind} Alpha`,
+        canUndo: true,
+        succeeded: true,
+      };
+    },
+    undoContextSourceAction() {
+      undoCalls.push("undo");
+      pinned = lastMutation?.kind === "unpin";
+      lastMutation = undefined;
+      return {
+        id: "receipt-undo",
+        action: "undo",
+        sourceId: "alpha",
+        sourceLabel: "Alpha",
+        message: "undo Alpha",
+        canUndo: false,
+        succeeded: true,
+      };
+    },
+  });
+  const release = () => pendingResolvers.shift()?.();
+
+  const opening = engine.handleSubmit("/context");
+  await Promise.resolve();
+  release();
+  await opening;
+
+  const firstToggle = engine.toggleContextInspectorPin();
+  await Promise.resolve();
+  const secondToggle = engine.toggleContextInspectorPin();
+  await Promise.resolve();
+  release();
+  await firstToggle;
+  await Promise.resolve();
+  release();
+  await secondToggle;
+
+  const undo = engine.undoLastContextSourceAction();
+  await Promise.resolve();
+  release();
+  await undo;
+
+  assert.deepEqual(mutations, [
+    { kind: "pin", id: "alpha" },
+    { kind: "unpin", id: "alpha" },
+  ]);
+  assert.deepEqual(undoCalls, ["undo"]);
+  assert.equal(engine.getState().contextActionReceipt?.action, "undo");
+  assert.equal(engine.getState().contextPacket?.included[0]?.salience, 1);
+});
+
+test("WorkShellEngine expands only omitted or preview-capable desk rows", async () => {
+  const makeItem = (id, actions) => ({
+    id,
+    category: "workspace",
+    label: id,
+    reason: "preview capability",
+    preview: `${id} preview`,
+    tokenEstimate: 4,
+    includedInModel: true,
+    ...(actions === undefined ? {} : { actions }),
+  });
+  const packet = {
+    id: "packet-capabilities",
+    version: 1,
+    generatedAt: "2026-08-11T00:00:00.000Z",
+    title: "Next answer context",
+    included: [
+      makeItem("explicit", ["pin"]),
+      makeItem("omitted"),
+      makeItem("preview", ["preview"]),
+    ],
+    excluded: [],
+    warnings: [],
+    preview: [],
+    sourceCounts: { included: 3, excluded: 0, warnings: 0 },
+    tokenEstimate: 12,
+  };
+  const { engine } = createEngine({
+    resolveContextPacket: async () => packet,
+    resolveContextSourceDetail: async (sourceId) => `detail:${sourceId}`,
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  const observations = [];
+  await engine.toggleContextInspectorExpanded();
+  observations.push({
+    expandedId: engine.getState().contextInspectorExpanded,
+    detail: engine.getState().contextInspectorDetailContent,
+  });
+  engine.moveContextInspectorCursor(1);
+  await engine.toggleContextInspectorExpanded();
+  observations.push({
+    expandedId: engine.getState().contextInspectorExpanded,
+    detail: engine.getState().contextInspectorDetailContent,
+  });
+  engine.moveContextInspectorCursor(1);
+  await engine.toggleContextInspectorExpanded();
+  observations.push({
+    expandedId: engine.getState().contextInspectorExpanded,
+    detail: engine.getState().contextInspectorDetailContent,
+  });
+
+  assert.deepEqual(observations, [
+    { expandedId: null, detail: undefined },
+    { expandedId: "omitted", detail: "detail:omitted" },
+    { expandedId: "preview", detail: "detail:preview" },
+  ]);
+});
+
+test("WorkShellEngine scrolls a long one-line preview in the preview pane", async () => {
+  const base = createContextDeskPacket();
+  const packet = {
+    ...base,
+    included: base.included.map((item, index) =>
+      index === 0 ? { ...item, preview: "long preview ".repeat(80).trim() } : item
+    ),
+  };
+  const { engine } = createContextDeskEngine({
+    resolveContextPacket: async () => packet,
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  engine.moveContextInspectorPane(1);
+  engine.moveContextInspectorCursor(1);
+
+  assert.equal(engine.getState().contextInspectorExpanded, null);
+  assert.equal(engine.getState().contextInspectorDetailOffset, 1);
+});
+
+test("WorkShellEngine leaves an unsupported accepted suggestion proposed without mutating its source", async () => {
+  const base = createLifecyclePacket();
+  const packet = createLifecyclePacket({
+    included: [{
+      ...base.included[0],
+      id: "preview-only-source",
+      label: "preview-only.md",
+      actions: ["preview"],
+    }],
+  });
+  const mutations = [];
+  const resolutions = [];
+  let generatedSuggestion;
+  const { engine } = createLifecycleLedgerHarness({
+    packet,
+    engineOverrides: {
+      async generateContextSuggestions({ receipt }) {
+        generatedSuggestion = {
+          id: "suggestion-preview-only-hold-back",
+          packetReceiptId: receipt.id,
+          sourceId: "preview-only-source",
+          action: "hold-back",
+          reasonCode: "low-trust-token-hotspot",
+          reasonText: "Hold back a source that is oversized.",
+          status: "proposed",
+          createdAt: "2026-08-11T00:00:01.000Z",
+        };
+        return [generatedSuggestion];
+      },
+      resolveContextSuggestion(id, status) {
+        resolutions.push({ id, status });
+        return { ...generatedSuggestion, id, status, resolvedAt: "2026-08-11T00:00:02.000Z" };
+      },
+      mutateContextSource(action) {
+        mutations.push(action);
+        return {
+          id: "mutation-preview-only",
+          action: "hold-back",
+          sourceId: action.id,
+          sourceLabel: "preview-only.md",
+          message: "Held back preview-only.md",
+          canUndo: true,
+          succeeded: true,
+        };
+      },
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("accept unsupported advice");
+  const before = engine.getState();
+  assert.equal(before.contextPolicySuggestions[0]?.status, "proposed");
+  assert.equal(before.contextActionReceipt, undefined);
+
+  await engine.acceptContextSuggestion("suggestion-preview-only-hold-back");
+
+  const after = engine.getState();
+  assert.deepEqual(mutations, []);
+  assert.deepEqual(resolutions, []);
+  assert.equal(after.contextActionReceipt, before.contextActionReceipt);
+  assert.equal(after.contextPolicySuggestions[0]?.status, "proposed");
+  assert.equal(
+    after.contextAdviceUnavailable,
+    "This suggestion is not available for the selected source.",
+  );
+  assert.equal(after.contextPacket?.included[0]?.id, "preview-only-source");
+  assert.equal(after.contextPacket?.included[0]?.includedInModel, true);
+});
+
+test("WorkShellEngine bounds long preview scrolling by wrapped rows at a finite terminal width", async () => {
+  const base = createContextDeskPacket();
+  const preview = "long preview ".repeat(80).trim();
+  const packet = {
+    ...base,
+    included: base.included.map((item, index) =>
+      index === 0 ? { ...item, preview, actions: ["preview"] } : item
+    ),
+  };
+  const { engine } = createContextDeskEngine({
+    resolveContextPacket: async () => packet,
+  });
+  const terminalColumns = 28;
+  const rendererMinimumWidth = 24;
+  const previewWrapWidth = Math.max(rendererMinimumWidth, terminalColumns - 4);
+
+  engine.updateTerminalColumns(terminalColumns);
+  await engine.initialize();
+  await engine.handleSubmit("/context");
+  engine.moveContextInspectorPane(1);
+  assert.equal(engine.getState().contextInspectorPane, "preview");
+
+  for (let operation = 0; operation < 12; operation += 1) {
+    engine.moveContextInspectorCursor(1);
+    engine.moveContextInspectorPage(1);
+  }
+
+  const saturatedOffset = engine.getState().contextInspectorDetailOffset;
+  const wrappedRowCeiling = wrapDisplayTextFast(preview, previewWrapWidth).length - 1;
+  assert.ok(saturatedOffset > 0, "the long preview must actually scroll");
+  assert.ok(
+    saturatedOffset <= wrappedRowCeiling,
+    `preview offset ${saturatedOffset} exceeded ${wrappedRowCeiling} wrapped rows`,
+  );
+
+  engine.moveContextInspectorCursor(-1);
+  assert.equal(
+    engine.getState().contextInspectorDetailOffset,
+    saturatedOffset - 1,
+    "one Up must immediately move the visible preview range back by one row",
+  );
+});
+const DETAIL_SCROLL_TERMINAL_ROWS = 40;
+const DETAIL_SCROLL_PALETTE = {
+  assistant: "cyan",
+  borderDefault: "gray",
+  borderSoft: "gray",
+  spinner: "yellow",
+  success: "green",
+  text: "white",
+  textDim: "gray",
+  textMuted: "gray",
+  toolAccent: "magenta",
+  user: "blue",
+  warning: "yellow",
+};
+
+function createMetadataHeavyDetailPacket() {
+  const base = createContextDeskPacket();
+  const item = {
+    id: "expanded-condensed-history",
+    category: "condensed-history",
+    label: "Session history compact",
+    reason: "compressed session history",
+    preview: "History compressed by a recent-window summary.",
+    tokenEstimate: 42,
+    includedInModel: true,
+    actions: ["pin", "preview"],
+    metadata: {
+      kind: "condensed-history",
+      sourceEventIds: ["trace-a", "trace-b", "trace-c", "trace-d", "trace-e", "trace-f"],
+      summary: (
+        "Earlier trace lines were summarized while the recent runtime rows remain "
+        + "available for inspection. ".repeat(3)
+      ).trim(),
+      recomputeReason: (
+        "History exceeded the recent-window threshold and needs a fresh compacted view. "
+        + "Reason context remains visible. ".repeat(2)
+      ).trim(),
+      compactedEventCount: 12,
+      recentEventCount: 8,
+      compression: {
+        method: "recent-window",
+        inputTokensEstimate: 30,
+        outputTokensEstimate: 11,
+      },
+    },
+  };
+  return {
+    ...base,
+    id: "packet-expanded-condensed-history",
+    included: [item],
+    excluded: [],
+    sourceCounts: { included: 1, excluded: 0, warnings: 0 },
+    tokenEstimate: item.tokenEstimate,
+  };
+}
+
+const DETAIL_SCROLL_LOCAL_CONTENT = Array.from(
+  { length: 8 },
+  (_, index) => (
+    `local content row ${index + 1} carries rendered evidence `
+    + "that stays available in the expanded detail. ".repeat(3)
+  ),
+).join("\n");
+
+async function renderExpandedDetailFrame({
+  packet,
+  detailContent,
+  terminalColumns,
+  detailOffset,
+  actionReceipt,
+}) {
+  const overlay = renderContextInspectorOverlay({
+    packet,
+    cursorIndex: 0,
+    activePane: "sources",
+    activeCollection: "all",
+    expandedId: packet.included[0]?.id ?? null,
+    detailContent,
+    detailOffset,
+    width: Math.max(32, terminalColumns - 4),
+    borderColor: "gray",
+    palette: DETAIL_SCROLL_PALETTE,
+    modelWindow: 200_000,
+    actionsEnabled: true,
+    terminalRows: DETAIL_SCROLL_TERMINAL_ROWS,
+    ...(actionReceipt ? { actionReceipt } : {}),
+  });
+  const { instance, getOutput } = renderDebugFrame(
+    React.createElement(React.Fragment, null, overlay),
+    { columns: terminalColumns, rows: DETAIL_SCROLL_TERMINAL_ROWS },
+  );
+  try {
+    await waitForSettledFrame(getOutput);
+    return getOutput();
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+}
+
+async function findRendererBottomOffset(input) {
+  let high = 1;
+  let frame = await renderExpandedDetailFrame({ ...input, detailOffset: high });
+  let attempts = 0;
+  while (frame.includes("lines below") && attempts < 12) {
+    high *= 2;
+    attempts += 1;
+    frame = await renderExpandedDetailFrame({ ...input, detailOffset: high });
+  }
+  assert.doesNotMatch(
+    frame,
+    /lines below/,
+    `renderer never reached a marker-free bottom within ${high} rows`,
+  );
+
+  let low = 0;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = await renderExpandedDetailFrame({ ...input, detailOffset: middle });
+    if (candidate.includes("lines below")) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low;
+}
+
+function moveDetailUntilStable(engine, move) {
+  let previous = engine.getState().contextInspectorDetailOffset;
+  for (let step = 0; step < 512; step += 1) {
+    move();
+    const current = engine.getState().contextInspectorDetailOffset;
+    if (current === previous) {
+      return current;
+    }
+    previous = current;
+  }
+  throw new Error("detail scroll did not reach a stable offset");
+}
+
+test("WorkShellEngine detail scrolling follows the renderer with and without action receipts at 52, 80, and 120 columns", async () => {
+  const packet = createMetadataHeavyDetailPacket();
+  const failures = [];
+
+  for (const withActionReceipt of [false, true]) {
+    for (const terminalColumns of [52, 80, 120]) {
+      const { engine } = createContextDeskEngine({
+        resolveContextPacket: async () => packet,
+        resolveContextSourceDetail: async (sourceId) =>
+          sourceId === packet.included[0]?.id ? DETAIL_SCROLL_LOCAL_CONTENT : undefined,
+        mutateContextSource: withActionReceipt
+          ? (action) => ({
+            id: `receipt-${action.id}`,
+            action: action.kind,
+            sourceId: action.id,
+            sourceLabel: action.id,
+            message: `${action.kind} ${action.id}`,
+            canUndo: true,
+            succeeded: true,
+          })
+          : undefined,
+      });
+      engine.updateTerminalColumns(terminalColumns);
+      engine.updateTerminalRows(DETAIL_SCROLL_TERMINAL_ROWS);
+      await engine.initialize();
+      await engine.handleSubmit("/context");
+      if (withActionReceipt) {
+        await engine.toggleContextInspectorPin();
+        assert.equal(
+          typeof engine.getState().contextActionReceipt?.sourceLabel,
+          "string",
+          JSON.stringify(engine.getState().contextActionReceipt),
+        );
+        assert.equal(
+          typeof engine.getState().contextActionReceipt?.action,
+          "string",
+          JSON.stringify(engine.getState().contextActionReceipt),
+        );
+      }
+      await engine.toggleContextInspectorExpanded();
+
+      const renderInput = {
+        packet,
+        detailContent: DETAIL_SCROLL_LOCAL_CONTENT,
+        terminalColumns,
+        ...(engine.getState().contextActionReceipt
+          ? { actionReceipt: engine.getState().contextActionReceipt }
+          : {}),
+      };
+      const rendererBottomOffset = await findRendererBottomOffset(renderInput);
+      const topFrame = await renderExpandedDetailFrame({ ...renderInput, detailOffset: 0 });
+      if (topFrame.includes("lines above") || !topFrame.includes("lines below")) {
+        failures.push(
+          `${withActionReceipt ? "receipt" : "no receipt"} ${terminalColumns}: `
+          + `renderer top marker state was ${JSON.stringify({
+            above: topFrame.includes("lines above"),
+            below: topFrame.includes("lines below"),
+          })}`,
+        );
+      }
+
+      const downOffset = moveDetailUntilStable(
+        engine,
+        () => engine.moveContextInspectorDetailOffset(1),
+      );
+      const downFrame = await renderExpandedDetailFrame({ ...renderInput, detailOffset: downOffset });
+      if (downOffset !== rendererBottomOffset || downFrame.includes("lines below")) {
+        failures.push(
+          `${withActionReceipt ? "receipt" : "no receipt"} ${terminalColumns}: `
+          + `Down reached engine offset ${downOffset}, `
+          + `renderer bottom offset ${rendererBottomOffset}, `
+          + `bottom marker ${downFrame.includes("lines below") ? "present" : "absent"}`,
+        );
+      }
+
+      moveDetailUntilStable(engine, () => engine.moveContextInspectorDetailOffset(-1));
+      const pageDownOffset = moveDetailUntilStable(
+        engine,
+        () => engine.moveContextInspectorPage(1),
+      );
+      const pageDownFrame = await renderExpandedDetailFrame({
+        ...renderInput,
+        detailOffset: pageDownOffset,
+      });
+      if (pageDownOffset !== rendererBottomOffset || pageDownFrame.includes("lines below")) {
+        failures.push(
+          `${withActionReceipt ? "receipt" : "no receipt"} ${terminalColumns}: `
+          + `PageDown reached engine offset ${pageDownOffset}, `
+          + `renderer bottom offset ${rendererBottomOffset}, `
+          + `bottom marker ${pageDownFrame.includes("lines below") ? "present" : "absent"}`,
+        );
+      }
+
+      moveDetailUntilStable(engine, () => engine.moveContextInspectorPage(-1));
+      const afterPageUp = engine.getState().contextInspectorDetailOffset;
+      engine.moveContextInspectorPage(-1);
+      if (afterPageUp !== 0 || engine.getState().contextInspectorDetailOffset !== 0) {
+        failures.push(
+          `${withActionReceipt ? "receipt" : "no receipt"} ${terminalColumns}: `
+          + `PageUp did not clamp detail offset at top `
+          + `(first ${afterPageUp}, repeat ${engine.getState().contextInspectorDetailOffset})`,
+        );
+      }
+    }
+  }
+
+  assert.deepEqual(failures, [], failures.join("\n"));
 });

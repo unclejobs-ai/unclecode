@@ -14,6 +14,7 @@ pub enum OpenAIChatResponseRecord {
     Usage {
         prompt_tokens: u64,
         completion_tokens: u64,
+        cache_read_tokens: u64,
     },
 }
 
@@ -82,6 +83,12 @@ pub fn parse_openai_chat_response_records_for_model(
             .get("completion_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        cache_read_tokens: usage
+            .get("prompt_tokens_details")
+            .and_then(|details| details.get("cached_tokens"))
+            .or_else(|| usage.get("cached_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
     });
 
     Ok(records)
@@ -137,6 +144,7 @@ pub fn parse_openai_chat_response_json_for_model(
     let mut actions = Vec::new();
     let mut prompt_tokens = 0;
     let mut completion_tokens = 0;
+    let mut cache_read_tokens = 0;
 
     for record in records {
         match record {
@@ -164,9 +172,11 @@ pub fn parse_openai_chat_response_json_for_model(
             OpenAIChatResponseRecord::Usage {
                 prompt_tokens: prompt,
                 completion_tokens: completion,
+                cache_read_tokens: cached,
             } => {
                 prompt_tokens = prompt;
                 completion_tokens = completion;
+                cache_read_tokens = cached;
             }
         }
     }
@@ -178,6 +188,7 @@ pub fn parse_openai_chat_response_json_for_model(
         "actions": actions,
         "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
+        "cacheReadTokens": cache_read_tokens,
         "costUsd": model
             .map(|model| estimate_cost_usd(model, prompt_tokens as f64, completion_tokens as f64))
             .unwrap_or(0.0)
@@ -201,6 +212,7 @@ fn parse_openai_chat_sse_response_records(
     let mut tool_calls: BTreeMap<usize, StreamToolCall> = BTreeMap::new();
     let mut prompt_tokens = 0;
     let mut completion_tokens = 0;
+    let mut cache_read_tokens = 0;
 
     for data in openai_sse_data_blocks(raw) {
         if data == "[DONE]" {
@@ -217,6 +229,12 @@ fn parse_openai_chat_sse_response_records(
             .get("completion_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(completion_tokens);
+        cache_read_tokens = usage
+            .get("prompt_tokens_details")
+            .and_then(|details| details.get("cached_tokens"))
+            .or_else(|| usage.get("cached_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(cache_read_tokens);
         if !is_openai_chat_stream_progress_chunk(&payload) {
             continue;
         }
@@ -299,6 +317,7 @@ fn parse_openai_chat_sse_response_records(
     records.push(OpenAIChatResponseRecord::Usage {
         prompt_tokens,
         completion_tokens,
+        cache_read_tokens,
     });
     Ok(records)
 }
@@ -506,7 +525,7 @@ mod tests {
                     "reasoning_content":"Thinking",
                     "tool_calls":[{"id":"call-1","function":{"name":"weather","arguments":"{\"city\":\"Seoul\"}"}}]
                 }}],
-                "usage":{"prompt_tokens":12,"completion_tokens":34}
+                "usage":{"prompt_tokens":12,"completion_tokens":34,"prompt_tokens_details":{"cached_tokens":8}}
             }"#,
         )
         .unwrap();
@@ -524,6 +543,7 @@ mod tests {
                 OpenAIChatResponseRecord::Usage {
                     prompt_tokens: 12,
                     completion_tokens: 34,
+                    cache_read_tokens: 8,
                 },
             ]
         );
@@ -538,6 +558,7 @@ mod tests {
             vec![OpenAIChatResponseRecord::Usage {
                 prompt_tokens: 0,
                 completion_tokens: 0,
+                cache_read_tokens: 0,
             }]
         );
     }
@@ -551,7 +572,7 @@ data: {"choices":[{"delta":{"content":"Hel"}}]}
 
 data: {"choices":[{"delta":{"content":"lo","tool_calls":[{"index":0,"id":"call-1","function":{"name":"weather","arguments":"{\"city\":"}}]}}]}
 
-data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Seoul\"}"}}]}}],"usage":{"prompt_tokens":3,"completion_tokens":4}}
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Seoul\"}"}}]}}],"usage":{"prompt_tokens":3,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":2}}}
 
 data: [DONE]
 "#,
@@ -571,6 +592,7 @@ data: [DONE]
                 OpenAIChatResponseRecord::Usage {
                     prompt_tokens: 3,
                     completion_tokens: 4,
+                    cache_read_tokens: 2,
                 },
             ]
         );

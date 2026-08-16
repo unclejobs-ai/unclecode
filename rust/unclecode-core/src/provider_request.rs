@@ -61,12 +61,32 @@ pub fn build_openai_chat_request_body(
     messages_json: &str,
     tools_json: Option<&str>,
     reasoning_effort: Option<&str>,
+    prompt_cache_key: Option<&str>,
+    prompt_cache_retention: Option<&str>,
 ) -> String {
     let messages_json = repair_openai_chat_messages_for_wire(messages_json);
     let mut fields = vec![
         format!("\"model\":\"{}\"", json_escape(model)),
         format!("\"messages\":{}", messages_json),
     ];
+    if let Some(cache_key) = prompt_cache_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        fields.push(format!(
+            "\"prompt_cache_key\":\"{}\"",
+            json_escape(cache_key)
+        ));
+    }
+    if let Some(retention) = prompt_cache_retention
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        fields.push(format!(
+            "\"prompt_cache_retention\":\"{}\"",
+            json_escape(retention)
+        ));
+    }
     if let Some(tools_json) = tools_json.map(str::trim).filter(|value| !value.is_empty()) {
         fields.push(format!("\"tools\":{tools_json}"));
     }
@@ -107,6 +127,8 @@ pub fn build_openai_codex_request_body(
     tools_json: &str,
     tool_choice: &str,
     reasoning_effort: Option<&str>,
+    prompt_cache_key: Option<&str>,
+    prompt_cache_retention: Option<&str>,
 ) -> String {
     let reasoning = if let Some(effort) = normalize_reasoning_effort(reasoning_effort) {
         format!(
@@ -121,13 +143,34 @@ pub fn build_openai_codex_request_body(
     } else {
         "\"include\":[]"
     };
+    let prompt_cache = prompt_cache_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|cache_key| {
+            let mut fields = vec![format!(
+                "\"prompt_cache_key\":\"{}\"",
+                json_escape(cache_key)
+            )];
+            if let Some(retention) = prompt_cache_retention
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                fields.push(format!(
+                    "\"prompt_cache_retention\":\"{}\"",
+                    json_escape(retention)
+                ));
+            }
+            format!("{},", fields.join(","))
+        })
+        .unwrap_or_default();
     format!(
-        "{{\"model\":\"{}\",\"instructions\":\"{}\",\"input\":{},\"tools\":{},\"tool_choice\":\"{}\",\"parallel_tool_calls\":true,{},\"store\":false,\"stream\":true,{},\"text\":{{\"format\":{{\"type\":\"text\"}},\"verbosity\":\"medium\"}}}}",
+        "{{\"model\":\"{}\",\"instructions\":\"{}\",\"input\":{},\"tools\":{},\"tool_choice\":\"{}\",\"parallel_tool_calls\":true,{}{},\"store\":false,\"stream\":true,{},\"text\":{{\"format\":{{\"type\":\"text\"}},\"verbosity\":\"medium\"}}}}",
         json_escape(model),
         json_escape(instructions),
         input_json.trim(),
         tools_json.trim(),
         json_escape(tool_choice),
+        prompt_cache,
         reasoning,
         include,
     )
@@ -636,10 +679,12 @@ mod tests {
             r#"[{"role":"user","content":"hi"}]"#,
             Some(r#"[{"type":"function","function":{"name":"run","parameters":{}}}]"#),
             Some("high"),
+            Some("unclecode-cache"),
+            Some("24h"),
         );
         assert_eq!(
             body,
-            r#"{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"run","parameters":{}}}],"tool_choice":"auto","reasoning":{"effort":"high"}}"#
+            r#"{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}],"prompt_cache_key":"unclecode-cache","prompt_cache_retention":"24h","tools":[{"type":"function","function":{"name":"run","parameters":{}}}],"tool_choice":"auto","reasoning":{"effort":"high"}}"#
         );
     }
 
@@ -656,6 +701,8 @@ mod tests {
                 {"role":"tool","tool_call_id":"call-a","content":"ok"},
                 {"role":"user","content":"continue"}
             ]"#,
+            None,
+            None,
             None,
             None,
         );
@@ -681,6 +728,8 @@ mod tests {
             r#"[{"role":"user","content":"hi"}]"#,
             None,
             Some("high"),
+            None,
+            None,
         );
         assert!(!kimi.contains(r#""reasoning""#));
         assert!(kimi.contains(r#""tool_choice":"auto""#));
@@ -690,6 +739,8 @@ mod tests {
             r#"[{"role":"user","content":"hi"}]"#,
             None,
             Some("high"),
+            None,
+            None,
         );
         assert!(!deepseek.contains(r#""reasoning""#));
         assert!(!deepseek.contains(r#""tool_choice":"auto""#));
@@ -723,12 +774,16 @@ mod tests {
             "[]",
             "none",
             Some("medium"),
+            Some("unclecode-cache"),
+            Some("24h"),
         );
         assert!(body.contains(r#""instructions":"System\nPrompt""#));
         assert!(body.contains(r#""tool_choice":"none""#));
         assert!(body.contains(r#""parallel_tool_calls":true"#));
         assert!(body.contains(r#""reasoning":{"effort":"medium","summary":"auto"}"#));
         assert!(body.contains(r#""include":["reasoning.encrypted_content"]"#));
+        assert!(body.contains(r#""prompt_cache_key":"unclecode-cache""#));
+        assert!(body.contains(r#""prompt_cache_retention":"24h""#));
         assert!(body.contains(r#""store":false"#));
         assert!(body.contains(r#""stream":true"#));
     }

@@ -1,4 +1,4 @@
-use crate::http_transport::ProxyPolicy;
+use crate::http_transport::{resolve_proxy_policy, ProxyPolicy};
 use serde_json::json;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +79,11 @@ const COMPAT_COPILOT_MODELS: &[&str] = &[
     "openai/o4-mini",
 ];
 const COMPAT_ZAI_MODELS: &[&str] = &["glm-5", "glm-4.5", "glm-4.5-air"];
+/// OMP is the delegated work/executor route: it is pinned to a single selector
+/// because UncleCode never picks the upstream model for a delegated turn.
+const OMP_MODELS: &[&str] = &["kimi-code/k3"];
+/// Providers UncleCode can drive as its own interactive runtime. `omp` is
+/// absent on purpose: it is executor-only and hands the whole turn to OMP.
 const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &["anthropic", "gemini", "openai"];
 
 pub fn openai_reasoning_support(model_id: &str) -> ReasoningSupport {
@@ -163,6 +168,23 @@ pub fn resolve_provider_route(
             .map(|key| key.to_string())
             .collect(),
     })
+}
+
+/// Resolve the proxy policy that applies to a route.
+///
+/// A route without an endpoint URL never leaves the machine — OMP runs as a
+/// local subprocess — so no HTTP proxy can apply and there is no URL to parse.
+pub fn provider_route_proxy_policy(route: &ProviderRoute) -> Result<ProxyPolicy, String> {
+    if route.endpoint_url.trim().is_empty() {
+        return Ok(ProxyPolicy {
+            target_host: String::new(),
+            proxy_url: None,
+            source: "none".to_string(),
+            bypassed: false,
+            no_proxy: Vec::new(),
+        });
+    }
+    resolve_proxy_policy(&route.endpoint_url)
 }
 
 pub fn provider_route_json(route: &ProviderRoute, proxy: &ProxyPolicy) -> Result<String, String> {
@@ -322,6 +344,7 @@ pub fn provider_label(provider_id: &str) -> String {
         "ollama" => "Ollama",
         "copilot" => "GitHub Copilot",
         "zai" => "z.ai",
+        "omp" => "OMP",
         other => other,
     }
     .to_string()
@@ -330,13 +353,15 @@ pub fn provider_label(provider_id: &str) -> String {
 fn is_known_provider(provider_id: &str) -> bool {
     matches!(
         provider_id,
-        "anthropic" | "gemini" | "openai" | "groq" | "ollama" | "copilot" | "zai"
+        "anthropic" | "gemini" | "openai" | "groq" | "ollama" | "copilot" | "zai" | "omp"
     )
 }
 
 fn provider_transport(provider_id: &str) -> &'static str {
     match provider_id {
-        "anthropic" | "gemini" | "openai" => "native",
+        // `omp` is native: the executor speaks OMP's own worker protocol over a
+        // subprocess, not the OpenAI-compatible HTTP shape.
+        "anthropic" | "gemini" | "openai" | "omp" => "native",
         _ => "compat",
     }
 }
@@ -344,8 +369,9 @@ fn provider_transport(provider_id: &str) -> &'static str {
 fn provider_supports_capability(provider_id: &str, capability: &str) -> bool {
     match capability {
         "tool-calls" => true,
-        "session-memory" => true,
-        "prompt-caching" => provider_id == "anthropic",
+        // OMP starts a fresh session per delegated turn, so nothing carries over.
+        "session-memory" => provider_id != "omp",
+        "prompt-caching" => provider_id == "anthropic" || provider_id == "omp",
         _ => provider_id == "openai",
     }
 }
@@ -359,6 +385,9 @@ fn provider_env_keys(provider_id: &str) -> &'static [&'static str] {
         "ollama" => &["OLLAMA_BASE_URL", "OLLAMA_MODEL", "OLLAMA_API_KEY"],
         "copilot" => &["COPILOT_TOKEN", "COPILOT_MODEL"],
         "zai" => &["ZAI_API_KEY", "ZAI_MODEL"],
+        // OMP resolves its own credentials from its own profile; UncleCode reads
+        // no environment for this route and holds no bearer token for it.
+        "omp" => &[],
         _ => &[],
     }
 }
@@ -372,6 +401,8 @@ fn provider_endpoint_url(provider_id: &str) -> &'static str {
         "ollama" => "http://localhost:11434/api/chat",
         "copilot" => "https://api.githubcopilot.com/chat/completions",
         "zai" => "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        // OMP has no endpoint: the executor turn runs in a local subprocess.
+        "omp" => "",
         _ => "",
     }
 }
@@ -381,6 +412,15 @@ pub fn provider_model_catalog(
     active_model: Option<&str>,
     custom_models: Option<&str>,
 ) -> CompatProviderCatalog {
+    // OMP is pinned: a delegated work turn always runs on the same selector, so
+    // neither an active model nor an operator model list may widen its catalog.
+    if provider_id == "omp" {
+        return CompatProviderCatalog {
+            provider_id: provider_id.to_string(),
+            label: provider_label(provider_id),
+            models: OMP_MODELS.iter().map(|model| (*model).to_string()).collect(),
+        };
+    }
     let mut models = Vec::new();
     if let Some(model) = active_model
         .map(str::trim)
@@ -416,6 +456,7 @@ fn provider_default_models(provider_id: &str) -> &'static [&'static str] {
         "ollama" => COMPAT_OLLAMA_MODELS,
         "copilot" => COMPAT_COPILOT_MODELS,
         "zai" => COMPAT_ZAI_MODELS,
+        "omp" => OMP_MODELS,
         _ => &[],
     }
 }
@@ -497,6 +538,79 @@ mod tests {
         assert_eq!(compat_route.endpoint_url, "http://localhost:11434/api/chat");
 
         assert!(resolve_provider_route("bogus", None).is_err());
+    }
+
+    #[test]
+    fn resolves_omp_as_an_executor_only_native_route() {
+        let route = resolve_provider_route("omp", None).unwrap();
+        assert_eq!(route.provider_id, "omp");
+        assert_eq!(route.label, "OMP");
+        assert_eq!(route.transport, "native");
+        assert_eq!(route.default_model, "kimi-code/k3");
+        // Executor-only: `omp` is never a selectable interactive runtime.
+        assert!(!route.runtime_supported);
+        // OMP owns credential lookup, so UncleCode reads no env and has no endpoint.
+        assert!(route.env_keys.is_empty());
+        assert_eq!(route.endpoint_url, "");
+
+        assert_eq!(resolve_provider_route("OMP", None).unwrap().provider_id, "omp");
+    }
+
+    #[test]
+    fn omp_route_json_reports_a_local_proxy_free_policy() {
+        let route = resolve_provider_route("omp", None).unwrap();
+        let proxy = provider_route_proxy_policy(&route).unwrap();
+        assert_eq!(proxy.proxy_url, None);
+        assert_eq!(proxy.source, "none");
+        assert!(!proxy.bypassed);
+        assert_eq!(proxy.target_host, "");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&provider_route_json(&route, &proxy).unwrap()).unwrap();
+        assert_eq!(parsed["providerId"], "omp");
+        assert_eq!(parsed["label"], "OMP");
+        assert_eq!(parsed["transport"], "native");
+        assert_eq!(parsed["runtimeSupported"], false);
+        assert_eq!(parsed["defaultModel"], "kimi-code/k3");
+        assert_eq!(parsed["endpointUrl"], "");
+        assert_eq!(parsed["envKeys"].as_array().unwrap().len(), 0);
+        assert_eq!(parsed["proxyPolicy"]["proxyUrl"], serde_json::Value::Null);
+
+        // Endpoint-bearing routes still parse their URL for a real proxy decision.
+        let hosted = resolve_provider_route("ollama", None).unwrap();
+        assert_eq!(
+            provider_route_proxy_policy(&hosted).unwrap().target_host,
+            "localhost"
+        );
+    }
+
+    #[test]
+    fn omp_capabilities_report_prompt_caching_without_session_memory() {
+        let caching: serde_json::Value = serde_json::from_str(
+            &provider_capability_json("omp", "prompt-caching", "kimi-code/k3").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(caching["providerId"], "omp");
+        assert_eq!(caching["supported"], true);
+
+        let memory: serde_json::Value = serde_json::from_str(
+            &provider_capability_json("omp", "session-memory", "kimi-code/k3").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(memory["supported"], false);
+
+        let tools: serde_json::Value = serde_json::from_str(
+            &provider_capability_json("omp", "tool-calls", "kimi-code/k3").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(tools["supported"], true);
+
+        // Every other provider keeps cross-turn session memory.
+        let zai: serde_json::Value = serde_json::from_str(
+            &provider_capability_json("zai", "session-memory", "glm-5").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(zai["supported"], true);
     }
 
     #[test]
@@ -606,5 +720,20 @@ mod tests {
             catalog.models,
             ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
         );
+    }
+
+    #[test]
+    fn omp_catalog_stays_pinned_to_k3_against_operator_model_env() {
+        let pinned = provider_model_catalog("omp", None, None);
+        assert_eq!(pinned.label, "OMP");
+        assert_eq!(pinned.models, ["kimi-code/k3"]);
+
+        // `OMP_MODEL` / `OMP_MODELS` must not widen or reorder a delegated route.
+        let forced = provider_model_catalog("omp", Some("zai/glm-5"), Some("groq/openai/gpt-oss-20b"));
+        assert_eq!(forced.models, ["kimi-code/k3"]);
+
+        // Every other provider still honours the operator's active/custom models.
+        let zai = provider_model_catalog("zai", Some("glm-4.6"), None);
+        assert_eq!(zai.models[0], "glm-4.6");
     }
 }

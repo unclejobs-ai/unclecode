@@ -33,6 +33,11 @@ test("execution trace contract exposes canonical event kinds", () => {
     "attachment.attached",
     "attachment.dropped",
     "policy.denied",
+    "job.queued",
+    "job.settled",
+    "agent.run.started",
+    "agent.run.settled",
+    "usage.recorded",
   ]);
 });
 

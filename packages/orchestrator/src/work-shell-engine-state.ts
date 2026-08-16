@@ -9,6 +9,7 @@ import type {
 } from "./work-shell-engine.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 import { createAgentConsoleSnapshot } from "@unclecode/contracts";
+import { createAgentConsoleViewState } from "./work-shell-agent-console-state.js";
 
 type BuildContextPanel<Reasoning extends WorkShellReasoningConfig> = (
   contextSummaryLines: readonly string[],
@@ -119,6 +120,12 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     contextInspectorExpanded: null,
     contextInspectorDetailContent: undefined,
     contextInspectorDetailOffset: 0,
+    // Context Desk (Pure Yazi): the desk starts closed, and `/context` is what
+    // hands it the keyboard. Focus defaults to the sources pane over the
+    // all-sources collection every time it opens.
+    contextInspectorOpen: false,
+    contextInspectorPane: "sources",
+    contextInspectorCollection: "all",
     agentConsole: createAgentConsoleSnapshot({
       profileId: input.options.contextProfile ?? input.options.initialAgentConsole?.profileId ?? "build",
       ...(input.options.initialAgentConsole
@@ -132,10 +139,19 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
             ...(input.options.initialAgentConsole.workGraph
               ? { workGraph: input.options.initialAgentConsole.workGraph }
               : {}),
+            ...(input.options.initialAgentConsole.mainUsage
+              ? { mainUsage: input.options.initialAgentConsole.mainUsage }
+              : {}),
             activity: input.options.initialAgentConsole.activity,
+            // Resume carries the whole safe lifecycle projection: dropping the
+            // agent and job records here would reopen the console with a
+            // history the checkpoint already normalised.
+            agents: input.options.initialAgentConsole.agents,
+            jobs: input.options.initialAgentConsole.jobs,
           }
-        : { activity: [] }),
+        : { activity: [], agents: [], jobs: [] }),
     }),
+    agentConsoleView: createAgentConsoleViewState(),
   };
 }
 

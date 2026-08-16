@@ -2,7 +2,7 @@ import type {
   ResolvedWorkShellBuiltinCommand,
   ResolvedWorkShellLocalCommand,
 } from "./work-shell-engine-commands.js";
-import { resolvePromptSlashCommand } from "./work-shell-engine-commands.js";
+import { isAgentConsoleTab, resolvePromptSlashCommand } from "./work-shell-engine-commands.js";
 import { runRustCommandSync } from "./rust-command.js";
 import type { WorkShellComposerMode } from "./work-shell-engine.js";
 import type { WorkShellPromptCommand } from "./work-shell-engine-turns.js";
@@ -14,7 +14,12 @@ export type WorkShellSubmitRoute =
   | { readonly kind: "prompt-command"; readonly line: string; readonly promptCommand: WorkShellPromptCommand }
   | { readonly kind: "inline-command"; readonly line: string; readonly slashCommand: readonly string[] }
   | { readonly kind: "local-command"; readonly line: string; readonly localCommand: ResolvedWorkShellLocalCommand }
-  | { readonly kind: "chat"; readonly line: string };
+  /**
+   * `consoleInvalid` is Rust's verdict that the line is a console-like form
+   * that can never run (`/tod`, `/agents extra`). It only ever reaches the
+   * unknown-slash leaf below, where it turns the outcome into a silent no-op.
+   */
+  | { readonly kind: "chat"; readonly line: string; readonly consoleInvalid?: boolean };
 
 function parseRustSubmitRoute(raw: string): WorkShellSubmitRoute | undefined {
   const parsed = JSON.parse(raw) as Partial<WorkShellSubmitRoute> | { readonly kind?: unknown };
@@ -48,8 +53,13 @@ function parseRustSubmitRoute(raw: string): WorkShellSubmitRoute | undefined {
         throw new Error("Rust submit route returned an invalid local command.");
       }
       return { kind: "local-command", line, localCommand: (parsed as { localCommand: ResolvedWorkShellLocalCommand }).localCommand };
-    case "chat":
-      return { kind: "chat", line };
+    case "chat": {
+      const consoleInvalid: unknown = "consoleInvalid" in parsed ? parsed.consoleInvalid : undefined;
+      if (consoleInvalid !== undefined && typeof consoleInvalid !== "boolean") {
+        throw new Error("Rust submit route returned an invalid console marker.");
+      }
+      return { kind: "chat", line, ...(consoleInvalid === true ? { consoleInvalid: true } : {}) };
+    }
     default:
       throw new Error("Rust submit route returned an invalid kind.");
   }
@@ -57,17 +67,19 @@ function parseRustSubmitRoute(raw: string): WorkShellSubmitRoute | undefined {
 
 function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinCommand {
   if (!value || typeof value !== "object") return false;
-  const command = value as { kind?: unknown; traceMode?: unknown; line?: unknown; skillName?: unknown; suggestion?: unknown };
+  const command = value as { kind?: unknown; tab?: unknown; traceMode?: unknown; line?: unknown; skillName?: unknown; suggestion?: unknown; consoleInvalid?: unknown };
   if (typeof command.kind !== "string") return false;
+  if (command.kind === "agent-console") return isAgentConsoleTab(command.tab);
   if (command.kind === "trace-mode") return command.traceMode === "verbose" || command.traceMode === "minimal";
   if (command.kind === "reasoning" || command.kind === "model") return typeof command.line === "string";
-  if (command.kind === "unknown-slash") return typeof command.line === "string" && (command.suggestion === undefined || typeof command.suggestion === "string");
+  if (command.kind === "unknown-slash") return typeof command.line === "string" && (command.suggestion === undefined || typeof command.suggestion === "string") && (command.consoleInvalid === undefined || typeof command.consoleInvalid === "boolean");
   if (command.kind === "skill") return typeof command.line === "string" && (command.skillName === undefined || typeof command.skillName === "string");
   return [
     "exit",
     "clear",
     "help",
     "context",
+    "cache",
     "reload",
     "status",
     "sessions",
@@ -185,6 +197,17 @@ export function resolveWorkShellSubmitRoute(input: {
   }
   if (slashCommand && input.hasInlineCommandRunner) {
     return { kind: "inline-command", line: route.line, slashCommand };
+  }
+
+  // Rust already decided this line is a console-like form that can never run.
+  // Nothing resolved it above, so it ends here as a silent no-op rather than
+  // as unknown-command guidance the operator did not ask for.
+  if (route.consoleInvalid) {
+    return {
+      kind: "builtin",
+      line: route.line,
+      command: { kind: "unknown-slash", line: route.line, consoleInvalid: true },
+    };
   }
 
   const suggestion = suggestKnownSlashCommand(route.line);

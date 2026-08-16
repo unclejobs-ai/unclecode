@@ -225,6 +225,12 @@ fn resolve_work_shell_submit_action(input: &Value) -> Value {
         return json!({ "type": "submit", "line": line, "clearInput": true });
     }
 
+    // Exact `/auth` opens the WorkShell-owned provider catalog. Its command
+    // suggestions remain selectable, but must not replace the launch command.
+    if line == "/auth" {
+        return json!({ "type": "submit", "line": line, "clearInput": true });
+    }
+
     if str_field(input, "activePanelTitle") == Some("Model picker") && !line.starts_with('/') {
         return json!({
             "type": "submit",
@@ -485,7 +491,7 @@ mod tests {
                 r#"{"value":"/auth","isBusy":false,"shouldBlockSlashSubmit":true,"selectedSlashCommand":"/auth status"}"#
             )
             .unwrap(),
-            r#"{"clearInput":true,"line":"/auth status","type":"submit-suggestion"}"#
+            r#"{"clearInput":true,"line":"/auth","type":"submit"}"#
         );
         assert_eq!(
             resolve_work_shell_submit_action_json(

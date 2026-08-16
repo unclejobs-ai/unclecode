@@ -8,6 +8,7 @@ import type {
   WorkShellPanel,
 } from "./work-shell-engine.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
+import type { WorkAgentTurnResult } from "./work-agent.js";
 import type { ContextPacketReceipt } from "@unclecode/contracts";
 import type {
   MemoryLineageAdapter,
@@ -27,7 +28,7 @@ export async function runPromptTurnSuccessSequence<Attachment>(input: {
   attachments?: readonly Attachment[];
   turnStartedAt: number;
   autoContinueOnPermissionStall?: boolean | undefined;
-  runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => Promise<{ text: string }>;
+  runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => Promise<WorkAgentTurnResult>;
   cwd: string;
   sessionId: string;
   currentBridgeLines: readonly string[];
@@ -54,16 +55,25 @@ export async function runPromptTurnSuccessSequence<Attachment>(input: {
     agentId?: string;
     lineage?: MemoryLineageAdapter;
   }) => Promise<readonly string[]>;
-} & WorkShellMemoryLineageRuntime): Promise<{
-  readonly assistantText: string;
-  readonly lastTurnDurationMs: number;
-  readonly postTurnEffects: Awaited<ReturnType<typeof WorkShellPostTurns.runWorkShellPostTurnSuccessEffects>>;
-}> {
+} & WorkShellMemoryLineageRuntime): Promise<
+  | { readonly cancelled: true; readonly cancelledText: string; readonly lastTurnDurationMs: number }
+  | {
+    readonly cancelled?: false;
+    readonly assistantText: string;
+    readonly lastTurnDurationMs: number;
+    readonly postTurnEffects: Awaited<ReturnType<typeof WorkShellPostTurns.runWorkShellPostTurnSuccessEffects>>;
+  }
+> {
   const result = await input.runAgentTurn(input.prompt, input.attachments ?? []);
   if (input.isTurnActive?.() === false) {
     throw new Error("Turn is no longer active.");
   }
   const lastTurnDurationMs = Date.now() - input.turnStartedAt;
+  // The operator cleared the turn mid-flight. That is a cancellation, not a
+  // reply: no permission-stall continuation, no bridge, no memory write.
+  if (result.cancelled) {
+    return { cancelled: true, cancelledText: result.text, lastTurnDurationMs };
+  }
   const assistantText = await WorkShellTurns.finalizeWorkShellAssistantReply({
     prompt: input.prompt,
     assistantText: result.text ?? "",
@@ -381,6 +391,48 @@ type WorkShellPromptTurnExecutionResult = {
   readonly replyPersisted: boolean;
 };
 
+type WorkShellRecordedTurn = {
+  prompt: string;
+  status: string;
+  summary?: string;
+  turnId?: string;
+  contextReceiptId?: string;
+  packetId?: string;
+};
+
+/**
+ * Report one turn outcome to the agentops recorder. Recording is
+ * observational: a recorder failure must never change what the operator sees,
+ * and every outcome — completed, cancelled, failed — reports the same shape.
+ */
+function recordPromptTurnOutcome(
+  input: {
+    readonly promptTurn: { readonly prompt: string };
+    readonly recordTurn?: ((turn: WorkShellRecordedTurn) => void) | undefined;
+    readonly turnId?: string | undefined;
+    readonly contextReceipt?: ContextPacketReceipt | undefined;
+  },
+  status: "completed" | "cancelled" | "failed",
+  summary: string,
+): void {
+  try {
+    input.recordTurn?.({
+      prompt: input.promptTurn.prompt,
+      status,
+      summary,
+      ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
+      ...(input.contextReceipt !== undefined
+        ? {
+            contextReceiptId: input.contextReceipt.id,
+            packetId: input.contextReceipt.packetId,
+          }
+        : {}),
+    });
+  } catch {
+    /* non-blocking */
+  }
+}
+
 function resolveApiBlockedAuthMessage(authLabel: string): string | undefined {
   if (!authLabel.endsWith("-api-blocked")) {
     return undefined;
@@ -404,7 +456,7 @@ export async function executeWorkShellPromptTurn<
   sessionId: string;
   autoContinueOnPermissionStall?: boolean | undefined;
   isTurnActive?: (() => boolean) | undefined;
-  runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => Promise<{ text: string }>;
+  runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => Promise<WorkAgentTurnResult>;
   publishContextBridge: (input: {
     cwd: string;
     summary: string;
@@ -443,7 +495,7 @@ export async function executeWorkShellPromptTurn<
     summary: string,
   ) => Promise<void>;
   /** Optional agentops recorder callback. Called after every turn (success or failure). Non-blocking. */
-  recordTurn?: ((turn: { prompt: string; status: string; summary?: string; turnId?: string; contextReceiptId?: string; packetId?: string }) => void) | undefined;
+  recordTurn?: ((turn: WorkShellRecordedTurn) => void) | undefined;
 } & WorkShellMemoryLineageRuntime): Promise<WorkShellPromptTurnExecutionResult> {
   input.appendEntries({ role: "user", text: input.promptTurn.transcriptText });
   const authGuard = resolveApiBlockedAuthMessage(input.state.authLabel);
@@ -462,7 +514,7 @@ export async function executeWorkShellPromptTurn<
   try {
     await input.persistSessionSnapshot("running", input.promptTurn.sessionSummary).catch(() => undefined);
 
-    const { assistantText, lastTurnDurationMs, postTurnEffects } = await runPromptTurnSuccessSequence({
+    const turnResult = await runPromptTurnSuccessSequence({
       prompt: input.promptTurn.prompt,
       transcriptText: input.promptTurn.transcriptText,
       ...(input.promptTurn.attachments ? { attachments: input.promptTurn.attachments } : {}),
@@ -486,6 +538,19 @@ export async function executeWorkShellPromptTurn<
         ? { promoteScopedMemory: input.promoteScopedMemory }
         : {}),
     });
+    if (turnResult.cancelled) {
+      // The clear already stopped the run; report it to the operator and end
+      // the turn without an assistant reply or a completed recording.
+      input.appendEntries({ role: "system", text: turnResult.cancelledText });
+      input.setState({
+        streamingAssistantText: undefined,
+        lastTurnDurationMs: turnResult.lastTurnDurationMs,
+      });
+      await input.persistSessionSnapshot("idle", turnResult.cancelledText).catch(() => undefined);
+      recordPromptTurnOutcome(input, "cancelled", turnResult.cancelledText);
+      return { completed: false, replyPersisted: false };
+    }
+    const { assistantText, lastTurnDurationMs, postTurnEffects } = turnResult;
     const successPayload = resolvePromptTurnSuccessPayload<Reasoning>({
       assistantText,
       bridgeLines: postTurnEffects.bridgeLines,
@@ -510,22 +575,7 @@ export async function executeWorkShellPromptTurn<
         () => true,
         () => false,
       );
-    try {
-      input.recordTurn?.({
-        prompt: input.promptTurn.prompt,
-        status: "completed",
-        summary: input.promptTurn.sessionSummary,
-        ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
-        ...(input.contextReceipt !== undefined
-          ? {
-              contextReceiptId: input.contextReceipt.id,
-              packetId: input.contextReceipt.packetId,
-            }
-          : {}),
-      });
-    } catch {
-      /* non-blocking */
-    }
+    recordPromptTurnOutcome(input, "completed", input.promptTurn.sessionSummary);
     return { completed: true, replyPersisted };
   } catch (error) {
     const failure = await resolvePromptTurnFailureResult({
@@ -553,22 +603,7 @@ export async function executeWorkShellPromptTurn<
       ...(input.contextReceipt !== undefined ? { contextSubmittedReceipt: input.contextReceipt } : {}),
     });
     await input.persistSessionSnapshot("requires_action", input.promptTurn.failureSummary).catch(() => undefined);
-    try {
-      input.recordTurn?.({
-        prompt: input.promptTurn.prompt,
-        status: "failed",
-        summary: input.promptTurn.failureSummary,
-        ...(input.turnId !== undefined ? { turnId: input.turnId } : {}),
-        ...(input.contextReceipt !== undefined
-          ? {
-              contextReceiptId: input.contextReceipt.id,
-              packetId: input.contextReceipt.packetId,
-            }
-          : {}),
-      });
-    } catch {
-      /* non-blocking */
-    }
+    recordPromptTurnOutcome(input, "failed", input.promptTurn.failureSummary);
     return { completed: false, replyPersisted: false };
   } finally {
     input.setState(createPromptTurnFinalizePatch(input.state));

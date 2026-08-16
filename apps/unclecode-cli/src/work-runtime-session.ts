@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   isModeReasoningEffort,
+  markUnrecoverableAgentConsoleWorkInterrupted,
   parseAgentConsoleSnapshot,
   type AgentConsoleSnapshot,
   type ModeReasoningEffort,
@@ -248,7 +249,14 @@ function parseRustResumedWorkSession(stdout: string): {
           || ((entry as { role?: unknown }).role === "tool"))
         && typeof (entry as { text?: unknown }).text === "string")
     : [];
-  const initialAgentConsole = parseAgentConsoleSnapshot(parsed.agentConsole);
+  // The resume boundary is the only place unrecoverable work settles: the
+  // parser gate rebuilds the safe projection, then a run or job that was still
+  // active when the process died becomes `interrupted` exactly once, before the
+  // snapshot reaches engine state.
+  const parsedAgentConsole = parseAgentConsoleSnapshot(parsed.agentConsole);
+  const initialAgentConsole = parsedAgentConsole
+    ? markUnrecoverableAgentConsoleWorkInterrupted(parsedAgentConsole)
+    : undefined;
   return {
     sessionId,
     ...(traceMode === "minimal" || traceMode === "verbose" ? { traceMode } : {}),

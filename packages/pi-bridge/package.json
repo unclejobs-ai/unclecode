@@ -1,0 +1,19 @@
+{
+  "name": "@unclecode/pi-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.84.1",
+    "@unclecode/contracts": "file:../contracts",
+    "@unclecode/providers": "file:../providers"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "source": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  }
+}

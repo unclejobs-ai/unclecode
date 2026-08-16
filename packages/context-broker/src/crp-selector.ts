@@ -10,10 +10,12 @@
  */
 import type { AgentOpsStore } from "@unclecode/agentops-db";
 import {
+  resolveContextDeskGroup,
   type ContextPacketViewItem,
   type ContextPacketSourceCategory,
   type ContextPacketView,
   type ContextPacketViewWarning,
+  type ContextProviderManifest,
   type ContextSourceCategory,
   type ContextSourceRecord,
 } from "@unclecode/contracts";
@@ -43,11 +45,15 @@ export function contextSourceToPacketItem(
   src: ContextSourceRecord,
   input: { readonly turnIndex?: number } = {},
 ): ContextPacketViewItem {
+  const category = toPacketCategory(src);
   return {
     id: src.id,
-    category: toPacketCategory(src),
+    category,
     label: src.label,
     reason: src.reason,
+    // The desk group is derived once here, at the packet source boundary, so
+    // every consumer reads the same grouping instead of re-deriving it.
+    group: resolveContextDeskGroup(category),
     ...(src.content !== null ? { preview: src.content } : {}),
     tokenEstimate: src.tokenEstimate,
     salience: src.salience,
@@ -77,6 +83,7 @@ function summarizeLoopTrailHeldBack(items: readonly ContextPacketViewItem[]): re
     visible.push({
       id: "loop-trail-excluded-other-summary",
       category: "loop-trail",
+      group: resolveContextDeskGroup("loop-trail"),
       label: formatCountLabel(additionalCount, "additional loop trail artifact", "additional loop trail artifacts"),
       reason: "loop trail artifacts stay local",
       sourceCount: additionalCount,
@@ -87,6 +94,7 @@ function summarizeLoopTrailHeldBack(items: readonly ContextPacketViewItem[]): re
     visible.push({
       id: "loop-trail-excluded-evidence-summary",
       category: "loop-trail",
+      group: resolveContextDeskGroup("loop-trail"),
       label: formatCountLabel(evidenceItems.length, "loop trail evidence transcript", "loop trail evidence transcripts"),
       reason: "loop trail evidence transcripts stay local",
       preview: "Detailed evidence paths stay local; use the loop trail session evidence directory for full transcripts.",
@@ -119,6 +127,52 @@ function buildCondensedHistoryWarnings(items: readonly ContextPacketViewItem[]):
     }));
 }
 
+/**
+ * Index the registry by the packet category each provider declares, so an item
+ * can be attributed to the provider that produced it.
+ *
+ * The lookup is keyed on the *packet* category rather than the stored one:
+ * that is the category the item itself carries, which keeps the registry
+ * self-consistent — a linked item's category is always one its provider
+ * declares. First registration wins when two providers claim a category, so
+ * registry order is the tiebreak.
+ */
+function indexProvidersByCategory(
+  providers: readonly ContextProviderManifest[],
+): ReadonlyMap<string, string> {
+  // A Map because the keys come from caller-supplied manifests: an object
+  // index would let a provider declaring `"constructor"` resolve to something
+  // off `Object.prototype` instead of leaving the category unregistered.
+  const index = new Map<string, string>();
+  for (const provider of providers) {
+    for (const category of provider.categories) {
+      if (!index.has(category)) {
+        index.set(category, provider.providerId);
+      }
+    }
+  }
+  return index;
+}
+
+/**
+ * Repoint an item's provenance at its registered provider.
+ *
+ * Items whose category no provider declares keep the legacy `crp:<category>`
+ * provider id, which is exactly what a caller that supplies no registry gets.
+ */
+function linkItemsToProviders(
+  items: readonly ContextPacketViewItem[],
+  index: ReadonlyMap<string, string>,
+): readonly ContextPacketViewItem[] {
+  return items.map((item) => {
+    const providerId = index.get(item.category);
+    if (providerId === undefined || item.provenance === undefined) {
+      return item;
+    }
+    return { ...item, provenance: { ...item.provenance, providerId } };
+  });
+}
+
 export type SelectContextPacketOptions = {
   readonly store: AgentOpsStore;
   readonly projectId: string;
@@ -127,6 +181,13 @@ export type SelectContextPacketOptions = {
   readonly warnings?: readonly ContextPacketViewWarning[];
   readonly preview?: readonly string[];
   readonly title?: string;
+  /**
+   * Provider registry for this turn. When supplied, the packet carries a
+   * sanitized clone of these manifests and every item's provenance points at
+   * the provider that declares its category. When omitted, the packet has no
+   * `registry` property at all and items keep their legacy provider ids.
+   */
+  readonly providers?: readonly ContextProviderManifest[] | undefined;
 };
 
 /**
@@ -148,8 +209,14 @@ export function selectContextPacketFromStore(options: SelectContextPacketOptions
   });
 
   const packetInput = { turnIndex: options.turnIndex };
-  const included = selection.selected.map((source) => contextSourceToPacketItem(source, packetInput));
-  const excluded = compactHeldBackItems(selection.heldBack.map((source) => contextSourceToPacketItem(source, packetInput)));
+  const providerIndex =
+    options.providers === undefined ? undefined : indexProvidersByCategory(options.providers);
+  const selected = selection.selected.map((source) => contextSourceToPacketItem(source, packetInput));
+  const heldBack = compactHeldBackItems(
+    selection.heldBack.map((source) => contextSourceToPacketItem(source, packetInput)),
+  );
+  const included = providerIndex === undefined ? selected : linkItemsToProviders(selected, providerIndex);
+  const excluded = providerIndex === undefined ? heldBack : linkItemsToProviders(heldBack, providerIndex);
   const warnings = [
     ...(options.warnings ?? []),
     ...buildCondensedHistoryWarnings(included),
@@ -181,5 +248,6 @@ export function selectContextPacketFromStore(options: SelectContextPacketOptions
     preview: options.preview ?? [
       "UncleCode will carry these summaries into the next answer.",
     ],
+    ...(options.providers === undefined ? {} : { registry: { providers: options.providers } }),
   });
 }

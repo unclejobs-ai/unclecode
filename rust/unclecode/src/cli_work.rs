@@ -1,8 +1,9 @@
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use unclecode_core::app_reasoning::resolve_app_reasoning_effort;
 use unclecode_core::auth::{
@@ -26,6 +27,7 @@ const GEMINI_DEFAULT_MODEL: &str = "gemini-2.5-pro";
 const GEMINI_DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 const WORK_PROMPT_STEP_LIMIT: usize = 16;
 const WORK_PROMPT_COST_LIMIT_USD: f64 = 2.0;
+const WORK_PI_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedWorkArgs {
@@ -34,6 +36,7 @@ struct ParsedWorkArgs {
     model: Option<String>,
     reasoning: Option<String>,
     session_id: Option<String>,
+    engine: Option<String>,
     prompt: Option<String>,
     show_help: bool,
     show_tools: bool,
@@ -49,6 +52,7 @@ struct WorkRuntimeConfig {
     system_prompt: String,
     reasoning_effort: Option<String>,
     allow_run_shell: bool,
+    engine: String,
 }
 
 pub fn top_level_work_args(args: &[OsString]) -> Option<Vec<OsString>> {
@@ -56,6 +60,20 @@ pub fn top_level_work_args(args: &[OsString]) -> Option<Vec<OsString>> {
         Some("work") | Some("tui") => Some(args[1..].to_vec()),
         _ => None,
     }
+}
+
+/// Reports whether post-command `work` args describe an interactive,
+/// promptless session. Parser-backed so option values (`--engine pi`) are
+/// never mistaken for a prompt; `--help`/`--tools` stay Rust-native, and any
+/// positional prompt means a one-shot turn.
+pub fn work_args_are_interactive_promptless(args: &[OsString]) -> bool {
+    let parsed = parse_work_args(args, PathBuf::from("."));
+    !parsed.show_help
+        && !parsed.show_tools
+        && parsed
+            .prompt
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
 }
 
 pub fn run_top_level_work_command(args: &[OsString]) -> Result<u8, String> {
@@ -106,6 +124,7 @@ fn parse_work_args(args: &[OsString], caller_cwd: PathBuf) -> ParsedWorkArgs {
     let mut model = None;
     let mut reasoning = None;
     let mut session_id = None;
+    let mut engine = None;
     let mut prompt_parts = Vec::new();
     let mut show_help = false;
     let mut show_tools = false;
@@ -148,6 +167,14 @@ fn parse_work_args(args: &[OsString], caller_cwd: PathBuf) -> ParsedWorkArgs {
                 session_id = string_args.get(index + 1).cloned();
                 index += 1;
             }
+            "--engine" => {
+                if let Some(next) = string_args.get(index + 1).map(String::as_str) {
+                    if matches!(next, "native" | "pi") {
+                        engine = Some(next.to_string());
+                    }
+                }
+                index += 1;
+            }
             _ => prompt_parts.push(arg.to_string()),
         }
         index += 1;
@@ -159,6 +186,7 @@ fn parse_work_args(args: &[OsString], caller_cwd: PathBuf) -> ParsedWorkArgs {
         model,
         reasoning,
         session_id,
+        engine,
         prompt: (!prompt_parts.is_empty()).then(|| prompt_parts.join(" ")),
         show_help,
         show_tools,
@@ -184,6 +212,7 @@ fn load_runtime_config(parsed: &ParsedWorkArgs) -> Result<WorkRuntimeConfig, Str
         system_prompt,
         reasoning_effort,
         allow_run_shell,
+        engine: parsed.engine.clone().unwrap_or_else(default_work_engine),
     })
 }
 
@@ -191,6 +220,9 @@ fn run_work_prompt_turn(
     config: &WorkRuntimeConfig,
     prompt: &str,
 ) -> Result<unclecode_core::team_mini_loop::ProviderMiniLoopResult, String> {
+    if config.engine == "pi" {
+        return run_pi_bridge_turn(config, prompt);
+    }
     run_provider_mini_loop(ProviderMiniLoopRequest {
         runtime: config.provider.clone(),
         api_key: config
@@ -342,6 +374,289 @@ fn handle_shell_reentry(line: &str) -> bool {
         println!("To run that shell command, leave this session first with /exit.");
     }
     true
+}
+
+fn resolve_pi_turn_entry(cwd: &Path) -> Result<PathBuf, String> {
+    if let Some(explicit) = env::var_os("UNCLECODE_PI_TURN_ENTRY") {
+        let candidate = PathBuf::from(explicit);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+        return Err(format!(
+            "UNCLECODE_PI_TURN_ENTRY points at a missing file: {}",
+            candidate.display()
+        ));
+    }
+    let mut roots = Vec::new();
+    if let Ok(exe) = env::current_exe() {
+        roots.extend(exe.ancestors().map(Path::to_path_buf));
+    }
+    roots.extend(cwd.ancestors().map(Path::to_path_buf));
+    for root in roots {
+        let candidate = root.join("apps/unclecode-cli/dist/index.js");
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(
+        "could not locate apps/unclecode-cli/dist/index.js for the pi engine; run `npm run build` or set UNCLECODE_PI_TURN_ENTRY"
+            .to_string(),
+    )
+}
+
+fn run_pi_bridge_turn(
+    config: &WorkRuntimeConfig,
+    prompt: &str,
+) -> Result<unclecode_core::team_mini_loop::ProviderMiniLoopResult, String> {
+    let entry = resolve_pi_turn_entry(&config.cwd)?;
+    run_pi_bridge_turn_with_entry(config, prompt, &entry)
+}
+
+fn run_pi_bridge_turn_with_entry(
+    config: &WorkRuntimeConfig,
+    prompt: &str,
+    entry: &Path,
+) -> Result<unclecode_core::team_mini_loop::ProviderMiniLoopResult, String> {
+    run_pi_bridge_turn_with_entry_timeout(config, prompt, entry, WORK_PI_TURN_TIMEOUT)
+}
+
+fn run_pi_bridge_turn_with_entry_timeout(
+    config: &WorkRuntimeConfig,
+    prompt: &str,
+    entry: &Path,
+    timeout: std::time::Duration,
+) -> Result<unclecode_core::team_mini_loop::ProviderMiniLoopResult, String> {
+    let request = serde_json::json!({
+        "provider": config.provider,
+        "model": config.model,
+        "prompt": prompt,
+        "cwd": config.cwd,
+        "apiKey": config.api_key,
+        "baseUrl": config.base_url,
+        "systemPrompt": config.system_prompt,
+        "reasoningEffort": config.reasoning_effort,
+        "allowedTools": work_pi_allowed_tools(),
+        "allowRunShell": config.allow_run_shell,
+        "stepLimit": WORK_PROMPT_STEP_LIMIT,
+        "costLimitUsd": WORK_PROMPT_COST_LIMIT_USD,
+    });
+    let mut command = Command::new("node");
+    command
+        .arg(entry)
+        .arg("work-pi-turn")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to spawn the pi turn helper: {error}"))?;
+    let child_pid = child.id();
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "pi turn helper stdin was not piped".to_string())?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "pi turn helper stdout was not piped".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "pi turn helper stderr was not piped".to_string())?;
+    let request_body = request.to_string();
+    let writer = std::thread::spawn(move || {
+        stdin
+            .write_all(request_body.as_bytes())
+            .map_err(|error| format!("failed to send the pi turn request: {error}"))
+    });
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("failed to read pi turn stdout: {error}"))?;
+        Ok::<Vec<u8>, String>(bytes)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("failed to read pi turn stderr: {error}"))?;
+        Ok::<Vec<u8>, String>(bytes)
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let mut timed_out = false;
+    let mut termination_warning = None;
+    let status = 'wait: loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("failed to wait for the pi turn helper: {error}"))?
+        {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            timed_out = true;
+            if let Err(error) = terminate_pi_turn_process_tree(child_pid) {
+                termination_warning = Some(error);
+            }
+            let _ = child.kill();
+            let kill_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                if let Some(status) = child.try_wait().map_err(|error| {
+                    format!("failed to reap the timed-out pi turn helper: {error}")
+                })? {
+                    break 'wait status;
+                }
+                if std::time::Instant::now() >= kill_deadline {
+                    return Err("pi turn helper did not exit after forced termination".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+    if !timed_out {
+        let _ = terminate_pi_turn_process_tree(child_pid);
+    }
+    let writer_result = writer
+        .join()
+        .map_err(|_| "pi turn helper stdin writer panicked".to_string())?;
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "pi turn helper stdout reader panicked".to_string())??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "pi turn helper stderr reader panicked".to_string())??;
+    if timed_out {
+        let cleanup_warning = termination_warning
+            .map(|warning| format!("; process-tree cleanup warning: {warning}"))
+            .unwrap_or_default();
+        return Err(format!(
+            "pi turn helper timed out after {}ms{cleanup_warning}",
+            timeout.as_millis()
+        ));
+    }
+    writer_result?;
+    if !status.success() {
+        let detail = String::from_utf8_lossy(&stderr);
+        let detail = detail.trim();
+        return Err(if detail.is_empty() {
+            format!("pi turn helper exited unsuccessfully: {status}")
+        } else {
+            format!("pi turn helper exited unsuccessfully: {status}: {detail}")
+        });
+    }
+    let body = String::from_utf8_lossy(&stdout);
+    let parsed: serde_json::Value = serde_json::from_str(body.trim())
+        .map_err(|error| format!("pi turn helper returned invalid JSON: {error}"))?;
+    match parsed.get("status").and_then(serde_json::Value::as_str) {
+        Some("ok") => {
+            let steps = parsed
+                .get("steps")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| {
+                    "pi turn helper response is missing a valid steps count".to_string()
+                })?;
+            let cost_usd = parsed
+                .get("costUsd")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| "pi turn helper response is missing a valid costUsd".to_string())?;
+            Ok(unclecode_core::team_mini_loop::ProviderMiniLoopResult {
+                status: "submitted".to_string(),
+                submission: parsed
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                steps,
+                cost_usd,
+            })
+        }
+        Some("error") => Err(parsed
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("pi turn helper failed without an error message")
+            .to_string()),
+        _ => Err(format!(
+            "pi turn helper returned an unexpected payload: {}",
+            body.trim()
+        )),
+    }
+}
+
+fn terminate_pi_turn_process_tree(pid: u32) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return Err(format!("invalid pi turn helper PID: {pid}"));
+        }
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        let group = -(pid as i32);
+        let term_result = unsafe { kill(group, 15) };
+        let term_error = std::io::Error::last_os_error();
+        if term_result != 0 && term_error.raw_os_error() != Some(3) {
+            return Err(format!(
+                "failed to terminate pi turn helper process group {pid}: {term_error}"
+            ));
+        }
+        let grace_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::time::Instant::now() < grace_deadline {
+            let alive = unsafe { kill(group, 0) } == 0
+                || std::io::Error::last_os_error().raw_os_error() == Some(1);
+            if !alive {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let kill_result = unsafe { kill(group, 9) };
+        let kill_error = std::io::Error::last_os_error();
+        if kill_result == 0 || kill_error.raw_os_error() == Some(3) {
+            return Ok(());
+        }
+        if kill_error.raw_os_error() == Some(1) {
+            let leader_kill_result = unsafe { kill(pid as i32, 9) };
+            let leader_kill_error = std::io::Error::last_os_error();
+            if leader_kill_result == 0 || leader_kill_error.raw_os_error() == Some(3) {
+                return Ok(());
+            }
+            return Err(format!(
+                "failed to kill pi turn helper process group {pid}: {kill_error}; \
+                 failed to kill its leader: {leader_kill_error}"
+            ));
+        }
+        Err(format!(
+            "failed to kill pi turn helper process group {pid}: {kill_error}"
+        ))
+    }
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status()
+            .map_err(|error| {
+                format!("failed to start taskkill for pi turn helper {pid}: {error}")
+            })?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "taskkill failed for pi turn helper {pid}: {status}"
+            ))
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err("pi turn helper timeout termination is unsupported on this platform".to_string())
+    }
 }
 
 fn run_interactive_turn(
@@ -667,6 +982,9 @@ fn print_work_help() {
     println!("  --model  Override the model for the chosen provider");
     println!("  --reasoning  Override reasoning effort: low, medium, high");
     println!("  --session-id  Resume a persisted work session id");
+    println!(
+        "  --engine  pi (default, pi-mono runtime + OAuth) or native (legacy provider runtime)"
+    );
     println!();
     println!("Prompt and interactive line modes are Rust-native.");
 }
@@ -687,6 +1005,35 @@ fn print_interactive_help() {
     println!("/exit             Leave the Rust work session");
 }
 
+fn resolve_default_work_engine(configured: Option<&str>) -> String {
+    match configured {
+        Some("native") => "native".to_string(),
+        _ => "pi".to_string(),
+    }
+}
+
+fn default_work_engine() -> String {
+    resolve_default_work_engine(env::var("UNCLECODE_WORK_ENGINE").ok().as_deref())
+}
+
+fn codex_oauth_credentials_available(cwd: &Path) -> bool {
+    let auth = resolve_openai_auth(|key| env_value(key, cwd));
+    auth.auth_type == "oauth" && auth.runtime.as_deref() == Some("codex")
+}
+
+fn work_auth_label(config: &WorkRuntimeConfig) -> &'static str {
+    if config.api_key.is_some() {
+        return "ready";
+    }
+    if config.engine == "pi"
+        && config.provider == "openai"
+        && codex_oauth_credentials_available(&config.cwd)
+    {
+        return "ready (codex oauth)";
+    }
+    "missing"
+}
+
 fn print_status(config: &WorkRuntimeConfig, queue: &WorkQueue) {
     println!("provider: {}", config.provider);
     println!("model: {}", config.model);
@@ -695,14 +1042,8 @@ fn print_status(config: &WorkRuntimeConfig, queue: &WorkQueue) {
         config.reasoning_effort.as_deref().unwrap_or("unsupported")
     );
     println!("cwd: {}", config.cwd.display());
-    println!(
-        "auth: {}",
-        if config.api_key.is_some() {
-            "ready"
-        } else {
-            "missing"
-        }
-    );
+    println!("engine: {}", config.engine);
+    println!("auth: {}", work_auth_label(config));
     println!("queue: {}", queue.len());
     println!(
         "run_shell: {}",
@@ -766,6 +1107,11 @@ fn print_tools() {
     println!("  write_file   Write a UTF-8 text file inside the workspace.");
     println!("  search_text  Search workspace text with ripgrep.");
     println!("  run_shell    Run a shell command only when UNCLECODE_ALLOW_RUN_SHELL=1.");
+    println!("Pi engine code-intelligence tools:");
+    println!("  lsp_query    Query diagnostics, definitions, references, hover, or symbols.");
+    println!("  lsp_rename   Rename a symbol across language-server references.");
+    println!("  ast_search   Search source code by AST structure.");
+    println!("  ast_rewrite  Preview or apply an AST-aware rewrite.");
 }
 
 fn work_allowed_tools() -> Vec<String> {
@@ -776,6 +1122,17 @@ fn work_allowed_tools() -> Vec<String> {
         "search_text".to_string(),
         "run_shell".to_string(),
     ]
+}
+
+fn work_pi_allowed_tools() -> Vec<String> {
+    let mut tools = work_allowed_tools();
+    tools.extend([
+        "lsp_query".to_string(),
+        "lsp_rename".to_string(),
+        "ast_search".to_string(),
+        "ast_rewrite".to_string(),
+    ]);
+    tools
 }
 
 #[cfg(test)]
@@ -791,6 +1148,35 @@ mod tests {
         assert!(top_level_work_args(&[OsString::from("work"), OsString::from("hello")]).is_some());
         assert!(top_level_work_args(&[OsString::from("work")]).is_some());
         assert!(top_level_work_args(&[OsString::from("tui")]).is_some());
+    }
+
+    #[test]
+    fn interactive_promptless_work_args_exclude_prompts_help_and_tools() {
+        assert!(work_args_are_interactive_promptless(&[]));
+        // Option values are consumed by the parser, never read as a prompt.
+        assert!(work_args_are_interactive_promptless(&[
+            OsString::from("--engine"),
+            OsString::from("pi"),
+            OsString::from("--model"),
+            OsString::from("gpt-5.5"),
+        ]));
+        // Help and tools stay on the Rust-native path.
+        assert!(!work_args_are_interactive_promptless(&[OsString::from(
+            "--help"
+        )]));
+        assert!(!work_args_are_interactive_promptless(&[OsString::from(
+            "-h"
+        )]));
+        assert!(!work_args_are_interactive_promptless(&[OsString::from(
+            "--tools"
+        )]));
+        // Any positional means a one-shot turn.
+        assert!(!work_args_are_interactive_promptless(&[
+            OsString::from("--engine"),
+            OsString::from("pi"),
+            OsString::from("fix"),
+            OsString::from("tests"),
+        ]));
     }
 
     #[test]
@@ -824,5 +1210,167 @@ mod tests {
         assert!(handle_shell_reentry("unclecode auth status"));
         assert!(!handle_shell_reentry("inspect unclecode binary"));
         assert!(!handle_shell_reentry("/status"));
+    }
+
+    #[test]
+    fn default_engine_is_pi_unless_explicitly_overridden() {
+        assert_eq!(resolve_default_work_engine(None), "pi");
+        assert_eq!(resolve_default_work_engine(Some("native")), "native");
+        assert_eq!(resolve_default_work_engine(Some("unknown")), "pi");
+    }
+
+    #[test]
+    fn auth_label_reports_codex_oauth_only_for_the_pi_engine() {
+        let mut config = WorkRuntimeConfig {
+            cwd: PathBuf::from("/tmp"),
+            provider: "openai".to_string(),
+            model: "gpt-5.6-sol".to_string(),
+            api_key: Some("sk-test".to_string()),
+            base_url: String::new(),
+            system_prompt: String::new(),
+            reasoning_effort: None,
+            allow_run_shell: false,
+            engine: "native".to_string(),
+        };
+        assert_eq!(work_auth_label(&config), "ready");
+
+        config.api_key = None;
+        assert_eq!(work_auth_label(&config), "missing");
+    }
+
+    #[test]
+    fn parses_engine_flag_and_ignores_unknown_values() {
+        let parsed = parse_work_args(
+            &[
+                OsString::from("--engine"),
+                OsString::from("pi"),
+                OsString::from("hello"),
+            ],
+            PathBuf::from("/tmp"),
+        );
+        assert_eq!(parsed.engine.as_deref(), Some("pi"));
+        assert_eq!(parsed.prompt.as_deref(), Some("hello"));
+
+        let invalid = parse_work_args(
+            &[
+                OsString::from("--engine"),
+                OsString::from("bogus"),
+                OsString::from("hello"),
+            ],
+            PathBuf::from("/tmp"),
+        );
+        assert!(invalid.engine.is_none());
+        assert_eq!(invalid.prompt.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn pi_engine_turn_delegates_to_node_helper() {
+        let dir = env::temp_dir().join(format!("unclecode-pi-turn-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let stub = dir.join("stub.mjs");
+        fs::write(
+            &stub,
+            "let input=\"\";process.stdin.on(\"data\",(d)=>input+=d).on(\"end\",()=>{const r=JSON.parse(input);process.stdout.write(JSON.stringify({status:\"ok\",text:`PI:${r.prompt}@${r.model} base=${r.baseUrl} tools=${r.allowedTools.join(\",\")} shell=${r.allowRunShell} steps=${r.stepLimit} cost=${r.costLimitUsd}`,steps:2,costUsd:0.25}))});",
+        )
+        .unwrap();
+        let config = WorkRuntimeConfig {
+            cwd: dir.clone(),
+            provider: "openai".to_string(),
+            model: "test-model".to_string(),
+            api_key: None,
+            base_url: "http://127.0.0.1:43123/v1".to_string(),
+            system_prompt: String::new(),
+            reasoning_effort: None,
+            allow_run_shell: false,
+            engine: "pi".to_string(),
+        };
+        let result = run_pi_bridge_turn_with_entry(&config, "hello", &stub);
+        fs::remove_dir_all(&dir).ok();
+
+        let result = result.unwrap();
+        assert_eq!(result.status, "submitted");
+        assert_eq!(result.steps, 2);
+        assert_eq!(result.cost_usd, 0.25);
+        assert_eq!(
+            result.submission,
+
+            "PI:hello@test-model base=http://127.0.0.1:43123/v1 tools=list_files,read_file,write_file,search_text,run_shell,lsp_query,lsp_rename,ast_search,ast_rewrite shell=false steps=16 cost=2"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn pi_engine_turn_terminates_inherited_pipe_descendants_after_helper_exit() {
+        let dir = env::temp_dir().join(format!(
+            "unclecode-pi-turn-descendant-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let stub = dir.join("descendant.mjs");
+        fs::write(
+            &stub,
+            "import {spawn} from \"node:child_process\";let input=\"\";process.stdin.on(\"data\",(d)=>input+=d).on(\"end\",()=>{JSON.parse(input);const child=spawn(process.execPath,[\"-e\",\"setTimeout(()=>{},2000)\"],{stdio:[\"ignore\",\"inherit\",\"inherit\"]});child.unref();process.stdout.write(JSON.stringify({status:\"ok\",text:\"done\",steps:1,costUsd:0}))});",
+        )
+        .unwrap();
+        let config = WorkRuntimeConfig {
+            cwd: dir.clone(),
+            provider: "openai".to_string(),
+            model: "test-model".to_string(),
+            api_key: None,
+            base_url: "http://127.0.0.1:43123/v1".to_string(),
+            system_prompt: String::new(),
+            reasoning_effort: None,
+            allow_run_shell: false,
+            engine: "pi".to_string(),
+        };
+        let started = std::time::Instant::now();
+        let result = run_pi_bridge_turn_with_entry_timeout(
+            &config,
+            "hello",
+            &stub,
+            std::time::Duration::from_secs(3),
+        );
+        fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(result.unwrap().submission, "done");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pi_engine_turn_times_out_and_terminates_the_helper() {
+        let dir = env::temp_dir().join(format!(
+            "unclecode-pi-turn-timeout-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let stub = dir.join("stall.mjs");
+        fs::write(
+            &stub,
+            "process.on(\"SIGTERM\",()=>{});process.stdin.resume();setInterval(()=>{},1000);",
+        )
+        .unwrap();
+        let config = WorkRuntimeConfig {
+            cwd: dir.clone(),
+            provider: "openai".to_string(),
+            model: "test-model".to_string(),
+            api_key: None,
+            base_url: "http://127.0.0.1:43123/v1".to_string(),
+            system_prompt: String::new(),
+            reasoning_effort: None,
+            allow_run_shell: false,
+            engine: "pi".to_string(),
+        };
+        let started = std::time::Instant::now();
+        let result = run_pi_bridge_turn_with_entry_timeout(
+            &config,
+            "hello",
+            &stub,
+            std::time::Duration::from_millis(50),
+        );
+        fs::remove_dir_all(&dir).ok();
+
+        let error = result.err().expect("stalled helper should time out");
+        assert!(error.contains("timed out after 50ms"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 }

@@ -367,6 +367,40 @@ describe("context packet view", () => {
       reason: "bounded summary",
       preview: "Public summary",
       content: "raw provider payload",
+      badges: [
+        {
+          label: "condensed",
+          tone: "info",
+          secretToken: "badge-secret",
+          path: "/var/internal/badge.json",
+        },
+      ],
+      provenance: {
+        kind: "condensed-history",
+        sourceId: "history-1",
+        scope: "workspace",
+        secretToken: "provenance-secret",
+        store: "sqlite:///var/internal/provenance.db",
+      },
+      freshness: {
+        state: "fresh",
+        updatedAt: "2026-07-13T00:00:00.000Z",
+        projectId: "internal-project",
+        secretToken: "freshness-secret",
+      },
+      rank: {
+        score: 0.42,
+        factors: [
+          {
+            label: "recency",
+            value: "high",
+            secretToken: "factor-secret",
+            path: "/var/internal/factor.json",
+          },
+        ],
+        store: "redis://internal-rank",
+        projectId: "internal-project",
+      },
       metadata: {
         kind: "condensed-history",
         sourceEventIds: ["trace-internal"],
@@ -378,27 +412,141 @@ describe("context packet view", () => {
           method: "recent-window",
           inputTokensEstimate: 10,
           outputTokensEstimate: 4,
+          secretToken: "compression-secret",
+          path: "/var/internal/compression.json",
         },
         sourceEventPreviews: ["raw event"],
       },
       arbitraryInternalField: "must not escape",
     };
 
+    const internalWarning = {
+      code: "omo.multiple-active",
+      message: "Multiple active OMO sessions detected.",
+      severity: "warning",
+      secretToken: "warning-secret",
+      store: "sqlite:///var/internal/warnings.db",
+      projectId: "internal-project",
+    };
+    const policySource = {
+      id: "policy-source",
+      label: "Public policy source",
+      authority: "mandatory",
+      digest: "sha256:policy-public-boundary",
+      secretToken: "policy-secret",
+      path: "/var/internal/policy.json",
+      store: "sqlite:///var/internal/policy.db",
+      projectId: "internal-project",
+    };
+    const manifest = {
+      id: "manifest-public-boundary",
+      profileId: "build",
+      createdAt: "2026-07-13T00:00:00.000Z",
+      packetId: "packet-public-boundary",
+      policy: [policySource],
+      includedSourceCount: 1,
+      excludedSourceCount: 0,
+      tokenEstimate: 30,
+      secretToken: "manifest-secret",
+      path: "/var/internal/manifest.json",
+      store: "sqlite:///var/internal/manifest.db",
+      projectId: "internal-project",
+    };
+    const included = [internalItem];
+    const excluded = [];
+    const warnings = [internalWarning];
+    const preview = ["caller-owned preview"];
+
     const packet = createContextPacketView({
       id: "packet-public-boundary",
       generatedAt: "2026-07-13T00:00:00.000Z",
-      included: [internalItem],
-      excluded: [],
-      warnings: [],
-      preview: [],
+      included,
+      excluded,
+      warnings,
+      preview,
+      manifest,
+    });
+    assert.notStrictEqual(packet.included, included);
+    assert.notStrictEqual(packet.included[0], internalItem);
+    assert.notStrictEqual(packet.warnings, warnings);
+    assert.notStrictEqual(packet.warnings[0], internalWarning);
+    assert.notStrictEqual(packet.preview, preview);
+    const projectedManifest = packet.manifest;
+    assert.ok(projectedManifest, "the valid prompt manifest must survive the public projection");
+    assert.notStrictEqual(projectedManifest, manifest);
+    assert.notStrictEqual(projectedManifest.policy, manifest.policy);
+    assert.notStrictEqual(projectedManifest.policy[0], policySource);
+
+    for (const [boundaryPath, record] of [
+      ["manifest", projectedManifest],
+      ["manifest.policy[0]", projectedManifest.policy[0]],
+    ]) {
+      for (const leaked of ["secretToken", "path", "store", "projectId"]) {
+        assert.equal(
+          Object.hasOwn(record, leaked),
+          false,
+          `${boundaryPath} leaked internal field "${leaked}" through the public packet boundary`,
+        );
+      }
+    }
+    assert.deepEqual(projectedManifest, {
+      id: "manifest-public-boundary",
+      profileId: "build",
+      createdAt: "2026-07-13T00:00:00.000Z",
+      packetId: "packet-public-boundary",
+      policy: [{
+        id: "policy-source",
+        label: "Public policy source",
+        authority: "mandatory",
+        digest: "sha256:policy-public-boundary",
+      }],
+      includedSourceCount: 1,
+      excludedSourceCount: 0,
+      tokenEstimate: 30,
     });
 
-    assert.deepEqual(packet.included[0], {
+    const projected = packet.included[0];
+    const nestedPublicRecords = [
+      ["included[0].badges[0]", projected.badges?.[0]],
+      ["included[0].provenance", projected.provenance],
+      ["included[0].freshness", projected.freshness],
+      ["included[0].rank", projected.rank],
+      ["included[0].rank.factors[0]", projected.rank?.factors?.[0]],
+      ["included[0].metadata.compression", projected.metadata?.compression],
+      ["warnings[0]", packet.warnings[0]],
+    ];
+    for (const [path, record] of nestedPublicRecords) {
+      assert.ok(record, `${path} must survive the public projection`);
+      for (const leaked of ["secretToken", "path", "store", "projectId"]) {
+        assert.equal(
+          Object.hasOwn(record, leaked),
+          false,
+          `${path} leaked internal field "${leaked}" through the public packet boundary`,
+        );
+      }
+    }
+
+    assert.deepEqual(projected, {
       id: "condensed-history",
       category: "condensed-history",
+      group: "conversation",
       label: "Condensed history",
       reason: "bounded summary",
       preview: "Public summary",
+      badges: [{ label: "condensed", tone: "info" }],
+      provenance: {
+        kind: "condensed-history",
+        sourceId: "history-1",
+        scope: "workspace",
+      },
+      freshness: {
+        state: "fresh",
+        updatedAt: "2026-07-13T00:00:00.000Z",
+      },
+      rank: {
+        score: 0.42,
+        factors: [{ label: "recency", value: "high" }],
+      },
       metadata: {
         kind: "condensed-history",
         sourceEventIds: ["trace-internal"],
@@ -413,5 +561,31 @@ describe("context packet view", () => {
         },
       },
     });
+
+    assert.deepEqual(packet.warnings, [
+      {
+        code: "omo.multiple-active",
+        message: "Multiple active OMO sessions detected.",
+        severity: "warning",
+      },
+    ]);
+    manifest.id = "caller-mutated-manifest";
+    manifest.packetId = "caller-mutated-packet";
+    manifest.policy.push({
+      id: "caller-added-policy",
+      label: "Caller-added policy",
+      authority: "profile-eligible",
+      digest: "sha256:caller-added-policy",
+    });
+    policySource.label = "caller-mutated-policy";
+    internalItem.badges[0].label = "caller-mutated-badge";
+    internalWarning.message = "caller-mutated-warning";
+
+    assert.equal(projectedManifest.id, "manifest-public-boundary");
+    assert.equal(projectedManifest.packetId, "packet-public-boundary");
+    assert.equal(projectedManifest.policy.length, 1);
+    assert.equal(projectedManifest.policy[0].label, "Public policy source");
+    assert.equal(packet.included[0].badges[0].label, "condensed");
+    assert.equal(packet.warnings[0].message, "Multiple active OMO sessions detected.");
   });
 });

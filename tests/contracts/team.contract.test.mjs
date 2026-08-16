@@ -8,6 +8,7 @@ import {
   EVIDENCE_GATE_STATUSES,
   SESSION_CHECKPOINT_TYPES,
   TEAM_GATE_LEVELS,
+  TEAM_ISOLATION_MODES,
   TEAM_LANE_RUNTIMES,
   TEAM_RUNTIME_MODES,
   TEAM_RUN_STATUSES,
@@ -34,6 +35,10 @@ test("team gate levels map to mmbridge severity", () => {
 
 test("team runtime modes mirror runtime-broker contract", () => {
   assert.deepEqual(TEAM_RUNTIME_MODES, ["local", "docker", "e2b", "openshell"]);
+});
+
+test("team isolation modes distinguish shared and per-worker workspaces", () => {
+  assert.deepEqual(TEAM_ISOLATION_MODES, ["shared", "worktree"]);
 });
 
 test("session checkpoint types now include team_run + team_step", () => {

@@ -28,9 +28,11 @@ export async function runSlashLatencyTuiSmoke({ tmp }) {
       `OPENAI_API_KEY=sk-local-slash-latency-test-key`,
       `NO_PROXY=127.0.0.1,localhost`,
       `${shellQuote(process.execPath)} bin/unclecode.cjs tui --provider openai --model gpt-5.4`,
-    ].join(" "),
-    `echo EXIT:$?`,
-    `sleep 20`,
+      `exit_code=$?`,
+      `echo EXIT:$exit_code`,
+      `sleep 20`,
+      `exit $exit_code`,
+    ].join("; "),
   ].join(" && ");
 
   try {

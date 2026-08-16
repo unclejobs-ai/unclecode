@@ -120,3 +120,50 @@ export function truncateForDisplayWidth(value: string, maxWidth: number): string
   }
   return ellipsisVersion;
 }
+
+/**
+ * Greedy display-width wrapping for consumers that need the same physical-line
+ * ceiling as the Context Desk renderer. Oversized words fall back to grapheme
+ * splitting so wide scripts and emoji remain bounded.
+ */
+export function wrapDisplayTextFast(value: string, width: number): readonly string[] {
+  if (width <= 0) {
+    return value.length > 0 ? [value] : [];
+  }
+  const lines: string[] = [];
+  for (const paragraph of value.split("\n")) {
+    let current = "";
+    let currentWidth = 0;
+    for (const word of paragraph.split(" ")) {
+      const wordWidth = getDisplayWidth(word);
+      const separatorWidth = current.length > 0 ? 1 : 0;
+      if (currentWidth + separatorWidth + wordWidth <= width) {
+        current = current.length > 0 ? `${current} ${word}` : word;
+        currentWidth += separatorWidth + wordWidth;
+        continue;
+      }
+      if (current.length > 0) {
+        lines.push(current);
+        current = "";
+        currentWidth = 0;
+      }
+      if (wordWidth <= width) {
+        current = word;
+        currentWidth = wordWidth;
+        continue;
+      }
+      for (const grapheme of segmentDisplayGraphemes(word)) {
+        const graphemeWidth = getGraphemeWidth(grapheme);
+        if (currentWidth + graphemeWidth > width && current.length > 0) {
+          lines.push(current);
+          current = "";
+          currentWidth = 0;
+        }
+        current += grapheme;
+        currentWidth += graphemeWidth;
+      }
+    }
+    lines.push(current);
+  }
+  return lines;
+}

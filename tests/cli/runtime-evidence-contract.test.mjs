@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildRuntimeEvidence,
   hasRuntimeEvidenceContract,
   summarizeRuntimeEvidence,
 } from "../../scripts/runtime-qa/report-evidence.mjs";
@@ -66,6 +67,25 @@ test("runtime evidence contract requires final answers gated by tool results", (
     hasRuntimeEvidenceContract({ ...evidence, tui: { ...evidence.tui, latencyOk: false } }),
     false,
   );
+});
+
+test("Gemini 2.x protocol pairing accepts the required function name without an optional call ID", () => {
+  const evidence = buildRuntimeEvidence({
+    toolCallSmoke: {
+      toolRoundTripVerified: true,
+      requestDelta: 2,
+      firstRequest: { hasTools: true },
+      secondRequest: {
+        hasFunctionResponse: true,
+        functionResponseNameMatched: true,
+        functionResponseIdMatched: false,
+        finalAnswerGatedByToolResult: true,
+      },
+      finalAnswerGatedByToolResult: true,
+    },
+  });
+
+  assert.equal(evidence.providerToolCalls.gemini.protocolPaired, true);
 });
 
 test("runtime evidence summary fails closed when provider evidence is missing", () => {

@@ -36,6 +36,39 @@ export function estimateCostUsd(args: {
   return Number(parseRustKeyValueLines(stdout).get("costUsd") ?? 0);
 }
 
+export function estimateCacheSavingsUsd(args: {
+  readonly provider: string;
+  readonly modelId: string;
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens?: number;
+}): number {
+  if (args.cacheReadTokens <= 0) {
+    return 0;
+  }
+  const readDiscount = args.provider === "gemini"
+    ? 0.75
+    : args.provider === "openai" || args.provider === "anthropic"
+      ? 0.9
+      : 0;
+  if (readDiscount === 0) {
+    return 0;
+  }
+  let price: ModelPrice | undefined;
+  try {
+    price = getModelPrice(args.modelId);
+  } catch {
+    return 0;
+  }
+  if (!price) {
+    return 0;
+  }
+  const writePremium = args.provider === "anthropic"
+    ? Math.max(0, args.cacheWriteTokens ?? 0) * 0.25
+    : 0;
+  const avoidedInputTokens = Math.max(0, args.cacheReadTokens * readDiscount - writePremium);
+  return avoidedInputTokens * price.inputUsdPer1M / 1_000_000;
+}
+
 function parseRustKeyValueLines(stdout: string): Map<string, string> {
   return new Map(
     stdout

@@ -379,6 +379,11 @@ test("OpenAIProvider can return a plain text response without tools", async () =
               },
             },
           ],
+          usage: {
+            prompt_tokens: 12,
+            completion_tokens: 3,
+            prompt_tokens_details: { cached_tokens: 8 },
+          },
         };
       },
     }),
@@ -386,6 +391,7 @@ test("OpenAIProvider can return a plain text response without tools", async () =
 
   const result = await provider.runTurn("say hello");
   assert.equal(result.text, "hello from openai");
+  assert.deepEqual(result.usage, { inputTokens: 4, outputTokens: 3, cacheReadTokens: 8 });
 });
 
 test("OpenAIProvider uses updated model for subsequent turns", async () => {
@@ -428,6 +434,41 @@ test("OpenAIProvider uses updated model for subsequent turns", async () => {
   assert.equal(capturedBodies[0]?.model, "gpt-5.4");
   assert.equal(capturedBodies[1]?.model, "gpt-4.1-mini");
   assert.equal(capturedBodies[1]?.reasoning, undefined);
+});
+
+test("OpenAIProvider reuses one prompt cache key across a conversation", async () => {
+  const capturedBodies = [];
+  const provider = new OpenAIProvider({
+    apiKey: "sk-test-123",
+    model: "gpt-5.4",
+    cwd: process.cwd(),
+    reasoning: {
+      effort: "medium",
+      source: "mode-default",
+      support: {
+        status: "supported",
+        defaultEffort: "medium",
+        supportedEfforts: ["low", "medium", "high"],
+      },
+    },
+    fetchImpl: async (_url, init) => {
+      capturedBodies.push(JSON.parse(String(init?.body ?? "{}")));
+      return {
+        ok: true,
+        async json() {
+          return { choices: [{ message: { content: "ok" } }] };
+        },
+      };
+    },
+  });
+
+  await provider.runTurn("first");
+  await provider.runTurn("second");
+
+  assert.match(capturedBodies[0].prompt_cache_key, /^unclecode-[a-f0-9]{40}$/);
+  assert.equal(capturedBodies[1].prompt_cache_key, capturedBodies[0].prompt_cache_key);
+  assert.equal(capturedBodies[0].prompt_cache_retention, "24h");
+  assert.equal(capturedBodies[1].prompt_cache_retention, "24h");
 });
 
 test("OpenAIProvider.runTurn uses Rust chat completion when fetch is not injected", async () => {
@@ -516,8 +557,8 @@ test("OpenAIProvider.runTurn uses Rust chat completion when fetch is not injecte
             input_schema: { type: "object", properties: {} },
           },
         ],
-        handlers: {
-          capture_args: async (input) => {
+        executor: {
+          async execute({ input }) {
             seenInputs.push(input);
             return { content: "tool-ok" };
           },
@@ -706,8 +747,8 @@ test("OpenAIProvider assembles streamed chat tool-call deltas through Rust SSE r
           input_schema: { type: "object", properties: {} },
         },
       ],
-      handlers: {
-        capture_args: async (input) => {
+      executor: {
+        async execute({ input }) {
           seenInputs.push(input);
           return { content: "tool-ok" };
         },
@@ -789,7 +830,7 @@ test("OpenAIProvider uses the Codex backend for codex oauth runtime", async () =
   let capturedBody;
   const provider = new OpenAIProvider({
     apiKey: "header.eyJzY3AiOlsib3BlbmlkIl19.sig",
-    model: "gpt-5.4",
+    model: "gpt-5.6-sol",
     cwd: process.cwd(),
     runtime: "codex",
     openAIAccountId: "acct_123",
@@ -810,7 +851,7 @@ test("OpenAIProvider uses the Codex backend for codex oauth runtime", async () =
             '',
             'data: {"type":"response.output_item.done","item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"OK"}]}}',
             '',
-            'data: {"type":"response.completed","response":{"id":"resp_1"}}',
+            'data: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":25,"input_tokens_details":{"cached_tokens":20},"output_tokens":4}}}',
             '',
           ].join("\n");
         },
@@ -823,6 +864,8 @@ test("OpenAIProvider uses the Codex backend for codex oauth runtime", async () =
   const result = await provider.runTurn("say ok");
 
   assert.equal(result.text, "OK");
+  assert.deepEqual(result.usage, { inputTokens: 5, outputTokens: 4, cacheReadTokens: 20 });
+  assert.ok((result.costUsd ?? 0) > 0);
   assert.deepEqual(
     traces.filter((event) => event.type === "assistant.delta"),
     [
@@ -830,7 +873,7 @@ test("OpenAIProvider uses the Codex backend for codex oauth runtime", async () =
         type: "assistant.delta",
         level: "default",
         provider: "openai",
-        model: "gpt-5.4",
+        model: "gpt-5.6-sol",
         itemId: "msg_1",
         delta: "OK",
       },
@@ -839,6 +882,8 @@ test("OpenAIProvider uses the Codex backend for codex oauth runtime", async () =
   assert.equal(capturedUrl, "https://chatgpt.com/backend-api/codex/responses");
   assert.equal(capturedBody.store, false);
   assert.equal(capturedBody.stream, true);
+  assert.match(capturedBody.prompt_cache_key, /^unclecode-[a-f0-9]{40}$/);
+  assert.equal(capturedBody.prompt_cache_retention, "24h");
   // Supported reasoning surfaces effort + summary so Codex streams the
   // reasoning trace; the "effort=none" hardcode was intentionally
   // removed in 87759e7 (fix: surface reasoning).
@@ -1089,8 +1134,8 @@ test("OpenAIProvider parses Codex Responses tool calls through Rust SSE records"
           input_schema: { type: "object", properties: {} },
         },
       ],
-      handlers: {
-        capture_args: async (input) => {
+      executor: {
+        async execute({ input }) {
           seenInputs.push(input);
           return { content: "tool-ok" };
         },
@@ -1241,7 +1286,9 @@ test("OpenAIProvider emits tool trace events for visible tool use", async () => 
 
   const traces = [];
   let callCount = 0;
-  const provider = new OpenAIProvider({
+  const requestModels = [];
+  let provider;
+  provider = new OpenAIProvider({
     apiKey: "sk-test-123",
     model: "gpt-5.4",
     cwd: workspaceRoot,
@@ -1250,10 +1297,13 @@ test("OpenAIProvider emits tool trace events for visible tool use", async () => 
       source: "mode-default",
       support: { status: "supported", defaultEffort: "medium", supportedEfforts: ["low", "medium", "high"] },
     },
-    fetchImpl: async () => ({
+    fetchImpl: async (_url, init) => {
+      requestModels.push(JSON.parse(init.body).model);
+      return {
       ok: true,
       async json() {
         callCount += 1;
+        if (callCount === 1) provider.updateRuntimeSettings({ model: "gpt-5.6-sol" });
         if (callCount === 1) {
           return {
             choices: [
@@ -1285,13 +1335,15 @@ test("OpenAIProvider emits tool trace events for visible tool use", async () => 
           ],
         };
       },
-    }),
+    };
+    },
   });
 
   provider.setTraceListener((event) => traces.push(event));
   const result = await provider.runTurn("read the file");
 
   assert.equal(result.text, "done");
+  assert.deepEqual(requestModels, ["gpt-5.4", "gpt-5.4"]);
   assert.equal(traces[0]?.type, "tool.started");
   assert.equal(traces[0]?.toolName, "read_file");
   assert.equal(typeof traces[0]?.startedAt, "number");
@@ -1305,7 +1357,7 @@ test("OpenAIProvider emits tool trace events for visible tool use", async () => 
 test("OpenAIProvider aborts in-flight tool handlers and rolls back turn state", async () => {
   const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-openai-abort-tool-"));
   const abortController = new AbortController();
-  let handlerOptions;
+  let executorRequest;
   let resolveHandlerStarted;
   const handlerStarted = new Promise((resolve) => {
     resolveHandlerStarted = resolve;
@@ -1328,17 +1380,17 @@ test("OpenAIProvider aborts in-flight tool handlers and rolls back turn state", 
           input_schema: { type: "object", properties: {} },
         },
       ],
-      handlers: {
-        slow_tool: async (_input, _cwd, options) => {
-          handlerOptions = options;
+      executor: {
+        async execute(request) {
+          executorRequest = request;
           resolveHandlerStarted();
-          if (options?.signal?.aborted) {
+          if (request.signal?.aborted) {
             const error = new Error("Operation aborted");
             error.name = "AbortError";
             throw error;
           }
           await new Promise((_resolve, reject) => {
-            options?.signal?.addEventListener(
+            request.signal?.addEventListener(
               "abort",
               () => {
                 const error = new Error("Operation aborted");
@@ -1379,7 +1431,7 @@ test("OpenAIProvider aborts in-flight tool handlers and rolls back turn state", 
 
   const turn = provider.runTurn("start slow tool", [], { signal: abortController.signal });
   await handlerStarted;
-  assert.equal(handlerOptions?.signal, abortController.signal);
+  assert.equal(executorRequest?.signal, abortController.signal);
 
   abortController.abort();
   await assert.rejects(turn, { name: "AbortError" });
@@ -1407,8 +1459,8 @@ test("OpenAIProvider defaults malformed tool arguments through Rust normalizatio
           input_schema: { type: "object", properties: {} },
         },
       ],
-      handlers: {
-        capture_args: async (input) => {
+      executor: {
+        async execute({ input }) {
           seenInputs.push(input);
           return { content: "ok" };
         },

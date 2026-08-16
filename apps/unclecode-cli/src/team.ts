@@ -15,7 +15,7 @@ import {
   startTeamRun,
   type ParsedLaneSpec,
 } from "@unclecode/orchestrator";
-import type { PersonaId, TeamGateLevel, TeamRuntimeMode } from "@unclecode/contracts";
+import type { PersonaId, TeamGateLevel, TeamIsolationMode, TeamRuntimeMode } from "@unclecode/contracts";
 import {
   appendTeamCheckpoint,
   getRunStatusFromCheckpoints,
@@ -29,6 +29,7 @@ type RunOptions = {
   readonly lanes?: string;
   readonly gate?: string;
   readonly runtime?: string;
+  readonly isolation?: string;
   readonly record?: string;
   readonly dispatch?: boolean;
   readonly workerTimeout?: string;
@@ -39,6 +40,7 @@ type TeamRunRustConfig = {
   readonly persona: PersonaId;
   readonly gate: TeamGateLevel;
   readonly runtime: TeamRuntimeMode;
+  readonly isolation: TeamIsolationMode;
   readonly workerTimeoutMs: number;
   readonly dataRoot: string;
   readonly createdBy: string;
@@ -50,7 +52,7 @@ export async function handleTeamRun(objective: string[], options: RunOptions): P
     throw new Error("`unclecode team run` requires an objective string.");
   }
   const runConfig = resolveTeamRunRustConfig(options);
-  const { persona, gate, runtime } = runConfig;
+  const { persona, gate, runtime, isolation } = runConfig;
   const laneSpecs = parseLanesSpec(options.lanes ?? "1");
   const dataRoot = runConfig.dataRoot;
   const runId = options.record?.trim() || generateRunIdForCli();
@@ -63,6 +65,7 @@ export async function handleTeamRun(objective: string[], options: RunOptions): P
     lanes: laneSpecs.length,
     gate,
     runtime,
+    isolation,
     workspaceRoot: process.cwd(),
     createdBy: runConfig.createdBy,
   });
@@ -74,7 +77,7 @@ export async function handleTeamRun(objective: string[], options: RunOptions): P
     process.stdout.write(`RUN_ID=${handle.runId}\n`);
     process.stdout.write(`RUN_ROOT=${handle.runRoot}\n`);
     process.stdout.write(
-      `persona=${persona} lanes=${formatLanesSummary(laneSpecs)} gate=${gate} runtime=${runtime}\n`,
+      `persona=${persona} lanes=${formatLanesSummary(laneSpecs)} gate=${gate} runtime=${runtime} isolation=${isolation}\n`,
     );
   }
 
@@ -117,8 +120,11 @@ export async function handleTeamRun(objective: string[], options: RunOptions): P
       process.stdout.write(`Final status: ${result.status}\n`);
       for (const outcome of result.outcomes) {
         process.stdout.write(
-          `  ${outcome.workerId} ${outcome.persona.padEnd(22)} ${outcome.status.padEnd(9)} exit=${outcome.exitCode} ${outcome.durationMs}ms\n`,
+          `  ${outcome.workerId} ${outcome.persona.padEnd(22)} ${outcome.status.padEnd(9)} exit=${outcome.exitCode} ${outcome.durationMs}ms isolation=${outcome.isolation}\n`,
         );
+        if (outcome.changePatchPath !== undefined) {
+          process.stdout.write(`    patch=${outcome.changePatchPath}\n`);
+        }
       }
       if (result.sweep.swept > 0) {
         process.stdout.write(`Stale lock sweep: removed=${result.sweep.swept} live=${result.sweep.live}\n`);
@@ -247,6 +253,7 @@ function printRunSummary(runRoot: string): void {
   process.stdout.write(`Lanes:     ${manifest.lanes}\n`);
   process.stdout.write(`Gate:      ${manifest.gate}\n`);
   process.stdout.write(`Runtime:   ${manifest.runtime}\n`);
+  process.stdout.write(`Isolation: ${manifest.isolation ?? "shared"}\n`);
   process.stdout.write(`Status:    ${status}\n`);
   process.stdout.write(`Steps:     ${checkpoints.filter((cp) => cp.type === "team_step").length}\n`);
   process.stdout.write(`Objective: ${manifest.objective}\n`);
@@ -285,6 +292,7 @@ function resolveTeamRunRustConfig(options: RunOptions): TeamRunRustConfig {
     typeof parsed.persona !== "string"
     || typeof parsed.gate !== "string"
     || typeof parsed.runtime !== "string"
+    || typeof parsed.isolation !== "string"
     || typeof parsed.dataRoot !== "string"
     || typeof parsed.createdBy !== "string"
     || (parsed.cliEntry !== null && typeof parsed.cliEntry !== "string")
@@ -298,6 +306,7 @@ function resolveTeamRunRustConfig(options: RunOptions): TeamRunRustConfig {
     persona: parsed.persona as PersonaId,
     gate: parsed.gate as TeamGateLevel,
     runtime: parsed.runtime as TeamRuntimeMode,
+    isolation: parsed.isolation as TeamIsolationMode,
     workerTimeoutMs,
     dataRoot: parsed.dataRoot,
     createdBy: parsed.createdBy,

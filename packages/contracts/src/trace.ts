@@ -1,4 +1,10 @@
-import type { AskUserQuestionResult, WorkGraph, WorkNodeStatus } from "./agent-console.js";
+import type {
+  AskUserQuestionResult,
+  TerminalAgentRunStatus,
+  TerminalAsyncJobStatus,
+  WorkGraph,
+  WorkNodeStatus,
+} from "./agent-console.js";
 import type {
   ExecutionPolicyCapability,
   PolicyDecisionEffect,
@@ -26,6 +32,11 @@ export const EXECUTION_TRACE_EVENT_TYPES = [
   "attachment.attached",
   "attachment.dropped",
   "policy.denied",
+  "job.queued",
+  "job.settled",
+  "agent.run.started",
+  "agent.run.settled",
+  "usage.recorded",
 ] as const;
 
 export type ExecutionTraceEventType = (typeof EXECUTION_TRACE_EVENT_TYPES)[number];
@@ -90,6 +101,9 @@ export type ToolStartedTraceEvent = {
   readonly toolCallId: string;
   readonly input: Record<string, unknown>;
   readonly startedAt: number;
+  /** Absent for main-agent tool calls; set when a subagent owns the call. */
+  readonly agentRunId?: string;
+  readonly asyncJobId?: string;
 };
 
 export type ToolCompletedTraceEvent = {
@@ -105,6 +119,9 @@ export type ToolCompletedTraceEvent = {
   readonly startedAt: number;
   readonly completedAt: number;
   readonly durationMs: number;
+  /** Absent for main-agent tool calls; set when a subagent owns the call. */
+  readonly agentRunId?: string;
+  readonly asyncJobId?: string;
 };
 
 export type DecisionOpenedTraceEvent = {
@@ -288,6 +305,81 @@ export type PolicyDeniedTraceEvent = {
   readonly startedAt: number;
 };
 
+export type JobQueuedTraceEvent = {
+  readonly type: "job.queued";
+  readonly level: "default";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly jobType: string;
+  readonly label: string;
+  readonly agentRunId?: string;
+  readonly queuedAt: number;
+};
+
+export type JobSettledTraceEvent = {
+  readonly type: "job.settled";
+  readonly level: "default";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly agentRunId?: string;
+  readonly status: TerminalAsyncJobStatus;
+  readonly startedAt?: number;
+  readonly completedAt: number;
+  /** Bounded via `boundLifecycleSummary` before it reaches a snapshot. */
+  readonly summary?: string;
+  readonly errorSummary?: string;
+};
+
+export type AgentRunStartedTraceEvent = {
+  readonly type: "agent.run.started";
+  readonly level: "high-signal";
+  readonly eventId: string;
+  readonly runId: string;
+  /** Required: every agent run is owned by exactly one job. */
+  readonly jobId: string;
+  readonly displayName: string;
+  readonly agentType: string;
+  readonly parentRunId?: string;
+  readonly continuationOf?: string;
+  readonly startedAt: number;
+};
+
+export type AgentRunSettledTraceEvent = {
+  readonly type: "agent.run.settled";
+  readonly level: "high-signal";
+  readonly eventId: string;
+  readonly runId: string;
+  readonly jobId: string;
+  readonly status: TerminalAgentRunStatus;
+  readonly startedAt?: number;
+  readonly completedAt: number;
+  /** Bounded via `boundLifecycleSummary` before it reaches a snapshot. */
+  readonly summary?: string;
+  readonly errorSummary?: string;
+};
+
+/**
+ * One usage measurement. `eventId` is the dedupe key: replaying the same
+ * event must not double-count, and a measurement lands on either the main
+ * session ledger or exactly one agent run — never both. Counters are optional
+ * because providers report partial usage.
+ */
+export type UsageRecordedTraceEvent = {
+  readonly type: "usage.recorded";
+  readonly level: "low-signal";
+  readonly eventId: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly agentRunId?: string;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly cacheReadTokens?: number;
+  readonly cacheWriteTokens?: number;
+  readonly cacheSavingsUsd?: number;
+  readonly costUsd?: number;
+  readonly startedAt: number;
+};
+
 export type ExecutionTraceEvent =
   | TurnStartedTraceEvent
   | ProviderRouteTraceEvent
@@ -307,4 +399,9 @@ export type ExecutionTraceEvent =
   | AssistantDeltaTraceEvent
   | AttachmentAttachedTraceEvent
   | AttachmentDroppedTraceEvent
-  | PolicyDeniedTraceEvent;
+  | PolicyDeniedTraceEvent
+  | JobQueuedTraceEvent
+  | JobSettledTraceEvent
+  | AgentRunStartedTraceEvent
+  | AgentRunSettledTraceEvent
+  | UsageRecordedTraceEvent;

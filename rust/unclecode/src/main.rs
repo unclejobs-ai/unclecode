@@ -10,6 +10,9 @@ use unclecode_core::aci::{
 };
 use unclecode_core::aci_edit::{line_edit_json, lint_failure_message, restore_file};
 use unclecode_core::aci_patch::{apply_unified_patch_json, parse_unified_diff_json};
+use unclecode_core::aci_safe::{
+    read_text_file_no_symlinks, write_text_file_atomically_no_symlinks,
+};
 use unclecode_core::aci_search::{find_files_json, glob_files, search_text, search_text_json};
 use unclecode_core::anthropic_request::{
     build_anthropic_messages_request_json, build_anthropic_messages_request_spec_with_base,
@@ -77,7 +80,8 @@ use unclecode_core::model_pricing::{estimate_cost_usd, model_price};
 use unclecode_core::model_registry::{
     detect_provider_for_model, openai_compat_policy_json, openai_model_registry,
     openai_reasoning_support, provider_capability_json, provider_label, provider_model_catalog,
-    provider_route_json, provider_runtime_decision_json, resolve_provider_route,
+    provider_route_json, provider_route_proxy_policy, provider_runtime_decision_json,
+    resolve_provider_route,
 };
 use unclecode_core::openai_query::{run_openai_chat_completion_json, run_openai_chat_query_json};
 use unclecode_core::orchestrator::{
@@ -174,9 +178,9 @@ use unclecode_core::steer::{
     resolve_busy_submit_json, resolve_drain_start_json, resolve_drain_step_json,
 };
 use unclecode_core::team_runtime::{
-    build_team_worker_spawn_args_json, format_team_run_status, format_team_runs_list,
-    list_team_runs_json, parse_team_lanes_json, resolve_team_child_env_json,
-    resolve_team_dispatch_status_json, resolve_team_run_config_json,
+    build_team_worker_spawn_args_json, finalize_team_worktree_json, format_team_run_status,
+    format_team_runs_list, list_team_runs_json, parse_team_lanes_json, prepare_team_worktree_json,
+    resolve_team_child_env_json, resolve_team_dispatch_status_json, resolve_team_run_config_json,
     resolve_team_worker_close_outcome_json, resolve_team_worker_options_json,
 };
 use unclecode_core::tools_command::resolve_tools_command_json;
@@ -235,6 +239,7 @@ mod cli_resume;
 mod cli_sessions;
 mod cli_setup;
 mod cli_team;
+mod cli_team_background;
 mod cli_work;
 
 const TS_ENTRYPOINT: &str = "apps/unclecode-cli/dist/index.js";
@@ -359,7 +364,11 @@ fn run_with_start(args: Vec<OsString>, started_at: Instant) -> Result<u8, String
         // Interactive `unclecode work` launches the TS TUI runtime so CRP
         // (Context Runbook Protocol) is active. Non-interactive (piped stdin,
         // one-shot prompt) falls through to the Rust-native mini-loop.
-        if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        if should_launch_work_tui(
+            &work_args,
+            io::stdin().is_terminal(),
+            io::stdout().is_terminal(),
+        ) {
             return launch_typescript_tui_bridge(&work_args);
         }
         return cli_work::run_top_level_work_command(&work_args);
@@ -425,7 +434,7 @@ fn print_rust_native_help_string() -> String {
         (
             "Team mode",
             &[
-                "rust team <run-config|worker-options|lanes|worker-spawn-args|dispatch-status|child-env|worker-close-outcome|list-runs|list-text|status-text>",
+                "rust team <run-config|worktree-prepare|worktree-finalize|worker-options|lanes|worker-spawn-args|dispatch-status|child-env|worker-close-outcome|list-runs|list-text|status-text>",
             ],
         ),
         (
@@ -481,6 +490,10 @@ fn should_launch_full_tui(args: &[OsString], stdin_is_tty: bool, stdout_is_tty: 
         .iter()
         .skip(1)
         .any(|arg| matches!(arg.to_str(), Some("--help") | Some("-h") | Some("--tools")))
+}
+
+fn should_launch_work_tui(work_args: &[OsString], stdin_is_tty: bool, stdout_is_tty: bool) -> bool {
+    stdin_is_tty && stdout_is_tty && cli_work::work_args_are_interactive_promptless(work_args)
 }
 
 fn should_launch_full_center(args: &[OsString], stdin_is_tty: bool, stdout_is_tty: bool) -> bool {
@@ -568,7 +581,7 @@ struct NativeModuleRebuildResult {
 fn probe_better_sqlite3(repo_root: &Path) -> Result<NativeModuleProbeResult, String> {
     let output = Command::new(node_binary())
         .arg("-e")
-        .arg("require('better-sqlite3')")
+        .arg("const Database = require('better-sqlite3'); const database = new Database(':memory:'); database.close();")
         .current_dir(repo_root)
         .envs(env::vars_os())
         .env(
@@ -850,6 +863,22 @@ fn run_native_team_command(args: &[OsString]) -> Result<u8, String> {
             println!("{}", resolve_team_run_config_json(&input)?);
             Ok(0)
         }
+        Some("worktree-prepare") => {
+            let mut input = String::new();
+            io::stdin()
+                .read_to_string(&mut input)
+                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            println!("{}", prepare_team_worktree_json(&input)?);
+            Ok(0)
+        }
+        Some("worktree-finalize") => {
+            let mut input = String::new();
+            io::stdin()
+                .read_to_string(&mut input)
+                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            println!("{}", finalize_team_worktree_json(&input)?);
+            Ok(0)
+        }
         Some("worker-options") => {
             let mut input = String::new();
             io::stdin()
@@ -924,7 +953,7 @@ fn run_native_team_command(args: &[OsString]) -> Result<u8, String> {
             Ok(0)
         }
         _ => Err(
-            "Usage: unclecode rust team <run-config|worker-options|lanes|worker-spawn-args|dispatch-status|child-env|worker-close-outcome|list-runs|list-text|status-text>"
+            "Usage: unclecode rust team <run-config|worktree-prepare|worktree-finalize|worker-options|lanes|worker-spawn-args|dispatch-status|child-env|worker-close-outcome|list-runs|list-text|status-text>"
                 .to_string(),
         ),
     }
@@ -2495,6 +2524,8 @@ fn run_native_provider_command(args: &[OsString]) -> Result<u8, String> {
                 .get(3)
                 .and_then(|arg| arg.to_str())
                 .ok_or("Usage: unclecode rust provider openai-chat-body <model> <reasoning-effort|-> <include-tools yes|no>")?;
+            let prompt_cache_key = args.get(4).and_then(|arg| arg.to_str());
+            let prompt_cache_retention = args.get(5).and_then(|arg| arg.to_str());
             let mut raw = String::new();
             io::stdin()
                 .read_to_string(&mut raw)
@@ -2509,6 +2540,8 @@ fn run_native_provider_command(args: &[OsString]) -> Result<u8, String> {
                     messages_json,
                     (include_tools == "yes").then_some(tools_json),
                     (reasoning != "-").then_some(reasoning),
+                    prompt_cache_key.filter(|value| *value != "-"),
+                    prompt_cache_retention.filter(|value| *value != "-"),
                 )
             );
             Ok(0)
@@ -2526,6 +2559,8 @@ fn run_native_provider_command(args: &[OsString]) -> Result<u8, String> {
                 .get(3)
                 .and_then(|arg| arg.to_str())
                 .ok_or("Usage: unclecode rust provider openai-codex-body <model> <reasoning-effort|-> <tool-choice auto|none>")?;
+            let prompt_cache_key = args.get(4).and_then(|arg| arg.to_str());
+            let prompt_cache_retention = args.get(5).and_then(|arg| arg.to_str());
             let mut raw = String::new();
             io::stdin()
                 .read_to_string(&mut raw)
@@ -2543,6 +2578,8 @@ fn run_native_provider_command(args: &[OsString]) -> Result<u8, String> {
                     tools_json,
                     tool_choice,
                     (reasoning != "-").then_some(reasoning),
+                    prompt_cache_key.filter(|value| *value != "-"),
+                    prompt_cache_retention.filter(|value| *value != "-"),
                 )
             );
             Ok(0)
@@ -3606,8 +3643,11 @@ fn print_openai_chat_response_record(record: &OpenAIChatResponseRecord) {
         OpenAIChatResponseRecord::Usage {
             prompt_tokens,
             completion_tokens,
+            cache_read_tokens,
         } => {
-            println!("usage\tpromptTokens={prompt_tokens}\tcompletionTokens={completion_tokens}");
+            println!(
+                "usage\tpromptTokens={prompt_tokens}\tcompletionTokens={completion_tokens}\tcacheReadTokens={cache_read_tokens}"
+            );
         }
     }
 }
@@ -3709,7 +3749,7 @@ fn run_native_model_command(args: &[OsString]) -> Result<u8, String> {
             );
             println!("defaultModel={}", route.default_model);
             println!("endpointUrl={}", route.endpoint_url);
-            let proxy = resolve_proxy_policy(&route.endpoint_url)?;
+            let proxy = provider_route_proxy_policy(&route)?;
             println!(
                 "proxyUrl={}",
                 proxy
@@ -3734,7 +3774,7 @@ fn run_native_model_command(args: &[OsString]) -> Result<u8, String> {
                 .and_then(|arg| arg.to_str())
                 .ok_or("Usage: unclecode rust model provider-route-json <provider-id|auto> [model-id]")?;
             let route = resolve_provider_route(provider, args.get(2).and_then(|arg| arg.to_str()))?;
-            let proxy = resolve_proxy_policy(&route.endpoint_url)?;
+            let proxy = provider_route_proxy_policy(&route)?;
             println!("{}", provider_route_json(&route, &proxy)?);
             Ok(0)
         }
@@ -4579,6 +4619,15 @@ fn run_native_aci_command(args: &[OsString]) -> Result<u8, String> {
             print!("{content}");
             Ok(0)
         }
+        Some("read-no-symlinks") => {
+            let path = args
+                .get(1)
+                .ok_or("Usage: unclecode rust aci read-no-symlinks <path>")?;
+            let content = read_text_file_no_symlinks(&cwd, PathBuf::from(path))
+                .map_err(|error| error.to_string())?;
+            print!("{content}");
+            Ok(0)
+        }
         Some("view") => {
             let path = args.get(1).ok_or("Usage: unclecode rust aci view <path> [window]")?;
             let window = args
@@ -4619,6 +4668,19 @@ fn run_native_aci_command(args: &[OsString]) -> Result<u8, String> {
                 .read_to_string(&mut content)
                 .map_err(|error| format!("Failed to read stdin: {error}"))?;
             write_text_file(&cwd, PathBuf::from(path), &content).map_err(|error| error.to_string())?;
+            println!("Wrote {}", path.to_string_lossy());
+            Ok(0)
+        }
+        Some("write-atomic-no-symlinks") => {
+            let path = args
+                .get(1)
+                .ok_or("Usage: unclecode rust aci write-atomic-no-symlinks <path>")?;
+            let mut content = String::new();
+            io::stdin()
+                .read_to_string(&mut content)
+                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            write_text_file_atomically_no_symlinks(&cwd, PathBuf::from(path), &content)
+                .map_err(|error| error.to_string())?;
             println!("Wrote {}", path.to_string_lossy());
             Ok(0)
         }
@@ -4814,7 +4876,7 @@ fn run_native_aci_command(args: &[OsString]) -> Result<u8, String> {
             Ok(0)
         }
         _ => Err(
-            "Usage: unclecode rust aci <list [path]|read <path>|view <path> [window]|view-json <path> [window] [start]|write <path>|edit-json <path> <start-line> <end-line>|restore <path>|lint-failure-message <start-line> <snippet-context>|search <query> [path]|search-json <query> [path] [cap] [max-count-per-file] [glob...]|find-json <pattern> [cap] [glob...]|glob <pattern>|apply-patch|parse-patch>".to_string(),
+            "Usage: unclecode rust aci <list [path]|read <path>|read-no-symlinks <path>|view <path> [window]|view-json <path> [window] [start]|write <path>|write-atomic-no-symlinks <path>|edit-json <path> <start-line> <end-line>|restore <path>|lint-failure-message <start-line> <snippet-context>|search <query> [path]|search-json <query> [path] [cap] [max-count-per-file] [glob...]|find-json <pattern> [cap] [glob...]|glob <pattern>|apply-patch|parse-patch>".to_string(),
         ),
     }
 }
@@ -4989,6 +5051,38 @@ mod tests {
     }
 
     #[test]
+    fn interactive_work_routes_full_screen_tui_only_without_a_one_shot_prompt() {
+        // `unclecode work` with no prompt on a real terminal stays a TUI session.
+        assert!(should_launch_work_tui(&[], true, true));
+        assert!(should_launch_work_tui(
+            &[OsString::from("--engine"), OsString::from("pi")],
+            true,
+            true
+        ));
+
+        // A typed one-shot prompt must fall through to the Rust-native turn even
+        // on a TTY, otherwise the prompt is silently dropped by the TS bridge.
+        assert!(!should_launch_work_tui(
+            &[OsString::from("summarize the repo")],
+            true,
+            true
+        ));
+        assert!(!should_launch_work_tui(
+            &[
+                OsString::from("--engine"),
+                OsString::from("pi"),
+                OsString::from("summarize the repo"),
+            ],
+            true,
+            true
+        ));
+
+        // Non-interactive stdio never opens the full-screen TUI.
+        assert!(!should_launch_work_tui(&[], false, true));
+        assert!(!should_launch_work_tui(&[], true, false));
+    }
+
+    #[test]
     fn full_screen_tui_node_options_suppress_experimental_warnings() {
         assert_eq!(
             node_options_with_experimental_warning_suppressed(None),
@@ -5029,6 +5123,35 @@ mod tests {
         ));
         assert!(!is_better_sqlite3_native_version_mismatch(
             "NODE_MODULE_VERSION mismatch in another native module"
+        ));
+    }
+
+    #[test]
+    fn better_sqlite3_probe_exercises_lazy_native_binding() {
+        let temp_dir = env::temp_dir().join(format!(
+            "unclecode-better-sqlite-probe-{}",
+            std::process::id()
+        ));
+        let module_dir = temp_dir.join("node_modules").join("better-sqlite3");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&module_dir).expect("fake better-sqlite3 module");
+        std::fs::write(
+            module_dir.join("index.js"),
+            r#"module.exports = class Database {
+                constructor() {
+                    throw new Error("The module '/fake/better_sqlite3.node' was compiled against a different Node.js version using NODE_MODULE_VERSION 127. This version of Node.js requires NODE_MODULE_VERSION 137.");
+                }
+                close() {}
+            };"#,
+        )
+        .expect("fake better-sqlite3 source");
+
+        let result = probe_better_sqlite3(&temp_dir).expect("native module probe");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        assert!(!result.success, "probe must instantiate the native binding");
+        assert!(is_better_sqlite3_native_version_mismatch(
+            &result.combined_output()
         ));
     }
 

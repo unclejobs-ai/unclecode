@@ -34,16 +34,15 @@ export async function runContextContrastTuiSmoke({ tmp }) {
     await runTmux(["new-session", "-d", "-x", "140", "-y", "34", "-s", session, command]);
     await waitForPane(session, /prompt deck|UncleCode · OpenAI/, paneFile);
     await submitLine(session, "/context", paneFile);
-    const pane = await waitForPane(session, /Sources · \d+ included|Warnings ·/, paneFile);
+    const pane = await waitForPane(session, /Sources · \d+ sent · \d+ held/, paneFile);
     const ansiCapture = await runTmux(["capture-pane", "-t", session, "-e", "-p", "-S", "-240"], {
       allowFailure: true,
     });
     writeFileSync(ansiPaneFile, ansiCapture.stdout);
 
     assert.match(pane, /Context expanded|Sources ·/);
-    assert.match(pane, /Sources · \d+ included/);
-    assert.match(pane, /\d+ held back/);
-    assert.match(pane, /Warnings|✓ none/i);
+    assert.match(pane, /Sources · \d+ sent · \d+ held/);
+    assert.match(pane, /(?:\d+ warnings?|✓ none)/i);
     assertReadableForegroundEscapes(
       ansiCapture.stdout,
       "/context expanded overlay should not paint low-contrast text on a light terminal",

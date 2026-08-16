@@ -14,30 +14,43 @@ export async function runLspGuardianChecks(input: {
   readonly lspBridge?: GuardianLspBridge;
   readonly timeoutMs: number;
   readonly maxDiagnostics?: number;
+  readonly signal?: AbortSignal | undefined;
 }): Promise<readonly GuardianExecutableCheck[]> {
+  input.signal?.throwIfAborted();
   if (!input.lspBridge || input.changedFiles.length === 0) {
     return [];
   }
 
   const checks: GuardianExecutableCheck[] = [];
   for (const file of input.changedFiles.filter(isLspCandidateFile)) {
+    input.signal?.throwIfAborted();
     try {
-      const path = await resolveWorkspaceFile(input.cwd, file);
+      const path = await resolveWorkspaceFile(input.cwd, file, input.signal);
+      input.signal?.throwIfAborted();
       const content = await input.readFile(path, "utf8");
+      input.signal?.throwIfAborted();
       const result = await input.lspBridge.checkAfterEdit({
         path: file,
         content,
         options: {
           timeoutMs: input.timeoutMs,
           ...(input.maxDiagnostics !== undefined ? { maxDiagnostics: input.maxDiagnostics } : {}),
+          ...(input.signal ? { signal: input.signal } : {}),
         },
       });
+      // A signal-deaf bridge can still resolve after the clear; its verdict is
+      // stale and must not be recorded, even for the last file.
+      input.signal?.throwIfAborted();
       checks.push({
         name: `lsp:${file}`,
         status: result.status === "fail" || result.status === "unavailable" ? "failed" : "passed",
         summary: `lsp:${file} ${result.status.toUpperCase()} · ${result.summary}`,
       });
     } catch (error) {
+      // A cancelled diagnostic reached no verdict, and the error that raced the
+      // abort is not the story: report the cancellation. Only a real bridge
+      // fault degrades into UNAVAILABLE evidence.
+      input.signal?.throwIfAborted();
       checks.push({
         name: `lsp:${file}`,
         status: "failed",
@@ -46,6 +59,7 @@ export async function runLspGuardianChecks(input: {
     }
   }
 
+  input.signal?.throwIfAborted();
   return checks;
 }
 
@@ -55,7 +69,11 @@ function isLspCandidateFile(file: string): boolean {
     && !/\.(test|spec)\.(c|m)?[jt]sx?$/i.test(file);
 }
 
-async function resolveWorkspaceFile(cwd: string, file: string): Promise<string> {
+async function resolveWorkspaceFile(
+  cwd: string,
+  file: string,
+  signal?: AbortSignal | undefined,
+): Promise<string> {
   const normalized = file.replace(/\\/g, "/");
   if (isAbsolute(normalized) || /^[a-zA-Z]:\//.test(normalized)) {
     throw new Error(`changed file must be workspace-relative: ${file}`);
@@ -67,7 +85,9 @@ async function resolveWorkspaceFile(cwd: string, file: string): Promise<string> 
     throw new Error(`changed file escapes workspace: ${file}`);
   }
   const realRoot = await realpath(root);
+  signal?.throwIfAborted();
   const realFile = await realpath(path);
+  signal?.throwIfAborted();
   const realRel = relative(realRoot, realFile);
   if (realRel.startsWith("..") || isAbsolute(realRel)) {
     throw new Error(`changed file escapes workspace: ${file}`);

@@ -166,7 +166,11 @@ test("GeminiProvider.query reports non-zero costUsd when usageMetadata is presen
   const { client } = makeStubClient([
     {
       candidates: [{ content: { parts: [{ text: "ok" }] } }],
-      usageMetadata: { promptTokenCount: 1_000_000, candidatesTokenCount: 1_000_000 },
+      usageMetadata: {
+        promptTokenCount: 1_000_000,
+        candidatesTokenCount: 1_000_000,
+        cachedContentTokenCount: 600_000,
+      },
     },
   ]);
   const provider = new GeminiProvider({
@@ -179,6 +183,11 @@ test("GeminiProvider.query reports non-zero costUsd when usageMetadata is presen
   const result = await provider.query([{ role: "user", content: "hi" }]);
   // gemini-3.1-flash: $0.5/M input + $3.0/M output → $3.50 for 1M+1M
   assert.equal(result.costUsd, 3.5);
+  assert.deepEqual(result.usage, {
+    inputTokens: 400_000,
+    outputTokens: 1_000_000,
+    cacheReadTokens: 600_000,
+  });
 });
 
 test("GeminiProvider.query uses Rust HTTP transport when no SDK client is injected", async () => {
@@ -411,8 +420,8 @@ test("GeminiProvider.runTurn uses Rust HTTP transport for live tool loop when no
             },
           },
         ],
-        handlers: {
-          async run_shell(input) {
+        executor: {
+          async execute({ input }) {
             assert.deepEqual(input, { command: "echo ok" });
             return { content: "ok", isError: false };
           },
@@ -478,7 +487,8 @@ test("GeminiProvider.runTurn sends Rust-built functionResponse parts after tool 
     },
     { candidates: [{ content: { parts: [{ text: "done" }] } }] },
   ]);
-  const provider = new BaseGeminiProvider({
+  let provider;
+  provider = new BaseGeminiProvider({
     apiKey: "g-test",
     model: "gemini-3.1-flash",
     cwd: process.cwd(),
@@ -495,9 +505,10 @@ test("GeminiProvider.runTurn sends Rust-built functionResponse parts after tool 
           },
         },
       ],
-      handlers: {
-        async run_shell(input) {
+      executor: {
+        async execute({ input }) {
           assert.deepEqual(input, { command: "echo ok" });
+          provider.updateRuntimeSettings({ model: "gemini-3.1-pro" });
           return { content: "ok", isError: false };
         },
       },
@@ -507,6 +518,10 @@ test("GeminiProvider.runTurn sends Rust-built functionResponse parts after tool 
   const result = await provider.runTurn("use tool");
 
   assert.equal(result.text, "done");
+  assert.deepEqual(captured.map((request) => request.model), [
+    "gemini-3.1-flash",
+    "gemini-3.1-flash",
+  ]);
   assert.ok(captured[0].config.tools[0].functionDeclarations.some(
     (declaration) => declaration.name === "run_shell",
   ));
@@ -522,4 +537,28 @@ test("GeminiProvider.runTurn sends Rust-built functionResponse parts after tool 
       },
     ],
   });
+});
+
+test("GeminiProvider.runTurn reports one step and the response cost for a single model response", async () => {
+  const { client } = makeStubClient([
+    {
+      candidates: [{ content: { role: "model", parts: [{ text: "single done" }] } }],
+      usageMetadata: { promptTokenCount: 1000, candidatesTokenCount: 200 },
+    },
+  ]);
+  const provider = new BaseGeminiProvider({
+    apiKey: "g-test",
+    model: "gemini-3.1-flash",
+    cwd: process.cwd(),
+    client,
+  });
+
+  const result = await provider.runTurn("do one thing");
+
+  assert.equal(result.text, "single done");
+  // Gemini 3.1 Flash: $0.50/M input + $3.00/M output → $0.0011 for 1000 + 200 tokens.
+  assert.deepEqual(
+    { steps: result.steps, costUsd: result.costUsd },
+    { steps: 1, costUsd: 0.0011 },
+  );
 });

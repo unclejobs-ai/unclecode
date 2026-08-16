@@ -980,6 +980,7 @@ mod tests {
             lanes_spec: "openai".to_string(),
             gate: "warn".to_string(),
             runtime: "local".to_string(),
+            isolation: "shared".to_string(),
             workspace_root: data_root.clone(),
             created_by: "test".to_string(),
         })

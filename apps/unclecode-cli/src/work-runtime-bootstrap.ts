@@ -25,10 +25,13 @@ import {
   buildMandatorySourceIds,
   classifyContextPacketChange,
   clearExtensionRegistryCache,
+  CodingAgent,
   loadConfig,
   loadExtensionConfigOverlays,
   loadExtensionManifestSummaries,
   WorkAgent,
+  type AppReasoningConfig,
+  type WorkTurnAgent,
 } from "@unclecode/orchestrator";
 
 import {
@@ -56,6 +59,19 @@ import {
 import { runWorkspaceGuardianChecks } from "./guardian-checks.js";
 import type { GuardianLspBridge } from "./guardian-check-types.js";
 import { createRuntimeCodingAgent } from "./runtime-coding-agent.js";
+import { resolveDefaultWorkEngine, resolveWorkShellAuthLabel } from "./work-engine-auth.js";
+import {
+  createPiBridgeProvider,
+  resolveCodexOAuthBridgeArgs,
+  resolvePiProviderBaseUrl,
+} from "@unclecode/pi-bridge";
+import {
+  createOmpAuthCatalogClient,
+  createOmpWorkerProvider,
+  OMP_WORKER_DEFAULT_MODEL,
+  OMP_WORKER_PROVIDER_ID,
+  type ToolRuntime,
+} from "@unclecode/providers";
 import {
   buildContextLineItems,
   buildContextSummaryItems,
@@ -70,6 +86,43 @@ import {
   resolveWorkShellCrpConfig,
   type WorkShellContextPacketResolver,
 } from "./work-runtime-crp.js";
+
+const WORK_PI_TURN_STEP_LIMIT = 16;
+const WORK_PI_TURN_COST_LIMIT_USD = 2;
+
+/**
+ * Build one work/executor agent backed by OMP.
+ *
+ * Executor turns run entirely inside OMP: it routes the request, executes its
+ * own tool loop, and resolves its own credentials from its own profile — so the
+ * executor needs neither UncleCode's tool runtime nor a bearer token. The
+ * surrounding `CodingAgent` still brackets the turn with the standard
+ * trace/usage events, under the `omp` provider identity and the OMP selector.
+ *
+ * The selector is fixed to `OMP_WORKER_DEFAULT_MODEL`: work turns always run on
+ * Kimi K3. There is deliberately no caller input and no environment override —
+ * a delegated turn that silently ran on a different upstream model would make
+ * every trace, cost figure, and guardian verdict unattributable.
+ *
+ * The interactive/direct conversation agent is deliberately untouched and stays
+ * on the configured runtime.
+ */
+export function createWorkExecutorAgent(input: {
+  readonly cwd: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly reasoning: AppReasoningConfig;
+}): WorkTurnAgent {
+  return new CodingAgent({
+    providerName: OMP_WORKER_PROVIDER_ID,
+    model: OMP_WORKER_DEFAULT_MODEL,
+    provider: createOmpWorkerProvider({
+      cwd: input.cwd,
+      env: input.env,
+      model: OMP_WORKER_DEFAULT_MODEL,
+      reasoning: input.reasoning,
+    }),
+  });
+}
 
 export type WorkCliBootstrapInput = {
   argv: readonly string[];
@@ -98,13 +151,6 @@ async function runInlineCommand(input: {
     ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
     ...(input.onProgress ? { onProgress: input.onProgress } : {}),
   });
-}
-
-function workShellAuthLabelForStatus(
-  authLabel: string,
-  authStatus: RustOpenAIAuthStatus | undefined,
-): string {
-  return workShellAuthLabelWithApiBlocked(authLabel, authStatus);
 }
 
 async function buildWorkShellContextSummary(input: {
@@ -326,9 +372,10 @@ export async function loadWorkCliBootstrap(
 ): Promise<WorkCliBootstrapResult> {
   const env = input.env ?? process.env;
   const userHomeDir = input.userHomeDir ?? env.HOME;
-  const { cwd, provider, model, reasoning, sessionId, prompt } = parseArgs([
+  const { cwd, provider, model, reasoning, sessionId, prompt, engine } = parseArgs([
     ...input.argv,
   ]);
+  const activeEngine = engine ?? resolveDefaultWorkEngine(env);
   const resumedSession = sessionId
     ? await loadResumedWorkSession({ cwd, sessionId, env })
     : undefined;
@@ -386,39 +433,69 @@ export async function loadWorkCliBootstrap(
     configuredPrompt: configExplanation.prompt.rendered,
     guidanceSystemPrompt: guidance.systemPromptAppendix,
   });
-  let executorApiKey = config.apiKey;
+  const codexOAuthAvailable = () => Boolean(resolveCodexOAuthBridgeArgs({
+    provider: resolveRuntimeProvider(config.provider),
+    apiKey: config.apiKey,
+    openAIRuntime: config.openAIRuntime,
+  }));
   const createConfiguredCodingAgent = (
     apiKey: string,
     model: string,
     reasoning: typeof config.reasoning,
+    mode: string,
   ) => createRuntimeCodingAgent({
     provider: resolveRuntimeProvider(config.provider),
     apiKey,
     model,
     cwd,
     reasoning,
+    mode,
     ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
     ...(config.openAIRuntime ? { openAIRuntime: config.openAIRuntime } : {}),
     ...(config.openAIAccountId !== undefined
       ? { openAIAccountId: config.openAIAccountId }
+      : {}),
+    ...(activeEngine === "pi"
+      ? {
+          providerOverrideFactory: ({ toolRuntime }: { toolRuntime: ToolRuntime }) => {
+            const runtimeProviderName = resolveRuntimeProvider(config.provider);
+            const codexOAuth = resolveCodexOAuthBridgeArgs({
+              provider: runtimeProviderName,
+              apiKey,
+              openAIRuntime: config.openAIRuntime,
+            });
+            const baseUrl = resolvePiProviderBaseUrl(runtimeProviderName);
+            return createPiBridgeProvider({
+              provider: runtimeProviderName,
+              apiKey,
+              model,
+              cwd,
+              reasoning,
+              ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
+              toolRuntime,
+              toolLoopMax: WORK_PI_TURN_STEP_LIMIT,
+              costLimitUsd: WORK_PI_TURN_COST_LIMIT_USD,
+              ...(codexOAuth ?? {}),
+              ...(baseUrl ? { baseUrl } : {}),
+            });
+          },
+        }
       : {}),
   });
   const directAgent = await createConfiguredCodingAgent(
     config.apiKey,
     config.model,
     config.reasoning,
+    config.mode,
   );
 
   const agent = new WorkAgent({
     directAgent,
-    createExecutorAgent: async (settings) => {
-      const executor = await createConfiguredCodingAgent(
-        executorApiKey,
-        settings.model,
-        settings.reasoning,
-      );
-      return executor;
-    },
+    createExecutorAgent: async (settings) => createWorkExecutorAgent({
+      cwd,
+      env,
+      reasoning: settings.reasoning,
+    }),
     mode: config.mode,
     reasoning: config.reasoning,
     model: config.model,
@@ -433,6 +510,7 @@ export async function loadWorkCliBootstrap(
         scripts,
         changedFiles: guardianInput.changedFiles,
         lspBridge,
+        signal: guardianInput.signal,
       });
     },
   });
@@ -443,11 +521,14 @@ export async function loadWorkCliBootstrap(
   }> => {
     const status = await resolveRustOpenAIAuthStatus({ cwd, env });
     const resolved = await resolveRustOpenAIAuth({ cwd, env });
-    executorApiKey = resolved.status === "ok" ? resolved.bearerToken : "";
-
     directAgent.refreshAuthToken(resolved.status === "ok" ? resolved.bearerToken : "");
     return {
-      authLabel: workShellAuthLabelForStatus(status.activeSource, status),
+      authLabel: resolveWorkShellAuthLabel({
+        engine: activeEngine,
+        configuredLabel: status.activeSource,
+        authStatus: status,
+        codexOAuthAvailable: codexOAuthAvailable(),
+      }),
       authIssueLines: deriveAuthIssueLines({
         ...(status ? { authStatus: status } : {}),
         ...(config.authIssueMessage
@@ -467,7 +548,12 @@ export async function loadWorkCliBootstrap(
     ...(authStatus ? { authStatus } : {}),
     ...(config.authIssueMessage ? { authIssueMessage: config.authIssueMessage } : {}),
   });
-  const authLabel = workShellAuthLabelForStatus(config.authLabel, authStatus);
+  const authLabel = resolveWorkShellAuthLabel({
+    engine: activeEngine,
+    configuredLabel: config.authLabel,
+    ...(authStatus ? { authStatus } : {}),
+    codexOAuthAvailable: codexOAuthAvailable(),
+  });
 
   const refreshHomeState = () =>
     buildTuiHomeState({
@@ -614,6 +700,7 @@ export async function loadWorkCliBootstrap(
       refreshHomeState,
       refreshAuthState,
       browserOAuthAvailable,
+      ompAuthCatalog: createOmpAuthCatalogClient({ env }),
       runInlineCommand: (
         args: readonly string[],
         onProgress?: ((line: string) => void) | undefined,
@@ -650,6 +737,7 @@ export async function loadWorkCliBootstrap(
         }),
       recordTurn: (turn) => recorder.recordTurn(turn),
       mutateContextSource: crpRuntime.mutateContextSource,
+      undoContextSourceAction: crpRuntime.undoLastContextSourceAction,
       previewContextPacket: ({ sessionId, packet, profile }) =>
         crpRuntime.contextLedger.previewPacket({ sessionId, packet, profile }),
       revalidateContextPacket: ({ preview, packet }) =>

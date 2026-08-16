@@ -140,6 +140,63 @@ test("provider route metadata is resolved by the Rust router", () => {
   );
 });
 
+test("omp resolves as an executor-only native route instead of being rejected", () => {
+  const ompRoute = resolveProviderRoute("omp");
+  assert.deepEqual(
+    {
+      providerId: ompRoute.providerId,
+      label: ompRoute.label,
+      transport: ompRoute.transport,
+      runtimeSupported: ompRoute.runtimeSupported,
+      defaultModel: ompRoute.defaultModel,
+      endpointUrl: ompRoute.endpointUrl,
+      envKeys: ompRoute.envKeys,
+    },
+    {
+      providerId: "omp",
+      label: "OMP",
+      transport: "native",
+      // Executor-only: OMP is never selectable as the interactive runtime.
+      runtimeSupported: false,
+      defaultModel: "kimi-code/k3",
+      // OMP runs as a local subprocess and resolves its own credentials, so it
+      // has no endpoint to proxy and UncleCode reads no environment for it.
+      endpointUrl: "",
+      envKeys: [],
+    },
+  );
+  // A route with no endpoint must still report a usable, proxy-free policy
+  // rather than failing to parse an empty URL.
+  assert.deepEqual(ompRoute.proxyPolicy, {
+    proxyUrl: null,
+    source: "none",
+    bypassed: false,
+    targetHost: "",
+    noProxy: [],
+  });
+});
+
+test("the omp adapter reports one pinned model and OMP's own capability shape", () => {
+  const adapter = getProviderAdapter("omp");
+  const registry = adapter.getModelRegistry({
+    // Neither knob may widen a delegated route: work turns are pinned to K3.
+    OMP_MODEL: "zai/glm-5",
+    OMP_MODELS: "groq/openai/gpt-oss-20b",
+  });
+
+  assert.equal(registry.providerId, "omp");
+  assert.equal(registry.defaultModel, "kimi-code/k3");
+  assert.deepEqual(registry.models, ["kimi-code/k3"]);
+
+  adapter.assertCapability("tool-calls", { modelId: "kimi-code/k3" });
+  adapter.assertCapability("prompt-caching", { modelId: "kimi-code/k3" });
+  assert.throws(
+    () => adapter.assertCapability("session-memory", { modelId: "kimi-code/k3" }),
+    ProviderCapabilityMismatchError,
+    "OMP starts a fresh session per delegated turn",
+  );
+});
+
 test("provider route metadata includes Rust proxy policy", () => {
   const originalNoProxy = process.env.NO_PROXY;
   const originalHttpsProxy = process.env.HTTPS_PROXY;

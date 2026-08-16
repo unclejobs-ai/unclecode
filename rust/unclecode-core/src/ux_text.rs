@@ -592,7 +592,7 @@ pub fn format_runtime_label(node: &str, platform: &str, arch: &str) -> String {
 }
 
 pub fn work_shell_empty_conversation_hint() -> &'static str {
-    "Work context ready. Type a task, /context, or @file; UncleCode carries only useful workspace context into the next answer."
+    "Type a task, /context to see what gets sent, @file to attach."
 }
 
 pub fn work_shell_composer_hint_json(input_json: &str) -> Result<String, String> {
@@ -867,7 +867,8 @@ fn format_trace_line(event: &Value) -> String {
 
 fn format_completed_tool_trace(event: &Value) -> String {
     let tool_name = str_field(event, "toolName").unwrap_or_default();
-    let subject = describe_completed_tool_subject(tool_name, event.get("input").unwrap_or(&Value::Null));
+    let subject =
+        describe_completed_tool_subject(tool_name, event.get("input").unwrap_or(&Value::Null));
     let duration_ms = number_field(event, "durationMs").unwrap_or(0);
     if !bool_field(event, "isError") {
         return format!("✓ {subject} · {duration_ms}ms");
@@ -1239,7 +1240,8 @@ fn normalize_status_detail(value: &str) -> String {
         return String::new();
     }
     let lower = stripped.to_ascii_lowercase();
-    if lower.contains("planner") || lower.contains("routing complex") || lower.contains("prepared ") {
+    if lower.contains("planner") || lower.contains("routing complex") || lower.contains("prepared ")
+    {
         return "Planning parallel work".to_string();
     }
     if lower.contains("synthesis") || lower.contains("synthesiz") {
@@ -1248,8 +1250,7 @@ fn normalize_status_detail(value: &str) -> String {
     if lower.contains("reviewer") || lower.contains("guardian") {
         return "Reviewing results".to_string();
     }
-    if lower.starts_with("read ") || lower.starts_with("write ") || lower.starts_with("search ")
-    {
+    if lower.starts_with("read ") || lower.starts_with("write ") || lower.starts_with("search ") {
         return "Reading files".to_string();
     }
     if lower.starts_with("calling ") || lower.starts_with("model ") {
@@ -1592,7 +1593,7 @@ mod tests {
         assert_eq!(work_shell_composer_hint("/unknown", 0), "No matches");
         assert_eq!(
             work_shell_empty_conversation_hint(),
-            "Work context ready. Type a task, /context, or @file; UncleCode carries only useful workspace context into the next answer."
+            "Type a task, /context to see what gets sent, @file to attach."
         );
         assert_eq!(
             format_work_shell_thinking_line("medium (mode-default)"),

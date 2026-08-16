@@ -1,3 +1,5 @@
+import type { ContextPacketSourceCounts } from "@unclecode/contracts";
+import { resolveWorkShellContextDetailLayout } from "@unclecode/orchestrator";
 import { Box, Text } from "ink";
 import React from "react";
 
@@ -6,16 +8,16 @@ import {
   type ContextInspectorVisibleRows,
   getContextItemDetailLines,
   formatContextTokenEstimate,
-  resolveContextSourceGroup,
-  type ContextInspectorHumanGroup,
+  sanitizeContextPreview,
   type ContextInspectorPalette,
   type ContextInspectorSourceRow,
 } from "./work-shell-context-inspector-model.js";
-import { sanitizeContextPreview } from "./work-shell-context-inspector-details.js";
 
 function renderContextInspectorSourceRow(input: {
   readonly row: ContextInspectorSourceRow;
-  readonly cursorIndex: number;
+  readonly selected: boolean;
+  /** Standalone callers default to Sources focus; other panes suppress the cursor. */
+  readonly focused?: boolean | undefined;
   readonly expandedId?: string | null | undefined;
   readonly maxDetailLines: number;
   readonly width: number;
@@ -23,23 +25,23 @@ function renderContextInspectorSourceRow(input: {
 }): React.ReactNode {
   const { row, palette } = input;
   const { item } = row;
-  const selected = row.sourceIndex === input.cursorIndex;
+  const selected = input.selected && input.focused !== false;
   const expanded = input.expandedId === item.id;
   const sourceCount = Math.max(1, Math.trunc(item.sourceCount ?? 1));
   const label = sanitizeContextPreview(item.label);
-  const statusLabel = row.heldBack ? "held" : "sent";
   const pinned = !row.heldBack && (item.salience ?? 0) >= 1;
   const tokenLabel = formatContextTokenEstimate(item.tokenEstimate);
   const parts = [
     label,
-    ...(sourceCount > 1 ? [`${sourceCount}`] : []),
-    statusLabel,
-    ...(pinned ? ["pinned"] : []),
+    ...(sourceCount > 1 ? [`${sourceCount} sources`] : []),
+    ...(row.heldBack ? ["held"] : pinned ? ["pinned"] : []),
     tokenLabel,
   ];
+  // The row prefix ("› " + status glyph) paints 4 cells; one trailing cell of
+  // slack keeps an exact-fit row off the wrap boundary.
   const body = truncateForDisplayWidth(
     parts.join(" · "),
-    Math.max(20, input.width - 4),
+    Math.max(18, input.width - 5),
   );
   const detailLines = expanded
     ? getContextItemDetailLines(item)
@@ -55,7 +57,8 @@ function renderContextInspectorSourceRow(input: {
   return (
     <Box key={`context-source-${row.sourceIndex}-${item.id}`} flexDirection="column">
       <Text>
-        <Text color={selected ? palette.user : palette.textDim} bold>{selected ? "> " : "  "}</Text>
+        <Text color={selected ? palette.user : palette.textDim} bold>{selected ? "› " : "  "}</Text>
+        <Text color={statusColor} bold>{row.heldBack ? "○ " : "● "}</Text>
         <Text color={selected ? palette.text : statusColor} bold={selected}>{body}</Text>
       </Text>
       {detailLines.map((line, index) => (
@@ -73,68 +76,87 @@ function buildContextInspectorViewportPlan(input: {
   readonly cursorIndex: number;
   readonly maxRows: number;
   readonly expandedId?: string | null | undefined;
-}): ContextInspectorVisibleRows & { readonly detailLineLimit: number } {
-  if (input.rows.length === 0) {
-    return { rows: [], hiddenBefore: 0, hiddenAfter: 0, detailLineLimit: 0 };
+}): ContextInspectorVisibleRows & {
+  readonly detailLineLimit: number;
+  readonly showHiddenBefore: boolean;
+  readonly showHiddenAfter: boolean;
+} {
+  const rowCount = input.rows.length;
+  if (rowCount === 0) {
+    return {
+      rows: [],
+      hiddenBefore: 0,
+      hiddenAfter: 0,
+      detailLineLimit: 0,
+      showHiddenBefore: false,
+      showHiddenAfter: false,
+    };
   }
-  const selectedOffset = input.rows.findIndex((row) => row.sourceIndex === input.cursorIndex);
-  const anchor = selectedOffset >= 0 ? selectedOffset : 0;
+  // The cursor is an offset into these rows (the active collection's filtered
+  // list), never a global source index, so windowing anchors on it directly.
+  const anchor = Math.min(Math.max(0, input.cursorIndex), rowCount - 1);
   const detailReserve = input.expandedId ? 3 : 0;
+  // Rows left for source lines plus their hidden-count marker lines.
+  const budget = input.maxRows - detailReserve;
   let bestStart = anchor;
   let bestEnd = anchor + 1;
   let bestCount = 0;
   let bestCenterDistance = Number.POSITIVE_INFINITY;
+  let showHiddenBefore = false;
+  let showHiddenAfter = false;
 
-  for (let start = 0; start <= anchor; start += 1) {
-    let groupHeaderCount = 0;
-    for (let end = start + 1; end <= input.rows.length; end += 1) {
-      const current = input.rows[end - 1];
-      const previous = end - 2 >= start ? input.rows[end - 2] : undefined;
-      if (
-        current
-        && (!previous
-          || resolveContextSourceGroup(current.item.category)
-          !== resolveContextSourceGroup(previous.item.category))
-      ) {
-        groupHeaderCount += 1;
-      }
-      if (end <= anchor) {
-        continue;
-      }
-      const hiddenMarkerCount = (start > 0 ? 1 : 0) + (end < input.rows.length ? 1 : 0);
-      const structuralRows = 2 + (end - start) + groupHeaderCount + hiddenMarkerCount;
-      if (structuralRows + detailReserve > input.maxRows) {
-        continue;
-      }
-      const count = end - start;
-      const centerDistance = Math.abs((start + end - 1) / 2 - anchor);
-      if (count > bestCount || (count === bestCount && centerDistance < bestCenterDistance)) {
-        bestStart = start;
-        bestEnd = end;
-        bestCount = count;
-        bestCenterDistance = centerDistance;
-      }
+  const consider = (start: number, end: number): void => {
+    if (start < 0 || start > anchor || end <= anchor || end > rowCount) {
+      return;
     }
+    const count = end - start;
+    const markerRows = (start > 0 ? 1 : 0) + (end < rowCount ? 1 : 0);
+    if (count + markerRows > budget) {
+      return;
+    }
+    const centerDistance = Math.abs((start + end - 1) / 2 - anchor);
+    const better = count > bestCount
+      || (count === bestCount
+        && (centerDistance < bestCenterDistance
+          || (centerDistance === bestCenterDistance && start < bestStart)));
+    if (!better) {
+      return;
+    }
+    bestStart = start;
+    bestEnd = end;
+    bestCount = count;
+    bestCenterDistance = centerDistance;
+    showHiddenBefore = start > 0;
+    showHiddenAfter = end < rowCount;
+  };
+
+  // A window is fully described by which hidden-count markers it shows, and
+  // for each of those four shapes the widest feasible width is closed form --
+  // as is the best-centred offset for the one shape that can still slide. So
+  // four candidates cover every window the exhaustive scan could have picked,
+  // and `consider` re-validates each against the very same rules.
+  consider(0, rowCount);
+  // One marker: the window is pinned to the head or to the tail of the list.
+  const edgeCount = Math.min(rowCount - 1, budget - 1);
+  consider(0, edgeCount);
+  consider(rowCount - edgeCount, rowCount);
+  // Two markers: the window floats, so centre it on the cursor and clamp it
+  // into the interior range that still contains the cursor.
+  const interiorCount = Math.min(rowCount - 2, budget - 2);
+  if (interiorCount >= 1) {
+    const lowestStart = Math.max(1, anchor - interiorCount + 1);
+    const highestStart = Math.min(anchor, rowCount - 1 - interiorCount);
+    const centredStart = anchor - Math.floor(interiorCount / 2);
+    const interiorStart = Math.min(Math.max(centredStart, lowestStart), highestStart);
+    consider(interiorStart, interiorStart + interiorCount);
   }
 
   const visibleRows = input.rows.slice(bestStart, bestEnd);
-  const groupHeaderCount = visibleRows.reduce((count, row, index) => {
-    const previous = index > 0 ? visibleRows[index - 1] : undefined;
-    return count + (
-      !previous
-      || resolveContextSourceGroup(row.item.category)
-      !== resolveContextSourceGroup(previous.item.category)
-        ? 1
-        : 0
-    );
-  }, 0);
   const hiddenBefore = bestStart;
-  const hiddenAfter = input.rows.length - bestEnd;
-  const structuralRows = 2
-    + visibleRows.length
-    + groupHeaderCount
-    + (hiddenBefore > 0 ? 1 : 0)
-    + (hiddenAfter > 0 ? 1 : 0);
+  const hiddenAfter = rowCount - bestEnd;
+  const structuralRows = visibleRows.length
+    + (showHiddenBefore ? 1 : 0)
+    + (showHiddenAfter ? 1 : 0);
   return {
     rows: visibleRows,
     hiddenBefore,
@@ -142,44 +164,30 @@ function buildContextInspectorViewportPlan(input: {
     detailLineLimit: input.expandedId
       ? Math.max(0, input.maxRows - structuralRows)
       : 0,
+    showHiddenBefore,
+    showHiddenAfter,
   };
 }
 
-function renderGroupedVisibleRows(input: {
-  readonly allRows: readonly ContextInspectorSourceRow[];
+function renderVisibleSourceRows(input: {
   readonly visibleRows: readonly ContextInspectorSourceRow[];
+  readonly hiddenBefore: number;
   readonly cursorIndex: number;
+  readonly focused?: boolean | undefined;
   readonly expandedId?: string | null | undefined;
   readonly maxDetailLines: number;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
 }): React.ReactNode {
-  const nodes: React.ReactNode[] = [];
-  let previousGroup: ContextInspectorHumanGroup | undefined;
-  for (const row of input.visibleRows) {
-    const group = resolveContextSourceGroup(row.item.category);
-    if (group !== previousGroup) {
-      previousGroup = group;
-      const groupCount = input.allRows.filter(
-        (candidate) => resolveContextSourceGroup(candidate.item.category) === group,
-      ).length;
-      nodes.push(
-        <Text key={`context-group-${group}-${row.sourceIndex}`}>
-          <Text color={input.palette.assistant} bold>{group}</Text>
-          <Text color={input.palette.textDim}>{` · ${groupCount}`}</Text>
-        </Text>,
-      );
-    }
-    nodes.push(renderContextInspectorSourceRow({
-      row,
-      cursorIndex: input.cursorIndex,
-      ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
-      maxDetailLines: input.maxDetailLines,
-      width: input.width,
-      palette: input.palette,
-    }));
-  }
-  return nodes;
+  return input.visibleRows.map((row, index) => renderContextInspectorSourceRow({
+    row,
+    selected: input.hiddenBefore + index === input.cursorIndex,
+    focused: input.focused,
+    ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
+    maxDetailLines: input.maxDetailLines,
+    width: input.width,
+    palette: input.palette,
+  }));
 }
 
 function renderContextInspectorDetailReader(input: {
@@ -190,28 +198,29 @@ function renderContextInspectorDetailReader(input: {
   readonly width: number;
   readonly palette: ContextInspectorPalette;
 }): React.ReactNode {
-  const summaryLines = getContextItemDetailLines(input.row.item)
-    .flatMap((line) => wrapDisplayTextFast(line, Math.max(24, input.width - 8)));
-  const contentLines = input.content?.trim()
-    ? input.content
-      .split(/\r?\n/u)
-      .flatMap((line) => wrapDisplayTextFast(line.length > 0 ? line : " ", Math.max(24, input.width - 8)))
-    : [];
-  const lines = [
-    ...summaryLines,
-    ...(contentLines.length > 0 ? ["", "Local source content", ...contentLines] : []),
-  ];
+  const layout = resolveWorkShellContextDetailLayout({
+    item: input.row.item,
+    ...(input.content === undefined ? {} : { content: input.content }),
+    width: input.width,
+    maxRows: input.maxRows,
+  });
+  const { lines, maxOffset } = layout;
   // `maxRows` includes the margin, separator, and detail heading. Overflow
   // markers consume rows too, so reserve them before slicing the content.
   const availableRows = Math.max(1, input.maxRows - 3);
-  const bottomPageSize = Math.max(1, availableRows - 1);
-  const maxOffset = Math.max(0, lines.length - bottomPageSize);
   const offset = Math.min(maxOffset, Math.max(0, input.offset));
   const hasAbove = offset > 0;
   const rowsAfterAboveMarker = Math.max(1, availableRows - (hasAbove ? 1 : 0));
   const hasBelow = offset + rowsAfterAboveMarker < lines.length;
   const visibleCount = Math.max(1, rowsAfterAboveMarker - (hasBelow ? 1 : 0));
   const visibleLines = lines.slice(offset, offset + visibleCount);
+  const detailHeading = truncateForDisplayWidth(
+    `Detail · ${sanitizeContextPreview(input.row.item.label)}`,
+    input.width,
+  );
+  const detailSuffix = detailHeading.startsWith("Detail")
+    ? detailHeading.slice("Detail".length)
+    : "";
 
   return (
     <Box marginTop={1} flexDirection="column">
@@ -220,7 +229,7 @@ function renderContextInspectorDetailReader(input: {
       </Text>
       <Text>
         <Text color={input.palette.assistant} bold>{"Detail"}</Text>
-        <Text color={input.palette.textDim}>{` · ${sanitizeContextPreview(input.row.item.label)}`}</Text>
+        <Text color={input.palette.textDim}>{detailSuffix}</Text>
       </Text>
       {offset > 0 ? <Text color={input.palette.textDim}>{`  … ${offset} lines above`}</Text> : null}
       {visibleLines.map((line, index) => (
@@ -241,14 +250,20 @@ export function renderContextInspectorGroupedViewport(input: {
   readonly rows: readonly ContextInspectorSourceRow[];
   readonly maxRows: number;
   readonly cursorIndex: number;
+  /** Standalone callers default to Sources focus. */
+  readonly focused?: boolean | undefined;
+  readonly sourceCounts?: ContextPacketSourceCounts | undefined;
   readonly expandedId?: string | null | undefined;
   readonly detailContent?: string | undefined;
   readonly detailOffset?: number | undefined;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
   readonly actionsEnabled: boolean;
+  /** Pane layouts place their own heading; the standalone margin is optional. */
+  readonly marginTop?: number | undefined;
+  /** Empty-state copy when this collection has no rows of its own. */
+  readonly emptyMessage?: string | undefined;
 }): React.ReactNode {
-  void input.actionsEnabled;
   const detailRow = input.expandedId
     ? input.rows.find((row) => row.item.id === input.expandedId)
     : undefined;
@@ -269,25 +284,25 @@ export function renderContextInspectorGroupedViewport(input: {
     ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
   });
   return (
-    <Box marginTop={1} flexDirection="column">
-      <Text color={input.palette.borderDefault}>{"─".repeat(Math.min(64, Math.max(24, input.width - 4)))}</Text>
+    <Box marginTop={input.marginTop ?? 1} flexDirection="column">
       {input.rows.length === 0 ? (
-        <Text color={input.palette.textMuted}>{"  none"}</Text>
+        <Text color={input.palette.textMuted}>{input.emptyMessage ?? "No context sources yet."}</Text>
       ) : (
         <>
-          {visible.hiddenBefore > 0 ? (
+          {visible.showHiddenBefore ? (
             <Text color={input.palette.textDim}>{`  … ${visible.hiddenBefore} more above`}</Text>
           ) : null}
-          {renderGroupedVisibleRows({
-            allRows: input.rows,
+          {renderVisibleSourceRows({
             visibleRows: visible.rows,
+            hiddenBefore: visible.hiddenBefore,
             cursorIndex: input.cursorIndex,
+            focused: input.focused,
             ...(input.expandedId !== undefined ? { expandedId: input.expandedId } : {}),
             maxDetailLines: visible.detailLineLimit,
             width: input.width,
             palette: input.palette,
           })}
-          {visible.hiddenAfter > 0 ? (
+          {visible.showHiddenAfter ? (
             <Text color={input.palette.textDim}>{`  … ${visible.hiddenAfter} more below`}</Text>
           ) : null}
         </>

@@ -119,7 +119,7 @@ test("work-shell hotspot re-exports extracted helper owner seams instead of regr
   assert.match(viewSource, /export function getWorkShellEntryPresentation\(/);
   assert.match(viewSource, /function WorkShellSectionDivider\(/);
   assert.doesNotMatch(viewSource, /Ctrl\+O context/);
-  assert.match(viewSource, /Ctrl\+O sessions/);
+  assert.doesNotMatch(viewSource, /Ctrl\+O sessions/);
   assert.doesNotMatch(
     viewSource,
     /<Text bold color="white">Conversation<\/Text>/,
@@ -182,7 +182,47 @@ test("TUI exports the read-only context turn receipt formatter", () => {
     createdAt: "2026-07-13T00:00:00.000Z",
   });
 
-  assert.equal(line, "ctx crp-b203 · 1 source · unknown · 0 memories");
+  // Compact proof (Task 14): the label is gone, a zero `held` and an unknown
+  // token estimate are omitted — the values themselves still travel for the
+  // same inputs the long form used to pin.
+  assert.equal(line, "▤ 1 sent");
+
+  // Segment omission rules: `held` survives when sources are held back, and a
+  // known estimate keeps its `~Xk tok` segment.
+  const held = formatContextTurnReceiptLine({
+    id: "receipt-held",
+    projectId: "project-1",
+    sessionId: "session-1",
+    turnId: "turn-2",
+    packetId: "crp-held",
+    state: "submitted",
+    profile: "build",
+    tokenEstimate: 24_000,
+    tokenEstimateState: "estimated",
+    sourceCount: 3,
+    sourceRefs: [
+      {
+        sourceId: "rules",
+        category: "workspace-guidance",
+        salience: 1,
+        includedInModel: true,
+      },
+      {
+        sourceId: "memory-1",
+        category: "memory",
+        salience: 0.8,
+        includedInModel: true,
+      },
+      {
+        sourceId: "held-1",
+        category: "loop-trail",
+        salience: 0.4,
+        includedInModel: false,
+      },
+    ],
+    createdAt: "2026-07-13T00:00:00.000Z",
+  });
+  assert.equal(held, "▤ 2 sent · 1 held · ~24k tok");
 });
 
 test("formatWorkShellProviderTitle humanizes known providers for the unified work tab", () => {
@@ -200,7 +240,7 @@ test("formatWorkShellHeaderLine renders one width-bounded row", () => {
     headerHint: "work context · Ctrl+O context · / commands",
     terminalColumns: 120,
   });
-  assert.equal(getDisplayWidth(wide), 118);
+  assert.equal(getDisplayWidth(wide), 116);
   assert.match(wide, /^UncleCode · OpenAI/);
   assert.match(wide, /work context/);
   assert.match(wide, /Ctrl\+O context/);
@@ -211,7 +251,7 @@ test("formatWorkShellHeaderLine renders one width-bounded row", () => {
     headerHint: "work context · Ctrl+O context · / commands",
     terminalColumns: 36,
   });
-  assert.equal(getDisplayWidth(narrow), 34);
+  assert.equal(getDisplayWidth(narrow), 32);
   assert.doesNotMatch(narrow, /\n/);
 });
 
@@ -221,7 +261,7 @@ test("formatWorkShellHeaderLine keeps header hints within the row width", () => 
     headerHint: "work context · Ctrl+O sessions · / commands",
     terminalColumns: 72,
   });
-  assert.equal(getDisplayWidth(line), 70);
+  assert.equal(getDisplayWidth(line), 68);
   assert.match(line, /UncleCode · Gemini/);
   assert.doesNotMatch(line, /\n/);
 });
@@ -269,7 +309,7 @@ test("getWorkShellEntryPresentation keeps user, assistant, tool, and system role
   assert.equal(getWorkShellEntryBorderStyle("system"), "single");
   assert.equal(
     getWorkShellEmptyConversationHint(),
-    "Work context ready. Type a task, /context, or @file; UncleCode carries only useful workspace context into the next answer.",
+    "Type a task, /context to see what gets sent, @file to attach.",
   );
 });
 
@@ -398,6 +438,10 @@ test("getWorkShellComposerHint keeps slash discovery guidance inside the shared 
     getWorkShellComposerHint("/unknown", 0),
     "No matches · try /model, /auth, /context, /queue",
   );
+  // The empty composer is the only surface that advertises slash discovery.
+  // Pre-redesign it carried `/ commands` alongside the paste affordance; the
+  // redesign dropped the discovery half and kept only `Ctrl+V image`. A typed
+  // draft keeps the shorter help below.
   assert.equal(
     getWorkShellComposerHint("", 0),
     "Enter send · Shift+Enter newline · / commands · Ctrl+V image",
@@ -410,7 +454,7 @@ test("getWorkShellComposerHint keeps slash discovery guidance inside the shared 
 });
 
 test("resolveWorkShellComposerHint and spinner interval stay aligned with DESIGN.md workflow states", () => {
-  assert.equal(WORK_SHELL_SPINNER_INTERVAL_MS, 80);
+  assert.equal(WORK_SHELL_SPINNER_INTERVAL_MS, 100);
   assert.equal(
     resolveWorkShellComposerHint({
       isBusy: true,
@@ -1062,7 +1106,7 @@ test("work-shell input decision helpers are exported from the shared tui package
       shouldBlockSlashSubmit: true,
       selectedSlashCommand: "/auth status",
     }),
-    { type: "submit-suggestion", line: "/auth status", clearInput: true },
+    { type: "submit", line: "/auth", clearInput: true },
   );
   assert.deepEqual(
     resolveWorkShellInputAction({
@@ -1095,7 +1139,7 @@ test("work-shell input decision helpers are exported from the shared tui package
       shouldBlockSlashSubmit: true,
       selectedSlashCommand: "/auth status",
     }),
-    { type: "submit-suggestion", line: "/auth status", clearInput: true },
+    { type: "submit", line: "/auth", clearInput: true },
   );
   assert.deepEqual(
     resolveWorkShellSubmitAction({
@@ -1611,33 +1655,31 @@ test("applyComposerEdit handles Hangul input and cursor positioning correctly", 
   assert.equal(result3.nextCursorOffset, 2);
 });
 
-test("applyComposerEdit replaces overlapping Hangul composition updates instead of duplicating them", () => {
-  assert.deepEqual(
-    applyComposerEdit({
-      value: "제대로 되는거 맞냐",
-      cursorOffset: "제대로 되는거 맞냐".length,
-      input: "제대로 되는거 맞나",
-      key: {},
-      allowLineBreaks: false,
-    }),
-    {
-      nextValue: "제대로 되는거 맞나",
-      nextCursorOffset: "제대로 되는거 맞나".length,
-      submitted: false,
-    },
-  );
+test("applyComposerEdit appends committed Hangul syllables without replacing previous input", () => {
+  const first = applyComposerEdit({
+    value: "",
+    cursorOffset: 0,
+    input: "한",
+    key: {},
+    allowLineBreaks: false,
+  });
+  assert.deepEqual(first, {
+    nextValue: "한",
+    nextCursorOffset: "한".length,
+    submitted: false,
+  });
 
   assert.deepEqual(
     applyComposerEdit({
-      value: "ㅎ",
-      cursorOffset: "ㅎ".length,
-      input: "하",
+      value: first.nextValue,
+      cursorOffset: first.nextCursorOffset,
+      input: "글 ",
       key: {},
       allowLineBreaks: false,
     }),
     {
-      nextValue: "하",
-      nextCursorOffset: "하".length,
+      nextValue: "한글 ",
+      nextCursorOffset: "한글 ".length,
       submitted: false,
     },
   );

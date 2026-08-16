@@ -36,6 +36,7 @@ apps/*/dist/
 .factory/
 .codegraph
 .cursor/
+.gjc/_session-*/
 
 # vendored third-party reference (kept on disk only)
 Leonxlnx-claude-code/

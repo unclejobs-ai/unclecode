@@ -3,8 +3,14 @@ import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { repoRoot, ttyResponseText } from "./constants.mjs";
-import { run, shellQuote, sleep } from "./cli-helpers.mjs";
-import { calculatePaneWidth, runTmux, sendKeys, waitForPane } from "./tmux-helpers.mjs";
+import { run, shellQuote } from "./cli-helpers.mjs";
+import {
+  calculatePaneWidth,
+  IDLE_COMPOSER_PATTERN,
+  runTmux,
+  sendKeys,
+  waitForPane,
+} from "./tmux-helpers.mjs";
 
 export async function runTtySmoke({ port, tmp, observations }) {
   const tmux = await run("sh", ["-lc", "command -v tmux"], process.env);
@@ -27,21 +33,22 @@ export async function runTtySmoke({ port, tmp, observations }) {
   ].join(" ");
   const command = [
     `cd ${shellQuote(repoRoot)} && ${launchCommand}`,
-    `status=$?`,
-    `echo EXIT:$status`,
+    `exit_code=$?`,
+    `echo EXIT:$exit_code`,
     `sleep 20`,
-    `exit $status`,
+    `exit $exit_code`,
   ].join("; ");
 
   try {
     await runTmux(["new-session", "-d", "-x", "100", "-y", "30", "-s", session, command]);
-    await waitForPane(session, /UncleCode|unclecode>/, paneFile);
+    const initialPane = await waitForPane(session, /UncleCode|unclecode>/, paneFile);
     await sendKeys(session, "/status");
-    await sleep(400);
+    await waitForPane(session, /Status shown\. Live steps return on the next action\./, paneFile);
+    await waitForPane(session, IDLE_COMPOSER_PATTERN, paneFile);
     await sendKeys(session, "/context");
-    await waitForPane(session, /Sources · \d+ included/, paneFile);
+    const contextPane = await waitForPane(session, /Sources · \d+ sent · \d+ held/, paneFile);
     await runTmux(["send-keys", "-t", session, "Escape"]);
-    await waitForPane(session, /prompt deck/, paneFile);
+    await waitForPane(session, IDLE_COMPOSER_PATTERN, paneFile);
     await sendKeys(session, "Say hello from runtime TTY QA.");
     try {
       await waitForPane(session, new RegExp(ttyResponseText), paneFile);
@@ -50,8 +57,8 @@ export async function runTtySmoke({ port, tmp, observations }) {
       throw new Error(`${message}\nRecent provider observations:\n${JSON.stringify(observations.slice(beforeRequests), null, 2)}`);
     }
     const pane = readFileSync(paneFile, "utf8");
-    assert.match(pane, /UncleCode · Gemini/);
-    assert.match(pane, /Work context status|Context opened|context \d+ ready|▤ \d+ ctx/i);
+    assert.match(initialPane, /UncleCode|unclecode>/);
+    assert.match(contextPane, /Sources · \d+ sent · \d+ held/);
     assert.doesNotMatch(pane, /Unknown command|panic|TypeError|ReferenceError/);
 
     const width = calculatePaneWidth(pane);

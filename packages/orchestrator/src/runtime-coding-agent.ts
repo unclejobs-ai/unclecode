@@ -1,10 +1,11 @@
-import type { ExecutionTraceEvent } from "@unclecode/contracts";
+import type { ExecutionPolicyProfile, ExecutionTraceEvent } from "@unclecode/contracts";
 import {
   createRuntimeProvider,
   type LlmProvider,
   type ProviderInputAttachment,
   type ProviderName,
   type ProviderToolTraceEvent,
+  type ToolRuntime,
 } from "@unclecode/providers";
 
 import {
@@ -13,6 +14,7 @@ import {
   type TurnAgent,
 } from "./coding-agent.js";
 import { createToolRuntime } from "./tools.js";
+import { resolveModeExecutionPolicyProfile } from "./tool-executor.js";
 import {
   createWorkShellInteractionBridge,
   type WorkShellInteractionBridge,
@@ -40,10 +42,17 @@ type RuntimeProviderArgs = {
   openAIRuntime?: "api" | "codex";
   openAIAccountId?: string | null;
   interactionBridge?: WorkShellInteractionBridge;
+  mode?: string;
 };
 
 export type RuntimeCodingAgentOptions = RuntimeProviderArgs & {
   providerOverride?: RuntimeProvider;
+  /**
+   * Builds the LLM provider with access to the agent's tool runtime. Used by
+   * alternate engines (e.g. the pi-mono bridge) that execute tool calls inside
+   * the provider's own turn loop.
+   */
+  providerOverrideFactory?: (context: { toolRuntime: ToolRuntime }) => RuntimeProvider;
 };
 
 export class RuntimeCodingAgent
@@ -56,28 +65,47 @@ export class RuntimeCodingAgent
 {
   private readonly runtimeProvider: RuntimeProvider;
   private readonly interactionBridge: WorkShellInteractionBridge;
+  // The explicit env opt-in is read once, at construction. The runtime never
+  // assigns or deletes UNCLECODE_ALLOW_RUN_SHELL.
+  private readonly envShellOptIn: boolean;
+  // Mutable box so the tool executor always reads the live profile after
+  // updateMode() without rebuilding the runtime or the provider.
+  private readonly policyProfile: { current: ExecutionPolicyProfile };
+  private readonly runtimeMode: { current: string };
 
   constructor(args: RuntimeCodingAgentOptions) {
     const interactionBridge = args.interactionBridge ?? createWorkShellInteractionBridge();
-    const runtimeProvider = args.providerOverride ?? createRuntimeProvider({
-      provider: args.provider,
-      apiKey: args.apiKey,
-      model: args.model,
-      cwd: args.cwd,
-      reasoning: args.reasoning,
-      ...(args.systemPrompt ? { systemPrompt: args.systemPrompt } : {}),
-      ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
-      ...(args.openAIAccountId !== undefined ? { openAIAccountId: args.openAIAccountId } : {}),
-      toolRuntime: createToolRuntime({
-        interactionBridge,
-        webSearch: {
-          provider: args.provider,
-          apiKey: args.apiKey,
-          model: args.model,
-          ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
-        },
-      }),
+    const envShellOptIn = process.env.UNCLECODE_ALLOW_RUN_SHELL === "1";
+    // `profileRef` lets the executor read the live instance profile after
+    // updateMode() without rebuilding the tool runtime or the provider.
+    const modeRef = { current: args.mode ?? "default" };
+    const profileRef = {
+      current: resolveModeExecutionPolicyProfile({ mode: modeRef.current, envShellOptIn }),
+    };
+    const toolRuntime = createToolRuntime({
+      interactionBridge,
+      policyProfile: () => profileRef.current,
+      runtimeMode: () => modeRef.current,
+      webSearch: {
+        provider: args.provider,
+        apiKey: args.apiKey,
+        model: args.model,
+        ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
+      },
     });
+    const runtimeProvider = args.providerOverride
+      ?? args.providerOverrideFactory?.({ toolRuntime })
+      ?? createRuntimeProvider({
+        provider: args.provider,
+        apiKey: args.apiKey,
+        model: args.model,
+        cwd: args.cwd,
+        reasoning: args.reasoning,
+        ...(args.systemPrompt ? { systemPrompt: args.systemPrompt } : {}),
+        ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
+        ...(args.openAIAccountId !== undefined ? { openAIAccountId: args.openAIAccountId } : {}),
+        toolRuntime,
+      });
     super({
       providerName: args.provider,
       model: args.model,
@@ -85,6 +113,21 @@ export class RuntimeCodingAgent
     });
     this.runtimeProvider = runtimeProvider;
     this.interactionBridge = interactionBridge;
+    this.envShellOptIn = envShellOptIn;
+    this.policyProfile = profileRef;
+    this.runtimeMode = modeRef;
+  }
+
+  updateMode(mode: string): void {
+    this.runtimeMode.current = mode;
+    this.policyProfile.current = resolveModeExecutionPolicyProfile({
+      mode,
+      envShellOptIn: this.envShellOptIn,
+    });
+  }
+
+  getExecutionPolicyProfile(): ExecutionPolicyProfile {
+    return this.policyProfile.current;
   }
 
   refreshAuthToken(apiKey: string): void {

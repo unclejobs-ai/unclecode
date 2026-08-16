@@ -15,6 +15,8 @@ use serde_json::{json, Map, Value};
 const MAX_RESUME_ENTRIES: usize = 24;
 const MAX_AGENT_CONSOLE_BYTES: usize = 32 * 1024;
 const MAX_AGENT_CONSOLE_ACTIVITY: usize = 80;
+const MAX_AGENT_CONSOLE_AGENTS: usize = 128;
+const MAX_AGENT_CONSOLE_JOBS: usize = 128;
 const MAX_RESUME_ENTRY_CHARS: usize = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -648,8 +650,511 @@ fn sanitize_agent_console_snapshot(value: &Value) -> Option<Value> {
         .collect::<Option<Vec<_>>>()?;
     snapshot.insert("activity".to_string(), Value::Array(activity));
 
-    let sanitized = redact_json_strings(Value::Object(snapshot));
-    (serde_json::to_vec(&sanitized).ok()?.len() <= MAX_AGENT_CONSOLE_BYTES).then_some(sanitized)
+    // Lifecycle projections are rebuilt field by field for the same reason as
+    // the activity list: only the named safe fields cross the durable gate, so
+    // a worker prompt, raw assignment, or provider credential can never ride
+    // along inside an agent or job record. A missing key is a legacy snapshot.
+    if let Some(agents) = source.get("agents") {
+        let agents = agents.as_array()?;
+        let start = agents.len().saturating_sub(MAX_AGENT_CONSOLE_AGENTS);
+        let agents = agents[start..]
+            .iter()
+            .map(sanitize_agent_run)
+            .collect::<Option<Vec<_>>>()?;
+        snapshot.insert("agents".to_string(), Value::Array(agents));
+    }
+    if let Some(jobs) = source.get("jobs") {
+        let jobs = jobs.as_array()?;
+        let start = jobs.len().saturating_sub(MAX_AGENT_CONSOLE_JOBS);
+        let jobs = jobs[start..]
+            .iter()
+            .map(sanitize_async_job)
+            .collect::<Option<Vec<_>>>()?;
+        snapshot.insert("jobs".to_string(), Value::Array(jobs));
+    }
+    if let Some(main_usage) = source.get("mainUsage") {
+        snapshot.insert(
+            "mainUsage".to_string(),
+            sanitize_agent_run_usage(main_usage)?,
+        );
+    }
+
+    // Allowlisting and redaction both run before fitting, so the size ladder
+    // below can only ever remove safe data — it can never keep an unknown field
+    // or a secret to make the budget work.
+    let Value::Object(sanitized) = redact_json_strings(Value::Object(snapshot)) else {
+        return None;
+    };
+    Some(Value::Object(fit_agent_console_snapshot(sanitized)))
+}
+
+/// Longest bounded prose a compacted lifecycle record keeps.
+const COMPACT_TEXT_CHARS: usize = 80;
+
+const COMPACTABLE_TEXT_FIELDS: &[&str] = &[
+    "summary",
+    "errorSummary",
+    "currentActivity",
+    "intent",
+    "target",
+];
+
+const LIFECYCLE_ARRAY_KEYS: &[&str] = &["activity", "agents", "jobs"];
+
+fn console_byte_len(snapshot: &Map<String, Value>) -> usize {
+    serde_json::to_vec(snapshot).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+fn console_fits(snapshot: &Map<String, Value>) -> bool {
+    console_byte_len(snapshot) <= MAX_AGENT_CONSOLE_BYTES
+}
+
+/// Bytes a JSON array loses when one element is removed: the element's own
+/// serialization plus the separator comma it no longer needs. `before` is the
+/// element count prior to the removal. Serde emits no whitespace, so this is
+/// exact — it is only ever used as a fast pre-filter in front of a real
+/// re-measure, so drift could cost an extra measurement, never correctness.
+fn removed_array_element_bytes(removed: &Value, before: usize) -> usize {
+    let element = serde_json::to_vec(removed).map_or(0, |bytes| bytes.len());
+    element + usize::from(before >= 2)
+}
+
+/// Deterministic size fitting for the durable console projection.
+///
+/// A legal bounded history can still exceed the byte budget, and discarding the
+/// whole console would resume a session with no interruptible work at all. The
+/// stages below run in one fixed order — most expendable first — and each stops
+/// the moment the projection fits:
+///
+///  1. per-run usage replay identities (`eventIds`, `routes`); counters stay
+///  2. the aggregate `mainUsage` replay identities; its counters stay
+///  3. oldest tool activity
+///  4. oldest settled jobs, then oldest settled agents
+///  5. lifecycle transcript metadata, then bounded prose compacted, then dropped
+///  6. the manifest policy list — provenance bulk, not manifest identity
+///  7. decision prose — option descriptions, then question and title text
+///  8. the manifest
+///  9. the proposed work graph
+/// 10. the pending decision
+/// 11. oldest active jobs, then oldest active agents — identity is sacrificed last
+/// 12. the smallest valid safe projection, which always fits
+///
+/// Stages 6–10 sit ahead of stage 11 deliberately: optional shell metadata is
+/// recoverable (the operator can re-ask, and a resumed decision is announced as
+/// unresumable anyway) while an evicted active identity leaves resume with
+/// nothing to mark interrupted.
+fn fit_agent_console_snapshot(mut snapshot: Map<String, Value>) -> Map<String, Value> {
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    strip_run_usage_replay_identities(&mut snapshot);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    if let Some(main_usage) = snapshot.get_mut("mainUsage") {
+        strip_usage_replay_identity(main_usage);
+    }
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    trim_oldest_entries(&mut snapshot, "activity", |_| false);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    trim_oldest_entries(&mut snapshot, "jobs", is_active_async_job);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    trim_oldest_entries(&mut snapshot, "agents", is_active_agent_run);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    drop_lifecycle_field(&mut snapshot, "transcriptRef");
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    compact_lifecycle_text(&mut snapshot, Some(COMPACT_TEXT_CHARS));
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    compact_lifecycle_text(&mut snapshot, None);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    trim_manifest_policy(&mut snapshot);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    compact_pending_decision(&mut snapshot);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    snapshot.remove("manifest");
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    snapshot.remove("workGraph");
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    snapshot.remove("pendingDecision");
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    trim_oldest_entries(&mut snapshot, "jobs", |_| false);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    trim_oldest_entries(&mut snapshot, "agents", |_| false);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    minimal_agent_console_snapshot(&snapshot)
+}
+
+/// Drop the oldest expendable entries of one JSON array in a single linear
+/// pass.
+///
+/// One forward scan finds the smallest window whose removal frees `excess`
+/// bytes, then one `retain` rebuilds the vector. Removing entries one at a time
+/// would shift every surviving `Value` on each removal — Θ(n²) moves on a
+/// synchronous persistence path that the engine's ordered write queue waits on.
+///
+/// Accounting is in serialized bytes, never characters: `manifest.policy`
+/// labels and lifecycle prose are arbitrary UTF-8, so a character count would
+/// under-measure multibyte text and over-trim. `keep` names the records this
+/// stage refuses to sacrifice; they stay even when they sit inside the scan
+/// window, and they do not count towards the freed total.
+fn drop_oldest_until_freed(items: &mut Vec<Value>, excess: usize, keep: fn(&Value) -> bool) {
+    if excess == 0 || items.is_empty() {
+        return;
+    }
+    let mut remaining = items.len();
+    let mut freed = 0usize;
+    let mut cutoff = 0usize;
+    for (index, item) in items.iter().enumerate() {
+        if freed >= excess {
+            break;
+        }
+        cutoff = index + 1;
+        if keep(item) {
+            continue;
+        }
+        freed += removed_array_element_bytes(item, remaining);
+        remaining -= 1;
+    }
+    if remaining == items.len() {
+        return;
+    }
+    let mut index = 0usize;
+    items.retain(|item| {
+        let position = index;
+        index += 1;
+        position >= cutoff || keep(item)
+    });
+}
+
+fn manifest_policy_mut(snapshot: &mut Map<String, Value>) -> Option<&mut Vec<Value>> {
+    snapshot
+        .get_mut("manifest")
+        .and_then(Value::as_object_mut)
+        .and_then(|manifest| manifest.get_mut("policy"))
+        .and_then(Value::as_array_mut)
+}
+
+/// The policy list is the manifest's bulk and its most expendable part: the
+/// manifest identity (`id`, `packetId`, counts) is what a resumed console needs
+/// to name the packet it was built from. The key itself must stay — the resume
+/// sanitizer requires it — so it empties rather than disappears.
+fn trim_manifest_policy(snapshot: &mut Map<String, Value>) {
+    let Some(excess) = console_byte_len(snapshot).checked_sub(MAX_AGENT_CONSOLE_BYTES) else {
+        return;
+    };
+    if let Some(policy) = manifest_policy_mut(snapshot) {
+        drop_oldest_until_freed(policy, excess, |_| false);
+    }
+    // The byte accounting is exact, but the serializer stays the authority. If
+    // it disagrees, spend the rest of the list in one more linear rebuild
+    // rather than trusting the estimate.
+    if console_fits(snapshot) {
+        return;
+    }
+    if let Some(policy) = manifest_policy_mut(snapshot) {
+        policy.clear();
+    }
+}
+
+/// Compact a pending decision without making it unanswerable. Option labels,
+/// question ids, and the recommended index are the answer contract, so only the
+/// prose is touched: descriptions go first, then the question and title text is
+/// truncated. Emptying `questions` or `options` would fail the resume parser.
+fn compact_pending_decision(snapshot: &mut Map<String, Value>) {
+    let Some(decision) = snapshot
+        .get_mut("pendingDecision")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if let Some(title) = decision.get("title").and_then(Value::as_str) {
+        let compacted = title.chars().take(COMPACT_TEXT_CHARS).collect::<String>();
+        if compacted.trim().is_empty() {
+            decision.remove("title");
+        } else {
+            decision.insert("title".to_string(), Value::String(compacted));
+        }
+    }
+    let Some(questions) = decision.get_mut("questions").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for question in questions.iter_mut() {
+        let Some(question) = question.as_object_mut() else {
+            continue;
+        };
+        if let Some(text) = question.get("question").and_then(Value::as_str) {
+            let compacted = text.chars().take(COMPACT_TEXT_CHARS).collect::<String>();
+            if !compacted.trim().is_empty() {
+                question.insert("question".to_string(), Value::String(compacted));
+            }
+        }
+        let Some(options) = question.get_mut("options").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for option in options.iter_mut() {
+            if let Some(option) = option.as_object_mut() {
+                option.remove("description");
+            }
+        }
+    }
+}
+
+fn is_active_agent_run(agent: &Value) -> bool {
+    matches!(
+        agent.get("status").and_then(Value::as_str),
+        Some("queued" | "running" | "waiting")
+    )
+}
+
+fn is_active_async_job(job: &Value) -> bool {
+    matches!(
+        job.get("status").and_then(Value::as_str),
+        Some("queued" | "running")
+    )
+}
+
+/// Remove the oldest entries of one lifecycle array until the projection fits.
+/// Lists are in creation order, so index order is age order. Same one-pass
+/// rebuild as the manifest policy: scan for the cutoff, then `retain` once.
+fn trim_oldest_entries(snapshot: &mut Map<String, Value>, key: &str, keep: fn(&Value) -> bool) {
+    let Some(excess) = console_byte_len(snapshot).checked_sub(MAX_AGENT_CONSOLE_BYTES) else {
+        return;
+    };
+    if let Some(items) = snapshot.get_mut(key).and_then(Value::as_array_mut) {
+        drop_oldest_until_freed(items, excess, keep);
+    }
+    if console_fits(snapshot) {
+        return;
+    }
+    if let Some(items) = snapshot.get_mut(key).and_then(Value::as_array_mut) {
+        items.retain(|item| keep(item));
+    }
+}
+
+fn strip_run_usage_replay_identities(snapshot: &mut Map<String, Value>) {
+    let Some(Value::Array(agents)) = snapshot.get_mut("agents") else {
+        return;
+    };
+    for agent in agents.iter_mut() {
+        if let Some(usage) = agent.get_mut("usage") {
+            strip_usage_replay_identity(usage);
+        }
+    }
+}
+
+/// Replay identities are dedupe bookkeeping, not operator evidence. Dropping
+/// them under size pressure keeps the counters an operator actually reads; the
+/// cost is that a resumed trace may re-count a duplicate event, which is a far
+/// smaller loss than resuming with no console at all.
+fn strip_usage_replay_identity(usage: &mut Value) {
+    let Some(usage) = usage.as_object_mut() else {
+        return;
+    };
+    usage.remove("routes");
+    usage.insert("eventIds".to_string(), Value::Array(Vec::new()));
+}
+
+fn drop_lifecycle_field(snapshot: &mut Map<String, Value>, field: &str) {
+    for key in LIFECYCLE_ARRAY_KEYS {
+        let Some(Value::Array(items)) = snapshot.get_mut(*key) else {
+            continue;
+        };
+        for item in items.iter_mut() {
+            if let Some(record) = item.as_object_mut() {
+                record.remove(field);
+            }
+        }
+    }
+}
+
+/// Compact bounded prose. `Some(limit)` truncates on a char boundary; `None`
+/// removes the field. A truncation that would leave blank text removes the
+/// field instead, so the projection stays valid for the resume parser.
+fn compact_lifecycle_text(snapshot: &mut Map<String, Value>, limit: Option<usize>) {
+    for key in LIFECYCLE_ARRAY_KEYS {
+        let Some(Value::Array(items)) = snapshot.get_mut(*key) else {
+            continue;
+        };
+        for item in items.iter_mut() {
+            let Some(record) = item.as_object_mut() else {
+                continue;
+            };
+            for field in COMPACTABLE_TEXT_FIELDS {
+                let Some(text) = record.get(*field).and_then(Value::as_str) else {
+                    continue;
+                };
+                let compacted =
+                    limit.map(|limit| text.chars().take(limit).collect::<String>());
+                match compacted {
+                    Some(compacted) if !compacted.trim().is_empty() => {
+                        record.insert((*field).to_string(), Value::String(compacted));
+                    }
+                    _ => {
+                        record.remove(*field);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The smallest projection that still identifies a session's console. It is a
+/// fixed handful of bytes, so it is the one outcome that always fits.
+fn minimal_agent_console_snapshot(snapshot: &Map<String, Value>) -> Map<String, Value> {
+    let mut minimal = Map::new();
+    minimal.insert(
+        "profileId".to_string(),
+        snapshot
+            .get("profileId")
+            .cloned()
+            .unwrap_or_else(|| Value::String("build".to_string())),
+    );
+    minimal.insert("activity".to_string(), Value::Array(Vec::new()));
+    minimal.insert("agents".to_string(), Value::Array(Vec::new()));
+    minimal.insert("jobs".to_string(), Value::Array(Vec::new()));
+    minimal
+}
+
+const AGENT_RUN_FIELDS: &[&str] = &[
+    "id",
+    "displayName",
+    "agentType",
+    "status",
+    "currentActivity",
+    "parentRunId",
+    "continuationOf",
+    "transcriptRef",
+    "startedAt",
+    "completedAt",
+    "summary",
+    "errorSummary",
+];
+
+const ASYNC_JOB_FIELDS: &[&str] = &[
+    "id",
+    "type",
+    "label",
+    "status",
+    "agentRunId",
+    "queuedAt",
+    "startedAt",
+    "completedAt",
+    "summary",
+    "errorSummary",
+];
+
+const USAGE_COUNTER_FIELDS: &[&str] = &[
+    "inputTokens",
+    "outputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+    "cacheSavingsUsd",
+    "costUsd",
+];
+
+fn sanitize_agent_run(value: &Value) -> Option<Value> {
+    let mut run = copy_known_fields(value, AGENT_RUN_FIELDS)?;
+    if let Some(usage) = value.as_object()?.get("usage") {
+        run.insert("usage".to_string(), sanitize_agent_run_usage(usage)?);
+    }
+    Some(Value::Object(run))
+}
+
+fn sanitize_async_job(value: &Value) -> Option<Value> {
+    copy_known_fields(value, ASYNC_JOB_FIELDS).map(Value::Object)
+}
+
+fn sanitize_agent_run_usage(value: &Value) -> Option<Value> {
+    let source = value.as_object()?;
+    let mut usage = copy_known_fields(value, USAGE_COUNTER_FIELDS)?;
+    usage.insert(
+        "eventIds".to_string(),
+        sanitize_usage_event_ids(source.get("eventIds")?)?,
+    );
+    if let Some(routes) = source.get("routes") {
+        let routes = routes
+            .as_array()?
+            .iter()
+            .map(sanitize_agent_run_usage_route)
+            .collect::<Option<Vec<_>>>()?;
+        usage.insert("routes".to_string(), Value::Array(routes));
+    }
+    Some(Value::Object(usage))
+}
+
+fn sanitize_agent_run_usage_route(value: &Value) -> Option<Value> {
+    let source = value.as_object()?;
+    let mut route = copy_known_fields(value, USAGE_COUNTER_FIELDS)?;
+    route.insert(
+        "provider".to_string(),
+        Value::String(source.get("provider")?.as_str()?.to_string()),
+    );
+    route.insert(
+        "model".to_string(),
+        Value::String(source.get("model")?.as_str()?.to_string()),
+    );
+    route.insert(
+        "eventIds".to_string(),
+        sanitize_usage_event_ids(source.get("eventIds")?)?,
+    );
+    Some(Value::Object(route))
+}
+
+/// Replay identities are the one raw string array a console carries. Rebuilding
+/// it keeps a nested object from riding into the checkpoint inside an
+/// allow-listed key.
+fn sanitize_usage_event_ids(value: &Value) -> Option<Value> {
+    Some(Value::Array(
+        value
+            .as_array()?
+            .iter()
+            .map(|entry| entry.as_str().map(|id| Value::String(id.to_string())))
+            .collect::<Option<Vec<_>>>()?,
+    ))
 }
 
 fn sanitize_prompt_manifest(value: &Value) -> Option<Value> {
@@ -1083,6 +1588,645 @@ mod tests {
         assert!(console["activity"][0].get("output").is_none());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn work_shell_agent_console_preserves_named_lifecycle_fields_only() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-lifecycle-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let project = env::current_dir().expect("cwd");
+        let store = WorkShellSessionStore::new(&root);
+        let payload = json!({
+            "sessionId": "work-session-lifecycle",
+            "model": "gpt-5.4",
+            "mode": "normal",
+            "state": "running",
+            "summary": "Chat: dispatch the plan",
+            "entries": [],
+            "agentConsole": {
+                "profileId": "build",
+                "activity": [],
+                "agents": [{
+                    "id": "run-1",
+                    "displayName": "Executor A",
+                    "agentType": "executor",
+                    "status": "running",
+                    "currentActivity": "Reading auth.ts",
+                    "parentRunId": "run-root",
+                    "transcriptRef": "transcripts/run-1.jsonl",
+                    "startedAt": 10,
+                    "summary": "Refactoring the auth guard.",
+                    "usage": {
+                        "eventIds": ["usage-1"],
+                        "inputTokens": 120,
+                        "outputTokens": 40,
+                        "costUsd": 0.002,
+                        "routes": [{
+                            "provider": "openai",
+                            "model": "gpt-5.6-sol",
+                            "eventIds": ["usage-1"],
+                            "inputTokens": 120,
+                            "outputTokens": 40,
+                            "costUsd": 0.002,
+                            "rawRequest": "must not persist"
+                        }],
+                        "rawFrames": ["must not persist"]
+                    },
+                    "systemPrompt": format!("Executor key sk-proj-{}", "a".repeat(30)),
+                    "rawAssignment": "internal worker assignment text"
+                }],
+                "jobs": [{
+                    "id": "job-1",
+                    "type": "executor",
+                    "label": "Plan step one",
+                    "status": "queued",
+                    "agentRunId": "run-1",
+                    "queuedAt": 5,
+                    "credential": format!("ghp_{}", "1".repeat(36))
+                }],
+                "mainUsage": {
+                    "eventIds": ["usage-main"],
+                    "inputTokens": 900,
+                    "outputTokens": 150,
+                    "cacheReadTokens": 400,
+                    "costUsd": 0.01,
+                    "providerHeaders": { "authorization": "Bearer secret" }
+                }
+            }
+        })
+        .to_string();
+
+        persist_work_shell_session_snapshot_json(&store, &project, &payload)
+            .expect("persist JSON snapshot");
+
+        let paths = session_paths(&root, &project, "work-session-lifecycle");
+        let checkpoint = fs::read_to_string(paths.checkpoint_path).expect("checkpoint");
+        assert!(!checkpoint.contains("systemPrompt"));
+        assert!(!checkpoint.contains("rawAssignment"));
+        assert!(!checkpoint.contains("rawFrames"));
+        assert!(!checkpoint.contains("rawRequest"));
+        assert!(!checkpoint.contains("providerHeaders"));
+        assert!(!checkpoint.contains("credential"));
+        assert!(!checkpoint.contains("sk-proj-"));
+        assert!(!checkpoint.contains("ghp_"));
+
+        let resumed = store
+            .resume_work_shell_session(&project, "work-session-lifecycle")
+            .expect("resume")
+            .expect("resumed");
+        let console = resumed.agent_console.expect("agent console");
+        assert_eq!(console["agents"][0]["id"], "run-1");
+        assert_eq!(console["agents"][0]["status"], "running");
+        assert_eq!(console["agents"][0]["currentActivity"], "Reading auth.ts");
+        assert_eq!(console["agents"][0]["parentRunId"], "run-root");
+        assert_eq!(
+            console["agents"][0]["transcriptRef"],
+            "transcripts/run-1.jsonl"
+        );
+        assert_eq!(console["agents"][0]["summary"], "Refactoring the auth guard.");
+        assert_eq!(console["agents"][0]["usage"]["inputTokens"], 120);
+        assert_eq!(console["agents"][0]["usage"]["eventIds"][0], "usage-1");
+        assert_eq!(
+            console["agents"][0]["usage"]["routes"][0]["model"],
+            "gpt-5.6-sol"
+        );
+        assert!(console["agents"][0]["usage"]["routes"][0]
+            .get("rawRequest")
+            .is_none());
+        assert!(console["agents"][0].get("systemPrompt").is_none());
+        assert!(console["agents"][0].get("rawAssignment").is_none());
+        assert_eq!(console["jobs"][0]["id"], "job-1");
+        assert_eq!(console["jobs"][0]["label"], "Plan step one");
+        assert_eq!(console["jobs"][0]["agentRunId"], "run-1");
+        assert!(console["jobs"][0].get("credential").is_none());
+        assert_eq!(console["mainUsage"]["inputTokens"], 900);
+        assert_eq!(console["mainUsage"]["cacheReadTokens"], 400);
+        assert!(console["mainUsage"].get("providerHeaders").is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn oversized_agent_console_payload() -> Value {
+        let long_summary = "s".repeat(400);
+        let long_intent = "i".repeat(400);
+        let secret_key = format!("sk-proj-{}", "a".repeat(30));
+        let agents = (0..128)
+            .map(|index| {
+                let active = index >= 120;
+                let mut agent = json!({
+                    "id": format!("run-{index}"),
+                    "displayName": format!("Executor {index}"),
+                    "agentType": "executor",
+                    "status": if active { "running" } else { "completed" },
+                    "startedAt": 1_000 + index,
+                    "summary": long_summary.clone(),
+                    "transcriptRef": format!("transcripts/run-{index}.jsonl"),
+                    "systemPrompt": secret_key.clone(),
+                    "usage": {
+                        "eventIds": (0..8).map(|slot| format!("usage-{index}-{slot}")).collect::<Vec<_>>(),
+                        "inputTokens": 10,
+                        "outputTokens": 5
+                    }
+                });
+                if !active {
+                    agent["completedAt"] = json!(2_000 + index);
+                }
+                agent
+            })
+            .collect::<Vec<_>>();
+        let jobs = (0..128)
+            .map(|index| {
+                let active = index >= 120;
+                let mut job = json!({
+                    "id": format!("job-{index}"),
+                    "type": "executor",
+                    "label": format!("Plan step {index}"),
+                    "status": if active { "queued" } else { "completed" },
+                    "queuedAt": 900 + index,
+                    "summary": long_summary.clone(),
+                    "credential": format!("ghp_{}", "1".repeat(36))
+                });
+                if !active {
+                    job["completedAt"] = json!(2_100 + index);
+                }
+                job
+            })
+            .collect::<Vec<_>>();
+        let activity = (0..80)
+            .map(|index| {
+                json!({
+                    "id": format!("activity-{index}"),
+                    "toolCallId": format!("call-{index}"),
+                    "toolName": "read_file",
+                    "kind": "read",
+                    "intent": long_intent.clone(),
+                    "status": "completed",
+                    "startedAt": 1,
+                    "output": "unbounded raw output"
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "profileId": "build",
+            "activity": activity,
+            "agents": agents,
+            "jobs": jobs,
+            "mainUsage": {
+                "eventIds": (0..64).map(|slot| format!("usage-main-{slot}")).collect::<Vec<_>>(),
+                "inputTokens": 900,
+                "outputTokens": 150,
+                "cacheReadTokens": 400,
+                "costUsd": 0.01,
+                "providerHeaders": { "authorization": "Bearer secret" }
+            }
+        })
+    }
+
+    #[test]
+    fn work_shell_agent_console_fits_oversized_history_without_dropping_active_work() {
+        let console = oversized_agent_console_payload();
+        assert!(
+            serde_json::to_vec(&console).expect("serialize").len() > MAX_AGENT_CONSOLE_BYTES,
+            "fixture must exceed the console byte budget"
+        );
+
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-oversized-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let project = env::current_dir().expect("cwd");
+        let store = WorkShellSessionStore::new(&root);
+        let payload = json!({
+            "sessionId": "work-session-oversized",
+            "model": "gpt-5.4",
+            "mode": "normal",
+            "state": "running",
+            "summary": "Chat: dispatch the plan",
+            "entries": [],
+            "agentConsole": console
+        })
+        .to_string();
+
+        persist_work_shell_session_snapshot_json(&store, &project, &payload)
+            .expect("persist JSON snapshot");
+
+        let resumed = store
+            .resume_work_shell_session(&project, "work-session-oversized")
+            .expect("resume")
+            .expect("resumed");
+        let fitted = resumed.agent_console.expect("agent console survives fitting");
+
+        // Fits the durable budget instead of collapsing to nothing.
+        let bytes = serde_json::to_vec(&fitted).expect("serialize fitted");
+        assert!(
+            bytes.len() <= MAX_AGENT_CONSOLE_BYTES,
+            "fitted console is {} bytes",
+            bytes.len()
+        );
+        assert_eq!(fitted["profileId"], "build");
+
+        // Every active identity resume needs to interrupt is still present.
+        let agents = fitted["agents"].as_array().expect("agents");
+        let jobs = fitted["jobs"].as_array().expect("jobs");
+        for index in 120..128 {
+            assert!(
+                agents
+                    .iter()
+                    .any(|agent| agent["id"] == json!(format!("run-{index}"))),
+                "active run-{index} must survive fitting"
+            );
+            assert!(
+                jobs.iter()
+                    .any(|job| job["id"] == json!(format!("job-{index}"))),
+                "active job-{index} must survive fitting"
+            );
+        }
+
+        // Oldest terminal history is what paid for the budget.
+        assert!(agents.len() < 128);
+        assert!(jobs.len() < 128);
+        assert!(!agents
+            .iter()
+            .any(|agent| agent["id"] == json!("run-0")));
+        assert!(!jobs.iter().any(|job| job["id"] == json!("job-0")));
+
+        // Aggregate main usage counters survive.
+        assert_eq!(fitted["mainUsage"]["inputTokens"], 900);
+        assert_eq!(fitted["mainUsage"]["outputTokens"], 150);
+        assert_eq!(fitted["mainUsage"]["cacheReadTokens"], 400);
+
+        // Nothing unknown or secret was retained to make the budget work.
+        let serialized = String::from_utf8(bytes).expect("utf8");
+        assert!(!serialized.contains("systemPrompt"));
+        assert!(!serialized.contains("credential"));
+        assert!(!serialized.contains("providerHeaders"));
+        assert!(!serialized.contains("unbounded raw output"));
+        assert!(!serialized.contains("sk-proj-"));
+        assert!(!serialized.contains("ghp_"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn active_lifecycle_console_fields() -> Map<String, Value> {
+        let mut fields = Map::new();
+        fields.insert("profileId".to_string(), json!("build"));
+        fields.insert("activity".to_string(), json!([]));
+        fields.insert(
+            "agents".to_string(),
+            json!([{
+                "id": "run-active",
+                "displayName": "Executor A",
+                "agentType": "executor",
+                "status": "running",
+                "startedAt": 10,
+                "systemPrompt": format!("Executor key sk-proj-{}", "a".repeat(30))
+            }]),
+        );
+        fields.insert(
+            "jobs".to_string(),
+            json!([{
+                "id": "job-active",
+                "type": "executor",
+                "label": "Plan step one",
+                "status": "queued",
+                "queuedAt": 5,
+                "credential": format!("ghp_{}", "1".repeat(36))
+            }]),
+        );
+        fields.insert(
+            "mainUsage".to_string(),
+            json!({
+                "eventIds": ["usage-main"],
+                "inputTokens": 900,
+                "outputTokens": 150,
+                "cacheReadTokens": 400,
+                "costUsd": 0.01,
+                "providerHeaders": { "authorization": "Bearer secret" }
+            }),
+        );
+        fields
+    }
+
+    fn oversized_manifest(policy_sources: usize) -> Value {
+        let long_label = "l".repeat(400);
+        json!({
+            "id": "manifest-oversized",
+            "profileId": "build",
+            "createdAt": "2026-08-09T00:00:00.000Z",
+            "packetId": "packet-oversized",
+            "includedSourceCount": policy_sources,
+            "excludedSourceCount": 0,
+            "tokenEstimate": 4_000,
+            "policy": (0..policy_sources)
+                .map(|index| json!({
+                    "id": format!("policy-{index}"),
+                    "label": long_label.clone(),
+                    "authority": "mandatory",
+                    "digest": format!("digest-{index}")
+                }))
+                .collect::<Vec<_>>()
+        })
+    }
+
+    fn oversized_pending_decision(questions: usize) -> Value {
+        let long_question = "q".repeat(400);
+        let long_description = "d".repeat(400);
+        json!({
+            "id": "decision-oversized",
+            "title": "Execution choice",
+            "questions": (0..questions)
+                .map(|index| json!({
+                    "id": format!("question-{index}"),
+                    "question": long_question.clone(),
+                    "recommended": 0,
+                    "options": [
+                        { "label": "Safe", "description": long_description.clone() },
+                        { "label": "Fast", "description": long_description.clone() }
+                    ]
+                }))
+                .collect::<Vec<_>>()
+        })
+    }
+
+    fn persist_and_resume_console(session_id: &str, console: Value) -> Value {
+        assert!(
+            serde_json::to_vec(&console).expect("serialize").len() > MAX_AGENT_CONSOLE_BYTES,
+            "fixture must exceed the console byte budget"
+        );
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-shell-test-{}-{}-{}",
+            session_id,
+            std::process::id(),
+            now_ms()
+        ));
+        let project = env::current_dir().expect("cwd");
+        let store = WorkShellSessionStore::new(&root);
+        let payload = json!({
+            "sessionId": session_id,
+            "model": "gpt-5.4",
+            "mode": "normal",
+            "state": "running",
+            "summary": "Chat: dispatch the plan",
+            "entries": [],
+            "agentConsole": console
+        })
+        .to_string();
+
+        persist_work_shell_session_snapshot_json(&store, &project, &payload)
+            .expect("persist JSON snapshot");
+        let resumed = store
+            .resume_work_shell_session(&project, session_id)
+            .expect("resume")
+            .expect("resumed");
+        let fitted = resumed.agent_console.expect("agent console survives fitting");
+        let _ = fs::remove_dir_all(root);
+        fitted
+    }
+
+    fn assert_active_lifecycle_survived(fitted: &Value) {
+        let bytes = serde_json::to_vec(fitted).expect("serialize fitted");
+        assert!(
+            bytes.len() <= MAX_AGENT_CONSOLE_BYTES,
+            "fitted console is {} bytes",
+            bytes.len()
+        );
+        assert_eq!(fitted["agents"][0]["id"], "run-active");
+        assert_eq!(fitted["agents"][0]["status"], "running");
+        assert_eq!(fitted["jobs"][0]["id"], "job-active");
+        assert_eq!(fitted["jobs"][0]["status"], "queued");
+        assert_eq!(fitted["mainUsage"]["inputTokens"], 900);
+        assert_eq!(fitted["mainUsage"]["outputTokens"], 150);
+        assert_eq!(fitted["mainUsage"]["cacheReadTokens"], 400);
+
+        let serialized = String::from_utf8(bytes).expect("utf8");
+        assert!(!serialized.contains("systemPrompt"));
+        assert!(!serialized.contains("credential"));
+        assert!(!serialized.contains("providerHeaders"));
+        assert!(!serialized.contains("sk-proj-"));
+        assert!(!serialized.contains("ghp_"));
+    }
+
+    #[test]
+    fn work_shell_agent_console_compacts_oversized_manifest_before_active_work() {
+        let mut console = active_lifecycle_console_fields();
+        console.insert("manifest".to_string(), oversized_manifest(400));
+
+        let fitted = persist_and_resume_console("work-session-manifest", Value::Object(console));
+
+        assert_active_lifecycle_survived(&fitted);
+        // The bounded safe subset of the manifest is what survives: the policy
+        // list is the expendable bulk, the identity is not.
+        assert_eq!(fitted["manifest"]["id"], "manifest-oversized");
+        assert_eq!(fitted["manifest"]["packetId"], "packet-oversized");
+        // Trimming is incremental and oldest-first: it stops as soon as the
+        // projection fits, so the newest policy sources are the ones kept.
+        let policy = fitted["manifest"]["policy"].as_array().expect("policy");
+        assert!(!policy.is_empty());
+        assert!(policy.len() < 400);
+        assert_eq!(policy[0]["id"], json!(format!("policy-{}", 400 - policy.len())));
+        assert_eq!(policy[policy.len() - 1]["id"], "policy-399");
+    }
+
+    #[test]
+    fn work_shell_agent_console_compacts_oversized_pending_decision_before_active_work() {
+        let mut console = active_lifecycle_console_fields();
+        console.insert("pendingDecision".to_string(), oversized_pending_decision(60));
+
+        let fitted = persist_and_resume_console("work-session-decision", Value::Object(console));
+
+        assert_active_lifecycle_survived(&fitted);
+        // The decision stays answerable: ids, option labels, and the recommended
+        // index survive; only the prose is compacted.
+        assert_eq!(fitted["pendingDecision"]["id"], "decision-oversized");
+        let questions = fitted["pendingDecision"]["questions"]
+            .as_array()
+            .expect("questions");
+        assert_eq!(questions.len(), 60);
+        assert_eq!(questions[0]["options"][0]["label"], "Safe");
+        assert_eq!(questions[0]["options"][1]["label"], "Fast");
+        assert_eq!(questions[0]["recommended"], 0);
+        assert!(questions[0]["options"][0].get("description").is_none());
+        assert_eq!(
+            questions[0]["question"]
+                .as_str()
+                .expect("question text")
+                .chars()
+                .count(),
+            COMPACT_TEXT_CHARS
+        );
+    }
+
+    #[test]
+    fn work_shell_agent_console_drops_shell_metadata_before_active_identities() {
+        let mut console = active_lifecycle_console_fields();
+        console.insert("manifest".to_string(), oversized_manifest(400));
+        console.insert("pendingDecision".to_string(), oversized_pending_decision(400));
+        console.insert(
+            "workGraph".to_string(),
+            json!({
+                "id": "graph-1",
+                "approval": "approved",
+                "nodes": (0..200)
+                    .map(|index| json!({
+                        "id": format!("node-{index}"),
+                        "title": "t".repeat(400),
+                        "status": "pending"
+                    }))
+                    .collect::<Vec<_>>()
+            }),
+        );
+
+        let fitted = persist_and_resume_console("work-session-shell", Value::Object(console));
+
+        // Optional shell metadata is spent before a single active identity or an
+        // aggregate usage counter is touched.
+        assert_active_lifecycle_survived(&fitted);
+        assert!(fitted.get("manifest").is_none());
+        assert!(fitted.get("pendingDecision").is_none());
+        assert!(fitted.get("workGraph").is_none());
+    }
+
+    fn policy_source(index: usize, label: &str) -> Value {
+        json!({
+            "id": format!("policy-{index}"),
+            "label": label,
+            "authority": "mandatory",
+            "digest": format!("digest-{index}")
+        })
+    }
+
+    /// A manifest whose policy list is the only thing pushing the console over
+    /// the budget. Labels are multibyte so a cutoff computed from character
+    /// count cannot agree with one computed from serialized bytes.
+    fn multibyte_policy_console(sources: usize) -> Map<String, Value> {
+        let label = "日本語ラベル".repeat(20);
+        let policy = (0..sources)
+            .map(|index| policy_source(index, &label))
+            .collect::<Vec<_>>();
+        let mut console = active_lifecycle_console_fields();
+        console.insert(
+            "manifest".to_string(),
+            json!({
+                "id": "manifest-multibyte",
+                "profileId": "build",
+                "createdAt": "2026-08-09T00:00:00.000Z",
+                "packetId": "packet-multibyte",
+                "includedSourceCount": sources,
+                "excludedSourceCount": 0,
+                "tokenEstimate": 4_000,
+                "policy": policy
+            }),
+        );
+        console
+    }
+
+    fn assert_minimal_newest_policy_suffix(sources: usize) -> usize {
+        let console = multibyte_policy_console(sources);
+        assert!(
+            console_byte_len(&console) > MAX_AGENT_CONSOLE_BYTES,
+            "fixture must exceed the console byte budget"
+        );
+
+        let fitted = fit_agent_console_snapshot(console);
+        assert!(console_fits(&fitted), "fitted console must respect the cap");
+
+        let policy = fitted["manifest"]["policy"]
+            .as_array()
+            .expect("policy survives as an array");
+        assert!(!policy.is_empty(), "trimming must not empty a policy that fits");
+        assert!(policy.len() < sources);
+
+        // Oldest-first retention: the survivors are the newest contiguous
+        // suffix, still in order.
+        let first_kept = sources - policy.len();
+        for (offset, source) in policy.iter().enumerate() {
+            assert_eq!(source["id"], json!(format!("policy-{}", first_kept + offset)));
+        }
+
+        // Minimality: putting the newest dropped source back must overflow.
+        let label = "日本語ラベル".repeat(20);
+        let mut restored = fitted.clone();
+        restored["manifest"]["policy"]
+            .as_array_mut()
+            .expect("policy")
+            .insert(0, policy_source(first_kept - 1, &label));
+        assert!(
+            !console_fits(&restored),
+            "trimming removed more than the smallest sufficient prefix"
+        );
+
+        // Active lifecycle and aggregate counters are untouched by policy work.
+        assert_eq!(fitted["agents"][0]["id"], "run-active");
+        assert_eq!(fitted["jobs"][0]["id"], "job-active");
+        assert_eq!(fitted["mainUsage"]["inputTokens"], 900);
+        policy.len()
+    }
+
+    #[test]
+    fn agent_console_policy_trim_keeps_the_minimal_newest_suffix() {
+        // Sized so only a small prefix has to go: a cutoff computed from
+        // character count under-measures multibyte labels, over-trims, and
+        // fails the minimality assertion instead of merely emptying the list.
+        let kept = assert_minimal_newest_policy_suffix(90);
+        assert!(kept > 1, "the fixture must need more than a single removal");
+    }
+
+    #[test]
+    fn agent_console_policy_trim_scales_to_a_large_policy() {
+        assert_minimal_newest_policy_suffix(5_000);
+    }
+
+    #[test]
+    fn drop_oldest_until_freed_handles_cutoff_boundaries() {
+        let entry = json!({ "id": "e", "label": "0123456789" });
+        let entry_bytes = serde_json::to_vec(&entry).expect("serialize").len();
+
+        // Nothing to free, nothing to do.
+        let mut none_needed = vec![entry.clone(), entry.clone()];
+        drop_oldest_until_freed(&mut none_needed, 0, |_| false);
+        assert_eq!(none_needed.len(), 2);
+
+        // Empty input is a no-op rather than a panic.
+        let mut empty: Vec<Value> = Vec::new();
+        drop_oldest_until_freed(&mut empty, 1_000, |_| false);
+        assert!(empty.is_empty());
+
+        // One element: removing it frees its own bytes and no separator.
+        let mut single = vec![entry.clone()];
+        drop_oldest_until_freed(&mut single, entry_bytes, |_| false);
+        assert!(single.is_empty());
+
+        // Cutoff boundary: one byte less than two elements' worth must still
+        // stop after the second element, never after the first.
+        let mut four = (0..4)
+            .map(|index| policy_source(index, "0123456789"))
+            .collect::<Vec<_>>();
+        let element = serde_json::to_vec(&four[0]).expect("serialize").len();
+        drop_oldest_until_freed(&mut four, element + 2, |_| false);
+        assert_eq!(four.len(), 2);
+        assert_eq!(four[0]["id"], "policy-2");
+        assert_eq!(four[1]["id"], "policy-3");
+
+        // A target larger than the whole list drains everything droppable.
+        let mut all = (0..4)
+            .map(|index| policy_source(index, "0123456789"))
+            .collect::<Vec<_>>();
+        drop_oldest_until_freed(&mut all, usize::MAX / 2, |_| false);
+        assert!(all.is_empty());
+
+        // Kept records survive even when they sit inside the scan window.
+        let mut mixed = vec![
+            json!({ "id": "old", "status": "completed" }),
+            json!({ "id": "live", "status": "running" }),
+            json!({ "id": "older", "status": "completed" }),
+        ];
+        drop_oldest_until_freed(&mut mixed, usize::MAX / 2, is_active_agent_run);
+        assert_eq!(mixed.len(), 1);
+        assert_eq!(mixed[0]["id"], "live");
     }
 
     #[test]

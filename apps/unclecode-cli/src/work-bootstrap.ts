@@ -35,6 +35,7 @@ export type WorkCommandArgOptions = {
   readonly reasoning?: string;
   readonly cwd?: string;
   readonly sessionId?: string;
+  readonly engine?: string;
   readonly tools?: boolean;
   readonly help?: boolean;
 };

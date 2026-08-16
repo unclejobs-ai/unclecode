@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 
-import { estimateCostUsd, getModelPrice } from "@unclecode/providers";
+import { estimateCacheSavingsUsd, estimateCostUsd, getModelPrice } from "@unclecode/providers";
 
 test("getModelPrice returns official GPT-5.6 family prices", () => {
   assert.deepEqual(getModelPrice("gpt-5.6-sol"), {
@@ -69,4 +70,52 @@ test("estimateCostUsd handles fractional usage counts cleanly", () => {
   });
   // 500/1M * $0.80 + 1000/1M * $4.00 = 0.0004 + 0.004 = 0.0044
   assert.ok(Math.abs(cost - 0.0044) < 1e-9);
+});
+
+test("estimateCacheSavingsUsd uses provider cache read and write rates", () => {
+  assert.ok(Math.abs(estimateCacheSavingsUsd({
+    provider: "openai",
+    modelId: "gpt-5.6-sol",
+    cacheReadTokens: 1_000,
+  }) - 0.0045) < 1e-12);
+  assert.ok(Math.abs(estimateCacheSavingsUsd({
+    provider: "anthropic",
+    modelId: "claude-sonnet-4-6",
+    cacheReadTokens: 1_000,
+    cacheWriteTokens: 300,
+  }) - 0.002475) < 1e-12);
+  assert.ok(Math.abs(estimateCacheSavingsUsd({
+    provider: "gemini",
+    modelId: "gemini-2.5-pro",
+    cacheReadTokens: 1_000,
+  }) - 0.0009375) < 1e-12);
+});
+
+test("cache-savings telemetry stays optional when the pricing helper is unavailable", () => {
+  const script = [
+    'import { estimateCacheSavingsUsd } from "@unclecode/providers";',
+    "process.stdout.write(String(estimateCacheSavingsUsd({",
+    'provider: "openai", modelId: "gpt-5.6-sol", cacheReadTokens: 1_000',
+    "})));",
+  ].join("");
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--disable-warning=ExperimentalWarning",
+      "--conditions=source",
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "--eval",
+      script,
+    ],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: { ...process.env, UNCLECODE_RUST_BIN: "/definitely/missing/unclecode" },
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "0");
 });

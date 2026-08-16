@@ -140,7 +140,7 @@ test("provider dispatch runs independent declared resources concurrently", async
   const bothStarted = new Promise((resolve) => {
     releaseBoth = resolve;
   });
-  const makeHandler = (name) => async () => {
+  const runTool = async (name) => {
     started.push(name);
     if (started.length === 2) {
       releaseBoth();
@@ -162,9 +162,10 @@ test("provider dispatch runs independent declared resources concurrently", async
     ],
     {
       definitions: [fileTool("read_a"), fileTool("read_b")],
-      handlers: {
-        read_a: makeHandler("a"),
-        read_b: makeHandler("b"),
+      executor: {
+        async execute({ toolName }) {
+          return await runTool(toolName === "read_a" ? "a" : "b");
+        },
       },
     },
   );
@@ -193,14 +194,14 @@ test("provider dispatch serializes opaque resources before later tools", async (
     ],
     {
       definitions: [opaqueShellTool, fileTool("read_file")],
-      handlers: {
-        async run_shell() {
-          events.push("shell:start");
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          events.push("shell:end");
-          return { content: "shell-ok" };
-        },
-        async read_file() {
+      executor: {
+        async execute({ toolName }) {
+          if (toolName === "run_shell") {
+            events.push("shell:start");
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            events.push("shell:end");
+            return { content: "shell-ok" };
+          }
           events.push("read:start");
           return { content: "read-ok" };
         },
@@ -233,8 +234,8 @@ test("provider dispatch runs apply_patch calls for different files concurrently"
     ],
     {
       definitions: [applyPatchTool],
-      handlers: {
-        async apply_patch(input) {
+      executor: {
+        async execute({ input }) {
           started.push(input.patch.includes("src/a.ts") ? "a" : "b");
           if (started.length === 2) {
             releaseBoth();
@@ -270,14 +271,14 @@ test("provider dispatch serializes apply_patch with reads for the same file", as
     ],
     {
       definitions: [applyPatchTool, fileTool("read_file")],
-      handlers: {
-        async apply_patch() {
-          events.push("patch:start");
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          events.push("patch:end");
-          return { content: "patch-ok" };
-        },
-        async read_file() {
+      executor: {
+        async execute({ toolName }) {
+          if (toolName === "apply_patch") {
+            events.push("patch:start");
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            events.push("patch:end");
+            return { content: "patch-ok" };
+          }
           events.push("read:start");
           return { content: "read-ok" };
         },

@@ -67,6 +67,8 @@ fn post_openai_chat(
         &wire_messages,
         include_tools.then_some(wire_tools.as_str()),
         reasoning_effort,
+        None,
+        None,
     );
     post_openai_chat_response(api_key, &body, base_url)
 }
@@ -87,6 +89,7 @@ fn parse_query_response(model: &str, response: HttpTransportResponse) -> Result<
     let mut content = String::new();
     let mut prompt_tokens = 0_u64;
     let mut completion_tokens = 0_u64;
+    let mut cache_read_tokens = 0_u64;
     let mut actions = Vec::new();
     for record in parse_openai_chat_response_records(&response.body)? {
         match record {
@@ -110,9 +113,11 @@ fn parse_query_response(model: &str, response: HttpTransportResponse) -> Result<
             OpenAIChatResponseRecord::Usage {
                 prompt_tokens: prompt,
                 completion_tokens: completion,
+                cache_read_tokens: cached,
             } => {
                 prompt_tokens = prompt;
                 completion_tokens = completion;
+                cache_read_tokens = cached;
             }
         }
     }
@@ -123,6 +128,7 @@ fn parse_query_response(model: &str, response: HttpTransportResponse) -> Result<
         "costUsd": estimate_cost_usd(model, prompt_tokens as f64, completion_tokens as f64),
         "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
+        "cacheReadTokens": cache_read_tokens,
         "attempts": response.attempts,
     }))
     .map_err(|error| error.to_string())
@@ -145,6 +151,7 @@ fn parse_completion_response(response: HttpTransportResponse) -> Result<String, 
     let mut reasoning = String::new();
     let mut prompt_tokens = 0_u64;
     let mut completion_tokens = 0_u64;
+    let mut cache_read_tokens = 0_u64;
     let mut tool_calls = Vec::new();
     let mut actions = Vec::new();
     for record in parse_openai_chat_response_records(&response.body)? {
@@ -175,9 +182,11 @@ fn parse_completion_response(response: HttpTransportResponse) -> Result<String, 
             OpenAIChatResponseRecord::Usage {
                 prompt_tokens: prompt,
                 completion_tokens: completion,
+                cache_read_tokens: cached,
             } => {
                 prompt_tokens = prompt;
                 completion_tokens = completion;
+                cache_read_tokens = cached;
             }
         }
     }
@@ -189,6 +198,7 @@ fn parse_completion_response(response: HttpTransportResponse) -> Result<String, 
         "actions": actions,
         "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
+        "cacheReadTokens": cache_read_tokens,
         "attempts": response.attempts,
     }))
     .map_err(|error| error.to_string())

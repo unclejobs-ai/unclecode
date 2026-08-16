@@ -19,7 +19,7 @@ import {
   pressEnter,
   runTmux,
   typeKeys,
-  waitForIdlePromptDeck,
+  waitForIdleComposer,
   waitForPane,
 } from "./tmux-helpers.mjs";
 
@@ -91,7 +91,7 @@ export async function runOpenAIStreamTuiSmoke({ tmp }) {
     );
 
     await waitForPane(session, new RegExp(escapeRegExp(openAIStreamFinalMarkerText)), paneFile);
-    const pane = await waitForIdlePromptDeck(session, paneFile);
+    const pane = await waitForIdleComposer(session, paneFile);
     assert.ok(
       pane.replace(/\n/g, "").includes(openAIStreamFinalMarkerText),
       `final stream marker missing from pane: ${openAIStreamFinalMarkerText}`,

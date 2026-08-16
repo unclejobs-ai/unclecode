@@ -43,7 +43,21 @@ npm run unclecode -- work  # 인터랙티브 코딩 워크 셸
 
 워크 셸이 켜지면 제공자(OpenAI / Anthropic / Gemini)를 고르고 자격 증명을 넣는다. 키가 없으면 자리에서 물어본다.
 
-> **왜 이 도구인가?** Cursor/Codex는 "채팅만 하는 터미널"이지만, UncleCode는 **다음 모델 호출에 들어갈 패킷을 열어 보고 조절**할 수 있게 한다. 컨텍스트가 까만 상자가 아니라 감사 가능한(auditable) 객체다.
+### 기본 코드 지능 도구
+
+Pi 작업 엔진은 셸 권한과 별개로 다음 도구를 기본 등록한다. `/tools`에서 현재 메타데이터와 위험도를 확인할 수 있다.
+
+| 도구 | 동작 |
+| --- | --- |
+| `lsp_query` | 진단, 정의, 참조, hover, 문서 심볼을 언어 서버에 질의 |
+| `lsp_rename` | 언어 서버가 반환한 워크스페이스 편집을 검증한 뒤 심볼 이름 변경 |
+| `ast_search` | `ast-grep` 패턴으로 구문 구조 검색 |
+| `ast_rewrite` | AST 치환 미리보기 또는 확인 후 일괄 적용 |
+
+LSP는 TypeScript/JavaScript(`typescript-language-server`), Rust(`rust-analyzer`), Python(`pyright-langserver`), Go(`gopls`)를 자동 선택한다. 실행 파일은 `UNCLECODE_TYPESCRIPT_LANGUAGE_SERVER`, `UNCLECODE_RUST_ANALYZER`, `UNCLECODE_PYRIGHT_LANGUAGE_SERVER`, `UNCLECODE_GOPLS`로 재정의할 수 있다. AST 도구는 `ast-grep` 실행 파일이 `PATH`에 있어야 하며 `UNCLECODE_AST_GREP`으로 경로를 재정의할 수 있다. `lsp_rename`과 적용 모드의 `ast_rewrite`는 쓰기 승인 대상으로 표시된다.
+
+
+> **왜 이 도구인가?** Cursor·Codex·OMP·Senpi·Prime Agent도 강한 코드 도구와 에이전트 실행을 제공한다. UncleCode의 차이는 우열을 주장하는 기능표가 아니라, **다음 모델 호출에 들어갈 로컬 컨텍스트 패킷을 열어 보고 조절하며 그 근거를 저장소에 남기는 운영 경계**다.
 
 ---
 
@@ -112,7 +126,7 @@ UncleCode는 한국어 운영자를 1급 사용자로 둔다. 모드 칩, 상태
 | 터미널 네이티브 · 제공자 무관 | 기본 온보딩 마찰 (Rust + Node 빌드) |
 | 들여다볼 수 있는 컨텍스트 | 인증 상태 파편화 (OAuth vs API key) |
 | 로컬 증거 JSON → CI 연동 | Cursor rules 미흡 |
-| `qa:health` 회귀 게이트 | MCP 조립 없는 기본 도구 폭 |
+| `qa:health` 회귀 게이트 | 브라우저·IDE UI·MCP 도구는 별도 조립 |
 
 </div>
 
@@ -295,10 +309,18 @@ cargo build --workspace
 npm run unclecode
 ```
 
-Rust 네이티브 워크 셸:
+기본 Pi 작업 엔진:
 
 ```bash
 npm run unclecode -- work
+```
+
+직접 대화는 선택한 제공자와 모델을 그대로 쓴다. 작업을 위임하는 executor 턴만 OMP의 `kimi-code/k3`로 고정되며, UncleCode 환경 변수나 런타임 모델 변경으로 다른 모델에 재라우팅되지 않는다. 워크 셸에서 `/auth`를 입력하면 OMP가 발견한 전체 로그인 카탈로그를 열어 검색할 수 있다. Enter는 자격 증명을 가져오지 않고 OMP 소유의 `omp auth-broker login <provider>` 명령만 넘긴다.
+
+레거시 네이티브 제공자 루프가 필요한 경우에만 엔진을 명시한다:
+
+```bash
+npm run unclecode -- work --engine native
 ```
 
 제공자를 직접 지정:
@@ -322,6 +344,17 @@ npm run unclecode -- work --provider anthropic --model claude-sonnet-4-6
 ```bash
 echo "이 저장소 요약해 줘" | npm run unclecode -- work
 ```
+
+격리된 팀 워커를 백그라운드에서 실행:
+
+```bash
+npm run unclecode -- team run --background --isolation worktree "검증 가능한 변경 구현"
+npm run unclecode -- team status <runId>
+npm run unclecode -- team abort <runId>
+npm run unclecode -- team restart <runId>
+```
+
+`worktree` 격리는 워커별 기준 커밋을 고정하고 변경 패치를 실행 루트에 반환한다. 백그라운드 작업은 PID와 프로세스 시작 식별자를 기록하며, `status`는 재시작 뒤에도 실행 상태를 복구하고 `abort`는 확인된 프로세스 트리를 종료한다.
 
 워크 셸에서 제공자를 고른 뒤 모델 id를 입력한다. 엔터를 치면 기본값을 유지하고, 직접 id(예: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`)를 입력해도 된다. GPT-5.6 모델은 `none`, `low`, `medium`, `high`, `xhigh`, `max` reasoning 단계를 지원한다.
 
@@ -382,12 +415,13 @@ node bin/unclecode.cjs doctor
 운영 게이트는 `npm run qa:health`다. 14개 체크를 통과해야 한다.
 
 ```bash
-npm run qa:health          # 운영 게이트
-npm run qa:runtime         # 런타임 QA
-npm run qa:live            # 라이브 제공자 QA
+npm run qa:health                 # 운영 게이트
+npm run qa:runtime                # 로컬 런타임·TUI QA
+npm run qa:providers              # Gemini/OpenAI/Anthropic 도구 호출 계약
+npm run benchmark:competitive:all # 격리 fixture 기반 4-system 공개 비교
 ```
 
-런타임 증거는 `.unclecode/qa/runtime-qa-latest.json`, 라이브 제공자는 `.unclecode/qa/live-provider-latest.json`에 남는다.
+런타임 증거는 `.unclecode/qa/runtime-qa-latest.json`, 제공자 계약은 `benchmarks/competitive/results/provider-conformance-local.json`, 경쟁 비교는 `benchmarks/competitive/results/latest.json`에 남는다. 비교 점수는 파일과 실행 가능한 post-check만 사용하며 인증 실패·미설치 시스템은 `blocked`/`unavailable`로 공개한다.
 
 개발 검증:
 

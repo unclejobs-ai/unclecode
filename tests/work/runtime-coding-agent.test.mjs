@@ -45,3 +45,38 @@ test("createRuntimeCodingAgent can wrap an injected provider and refresh auth to
   assert.deepEqual(refreshed, ["next-token"]);
   assert.equal(second.text, "next-token:again");
 });
+
+test("RuntimeCodingAgent.runTurn preserves provider step count and cost", async () => {
+  const provider = {
+    clear() {},
+    setTraceListener() {},
+    updateRuntimeSettings() {},
+    async runTurn() {
+      return { text: "done", steps: 2, costUsd: 0.5 };
+    },
+  };
+
+  const agent = await createRuntimeCodingAgent({
+    provider: "openai",
+    apiKey: "token",
+    model: "gpt-5.4",
+    cwd: process.cwd(),
+    reasoning: {
+      effort: "medium",
+      source: "mode-default",
+      support: {
+        status: "supported",
+        defaultEffort: "medium",
+        supportedEfforts: ["low", "medium", "high"],
+      },
+    },
+    providerOverride: provider,
+  });
+
+  const result = await agent.runTurn("measure me");
+
+  assert.deepEqual(
+    { text: result.text, steps: result.steps, costUsd: result.costUsd },
+    { text: "done", steps: 2, costUsd: 0.5 },
+  );
+});

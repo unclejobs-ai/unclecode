@@ -117,16 +117,20 @@ test("runtime QA stays split into inspectable modules", () => {
     .sort();
 
   assert.deepEqual(moduleFiles, [
+    "agent-console-smoke-fixture.mjs",
+    "agent-console-smoke-server.mjs",
     "cli-helpers.mjs",
     "constants.mjs",
     "fake-anthropic-server.mjs",
     "fake-gemini-server.mjs",
+    "fake-openai-responses.mjs",
     "fake-openai-server.mjs",
     "provider-smokes.mjs",
     "report-evidence.mjs",
     "run-targeted-live-verification.mjs",
     "tmux-helpers.mjs",
     "tty-smoke.mjs",
+    "tui-agent-console-smoke.mjs",
     "tui-basic-smokes.mjs",
     "tui-context-contrast-smoke.mjs",
     "tui-korean-smoke.mjs",

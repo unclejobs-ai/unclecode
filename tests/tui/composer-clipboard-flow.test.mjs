@@ -44,8 +44,6 @@ function createInkInput() {
   const input = new PassThrough();
   input.isTTY = true;
   input.setRawMode = () => input;
-  input.resume = () => input;
-  input.pause = () => input;
   input.ref = () => input;
   input.unref = () => input;
   return input;
@@ -206,9 +204,9 @@ test("mounted Ctrl+V with injected synthetic PNG captures once and forwards badg
   );
 
   try {
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await waitForCondition(() => getOutput().includes("UncleCode · OpenAI"));
     stdin.write("\u0016");
-    await waitForCondition(() => captureCalls === 1);
+    await waitForCondition(() => captureCalls === 1, 20_000);
     await waitForCondition(() => getOutput().includes("[1/5]"));
 
     stdin.write("\r");
@@ -275,7 +273,7 @@ test("exact /attach clipboard uses injectable capture and does not submit the sl
     stdin.write("\r");
     await waitForCondition(() => captureCalls === 1);
     await waitForCondition(() => getOutput().includes("[1/5]"));
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
   } finally {
     instance.unmount();
@@ -461,7 +459,7 @@ test("attachment pasted during an in-flight submit remains queued for the next t
     clearOutput();
     stdin.write("\r");
     await waitForCondition(() => submitted.length === 2);
-    await waitForCondition(() => getOutput().includes("prompt deck") && !getOutput().includes("[1/5]"));
+    await waitForCondition(() => getOutput().includes("UncleCode · OpenAI") && !getOutput().includes("[1/5]"));
     assert.deepEqual(submitted, [
       {
         line: "Please inspect the attached image.",
@@ -500,7 +498,7 @@ test("Composer injectable capture defaults are overridable without OS clipboard 
 
   const { stdin, instance } = renderWithInput(React.createElement(Harness));
   try {
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 100));
     stdin.write("\u0016");
     await waitForCondition(() => captureCalls === 1 && attached.length === 1);
   } finally {

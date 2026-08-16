@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
 
+use crate::command_router::work_shell_agent_console_tab;
+
 pub fn resolve_busy_submit_json(line: &str, queued_count: usize) -> Result<String, String> {
     let value = resolve_busy_submit_value(line, queued_count);
     serde_json::to_string(&value)
@@ -81,11 +83,20 @@ fn resolve_busy_submit_value(line: &str, queued_count: usize) -> Value {
             "message": "Interrupting active turn. Queued follow-ups are paused.",
         });
     }
+    // The console is a read surface over the running turn, so it opens
+    // immediately instead of queueing: no transcript copy, no backlog entry.
+    if let Some(tab) = work_shell_agent_console_tab(line) {
+        return json!({
+            "action": "open_agent_console",
+            "line": line,
+            "tab": tab,
+        });
+    }
     if line.starts_with('/') {
         return json!({
             "action": "reject_slash",
             "line": line,
-            "message": "Busy. Slash commands are not queued. Wait for this turn, type /cancel to interrupt, or open /queue to inspect pending follow-ups.",
+            "message": "Busy. This slash command is not queued. /queue, /queue clear, /cancel, /agents, /jobs, and /todo still work during an active turn.",
         });
     }
 
@@ -127,8 +138,22 @@ mod tests {
         assert_eq!(value["action"], "reject_slash");
         assert_eq!(
             value["message"],
-            "Busy. Slash commands are not queued. Wait for this turn, type /cancel to interrupt, or open /queue to inspect pending follow-ups."
+            "Busy. This slash command is not queued. /queue, /queue clear, /cancel, /agents, /jobs, and /todo still work during an active turn."
         );
+    }
+
+    #[test]
+    fn opens_the_agent_console_while_busy() {
+        for (line, tab) in [("/agents", "agents"), ("/jobs", "jobs"), ("/todo", "plan")] {
+            let value = resolve_busy_submit_value(line, 2);
+            assert_eq!(value["action"], "open_agent_console");
+            assert_eq!(value["line"], line);
+            assert_eq!(value["tab"], tab);
+            assert!(
+                value.get("message").is_none(),
+                "opening the console must not add transcript copy"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,5 @@
 import { runRustCommandSync } from "./rust-command.js";
 import { createWorkShellBusyStatePatch } from "./work-shell-engine-state.js";
-import { applyTraceEventToAgentConsole } from "./work-shell-agent-console.js";
 import type { WorkShellChatEntry, WorkShellEngineState } from "./work-shell-engine.js";
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 
@@ -110,11 +109,6 @@ export function applyWorkShellTraceEvent<
       streamingAssistantText: `${input.state.streamingAssistantText ?? ""}${input.event.delta}`,
     });
     return;
-  }
-
-  const agentConsole = applyTraceEventToAgentConsole(input.state.agentConsole, input.event);
-  if (agentConsole !== input.state.agentConsole) {
-    input.setState({ agentConsole });
   }
 
   const line = input.formatAgentTraceLine(input.event);

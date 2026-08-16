@@ -18,6 +18,7 @@ import { loadWorkShellDashboardProps } from "../../apps/unclecode-cli/src/work-r
 import { createManagedDashboardInput } from "../../apps/unclecode-cli/src/work-runtime-dashboard.ts";
 import { createAgentOpsStore } from "@unclecode/agentops-db";
 import { persistWorkShellSessionSnapshot } from "@unclecode/orchestrator";
+import { createManagedWorkShellDashboardProps } from "../../packages/tui/src/index.tsx";
 import {
   formatContextPacketPromptPrefix,
   listScopedMemoryEntries,
@@ -1011,7 +1012,83 @@ test("goal context projection prioritizes active tasks and excludes private exec
   assert.doesNotMatch(JSON.stringify(items), /PRIVATE_PROMPT|private-\d+\.ts/);
 });
 
+test("goal context projection carries title, goal, constraints, acceptance criteria and evidence per task", () => {
+  const items = buildWorkGraphContextItems({
+    id: "graph-runbook",
+    goal: "Ship the context desk",
+    constraints: ["no new dependencies", "keyboard semantics unchanged"],
+    approval: "approved",
+    nodes: [
+      {
+        id: "node-desk",
+        title: "Wire the desk",
+        prompt: "PRIVATE_PROMPT wire the Context Desk to the runbook lane",
+        status: "requires_action",
+        dependsOn: ["node-contract"],
+        fileOwnership: ["packages/tui/src/work-shell-view.tsx"],
+        acceptanceCriteria: ["Runbook lane renders", "Keyboard focus survives", "No new deps"],
+        evidenceRefs: ["evidence/desk-render.txt", "evidence/desk-keys.txt", "evidence/desk-deps.txt"],
+      },
+    ],
+  });
+
+  const node = items[1];
+  assert.equal(node?.id, "goal-loop-graph-runbook-node-desk");
+  assert.equal(
+    node?.preview,
+    "Aim: Wire the desk"
+      + " · Done when: Runbook lane renders; Keyboard focus survives (+1 more)"
+      + " · Evidence: evidence/desk-render.txt; evidence/desk-keys.txt (+1 more)",
+  );
+  assert.deepEqual(node?.metadata, {
+    kind: "work-node",
+    graphId: "graph-runbook",
+    nodeId: "node-desk",
+    title: "Wire the desk",
+    goal: "Ship the context desk",
+    constraints: ["no new dependencies", "keyboard semantics unchanged"],
+    status: "requires_action",
+    acceptanceCriteria: ["Runbook lane renders", "Keyboard focus survives", "No new deps"],
+    evidenceRefs: ["evidence/desk-render.txt", "evidence/desk-keys.txt", "evidence/desk-deps.txt"],
+  });
+  assert.doesNotMatch(JSON.stringify(node), /PRIVATE_PROMPT|work-shell-view\.tsx/);
+});
+
+test("goal context projection states missing acceptance criteria and evidence in words", () => {
+  const items = buildWorkGraphContextItems({
+    id: "graph-bare",
+    approval: "pending",
+    nodes: [
+      {
+        id: "node-bare",
+        title: "Unscoped task",
+        prompt: "PRIVATE_PROMPT investigate the regression",
+        status: "ready",
+        dependsOn: [],
+        fileOwnership: [],
+        evidenceRefs: ["   "],
+      },
+    ],
+  });
+
+  assert.equal(
+    items[1]?.preview,
+    "Aim: Unscoped task"
+      + " · Done when: no acceptance criteria recorded yet"
+      + " · Evidence: nothing captured yet",
+  );
+  assert.equal(items[1]?.metadata?.title, "Unscoped task");
+  assert.deepEqual(items[1]?.metadata?.constraints, []);
+  assert.equal("goal" in (items[1]?.metadata ?? {}), false);
+  assert.deepEqual(items[1]?.metadata?.acceptanceCriteria, []);
+  assert.deepEqual(items[1]?.metadata?.evidenceRefs, ["   "]);
+});
+
 test("managed dashboard preserves the resumed submitted receipt identity", () => {
+  const ompAuthCatalog = {
+    list: async () => ({ ok: true, providers: [] }),
+    signIn: async () => ({ ok: true, command: "omp auth-broker login kimi-code" }),
+  };
   const managed = createManagedDashboardInput({
     agent: {},
     options: {
@@ -1033,6 +1110,7 @@ test("managed dashboard preserves the resumed submitted receipt identity", () =>
       contextSummaryLines: [],
       homeState: {},
       initialLastSubmittedContextReceiptId: "receipt-resumed-submitted",
+      ompAuthCatalog,
     },
   }, {
     resolveWorkShellInlineCommand: async () => ({ lines: [], failed: false }),
@@ -1042,4 +1120,12 @@ test("managed dashboard preserves the resumed submitted receipt identity", () =>
     managed.paneRuntime.initialLastSubmittedContextReceiptId,
     "receipt-resumed-submitted",
   );
+
+  const dashboard = createManagedWorkShellDashboardProps(managed);
+  const embeddedPane = dashboard.renderWorkPane({
+    openSessions() {},
+    syncHomeState() {},
+  });
+  const pane = embeddedPane.props.buildPane({ onExit() {} });
+  assert.equal(pane.ompAuthCatalog, ompAuthCatalog);
 });

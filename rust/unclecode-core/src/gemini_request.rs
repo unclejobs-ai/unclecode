@@ -292,12 +292,17 @@ pub fn parse_gemini_response_json_for_model(
         .get("candidatesTokenCount")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let cache_read_tokens = usage
+        .get("cachedContentTokenCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
 
     serde_json::to_string(&json!({
         "content": content,
         "actions": actions,
         "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
+        "cacheReadTokens": cache_read_tokens,
         "costUsd": model
             .map(|model| estimate_cost_usd(model, prompt_tokens as f64, completion_tokens as f64))
             .unwrap_or(0.0),
@@ -523,7 +528,7 @@ mod tests {
                     {"text":"running"},
                     {"functionCall":{"id":"fc_1","name":"run_shell","args":{"command":"echo hi"}}}
                 ]}}],
-                "usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3}
+                "usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"cachedContentTokenCount":2}
             }"#,
             Some("gemini-2.5-pro"),
         )
@@ -534,8 +539,9 @@ mod tests {
         assert_eq!(parsed["actions"][0]["callId"], "fc_1");
         assert_eq!(parsed["actions"][0]["input"]["command"], "echo hi");
         assert_eq!(parsed["modelContent"]["role"], "model");
-        assert_eq!(parsed["promptTokens"], 2);
+        assert_eq!(parsed["promptTokens"], 5);
         assert_eq!(parsed["completionTokens"], 3);
+        assert_eq!(parsed["cacheReadTokens"], 2);
         assert!(parsed["costUsd"].as_f64().unwrap_or(0.0) > 0.0);
     }
 
@@ -545,7 +551,7 @@ mod tests {
 
         assert_eq!(
             output,
-            r#"{"actions":[],"completionTokens":0,"content":"fallback","costUsd":0.0,"modelContent":{"parts":[],"role":"model"},"promptTokens":0}"#
+            r#"{"actions":[],"cacheReadTokens":0,"completionTokens":0,"content":"fallback","costUsd":0.0,"modelContent":{"parts":[],"role":"model"},"promptTokens":0}"#
         );
     }
 

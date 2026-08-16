@@ -18,6 +18,7 @@ import type {
   ContextPacketViewSourceState,
   ContextPacketViewWarning,
   ContextSourceCategory,
+  UpsertContextSourceInput,
   WorkGraph,
 } from "@unclecode/contracts";
 
@@ -130,7 +131,7 @@ async function upsertPacketItemsAsContextSources(input: {
       input.recordPerformanceSample,
       "source-upsert-batch",
       () => {
-        const sources = [];
+        const sources: UpsertContextSourceInput[] = [];
         for (let index = batchStart; index < batchEnd; index += 1) {
           const item = input.items[index];
           if (item === undefined) continue;
@@ -144,6 +145,9 @@ async function upsertPacketItemsAsContextSources(input: {
             reason: item.reason,
             salience: input.salience,
             tokenEstimate: item.tokenEstimate ?? estimateTokens(`${item.label} ${content}`),
+            // Every packet-view metadata variant is a valid stored variant; the
+            // store side only adds optional fields the view never carries.
+            ...(item.metadata === undefined ? {} : { metadata: item.metadata }),
           });
         }
         input.store.upsertContextSources(sources);
@@ -309,6 +313,9 @@ export function createCrpRuntime(
   } | undefined;
   const actionReceipts: ContextPacketViewActionReceipt[] = [];
   const undoStack: ContextSourceUndoEntry[] = [];
+  // Receipt ids stay unique even for attempts that are reported to the caller
+  // without joining the applied-mutation log.
+  let receiptSequence = 0;
   const createCrpState = (cwd: string): NonNullable<typeof crpState> => {
     const { store, projectId } = openContextLifecycleStore(cwd, bootstrap);
     const memoryLineage = createMemoryLineageAdapter(() => store);
@@ -379,14 +386,20 @@ export function createCrpRuntime(
           ? { recordPerformanceSample: bootstrap.recordPerformanceSample }
           : {}),
       });
+      const workGraphItems = buildWorkGraphContextItems(input.workGraph);
       await upsertPacketItemsAsContextSources({
         store: crpState.store,
         projectId: crpState.projectId,
-        items: buildWorkGraphContextItems(input.workGraph),
+        items: workGraphItems,
         salience: 0.93,
         ...(bootstrap.recordPerformanceSample !== undefined
           ? { recordPerformanceSample: bootstrap.recordPerformanceSample }
           : {}),
+      });
+      crpState.store.deleteContextSourcesByIdPrefix({
+        projectId: crpState.projectId,
+        idPrefix: "goal-loop-",
+        keepIds: workGraphItems.map((item) => item.id),
       });
       await upsertPacketItemsAsContextSources({
         store: crpState.store,
@@ -408,18 +421,23 @@ export function createCrpRuntime(
           projectId: activeState.projectId,
           tokenBudget: bootstrap.crpConfig.tokenBudget,
           turnIndex: activeState.turnIndex,
+          providers: activeState.registry.listProviders(),
           ...(bootstrap.bootstrapPacketWarnings !== undefined
             ? { warnings: bootstrap.bootstrapPacketWarnings }
             : {}),
         }),
       );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      process.stderr.write(`[crp] fallback to legacy resolver: ${message}\n`);
+    } catch {
+      process.stderr.write("[crp] Context refresh unavailable; using previous context.\n");
       return legacy(input);
     }
   };
 
+  /**
+   * Records an applied mutation. `actionReceipts` is the log the ledger replays
+   * to derive protected sources, so only receipts whose effect actually landed
+   * belong here — a failed attempt is returned to the caller unrecorded.
+   */
   const pushReceipt = (receipt: ContextPacketViewActionReceipt): ContextPacketViewActionReceipt => {
     actionReceipts.push(receipt);
     return receipt;
@@ -506,7 +524,7 @@ export function createCrpRuntime(
       after,
     });
     return pushReceipt({
-      id: `context-action-${actionReceipts.length + 1}`,
+      id: `context-action-${(receiptSequence += 1)}`,
       action: receiptAction,
       sourceId: action.id,
       sourceLabel: before.label,
@@ -516,6 +534,7 @@ export function createCrpRuntime(
         before,
         after,
       }),
+      succeeded: true,
       canUndo: true,
       before,
       after,
@@ -526,7 +545,10 @@ export function createCrpRuntime(
     if (!crpState) {
       return undefined;
     }
-    const entry = undoStack.pop();
+    // Peek: the entry only leaves the stack once the store confirms the
+    // restoration, so a source that vanished mid-session cannot silently burn
+    // the user's one chance to undo.
+    const entry = undoStack.at(-1);
     if (entry === undefined) {
       return undefined;
     }
@@ -538,11 +560,26 @@ export function createCrpRuntime(
       includedInModel: entry.before.includedInModel,
     });
     const afterUndo = resolveSourceState(crpState, entry.sourceId);
-    if (afterUndo === undefined) {
-      return undefined;
+    if (afterUndo === undefined || afterUndo.includedInModel !== entry.before.includedInModel) {
+      const observed = afterUndo ?? beforeUndo;
+      const failure = `Could not undo ${entry.action} on ${entry.sourceLabel} — `
+        + "that source is no longer part of this session's context. "
+        + "Nothing changed, and the undo is still waiting.";
+      return {
+        id: `context-action-${(receiptSequence += 1)}`,
+        action: "undo",
+        sourceId: entry.sourceId,
+        sourceLabel: entry.sourceLabel,
+        message: failure,
+        succeeded: false,
+        canUndo: undoStack.length > 0,
+        before: beforeUndo,
+        after: observed,
+      };
     }
+    undoStack.pop();
     return pushReceipt({
-      id: `context-action-${actionReceipts.length + 1}`,
+      id: `context-action-${(receiptSequence += 1)}`,
       action: "undo",
       sourceId: entry.sourceId,
       sourceLabel: entry.sourceLabel,
@@ -552,6 +589,7 @@ export function createCrpRuntime(
         before: beforeUndo,
         after: afterUndo,
       }),
+      succeeded: true,
       canUndo: undoStack.length > 0,
       before: beforeUndo,
       after: afterUndo,

@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { writeScopedMemory } from "./context-memory.js";
 import { createContextPacketView } from "./context-packet-view.js";
 import { discoverCursorRules } from "./cursor-rules.js";
 import { prefetchScopedMemory } from "./memory-prefetch.js";
@@ -11,6 +9,7 @@ import { loadPinnedSkillNames } from "./pinned-skills.js";
 import { runRustCommandSync } from "./rust-command.js";
 import { loadCachedWorkspaceGuidance } from "./workspace-guidance.js";
 import { discoverSkillMetadata } from "./workspace-skills.js";
+import { createSessionStore, getSessionStoreRoot } from "@unclecode/session-store";
 import type { ContextPacketView, ContextPacketViewItem, ContextPacketViewWarning } from "@unclecode/contracts";
 
 export type BootstrapSourceKind =
@@ -64,15 +63,19 @@ export type IngestWorkspaceBootstrapContextResult = {
   readonly packetWarnings: readonly ContextPacketViewWarning[];
 };
 
-const BOOTSTRAP_DIR = path.join(".unclecode", "context");
 const BOOTSTRAP_FILE = "bootstrap.json";
+const BOOTSTRAP_PATH_SEGMENTS: readonly string[] = [".unclecode", "context", BOOTSTRAP_FILE];
+const BOOTSTRAP_RELATIVE_PATH = BOOTSTRAP_PATH_SEGMENTS.join("/");
+const BOOTSTRAP_MEMORY_ID = "bootstrap:context";
+const BOOTSTRAP_MEMORY_PREFIX = "Bootstrap context:";
+const LEGACY_SCOPED_MEMORY_PREFIX = "memory:project:";
 
 function sha256Content(content: string): string {
   return runRustCommandSync(["rust", "sha256"], process.cwd(), content).trim();
 }
 
 function getBootstrapSnapshotPath(workspaceRoot: string): string {
-  return path.join(workspaceRoot, BOOTSTRAP_DIR, BOOTSTRAP_FILE);
+  return path.join(workspaceRoot, ...BOOTSTRAP_PATH_SEGMENTS);
 }
 
 function readMcpServerRecords(input: {
@@ -111,13 +114,6 @@ function readMcpServerRecords(input: {
   }
 }
 
-async function readOptionalUtf8(filePath: string): Promise<string | undefined> {
-  try {
-    return await readFile(filePath, "utf8");
-  } catch {
-    return undefined;
-  }
-}
 
 function discoverMcpSources(input: {
   readonly cwd: string;
@@ -374,35 +370,61 @@ function isNonWritableWorkspaceError(error: unknown): boolean {
     return false;
   }
   const code = (error as NodeJS.ErrnoException).code;
-  return code === "EACCES" || code === "EROFS" || code === "EPERM";
+  return (
+    code === "EACCES"
+    || code === "EROFS"
+    || code === "EPERM"
+    || /permission denied|read-only file system/i.test(error.message)
+  );
 }
+
+export type BootstrapSnapshotSkipReason = "read-only" | "symlinked-path";
 
 export type WriteBootstrapSnapshotResult = {
   readonly snapshotPath: string;
   readonly written: boolean;
+  readonly reason?: BootstrapSnapshotSkipReason;
 };
+
+function isSymlinkedWorkspacePathError(error: unknown): boolean {
+  return error instanceof Error && /symbolic-link/i.test(error.message);
+}
 
 export async function writeBootstrapSnapshot(input: {
   readonly workspaceRoot: string;
   readonly snapshot: BootstrapSnapshot;
 }): Promise<WriteBootstrapSnapshotResult> {
   const snapshotPath = getBootstrapSnapshotPath(input.workspaceRoot);
+  const contents = `${JSON.stringify(input.snapshot, null, 2)}\n`;
   try {
-    await mkdir(path.dirname(snapshotPath), { recursive: true });
-    await writeFile(snapshotPath, `${JSON.stringify(input.snapshot, null, 2)}\n`, "utf8");
+    runRustCommandSync(
+      ["rust", "aci", "write-atomic-no-symlinks", BOOTSTRAP_RELATIVE_PATH],
+      input.workspaceRoot,
+      contents,
+    );
     return { snapshotPath, written: true };
   } catch (error) {
+    if (isSymlinkedWorkspacePathError(error)) {
+      return { snapshotPath, written: false, reason: "symlinked-path" };
+    }
     if (isNonWritableWorkspaceError(error)) {
-      return { snapshotPath, written: false };
+      return { snapshotPath, written: false, reason: "read-only" };
     }
     throw error;
   }
 }
 
 export async function loadBootstrapSnapshot(workspaceRoot: string): Promise<BootstrapSnapshot | undefined> {
-  const snapshotPath = getBootstrapSnapshotPath(workspaceRoot);
-  const raw = await readOptionalUtf8(snapshotPath);
-  if (!raw) {
+  let raw: string;
+  try {
+    raw = runRustCommandSync(
+      ["rust", "aci", "read-no-symlinks", BOOTSTRAP_RELATIVE_PATH],
+      workspaceRoot,
+    );
+  } catch (error) {
+    if (isSymlinkedWorkspacePathError(error)) {
+      throw error;
+    }
     return undefined;
   }
 
@@ -424,12 +446,22 @@ async function persistBootstrapMemoryFacts(input: {
   const mcpCount = input.snapshot.sources.filter((source) => source.kind === "mcp").length;
   const cursorRuleCount = input.snapshot.sources.filter((source) => source.kind === "cursor-rule").length;
 
-  await writeScopedMemory({
-    scope: "project",
-    cwd: input.cwd,
-    ...(input.env ? { env: input.env } : {}),
-    summary: `Bootstrap context: ${guidanceCount} guidance, ${cursorRuleCount} cursor rules, ${skillCount} skills, ${mcpCount} MCP servers.`,
+  const sessionStore = createSessionStore({ rootDir: getSessionStoreRoot(input.env) });
+  await sessionStore.writeProjectMemory({
+    projectPath: input.cwd,
+    memoryId: BOOTSTRAP_MEMORY_ID,
+    content: `${BOOTSTRAP_MEMORY_PREFIX} ${guidanceCount} guidance, ${cursorRuleCount} cursor rules, ${skillCount} skills, ${mcpCount} MCP servers.`,
   });
+
+  const persisted = await sessionStore.listProjectMemories(input.cwd);
+  for (const record of persisted) {
+    if (
+      record.memoryId.startsWith(LEGACY_SCOPED_MEMORY_PREFIX) &&
+      record.content.startsWith(BOOTSTRAP_MEMORY_PREFIX)
+    ) {
+      await sessionStore.deleteProjectMemory({ projectPath: input.cwd, memoryId: record.memoryId });
+    }
+  }
 }
 
 export async function ingestWorkspaceBootstrapContext(
@@ -501,7 +533,13 @@ export async function ingestWorkspaceBootstrapContext(
 
   const summaryLines = [
     ...buildBootstrapSummaryLines(snapshot),
-    ...(!snapshotWrite.written ? ["Bootstrap snapshot not persisted · workspace is read-only"] : []),
+    ...(snapshotWrite.written
+      ? []
+      : [
+          snapshotWrite.reason === "symlinked-path"
+            ? "Bootstrap snapshot not persisted · snapshot path crosses a symbolic link"
+            : "Bootstrap snapshot not persisted · workspace is read-only",
+        ]),
   ];
 
   return {

@@ -3,6 +3,7 @@ import { executeWorkShellPromptTurn } from "./work-shell-engine-execution.js";
 import { createWorkShellStatusPanel } from "./work-shell-engine-panels.js";
 import * as WorkShellTurns from "./work-shell-engine-turns.js";
 import type { WorkShellPromptCommand } from "./work-shell-engine-turns.js";
+import type { WorkAgentTurnResult } from "./work-agent.js";
 import type { ContextPacketReceipt } from "@unclecode/contracts";
 import type {
   MemoryLineageAdapter,
@@ -64,7 +65,7 @@ type PromptRuntimeInput<Attachment, Reasoning extends WorkShellReasoningConfig> 
     statusContext?: WorkShellStatusContext,
   ) => WorkShellPanel;
   autoContinueOnPermissionStall?: boolean | undefined;
-  runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => Promise<{ text: string }>;
+  runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => Promise<WorkAgentTurnResult>;
   isTurnActive?: (() => boolean) | undefined;
   publishContextBridge: (input: {
     cwd: string;

@@ -70,6 +70,7 @@ type WorkCommandOptions = {
   readonly reasoning?: string;
   readonly cwd?: string;
   readonly sessionId?: string;
+  readonly engine?: string;
   readonly tools?: boolean;
   readonly help?: boolean;
   readonly smoke?: boolean;
@@ -388,6 +389,7 @@ async function handleTuiSmokeCommand(options: WorkCommandOptions): Promise<void>
     ...(options.model ? { model: options.model } : {}),
     ...(options.reasoning ? { reasoning: options.reasoning } : {}),
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+    ...(options.engine ? { engine: options.engine } : {}),
   }));
   process.stdout.write(`${lines.join("\n")}\n`);
 }
@@ -671,6 +673,7 @@ function registerWorkCommands(program: Command): void {
     .option("--reasoning <effort>")
     .option("--cwd <cwd>")
     .option("--session-id <sessionId>")
+    .option("--engine <engine>")
     .option("--tools")
     .option("--help")
     .option("--smoke", "Run non-interactive TUI runtime smoke checks")
@@ -688,10 +691,19 @@ function registerWorkCommands(program: Command): void {
     .option("--reasoning <effort>")
     .option("--cwd <cwd>")
     .option("--session-id <sessionId>")
+    .option("--engine <engine>")
     .option("--tools")
     .option("--help")
     .action(async (promptParts: string[], options: WorkCommandOptions, _command) => {
       await handleWorkCommand(promptParts, options);
+    });
+
+  program
+    .command("work-pi-turn")
+    .description("Run a single pi-mono engine turn (internal, invoked by the Rust work shell)")
+    .action(async () => {
+      const { runWorkPiTurn } = await import("./pi-turn.js");
+      process.exitCode = await runWorkPiTurn();
     });
 }
 
@@ -948,11 +960,12 @@ function registerTeamCommands(program: import("commander").Command): void {
     )
     .option("--gate <level>", "strict|warn|off", "strict")
     .option("--runtime <mode>", "local|docker|e2b", "local")
+    .option("--isolation <mode>", "shared|worktree", "shared")
     .option("--record <runId>", "Force a specific RUN_ID (resume / external dispatch)")
     .option("--dispatch", "Spawn worker child processes after recording")
     .option("--worker-timeout <ms>", "Per-worker SIGKILL timeout (default 600000)", "600000")
     .option("--quiet", "Print only the RUN_ID on stdout")
-    .action(async (objective: string[], options: { persona?: string; lanes?: string; gate?: string; runtime?: string; record?: string; dispatch?: boolean; workerTimeout?: string; quiet?: boolean }) => {
+    .action(async (objective: string[], options: { persona?: string; lanes?: string; gate?: string; runtime?: string; isolation?: string; record?: string; dispatch?: boolean; workerTimeout?: string; quiet?: boolean }) => {
       const teamModule = await import("./team.js");
       await teamModule.handleTeamRun(objective, options);
     });

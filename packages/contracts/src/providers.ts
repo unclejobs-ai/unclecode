@@ -6,6 +6,7 @@ export const PROVIDER_IDS = [
   "ollama",
   "copilot",
   "zai",
+  "omp",
 ] as const;
 
 export type ProviderId = (typeof PROVIDER_IDS)[number];
@@ -95,6 +96,19 @@ export const PROVIDER_CAPABILITIES = {
     supportsToolCalls: true,
     supportsSessionMemory: true,
     supportsPromptCaching: false,
+  },
+  // OMP is the delegated work/executor route. It owns credential lookup and
+  // model selection itself, so UncleCode reads no environment for it — not a
+  // bearer token, not a model override — and every turn starts a fresh session.
+  omp: {
+    id: "omp",
+    label: "OMP",
+    transport: "native",
+    defaultModel: "kimi-code/k3",
+    envKeys: [],
+    supportsToolCalls: true,
+    supportsSessionMemory: false,
+    supportsPromptCaching: true,
   },
 } as const satisfies Readonly<Record<ProviderId, ProviderCapability>>;
 

@@ -2,6 +2,7 @@ import type {
   AskUserQuestion,
   AskUserQuestionOption,
   AskUserQuestionRequest,
+  ExecutionPolicyProfile,
   ToolMetadata,
 } from "@unclecode/contracts";
 import type { WorkShellInteractionBridge } from "./work-shell-interaction-bridge.js";
@@ -10,6 +11,14 @@ import {
   createWebSearchHandler,
   type WebSearchActiveProvider,
 } from "./web-search.js";
+import { createAstToolRegistry } from "./ast-tools.js";
+import { createLspToolRegistry } from "./lsp-tools.js";
+import {
+  createPolicyAwareToolExecutor,
+  resolveModeExecutionPolicyProfile,
+  type ToolExecutor,
+  type ToolRegistry,
+} from "./tool-executor.js";
 
 export type ToolDefinition = {
   name: string;
@@ -38,7 +47,11 @@ async function runRustAci(args: readonly string[], cwd: string, stdin?: string, 
 }
 
 async function runRustShell(command: string, cwd: string, options: ToolHandlerOptions = {}): Promise<string> {
-  return await runRustCommand(["rust", "shell", "--", command], cwd, options.signal ? "" : undefined, process.env, options);
+  // Reaching this handler means the executor already authorized shell.run, so
+  // the Rust child gets a request-scoped grant. The parent process env is
+  // never mutated.
+  const env = { ...process.env, UNCLECODE_ALLOW_RUN_SHELL: "1" };
+  return await runRustCommand(["rust", "shell", "--", command], cwd, options.signal ? "" : undefined, env, options);
 }
 
 function normalizeRustPathError(error: unknown, requestedPath: string): never {
@@ -115,13 +128,14 @@ async function runShell(input: Record<string, unknown>, cwd: string, options: To
   if (typeof input.command !== "string" || input.command.length === 0) {
     throw new Error("command is required");
   }
-  if (process.env.UNCLECODE_ALLOW_RUN_SHELL !== "1") {
-    throw new Error("run_shell is disabled by default. Set UNCLECODE_ALLOW_RUN_SHELL=1 to enable it.");
-  }
+  // Authorization lives in the policy-aware executor, not in this handler.
   const stdout = await runRustShell(input.command, cwd, options);
   const content = stdout.trim();
   return { content: content || "(command produced no output)" };
 }
+const astTools = createAstToolRegistry();
+const lspTools = createLspToolRegistry();
+
 
 export const toolDefinitions: ToolDefinition[] = [
   {
@@ -261,7 +275,7 @@ export const toolDefinitions: ToolDefinition[] = [
   },
   {
     name: "run_shell",
-    description: "Run a shell command in the current workspace when UNCLECODE_ALLOW_RUN_SHELL=1 is set.",
+    description: "Run a shell command in the current workspace when execution policy grants shell access.",
     input_schema: {
       type: "object",
       properties: {
@@ -287,15 +301,19 @@ export const toolDefinitions: ToolDefinition[] = [
       }],
     },
   },
+  ...lspTools.definitions,
+  ...astTools.definitions,
 ];
 
-export const toolHandlers: Record<string, ToolHandler> = {
+const toolHandlers: Record<string, ToolHandler> = {
   list_files: listFiles,
   read_file: readFile,
   write_file: writeFile,
   delete_file: deleteFile,
   search_text: searchText,
   run_shell: runShell,
+  ...lspTools.handlers,
+  ...astTools.handlers,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -439,9 +457,13 @@ function createAskUserToolDefinition(): ToolDefinition {
   };
 }
 
+/**
+ * The public runtime handed to provider and Pi turn loops. Handlers are never
+ * exposed: every call goes through the policy-aware executor.
+ */
 export type ToolRuntime = {
   readonly definitions: readonly ToolDefinition[];
-  readonly handlers: Readonly<Record<string, ToolHandler>>;
+  readonly executor: ToolExecutor;
 };
 
 function createWebSearchToolDefinition(): ToolDefinition {
@@ -484,28 +506,64 @@ function createWebSearchToolDefinition(): ToolDefinition {
   };
 }
 
-export function createToolRuntime(input: {
-  readonly interactionBridge: WorkShellInteractionBridge;
+/**
+ * Builds the internal raw registry. Kept private so no caller can reach a
+ * handler without a policy decision.
+ */
+function createToolRegistry(input: {
+  readonly interactionBridge?: WorkShellInteractionBridge | undefined;
   readonly webSearch?: WebSearchActiveProvider;
-}): ToolRuntime {
-  const askUser: ToolHandler = async (rawInput, _cwd, options = {}) => {
-    const request = parseAskUserQuestionRequest(rawInput);
-    const result = await input.interactionBridge.ask(request, options.signal);
-    return { content: JSON.stringify(result) };
+  readonly allowedTools?: readonly string[] | undefined;
+}): ToolRegistry {
+  const definitions: ToolDefinition[] = [...toolDefinitions, createWebSearchToolDefinition()];
+  const handlers: Record<string, ToolHandler> = {
+    ...toolHandlers,
+    web_search: createWebSearchHandler(input.webSearch),
   };
-  const webSearch = createWebSearchHandler(input.webSearch);
 
+  const bridge = input.interactionBridge;
+  if (bridge !== undefined) {
+    definitions.push(createAskUserToolDefinition());
+    handlers.ask_user = async (rawInput, _cwd, options = {}) => {
+      const request = parseAskUserQuestionRequest(rawInput);
+      const result = await bridge.ask(request, options.signal);
+      return { content: JSON.stringify(result) };
+    };
+  }
+
+  if (input.allowedTools === undefined) {
+    return { definitions, handlers };
+  }
+
+  const allowed = new Set(input.allowedTools);
   return {
-    definitions: [
-      ...toolDefinitions,
-      createAskUserToolDefinition(),
-      createWebSearchToolDefinition(),
-    ],
-    handlers: {
-      ...toolHandlers,
-      ask_user: askUser,
-      web_search: webSearch,
-    },
+    definitions: definitions.filter((definition) => allowed.has(definition.name)),
+    handlers: Object.fromEntries(
+      Object.entries(handlers).filter(([name]) => allowed.has(name)),
+    ),
+  };
+}
+
+export function createToolRuntime(input: {
+  readonly interactionBridge?: WorkShellInteractionBridge | undefined;
+  readonly webSearch?: WebSearchActiveProvider;
+  readonly allowedTools?: readonly string[] | undefined;
+  readonly policyProfile?: ExecutionPolicyProfile | (() => ExecutionPolicyProfile) | undefined;
+  readonly runtimeMode?: string | (() => string) | undefined;
+}): ToolRuntime {
+  const registry = createToolRegistry(input);
+  return {
+    definitions: registry.definitions,
+    executor: createPolicyAwareToolExecutor({
+      definitions: registry.definitions,
+      handlers: registry.handlers,
+      policyProfile: input.policyProfile ?? resolveModeExecutionPolicyProfile({
+        mode: "default",
+        envShellOptIn: process.env.UNCLECODE_ALLOW_RUN_SHELL === "1",
+      }),
+      runtimeMode: input.runtimeMode ?? "local",
+      ...(input.interactionBridge ? { interactionBridge: input.interactionBridge } : {}),
+    }),
   };
 }
 

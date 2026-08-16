@@ -1,8 +1,20 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
+
+import { createSessionStore } from "@unclecode/session-store";
 
 import {
   augmentContextPacketViewInput,
@@ -10,9 +22,10 @@ import {
   clearCachedWorkspaceGuidance,
   discoverCursorRules,
   ingestWorkspaceBootstrapContext,
-  listScopedMemoryEntries,
   loadBootstrapSnapshot,
 } from "../../packages/context-broker/src/index.ts";
+
+const SYMLINKS_REQUIRE_ELEVATION = process.platform === "win32";
 
 function createFixtureWorkspace() {
   const root = mkdtempSync(path.join(tmpdir(), "unclecode-bootstrap-"));
@@ -87,13 +100,15 @@ describe("context bootstrap", () => {
     const reloaded = await loadBootstrapSnapshot(nested);
     assert.equal(reloaded?.sources.length, result.snapshot.sources.length);
 
-    const memoryEntries = await listScopedMemoryEntries({
-      scope: "project",
-      cwd: nested,
-      env,
-    });
-    assert.ok(memoryEntries.some((entry) => /Bootstrap context:/.test(entry.summary)));
-    assert.match(memoryEntries[0]?.memoryId ?? "", /^memory:project:/);
+    assert.deepEqual(
+      readdirSync(path.dirname(result.snapshotPath)).filter((entry) => entry.endsWith(".tmp")),
+      [],
+    );
+
+    const projectMemories = await createSessionStore({ rootDir }).listProjectMemories(nested);
+    const bootstrapRecord = projectMemories.find((record) => record.memoryId === "bootstrap:context");
+    assert.ok(bootstrapRecord);
+    assert.match(bootstrapRecord.content, /^Bootstrap context:/);
   });
 
   it("classifies bootstrap sources into packet included, excluded, and warnings", async () => {
@@ -239,5 +254,152 @@ describe("context bootstrap", () => {
     } finally {
       chmodSync(bootstrapDir, 0o755);
     }
+  });
+
+  it(
+    "refuses to persist bootstrap.json through a symlinked .unclecode directory",
+    { skip: SYMLINKS_REQUIRE_ELEVATION },
+    async () => {
+      const { root, home, nested } = createFixtureWorkspace();
+      const escapeTarget = path.join(root, "escaped-unclecode");
+      mkdirSync(escapeTarget, { recursive: true });
+      const unclecodeLink = path.join(nested, ".unclecode");
+      symlinkSync(escapeTarget, unclecodeLink);
+
+      const result = await ingestWorkspaceBootstrapContext({
+        cwd: nested,
+        env: { ...process.env, HOME: home },
+        userHomeDir: home,
+        persistMemoryFacts: false,
+      });
+
+      assert.equal(result.snapshotWritten, false);
+      assert.equal(existsSync(path.join(escapeTarget, "context", "bootstrap.json")), false);
+      assert.equal(existsSync(path.join(escapeTarget, "context")), false);
+      assert.equal(lstatSync(unclecodeLink).isSymbolicLink(), true);
+      assert.ok(result.snapshot.sources.length > 0);
+    },
+  );
+
+  it(
+    "refuses to write through a symlinked bootstrap.json and leaves its target intact",
+    { skip: SYMLINKS_REQUIRE_ELEVATION },
+    async () => {
+      const { root, home, nested } = createFixtureWorkspace();
+      const escapeTarget = path.join(root, "escaped-bootstrap.json");
+      const untouched = "sentinel payload the bootstrap writer must never replace\n";
+      writeFileSync(escapeTarget, untouched, "utf8");
+
+      const snapshotLink = path.join(nested, ".unclecode", "context", "bootstrap.json");
+      mkdirSync(path.dirname(snapshotLink), { recursive: true });
+      symlinkSync(escapeTarget, snapshotLink);
+
+      const result = await ingestWorkspaceBootstrapContext({
+        cwd: nested,
+        env: { ...process.env, HOME: home },
+        userHomeDir: home,
+        persistMemoryFacts: false,
+      });
+
+      assert.equal(result.snapshotWritten, false);
+      assert.equal(readFileSync(escapeTarget, "utf8"), untouched);
+      assert.equal(lstatSync(snapshotLink).isSymbolicLink(), true);
+      assert.ok(result.snapshot.sources.length > 0);
+    },
+  );
+
+  it(
+    "refuses to load bootstrap.json through a symbolic link",
+    { skip: SYMLINKS_REQUIRE_ELEVATION },
+    async () => {
+      const { root, nested } = createFixtureWorkspace();
+      const escapeTarget = path.join(root, "escaped-bootstrap.json");
+      writeFileSync(
+        escapeTarget,
+        `${JSON.stringify({
+          version: 1,
+          workspaceRoot: nested,
+          generatedAt: new Date().toISOString(),
+          sources: [],
+          warnings: [],
+          conflicts: [],
+          memoryPrefetch: { status: "empty" },
+        })}\n`,
+        "utf8",
+      );
+      const snapshotLink = path.join(nested, ".unclecode", "context", "bootstrap.json");
+      mkdirSync(path.dirname(snapshotLink), { recursive: true });
+      symlinkSync(escapeTarget, snapshotLink);
+
+      await assert.rejects(loadBootstrapSnapshot(nested), /symbolic-link/i);
+      assert.equal(lstatSync(snapshotLink).isSymbolicLink(), true);
+    },
+  );
+
+  it("keeps exactly one stable bootstrap memory record across repeated ingests", async () => {
+    const { home, nested } = createFixtureWorkspace();
+    const rootDir = path.join(nested, ".state");
+    const env = { ...process.env, UNCLECODE_SESSION_STORE_ROOT: rootDir, HOME: home };
+
+    await ingestWorkspaceBootstrapContext({
+      cwd: nested,
+      env,
+      userHomeDir: home,
+      sessionId: "bootstrap-stable-1",
+    });
+    await ingestWorkspaceBootstrapContext({
+      cwd: nested,
+      env,
+      userHomeDir: home,
+      sessionId: "bootstrap-stable-2",
+    });
+
+    const records = await createSessionStore({ rootDir }).listProjectMemories(nested);
+    const bootstrapRecords = records.filter((record) => record.content.startsWith("Bootstrap context:"));
+
+    assert.deepEqual(
+      bootstrapRecords.map((record) => record.memoryId),
+      ["bootstrap:context"],
+    );
+  });
+
+  it("deletes legacy synthetic bootstrap memory records when writing the stable record", async () => {
+    const { home, nested } = createFixtureWorkspace();
+    const rootDir = path.join(nested, ".state");
+    const env = { ...process.env, UNCLECODE_SESSION_STORE_ROOT: rootDir, HOME: home };
+    const store = createSessionStore({ rootDir });
+
+    await store.writeProjectMemory({
+      projectPath: nested,
+      memoryId: "memory:project:2024-01-01T00:00:00.000Z:11111111",
+      content: "Bootstrap context: 1 guidance, 0 cursor rules, 0 skills, 0 MCP servers.",
+    });
+    await store.writeProjectMemory({
+      projectPath: nested,
+      memoryId: "memory:project:2024-01-02T00:00:00.000Z:22222222",
+      content: "Bootstrap context: 2 guidance, 1 cursor rules, 1 skills, 2 MCP servers.",
+    });
+    await store.writeProjectMemory({
+      projectPath: nested,
+      memoryId: "memory:project:2024-01-03T00:00:00.000Z:33333333",
+      content: "Operator prefers read before edit.",
+    });
+
+    await ingestWorkspaceBootstrapContext({
+      cwd: nested,
+      env,
+      userHomeDir: home,
+      sessionId: "bootstrap-legacy-sweep",
+    });
+
+    const records = await store.listProjectMemories(nested);
+
+    assert.deepEqual(
+      records
+        .filter((record) => record.content.startsWith("Bootstrap context:"))
+        .map((record) => record.memoryId),
+      ["bootstrap:context"],
+    );
+    assert.ok(records.some((record) => record.content === "Operator prefers read before edit."));
   });
 });

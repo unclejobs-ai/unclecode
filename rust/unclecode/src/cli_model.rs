@@ -1,11 +1,12 @@
 use std::env;
 use std::ffi::OsString;
 
-use unclecode_core::http_transport::{redact_proxy_url_for_display, resolve_proxy_policy};
+use unclecode_core::http_transport::redact_proxy_url_for_display;
 use unclecode_core::model_pricing::{estimate_cost_usd, model_price};
 use unclecode_core::model_registry::{
     detect_provider_for_model, openai_reasoning_support, provider_capability_json, provider_label,
-    provider_model_catalog, provider_route_json, resolve_provider_route,
+    provider_model_catalog, provider_route_json, provider_route_proxy_policy,
+    resolve_provider_route,
 };
 
 pub fn top_level_model_args(args: &[OsString]) -> Option<Vec<OsString>> {
@@ -40,7 +41,7 @@ pub fn run_top_level_model_command(args: &[OsString]) -> Result<u8, String> {
             let provider = args.get(1).and_then(|arg| arg.to_str()).unwrap_or("auto");
             let model = args.get(2).and_then(|arg| arg.to_str());
             let route = resolve_provider_route(provider, model)?;
-            let proxy = resolve_proxy_policy(&route.endpoint_url)?;
+            let proxy = provider_route_proxy_policy(&route)?;
             println!("{}", provider_route_json(&route, &proxy)?);
             Ok(0)
         }
@@ -163,7 +164,7 @@ fn print_model_catalog(provider: &str) -> Result<(), String> {
 
 fn print_provider_route(provider: &str, model: Option<&str>) -> Result<(), String> {
     let route = resolve_provider_route(provider, model)?;
-    let proxy = resolve_proxy_policy(&route.endpoint_url)?;
+    let proxy = provider_route_proxy_policy(&route)?;
     println!("Provider: {} ({})", route.label, route.provider_id);
     println!("Transport: {}", route.transport);
     println!(

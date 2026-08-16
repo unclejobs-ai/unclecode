@@ -1,0 +1,52 @@
+name: QA
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  health:
+    name: qa:health
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Select Rust 1.96.1
+        run: |
+          rustup toolchain install 1.96.1 --profile minimal --no-self-update
+          rustup default 1.96.1
+          rustc --version
+
+      - name: Install tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux=3.4-1build1
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Pre-warm TypeScript build
+        run: npm run build --silent
+
+      - name: Pre-warm Rust build
+        run: cargo build --quiet -p unclecode
+
+      - name: Run health QA
+        run: npm run qa:health
+
+      - name: Upload QA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-evidence
+          path: .unclecode/qa/*.json
+          if-no-files-found: warn

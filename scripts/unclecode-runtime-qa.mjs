@@ -19,6 +19,7 @@ import {
   buildRuntimeEvidence,
   formatRuntimeQaCompactReport,
 } from "./runtime-qa/report-evidence.mjs";
+import { runAgentConsoleTuiSmoke } from "./runtime-qa/tui-basic-smokes.mjs";
 import { killRuntimeTmuxServer } from "./runtime-qa/tmux-helpers.mjs";
 import { runTtySmoke } from "./runtime-qa/tty-smoke.mjs";
 import { runTuiSmokeSuite } from "./runtime-qa/tui-suite-smokes.mjs";
@@ -45,6 +46,9 @@ try {
     const anthropicToolCallSmoke = await runAnthropicToolCallSmoke(anthropicServer.port, anthropicObservations);
     const ttySmoke = await runTtySmoke({ port: server.port, tmp, observations });
     const tuiSmokes = await runTuiSmokeSuite({ port: server.port, tmp, observations });
+    // The Agent Console gate scripts its own provider and OMP executor
+    // boundaries, so it needs no shared fake-provider port or observation log.
+    const agentConsoleTuiSmoke = await runAgentConsoleTuiSmoke({ tmp });
     const providerSmokes = { toolCallSmoke, openAIToolCallSmoke, anthropicToolCallSmoke };
     const evidence = buildRuntimeEvidence({ ...providerSmokes, ...tuiSmokes });
     const report = {
@@ -63,6 +67,7 @@ try {
       ttySmoke,
       ...providerSmokes,
       ...tuiSmokes,
+      agentConsoleTuiSmoke,
       externalLiveProviderGate: "not covered by local QA; run a real provider smoke after OPENAI_API_KEY or equivalent provider credentials are API-ready",
       checks: [
         "real bin work prompt response",
@@ -88,6 +93,13 @@ try {
         "slash commander first paint, warm reopen, filter, and model picker stay within latency budgets",
         "model-bound context packets expose included/excluded/warnings sections during real TUI turns",
         "80-column and 120-column TUI resize captures do not overflow",
+        "Agent Console fans one work turn out to two live executor runs",
+        "Alt+A opens the Agent Console roster and inspector over live runs",
+        "steering a live agent run returns an accepted control receipt",
+        "confirmed cancel settles one run and leaves the other executing",
+        "settled delegated work clears every live agent and job count",
+        "/jobs keeps both settled job records after the turn ends",
+        "resuming the session rebuilds the console with no running phantom",
         "100-column TTY display width",
       ],
     };

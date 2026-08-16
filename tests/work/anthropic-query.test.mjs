@@ -67,7 +67,7 @@ function waitForWorkerMessages(worker, type, count) {
 
 test("AnthropicProvider.query returns plain text when model emits no tool_use", async () => {
   const { client, captured } = makeStubClient([
-    { content: [{ type: "text", text: "all done" }] },
+    { content: [{ type: "text", text: "all done" }], usage: { input_tokens: 9, output_tokens: 2, cache_read_input_tokens: 7 } },
   ]);
   const provider = new AnthropicProvider({
     apiKey: "sk-ant-test",
@@ -83,9 +83,12 @@ test("AnthropicProvider.query returns plain text when model emits no tool_use", 
 
   assert.equal(result.content, "all done");
   assert.deepEqual(result.actions, []);
-  assert.equal(result.costUsd, 0);
+  assert.ok(Math.abs(result.costUsd - 0.000078) < 1e-12);
+  assert.deepEqual(result.usage, { inputTokens: 9, outputTokens: 2, cacheReadTokens: 7 });
   assert.equal(captured.length, 1);
-  assert.equal(captured[0].system, "you are a worker");
+  assert.deepEqual(captured[0].system, [
+    { type: "text", text: "you are a worker", cache_control: { type: "ephemeral" } },
+  ]);
   assert.equal(captured[0].messages[0].role, "user");
 });
 
@@ -163,7 +166,9 @@ test("AnthropicProvider.query round-trips assistant tool_use + tool_result", asy
   ]);
 
   const params = captured[0];
-  assert.equal(params.system, "system override");
+  assert.deepEqual(params.system, [
+    { type: "text", text: "system override", cache_control: { type: "ephemeral" } },
+  ]);
   assert.equal(params.messages.length, 3);
   // assistant block carries tool_use shape
   const assistantBlocks = params.messages[1].content;
@@ -192,16 +197,39 @@ test("AnthropicProvider.query falls back to default system prompt when caller om
 
   await provider.query([{ role: "user", content: "hello" }]);
 
-  assert.ok(typeof captured[0].system === "string");
-  assert.ok(captured[0].system.length > 0);
-  assert.match(captured[0].system, /extra-instructions/);
+  assert.ok(Array.isArray(captured[0].system));
+  assert.match(captured[0].system[0].text, /extra-instructions/);
+  assert.deepEqual(captured[0].system[0].cache_control, { type: "ephemeral" });
 });
 
-test("AnthropicProvider.query reports non-zero costUsd when the response carries token usage", async () => {
-  const { client } = makeStubClient([
+test("AnthropicProvider.query omits an explicitly empty system block", async () => {
+  const { client, captured } = makeStubClient([
+    { content: [{ type: "text", text: "ok" }] },
+  ]);
+  const provider = new AnthropicProvider({
+    apiKey: "sk-ant-test",
+    model: "claude-sonnet-4-6",
+    cwd: process.cwd(),
+    client,
+  });
+
+  await provider.query([
+    { role: "system", content: "" },
+    { role: "user", content: "hello" },
+  ]);
+
+  assert.equal(captured[0].system, undefined);
+});
+
+test("AnthropicProvider.query reports token usage and caches stable prompt prefixes", async () => {
+  const { client, captured } = makeStubClient([
     {
       content: [{ type: "text", text: "ok" }],
-      usage: { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+      usage: {
+        input_tokens: 1_000_000,
+        output_tokens: 1_000_000,
+        cache_read_input_tokens: 750_000,
+      },
     },
   ]);
   const provider = new AnthropicProvider({
@@ -211,9 +239,24 @@ test("AnthropicProvider.query reports non-zero costUsd when the response carries
     client,
   });
 
-  const result = await provider.query([{ role: "user", content: "hi" }]);
-  // claude-sonnet-4-6: $3/M input + $15/M output → $18 for 1M+1M
-  assert.equal(result.costUsd, 18.0);
+  const result = await provider.query([
+    { role: "system", content: "stable instructions" },
+    { role: "user", content: "first" },
+    { role: "assistant", content: "answer" },
+    { role: "user", content: "second" },
+  ]);
+
+  // Provider usage keeps uncached, cache-read, and cache-write input disjoint.
+  assert.equal(result.costUsd, 20.25);
+  assert.deepEqual(result.usage, {
+    inputTokens: 1_000_000,
+    outputTokens: 1_000_000,
+    cacheReadTokens: 750_000,
+  });
+  assert.deepEqual(captured[0].system[0].cache_control, { type: "ephemeral" });
+  assert.equal(captured[0].messages[0].content[0].cache_control, undefined);
+  assert.deepEqual(captured[0].messages[1].content[0].cache_control, { type: "ephemeral" });
+  assert.deepEqual(captured[0].messages[2].content[0].cache_control, { type: "ephemeral" });
 });
 
 test("AnthropicProvider.query tolerates malformed tool_call argumentsJson", async () => {
@@ -302,7 +345,9 @@ test("AnthropicProvider.query uses Rust HTTP transport when no SDK client is inj
     assert.equal(observedRequest.url, "/v1/messages");
     assert.equal(observedRequest.apiKey, "sk-ant-test");
     assert.equal(observedRequest.version, "2023-06-01");
-    assert.equal(observedRequest.body.messages[0].content, "hi");
+    assert.deepEqual(observedRequest.body.messages[0].content, [
+      { type: "text", text: "hi", cache_control: { type: "ephemeral" } },
+    ]);
   } finally {
     if (originalBaseUrl === undefined) {
       delete process.env.ANTHROPIC_API_BASE_URL;
@@ -358,6 +403,7 @@ test("AnthropicProvider.runTurn sends Rust-built user message with supported inl
           media_type: "image/png",
           data: "AAAA",
         },
+        cache_control: { type: "ephemeral" },
       },
     ],
   });
@@ -437,8 +483,8 @@ test("AnthropicProvider.runTurn uses Rust HTTP transport for live tool loop when
             },
           },
         ],
-        handlers: {
-          async run_shell(input) {
+        executor: {
+          async execute({ input }) {
             assert.deepEqual(input, { command: "echo ok" });
             return { content: "ok", isError: false };
           },
@@ -455,7 +501,9 @@ test("AnthropicProvider.runTurn uses Rust HTTP transport for live tool loop when
     assert.equal(firstRequest.method, "POST");
     assert.equal(firstRequest.url, "/v1/messages");
     assert.equal(firstRequest.apiKey, "sk-ant-test");
-    assert.equal(firstRequest.body.messages[0].content, "use tool");
+    assert.deepEqual(firstRequest.body.messages[0].content, [
+      { type: "text", text: "use tool", cache_control: { type: "ephemeral" } },
+    ]);
     assert.equal(secondRequest.body.messages[1].content[0].type, "tool_use");
     assert.equal(secondRequest.body.messages[2].content[0].tool_use_id, "tu_1");
     assert.equal(secondRequest.body.messages[2].content[0].content, "ok");
@@ -490,7 +538,8 @@ test("AnthropicProvider.runTurn sends Rust-built tool_result blocks after tool c
     },
     { content: [{ type: "text", text: "done" }] },
   ]);
-  const provider = new BaseAnthropicProvider({
+  let provider;
+  provider = new BaseAnthropicProvider({
     apiKey: "sk-ant-test",
     model: "claude-sonnet-4-6",
     cwd: process.cwd(),
@@ -507,9 +556,10 @@ test("AnthropicProvider.runTurn sends Rust-built tool_result blocks after tool c
           },
         },
       ],
-      handlers: {
-        async run_shell(input) {
+      executor: {
+        async execute({ input }) {
           assert.deepEqual(input, { command: "echo ok" });
+          provider.updateRuntimeSettings({ model: "claude-opus-4-6" });
           return { content: "ok", isError: false };
         },
       },
@@ -519,6 +569,10 @@ test("AnthropicProvider.runTurn sends Rust-built tool_result blocks after tool c
   const result = await provider.runTurn("use tool");
 
   assert.equal(result.text, "done");
+  assert.deepEqual(captured.map((request) => request.model), [
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-6",
+  ]);
   assert.deepEqual(captured[1].messages[2], {
     role: "user",
     content: [
@@ -527,7 +581,32 @@ test("AnthropicProvider.runTurn sends Rust-built tool_result blocks after tool c
         tool_use_id: "tu_1",
         content: "ok",
         is_error: false,
+        cache_control: { type: "ephemeral" },
       },
     ],
   });
+});
+
+test("AnthropicProvider.runTurn reports one step and the response cost for a single model response", async () => {
+  const { client } = makeStubClient([
+    {
+      content: [{ type: "text", text: "single done" }],
+      usage: { input_tokens: 1000, output_tokens: 200 },
+    },
+  ]);
+  const provider = new BaseAnthropicProvider({
+    apiKey: "sk-ant-test",
+    model: "claude-sonnet-4-6",
+    cwd: process.cwd(),
+    client,
+  });
+
+  const result = await provider.runTurn("do one thing");
+
+  assert.equal(result.text, "single done");
+  // Claude Sonnet 4.6: $3.00/M input + $15.00/M output → $0.006 for 1000 + 200 tokens.
+  assert.deepEqual(
+    { steps: result.steps, costUsd: result.costUsd },
+    { steps: 1, costUsd: 0.006 },
+  );
 });

@@ -4,6 +4,8 @@ import type {
   ContextPacketViewItem,
 } from "@unclecode/contracts";
 
+import { sanitizeContextPreview } from "@unclecode/orchestrator";
+
 export type ContextInspectorBudgetState = "roomy" | "steady" | "tight" | "over";
 export type ContextInspectorSuggestionTone = "success" | "info" | "warning";
 
@@ -51,7 +53,7 @@ export function resolveContextSourceGroup(category: string): ContextInspectorHum
 }
 
 function formatSuggestionSourceLabel(row: ContextInspectorSuggestionRow): string {
-  return `${resolveContextSourceGroup(row.item.category)} · ${row.item.label}`;
+  return `${resolveContextSourceGroup(row.item.category)} · ${sanitizeContextPreview(row.item.label)}`;
 }
 
 export function formatContextTokenEstimate(
