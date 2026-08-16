@@ -2454,23 +2454,29 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
     undefined,
     "tool.started stays out of the default conversation transcript",
   );
-  assert.equal(
+  assert.deepEqual(
     resolveVerboseTraceEntry({
       traceMode: "minimal",
       event: { type: "tool.completed", toolName: "write_file" },
       line: "✓ wrote notes.txt · 7 lines",
     }),
-    undefined,
-    "completed file mutations use live status without polluting the conversation transcript",
+    {
+      role: "tool",
+      text: "✓ wrote notes.txt · 7 lines",
+    },
+    "completed file mutations append a transcript entry in every trace mode; the engine swaps the line for assembled detail text",
   );
-  assert.equal(
+  assert.deepEqual(
     resolveVerboseTraceEntry({
       traceMode: "minimal",
       event: { type: "tool.completed", toolName: "read_file" },
       line: "Read src/index.ts · 18 lines",
     }),
-    undefined,
-    "completed reads use live status without polluting the conversation transcript",
+    {
+      role: "tool",
+      text: "Read src/index.ts · 18 lines",
+    },
+    "completed reads append a transcript entry in every trace mode too",
   );
   assert.equal(
     resolveVerboseTraceEntry({
@@ -2547,7 +2553,11 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
     pushTraceLine() {},
   });
   assert.match(completedPatches[0]?.busyStatus ?? "", /npm test -- work/);
-  assert.deepEqual(completedEntries, []);
+  assert.deepEqual(
+    completedEntries,
+    [{ role: "tool", text: "bash" }],
+    "a completed tool appends the glyph-less assembled detail entry (verb row first), not the formatted one-liner",
+  );
 });
 
 test("assistant delta trace accumulates streaming assistant text without transcript noise", () => {
@@ -5698,7 +5708,11 @@ test("WorkShellEngine keeps a lightweight busy status even outside verbose trace
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.match(engine.getState().busyStatus ?? "", /read/i);
-  assert.deepEqual(engine.getState().entries, []);
+  assert.deepEqual(
+    engine.getState().entries,
+    [{ role: "tool", text: "read\n5ms" }],
+    "a completed read appends the assembled tool detail entry even in minimal trace mode",
+  );
   assert.deepEqual(engine.getState().traceLines, []);
 });
 
@@ -7026,15 +7040,21 @@ test("WorkShellEngine keeps a tool lifecycle burst out of the subscriber fan-out
   assert.equal(published.agentConsole.activity[1]?.status, "completed");
   assert.equal(published.agentConsole.agents[0]?.status, "completed");
   assert.equal(published.agentConsole.agents[0]?.currentActivity, undefined);
-  // Completed-tool lines are live status (and verbose transcript), not
-  // minimal transcript entries — for either scope.
+  // Completed tools land as assembled detail entries (never as the raw
+  // formatted one-liner), and only for the operator's own calls: a delegated
+  // run's completion (call-1) never reaches the transcript at all.
   assert.ok(
     !published.entries.some((entry) => entry.text === "✓ read call-main"),
-    "minimal trace mode keeps completed-tool lines out of the transcript",
+    "the formatted one-liner itself never lands in the transcript",
   );
   assert.ok(
     !published.entries.some((entry) => entry.text === "✓ read call-1"),
     "a delegated run's tool output belongs to the console, never to the transcript",
+  );
+  assert.equal(
+    published.entries.filter((entry) => entry.text === "read\n10ms").length,
+    1,
+    "exactly one assembled tool detail entry lands — the operator's call, not the delegated twin",
   );
 });
 

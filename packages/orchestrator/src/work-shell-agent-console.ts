@@ -712,7 +712,49 @@ function createCompletedActivity(input: {
   };
 }
 
-const UNIFIED_DIFF_HUNK_RE = /^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/m;
+export const UNIFIED_DIFF_HUNK_RE = /^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/m;
+
+const UNIFIED_DIFF_HUNK_LINE_RE = /^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/;
+
+const UNIFIED_DIFF_FILE_BOUNDARY_RE = /^(?:diff --git |--- |\+\+\+ )/;
+
+/**
+ * Count added/removed lines inside the unified-diff hunks embedded in a tool
+ * output. Returns undefined when the output carries no hunk header at all, so
+ * callers can render `+N −M` stats only for genuine diff output. File-level
+ * boundary lines (`diff --git`, `--- `, `+++ `) end the current hunk instead of
+ * being miscounted as content, which keeps multi-file patches honest.
+ */
+export function countUnifiedDiffLines(
+  output: string | undefined,
+): { readonly additions: number; readonly deletions: number } | undefined {
+  const normalized = output?.trim();
+  if (!normalized || !UNIFIED_DIFF_HUNK_RE.test(normalized)) {
+    return undefined;
+  }
+  let additions = 0;
+  let deletions = 0;
+  let inHunk = false;
+  for (const line of normalized.split(/\r?\n/)) {
+    if (UNIFIED_DIFF_HUNK_LINE_RE.test(line)) {
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) {
+      continue;
+    }
+    if (UNIFIED_DIFF_FILE_BOUNDARY_RE.test(line)) {
+      inHunk = false;
+      continue;
+    }
+    if (line.startsWith("+")) {
+      additions += 1;
+    } else if (line.startsWith("-")) {
+      deletions += 1;
+    }
+  }
+  return { additions, deletions };
+}
 
 /**
  * Pull a unified diff out of a completed write/patch call.
@@ -723,7 +765,7 @@ const UNIFIED_DIFF_HUNK_RE = /^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/m;
  * tool's own input is checked first — patch tools receive the diff as an
  * argument — then its output, for tools that echo the applied patch.
  */
-function deriveToolActivityPreview(input: {
+export function deriveToolActivityPreview(input: {
   readonly kind: ToolActivityKind;
   readonly trace: TraceRecord;
   readonly input: TraceRecord | undefined;
@@ -792,7 +834,7 @@ function deriveToolTarget(input: TraceRecord | undefined): string | undefined {
     ?? readNonEmptyString(input, "url");
 }
 
-function deriveToolOutputMetric(output: string | undefined): string | undefined {
+export function deriveToolOutputMetric(output: string | undefined): string | undefined {
   const normalized = output?.trim();
   if (!normalized) {
     return undefined;

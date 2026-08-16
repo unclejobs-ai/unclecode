@@ -41,7 +41,6 @@ fn resolve_work_shell_trace_event(input: &Value) -> Value {
 fn resolve_busy_status_action(event: &Value, line: &str) -> &'static str {
     match str_field(event, "type").unwrap_or_default() {
         "turn.completed" => "clear",
-        "turn.completed" => "clear",
         "turn.started" | "provider.calling" | "tool.started" | "tool.completed" => "set",
         "reasoning.delta" if !line.is_empty() => "set",
         "orchestrator.step" if str_field(event, "status") == Some("running") => "set",
@@ -77,7 +76,7 @@ fn extract_current_turn_started_at(event: &Value) -> Option<i64> {
     }
 }
 
-fn resolve_verbose_trace_entry(trace_mode: &str, event: &Value, line: &str) -> Option<Value> {
+fn resolve_verbose_trace_entry(_trace_mode: &str, event: &Value, line: &str) -> Option<Value> {
     if line.is_empty() {
         return None;
     }
@@ -87,7 +86,11 @@ fn resolve_verbose_trace_entry(trace_mode: &str, event: &Value, line: &str) -> O
             "role": "tool",
             "text": line,
         })),
-        "tool.completed" if trace_mode == "verbose" => Some(json!({
+        // tool.completed is a first-class transcript citizen in every trace
+        // mode: the decision only says "emit an entry"; the caller replaces
+        // the formatted one-liner with a multi-row glyph-less detail text
+        // assembled from the structured event.
+        "tool.completed" => Some(json!({
             "role": "tool",
             "text": line,
         })),
@@ -175,20 +178,20 @@ mod tests {
     }
 
     #[test]
-    fn resolves_completed_tool_status_and_verbose_entries() {
+    fn resolves_completed_tool_status_and_trace_entries() {
         assert_eq!(
             resolve_work_shell_trace_event_json(
                 r#"{"event":{"type":"tool.completed","toolName":"write_file","isError":false},"line":"✓ write 12ms notes.txt","traceMode":"minimal"}"#,
             )
             .unwrap(),
-            r#"{"busyStatus":"✓ write 12ms notes.txt","busyStatusAction":"set","traceEntryRole":"tool"}"#
+            r#"{"busyStatus":"✓ write 12ms notes.txt","busyStatusAction":"set","traceEntry":{"role":"tool","text":"✓ write 12ms notes.txt"},"traceEntryRole":"tool"}"#
         );
         assert_eq!(
             resolve_work_shell_trace_event_json(
                 r#"{"event":{"type":"tool.completed","toolName":"run_shell","isError":false},"line":"✓ bash 34ms cargo test -p unclecode-core","traceMode":"minimal"}"#,
             )
             .unwrap(),
-            r#"{"busyStatus":"✓ bash 34ms cargo test -p unclecode-core","busyStatusAction":"set","traceEntryRole":"tool"}"#
+            r#"{"busyStatus":"✓ bash 34ms cargo test -p unclecode-core","busyStatusAction":"set","traceEntry":{"role":"tool","text":"✓ bash 34ms cargo test -p unclecode-core"},"traceEntryRole":"tool"}"#
         );
         assert_eq!(
             resolve_work_shell_trace_event_json(
@@ -196,6 +199,14 @@ mod tests {
             )
             .unwrap(),
             r#"{"busyStatus":"✓ write 12ms notes.txt","busyStatusAction":"set","traceEntry":{"role":"tool","text":"✓ write 12ms notes.txt"},"traceEntryRole":"tool"}"#
+        );
+        assert_eq!(
+            resolve_work_shell_trace_event_json(
+                r#"{"event":{"type":"tool.completed","toolName":"read_file","isError":true},"line":"","traceMode":"minimal"}"#,
+            )
+            .unwrap(),
+            r#"{"busyStatus":"thinking","busyStatusAction":"set","traceEntryRole":"tool"}"#,
+            "an empty formatted line still emits no trace entry",
         );
         assert_eq!(
             resolve_work_shell_trace_event_json(
@@ -209,7 +220,8 @@ mod tests {
                 r#"{"event":{"type":"tool.started"},"line":"→ write notes.txt","traceMode":"minimal"}"#,
             )
             .unwrap(),
-            r#"{"busyStatus":"→ write notes.txt","busyStatusAction":"set","traceEntryRole":"tool"}"#
+            r#"{"busyStatus":"→ write notes.txt","busyStatusAction":"set","traceEntryRole":"tool"}"#,
+            "tool.started stays a live-status-only event in every trace mode",
         );
     }
 }
