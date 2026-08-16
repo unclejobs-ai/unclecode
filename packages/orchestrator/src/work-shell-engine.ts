@@ -417,6 +417,15 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly memoryLines: readonly string[];
   readonly panel: WorkShellPanel;
   readonly traceLines: readonly string[];
+  /**
+   * Always-filled live trace tail for the composer dock's busy feed. Unlike
+   * `traceLines` (verbose-only, tied to the context panel and cleared by
+   * `/minimal`), this buffer receives every meaningful formatted line in
+   * EVERY trace mode and is capped at the newest 8 entries — so the dock
+   * feed stays alive in default (minimal) mode. Overlay/panel semantics are
+   * unchanged because nothing but the dock feed consumes it.
+   */
+  readonly liveTraceLines: readonly string[];
   readonly traceMode: WorkShellTraceMode;
   readonly composerMode: WorkShellComposerMode;
   readonly isBusy: boolean;

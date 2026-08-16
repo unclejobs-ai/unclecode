@@ -258,7 +258,7 @@ export function WorkShellPane<
     busyStatus,
     currentTurnStartedAt,
     lastTurnDurationMs,
-    traceLines,
+    liveTraceLines,
     contextIndicator,
     contextActionReceipt,
     contextPreviewReceipt,
@@ -305,10 +305,13 @@ export function WorkShellPane<
     [props.getReasoningLabel, reasoning],
   );
   // Task 10: the dock's live tool feed carries only the trace tail — what the
-  // running turn touched most recently. The transcript's own trace filtering
-  // is untouched; these raw lines never enter the conversation rail.
-  const liveToolTraceLines = traceLines !== undefined && traceLines.length > 0
-    ? traceLines.slice(-3)
+  // running turn touched most recently. The feed reads the engine's
+  // always-filled liveTraceLines buffer (cap 8, every trace mode), not the
+  // verbose-only traceLines, so it stays alive in default (minimal) mode.
+  // The transcript's own trace filtering is untouched; these raw lines never
+  // enter the conversation rail.
+  const liveToolTraceLines = liveTraceLines !== undefined && liveTraceLines.length > 0
+    ? liveTraceLines.slice(-3)
     : undefined;
   const reasoningSupported = React.useMemo(
     () => props.isReasoningSupported(reasoning),

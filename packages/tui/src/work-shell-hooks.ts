@@ -293,6 +293,12 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   // tool feed in the composer dock). Optional so hosts and test fakes
   // without engine trace state render no feed.
   readonly traceLines?: readonly string[];
+  // Always-filled live trace tail (engine-owned, capped at 8). The pane's
+  // dock feed reads THIS buffer — not the verbose-only `traceLines` above —
+  // so the busy feed stays alive in default (minimal) trace mode.
+  // Optional so hosts and test fakes without engine trace state render no
+  // feed.
+  readonly liveTraceLines?: readonly string[];
   readonly authLauncherLines?: readonly string[];
   readonly composerMode?: WorkShellComposerMode;
   readonly panel: WorkShellPanel;

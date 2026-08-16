@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { stripVTControlCharacters } from "node:util";
+import { PassThrough, Writable } from "node:stream";
 
 import React from "react";
+import { render } from "ink";
 
 import { renderDebugFrame, waitForSettledFrame } from "./work-shell-render-harness.mjs";
 import { getDisplayWidth } from "../../packages/tui/src/text-width.ts";
@@ -21,6 +23,11 @@ import {
   shouldSuppressWorkShellPassivePanel,
   shouldUseCompactAssistantSurface,
 } from "../../packages/tui/src/work-shell-view.tsx";
+import { WorkShellPane } from "../../packages/tui/src/index.tsx";
+import {
+  getWorkShellSlashSuggestions,
+  shouldBlockSlashSubmit,
+} from "../../packages/orchestrator/src/index.ts";
 
 function getLastWorkShellFrame(output) {
   const frameStart = output.lastIndexOf("UncleCode ·");
@@ -763,4 +770,156 @@ test("an over-width trace line truncates to a single dock row", async () => {
   assert.ok(getDisplayWidth(feedRows[0]) <= 52, `feed row exceeded terminal width: ${feedRows[0]}`);
   assert.match(feedRows[0], /…/u, "truncation should leave an ellipsis");
   assert.doesNotMatch(frame, /pane\.tsx/u, "the truncated tail must not wrap onto a second row");
+});
+
+// Task 5: the feed's source is the engine's always-filled `liveTraceLines`
+// buffer, not the verbose-only `traceLines` — so the busy dock stays alive in
+// default (minimal) trace mode. These pane-level cases inject the buffer the
+// way the engine does and prove the wiring end to end.
+
+function createLiveFeedPaneEngine(overrides = {}) {
+  let state = {
+    entries: [],
+    model: "gpt-5.4",
+    mode: "default",
+    reasoning: "medium",
+    authLabel: "oauth-file",
+    isBusy: false,
+    bridgeLines: [],
+    memoryLines: [],
+    panel: { title: "Session status", lines: ["Work context ready."] },
+    traceMode: "minimal",
+    traceLines: [],
+    ...overrides,
+  };
+  const listeners = new Set();
+  return {
+    engine: {
+      getState: () => state,
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+      initialize: async () => {},
+      dispose: () => {},
+      handleSubmit: async () => {},
+      setMode: async () => {},
+      openSessionsPanel: async () => {},
+    },
+  };
+}
+
+function renderLiveFeedPane(engine) {
+  const stdin = new PassThrough();
+  stdin.isTTY = true;
+  stdin.setRawMode = () => stdin;
+  stdin.resume = () => stdin;
+  stdin.pause = () => stdin;
+  stdin.ref = () => stdin;
+  stdin.unref = () => stdin;
+  const stdout = new PassThrough();
+  stdout.columns = 100;
+  stdout.rows = 30;
+  stdout.isTTY = true;
+  let output = "";
+  stdout.on("data", (chunk) => {
+    output += chunk.toString();
+  });
+  const stderr = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+  });
+  stderr.columns = 100;
+  stderr.rows = 30;
+  stderr.isTTY = true;
+  const instance = render(
+    React.createElement(WorkShellPane, {
+      provider: "OpenAI",
+      model: "gpt-5.4",
+      mode: "default",
+      engine,
+      cwd: "/tmp/unclecode-live-feed-workspace",
+      resolveComposerInput: async (value) => ({
+        prompt: value,
+        attachments: [],
+        transcriptText: value,
+      }),
+      getSuggestions: (value) =>
+        getWorkShellSlashSuggestions(value, {
+          provider: "openai",
+          currentModel: "gpt-5.4",
+        }),
+      onExit: () => {},
+      shouldBlockSlashSubmit: (line) =>
+        shouldBlockSlashSubmit(line, {
+          provider: "openai",
+          currentModel: "gpt-5.4",
+        }),
+      getReasoningLabel: () => "default medium",
+      isReasoningSupported: () => true,
+    }),
+    {
+      stdin,
+      stdout,
+      stderr,
+      debug: true,
+      patchConsole: false,
+      exitOnCtrlC: false,
+    },
+  );
+  return { instance, getOutput: () => output };
+}
+
+test("busy pane streams the liveTraceLines tail in minimal trace mode", async () => {
+  const liveTraceLines = Array.from(
+    { length: 8 },
+    (_, index) => `→ read src/step-0${index + 1}.ts`,
+  );
+  const { instance, getOutput } = renderLiveFeedPane(createLiveFeedPaneEngine({
+    isBusy: true,
+    busyStatus: "read src/app.ts",
+    currentTurnStartedAt: Date.now() - 1_000,
+    liveTraceLines,
+  }).engine);
+
+  await waitForSettledFrame(getOutput);
+  const frame = getLastWorkShellFrame(getOutput());
+  instance.unmount();
+  instance.cleanup();
+
+  const rows = frame.split("\n");
+  const activityIndex = rows.findIndex((row) => SPINNER.test(row));
+  assert.ok(activityIndex >= 0, `expected the dock activity row, received:\n${frame}`);
+  const promptIndex = rows.findIndex((row) => row.trimStart().startsWith("›"));
+  assert.ok(promptIndex > activityIndex, `the prompt row should sit below the activity row, received:\n${frame}`);
+  for (const line of liveTraceLines.slice(-3)) {
+    const feedIndex = rows.findIndex((row) => row.includes(line));
+    assert.ok(
+      feedIndex > activityIndex && feedIndex < promptIndex,
+      `feed line ${line} should render between the activity row and the › row, received:\n${frame}`,
+    );
+  }
+  for (const line of liveTraceLines.slice(0, liveTraceLines.length - 3)) {
+    assert.ok(
+      !frame.includes(line),
+      `older buffer line ${line} must stay out of the 3-row dock feed, received:\n${frame}`,
+    );
+  }
+});
+
+test("idle pane renders no liveTraceLines feed even with a filled buffer", async () => {
+  const { instance, getOutput } = renderLiveFeedPane(createLiveFeedPaneEngine({
+    liveTraceLines: ["→ read src/app.ts"],
+  }).engine);
+
+  await waitForSettledFrame(getOutput);
+  const frame = getLastWorkShellFrame(getOutput());
+  instance.unmount();
+  instance.cleanup();
+
+  assert.doesNotMatch(frame, /→ read src\/app\.ts/u, "the liveTraceLines feed is busy-only");
+  assert.doesNotMatch(frame, SPINNER, "idle frames must not render a spinner glyph");
 });

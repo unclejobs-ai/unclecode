@@ -48,6 +48,13 @@ const WORK_SHELL_REASONING_ACCUMULATION_MAX_CHARS = 2000;
 const WORK_SHELL_REASONING_SUMMARY_MAX_ROWS = 6;
 
 /**
+ * Row cap for the always-filled live trace tail feeding the composer dock.
+ * The dock renders the newest 3; the wider 8-entry buffer keeps the tail
+ * meaningful across the coalesced publish window without growing state.
+ */
+const WORK_SHELL_LIVE_TRACE_LINES_MAX = 8;
+
+/**
  * Accumulate one reasoning delta into the per-turn buffer. Both `text` and
  * `summary` reasoning kinds contribute to the same buffer — they are two
  * spellings of the turn's thinking, not two summaries. Returns undefined
@@ -391,6 +398,22 @@ export function applyWorkShellTraceEvent<
 
   if (line.trim().length > 0 && input.state.traceMode === "verbose") {
     input.pushTraceLine(line);
+  }
+
+  // The dock feed rides its own always-filled buffer: every meaningful line
+  // lands in liveTraceLines in EVERY trace mode, capped to the newest
+  // WORK_SHELL_LIVE_TRACE_LINES_MAX entries (oldest dropped first). This is
+  // deliberately separate from the verbose-only traceLines push above — the
+  // context overlay, the panel rebuild, and `/minimal`'s traceLines cleanup
+  // keep their exact semantics, while the busy dock never goes dark in
+  // default (minimal) mode. Executor-scoped events never reach here (the
+  // engine drops them before applying this function).
+  if (line.trim().length > 0) {
+    input.setState({
+      liveTraceLines: [...(input.state.liveTraceLines ?? []), line].slice(
+        -WORK_SHELL_LIVE_TRACE_LINES_MAX,
+      ),
+    });
   }
 
   const traceEntry = resolveVerboseTraceEntry({

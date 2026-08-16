@@ -2538,9 +2538,14 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
       liveTraceLines.push(line);
     },
   });
-  assert.equal(livePatches.length, 1);
+  assert.equal(livePatches.length, 2);
   assert.equal(liveEntries.length, 0);
   assert.deepEqual(liveTraceLines, ["calling openai gpt-5.4"]);
+  assert.deepEqual(
+    livePatches[1],
+    { liveTraceLines: ["calling openai gpt-5.4"] },
+    "verbose mode fills the always-on live feed buffer alongside traceLines",
+  );
   const completedPatches = [];
   const completedEntries = [];
   applyWorkShellTraceEvent({
@@ -2556,6 +2561,11 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
     pushTraceLine() {},
   });
   assert.match(completedPatches[0]?.busyStatus ?? "", /npm test -- work/);
+  assert.deepEqual(
+    completedPatches[1],
+    { liveTraceLines: ["✓ $ npm test -- work · 34ms"] },
+    "minimal mode fills the live feed buffer too — the dock feed never depends on verbose mode",
+  );
   assert.deepEqual(
     completedEntries,
     [{ role: "tool", text: "bash" }],
@@ -5871,6 +5881,11 @@ test("WorkShellEngine starts in minimal trace mode for default sessions", async 
 
   assert.equal(engine.getState().traceMode, "minimal");
   assert.deepEqual(engine.getState().traceLines, []);
+  assert.deepEqual(
+    engine.getState().liveTraceLines,
+    ["executor Inspect login.ts"],
+    "the always-on live feed buffer fills even in minimal trace mode",
+  );
 });
 
 test("WorkShellEngine keeps a lightweight busy status even outside verbose trace mode", async () => {
@@ -5889,6 +5904,11 @@ test("WorkShellEngine keeps a lightweight busy status even outside verbose trace
   assert.match(engine.getState().busyStatus ?? "", /thinking/i);
   assert.equal(typeof engine.getState().currentTurnStartedAt, "number");
   assert.equal(engine.getState().traceLines.length, 0);
+  assert.deepEqual(
+    engine.getState().liveTraceLines,
+    ["thinking inspect repo"],
+    "a minimal-mode turn already feeds the live dock buffer",
+  );
 
   emitTrace({
     type: "reasoning.delta",
@@ -5899,6 +5919,11 @@ test("WorkShellEngine keeps a lightweight busy status even outside verbose trace
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.match(engine.getState().busyStatus ?? "", /inspect repo before editing/i);
+  assert.deepEqual(
+    engine.getState().liveTraceLines,
+    ["thinking inspect repo", "✦ thinking· inspect repo before editing"],
+    "reasoning deltas append to the live feed buffer",
+  );
 
   emitTrace({
     type: "tool.started",
@@ -5929,6 +5954,105 @@ test("WorkShellEngine keeps a lightweight busy status even outside verbose trace
     "a completed read appends the assembled tool detail entry even in minimal trace mode",
   );
   assert.deepEqual(engine.getState().traceLines, []);
+  assert.deepEqual(
+    engine.getState().liveTraceLines,
+    [
+      "thinking inspect repo",
+      "✦ thinking· inspect repo before editing",
+      "→ read README.md",
+      "✓ read 5ms",
+    ],
+    "minimal mode keeps filling the live dock buffer while traceLines stays empty",
+  );
+});
+
+test("WorkShellEngine fills both trace buffers in verbose mode", async () => {
+  const { engine, emitTrace } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/verbose");
+  emitTrace({
+    type: "tool.started",
+    provider: "openai",
+    toolName: "read_file",
+    toolCallId: "call-verbose-1",
+    input: { path: "README.md" },
+    startedAt: 1,
+  });
+  emitTrace({
+    type: "reasoning.delta",
+    provider: "openai",
+    model: "gpt-5.6-luna",
+    kind: "summary",
+    delta: "inspect repo before editing",
+  });
+
+  assert.deepEqual(
+    engine.getState().traceLines,
+    ["✦ thinking· inspect repo before editing", "→ read README.md"],
+    "traceLines keeps its existing newest-first buffer ordering",
+  );
+  assert.deepEqual(
+    engine.getState().liveTraceLines,
+    ["→ read README.md", "✦ thinking· inspect repo before editing"],
+    "liveTraceLines fills in chronological order (newest last) in verbose mode too",
+  );
+});
+
+test("WorkShellEngine keeps the live feed buffer alive across /minimal", async () => {
+  const { engine, emitTrace } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/verbose");
+  emitTrace({
+    type: "tool.started",
+    provider: "openai",
+    toolName: "read_file",
+    toolCallId: "call-minimal-1",
+    input: { path: "README.md" },
+    startedAt: 1,
+  });
+  assert.ok(engine.getState().traceLines.length > 0);
+  assert.ok(engine.getState().liveTraceLines.length > 0);
+
+  await engine.handleSubmit("/minimal");
+
+  assert.equal(engine.getState().traceMode, "minimal");
+  assert.deepEqual(
+    engine.getState().traceLines,
+    [],
+    "/minimal still clears the verbose-only trace buffer",
+  );
+  assert.deepEqual(
+    engine.getState().liveTraceLines,
+    ["→ read README.md"],
+    "/minimal leaves the live dock buffer alone so the feed never breaks",
+  );
+});
+
+test("WorkShellEngine caps the live feed buffer at the newest 8 lines", async () => {
+  const { engine, emitTrace } = createEngine();
+
+  await engine.initialize();
+  for (let step = 1; step <= 10; step += 1) {
+    emitTrace({
+      type: "orchestrator.step",
+      role: "executor",
+      status: "running",
+      summary: `step ${step}`,
+    });
+  }
+
+  assert.deepEqual(
+    engine.getState().liveTraceLines,
+    Array.from({ length: 8 }, (_, index) => `executor step ${index + 3}`),
+    "the live buffer keeps only the newest 8 lines (oldest dropped first)",
+  );
+  assert.deepEqual(
+    engine.getState().traceLines,
+    [],
+    "minimal mode keeps the verbose-only trace buffer empty",
+  );
 });
 
 test("WorkShellEngine soft-interrupts a busy turn and ignores late assistant output", async () => {
@@ -7313,6 +7437,11 @@ test("WorkShellEngine keeps executor-scoped turn traces off the main transcript 
   );
   assert.deepEqual(engine.getState().traceLines, []);
   assert.deepEqual(
+    engine.getState().liveTraceLines,
+    [],
+    "executor-scoped lines never reach the live dock feed either",
+  );
+  assert.deepEqual(
     engine.getState().entries.slice(entriesBefore).map((entry) => entry.text),
     [],
     "no executor-scoped line may reach the operator's transcript",
@@ -7340,6 +7469,10 @@ test("WorkShellEngine keeps executor-scoped turn traces off the main transcript 
     "the delegated prompt never reaches the operator's status line",
   );
   assert.ok(engine.getState().traceLines.some((line) => /thinking inspect repo/.test(line)));
+  assert.ok(
+    engine.getState().liveTraceLines.some((line) => /thinking inspect repo/.test(line)),
+    "the operator's own turn feeds the live dock buffer",
+  );
 });
 
 test("WorkShellEngine reduces lifecycle events from the newest decision and manifest state", async () => {
