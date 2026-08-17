@@ -137,6 +137,7 @@ test("runtime QA stays split into inspectable modules", () => {
     "tui-openai-stream-smoke.mjs",
     "tui-parallel-mode-korean-smoke.mjs",
     "tui-real-use-smoke.mjs",
+    "tui-scrollback-smoke.mjs",
     "tui-slash-latency-smoke.mjs",
     "tui-suite-smokes.mjs",
   ]);
