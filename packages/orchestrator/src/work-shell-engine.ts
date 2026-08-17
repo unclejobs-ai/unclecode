@@ -400,6 +400,14 @@ export type WorkShellComposerMode = "default" | "api-key-entry" | "agent-steer";
 export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly entries: readonly WorkShellChatEntry[];
   readonly streamingAssistantText?: string | undefined;
+  /**
+   * Per-turn reasoning accumulation: `reasoning.delta` events (both `text`
+   * and `summary` kinds) append here, capped at 2000 chars. It flushes as
+   * ONE `✻ `-prefixed assistant summary entry at the first assistant delta
+   * or turn completion — whichever arrives first — and resets after the
+   * flush and at every turn end (success, failure, cancel, interrupt).
+   */
+  readonly streamingReasoningText?: string | undefined;
   readonly model: string;
   readonly mode: string;
   readonly reasoning: Reasoning;
@@ -409,6 +417,15 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly memoryLines: readonly string[];
   readonly panel: WorkShellPanel;
   readonly traceLines: readonly string[];
+  /**
+   * Always-filled live trace tail for the composer dock's busy feed. Unlike
+   * `traceLines` (verbose-only, tied to the context panel and cleared by
+   * `/minimal`), this buffer receives every meaningful formatted line in
+   * EVERY trace mode and is capped at the newest 8 entries — so the dock
+   * feed stays alive in default (minimal) mode. Overlay/panel semantics are
+   * unchanged because nothing but the dock feed consumes it.
+   */
+  readonly liveTraceLines: readonly string[];
   readonly traceMode: WorkShellTraceMode;
   readonly composerMode: WorkShellComposerMode;
   readonly isBusy: boolean;
@@ -2125,6 +2142,7 @@ export class WorkShellEngine<
       busyStatus: undefined,
       currentTurnStartedAt: undefined,
       streamingAssistantText: undefined,
+      streamingReasoningText: undefined,
       queuePaused: this.queueAutoDrainPaused,
       ...(lastTurnDurationMs !== undefined ? { lastTurnDurationMs } : {}),
     });

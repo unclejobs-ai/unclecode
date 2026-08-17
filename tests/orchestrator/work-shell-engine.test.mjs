@@ -27,6 +27,7 @@ import {
   resolveModelBuiltinResult,
   resolveQueueBlockedReason,
   resolveReasoningBuiltinResult,
+  resolveLastCompletedTurn,
   buildWorkShellQueueBuiltinInput,
 } from "../../packages/orchestrator/src/work-shell-engine-builtins.ts";
 import { executeWorkShellBuiltinSubmit } from "../../packages/orchestrator/src/work-shell-engine-builtin-runtime.ts";
@@ -1443,12 +1444,14 @@ test("work-shell execution helpers assemble start, success, failure, finalize, a
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
     streamingAssistantText: undefined,
+    streamingReasoningText: undefined,
   });
   assert.deepEqual(resolvePromptTurnFinalizePatch(), {
     isBusy: false,
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
     streamingAssistantText: undefined,
+    streamingReasoningText: undefined,
   });
 });
 
@@ -2454,23 +2457,29 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
     undefined,
     "tool.started stays out of the default conversation transcript",
   );
-  assert.equal(
+  assert.deepEqual(
     resolveVerboseTraceEntry({
       traceMode: "minimal",
       event: { type: "tool.completed", toolName: "write_file" },
       line: "✓ wrote notes.txt · 7 lines",
     }),
-    undefined,
-    "completed file mutations use live status without polluting the conversation transcript",
+    {
+      role: "tool",
+      text: "✓ wrote notes.txt · 7 lines",
+    },
+    "completed file mutations append a transcript entry in every trace mode; the engine swaps the line for assembled detail text",
   );
-  assert.equal(
+  assert.deepEqual(
     resolveVerboseTraceEntry({
       traceMode: "minimal",
       event: { type: "tool.completed", toolName: "read_file" },
       line: "Read src/index.ts · 18 lines",
     }),
-    undefined,
-    "completed reads use live status without polluting the conversation transcript",
+    {
+      role: "tool",
+      text: "Read src/index.ts · 18 lines",
+    },
+    "completed reads append a transcript entry in every trace mode too",
   );
   assert.equal(
     resolveVerboseTraceEntry({
@@ -2529,9 +2538,14 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
       liveTraceLines.push(line);
     },
   });
-  assert.equal(livePatches.length, 1);
+  assert.equal(livePatches.length, 2);
   assert.equal(liveEntries.length, 0);
   assert.deepEqual(liveTraceLines, ["calling openai gpt-5.4"]);
+  assert.deepEqual(
+    livePatches[1],
+    { liveTraceLines: ["calling openai gpt-5.4"] },
+    "verbose mode fills the always-on live feed buffer alongside traceLines",
+  );
   const completedPatches = [];
   const completedEntries = [];
   applyWorkShellTraceEvent({
@@ -2547,7 +2561,16 @@ test("work-shell trace helpers derive busy status, apply live updates, and map t
     pushTraceLine() {},
   });
   assert.match(completedPatches[0]?.busyStatus ?? "", /npm test -- work/);
-  assert.deepEqual(completedEntries, []);
+  assert.deepEqual(
+    completedPatches[1],
+    { liveTraceLines: ["✓ $ npm test -- work · 34ms"] },
+    "minimal mode fills the live feed buffer too — the dock feed never depends on verbose mode",
+  );
+  assert.deepEqual(
+    completedEntries,
+    [{ role: "tool", text: "bash" }],
+    "a completed tool appends the glyph-less assembled detail entry (verb row first), not the formatted one-liner",
+  );
 });
 
 test("assistant delta trace accumulates streaming assistant text without transcript noise", () => {
@@ -2581,6 +2604,218 @@ test("assistant delta trace accumulates streaming assistant text without transcr
   assert.deepEqual(patches, [{ streamingAssistantText: "Hello" }]);
   assert.deepEqual(liveEntries, []);
   assert.deepEqual(liveTraceLines, []);
+});
+
+/**
+ * Drive applyWorkShellTraceEvent the way the engine does: the trace listener
+ * stages each patch synchronously, so every event sees the previous event's
+ * streaming state. The returned apply() threads that staging forward.
+ */
+function createTraceEventDriver(overrides = {}) {
+  let state = createState({ isBusy: true, ...overrides });
+  const entries = [];
+  const apply = (event) => {
+    applyWorkShellTraceEvent({
+      state,
+      event,
+      formatAgentTraceLine: (candidate) => {
+        if (candidate.type === "reasoning.delta") return `✦ thinking· ${candidate.delta ?? ""}`;
+        if (candidate.type === "turn.completed") return `done ${candidate.durationMs ?? 0}`;
+        return "";
+      },
+      setState: (patch) => {
+        state = { ...state, ...patch };
+      },
+      appendEntries: (...next) => {
+        entries.push(...next);
+        state = { ...state, entries: [...state.entries, ...next] };
+      },
+      pushTraceLine() {},
+    });
+  };
+  return { apply, get state() { return state; }, entries };
+}
+
+test("reasoning deltas accumulate per turn without transcript noise or busy-status drift", () => {
+  const driver = createTraceEventDriver();
+
+  driver.apply({ type: "reasoning.delta", kind: "text", delta: "inspect the repo" });
+  driver.apply({ type: "reasoning.delta", kind: "summary", delta: "\nthen edit notes.txt" });
+
+  assert.equal(driver.state.streamingReasoningText, "inspect the repo\nthen edit notes.txt");
+  assert.deepEqual(driver.entries, [], "reasoning never appends live transcript entries");
+  // The dock activity row keeps its existing behavior: the LAST reasoning
+  // line stays the busy phrase — accumulation did not disturb it.
+  assert.match(driver.state.busyStatus ?? "", /✦ thinking· \nthen edit notes\.txt/u);
+});
+
+test("the accumulated reasoning flushes as ONE ✻ entry at the first assistant delta", () => {
+  const driver = createTraceEventDriver();
+
+  driver.apply({ type: "reasoning.delta", kind: "text", delta: "inspect the repo" });
+  driver.apply({ type: "reasoning.delta", kind: "summary", delta: "\nthen edit notes.txt" });
+  driver.apply({ type: "assistant.delta", delta: "He" });
+  driver.apply({ type: "assistant.delta", delta: "llo" });
+
+  assert.deepEqual(
+    driver.entries,
+    [{ role: "assistant", text: "✻ inspect the repo\nthen edit notes.txt" }],
+    "exactly one ✻ entry flushes — later assistant deltas never add a second",
+  );
+  assert.equal(driver.state.streamingReasoningText, undefined, "the buffer resets after the flush");
+  assert.equal(driver.state.streamingAssistantText, "Hello", "the answer text still streams normally");
+});
+
+test("the ✻ summary carries at most the first 6 rows of the accumulated reasoning", () => {
+  const driver = createTraceEventDriver();
+  driver.apply({
+    type: "reasoning.delta",
+    kind: "text",
+    delta: ["row 1", "row 2", "row 3", "row 4", "row 5", "row 6", "row 7", "row 8"].join("\n"),
+  });
+  driver.apply({ type: "assistant.delta", delta: "Answer." });
+
+  assert.equal(driver.entries.length, 1);
+  assert.deepEqual(
+    driver.entries[0].text.split("\n"),
+    ["✻ row 1", "row 2", "row 3", "row 4", "row 5", "row 6"],
+    "rows past the 6th are dropped by the hard cap",
+  );
+});
+
+test("the reasoning buffer stops at 2000 characters even against a runaway stream", () => {
+  const driver = createTraceEventDriver();
+
+  driver.apply({ type: "reasoning.delta", kind: "text", delta: "x".repeat(1500) });
+  driver.apply({ type: "reasoning.delta", kind: "summary", delta: "y".repeat(900) });
+  driver.apply({ type: "reasoning.delta", kind: "text", delta: "z".repeat(50) });
+
+  assert.equal(driver.state.streamingReasoningText?.length, 2000);
+  assert.ok(driver.state.streamingReasoningText?.endsWith("y"), "the cap keeps the earliest 2000 chars");
+});
+
+test("turn.completed flushes the reasoning when no assistant delta ever arrived", () => {
+  const driver = createTraceEventDriver();
+
+  driver.apply({ type: "reasoning.delta", kind: "text", delta: "thought about it, decided to stay quiet" });
+  driver.apply({ type: "turn.completed", durationMs: 42 });
+
+  assert.deepEqual(driver.entries, [
+    { role: "assistant", text: "✻ thought about it, decided to stay quiet" },
+  ]);
+  assert.equal(driver.state.streamingReasoningText, undefined);
+  assert.equal(driver.state.busyStatus, undefined, "turn completion still clears the busy row");
+});
+
+test("turns without visible reasoning never grow a ✻ entry", () => {
+  const quiet = createTraceEventDriver();
+  quiet.apply({ type: "assistant.delta", delta: "Hi" });
+  quiet.apply({ type: "turn.completed", durationMs: 7 });
+  assert.deepEqual(quiet.entries, [], "no accumulation means no entry at either flush trigger");
+
+  const blank = createTraceEventDriver();
+  blank.apply({ type: "reasoning.delta", kind: "text", delta: "   " });
+  blank.apply({ type: "reasoning.delta", kind: "summary", delta: "\n \n" });
+  blank.apply({ type: "turn.completed", durationMs: 7 });
+  assert.deepEqual(blank.entries, [], "a whitespace-only accumulation is empty, not blank-row noise");
+  assert.equal(blank.state.streamingReasoningText, undefined, "the flush still resets the buffer");
+});
+
+test("the reasoning buffer resets between turns", () => {
+  const driver = createTraceEventDriver();
+
+  driver.apply({ type: "reasoning.delta", kind: "text", delta: "first turn thinking" });
+  driver.apply({ type: "turn.completed", durationMs: 5 });
+  driver.apply({ type: "reasoning.delta", kind: "text", delta: "second turn thinking" });
+  driver.apply({ type: "turn.completed", durationMs: 6 });
+
+  assert.deepEqual(driver.entries, [
+    { role: "assistant", text: "✻ first turn thinking" },
+    { role: "assistant", text: "✻ second turn thinking" },
+  ], "each turn's summary carries only that turn's reasoning");
+});
+
+test("WorkShellEngine lands the ✻ reasoning summary in front of the assistant reply", async () => {
+  const { engine, calls } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener(listener) {
+        calls.traceListener = listener;
+      },
+      async runTurn() {
+        const emit = calls.traceListener;
+        emit?.({
+          type: "reasoning.delta",
+          level: "default",
+          provider: "openai",
+          model: "gpt-5.4",
+          kind: "text",
+          itemId: "rs_1",
+          delta: "inspect repo before editing",
+        });
+        emit?.({
+          type: "assistant.delta",
+          level: "default",
+          provider: "openai",
+          model: "gpt-5.4",
+          itemId: "msg_1",
+          delta: "All clear.",
+        });
+        return { text: "All clear." };
+      },
+    },
+  });
+
+  await engine.initialize();
+  await engine.handleSubmit("check the repo");
+
+  const texts = engine.getState().entries.map((entry) => entry.text);
+  const reasoningIndex = texts.findIndex((text) => text.startsWith("✻ "));
+  const answerIndex = texts.indexOf("All clear.");
+  assert.ok(reasoningIndex >= 0, "the turn's reasoning summary must land in the transcript");
+  assert.ok(
+    answerIndex > reasoningIndex,
+    "the ✻ summary lands in front of the assistant reply it preceded",
+  );
+  assert.equal(
+    texts.filter((text) => text.startsWith("✻ ")).length,
+    1,
+    "exactly one ✻ entry per turn",
+  );
+  assert.equal(texts[reasoningIndex], "✻ inspect repo before editing");
+  assert.equal(engine.getState().streamingReasoningText, undefined, "the turn end resets the buffer");
+});
+
+test("resolveLastCompletedTurn skips ✻ reasoning entries so thinking never poses as the reply", () => {
+  // The reasoning summary behind a real answer is invisible to the snapshot.
+  assert.deepEqual(
+    resolveLastCompletedTurn([
+      { role: "user", text: "fix the bug" },
+      { role: "assistant", text: "✻ plan the fix" },
+      { role: "assistant", text: "Fixed in a.ts" },
+    ]),
+    { user: "fix the bug", assistant: "Fixed in a.ts" },
+  );
+  // An answer-less turn: the ✻ summary is not the reply, so the turn
+  // contributes nothing to the queue preview / idle snapshot.
+  assert.equal(
+    resolveLastCompletedTurn([
+      { role: "user", text: "fix the bug" },
+      { role: "assistant", text: "✻ plan the fix" },
+    ]),
+    undefined,
+  );
+  // An earlier turn's real answer is still reachable through the skipped one.
+  assert.deepEqual(
+    resolveLastCompletedTurn([
+      { role: "user", text: "earlier ask" },
+      { role: "assistant", text: "earlier answer" },
+      { role: "user", text: "fix the bug" },
+      { role: "assistant", text: "✻ plan the fix" },
+    ]),
+    { user: "earlier ask", assistant: "earlier answer" },
+  );
 });
 
 test("work-shell snapshot and context loaders stay available through their helper seams", async () => {
@@ -5646,6 +5881,11 @@ test("WorkShellEngine starts in minimal trace mode for default sessions", async 
 
   assert.equal(engine.getState().traceMode, "minimal");
   assert.deepEqual(engine.getState().traceLines, []);
+  assert.deepEqual(
+    engine.getState().liveTraceLines,
+    ["executor Inspect login.ts"],
+    "the always-on live feed buffer fills even in minimal trace mode",
+  );
 });
 
 test("WorkShellEngine keeps a lightweight busy status even outside verbose trace mode", async () => {
@@ -5664,6 +5904,11 @@ test("WorkShellEngine keeps a lightweight busy status even outside verbose trace
   assert.match(engine.getState().busyStatus ?? "", /thinking/i);
   assert.equal(typeof engine.getState().currentTurnStartedAt, "number");
   assert.equal(engine.getState().traceLines.length, 0);
+  assert.deepEqual(
+    engine.getState().liveTraceLines,
+    ["thinking inspect repo"],
+    "a minimal-mode turn already feeds the live dock buffer",
+  );
 
   emitTrace({
     type: "reasoning.delta",
@@ -5674,6 +5919,11 @@ test("WorkShellEngine keeps a lightweight busy status even outside verbose trace
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.match(engine.getState().busyStatus ?? "", /inspect repo before editing/i);
+  assert.deepEqual(
+    engine.getState().liveTraceLines,
+    ["thinking inspect repo", "✦ thinking· inspect repo before editing"],
+    "reasoning deltas append to the live feed buffer",
+  );
 
   emitTrace({
     type: "tool.started",
@@ -5698,8 +5948,111 @@ test("WorkShellEngine keeps a lightweight busy status even outside verbose trace
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.match(engine.getState().busyStatus ?? "", /read/i);
-  assert.deepEqual(engine.getState().entries, []);
+  assert.deepEqual(
+    engine.getState().entries,
+    [{ role: "tool", text: "read\n5ms" }],
+    "a completed read appends the assembled tool detail entry even in minimal trace mode",
+  );
   assert.deepEqual(engine.getState().traceLines, []);
+  assert.deepEqual(
+    engine.getState().liveTraceLines,
+    [
+      "thinking inspect repo",
+      "✦ thinking· inspect repo before editing",
+      "→ read README.md",
+      "✓ read 5ms",
+    ],
+    "minimal mode keeps filling the live dock buffer while traceLines stays empty",
+  );
+});
+
+test("WorkShellEngine fills both trace buffers in verbose mode", async () => {
+  const { engine, emitTrace } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/verbose");
+  emitTrace({
+    type: "tool.started",
+    provider: "openai",
+    toolName: "read_file",
+    toolCallId: "call-verbose-1",
+    input: { path: "README.md" },
+    startedAt: 1,
+  });
+  emitTrace({
+    type: "reasoning.delta",
+    provider: "openai",
+    model: "gpt-5.6-luna",
+    kind: "summary",
+    delta: "inspect repo before editing",
+  });
+
+  assert.deepEqual(
+    engine.getState().traceLines,
+    ["✦ thinking· inspect repo before editing", "→ read README.md"],
+    "traceLines keeps its existing newest-first buffer ordering",
+  );
+  assert.deepEqual(
+    engine.getState().liveTraceLines,
+    ["→ read README.md", "✦ thinking· inspect repo before editing"],
+    "liveTraceLines fills in chronological order (newest last) in verbose mode too",
+  );
+});
+
+test("WorkShellEngine keeps the live feed buffer alive across /minimal", async () => {
+  const { engine, emitTrace } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/verbose");
+  emitTrace({
+    type: "tool.started",
+    provider: "openai",
+    toolName: "read_file",
+    toolCallId: "call-minimal-1",
+    input: { path: "README.md" },
+    startedAt: 1,
+  });
+  assert.ok(engine.getState().traceLines.length > 0);
+  assert.ok(engine.getState().liveTraceLines.length > 0);
+
+  await engine.handleSubmit("/minimal");
+
+  assert.equal(engine.getState().traceMode, "minimal");
+  assert.deepEqual(
+    engine.getState().traceLines,
+    [],
+    "/minimal still clears the verbose-only trace buffer",
+  );
+  assert.deepEqual(
+    engine.getState().liveTraceLines,
+    ["→ read README.md"],
+    "/minimal leaves the live dock buffer alone so the feed never breaks",
+  );
+});
+
+test("WorkShellEngine caps the live feed buffer at the newest 8 lines", async () => {
+  const { engine, emitTrace } = createEngine();
+
+  await engine.initialize();
+  for (let step = 1; step <= 10; step += 1) {
+    emitTrace({
+      type: "orchestrator.step",
+      role: "executor",
+      status: "running",
+      summary: `step ${step}`,
+    });
+  }
+
+  assert.deepEqual(
+    engine.getState().liveTraceLines,
+    Array.from({ length: 8 }, (_, index) => `executor step ${index + 3}`),
+    "the live buffer keeps only the newest 8 lines (oldest dropped first)",
+  );
+  assert.deepEqual(
+    engine.getState().traceLines,
+    [],
+    "minimal mode keeps the verbose-only trace buffer empty",
+  );
 });
 
 test("WorkShellEngine soft-interrupts a busy turn and ignores late assistant output", async () => {
@@ -7026,15 +7379,21 @@ test("WorkShellEngine keeps a tool lifecycle burst out of the subscriber fan-out
   assert.equal(published.agentConsole.activity[1]?.status, "completed");
   assert.equal(published.agentConsole.agents[0]?.status, "completed");
   assert.equal(published.agentConsole.agents[0]?.currentActivity, undefined);
-  // Completed-tool lines are live status (and verbose transcript), not
-  // minimal transcript entries — for either scope.
+  // Completed tools land as assembled detail entries (never as the raw
+  // formatted one-liner), and only for the operator's own calls: a delegated
+  // run's completion (call-1) never reaches the transcript at all.
   assert.ok(
     !published.entries.some((entry) => entry.text === "✓ read call-main"),
-    "minimal trace mode keeps completed-tool lines out of the transcript",
+    "the formatted one-liner itself never lands in the transcript",
   );
   assert.ok(
     !published.entries.some((entry) => entry.text === "✓ read call-1"),
     "a delegated run's tool output belongs to the console, never to the transcript",
+  );
+  assert.equal(
+    published.entries.filter((entry) => entry.text === "read\n10ms").length,
+    1,
+    "exactly one assembled tool detail entry lands — the operator's call, not the delegated twin",
   );
 });
 
@@ -7078,6 +7437,11 @@ test("WorkShellEngine keeps executor-scoped turn traces off the main transcript 
   );
   assert.deepEqual(engine.getState().traceLines, []);
   assert.deepEqual(
+    engine.getState().liveTraceLines,
+    [],
+    "executor-scoped lines never reach the live dock feed either",
+  );
+  assert.deepEqual(
     engine.getState().entries.slice(entriesBefore).map((entry) => entry.text),
     [],
     "no executor-scoped line may reach the operator's transcript",
@@ -7105,6 +7469,10 @@ test("WorkShellEngine keeps executor-scoped turn traces off the main transcript 
     "the delegated prompt never reaches the operator's status line",
   );
   assert.ok(engine.getState().traceLines.some((line) => /thinking inspect repo/.test(line)));
+  assert.ok(
+    engine.getState().liveTraceLines.some((line) => /thinking inspect repo/.test(line)),
+    "the operator's own turn feeds the live dock buffer",
+  );
 });
 
 test("WorkShellEngine reduces lifecycle events from the newest decision and manifest state", async () => {

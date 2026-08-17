@@ -18,6 +18,7 @@ export function formatRuntimeQaCompactReport(report, reportPath, repoRoot) {
       `duplicateBusy=${evidence.duplicateBusy}`,
       `queueDrain=${evidence.queueDrain}`,
       `resize=${evidence.resize}; idleStable=${evidence.idleStable}; latencyOk=${evidence.latencyOk}`,
+      `scrollbackPageUp=${evidence.scrollbackPageUp}; escapeReturn=${evidence.scrollEscapeReturn}`,
     ].join("; "),
     `report: ${path.relative(repoRoot, reportPath)} (--json prints full report)`,
   ].join("\n");
@@ -55,6 +56,8 @@ export function buildRuntimeEvidence(report) {
       latencyOk:
         report.realUseTuiStress?.latencyWithinBudget === true &&
         report.slashLatencyTuiSmoke?.latencyWithinBudget === true,
+      scrollbackPageUp: report.scrollbackTuiSmoke?.pageUpIndicatorVerified === true,
+      scrollEscapeReturn: report.scrollbackTuiSmoke?.escapeReturnVerified === true,
       slashCommanderLatency: {
         firstSlashMs: report.slashLatencyTuiSmoke?.latencies?.firstSlashMs,
         warmSlashMs: report.slashLatencyTuiSmoke?.latencies?.warmSlashMs,
@@ -93,6 +96,8 @@ export function summarizeRuntimeEvidence(report) {
     resize: evidence.tui?.resize === true,
     idleStable: evidence.tui?.idleStable === true,
     latencyOk: evidence.tui?.latencyOk === true,
+    scrollbackPageUp: evidence.tui?.scrollbackPageUp === true,
+    scrollEscapeReturn: evidence.tui?.scrollEscapeReturn === true,
   };
 }
 

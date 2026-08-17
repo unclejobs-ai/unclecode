@@ -293,6 +293,12 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   // tool feed in the composer dock). Optional so hosts and test fakes
   // without engine trace state render no feed.
   readonly traceLines?: readonly string[];
+  // Always-filled live trace tail (engine-owned, capped at 8). The pane's
+  // dock feed reads THIS buffer — not the verbose-only `traceLines` above —
+  // so the busy feed stays alive in default (minimal) trace mode.
+  // Optional so hosts and test fakes without engine trace state render no
+  // feed.
+  readonly liveTraceLines?: readonly string[];
   readonly authLauncherLines?: readonly string[];
   readonly composerMode?: WorkShellComposerMode;
   readonly panel: WorkShellPanel;
@@ -1326,23 +1332,28 @@ export function useWorkShellPaneState<
     }
   }, [engineState.entries]);
   // One page is exactly the rendered window's capacity, so PageUp/PageDown
-  // never move by a different amount than the view shows.
-  const transcriptPageCapacity = getWorkShellTranscriptEntryCapacity(input.terminalRows);
+  // never move by a different amount than the view shows. The capacity comes
+  // from the same entry-weight function the view's window slices with
+  // (measureWorkShellEntryRows via getWorkShellTranscriptEntryCapacity) — a
+  // multi-row tool entry shrinks both the step and the window by the same
+  // amount, so the clamp (`visible − capacity`) always matches what rendering
+  // can actually anchor.
   const moveTranscriptPage = useCallback(
     (direction: -1 | 1) => {
       setTranscriptScrollOffset((current) => {
-        const maxOffset = Math.max(
-          0,
-          engineState.entries.filter(shouldShowWorkShellConversationEntry).length
-            - transcriptPageCapacity,
+        const visibleEntries = engineState.entries.filter(shouldShowWorkShellConversationEntry);
+        const transcriptPageCapacity = getWorkShellTranscriptEntryCapacity(
+          visibleEntries,
+          input.terminalRows,
         );
+        const maxOffset = Math.max(0, visibleEntries.length - transcriptPageCapacity);
         // PageUp (direction -1) moves toward older entries, which hides more
         // of them below the window — the offset grows, not shrinks.
         const next = current - direction * transcriptPageCapacity;
         return Math.max(0, Math.min(maxOffset, next));
       });
     },
-    [engineState.entries, transcriptPageCapacity],
+    [engineState.entries, input.terminalRows],
   );
   const returnTranscriptToNewest = useCallback(() => {
     setTranscriptScrollOffset(0);

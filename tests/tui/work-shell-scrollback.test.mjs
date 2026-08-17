@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
+import { stripVTControlCharacters } from "node:util";
 
 import { render } from "ink";
 import React from "react";
@@ -8,6 +9,7 @@ import React from "react";
 import { WorkShellPane } from "../../packages/tui/src/index.tsx";
 import {
   getWorkShellTranscriptEntryCapacity,
+  measureWorkShellEntryRows,
   resolveWorkShellTranscriptWindow,
 } from "../../packages/tui/src/work-shell-view.tsx";
 import {
@@ -19,10 +21,38 @@ const KEY_PAGE_UP = "\u001b[5~";
 const KEY_PAGE_DOWN = "\u001b[6~";
 const KEY_ESCAPE = "\u001b";
 
-// rows=30 → capacity max(3, floor((30-10)/3)) = 6 entries per window.
+function padScrollbackIndex(index) {
+  return String(index).padStart(4, "0");
+}
+
+function createScrollbackEntries(count = 60) {
+  return Array.from({ length: count }, (_, index) => ({
+    role: "user",
+    text: `sb-${padScrollbackIndex(index)}`,
+  }));
+}
+
+// Multi-row tool entries (assembled tool-call detail) mixed into the
+// transcript: every third entry carries a 5-row body, so entry heights vary
+// and the window math has to weigh rows, not count entries.
+function createMixedScrollbackEntries(count = 60) {
+  return Array.from({ length: count }, (_, index) => ({
+    role: index % 3 === 2 ? "tool" : "user",
+    text: index % 3 === 2
+      ? `sb-${padScrollbackIndex(index)}\n3 lines · 12ms\nrow one\nrow two\nrow three`
+      : `sb-${padScrollbackIndex(index)}`,
+  }));
+}
+
+// rows=30 leaves 20 rows for transcript entries (10 reserved for chrome);
+// every 1-row entry weighs 2 rows (text + margin), so the weighted capacity
+// for the single-line sb-* transcript is 10 entries per window.
 const TERMINAL_ROWS = 30;
 const TRANSCRIPT_ENTRY_COUNT = 60;
-const TRANSCRIPT_CAPACITY = getWorkShellTranscriptEntryCapacity(TERMINAL_ROWS);
+const TRANSCRIPT_CAPACITY = getWorkShellTranscriptEntryCapacity(
+  createScrollbackEntries(),
+  TERMINAL_ROWS,
+);
 
 function createInkInput() {
   const input = new PassThrough();
@@ -89,13 +119,6 @@ async function waitForCondition(predicate, timeoutMs = 5000) {
 function getLastWorkFrame(output) {
   const finalFrameStart = output.lastIndexOf("UncleCode · OpenAI");
   return finalFrameStart >= 0 ? output.slice(finalFrameStart) : output;
-}
-
-function createScrollbackEntries(count = TRANSCRIPT_ENTRY_COUNT) {
-  return Array.from({ length: count }, (_, index) => ({
-    role: "user",
-    text: `sb-${String(index).padStart(4, "0")}`,
-  }));
 }
 
 function createWorkShellPaneEngine(overrides = {}) {
@@ -203,6 +226,88 @@ test("resolveWorkShellTranscriptWindow keeps the historical window at rest and p
   assert.equal(atTop.scrolled, true);
 });
 
+test("measureWorkShellEntryRows counts text rows plus the one-row margin", () => {
+  assert.equal(measureWorkShellEntryRows({ role: "user", text: "one line" }), 2);
+  assert.equal(
+    measureWorkShellEntryRows({ role: "tool", text: "bash test\n3 lines · 5ms\nout" }),
+    4,
+  );
+  const eightRowToolEntry = {
+    role: "tool",
+    text: ["bash test", "9 lines · 5ms", "r1", "r2", "r3", "r4", "r5", "r6"].join("\n"),
+  };
+  assert.equal(measureWorkShellEntryRows(eightRowToolEntry), 9);
+});
+
+test("multi-row tool entries shrink the window capacity the view and controller share", () => {
+  // 20 available rows at rows=30: single-line entries weigh 2 → 10 fit.
+  const singleLine = Array.from({ length: 20 }, (_, index) => ({
+    role: "user",
+    text: `sb-${padScrollbackIndex(index)}`,
+  }));
+  assert.equal(getWorkShellTranscriptEntryCapacity(singleLine, TERMINAL_ROWS), 10);
+
+  // 8-row tool entries weigh 9: two fit in 20 rows, and the safety floor
+  // (never fewer than 3 entries per window) holds the page there.
+  const eightRowTools = Array.from({ length: 20 }, () => ({
+    role: "tool",
+    text: "bash test\n9 lines · 5ms\nr1\nr2\nr3\nr4\nr5\nr6",
+  }));
+  assert.equal(getWorkShellTranscriptEntryCapacity(eightRowTools, TERMINAL_ROWS), 3);
+
+  // On a taller terminal the floor stops masking the weights: 50 available
+  // rows fit five 9-row entries (45 rows), not the ten single-liners.
+  assert.equal(getWorkShellTranscriptEntryCapacity(eightRowTools, 60), 5);
+
+  // A transcript that ends on heavy entries pages smaller than one that ends
+  // on single-row replies — the weight reads from the newest entry backwards.
+  const mixed = createMixedScrollbackEntries();
+  const mixedCapacity = getWorkShellTranscriptEntryCapacity(mixed, TERMINAL_ROWS);
+  assert.ok(
+    mixedCapacity < getWorkShellTranscriptEntryCapacity(createScrollbackEntries(), TERMINAL_ROWS),
+    "heavy tool entries in the tail must shrink the page",
+  );
+});
+
+test("the weighted window pages and clamps on the same capacity the controller steps by", () => {
+  const entries = createMixedScrollbackEntries();
+  const capacity = getWorkShellTranscriptEntryCapacity(entries, TERMINAL_ROWS);
+
+  // One controller step (PageUp) lands exactly one window above the newest
+  // entry — the offset, the window length, and entriesAbove all derive from
+  // the one weight function.
+  const scrolled = resolveWorkShellTranscriptWindow({
+    entries,
+    terminalRows: TERMINAL_ROWS,
+    scrollOffset: capacity,
+  });
+  assert.equal(scrolled.window.length, capacity);
+  assert.equal(scrolled.window[0].text, `sb-${padScrollbackIndex(TRANSCRIPT_ENTRY_COUNT - 2 * capacity)}`);
+  assert.equal(scrolled.entriesAbove, TRANSCRIPT_ENTRY_COUNT - 2 * capacity);
+
+  // The clamp: the controller's maxOffset is visible − capacity; at that
+  // offset the window starts at entry 0.
+  const atTop = resolveWorkShellTranscriptWindow({
+    entries,
+    terminalRows: TERMINAL_ROWS,
+    scrollOffset: TRANSCRIPT_ENTRY_COUNT,
+  });
+  assert.equal(atTop.window[0].text, "sb-0000");
+  assert.equal(atTop.entriesAbove, 0);
+});
+
+test("offset 0 keeps the exact last-50 slice even for mixed-height entries", () => {
+  const entries = createMixedScrollbackEntries();
+  const atRest = resolveWorkShellTranscriptWindow({
+    entries,
+    terminalRows: TERMINAL_ROWS,
+    scrollOffset: 0,
+  });
+  assert.equal(atRest.scrolled, false);
+  assert.deepEqual(atRest.window, entries.slice(-50));
+  assert.equal(atRest.entriesAbove, 10);
+});
+
 test("PageUp scrolls older entries into view with the indicator row", async () => {
   const { engine } = createWorkShellPaneEngine();
   const { stdin, instance, getOutput } = renderScrollbackPane(engine);
@@ -232,6 +337,103 @@ test("PageUp scrolls older entries into view with the indicator row", async () =
       scrolled,
       new RegExp(`↑ ${TRANSCRIPT_ENTRY_COUNT - 2 * TRANSCRIPT_CAPACITY} entries above · PageUp/PageDown scroll · Esc newest`),
     );
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("PageUp shows older entries when multi-row tool entries fill the transcript", async () => {
+  const entries = createMixedScrollbackEntries();
+  const capacity = getWorkShellTranscriptEntryCapacity(entries, TERMINAL_ROWS);
+  const { engine } = createWorkShellPaneEngine({ entries });
+  const { stdin, instance, getOutput } = renderScrollbackPane(engine);
+
+  try {
+    assert.ok(
+      await waitForCondition(() =>
+        getLastWorkFrame(getOutput()).includes(`sb-${padScrollbackIndex(TRANSCRIPT_ENTRY_COUNT - 1)}`)
+      ),
+    );
+    stdin.write(KEY_PAGE_UP);
+    assert.ok(
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("entries above")),
+    );
+    const scrolled = getLastWorkFrame(getOutput());
+    // The page is the weighted capacity: the first window entry, the gone
+    // newest entry, and the indicator count all come from the same weight
+    // math the controller stepped by.
+    assert.ok(
+      scrolled.includes(`sb-${padScrollbackIndex(TRANSCRIPT_ENTRY_COUNT - 2 * capacity)}`),
+      `first weighted-window entry sb-${padScrollbackIndex(TRANSCRIPT_ENTRY_COUNT - 2 * capacity)} must be visible`,
+    );
+    assert.ok(!scrolled.includes(`sb-${padScrollbackIndex(TRANSCRIPT_ENTRY_COUNT - 1)}`));
+    assert.match(
+      scrolled,
+      new RegExp(`↑ ${TRANSCRIPT_ENTRY_COUNT - 2 * capacity} entries above · PageUp/PageDown scroll · Esc newest`),
+    );
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("a scrolled window separates entries with exactly one blank row and closes the weight budget on the indicator", async () => {
+  const entries = createScrollbackEntries();
+  const capacity = getWorkShellTranscriptEntryCapacity(entries, TERMINAL_ROWS);
+  const { engine } = createWorkShellPaneEngine();
+  const { stdin, instance, getOutput } = renderScrollbackPane(engine);
+
+  try {
+    assert.ok(await waitForNewestEntry(getOutput));
+    stdin.write(KEY_PAGE_UP);
+    assert.ok(
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("entries above")),
+    );
+    const frame = stripVTControlCharacters(getLastWorkFrame(getOutput()));
+    const frameRows = frame.split("\n");
+    const window = resolveWorkShellTranscriptWindow({
+      entries,
+      terminalRows: TERMINAL_ROWS,
+      scrollOffset: capacity,
+    }).window;
+
+    // Every window entry renders as one row (the sb-* texts never wrap at the
+    // test width), so consecutive entries must sit exactly one blank row apart:
+    // the frame check the scroll weight's `+1` margin is written against.
+    const entryRowIndexes = window.map(
+      (entry) => frameRows.findIndex((row) => row.includes(entry.text)),
+    );
+    for (const [index, rowIndex] of entryRowIndexes.entries()) {
+      assert.ok(rowIndex >= 0, `window entry ${window[index].text} must render in the scrolled frame`);
+      if (index === 0) {
+        continue;
+      }
+      const previousRow = entryRowIndexes[index - 1];
+      assert.equal(
+        rowIndex - previousRow,
+        2,
+        `exactly one blank row must separate ${window[index - 1].text} from ${window[index].text}`,
+      );
+      assert.equal(frameRows[previousRow + 1].trim(), "", "the separating row must be empty");
+    }
+
+    // The last window entry adds no trailing blank: the scroll indicator sits
+    // directly beneath it, inside the conversation block.
+    const lastEntryRow = entryRowIndexes[entryRowIndexes.length - 1];
+    const indicatorRow = frameRows.findIndex((row) => row.includes("entries above"));
+    assert.equal(indicatorRow, lastEntryRow + 1);
+
+    // Weight consistency, direct assertion: the frame span from the window's
+    // first entry row through the indicator row equals the sum of
+    // measureWorkShellEntryRows over the window. The per-entry `+1` margin is
+    // spent on the blank separators, and the indicator row closes the final
+    // entry's budget — render and weight math agree row for row.
+    const weightSum = window.reduce(
+      (total, entry) => total + measureWorkShellEntryRows(entry),
+      0,
+    );
+    assert.equal(indicatorRow - entryRowIndexes[0] + 1, weightSum);
   } finally {
     instance.unmount();
     instance.cleanup();

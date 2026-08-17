@@ -358,10 +358,75 @@ function renderDiagramLine(line: string, theme: MarkdownTheme, key: string): Rea
   );
 }
 
+/**
+ * Streaming cursor the work shell trims before handing text to the renderer.
+ * Kept here (duplicated glyph) because markdown-render must not import from
+ * the view; the rule it drives is the same one the view's Rust text caches
+ * use: text that is still growing is transient, so parsing results for it
+ * are never worth caching — each delta would evict a settled entry.
+ */
+const STREAMING_CURSOR_GLYPH = "▌";
+
+const MARKDOWN_RENDER_CACHE_MAX_ENTRIES = 64;
+const markdownRenderCache = new Map<string, React.ReactNode>();
+let markdownRenderParseCount = 0;
+
+function buildMarkdownRenderCacheKey(
+  text: string,
+  width: number,
+  theme: MarkdownTheme,
+): string {
+  return JSON.stringify({ text, width, theme });
+}
+
+/**
+ * Cache exclusion rule (mirrors the view's shouldSkipRustTextCacheStore):
+ * never cache text that is still streaming. `isStreamingText` is supplied by
+ * the view, which knows the entry's streaming state; the raw-glyph check
+ * keeps the rule true for callers that pass untrimmed streaming text.
+ */
+function shouldSkipMarkdownRenderCache(input: {
+  readonly text: string;
+  readonly isStreamingText?: boolean;
+}): boolean {
+  return input.isStreamingText === true || input.text.endsWith(STREAMING_CURSOR_GLYPH);
+}
+
+/** @internal test seam — parse counter for cache-hit assertions. */
+export function getMarkdownRenderParseCountForTest(): number {
+  return markdownRenderParseCount;
+}
+
+/** @internal test seam — isolates cache state between tests. */
+export function resetMarkdownRenderCacheForTest(): void {
+  markdownRenderCache.clear();
+  markdownRenderParseCount = 0;
+}
+
 export function renderMarkdown(
-  input: { readonly text: string; readonly width: number; readonly theme: MarkdownTheme },
+  input: {
+    readonly text: string;
+    readonly width: number;
+    readonly theme: MarkdownTheme;
+    /** True while the entry's text is still growing: cache lookups and stores are skipped. */
+    readonly isStreamingText?: boolean;
+  },
 ): React.ReactNode {
   const { text, width, theme } = input;
+  const skipCache = shouldSkipMarkdownRenderCache(input);
+  const cacheKey = skipCache
+    ? undefined
+    : buildMarkdownRenderCacheKey(text, width, theme);
+  if (cacheKey !== undefined) {
+    const cached = markdownRenderCache.get(cacheKey);
+    if (cached !== undefined) {
+      // LRU touch: re-insert so the newest reads survive eviction.
+      markdownRenderCache.delete(cacheKey);
+      markdownRenderCache.set(cacheKey, cached);
+      return cached;
+    }
+  }
+  markdownRenderParseCount += 1;
   const lines = text.split("\n");
   const nodes: React.ReactNode[] = [];
   let inFence = false;
@@ -554,7 +619,17 @@ export function renderMarkdown(
   flushCode("final");
   flushTable("final");
 
-  return <Box flexDirection="column">{nodes}</Box>;
+  const rendered = <Box flexDirection="column">{nodes}</Box>;
+  if (cacheKey !== undefined) {
+    if (markdownRenderCache.size >= MARKDOWN_RENDER_CACHE_MAX_ENTRIES) {
+      const oldestKey = markdownRenderCache.keys().next().value;
+      if (oldestKey !== undefined) {
+        markdownRenderCache.delete(oldestKey);
+      }
+    }
+    markdownRenderCache.set(cacheKey, rendered);
+  }
+  return rendered;
 }
 
 /** @internal test seam — preserves snake_case identifiers in inline markdown. */

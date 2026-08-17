@@ -21,7 +21,7 @@ import {
 
 import type { GitFacts } from "./facts.js";
 import { detectTerminalBackground } from "./terminal-theme.js";
-import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
+import { getDisplayWidth, truncateForDisplayWidth, wrapDisplayTextFast } from "./text-width.js";
 import { renderMarkdown, type MarkdownTheme } from "./markdown-render.js";
 import {
   classifyWorkShellPanelLineFast,
@@ -556,6 +556,12 @@ function pickBusySpinnerFrame(frame = 0): string {
 const STREAMING_CURSOR = "▌";
 /** Marks the user's turn, matching the composer's own prompt glyph. */
 const WORK_SHELL_PROMPT_GLYPH = "›";
+/**
+ * Prefix the engine puts on a turn's settled reasoning summary. Chosen to be
+ * outside the transcript kill filter's glyph class (`✓✖→·★↔↗📎`), so the
+ * summary survives into the conversation and this renderer branch can claim it.
+ */
+const WORK_SHELL_REASONING_ENTRY_PREFIX = "✻ ";
 const BODY_CONTINUATION_INDENT = "   ";
 const RUST_TEXT_CACHE_MAX_ENTRIES = 512;
 const rustBusyStatusCache = new Map<string, string>();
@@ -1237,6 +1243,8 @@ export function formatWorkShellHeaderLine(input: {
   return padDisplayLine(truncateForDisplayWidth(input.providerTitle, width), width);
 }
 
+const WORK_SHELL_TOOL_OVERFLOW_ROW_PREFIX = "… +";
+
 /**
  * Split a tool entry into its call line and its result lines.
  *
@@ -1247,7 +1255,12 @@ export function formatWorkShellHeaderLine(input: {
  * lets the call carry weight and the result recede.
  *
  * Result lines are capped: a tool that prints a thousand lines would otherwise
- * push the conversation off screen.
+ * push the conversation off screen. The cap folds overflow into exactly one
+ * `… +N more lines` row — the assembled detail text may already end in its own
+ * ellipsis row (`formatWorkShellToolDetailEntry` caps at 8 rows), so the shown
+ * prefix drops any `… +` row and the appended ellipsis counts everything left
+ * out, rendering included. Two ellipsis rows on one entry is the bug this
+ * merge prevents.
  */
 export function splitWorkShellToolEntry(
   text: string,
@@ -1268,10 +1281,13 @@ export function splitWorkShellToolEntry(
   if (wrapped.length <= maxResultLines) {
     return { call, resultLines: wrapped };
   }
-  const shown = wrapped.slice(0, maxResultLines);
+  const shown = wrapped
+    .slice(0, maxResultLines)
+    .filter((line) => !line.startsWith(WORK_SHELL_TOOL_OVERFLOW_ROW_PREFIX));
+  const hidden = wrapped.length - shown.length;
   return {
     call,
-    resultLines: [...shown, `… +${wrapped.length - shown.length} more lines`],
+    resultLines: [...shown, `${WORK_SHELL_TOOL_OVERFLOW_ROW_PREFIX}${hidden} more lines`],
   };
 }
 
@@ -1281,6 +1297,26 @@ export function formatWorkShellToolEntryLines(text: string, width: number): read
     return [];
   }
   return wrapDisplayText(normalized, Math.max(20, width - 4));
+}
+
+/**
+ * Success-metric rows the tool detail assembly can emit: the line-count metric
+ * (`3 lines`), the empty-result metric (`no matches`), unified-diff stats
+ * (`+2 −1`), a bare duration (`12ms`) — the last metric row may carry a
+ * trailing `· {ms}ms` duration. Everything else on the first metric row is the
+ * raw first error line the assembly puts there when the tool failed, so
+ * "first metric row is not a success shape" is how the renderer spots a failed
+ * call from glyph-less text alone. The entry carries no structured error flag
+ * by design (the transcript stores plain text), and a failing tool whose
+ * first output line happens to look like a metric merely renders green —
+ * cosmetic, never structural.
+ */
+const WORK_SHELL_TOOL_METRIC_ROW_RE = /^(?:\d+ lines?|no matches|\+\d+ −\d+|\d+ms)(?: · \d+ms)?$/u;
+
+export function isWorkShellToolErrorEntry(text: string): boolean {
+  const rows = text.trimEnd().split("\n");
+  const firstMetricRow = rows[1];
+  return firstMetricRow !== undefined && !WORK_SHELL_TOOL_METRIC_ROW_RE.test(firstMetricRow.trim());
 }
 
 export function formatWorkShellFooterLine(input: {
@@ -1370,7 +1406,12 @@ export function resolveWorkShellComposerAdditionalRows(input: {
   const attachmentBadge = input.attachmentCount === undefined
     ? ""
     : ` [${input.attachmentCount}/5]`;
-  const composerRows = wrapDisplayText(
+  // Keystroke path: this runs on every input change to size the transcript
+  // window, so it must not spawn the sync Rust wrap (wrapDisplayText). The
+  // pure-TS wrap keeps composer typing free of process spawns; the row count
+  // it returns only gates layout height, where the fast wrap's greedy
+  // behavior matches the Rust wrap for counting purposes.
+  const composerRows = wrapDisplayTextFast(
     `${input.inputValue || " "}${attachmentBadge}`,
     contentWidth,
   ).length;
@@ -1382,8 +1423,20 @@ function renderWorkShellEntryBlock(input: {
   readonly entry: WorkShellEntry;
   readonly index: number;
   readonly width: number;
+  /**
+   * Task 9 block separation: every entry except the last one in the rendered
+   * window closes with a one-row margin, so consecutive transcript blocks are
+   * separated by exactly one blank row. The last window entry renders no
+   * trailing blank — the row that follows it inside the conversation block
+   * (the scroll indicator when scrolled) sits directly beneath it, which is
+   * also what `measureWorkShellEntryRows` budgets: its `+1` margin is the
+   * between-entries blank, and the final entry's budget closes on the
+   * indicator row instead of an empty line.
+   */
+  readonly isLastWindowEntry?: boolean;
 }): React.ReactNode {
   const presentation = getWorkShellEntryPresentation(input.entry.role);
+  const bottomMargin = input.isLastWindowEntry === true ? 0 : 1;
   // For assistant replies, skip the Rust markdown *stripper* — we render
   // markdown structure natively now (headings, code, lists, tables). We still
   // sanitize the text (removes leaked plan JSON etc.) but keep all markdown
@@ -1402,7 +1455,7 @@ function renderWorkShellEntryBlock(input: {
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
-        marginBottom={1}
+        marginBottom={bottomMargin}
         flexDirection="column"
       >
         {lines.map((line, lineIndex) => (
@@ -1415,6 +1468,31 @@ function renderWorkShellEntryBlock(input: {
                   <WorkShellReadableText color={presentation.bodyColor}>{line}</WorkShellReadableText>
                 </>
               )}
+          </Text>
+        ))}
+      </Box>
+    );
+  }
+
+  if (input.entry.role === "assistant" && input.entry.text.startsWith(WORK_SHELL_REASONING_ENTRY_PREFIX)) {
+    // Reasoning summary (engine prefixes a turn's settled thinking with `✻ `).
+    // It renders as one plain dim block, intercepted before the assistant
+    // markdown branch on purpose: thinking text is prose that must read quiet,
+    // and the markdown parser would hand stray emphasis/code styling to what
+    // should recede. The prefix itself is part of the dim text.
+    const lines = wrapDisplayText(input.entry.text.trimEnd(), Math.max(20, input.width - 4));
+    return (
+      <Box
+        key={`${input.entry.role}-${input.index}`}
+        marginBottom={bottomMargin}
+        flexDirection="column"
+      >
+        {lines.map((line, lineIndex) => (
+          <Text
+            key={`reasoning-${String(input.index)}-${String(lineIndex)}`}
+            color={W.textMuted}
+          >
+            {line}
           </Text>
         ))}
       </Box>
@@ -1441,12 +1519,12 @@ function renderWorkShellEntryBlock(input: {
       return (
         <Box
           key={`${input.entry.role}-${input.index}`}
-          marginBottom={1}
+          marginBottom={bottomMargin}
           flexDirection="column"
         >
           <Text color={W.assistant} bold>{presentation.badge} {presentation.label}</Text>
           <Box flexDirection="column" paddingLeft={3}>
-            {renderMarkdown({ text: renderText, width: contentWidth, theme: mdTheme })}
+            {renderMarkdown({ text: renderText, width: contentWidth, theme: mdTheme, isStreamingText: isStreamingEntry })}
             {isStreamingEntry ? <Text color={W.assistant} bold>{STREAMING_CURSOR}</Text> : null}
           </Box>
         </Box>
@@ -1455,14 +1533,14 @@ function renderWorkShellEntryBlock(input: {
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
-        marginBottom={1}
+        marginBottom={bottomMargin}
         borderStyle="single"
         borderColor={presentation.borderColor}
         paddingX={1}
         flexDirection="column"
       >
         <Box marginTop={0} flexDirection="column">
-          {renderMarkdown({ text: renderText, width: contentWidth, theme: mdTheme })}
+          {renderMarkdown({ text: renderText, width: contentWidth, theme: mdTheme, isStreamingText: isStreamingEntry })}
           {isStreamingEntry ? <Text color={W.assistant} bold>{STREAMING_CURSOR}</Text> : null}
         </Box>
       </Box>
@@ -1474,15 +1552,19 @@ function renderWorkShellEntryBlock(input: {
     // its result hanging off a ⎿ underneath. The old form stacked a ▏ rail
     // whose height was computed from the wrapped line count — the same
     // predict-the-height trick that left dangling rails on assistant replies.
+    // The dot carries the outcome color: success green, error red when the
+    // assembly's first metric row is the raw first error line (see
+    // isWorkShellToolErrorEntry).
     const { call, resultLines } = splitWorkShellToolEntry(bodyText, input.width);
+    const callColor = isWorkShellToolErrorEntry(bodyText) ? W.error : W.success;
     return (
       <Box
         key={`${input.entry.role}-${input.index}`}
-        marginBottom={1}
+        marginBottom={bottomMargin}
         flexDirection="column"
       >
         <Text>
-          <Text color={W.success} bold>{"● "}</Text>
+          <Text color={callColor} bold>{"● "}</Text>
           <Text color={W.text} bold>{call}</Text>
         </Text>
         {resultLines.map((line, lineIndex) => (
@@ -1506,7 +1588,7 @@ function renderWorkShellEntryBlock(input: {
       <Box
         key={`${input.entry.role}-${input.index}`}
         marginTop={0}
-        marginBottom={0}
+        marginBottom={bottomMargin}
         paddingLeft={2}
         flexDirection="column"
       >
@@ -1521,7 +1603,7 @@ function renderWorkShellEntryBlock(input: {
   return (
     <Box
       key={`${input.entry.role}-${input.index}`}
-      marginBottom={0}
+      marginBottom={bottomMargin}
       paddingLeft={3}
       flexDirection="column"
     >
@@ -1627,23 +1709,67 @@ export function getWorkShellThinkingDetailLines(input: {
 }
 
 /**
- * Approximate how many transcript entries the terminal can show at once.
- * Entry height varies with body length; three rows per entry (badge or chip
- * line, body, breathing room) matches the observed average, and ten rows are
- * reserved for the shell chrome (header, status strip, composer dock, and the
- * scroll indicator itself). The approximation only has to be stable, not
- * exact: it sizes the scrolled window and the PageUp/PageDown step, and both
- * read it so a page never moves by a different amount than it shows.
+ * How many terminal rows one transcript entry will claim: its text row count
+ * plus the one-row margin that separates it from the entry rendered after it
+ * (`marginBottom={1}` on every entry block except the last window entry). The
+ * blank rows those margins produce are what make consecutive blocks read as
+ * separate turns; the last entry adds no trailing blank, and its budgeted
+ * margin closes on the row that follows the window inside the conversation
+ * block (the scroll indicator row when scrolled) — so the weight never
+ * over- or under-counts the rendered frame.
+ *
+ * Tool entries assembled by `formatWorkShellToolDetailEntry` are multi-row by
+ * design, so a flat "N rows per entry" window math under-counted them and the
+ * scrolled window overflowed the screen. This is the one weight function the
+ * view's window/capacity and the controller's PageUp/PageDown step/clamp share
+ * (`work-shell-hooks.ts`) — both read it, so a page never moves by a different
+ * amount than the view shows. It deliberately ignores wrap growth: the weight
+ * only has to be consistent everywhere, not pixel-exact.
  */
-const WORK_SHELL_TRANSCRIPT_RESERVED_ROWS = 10;
-const WORK_SHELL_TRANSCRIPT_ROWS_PER_ENTRY = 3;
+export function measureWorkShellEntryRows(entry: WorkShellEntry): number {
+  return entry.text.split("\n").length + 1;
+}
 
-export function getWorkShellTranscriptEntryCapacity(terminalRows?: number): number {
+const WORK_SHELL_TRANSCRIPT_RESERVED_ROWS = 10;
+const WORK_SHELL_TRANSCRIPT_MIN_ENTRY_CAPACITY = 3;
+
+/**
+ * Rows available for transcript entries after the shell chrome (header, status
+ * strip, composer dock, and the scroll indicator itself).
+ */
+export function getWorkShellTranscriptAvailableRows(terminalRows?: number): number {
   const rows = terminalRows ?? process.stdout.rows ?? 24;
-  return Math.max(
-    3,
-    Math.floor((rows - WORK_SHELL_TRANSCRIPT_RESERVED_ROWS) / WORK_SHELL_TRANSCRIPT_ROWS_PER_ENTRY),
-  );
+  return Math.max(WORK_SHELL_TRANSCRIPT_MIN_ENTRY_CAPACITY, rows - WORK_SHELL_TRANSCRIPT_RESERVED_ROWS);
+}
+
+/**
+ * Approximate how many transcript entries the terminal can show at once,
+ * measured with `measureWorkShellEntryRows` from the newest entry backwards.
+ * The count is taken from the end because that is the slice the window anchors
+ * on: a bottom-heavy tail of multi-row tool entries yields a smaller page than
+ * a tail of single-row replies, which is exactly the difference the old flat
+ * rows-per-entry constant could not see.
+ */
+export function getWorkShellTranscriptEntryCapacity(
+  entries: readonly WorkShellEntry[],
+  terminalRows?: number,
+): number {
+  const availableRows = getWorkShellTranscriptAvailableRows(terminalRows);
+  let usedRows = 0;
+  let count = 0;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry === undefined) {
+      break;
+    }
+    const weight = measureWorkShellEntryRows(entry);
+    if (count > 0 && usedRows + weight > availableRows) {
+      break;
+    }
+    usedRows += weight;
+    count += 1;
+  }
+  return Math.max(WORK_SHELL_TRANSCRIPT_MIN_ENTRY_CAPACITY, count);
 }
 
 /**
@@ -1651,8 +1777,9 @@ export function getWorkShellTranscriptEntryCapacity(terminalRows?: number): numb
  * window ("entries from the bottom"); 0 is bottom-follow. At 0 the window is
  * the historical last-50 slice, so the unscrolled frame is byte-identical to
  * the pre-scrollback render (the existing render tests guard that). Once
- * scrolled, the window is the rows-derived capacity anchored `scrollOffset`
- * entries above the newest entry. `entriesAbove` feeds the indicator row.
+ * scrolled, the window is the weight-derived capacity (entry rows measured by
+ * `measureWorkShellEntryRows`) anchored `scrollOffset` entries above the
+ * newest entry. `entriesAbove` feeds the indicator row.
  */
 export function resolveWorkShellTranscriptWindow(input: {
   readonly entries: readonly WorkShellEntry[];
@@ -1670,7 +1797,7 @@ export function resolveWorkShellTranscriptWindow(input: {
       scrolled: false,
     };
   }
-  const capacity = getWorkShellTranscriptEntryCapacity(input.terminalRows);
+  const capacity = getWorkShellTranscriptEntryCapacity(input.entries, input.terminalRows);
   const end = Math.min(
     input.entries.length,
     Math.max(capacity, input.entries.length - input.scrollOffset),
@@ -1718,6 +1845,7 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
           entry,
           index,
           width: conversationWidth,
+          isLastWindowEntry: index === transcriptWindow.window.length - 1,
         }))}
         {transcriptWindow.scrolled ? (
           <Text color={W.textDim}>{`↑ ${transcriptWindow.entriesAbove} entries above · PageUp/PageDown scroll · Esc newest`}</Text>

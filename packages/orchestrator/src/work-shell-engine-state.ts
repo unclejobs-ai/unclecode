@@ -79,6 +79,7 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
   return {
     entries: input.options.initialEntries ? [...input.options.initialEntries] : [...decision.entries],
     streamingAssistantText: undefined,
+    streamingReasoningText: undefined,
     model: decision.model,
     mode: decision.mode,
     reasoning: decision.reasoning,
@@ -94,6 +95,10 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
       buildContextPanel: input.buildContextPanel,
     }),
     traceLines: [...decision.traceLines],
+    // Live dock-feed tail: engine-owned TS state, deliberately NOT part of the
+    // Rust initial-state decision — it fills from trace events in every mode
+    // and starts empty like traceLines does.
+    liveTraceLines: [],
     traceMode: decision.traceMode,
     composerMode: decision.composerMode,
     isBusy: decision.isBusy,
