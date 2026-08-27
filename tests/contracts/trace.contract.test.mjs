@@ -38,6 +38,11 @@ test("execution trace contract exposes canonical event kinds", () => {
     "agent.run.started",
     "agent.run.settled",
     "usage.recorded",
+    "quality.stage_started",
+    "quality.gate_evaluated",
+    "quality.refine_requested",
+    "quality.pivot_requested",
+    "quality.completed",
   ]);
 });
 

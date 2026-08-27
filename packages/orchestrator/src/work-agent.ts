@@ -160,6 +160,10 @@ function createWorkGraph(tasks: readonly PlannedWorkTask[], startedAt: number): 
     id: `goal-${startedAt}-${workGraphSequence}`,
     ...(tasks[0]?.goal ? { goal: tasks[0].goal } : {}),
     ...(tasks[0]?.constraints ? { constraints: tasks[0].constraints } : {}),
+    qualityProfile: "minimal",
+    currentStage: "plan",
+    gateStatus: "unproven",
+    iteration: 0,
     approval: "pending",
     nodes: tasks.map((task) => ({
       id: task.id,
@@ -170,6 +174,11 @@ function createWorkGraph(tasks: readonly PlannedWorkTask[], startedAt: number): 
       fileOwnership: task.writePaths,
       acceptanceCriteria: task.acceptanceCriteria,
       evidenceRefs: [],
+      stage: "work",
+      role: "worker",
+      attempt: 0,
+      artifactRefs: [],
+      reviewRequired: false,
     })),
   };
 }

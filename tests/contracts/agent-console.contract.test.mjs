@@ -204,6 +204,91 @@ test("agent-console resume parser accepts goal metadata before a prompt manifest
   assert.equal(parsed?.workGraph?.nodes[0]?.manifestId, undefined);
 });
 
+test("agent-console quality graph fields round-trip and legacy graphs receive conservative defaults", () => {
+  const legacy = parseAgentConsoleSnapshot({
+    profileId: "build",
+    workGraph: {
+      id: "legacy-graph",
+      approval: "approved",
+      nodes: [
+        {
+          id: "legacy-node",
+          title: "Legacy work",
+          prompt: "Continue legacy work.",
+          status: "ready",
+          dependsOn: [],
+          fileOwnership: ["src/legacy.ts"],
+          evidenceRefs: [],
+        },
+      ],
+    },
+    activity: [],
+  });
+
+  assert.deepEqual(
+    {
+      qualityProfile: legacy?.workGraph?.qualityProfile,
+      currentStage: legacy?.workGraph?.currentStage,
+      gateStatus: legacy?.workGraph?.gateStatus,
+      iteration: legacy?.workGraph?.iteration,
+      node: legacy?.workGraph?.nodes[0],
+    },
+    {
+      qualityProfile: "minimal",
+      currentStage: "work",
+      gateStatus: "unproven",
+      iteration: 0,
+      node: {
+        id: "legacy-node",
+        title: "Legacy work",
+        prompt: "Continue legacy work.",
+        status: "ready",
+        dependsOn: [],
+        fileOwnership: ["src/legacy.ts"],
+        acceptanceCriteria: [],
+        evidenceRefs: [],
+        stage: "work",
+        role: "worker",
+        attempt: 0,
+        artifactRefs: [],
+        reviewRequired: false,
+      },
+    },
+  );
+
+  const current = createAgentConsoleSnapshot({
+    profileId: "build",
+    workGraph: {
+      id: "quality-graph",
+      qualityProfile: "deep",
+      currentStage: "critic",
+      gateStatus: "refine",
+      iteration: 2,
+      approval: "approved",
+      nodes: [
+        {
+          id: "critic-node",
+          title: "Review artifacts",
+          prompt: "Review the artifact hash.",
+          status: "running",
+          dependsOn: ["work-node"],
+          fileOwnership: [],
+          acceptanceCriteria: ["Independent review is recorded"],
+          evidenceRefs: ["evidence/reviewer.json"],
+          stage: "critic",
+          role: "critic",
+          attempt: 2,
+          artifactRefs: ["sha256:abc123"],
+          reviewRequired: true,
+        },
+      ],
+    },
+    activity: [],
+  });
+
+  assert.deepEqual(parseAgentConsoleSnapshot(current)?.workGraph, current.workGraph);
+});
+
 test("agent-console resume parser round-trips every safe lifecycle field", () => {
   const parsed = parseAgentConsoleSnapshot({
     profileId: "build",

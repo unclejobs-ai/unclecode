@@ -20,6 +20,12 @@ import type {
   ToolCompletedTraceEvent,
   ToolStartedTraceEvent,
   UsageRecordedTraceEvent,
+  WorkGraph,
+  QualityStageStartedTraceEvent,
+  QualityGateEvaluatedTraceEvent,
+  QualityRefineRequestedTraceEvent,
+  QualityPivotRequestedTraceEvent,
+  QualityCompletedTraceEvent,
 } from "@unclecode/contracts";
 import type { PolicyDecision as PolicyEngineDecision } from "@unclecode/policy-engine";
 import type { ProviderId as PackageProviderId } from "@unclecode/providers";
@@ -230,6 +236,41 @@ void (null as unknown as JobSettledRequiredFields);
 void (null as unknown as AgentRunStartedRequiredFields);
 void (null as unknown as AgentRunSettledRequiredFields);
 void (null as unknown as UsageRecordedRequiredFields);
+
+type QualityEventsAreTraceMembers = Assert<
+  IsExact<
+    Extract<ExecutionTraceEvent, { type: `quality.${string}` }>,
+    | QualityStageStartedTraceEvent
+    | QualityGateEvaluatedTraceEvent
+    | QualityRefineRequestedTraceEvent
+    | QualityPivotRequestedTraceEvent
+    | QualityCompletedTraceEvent
+  >
+>;
+type WorkGraphQualityFieldsAreRequired = Assert<
+  IsExact<
+    Pick<WorkGraph, "qualityProfile" | "currentStage" | "gateStatus" | "iteration">,
+    Required<Pick<WorkGraph, "qualityProfile" | "currentStage" | "gateStatus" | "iteration">>
+  >
+>;
+type WorkNodeQualityFieldsAreRequired = Assert<
+  IsExact<
+    Pick<
+      WorkGraph["nodes"][number],
+      "stage" | "role" | "attempt" | "artifactRefs" | "reviewRequired"
+    >,
+    Required<
+      Pick<
+        WorkGraph["nodes"][number],
+        "stage" | "role" | "attempt" | "artifactRefs" | "reviewRequired"
+      >
+    >
+  >
+>;
+
+void (null as unknown as QualityEventsAreTraceMembers);
+void (null as unknown as WorkGraphQualityFieldsAreRequired);
+void (null as unknown as WorkNodeQualityFieldsAreRequired);
 
 type AgentRunStartedRequiresJobId = Assert<
   IsExact<AgentRunStartedTraceEvent["jobId"], string>

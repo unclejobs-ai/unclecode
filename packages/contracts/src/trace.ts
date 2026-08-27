@@ -3,6 +3,9 @@ import type {
   TerminalAgentRunStatus,
   TerminalAsyncJobStatus,
   WorkGraph,
+  QualityGateStatus,
+  QualityHarnessStage,
+  QualityProfile,
   WorkNodeStatus,
 } from "./agent-console.js";
 import type {
@@ -37,6 +40,11 @@ export const EXECUTION_TRACE_EVENT_TYPES = [
   "agent.run.started",
   "agent.run.settled",
   "usage.recorded",
+  "quality.stage_started",
+  "quality.gate_evaluated",
+  "quality.refine_requested",
+  "quality.pivot_requested",
+  "quality.completed",
 ] as const;
 
 export type ExecutionTraceEventType = (typeof EXECUTION_TRACE_EVENT_TYPES)[number];
@@ -380,6 +388,74 @@ export type UsageRecordedTraceEvent = {
   readonly startedAt: number;
 };
 
+export type QualityRouteKind = "direct" | "frontier" | "commodity" | "fallback";
+
+type QualityTraceRoute = {
+  /** Present only after a real model dispatch selected this route. */
+  readonly provider?: ProviderId | "unknown";
+  /** Present only after a real model dispatch selected this model. */
+  readonly model?: string;
+  /** Present only after a real model dispatch used this routing lane. */
+  readonly route?: QualityRouteKind;
+  readonly agentRunId?: string;
+};
+
+type QualityTraceBase = QualityTraceRoute & {
+  readonly level: "high-signal";
+  readonly runId: string;
+  readonly graphId: string;
+  readonly profile: QualityProfile;
+  readonly stage: QualityHarnessStage;
+  readonly iteration: number;
+  readonly startedAt: number;
+};
+
+export type QualityStageStartedTraceEvent = QualityTraceBase & {
+  readonly type: "quality.stage_started";
+};
+
+export type QualityGateEvaluatedTraceEvent = QualityTraceBase & {
+  readonly type: "quality.gate_evaluated";
+  readonly decision: QualityGateStatus;
+  readonly refineCount: number;
+  readonly pivotCount: number;
+  readonly evidenceRefs: readonly string[];
+  readonly failures: readonly string[];
+  readonly artifactHash?: string;
+  readonly independentVerification: boolean;
+};
+
+export type QualityRefineRequestedTraceEvent = QualityTraceBase & {
+  readonly type: "quality.refine_requested";
+  readonly decision: "refine";
+  readonly count: number;
+  readonly limit: number;
+  readonly reason: string;
+  readonly evidenceRefs: readonly string[];
+  readonly failures: readonly string[];
+  readonly nodeId?: string;
+};
+
+export type QualityPivotRequestedTraceEvent = QualityTraceBase & {
+  readonly type: "quality.pivot_requested";
+  readonly decision: "pivot";
+  readonly count: number;
+  readonly limit: number;
+  readonly reason: string;
+  readonly evidenceRefs: readonly string[];
+  readonly failures: readonly string[];
+};
+
+export type QualityCompletedTraceEvent = QualityTraceBase & {
+  readonly type: "quality.completed";
+  readonly decision: QualityGateStatus;
+  readonly completedStages: readonly QualityHarnessStage[];
+  readonly evidenceRefs: readonly string[];
+  readonly failures: readonly string[];
+  readonly independentVerification: boolean;
+  readonly completedAt: number;
+};
+
 export type ExecutionTraceEvent =
   | TurnStartedTraceEvent
   | ProviderRouteTraceEvent
@@ -404,4 +480,9 @@ export type ExecutionTraceEvent =
   | JobSettledTraceEvent
   | AgentRunStartedTraceEvent
   | AgentRunSettledTraceEvent
-  | UsageRecordedTraceEvent;
+  | UsageRecordedTraceEvent
+  | QualityStageStartedTraceEvent
+  | QualityGateEvaluatedTraceEvent
+  | QualityRefineRequestedTraceEvent
+  | QualityPivotRequestedTraceEvent
+  | QualityCompletedTraceEvent;

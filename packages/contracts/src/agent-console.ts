@@ -89,6 +89,18 @@ export const WORK_NODE_STATUSES = [
 ] as const;
 export type WorkNodeStatus = (typeof WORK_NODE_STATUSES)[number];
 
+export const QUALITY_PROFILES = ["minimal", "standard", "deep", "creator"] as const;
+export type QualityProfile = (typeof QUALITY_PROFILES)[number];
+
+export const QUALITY_HARNESS_STAGES = ["explore", "plan", "work", "critic", "promote"] as const;
+export type QualityHarnessStage = (typeof QUALITY_HARNESS_STAGES)[number];
+
+export const QUALITY_GATE_STATUSES = ["proceed", "refine", "pivot", "block", "unproven"] as const;
+export type QualityGateStatus = (typeof QUALITY_GATE_STATUSES)[number];
+
+export const WORK_NODE_ROLES = ["explorer", "planner", "worker", "critic", "promoter"] as const;
+export type WorkNodeRole = (typeof WORK_NODE_ROLES)[number];
+
 export type WorkNode = {
   readonly id: string;
   readonly title: string;
@@ -99,12 +111,21 @@ export type WorkNode = {
   readonly manifestId?: string;
   readonly acceptanceCriteria?: readonly string[];
   readonly evidenceRefs: readonly string[];
+  readonly stage: QualityHarnessStage;
+  readonly role: WorkNodeRole;
+  readonly attempt: number;
+  readonly artifactRefs: readonly string[];
+  readonly reviewRequired: boolean;
 };
 
 export type WorkGraph = {
   readonly id: string;
   readonly goal?: string;
   readonly constraints?: readonly string[];
+  readonly qualityProfile: QualityProfile;
+  readonly currentStage: QualityHarnessStage;
+  readonly gateStatus: QualityGateStatus;
+  readonly iteration: number;
   readonly nodes: readonly WorkNode[];
   readonly approval: "pending" | "approved" | "rejected";
 };
@@ -483,6 +504,10 @@ function copyWorkGraph(graph: WorkGraph): WorkGraph {
     id: graph.id,
     ...(graph.goal === undefined ? {} : { goal: graph.goal }),
     ...(graph.constraints === undefined ? {} : { constraints: [...graph.constraints] }),
+    qualityProfile: graph.qualityProfile ?? "minimal",
+    currentStage: graph.currentStage ?? "work",
+    gateStatus: graph.gateStatus ?? "unproven",
+    iteration: graph.iteration ?? 0,
     approval: graph.approval,
     nodes: graph.nodes.map((node) => ({
       id: node.id,
@@ -492,10 +517,13 @@ function copyWorkGraph(graph: WorkGraph): WorkGraph {
       dependsOn: [...node.dependsOn],
       fileOwnership: [...node.fileOwnership],
       ...(node.manifestId === undefined ? {} : { manifestId: node.manifestId }),
-      ...(node.acceptanceCriteria === undefined
-        ? {}
-        : { acceptanceCriteria: [...node.acceptanceCriteria] }),
+      acceptanceCriteria: [...(node.acceptanceCriteria ?? [])],
       evidenceRefs: [...node.evidenceRefs],
+      stage: node.stage ?? "work",
+      role: node.role ?? "worker",
+      attempt: node.attempt ?? 0,
+      artifactRefs: [...(node.artifactRefs ?? [])],
+      reviewRequired: node.reviewRequired ?? false,
     })),
   };
 }
@@ -625,6 +653,10 @@ function copyAgentRunUsage(usage: AgentRunUsage): AgentRunUsage {
 
 const MAX_PERSISTED_TOOL_ACTIVITY = 80;
 const WORK_NODE_STATUS_SET = new Set<string>(WORK_NODE_STATUSES);
+const QUALITY_PROFILE_SET = new Set<string>(QUALITY_PROFILES);
+const QUALITY_HARNESS_STAGE_SET = new Set<string>(QUALITY_HARNESS_STAGES);
+const QUALITY_GATE_STATUS_SET = new Set<string>(QUALITY_GATE_STATUSES);
+const WORK_NODE_ROLE_SET = new Set<string>(WORK_NODE_ROLES);
 const TOOL_ACTIVITY_KIND_SET = new Set<string>(TOOL_ACTIVITY_KINDS);
 const TOOL_ACTIVITY_STATUS_SET = new Set<string>(TOOL_ACTIVITY_STATUSES);
 const MAX_PERSISTED_AGENT_RUNS = 128;
@@ -919,13 +951,26 @@ function parseAskUserQuestionOption(value: unknown): AskUserQuestionOption | und
 
 function parseWorkGraph(value: unknown): WorkGraph | undefined {
   const record = asRecord(value);
+  if (!record) {
+    return undefined;
+  }
   const constraints = parseOptionalStringList(record, "constraints");
+  const qualityProfile = hasOwn(record, "qualityProfile") ? record.qualityProfile : "minimal";
+  const currentStage = hasOwn(record, "currentStage") ? record.currentStage : "work";
+  const gateStatus = hasOwn(record, "gateStatus") ? record.gateStatus : "unproven";
+  const iteration = hasOwn(record, "iteration") ? record.iteration : 0;
   if (
-    !record
-    || !isNonEmptyString(record.id)
+    !isNonEmptyString(record.id)
     || !Array.isArray(record.nodes)
     || (hasOwn(record, "goal") && !isNonEmptyString(record.goal))
     || constraints === null
+    || typeof qualityProfile !== "string"
+    || !QUALITY_PROFILE_SET.has(qualityProfile)
+    || typeof currentStage !== "string"
+    || !QUALITY_HARNESS_STAGE_SET.has(currentStage)
+    || typeof gateStatus !== "string"
+    || !QUALITY_GATE_STATUS_SET.has(gateStatus)
+    || !isNonNegativeInteger(iteration)
     || (record.approval !== "pending" && record.approval !== "approved" && record.approval !== "rejected")
   ) {
     return undefined;
@@ -942,6 +987,10 @@ function parseWorkGraph(value: unknown): WorkGraph | undefined {
     id: record.id,
     ...(typeof record.goal === "string" ? { goal: record.goal } : {}),
     ...(constraints === undefined ? {} : { constraints }),
+    qualityProfile: qualityProfile as QualityProfile,
+    currentStage: currentStage as QualityHarnessStage,
+    gateStatus: gateStatus as QualityGateStatus,
+    iteration,
     approval: record.approval,
     nodes: parsedNodes,
   };
@@ -949,13 +998,22 @@ function parseWorkGraph(value: unknown): WorkGraph | undefined {
 
 function parseWorkNode(value: unknown): WorkNode | undefined {
   const record = asRecord(value);
-  const dependsOn = parseStringList(record?.dependsOn);
-  const fileOwnership = parseStringList(record?.fileOwnership);
+  if (!record) {
+    return undefined;
+  }
+  const dependsOn = parseStringList(record.dependsOn);
+  const fileOwnership = parseStringList(record.fileOwnership);
   const acceptanceCriteria = parseOptionalStringList(record, "acceptanceCriteria");
-  const evidenceRefs = parseStringList(record?.evidenceRefs);
+  const evidenceRefs = parseStringList(record.evidenceRefs);
+  const stage = hasOwn(record, "stage") ? record.stage : "work";
+  const role = hasOwn(record, "role") ? record.role : "worker";
+  const attempt = hasOwn(record, "attempt") ? record.attempt : 0;
+  const artifactRefs = hasOwn(record, "artifactRefs")
+    ? parseStringList(record.artifactRefs)
+    : [];
+  const reviewRequired = hasOwn(record, "reviewRequired") ? record.reviewRequired : false;
   if (
-    !record
-    || !isNonEmptyString(record.id)
+    !isNonEmptyString(record.id)
     || !isNonEmptyString(record.title)
     || !isNonEmptyString(record.prompt)
     || typeof record.status !== "string"
@@ -965,6 +1023,13 @@ function parseWorkNode(value: unknown): WorkNode | undefined {
     || (hasOwn(record, "manifestId") && !isNonEmptyString(record.manifestId))
     || acceptanceCriteria === null
     || !evidenceRefs
+    || typeof stage !== "string"
+    || !QUALITY_HARNESS_STAGE_SET.has(stage)
+    || typeof role !== "string"
+    || !WORK_NODE_ROLE_SET.has(role)
+    || !isNonNegativeInteger(attempt)
+    || !artifactRefs
+    || typeof reviewRequired !== "boolean"
   ) {
     return undefined;
   }
@@ -976,8 +1041,13 @@ function parseWorkNode(value: unknown): WorkNode | undefined {
     dependsOn,
     fileOwnership,
     ...(typeof record.manifestId === "string" ? { manifestId: record.manifestId } : {}),
-    ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
+    acceptanceCriteria: acceptanceCriteria ?? [],
     evidenceRefs,
+    stage: stage as QualityHarnessStage,
+    role: role as WorkNodeRole,
+    attempt,
+    artifactRefs,
+    reviewRequired,
   };
 }
 
