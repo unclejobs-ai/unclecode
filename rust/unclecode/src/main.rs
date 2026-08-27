@@ -3248,9 +3248,10 @@ fn run_native_provider_command(args: &[OsString]) -> Result<u8, String> {
             let parts = split_nul_parts(&raw);
             let content = parts.first().copied().unwrap_or("");
             let tool_calls_json = parts.get(1).copied().unwrap_or("[]");
+            let reasoning_content = parts.get(2).copied().filter(|value| !value.is_empty());
             println!(
                 "{}",
-                build_openai_assistant_message_json(content, tool_calls_json)?
+                build_openai_assistant_message_json(content, tool_calls_json, reasoning_content)?
             );
             Ok(0)
         }

@@ -6,7 +6,10 @@ import test from "node:test";
 
 import { loadConfig } from "@unclecode/orchestrator";
 import { OpenAIProvider, createRuntimeProvider } from "@unclecode/providers";
-import { loadWorkCliBootstrap } from "../../apps/unclecode-cli/src/work-runtime-bootstrap.ts";
+import {
+  loadWorkCliBootstrap,
+  resolveQualityReviewSelection,
+} from "../../apps/unclecode-cli/src/work-runtime-bootstrap.ts";
 
 const unsupportedReasoning = {
   effort: "unsupported",
@@ -60,6 +63,67 @@ test("the native DeepSeek runtime reuses chat completions at the configured endp
   assert.equal(JSON.parse(requests[0].init.body).model, "deepseek-chat");
 });
 
+test("DeepSeek tool continuation resends reasoning_content in the second HTTP body", async () => {
+  const requestBodies = [];
+  const responses = [
+    {
+      choices: [{
+        message: {
+          content: "",
+          reasoning_content: "retain this chain for the tool continuation",
+          tool_calls: [{
+            id: "call_1",
+            type: "function",
+            function: { name: "inspect", arguments: "{\"path\":\"src\"}" },
+          }],
+        },
+      }],
+      usage: { prompt_tokens: 2, completion_tokens: 3 },
+    },
+    {
+      choices: [{ message: { content: "inspection complete" } }],
+      usage: { prompt_tokens: 4, completion_tokens: 1 },
+    },
+  ];
+  const provider = new OpenAIProvider({
+    providerName: "deepseek",
+    endpointUrl: "https://api.deepseek.com/chat/completions",
+    apiKey: "ds-test-key",
+    model: "deepseek-reasoner",
+    cwd: process.cwd(),
+    reasoning: unsupportedReasoning,
+    toolRuntime: {
+      definitions: [{
+        name: "inspect",
+        description: "Inspect one workspace path.",
+        input_schema: {
+          type: "object",
+          properties: { path: { type: "string" } },
+          required: ["path"],
+        },
+      }],
+      executor: {
+        async execute() {
+          return { content: "src/index.ts" };
+        },
+      },
+    },
+    fetchImpl: async (_url, init) => {
+      requestBodies.push(JSON.parse(init.body));
+      return new Response(JSON.stringify(responses.shift()), { status: 200 });
+    },
+  });
+
+  const result = await provider.runTurn("inspect src");
+
+  assert.equal(result.text, "inspection complete");
+  assert.equal(requestBodies.length, 2);
+  const assistant = requestBodies[1].messages.find((message) => message.role === "assistant");
+  assert.equal(assistant.reasoning_content, "retain this chain for the tool continuation");
+  assert.equal(assistant.tool_calls[0].id, "call_1");
+  assert.equal(requestBodies[1].messages.at(-1).role, "tool");
+});
+
 test("createRuntimeProvider accepts the canonical DeepSeek runtime", () => {
   const provider = createRuntimeProvider({
     provider: "deepseek",
@@ -101,4 +165,30 @@ test("the real work CLI bootstrap preserves the selected DeepSeek route", async 
     process.env = originalEnv;
     rmSync(workspaceRoot, { recursive: true, force: true });
   }
+});
+
+test("quality review bootstrap prefers a genuinely distinct configured provider", () => {
+  assert.deepEqual(resolveQualityReviewSelection({
+    directProvider: "openai",
+    directModel: "gpt-5.6-sol",
+    env: {
+      OPENAI_API_KEY: "openai-key",
+      ANTHROPIC_API_KEY: "anthropic-key",
+      ANTHROPIC_MODEL: "claude-review",
+    },
+  }), {
+    provider: "anthropic",
+    model: "claude-review",
+    distinct: true,
+  });
+
+  assert.deepEqual(resolveQualityReviewSelection({
+    directProvider: "deepseek",
+    directModel: "deepseek-chat",
+    env: { DEEPSEEK_API_KEY: "deepseek-key" },
+  }), {
+    provider: "deepseek",
+    model: "deepseek-chat",
+    distinct: false,
+  });
 });

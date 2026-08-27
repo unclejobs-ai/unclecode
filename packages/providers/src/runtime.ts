@@ -484,7 +484,12 @@ type ProviderToolExecutionStart = {
 };
 
 type OpenAIMessage =
-  | { role: "system" | "assistant"; content: string; tool_calls?: unknown[] }
+  | {
+      role: "system" | "assistant";
+      content: string;
+      tool_calls?: unknown[];
+      reasoning_content?: string;
+    }
   | {
       role: "user";
       content:
@@ -574,6 +579,7 @@ export class OpenAIProvider implements LlmProvider {
     options: ProviderTurnOptions = {},
   ): Promise<{
     content?: string | null;
+    reasoning?: string;
     tool_calls?: Array<{
       id?: string;
       function?: { name?: string; arguments?: string };
@@ -658,6 +664,7 @@ export class OpenAIProvider implements LlmProvider {
         }
         return {
           content: parsed.content,
+          reasoning: parsed.reasoning,
           tool_calls: parsed.toolCalls,
           actions: parsed.actions,
           usage: createProviderTokenUsage(
@@ -688,6 +695,7 @@ export class OpenAIProvider implements LlmProvider {
     }
     return {
       content: parsed.content,
+      reasoning: parsed.reasoning,
       tool_calls: parsed.toolCalls.map((toolCall) => ({
         id: toolCall.id,
         function: { name: toolCall.name, arguments: toolCall.argumentsJson },
@@ -710,6 +718,7 @@ export class OpenAIProvider implements LlmProvider {
     options: ProviderTurnOptions = {},
   ): Promise<{
     content?: string | null;
+    reasoning?: string;
     tool_calls?: Array<{
       id?: string;
       function?: { name?: string; arguments?: string };
@@ -813,6 +822,10 @@ export class OpenAIProvider implements LlmProvider {
           : await this.requestOpenApiMessage(model, reasoning, options);
         throwIfAborted(options.signal);
         assistantText = typeof message?.content === "string" ? message.content : "";
+        const reasoningContent = this.providerName === "deepseek"
+          && typeof message.reasoning === "string"
+          ? message.reasoning
+          : undefined;
         const toolCalls = message?.tool_calls ?? [];
         const actions = message.actions;
         steps += 1;
@@ -841,7 +854,7 @@ export class OpenAIProvider implements LlmProvider {
           assistantText,
           actions.length,
           this.messages,
-          [buildOpenAIAssistantMessage(assistantText, toolCalls)],
+          [buildOpenAIAssistantMessage(assistantText, toolCalls, reasoningContent)],
           toolResultOutcomes,
         );
         assistantText = turnStep.assistantText;
@@ -2590,12 +2603,13 @@ function buildOpenAIChatTools(tools: readonly ToolDefinition[]): string {
 function buildOpenAIAssistantMessage(
   content: string,
   toolCalls: readonly unknown[],
+  reasoningContent?: string | undefined,
 ): OpenAIMessage {
   const raw = runRustCommandSync(
     ["rust", "provider", "openai-assistant-message"],
     process.cwd(),
     process.env,
-    `${content}\0${JSON.stringify(toolCalls)}`,
+    `${content}\0${JSON.stringify(toolCalls)}\0${reasoningContent ?? ""}`,
   ).trim();
   const parsed = JSON.parse(raw) as unknown;
   if (!isRecord(parsed) || parsed.role !== "assistant" || typeof parsed.content !== "string") {
