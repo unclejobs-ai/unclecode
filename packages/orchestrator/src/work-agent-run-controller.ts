@@ -607,9 +607,6 @@ export class WorkAgentRunController<
       return { text: CANCELLED_SUMMARY, status: "cancelled" };
     };
 
-    if (!signal.aborted) {
-      input.onDispatchStarting?.(runId);
-    }
     this.emitTrace({
       type: "agent.run.started",
       level: "high-signal",
@@ -649,6 +646,10 @@ export class WorkAgentRunController<
       if (signal.aborted) {
         return settleCancelled();
       }
+      // A route is real only once its executor exists and the provider turn is
+      // the next operation. Factory failures and pre-dispatch cancellation
+      // therefore emit no provider/model/agentRunId quality boundary.
+      input.onDispatchStarting?.(runId);
       let result = await executor.runTurn(input.prompt, [], { signal });
       // Steering lands between provider turns, never inside one. The mailbox is
       // re-read after every turn, so guidance queued during a steer turn is

@@ -1,5 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -48,6 +59,95 @@ const passingCriticVerdict = JSON.stringify({
   summary: "Implementation matches the requested acceptance criteria.",
   findings: [],
 });
+
+const directoryQualityPlan = JSON.stringify([
+  {
+    id: "task-directory-runtime",
+    summary: "Implement the owned runtime tree",
+    prompt: "Implement the src/runtime directory",
+    goal: "Build the source tree safely",
+    constraints: ["Keep every source under src"],
+    acceptanceCriteria: ["Runtime checks pass"],
+    dependsOn: [],
+    writePaths: ["src/runtime"],
+  },
+  {
+    id: "task-directory-tests",
+    summary: "Implement the owned test tree",
+    prompt: "Implement the src/tests directory",
+    goal: "Build the source tree safely",
+    constraints: ["Keep every source under src"],
+    acceptanceCriteria: ["Test checks pass"],
+    dependsOn: ["task-directory-runtime"],
+    writePaths: ["src/tests"],
+  },
+]);
+
+function createDirectoryQualityAgent(input) {
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: input.workspace });
+  if (input.mutateCompletion) {
+    host.register("directory-completion-mutator", {
+      beforeRunComplete() {
+        input.mutateCompletion();
+        return { action: "proceed" };
+      },
+    });
+  }
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      if (prompt.includes("<goal_task_planner>")) return { text: directoryQualityPlan };
+      if (prompt.includes("Implement the src/runtime directory")) {
+        mkdirSync(path.join(input.workspace, "src", "runtime", "nested"), { recursive: true });
+        writeFileSync(path.join(input.workspace, "src", "runtime", "nested", "baseline.ts"), "baseline\n");
+        return { text: "runtime directory worker complete" };
+      }
+      if (prompt.includes("Implement the src/tests directory")) {
+        mkdirSync(path.join(input.workspace, "src", "tests"), { recursive: true });
+        writeFileSync(path.join(input.workspace, "src", "tests", "runtime.test.ts"), "test\n");
+        return { text: "test directory worker complete" };
+      }
+      throw new Error(`unexpected direct directory prompt: ${prompt}`);
+    },
+  };
+  const reviewAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      if (prompt.includes("<quality_critic_read_only>")) {
+        input.mutateCritic?.();
+        return { text: passingCriticVerdict };
+      }
+      if (prompt.includes("<quality_promote_read_only>")) {
+        input.mutatePromote?.();
+        return { text: "directory handoff" };
+      }
+      throw new Error(`unexpected directory review prompt: ${prompt}`);
+    },
+  };
+  return new orchestrator.WorkAgent({
+    directAgent,
+    reviewAgent,
+    reviewRoute: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
+    mode: "default",
+    reasoning: supportedReasoning,
+    model: "gpt-5.4",
+    workspaceRoot: input.workspace,
+    pluginHost: host,
+    qualityRisk: "medium",
+    directRoute: { provider: "openai", model: "gpt-5.4" },
+    async runExecutableGuardianChecks() {
+      return {
+        checks: [{ name: "test", status: "passed", summary: "test PASS" }],
+        summary: "test PASS",
+      };
+    },
+  });
+}
 
 test("balanced-prewalk uses direct frontier for pattern setting and commodity only for followers", () => {
   const directRoute = { provider: "openai", model: "gpt-5.4" };
@@ -344,6 +444,64 @@ test("failed and dependency-blocked workers both reach afterNodeCompleted and bl
   }
 });
 
+test("a commodity factory failure emits no quality route trace for an executor that never ran", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-factory-trace-"));
+  const traces = [];
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      if (prompt.includes("<goal_task_planner>")) return { text: qualityPlan };
+      if (prompt.includes("Implement login.ts")) {
+        writeFileSync(path.join(workspace, "login.ts"), "export const login = true;\n");
+        return { text: "pattern complete" };
+      }
+      throw new Error(`unexpected factory trace prompt: ${prompt}`);
+    },
+  };
+
+  try {
+    const agent = new orchestrator.WorkAgent({
+      directAgent,
+      async createExecutorAgent() {
+        throw new Error("commodity factory exploded");
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      qualityRisk: "medium",
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+      commodityRoute: { provider: "omp", model: "kimi-code/k3" },
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    const result = await agent.runTurn("refactor login.ts and session.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    const workStarts = traces.filter((event) =>
+      event.type === "quality.stage_started" && event.stage === "work"
+    );
+    assert.deepEqual(workStarts.map((event) => ({
+      nodeId: event.nodeId,
+      provider: event.provider,
+      model: event.model,
+      hasAgentRunId: typeof event.agentRunId === "string",
+    })), [{
+      nodeId: "task-1",
+      provider: "openai",
+      model: "gpt-5.4",
+      hasAgentRunId: true,
+    }]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("a cancelled worker reaches afterNodeCompleted before parent abort propagation", async () => {
   const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-cancelled-hook-"));
   const controller = new AbortController();
@@ -528,6 +686,170 @@ test("a failing executable check blocks a passing critic before promote", async 
     assert.match(result.text, /executable check failed/i);
     assert.equal(reviewPrompts.length, 1, "failed checks must prevent promote");
   } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("directory ownership detects a file created during critic", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-dir-critic-"));
+  try {
+    const agent = createDirectoryQualityAgent({
+      workspace,
+      mutateCritic() {
+        writeFileSync(path.join(workspace, "src", "runtime", "nested", "created-during-critic.ts"), "created\n");
+      },
+    });
+
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /artifact manifest changed during critic/i);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("directory ownership detects a file renamed during promote", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-dir-promote-"));
+  try {
+    const agent = createDirectoryQualityAgent({
+      workspace,
+      mutatePromote() {
+        renameSync(
+          path.join(workspace, "src", "runtime", "nested", "baseline.ts"),
+          path.join(workspace, "src", "runtime", "nested", "renamed-during-promote.ts"),
+        );
+      },
+    });
+
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /artifact manifest changed during promote/i);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("directory ownership detects a file deleted inside beforeRunComplete", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-dir-completion-"));
+  try {
+    const agent = createDirectoryQualityAgent({
+      workspace,
+      mutateCompletion() {
+        unlinkSync(path.join(workspace, "src", "runtime", "nested", "baseline.ts"));
+      },
+    });
+
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /artifact manifest changed during promote/i);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("directory ownership persists canonical recursive worker evidence", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-dir-evidence-"));
+  try {
+    mkdirSync(path.join(workspace, "src", "nested"), { recursive: true });
+    writeFileSync(path.join(workspace, "src", "alpha.ts"), "alpha\n");
+    writeFileSync(path.join(workspace, "src", "nested", "beta.ts"), "nested\n");
+    writeFileSync(path.join(workspace, "outside-secret.txt"), "must not be followed\n");
+    symlinkSync("../outside-secret.txt", path.join(workspace, "src", "external-link"));
+    const store = new orchestrator.QualityArtifactStore(workspace, "directory-evidence");
+    const expectedFiles = [
+      { path: "src", kind: "directory", sha256: null },
+      {
+        path: "src/alpha.ts",
+        kind: "file",
+        sha256: "sha256:b6a98d9ce9a2d9149288fa3df42d377c3e42737afdcdaf714e33c0a100b51060",
+      },
+      {
+        path: "src/external-link",
+        kind: "symlink",
+        sha256: "sha256:ac9b38ca422ebb62cab06155a594906004d01601ffd2f5cf054db4301e523a7b",
+      },
+      { path: "src/nested", kind: "directory", sha256: null },
+      {
+        path: "src/nested/beta.ts",
+        kind: "file",
+        sha256: "sha256:370a8c04b8a65bb4494275eec227f1b694db04c76da6b0b8ae88ed1ab19790a3",
+      },
+    ];
+
+    const manifest = store.captureWorkspaceManifest(["src/", "src/nested/beta.ts"]);
+    const artifact = store.persistNode({
+      nodeId: "directory-node",
+      attempt: 0,
+      producerId: "worker:test",
+      summary: "directory complete",
+      writePaths: ["src/", "src/nested/beta.ts"],
+      completedAt: "2026-08-28T00:00:00.000Z",
+    });
+    const persisted = JSON.parse(readFileSync(path.join(workspace, artifact.path), "utf8"));
+
+    assert.deepEqual(manifest.files, expectedFiles);
+    assert.deepEqual(persisted.files, expectedFiles);
+    assert.doesNotMatch(JSON.stringify(persisted), /must not be followed/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("ownership snapshots refuse paths outside the workspace", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-contained-"));
+  try {
+    const store = new orchestrator.QualityArtifactStore(workspace, "contained");
+    assert.throws(
+      () => store.captureWorkspaceManifest(["../outside-secret.txt"]),
+      /outside the workspace/i,
+    );
+    assert.throws(
+      () => store.persistNode({
+        nodeId: "escaping-node",
+        attempt: 0,
+        producerId: "worker:test",
+        summary: "must fail closed",
+        writePaths: ["../outside-secret.txt"],
+        completedAt: "2026-08-28T00:00:00.000Z",
+      }),
+      /outside the workspace/i,
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("ownership snapshots record a filesystem socket without reading it", {
+  skip: process.platform === "win32",
+}, async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-special-"));
+  const socketPath = path.join(workspace, "owned.sock");
+  const server = createServer();
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, resolve);
+    });
+    const store = new orchestrator.QualityArtifactStore(workspace, "special");
+
+    const manifest = store.captureWorkspaceManifest(["owned.sock"]);
+    const artifact = store.persistNode({
+      nodeId: "special-node",
+      attempt: 0,
+      producerId: "worker:test",
+      summary: "special file observed safely",
+      writePaths: ["owned.sock"],
+      completedAt: "2026-08-28T00:00:00.000Z",
+    });
+    const persisted = JSON.parse(readFileSync(path.join(workspace, artifact.path), "utf8"));
+
+    assert.deepEqual(manifest.files, [{ path: "owned.sock", kind: "special", sha256: null }]);
+    assert.deepEqual(persisted.files, [{ path: "owned.sock", kind: "special", sha256: null }]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
     rmSync(workspace, { recursive: true, force: true });
   }
 });

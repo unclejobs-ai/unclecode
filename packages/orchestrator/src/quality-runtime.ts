@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import {
-  existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
-  statSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -96,10 +98,13 @@ export type PersistedQualityArtifact = {
 
 export type QualityWorkspaceManifest = {
   readonly artifactHash: `sha256:${string}`;
-  readonly files: readonly {
-    readonly path: string;
-    readonly sha256: `sha256:${string}` | null;
-  }[];
+  readonly files: readonly QualityWorkspaceEntry[];
+};
+
+export type QualityWorkspaceEntry = {
+  readonly path: string;
+  readonly kind: "file" | "directory" | "symlink" | "special" | "missing" | "unreadable";
+  readonly sha256: `sha256:${string}` | null;
 };
 
 export type ParsedCriticVerdict = {
@@ -171,13 +176,29 @@ function stableJson(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
+function compareStablePaths(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function portableRelativePath(root: string, absolutePath: string): string {
+  const relative = path.relative(root, absolutePath);
+  return relative.length === 0 ? "." : relative.split(path.sep).join("/");
+}
+
+function isContainedPath(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
 export class QualityArtifactStore {
   readonly workspaceRoot: string;
   readonly runId: string;
   readonly runDirectory: string;
+  private readonly workspaceRealRoot: string;
 
   constructor(workspaceRoot: string, runId: string) {
     this.workspaceRoot = path.resolve(workspaceRoot);
+    this.workspaceRealRoot = realpathSync.native(this.workspaceRoot);
     this.runId = safeFilePart(runId);
     this.runDirectory = path.join(
       this.workspaceRoot,
@@ -187,25 +208,12 @@ export class QualityArtifactStore {
     );
   }
 
-  /** Hashes every declared output, including missing files, in stable path order. */
+  /**
+   * Snapshots declared files and directory trees without following symlinks.
+   * Missing and unreadable paths remain explicit evidence; escaping paths fail closed.
+   */
   captureWorkspaceManifest(writePaths: readonly string[]): QualityWorkspaceManifest {
-    const files = [...new Set(writePaths)]
-      .sort((left, right) => left.localeCompare(right))
-      .flatMap((relativePath) => {
-        const absolutePath = path.resolve(this.workspaceRoot, relativePath);
-        const relative = path.relative(this.workspaceRoot, absolutePath);
-        if (relative.startsWith("..") || path.isAbsolute(relative)) return [];
-        try {
-          return [{
-            path: relative,
-            sha256: existsSync(absolutePath) && statSync(absolutePath).isFile()
-              ? sha256(readFileSync(absolutePath))
-              : null,
-          }];
-        } catch {
-          return [{ path: relative, sha256: null }];
-        }
-      });
+    const files = this.snapshotOwnedPaths(writePaths);
     return {
       artifactHash: sha256(stableJson({ schemaVersion: 1, kind: "workspace-manifest", files })),
       files,
@@ -221,19 +229,7 @@ export class QualityArtifactStore {
     readonly completedAt: string;
     readonly status?: "completed" | "failed" | "cancelled" | "blocked" | undefined;
   }): PersistedQualityArtifact {
-    const files = input.writePaths.flatMap((relativePath) => {
-      const absolutePath = path.resolve(this.workspaceRoot, relativePath);
-      const relative = path.relative(this.workspaceRoot, absolutePath);
-      if (relative.startsWith("..") || path.isAbsolute(relative) || !existsSync(absolutePath)) {
-        return [];
-      }
-      try {
-        if (!statSync(absolutePath).isFile()) return [];
-        return [{ path: relative, sha256: sha256(readFileSync(absolutePath)) }];
-      } catch {
-        return [];
-      }
-    });
+    const files = this.snapshotOwnedPaths(input.writePaths);
     return this.persist(
       `${safeFilePart(input.nodeId)}-attempt-${input.attempt}.json`,
       {
@@ -249,6 +245,114 @@ export class QualityArtifactStore {
         completedAt: input.completedAt,
       },
     );
+  }
+
+  private snapshotOwnedPaths(writePaths: readonly string[]): readonly QualityWorkspaceEntry[] {
+    const entries = new Map<string, QualityWorkspaceEntry>();
+    const roots = [...new Set(writePaths)]
+      .map((writePath) => this.resolveOwnedPath(writePath))
+      .sort((left, right) => compareStablePaths(left.relativePath, right.relativePath));
+    for (const root of roots) {
+      this.snapshotOwnedPath(root.absolutePath, root.relativePath, entries);
+    }
+    return [...entries.values()].sort((left, right) => compareStablePaths(left.path, right.path));
+  }
+
+  private resolveOwnedPath(writePath: string): { readonly absolutePath: string; readonly relativePath: string } {
+    const absolutePath = path.resolve(this.workspaceRoot, writePath);
+    if (!isContainedPath(this.workspaceRoot, absolutePath)) {
+      throw new Error(`Owned path is outside the workspace: ${writePath}`);
+    }
+    this.assertExistingParentContained(absolutePath, writePath);
+    return {
+      absolutePath,
+      relativePath: portableRelativePath(this.workspaceRoot, absolutePath),
+    };
+  }
+
+  private assertExistingParentContained(absolutePath: string, writePath: string): void {
+    let ancestor = path.dirname(absolutePath);
+    while (isContainedPath(this.workspaceRoot, ancestor)) {
+      try {
+        const realAncestor = realpathSync.native(ancestor);
+        if (!isContainedPath(this.workspaceRealRoot, realAncestor)) {
+          throw new Error(`Owned path resolves outside the workspace: ${writePath}`);
+        }
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (ancestor === this.workspaceRoot) return;
+      ancestor = path.dirname(ancestor);
+    }
+  }
+
+  private snapshotOwnedPath(
+    absolutePath: string,
+    relativePath: string,
+    entries: Map<string, QualityWorkspaceEntry>,
+  ): void {
+    if (isContainedPath(this.runDirectory, absolutePath)) return;
+    let stats: ReturnType<typeof lstatSync>;
+    try {
+      stats = lstatSync(absolutePath);
+    } catch (error) {
+      entries.set(relativePath, {
+        path: relativePath,
+        kind: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable",
+        sha256: null,
+      });
+      return;
+    }
+
+    if (stats.isSymbolicLink()) {
+      try {
+        entries.set(relativePath, {
+          path: relativePath,
+          kind: "symlink",
+          sha256: sha256(readlinkSync(absolutePath)),
+        });
+      } catch {
+        entries.set(relativePath, { path: relativePath, kind: "unreadable", sha256: null });
+      }
+      return;
+    }
+    if (stats.isFile()) {
+      try {
+        entries.set(relativePath, {
+          path: relativePath,
+          kind: "file",
+          sha256: sha256(readFileSync(absolutePath)),
+        });
+      } catch {
+        entries.set(relativePath, { path: relativePath, kind: "unreadable", sha256: null });
+      }
+      return;
+    }
+    if (!stats.isDirectory()) {
+      entries.set(relativePath, { path: relativePath, kind: "special", sha256: null });
+      return;
+    }
+
+    entries.set(relativePath, { path: relativePath, kind: "directory", sha256: null });
+    let childNames: string[];
+    try {
+      childNames = readdirSync(absolutePath).sort(compareStablePaths);
+    } catch {
+      entries.set(relativePath, { path: relativePath, kind: "unreadable", sha256: null });
+      return;
+    }
+    for (const childName of childNames) {
+      const childAbsolutePath = path.join(absolutePath, childName);
+      if (!isContainedPath(this.workspaceRoot, childAbsolutePath)) {
+        throw new Error(`Owned directory entry is outside the workspace: ${relativePath}/${childName}`);
+      }
+      this.snapshotOwnedPath(
+        childAbsolutePath,
+        portableRelativePath(this.workspaceRoot, childAbsolutePath),
+        entries,
+      );
+    }
   }
 
   persistRun(input: {
