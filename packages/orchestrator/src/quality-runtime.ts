@@ -94,18 +94,26 @@ export function resolveBalancedPrewalkRoute(input: {
 export type PersistedQualityArtifact = {
   readonly path: string;
   readonly artifactHash: `sha256:${string}`;
+  readonly evidenceStatus?: QualityWorkspaceEvidenceStatus | undefined;
+  readonly unsupportedEntries?: readonly QualityWorkspaceEntry[] | undefined;
 };
 
 export type QualityWorkspaceManifest = {
   readonly artifactHash: `sha256:${string}`;
+  readonly evidenceStatus: QualityWorkspaceEvidenceStatus;
+  readonly unsupportedEntries: readonly QualityWorkspaceEntry[];
   readonly files: readonly QualityWorkspaceEntry[];
 };
+
+export type QualityWorkspaceEvidenceStatus = "supported" | "unsupported";
 
 export type QualityWorkspaceEntry = {
   readonly path: string;
   readonly kind: "file" | "directory" | "symlink" | "special" | "missing" | "unreadable";
   readonly sha256: `sha256:${string}` | null;
 };
+
+type QualityWorkspaceSnapshot = Omit<QualityWorkspaceManifest, "artifactHash">;
 
 export type ParsedCriticVerdict = {
   readonly verdict: "pass" | "fail" | "unproven";
@@ -213,10 +221,14 @@ export class QualityArtifactStore {
    * Missing and unreadable paths remain explicit evidence; escaping paths fail closed.
    */
   captureWorkspaceManifest(writePaths: readonly string[]): QualityWorkspaceManifest {
-    const files = this.snapshotOwnedPaths(writePaths);
+    const snapshot = this.snapshotOwnedPaths(writePaths);
     return {
-      artifactHash: sha256(stableJson({ schemaVersion: 1, kind: "workspace-manifest", files })),
-      files,
+      artifactHash: sha256(stableJson({
+        schemaVersion: 1,
+        kind: "workspace-manifest",
+        ...snapshot,
+      })),
+      ...snapshot,
     };
   }
 
@@ -229,8 +241,8 @@ export class QualityArtifactStore {
     readonly completedAt: string;
     readonly status?: "completed" | "failed" | "cancelled" | "blocked" | undefined;
   }): PersistedQualityArtifact {
-    const files = this.snapshotOwnedPaths(input.writePaths);
-    return this.persist(
+    const snapshot = this.snapshotOwnedPaths(input.writePaths);
+    const artifact = this.persist(
       `${safeFilePart(input.nodeId)}-attempt-${input.attempt}.json`,
       {
         schemaVersion: 1,
@@ -241,13 +253,18 @@ export class QualityArtifactStore {
         producerId: input.producerId,
         summary: input.summary.slice(0, 8_000),
         status: input.status ?? "completed",
-        files,
+        ...snapshot,
         completedAt: input.completedAt,
       },
     );
+    return {
+      ...artifact,
+      evidenceStatus: snapshot.evidenceStatus,
+      unsupportedEntries: snapshot.unsupportedEntries,
+    };
   }
 
-  private snapshotOwnedPaths(writePaths: readonly string[]): readonly QualityWorkspaceEntry[] {
+  private snapshotOwnedPaths(writePaths: readonly string[]): QualityWorkspaceSnapshot {
     const entries = new Map<string, QualityWorkspaceEntry>();
     const roots = [...new Set(writePaths)]
       .map((writePath) => this.resolveOwnedPath(writePath))
@@ -255,7 +272,14 @@ export class QualityArtifactStore {
     for (const root of roots) {
       this.snapshotOwnedPath(root.absolutePath, root.relativePath, entries);
     }
-    return [...entries.values()].sort((left, right) => compareStablePaths(left.path, right.path));
+    const files = [...entries.values()].sort((left, right) => compareStablePaths(left.path, right.path));
+    const unsupportedEntries = files.filter((entry) =>
+      entry.kind === "symlink" || entry.kind === "special" || entry.kind === "unreadable");
+    return {
+      evidenceStatus: unsupportedEntries.length === 0 ? "supported" : "unsupported",
+      unsupportedEntries,
+      files,
+    };
   }
 
   private resolveOwnedPath(writePath: string): { readonly absolutePath: string; readonly relativePath: string } {
@@ -263,11 +287,42 @@ export class QualityArtifactStore {
     if (!isContainedPath(this.workspaceRoot, absolutePath)) {
       throw new Error(`Owned path is outside the workspace: ${writePath}`);
     }
+    const unsupportedAncestor = this.findUnsupportedPathComponent(absolutePath);
+    if (unsupportedAncestor) return unsupportedAncestor;
     this.assertExistingParentContained(absolutePath, writePath);
     return {
       absolutePath,
       relativePath: portableRelativePath(this.workspaceRoot, absolutePath),
     };
+  }
+
+  /** Returns the first symlink/special path component without traversing beyond it. */
+  private findUnsupportedPathComponent(
+    absolutePath: string,
+  ): { readonly absolutePath: string; readonly relativePath: string } | undefined {
+    const relative = path.relative(this.workspaceRoot, absolutePath);
+    if (!relative) return undefined;
+    let candidate = this.workspaceRoot;
+    for (const component of relative.split(path.sep)) {
+      candidate = path.join(candidate, component);
+      try {
+        const stats = lstatSync(candidate);
+        if (stats.isSymbolicLink() || (!stats.isDirectory() && !stats.isFile())) {
+          return {
+            absolutePath: candidate,
+            relativePath: portableRelativePath(this.workspaceRoot, candidate),
+          };
+        }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "ENOTDIR") return undefined;
+        return {
+          absolutePath: candidate,
+          relativePath: portableRelativePath(this.workspaceRoot, candidate),
+        };
+      }
+    }
+    return undefined;
   }
 
   private assertExistingParentContained(absolutePath: string, writePath: string): void {

@@ -54,6 +54,7 @@ import {
   type BalancedPrewalkRoute,
   type PersistedQualityArtifact,
   type QualityProviderRoute,
+  type QualityWorkspaceEntry,
 } from "./quality-runtime.js";
 
 type ReasoningLike = {
@@ -273,6 +274,16 @@ type QualityRuntimeState = {
   completed: boolean;
 };
 
+type QualityDecisionDetail = {
+  readonly nodeId?: string | undefined;
+  readonly artifactHash?: string | undefined;
+  readonly evidenceRefs?: readonly string[] | undefined;
+  readonly independentVerification?: boolean | undefined;
+  readonly route?: BalancedPrewalkRoute | undefined;
+  readonly nodeAttempt?: number | undefined;
+  readonly artifactRefs?: readonly string[] | undefined;
+};
+
 class QualityLifecycleStop extends Error {
   constructor() {
     super("Quality lifecycle terminated explicitly.");
@@ -327,6 +338,36 @@ function staleArtifactDecision(stage: "critic" | "promote"): PluginDecisionAggre
       failures: [code],
     }],
     failures: [code],
+  };
+}
+
+function unsupportedOwnershipDecision(
+  stage: QualityHarnessStage,
+  entries: readonly QualityWorkspaceEntry[],
+): PluginDecisionAggregate {
+  const paths = entries.slice(0, 8).map((entry) => `${entry.path} (${entry.kind})`).join(", ");
+  const remainder = entries.length > 8 ? `, and ${entries.length - 8} more` : "";
+  const reason = `Unsupported owned workspace evidence encountered during ${stage}: ${paths}${remainder}.`;
+  return {
+    action: "block",
+    decisions: [{
+      pluginName: "unclecode-runtime",
+      action: "block",
+      reason,
+      failures: ["UNSUPPORTED_OWNERSHIP_EVIDENCE"],
+    }],
+    failures: ["UNSUPPORTED_OWNERSHIP_EVIDENCE"],
+  };
+}
+
+function forceRuntimeBlock(
+  observed: PluginDecisionAggregate,
+  runtime: PluginDecisionAggregate,
+): PluginDecisionAggregate {
+  return {
+    action: "block",
+    decisions: [...runtime.decisions, ...observed.decisions],
+    failures: [...new Set([...runtime.failures, ...observed.failures])],
   };
 }
 
@@ -619,15 +660,7 @@ export class WorkAgent<
     state: QualityRuntimeState,
     stage: QualityHarnessStage,
     decision: PluginDecisionAggregate,
-    detail: {
-      readonly nodeId?: string | undefined;
-      readonly artifactHash?: string | undefined;
-      readonly evidenceRefs?: readonly string[] | undefined;
-      readonly independentVerification?: boolean | undefined;
-      readonly route?: BalancedPrewalkRoute | undefined;
-      readonly nodeAttempt?: number | undefined;
-      readonly artifactRefs?: readonly string[] | undefined;
-    } = {},
+    detail: QualityDecisionDetail = {},
   ): void {
     const failures = [...new Set(decision.failures)];
     for (const failure of failures) {
@@ -717,6 +750,20 @@ export class WorkAgent<
       failures,
       ...(detail.nodeId ? { nodeId: detail.nodeId } : {}),
     };
+  }
+
+  private recordUnsupportedOwnershipDecision(
+    state: QualityRuntimeState,
+    stage: QualityHarnessStage,
+    entries: readonly QualityWorkspaceEntry[],
+    detail: QualityDecisionDetail,
+  ): void {
+    this.recordQualityDecision(
+      state,
+      stage,
+      unsupportedOwnershipDecision(stage, entries),
+      detail,
+    );
   }
 
   private async finishTerminalQualityNode(
@@ -1048,11 +1095,13 @@ export class WorkAgent<
           });
           quality.workerArtifacts.push(artifact);
           quality.producerRoutes.push({ provider: route.provider, model: route.model });
+          const unsupportedEntries = artifact.unsupportedEntries ?? [];
+          const evidenceUnsupported = artifact.evidenceStatus === "unsupported";
           const evidence: GateEvidence[] = [{
             kind: "artifact",
             artifactHash: artifact.artifactHash,
             producerId,
-            result: "pass",
+            result: evidenceUnsupported ? "fail" : "pass",
             timestamp: completedAt,
           }];
           const alternateRoutes = [
@@ -1081,13 +1130,23 @@ export class WorkAgent<
             artifactHash: artifact.artifactHash,
             producerId,
             evidence,
-            findings: [],
+            findings: evidenceUnsupported
+              ? [{
+                  kind: "implementation",
+                  severity: "critical",
+                  correctable: false,
+                  direction: "Owned output contains a symlink, special file, or unreadable entry and cannot be trusted as review evidence.",
+                }]
+              : [],
             independentProviderAvailable: independentAvailable,
             independentReviewerAvailable: independentAvailable,
             refineCount: quality.refineCount,
             pivotCount: quality.pivotCount,
           });
-          this.recordQualityDecision(quality, "work", afterNode, {
+          const afterNodeDecision = evidenceUnsupported
+            ? forceRuntimeBlock(afterNode, unsupportedOwnershipDecision("work", unsupportedEntries))
+            : afterNode;
+          this.recordQualityDecision(quality, "work", afterNodeDecision, {
             nodeId: node.id,
             nodeAttempt: node.attempt,
             artifactRefs: [artifact.path],
@@ -1166,9 +1225,26 @@ export class WorkAgent<
             kind: "artifact",
             artifactHash: completionArtifact.artifactHash,
             producerId: completionProducerId,
-            result: "pass",
+            result: workspaceManifest.evidenceStatus === "unsupported" ? "fail" : "pass",
             timestamp: new Date().toISOString(),
           }];
+          if (workspaceManifest.evidenceStatus === "unsupported") {
+            criticGateStatus = "block";
+            this.recordUnsupportedOwnershipDecision(
+              quality,
+              "critic",
+              workspaceManifest.unsupportedEntries,
+              {
+                artifactHash: completionArtifact.artifactHash,
+                evidenceRefs: [completionArtifact.path],
+                independentVerification: false,
+              },
+            );
+            if (quality.graph) {
+              quality.graph = { ...quality.graph, currentStage: "critic", gateStatus: "block" };
+            }
+            return { summary: "Quality review blocked: unsupported owned workspace evidence." };
+          }
           criticRoute = resolveBalancedPrewalkRoute({
             stage: "critic",
             directRoute: this.directRoute,
@@ -1205,6 +1281,33 @@ export class WorkAgent<
           const reviewerId = `critic:${criticRoute.provider}:${criticRoute.model}`;
           const completedAt = new Date().toISOString();
           const postCriticManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
+          if (postCriticManifest.evidenceStatus === "unsupported") {
+            const criticArtifact = quality.artifacts.persistCritic({
+              reviewerId,
+              reviewedArtifactHash: completionArtifact.artifactHash,
+              summary,
+              independent: criticIndependent,
+              completedAt,
+            });
+            completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
+            criticGateStatus = "block";
+            this.recordUnsupportedOwnershipDecision(
+              quality,
+              "critic",
+              postCriticManifest.unsupportedEntries,
+              {
+                artifactHash: completionArtifact.artifactHash,
+                evidenceRefs: [completionArtifact.path, criticArtifact.path],
+                independentVerification: false,
+                route: criticRoute,
+              },
+            );
+            quality.completedStages.add("critic");
+            if (quality.graph) {
+              quality.graph = { ...quality.graph, currentStage: "critic", gateStatus: "block" };
+            }
+            return { summary: "Unsupported owned workspace evidence encountered during critic." };
+          }
           if (postCriticManifest.artifactHash !== completionManifestHash) {
             const criticArtifact = quality.artifacts.persistCritic({
               reviewerId,
@@ -1429,6 +1532,20 @@ export class WorkAgent<
 
     if (quality && completionArtifact && completionManifestHash) {
       const prePromoteManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
+      if (prePromoteManifest.evidenceStatus === "unsupported") {
+        completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
+        this.recordUnsupportedOwnershipDecision(
+          quality,
+          "promote",
+          prePromoteManifest.unsupportedEntries,
+          {
+            artifactHash: completionArtifact.artifactHash,
+            evidenceRefs: [completionArtifact.path],
+            independentVerification: false,
+          },
+        );
+        return this.terminateQuality(quality);
+      }
       if (prePromoteManifest.artifactHash !== completionManifestHash) {
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
         this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
@@ -1469,6 +1586,21 @@ export class WorkAgent<
 
     if (quality && completionArtifact && completionManifestHash) {
       const postPromoteManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
+      if (postPromoteManifest.evidenceStatus === "unsupported") {
+        completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
+        this.recordUnsupportedOwnershipDecision(
+          quality,
+          "promote",
+          postPromoteManifest.unsupportedEntries,
+          {
+            artifactHash: completionArtifact.artifactHash,
+            evidenceRefs: [completionArtifact.path],
+            independentVerification: false,
+            ...(promoteRoute ? { route: promoteRoute } : {}),
+          },
+        );
+        return this.terminateQuality(quality);
+      }
       if (postPromoteManifest.artifactHash !== completionManifestHash) {
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
         this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
@@ -1491,6 +1623,21 @@ export class WorkAgent<
         };
       }
       const completionManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
+      if (completionManifest.evidenceStatus === "unsupported") {
+        completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
+        this.recordUnsupportedOwnershipDecision(
+          quality,
+          "promote",
+          completionManifest.unsupportedEntries,
+          {
+            artifactHash: completionArtifact.artifactHash,
+            evidenceRefs: [completionArtifact.path],
+            independentVerification: false,
+            ...(promoteRoute ? { route: promoteRoute } : {}),
+          },
+        );
+        return this.terminateQuality(quality);
+      }
       if (completionManifest.artifactHash !== completionManifestHash) {
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
         this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
@@ -1532,6 +1679,21 @@ export class WorkAgent<
       const postCompletionManifest = quality.artifacts.captureWorkspaceManifest(
         qualityWritePaths(quality),
       );
+      if (postCompletionManifest.evidenceStatus === "unsupported") {
+        completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
+        this.recordUnsupportedOwnershipDecision(
+          quality,
+          "promote",
+          postCompletionManifest.unsupportedEntries,
+          {
+            artifactHash: completionArtifact.artifactHash,
+            evidenceRefs: [completionArtifact.path],
+            independentVerification: false,
+            ...(promoteRoute ? { route: promoteRoute } : {}),
+          },
+        );
+        return this.terminateQuality(quality);
+      }
       if (postCompletionManifest.artifactHash !== completionManifestHash) {
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
         this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {

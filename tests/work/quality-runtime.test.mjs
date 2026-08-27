@@ -103,6 +103,7 @@ function createDirectoryQualityAgent(input) {
       if (prompt.includes("Implement the src/runtime directory")) {
         mkdirSync(path.join(input.workspace, "src", "runtime", "nested"), { recursive: true });
         writeFileSync(path.join(input.workspace, "src", "runtime", "nested", "baseline.ts"), "baseline\n");
+        await input.mutateRuntimeWorker?.();
         return { text: "runtime directory worker complete" };
       }
       if (prompt.includes("Implement the src/tests directory")) {
@@ -129,7 +130,7 @@ function createDirectoryQualityAgent(input) {
       throw new Error(`unexpected directory review prompt: ${prompt}`);
     },
   };
-  return new orchestrator.WorkAgent({
+  const agent = new orchestrator.WorkAgent({
     directAgent,
     reviewAgent,
     reviewRoute: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
@@ -147,6 +148,25 @@ function createDirectoryQualityAgent(input) {
       };
     },
   });
+  if (input.traces) agent.setTraceListener((event) => input.traces.push(event));
+  return agent;
+}
+
+function replaceNestedDirectoryWithInternalSymlink(workspace, content) {
+  const targetDirectory = path.join(workspace, "internal-target");
+  const linkPath = path.join(workspace, "src", "runtime", "nested");
+  mkdirSync(targetDirectory, { recursive: true });
+  writeFileSync(path.join(targetDirectory, "target.ts"), "initial target\n");
+  rmSync(linkPath, { recursive: true, force: true });
+  symlinkSync(targetDirectory, linkPath, "dir");
+  writeFileSync(path.join(targetDirectory, "target.ts"), content);
+}
+
+function unsupportedOwnershipFailures(traces) {
+  return traces
+    .filter((event) => event.type === "quality.gate_evaluated")
+    .flatMap((event) => event.failures ?? [])
+    .filter((failure) => failure === "UNSUPPORTED_OWNERSHIP_EVIDENCE");
 }
 
 test("balanced-prewalk uses direct frontier for pattern setting and commodity only for followers", () => {
@@ -750,6 +770,133 @@ test("directory ownership detects a file deleted inside beforeRunComplete", asyn
   }
 });
 
+test("an internal directory symlink is unsupported before its critic can mutate the target", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-dir-link-precritic-"));
+  let criticCalls = 0;
+  try {
+    const agent = createDirectoryQualityAgent({
+      workspace,
+      mutateRuntimeWorker() {
+        replaceNestedDirectoryWithInternalSymlink(workspace, "worker target\n");
+      },
+      mutateCritic() {
+        criticCalls += 1;
+        writeFileSync(path.join(workspace, "internal-target", "target.ts"), "critic target mutation\n");
+      },
+    });
+
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /unsupported owned workspace evidence/i);
+    assert.equal(criticCalls, 0, "unsupported worker evidence must block before critic execution");
+    assert.equal(
+      readFileSync(path.join(workspace, "internal-target", "target.ts"), "utf8"),
+      "worker target\n",
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a directory symlink introduced during critic invalidates target-mutation evidence as unsupported", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-dir-link-critic-"));
+  const traces = [];
+  try {
+    const agent = createDirectoryQualityAgent({
+      workspace,
+      traces,
+      mutateCritic() {
+        replaceNestedDirectoryWithInternalSymlink(workspace, "critic target mutation\n");
+      },
+    });
+
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /unsupported owned workspace evidence/i);
+    assert.deepEqual(unsupportedOwnershipFailures(traces), ["UNSUPPORTED_OWNERSHIP_EVIDENCE"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a directory symlink introduced during promote invalidates target-mutation evidence as unsupported", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-dir-link-promote-"));
+  const traces = [];
+  try {
+    const agent = createDirectoryQualityAgent({
+      workspace,
+      traces,
+      mutatePromote() {
+        replaceNestedDirectoryWithInternalSymlink(workspace, "promote target mutation\n");
+      },
+    });
+
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /unsupported owned workspace evidence/i);
+    assert.deepEqual(unsupportedOwnershipFailures(traces), ["UNSUPPORTED_OWNERSHIP_EVIDENCE"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a directory symlink introduced in beforeRunComplete invalidates target-mutation evidence as unsupported", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-dir-link-completion-"));
+  const traces = [];
+  try {
+    const agent = createDirectoryQualityAgent({
+      workspace,
+      traces,
+      mutateCompletion() {
+        replaceNestedDirectoryWithInternalSymlink(workspace, "completion target mutation\n");
+      },
+    });
+
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /unsupported owned workspace evidence/i);
+    assert.deepEqual(unsupportedOwnershipFailures(traces), ["UNSUPPORTED_OWNERSHIP_EVIDENCE"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a nested special entry is unsupported before review", {
+  skip: process.platform === "win32",
+}, async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-s-"));
+  const socketPath = path.join(workspace, "src", "runtime", "owned.sock");
+  const server = createServer();
+  let criticCalls = 0;
+  try {
+    const agent = createDirectoryQualityAgent({
+      workspace,
+      async mutateRuntimeWorker() {
+        await new Promise((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(socketPath, resolve);
+        });
+      },
+      mutateCritic() {
+        criticCalls += 1;
+      },
+    });
+
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /unsupported owned workspace evidence/i);
+    assert.equal(criticCalls, 0);
+  } finally {
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("directory ownership persists canonical recursive worker evidence", () => {
   const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-dir-evidence-"));
   try {
@@ -790,9 +937,82 @@ test("directory ownership persists canonical recursive worker evidence", () => {
     });
     const persisted = JSON.parse(readFileSync(path.join(workspace, artifact.path), "utf8"));
 
+    assert.equal(manifest.evidenceStatus, "unsupported");
+    assert.deepEqual(manifest.unsupportedEntries, [expectedFiles[2]]);
     assert.deepEqual(manifest.files, expectedFiles);
+    assert.equal(persisted.evidenceStatus, "unsupported");
+    assert.deepEqual(persisted.unsupportedEntries, [expectedFiles[2]]);
     assert.deepEqual(persisted.files, expectedFiles);
     assert.doesNotMatch(JSON.stringify(persisted), /must not be followed/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("ordinary files, directories, and missing owned roots remain supported evidence", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-supported-evidence-"));
+  try {
+    mkdirSync(path.join(workspace, "src"), { recursive: true });
+    writeFileSync(path.join(workspace, "src", "ordinary.ts"), "ordinary\n");
+    const store = new orchestrator.QualityArtifactStore(workspace, "supported-evidence");
+
+    const manifest = store.captureWorkspaceManifest(["src", "missing-output.ts"]);
+
+    assert.equal(manifest.evidenceStatus, "supported");
+    assert.deepEqual(manifest.unsupportedEntries, []);
+    assert.deepEqual(
+      manifest.files.map(({ path: entryPath, kind }) => ({ path: entryPath, kind })),
+      [
+        { path: "missing-output.ts", kind: "missing" },
+        { path: "src", kind: "directory" },
+        { path: "src/ordinary.ts", kind: "file" },
+      ],
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a symlink at an owned root is explicitly unsupported without following its target", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-root-link-"));
+  try {
+    writeFileSync(path.join(workspace, "target.ts"), "external target contents must stay unread\n");
+    symlinkSync("target.ts", path.join(workspace, "owned-link.ts"));
+    const store = new orchestrator.QualityArtifactStore(workspace, "root-link");
+
+    const manifest = store.captureWorkspaceManifest(["owned-link.ts"]);
+
+    assert.equal(manifest.evidenceStatus, "unsupported");
+    assert.deepEqual(
+      manifest.unsupportedEntries.map(({ path: entryPath, kind }) => ({ path: entryPath, kind })),
+      [{ path: "owned-link.ts", kind: "symlink" }],
+    );
+    assert.doesNotMatch(JSON.stringify(manifest), /external target contents must stay unread/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a symlink in the path to an owned root is unsupported without reading the nested target", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-ancestor-link-"));
+  try {
+    mkdirSync(path.join(workspace, "src"), { recursive: true });
+    mkdirSync(path.join(workspace, "internal-target"), { recursive: true });
+    writeFileSync(
+      path.join(workspace, "internal-target", "secret.ts"),
+      "nested target contents must stay unread\n",
+    );
+    symlinkSync(path.join(workspace, "internal-target"), path.join(workspace, "src", "linked"), "dir");
+    const store = new orchestrator.QualityArtifactStore(workspace, "ancestor-link");
+
+    const manifest = store.captureWorkspaceManifest(["src/linked/secret.ts"]);
+
+    assert.equal(manifest.evidenceStatus, "unsupported");
+    assert.deepEqual(
+      manifest.unsupportedEntries.map(({ path: entryPath, kind }) => ({ path: entryPath, kind })),
+      [{ path: "src/linked", kind: "symlink" }],
+    );
+    assert.doesNotMatch(JSON.stringify(manifest), /nested target contents must stay unread/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -846,7 +1066,15 @@ test("ownership snapshots record a filesystem socket without reading it", {
     });
     const persisted = JSON.parse(readFileSync(path.join(workspace, artifact.path), "utf8"));
 
+    assert.equal(manifest.evidenceStatus, "unsupported");
+    assert.deepEqual(manifest.unsupportedEntries, [
+      { path: "owned.sock", kind: "special", sha256: null },
+    ]);
     assert.deepEqual(manifest.files, [{ path: "owned.sock", kind: "special", sha256: null }]);
+    assert.equal(persisted.evidenceStatus, "unsupported");
+    assert.deepEqual(persisted.unsupportedEntries, [
+      { path: "owned.sock", kind: "special", sha256: null },
+    ]);
     assert.deepEqual(persisted.files, [{ path: "owned.sock", kind: "special", sha256: null }]);
   } finally {
     await new Promise((resolve) => server.close(resolve));
