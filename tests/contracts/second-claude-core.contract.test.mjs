@@ -5,7 +5,10 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const workspaceRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../..",
+);
 const vendorTarball = path.join(
   workspaceRoot,
   "vendor/second-claude/second-claude-core-4.0.0.tgz",
@@ -24,7 +27,9 @@ test("the installed SCC core is the reviewed vendored release and passes its sha
     expectedSha256,
   );
 
-  const packageJson = JSON.parse(readFileSync(path.join(workspaceRoot, "package.json"), "utf8"));
+  const packageJson = JSON.parse(
+    readFileSync(path.join(workspaceRoot, "package.json"), "utf8"),
+  );
   assert.equal(
     packageJson.dependencies?.["@second-claude/core"],
     "file:vendor/second-claude/second-claude-core-4.0.0.tgz",
@@ -33,13 +38,17 @@ test("the installed SCC core is the reviewed vendored release and passes its sha
   const core = await import("@second-claude/core");
   const fixture = JSON.parse(
     readFileSync(
-      new URL("../../node_modules/@second-claude/core/fixtures/quality-contract.json", import.meta.url),
+      new URL(
+        "../../node_modules/@second-claude/core/fixtures/quality-contract.json",
+        import.meta.url,
+      ),
       "utf8",
     ),
   );
   const operations = {
     evaluateGate: (input) => core.evaluateGate(input),
-    validateEvidence: (input) => core.validateEvidence(input.evidence, input.context),
+    validateEvidence: (input) =>
+      core.validateEvidence(input.evidence, input.context),
     validateEvolutionProposal: (input) =>
       core.validateEvolutionProposal(input.proposal, input.context),
     validatePlan: (input) => core.validatePlan(input),
@@ -49,7 +58,11 @@ test("the installed SCC core is the reviewed vendored release and passes its sha
 
   for (const fixtureCase of fixture.cases) {
     const operation = operations[fixtureCase.operation];
-    assert.equal(typeof operation, "function", `unknown fixture operation ${fixtureCase.operation}`);
+    assert.equal(
+      typeof operation,
+      "function",
+      `unknown fixture operation ${fixtureCase.operation}`,
+    );
     const actual = operation(fixtureCase.input);
     assert.deepEqual(
       typeof actual === "object" && actual !== null && "issues" in actual

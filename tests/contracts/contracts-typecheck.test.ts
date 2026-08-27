@@ -13,6 +13,11 @@ import type {
   JsonObject,
   JsonValue,
   OpenEmbeddedWorkSession,
+  QualityCompletedTraceEvent,
+  QualityGateEvaluatedTraceEvent,
+  QualityPivotRequestedTraceEvent,
+  QualityRefineRequestedTraceEvent,
+  QualityStageStartedTraceEvent,
   SessionMetadata,
   SessionPendingAction,
   TerminalAgentRunStatus,
@@ -21,11 +26,6 @@ import type {
   ToolStartedTraceEvent,
   UsageRecordedTraceEvent,
   WorkGraph,
-  QualityStageStartedTraceEvent,
-  QualityGateEvaluatedTraceEvent,
-  QualityRefineRequestedTraceEvent,
-  QualityPivotRequestedTraceEvent,
-  QualityCompletedTraceEvent,
 } from "@unclecode/contracts";
 import type { PolicyDecision as PolicyEngineDecision } from "@unclecode/policy-engine";
 import type { ProviderId as PackageProviderId } from "@unclecode/providers";
@@ -249,8 +249,16 @@ type QualityEventsAreTraceMembers = Assert<
 >;
 type WorkGraphQualityFieldsAreRequired = Assert<
   IsExact<
-    Pick<WorkGraph, "qualityProfile" | "currentStage" | "gateStatus" | "iteration">,
-    Required<Pick<WorkGraph, "qualityProfile" | "currentStage" | "gateStatus" | "iteration">>
+    Pick<
+      WorkGraph,
+      "qualityProfile" | "currentStage" | "gateStatus" | "iteration"
+    >,
+    Required<
+      Pick<
+        WorkGraph,
+        "qualityProfile" | "currentStage" | "gateStatus" | "iteration"
+      >
+    >
   >
 >;
 type WorkNodeQualityFieldsAreRequired = Assert<

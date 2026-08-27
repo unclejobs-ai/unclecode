@@ -286,7 +286,10 @@ test("agent-console quality graph fields round-trip and legacy graphs receive co
     activity: [],
   });
 
-  assert.deepEqual(parseAgentConsoleSnapshot(current)?.workGraph, current.workGraph);
+  assert.deepEqual(
+    parseAgentConsoleSnapshot(current)?.workGraph,
+    current.workGraph,
+  );
 });
 
 test("agent-console resume parser round-trips every safe lifecycle field", () => {
