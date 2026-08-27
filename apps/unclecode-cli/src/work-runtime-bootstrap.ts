@@ -231,6 +231,7 @@ async function buildWorkShellContextSummary(input: {
     clearCachedWorkspaceGuidance(input.cwd, input.userHomeDir);
     clearExtensionRegistryCache({
       workspaceRoot: input.cwd,
+      env: input.env,
       ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
     });
   }
@@ -241,6 +242,7 @@ async function buildWorkShellContextSummary(input: {
   });
   const extensionSummaries = loadExtensionManifestSummaries({
     workspaceRoot: input.cwd,
+    env: input.env,
     ...(input.userHomeDir ? { userHomeDir: input.userHomeDir } : {}),
   });
 
@@ -448,6 +450,7 @@ export async function loadWorkCliBootstrap(
     : undefined;
   const config = await loadConfig({
     cwd,
+    env,
     ...(provider !== undefined ? { provider } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(reasoning !== undefined
@@ -463,6 +466,7 @@ export async function loadWorkCliBootstrap(
   });
   const pluginOverlays = loadExtensionConfigOverlays({
     workspaceRoot: cwd,
+    env,
     ...(userHomeDir ? { userHomeDir } : {}),
   });
   const configExplanation = explainUncleCodeConfig({
@@ -567,6 +571,7 @@ export async function loadWorkCliBootstrap(
     ? config
     : await loadConfig({
         cwd,
+        env,
         provider: reviewSelection.provider,
         model: reviewSelection.model,
         allowProblematicOpenAIAuth: true,

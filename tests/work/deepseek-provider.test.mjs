@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -34,6 +34,38 @@ test("loadConfig exposes DeepSeek defaults and optional endpoint override", asyn
     assert.equal(config.reasoning.effort, "unsupported");
   } finally {
     process.env = originalEnv;
+  }
+});
+
+test("loadConfig resolves injected env auth, model, and home extension overlays", async () => {
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-injected-config-"));
+  const injectedHome = path.join(workspaceRoot, "injected-home");
+  const extensionRoot = path.join(injectedHome, ".unclecode", "extensions");
+  const env = {
+    PATH: process.env.PATH,
+    HOME: injectedHome,
+    LLM_PROVIDER: "deepseek",
+    DEEPSEEK_API_KEY: "injected-direct-secret",
+    DEEPSEEK_MODEL: "deepseek-reasoner",
+    DEEPSEEK_BASE_URL: "https://injected.example/v1",
+  };
+
+  try {
+    mkdirSync(extensionRoot, { recursive: true });
+    writeFileSync(path.join(extensionRoot, "mode.json"), `${JSON.stringify({
+      name: "injected-home-mode",
+      config: { mode: "analyze" },
+    })}\n`, "utf8");
+
+    const config = await loadConfig({ cwd: workspaceRoot, env });
+
+    assert.equal(config.provider, "deepseek");
+    assert.equal(config.apiKey, "injected-direct-secret");
+    assert.equal(config.model, "deepseek-reasoner");
+    assert.equal(config.baseUrl, "https://injected.example/v1/chat/completions");
+    assert.equal(config.mode, "analyze");
+  } finally {
+    rmSync(workspaceRoot, { recursive: true, force: true });
   }
 });
 
@@ -191,4 +223,63 @@ test("quality review bootstrap prefers a genuinely distinct configured provider"
     model: "deepseek-chat",
     distinct: false,
   });
+});
+
+test("the real bootstrap uses injected env for distinct direct and review routes", async () => {
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-injected-review-bootstrap-"));
+  const injectedHome = path.join(workspaceRoot, "home");
+  const before = {
+    LLM_PROVIDER: process.env.LLM_PROVIDER,
+    DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+    UNCLECODE_REVIEW_PROVIDER: process.env.UNCLECODE_REVIEW_PROVIDER,
+  };
+  const env = {
+    PATH: process.env.PATH,
+    HOME: injectedHome,
+    LLM_PROVIDER: "deepseek",
+    DEEPSEEK_API_KEY: "injected-direct-secret",
+    DEEPSEEK_MODEL: "deepseek-reasoner",
+    ANTHROPIC_API_KEY: "injected-review-secret",
+    ANTHROPIC_MODEL: "claude-injected-review",
+    UNCLECODE_REVIEW_PROVIDER: "anthropic",
+    UNCLECODE_SESSION_STORE_ROOT: path.join(workspaceRoot, ".state"),
+    UNCLECODE_OMP_BIN: path.join(workspaceRoot, "missing-omp"),
+    UNCLECODE_OMP_BUN_BIN: path.join(workspaceRoot, "missing-bun"),
+  };
+
+  try {
+    mkdirSync(injectedHome, { recursive: true });
+    const result = await loadWorkCliBootstrap({
+      argv: ["--cwd", workspaceRoot, "--provider", "deepseek", "--engine", "native"],
+      env,
+      userHomeDir: injectedHome,
+    });
+
+    assert.equal(result.options.provider, "deepseek");
+    assert.equal(result.options.model, "deepseek-reasoner");
+    assert.deepEqual(result.agent.directRoute, {
+      provider: "deepseek",
+      model: "deepseek-reasoner",
+    });
+    assert.deepEqual(result.agent.reviewRoute, {
+      provider: "anthropic",
+      model: "claude-injected-review",
+    });
+    const safeRouteMetadata = JSON.stringify({
+      provider: result.options.provider,
+      model: result.options.model,
+      directRoute: result.agent.directRoute,
+      reviewRoute: result.agent.reviewRoute,
+    });
+    assert.doesNotMatch(safeRouteMetadata, /injected-(?:direct|review)-secret/);
+    assert.deepEqual({
+      LLM_PROVIDER: process.env.LLM_PROVIDER,
+      DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+      UNCLECODE_REVIEW_PROVIDER: process.env.UNCLECODE_REVIEW_PROVIDER,
+    }, before);
+  } finally {
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
 });

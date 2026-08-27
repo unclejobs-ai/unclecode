@@ -71,6 +71,7 @@ function resolveReasoningConfig(input: {
   model: string;
   mode: ModeProfileId;
   override?: ModeReasoningEffort;
+  env: NodeJS.ProcessEnv;
 }): AppReasoningConfig {
   const cacheKey = JSON.stringify({
     provider: input.provider,
@@ -93,6 +94,8 @@ function resolveReasoningConfig(input: {
       input.override ?? "-",
     ],
     process.cwd(),
+    undefined,
+    input.env,
   ).trim();
   const parsed = JSON.parse(raw) as unknown;
   if (!isAppReasoningConfig(parsed)) {
@@ -220,9 +223,12 @@ export async function loadConfig(
     reasoning?: ModeReasoningEffort;
     readOpenAiAuthFile?: () => Promise<string>;
     allowProblematicOpenAIAuth?: boolean;
+    /** Complete environment override for deterministic embedding/bootstrap callers. */
+    env?: NodeJS.ProcessEnv;
   },
 ): Promise<AppConfig> {
-  const parsed = envSchema.safeParse(process.env);
+  const env = overrides?.env ?? process.env;
+  const parsed = envSchema.safeParse(env);
   if (!parsed.success) {
     const message = parsed.error.issues.map((issue) => issue.message).join(", ");
     throw new Error(message);
@@ -231,17 +237,18 @@ export async function loadConfig(
   const workspaceRoot = overrides?.cwd ?? process.cwd();
   const mode = explainUncleCodeConfig({
     workspaceRoot,
-    env: process.env,
+    env,
     pluginOverlays: loadExtensionConfigOverlays({
       workspaceRoot,
-      ...(process.env.HOME ? { userHomeDir: process.env.HOME } : {}),
+      env,
+      ...(env.HOME ? { userHomeDir: env.HOME } : {}),
     }),
   }).activeMode.id;
 
   if (provider === "openai") {
     const auth = await resolveOpenAIAuthForConfig({
       cwd: workspaceRoot,
-      env: process.env,
+      env,
       ...(overrides?.readOpenAiAuthFile
         ? { readOpenAiAuthFile: overrides.readOpenAiAuthFile }
         : {}),
@@ -276,6 +283,7 @@ export async function loadConfig(
           provider,
           model,
           mode,
+          env,
           ...(overrides?.reasoning ? { override: overrides.reasoning } : {}),
         }),
       };
@@ -296,6 +304,7 @@ export async function loadConfig(
           provider,
           model,
           mode,
+          env,
           ...(overrides?.reasoning ? { override: overrides.reasoning } : {}),
         }),
         authIssueMessage:
@@ -327,7 +336,7 @@ export async function loadConfig(
       mode,
       authLabel: "env-key",
       baseUrl: resolveDeepSeekEndpoint(parsed.data.DEEPSEEK_BASE_URL),
-      reasoning: resolveReasoningConfig({ provider, model, mode }),
+      reasoning: resolveReasoningConfig({ provider, model, mode, env }),
     };
   }
 
@@ -343,7 +352,7 @@ export async function loadConfig(
       model,
       mode,
       authLabel: "env-key",
-      reasoning: resolveReasoningConfig({ provider, model, mode }),
+      reasoning: resolveReasoningConfig({ provider, model, mode, env }),
     };
   }
 
@@ -359,6 +368,6 @@ export async function loadConfig(
     model,
     mode,
     authLabel: "env-key",
-    reasoning: resolveReasoningConfig({ provider, model, mode }),
+    reasoning: resolveReasoningConfig({ provider, model, mode, env }),
   };
 }
