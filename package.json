@@ -19,6 +19,7 @@
     "qa:providers": "npm run build --silent && cargo build --quiet -p unclecode && node scripts/provider-conformance.mjs",
     "benchmark:competitive": "npm run build --silent && cargo build --quiet -p unclecode && node scripts/competitive-benchmark.mjs",
     "benchmark:competitive:all": "npm run build --silent && cargo build --quiet -p unclecode && node scripts/competitive-benchmark.mjs --systems all",
+    "core:use-local": "node scripts/use-local-second-claude-core.mjs",
     "qa:live:record": "npm run build --silent && cargo build --quiet -p unclecode && node scripts/unclecode-live-provider-qa.mjs --allow-blocked",
     "qa:stability": "npm run qa:health",
     "qa:health": "node scripts/unclecode-health-qa.mjs",
@@ -63,6 +64,7 @@
     "typescript": "^5.9.2"
   },
   "dependencies": {
+    "@second-claude/core": "file:vendor/second-claude/second-claude-core-4.0.0.tgz",
     "@google/genai": "^2.7.0",
     "dotenv": "^17.4.0",
     "ink-text-input": "^6.0.0",
