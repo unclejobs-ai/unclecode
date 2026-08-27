@@ -47,6 +47,8 @@ type RuntimeProviderArgs = {
 };
 
 export type RuntimeCodingAgentOptions = RuntimeProviderArgs & {
+  /** Quality critic/promote capability boundary: advertise and execute no tools. */
+  toolAccess?: "full" | "none";
   providerOverride?: RuntimeProvider;
   /**
    * Builds the LLM provider with access to the agent's tool runtime. Used by
@@ -54,6 +56,18 @@ export type RuntimeCodingAgentOptions = RuntimeProviderArgs & {
    * the provider's own turn loop.
    */
   providerOverrideFactory?: (context: { toolRuntime: ToolRuntime }) => RuntimeProvider;
+};
+
+const READ_ONLY_QUALITY_TOOL_RUNTIME: ToolRuntime = {
+  definitions: [],
+  executor: {
+    async execute() {
+      return {
+        isError: true,
+        content: "Quality review is read-only; tools are unavailable.",
+      };
+    },
+  },
 };
 
 export class RuntimeCodingAgent
@@ -83,21 +97,23 @@ export class RuntimeCodingAgent
     const profileRef = {
       current: resolveModeExecutionPolicyProfile({ mode: modeRef.current, envShellOptIn }),
     };
-    const toolRuntime = createToolRuntime({
-      interactionBridge,
-      policyProfile: () => profileRef.current,
-      runtimeMode: () => modeRef.current,
-      ...(args.provider === "deepseek"
-        ? {}
-        : {
-            webSearch: {
-              provider: args.provider,
-              apiKey: args.apiKey,
-              model: args.model,
-              ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
-            },
-          }),
-    });
+    const toolRuntime = args.toolAccess === "none"
+      ? READ_ONLY_QUALITY_TOOL_RUNTIME
+      : createToolRuntime({
+          interactionBridge,
+          policyProfile: () => profileRef.current,
+          runtimeMode: () => modeRef.current,
+          ...(args.provider === "deepseek"
+            ? {}
+            : {
+                webSearch: {
+                  provider: args.provider,
+                  apiKey: args.apiKey,
+                  model: args.model,
+                  ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
+                },
+              }),
+        });
     const runtimeProvider = args.providerOverride
       ?? args.providerOverrideFactory?.({ toolRuntime })
       ?? createRuntimeProvider({

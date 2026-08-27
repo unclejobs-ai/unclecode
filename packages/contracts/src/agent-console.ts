@@ -132,7 +132,7 @@ export type WorkGraph = {
 
 export type WorkNodeDispatchOutcome = {
   readonly nodeId: string;
-  readonly status: Extract<WorkNodeStatus, "completed" | "failed" | "blocked">;
+  readonly status: Extract<WorkNodeStatus, "completed" | "failed" | "cancelled" | "blocked">;
   readonly summary: string;
   readonly evidenceRefs: readonly string[];
 };

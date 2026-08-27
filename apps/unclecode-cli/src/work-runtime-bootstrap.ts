@@ -94,6 +94,69 @@ import {
 const WORK_PI_TURN_STEP_LIMIT = 16;
 const WORK_PI_TURN_COST_LIMIT_USD = 2;
 
+type QualityReviewProvider = "openai" | "anthropic" | "gemini" | "deepseek";
+
+export type QualityReviewSelection = {
+  readonly provider: QualityReviewProvider;
+  readonly model: string;
+  readonly distinct: boolean;
+};
+
+const QUALITY_REVIEW_PROVIDER_ORDER: readonly QualityReviewProvider[] = [
+  "anthropic",
+  "gemini",
+  "deepseek",
+  "openai",
+];
+
+const QUALITY_REVIEW_PROVIDER_ENV = {
+  openai: { key: "OPENAI_API_KEY", model: "OPENAI_MODEL", fallback: "gpt-5.6-sol" },
+  anthropic: { key: "ANTHROPIC_API_KEY", model: "ANTHROPIC_MODEL", fallback: "claude-sonnet-4-20250514" },
+  gemini: { key: "GEMINI_API_KEY", model: "GEMINI_MODEL", fallback: "gemini-2.5-flash" },
+  deepseek: { key: "DEEPSEEK_API_KEY", model: "DEEPSEEK_MODEL", fallback: "deepseek-chat" },
+} as const;
+
+function isQualityReviewProvider(value: string | undefined): value is QualityReviewProvider {
+  return value === "openai" || value === "anthropic" || value === "gemini" || value === "deepseek";
+}
+
+/** Picks a real configured alternate route; otherwise a separate no-tools agent uses the direct route. */
+export function resolveQualityReviewSelection(input: {
+  readonly directProvider: QualityReviewProvider;
+  readonly directModel: string;
+  readonly env: NodeJS.ProcessEnv;
+}): QualityReviewSelection {
+  const explicitProvider = input.env.UNCLECODE_REVIEW_PROVIDER?.trim().toLowerCase();
+  if (explicitProvider && !isQualityReviewProvider(explicitProvider)) {
+    throw new Error(`Unsupported UNCLECODE_REVIEW_PROVIDER: ${explicitProvider}`);
+  }
+  const requestedProvider = isQualityReviewProvider(explicitProvider) ? explicitProvider : undefined;
+  const explicitModel = input.env.UNCLECODE_REVIEW_MODEL?.trim();
+  const candidates: readonly QualityReviewProvider[] = requestedProvider
+    ? [requestedProvider]
+    : explicitModel
+      ? [input.directProvider]
+      : QUALITY_REVIEW_PROVIDER_ORDER.filter((provider) => provider !== input.directProvider);
+  for (const provider of candidates) {
+    const fields = QUALITY_REVIEW_PROVIDER_ENV[provider];
+    const configured = provider === input.directProvider || Boolean(input.env[fields.key]?.trim());
+    if (!configured) continue;
+    const model = explicitModel
+      ?? input.env[fields.model]?.trim()
+      ?? (provider === input.directProvider ? input.directModel : fields.fallback);
+    return {
+      provider,
+      model,
+      distinct: provider !== input.directProvider || model !== input.directModel,
+    };
+  }
+  return {
+    provider: input.directProvider,
+    model: input.directModel,
+    distinct: false,
+  };
+}
+
 /**
  * Build one work/executor agent backed by OMP.
  *
@@ -493,6 +556,36 @@ export async function loadWorkCliBootstrap(
     config.reasoning,
     config.mode,
   );
+  const directRuntimeProvider = resolveRuntimeProvider(config.provider);
+  const reviewSelection = resolveQualityReviewSelection({
+    directProvider: directRuntimeProvider,
+    directModel: config.model,
+    env,
+  });
+  const reviewConfig = reviewSelection.provider === directRuntimeProvider
+      && reviewSelection.model === config.model
+    ? config
+    : await loadConfig({
+        cwd,
+        provider: reviewSelection.provider,
+        model: reviewSelection.model,
+        allowProblematicOpenAIAuth: true,
+      });
+  const reviewAgent = await createRuntimeCodingAgent({
+    provider: resolveRuntimeProvider(reviewConfig.provider),
+    apiKey: reviewConfig.apiKey,
+    model: reviewConfig.model,
+    cwd,
+    reasoning: reviewConfig.reasoning,
+    mode: reviewConfig.mode,
+    toolAccess: "none",
+    ...(reviewConfig.baseUrl ? { baseUrl: reviewConfig.baseUrl } : {}),
+    ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
+    ...(reviewConfig.openAIRuntime ? { openAIRuntime: reviewConfig.openAIRuntime } : {}),
+    ...(reviewConfig.openAIAccountId !== undefined
+      ? { openAIAccountId: reviewConfig.openAIAccountId }
+      : {}),
+  });
 
   const pluginHost = new PluginHost();
   registerBuiltInSccQualityEngine(pluginHost, { workspaceRoot: cwd, env });
@@ -503,6 +596,7 @@ export async function loadWorkCliBootstrap(
 
   const agent = new WorkAgent({
     directAgent,
+    reviewAgent,
     createExecutorAgent: async (settings) => createWorkExecutorAgent({
       cwd,
       env,
@@ -514,8 +608,12 @@ export async function loadWorkCliBootstrap(
     workspaceRoot: cwd,
     pluginHost,
     directRoute: {
-      provider: resolveRuntimeProvider(config.provider),
+      provider: directRuntimeProvider,
       model: config.model,
+    },
+    reviewRoute: {
+      provider: reviewSelection.provider,
+      model: reviewSelection.model,
     },
     commodityRoute: {
       provider: OMP_WORKER_PROVIDER_ID,

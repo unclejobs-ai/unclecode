@@ -43,6 +43,12 @@ const qualityPlan = JSON.stringify([
   },
 ]);
 
+const passingCriticVerdict = JSON.stringify({
+  verdict: "pass",
+  summary: "Implementation matches the requested acceptance criteria.",
+  findings: [],
+});
+
 test("balanced-prewalk uses direct frontier for pattern setting and commodity only for followers", () => {
   const directRoute = { provider: "openai", model: "gpt-5.4" };
   const commodityRoute = { provider: "omp", model: "kimi-code/k3" };
@@ -125,14 +131,24 @@ test("WorkAgent runs the real quality lifecycle, persists hashed artifacts, and 
         writeFileSync(path.join(workspace, "login.ts"), "export const login = true;\n");
         return { text: "pattern worker complete" };
       }
+      throw new Error(`unexpected direct quality prompt: ${prompt}`);
+    },
+  };
+  const reviewAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      directCalls.push(prompt);
       if (prompt.includes("Synthesize executor findings")) return { text: "synthesis handoff" };
-      return { text: "critic review passed" };
+      return { text: passingCriticVerdict };
     },
   };
 
   try {
     const agent = new orchestrator.WorkAgent({
       directAgent,
+      reviewAgent,
       async createExecutorAgent() {
         return {
           clear() {},
@@ -152,6 +168,7 @@ test("WorkAgent runs the real quality lifecycle, persists hashed artifacts, and 
       pluginHost: host,
       qualityRisk: "medium",
       directRoute: { provider: "openai", model: "gpt-5.4" },
+      reviewRoute: { provider: "openai", model: "gpt-5.4" },
       commodityRoute: { provider: "omp", model: "kimi-code/k3" },
     });
     agent.setTraceListener((event) => traces.push(event));
@@ -174,6 +191,12 @@ test("WorkAgent runs the real quality lifecycle, persists hashed artifacts, and 
     assert.ok([...directCalls, ...commodityCalls].every((prompt) =>
       prompt.includes("SCC Quality Engine") || prompt.includes("Bounded project quality standards")
     ));
+    const criticPrompt = directCalls.find((prompt) => prompt.includes("Artifact manifest:"));
+    const promotePrompt = directCalls.find((prompt) => prompt.includes("Synthesize executor findings"));
+    assert.match(criticPrompt ?? "", /<quality_critic_read_only>/);
+    assert.match(criticPrompt ?? "", /return only one JSON object/i);
+    assert.match(promotePrompt ?? "", /<quality_promote_read_only>/);
+    assert.match(promotePrompt ?? "", /do not invoke tools|tools are unavailable/i);
 
     const qualityTraces = traces.filter((event) => event.type.startsWith("quality."));
     assert.deepEqual(
@@ -196,6 +219,13 @@ test("WorkAgent runs the real quality lifecycle, persists hashed artifacts, and 
     assert.equal(gate?.decision, "unproven");
     assert.equal(gate?.independentVerification, false);
     assert.match(gate?.artifactHash ?? "", /^sha256:[a-f0-9]{64}$/);
+    const workerGate = qualityTraces.find((event) =>
+      event.type === "quality.gate_evaluated" && event.stage === "work" && event.nodeId === "task-1"
+    );
+    assert.equal(workerGate?.nodeAttempt, 0);
+    assert.deepEqual(workerGate?.artifactRefs, [
+      `.unclecode/artifacts/${workerGate?.runId}/task-1-attempt-0.json`,
+    ]);
     assert.equal(qualityTraces.at(-1)?.type, "quality.completed");
     assert.equal(qualityTraces.at(-1)?.decision, "unproven");
 
@@ -259,6 +289,462 @@ test("a refine decision terminates explicitly instead of silently reaching criti
     assert.equal(traces.filter((event) => event.type === "quality.refine_requested").length, 1);
     assert.equal(traces.some((event) => event.type === "quality.stage_started" && event.stage === "critic"), false);
     assert.equal(traces.some((event) => event.type === "quality.stage_started" && event.stage === "promote"), false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("failed and dependency-blocked workers both reach afterNodeCompleted and block before critic", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-terminal-hooks-"));
+  const terminalHooks = [];
+  const unexpectedPrompts = [];
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+  host.register("terminal-observer", {
+    afterNodeCompleted: ({ node, outcome }) => {
+      terminalHooks.push([node.id, outcome.status]);
+      return { action: "proceed" };
+    },
+  });
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      if (prompt.includes("<goal_task_planner>")) return { text: qualityPlan };
+      if (prompt.includes("Implement login.ts")) throw new Error("worker exploded");
+      unexpectedPrompts.push(prompt);
+      return { text: passingCriticVerdict };
+    },
+  };
+
+  try {
+    const agent = new orchestrator.WorkAgent({
+      directAgent,
+      async createExecutorAgent() {
+        throw new Error("a dependency-blocked worker must not dispatch");
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      qualityRisk: "medium",
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+      commodityRoute: { provider: "omp", model: "kimi-code/k3" },
+    });
+
+    const result = await agent.runTurn("refactor login.ts and session.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.deepEqual(terminalHooks, [["task-1", "failed"], ["task-2", "blocked"]]);
+    assert.equal(unexpectedPrompts.length, 0, "worker failure must prevent critic and promote dispatch");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a cancelled worker reaches afterNodeCompleted before parent abort propagation", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-cancelled-hook-"));
+  const controller = new AbortController();
+  const terminalHooks = [];
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+  host.register("terminal-observer", {
+    afterNodeCompleted: ({ node, outcome }) => {
+      terminalHooks.push([node.id, outcome.status]);
+      return { action: "proceed" };
+    },
+  });
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt, _attachments, options) {
+      if (prompt.includes("<goal_task_planner>")) return { text: qualityPlan };
+      if (prompt.includes("Implement login.ts")) {
+        controller.abort(new DOMException("parent cancelled", "AbortError"));
+        options?.signal?.throwIfAborted();
+      }
+      throw new Error(`unexpected prompt after cancellation: ${prompt}`);
+    },
+  };
+
+  try {
+    const agent = new orchestrator.WorkAgent({
+      directAgent,
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      qualityRisk: "medium",
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+    });
+
+    await assert.rejects(
+      agent.runTurn("refactor login.ts and session.ts", [], { signal: controller.signal }),
+      (error) => error?.name === "AbortError",
+    );
+    assert.deepEqual(terminalHooks, [["task-1", "cancelled"], ["task-2", "blocked"]]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("an invalid critic verdict blocks before promote instead of becoming pass evidence", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-invalid-critic-"));
+  const reviewPrompts = [];
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      if (prompt.includes("<goal_task_planner>")) return { text: qualityPlan };
+      if (prompt.includes("Implement login.ts")) {
+        writeFileSync(path.join(workspace, "login.ts"), "export const login = true;\n");
+        return { text: "pattern complete" };
+      }
+      throw new Error(`unexpected direct prompt: ${prompt}`);
+    },
+  };
+  const reviewAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      reviewPrompts.push(prompt);
+      return { text: "looks good to me" };
+    },
+  };
+
+  try {
+    const agent = new orchestrator.WorkAgent({
+      directAgent,
+      reviewAgent,
+      reviewRoute: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
+      async createExecutorAgent() {
+        return {
+          clear() {},
+          updateRuntimeSettings() {},
+          setTraceListener() {},
+          async runTurn() {
+            writeFileSync(path.join(workspace, "session.ts"), "export const session = true;\n");
+            return { text: "follower complete" };
+          },
+        };
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      qualityRisk: "medium",
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+      commodityRoute: { provider: "omp", model: "kimi-code/k3" },
+      async runExecutableGuardianChecks() {
+        return {
+          checks: [{ name: "test", status: "passed", summary: "test PASS" }],
+          summary: "test PASS",
+        };
+      },
+    });
+
+    const result = await agent.runTurn("refactor login.ts and session.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /invalid critic verdict/i);
+    assert.equal(reviewPrompts.length, 1, "invalid critic output must prevent promote");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a failing executable check blocks a passing critic before promote", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-failing-check-"));
+  const reviewPrompts = [];
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      if (prompt.includes("<goal_task_planner>")) return { text: qualityPlan };
+      if (prompt.includes("Implement login.ts")) {
+        writeFileSync(path.join(workspace, "login.ts"), "export const login = true;\n");
+        return { text: "pattern complete" };
+      }
+      throw new Error(`unexpected direct prompt: ${prompt}`);
+    },
+  };
+  const reviewAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      reviewPrompts.push(prompt);
+      return { text: passingCriticVerdict };
+    },
+  };
+
+  try {
+    const agent = new orchestrator.WorkAgent({
+      directAgent,
+      reviewAgent,
+      reviewRoute: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
+      async createExecutorAgent() {
+        return {
+          clear() {},
+          updateRuntimeSettings() {},
+          setTraceListener() {},
+          async runTurn() {
+            writeFileSync(path.join(workspace, "session.ts"), "export const session = true;\n");
+            return { text: "follower complete" };
+          },
+        };
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      qualityRisk: "medium",
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+      commodityRoute: { provider: "omp", model: "kimi-code/k3" },
+      async runExecutableGuardianChecks() {
+        return {
+          checks: [{ name: "test", status: "failed", summary: "test FAIL" }],
+          summary: "test FAIL",
+        };
+      },
+    });
+
+    const result = await agent.runTurn("refactor login.ts and session.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /executable check failed/i);
+    assert.equal(reviewPrompts.length, 1, "failed checks must prevent promote");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a workspace mutation during critic invalidates reviewer evidence before promote", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-stale-critic-"));
+  const reviewPrompts = [];
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      if (prompt.includes("<goal_task_planner>")) return { text: qualityPlan };
+      if (prompt.includes("Implement login.ts")) {
+        writeFileSync(path.join(workspace, "login.ts"), "export const login = true;\n");
+        return { text: "pattern complete" };
+      }
+      throw new Error(`unexpected direct prompt: ${prompt}`);
+    },
+  };
+  const reviewAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      reviewPrompts.push(prompt);
+      writeFileSync(path.join(workspace, "login.ts"), "export const login = 'mutated-by-review';\n");
+      return { text: passingCriticVerdict };
+    },
+  };
+
+  try {
+    const agent = new orchestrator.WorkAgent({
+      directAgent,
+      reviewAgent,
+      reviewRoute: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
+      async createExecutorAgent() {
+        return {
+          clear() {},
+          updateRuntimeSettings() {},
+          setTraceListener() {},
+          async runTurn() {
+            writeFileSync(path.join(workspace, "session.ts"), "export const session = true;\n");
+            return { text: "follower complete" };
+          },
+        };
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      qualityRisk: "medium",
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+      commodityRoute: { provider: "omp", model: "kimi-code/k3" },
+      async runExecutableGuardianChecks() {
+        return {
+          checks: [{ name: "test", status: "passed", summary: "test PASS" }],
+          summary: "test PASS",
+        };
+      },
+    });
+
+    const result = await agent.runTurn("refactor login.ts and session.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /artifact manifest changed during critic/i);
+    assert.equal(reviewPrompts.length, 1, "stale critic evidence must prevent promote");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a workspace mutation during promote blocks completion and invalidates the critic", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-stale-promote-"));
+  const reviewPrompts = [];
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      if (prompt.includes("<goal_task_planner>")) return { text: qualityPlan };
+      if (prompt.includes("Implement login.ts")) {
+        writeFileSync(path.join(workspace, "login.ts"), "export const login = true;\n");
+        return { text: "pattern complete" };
+      }
+      throw new Error(`unexpected direct prompt: ${prompt}`);
+    },
+  };
+  const reviewAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      reviewPrompts.push(prompt);
+      if (prompt.includes("Synthesize executor findings")) {
+        writeFileSync(path.join(workspace, "session.ts"), "export const session = 'mutated-by-promote';\n");
+        return { text: "handoff" };
+      }
+      return { text: passingCriticVerdict };
+    },
+  };
+
+  try {
+    const agent = new orchestrator.WorkAgent({
+      directAgent,
+      reviewAgent,
+      reviewRoute: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
+      async createExecutorAgent() {
+        return {
+          clear() {},
+          updateRuntimeSettings() {},
+          setTraceListener() {},
+          async runTurn() {
+            writeFileSync(path.join(workspace, "session.ts"), "export const session = true;\n");
+            return { text: "follower complete" };
+          },
+        };
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      qualityRisk: "medium",
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+      commodityRoute: { provider: "omp", model: "kimi-code/k3" },
+      async runExecutableGuardianChecks() {
+        return {
+          checks: [{ name: "test", status: "passed", summary: "test PASS" }],
+          summary: "test PASS",
+        };
+      },
+    });
+
+    const result = await agent.runTurn("refactor login.ts and session.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /artifact manifest changed during promote/i);
+    assert.equal(reviewPrompts.length, 2);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a workspace mutation inside beforeRunComplete invalidates reviewer evidence", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-stale-completion-"));
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+  host.register("completion-mutator", {
+    beforeRunComplete() {
+      writeFileSync(path.join(workspace, "login.ts"), "export const login = 'mutated-at-completion';\n");
+      return { action: "proceed" };
+    },
+  });
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      if (prompt.includes("<goal_task_planner>")) return { text: qualityPlan };
+      if (prompt.includes("Implement login.ts")) {
+        writeFileSync(path.join(workspace, "login.ts"), "export const login = true;\n");
+        return { text: "pattern complete" };
+      }
+      throw new Error(`unexpected direct prompt: ${prompt}`);
+    },
+  };
+  const reviewAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      return { text: prompt.includes("Synthesize executor findings") ? "handoff" : passingCriticVerdict };
+    },
+  };
+
+  try {
+    const agent = new orchestrator.WorkAgent({
+      directAgent,
+      reviewAgent,
+      reviewRoute: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
+      async createExecutorAgent() {
+        return {
+          clear() {},
+          updateRuntimeSettings() {},
+          setTraceListener() {},
+          async runTurn() {
+            writeFileSync(path.join(workspace, "session.ts"), "export const session = true;\n");
+            return { text: "follower complete" };
+          },
+        };
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      qualityRisk: "medium",
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+      commodityRoute: { provider: "omp", model: "kimi-code/k3" },
+      async runExecutableGuardianChecks() {
+        return {
+          checks: [{ name: "test", status: "passed", summary: "test PASS" }],
+          summary: "test PASS",
+        };
+      },
+    });
+
+    const result = await agent.runTurn("refactor login.ts and session.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /artifact manifest changed during promote/i);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

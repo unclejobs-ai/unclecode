@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   classifyQualityProfile,
   DEFAULT_ITERATION_LIMITS,
+  evaluateGate,
   type GateEvidence,
   type QualityRunProjection,
   type RiskLevel,
@@ -19,6 +20,7 @@ import type {
   QualityStageStartedTraceEvent,
   WorkApprovedTraceEvent,
   WorkGraph,
+  WorkNode,
   WorkNodeStatus,
   WorkProposedTraceEvent,
   WorkStatusTraceEvent,
@@ -47,6 +49,7 @@ import {
 } from "./work-agent-run-controller.js";
 import {
   QualityArtifactStore,
+  parseCriticVerdict,
   resolveBalancedPrewalkRoute,
   type BalancedPrewalkRoute,
   type PersistedQualityArtifact,
@@ -85,7 +88,25 @@ type GuardianCheckRequest = {
   readonly changedFiles: readonly string[];
   readonly signal: AbortSignal;
 };
-type GuardianCheckRunner = (input: GuardianCheckRequest) => Promise<{ readonly summary: string }>;
+type GuardianExecutableCheck = {
+  readonly name: string;
+  readonly status: "passed" | "failed";
+  readonly summary: string;
+};
+
+type GuardianCheckResult = {
+  readonly summary: string;
+  readonly checks?: readonly GuardianExecutableCheck[] | undefined;
+};
+
+type LoadedGuardianChecks = {
+  readonly summary: string;
+  readonly checks: readonly GuardianExecutableCheck[];
+  readonly status: "passed" | "failed" | "unproven";
+  readonly failures: readonly string[];
+};
+
+type GuardianCheckRunner = (input: GuardianCheckRequest) => Promise<GuardianCheckResult>;
 
 export type OrchestratedWorkAgentTraceEvent<TraceEvent extends { readonly type: string }> =
   | WorkAgentRunControllerTraceEvent<TraceEvent>
@@ -132,6 +153,7 @@ function buildGuardianReviewPrompt(input: {
   readonly prompt: string;
   readonly results: readonly { readonly summary: string }[];
   readonly executableChecks?: string | undefined;
+  readonly qualityReadOnly?: boolean | undefined;
 }): string {
   return buildRustPrompt("guardian-review-prompt", input);
 }
@@ -142,6 +164,7 @@ function buildSynthesisPrompt(input: {
   readonly reasoning: string;
   readonly results: readonly { readonly summary: string }[];
   readonly guardianSummary?: string | undefined;
+  readonly qualityReadOnly?: boolean | undefined;
 }): string {
   return buildRustPrompt("synthesis-prompt", input);
 }
@@ -241,6 +264,7 @@ type QualityRuntimeState = {
   readonly workerArtifacts: PersistedQualityArtifact[];
   readonly producerRoutes: QualityProviderRoute[];
   readonly failures: string[];
+  readonly terminalHookNodeIds: Set<string>;
   graph?: WorkGraph;
   refineCount: number;
   pivotCount: number;
@@ -285,6 +309,27 @@ function routesDiffer(left: QualityProviderRoute, right: QualityProviderRoute): 
   return left.provider !== right.provider || left.model !== right.model;
 }
 
+function qualityWritePaths(state: QualityRuntimeState): readonly string[] {
+  return [...new Set(state.graph?.nodes.flatMap((node) => node.fileOwnership) ?? [])]
+    .sort((left, right) => left.localeCompare(right));
+}
+
+function staleArtifactDecision(stage: "critic" | "promote"): PluginDecisionAggregate {
+  const code = stage === "critic"
+    ? "ARTIFACT_MANIFEST_CHANGED_DURING_CRITIC"
+    : "ARTIFACT_MANIFEST_CHANGED_DURING_PROMOTE";
+  return {
+    action: "block",
+    decisions: [{
+      pluginName: "unclecode-runtime",
+      action: "block",
+      reason: `Artifact manifest changed during ${stage}; reviewer evidence is stale.`,
+      failures: [code],
+    }],
+    failures: [code],
+  };
+}
+
 type ExecutorAgentFactory<Attachment, TraceEvent extends { readonly type: string }, Reasoning extends ReasoningLike> = (
   settings: WorkAgentExecutorSettings<Reasoning>,
 ) => Promise<OrchestratedWorkTurnAgent<Attachment, TraceEvent, Reasoning>>;
@@ -295,6 +340,7 @@ export class WorkAgent<
   Reasoning extends ReasoningLike,
 > {
   private readonly directAgent: OrchestratedWorkTurnAgent<Attachment, TraceEvent, Reasoning>;
+  private readonly reviewAgent: OrchestratedWorkTurnAgent<Attachment, TraceEvent, Reasoning> | undefined;
   private readonly createExecutorAgent: ExecutorAgentFactory<Attachment, TraceEvent, Reasoning> | undefined;
   private mode: string;
   private reasoning: Reasoning;
@@ -305,11 +351,13 @@ export class WorkAgent<
   private readonly qualityRisk: RiskLevel | undefined;
   private directRoute: QualityProviderRoute;
   private readonly commodityRoute: QualityProviderRoute | undefined;
+  private readonly reviewRoute: QualityProviderRoute | undefined;
   private traceListener: ((event: OrchestratedWorkAgentTraceEvent<TraceEvent>) => void) | undefined;
   private readonly runController: WorkAgentRunController<Attachment, TraceEvent, Reasoning>;
 
   constructor(input: {
     directAgent: OrchestratedWorkTurnAgent<Attachment, TraceEvent, Reasoning>;
+    reviewAgent?: OrchestratedWorkTurnAgent<Attachment, TraceEvent, Reasoning> | undefined;
     createExecutorAgent?: ExecutorAgentFactory<Attachment, TraceEvent, Reasoning> | undefined;
     mode: string;
     reasoning: Reasoning;
@@ -320,8 +368,10 @@ export class WorkAgent<
     qualityRisk?: RiskLevel | undefined;
     directRoute?: QualityProviderRoute | undefined;
     commodityRoute?: QualityProviderRoute | undefined;
+    reviewRoute?: QualityProviderRoute | undefined;
   }) {
     this.directAgent = input.directAgent;
+    this.reviewAgent = input.reviewAgent;
     this.createExecutorAgent = input.createExecutorAgent;
     this.mode = input.mode;
     this.reasoning = input.reasoning;
@@ -332,6 +382,7 @@ export class WorkAgent<
     this.qualityRisk = input.qualityRisk;
     this.directRoute = input.directRoute ?? { provider: "unknown", model: input.model };
     this.commodityRoute = input.commodityRoute;
+    this.reviewRoute = input.reviewRoute;
     this.runController = new WorkAgentRunController({
       directAgent: input.directAgent,
       ...(input.createExecutorAgent ? { createExecutorAgent: input.createExecutorAgent } : {}),
@@ -350,6 +401,7 @@ export class WorkAgent<
 
   clear(): void {
     this.directAgent.clear();
+    this.reviewAgent?.clear();
     this.runController.clear("Work agent cleared.");
   }
 
@@ -397,6 +449,34 @@ export class WorkAgent<
         this.directAgent.setTraceListener(outerListener ? (event) => this.emitTrace(event) : undefined);
       }
     });
+  }
+
+  /**
+   * Critic and promote use a dedicated agent whose provider is constructed
+   * without a tool runtime. Keeping it outside the interactive agent's lock is
+   * the capability boundary: review can read the supplied manifest/prompt but
+   * cannot execute a workspace mutation.
+   */
+  private async runReadOnlyQualityTurn(
+    prompt: string,
+    signal: AbortSignal,
+  ): Promise<{ readonly text: string }> {
+    if (!this.reviewAgent || this.reviewAgent === this.directAgent) {
+      throw new Error("A dedicated read-only quality review agent is unavailable.");
+    }
+    const outerListener = this.traceListener;
+    this.reviewAgent.setTraceListener(
+      outerListener
+        ? (event) => {
+            if (event.type === "usage.recorded") this.emitTrace(event);
+          }
+        : undefined,
+    );
+    try {
+      return await this.reviewAgent.runTurn(prompt, [], { signal });
+    } finally {
+      this.reviewAgent.setTraceListener(undefined);
+    }
   }
 
   private async planTasks(
@@ -481,6 +561,7 @@ export class WorkAgent<
       workerArtifacts: [],
       producerRoutes: [],
       failures: [],
+      terminalHookNodeIds: new Set(),
       refineCount: 0,
       pivotCount: 0,
       iteration: 0,
@@ -505,6 +586,7 @@ export class WorkAgent<
     stage: QualityHarnessStage,
     route?: BalancedPrewalkRoute | undefined,
     agentRunId?: string | undefined,
+    node?: Pick<WorkNode, "id" | "attempt" | "artifactRefs"> | undefined,
   ): void {
     this.emitTrace({
       type: "quality.stage_started",
@@ -514,6 +596,13 @@ export class WorkAgent<
       profile: state.profile,
       stage,
       iteration: state.iteration,
+      ...(node
+        ? {
+            nodeId: node.id,
+            nodeAttempt: node.attempt,
+            artifactRefs: [...node.artifactRefs],
+          }
+        : {}),
       ...(route
         ? {
             provider: route.provider,
@@ -536,6 +625,8 @@ export class WorkAgent<
       readonly evidenceRefs?: readonly string[] | undefined;
       readonly independentVerification?: boolean | undefined;
       readonly route?: BalancedPrewalkRoute | undefined;
+      readonly nodeAttempt?: number | undefined;
+      readonly artifactRefs?: readonly string[] | undefined;
     } = {},
   ): void {
     const failures = [...new Set(decision.failures)];
@@ -550,6 +641,9 @@ export class WorkAgent<
       profile: state.profile,
       stage,
       iteration: state.iteration,
+      ...(detail.nodeId ? { nodeId: detail.nodeId } : {}),
+      ...(detail.nodeAttempt === undefined ? {} : { nodeAttempt: detail.nodeAttempt }),
+      ...(detail.artifactRefs ? { artifactRefs: [...detail.artifactRefs] } : {}),
       ...(detail.route
         ? {
             provider: detail.route.provider,
@@ -589,6 +683,8 @@ export class WorkAgent<
         evidenceRefs: detail.evidenceRefs ?? [],
         failures,
         ...(detail.nodeId ? { nodeId: detail.nodeId } : {}),
+        ...(detail.nodeAttempt === undefined ? {} : { nodeAttempt: detail.nodeAttempt }),
+        ...(detail.artifactRefs ? { artifactRefs: [...detail.artifactRefs] } : {}),
         startedAt: Date.now(),
       });
     } else if (decision.action === "pivot") {
@@ -608,6 +704,9 @@ export class WorkAgent<
         reason,
         evidenceRefs: detail.evidenceRefs ?? [],
         failures,
+        ...(detail.nodeId ? { nodeId: detail.nodeId } : {}),
+        ...(detail.nodeAttempt === undefined ? {} : { nodeAttempt: detail.nodeAttempt }),
+        ...(detail.artifactRefs ? { artifactRefs: [...detail.artifactRefs] } : {}),
         startedAt: Date.now(),
       });
     }
@@ -618,6 +717,117 @@ export class WorkAgent<
       failures,
       ...(detail.nodeId ? { nodeId: detail.nodeId } : {}),
     };
+  }
+
+  private async finishTerminalQualityNode(
+    state: QualityRuntimeState,
+    node: WorkNode,
+    status: Extract<WorkNodeStatus, "failed" | "cancelled" | "blocked">,
+    summary: string,
+    route?: BalancedPrewalkRoute | undefined,
+  ): Promise<void> {
+    if (!this.pluginHost || state.terminalHookNodeIds.has(node.id)) return;
+    const completedAt = new Date().toISOString();
+    const producerId = route
+      ? `worker:${route.provider}:${route.model}:${node.id}`
+      : `worker:undispatched:${node.id}`;
+    const artifact = state.artifacts.persistNode({
+      nodeId: node.id,
+      attempt: node.attempt,
+      producerId,
+      summary,
+      writePaths: status === "blocked" ? [] : node.fileOwnership,
+      completedAt,
+      status,
+    });
+    const graph = state.graph;
+    if (!graph) throw new Error(`Quality graph is missing terminal node ${node.id}.`);
+    const graphWithArtifact: WorkGraph = {
+      ...graph,
+      currentStage: "work",
+      gateStatus: "block",
+      nodes: graph.nodes.map((entry) => entry.id === node.id
+        ? {
+            ...entry,
+            status,
+            artifactRefs: entry.artifactRefs.includes(artifact.path)
+              ? entry.artifactRefs
+              : [...entry.artifactRefs, artifact.path],
+          }
+        : entry),
+    };
+    state.graph = graphWithArtifact;
+    const evidence: GateEvidence[] = [{
+      kind: "artifact",
+      artifactHash: artifact.artifactHash,
+      producerId,
+      result: "fail",
+      timestamp: completedAt,
+    }];
+    const observed = await this.pluginHost.dispatchAfterNodeCompleted({
+      runId: state.runId,
+      graph: graphWithArtifact,
+      node: graphWithArtifact.nodes.find((entry) => entry.id === node.id) ?? node,
+      outcome: {
+        nodeId: node.id,
+        status,
+        summary,
+        evidenceRefs: [artifact.path],
+      },
+      artifactHash: artifact.artifactHash,
+      producerId,
+      evidence,
+      findings: [{
+        kind: "implementation",
+        severity: "critical",
+        correctable: false,
+        direction: `Worker ended ${status}: ${summary.slice(0, 1_000)}`,
+      }],
+      independentProviderAvailable: false,
+      independentReviewerAvailable: false,
+      refineCount: state.refineCount,
+      pivotCount: state.pivotCount,
+    });
+    state.terminalHookNodeIds.add(node.id);
+    state.completedStages.add("work");
+    const decision: PluginDecisionAggregate = observed.action === "block"
+      ? observed
+      : {
+          action: "block",
+          decisions: [
+            ...observed.decisions,
+            {
+              pluginName: "unclecode-runtime",
+              action: "block",
+              reason: `Worker ${node.id} ended ${status}.`,
+              failures: [`WORKER_${status.toUpperCase()}`],
+            },
+          ],
+          failures: [...new Set([...observed.failures, `WORKER_${status.toUpperCase()}`])],
+        };
+    const existingTerminal = state.terminal;
+    this.recordQualityDecision(state, "work", decision, {
+      nodeId: node.id,
+      nodeAttempt: node.attempt,
+      artifactRefs: [artifact.path],
+      artifactHash: artifact.artifactHash,
+      evidenceRefs: [artifact.path],
+      independentVerification: false,
+      ...(route ? { route } : {}),
+    });
+    if (existingTerminal) state.terminal = existingTerminal;
+  }
+
+  private async reconcileTerminalQualityResults(
+    state: QualityRuntimeState,
+    results: readonly PlannedWorkResult[],
+  ): Promise<void> {
+    for (const result of results) {
+      if (result.status === "completed" || state.terminalHookNodeIds.has(result.id)) continue;
+      const node = state.graph?.nodes.find((candidate) => candidate.id === result.id);
+      if (!node) throw new Error(`Quality graph is missing terminal node ${result.id}.`);
+      await this.finishTerminalQualityNode(state, node, result.status, result.summary);
+    }
   }
 
   private completeQuality(
@@ -714,6 +924,7 @@ export class WorkAgent<
     // naming a job the plan never queued, so no second guard is needed here.
     let activeGraphId = "";
     let completionArtifact: PersistedQualityArtifact | undefined;
+    let completionManifestHash = "";
     let completionProducerId = "";
     let completionEvidence: GateEvidence[] = [];
     let criticIndependent = false;
@@ -767,6 +978,12 @@ export class WorkAgent<
           }
           if (quality.terminal) {
             this.runController.settleBlockedJob(activeGraphId, task.id);
+            await this.finishTerminalQualityNode(
+              quality,
+              plannedNode,
+              "blocked",
+              quality.terminal.reason,
+            );
             return {
               id: task.id,
               summary: quality.terminal.reason,
@@ -790,23 +1007,32 @@ export class WorkAgent<
               : {}),
           });
           const context = await this.qualityContext(quality, "work");
-          const outcome = await this.runController.runTask({
-            graphId: activeGraphId,
-            task: {
-              id: node.id,
-              summary: node.title,
-              prompt: appendQualityContext(node.prompt, context),
-            },
-            signal: turnSignal,
-            preferDirect: route.executor !== "commodity",
-            onDispatchStarting: (agentRunId) => this.emitQualityStage(
-              quality,
-              "work",
-              route,
-              agentRunId,
-            ),
-          });
+          let outcome: Awaited<ReturnType<WorkAgentRunController<Attachment, TraceEvent, Reasoning>["runTask"]>>;
+          try {
+            outcome = await this.runController.runTask({
+              graphId: activeGraphId,
+              task: {
+                id: node.id,
+                summary: node.title,
+                prompt: appendQualityContext(node.prompt, context),
+              },
+              signal: turnSignal,
+              preferDirect: route.executor !== "commodity",
+              onDispatchStarting: (agentRunId) => this.emitQualityStage(
+                quality,
+                "work",
+                route,
+                agentRunId,
+                node,
+              ),
+            });
+          } catch (error) {
+            const summary = `Executor failed: ${error instanceof Error ? error.message : String(error)}`;
+            await this.finishTerminalQualityNode(quality, node, "failed", summary, route);
+            return { id: task.id, summary, status: "failed" };
+          }
           if (outcome.status !== "completed") {
+            await this.finishTerminalQualityNode(quality, node, outcome.status, outcome.text, route);
             return { id: task.id, summary: outcome.text, status: outcome.status };
           }
 
@@ -838,7 +1064,7 @@ export class WorkAgent<
           const graphWithArtifact: WorkGraph = {
             ...quality.graph,
             nodes: quality.graph.nodes.map((entry) => entry.id === node.id
-              ? { ...entry, artifactRefs: [...entry.artifactRefs, artifact.path] }
+              ? { ...entry, status: "completed", artifactRefs: [...entry.artifactRefs, artifact.path] }
               : entry),
           };
           quality.graph = graphWithArtifact;
@@ -863,11 +1089,14 @@ export class WorkAgent<
           });
           this.recordQualityDecision(quality, "work", afterNode, {
             nodeId: node.id,
+            nodeAttempt: node.attempt,
+            artifactRefs: [artifact.path],
             artifactHash: artifact.artifactHash,
             evidenceRefs: [artifact.path],
             independentVerification: independentAvailable,
             route,
           });
+          quality.terminalHookNodeIds.add(node.id);
           quality.completedStages.add("work");
           const terminalAfterNode = quality.terminal as QualityTerminal | undefined;
           if (terminalAfterNode) {
@@ -902,7 +1131,7 @@ export class WorkAgent<
       runGuardianReview: async ({ prompt: originalPrompt, tasks, results }) => {
         turnSignal.throwIfAborted();
         const changedFiles = extractChangedFilesFromTasks(tasks);
-        const executableChecks = await this.loadExecutableGuardianSummary({
+        const executableChecks = await this.loadExecutableGuardianChecks({
           prompt: originalPrompt,
           mode: this.mode,
           tasks,
@@ -916,16 +1145,22 @@ export class WorkAgent<
         let reviewPrompt = buildGuardianReviewPrompt({
           prompt: originalPrompt,
           results,
-          ...(executableChecks ? { executableChecks } : {}),
+          ...(quality || this.runExecutableGuardianChecks
+            ? { executableChecks: executableChecks.summary }
+            : {}),
+          ...(quality ? { qualityReadOnly: true } : {}),
         });
         let criticRoute: BalancedPrewalkRoute | undefined;
         if (quality) {
           completionProducerId = `graph:${quality.graphId}`;
+          const workspaceManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
+          completionManifestHash = workspaceManifest.artifactHash;
           completionArtifact = quality.artifacts.persistRun({
             graphId: quality.graphId,
             producerId: completionProducerId,
             artifacts: quality.workerArtifacts,
             completedAt: new Date().toISOString(),
+            workspaceManifest,
           });
           completionEvidence = [{
             kind: "artifact",
@@ -938,20 +1173,61 @@ export class WorkAgent<
             stage: "critic",
             directRoute: this.directRoute,
             ...(this.commodityRoute ? { commodityRoute: this.commodityRoute } : {}),
+            ...(this.reviewAgent && this.reviewRoute ? { reviewRoute: this.reviewRoute } : {}),
             producerRoutes: quality.producerRoutes,
           });
           criticIndependent = criticRoute.independent;
           reviewPrompt = `${reviewPrompt}\n\nArtifact manifest: ${completionArtifact.path}\nArtifact SHA-256: ${completionArtifact.artifactHash}`;
           reviewPrompt = appendQualityContext(reviewPrompt, await this.qualityContext(quality, "critic"));
+          if (!this.reviewAgent || this.reviewAgent === this.directAgent || !this.reviewRoute) {
+            this.recordQualityDecision(quality, "critic", {
+              action: "block",
+              decisions: [{
+                pluginName: "unclecode-runtime",
+                action: "block",
+                reason: "A dedicated read-only quality review agent is unavailable.",
+                failures: ["READ_ONLY_REVIEWER_UNAVAILABLE"],
+              }],
+              failures: ["READ_ONLY_REVIEWER_UNAVAILABLE"],
+            }, {
+              artifactHash: completionArtifact.artifactHash,
+              evidenceRefs: [completionArtifact.path],
+            });
+            return { summary: "Quality review blocked: read-only reviewer unavailable." };
+          }
           this.emitQualityStage(quality, "critic", criticRoute);
         }
-        const review = await this.runInternalTurn(reviewPrompt, [], turnOptions);
-        const summary = executableChecks
-          ? `${review.text}\n\nExecutable checks:\n${executableChecks}`
-          : review.text;
+        const review = quality
+          ? await this.runReadOnlyQualityTurn(reviewPrompt, turnSignal)
+          : await this.runInternalTurn(reviewPrompt, [], turnOptions);
+        const summary = `${review.text}\n\nExecutable checks:\n${executableChecks.summary}`;
         if (quality && criticRoute && completionArtifact) {
           const reviewerId = `critic:${criticRoute.provider}:${criticRoute.model}`;
           const completedAt = new Date().toISOString();
+          const postCriticManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
+          if (postCriticManifest.artifactHash !== completionManifestHash) {
+            const criticArtifact = quality.artifacts.persistCritic({
+              reviewerId,
+              reviewedArtifactHash: completionArtifact.artifactHash,
+              summary,
+              independent: criticIndependent,
+              completedAt,
+            });
+            completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
+            criticGateStatus = "block";
+            this.recordQualityDecision(quality, "critic", staleArtifactDecision("critic"), {
+              artifactHash: completionArtifact.artifactHash,
+              evidenceRefs: [completionArtifact.path, criticArtifact.path],
+              independentVerification: false,
+              route: criticRoute,
+            });
+            quality.completedStages.add("critic");
+            if (quality.graph) {
+              quality.graph = { ...quality.graph, currentStage: "critic", gateStatus: "block" };
+            }
+            return { summary: "Artifact manifest changed during critic; review evidence invalidated." };
+          }
+          const parsedVerdict = parseCriticVerdict(review.text);
           const criticArtifact = quality.artifacts.persistCritic({
             reviewerId,
             reviewedArtifactHash: completionArtifact.artifactHash,
@@ -959,27 +1235,68 @@ export class WorkAgent<
             independent: criticIndependent,
             completedAt,
           });
-          completionEvidence.push({
-            kind: "reviewer",
-            artifactHash: completionArtifact.artifactHash,
+          completionEvidence.push(...executableChecks.checks.map((check) => ({
+            kind: "test" as const,
+            artifactHash: completionArtifact?.artifactHash ?? "",
             producerId: completionProducerId,
-            reviewerId,
-            result: "pass",
+            result: check.status === "passed" ? "pass" as const : "fail" as const,
             timestamp: completedAt,
-          });
-          criticGateStatus = criticIndependent ? "proceed" : "unproven";
-          const failures = criticIndependent ? [] : ["INDEPENDENT_REVIEW_UNAVAILABLE"];
+          })));
+          if (parsedVerdict) {
+            completionEvidence.push({
+              kind: "reviewer",
+              artifactHash: completionArtifact.artifactHash,
+              producerId: completionProducerId,
+              reviewerId,
+              result: parsedVerdict.verdict === "pass"
+                ? "pass"
+                : parsedVerdict.verdict === "fail"
+                  ? "fail"
+                  : "warning",
+              timestamp: completedAt,
+            });
+          }
+          const failures = [
+            ...executableChecks.failures,
+            ...(!parsedVerdict ? ["INVALID_CRITIC_VERDICT"] : []),
+            ...(parsedVerdict?.verdict === "fail" ? ["CRITIC_REJECTED"] : []),
+            ...(!criticIndependent ? ["INDEPENDENT_REVIEW_UNAVAILABLE"] : []),
+          ];
+          const evaluated = parsedVerdict
+            ? evaluateGate({
+                findings: parsedVerdict.findings,
+                evidence: completionEvidence,
+                currentArtifactHash: completionArtifact.artifactHash,
+                producerId: completionProducerId,
+                reviewRequired: quality.profile !== "minimal",
+                independentProviderAvailable: criticIndependent,
+                independentReviewerAvailable: criticIndependent,
+                refineCount: quality.refineCount,
+                pivotCount: quality.pivotCount,
+              })
+            : "block";
+          criticGateStatus = !parsedVerdict
+            || parsedVerdict.verdict === "fail"
+            || executableChecks.status === "failed"
+            ? "block"
+            : parsedVerdict.verdict === "unproven"
+                || executableChecks.status === "unproven"
+                || !criticIndependent
+              ? "unproven"
+              : evaluated;
           this.recordQualityDecision(quality, "critic", {
             action: criticGateStatus,
             decisions: [{
-              pluginName: "unclecode-routing",
+              pluginName: "unclecode-critic",
               action: criticGateStatus,
-              ...(criticIndependent
-                ? {}
-                : {
-                    reason: "No distinct reviewer route was available.",
-                    failures,
-                  }),
+              reason: !parsedVerdict
+                ? "Invalid critic verdict; expected the structured critic JSON contract."
+                : executableChecks.status === "failed"
+                  ? "Executable check failed."
+                  : parsedVerdict.verdict === "fail"
+                    ? `Critic rejected the implementation: ${parsedVerdict.summary}`
+                    : parsedVerdict.summary,
+              ...(failures.length > 0 ? { failures } : {}),
             }],
             failures,
           }, {
@@ -999,7 +1316,8 @@ export class WorkAgent<
         }
         return { summary };
       },
-      shouldRunGuardianReview: () => !quality?.terminal,
+      shouldRunGuardianReview: ({ results }) =>
+        !quality?.terminal && results.every((entry) => entry.status === "completed"),
     });
 
     let result: Awaited<ReturnType<typeof orchestrator.run>>;
@@ -1060,6 +1378,14 @@ export class WorkAgent<
             summary: task.summary,
             startedAt: Date.now(),
           });
+          if (quality?.graph) {
+            quality.graph = {
+              ...quality.graph,
+              nodes: quality.graph.nodes.map((node) => node.id === task.id
+                ? { ...node, status }
+                : node),
+            };
+          }
         },
       });
     } catch (error) {
@@ -1072,9 +1398,15 @@ export class WorkAgent<
     if (result.kind !== "complex") {
       return { text: result.text };
     }
+    if (quality) {
+      await this.reconcileTerminalQualityResults(quality, result.results);
+    }
     if (epoch.isCleared()) {
       return CLEARED_TURN_RESULT;
     }
+    // A parent abort keeps its ordinary AbortError contract, but only after
+    // terminal node hooks have observed cancelled/blocked scheduler outcomes.
+    turnSignal.throwIfAborted();
     if (quality?.terminal) {
       return this.terminateQuality(quality);
     }
@@ -1092,7 +1424,21 @@ export class WorkAgent<
       reasoning: this.reasoning.effort,
       results: result.results,
       ...(result.guardian ? { guardianSummary: result.guardian.summary } : {}),
+      ...(quality ? { qualityReadOnly: true } : {}),
     });
+
+    if (quality && completionArtifact && completionManifestHash) {
+      const prePromoteManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
+      if (prePromoteManifest.artifactHash !== completionManifestHash) {
+        completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
+        this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
+          artifactHash: completionArtifact.artifactHash,
+          evidenceRefs: [completionArtifact.path],
+          independentVerification: false,
+        });
+        return this.terminateQuality(quality);
+      }
+    }
 
     let promoteRoute: BalancedPrewalkRoute | undefined;
     if (quality) {
@@ -1100,6 +1446,7 @@ export class WorkAgent<
         stage: "promote",
         directRoute: this.directRoute,
         ...(this.commodityRoute ? { commodityRoute: this.commodityRoute } : {}),
+        ...(this.reviewAgent && this.reviewRoute ? { reviewRoute: this.reviewRoute } : {}),
         producerRoutes: quality.producerRoutes,
       });
       synthesisPrompt = appendQualityContext(
@@ -1109,7 +1456,9 @@ export class WorkAgent<
       this.emitQualityStage(quality, "promote", promoteRoute);
     }
 
-    const synthesis = await this.runMainTurn(synthesisPrompt, [], turnOptions);
+    const synthesis = quality
+      ? await this.runReadOnlyQualityTurn(synthesisPrompt, turnSignal)
+      : await this.runMainTurn(synthesisPrompt, [], turnOptions);
     const reviewerCompletedAt = Date.now();
     this.emitTrace(resolveAgentTraceEvent({
       kind: "synthesis-completed",
@@ -1117,6 +1466,20 @@ export class WorkAgent<
       startedAt: reviewerStartedAt,
       completedAt: reviewerCompletedAt,
     }));
+
+    if (quality && completionArtifact && completionManifestHash) {
+      const postPromoteManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
+      if (postPromoteManifest.artifactHash !== completionManifestHash) {
+        completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
+        this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
+          artifactHash: completionArtifact.artifactHash,
+          evidenceRefs: [completionArtifact.path],
+          independentVerification: false,
+          ...(promoteRoute ? { route: promoteRoute } : {}),
+        });
+        return this.terminateQuality(quality);
+      }
+    }
 
     if (quality && this.pluginHost && completionArtifact) {
       quality.completedStages.add("promote");
@@ -1126,6 +1489,17 @@ export class WorkAgent<
           currentStage: "promote",
           gateStatus: criticGateStatus,
         };
+      }
+      const completionManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
+      if (completionManifest.artifactHash !== completionManifestHash) {
+        completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
+        this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
+          artifactHash: completionArtifact.artifactHash,
+          evidenceRefs: [completionArtifact.path],
+          independentVerification: false,
+          ...(promoteRoute ? { route: promoteRoute } : {}),
+        });
+        return this.terminateQuality(quality);
       }
       const projection: QualityRunProjection = {
         runId: quality.runId,
@@ -1155,6 +1529,19 @@ export class WorkAgent<
         independentReviewerAvailable: criticIndependent,
         reviewRequired: quality.profile !== "minimal",
       });
+      const postCompletionManifest = quality.artifacts.captureWorkspaceManifest(
+        qualityWritePaths(quality),
+      );
+      if (postCompletionManifest.artifactHash !== completionManifestHash) {
+        completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
+        this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
+          artifactHash: completionArtifact.artifactHash,
+          evidenceRefs: [completionArtifact.path],
+          independentVerification: false,
+          ...(promoteRoute ? { route: promoteRoute } : {}),
+        });
+        return this.terminateQuality(quality);
+      }
       if (completion.action !== "proceed") {
         this.recordQualityDecision(quality, "promote", completion, {
           artifactHash: completionArtifact.artifactHash,
@@ -1178,22 +1565,59 @@ export class WorkAgent<
     return { text: synthesis.text };
   }
 
-  private async loadExecutableGuardianSummary(
+  private async loadExecutableGuardianChecks(
     input: GuardianCheckRequest,
-  ): Promise<string | undefined> {
+  ): Promise<LoadedGuardianChecks> {
     if (!this.runExecutableGuardianChecks) {
-      return undefined;
+      return {
+        summary: "No executable checks configured.",
+        checks: [],
+        status: "unproven",
+        failures: ["EXECUTABLE_CHECKS_UNAVAILABLE"],
+      };
     }
 
     try {
-      return (await this.runExecutableGuardianChecks(input)).summary;
+      const result = await this.runExecutableGuardianChecks(input);
+      const checks = result.checks?.filter((check) =>
+        typeof check.name === "string"
+        && (check.status === "passed" || check.status === "failed")
+        && typeof check.summary === "string") ?? [];
+      if (!result.checks || checks.length !== result.checks.length || checks.length === 0) {
+        return {
+          summary: result.summary,
+          checks,
+          status: "unproven",
+          failures: ["EXECUTABLE_CHECKS_UNPROVEN"],
+        };
+      }
+      const failed = checks.some((check) => check.status === "failed");
+      return {
+        summary: result.summary,
+        checks,
+        status: failed ? "failed" : "passed",
+        failures: failed ? ["EXECUTABLE_CHECK_FAILED"] : [],
+      };
     } catch (error) {
       // A cancelled check has no verdict. Report the cancellation itself, not
       // whatever error raced it, and never degrade it into an "unavailable"
       // note the reviewer would read as a real result.
       input.signal?.throwIfAborted();
-      return `Executable checks unavailable: ${error instanceof Error ? error.message : String(error)}`;
+      return {
+        summary: `Executable checks unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        checks: [],
+        status: "unproven",
+        failures: ["EXECUTABLE_CHECKS_UNAVAILABLE"],
+      };
     }
+  }
+
+  /** Compatibility seam used by guardian diagnostics and shell bootstrap tests. */
+  async loadExecutableGuardianSummary(
+    input: GuardianCheckRequest,
+  ): Promise<string | undefined> {
+    if (!this.runExecutableGuardianChecks) return undefined;
+    return (await this.loadExecutableGuardianChecks(input)).summary;
   }
 
   private emitTrace(event: OrchestratedWorkAgentTraceEvent<TraceEvent>): void {
