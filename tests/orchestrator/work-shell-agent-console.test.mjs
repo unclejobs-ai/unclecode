@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { applyTraceEventToAgentConsole } from "@unclecode/orchestrator";
+import { parseAgentConsoleSnapshot } from "@unclecode/contracts";
 
 const initialConsole = Object.freeze({ profileId: "build", activity: [], agents: [], jobs: [] });
 const TEST_USAGE_ROUTE = { provider: "openai", model: "gpt-5.6-sol" };
@@ -1437,6 +1438,84 @@ test("work lifecycle reducer keeps terminal node statuses monotonic", () => {
     completed,
     "an unknown node changes nothing",
   );
+});
+
+test("quality traces project stage, gate, iteration, node attempt, and artifacts into resume state", () => {
+  const proposed = applyTraceEventToAgentConsole(initialConsole, {
+    type: "work.proposed",
+    graphId: "goal-quality",
+    graph: {
+      id: "goal-quality",
+      qualityProfile: "standard",
+      currentStage: "plan",
+      gateStatus: "unproven",
+      iteration: 0,
+      approval: "approved",
+      nodes: [{
+        id: "task-1",
+        title: "Implement auth",
+        prompt: "private executor assignment",
+        status: "running",
+        dependsOn: [],
+        fileOwnership: ["src/auth.ts"],
+        acceptanceCriteria: ["tests pass"],
+        evidenceRefs: [],
+        stage: "work",
+        role: "worker",
+        attempt: 0,
+        artifactRefs: [],
+        reviewRequired: true,
+      }],
+    },
+  });
+  const started = applyTraceEventToAgentConsole(proposed, {
+    type: "quality.stage_started",
+    runId: "run-quality",
+    graphId: "goal-quality",
+    profile: "standard",
+    stage: "work",
+    iteration: 1,
+    nodeId: "task-1",
+    nodeAttempt: 1,
+    startedAt: 10,
+  });
+  const gated = applyTraceEventToAgentConsole(started, {
+    type: "quality.gate_evaluated",
+    runId: "run-quality",
+    graphId: "goal-quality",
+    profile: "standard",
+    stage: "work",
+    iteration: 2,
+    decision: "refine",
+    nodeId: "task-1",
+    nodeAttempt: 2,
+    artifactRefs: [".unclecode/artifacts/run-quality/task-1-attempt-2.json"],
+    startedAt: 20,
+  });
+  const resumed = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(gated)));
+
+  assert.equal(resumed?.workGraph?.currentStage, "work");
+  assert.equal(resumed?.workGraph?.gateStatus, "refine");
+  assert.equal(resumed?.workGraph?.iteration, 2);
+  assert.equal(resumed?.workGraph?.nodes[0]?.attempt, 2);
+  assert.deepEqual(resumed?.workGraph?.nodes[0]?.artifactRefs, [
+    ".unclecode/artifacts/run-quality/task-1-attempt-2.json",
+  ]);
+
+  const completed = applyTraceEventToAgentConsole(resumed, {
+    type: "quality.completed",
+    runId: "run-quality",
+    graphId: "goal-quality",
+    profile: "standard",
+    stage: "promote",
+    iteration: 3,
+    decision: "unproven",
+    startedAt: 30,
+    completedAt: 31,
+  });
+  assert.equal(completed.workGraph?.currentStage, "promote");
+  assert.equal(completed.workGraph?.gateStatus, "unproven");
+  assert.equal(completed.workGraph?.iteration, 3);
 });
 
 test("agent lifecycle reducer accepts run events only against the job the run owns", () => {

@@ -606,6 +606,49 @@ function applyWorkLifecycleEvent(
     });
   }
 
+  if (
+    event.type === "quality.stage_started"
+    || event.type === "quality.gate_evaluated"
+    || event.type === "quality.refine_requested"
+    || event.type === "quality.pivot_requested"
+    || event.type === "quality.completed"
+  ) {
+    const stage = readQualityStage(trace.stage);
+    const iteration = readNonNegativeInteger(trace.iteration);
+    if (!stage || iteration === undefined || iteration < graph.iteration) return snapshot;
+    const gateStatus = event.type === "quality.stage_started"
+      ? graph.gateStatus
+      : readQualityGateStatus(trace.decision);
+    if (!gateStatus) return snapshot;
+
+    const nodeId = readNonEmptyString(trace, "nodeId");
+    const nodeAttempt = readNonNegativeInteger(trace.nodeAttempt);
+    const artifactRefs = readQualityArtifactRefs(trace.artifactRefs);
+    const nodes = nodeId
+      ? graph.nodes.map((node) => {
+          if (node.id !== nodeId) return node;
+          return {
+            ...node,
+            stage,
+            ...(nodeAttempt === undefined ? {} : { attempt: Math.max(node.attempt, nodeAttempt) }),
+            ...(artifactRefs === undefined
+              ? {}
+              : { artifactRefs: [...new Set([...node.artifactRefs, ...artifactRefs])] }),
+          };
+        })
+      : graph.nodes;
+    return createAgentConsoleSnapshot({
+      ...snapshot,
+      workGraph: {
+        ...graph,
+        currentStage: stage,
+        gateStatus,
+        iteration,
+        nodes,
+      },
+    });
+  }
+
   if (event.type !== "work.status") {
     return snapshot;
   }
@@ -651,6 +694,33 @@ function readWorkNodeStatus(value: unknown): WorkNodeStatus | undefined {
   ].includes(value)
     ? value as WorkNodeStatus
     : undefined;
+}
+
+function readQualityStage(value: unknown): "explore" | "plan" | "work" | "critic" | "promote" | undefined {
+  return value === "explore" || value === "plan" || value === "work" || value === "critic" || value === "promote"
+    ? value
+    : undefined;
+}
+
+function readQualityGateStatus(
+  value: unknown,
+): "proceed" | "refine" | "pivot" | "block" | "unproven" | undefined {
+  return value === "proceed" || value === "refine" || value === "pivot" || value === "block" || value === "unproven"
+    ? value
+    : undefined;
+}
+
+function readNonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+function readQualityArtifactRefs(value: unknown): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) return undefined;
+  return value
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .slice(0, 64);
 }
 
 function createStartedActivity(input: {

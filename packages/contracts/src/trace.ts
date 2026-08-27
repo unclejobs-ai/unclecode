@@ -407,6 +407,10 @@ type QualityTraceBase = QualityTraceRoute & {
   readonly profile: QualityProfile;
   readonly stage: QualityHarnessStage;
   readonly iteration: number;
+  /** Present when the transition belongs to one WorkGraph node. */
+  readonly nodeId?: string;
+  readonly nodeAttempt?: number;
+  readonly artifactRefs?: readonly string[];
   readonly startedAt: number;
 };
 
