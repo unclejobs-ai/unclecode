@@ -454,6 +454,7 @@ export async function loadWorkCliBootstrap(
     cwd,
     reasoning,
     mode,
+    ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
     ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
     ...(config.openAIRuntime ? { openAIRuntime: config.openAIRuntime } : {}),
     ...(config.openAIAccountId !== undefined
@@ -468,7 +469,7 @@ export async function loadWorkCliBootstrap(
               apiKey,
               openAIRuntime: config.openAIRuntime,
             });
-            const baseUrl = resolvePiProviderBaseUrl(runtimeProviderName);
+            const baseUrl = resolvePiProviderBaseUrl(runtimeProviderName, env);
             return createPiBridgeProvider({
               provider: runtimeProviderName,
               apiKey,
@@ -540,6 +541,16 @@ export async function loadWorkCliBootstrap(
     authLabel: string;
     authIssueLines?: readonly string[];
   }> => {
+    if (config.provider !== "openai") {
+      return {
+        authLabel: resolveWorkShellAuthLabel({
+          engine: activeEngine,
+          configuredLabel: config.authLabel,
+          codexOAuthAvailable: false,
+        }),
+        authIssueLines: [],
+      };
+    }
     const status = await resolveRustOpenAIAuthStatus({ cwd, env });
     const resolved = await resolveRustOpenAIAuth({ cwd, env });
     directAgent.refreshAuthToken(resolved.status === "ok" ? resolved.bearerToken : "");

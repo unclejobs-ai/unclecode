@@ -122,6 +122,7 @@ fn parse_work_runtime_args(argv: &[String], cwd: &str) -> Value {
                     Some("anthropic") => provider = Some("anthropic"),
                     Some("gemini") => provider = Some("gemini"),
                     Some("openai") => provider = Some("openai"),
+                    Some("deepseek") => provider = Some("deepseek"),
                     _ => {}
                 }
                 index += 1;
@@ -297,6 +298,20 @@ mod tests {
         assert_eq!(parsed["prompt"], "fix auth");
         assert_eq!(parsed["showHelp"], false);
         assert_eq!(parsed["showTools"], true);
+    }
+
+    #[test]
+    fn parses_deepseek_as_a_runtime_provider() {
+        let parsed = serde_json::from_str::<Value>(
+            &parse_work_runtime_args_json(
+                r#"{"cwd":"/repo","argv":["--provider","deepseek","--model","deepseek-reasoner","review"]}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed["provider"], "deepseek");
+        assert_eq!(parsed["model"], "deepseek-reasoner");
+        assert_eq!(parsed["prompt"], "review");
     }
 
     #[test]

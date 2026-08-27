@@ -1,5 +1,6 @@
 const MODEL_ENV_KEY_BY_PROVIDER = {
   openai: "OPENAI_MODEL",
+  deepseek: "DEEPSEEK_MODEL",
   gemini: "GEMINI_MODEL",
   groq: "GROQ_MODEL",
   ollama: "OLLAMA_MODEL",

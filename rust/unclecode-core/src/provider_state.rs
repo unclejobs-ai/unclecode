@@ -10,11 +10,12 @@ pub fn reset_provider_turn_state_json(
     system_prompt: &str,
 ) -> Result<String, String> {
     let state = match provider {
-        "openai" => vec![json!({ "role": "system", "content": system_prompt })],
+        "openai" | "deepseek" => vec![json!({ "role": "system", "content": system_prompt })],
         "anthropic" | "gemini" => Vec::new(),
         _ => {
             return Err(
-                "Usage: unclecode rust provider reset-state <openai|anthropic|gemini>".to_string(),
+                "Usage: unclecode rust provider reset-state <openai|deepseek|anthropic|gemini>"
+                    .to_string(),
             )
         }
     };
@@ -33,10 +34,10 @@ pub fn resolve_provider_runtime_settings_json(
     settings_json: &str,
 ) -> Result<String, String> {
     match provider {
-        "openai" | "anthropic" | "gemini" => {}
+        "openai" | "deepseek" | "anthropic" | "gemini" => {}
         _ => {
             return Err(
-                "Usage: unclecode rust provider runtime-settings <openai|anthropic|gemini> <current-model>"
+                "Usage: unclecode rust provider runtime-settings <openai|deepseek|anthropic|gemini> <current-model>"
                     .to_string(),
             )
         }
@@ -51,7 +52,7 @@ pub fn resolve_provider_runtime_settings_json(
         .unwrap_or_else(|| current_model.trim())
         .to_string();
 
-    let reasoning = if provider == "openai" {
+    let reasoning = if provider == "openai" || provider == "deepseek" {
         settings
             .get("reasoning")
             .cloned()
@@ -74,10 +75,11 @@ pub fn append_provider_turn_state_json(
     entries_json: &str,
 ) -> Result<String, String> {
     match provider {
-        "openai" | "anthropic" | "gemini" => {}
+        "openai" | "deepseek" | "anthropic" | "gemini" => {}
         _ => {
             return Err(
-                "Usage: unclecode rust provider append-state <openai|anthropic|gemini>".to_string(),
+                "Usage: unclecode rust provider append-state <openai|deepseek|anthropic|gemini>"
+                    .to_string(),
             )
         }
     }
@@ -100,15 +102,13 @@ pub fn start_provider_turn_state_json(
     attachments_json: &str,
 ) -> Result<String, String> {
     let entry_raw = match provider {
-        "openai" => build_openai_user_message_json(prompt, attachments_json)?,
+        "openai" | "deepseek" => build_openai_user_message_json(prompt, attachments_json)?,
         "anthropic" => build_anthropic_user_message_json(prompt, attachments_json)?,
         "gemini" => build_gemini_user_content_json(prompt, attachments_json)?,
-        _ => {
-            return Err(
-                "Usage: unclecode rust provider start-turn <openai|anthropic|gemini> <prompt>"
-                    .to_string(),
-            )
-        }
+        _ => return Err(
+            "Usage: unclecode rust provider start-turn <openai|deepseek|anthropic|gemini> <prompt>"
+                .to_string(),
+        ),
     };
     let entry = serde_json::from_str::<Value>(&entry_raw)
         .map_err(|error| format!("Invalid generated user entry JSON: {error}"))?;

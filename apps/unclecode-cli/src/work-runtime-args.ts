@@ -5,7 +5,7 @@ export type WorkEngine = "native" | "pi";
 
 export type ParsedArgs = {
   cwd: string;
-  provider?: "anthropic" | "gemini" | "openai";
+  provider?: "anthropic" | "gemini" | "openai" | "deepseek";
   model?: string;
   reasoning?: ModeReasoningEffort;
   sessionId?: string;
@@ -25,7 +25,7 @@ export function printHelp(): void {
   process.stdout.write(`  --help   Show this help text\n`);
   process.stdout.write(`  --tools  List available local tools\n`);
   process.stdout.write(`  --cwd    Set the workspace root\n`);
-  process.stdout.write(`  --provider  Choose openai, anthropic, or gemini\n`);
+  process.stdout.write(`  --provider  Choose openai, anthropic, gemini, or deepseek\n`);
   process.stdout.write(`  --model  Override the model for the chosen provider\n`);
   process.stdout.write(`  --reasoning  Override reasoning effort: none, low, medium, high, xhigh, max\n`);
   process.stdout.write(`  --session-id  Resume a persisted work session id\n`);
@@ -39,14 +39,16 @@ export function printTools(): void {
   }
 }
 
-export function resolveRuntimeProvider(provider: string): "anthropic" | "gemini" | "openai" {
+export function resolveRuntimeProvider(
+  provider: string,
+): "anthropic" | "gemini" | "openai" | "deepseek" {
   const parsed = JSON.parse(
     runRustCommandSync(["rust", "model", "provider-runtime-json", provider], process.cwd()).trim(),
   ) as unknown;
   const decision = isRecord(parsed) ? parsed : {};
   const routed = typeof decision.runtimeKind === "string" ? decision.runtimeKind : undefined;
   if (
-    (routed === "anthropic" || routed === "gemini" || routed === "openai")
+    (routed === "anthropic" || routed === "gemini" || routed === "openai" || routed === "deepseek")
     && decision.runtimeSupported === true
   ) {
     return routed;
@@ -83,7 +85,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
     showHelp: parsed.showHelp,
     showTools: parsed.showTools,
   };
-  if (parsed.provider === "anthropic" || parsed.provider === "gemini" || parsed.provider === "openai") {
+  if (
+    parsed.provider === "anthropic"
+    || parsed.provider === "gemini"
+    || parsed.provider === "openai"
+    || parsed.provider === "deepseek"
+  ) {
     result.provider = parsed.provider;
   }
   if (typeof parsed.model === "string") {

@@ -7,13 +7,11 @@ pub fn provider_tool_dispatch_plan_json(
     handler_names_json: &str,
 ) -> Result<String, String> {
     match provider {
-        "openai" | "anthropic" | "gemini" => {}
-        _ => {
-            return Err(
-                "Usage: unclecode rust provider tool-dispatch-plan <openai|anthropic|gemini>"
-                    .to_string(),
-            )
-        }
+        "openai" | "deepseek" | "anthropic" | "gemini" => {}
+        _ => return Err(
+            "Usage: unclecode rust provider tool-dispatch-plan <openai|deepseek|anthropic|gemini>"
+                .to_string(),
+        ),
     }
 
     let actions = parse_array(actions_json, "actions")?;

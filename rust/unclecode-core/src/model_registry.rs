@@ -54,6 +54,7 @@ const OPENAI_DEFAULT_MODELS: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.
 pub const OPENAI_REASONING_EFFORTS: &[&str] = &["none", "low", "medium", "high", "xhigh", "max"];
 
 const COMPAT_OPENAI_MODELS: &[&str] = &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
+const COMPAT_DEEPSEEK_MODELS: &[&str] = &["deepseek-chat", "deepseek-reasoner"];
 const COMPAT_ANTHROPIC_MODELS: &[&str] = &[
     "claude-sonnet-4-20250514",
     "claude-sonnet-4-6",
@@ -84,7 +85,7 @@ const COMPAT_ZAI_MODELS: &[&str] = &["glm-5", "glm-4.5", "glm-4.5-air"];
 const OMP_MODELS: &[&str] = &["kimi-code/k3"];
 /// Providers UncleCode can drive as its own interactive runtime. `omp` is
 /// absent on purpose: it is executor-only and hands the whole turn to OMP.
-const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &["anthropic", "gemini", "openai"];
+const RUNTIME_SUPPORTED_PROVIDERS: &[&str] = &["anthropic", "gemini", "openai", "deepseek"];
 
 pub fn openai_reasoning_support(model_id: &str) -> ReasoningSupport {
     let normalized = model_id.trim().to_ascii_lowercase();
@@ -137,6 +138,8 @@ pub fn detect_provider_for_model(model_id: &str) -> &'static str {
         "anthropic"
     } else if normalized.starts_with("gemini") {
         "gemini"
+    } else if normalized.starts_with("deepseek") {
+        "deepseek"
     } else {
         "openai"
     }
@@ -260,7 +263,7 @@ pub fn openai_compat_policy(
     let is_kimi =
         model.contains("kimi") || model.contains("moonshot") || endpoint.contains("moonshot");
     let is_qwen = model.contains("qwen");
-    let is_deepseek = model.contains("deepseek");
+    let is_deepseek = provider == "deepseek" || model.contains("deepseek");
     let is_groq = provider == "groq" || endpoint.contains("groq.com");
     let is_mistral =
         provider == "mistral" || endpoint.contains("mistral") || model.contains("mistral");
@@ -339,6 +342,7 @@ pub fn provider_label(provider_id: &str) -> String {
     match provider_id {
         "anthropic" => "Anthropic",
         "openai" => "OpenAI",
+        "deepseek" => "DeepSeek",
         "gemini" => "Google Gemini",
         "groq" => "Groq",
         "ollama" => "Ollama",
@@ -353,7 +357,15 @@ pub fn provider_label(provider_id: &str) -> String {
 fn is_known_provider(provider_id: &str) -> bool {
     matches!(
         provider_id,
-        "anthropic" | "gemini" | "openai" | "groq" | "ollama" | "copilot" | "zai" | "omp"
+        "anthropic"
+            | "gemini"
+            | "openai"
+            | "deepseek"
+            | "groq"
+            | "ollama"
+            | "copilot"
+            | "zai"
+            | "omp"
     )
 }
 
@@ -381,6 +393,7 @@ fn provider_env_keys(provider_id: &str) -> &'static [&'static str] {
         "anthropic" => &["ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"],
         "gemini" => &["GEMINI_API_KEY", "GEMINI_MODEL"],
         "openai" => &["OPENAI_API_KEY", "OPENAI_MODEL"],
+        "deepseek" => &["DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL"],
         "groq" => &["GROQ_API_KEY", "GROQ_MODEL"],
         "ollama" => &["OLLAMA_BASE_URL", "OLLAMA_MODEL", "OLLAMA_API_KEY"],
         "copilot" => &["COPILOT_TOKEN", "COPILOT_MODEL"],
@@ -397,6 +410,7 @@ fn provider_endpoint_url(provider_id: &str) -> &'static str {
         "anthropic" => "https://api.anthropic.com/v1/messages",
         "gemini" => "https://generativelanguage.googleapis.com/v1beta/models",
         "openai" => "https://api.openai.com/v1/responses",
+        "deepseek" => "https://api.deepseek.com/chat/completions",
         "groq" => "https://api.groq.com/openai/v1/chat/completions",
         "ollama" => "http://localhost:11434/api/chat",
         "copilot" => "https://api.githubcopilot.com/chat/completions",
@@ -451,6 +465,7 @@ fn provider_default_models(provider_id: &str) -> &'static [&'static str] {
     match provider_id {
         "anthropic" => COMPAT_ANTHROPIC_MODELS,
         "openai" => COMPAT_OPENAI_MODELS,
+        "deepseek" => COMPAT_DEEPSEEK_MODELS,
         "gemini" => COMPAT_GEMINI_MODELS,
         "groq" => COMPAT_GROQ_MODELS,
         "ollama" => COMPAT_OLLAMA_MODELS,
@@ -509,7 +524,34 @@ mod tests {
     fn detects_provider_from_model_family() {
         assert_eq!(detect_provider_for_model("Claude-Sonnet"), "anthropic");
         assert_eq!(detect_provider_for_model("Gemini-3.1"), "gemini");
+        assert_eq!(detect_provider_for_model("deepseek-reasoner"), "deepseek");
         assert_eq!(detect_provider_for_model("gpt-5.6-terra"), "openai");
+    }
+
+    #[test]
+    fn resolves_deepseek_runtime_route_catalog_and_wire_policy() {
+        let route = resolve_provider_route("deepseek", None).unwrap();
+        assert_eq!(route.provider_id, "deepseek");
+        assert_eq!(route.label, "DeepSeek");
+        assert_eq!(route.transport, "compat");
+        assert!(route.runtime_supported);
+        assert_eq!(route.default_model, "deepseek-chat");
+        assert_eq!(
+            route.endpoint_url,
+            "https://api.deepseek.com/chat/completions"
+        );
+        assert_eq!(
+            route.env_keys,
+            ["DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL"]
+        );
+
+        let catalog = provider_model_catalog("deepseek", None, None);
+        assert_eq!(catalog.models, ["deepseek-chat", "deepseek-reasoner"]);
+
+        let policy = openai_compat_policy("deepseek", "deepseek-reasoner", None);
+        assert_eq!(policy.thinking_format, "deepseek");
+        assert!(!policy.supports_tool_choice);
+        assert!(policy.requires_reasoning_content_for_tool_calls);
     }
 
     #[test]

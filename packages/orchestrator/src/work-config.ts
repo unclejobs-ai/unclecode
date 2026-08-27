@@ -18,12 +18,17 @@ import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 
 loadEnv({ quiet: true });
 
-const providerSchema = z.enum(["anthropic", "gemini", "openai"]);
+const providerSchema = z.enum(["anthropic", "gemini", "openai", "deepseek"]);
+
+const DEEPSEEK_DEFAULT_ENDPOINT = "https://api.deepseek.com/chat/completions";
 
 const envSchema = z.object({
   LLM_PROVIDER: providerSchema.default("openai"),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().min(1).default("gpt-5.6-sol"),
+  DEEPSEEK_API_KEY: z.string().optional(),
+  DEEPSEEK_MODEL: z.string().min(1).default("deepseek-chat"),
+  DEEPSEEK_BASE_URL: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_MODEL: z.string().min(1).default("claude-sonnet-4-20250514"),
   GEMINI_API_KEY: z.string().optional(),
@@ -48,7 +53,18 @@ export type AppConfig = {
   openAIRuntime?: "api" | "codex";
   openAIAccountId?: string | null;
   authIssueMessage?: string;
+  baseUrl?: string;
 };
+
+function resolveDeepSeekEndpoint(baseUrl: string | undefined): string {
+  const normalized = baseUrl?.trim().replace(/\/+$/, "");
+  if (!normalized) {
+    return DEEPSEEK_DEFAULT_ENDPOINT;
+  }
+  return /\/chat\/completions$/i.test(normalized)
+    ? normalized
+    : `${normalized}/chat/completions`;
+}
 
 function resolveReasoningConfig(input: {
   provider: ProviderId;
@@ -296,6 +312,23 @@ export async function loadConfig(
           ? "OpenAI OAuth is present but missing model.request scope for API calls. Codex chat auth may exist locally but is not usable here. Use unclecode auth login --api-key-stdin, OPENAI_API_KEY, or browser OAuth with OPENAI_OAUTH_CLIENT_ID."
           : "OPENAI_API_KEY or a valid UncleCode OpenAI login is required when LLM_PROVIDER=openai",
     );
+  }
+
+  if (provider === "deepseek") {
+    const apiKey = parsed.data.DEEPSEEK_API_KEY?.trim();
+    if (!apiKey) {
+      throw new Error("DEEPSEEK_API_KEY is required when LLM_PROVIDER=deepseek");
+    }
+    const model = overrides?.model ?? parsed.data.DEEPSEEK_MODEL;
+    return {
+      provider,
+      apiKey,
+      model,
+      mode,
+      authLabel: "env-key",
+      baseUrl: resolveDeepSeekEndpoint(parsed.data.DEEPSEEK_BASE_URL),
+      reasoning: resolveReasoningConfig({ provider, model, mode }),
+    };
   }
 
   if (provider === "gemini") {

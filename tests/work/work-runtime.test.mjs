@@ -58,7 +58,29 @@ test("parseArgs extracts cwd/provider/model/reasoning/session/help/tools/prompt 
 
 test("resolveRuntimeProvider rejects unsupported providers honestly", () => {
   assert.equal(resolveRuntimeProvider("openai"), "openai");
+  assert.equal(resolveRuntimeProvider("deepseek"), "deepseek");
   assert.throws(() => resolveRuntimeProvider("bogus"), /Unsupported runtime provider: bogus/);
+});
+
+test("parseArgs accepts deepseek as a first-class work runtime", () => {
+  assert.deepEqual(
+    parseArgs([
+      "--provider",
+      "deepseek",
+      "--model",
+      "deepseek-reasoner",
+      "review",
+      "this",
+    ]),
+    {
+      cwd: process.cwd(),
+      provider: "deepseek",
+      model: "deepseek-reasoner",
+      prompt: "review this",
+      showHelp: false,
+      showTools: false,
+    },
+  );
 });
 
 test("deriveAuthIssueLines maps saved oauth states into actionable operator guidance", () => {

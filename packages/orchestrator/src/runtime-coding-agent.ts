@@ -41,6 +41,7 @@ type RuntimeProviderArgs = {
   systemPrompt?: string;
   openAIRuntime?: "api" | "codex";
   openAIAccountId?: string | null;
+  baseUrl?: string;
   interactionBridge?: WorkShellInteractionBridge;
   mode?: string;
 };
@@ -86,12 +87,16 @@ export class RuntimeCodingAgent
       interactionBridge,
       policyProfile: () => profileRef.current,
       runtimeMode: () => modeRef.current,
-      webSearch: {
-        provider: args.provider,
-        apiKey: args.apiKey,
-        model: args.model,
-        ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
-      },
+      ...(args.provider === "deepseek"
+        ? {}
+        : {
+            webSearch: {
+              provider: args.provider,
+              apiKey: args.apiKey,
+              model: args.model,
+              ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
+            },
+          }),
     });
     const runtimeProvider = args.providerOverride
       ?? args.providerOverrideFactory?.({ toolRuntime })
@@ -104,6 +109,7 @@ export class RuntimeCodingAgent
         ...(args.systemPrompt ? { systemPrompt: args.systemPrompt } : {}),
         ...(args.openAIRuntime ? { openAIRuntime: args.openAIRuntime } : {}),
         ...(args.openAIAccountId !== undefined ? { openAIAccountId: args.openAIAccountId } : {}),
+        ...(args.baseUrl ? { baseUrl: args.baseUrl } : {}),
         toolRuntime,
       });
     super({

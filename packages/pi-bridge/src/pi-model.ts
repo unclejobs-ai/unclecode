@@ -11,6 +11,7 @@ import type { ProviderName, RuntimeReasoningConfig } from "@unclecode/providers"
 // pi-ai registers the Gemini API surface under the "google" provider id.
 export const PI_BRIDGE_PROVIDER_IDS: Readonly<Record<ProviderName, string>> = {
   openai: "openai",
+  deepseek: "deepseek",
   anthropic: "anthropic",
   gemini: "google",
 };
@@ -28,18 +29,21 @@ export function getSharedPiModels(): Models {
 
 const PI_PROVIDER_DEFAULT_APIS: Readonly<Record<ProviderName, string>> = {
   openai: "openai-responses",
+  deepseek: "openai-completions",
   anthropic: "anthropic-messages",
   gemini: "google-generative-ai",
 };
 
 const PI_PROVIDER_DEFAULT_BASE_URLS: Readonly<Record<ProviderName, string>> = {
   openai: "https://api.openai.com/v1",
+  deepseek: "https://api.deepseek.com",
   anthropic: "https://api.anthropic.com",
   gemini: "https://generativelanguage.googleapis.com/v1beta",
 };
 
 const PI_PROVIDER_BASE_URL_ENV_KEYS: Readonly<Record<ProviderName, readonly string[]>> = {
   openai: ["OPENAI_BASE_URL", "OPENAI_API_BASE_URL"],
+  deepseek: ["DEEPSEEK_BASE_URL"],
   anthropic: ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_BASE_URL"],
   gemini: ["GEMINI_BASE_URL", "GEMINI_API_BASE_URL"],
 };
@@ -51,7 +55,9 @@ export function resolvePiProviderBaseUrl(
   for (const name of PI_PROVIDER_BASE_URL_ENV_KEYS[provider]) {
     const value = env[name]?.trim().replace(/\/+$/, "");
     if (value) {
-      return value;
+      return provider === "deepseek"
+        ? value.replace(/\/chat\/completions$/i, "")
+        : value;
     }
   }
   return undefined;

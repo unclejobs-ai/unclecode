@@ -23,3 +23,14 @@ test("applyCompatModelEnv leaves anthropic env unchanged when provider model is 
 
   assert.equal(env.ANTHROPIC_MODEL, "claude-sonnet-4-20250514");
 });
+
+test("applyCompatModelEnv mirrors a selected DeepSeek model", () => {
+  const env = {
+    DEEPSEEK_MODEL: "deepseek-reasoner",
+    ANTHROPIC_MODEL: "claude-sonnet-4-20250514",
+  };
+
+  applyCompatModelEnv("deepseek", env);
+
+  assert.equal(env.ANTHROPIC_MODEL, "deepseek-reasoner");
+});
