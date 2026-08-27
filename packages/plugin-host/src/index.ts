@@ -523,7 +523,11 @@ export function registerBuiltInSccQualityEngine(
         evidence: event.evidence,
         currentArtifactHash: event.artifactHash,
         producerId: event.producerId,
-        reviewRequired: event.node.reviewRequired,
+        // A worker artifact is evaluated before the guardian/critic exists.
+        // Requiring reviewer evidence here would make every standard run stop
+        // before it can reach the stage that produces that evidence; final
+        // review is enforced by `beforeRunComplete` below.
+        reviewRequired: false,
         independentProviderAvailable: event.independentProviderAvailable,
         independentReviewerAvailable: event.independentReviewerAvailable,
         refineCount: event.refineCount,

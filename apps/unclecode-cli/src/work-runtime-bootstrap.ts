@@ -73,6 +73,10 @@ import {
   type ToolRuntime,
 } from "@unclecode/providers";
 import {
+  PluginHost,
+  registerBuiltInSccQualityEngine,
+} from "@unclecode/plugin-host";
+import {
   buildContextLineItems,
   buildContextSummaryItems,
   buildOmoExcludedPacketItems,
@@ -489,6 +493,13 @@ export async function loadWorkCliBootstrap(
     config.mode,
   );
 
+  const pluginHost = new PluginHost();
+  registerBuiltInSccQualityEngine(pluginHost, { workspaceRoot: cwd, env });
+  await pluginHost.loadFromDisk(cwd, {
+    env,
+    ...(input.userHomeDir ? { homeDir: input.userHomeDir } : {}),
+  });
+
   const agent = new WorkAgent({
     directAgent,
     createExecutorAgent: async (settings) => createWorkExecutorAgent({
@@ -499,6 +510,16 @@ export async function loadWorkCliBootstrap(
     mode: config.mode,
     reasoning: config.reasoning,
     model: config.model,
+    workspaceRoot: cwd,
+    pluginHost,
+    directRoute: {
+      provider: resolveRuntimeProvider(config.provider),
+      model: config.model,
+    },
+    commodityRoute: {
+      provider: OMP_WORKER_PROVIDER_ID,
+      model: OMP_WORKER_DEFAULT_MODEL,
+    },
     async runExecutableGuardianChecks(guardianInput) {
       const scripts = guardianInput.mode === "ultrawork" || guardianInput.mode === "yolo"
         ? ["lint", "check", "test"]

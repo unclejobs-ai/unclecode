@@ -219,7 +219,7 @@ export async function runGoalTaskExecutorPool<Task extends ComplexPlanTask, Resu
    * `isSuccessful`: a cancelled task blocks its dependents.
    */
   readonly resolveResultStatus?:
-    | ((result: Result) => Extract<WorkNodeStatus, "completed" | "failed" | "cancelled">)
+    | ((result: Result) => Extract<WorkNodeStatus, "completed" | "failed" | "cancelled" | "blocked">)
     | undefined;
   readonly createFailedResult?: ((task: Task, error: unknown) => Result) | undefined;
   readonly createBlockedResult?: ((task: Task) => Result) | undefined;
@@ -321,7 +321,7 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
   readonly executeComplexTask: (task: Task) => Promise<Result>;
   readonly isComplexTaskSuccessful?: ((result: Result) => boolean) | undefined;
   readonly resolveComplexTaskStatus?:
-    | ((result: Result) => Extract<WorkNodeStatus, "completed" | "failed" | "cancelled">)
+    | ((result: Result) => Extract<WorkNodeStatus, "completed" | "failed" | "cancelled" | "blocked">)
     | undefined;
   readonly createFailedComplexTaskResult?: ((task: Task, error: unknown) => Result) | undefined;
   readonly createBlockedComplexTaskResult?: ((task: Task) => Result) | undefined;
@@ -331,6 +331,10 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
     readonly tasks: readonly Task[];
     readonly results: readonly Result[];
   }) => Promise<GuardianReviewResult>) | undefined;
+  readonly shouldRunGuardianReview?: ((input: {
+    readonly tasks: readonly Task[];
+    readonly results: readonly Result[];
+  }) => boolean) | undefined;
 }) {
   return {
     async run(input: {
@@ -338,15 +342,17 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
       readonly mode: string;
       readonly maxWorkers?: number | undefined;
       readonly ownershipRegistry?: FileOwnershipRegistry | undefined;
+      /** A caller that already classified the turn can avoid a second Rust pass. */
+      readonly intent?: WorkIntent | undefined;
       readonly onTrace?: TurnOrchestratorTraceListener | undefined;
-      readonly onPlan?: ((tasks: readonly Task[]) => void) | undefined;
+      readonly onPlan?: ((tasks: readonly Task[]) => void | Promise<void>) | undefined;
       readonly onTaskStatus?: ((task: Task, status: WorkNodeStatus) => void) | undefined;
     }): Promise<
       | { readonly kind: "simple"; readonly text: string }
       | { readonly kind: "research"; readonly text: string }
       | { readonly kind: "complex"; readonly results: readonly Result[]; readonly guardian?: GuardianReviewResult }
     > {
-      const intent = classifyWorkIntent(input.prompt, input.mode);
+      const intent = input.intent ?? classifyWorkIntent(input.prompt, input.mode);
 
       if (intent === "simple") {
         const result = await deps.runSimpleTurn(input.prompt);
@@ -387,7 +393,7 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
         onTrace: input.onTrace,
       });
       const tasks = planOutcome.tasks;
-      input.onPlan?.(tasks);
+      await input.onPlan?.(tasks);
       const plannerCompletedAt = Date.now();
       if (planOutcome.usedLlm) {
         // Pair the running event the planner already emitted with a
@@ -429,7 +435,10 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
             ...(input.onTrace ? { onTrace: input.onTrace } : {}),
           });
 
-      const runGuardianReview = deps.runGuardianReview;
+      const runGuardianReview = deps.runGuardianReview
+        && (deps.shouldRunGuardianReview?.({ tasks, results }) ?? true)
+        ? deps.runGuardianReview
+        : undefined;
       const guardian = runGuardianReview
         ? await (async () => {
             const reviewerStartedAt = Date.now();

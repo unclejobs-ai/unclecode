@@ -25,6 +25,7 @@
       "@unclecode/runtime-broker": ["packages/runtime-broker/src/index.ts"],
       "@unclecode/providers": ["packages/providers/src/index.ts"],
       "@unclecode/pi-bridge": ["packages/pi-bridge/src/index.ts"],
+      "@unclecode/plugin-host": ["packages/plugin-host/src/index.ts"],
       "@unclecode/mcp-host": ["packages/mcp-host/src/index.ts"],
       "@unclecode/orchestrator": ["packages/orchestrator/src/index.ts"],
       "@unclecode/tui": ["packages/tui/src/index.tsx"]

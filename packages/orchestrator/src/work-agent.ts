@@ -1,14 +1,36 @@
+import { randomUUID } from "node:crypto";
+
+import {
+  classifyQualityProfile,
+  DEFAULT_ITERATION_LIMITS,
+  type GateEvidence,
+  type QualityRunProjection,
+  type RiskLevel,
+} from "@second-claude/core";
 import type {
   OrchestratorStepTraceEvent,
+  QualityCompletedTraceEvent,
+  QualityGateEvaluatedTraceEvent,
+  QualityGateStatus,
+  QualityHarnessStage,
+  QualityPivotRequestedTraceEvent,
+  QualityProfile,
+  QualityRefineRequestedTraceEvent,
+  QualityStageStartedTraceEvent,
   WorkApprovedTraceEvent,
   WorkGraph,
   WorkNodeStatus,
   WorkProposedTraceEvent,
   WorkStatusTraceEvent,
 } from "@unclecode/contracts";
+import {
+  type PluginDecisionAggregate,
+  PluginHost,
+} from "@unclecode/plugin-host";
 
 import {
   createTurnOrchestrator,
+  classifyWorkIntent,
   parsePlannedWorkTasks,
   type PlannedWorkTask,
   type TurnOrchestratorTraceListener,
@@ -23,6 +45,13 @@ import {
   type WorkAgentTurnEpoch,
   type WorkAgentRunControllerTraceEvent,
 } from "./work-agent-run-controller.js";
+import {
+  QualityArtifactStore,
+  resolveBalancedPrewalkRoute,
+  type BalancedPrewalkRoute,
+  type PersistedQualityArtifact,
+  type QualityProviderRoute,
+} from "./quality-runtime.js";
 
 type ReasoningLike = {
   readonly effort: string;
@@ -42,6 +71,7 @@ type PlannedWorkResult = {
 export type WorkAgentTurnResult = {
   readonly text: string;
   readonly cancelled?: true;
+  readonly qualityStatus?: QualityGateStatus;
 };
 
 const CLEARED_TURN_RESULT: WorkAgentTurnResult = { text: WORK_TURN_CANCELLED_SUMMARY, cancelled: true };
@@ -62,7 +92,12 @@ export type OrchestratedWorkAgentTraceEvent<TraceEvent extends { readonly type: 
   | OrchestratorStepTraceEvent
   | WorkProposedTraceEvent
   | WorkApprovedTraceEvent
-  | WorkStatusTraceEvent;
+  | WorkStatusTraceEvent
+  | QualityStageStartedTraceEvent
+  | QualityGateEvaluatedTraceEvent
+  | QualityRefineRequestedTraceEvent
+  | QualityPivotRequestedTraceEvent
+  | QualityCompletedTraceEvent;
 
 export interface OrchestratedWorkTurnAgent<
   Attachment,
@@ -154,13 +189,17 @@ export function resolveWorkerBudget(mode: string): number {
 
 let workGraphSequence = 0;
 
-function createWorkGraph(tasks: readonly PlannedWorkTask[], startedAt: number): WorkGraph {
+function createWorkGraph(
+  tasks: readonly PlannedWorkTask[],
+  startedAt: number,
+  quality?: { readonly graphId: string; readonly profile: QualityProfile } | undefined,
+): WorkGraph {
   workGraphSequence += 1;
   return {
-    id: `goal-${startedAt}-${workGraphSequence}`,
+    id: quality?.graphId ?? `goal-${startedAt}-${workGraphSequence}`,
     ...(tasks[0]?.goal ? { goal: tasks[0].goal } : {}),
     ...(tasks[0]?.constraints ? { constraints: tasks[0].constraints } : {}),
-    qualityProfile: "minimal",
+    qualityProfile: quality?.profile ?? "minimal",
     currentStage: "plan",
     gateStatus: "unproven",
     iteration: 0,
@@ -178,9 +217,72 @@ function createWorkGraph(tasks: readonly PlannedWorkTask[], startedAt: number): 
       role: "worker",
       attempt: 0,
       artifactRefs: [],
-      reviewRequired: false,
+      reviewRequired: quality ? quality.profile !== "minimal" : false,
     })),
   };
+}
+
+type QualityTerminal = {
+  readonly requested: Extract<QualityGateStatus, "refine" | "pivot" | "block">;
+  readonly stage: QualityHarnessStage;
+  readonly reason: string;
+  readonly failures: readonly string[];
+  readonly nodeId?: string;
+};
+
+type QualityRuntimeState = {
+  readonly runId: string;
+  readonly graphId: string;
+  readonly profile: QualityProfile;
+  readonly risk: RiskLevel;
+  readonly creatorIntent: boolean;
+  readonly artifacts: QualityArtifactStore;
+  readonly completedStages: Set<QualityHarnessStage>;
+  readonly workerArtifacts: PersistedQualityArtifact[];
+  readonly producerRoutes: QualityProviderRoute[];
+  readonly failures: string[];
+  graph?: WorkGraph;
+  refineCount: number;
+  pivotCount: number;
+  iteration: number;
+  terminal?: QualityTerminal;
+  completed: boolean;
+};
+
+class QualityLifecycleStop extends Error {
+  constructor() {
+    super("Quality lifecycle terminated explicitly.");
+    this.name = "QualityLifecycleStop";
+  }
+}
+
+function creatorIntentFromPrompt(prompt: string): boolean {
+  return /\b(?:create|evolve|author|modify)\b[\s\S]{0,80}\b(?:agent|plugin|skill|benchmark|quality\s+policy)\b/iu.test(prompt);
+}
+
+function riskFromPrompt(prompt: string): RiskLevel {
+  if (/\b(?:production|payment|billing|credential|secret|authorization|security-critical)\b/iu.test(prompt)) {
+    return "high";
+  }
+  return "low";
+}
+
+function decisionReason(decision: PluginDecisionAggregate): string {
+  return decision.decisions.find((entry) => entry.action === decision.action)?.reason
+    ?? `Quality plugin requested ${decision.action}.`;
+}
+
+function appendQualityContext(
+  prompt: string,
+  contributions: readonly { readonly pluginName: string; readonly content: string }[],
+): string {
+  if (contributions.length === 0) return prompt;
+  const body = contributions.map(({ pluginName, content }) => `[${pluginName}] ${content}`).join("\n");
+  return `${prompt}\n\n<quality_engine_context>\n${body}\n</quality_engine_context>`;
+}
+
+function routesDiffer(left: QualityProviderRoute, right: QualityProviderRoute): boolean {
+  return left.provider !== right.provider || left.model !== right.model;
 }
 
 type ExecutorAgentFactory<Attachment, TraceEvent extends { readonly type: string }, Reasoning extends ReasoningLike> = (
@@ -198,6 +300,11 @@ export class WorkAgent<
   private reasoning: Reasoning;
   private model: string;
   private readonly runExecutableGuardianChecks?: GuardianCheckRunner | undefined;
+  private readonly workspaceRoot: string;
+  private readonly pluginHost: PluginHost | undefined;
+  private readonly qualityRisk: RiskLevel | undefined;
+  private directRoute: QualityProviderRoute;
+  private readonly commodityRoute: QualityProviderRoute | undefined;
   private traceListener: ((event: OrchestratedWorkAgentTraceEvent<TraceEvent>) => void) | undefined;
   private readonly runController: WorkAgentRunController<Attachment, TraceEvent, Reasoning>;
 
@@ -208,6 +315,11 @@ export class WorkAgent<
     reasoning: Reasoning;
     model: string;
     runExecutableGuardianChecks?: GuardianCheckRunner | undefined;
+    workspaceRoot?: string | undefined;
+    pluginHost?: PluginHost | undefined;
+    qualityRisk?: RiskLevel | undefined;
+    directRoute?: QualityProviderRoute | undefined;
+    commodityRoute?: QualityProviderRoute | undefined;
   }) {
     this.directAgent = input.directAgent;
     this.createExecutorAgent = input.createExecutorAgent;
@@ -215,6 +327,11 @@ export class WorkAgent<
     this.reasoning = input.reasoning;
     this.model = input.model;
     this.runExecutableGuardianChecks = input.runExecutableGuardianChecks;
+    this.workspaceRoot = input.workspaceRoot ?? process.cwd();
+    this.pluginHost = input.pluginHost;
+    this.qualityRisk = input.qualityRisk;
+    this.directRoute = input.directRoute ?? { provider: "unknown", model: input.model };
+    this.commodityRoute = input.commodityRoute;
     this.runController = new WorkAgentRunController({
       directAgent: input.directAgent,
       ...(input.createExecutorAgent ? { createExecutorAgent: input.createExecutorAgent } : {}),
@@ -286,12 +403,16 @@ export class WorkAgent<
     prompt: string,
     onTrace?: TurnOrchestratorTraceListener,
     signal?: AbortSignal | undefined,
+    qualityContext?: readonly { readonly pluginName: string; readonly content: string }[] | undefined,
   ): Promise<{ readonly tasks: readonly PlannedWorkTask[]; readonly usedLlm: boolean }> {
     const staticTasks = buildComplexTasks(prompt);
     let plannerInvoked = false;
 
     try {
-      const planPrompt = buildRustPrompt("planner-prompt", { prompt });
+      const planPrompt = appendQualityContext(
+        buildRustPrompt("planner-prompt", { prompt }),
+        qualityContext ?? [],
+      );
       const plannerStartedAt = Date.now();
       onTrace?.(resolveAgentTraceEvent({
         kind: "planner-running",
@@ -328,6 +449,7 @@ export class WorkAgent<
     }
     if (settings.model?.trim()) {
       this.model = settings.model.trim();
+      this.directRoute = { ...this.directRoute, model: this.model };
     }
   }
 
@@ -336,6 +458,209 @@ export class WorkAgent<
   updateMode(mode: string): void {
     this.mode = mode;
     this.directAgent.updateMode?.(mode);
+  }
+
+  private createQualityState(prompt: string): QualityRuntimeState {
+    const runId = `quality-${randomUUID()}`;
+    const graphId = `goal-${runId}`;
+    const risk = this.qualityRisk ?? riskFromPrompt(prompt);
+    const creatorIntent = creatorIntentFromPrompt(prompt);
+    const profile = classifyQualityProfile({
+      complexity: "complex",
+      risk,
+      creatorIntent,
+    });
+    return {
+      runId,
+      graphId,
+      profile,
+      risk,
+      creatorIntent,
+      artifacts: new QualityArtifactStore(this.workspaceRoot, runId),
+      completedStages: new Set(),
+      workerArtifacts: [],
+      producerRoutes: [],
+      failures: [],
+      refineCount: 0,
+      pivotCount: 0,
+      iteration: 0,
+      completed: false,
+    };
+  }
+
+  private async qualityContext(
+    state: QualityRuntimeState,
+    stage: QualityHarnessStage,
+  ): Promise<readonly { readonly pluginName: string; readonly content: string }[]> {
+    return await this.pluginHost?.dispatchContextContribute({
+      runId: state.runId,
+      graphId: state.graphId,
+      profile: state.profile,
+      stage,
+    }) ?? [];
+  }
+
+  private emitQualityStage(
+    state: QualityRuntimeState,
+    stage: QualityHarnessStage,
+    route?: BalancedPrewalkRoute | undefined,
+    agentRunId?: string | undefined,
+  ): void {
+    this.emitTrace({
+      type: "quality.stage_started",
+      level: "high-signal",
+      runId: state.runId,
+      graphId: state.graphId,
+      profile: state.profile,
+      stage,
+      iteration: state.iteration,
+      ...(route
+        ? {
+            provider: route.provider,
+            model: route.model,
+            route: route.route,
+            ...(agentRunId ? { agentRunId } : {}),
+          }
+        : {}),
+      startedAt: Date.now(),
+    });
+  }
+
+  private recordQualityDecision(
+    state: QualityRuntimeState,
+    stage: QualityHarnessStage,
+    decision: PluginDecisionAggregate,
+    detail: {
+      readonly nodeId?: string | undefined;
+      readonly artifactHash?: string | undefined;
+      readonly evidenceRefs?: readonly string[] | undefined;
+      readonly independentVerification?: boolean | undefined;
+      readonly route?: BalancedPrewalkRoute | undefined;
+    } = {},
+  ): void {
+    const failures = [...new Set(decision.failures)];
+    for (const failure of failures) {
+      if (!state.failures.includes(failure)) state.failures.push(failure);
+    }
+    this.emitTrace({
+      type: "quality.gate_evaluated",
+      level: "high-signal",
+      runId: state.runId,
+      graphId: state.graphId,
+      profile: state.profile,
+      stage,
+      iteration: state.iteration,
+      ...(detail.route
+        ? {
+            provider: detail.route.provider,
+            model: detail.route.model,
+            route: detail.route.route,
+          }
+        : {}),
+      decision: decision.action,
+      refineCount: state.refineCount,
+      pivotCount: state.pivotCount,
+      evidenceRefs: detail.evidenceRefs ?? [],
+      failures,
+      ...(detail.artifactHash ? { artifactHash: detail.artifactHash } : {}),
+      independentVerification: detail.independentVerification ?? false,
+      startedAt: Date.now(),
+    });
+
+    if (decision.action !== "refine" && decision.action !== "pivot" && decision.action !== "block") {
+      return;
+    }
+    const reason = decisionReason(decision);
+    if (decision.action === "refine") {
+      state.refineCount += 1;
+      state.iteration += 1;
+      this.emitTrace({
+        type: "quality.refine_requested",
+        level: "high-signal",
+        runId: state.runId,
+        graphId: state.graphId,
+        profile: state.profile,
+        stage,
+        iteration: state.iteration,
+        decision: "refine",
+        count: state.refineCount,
+        limit: DEFAULT_ITERATION_LIMITS.refine,
+        reason,
+        evidenceRefs: detail.evidenceRefs ?? [],
+        failures,
+        ...(detail.nodeId ? { nodeId: detail.nodeId } : {}),
+        startedAt: Date.now(),
+      });
+    } else if (decision.action === "pivot") {
+      state.pivotCount += 1;
+      state.iteration += 1;
+      this.emitTrace({
+        type: "quality.pivot_requested",
+        level: "high-signal",
+        runId: state.runId,
+        graphId: state.graphId,
+        profile: state.profile,
+        stage,
+        iteration: state.iteration,
+        decision: "pivot",
+        count: state.pivotCount,
+        limit: DEFAULT_ITERATION_LIMITS.pivot,
+        reason,
+        evidenceRefs: detail.evidenceRefs ?? [],
+        failures,
+        startedAt: Date.now(),
+      });
+    }
+    state.terminal = {
+      requested: decision.action,
+      stage,
+      reason,
+      failures,
+      ...(detail.nodeId ? { nodeId: detail.nodeId } : {}),
+    };
+  }
+
+  private completeQuality(
+    state: QualityRuntimeState,
+    decision: QualityGateStatus,
+    stage: QualityHarnessStage,
+    input: {
+      readonly evidenceRefs?: readonly string[] | undefined;
+      readonly failures?: readonly string[] | undefined;
+      readonly independentVerification?: boolean | undefined;
+    } = {},
+  ): void {
+    if (state.completed) return;
+    state.completed = true;
+    const startedAt = Date.now();
+    this.emitTrace({
+      type: "quality.completed",
+      level: "high-signal",
+      runId: state.runId,
+      graphId: state.graphId,
+      profile: state.profile,
+      stage,
+      iteration: state.iteration,
+      decision,
+      completedStages: [...state.completedStages],
+      evidenceRefs: input.evidenceRefs ?? [],
+      failures: [...new Set([...(input.failures ?? []), ...state.failures])],
+      independentVerification: input.independentVerification ?? false,
+      startedAt,
+      completedAt: Date.now(),
+    });
+  }
+
+  private terminateQuality(state: QualityRuntimeState): WorkAgentTurnResult {
+    const terminal = state.terminal;
+    if (!terminal) {
+      throw new Error("Quality termination requested without a terminal decision.");
+    }
+    this.completeQuality(state, "block", terminal.stage, { failures: terminal.failures });
+    return {
+      text: `Quality ${terminal.requested} requested; run terminated explicitly: ${terminal.reason}`,
+      qualityStatus: "block",
+    };
   }
 
   /**
@@ -366,17 +691,195 @@ export class WorkAgent<
       return await this.runMainTurn(prompt, attachments, turnOptions);
     }
 
+    const classifiedIntent = this.pluginHost ? classifyWorkIntent(prompt, this.mode) : undefined;
+    const quality = classifiedIntent === "complex" ? this.createQualityState(prompt) : undefined;
+    if (quality && this.pluginHost) {
+      this.emitQualityStage(quality, "explore");
+      const classified = await this.pluginHost.dispatchRunClassified({
+        runId: quality.runId,
+        prompt,
+        complexity: "complex",
+        risk: quality.risk,
+        creatorIntent: quality.creatorIntent,
+        proposedProfile: quality.profile,
+      });
+      quality.completedStages.add("explore");
+      if (classified.action !== "proceed") {
+        this.recordQualityDecision(quality, "explore", classified);
+      }
+      if (quality.terminal) return this.terminateQuality(quality);
+    }
+
     // Empty until the plan is accepted; the controller refuses any dispatch
     // naming a job the plan never queued, so no second guard is needed here.
     let activeGraphId = "";
+    let completionArtifact: PersistedQualityArtifact | undefined;
+    let completionProducerId = "";
+    let completionEvidence: GateEvidence[] = [];
+    let criticIndependent = false;
+    let criticGateStatus: QualityGateStatus = "proceed";
     const orchestrator = createTurnOrchestrator<PlannedWorkTask, PlannedWorkResult>({
       runSimpleTurn: (simplePrompt) => this.runMainTurn(simplePrompt, attachments, turnOptions),
       runResearchTurn: (researchPrompt) => this.runMainTurn(researchPrompt, attachments, turnOptions),
       planComplexTurn: async (complexPrompt, planOptions) => {
-        const { tasks, usedLlm } = await this.planTasks(complexPrompt, planOptions?.onTrace, turnSignal);
+        const context = quality ? await this.qualityContext(quality, "plan") : undefined;
+        if (quality) {
+          this.emitQualityStage(quality, "plan", resolveBalancedPrewalkRoute({
+            stage: "plan",
+            directRoute: this.directRoute,
+            ...(this.commodityRoute ? { commodityRoute: this.commodityRoute } : {}),
+          }));
+        }
+        const { tasks, usedLlm } = await this.planTasks(
+          complexPrompt,
+          planOptions?.onTrace,
+          turnSignal,
+          context,
+        );
         return { tasks, usedLlm };
       },
       executeComplexTask: async (task) => {
+        if (quality && this.pluginHost) {
+          const graph = quality.graph;
+          const plannedNode = graph?.nodes.find((node) => node.id === task.id);
+          if (!graph || !plannedNode) {
+            throw new Error(`Quality graph is missing planned node ${task.id}.`);
+          }
+          const beforeDispatch = await this.pluginHost.dispatchBeforeNodeDispatch({
+            runId: quality.runId,
+            graph,
+            node: plannedNode,
+          });
+          if (beforeDispatch.action !== "proceed") {
+            this.recordQualityDecision(quality, "work", beforeDispatch, { nodeId: task.id });
+          }
+          if (beforeDispatch.node.id !== task.id && !quality.terminal) {
+            this.recordQualityDecision(quality, "work", {
+              action: "block",
+              decisions: [{
+                pluginName: "unclecode-runtime",
+                action: "block",
+                reason: "A replacement node must preserve the planned node id.",
+                failures: ["REPLACEMENT_NODE_ID_MISMATCH"],
+              }],
+              failures: ["REPLACEMENT_NODE_ID_MISMATCH"],
+            }, { nodeId: task.id });
+          }
+          if (quality.terminal) {
+            this.runController.settleBlockedJob(activeGraphId, task.id);
+            return {
+              id: task.id,
+              summary: quality.terminal.reason,
+              status: "blocked",
+            };
+          }
+
+          const node = beforeDispatch.node;
+          quality.graph = {
+            ...graph,
+            currentStage: "work",
+            nodes: graph.nodes.map((entry) => entry.id === task.id ? node : entry),
+          };
+          const taskIndex = graph.nodes.findIndex((entry) => entry.id === task.id);
+          const route = resolveBalancedPrewalkRoute({
+            stage: "work",
+            workerIndex: Math.max(0, taskIndex),
+            directRoute: this.directRoute,
+            ...(this.createExecutorAgent && this.commodityRoute
+              ? { commodityRoute: this.commodityRoute }
+              : {}),
+          });
+          const context = await this.qualityContext(quality, "work");
+          const outcome = await this.runController.runTask({
+            graphId: activeGraphId,
+            task: {
+              id: node.id,
+              summary: node.title,
+              prompt: appendQualityContext(node.prompt, context),
+            },
+            signal: turnSignal,
+            preferDirect: route.executor !== "commodity",
+            onDispatchStarting: (agentRunId) => this.emitQualityStage(
+              quality,
+              "work",
+              route,
+              agentRunId,
+            ),
+          });
+          if (outcome.status !== "completed") {
+            return { id: task.id, summary: outcome.text, status: outcome.status };
+          }
+
+          const completedAt = new Date().toISOString();
+          const producerId = `worker:${route.provider}:${route.model}:${node.id}`;
+          const artifact = quality.artifacts.persistNode({
+            nodeId: node.id,
+            attempt: node.attempt,
+            producerId,
+            summary: outcome.text,
+            writePaths: node.fileOwnership,
+            completedAt,
+          });
+          quality.workerArtifacts.push(artifact);
+          quality.producerRoutes.push({ provider: route.provider, model: route.model });
+          const evidence: GateEvidence[] = [{
+            kind: "artifact",
+            artifactHash: artifact.artifactHash,
+            producerId,
+            result: "pass",
+            timestamp: completedAt,
+          }];
+          const alternateRoutes = [
+            this.directRoute,
+            ...(this.createExecutorAgent && this.commodityRoute ? [this.commodityRoute] : []),
+          ];
+          const independentAvailable = alternateRoutes.some((candidate) =>
+            routesDiffer(candidate, { provider: route.provider, model: route.model }));
+          const graphWithArtifact: WorkGraph = {
+            ...quality.graph,
+            nodes: quality.graph.nodes.map((entry) => entry.id === node.id
+              ? { ...entry, artifactRefs: [...entry.artifactRefs, artifact.path] }
+              : entry),
+          };
+          quality.graph = graphWithArtifact;
+          const afterNode = await this.pluginHost.dispatchAfterNodeCompleted({
+            runId: quality.runId,
+            graph: graphWithArtifact,
+            node: graphWithArtifact.nodes.find((entry) => entry.id === node.id) ?? node,
+            outcome: {
+              nodeId: node.id,
+              status: "completed",
+              summary: outcome.text,
+              evidenceRefs: [artifact.path],
+            },
+            artifactHash: artifact.artifactHash,
+            producerId,
+            evidence,
+            findings: [],
+            independentProviderAvailable: independentAvailable,
+            independentReviewerAvailable: independentAvailable,
+            refineCount: quality.refineCount,
+            pivotCount: quality.pivotCount,
+          });
+          this.recordQualityDecision(quality, "work", afterNode, {
+            nodeId: node.id,
+            artifactHash: artifact.artifactHash,
+            evidenceRefs: [artifact.path],
+            independentVerification: independentAvailable,
+            route,
+          });
+          quality.completedStages.add("work");
+          const terminalAfterNode = quality.terminal as QualityTerminal | undefined;
+          if (terminalAfterNode) {
+            return {
+              id: task.id,
+              summary: terminalAfterNode.reason,
+              status: "blocked",
+            };
+          }
+          return { id: task.id, summary: outcome.text, status: "completed" };
+        }
+
         const outcome = await this.runController.runTask({
           graphId: activeGraphId,
           task,
@@ -385,8 +888,8 @@ export class WorkAgent<
         return { id: task.id, summary: outcome.text, status: outcome.status };
       },
       isComplexTaskSuccessful: (taskResult) => taskResult.status === "completed",
-      // Cancelled is not failed; only the dependency gate treats them alike.
-      resolveComplexTaskStatus: ({ status }) => (status === "blocked" ? "failed" : status),
+      // Cancelled and quality-blocked are typed terminal outcomes, not failures.
+      resolveComplexTaskStatus: ({ status }) => status,
       createFailedComplexTaskResult: (task, error) => ({
         id: task.id,
         summary: `Executor failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -410,66 +913,170 @@ export class WorkAgent<
         // The checks can run for minutes; a clear that landed while they ran
         // must not still spend a review turn.
         turnSignal.throwIfAborted();
-        const reviewPrompt = buildGuardianReviewPrompt({
+        let reviewPrompt = buildGuardianReviewPrompt({
           prompt: originalPrompt,
           results,
           ...(executableChecks ? { executableChecks } : {}),
         });
+        let criticRoute: BalancedPrewalkRoute | undefined;
+        if (quality) {
+          completionProducerId = `graph:${quality.graphId}`;
+          completionArtifact = quality.artifacts.persistRun({
+            graphId: quality.graphId,
+            producerId: completionProducerId,
+            artifacts: quality.workerArtifacts,
+            completedAt: new Date().toISOString(),
+          });
+          completionEvidence = [{
+            kind: "artifact",
+            artifactHash: completionArtifact.artifactHash,
+            producerId: completionProducerId,
+            result: "pass",
+            timestamp: new Date().toISOString(),
+          }];
+          criticRoute = resolveBalancedPrewalkRoute({
+            stage: "critic",
+            directRoute: this.directRoute,
+            ...(this.commodityRoute ? { commodityRoute: this.commodityRoute } : {}),
+            producerRoutes: quality.producerRoutes,
+          });
+          criticIndependent = criticRoute.independent;
+          reviewPrompt = `${reviewPrompt}\n\nArtifact manifest: ${completionArtifact.path}\nArtifact SHA-256: ${completionArtifact.artifactHash}`;
+          reviewPrompt = appendQualityContext(reviewPrompt, await this.qualityContext(quality, "critic"));
+          this.emitQualityStage(quality, "critic", criticRoute);
+        }
         const review = await this.runInternalTurn(reviewPrompt, [], turnOptions);
-        return {
-          summary: executableChecks
-            ? `${review.text}\n\nExecutable checks:\n${executableChecks}`
-            : review.text,
-        };
+        const summary = executableChecks
+          ? `${review.text}\n\nExecutable checks:\n${executableChecks}`
+          : review.text;
+        if (quality && criticRoute && completionArtifact) {
+          const reviewerId = `critic:${criticRoute.provider}:${criticRoute.model}`;
+          const completedAt = new Date().toISOString();
+          const criticArtifact = quality.artifacts.persistCritic({
+            reviewerId,
+            reviewedArtifactHash: completionArtifact.artifactHash,
+            summary,
+            independent: criticIndependent,
+            completedAt,
+          });
+          completionEvidence.push({
+            kind: "reviewer",
+            artifactHash: completionArtifact.artifactHash,
+            producerId: completionProducerId,
+            reviewerId,
+            result: "pass",
+            timestamp: completedAt,
+          });
+          criticGateStatus = criticIndependent ? "proceed" : "unproven";
+          const failures = criticIndependent ? [] : ["INDEPENDENT_REVIEW_UNAVAILABLE"];
+          this.recordQualityDecision(quality, "critic", {
+            action: criticGateStatus,
+            decisions: [{
+              pluginName: "unclecode-routing",
+              action: criticGateStatus,
+              ...(criticIndependent
+                ? {}
+                : {
+                    reason: "No distinct reviewer route was available.",
+                    failures,
+                  }),
+            }],
+            failures,
+          }, {
+            artifactHash: completionArtifact.artifactHash,
+            evidenceRefs: [completionArtifact.path, criticArtifact.path],
+            independentVerification: criticIndependent,
+            route: criticRoute,
+          });
+          quality.completedStages.add("critic");
+          if (quality.graph) {
+            quality.graph = {
+              ...quality.graph,
+              currentStage: "critic",
+              gateStatus: criticGateStatus,
+            };
+          }
+        }
+        return { summary };
       },
+      shouldRunGuardianReview: () => !quality?.terminal,
     });
 
-    const result = await orchestrator.run({
-      prompt,
-      mode: this.mode,
-      maxWorkers: this.createExecutorAgent ? resolveWorkerBudget(this.mode) : 1,
-      ...(this.traceListener ? { onTrace: (event) => this.emitTrace(event) } : {}),
-      onPlan: (tasks) => {
-        const startedAt = Date.now();
-        const graph = createWorkGraph(tasks, startedAt);
-        activeGraphId = graph.id;
-        this.emitTrace({
-          type: "work.proposed",
-          level: "high-signal",
-          graphId: graph.id,
-          nodeCount: graph.nodes.length,
-          startedAt,
-          graph,
-        });
-        this.emitTrace({
-          type: "work.approved",
-          level: "high-signal",
-          graphId: graph.id,
-          startedAt: Date.now(),
-        });
-        this.runController.queuePlannedJobs(graph.id, tasks, startedAt);
-      },
-      onTaskStatus: (task, status) => {
-        if (!activeGraphId) {
-          return;
-        }
-        this.emitTrace({
-          type: "work.status",
-          level: "high-signal",
-          graphId: activeGraphId,
-          nodeId: task.id,
-          status,
-          summary: task.summary,
-          startedAt: Date.now(),
-        });
-      },
-    });
+    let result: Awaited<ReturnType<typeof orchestrator.run>>;
+    try {
+      result = await orchestrator.run({
+        prompt,
+        mode: this.mode,
+        maxWorkers: this.createExecutorAgent ? resolveWorkerBudget(this.mode) : 1,
+        ...(classifiedIntent ? { intent: classifiedIntent } : {}),
+        ...(this.traceListener ? { onTrace: (event) => this.emitTrace(event) } : {}),
+        onPlan: async (tasks) => {
+          const startedAt = Date.now();
+          const graph = createWorkGraph(
+            tasks,
+            startedAt,
+            quality ? { graphId: quality.graphId, profile: quality.profile } : undefined,
+          );
+          activeGraphId = graph.id;
+          if (quality) quality.graph = graph;
+          this.emitTrace({
+            type: "work.proposed",
+            level: "high-signal",
+            graphId: graph.id,
+            nodeCount: graph.nodes.length,
+            startedAt,
+            graph,
+          });
+          if (quality && this.pluginHost) {
+            const planned = await this.pluginHost.dispatchPlanCreated({
+              runId: quality.runId,
+              graph,
+            });
+            quality.completedStages.add("plan");
+            if (planned.action !== "proceed") {
+              this.recordQualityDecision(quality, "plan", planned);
+            }
+            if (quality.terminal) throw new QualityLifecycleStop();
+            quality.graph = { ...graph, approval: "approved", currentStage: "work" };
+          }
+          this.emitTrace({
+            type: "work.approved",
+            level: "high-signal",
+            graphId: graph.id,
+            startedAt: Date.now(),
+          });
+          this.runController.queuePlannedJobs(graph.id, tasks, startedAt);
+        },
+        onTaskStatus: (task, status) => {
+          if (!activeGraphId) {
+            return;
+          }
+          this.emitTrace({
+            type: "work.status",
+            level: "high-signal",
+            graphId: activeGraphId,
+            nodeId: task.id,
+            status,
+            summary: task.summary,
+            startedAt: Date.now(),
+          });
+        },
+      });
+    } catch (error) {
+      if (error instanceof QualityLifecycleStop && quality?.terminal) {
+        return this.terminateQuality(quality);
+      }
+      throw error;
+    }
 
     if (result.kind !== "complex") {
       return { text: result.text };
     }
     if (epoch.isCleared()) {
       return CLEARED_TURN_RESULT;
+    }
+    if (quality?.terminal) {
+      return this.terminateQuality(quality);
     }
 
     const reviewerStartedAt = Date.now();
@@ -479,13 +1086,28 @@ export class WorkAgent<
       startedAt: reviewerStartedAt,
     }));
 
-    const synthesisPrompt = buildSynthesisPrompt({
+    let synthesisPrompt = buildSynthesisPrompt({
       prompt,
       model: this.model,
       reasoning: this.reasoning.effort,
       results: result.results,
       ...(result.guardian ? { guardianSummary: result.guardian.summary } : {}),
     });
+
+    let promoteRoute: BalancedPrewalkRoute | undefined;
+    if (quality) {
+      promoteRoute = resolveBalancedPrewalkRoute({
+        stage: "promote",
+        directRoute: this.directRoute,
+        ...(this.commodityRoute ? { commodityRoute: this.commodityRoute } : {}),
+        producerRoutes: quality.producerRoutes,
+      });
+      synthesisPrompt = appendQualityContext(
+        synthesisPrompt,
+        await this.qualityContext(quality, "promote"),
+      );
+      this.emitQualityStage(quality, "promote", promoteRoute);
+    }
 
     const synthesis = await this.runMainTurn(synthesisPrompt, [], turnOptions);
     const reviewerCompletedAt = Date.now();
@@ -495,6 +1117,63 @@ export class WorkAgent<
       startedAt: reviewerStartedAt,
       completedAt: reviewerCompletedAt,
     }));
+
+    if (quality && this.pluginHost && completionArtifact) {
+      quality.completedStages.add("promote");
+      if (quality.graph) {
+        quality.graph = {
+          ...quality.graph,
+          currentStage: "promote",
+          gateStatus: criticGateStatus,
+        };
+      }
+      const projection: QualityRunProjection = {
+        runId: quality.runId,
+        profile: quality.profile,
+        currentStage: "promote",
+        currentPhase: "act",
+        score: null,
+        failures: [],
+        iteration: quality.iteration,
+        refineCount: quality.refineCount,
+        pivotCount: quality.pivotCount,
+        // Completion validation independently verifies review availability;
+        // this field represents the implementation gate entering completion.
+        gateDecision: "proceed",
+        completedStages: [...quality.completedStages],
+      };
+      const completion = await this.pluginHost.dispatchBeforeRunComplete({
+        runId: quality.runId,
+        graph: quality.graph ?? createWorkGraph([], Date.now(), {
+          graphId: quality.graphId,
+          profile: quality.profile,
+        }),
+        projection,
+        evidence: completionEvidence,
+        currentArtifactHash: completionArtifact.artifactHash,
+        producerId: completionProducerId,
+        independentReviewerAvailable: criticIndependent,
+        reviewRequired: quality.profile !== "minimal",
+      });
+      if (completion.action !== "proceed") {
+        this.recordQualityDecision(quality, "promote", completion, {
+          artifactHash: completionArtifact.artifactHash,
+          evidenceRefs: [completionArtifact.path],
+          independentVerification: criticIndependent,
+          ...(promoteRoute ? { route: promoteRoute } : {}),
+        });
+      }
+      if (quality.terminal) return this.terminateQuality(quality);
+      const qualityStatus = completion.action === "proceed"
+        ? criticGateStatus
+        : completion.action;
+      this.completeQuality(quality, qualityStatus, "promote", {
+        evidenceRefs: [completionArtifact.path],
+        failures: completion.failures,
+        independentVerification: criticIndependent,
+      });
+      return { text: synthesis.text, qualityStatus };
+    }
 
     return { text: synthesis.text };
   }

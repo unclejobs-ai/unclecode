@@ -377,6 +377,10 @@ export class WorkAgentRunController<
     readonly graphId: string;
     readonly task: WorkAgentRunTask;
     readonly signal?: AbortSignal | undefined;
+    /** Route this planned node through the configured direct/frontier agent. */
+    readonly preferDirect?: boolean | undefined;
+    /** Fires only after a queued job owns a real run and is about to dispatch. */
+    readonly onDispatchStarting?: ((agentRunId: string) => void) | undefined;
   }): Promise<WorkAgentRunOutcome> {
     const jobId = `${input.graphId}:${input.task.id}`;
     // A turn cancelled before dispatch opens no run at all. The job it queued
@@ -414,6 +418,8 @@ export class WorkAgentRunController<
       displayName: input.task.summary,
       prompt: input.task.prompt,
       permit,
+      ...(input.preferDirect ? { preferDirect: true } : {}),
+      ...(input.onDispatchStarting ? { onDispatchStarting: input.onDispatchStarting } : {}),
       ...(input.signal ? { parentSignal: input.signal } : {}),
     });
   }
@@ -560,6 +566,8 @@ export class WorkAgentRunController<
     readonly runId: string;
     readonly displayName: string;
     readonly prompt: string;
+    readonly preferDirect?: boolean | undefined;
+    readonly onDispatchStarting?: ((agentRunId: string) => void) | undefined;
     /** Capacity this run already holds; released on every terminal path. */
     readonly permit: ExecutorPermit;
     readonly parentSignal?: AbortSignal | undefined;
@@ -599,6 +607,9 @@ export class WorkAgentRunController<
       return { text: CANCELLED_SUMMARY, status: "cancelled" };
     };
 
+    if (!signal.aborted) {
+      input.onDispatchStarting?.(runId);
+    }
     this.emitTrace({
       type: "agent.run.started",
       level: "high-signal",
@@ -667,7 +678,7 @@ export class WorkAgentRunController<
         return settleCancelled();
       }
 
-      if (!this.createExecutorAgent) {
+      if (!this.createExecutorAgent || input.preferDirect) {
         // Siblings and main turns share this agent's single listener slot, so
         // install, run, and restore happen as one section: nobody else can
         // observe — or overwrite — this run's scoped listener while it is live.

@@ -42,6 +42,7 @@ export * from "./work-config.js";
 export * from "./file-ownership-registry.js";
 export * from "./turn-orchestrator.js";
 export * from "./work-agent.js";
+export * from "./quality-runtime.js";
 export * from "./work-agent-run-controller.js";
 export * from "./work-shell-engine.js";
 export * from "./work-shell-agent-console.js";
