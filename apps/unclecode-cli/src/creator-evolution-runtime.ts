@@ -75,6 +75,7 @@ export function createWorkCreatorEvolutionService(input: {
 
   const host = createGitCreatorEvolutionHost({
     workspaceRoot: input.cwd,
+    lifecycleLockTimeoutMs: CREATOR_TIMEOUT_MS + EVALUATOR_TIMEOUT_MS + 60_000,
     async generateCreatorEdits(request) {
       const agent = await input.createCreatorAgent();
       const strictPrompt = [

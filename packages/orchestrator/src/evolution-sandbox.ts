@@ -12,6 +12,7 @@ const DEFAULT_CPU_QUOTA_MICROS = 100_000;
 const CPU_PERIOD_MICROS = 100_000;
 const TERMINATION_GRACE_MS = 100;
 const DOMAIN_EMPTY_TIMEOUT_MS = 5_000;
+const CHILD_CLOSE_TIMEOUT_MS = 5_000;
 
 export type ContainedEvolutionCommandResult = {
   readonly status: "completed" | "failed" | "timeout" | "cancelled";
@@ -83,7 +84,7 @@ export async function runContainedEvolutionCommand(input: {
       ...writablePaths,
       ...(input.readablePaths ?? []),
     ]);
-    return await spawnOwnedProcessGroup({
+    return await runSupervisedEvolutionProcess({
       ...input,
       cwd,
       command: sandbox,
@@ -107,6 +108,8 @@ export async function runContainedEvolutionCommand(input: {
     });
   } finally {
     try {
+      // The domain implementation is idempotent. Retrying disposal here also
+      // covers failures that happen before process supervision is established.
       await containment.dispose();
     } finally {
       if (privateTemp) await rm(privateTemp, { recursive: true, force: true });
@@ -114,7 +117,20 @@ export async function runContainedEvolutionCommand(input: {
   }
 }
 
-async function spawnOwnedProcessGroup(input: {
+export type EvolutionContainmentDomain = {
+  readonly path: string;
+  readonly isPopulated: () => Promise<boolean>;
+  readonly kill: () => Promise<void>;
+  readonly killAndWaitEmpty: () => Promise<void>;
+  readonly dispose: () => Promise<void>;
+};
+
+/**
+ * Supervises an already-contained process. This is separate from sandbox
+ * selection so host adapters can exercise termination failures without ever
+ * weakening the mandatory production sandbox entry point above.
+ */
+export async function runSupervisedEvolutionProcess(input: {
   readonly cwd: string;
   readonly command: string;
   readonly args: readonly string[];
@@ -122,7 +138,7 @@ async function spawnOwnedProcessGroup(input: {
   readonly timeoutMs: number;
   readonly maxOutputBytes: number;
   readonly signal?: AbortSignal;
-  readonly containment: LinuxContainmentDomain;
+  readonly containment: EvolutionContainmentDomain;
 }): Promise<ContainedEvolutionCommandResult> {
   const cpuSeconds = Math.max(1, Math.ceil(input.timeoutMs / 1_000) + 1);
   const limits = [
@@ -151,17 +167,30 @@ async function spawnOwnedProcessGroup(input: {
   let stderr: Buffer = Buffer.alloc(0);
   let outputBytes = 0;
   let terminal: "timeout" | "cancelled" | "output" | undefined;
+  let resolveTerminationRequested: (() => void) | undefined;
+  const terminationRequested = new Promise<void>((resolveRequested) => {
+    resolveTerminationRequested = resolveRequested;
+  });
   let termination: Promise<void> | undefined;
   const terminate = (cause: NonNullable<typeof terminal>): void => {
     if (terminal) return;
     terminal = cause;
+    resolveTerminationRequested?.();
     const pid = child.pid;
     termination = (async () => {
-      await input.containment.kill();
-      if (pid) killProcessGroup(pid, "SIGTERM");
+      await Promise.allSettled([
+        input.containment.kill(),
+        attempt(() => {
+          if (pid) killProcessGroup(pid, "SIGTERM");
+        }),
+      ]);
       await delay(TERMINATION_GRACE_MS);
-      await input.containment.kill();
-      if (pid) killProcessGroup(pid, "SIGKILL");
+      await Promise.allSettled([
+        input.containment.kill(),
+        attempt(() => {
+          if (pid) killProcessGroup(pid, "SIGKILL");
+        }),
+      ]);
     })();
   };
   const append = (current: Buffer, chunk: Buffer): Buffer => {
@@ -190,58 +219,112 @@ async function spawnOwnedProcessGroup(input: {
   const onAbort = (): void => terminate("cancelled");
   input.signal?.addEventListener("abort", onAbort, { once: true });
   if (input.signal?.aborted) onAbort();
-  const settled = await new Promise<{ code: number | null; error?: Error }>((resolveResult) => {
+  const childClosed = new Promise<{ code: number | null; error?: Error }>((resolveResult) => {
     let spawnError: Error | undefined;
     child.once("error", (error) => {
       spawnError = error;
     });
     child.once("close", (code) => resolveResult({ code, ...(spawnError ? { error: spawnError } : {}) }));
   });
-  clearTimeout(timeout);
-  input.signal?.removeEventListener("abort", onAbort);
-  await termination;
-  const retainedDescendants = await input.containment.isPopulated();
-  await input.containment.killAndWaitEmpty();
+  let settled: { code: number | null; error?: Error } | undefined;
+  let retainedDescendants = false;
+  let primaryError: unknown;
+  let result: ContainedEvolutionCommandResult | undefined;
+  try {
+    const first = await Promise.race([
+      childClosed.then((value) => ({ kind: "closed" as const, value })),
+      terminationRequested.then(() => ({ kind: "termination" as const })),
+    ]);
+    clearTimeout(timeout);
+    input.signal?.removeEventListener("abort", onAbort);
+    if (first.kind === "closed") settled = first.value;
+    if (termination) {
+      await termination;
+      settled ??= await waitForSettlement(childClosed, CHILD_CLOSE_TIMEOUT_MS);
+      if (!settled) {
+        const pid = child.pid;
+        await Promise.allSettled([
+          input.containment.kill(),
+          attempt(() => {
+            if (pid) killProcessGroup(pid, "SIGKILL");
+          }),
+        ]);
+        settled = await waitForSettlement(childClosed, CHILD_CLOSE_TIMEOUT_MS);
+      }
+      if (!settled) {
+        throw new EvolutionSandboxUnavailableError(
+          "Evolution process did not close within its bounded termination window.",
+        );
+      }
+    }
+    if (!settled) settled = await waitForSettlement(childClosed, CHILD_CLOSE_TIMEOUT_MS);
+    if (!settled) {
+      terminate("output");
+      await termination;
+      throw new EvolutionSandboxUnavailableError(
+        "Evolution process close supervision expired.",
+      );
+    }
+    retainedDescendants = await input.containment.isPopulated();
 
-  const output = {
-    stdout: stdout.toString("utf8"),
-    stderr: stderr.toString("utf8"),
-  };
-  if (terminal === "timeout") return { status: "timeout", ...output };
-  if (terminal === "cancelled") return { status: "cancelled", ...output };
-  if (terminal === "output") {
-    return { status: "failed", ...output, stderr: `${output.stderr}\nEvolution command exceeded its output bound.`.trim() };
-  }
-  if (retainedDescendants) {
-    return {
-      status: "failed",
-      ...output,
-      stderr: `${output.stderr}\nEvolution command left descendant processes running.`.trim(),
+    const output = {
+      stdout: stdout.toString("utf8"),
+      stderr: stderr.toString("utf8"),
     };
+    if (terminal === "timeout") result = { status: "timeout", ...output };
+    else if (terminal === "cancelled") result = { status: "cancelled", ...output };
+    else if (terminal === "output") {
+      result = {
+        status: "failed",
+        ...output,
+        stderr: `${output.stderr}\nEvolution command exceeded its output bound.`.trim(),
+      };
+    } else if (retainedDescendants) {
+      result = {
+        status: "failed",
+        ...output,
+        stderr: `${output.stderr}\nEvolution command left descendant processes running.`.trim(),
+      };
+    } else if (settled.error || settled.code !== 0) {
+      result = {
+        status: "failed",
+        ...(settled.code === null ? {} : { exitCode: settled.code }),
+        ...output,
+        stderr: settled.error ? `${output.stderr}\n${settled.error.message}`.trim() : output.stderr,
+      };
+    } else {
+      result = { status: "completed", exitCode: 0, ...output };
+    }
+  } catch (error) {
+    primaryError = error;
+  } finally {
+    clearTimeout(timeout);
+    input.signal?.removeEventListener("abort", onAbort);
+    const pid = child.pid;
+    if (!settled || retainedDescendants) {
+      await Promise.allSettled([
+        input.containment.kill(),
+        attempt(() => {
+          if (pid) killProcessGroup(pid, "SIGKILL");
+        }),
+      ]);
+    }
+    const drain = await Promise.allSettled([input.containment.killAndWaitEmpty()]);
+    const dispose = await Promise.allSettled([input.containment.dispose()]);
+    const cleanupFailure = [...drain, ...dispose].find(
+      (entry): entry is PromiseRejectedResult => entry.status === "rejected",
+    );
+    if (!primaryError && cleanupFailure) primaryError = cleanupFailure.reason;
   }
-  if (settled.error || settled.code !== 0) {
-    return {
-      status: "failed",
-      ...(settled.code === null ? {} : { exitCode: settled.code }),
-      ...output,
-      stderr: settled.error ? `${output.stderr}\n${settled.error.message}`.trim() : output.stderr,
-    };
-  }
-  return { status: "completed", exitCode: 0, ...output };
+  if (primaryError) throw primaryError;
+  if (!result) throw new Error("Evolution process supervision produced no result.");
+  return result;
 }
-
-type LinuxContainmentDomain = {
-  readonly path: string;
-  readonly isPopulated: () => Promise<boolean>;
-  readonly kill: () => Promise<void>;
-  readonly killAndWaitEmpty: () => Promise<void>;
-  readonly dispose: () => Promise<void>;
-};
 
 async function createLinuxContainmentDomain(input: {
   readonly maxProcesses: number;
   readonly maxMemoryBytes: number;
-}): Promise<LinuxContainmentDomain> {
+}): Promise<EvolutionContainmentDomain> {
   const root = await resolveDelegatedCgroupRoot();
   const availableControllers = new Set((await readFile(join(root, "cgroup.controllers"), "utf8")).trim().split(/\s+/));
   for (const required of ["cpu", "memory", "pids"]) {
@@ -473,4 +556,23 @@ function validateBounds(
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+function attempt(operation: () => void): Promise<void> {
+  return Promise.resolve().then(operation);
+}
+
+async function waitForSettlement<T>(settlement: Promise<T>, timeoutMs: number): Promise<T | undefined> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      settlement,
+      new Promise<undefined>((resolveTimeout) => {
+        timeout = setTimeout(() => resolveTimeout(undefined), timeoutMs);
+        timeout.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }

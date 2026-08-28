@@ -241,6 +241,13 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
     async appendEvent(ref, event): Promise<void> {
       const timestamp = new Date().toISOString();
       await appendRecord(options, ref, toRecord(ref.sessionId, timestamp, event));
+      const revision = await countRecords(getSessionPaths(options, ref).eventLogPath);
+      await options.onPersisted?.({
+        kind: "engine_event",
+        sessionId: ref.sessionId,
+        projectPath: ref.projectPath,
+        revision,
+      });
     },
 
     async appendCheckpoint(ref, checkpoint): Promise<void> {
@@ -254,6 +261,12 @@ export function createSessionStore(options: SessionStoreOptions): SessionStore {
         eventCount: await countRecords(paths.eventLogPath),
       };
       await writeCheckpointSnapshot(paths.checkpointPath, nextSnapshot);
+      await options.onPersisted?.({
+        kind: "checkpoint",
+        sessionId: ref.sessionId,
+        projectPath: ref.projectPath,
+        revision: nextSnapshot.eventCount,
+      });
     },
 
     async resumeSession(ref): Promise<SessionResumeResult> {

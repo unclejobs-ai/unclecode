@@ -1,6 +1,9 @@
 import { lstat, opendir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { createSessionStore, type SessionStore } from "@unclecode/session-store";
+
+import { BoundedEventJournal } from "./event-journal.js";
 import { createRuntimeAdapter, type RuntimeAdapter, type RuntimeControlPort, type RuntimeControlRequest, type RuntimeControlResult } from "./runtime-adapter.js";
 import type { RuntimeReadSource, RuntimeSessionSource } from "./control-room.js";
 
@@ -144,10 +147,31 @@ export async function readPersistentRuntime(rootDir: string, controls: LiveRunti
 export function createPersistentRuntimeAdapter(input: {
   readonly rootDir: string;
   readonly controls?: LiveRuntimeControlRegistry;
-}): { readonly adapter: RuntimeAdapter; readonly controls: LiveRuntimeControlRegistry } {
+  readonly journal?: BoundedEventJournal;
+  readonly journalCapacity?: number;
+}): {
+  readonly adapter: RuntimeAdapter;
+  readonly controls: LiveRuntimeControlRegistry;
+  readonly journal: BoundedEventJournal;
+  readonly sessions: SessionStore;
+} {
   const controls = input.controls ?? new LiveRuntimeControlRegistry();
+  const journal = input.journal ?? new BoundedEventJournal(
+    input.journalCapacity === undefined ? {} : { capacity: input.journalCapacity },
+  );
+  const sessions = createSessionStore({
+    rootDir: input.rootDir,
+    onPersisted(notice) {
+      journal.publish(notice.sessionId, "run.updated", {
+        kind: notice.kind,
+        revision: notice.revision,
+      });
+    },
+  });
   return {
     controls,
+    journal,
+    sessions,
     adapter: createRuntimeAdapter({
       read: () => readPersistentRuntime(input.rootDir, controls),
       controls,

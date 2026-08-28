@@ -60,8 +60,8 @@ test("PluginHost dispatches lifecycle events to registered hooks", async () => {
       calls.push(`done:${event.runId}:${event.status}`);
     },
   });
-  await host.dispatchToolExecuteBefore({ toolName: "write_file", input: {} });
-  await host.dispatchToolExecuteAfter({ toolName: "write_file", output: "ok", isError: false });
+  await host.dispatchToolExecuteBefore({ runId: "tr_x", toolName: "write_file", input: {} });
+  await host.dispatchToolExecuteAfter({ runId: "tr_x", toolName: "write_file", output: "ok", isError: false });
   await host.dispatchRunCompleted({ runId: "tr_x", status: "accepted" });
   assert.deepEqual(calls, ["before:write_file", "after:write_file:ok", "done:tr_x:accepted"]);
 });

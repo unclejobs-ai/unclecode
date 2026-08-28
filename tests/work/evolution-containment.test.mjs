@@ -8,6 +8,20 @@ import test from "node:test";
 
 import { runContainedEvolutionCommand } from "../../packages/orchestrator/src/evolution-sandbox.ts";
 
+async function waitForProcessExit(pid, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error?.code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail(`descendant ${pid} survived bounded termination`);
+}
+
 async function temporaryWorkspace(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), "unclecode-evolution-containment-"));
   const workspace = path.join(root, "candidate");
@@ -93,6 +107,75 @@ test("Linux without a delegated cgroup containment domain fails closed before sa
     else process.env.UNCLECODE_EVOLUTION_CGROUP_ROOT = previousRoot;
   }
 });
+
+for (const cause of ["timeout", "cancelled", "output"]) {
+  test(`${cause} still terminates descendants and drains the domain when cgroup.kill fails`, async (t) => {
+    const { root, workspace } = await temporaryWorkspace(t);
+    const containmentRoot = path.join(root, "fake-cgroup");
+    const script = path.join(workspace, "kill-failure.mjs");
+    const marker = path.join(root, `survivor-${cause}`);
+    await mkdir(containmentRoot);
+    await writeFile(path.join(containmentRoot, "cgroup.procs"), "");
+    await writeFile(script, `
+      import { spawn } from "node:child_process";
+      const marker = process.argv[2];
+      const child = spawn(process.execPath, ["-e", ${JSON.stringify(`
+        const { writeFileSync } = require("node:fs");
+        const marker = process.argv[1];
+        setTimeout(() => writeFileSync(marker, "survived"), 600);
+        setInterval(() => {}, 5000);
+      `)}, marker], { stdio: "ignore" });
+      process.stdout.write(String(child.pid) + "\\n");
+      if (process.argv[3] === "output") process.stdout.write("x".repeat(64 * 1024));
+      setInterval(() => {}, 5000);
+    `);
+    const controller = new AbortController();
+    const abort = cause === "cancelled"
+      ? setTimeout(() => controller.abort(new Error("cancel test")), 80)
+      : undefined;
+    const calls = { kill: 0, drain: 0, dispose: 0 };
+    const containment = {
+      path: containmentRoot,
+      async isPopulated() { return false; },
+      async kill() {
+        calls.kill += 1;
+        throw new Error("injected cgroup.kill failure");
+      },
+      async killAndWaitEmpty() { calls.drain += 1; },
+      async dispose() { calls.dispose += 1; },
+    };
+    const { runSupervisedEvolutionProcess } = await import(
+      "../../packages/orchestrator/src/evolution-sandbox.ts"
+    );
+    const startedAt = Date.now();
+    let result;
+    try {
+      result = await runSupervisedEvolutionProcess({
+        cwd: workspace,
+        command: process.execPath,
+        args: [script, marker, cause],
+        environment: process.env,
+        timeoutMs: cause === "timeout" ? 80 : 2_000,
+        maxOutputBytes: cause === "output" ? 64 : 4_096,
+        signal: controller.signal,
+        containment,
+      });
+    } finally {
+      if (abort) clearTimeout(abort);
+    }
+
+    assert.ok(Date.now() - startedAt < 2_000, "termination waited without a bound");
+    assert.equal(result.status, cause === "output" ? "failed" : cause);
+    const descendantPid = Number.parseInt(result.stdout, 10);
+    assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
+    await waitForProcessExit(descendantPid);
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    assert.equal(existsSync(marker), false, "a descendant survived after the result settled");
+    assert.ok(calls.kill >= 1, "the cgroup kill path was not attempted");
+    assert.ok(calls.drain >= 1, "the containment domain was not drained");
+    assert.equal(calls.dispose, 1, "the containment domain was not disposed exactly once");
+  });
+}
 
 test("the private evaluator TMPDIR is both writable and readable", async (t) => {
   if (process.platform !== "linux") t.skip("Linux host containment is required");

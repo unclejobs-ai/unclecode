@@ -70,8 +70,16 @@ export interface ProjectMemoryEntry {
   readonly content: string;
 }
 
+export interface SessionStorePersistenceNotice {
+  readonly kind: "engine_event" | "checkpoint";
+  readonly sessionId: string;
+  readonly projectPath: string;
+  readonly revision: number;
+}
+
 export interface SessionStoreOptions {
   readonly rootDir: string;
+  readonly onPersisted?: ((notice: SessionStorePersistenceNotice) => void | Promise<void>) | undefined;
 }
 
 export interface SessionForkOptions {

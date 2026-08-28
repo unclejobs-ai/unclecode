@@ -152,7 +152,11 @@ export type CreatorEvolutionResult = {
 
 export type CreatorEvolutionHost = {
   withLifecycleLock?<T>(
-    input: { readonly runId: string; readonly workspaceRoot: string },
+    input: {
+      readonly runId: string;
+      readonly workspaceRoot: string;
+      readonly signal?: AbortSignal | undefined;
+    },
     operation: () => Promise<T>,
   ): Promise<T>;
   loadRecord(input: { readonly runId: string }): Promise<{ readonly result: CreatorEvolutionResult } | undefined>;
@@ -319,8 +323,9 @@ export class CreatorEvolutionService {
     const operation = (): Promise<CreatorEvolutionResult> => this.verifyFreshLocked(result);
     return execution && this.host.withLifecycleLock
       ? this.host.withLifecycleLock({
-          runId: execution.input.runId,
-          workspaceRoot: execution.input.workspaceRoot,
+        runId: execution.input.runId,
+        workspaceRoot: execution.input.workspaceRoot,
+        signal: execution.input.signal,
         }, operation)
       : operation();
   }
@@ -393,7 +398,7 @@ export class CreatorEvolutionService {
   private execute(input: CreatorEvolutionRunInput): Promise<CreatorEvolutionResult> {
     const operation = (): Promise<CreatorEvolutionResult> => this.executeLocked(input);
     return this.host.withLifecycleLock
-      ? this.host.withLifecycleLock({ runId: input.runId, workspaceRoot: input.workspaceRoot }, operation)
+      ? this.host.withLifecycleLock({ runId: input.runId, workspaceRoot: input.workspaceRoot, signal: input.signal }, operation)
       : operation();
   }
 

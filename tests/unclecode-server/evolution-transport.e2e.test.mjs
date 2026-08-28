@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import {
-  BoundedEventJournal,
   createPersistentRuntimeAdapter,
   makeControlRoomHandlers,
   startServer,
@@ -101,25 +100,18 @@ test("recorded evolution checkpoint reaches the actual web store over bounded HT
   const root = await mkdtemp(
     path.join(tmpdir(), "unclecode-evolution-transport-"),
   );
-  const sessions = path.join(root, "projects", "project-1", "sessions");
-  const checkpoint = path.join(sessions, "opaque-trace.checkpoint.json");
-  await mkdir(sessions, { recursive: true });
-  const writeCheckpoint = async (state, eventCount) =>
-    writeFile(
-      checkpoint,
-      JSON.stringify({
-        sessionId: "session-evolution-1",
-        projectPath: "/private/project/path",
-        state: "completed",
-        eventCount,
-        uiLocale: "en",
-        agentConsole: { evolutionProposals: [proposal(state)] },
-      }),
-    );
-  await writeCheckpoint("pr-ready", 9);
-
-  const journal = new BoundedEventJournal({ capacity: 16 });
-  const { adapter } = createPersistentRuntimeAdapter({ rootDir: root });
+  const sessionRef = {
+    sessionId: "session-evolution-1",
+    projectPath: root,
+  };
+  const { adapter, journal, sessions } = createPersistentRuntimeAdapter({
+    rootDir: root,
+    journalCapacity: 16,
+  });
+  await sessions.appendCheckpoint(sessionRef, {
+    type: "agent_console",
+    agentConsole: { evolutionProposals: [proposal("stale")] },
+  });
   const server = await startServer({
     port: 0,
     authToken: TOKEN,
@@ -130,23 +122,33 @@ test("recorded evolution checkpoint reaches the actual web store over bounded HT
   try {
     await store.start();
     await waitFor(() => assert.equal(store.getSnapshot().connection, "live"));
-    const fresh = store.getSnapshot().data.runs[0].evolve[0];
-    assert.equal(fresh.state, "pr-ready");
-    assert.equal(fresh.cleanup.status, "retained");
-    assert.equal(fresh.hashes.evaluatorEnvironment, `sha256:${"e".repeat(64)}`);
+    const historical = store.getSnapshot().data.runs[0].evolve[0];
+    assert.equal(historical.state, "stale");
+    assert.equal(historical.cleanup.status, "completed");
+    assert.equal(historical.hashes.evaluatorEnvironment, `sha256:${"e".repeat(64)}`);
     assert.doesNotMatch(
       JSON.stringify(store.getSnapshot().data),
-      /secret candidate content|\/private\/project\/path/,
+      /secret candidate content/,
     );
+    assert.equal(JSON.stringify(store.getSnapshot().data).includes(root), false);
 
-    await writeCheckpoint("stale", 10);
-    journal.publish("session-evolution-1", "run.updated", { revision: 10 });
+    await sessions.appendCheckpoint(sessionRef, {
+      type: "agent_console",
+      agentConsole: { evolutionProposals: [proposal("pr-ready")] },
+    });
     await waitFor(() =>
-      assert.equal(store.getSnapshot().data.runs[0].evolve[0].state, "stale"),
+      assert.equal(store.getSnapshot().data.runs[0].evolve[0].state, "pr-ready"),
     );
     assert.equal(
       store.getSnapshot().data.runs[0].evolve[0].cleanup.status,
-      "completed",
+      "retained",
+    );
+    const replay = journal.replay("session-evolution-1", 0);
+    assert.equal(replay.status, "ok");
+    assert.deepEqual(replay.events.map((event) => event.id), [1, 2]);
+    assert.deepEqual(
+      replay.events.map((event) => event.event),
+      ["run.updated", "run.updated"],
     );
   } finally {
     store.stop();
