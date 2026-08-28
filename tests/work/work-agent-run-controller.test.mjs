@@ -691,6 +691,40 @@ test("planned jobs queue exactly once and runTask refuses an unplanned task", as
   );
 });
 
+test("attempt-specific job keys keep the stable planned task identity", async () => {
+  const prompts = [];
+  const harness = createHarness(() => ({
+    clear() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      prompts.push(prompt);
+      return { text: "retry complete" };
+    },
+  }));
+  const task = planTask("task-1");
+  const jobKey = "task-1:attempt-1:iteration-1";
+
+  harness.controller.queuePlannedJobs("graph-1", [task], 1_000, {
+    resolveJobKey: () => jobKey,
+  });
+  const outcome = await harness.controller.runTask({
+    graphId: "graph-1",
+    jobKey,
+    task,
+  });
+
+  assert.deepEqual(outcome, { text: "retry complete", status: "completed" });
+  assert.deepEqual(prompts, ["Do task-1"], "the executor still receives the stable task prompt");
+  assert.equal(
+    harness.traces.find((event) => event.type === "job.queued")?.jobId,
+    `graph-1:${jobKey}`,
+  );
+  assert.equal(
+    harness.traces.find((event) => event.type === "agent.run.started")?.jobId,
+    `graph-1:${jobKey}`,
+  );
+});
+
 test("a blocked dependency settles its planned job as cancelled without an agent run", () => {
   const harness = createHarness(() => ({
     clear() {},

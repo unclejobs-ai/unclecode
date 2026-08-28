@@ -323,13 +323,16 @@ export class WorkAgentRunController<
     graphId: string,
     tasks: readonly ComplexPlanTask[],
     queuedAt: number,
+    options: {
+      readonly resolveJobKey?: ((task: ComplexPlanTask) => string) | undefined;
+    } = {},
   ): void {
     const violation = findGoalTaskPlanViolation(tasks);
     if (violation) {
       throw new Error(violation);
     }
     for (const task of tasks) {
-      const jobId = `${graphId}:${task.id}`;
+      const jobId = `${graphId}:${options.resolveJobKey?.(task) ?? task.id}`;
       if (this.plannedJobs.has(jobId)) {
         continue;
       }
@@ -347,8 +350,8 @@ export class WorkAgentRunController<
   }
 
   /** Settles a planned job whose dependency failed; no agent run ever opened. */
-  settleBlockedJob(graphId: string, taskId: string): void {
-    this.settleQueuedJob(`${graphId}:${taskId}`, BLOCKED_BY_DEPENDENCY_SUMMARY);
+  settleBlockedJob(graphId: string, taskId: string, jobKey?: string | undefined): void {
+    this.settleQueuedJob(`${graphId}:${jobKey ?? taskId}`, BLOCKED_BY_DEPENDENCY_SUMMARY);
   }
 
   /**
@@ -376,13 +379,15 @@ export class WorkAgentRunController<
   async runTask(input: {
     readonly graphId: string;
     readonly task: WorkAgentRunTask;
+    /** Persisted scheduler identity; the stable WorkGraph node id remains `task.id`. */
+    readonly jobKey?: string | undefined;
     readonly signal?: AbortSignal | undefined;
     /** Route this planned node through the configured direct/frontier agent. */
     readonly preferDirect?: boolean | undefined;
     /** Fires only after a queued job owns a real run and is about to dispatch. */
     readonly onDispatchStarting?: ((agentRunId: string) => void) | undefined;
   }): Promise<WorkAgentRunOutcome> {
-    const jobId = `${input.graphId}:${input.task.id}`;
+    const jobId = `${input.graphId}:${input.jobKey ?? input.task.id}`;
     // A turn cancelled before dispatch opens no run at all. The job it queued
     // still has to reach a terminal state, and `settleQueuedJob` is idempotent,
     // so a clear that already settled it is not settled twice.
