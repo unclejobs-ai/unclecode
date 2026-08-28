@@ -223,6 +223,250 @@ test("balanced-prewalk uses direct frontier for pattern setting and commodity on
   );
 });
 
+test("simple English and Korean turns run the minimal SCC lifecycle without planner or critic calls", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-minimal-simple-"));
+  const classifications = [];
+  const completionHooks = [];
+  const providerCalls = [];
+  const traces = [];
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+  host.register("minimal-observer", {
+    runClassified(event) {
+      classifications.push(event);
+      return { action: "proceed" };
+    },
+    beforeRunComplete(event) {
+      completionHooks.push(event);
+      return { action: "proceed" };
+    },
+  });
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt, attachments) {
+      providerCalls.push({ prompt, attachments });
+      if (prompt.includes("<goal_task_planner>") || prompt.includes("<quality_critic_read_only>")) {
+        throw new Error("minimal turns must not invoke planner or critic prompts");
+      }
+      return { text: `direct answer ${providerCalls.length}` };
+    },
+  };
+
+  try {
+    const agent = new orchestrator.WorkAgent({
+      directAgent,
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    const english = await agent.runTurn("hello");
+    const koreanAttachment = { id: "ko-context" };
+    const korean = await agent.runTurn("반갑다", [koreanAttachment]);
+
+    assert.deepEqual([english.qualityStatus, korean.qualityStatus], ["proceed", "proceed"]);
+    assert.deepEqual(
+      classifications.map(({ complexity, proposedProfile }) => ({ complexity, proposedProfile })),
+      [
+        { complexity: "simple", proposedProfile: "minimal" },
+        { complexity: "simple", proposedProfile: "minimal" },
+      ],
+    );
+    assert.equal(providerCalls.length, 2, "minimal quality must add no planner, critic, or synthesis provider call");
+    assert.deepEqual(providerCalls[1].attachments, [koreanAttachment]);
+    assert.ok(providerCalls.every(({ prompt }) => prompt.includes("SCC Quality Engine (minimal/work)")));
+    assert.equal(completionHooks.length, 2);
+    assert.ok(completionHooks.every(({ reviewRequired, independentReviewerAvailable }) =>
+      reviewRequired === false && independentReviewerAvailable === false
+    ));
+
+    const qualityTraces = traces.filter((event) => event.type.startsWith("quality."));
+    const runIds = [...new Set(qualityTraces.map((event) => event.runId))];
+    assert.equal(runIds.length, 2);
+    for (const runId of runIds) {
+      const runTraces = qualityTraces.filter((event) => event.runId === runId);
+      assert.deepEqual(
+        runTraces.filter((event) => event.type === "quality.stage_started").map((event) => event.stage),
+        ["explore", "work"],
+      );
+      assert.equal(runTraces.some((event) => ["plan", "critic", "promote"].includes(event.stage)), false);
+      assert.equal(runTraces.some((event) => event.independentVerification === true), false);
+      const gate = runTraces.find((event) => event.type === "quality.gate_evaluated");
+      const completed = runTraces.find((event) => event.type === "quality.completed");
+      assert.equal(gate?.decision, "proceed");
+      assert.equal(completed?.decision, "proceed");
+      assert.deepEqual(completed?.evidenceRefs, gate?.evidenceRefs);
+      assert.equal(gate?.independentVerification, false);
+      assert.equal(completed?.independentVerification, false);
+      assert.equal(gate?.reviewerRunId, undefined);
+      assert.match(gate?.artifactHash ?? "", /^sha256:[a-f0-9]{64}$/);
+      assert.deepEqual(readdirSync(path.join(workspace, ".unclecode", "artifacts", runId)), ["direct-turn.json"]);
+      const artifact = JSON.parse(readFileSync(path.join(workspace, gate.evidenceRefs[0]), "utf8"));
+      assert.equal(artifact.kind, "direct-turn");
+      assert.equal(artifact.status, "completed");
+      assert.equal(artifact.artifactHash, gate.artifactHash);
+      assert.ok(artifact.summary.length <= 8_000);
+    }
+    assert.equal(traces.some((event) => event.type === "work.proposed"), false, "minimal quality must not invent a DAG");
+    assert.throws(() => readdirSync(path.join(workspace, ".data")));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("research turns are classified as deep and reach SCC completion instead of bypassing the plugin host", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-research-"));
+  const classifications = [];
+  const traces = [];
+  let providerCalls = 0;
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+  host.register("research-observer", {
+    runClassified(event) {
+      classifications.push(event);
+      return { action: "proceed" };
+    },
+  });
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      providerCalls += 1;
+      assert.match(prompt, /SCC Quality Engine \(deep\/work\)/);
+      return { text: "research answer" };
+    },
+  };
+
+  try {
+    const agent = new orchestrator.WorkAgent({
+      directAgent,
+      mode: "search",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    const result = await agent.runTurn("explain auth");
+
+    assert.equal(result.text, "research answer");
+    assert.equal(result.qualityStatus, "unproven");
+    assert.equal(providerCalls, 1);
+    assert.deepEqual(
+      classifications.map(({ complexity, proposedProfile }) => ({ complexity, proposedProfile })),
+      [{ complexity: "research", proposedProfile: "deep" }],
+    );
+    const gate = traces.find((event) => event.type === "quality.gate_evaluated");
+    assert.equal(gate?.decision, "unproven");
+    assert.ok(gate?.failures.includes("MISSING_CRITIC_STAGE"));
+    assert.ok(gate?.failures.includes("MISSING_PROMOTE_STAGE"));
+    assert.equal(gate?.independentVerification, false);
+    assert.equal(traces.at(-1)?.type, "quality.completed");
+    assert.equal(traces.at(-1)?.decision, "unproven");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a failed simple provider turn persists failed evidence and completes quality before rethrowing", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-minimal-failure-"));
+  const traces = [];
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn() {
+      throw new Error("provider exploded");
+    },
+  };
+
+  try {
+    const agent = new orchestrator.WorkAgent({
+      directAgent,
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    await assert.rejects(agent.runTurn("hello"), /provider exploded/);
+
+    const qualityTraces = traces.filter((event) => event.type.startsWith("quality."));
+    const gate = qualityTraces.find((event) => event.type === "quality.gate_evaluated");
+    const completed = qualityTraces.find((event) => event.type === "quality.completed");
+    assert.equal(gate?.decision, "block");
+    assert.equal(completed?.decision, "block");
+    assert.deepEqual(completed?.evidenceRefs, gate?.evidenceRefs);
+    assert.ok(qualityTraces.every((event) => event.runId === gate.runId && event.graphId === gate.graphId));
+    assert.equal(qualityTraces.some((event) => event.independentVerification === true), false);
+    const artifact = JSON.parse(readFileSync(path.join(workspace, gate.evidenceRefs[0]), "utf8"));
+    assert.equal(artifact.status, "failed");
+    assert.equal(artifact.artifactHash, gate.artifactHash);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a cancelled simple provider turn records cancelled evidence before preserving AbortError", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-minimal-cancel-"));
+  const traces = [];
+  const controller = new AbortController();
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(_prompt, _attachments, options) {
+      controller.abort(new DOMException("parent cancelled", "AbortError"));
+      options.signal.throwIfAborted();
+    },
+  };
+
+  try {
+    const agent = new orchestrator.WorkAgent({
+      directAgent,
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    await assert.rejects(
+      agent.runTurn("hello", [], { signal: controller.signal }),
+      (error) => error?.name === "AbortError",
+    );
+
+    const gate = traces.find((event) => event.type === "quality.gate_evaluated");
+    const completed = traces.find((event) => event.type === "quality.completed");
+    assert.equal(gate?.decision, "block");
+    assert.equal(completed?.decision, "block");
+    assert.deepEqual(completed?.evidenceRefs, gate?.evidenceRefs);
+    assert.equal(traces.some((event) => event.independentVerification === true), false);
+    const artifact = JSON.parse(readFileSync(path.join(workspace, gate.evidenceRefs[0]), "utf8"));
+    assert.equal(artifact.status, "cancelled");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("WorkAgent runs the real quality lifecycle, persists hashed artifacts, and reports non-independent review unproven", async () => {
   const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-runtime-"));
   const traces = [];

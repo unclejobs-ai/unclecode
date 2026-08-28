@@ -264,6 +264,25 @@ export class QualityArtifactStore {
     };
   }
 
+  persistDirectTurn(input: {
+    readonly intent: "simple" | "research";
+    readonly producerId: string;
+    readonly summary: string;
+    readonly completedAt: string;
+    readonly status: "completed" | "failed" | "cancelled";
+  }): PersistedQualityArtifact {
+    return this.persist("direct-turn.json", {
+      schemaVersion: 1,
+      kind: "direct-turn",
+      runId: this.runId,
+      intent: input.intent,
+      producerId: input.producerId,
+      summary: input.summary.slice(0, 8_000),
+      status: input.status,
+      completedAt: input.completedAt,
+    });
+  }
+
   private snapshotOwnedPaths(writePaths: readonly string[]): QualityWorkspaceSnapshot {
     const entries = new Map<string, QualityWorkspaceEntry>();
     const roots = [...new Set(writePaths)]

@@ -36,6 +36,7 @@ import {
   parsePlannedWorkTasks,
   type PlannedWorkTask,
   type TurnOrchestratorTraceListener,
+  type WorkIntent,
 } from "./turn-orchestrator.js";
 import { runRustCommandSync } from "./rust-command.js";
 import {
@@ -581,13 +582,13 @@ export class WorkAgent<
     this.directAgent.updateMode?.(mode);
   }
 
-  private createQualityState(prompt: string): QualityRuntimeState {
+  private createQualityState(prompt: string, complexity: WorkIntent): QualityRuntimeState {
     const runId = `quality-${randomUUID()}`;
     const graphId = `goal-${runId}`;
     const risk = this.qualityRisk ?? riskFromPrompt(prompt);
     const creatorIntent = creatorIntentFromPrompt(prompt);
     const profile = classifyQualityProfile({
-      complexity: "complex",
+      complexity,
       risk,
       creatorIntent,
     });
@@ -920,6 +921,146 @@ export class WorkAgent<
     };
   }
 
+  private directQualityGraph(state: QualityRuntimeState): WorkGraph {
+    return {
+      id: state.graphId,
+      qualityProfile: state.profile,
+      currentStage: "work",
+      gateStatus: "unproven",
+      iteration: state.iteration,
+      approval: "approved",
+      nodes: [],
+    };
+  }
+
+  /**
+   * Simple and research turns have no planner or execution DAG. They still
+   * cross the in-process SCC completion boundary with one bounded artifact
+   * bound to the provider result. Minimal completion can proceed without a
+   * reviewer, while traces retain `independentVerification: false`; deeper
+   * profiles remain unproven until their required review stages exist.
+   */
+  private async runDirectQualityTurn(
+    state: QualityRuntimeState,
+    intent: Extract<WorkIntent, "simple" | "research">,
+    prompt: string,
+    attachments: readonly Attachment[],
+    signal: AbortSignal,
+  ): Promise<WorkAgentTurnResult> {
+    if (!this.pluginHost) {
+      throw new Error("Direct quality lifecycle requires a plugin host.");
+    }
+    const route = resolveBalancedPrewalkRoute({
+      stage: "work",
+      directRoute: this.directRoute,
+    });
+    const context = await this.qualityContext(state, "work");
+    const qualityPrompt = appendQualityContext(prompt, context);
+    const producerId = `direct:${route.provider}:${route.model}`;
+    this.emitQualityStage(state, "work", route, `${state.runId}:direct`);
+
+    let directResult: { readonly text: string };
+    try {
+      directResult = await this.runMainTurn(qualityPrompt, attachments, { signal });
+    } catch (error) {
+      const status = error instanceof Error && error.name === "AbortError"
+        ? "cancelled"
+        : "failed";
+      const failure = status === "cancelled" ? "DIRECT_TURN_CANCELLED" : "DIRECT_TURN_FAILED";
+      const summary = status === "cancelled"
+        ? "Direct provider turn cancelled."
+        : `Direct provider turn failed: ${error instanceof Error ? error.message : String(error)}`;
+      const artifact = state.artifacts.persistDirectTurn({
+        intent,
+        producerId,
+        summary,
+        completedAt: new Date().toISOString(),
+        status,
+      });
+      state.completedStages.add("work");
+      this.recordQualityDecision(state, "work", {
+        action: "block",
+        decisions: [{
+          pluginName: "unclecode-runtime",
+          action: "block",
+          reason: summary,
+          failures: [failure],
+        }],
+        failures: [failure],
+      }, {
+        artifactHash: artifact.artifactHash,
+        evidenceRefs: [artifact.path],
+        independentVerification: false,
+        route,
+      });
+      this.completeQuality(state, "block", "work", {
+        evidenceRefs: [artifact.path],
+        failures: [failure],
+        independentVerification: false,
+      });
+      throw error;
+    }
+
+    const artifact = state.artifacts.persistDirectTurn({
+      intent,
+      producerId,
+      summary: directResult.text,
+      completedAt: new Date().toISOString(),
+      status: "completed",
+    });
+    const evidence: GateEvidence[] = [{
+      kind: "artifact",
+      artifactHash: artifact.artifactHash,
+      producerId,
+      result: "pass",
+      timestamp: new Date().toISOString(),
+    }];
+    state.completedStages.add("work");
+    state.graph = this.directQualityGraph(state);
+    const projection: QualityRunProjection = {
+      runId: state.runId,
+      profile: state.profile,
+      currentStage: "work",
+      currentPhase: "do",
+      score: null,
+      failures: [],
+      iteration: state.iteration,
+      refineCount: state.refineCount,
+      pivotCount: state.pivotCount,
+      gateDecision: "proceed",
+      completedStages: [...state.completedStages],
+    };
+    const observed = await this.pluginHost.dispatchBeforeRunComplete({
+      runId: state.runId,
+      graph: state.graph,
+      projection,
+      evidence,
+      currentArtifactHash: artifact.artifactHash,
+      producerId,
+      independentReviewerAvailable: false,
+      reviewRequired: state.profile !== "minimal",
+    });
+    const decision = observed;
+    this.recordQualityDecision(state, "work", decision, {
+      artifactHash: artifact.artifactHash,
+      evidenceRefs: [artifact.path],
+      independentVerification: false,
+      route,
+    });
+    if (state.terminal) return this.terminateQuality(state);
+    const qualityStatus = decision.action;
+    if (qualityStatus === "refine" || qualityStatus === "pivot") {
+      throw new Error("Direct quality iteration escaped terminal handling.");
+    }
+    state.graph = { ...state.graph, gateStatus: qualityStatus };
+    this.completeQuality(state, qualityStatus, "work", {
+      evidenceRefs: [artifact.path],
+      failures: decision.failures,
+      independentVerification: false,
+    });
+    return { text: directResult.text, qualityStatus };
+  }
+
   /**
    * Every phase of a turn — attachment, simple, research, planning, executor,
    * guardian, synthesis — runs inside one epoch. A clear stops whichever phase
@@ -944,18 +1085,18 @@ export class WorkAgent<
   private async runTurnInEpoch(prompt: string, attachments: readonly Attachment[], epoch: WorkAgentTurnEpoch): Promise<WorkAgentTurnResult> {
     const turnSignal = epoch.signal;
     const turnOptions = { signal: turnSignal };
-    if (attachments.length > 0) {
+    if (!this.pluginHost && attachments.length > 0) {
       return await this.runMainTurn(prompt, attachments, turnOptions);
     }
 
     const classifiedIntent = this.pluginHost ? classifyWorkIntent(prompt, this.mode) : undefined;
-    const quality = classifiedIntent === "complex" ? this.createQualityState(prompt) : undefined;
-    if (quality && this.pluginHost) {
+    const quality = classifiedIntent ? this.createQualityState(prompt, classifiedIntent) : undefined;
+    if (quality && this.pluginHost && classifiedIntent) {
       this.emitQualityStage(quality, "explore");
       const classified = await this.pluginHost.dispatchRunClassified({
         runId: quality.runId,
         prompt,
-        complexity: "complex",
+        complexity: classifiedIntent,
         risk: quality.risk,
         creatorIntent: quality.creatorIntent,
         proposedProfile: quality.profile,
@@ -976,9 +1117,30 @@ export class WorkAgent<
     let completionEvidence: GateEvidence[] = [];
     let criticIndependent = false;
     let criticGateStatus: QualityGateStatus = "proceed";
+    let directQualityResult: WorkAgentTurnResult | undefined;
     const orchestrator = createTurnOrchestrator<PlannedWorkTask, PlannedWorkResult>({
-      runSimpleTurn: (simplePrompt) => this.runMainTurn(simplePrompt, attachments, turnOptions),
-      runResearchTurn: (researchPrompt) => this.runMainTurn(researchPrompt, attachments, turnOptions),
+      runSimpleTurn: async (simplePrompt) => {
+        if (!quality) return await this.runMainTurn(simplePrompt, attachments, turnOptions);
+        directQualityResult = await this.runDirectQualityTurn(
+          quality,
+          "simple",
+          simplePrompt,
+          attachments,
+          turnSignal,
+        );
+        return { text: directQualityResult.text };
+      },
+      runResearchTurn: async (researchPrompt) => {
+        if (!quality) return await this.runMainTurn(researchPrompt, attachments, turnOptions);
+        directQualityResult = await this.runDirectQualityTurn(
+          quality,
+          "research",
+          researchPrompt,
+          attachments,
+          turnSignal,
+        );
+        return { text: directQualityResult.text };
+      },
       planComplexTurn: async (complexPrompt, planOptions) => {
         const context = quality ? await this.qualityContext(quality, "plan") : undefined;
         if (quality) {
@@ -1499,7 +1661,7 @@ export class WorkAgent<
     }
 
     if (result.kind !== "complex") {
-      return { text: result.text };
+      return directQualityResult ?? { text: result.text };
     }
     if (quality) {
       await this.reconcileTerminalQualityResults(quality, result.results);
