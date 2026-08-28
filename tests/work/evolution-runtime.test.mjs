@@ -28,6 +28,7 @@ function config(overrides = {}) {
       assets: ["host/evaluator.json"],
     },
     policyAssets: ["AGENTS.md"],
+    evaluatorEnvironmentHash: sha("locale=C;timezone=UTC;network=disabled"),
     suite: {
       id: "held-out-suite-v1",
       version: "1.0.0",
@@ -292,6 +293,9 @@ test("a distinct creator, evaluator, and attestor records one isolated PR-ready 
   assert.equal(result.projection.hashes.candidateCommit, CANDIDATE_COMMIT);
   assert.equal(result.projection.hashes.patch, sha("candidate patch v1"));
   assert.match(result.projection.hashes.evaluator, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(result.projection.hashes.evaluatorEnvironment, config().evaluatorEnvironmentHash);
+  assert.match(result.proposal.validationEvidence[0].artifactHash, /^sha256:[a-f0-9]{64}$/);
+  assert.notEqual(result.proposal.validationEvidence[0].artifactHash, result.projection.hashes.candidateArtifact);
   assert.match(result.projection.hashes.policy, /^sha256:[a-f0-9]{64}$/);
   assert.match(result.projection.hashes.suite, /^sha256:[a-f0-9]{64}$/);
   assert.match(result.projection.hashes.baselineResult, /^sha256:[a-f0-9]{64}$/);
@@ -566,6 +570,23 @@ test("the evaluator receives one immutable same-suite comparison and failures ne
   }
 });
 
+test("a syntactically valid but unexpected evaluator environment hash fails closed", async () => {
+  const host = makeHost({
+    evaluationResult: evaluation({ environmentHash: sha("network=enabled") }),
+  });
+  const lifecycleDispatch = makeDispatch();
+  const result = await new CreatorEvolutionService({
+    config: config(),
+    host,
+    now: () => new Date(NOW),
+  }).run(runInput(lifecycleDispatch.dispatch));
+
+  assert.equal(result.status, "failed");
+  assert.ok(result.projection.failures.includes("EVOLUTION_EVALUATION_ENVIRONMENT_MISMATCH"));
+  assert.equal(lifecycleDispatch.count, 0);
+  assert.equal(result.projection.cleanup.status, "completed");
+});
+
 test("caller mutation cannot replace the evaluator, suite, environment, or thresholds after construction", async () => {
   const mutableConfig = config();
   const host = makeHost();
@@ -682,6 +703,28 @@ test("duplicate and crash-resume invocation reuse one recorded candidate without
   assert.deepEqual(resumed, first);
   assert.equal(host.state.prepareCount, 1, "recorded crash-resume state must not create another worktree");
   assert.equal(lifecycleDispatch.count, 1, "recorded crash-resume state must not redispatch validation");
+});
+
+test("a changed expected evaluator environment stales a recorded PR-ready proposal", async () => {
+  const host = makeHost();
+  const lifecycleDispatch = makeDispatch();
+  const first = await new CreatorEvolutionService({
+    config: config(),
+    host,
+    now: () => new Date(NOW),
+  }).run(runInput(lifecycleDispatch.dispatch));
+  assert.equal(first.status, "pr-ready");
+
+  const resumed = await new CreatorEvolutionService({
+    config: config({ evaluatorEnvironmentHash: sha("different-contained-runtime") }),
+    host,
+    now: () => new Date(NOW),
+  }).run(runInput(lifecycleDispatch.dispatch));
+
+  assert.equal(resumed.status, "stale");
+  assert.ok(resumed.projection.failures.includes("EVOLUTION_EVALUATION_ENVIRONMENT_MISMATCH"));
+  assert.equal(host.state.prepareCount, 1);
+  assert.equal(host.state.cleanupCount, 2);
 });
 
 test("failure cleanup status is recorded honestly when resource cleanup itself fails", async () => {

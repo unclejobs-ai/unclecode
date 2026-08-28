@@ -9,6 +9,7 @@ import {
   type AppReasoningConfig,
   type EvolutionBenchmarkResult,
   type EvolutionEvaluatorResult,
+  runContainedEvolutionCommand,
   type WorkTurnAgent,
 } from "@unclecode/orchestrator";
 
@@ -23,37 +24,45 @@ export function createWorkCreatorEvolutionService(input: {
   readonly env: NodeJS.ProcessEnv;
   readonly reasoning: AppReasoningConfig;
   readonly recorder: AgentOpsRecorder;
-  readonly createCreatorAgent: (cwd: string) => WorkTurnAgent;
+  readonly createCreatorAgent: () => WorkTurnAgent | Promise<WorkTurnAgent>;
 }): CreatorEvolutionService {
   const policyAssets = ["AGENTS.md"].filter((asset) => existsSync(join(input.cwd, asset)));
   const benchmarkAssets = ["package.json"].filter((asset) => existsSync(join(input.cwd, asset)));
   const immutableEvaluatorEnvironment = Object.freeze(evaluatorEnvironment(input.env));
-  const evaluatorEnvironmentHash = sha256(canonicalJson(immutableEvaluatorEnvironment));
+  const evaluator = {
+    id: "unclecode-guardian-evaluator-v1",
+    definition: "UncleCode host guardian checks; creator has no evaluator capability",
+    version: "1.0.0",
+    assets: [] as readonly string[],
+  } as const;
+  const suite = {
+    id: "unclecode-held-out-guardian-v1",
+    version: "1.0.0",
+    assets: benchmarkAssets,
+    checks: [{ id: "guardian", weight: 1 }],
+    thresholds: {
+      minimumCandidateScore: 1,
+      minimumDelta: 0,
+      maximumRegression: 0,
+    },
+    environment: {
+      locale: "C",
+      timezone: "UTC",
+      network: "host-enforced-disabled",
+      scripts: "check,test",
+    },
+  } as const;
+  const evaluatorEnvironmentHash = sha256(canonicalJson({
+    evaluator,
+    environment: suite.environment,
+    runtimeEnvironmentHash: sha256(canonicalJson(immutableEvaluatorEnvironment)),
+    containmentPolicy: "unclecode-evolution-sandbox-v1",
+  }));
   const config = {
-    evaluator: {
-      id: "unclecode-guardian-evaluator-v1",
-      definition: "UncleCode host guardian checks; creator has no evaluator capability",
-      version: "1.0.0",
-      assets: [] as readonly string[],
-    },
+    evaluator,
     policyAssets,
-    suite: {
-      id: "unclecode-held-out-guardian-v1",
-      version: "1.0.0",
-      assets: benchmarkAssets,
-      checks: [{ id: "guardian", weight: 1 }],
-      thresholds: {
-        minimumCandidateScore: 1,
-        minimumDelta: 0,
-        maximumRegression: 0,
-      },
-      environment: {
-        locale: "C",
-        timezone: "UTC",
-        network: "npm-offline-policy",
-        scripts: "check,test",
-      },
-    },
+    evaluatorEnvironmentHash,
+    suite,
     attestorId: "unclecode-git-attestor",
     maxAttestationAgeMs: 5 * 60_000,
     bounds: {
@@ -66,30 +75,33 @@ export function createWorkCreatorEvolutionService(input: {
 
   const host = createGitCreatorEvolutionHost({
     workspaceRoot: input.cwd,
-    async runCreator(request) {
-      const agent = input.createCreatorAgent(request.candidate.worktree);
+    async generateCreatorEdits(request) {
+      const agent = await input.createCreatorAgent();
       const strictPrompt = [
         request.prompt,
         "",
         "<unclecode_creator_evolution>",
-        `Work only inside this isolated worktree: ${request.candidate.worktree}`,
-        "You may modify only these host-owned targets:",
+        "You have no tools and no filesystem access. Return proposed file bodies only.",
+        "You may propose edits only for these host-owned targets:",
         ...request.mutableTargets.map((target) => `- ${target}`),
         "Do not modify evaluator, policy, benchmark, repository-control, or threshold assets.",
         "Do not merge, push, publish, deploy, release, or approve the candidate.",
+        'Return exactly one JSON object: {"files":[{"path":"relative/path","content":"complete file body"}]}.',
+        "Do not use Markdown fences or include commentary outside the JSON object.",
         "</unclecode_creator_evolution>",
       ].join("\n");
       try {
         const outcome = await runBounded(
           request.signal,
           request.timeoutMs,
-          () => agent.runTurn(strictPrompt, [], { signal: request.signal }),
+          (signal) => agent.runTurn(strictPrompt, [], { signal }),
           () => agent.clear(),
         );
         if (outcome.status !== "completed") return outcome;
         return {
           status: "completed" as const,
-          summary: boundUtf8(outcome.value.text, request.maxOutputBytes),
+          summary: "Creator returned bounded edits for host validation.",
+          edits: parseCreatorEdits(outcome.value.text, request.maxOutputBytes),
         };
       } catch (error) {
         return {
@@ -99,13 +111,39 @@ export function createWorkCreatorEvolutionService(input: {
       }
     },
     async runEvaluator(request): Promise<EvolutionEvaluatorResult> {
-      const evaluate = async (cwd: string): Promise<EvolutionBenchmarkResult> => {
+      const evaluate = async (cwd: string, signal: AbortSignal): Promise<EvolutionBenchmarkResult> => {
         const outcome = await runWorkspaceGuardianChecks({
           cwd,
           env: { ...immutableEvaluatorEnvironment },
           scripts: ["check", "test"],
           timeoutMs: Math.max(1_000, Math.floor(request.timeoutMs / 2)),
-          signal: request.signal,
+          signal,
+        }, {
+          async execFile(command, args, options) {
+            const contained = await runContainedEvolutionCommand({
+              cwd: options.cwd,
+              workspaceRoot: input.cwd,
+              command,
+              args,
+              environment: options.env ?? immutableEvaluatorEnvironment,
+              timeoutMs: options.timeout ?? Math.max(1_000, Math.floor(request.timeoutMs / 2)),
+              maxOutputBytes: request.maxOutputBytes,
+              readablePaths: existsSync(join(input.cwd, "node_modules"))
+                ? [join(input.cwd, "node_modules")]
+                : [],
+              ...(options.signal ? { signal: options.signal } : {}),
+            });
+            if (contained.status !== "completed") {
+              const error = new Error(`Contained evaluator ${contained.status}: ${contained.stderr}`.trim()) as Error & {
+                stdout?: string;
+                stderr?: string;
+              };
+              error.stdout = contained.stdout;
+              error.stderr = contained.stderr;
+              throw error;
+            }
+            return { stdout: contained.stdout, stderr: contained.stderr };
+          },
         });
         const proven = outcome.checks.length > 0;
         const passed = proven && outcome.checks.every((check) => check.status === "passed");
@@ -127,19 +165,15 @@ export function createWorkCreatorEvolutionService(input: {
         const outcome = await runBounded(
           request.signal,
           request.timeoutMs,
-          async () => ({
-            baseline: await evaluate(request.baselineWorktree),
-            candidate: await evaluate(request.candidateWorktree),
+          async (signal) => ({
+            baseline: await evaluate(request.baselineWorktree, signal),
+            candidate: await evaluate(request.candidateWorktree, signal),
           }),
         );
         if (outcome.status !== "completed") return outcome;
         return {
           status: "completed",
-          environmentHash: sha256(canonicalJson({
-            evaluator: request.evaluator,
-            environment: request.suite.environment,
-            runtimeEnvironmentHash: evaluatorEnvironmentHash,
-          })),
+          environmentHash: request.expectedEnvironmentHash,
           baseline: outcome.value.baseline,
           candidate: outcome.value.candidate,
         };
@@ -179,28 +213,50 @@ type BoundedOutcome<T> =
 async function runBounded<T>(
   signal: AbortSignal,
   timeoutMs: number,
-  run: () => Promise<T>,
-  onTimeout?: (() => void) | undefined,
+  run: (signal: AbortSignal) => Promise<T>,
+  onTerminate?: (() => void) | undefined,
 ): Promise<BoundedOutcome<T>> {
   if (signal.aborted) return { status: "cancelled", summary: "Evolution execution was cancelled." };
-  let timeout: NodeJS.Timeout | undefined;
-  let abortListener: (() => void) | undefined;
+  const controller = new AbortController();
+  let cause: "timeout" | "cancelled" | undefined;
+  let terminationRequested = false;
+  const requestTermination = (): void => {
+    if (terminationRequested) return;
+    terminationRequested = true;
+    try {
+      onTerminate?.();
+    } catch {
+      // The aborted operation still owns settlement; cancellation callbacks are best effort.
+    }
+  };
+  const abortListener = () => {
+    cause = "cancelled";
+    controller.abort(signal.reason);
+    requestTermination();
+  };
+  signal.addEventListener("abort", abortListener, { once: true });
+  const timeout = setTimeout(() => {
+    cause = "timeout";
+    controller.abort(new Error(`Evolution execution exceeded ${timeoutMs}ms.`));
+    requestTermination();
+  }, timeoutMs);
+  timeout.unref?.();
+  const running = Promise.resolve().then(() => {
+    controller.signal.throwIfAborted();
+    return run(controller.signal);
+  });
   try {
-    return await Promise.race([
-      run().then((value): BoundedOutcome<T> => ({ status: "completed", value })),
-      new Promise<BoundedOutcome<T>>((resolve) => {
-        timeout = setTimeout(() => {
-          onTimeout?.();
-          resolve({ status: "timeout", summary: `Evolution execution exceeded ${timeoutMs}ms.` });
-        }, timeoutMs);
-        timeout.unref?.();
-        abortListener = () => resolve({ status: "cancelled", summary: "Evolution execution was cancelled." });
-        signal.addEventListener("abort", abortListener, { once: true });
-      }),
-    ]);
+    const settled = await running.then(
+      (value) => ({ ok: true as const, value }),
+      (error) => ({ ok: false as const, error }),
+    );
+    if (cause === "timeout") return { status: "timeout", summary: `Evolution execution exceeded ${timeoutMs}ms.` };
+    if (cause === "cancelled") return { status: "cancelled", summary: "Evolution execution was cancelled." };
+    if (!settled.ok) throw settled.error;
+    return { status: "completed", value: settled.value };
   } finally {
-    if (timeout) clearTimeout(timeout);
-    if (abortListener) signal.removeEventListener("abort", abortListener);
+    clearTimeout(timeout);
+    signal.removeEventListener("abort", abortListener);
   }
 }
 
@@ -217,9 +273,36 @@ function evaluatorEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     LANG: "C",
     LC_ALL: "C",
     npm_config_offline: "true",
-    NO_PROXY: "*",
-    no_proxy: "*",
+    npm_config_proxy: "",
+    npm_config_https_proxy: "",
+    HTTP_PROXY: "",
+    HTTPS_PROXY: "",
+    ALL_PROXY: "",
+    NO_PROXY: "",
+    no_proxy: "",
   };
+}
+
+function parseCreatorEdits(value: string, maximumBytes: number): readonly { readonly path: string; readonly content: string }[] {
+  if (Buffer.byteLength(value, "utf8") > maximumBytes) throw new Error("Creator edit response exceeds its bound.");
+  const parsed = JSON.parse(value) as { files?: unknown };
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.files)) {
+    throw new Error("Creator must return a JSON files array.");
+  }
+  return parsed.files.map((entry) => {
+    if (
+      !entry
+      || typeof entry !== "object"
+      || typeof (entry as { path?: unknown }).path !== "string"
+      || typeof (entry as { content?: unknown }).content !== "string"
+    ) {
+      throw new Error("Creator returned an invalid file edit.");
+    }
+    return {
+      path: (entry as { path: string }).path,
+      content: (entry as { content: string }).content,
+    };
+  });
 }
 
 function boundUtf8(value: string, maximumBytes: number): string {

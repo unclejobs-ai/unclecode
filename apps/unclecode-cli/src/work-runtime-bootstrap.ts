@@ -90,6 +90,7 @@ import {
   resolveWorkShellCrpConfig,
   type WorkShellContextPacketResolver,
 } from "./work-runtime-crp.js";
+import { createWorkCreatorEvolutionService } from "./creator-evolution-runtime.js";
 
 const WORK_PI_TURN_STEP_LIMIT = 16;
 const WORK_PI_TURN_COST_LIMIT_USD = 2;
@@ -593,10 +594,37 @@ export async function loadWorkCliBootstrap(
   });
 
   const pluginHost = new PluginHost();
+  const recorder = createAgentOpsRecorder({
+    workspaceRoot: cwd,
+    command: "unclecode work",
+    ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
+  });
+
   registerBuiltInSccQualityEngine(pluginHost, { workspaceRoot: cwd, env });
   await pluginHost.loadFromDisk(cwd, {
     env,
     ...(input.userHomeDir ? { homeDir: input.userHomeDir } : {}),
+  });
+  const creatorEvolutionService = createWorkCreatorEvolutionService({
+    cwd,
+    env,
+    reasoning: config.reasoning,
+    recorder,
+    createCreatorAgent: () => createRuntimeCodingAgent({
+      provider: directRuntimeProvider,
+      apiKey: config.apiKey,
+      model: config.model,
+      cwd,
+      reasoning: config.reasoning,
+      mode: config.mode,
+      toolAccess: "none",
+      ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+      ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
+      ...(config.openAIRuntime ? { openAIRuntime: config.openAIRuntime } : {}),
+      ...(config.openAIAccountId !== undefined
+        ? { openAIAccountId: config.openAIAccountId }
+        : {}),
+    }),
   });
 
   const agent = new WorkAgent({
@@ -612,6 +640,7 @@ export async function loadWorkCliBootstrap(
     model: config.model,
     workspaceRoot: cwd,
     pluginHost,
+    creatorEvolutionService,
     directRoute: {
       provider: directRuntimeProvider,
       model: config.model,
@@ -707,11 +736,6 @@ export async function loadWorkCliBootstrap(
     authLabel,
   });
 
-  const recorder = createAgentOpsRecorder({
-    workspaceRoot: cwd,
-    command: "unclecode work",
-    ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
-  });
   const crpConfig = resolveWorkShellCrpConfig(configExplanation);
   let resumeIntegrityLines: readonly string[] = [];
   if (crpConfig.enabled && resumedSession !== undefined) {

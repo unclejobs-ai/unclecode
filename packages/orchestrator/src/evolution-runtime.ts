@@ -66,6 +66,22 @@ export type EvolutionEvaluatorDefinition = {
   readonly assets: readonly string[];
 };
 
+export type EvolutionCreatorEdit = {
+  readonly path: string;
+  readonly content: string;
+};
+
+export type EvolutionCreatorEditResult =
+  | {
+      readonly status: "completed";
+      readonly summary: string;
+      readonly edits: readonly EvolutionCreatorEdit[];
+    }
+  | {
+      readonly status: "failed" | "timeout" | "cancelled";
+      readonly summary: string;
+    };
+
 export type EvolutionSuiteDefinition = {
   readonly id: string;
   readonly version: string;
@@ -82,6 +98,8 @@ export type EvolutionSuiteDefinition = {
 export type CreatorEvolutionConfig = {
   readonly evaluator: EvolutionEvaluatorDefinition;
   readonly policyAssets: readonly string[];
+  /** Exact host-computed identity of the evaluator runtime and containment policy. */
+  readonly evaluatorEnvironmentHash: string;
   readonly suite: EvolutionSuiteDefinition;
   readonly attestorId: string;
   readonly maxAttestationAgeMs: number;
@@ -141,6 +159,7 @@ export type CreatorEvolutionHost = {
     readonly evaluator: Readonly<EvolutionEvaluatorDefinition>;
     readonly policyAssets: readonly string[];
     readonly suite: Readonly<EvolutionSuiteDefinition>;
+    readonly evaluatorEnvironmentHash: string;
     readonly attestorId: string;
     readonly maxAttestationAgeMs: number;
   }): Promise<readonly string[]>;
@@ -187,6 +206,7 @@ export type CreatorEvolutionHost = {
     readonly candidateWorktree: string;
     readonly evaluator: Readonly<EvolutionEvaluatorDefinition>;
     readonly suite: Readonly<EvolutionSuiteDefinition>;
+    readonly expectedEnvironmentHash: string;
     readonly timeoutMs: number;
     readonly maxOutputBytes: number;
     readonly signal: AbortSignal;
@@ -197,6 +217,7 @@ export type CreatorEvolutionHost = {
     readonly candidate: PreparedEvolutionCandidate;
   }): Promise<EvolutionIsolationAttestation | undefined>;
   cleanup(input: {
+    readonly runId: string;
     readonly workspaceRoot: string;
     readonly candidate: PreparedEvolutionCandidate;
     readonly resources: readonly EvolutionCleanupResource[];
@@ -304,6 +325,14 @@ export class CreatorEvolutionService {
     }
 
     const failures: string[] = [];
+    if (
+      result.projection.hashes.evaluatorEnvironment !== this.config.evaluatorEnvironmentHash
+      || result.proposal.validationEvidence.length !== 1
+      || result.proposal.validationEvidence[0]?.artifactHash
+        !== evaluationEvidenceArtifactHash(execution.candidateSnapshot, this.config.evaluatorEnvironmentHash)
+    ) {
+      failures.push("EVOLUTION_EVALUATION_ENVIRONMENT_MISMATCH");
+    }
     try {
       const [candidate, protectedAssets, isolation] = await Promise.all([
         this.host.inspectCandidate({
@@ -355,6 +384,9 @@ export class CreatorEvolutionService {
         ...(loaded.result.projection.evaluatorId === this.config.evaluator.id ? [] : ["EVOLUTION_RECORDED_IDENTITY_MISMATCH"]),
         ...(loaded.result.projection.attestorId === this.config.attestorId ? [] : ["EVOLUTION_RECORDED_IDENTITY_MISMATCH"]),
         ...(loaded.result.projection.heldOutBenchmarkId === this.config.suite.id ? [] : ["EVOLUTION_RECORDED_IDENTITY_MISMATCH"]),
+        ...(loaded.result.projection.hashes.evaluatorEnvironment === this.config.evaluatorEnvironmentHash
+          ? []
+          : ["EVOLUTION_EVALUATION_ENVIRONMENT_MISMATCH"]),
       ];
       let hostFailures: readonly string[];
       try {
@@ -365,6 +397,7 @@ export class CreatorEvolutionService {
           evaluator: this.config.evaluator,
           policyAssets: this.config.policyAssets,
           suite: this.config.suite,
+          evaluatorEnvironmentHash: this.config.evaluatorEnvironmentHash,
           attestorId: this.config.attestorId,
           maxAttestationAgeMs: this.config.maxAttestationAgeMs,
         });
@@ -610,6 +643,7 @@ export class CreatorEvolutionService {
         candidateWorktree: execution.candidate.worktree,
         evaluator: this.config.evaluator,
         suite: this.config.suite,
+        expectedEnvironmentHash: this.config.evaluatorEnvironmentHash,
         timeoutMs: this.config.bounds.evaluatorTimeoutMs,
         maxOutputBytes: this.config.bounds.maxOutputBytes,
         signal: input.signal,
@@ -634,7 +668,11 @@ export class CreatorEvolutionService {
       });
     }
     execution.evaluation = sanitizeEvaluation(evaluatorResult);
-    const evaluationFailures = validateEvaluation(execution.evaluation, this.config.suite);
+    const evaluationFailures = validateEvaluation(
+      execution.evaluation,
+      this.config.suite,
+      this.config.evaluatorEnvironmentHash,
+    );
     if (evaluationFailures.length > 0) {
       return this.finish(execution, {
         status: "failed",
@@ -720,7 +758,10 @@ export class CreatorEvolutionService {
       candidateScore: execution.evaluation.candidate.score,
       validationEvidence: [{
         kind: "metric",
-        artifactHash: candidateArtifactHash(execution.candidateSnapshot),
+        artifactHash: evaluationEvidenceArtifactHash(
+          execution.candidateSnapshot,
+          this.config.evaluatorEnvironmentHash,
+        ),
         producerId: input.creatorId,
         result: "pass",
         timestamp: createdAt,
@@ -831,6 +872,7 @@ export class CreatorEvolutionService {
       const resources = result.projection.cleanup.resources.map(({ kind, identity }) => ({ kind, identity }));
       try {
         cleanup = await this.host.cleanup({
+          runId: input.runId,
           workspaceRoot: input.workspaceRoot,
           candidate: {
             candidateId: result.projection.candidateId,
@@ -900,6 +942,7 @@ export class CreatorEvolutionService {
     if (execution.candidate) {
       try {
         cleanup = await this.host.cleanup({
+          runId: execution.input.runId,
           workspaceRoot: execution.input.workspaceRoot,
           candidate: execution.candidate,
           resources: execution.candidate.resources,
@@ -943,13 +986,38 @@ export class CreatorEvolutionService {
       }
       return recorded;
     } catch (error) {
+      let failedCleanup = cleanup;
+      const recordFailures = [...new Set([...projection.failures, "EVOLUTION_RECORD_FAILED"])];
+      if (execution.candidate && terminal.retainCandidate === true) {
+        try {
+          failedCleanup = await this.host.cleanup({
+            runId: execution.input.runId,
+            workspaceRoot: execution.input.workspaceRoot,
+            candidate: execution.candidate,
+            resources: execution.candidate.resources,
+            retainCandidate: false,
+            reason: "Evolution proposal persistence failed before ownership transfer.",
+          });
+        } catch (cleanupError) {
+          recordFailures.push("EVOLUTION_CLEANUP_FAILED");
+          failedCleanup = {
+            status: "failed",
+            resources: execution.candidate.resources.map((resource) => ({
+              ...resource,
+              status: "cleanup-failed",
+            })),
+            summary: boundedSummary(cleanupError instanceof Error ? cleanupError.message : String(cleanupError)),
+          };
+        }
+      }
       return {
         ...provisional,
         status: "failed",
         projection: {
           ...projection,
           state: "failed",
-          failures: [...new Set([...projection.failures, "EVOLUTION_RECORD_FAILED"])],
+          cleanup: failedCleanup,
+          failures: [...new Set(recordFailures)],
           summary: boundedSummary(errorSummary("Evolution record failed", error)),
         },
       };
@@ -999,6 +1067,7 @@ function projectResult(
             candidateArtifact: candidateArtifactHash(snapshot),
           }),
       evaluator: execution.evaluatorHash,
+      evaluatorEnvironment: config.evaluatorEnvironmentHash,
       policy: execution.policyHash,
       suite: execution.suiteHash,
       ...(evaluation === undefined
@@ -1044,6 +1113,9 @@ function validateIdentityConfiguration(
 
 function validateConfig(config: Readonly<CreatorEvolutionConfig>): string[] {
   const failures: string[] = [];
+  if (!SHA256.test(config.evaluatorEnvironmentHash)) {
+    failures.push("EVOLUTION_EVALUATION_ENVIRONMENT_INVALID");
+  }
   const boundedPositive = [
     config.bounds.creatorTimeoutMs,
     config.bounds.evaluatorTimeoutMs,
@@ -1184,7 +1256,11 @@ function validateRelativeAssetPath(value: string): string | undefined {
 }
 
 function hasRepositoryControlSegment(value: string): boolean {
-  return value.split("/").some((segment) => segment === ".git" || segment === ".unclecode");
+  return value.split("/").some((segment) =>
+    segment === ".git"
+    || segment === ".unclecode"
+    || segment === ".gitattributes"
+    || segment === ".gitmodules");
 }
 
 function pathMatchesTarget(path: string, target: string): boolean {
@@ -1195,9 +1271,13 @@ function pathMatchesTarget(path: string, target: string): boolean {
 function validateEvaluation(
   evaluation: Extract<EvolutionEvaluatorResult, { readonly status: "completed" }>,
   suite: Readonly<EvolutionSuiteDefinition>,
+  expectedEnvironmentHash: string,
 ): string[] {
   const failures = new Set<string>();
   if (!SHA256.test(evaluation.environmentHash)) failures.add("EVOLUTION_EVALUATION_ENVIRONMENT_INVALID");
+  if (evaluation.environmentHash !== expectedEnvironmentHash) {
+    failures.add("EVOLUTION_EVALUATION_ENVIRONMENT_MISMATCH");
+  }
   const expectedChecks = suite.checks.map((entry) => entry.id);
   for (const result of [evaluation.baseline, evaluation.candidate]) {
     if (!finiteScore(result.score)) failures.add("EVOLUTION_EVALUATION_SCORE_INVALID");
@@ -1372,6 +1452,16 @@ function candidateArtifactHash(snapshot: EvolutionCandidateSnapshot): string {
   });
 }
 
+function evaluationEvidenceArtifactHash(
+  snapshot: EvolutionCandidateSnapshot,
+  evaluatorEnvironmentHash: string,
+): string {
+  return canonicalHash({
+    candidateArtifact: candidateArtifactHash(snapshot),
+    evaluatorEnvironmentHash,
+  });
+}
+
 function candidateFingerprint(snapshot: EvolutionCandidateSnapshot): string {
   return canonicalHash(snapshot);
 }
@@ -1425,6 +1515,7 @@ function cloneConfig(config: CreatorEvolutionConfig): CreatorEvolutionConfig {
       assets: [...config.evaluator.assets],
     },
     policyAssets: [...config.policyAssets],
+    evaluatorEnvironmentHash: config.evaluatorEnvironmentHash,
     suite: {
       id: config.suite.id,
       version: config.suite.version,

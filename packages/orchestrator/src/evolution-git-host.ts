@@ -1,8 +1,10 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import {
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   realpath,
@@ -20,6 +22,7 @@ import type {
   EvolutionCandidateSnapshot,
   EvolutionCleanupProjection,
   EvolutionCleanupResource,
+  EvolutionCreatorEditResult,
   EvolutionRepositoryIdentity,
   PreparedEvolutionCandidate,
 } from "./evolution-runtime.js";
@@ -33,13 +36,37 @@ const CANONICAL_UTC_MILLISECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z
 
 export type CreateGitCreatorEvolutionHostInput = {
   readonly workspaceRoot: string;
-  readonly runCreator: CreatorEvolutionHost["runCreator"];
+  readonly generateCreatorEdits: (input: {
+    readonly runId: string;
+    readonly prompt: string;
+    readonly creatorId: string;
+    readonly mutableTargets: readonly string[];
+    readonly timeoutMs: number;
+    readonly maxOutputBytes: number;
+    readonly signal: AbortSignal;
+  }) => Promise<EvolutionCreatorEditResult>;
   readonly runEvaluator: CreatorEvolutionHost["runEvaluator"];
   readonly recordAgentOps?: ((result: CreatorEvolutionResult) => void) | undefined;
+  readonly onPreparationCheckpoint?: ((checkpoint: {
+    readonly kind: EvolutionCleanupResource["kind"];
+    readonly identity: string;
+  }) => void | Promise<void>) | undefined;
   readonly now?: (() => Date) | undefined;
 };
 
 type TreeEntry = EvolutionAssetDigest & { readonly fingerprint: string };
+type PreparationResource = EvolutionCleanupResource & {
+  status: "planned" | "acquiring" | "acquired";
+};
+type PreparationJournal = {
+  readonly version: 1;
+  readonly runId: string;
+  readonly workspaceRoot: string;
+  readonly candidateId: string;
+  readonly baseCommit: string;
+  readonly branch: string;
+  readonly resources: PreparationResource[];
+};
 
 /**
  * Concrete local-Git boundary for the evolution service. It uses only local
@@ -67,6 +94,7 @@ export function createGitCreatorEvolutionHost(
         ) {
           return undefined;
         }
+        await rm(evolutionPreparationPath(workspaceRoot, runId), { force: true });
         return { result };
       } catch {
         return undefined;
@@ -96,6 +124,7 @@ export function createGitCreatorEvolutionHost(
         || proposal.candidateId !== projection.candidateId
         || proposal.isolatedBranch !== branch
         || proposal.isolatedWorktree !== worktree
+        || projection.hashes.evaluatorEnvironment !== input.evaluatorEnvironmentHash
       ) {
         failures.add("EVOLUTION_CANDIDATE_STALE");
         return [...failures];
@@ -162,6 +191,9 @@ export function createGitCreatorEvolutionHost(
         if (
           snapshot.patchHash !== projection.hashes.patch
           || candidateArtifactHash(snapshot) !== projection.hashes.candidateArtifact
+          || proposal.validationEvidence.length !== 1
+          || proposal.validationEvidence[0]?.artifactHash
+            !== evaluationEvidenceArtifactHash(snapshot, input.evaluatorEnvironmentHash)
         ) {
           failures.add("EVOLUTION_CANDIDATE_STALE");
         }
@@ -216,6 +248,7 @@ export function createGitCreatorEvolutionHost(
     async resolveBase({ runId, workspaceRoot, snapshotTargets }) {
       const root = await requireRepositoryRoot(workspaceRoot, workspaceRoot);
       const head = await git(root, ["rev-parse", "HEAD"]);
+      await assertSafeGitBoundary(root, head);
       const branch = await currentBranch(root, head);
       const baseCommit = await createImmutableBaseCommit(root, runId, head, snapshotTargets);
       const paths = evolutionWorktreePaths(root, runId);
@@ -231,20 +264,67 @@ export function createGitCreatorEvolutionHost(
     async prepareCandidate({ runId, workspaceRoot, candidateId, branch, base }) {
       const root = await requireRepositoryRoot(workspaceRoot, workspaceRoot);
       const paths = evolutionWorktreePaths(root, runId);
-      await mkdir(paths.root, { recursive: true, mode: 0o700 });
-      await ensureWorktree(root, paths.baseline, base.baseCommit, undefined);
-      await ensureWorktree(root, paths.candidate, base.baseCommit, branch);
-      return {
+      const journalPath = evolutionPreparationPath(root, runId);
+      const expectedResources: PreparationResource[] = [
+        { kind: "branch", identity: branch, status: "planned" },
+        { kind: "worktree", identity: paths.candidate, status: "planned" },
+        { kind: "baseline-worktree", identity: paths.baseline, status: "planned" },
+      ];
+      const existing = await loadPreparationJournal(journalPath);
+      if (!existing || !preparationJournalMatches(existing, {
+        runId,
+        workspaceRoot: root,
         candidateId,
+        baseCommit: base.baseCommit,
         branch,
-        worktree: paths.candidate,
-        baselineWorktree: paths.baseline,
-        resources: [
-          { kind: "branch", identity: branch },
-          { kind: "worktree", identity: paths.candidate },
-          { kind: "baseline-worktree", identity: paths.baseline },
-        ],
+        resources: expectedResources,
+      }) || !(await preparationResourcesMatch(root, paths, branch, base.baseCommit))) {
+        await removePreparationResources(root, paths, branch);
+      }
+      const journal: PreparationJournal = {
+        version: 1,
+        runId,
+        workspaceRoot: root,
+        candidateId,
+        baseCommit: base.baseCommit,
+        branch,
+        resources: expectedResources,
       };
+      await writePreparationJournal(journalPath, journal);
+      const acquire = async (
+        kind: EvolutionCleanupResource["kind"],
+        acquireResource: () => Promise<void>,
+      ): Promise<void> => {
+        const resource = journal.resources.find((entry) => entry.kind === kind);
+        if (!resource) throw new Error(`Evolution preparation journal omitted ${kind}.`);
+        resource.status = "acquiring";
+        await writePreparationJournal(journalPath, journal);
+        await options.onPreparationCheckpoint?.({ kind, identity: resource.identity });
+        await acquireResource();
+        resource.status = "acquired";
+        await writePreparationJournal(journalPath, journal);
+      };
+      try {
+        await mkdir(paths.root, { recursive: true, mode: 0o700 });
+        await acquire("baseline-worktree", () => ensureWorktree(root, paths.baseline, base.baseCommit, undefined));
+        await acquire("branch", () => ensureBranch(root, branch, base.baseCommit));
+        await acquire("worktree", () => ensureWorktree(root, paths.candidate, base.baseCommit, branch));
+        return {
+          candidateId,
+          branch,
+          worktree: paths.candidate,
+          baselineWorktree: paths.baseline,
+          resources: expectedResources.map(({ kind, identity }) => ({ kind, identity })),
+        };
+      } catch (error) {
+        try {
+          await removePreparationResources(root, paths, branch);
+          await rm(journalPath, { force: true });
+        } catch {
+          // Keep the journal when cleanup cannot complete so the next retry can recover it.
+        }
+        throw error;
+      }
     },
 
     async snapshotProtectedAssets({ candidate, assets }) {
@@ -252,7 +332,26 @@ export function createGitCreatorEvolutionHost(
       return { entries };
     },
 
-    runCreator: options.runCreator,
+    async runCreator(request) {
+      const generated = await options.generateCreatorEdits({
+        runId: request.runId,
+        prompt: request.prompt,
+        creatorId: request.creatorId,
+        mutableTargets: request.mutableTargets,
+        timeoutMs: request.timeoutMs,
+        maxOutputBytes: request.maxOutputBytes,
+        signal: request.signal,
+      });
+      if (generated.status !== "completed") return generated;
+      await applyCreatorEdits(
+        request.candidate.worktree,
+        request.mutableTargets,
+        generated.edits,
+        request.maxOutputBytes,
+        request.signal,
+      );
+      return { status: "completed", summary: generated.summary };
+    },
 
     async inspectCandidate({ candidate, base }) {
       return inspectCandidateSnapshot(candidate, base);
@@ -304,8 +403,8 @@ export function createGitCreatorEvolutionHost(
       };
     },
 
-    async cleanup({ workspaceRoot, candidate, resources, retainCandidate, reason }) {
-      return cleanupCandidate(workspaceRoot, candidate, resources, retainCandidate, reason);
+    async cleanup({ runId, workspaceRoot, candidate, resources, retainCandidate, reason }) {
+      return cleanupCandidate(runId, workspaceRoot, candidate, resources, retainCandidate, reason);
     },
 
     async record({ result }) {
@@ -317,8 +416,13 @@ export function createGitCreatorEvolutionHost(
       }
       await mkdir(dirname(recordPath), { recursive: true, mode: 0o700 });
       const temporary = `${recordPath}.tmp-${process.pid}`;
-      await writeFile(temporary, body, { encoding: "utf8", mode: 0o600 });
-      await rename(temporary, recordPath);
+      try {
+        await writeFile(temporary, body, { encoding: "utf8", mode: 0o600 });
+        await rename(temporary, recordPath);
+      } finally {
+        await rm(temporary, { force: true });
+      }
+      await rm(evolutionPreparationPath(root, result.projection.runId), { force: true });
       try {
         options.recordAgentOps?.(result);
       } catch {
@@ -388,6 +492,76 @@ async function inspectCandidateSnapshot(
     })),
     changedAssets: changedAssets.map(({ fingerprint: _fingerprint, ...entry }) => entry),
   };
+}
+
+async function applyCreatorEdits(
+  candidateRoot: string,
+  mutableTargets: readonly string[],
+  edits: readonly { readonly path: string; readonly content: string }[],
+  maximumBytes: number,
+  signal: AbortSignal,
+): Promise<void> {
+  if (edits.length === 0 || edits.length > 64) {
+    throw new Error("Creator edit count is outside the host bound.");
+  }
+  const root = await realpath(candidateRoot);
+  const seen = new Set<string>();
+  let totalBytes = 0;
+  for (const edit of edits) {
+    signal.throwIfAborted();
+    if (
+      !isSafeRelativePath(edit.path)
+      || !mutableTargets.some((target) => pathMatchesTarget(edit.path, target))
+      || seen.has(edit.path)
+    ) {
+      throw new Error(`Creator edit is outside the mutable target allowlist: ${edit.path}`);
+    }
+    seen.add(edit.path);
+    const contents = Buffer.from(edit.content, "utf8");
+    totalBytes += contents.byteLength;
+    if (totalBytes > maximumBytes) throw new Error("Creator edits exceed the host output bound.");
+    const absolute = resolve(root, ...edit.path.split("/"));
+    if (!isContained(root, absolute)) throw new Error("Creator edit escaped the candidate worktree.");
+    await ensureSafeParentDirectories(root, dirname(absolute));
+    try {
+      const stats = await lstat(absolute);
+      if (!stats.isFile() || stats.isSymbolicLink()) {
+        throw new Error(`Creator edit target is not a regular file: ${edit.path}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const handle = await open(
+      absolute,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      await handle.writeFile(contents);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+}
+
+async function ensureSafeParentDirectories(root: string, directory: string): Promise<void> {
+  const relativeDirectory = relative(root, directory);
+  if (!relativeDirectory || relativeDirectory === ".") return;
+  if (!isContained(root, directory)) throw new Error("Creator edit parent escaped the candidate worktree.");
+  let current = root;
+  for (const segment of relativeDirectory.split(sep)) {
+    current = join(current, segment);
+    try {
+      const stats = await lstat(current);
+      if (!stats.isDirectory() || stats.isSymbolicLink()) {
+        throw new Error(`Creator edit parent is unsafe: ${relative(root, current)}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      await mkdir(current, { mode: 0o700 });
+    }
+  }
 }
 
 async function scanTree(root: string): Promise<Map<string, TreeEntry>> {
@@ -468,6 +642,7 @@ function missingAsset(path: string): TreeEntry {
 }
 
 async function cleanupCandidate(
+  runId: string,
   workspaceRoot: string,
   candidate: PreparedEvolutionCandidate,
   resources: readonly EvolutionCleanupResource[],
@@ -508,7 +683,7 @@ async function cleanupCandidate(
       statuses.set(candidate.branch, "removed");
     }
   }
-  return {
+  const projection: EvolutionCleanupProjection = {
     status: failures.size > 0 ? "failed" : retainCandidate ? "retained" : "completed",
     resources: resources.map((resource) => ({
       ...resource,
@@ -518,6 +693,142 @@ async function cleanupCandidate(
       ? { summary: `Cleanup failed for ${failures.size} retained resource(s): ${reason.slice(0, 240)}` }
       : {}),
   };
+  if (!retainCandidate && failures.size === 0) {
+    await rm(evolutionPreparationPath(root, runId), { force: true });
+  }
+  return projection;
+}
+
+async function ensureBranch(root: string, branch: string, commit: string): Promise<void> {
+  const branchRef = `refs/heads/${branch}`;
+  if (await gitSucceeds(root, ["show-ref", "--verify", branchRef])) {
+    const branchCommit = await git(root, ["rev-parse", branchRef]);
+    if (branchCommit !== commit) throw new Error(`Existing evolution branch identity mismatch: ${branch}`);
+    return;
+  }
+  await git(root, ["branch", branch, commit]);
+}
+
+async function preparationResourcesMatch(
+  root: string,
+  paths: ReturnType<typeof evolutionWorktreePaths>,
+  branch: string,
+  commit: string,
+): Promise<boolean> {
+  try {
+    if (await pathExists(paths.baseline)) {
+      const baselineRoot = await requireRepositoryRoot(paths.baseline, root);
+      if (await git(baselineRoot, ["rev-parse", "HEAD"]) !== commit) return false;
+    }
+    const branchRef = `refs/heads/${branch}`;
+    if (await gitSucceeds(root, ["show-ref", "--verify", branchRef])) {
+      if (await git(root, ["rev-parse", branchRef]) !== commit) return false;
+    }
+    if (await pathExists(paths.candidate)) {
+      const candidateRoot = await requireRepositoryRoot(paths.candidate, root);
+      if (
+        await git(candidateRoot, ["rev-parse", "HEAD"]) !== commit
+        || await currentBranch(candidateRoot, commit) !== branch
+      ) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function removePreparationResources(
+  root: string,
+  paths: ReturnType<typeof evolutionWorktreePaths>,
+  branch: string,
+): Promise<void> {
+  for (const worktree of [paths.candidate, paths.baseline]) {
+    if (!(await pathExists(worktree))) continue;
+    try {
+      await git(root, ["worktree", "remove", "--force", worktree]);
+    } catch {
+      await rm(worktree, { recursive: true, force: true });
+      await git(root, ["worktree", "prune"]);
+    }
+  }
+  if (await gitSucceeds(root, ["show-ref", "--verify", `refs/heads/${branch}`])) {
+    await git(root, ["branch", "-D", branch]);
+  }
+}
+
+async function loadPreparationJournal(path: string): Promise<PreparationJournal | undefined> {
+  try {
+    const raw = await readFile(path, "utf8");
+    if (Buffer.byteLength(raw) > MAX_RECORD_BYTES) throw new Error("Evolution preparation journal is oversized.");
+    const parsed = JSON.parse(raw) as Partial<PreparationJournal>;
+    if (
+      parsed.version !== 1
+      || typeof parsed.runId !== "string"
+      || typeof parsed.workspaceRoot !== "string"
+      || typeof parsed.candidateId !== "string"
+      || typeof parsed.baseCommit !== "string"
+      || typeof parsed.branch !== "string"
+      || !Array.isArray(parsed.resources)
+      || parsed.resources.length !== 3
+      || parsed.resources.some((resource) =>
+        !resource
+        || !["branch", "worktree", "baseline-worktree"].includes(resource.kind)
+        || typeof resource.identity !== "string"
+        || !["planned", "acquiring", "acquired"].includes(resource.status))
+    ) {
+      throw new Error("Evolution preparation journal is invalid.");
+    }
+    return parsed as PreparationJournal;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function preparationJournalMatches(
+  actual: PreparationJournal,
+  expected: Omit<PreparationJournal, "version">,
+): boolean {
+  return actual.runId === expected.runId
+    && actual.workspaceRoot === expected.workspaceRoot
+    && actual.candidateId === expected.candidateId
+    && actual.baseCommit === expected.baseCommit
+    && actual.branch === expected.branch
+    && canonicalJson(actual.resources.map(({ kind, identity }) => ({ kind, identity })).sort(compareResources))
+      === canonicalJson(expected.resources.map(({ kind, identity }) => ({ kind, identity })).sort(compareResources));
+}
+
+function compareResources(
+  left: Pick<EvolutionCleanupResource, "kind" | "identity">,
+  right: Pick<EvolutionCleanupResource, "kind" | "identity">,
+): number {
+  return `${left.kind}:${left.identity}`.localeCompare(`${right.kind}:${right.identity}`);
+}
+
+async function writePreparationJournal(path: string, journal: PreparationJournal): Promise<void> {
+  const directory = dirname(path);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const temporary = `${path}.tmp-${process.pid}`;
+  const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC, 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(journal, null, 2)}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await rename(temporary, path);
+  try {
+    const directoryHandle = await open(directory, constants.O_RDONLY);
+    try {
+      await directoryHandle.sync();
+    } finally {
+      await directoryHandle.close();
+    }
+  } catch {
+    // Some filesystems do not support directory fsync; the file itself is synced.
+  }
 }
 
 async function ensureWorktree(
@@ -595,15 +906,94 @@ async function gitRaw(
   args: readonly string[],
   extraEnvironment: Readonly<Record<string, string>> = {},
 ): Promise<string> {
-  const { stdout } = await execFile("git", [...args], {
+  const safeConfiguration = [
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "core.attributesFile=/dev/null",
+    "-c", "core.fsmonitor=false",
+    "-c", "commit.gpgSign=false",
+    "-c", "tag.gpgSign=false",
+    "-c", "diff.external=",
+    "-c", "submodule.recurse=false",
+    "-c", "checkout.recurseSubmodules=false",
+  ];
+  const environment: NodeJS.ProcessEnv = { ...process.env, ...extraEnvironment };
+  delete environment.GIT_CONFIG_PARAMETERS;
+  for (const key of Object.keys(environment)) {
+    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/u.test(key)) delete environment[key];
+  }
+  Object.assign(environment, {
+    GIT_CONFIG_COUNT: "0",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "/usr/bin/false",
+  });
+  const { stdout } = await execFile("git", [...safeConfiguration, ...args], {
     cwd,
-    env: { ...process.env, ...extraEnvironment },
+    env: environment,
     encoding: "utf8",
     maxBuffer: GIT_OUTPUT_LIMIT,
     timeout: 30_000,
     windowsHide: true,
   });
   return stdout;
+}
+
+async function assertSafeGitBoundary(root: string, head: string): Promise<void> {
+  const attributeFiles = new Set<string>();
+  let visited = 0;
+  const visit = async (directory: string, prefix: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === ".git" || entry.name === ".unclecode") continue;
+      visited += 1;
+      if (visited > MAX_TREE_ENTRIES) {
+        throw new Error("Evolution repository attribute scan exceeds its bound.");
+      }
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const absolutePath = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(absolutePath, relativePath);
+      } else if (entry.name === ".gitattributes") {
+        const stats = await lstat(absolutePath);
+        if (!stats.isFile() || stats.isSymbolicLink()) {
+          throw new Error(`Unsafe Git attribute source: ${relativePath}`);
+        }
+        attributeFiles.add(relativePath);
+        assertSafeAttributeContents(await readFile(absolutePath, "utf8"), relativePath);
+      }
+    }
+  };
+  await visit(root, "");
+
+  const tracked = splitNul(await gitRaw(root, ["ls-tree", "-r", "--name-only", "-z", head]));
+  for (const path of tracked) {
+    if (path.split("/").at(-1) !== ".gitattributes" || attributeFiles.has(path)) continue;
+    const contents = await gitRaw(root, ["show", `${head}:${path}`]);
+    assertSafeAttributeContents(contents, `${head}:${path}`);
+  }
+
+  const gitPath = (await git(root, ["rev-parse", "--git-path", "info/attributes"]));
+  const infoAttributes = resolve(root, gitPath);
+  if (await pathExists(infoAttributes)) {
+    const stats = await lstat(infoAttributes);
+    if (!stats.isFile() || stats.isSymbolicLink()) {
+      throw new Error("Unsafe Git info attribute source.");
+    }
+    assertSafeAttributeContents(await readFile(infoAttributes, "utf8"), "info/attributes");
+  }
+}
+
+function assertSafeAttributeContents(contents: string, source: string): void {
+  for (const rawLine of contents.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("#")) continue;
+    const attributes = line.split(/\s+/u).slice(1);
+    if (attributes.some((attribute) => /^(?:-|!)?(?:filter|diff|merge)(?:=|$)/iu.test(attribute))) {
+      throw new Error(`Unsafe external Git driver attribute in ${source}.`);
+    }
+  }
 }
 
 async function gitSucceeds(cwd: string, args: readonly string[]): Promise<boolean> {
@@ -641,6 +1031,10 @@ function evolutionArtifactPath(root: string, runId: string): string {
   return join(root, ".unclecode", "artifacts", safeIdentity(runId), "evolution-proposal.json");
 }
 
+function evolutionPreparationPath(root: string, runId: string): string {
+  return join(root, ".unclecode", "artifacts", safeIdentity(runId), "evolution-preparation.json");
+}
+
 function safeIdentity(value: string): string {
   const safe = value.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 96);
   return safe || "evolution-run";
@@ -670,6 +1064,16 @@ function candidateArtifactHash(snapshot: EvolutionCandidateSnapshot): string {
     changedAssets: snapshot.changedAssets
       .map(({ path, sha256 }) => ({ path, sha256 }))
       .sort((left, right) => left.path.localeCompare(right.path)),
+  });
+}
+
+function evaluationEvidenceArtifactHash(
+  snapshot: EvolutionCandidateSnapshot,
+  evaluatorEnvironmentHash: string,
+): string {
+  return metadataHash({
+    candidateArtifact: candidateArtifactHash(snapshot),
+    evaluatorEnvironmentHash,
   });
 }
 

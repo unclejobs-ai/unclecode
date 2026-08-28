@@ -1,5 +1,6 @@
 import { useState, useSyncExternalStore } from 'react'
 import './App.css'
+import { evolutionEvidenceLabel } from './evolution-labels.js'
 
 const COPY = {
   en: {
@@ -144,7 +145,7 @@ function EvolveView({ run, copy }) {
       const comparison = proposal.comparison
       const candidateHash = proposal.hashes?.candidateArtifact ?? proposal.hashes?.patch ?? proposal.hashes?.candidateCommit ?? '—'
       const attested = proposal.attestation?.branchExists === true && proposal.attestation?.worktreeExists === true
-      const evidenceLabel = proposal.stale ? 'stale' : 'verified'
+      const evidenceLabel = evolutionEvidenceLabel(proposal)
       return <section className="plane" key={proposal.id ?? i}>
         <div className="section-title"><div><span className="eyebrow">{proposal.candidateId ?? proposal.id}</span><h2>{copy.proposalStates[proposal.state] ?? proposal.state}{proposal.stale ? ` · ${copy.stale}` : ''}</h2></div><span className="guard-label">{proposal.humanApproval ?? copy.manual}</span></div>
         <div className="history-table">

@@ -43,6 +43,7 @@ test("execution trace contract exposes canonical event kinds", () => {
     "quality.refine_requested",
     "quality.pivot_requested",
     "quality.completed",
+    "evolution.proposed",
   ]);
 });
 

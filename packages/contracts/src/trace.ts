@@ -1,5 +1,6 @@
 import type {
   AskUserQuestionResult,
+  EvolutionProposalProjection,
   TerminalAgentRunStatus,
   TerminalAsyncJobStatus,
   WorkGraph,
@@ -45,6 +46,7 @@ export const EXECUTION_TRACE_EVENT_TYPES = [
   "quality.refine_requested",
   "quality.pivot_requested",
   "quality.completed",
+  "evolution.proposed",
 ] as const;
 
 export type ExecutionTraceEventType = (typeof EXECUTION_TRACE_EVENT_TYPES)[number];
@@ -460,6 +462,16 @@ export type QualityCompletedTraceEvent = QualityTraceBase & {
   readonly completedAt: number;
 };
 
+export type EvolutionProposedTraceEvent = {
+  readonly type: "evolution.proposed";
+  readonly level: "high-signal";
+  readonly runId: string;
+  /** Only durable proposals may enter the session/control-room projection. */
+  readonly recorded: true;
+  readonly proposal: EvolutionProposalProjection;
+  readonly startedAt: number;
+};
+
 export type ExecutionTraceEvent =
   | TurnStartedTraceEvent
   | ProviderRouteTraceEvent
@@ -489,4 +501,5 @@ export type ExecutionTraceEvent =
   | QualityGateEvaluatedTraceEvent
   | QualityRefineRequestedTraceEvent
   | QualityPivotRequestedTraceEvent
-  | QualityCompletedTraceEvent;
+  | QualityCompletedTraceEvent
+  | EvolutionProposedTraceEvent;

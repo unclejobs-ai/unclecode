@@ -26,6 +26,10 @@ export function applyTraceEventToAgentConsole(
   snapshot: AgentConsoleSnapshot,
   event: { readonly type: string },
 ): AgentConsoleSnapshot {
+  const evolutionSnapshot = applyEvolutionProposalEvent(snapshot, event);
+  if (evolutionSnapshot !== snapshot) {
+    return evolutionSnapshot;
+  }
   const lifecycleSnapshot = applyAgentLifecycleEvent(snapshot, event);
   if (lifecycleSnapshot !== snapshot) {
     return lifecycleSnapshot;
@@ -37,6 +41,28 @@ export function applyTraceEventToAgentConsole(
   }
 
   return applyToolLifecycleEvent(snapshot, event);
+}
+
+function applyEvolutionProposalEvent(
+  snapshot: AgentConsoleSnapshot,
+  event: { readonly type: string },
+): AgentConsoleSnapshot {
+  if (event.type !== "evolution.proposed") return snapshot;
+  const trace = asRecord(event);
+  const proposal = asRecord(trace?.proposal);
+  const runId = trace ? readNonEmptyString(trace, "runId") : undefined;
+  if (trace?.recorded !== true || !proposal || !runId || proposal.runId !== runId) {
+    return snapshot;
+  }
+  const id = readNonEmptyString(proposal, "id");
+  const candidateId = readNonEmptyString(proposal, "candidateId");
+  if (!id || !candidateId) return snapshot;
+  const retained = (snapshot.evolutionProposals ?? []).filter((current) =>
+    current.id !== id && !(current.runId === runId && current.candidateId === candidateId));
+  return parseAgentConsoleSnapshot({
+    ...snapshot,
+    evolutionProposals: [...retained, proposal].slice(-32),
+  }) ?? snapshot;
 }
 
 /**

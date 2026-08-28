@@ -110,6 +110,21 @@ export type PluginBeforeRunCompleteEvent = PluginPlanCreatedEvent & {
   readonly producerId: string;
   readonly independentReviewerAvailable: boolean;
   readonly reviewRequired?: boolean;
+  /**
+   * Host-recorded creator result. The runtime supplies this only after the
+   * proposal crossed `evolutionProposed`; profile selection and ordinary gate
+   * success never synthesize it.
+   */
+  readonly evolution?: PluginCreatorEvolutionCompletion;
+};
+
+export type PluginCreatorEvolutionCompletion = {
+  readonly proposalId: string;
+  readonly proposal?: EvolutionProposal;
+  readonly context?: EvolutionValidationContext;
+  readonly state: "pr-ready" | "rejected" | "failed" | "cancelled" | "stale";
+  readonly recorded: boolean;
+  readonly stale: boolean;
 };
 
 export type PluginContextContributeEvent = {
@@ -535,6 +550,10 @@ export function registerBuiltInSccQualityEngine(
       }),
     }),
     beforeRunComplete: (event) => {
+      if (event.projection.profile === "creator") {
+        const evolutionDecision = validateCreatorEvolutionCompletion(event.evolution);
+        if (evolutionDecision !== undefined) return evolutionDecision;
+      }
       const result = validateRunCompletion(
         event.projection,
         event.evidence,
@@ -560,6 +579,48 @@ export function registerBuiltInSccQualityEngine(
       validateEvolutionProposal(event.proposal, event.context),
     ),
   });
+}
+
+function validateCreatorEvolutionCompletion(
+  evolution: PluginCreatorEvolutionCompletion | undefined,
+): PluginLifecycleDecision | undefined {
+  if (evolution === undefined) {
+    return {
+      action: "block",
+      reason: "Creator completion requires a recorded isolated evolution proposal; this runtime has not produced one.",
+      failures: ["CREATOR_EVOLUTION_LIFECYCLE_UNAVAILABLE"],
+    };
+  }
+  if (!evolution.recorded) {
+    return {
+      action: "block",
+      reason: "Creator evolution exists only as an unrecorded runtime claim.",
+      failures: ["CREATOR_EVOLUTION_NOT_RECORDED"],
+    };
+  }
+  if (evolution.stale || evolution.state === "stale") {
+    return {
+      action: "block",
+      reason: "Creator evolution evidence is stale for the current candidate.",
+      failures: ["CREATOR_EVOLUTION_STALE"],
+    };
+  }
+  if (evolution.state !== "pr-ready") {
+    return {
+      action: "block",
+      reason: `Creator evolution candidate is ${evolution.state}, not PR-ready.`,
+      failures: ["CREATOR_EVOLUTION_NOT_PR_READY"],
+    };
+  }
+  if (!evolution.proposal || !evolution.context) {
+    return {
+      action: "block",
+      reason: "Creator evolution is marked PR-ready without its validated proposal evidence.",
+      failures: ["CREATOR_EVOLUTION_EVIDENCE_MISSING"],
+    };
+  }
+  const validation = validateEvolutionProposal(evolution.proposal, evolution.context);
+  return validation.valid ? undefined : validationDecision(validation);
 }
 
 function qualityStandards(profile: QualityProfile, stage: QualityHarnessStage): string {

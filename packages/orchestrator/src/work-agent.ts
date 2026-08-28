@@ -10,6 +10,7 @@ import {
 } from "@second-claude/core";
 import type {
   OrchestratorStepTraceEvent,
+  EvolutionProposedTraceEvent,
   QualityCompletedTraceEvent,
   QualityGateEvaluatedTraceEvent,
   QualityGateStatus,
@@ -57,6 +58,7 @@ import {
   type QualityProviderRoute,
   type QualityWorkspaceEntry,
 } from "./quality-runtime.js";
+import type { CreatorEvolutionService } from "./evolution-runtime.js";
 
 type ReasoningLike = {
   readonly effort: string;
@@ -120,7 +122,8 @@ export type OrchestratedWorkAgentTraceEvent<TraceEvent extends { readonly type: 
   | QualityGateEvaluatedTraceEvent
   | QualityRefineRequestedTraceEvent
   | QualityPivotRequestedTraceEvent
-  | QualityCompletedTraceEvent;
+  | QualityCompletedTraceEvent
+  | EvolutionProposedTraceEvent;
 
 export interface OrchestratedWorkTurnAgent<
   Attachment,
@@ -391,6 +394,7 @@ export class WorkAgent<
   private readonly workspaceRoot: string;
   private readonly pluginHost: PluginHost | undefined;
   private readonly qualityRisk: RiskLevel | undefined;
+  private readonly creatorEvolutionService: Pick<CreatorEvolutionService, "run" | "verifyFresh"> | undefined;
   private directRoute: QualityProviderRoute;
   private readonly commodityRoute: QualityProviderRoute | undefined;
   private readonly reviewRoute: QualityProviderRoute | undefined;
@@ -408,6 +412,7 @@ export class WorkAgent<
     workspaceRoot?: string | undefined;
     pluginHost?: PluginHost | undefined;
     qualityRisk?: RiskLevel | undefined;
+    creatorEvolutionService?: Pick<CreatorEvolutionService, "run" | "verifyFresh"> | undefined;
     directRoute?: QualityProviderRoute | undefined;
     commodityRoute?: QualityProviderRoute | undefined;
     reviewRoute?: QualityProviderRoute | undefined;
@@ -422,6 +427,7 @@ export class WorkAgent<
     this.workspaceRoot = input.workspaceRoot ?? process.cwd();
     this.pluginHost = input.pluginHost;
     this.qualityRisk = input.qualityRisk;
+    this.creatorEvolutionService = input.creatorEvolutionService;
     this.directRoute = input.directRoute ?? { provider: "unknown", model: input.model };
     this.commodityRoute = input.commodityRoute;
     this.reviewRoute = input.reviewRoute;
@@ -1810,6 +1816,33 @@ export class WorkAgent<
         });
         return this.terminateQuality(quality);
       }
+      let creatorEvolution: Awaited<ReturnType<CreatorEvolutionService["run"]>> | undefined;
+      if (quality.profile === "creator" && this.creatorEvolutionService) {
+        try {
+          creatorEvolution = await this.creatorEvolutionService.run({
+            runId: quality.runId,
+            workspaceRoot: this.workspaceRoot,
+            prompt,
+            creatorId: completionProducerId,
+            mutableTargets: qualityWritePaths(quality),
+            dispatchEvolutionProposed: (event) => this.pluginHost!.dispatchEvolutionProposed(event),
+            signal: turnSignal,
+          });
+        } catch {
+          // The built-in completion hook remains fail-closed when the injected
+          // host cannot return a durable lifecycle result.
+        }
+        if (creatorEvolution?.recorded) {
+          this.emitTrace({
+            type: "evolution.proposed",
+            level: "high-signal",
+            runId: quality.runId,
+            recorded: true,
+            proposal: creatorEvolution.projection,
+            startedAt: Date.parse(creatorEvolution.projection.createdAt),
+          });
+        }
+      }
       const projection: QualityRunProjection = {
         runId: quality.runId,
         profile: quality.profile,
@@ -1825,7 +1858,7 @@ export class WorkAgent<
         gateDecision: "proceed",
         completedStages: [...quality.completedStages],
       };
-      const completion = await this.pluginHost.dispatchBeforeRunComplete({
+      let completion = await this.pluginHost.dispatchBeforeRunComplete({
         runId: quality.runId,
         graph: quality.graph ?? createWorkGraph([], Date.now(), {
           graphId: quality.graphId,
@@ -1837,7 +1870,62 @@ export class WorkAgent<
         producerId: completionProducerId,
         independentReviewerAvailable: criticIndependent,
         reviewRequired: quality.profile !== "minimal",
+        ...(creatorEvolution === undefined
+          ? {}
+          : {
+              evolution: {
+                proposalId: creatorEvolution.projection.id,
+                state: creatorEvolution.status,
+                recorded: creatorEvolution.recorded,
+                stale: creatorEvolution.projection.stale,
+                ...(creatorEvolution.proposal === undefined ? {} : { proposal: creatorEvolution.proposal }),
+                ...(creatorEvolution.context === undefined ? {} : { context: creatorEvolution.context }),
+              },
+            }),
       });
+      if (creatorEvolution?.status === "pr-ready" && this.creatorEvolutionService) {
+        try {
+          const freshEvolution = await this.creatorEvolutionService.verifyFresh(creatorEvolution);
+          if (freshEvolution !== creatorEvolution && freshEvolution.recorded) {
+            this.emitTrace({
+              type: "evolution.proposed",
+              level: "high-signal",
+              runId: quality.runId,
+              recorded: true,
+              proposal: freshEvolution.projection,
+              startedAt: Date.parse(freshEvolution.projection.createdAt),
+            });
+          }
+          creatorEvolution = freshEvolution;
+          if (freshEvolution.status !== "pr-ready" || freshEvolution.projection.stale) {
+            const failures = freshEvolution.projection.failures.length > 0
+              ? freshEvolution.projection.failures
+              : ["CREATOR_EVOLUTION_STALE"];
+            completion = {
+              action: "block",
+              decisions: [{
+                pluginName: "unclecode-evolution-runtime",
+                action: "block",
+                reason: "Creator evolution changed after completion validation.",
+                failures,
+              }],
+              failures,
+            };
+          }
+        } catch {
+          const failures = ["CREATOR_EVOLUTION_FRESHNESS_FAILED"];
+          completion = {
+            action: "block",
+            decisions: [{
+              pluginName: "unclecode-evolution-runtime",
+              action: "block",
+              reason: "Creator evolution freshness could not be proven after completion validation.",
+              failures,
+            }],
+            failures,
+          };
+        }
+      }
       const postCompletionManifest = quality.artifacts.captureWorkspaceManifest(
         qualityWritePaths(quality),
       );

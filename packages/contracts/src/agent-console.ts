@@ -130,6 +130,74 @@ export type WorkGraph = {
   readonly approval: "pending" | "approved" | "rejected";
 };
 
+export const MAX_EVOLUTION_PROPOSALS = 32;
+
+export type EvolutionCleanupResourceProjection = {
+  readonly kind: "branch" | "worktree" | "baseline-worktree";
+  readonly identity: string;
+  readonly status: "removed" | "retained" | "cleanup-failed";
+};
+
+export type EvolutionCleanupProjection = {
+  readonly status: "completed" | "retained" | "failed";
+  readonly resources: readonly EvolutionCleanupResourceProjection[];
+  readonly summary?: string;
+};
+
+/**
+ * Bounded, content-free projection of a host-recorded evolution candidate.
+ * Candidate file bodies and evaluator output are artifact-owned and never
+ * enter a console snapshot.
+ */
+export type EvolutionProposalProjection = {
+  readonly id: string;
+  readonly runId: string;
+  readonly candidateId: string;
+  readonly creatorId: string;
+  readonly evaluatorId: string;
+  readonly attestorId: string;
+  readonly state: "pr-ready" | "rejected" | "failed" | "cancelled" | "stale";
+  readonly isolation: "worktree";
+  readonly isolatedBranch?: string;
+  readonly isolatedWorktree?: string;
+  readonly heldOutBenchmark: boolean;
+  readonly heldOutBenchmarkId: string;
+  readonly humanApproval: "pending";
+  readonly mergeRequiresHumanApproval: true;
+  readonly stale: boolean;
+  readonly changedAssets: readonly { readonly path: string; readonly sha256: string }[];
+  readonly hashes: {
+    readonly baseCommit?: string;
+    readonly candidateCommit?: string;
+    readonly patch?: string;
+    readonly candidateArtifact?: string;
+    readonly evaluator: string;
+    readonly evaluatorEnvironment: string;
+    readonly policy: string;
+    readonly suite: string;
+    readonly baselineResult?: string;
+    readonly candidateResult?: string;
+  };
+  readonly comparison?: {
+    readonly baselineScore: number;
+    readonly candidateScore: number;
+    readonly delta: number;
+    readonly passed: boolean;
+    readonly thresholdsHash: string;
+  };
+  readonly attestation?: {
+    readonly timestamp: string;
+    readonly maxAgeMs: number;
+    readonly branchExists: boolean;
+    readonly worktreeExists: boolean;
+  };
+  readonly cleanup: EvolutionCleanupProjection;
+  readonly failures: readonly string[];
+  readonly summary: string;
+  readonly artifactRefs: readonly string[];
+  readonly createdAt: string;
+};
+
 export type WorkNodeDispatchOutcome = {
   readonly nodeId: string;
   readonly status: Extract<WorkNodeStatus, "completed" | "failed" | "cancelled" | "blocked">;
@@ -347,6 +415,7 @@ export type AgentConsoleSnapshot = {
   readonly manifest?: PersistedPromptManifest;
   readonly pendingDecision?: AskUserQuestionRequest;
   readonly workGraph?: WorkGraph;
+  readonly evolutionProposals?: readonly EvolutionProposalProjection[];
   readonly activity: readonly ToolActivity[];
   readonly agents: readonly AgentRun[];
   readonly jobs: readonly AsyncJob[];
@@ -391,6 +460,9 @@ export function createAgentConsoleSnapshot(
       ? { pendingDecision: copyAskUserQuestionRequest(input.pendingDecision) }
       : {}),
     ...(input.workGraph ? { workGraph: copyWorkGraph(input.workGraph) } : {}),
+    ...(input.evolutionProposals && input.evolutionProposals.length > 0
+      ? { evolutionProposals: input.evolutionProposals.slice(-MAX_EVOLUTION_PROPOSALS).map(copyEvolutionProposal) }
+      : {}),
     activity: input.activity.map((activity) => ({
       id: activity.id,
       toolCallId: activity.toolCallId,
@@ -525,6 +597,90 @@ function copyWorkGraph(graph: WorkGraph): WorkGraph {
       artifactRefs: [...(node.artifactRefs ?? [])],
       reviewRequired: node.reviewRequired ?? false,
     })),
+  };
+}
+
+function copyEvolutionProposal(proposal: EvolutionProposalProjection): EvolutionProposalProjection {
+  return {
+    id: proposal.id.slice(0, 256),
+    runId: proposal.runId.slice(0, 256),
+    candidateId: proposal.candidateId.slice(0, 256),
+    creatorId: proposal.creatorId.slice(0, 256),
+    evaluatorId: proposal.evaluatorId.slice(0, 256),
+    attestorId: proposal.attestorId.slice(0, 256),
+    state: proposal.state,
+    isolation: "worktree",
+    ...(proposal.isolatedBranch === undefined
+      ? {}
+      : { isolatedBranch: proposal.isolatedBranch.slice(0, 512) }),
+    ...(proposal.isolatedWorktree === undefined
+      ? {}
+      : { isolatedWorktree: proposal.isolatedWorktree.slice(0, 1_000) }),
+    heldOutBenchmark: proposal.heldOutBenchmark,
+    heldOutBenchmarkId: proposal.heldOutBenchmarkId.slice(0, 256),
+    humanApproval: "pending",
+    mergeRequiresHumanApproval: true,
+    stale: proposal.stale,
+    changedAssets: proposal.changedAssets.slice(0, 128).map((entry) => ({
+      path: entry.path.slice(0, 1_000),
+      sha256: entry.sha256.slice(0, 80),
+    })),
+    hashes: {
+      ...(proposal.hashes.baseCommit === undefined ? {} : { baseCommit: proposal.hashes.baseCommit.slice(0, 80) }),
+      ...(proposal.hashes.candidateCommit === undefined
+        ? {}
+        : { candidateCommit: proposal.hashes.candidateCommit.slice(0, 80) }),
+      ...(proposal.hashes.patch === undefined ? {} : { patch: proposal.hashes.patch.slice(0, 80) }),
+      ...(proposal.hashes.candidateArtifact === undefined
+        ? {}
+        : { candidateArtifact: proposal.hashes.candidateArtifact.slice(0, 80) }),
+      evaluator: proposal.hashes.evaluator.slice(0, 80),
+      evaluatorEnvironment: proposal.hashes.evaluatorEnvironment.slice(0, 80),
+      policy: proposal.hashes.policy.slice(0, 80),
+      suite: proposal.hashes.suite.slice(0, 80),
+      ...(proposal.hashes.baselineResult === undefined
+        ? {}
+        : { baselineResult: proposal.hashes.baselineResult.slice(0, 80) }),
+      ...(proposal.hashes.candidateResult === undefined
+        ? {}
+        : { candidateResult: proposal.hashes.candidateResult.slice(0, 80) }),
+    },
+    ...(proposal.comparison === undefined
+      ? {}
+      : {
+          comparison: {
+            baselineScore: proposal.comparison.baselineScore,
+            candidateScore: proposal.comparison.candidateScore,
+            delta: proposal.comparison.delta,
+            passed: proposal.comparison.passed,
+            thresholdsHash: proposal.comparison.thresholdsHash.slice(0, 80),
+          },
+        }),
+    ...(proposal.attestation === undefined
+      ? {}
+      : {
+          attestation: {
+            timestamp: proposal.attestation.timestamp.slice(0, 80),
+            maxAgeMs: proposal.attestation.maxAgeMs,
+            branchExists: proposal.attestation.branchExists,
+            worktreeExists: proposal.attestation.worktreeExists,
+          },
+        }),
+    cleanup: {
+      status: proposal.cleanup.status,
+      resources: proposal.cleanup.resources.slice(0, 16).map((resource) => ({
+        kind: resource.kind,
+        identity: resource.identity.slice(0, 1_000),
+        status: resource.status,
+      })),
+      ...(proposal.cleanup.summary === undefined
+        ? {}
+        : { summary: proposal.cleanup.summary.slice(0, 512) }),
+    },
+    failures: proposal.failures.slice(0, 32).map((failure) => failure.slice(0, 256)),
+    summary: proposal.summary.slice(0, 512),
+    artifactRefs: proposal.artifactRefs.slice(0, 32).map((reference) => reference.slice(0, 1_000)),
+    createdAt: proposal.createdAt.slice(0, 80),
   };
 }
 
@@ -663,6 +819,11 @@ const MAX_PERSISTED_AGENT_RUNS = 128;
 const MAX_PERSISTED_ASYNC_JOBS = 128;
 const AGENT_RUN_STATUS_SET = new Set<string>(AGENT_RUN_STATUSES);
 const ASYNC_JOB_STATUS_SET = new Set<string>(ASYNC_JOB_STATUSES);
+const EVOLUTION_STATE_SET = new Set(["pr-ready", "rejected", "failed", "cancelled", "stale"] as const);
+const EVOLUTION_CLEANUP_STATUS_SET = new Set(["completed", "retained", "failed"] as const);
+const EVOLUTION_RESOURCE_KIND_SET = new Set(["branch", "worktree", "baseline-worktree"] as const);
+const EVOLUTION_RESOURCE_STATUS_SET = new Set(["removed", "retained", "cleanup-failed"] as const);
+const SHA256_DIGEST = /^sha256:[a-f0-9]{64}$/;
 
 /**
  * Validates the durable console projection at the resume boundary. The parser
@@ -680,6 +841,9 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     ? parseAskUserQuestionRequest(record.pendingDecision)
     : undefined;
   const workGraph = hasOwn(record, "workGraph") ? parseWorkGraph(record.workGraph) : undefined;
+  const evolutionProposals = hasOwn(record, "evolutionProposals")
+    ? parseEvolutionProposals(record.evolutionProposals)
+    : undefined;
   const mainUsage = hasOwn(record, "mainUsage") ? parseAgentRunUsage(record.mainUsage) : undefined;
   const activityValue = record.activity;
 
@@ -687,6 +851,7 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     (hasOwn(record, "manifest") && !manifest)
     || (hasOwn(record, "pendingDecision") && !pendingDecision)
     || (hasOwn(record, "workGraph") && !workGraph)
+    || (hasOwn(record, "evolutionProposals") && !evolutionProposals)
     || (hasOwn(record, "mainUsage") && !mainUsage)
     || !Array.isArray(activityValue)
   ) {
@@ -725,11 +890,242 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     ...(manifest ? { manifest } : {}),
     ...(pendingDecision ? { pendingDecision } : {}),
     ...(workGraph ? { workGraph } : {}),
+    ...(evolutionProposals && evolutionProposals.length > 0 ? { evolutionProposals } : {}),
     activity,
     agents,
     jobs,
     ...(mainUsage ? { mainUsage } : {}),
   });
+}
+
+function parseEvolutionProposals(value: unknown): readonly EvolutionProposalProjection[] | undefined {
+  if (!Array.isArray(value) || value.length > MAX_EVOLUTION_PROPOSALS) return undefined;
+  const parsed = value.map(parseEvolutionProposal);
+  return parsed.every((item): item is EvolutionProposalProjection => item !== undefined)
+    ? parsed
+    : undefined;
+}
+
+function parseEvolutionProposal(value: unknown): EvolutionProposalProjection | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  const requiredIdentities = ["id", "runId", "candidateId", "creatorId", "evaluatorId", "attestorId"] as const;
+  const state = record.state;
+  const changedAssets = parseEvolutionChangedAssets(record.changedAssets);
+  const hashes = parseEvolutionHashes(record.hashes);
+  const comparison = hasOwn(record, "comparison") ? parseEvolutionComparison(record.comparison) : undefined;
+  const attestation = hasOwn(record, "attestation") ? parseEvolutionAttestation(record.attestation) : undefined;
+  const cleanup = parseEvolutionCleanup(record.cleanup);
+  const failures = parseBoundedEvolutionStrings(record.failures, 32, 256);
+  const artifactRefs = parseBoundedEvolutionStrings(record.artifactRefs, 32, 1_000);
+  if (
+    !requiredIdentities.every((key) => isBoundedNonEmptyString(record[key], 256))
+    || !EVOLUTION_STATE_SET.has(state as EvolutionProposalProjection["state"])
+    || record.isolation !== "worktree"
+    || (record.isolatedBranch !== undefined && !isBoundedNonEmptyString(record.isolatedBranch, 512))
+    || (record.isolatedWorktree !== undefined && !isBoundedNonEmptyString(record.isolatedWorktree, 1_000))
+    || typeof record.heldOutBenchmark !== "boolean"
+    || !isBoundedNonEmptyString(record.heldOutBenchmarkId, 256)
+    || record.humanApproval !== "pending"
+    || record.mergeRequiresHumanApproval !== true
+    || typeof record.stale !== "boolean"
+    || !changedAssets
+    || !hashes
+    || (hasOwn(record, "comparison") && !comparison)
+    || (hasOwn(record, "attestation") && !attestation)
+    || !cleanup
+    || !failures
+    || !isBoundedString(record.summary, 512)
+    || !artifactRefs
+    || !isCanonicalUtcMilliseconds(record.createdAt)
+  ) {
+    return undefined;
+  }
+  return copyEvolutionProposal({
+    id: record.id as string,
+    runId: record.runId as string,
+    candidateId: record.candidateId as string,
+    creatorId: record.creatorId as string,
+    evaluatorId: record.evaluatorId as string,
+    attestorId: record.attestorId as string,
+    state: state as EvolutionProposalProjection["state"],
+    isolation: "worktree",
+    ...(typeof record.isolatedBranch === "string" ? { isolatedBranch: record.isolatedBranch } : {}),
+    ...(typeof record.isolatedWorktree === "string" ? { isolatedWorktree: record.isolatedWorktree } : {}),
+    heldOutBenchmark: record.heldOutBenchmark,
+    heldOutBenchmarkId: record.heldOutBenchmarkId as string,
+    humanApproval: "pending",
+    mergeRequiresHumanApproval: true,
+    stale: record.stale,
+    changedAssets,
+    hashes,
+    ...(comparison ? { comparison } : {}),
+    ...(attestation ? { attestation } : {}),
+    cleanup,
+    failures,
+    summary: record.summary as string,
+    artifactRefs,
+    createdAt: record.createdAt as string,
+  });
+}
+
+function parseEvolutionChangedAssets(
+  value: unknown,
+): EvolutionProposalProjection["changedAssets"] | undefined {
+  if (!Array.isArray(value) || value.length > 128) return undefined;
+  const parsed = value.map((entry) => {
+    const record = asRecord(entry);
+    return record
+      && isBoundedNonEmptyString(record.path, 1_000)
+      && isBoundedNonEmptyString(record.sha256, 80)
+      ? { path: record.path, sha256: record.sha256 }
+      : undefined;
+  });
+  return parsed.every((entry): entry is { readonly path: string; readonly sha256: string } => entry !== undefined)
+    ? parsed
+    : undefined;
+}
+
+function parseEvolutionHashes(value: unknown): EvolutionProposalProjection["hashes"] | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  const required = ["evaluator", "evaluatorEnvironment", "policy", "suite"] as const;
+  const optional = [
+    "baseCommit",
+    "candidateCommit",
+    "patch",
+    "candidateArtifact",
+    "baselineResult",
+    "candidateResult",
+  ] as const;
+  if (
+    !required.every((key) => typeof record[key] === "string" && SHA256_DIGEST.test(record[key]))
+    || !optional.every((key) => record[key] === undefined || isBoundedNonEmptyString(record[key], 80))
+  ) {
+    return undefined;
+  }
+  return {
+    ...(typeof record.baseCommit === "string" ? { baseCommit: record.baseCommit } : {}),
+    ...(typeof record.candidateCommit === "string" ? { candidateCommit: record.candidateCommit } : {}),
+    ...(typeof record.patch === "string" ? { patch: record.patch } : {}),
+    ...(typeof record.candidateArtifact === "string" ? { candidateArtifact: record.candidateArtifact } : {}),
+    evaluator: record.evaluator as string,
+    evaluatorEnvironment: record.evaluatorEnvironment as string,
+    policy: record.policy as string,
+    suite: record.suite as string,
+    ...(typeof record.baselineResult === "string" ? { baselineResult: record.baselineResult } : {}),
+    ...(typeof record.candidateResult === "string" ? { candidateResult: record.candidateResult } : {}),
+  };
+}
+
+function parseEvolutionComparison(
+  value: unknown,
+): NonNullable<EvolutionProposalProjection["comparison"]> | undefined {
+  const record = asRecord(value);
+  if (
+    !record
+    || !isFiniteNumber(record.baselineScore)
+    || !isFiniteNumber(record.candidateScore)
+    || !isFiniteNumber(record.delta)
+    || typeof record.passed !== "boolean"
+    || typeof record.thresholdsHash !== "string"
+    || !SHA256_DIGEST.test(record.thresholdsHash)
+  ) {
+    return undefined;
+  }
+  return {
+    baselineScore: record.baselineScore,
+    candidateScore: record.candidateScore,
+    delta: record.delta,
+    passed: record.passed,
+    thresholdsHash: record.thresholdsHash,
+  };
+}
+
+function parseEvolutionAttestation(
+  value: unknown,
+): NonNullable<EvolutionProposalProjection["attestation"]> | undefined {
+  const record = asRecord(value);
+  if (
+    !record
+    || !isCanonicalUtcMilliseconds(record.timestamp)
+    || !isNonNegativeInteger(record.maxAgeMs)
+    || record.maxAgeMs > 3_600_000
+    || typeof record.branchExists !== "boolean"
+    || typeof record.worktreeExists !== "boolean"
+  ) {
+    return undefined;
+  }
+  return {
+    timestamp: record.timestamp,
+    maxAgeMs: record.maxAgeMs,
+    branchExists: record.branchExists,
+    worktreeExists: record.worktreeExists,
+  };
+}
+
+function parseEvolutionCleanup(value: unknown): EvolutionCleanupProjection | undefined {
+  const record = asRecord(value);
+  if (
+    !record
+    || !EVOLUTION_CLEANUP_STATUS_SET.has(record.status as EvolutionCleanupProjection["status"])
+    || !Array.isArray(record.resources)
+    || record.resources.length > 16
+    || (record.summary !== undefined && !isBoundedString(record.summary, 512))
+  ) {
+    return undefined;
+  }
+  const resources = record.resources.map((entry) => {
+    const resource = asRecord(entry);
+    return resource
+      && EVOLUTION_RESOURCE_KIND_SET.has(resource.kind as EvolutionCleanupResourceProjection["kind"])
+      && isBoundedNonEmptyString(resource.identity, 1_000)
+      && EVOLUTION_RESOURCE_STATUS_SET.has(resource.status as EvolutionCleanupResourceProjection["status"])
+      ? {
+          kind: resource.kind as EvolutionCleanupResourceProjection["kind"],
+          identity: resource.identity,
+          status: resource.status as EvolutionCleanupResourceProjection["status"],
+        }
+      : undefined;
+  });
+  if (!resources.every((entry): entry is EvolutionCleanupResourceProjection => entry !== undefined)) {
+    return undefined;
+  }
+  return {
+    status: record.status as EvolutionCleanupProjection["status"],
+    resources,
+    ...(typeof record.summary === "string" ? { summary: record.summary } : {}),
+  };
+}
+
+function parseBoundedEvolutionStrings(
+  value: unknown,
+  maximumItems: number,
+  maximumLength: number,
+): readonly string[] | undefined {
+  return Array.isArray(value)
+    && value.length <= maximumItems
+    && value.every((entry) => isBoundedNonEmptyString(entry, maximumLength))
+    ? value
+    : undefined;
+}
+
+function isBoundedString(value: unknown, maximumLength: number): value is string {
+  return typeof value === "string" && value.length <= maximumLength;
+}
+
+function isBoundedNonEmptyString(value: unknown, maximumLength: number): value is string {
+  return isBoundedString(value, maximumLength) && value.trim().length > 0;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isCanonicalUtcMilliseconds(value: unknown): value is string {
+  return typeof value === "string"
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)
+    && Number.isFinite(Date.parse(value));
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

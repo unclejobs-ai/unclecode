@@ -50,6 +50,7 @@ function createRepository() {
 }
 
 function config() {
+  const environment = { locale: "C", timezone: "UTC", network: "disabled" };
   return {
     evaluator: {
       id: "git-held-out-evaluator",
@@ -58,6 +59,7 @@ function config() {
       assets: ["host/evaluator.json"],
     },
     policyAssets: ["AGENTS.md"],
+    evaluatorEnvironmentHash: sha(JSON.stringify(environment)),
     suite: {
       id: "git-held-out-suite",
       version: "1.0.0",
@@ -68,7 +70,7 @@ function config() {
         minimumDelta: 0.1,
         maximumRegression: 0,
       },
-      environment: { locale: "C", timezone: "UTC", network: "disabled" },
+      environment,
     },
     attestorId: "unclecode-git-attestor",
     maxAttestationAgeMs: 300_000,
@@ -109,10 +111,14 @@ test("the Git host creates one isolated local proposal, persists it, and never c
   const host = createGitCreatorEvolutionHost({
     workspaceRoot: root,
     now: () => new Date(NOW),
-    async runCreator(input) {
+    async generateCreatorEdits(input) {
       assert.deepEqual(input.mutableTargets, ["skills/creator.md"]);
-      writeFileSync(path.join(input.candidate.worktree, "skills", "creator.md"), "creator v2\n");
-      return { status: "completed", summary: "creator completed in isolated worktree" };
+      assert.equal("candidate" in input, false, "the no-tools creator broker must not receive a host path");
+      return {
+        status: "completed",
+        summary: "creator returned a bounded edit",
+        edits: [{ path: "skills/creator.md", content: "creator v2\n" }],
+      };
     },
     async runEvaluator(input) {
       assert.equal(readFileSync(path.join(input.baselineWorktree, "skills", "creator.md"), "utf8"), "creator reviewed v1.1\n");
@@ -213,15 +219,18 @@ test("the Git host creates one isolated local proposal, persists it, and never c
   }
 });
 
-test("unsupported candidate entries fail closed and remove branch/worktree resources", async () => {
+test("the host write API rejects creator path escapes and removes branch/worktree resources", async () => {
   const root = createRepository();
   const lifecycleDispatch = dispatch();
   const host = createGitCreatorEvolutionHost({
     workspaceRoot: root,
     now: () => new Date(NOW),
-    async runCreator(input) {
-      symlinkSync("creator.md", path.join(input.candidate.worktree, "skills", "unsafe-link"));
-      return { status: "completed", summary: "creator made an unsafe link" };
+    async generateCreatorEdits() {
+      return {
+        status: "completed",
+        summary: "creator attempted an escape",
+        edits: [{ path: "../outside.txt", content: "escaped" }],
+      };
     },
     async runEvaluator() {
       throw new Error("evaluator must not run for an unsafe candidate");
@@ -240,9 +249,211 @@ test("unsupported candidate entries fail closed and remove branch/worktree resou
       signal: new AbortController().signal,
     });
     assert.equal(result.status, "failed");
-    assert.ok(result.projection.failures.includes("EVOLUTION_UNSUPPORTED_ASSET"));
+    assert.ok(result.projection.failures.includes("EVOLUTION_CREATOR_FAILED"));
     assert.equal(result.projection.cleanup.status, "completed");
     assert.equal(lifecycleDispatch.count, 0);
+    assert.equal(existsSync(result.projection.isolatedWorktree), false);
+    assert.equal(
+      git(root, ["for-each-ref", "--format=%(refname:short)", `refs/heads/${result.projection.isolatedBranch}`]),
+      "",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("unsafe Git filter attributes fail closed before a clean filter can execute", async () => {
+  const root = createRepository();
+  const marker = path.join(root, "filter-executed.txt");
+  git(root, ["config", "filter.evil.clean", `sh -c 'touch ${marker}; cat'`]);
+  git(root, ["config", "filter.evil.smudge", "cat"]);
+  writeFileSync(path.join(root, ".gitattributes"), "skills/creator.md filter=evil\n");
+  const host = createGitCreatorEvolutionHost({
+    workspaceRoot: root,
+    now: () => new Date(NOW),
+    async generateCreatorEdits() {
+      return {
+        status: "completed",
+        summary: "creator edit",
+        edits: [{ path: "skills/creator.md", content: "creator v2\n" }],
+      };
+    },
+    async runEvaluator() {
+      throw new Error("unsafe Git attributes must block before evaluation");
+    },
+  });
+  try {
+    const result = await new CreatorEvolutionService({ config: config(), host, now: () => new Date(NOW) }).run({
+      runId: "git-run-filter",
+      workspaceRoot: root,
+      prompt: "Create a stronger creator skill.",
+      creatorId: "isolated-creator",
+      mutableTargets: ["skills/creator.md"],
+      dispatchEvolutionProposed: dispatch().run,
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.status, "failed");
+    assert.equal(existsSync(marker), false, "Git clean/smudge filters must never execute");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resource acquisition is durably journaled before baseline, branch, and candidate creation", async () => {
+  const root = createRepository();
+  const runId = "git-run-journal";
+  const candidateId = "candidate-journal";
+  const branch = `unclecode/evolve/${candidateId}`;
+  const journalPath = path.join(root, ".unclecode", "artifacts", runId, "evolution-preparation.json");
+  const checkpoints = [];
+  const host = createGitCreatorEvolutionHost({
+    workspaceRoot: root,
+    async onPreparationCheckpoint(checkpoint) {
+      const journal = JSON.parse(readFileSync(journalPath, "utf8"));
+      const resource = journal.resources.find((entry) => entry.kind === checkpoint.kind);
+      assert.equal(resource.status, "acquiring");
+      checkpoints.push(checkpoint.kind);
+      if (checkpoint.kind === "branch") {
+        assert.throws(() => git(root, ["show-ref", "--verify", `refs/heads/${branch}`]));
+      } else {
+        assert.equal(existsSync(checkpoint.identity), false);
+      }
+    },
+    async generateCreatorEdits() {
+      return { status: "failed", summary: "unused" };
+    },
+    async runEvaluator() {
+      return { status: "failed", summary: "unused" };
+    },
+  });
+  try {
+    const base = await host.resolveBase({
+      runId,
+      workspaceRoot: root,
+      snapshotTargets: ["skills/creator.md", "AGENTS.md", "host/evaluator.json", "bench/held-out.json"],
+    });
+    const candidate = await host.prepareCandidate({
+      runId,
+      workspaceRoot: root,
+      candidateId,
+      branch,
+      base,
+    });
+    assert.deepEqual(checkpoints, ["baseline-worktree", "branch", "worktree"]);
+    await host.cleanup({
+      runId,
+      workspaceRoot: root,
+      candidate,
+      resources: candidate.resources,
+      retainCandidate: false,
+      reason: "test cleanup",
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a retry adopts every journaled partial-preparation boundary deterministically", async (t) => {
+  for (const phase of ["baseline-worktree", "branch", "worktree"]) {
+    await t.test(phase, async () => {
+      const root = createRepository();
+      const runId = `git-run-retry-${phase}`;
+      const candidateId = `candidate-retry-${phase}`;
+      const branch = `unclecode/evolve/${candidateId}`;
+      const baseHostOptions = {
+        workspaceRoot: root,
+        async generateCreatorEdits() {
+          return { status: "failed", summary: "unused" };
+        },
+        async runEvaluator() {
+          return { status: "failed", summary: "unused" };
+        },
+      };
+      const recoveryHost = createGitCreatorEvolutionHost(baseHostOptions);
+      let recovered;
+      let recoveryStarted = false;
+      const interruptedHost = createGitCreatorEvolutionHost({
+        ...baseHostOptions,
+        async onPreparationCheckpoint(checkpoint) {
+          if (checkpoint.kind !== phase || recoveryStarted) return;
+          recoveryStarted = true;
+          recovered = await recoveryHost.prepareCandidate({
+            runId,
+            workspaceRoot: root,
+            candidateId,
+            branch,
+            base,
+          });
+        },
+      });
+      let base;
+      try {
+        base = await interruptedHost.resolveBase({
+          runId,
+          workspaceRoot: root,
+          snapshotTargets: ["skills/creator.md", "AGENTS.md", "host/evaluator.json", "bench/held-out.json"],
+        });
+        const adopted = await interruptedHost.prepareCandidate({
+          runId,
+          workspaceRoot: root,
+          candidateId,
+          branch,
+          base,
+        });
+        assert.equal(recoveryStarted, true);
+        assert.equal(recovered.worktree, adopted.worktree);
+        assert.equal(git(adopted.worktree, ["rev-parse", "HEAD"]), base.baseCommit);
+        await interruptedHost.cleanup({
+          runId,
+          workspaceRoot: root,
+          candidate: adopted,
+          resources: adopted.resources,
+          retainCandidate: false,
+          reason: "test cleanup",
+        });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("a proposal record failure removes the retained candidate and branch", async () => {
+  const root = createRepository();
+  const runId = "git-run-record-failure";
+  mkdirSync(path.join(root, ".unclecode", "artifacts", runId, "evolution-proposal.json"), { recursive: true });
+  const host = createGitCreatorEvolutionHost({
+    workspaceRoot: root,
+    now: () => new Date(NOW),
+    async generateCreatorEdits() {
+      return {
+        status: "completed",
+        summary: "creator edit",
+        edits: [{ path: "skills/creator.md", content: "creator v2\n" }],
+      };
+    },
+    async runEvaluator(input) {
+      const check = (score) => [{ id: "content", status: "passed", score, durationMs: 1 }];
+      return {
+        status: "completed",
+        environmentHash: input.expectedEnvironmentHash,
+        baseline: { score: 0.7, summary: "baseline", checks: check(0.7) },
+        candidate: { score: 0.9, summary: "candidate", checks: check(0.9) },
+      };
+    },
+  });
+  try {
+    const result = await new CreatorEvolutionService({ config: config(), host, now: () => new Date(NOW) }).run({
+      runId,
+      workspaceRoot: root,
+      prompt: "Create a stronger creator skill.",
+      creatorId: "isolated-creator",
+      mutableTargets: ["skills/creator.md"],
+      dispatchEvolutionProposed: dispatch().run,
+      signal: new AbortController().signal,
+    });
+    assert.equal(result.status, "failed");
+    assert.ok(result.projection.failures.includes("EVOLUTION_RECORD_FAILED"));
     assert.equal(existsSync(result.projection.isolatedWorktree), false);
     assert.equal(
       git(root, ["for-each-ref", "--format=%(refname:short)", `refs/heads/${result.projection.isolatedBranch}`]),

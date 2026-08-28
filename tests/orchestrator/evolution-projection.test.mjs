@@ -43,6 +43,7 @@ function proposal(id = "evolution-1", overrides = {}) {
       patch: HASH,
       candidateArtifact: HASH,
       evaluator: HASH,
+      evaluatorEnvironment: HASH,
       policy: HASH,
       suite: HASH,
       baselineResult: HASH,

@@ -14,8 +14,25 @@ export interface AgentOpsRecorder {
     contextReceiptId?: string;
     packetId?: string;
   }): void;
+  recordEvolutionProposal(input: AgentOpsEvolutionProposalEvent): void;
   finish(status: string): void;
 }
+
+export type AgentOpsEvolutionProposalEvent = {
+  readonly id: string;
+  readonly runId: string;
+  readonly candidateId: string;
+  readonly state: "pr-ready" | "rejected" | "failed" | "cancelled" | "stale";
+  readonly creatorId: string;
+  readonly evaluatorId: string;
+  readonly attestorId: string;
+  readonly humanApproval: "pending";
+  readonly stale: boolean;
+  readonly hashes: Readonly<Record<string, string | undefined>>;
+  readonly artifactRefs: readonly string[];
+  readonly cleanupStatus: "completed" | "retained" | "failed";
+  readonly summary: string;
+};
 
 export interface CreateAgentOpsRecorderInput {
   readonly workspaceRoot: string;
@@ -52,6 +69,9 @@ function createNoOpRecorder(dbPath: string | undefined): AgentOpsRecorder {
     healthy: false,
     dbPath,
     recordTurn() {
+      /* no-op */
+    },
+    recordEvolutionProposal() {
       /* no-op */
     },
     finish() {
@@ -131,6 +151,44 @@ export function createAgentOpsRecorder(
             ...(turnId !== undefined ? { turnId } : {}),
             ...(contextReceiptId !== undefined ? { contextReceiptId } : {}),
             ...(packetId !== undefined ? { packetId } : {}),
+          }),
+        });
+      } catch {
+        /* non-blocking: never throw */
+      }
+    },
+    recordEvolutionProposal(input) {
+      if (store === undefined || runId === undefined || projectId === undefined) {
+        return;
+      }
+      try {
+        const safeSummary = redactAgentOpsSecrets(input.summary).slice(0, 512);
+        const hashes = Object.fromEntries(
+          Object.entries(input.hashes)
+            .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+            .slice(0, 16)
+            .map(([key, value]) => [key.slice(0, 80), value.slice(0, 160)]),
+        );
+        store.addEvent({
+          runId,
+          projectId,
+          eventType: "evolution.proposed",
+          message: redactAgentOpsSecrets(
+            `Evolution ${input.id} ${input.state}: ${safeSummary}`,
+          ).slice(0, 240),
+          metadataJson: JSON.stringify({
+            id: input.id.slice(0, 256),
+            runId: input.runId.slice(0, 256),
+            candidateId: input.candidateId.slice(0, 256),
+            state: input.state,
+            creatorId: input.creatorId.slice(0, 256),
+            evaluatorId: input.evaluatorId.slice(0, 256),
+            attestorId: input.attestorId.slice(0, 256),
+            humanApproval: "pending",
+            stale: input.stale,
+            hashes,
+            artifactRefs: input.artifactRefs.slice(0, 16).map((reference) => reference.slice(0, 1_000)),
+            cleanupStatus: input.cleanupStatus,
           }),
         });
       } catch {
