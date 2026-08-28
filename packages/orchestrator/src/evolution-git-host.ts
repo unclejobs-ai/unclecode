@@ -6,6 +6,7 @@ import {
   lstat,
   mkdir,
   open,
+  opendir,
   readFile,
   readdir,
   realpath,
@@ -13,7 +14,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 import type {
@@ -33,9 +34,13 @@ const GIT_OUTPUT_LIMIT = 16 * 1024 * 1024;
 const MAX_RECORD_BYTES = 1024 * 1024;
 const MAX_TREE_ENTRIES = 50_000;
 const MAX_HASHED_FILE_BYTES = 8 * 1024 * 1024;
-const DEFAULT_LIFECYCLE_LOCK_TIMEOUT_MS = 20 * 60_000;
+const DEFAULT_LIFECYCLE_LOCK_LEASE_MS = 30_000;
+const DEFAULT_LIFECYCLE_LOCK_HEARTBEAT_MS = 5_000;
 const PREPARATION_LOCK_RETRY_MS = 20;
 const INCOMPLETE_LOCK_GRACE_MS = 5_000;
+const MAX_ORPHAN_CLAIM_SCAN = 128;
+const MAX_ORPHAN_CLAIM_DELETIONS = 16;
+const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 const CANONICAL_UTC_MILLISECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 export type CreateGitCreatorEvolutionHostInput = {
@@ -59,7 +64,8 @@ export type CreateGitCreatorEvolutionHostInput = {
     readonly phase: "claim-created" | "acquired" | "waiting";
     readonly lockPath: string;
   }) => void | Promise<void>) | undefined;
-  readonly lifecycleLockTimeoutMs?: number | undefined;
+  readonly lifecycleLockLeaseMs?: number | undefined;
+  readonly lifecycleLockHeartbeatMs?: number | undefined;
   readonly lifecycleLockNow?: (() => number) | undefined;
   readonly now?: (() => Date) | undefined;
 };
@@ -95,10 +101,14 @@ export function createGitCreatorEvolutionHost(
   options: CreateGitCreatorEvolutionHostInput,
 ): CreatorEvolutionHost {
   const now = options.now ?? (() => new Date());
-  const lifecycleLockTimeoutMs = options.lifecycleLockTimeoutMs ?? DEFAULT_LIFECYCLE_LOCK_TIMEOUT_MS;
-  if (!Number.isSafeInteger(lifecycleLockTimeoutMs) || lifecycleLockTimeoutMs <= 0
-    || lifecycleLockTimeoutMs > 24 * 60 * 60_000) {
-    throw new RangeError("Evolution lifecycle lock timeout is invalid.");
+  const lifecycleLockLeaseMs = options.lifecycleLockLeaseMs ?? DEFAULT_LIFECYCLE_LOCK_LEASE_MS;
+  const lifecycleLockHeartbeatMs = options.lifecycleLockHeartbeatMs
+    ?? DEFAULT_LIFECYCLE_LOCK_HEARTBEAT_MS;
+  if (!Number.isSafeInteger(lifecycleLockLeaseMs) || lifecycleLockLeaseMs <= 0
+    || lifecycleLockLeaseMs > 24 * 60 * 60_000
+    || !Number.isSafeInteger(lifecycleLockHeartbeatMs) || lifecycleLockHeartbeatMs <= 0
+    || lifecycleLockHeartbeatMs * 2 >= lifecycleLockLeaseMs) {
+    throw new RangeError("Evolution lifecycle lock lease is invalid.");
   }
   const lifecycleLockNow = options.lifecycleLockNow ?? Date.now;
   const lockContext = new AsyncLocalStorage<ReadonlySet<string>>();
@@ -111,7 +121,8 @@ export function createGitCreatorEvolutionHost(
     const lockPath = evolutionPreparationLockPath(root, runId);
     if (lockContext.getStore()?.has(lockPath)) return operation();
     const lease = await acquirePreparationLock(lockPath, {
-      timeoutMs: lifecycleLockTimeoutMs,
+      leaseMs: lifecycleLockLeaseMs,
+      heartbeatMs: lifecycleLockHeartbeatMs,
       now: lifecycleLockNow,
       signal,
       onCheckpoint: options.onLifecycleLockCheckpoint,
@@ -1127,19 +1138,21 @@ type PreparationLockOwner = {
   readonly pid: number;
   readonly token: string;
   readonly createdAt: number;
+  readonly heartbeatAt: number;
 };
 
 async function acquirePreparationLock(
   lockPath: string,
   input: {
-    readonly timeoutMs: number;
+    readonly leaseMs: number;
+    readonly heartbeatMs: number;
     readonly now: () => number;
     readonly signal?: AbortSignal | undefined;
     readonly onCheckpoint?: CreateGitCreatorEvolutionHostInput["onLifecycleLockCheckpoint"];
   },
 ): Promise<{ readonly release: () => Promise<void> }> {
   await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
-  const deadline = input.now() + input.timeoutMs;
+  await garbageCollectOrphanPreparationClaims(lockPath, input);
   while (true) {
     input.signal?.throwIfAborted();
     const owner: PreparationLockOwner = {
@@ -1147,13 +1160,14 @@ async function acquirePreparationLock(
       pid: process.pid,
       token: randomUUID(),
       createdAt: input.now(),
+      heartbeatAt: input.now(),
     };
     const claimPath = `${lockPath}.claim-${owner.token}`;
+    const buildingPath = `${lockPath}.building-${owner.token}`;
     try {
-      await mkdir(claimPath, { mode: 0o700 });
+      await mkdir(buildingPath, { mode: 0o700 });
       try {
-        await input.onCheckpoint?.({ phase: "claim-created", lockPath });
-        const ownerPath = join(claimPath, "owner.json");
+        const ownerPath = join(buildingPath, "owner.json");
         const handle = await open(ownerPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
         try {
           await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
@@ -1161,31 +1175,35 @@ async function acquirePreparationLock(
         } finally {
           await handle.close();
         }
-        await syncDirectory(claimPath);
+        await syncDirectory(buildingPath);
+        // Only fully initialized private claims use the collectible `.claim-`
+        // namespace. A paused claimant therefore always has a durable owner
+        // token and can never be mistaken for an ownerless crash orphan.
+        await rename(buildingPath, claimPath);
+        await input.onCheckpoint?.({ phase: "claim-created", lockPath });
         await rename(claimPath, lockPath);
       } finally {
+        await rm(buildingPath, { recursive: true, force: true });
         await rm(claimPath, { recursive: true, force: true });
       }
-      await input.onCheckpoint?.({ phase: "acquired", lockPath });
+      const heartbeat = startPreparationLockHeartbeat(lockPath, owner, input);
+      try {
+        await input.onCheckpoint?.({ phase: "acquired", lockPath });
+      } catch (error) {
+        await heartbeat.stop().catch(() => undefined);
+        await releasePreparationLock(lockPath, owner);
+        throw error;
+      }
       return {
         release: async (): Promise<void> => {
-          const released = `${lockPath}.released-${owner.token}`;
+          let heartbeatError: unknown;
           try {
-            await rename(lockPath, released);
+            await heartbeat.stop();
           } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-            throw error;
+            heartbeatError = error;
           }
-          const current = await readPreparationLockOwner(join(released, "owner.json")).catch(() => undefined);
-          if (current?.token !== owner.token) {
-            try {
-              await rename(released, lockPath);
-            } catch {
-              // A changed owner is never deleted, even when restoration cannot complete.
-            }
-            throw new Error("Evolution preparation lock ownership changed before release.");
-          }
-          await rm(released, { recursive: true, force: true });
+          await releasePreparationLock(lockPath, owner);
+          if (heartbeatError) throw heartbeatError;
         },
       };
     } catch (error) {
@@ -1195,7 +1213,13 @@ async function acquirePreparationLock(
 
     const ownerPath = join(lockPath, "owner.json");
     const current = await readPreparationLockOwner(ownerPath).catch(() => undefined);
-    const stale = current ? !isProcessAlive(current.pid) : await incompleteLockIsStale(lockPath);
+    // An expired heartbeat alone never fences a live local process: without
+    // token checks at every Git/resource mutation, allowing that takeover
+    // would let a paused old callback resume into a newer owner's resources.
+    // Requiring both expiry and a dead PID is conservative but sound.
+    const stale = current
+      ? !isProcessAlive(current.pid) && input.now() - current.heartbeatAt >= input.leaseMs
+      : await incompleteLockIsStale(lockPath, input.now());
     if (stale) {
       const observedToken = current?.token;
       const quarantine = `${lockPath}.stale-${observedToken ?? randomUUID()}`;
@@ -1216,9 +1240,171 @@ async function acquirePreparationLock(
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
-    if (input.now() >= deadline) throw new Error("Timed out waiting for the evolution lifecycle lock.");
     await input.onCheckpoint?.({ phase: "waiting", lockPath });
     await delayWithSignal(PREPARATION_LOCK_RETRY_MS, input.signal);
+  }
+}
+
+type ClaimOwnerState =
+  | { readonly status: "missing" }
+  | { readonly status: "unsafe" }
+  | { readonly status: "valid"; readonly owner: PreparationLockOwner };
+
+async function readClaimOwner(claimPath: string): Promise<ClaimOwnerState> {
+  const ownerPath = join(claimPath, "owner.json");
+  try {
+    const stat = await lstat(ownerPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 4 * 1024) {
+      return { status: "unsafe" };
+    }
+    return { status: "valid", owner: await readPreparationLockOwner(ownerPath) };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? { status: "missing" }
+      : { status: "unsafe" };
+  }
+}
+
+async function orphanClaimIsReclaimable(
+  claimPath: string,
+  input: { readonly leaseMs: number; readonly now: () => number },
+): Promise<boolean> {
+  const stat = await lstat(claimPath);
+  if (!stat.isDirectory() || stat.isSymbolicLink()
+    || input.now() - stat.mtimeMs < INCOMPLETE_LOCK_GRACE_MS) {
+    return false;
+  }
+  const owner = await readClaimOwner(claimPath);
+  if (owner.status === "missing") return true;
+  if (owner.status !== "valid") return false;
+  return !isProcessAlive(owner.owner.pid)
+    && input.now() - owner.owner.heartbeatAt >= input.leaseMs;
+}
+
+async function garbageCollectOrphanPreparationClaims(
+  lockPath: string,
+  input: { readonly leaseMs: number; readonly now: () => number },
+): Promise<void> {
+  const parent = dirname(lockPath);
+  const claimPattern = new RegExp(`^${basename(lockPath).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}\\.claim-${UUID}$`, "u");
+  const directory = await opendir(parent);
+  let visited = 0;
+  let deleted = 0;
+  for await (const entry of directory) {
+    if (visited >= MAX_ORPHAN_CLAIM_SCAN) break;
+    visited += 1;
+    if (deleted >= MAX_ORPHAN_CLAIM_DELETIONS
+      || !entry.isDirectory() || entry.isSymbolicLink() || !claimPattern.test(entry.name)) {
+      continue;
+    }
+    const claimPath = join(parent, entry.name);
+    if (!(await orphanClaimIsReclaimable(claimPath, input).catch(() => false))) continue;
+    const quarantine = `${claimPath}.gc-${randomUUID()}`;
+    try {
+      await rename(claimPath, quarantine);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    if (await orphanClaimIsReclaimable(quarantine, input).catch(() => false)) {
+      await rm(quarantine, { recursive: true, force: true });
+      deleted += 1;
+      continue;
+    }
+    try {
+      await rename(quarantine, claimPath);
+    } catch {
+      // A raced claim that cannot be restored is retained under quarantine;
+      // deleting it would be less safe than leaking one bounded directory.
+    }
+  }
+}
+
+async function releasePreparationLock(
+  lockPath: string,
+  owner: PreparationLockOwner,
+): Promise<void> {
+  const released = `${lockPath}.released-${owner.token}`;
+  try {
+    await rename(lockPath, released);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  const current = await readPreparationLockOwner(join(released, "owner.json")).catch(() => undefined);
+  if (current?.token !== owner.token) {
+    try {
+      await rename(released, lockPath);
+    } catch {
+      // A changed owner is never deleted, even when restoration cannot complete.
+    }
+    throw new Error("Evolution preparation lock ownership changed before release.");
+  }
+  await rm(released, { recursive: true, force: true });
+}
+
+function startPreparationLockHeartbeat(
+  lockPath: string,
+  owner: PreparationLockOwner,
+  input: { readonly heartbeatMs: number; readonly now: () => number },
+): { readonly stop: () => Promise<void> } {
+  let stopped = false;
+  let timer: NodeJS.Timeout | undefined;
+  let running: Promise<void> = Promise.resolve();
+  let failure: unknown;
+
+  const schedule = (): void => {
+    if (stopped || failure) return;
+    timer = setTimeout(() => {
+      running = renewPreparationLock(lockPath, owner, input.now())
+        .catch((error: unknown) => { failure = error; })
+        .finally(schedule);
+    }, input.heartbeatMs);
+    timer.unref?.();
+  };
+  schedule();
+  return {
+    async stop(): Promise<void> {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      await running;
+      if (failure) throw failure;
+    },
+  };
+}
+
+async function renewPreparationLock(
+  lockPath: string,
+  owner: PreparationLockOwner,
+  heartbeatAt: number,
+): Promise<void> {
+  const ownerPath = join(lockPath, "owner.json");
+  const current = await readPreparationLockOwner(ownerPath);
+  if (current.token !== owner.token) {
+    throw new Error("Evolution lifecycle lock ownership changed before heartbeat.");
+  }
+  const next: PreparationLockOwner = { ...current, heartbeatAt };
+  const temporary = join(lockPath, `.owner-${owner.token}-${randomUUID()}.tmp`);
+  try {
+    const handle = await open(
+      temporary,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+      0o600,
+    );
+    try {
+      await handle.writeFile(`${JSON.stringify(next)}\n`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    const observed = await readPreparationLockOwner(ownerPath);
+    if (observed.token !== owner.token) {
+      throw new Error("Evolution lifecycle lock ownership changed during heartbeat.");
+    }
+    await rename(temporary, ownerPath);
+    await syncDirectory(lockPath);
+  } finally {
+    await rm(temporary, { force: true });
   }
 }
 
@@ -1237,17 +1423,19 @@ async function syncDirectory(path: string): Promise<void> {
 
 async function readPreparationLockOwner(path: string): Promise<PreparationLockOwner> {
   const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<PreparationLockOwner>;
+  const heartbeatAt = parsed.heartbeatAt ?? parsed.createdAt;
   if (parsed.version !== 1 || !Number.isInteger(parsed.pid) || (parsed.pid ?? 0) <= 0
     || typeof parsed.token !== "string" || parsed.token.length > 128
-    || !Number.isFinite(parsed.createdAt)) {
+    || !Number.isFinite(parsed.createdAt) || !Number.isFinite(heartbeatAt)
+    || (heartbeatAt ?? 0) < (parsed.createdAt ?? 0)) {
     throw new Error("Evolution preparation lock owner is invalid.");
   }
-  return parsed as PreparationLockOwner;
+  return { ...(parsed as PreparationLockOwner), heartbeatAt: heartbeatAt as number };
 }
 
-async function incompleteLockIsStale(lockPath: string): Promise<boolean> {
+async function incompleteLockIsStale(lockPath: string, now: number): Promise<boolean> {
   try {
-    return Date.now() - (await lstat(lockPath)).mtimeMs >= INCOMPLETE_LOCK_GRACE_MS;
+    return now - (await lstat(lockPath)).mtimeMs >= INCOMPLETE_LOCK_GRACE_MS;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
     throw error;

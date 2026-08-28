@@ -16,6 +16,7 @@ import {
 import { runWorkspaceGuardianChecks } from "./guardian-checks.js";
 
 const CREATOR_TIMEOUT_MS = 10 * 60_000;
+const CREATOR_POST_ABORT_SETTLEMENT_GRACE_MS = 1_000;
 const EVALUATOR_TIMEOUT_MS = 5 * 60_000;
 const MAX_OUTPUT_BYTES = 16_384;
 
@@ -25,6 +26,10 @@ export function createWorkCreatorEvolutionService(input: {
   readonly reasoning: AppReasoningConfig;
   readonly recorder: AgentOpsRecorder;
   readonly createCreatorAgent: () => WorkTurnAgent | Promise<WorkTurnAgent>;
+  /** Optional operational override; production defaults to the ten-minute creator budget. */
+  readonly creatorTimeoutMs?: number;
+  /** Creator providers receive abort, then this finite grace before their edit envelope is detached. */
+  readonly creatorAbortSettlementGraceMs?: number;
 }): CreatorEvolutionService {
   const policyAssets = ["AGENTS.md"].filter((asset) => existsSync(join(input.cwd, asset)));
   const benchmarkAssets = ["package.json"].filter((asset) => existsSync(join(input.cwd, asset)));
@@ -66,7 +71,7 @@ export function createWorkCreatorEvolutionService(input: {
     attestorId: "unclecode-git-attestor",
     maxAttestationAgeMs: 5 * 60_000,
     bounds: {
-      creatorTimeoutMs: CREATOR_TIMEOUT_MS,
+      creatorTimeoutMs: input.creatorTimeoutMs ?? CREATOR_TIMEOUT_MS,
       evaluatorTimeoutMs: EVALUATOR_TIMEOUT_MS,
       maxOutputBytes: MAX_OUTPUT_BYTES,
       maxChangedAssets: 64,
@@ -75,7 +80,6 @@ export function createWorkCreatorEvolutionService(input: {
 
   const host = createGitCreatorEvolutionHost({
     workspaceRoot: input.cwd,
-    lifecycleLockTimeoutMs: CREATOR_TIMEOUT_MS + EVALUATOR_TIMEOUT_MS + 60_000,
     async generateCreatorEdits(request) {
       const agent = await input.createCreatorAgent();
       const strictPrompt = [
@@ -92,12 +96,14 @@ export function createWorkCreatorEvolutionService(input: {
         "</unclecode_creator_evolution>",
       ].join("\n");
       try {
-        const outcome = await runBounded(
-          request.signal,
-          request.timeoutMs,
-          (signal) => agent.runTurn(strictPrompt, [], { signal }),
-          () => agent.clear(),
-        );
+        const outcome = await runBoundedCreatorOperation({
+          signal: request.signal,
+          timeoutMs: request.timeoutMs,
+          abortSettlementGraceMs: input.creatorAbortSettlementGraceMs
+            ?? CREATOR_POST_ABORT_SETTLEMENT_GRACE_MS,
+          run: (signal) => agent.runTurn(strictPrompt, [], { signal }),
+          onTerminate: () => agent.clear(),
+        });
         if (outcome.status !== "completed") return outcome;
         return {
           status: "completed" as const,
@@ -210,6 +216,101 @@ export function createWorkCreatorEvolutionService(input: {
 type BoundedOutcome<T> =
   | { readonly status: "completed"; readonly value: T }
   | { readonly status: "timeout" | "cancelled"; readonly summary: string };
+
+/**
+ * Bounds a no-tools creator provider after cancellation. The provider can only
+ * return an edit envelope; once the grace expires its promise is detached and
+ * no late value can cross into host validation or filesystem mutation.
+ */
+export async function runBoundedCreatorOperation<T>(input: {
+  readonly signal: AbortSignal;
+  readonly timeoutMs: number;
+  readonly abortSettlementGraceMs: number;
+  readonly run: (signal: AbortSignal) => Promise<T>;
+  readonly onTerminate?: (() => void) | undefined;
+}): Promise<BoundedOutcome<T>> {
+  if (input.signal.aborted) {
+    try {
+      input.onTerminate?.();
+    } catch {
+      // The host boundary is already closed; provider cleanup is best effort.
+    }
+    return { status: "cancelled", summary: "Evolution execution was cancelled." };
+  }
+  if (!Number.isFinite(input.abortSettlementGraceMs) || input.abortSettlementGraceMs < 0) {
+    throw new RangeError("Creator abort settlement grace must be a finite non-negative duration.");
+  }
+
+  const controller = new AbortController();
+  let cause: "timeout" | "cancelled" | undefined;
+  let resolveAborted!: (cause: "timeout" | "cancelled") => void;
+  const aborted = new Promise<"timeout" | "cancelled">((resolve) => {
+    resolveAborted = resolve;
+  });
+  const requestAbort = (next: "timeout" | "cancelled", reason: unknown): void => {
+    if (cause !== undefined) return;
+    cause = next;
+    controller.abort(reason);
+    try {
+      input.onTerminate?.();
+    } catch {
+      // Detachment still closes the host boundary when provider cleanup fails.
+    }
+    resolveAborted(next);
+  };
+  const abortListener = () => requestAbort("cancelled", input.signal.reason);
+  input.signal.addEventListener("abort", abortListener, { once: true });
+  const timeout = setTimeout(() => {
+    requestAbort("timeout", new Error(`Evolution execution exceeded ${input.timeoutMs}ms.`));
+  }, input.timeoutMs);
+
+  const running = Promise.resolve().then(() => {
+    controller.signal.throwIfAborted();
+    return input.run(controller.signal);
+  });
+  // Install both handlers immediately so a detached provider can never create
+  // an unhandled rejection after the lifecycle has released its durable lock.
+  const settled = running.then(
+    (value) => ({ ok: true as const, value }),
+    (error) => ({ ok: false as const, error }),
+  );
+  try {
+    const first = await Promise.race([
+      settled.then((result) => ({ kind: "settled" as const, result })),
+      aborted.then((abortCause) => ({ kind: "aborted" as const, abortCause })),
+    ]);
+    if (first.kind === "settled") {
+      if (cause !== undefined) return creatorAbortOutcome(cause, input.timeoutMs);
+      if (!first.result.ok) throw first.result.error;
+      return { status: "completed", value: first.result.value };
+    }
+
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        settled.then(() => undefined),
+        new Promise<void>((resolve) => {
+          graceTimer = setTimeout(resolve, input.abortSettlementGraceMs);
+        }),
+      ]);
+    } finally {
+      if (graceTimer !== undefined) clearTimeout(graceTimer);
+    }
+    return creatorAbortOutcome(first.abortCause, input.timeoutMs);
+  } finally {
+    clearTimeout(timeout);
+    input.signal.removeEventListener("abort", abortListener);
+  }
+}
+
+function creatorAbortOutcome(
+  cause: "timeout" | "cancelled",
+  timeoutMs: number,
+): BoundedOutcome<never> {
+  return cause === "timeout"
+    ? { status: "timeout", summary: `Evolution execution exceeded ${timeoutMs}ms.` }
+    : { status: "cancelled", summary: "Evolution execution was cancelled." };
+}
 
 async function runBounded<T>(
   signal: AbortSignal,

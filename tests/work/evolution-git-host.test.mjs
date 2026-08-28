@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdtempSync,
@@ -9,6 +9,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,6 +30,18 @@ function git(cwd, args) {
 
 function sha(value) {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+async function waitFor(assertion, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      return assertion();
+    } catch (error) {
+      if (Date.now() >= deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
 }
 
 function createRepository() {
@@ -798,21 +811,291 @@ test("a duplicate lifecycle lock wait observes caller cancellation", async () =>
   }
 });
 
+test("an active lifecycle owner durably renews its token without an elapsed-time rejection", async () => {
+  const root = createRepository();
+  const runId = "git-run-lock-heartbeat";
+  const lockPath = path.join(root, ".unclecode", "artifacts", runId, "evolution-lifecycle.lock");
+  let clock = 1;
+  let releaseOwner;
+  const ownerMayFinish = new Promise((resolve) => { releaseOwner = resolve; });
+  let announceOwner;
+  const ownerEntered = new Promise((resolve) => { announceOwner = resolve; });
+  const host = createGitCreatorEvolutionHost({
+    workspaceRoot: root,
+    lifecycleLockLeaseMs: 100,
+    lifecycleLockHeartbeatMs: 5,
+    lifecycleLockNow: () => clock,
+    async generateCreatorEdits() { return { status: "failed", summary: "unused" }; },
+    async runEvaluator() { return { status: "failed", summary: "unused" }; },
+  });
+  try {
+    const running = host.withLifecycleLock({ runId, workspaceRoot: root }, async () => {
+      announceOwner();
+      await ownerMayFinish;
+    });
+    await ownerEntered;
+    const initial = JSON.parse(readFileSync(path.join(lockPath, "owner.json"), "utf8"));
+    assert.equal(initial.heartbeatAt, 1);
+    clock = 10_000;
+    await waitFor(() => {
+      const renewed = JSON.parse(readFileSync(path.join(lockPath, "owner.json"), "utf8"));
+      assert.equal(renewed.token, initial.token);
+      assert.equal(renewed.heartbeatAt, 10_000);
+    });
+    releaseOwner();
+    await running;
+  } finally {
+    releaseOwner();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an expired heartbeat never fences a paused live owner", async () => {
+  const root = createRepository();
+  const runId = "git-run-lock-live-expired";
+  const lockPath = path.join(root, ".unclecode", "artifacts", runId, "evolution-lifecycle.lock");
+  let releaseFirst;
+  const firstMayFinish = new Promise((resolve) => { releaseFirst = resolve; });
+  let announceFirst;
+  const firstEntered = new Promise((resolve) => { announceFirst = resolve; });
+  const order = [];
+  const makeHost = () => createGitCreatorEvolutionHost({
+    workspaceRoot: root,
+    lifecycleLockLeaseMs: 100,
+    lifecycleLockHeartbeatMs: 40,
+    lifecycleLockNow: () => 1_000,
+    async generateCreatorEdits() { return { status: "failed", summary: "unused" }; },
+    async runEvaluator() { return { status: "failed", summary: "unused" }; },
+  });
+  try {
+    const first = makeHost().withLifecycleLock({ runId, workspaceRoot: root }, async () => {
+      announceFirst();
+      await firstMayFinish;
+      order.push("old-owner-resumed");
+    });
+    await firstEntered;
+    const ownerPath = path.join(lockPath, "owner.json");
+    const owner = JSON.parse(readFileSync(ownerPath, "utf8"));
+    writeFileSync(ownerPath, `${JSON.stringify({ ...owner, createdAt: 0, heartbeatAt: 0 })}\n`);
+    const second = makeHost().withLifecycleLock({ runId, workspaceRoot: root }, async () => {
+      order.push("new-owner-entered");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    assert.deepEqual(order, [], "a live old owner was unsafely fenced by heartbeat age alone");
+    releaseFirst();
+    await Promise.all([first, second]);
+    assert.deepEqual(order, ["old-owner-resumed", "new-owner-entered"]);
+  } finally {
+    releaseFirst();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a dead owner is recovered only after its durable heartbeat lease expires", async () => {
+  const root = createRepository();
+  const runId = "git-run-lock-dead-expired";
+  const lockPath = path.join(root, ".unclecode", "artifacts", runId, "evolution-lifecycle.lock");
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(path.join(lockPath, "owner.json"), `${JSON.stringify({
+    version: 1,
+    pid: 2_147_483_647,
+    token: randomUUID(),
+    createdAt: 0,
+    heartbeatAt: 0,
+  })}\n`);
+  let entered = false;
+  const host = createGitCreatorEvolutionHost({
+    workspaceRoot: root,
+    lifecycleLockLeaseMs: 100,
+    lifecycleLockHeartbeatMs: 20,
+    lifecycleLockNow: () => 1_000,
+    async generateCreatorEdits() { return { status: "failed", summary: "unused" }; },
+    async runEvaluator() { return { status: "failed", summary: "unused" }; },
+  });
+  try {
+    await host.withLifecycleLock({ runId, workspaceRoot: root }, async () => { entered = true; });
+    assert.equal(entered, true);
+    assert.equal(existsSync(lockPath), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("lock acquisition garbage-collects only bounded dead orphan claims", async () => {
+  const root = createRepository();
+  const outside = realpathSync(mkdtempSync(path.join(tmpdir(), "uc-evolution-claim-outside-")));
+  const runId = "git-run-lock-claim-gc";
+  const artifactDir = path.join(root, ".unclecode", "artifacts", runId);
+  const prefix = "evolution-lifecycle.lock.claim-";
+  const orphan = path.join(artifactDir, `${prefix}${randomUUID()}`);
+  const dead = path.join(artifactDir, `${prefix}${randomUUID()}`);
+  const live = path.join(artifactDir, `${prefix}${randomUUID()}`);
+  const recent = path.join(artifactDir, `${prefix}${randomUUID()}`);
+  const misnamed = path.join(artifactDir, `${prefix}not-a-uuid`);
+  const linked = path.join(artifactDir, `${prefix}${randomUUID()}`);
+  mkdirSync(orphan, { recursive: true });
+  mkdirSync(dead, { recursive: true });
+  mkdirSync(live, { recursive: true });
+  mkdirSync(recent, { recursive: true });
+  mkdirSync(misnamed, { recursive: true });
+  writeFileSync(path.join(live, "owner.json"), `${JSON.stringify({
+    version: 1,
+    pid: process.pid,
+    token: randomUUID(),
+    createdAt: 0,
+    heartbeatAt: 0,
+  })}\n`);
+  writeFileSync(path.join(dead, "owner.json"), `${JSON.stringify({
+    version: 1,
+    pid: 2_147_483_647,
+    token: randomUUID(),
+    createdAt: 0,
+    heartbeatAt: 0,
+  })}\n`);
+  writeFileSync(path.join(outside, "sentinel.txt"), "keep\n");
+  symlinkSync(outside, linked, "dir");
+  utimesSync(orphan, new Date(0), new Date(0));
+  utimesSync(dead, new Date(0), new Date(0));
+  utimesSync(live, new Date(0), new Date(0));
+  const host = createGitCreatorEvolutionHost({
+    workspaceRoot: root,
+    lifecycleLockLeaseMs: 100,
+    lifecycleLockHeartbeatMs: 20,
+    lifecycleLockNow: () => 10_000,
+    async generateCreatorEdits() { return { status: "failed", summary: "unused" }; },
+    async runEvaluator() { return { status: "failed", summary: "unused" }; },
+  });
+  try {
+    await host.withLifecycleLock({ runId, workspaceRoot: root }, async () => undefined);
+    assert.equal(existsSync(orphan), false, "old ownerless crash claim leaked");
+    assert.equal(existsSync(dead), false, "old dead-owner crash claim leaked");
+    assert.equal(existsSync(live), true, "live owner claim was deleted");
+    assert.equal(existsSync(recent), true, "recent ownerless claim was deleted");
+    assert.equal(existsSync(misnamed), true, "misnamed path was treated as a claim");
+    assert.equal(existsSync(linked), true, "symlink claim was followed or deleted");
+    assert.equal(readFileSync(path.join(outside, "sentinel.txt"), "utf8"), "keep\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("orphan claim cleanup enforces its per-acquisition deletion cap", async () => {
+  const root = createRepository();
+  const runId = "git-run-lock-claim-gc-cap";
+  const artifactDir = path.join(root, ".unclecode", "artifacts", runId);
+  const claims = Array.from({ length: 20 }, () =>
+    path.join(artifactDir, `evolution-lifecycle.lock.claim-${randomUUID()}`));
+  for (const claim of claims) {
+    mkdirSync(claim, { recursive: true });
+    utimesSync(claim, new Date(0), new Date(0));
+  }
+  const host = createGitCreatorEvolutionHost({
+    workspaceRoot: root,
+    lifecycleLockLeaseMs: 100,
+    lifecycleLockHeartbeatMs: 20,
+    lifecycleLockNow: () => 10_000,
+    async generateCreatorEdits() { return { status: "failed", summary: "unused" }; },
+    async runEvaluator() { return { status: "failed", summary: "unused" }; },
+  });
+  try {
+    await host.withLifecycleLock({ runId, workspaceRoot: root }, async () => undefined);
+    assert.equal(claims.filter((claim) => existsSync(claim)).length, 4);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a hung creator abort settlement retains the live lease while a duplicate remains cancellable", async () => {
+  const root = createRepository();
+  const runId = "git-run-lock-hung-abort";
+  let clock = 1;
+  let creatorCalls = 0;
+  let evaluatorCalls = 0;
+  let releaseCreator;
+  const creatorMaySettle = new Promise((resolve) => { releaseCreator = resolve; });
+  let announceCreator;
+  const creatorEntered = new Promise((resolve) => { announceCreator = resolve; });
+  const makeHost = () => createGitCreatorEvolutionHost({
+    workspaceRoot: root,
+    lifecycleLockLeaseMs: 100,
+    lifecycleLockHeartbeatMs: 5,
+    lifecycleLockNow: () => clock,
+    now: () => new Date(NOW),
+    async generateCreatorEdits() {
+      creatorCalls += 1;
+      announceCreator();
+      await creatorMaySettle;
+      return {
+        status: "completed",
+        summary: "late creator settlement",
+        edits: [{ path: "skills/creator.md", content: "creator v2\n" }],
+      };
+    },
+    async runEvaluator() {
+      evaluatorCalls += 1;
+      return { status: "failed", summary: "must not run" };
+    },
+  });
+  const firstController = new AbortController();
+  const duplicateController = new AbortController();
+  const runInput = (signal) => ({
+    runId,
+    workspaceRoot: root,
+    prompt: "Create a stronger creator skill.",
+    creatorId: "isolated-creator",
+    mutableTargets: ["skills/creator.md"],
+    dispatchEvolutionProposed: dispatch().run,
+    signal,
+  });
+  try {
+    const firstRun = new CreatorEvolutionService({
+      config: config(),
+      host: makeHost(),
+      now: () => new Date(NOW),
+    }).run(runInput(firstController.signal));
+    await creatorEntered;
+    firstController.abort(new Error("cancel owner during creator settlement"));
+    clock = 10_000;
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    const duplicateRun = new CreatorEvolutionService({
+      config: config(),
+      host: makeHost(),
+      now: () => new Date(NOW),
+    }).run(runInput(duplicateController.signal));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(creatorCalls, 1, "duplicate crossed a creator that had not settled after abort");
+    duplicateController.abort(new Error("cancel duplicate while owner settles"));
+    await assert.rejects(duplicateRun, /cancel duplicate while owner settles/);
+    releaseCreator();
+    const result = await firstRun;
+    assert.equal(result.status, "cancelled");
+    assert.equal(creatorCalls, 1);
+    assert.equal(evaluatorCalls, 0);
+  } finally {
+    releaseCreator();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("two host instances join and replay one authoritative lifecycle beyond thirty seconds", async () => {
   const root = createRepository();
   const runId = "git-run-cross-instance";
-  const originalDateNow = Date.now;
   let lockClock = 0;
-  Date.now = () => lockClock;
   let creatorCalls = 0;
   let evaluatorCalls = 0;
   let releaseFirstCreator;
   const firstCreatorReleased = new Promise((resolve) => { releaseFirstCreator = resolve; });
   let announceFirstCreator;
   const firstCreatorEntered = new Promise((resolve) => { announceFirstCreator = resolve; });
+  let releaseFirstEvaluator;
+  const firstEvaluatorReleased = new Promise((resolve) => { releaseFirstEvaluator = resolve; });
+  let announceFirstEvaluator;
+  const firstEvaluatorEntered = new Promise((resolve) => { announceFirstEvaluator = resolve; });
   const makeHost = () => createGitCreatorEvolutionHost({
     workspaceRoot: root,
-    lifecycleLockTimeoutMs: 120_000,
+    lifecycleLockLeaseMs: 100,
+    lifecycleLockHeartbeatMs: 5,
     lifecycleLockNow: () => lockClock,
     now: () => new Date(NOW),
     async generateCreatorEdits() {
@@ -829,6 +1112,10 @@ test("two host instances join and replay one authoritative lifecycle beyond thir
     },
     async runEvaluator(input) {
       evaluatorCalls += 1;
+      if (evaluatorCalls === 1) {
+        announceFirstEvaluator();
+        await firstEvaluatorReleased;
+      }
       const check = (score) => [{ id: "content", status: "passed", score, durationMs: 1 }];
       return {
         status: "completed",
@@ -852,25 +1139,35 @@ test("two host instances join and replay one authoritative lifecycle beyond thir
   try {
     const firstRun = first.run(runInput);
     await firstCreatorEntered;
+    lockClock = 31_000;
+    await new Promise((resolve) => setTimeout(resolve, 15));
     const secondRun = second.run(runInput);
     await new Promise((resolve) => setTimeout(resolve, 25));
-    lockClock = 31_000;
     const secondFinishedEarly = await Promise.race([
       secondRun.then(() => true, () => true),
       new Promise((resolve) => setTimeout(() => resolve(false), 80)),
     ]);
     releaseFirstCreator();
+    await firstEvaluatorEntered;
+    lockClock = 62_000;
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    const secondFinishedDuringEvaluator = await Promise.race([
+      secondRun.then(() => true, () => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 80)),
+    ]);
+    releaseFirstEvaluator();
     const [firstResult, secondResult] = await Promise.all([firstRun, secondRun]);
 
     assert.equal(secondFinishedEarly, false, "a second host crossed the active lifecycle lock");
+    assert.equal(secondFinishedDuringEvaluator, false, "a second host crossed evaluator/record overhead");
     assert.equal(creatorCalls, 1, "the recorded result should be replayed instead of rerunning the creator");
     assert.equal(evaluatorCalls, 1, "the recorded result should be replayed instead of rerunning the evaluator");
     assert.equal(firstResult.projection.id, secondResult.projection.id);
     assert.equal(firstResult.status, "pr-ready");
     assert.equal(secondResult.status, "pr-ready");
   } finally {
-    Date.now = originalDateNow;
     releaseFirstCreator();
+    releaseFirstEvaluator();
     rmSync(root, { recursive: true, force: true });
   }
 });

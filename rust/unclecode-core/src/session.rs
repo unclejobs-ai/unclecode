@@ -2,6 +2,7 @@ use std::cmp::Reverse;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::model_registry::is_openai_reasoning_effort;
@@ -17,7 +18,10 @@ const MAX_AGENT_CONSOLE_BYTES: usize = 32 * 1024;
 const MAX_AGENT_CONSOLE_ACTIVITY: usize = 80;
 const MAX_AGENT_CONSOLE_AGENTS: usize = 128;
 const MAX_AGENT_CONSOLE_JOBS: usize = 128;
+const MAX_AGENT_CONSOLE_EVOLUTION_PROPOSALS: usize = 32;
 const MAX_RESUME_ENTRY_CHARS: usize = 600;
+const SESSION_NOTICE_VERSION: u8 = 1;
+static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEvent {
@@ -151,10 +155,24 @@ impl WorkShellSessionStore {
             writeln!(event_log, "{}", record.to_json(&snapshot.session_id))?;
         }
 
-        fs::write(
-            &paths.checkpoint_path,
-            build_checkpoint_json(snapshot, existing_count, &updated_at),
-        )
+        let checkpoint = build_checkpoint_json(snapshot, existing_count, &updated_at);
+        write_atomic_durable(&paths.checkpoint_path, checkpoint.as_bytes())?;
+        self.persist_checkpoint_notice(&snapshot.session_id, existing_count)
+    }
+
+    fn persist_checkpoint_notice(&self, session_id: &str, revision: usize) -> io::Result<()> {
+        let notice_dir = self.root_dir.join("notifications");
+        let notice_path = notice_dir.join(format!(
+            "{}.notice.json",
+            to_opaque_id(session_id, "session")
+        ));
+        let notice = serde_json::to_vec(&json!({
+            "version": SESSION_NOTICE_VERSION,
+            "sessionId": session_id,
+            "revision": revision,
+        }))
+        .map_err(io::Error::other)?;
+        write_atomic_durable(&notice_path, &notice)
     }
 
     pub fn list_session_lines(&self, project_path: &Path) -> io::Result<Vec<SessionLine>> {
@@ -616,6 +634,33 @@ fn count_lines(path: &Path) -> io::Result<usize> {
     }
 }
 
+fn write_atomic_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "durable file has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid durable file name"))?;
+    let nonce = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(".{file_name}.tmp-{}-{nonce}", std::process::id()));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        OpenOptions::new().read(true).open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn sanitize_agent_console_snapshot(value: &Value) -> Option<Value> {
     let source = value.as_object()?;
     let profile_id = source.get("profileId")?.as_str()?;
@@ -640,6 +685,20 @@ fn sanitize_agent_console_snapshot(value: &Value) -> Option<Value> {
     }
     if let Some(work_graph) = source.get("workGraph") {
         snapshot.insert("workGraph".to_string(), sanitize_work_graph(work_graph)?);
+    }
+    if let Some(evolution_proposals) = source.get("evolutionProposals") {
+        let evolution_proposals = evolution_proposals.as_array()?;
+        let start = evolution_proposals
+            .len()
+            .saturating_sub(MAX_AGENT_CONSOLE_EVOLUTION_PROPOSALS);
+        let evolution_proposals = evolution_proposals[start..]
+            .iter()
+            .map(sanitize_evolution_proposal)
+            .collect::<Option<Vec<_>>>()?;
+        snapshot.insert(
+            "evolutionProposals".to_string(),
+            Value::Array(evolution_proposals),
+        );
     }
 
     let activity = source.get("activity")?.as_array()?;
@@ -800,6 +859,11 @@ fn fit_agent_console_snapshot(mut snapshot: Map<String, Value>) -> Map<String, V
         return snapshot;
     }
 
+    trim_evolution_proposals(&mut snapshot);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
     snapshot.remove("manifest");
     if console_fits(&snapshot) {
         return snapshot;
@@ -940,6 +1004,26 @@ fn compact_pending_decision(snapshot: &mut Map<String, Value>) {
                 option.remove("description");
             }
         }
+    }
+}
+
+fn trim_evolution_proposals(snapshot: &mut Map<String, Value>) {
+    loop {
+        if console_fits(snapshot) {
+            return;
+        }
+        let Some(proposals) = snapshot
+            .get_mut("evolutionProposals")
+            .and_then(Value::as_array_mut)
+        else {
+            return;
+        };
+        // The newest host record is the authoritative lifecycle outcome. Keep
+        // it while spending older history under the durable byte budget.
+        if proposals.len() <= 1 {
+            return;
+        }
+        proposals.remove(0);
     }
 }
 
@@ -1236,6 +1320,117 @@ fn sanitize_work_graph(value: &Value) -> Option<Value> {
         .collect::<Option<Vec<_>>>()?;
     graph.insert("nodes".to_string(), Value::Array(nodes));
     Some(Value::Object(graph))
+}
+
+fn sanitize_evolution_proposal(value: &Value) -> Option<Value> {
+    let source = value.as_object()?;
+    let mut proposal = copy_known_fields(
+        value,
+        &[
+            "id",
+            "runId",
+            "candidateId",
+            "creatorId",
+            "evaluatorId",
+            "attestorId",
+            "state",
+            "isolation",
+            "isolatedBranch",
+            "isolatedWorktree",
+            "heldOutBenchmark",
+            "heldOutBenchmarkId",
+            "humanApproval",
+            "mergeRequiresHumanApproval",
+            "stale",
+            "summary",
+            "createdAt",
+        ],
+    )?;
+
+    let changed_assets = source
+        .get("changedAssets")?
+        .as_array()?
+        .iter()
+        .take(128)
+        .map(|asset| copy_known_fields(asset, &["path", "sha256"]).map(Value::Object))
+        .collect::<Option<Vec<_>>>()?;
+    proposal.insert("changedAssets".to_string(), Value::Array(changed_assets));
+
+    let hashes = copy_known_fields(
+        source.get("hashes")?,
+        &[
+            "baseCommit",
+            "candidateCommit",
+            "patch",
+            "candidateArtifact",
+            "evaluator",
+            "evaluatorEnvironment",
+            "policy",
+            "suite",
+            "baselineResult",
+            "candidateResult",
+        ],
+    )?;
+    proposal.insert("hashes".to_string(), Value::Object(hashes));
+
+    if let Some(comparison) = source.get("comparison") {
+        proposal.insert(
+            "comparison".to_string(),
+            Value::Object(copy_known_fields(
+                comparison,
+                &[
+                    "baselineScore",
+                    "candidateScore",
+                    "delta",
+                    "passed",
+                    "thresholdsHash",
+                ],
+            )?),
+        );
+    }
+    if let Some(attestation) = source.get("attestation") {
+        proposal.insert(
+            "attestation".to_string(),
+            Value::Object(copy_known_fields(
+                attestation,
+                &["timestamp", "maxAgeMs", "branchExists", "worktreeExists"],
+            )?),
+        );
+    }
+
+    let cleanup_source = source.get("cleanup")?.as_object()?;
+    let mut cleanup = copy_known_fields(source.get("cleanup")?, &["status", "summary"])?;
+    let resources = cleanup_source
+        .get("resources")?
+        .as_array()?
+        .iter()
+        .take(16)
+        .map(|resource| {
+            copy_known_fields(resource, &["kind", "identity", "status"]).map(Value::Object)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    cleanup.insert("resources".to_string(), Value::Array(resources));
+    proposal.insert("cleanup".to_string(), Value::Object(cleanup));
+    proposal.insert(
+        "failures".to_string(),
+        sanitize_bounded_string_array(source.get("failures")?, 32)?,
+    );
+    proposal.insert(
+        "artifactRefs".to_string(),
+        sanitize_bounded_string_array(source.get("artifactRefs")?, 32)?,
+    );
+    Some(Value::Object(proposal))
+}
+
+fn sanitize_bounded_string_array(value: &Value, maximum_items: usize) -> Option<Value> {
+    Some(Value::Array(
+        value
+            .as_array()?
+            .iter()
+            .take(maximum_items)
+            .map(|entry| entry.as_str().map(|text| Value::String(text.to_string())))
+            .collect::<Option<Vec<_>>>()?,
+    ))
 }
 
 fn sanitize_tool_activity(value: &Value) -> Option<Value> {
@@ -1535,6 +1730,121 @@ mod tests {
         assert_eq!(resumed.entries.len(), 2);
         assert_eq!(resumed.entries[0].text, "inspect repo");
         assert_eq!(resumed.entries[1].text, "repo inspected");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn work_shell_evolution_projection_and_notice_cross_the_durable_gate() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-evolution-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let project = env::current_dir().expect("cwd");
+        let session_id = "work-session-evolution";
+        let store = WorkShellSessionStore::new(&root);
+        let proposal = json!({
+            "id": "proposal-1",
+            "runId": "run-1",
+            "candidateId": "candidate-1",
+            "creatorId": "creator-1",
+            "evaluatorId": "evaluator-1",
+            "attestorId": "attestor-1",
+            "state": "pr-ready",
+            "isolation": "worktree",
+            "isolatedBranch": "unclecode/evolve/candidate-1",
+            "isolatedWorktree": "/private/candidate-1",
+            "heldOutBenchmark": true,
+            "heldOutBenchmarkId": "suite-1",
+            "humanApproval": "pending",
+            "mergeRequiresHumanApproval": true,
+            "stale": false,
+            "changedAssets": [{ "path": "skills/creator.md", "sha256": format!("sha256:{}", "a".repeat(64)), "body": "must-not-persist" }],
+            "hashes": {
+                "evaluator": format!("sha256:{}", "b".repeat(64)),
+                "evaluatorEnvironment": format!("sha256:{}", "c".repeat(64)),
+                "policy": format!("sha256:{}", "d".repeat(64)),
+                "suite": format!("sha256:{}", "e".repeat(64)),
+                "providerCredential": "must-not-persist"
+            },
+            "comparison": {
+                "baselineScore": 0.7,
+                "candidateScore": 0.9,
+                "delta": 0.2,
+                "passed": true,
+                "thresholdsHash": format!("sha256:{}", "f".repeat(64)),
+                "rawOutput": "must-not-persist"
+            },
+            "attestation": {
+                "timestamp": "2026-08-28T12:00:00.000Z",
+                "maxAgeMs": 300000,
+                "branchExists": true,
+                "worktreeExists": true,
+                "hookOutput": "must-not-persist"
+            },
+            "cleanup": {
+                "status": "retained",
+                "resources": [{ "kind": "branch", "identity": "unclecode/evolve/candidate-1", "status": "retained", "command": "must-not-persist" }]
+            },
+            "failures": [],
+            "summary": format!("safe summary sk-proj-{}", "s".repeat(30)),
+            "artifactRefs": [".unclecode/artifacts/run-1/proposal.json"],
+            "createdAt": "2026-08-28T12:00:00.000Z",
+            "rawCandidateOutput": "must-not-persist"
+        });
+        let payload = json!({
+            "sessionId": session_id,
+            "model": "gpt-5.4",
+            "mode": "normal",
+            "state": "idle",
+            "summary": "Recorded evolution proposal",
+            "entries": [],
+            "agentConsole": {
+                "profileId": "build",
+                "activity": [],
+                "evolutionProposals": [proposal]
+            }
+        })
+        .to_string();
+
+        persist_work_shell_session_snapshot_json(&store, &project, &payload)
+            .expect("persist evolution snapshot");
+        let resumed = store
+            .resume_work_shell_session(&project, session_id)
+            .expect("resume")
+            .expect("resumed");
+        let console = resumed.agent_console.expect("agent console");
+        let recorded = &console["evolutionProposals"][0];
+        assert_eq!(recorded["state"], "pr-ready");
+        assert_eq!(
+            recorded["hashes"]["evaluatorEnvironment"],
+            format!("sha256:{}", "c".repeat(64))
+        );
+        let serialized = serde_json::to_string(recorded).expect("serialize proposal");
+        assert!(!serialized.contains("must-not-persist"));
+        assert!(!serialized.contains("sk-proj-"));
+        assert!(serialized.contains("[REDACTED]"));
+
+        let notice_path = root.join("notifications").join(format!(
+            "{}.notice.json",
+            to_opaque_id(session_id, "session")
+        ));
+        let first_notice: Value = serde_json::from_str(
+            &fs::read_to_string(&notice_path).expect("read persistence notice"),
+        )
+        .expect("parse persistence notice");
+        assert_eq!(first_notice["version"], 1);
+        assert_eq!(first_notice["sessionId"], session_id);
+        assert_eq!(first_notice["revision"], 5);
+
+        persist_work_shell_session_snapshot_json(&store, &project, &payload)
+            .expect("persist next evolution snapshot");
+        let next_notice: Value = serde_json::from_str(
+            &fs::read_to_string(&notice_path).expect("read next persistence notice"),
+        )
+        .expect("parse next persistence notice");
+        assert_eq!(next_notice["revision"], 10);
 
         let _ = fs::remove_dir_all(root);
     }

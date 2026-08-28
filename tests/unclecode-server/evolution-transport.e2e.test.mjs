@@ -1,17 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import {
-  createPersistentRuntimeAdapter,
-  makeControlRoomHandlers,
-  startServer,
-} from "@unclecode/server";
+import { persistWorkShellSessionSnapshot } from "@unclecode/orchestrator";
 import { createControlRoomStore } from "../../apps/godness-web/src/control-room-store.js";
-
-const TOKEN = "evolution-transport-token".padEnd(64, "x");
 
 function proposal(state = "pr-ready") {
   const fresh = state === "pr-ready";
@@ -96,29 +91,122 @@ async function waitFor(assertion, timeoutMs = 2_000) {
   }
 }
 
-test("recorded evolution checkpoint reaches the actual web store over bounded HTTP and SSE", async () => {
+async function startStandaloneServer(root, sessionStoreRoot) {
+  const child = spawn(
+    process.execPath,
+    [
+      "--disable-warning=ExperimentalWarning",
+      "--conditions=source",
+      "--import",
+      "tsx",
+      "apps/unclecode-server/src/cli.ts",
+    ],
+    {
+      cwd: new URL("../..", import.meta.url),
+      env: {
+        ...process.env,
+        HOME: root,
+        UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot,
+        UNCLECODE_SERVER_HOST: "127.0.0.1",
+        UNCLECODE_SERVER_PORT: "0",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let output = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  const url = await waitFor(() => {
+    const match = output.match(/unclecode-server listening on (http:\/\/127\.0\.0\.1:\d+)/u);
+    assert.ok(match?.[1], output);
+    return match[1];
+  }, 5_000);
+  const token = (await readFile(path.join(root, ".unclecode", "server.token"), "utf8")).trim();
+  return {
+    child,
+    token,
+    url,
+    async stop() {
+      child.kill("SIGTERM");
+      await Promise.race([
+        new Promise((resolve) => child.once("close", resolve)),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("standalone server did not stop")), 2_000)),
+      ]);
+    },
+  };
+}
+
+async function readReplayIds(url, token, sessionId, count) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error("SSE replay timed out")), 2_000);
+  try {
+    const response = await fetch(`${url}/sessions/${sessionId}/events`, {
+      headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" },
+      signal: controller.signal,
+    });
+    assert.equal(response.status, 200);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const ids = [];
+    while (ids.length < count) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        const id = Number.parseInt(frame.match(/^id:\s*(\d+)$/mu)?.[1] ?? "", 10);
+        if (Number.isSafeInteger(id)) ids.push(id);
+      }
+    }
+    await reader.cancel();
+    return ids;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+test("actual Work Shell persistence refreshes the real web store through standalone bearer SSE", async () => {
   const root = await mkdtemp(
     path.join(tmpdir(), "unclecode-evolution-transport-"),
   );
-  const sessionRef = {
-    sessionId: "session-evolution-1",
-    projectPath: root,
+  const sessionStoreRoot = path.join(root, "sessions");
+  const sessionId = "session-evolution-1";
+  const persistenceEnv = {
+    ...process.env,
+    UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot,
   };
-  const { adapter, journal, sessions } = createPersistentRuntimeAdapter({
-    rootDir: root,
-    journalCapacity: 16,
+  const server = await startStandaloneServer(root, sessionStoreRoot);
+  const persist = (state) => persistWorkShellSessionSnapshot({
+    cwd: root,
+    env: persistenceEnv,
+    sessionId,
+    model: "gpt-5.6-sol",
+    mode: "build",
+    state: "idle",
+    summary: `Recorded evolution proposal: ${state}`,
+    entries: [],
+    agentConsole: {
+      profileId: "build",
+      activity: [],
+      evolutionProposals: [proposal(state)],
+    },
   });
-  await sessions.appendCheckpoint(sessionRef, {
-    type: "agent_console",
-    agentConsole: { evolutionProposals: [proposal("stale")] },
+  await persist("stale");
+  const eventRequests = [];
+  const store = createControlRoomStore({
+    baseUrl: server.url,
+    token: server.token,
+    async fetchImpl(url, options) {
+      if (String(url).endsWith(`/sessions/${sessionId}/events`)) {
+        eventRequests.push(options?.headers?.authorization);
+      }
+      return fetch(url, options);
+    },
   });
-  const server = await startServer({
-    port: 0,
-    authToken: TOKEN,
-    handlers: makeControlRoomHandlers({ adapter, journal }),
-    heartbeatMs: 10_000,
-  });
-  const store = createControlRoomStore({ baseUrl: server.url, token: TOKEN });
   try {
     await store.start();
     await waitFor(() => assert.equal(store.getSnapshot().connection, "live"));
@@ -132,10 +220,7 @@ test("recorded evolution checkpoint reaches the actual web store over bounded HT
     );
     assert.equal(JSON.stringify(store.getSnapshot().data).includes(root), false);
 
-    await sessions.appendCheckpoint(sessionRef, {
-      type: "agent_console",
-      agentConsole: { evolutionProposals: [proposal("pr-ready")] },
-    });
+    await persist("pr-ready");
     await waitFor(() =>
       assert.equal(store.getSnapshot().data.runs[0].evolve[0].state, "pr-ready"),
     );
@@ -143,13 +228,8 @@ test("recorded evolution checkpoint reaches the actual web store over bounded HT
       store.getSnapshot().data.runs[0].evolve[0].cleanup.status,
       "retained",
     );
-    const replay = journal.replay("session-evolution-1", 0);
-    assert.equal(replay.status, "ok");
-    assert.deepEqual(replay.events.map((event) => event.id), [1, 2]);
-    assert.deepEqual(
-      replay.events.map((event) => event.event),
-      ["run.updated", "run.updated"],
-    );
+    assert.deepEqual(eventRequests, [`Bearer ${server.token}`]);
+    assert.deepEqual(await readReplayIds(server.url, server.token, sessionId, 2), [1, 2]);
   } finally {
     store.stop();
     await server.stop();
