@@ -40,6 +40,7 @@ const PREPARATION_LOCK_RETRY_MS = 20;
 const INCOMPLETE_LOCK_GRACE_MS = 5_000;
 const MAX_ORPHAN_CLAIM_SCAN = 128;
 const MAX_ORPHAN_CLAIM_DELETIONS = 16;
+const MAX_PROCESS_ID = 2_147_483_647;
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 const CANONICAL_UTC_MILLISECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -61,7 +62,7 @@ export type CreateGitCreatorEvolutionHostInput = {
     readonly identity: string;
   }) => void | Promise<void>) | undefined;
   readonly onLifecycleLockCheckpoint?: ((checkpoint: {
-    readonly phase: "claim-created" | "acquired" | "waiting";
+    readonly phase: "building-created" | "claim-created" | "acquired" | "waiting";
     readonly lockPath: string;
   }) => void | Promise<void>) | undefined;
   readonly lifecycleLockLeaseMs?: number | undefined;
@@ -1163,10 +1164,13 @@ async function acquirePreparationLock(
       heartbeatAt: input.now(),
     };
     const claimPath = `${lockPath}.claim-${owner.token}`;
-    const buildingPath = `${lockPath}.building-${owner.token}`;
+    // The directory name carries the live identity atomically from mkdir;
+    // owner.json is the durable identity only after its fsync completes.
+    const buildingPath = `${lockPath}.building-${owner.pid}-${owner.token}`;
     try {
       await mkdir(buildingPath, { mode: 0o700 });
       try {
+        await input.onCheckpoint?.({ phase: "building-created", lockPath });
         const ownerPath = join(buildingPath, "owner.json");
         const handle = await open(ownerPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
         try {
@@ -1268,17 +1272,37 @@ async function readClaimOwner(claimPath: string): Promise<ClaimOwnerState> {
 async function orphanClaimIsReclaimable(
   claimPath: string,
   input: { readonly leaseMs: number; readonly now: () => number },
+  identity: { readonly kind: "claim" } | { readonly kind: "building"; readonly pid: number },
 ): Promise<boolean> {
   const stat = await lstat(claimPath);
   if (!stat.isDirectory() || stat.isSymbolicLink()
     || input.now() - stat.mtimeMs < INCOMPLETE_LOCK_GRACE_MS) {
     return false;
   }
+  if (identity.kind === "building" && isProcessAlive(identity.pid)) return false;
   const owner = await readClaimOwner(claimPath);
   if (owner.status === "missing") return true;
   if (owner.status !== "valid") return false;
+  if (identity.kind === "building" && owner.owner.pid !== identity.pid) return false;
   return !isProcessAlive(owner.owner.pid)
     && input.now() - owner.owner.heartbeatAt >= input.leaseMs;
+}
+
+function parseOrphanClaimIdentity(
+  lockName: string,
+  entryName: string,
+): { readonly kind: "claim" } | { readonly kind: "building"; readonly pid: number } | undefined {
+  if (new RegExp(`^${lockName}\\.claim-${UUID}$`, "u").test(entryName)) {
+    return { kind: "claim" };
+  }
+  const building = new RegExp(
+    `^${lockName}\\.building-([1-9][0-9]{0,9})-${UUID}$`,
+    "u",
+  ).exec(entryName);
+  if (!building) return undefined;
+  const pid = Number(building[1]);
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid > MAX_PROCESS_ID) return undefined;
+  return { kind: "building", pid };
 }
 
 async function garbageCollectOrphanPreparationClaims(
@@ -1287,19 +1311,19 @@ async function garbageCollectOrphanPreparationClaims(
 ): Promise<void> {
   const parent = dirname(lockPath);
   const lockName = basename(lockPath).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  const claimPattern = new RegExp(`^${lockName}\\.(?:claim|building)-${UUID}$`, "u");
   const directory = await opendir(parent);
   let visited = 0;
   let deleted = 0;
   for await (const entry of directory) {
     if (visited >= MAX_ORPHAN_CLAIM_SCAN) break;
     visited += 1;
+    const identity = parseOrphanClaimIdentity(lockName, entry.name);
     if (deleted >= MAX_ORPHAN_CLAIM_DELETIONS
-      || !entry.isDirectory() || entry.isSymbolicLink() || !claimPattern.test(entry.name)) {
+      || !entry.isDirectory() || entry.isSymbolicLink() || !identity) {
       continue;
     }
     const claimPath = join(parent, entry.name);
-    if (!(await orphanClaimIsReclaimable(claimPath, input).catch(() => false))) continue;
+    if (!(await orphanClaimIsReclaimable(claimPath, input, identity).catch(() => false))) continue;
     const quarantine = `${claimPath}.gc-${randomUUID()}`;
     try {
       await rename(claimPath, quarantine);
@@ -1307,7 +1331,7 @@ async function garbageCollectOrphanPreparationClaims(
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
       throw error;
     }
-    if (await orphanClaimIsReclaimable(quarantine, input).catch(() => false)) {
+    if (await orphanClaimIsReclaimable(quarantine, input, identity).catch(() => false)) {
       await rm(quarantine, { recursive: true, force: true });
       deleted += 1;
       continue;

@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   realpathSync,
   readFileSync,
   rmSync,
@@ -770,6 +771,77 @@ test("a paused pre-owner claim cannot delete a newer lifecycle lock", async () =
   }
 });
 
+test("orphan cleanup retains a live claimant paused before its building owner is written", async () => {
+  const root = createRepository();
+  const runId = "git-run-lock-live-building";
+  const artifactDir = path.join(root, ".unclecode", "artifacts", runId);
+  let announceBuilding;
+  const buildingCreated = new Promise((resolve) => { announceBuilding = resolve; });
+  let resumeBuilding;
+  const buildingMayResume = new Promise((resolve) => { resumeBuilding = resolve; });
+  let releaseSecond;
+  const secondMayFinish = new Promise((resolve) => { releaseSecond = resolve; });
+  let announceSecond;
+  const secondEntered = new Promise((resolve) => { announceSecond = resolve; });
+  let firstRun;
+  let secondRun;
+  const firstHost = createGitCreatorEvolutionHost({
+    workspaceRoot: root,
+    lifecycleLockLeaseMs: 100,
+    lifecycleLockHeartbeatMs: 20,
+    lifecycleLockNow: () => 10_000,
+    async onLifecycleLockCheckpoint(checkpoint) {
+      if (checkpoint.phase !== "building-created") return;
+      const names = readdirSync(artifactDir).filter((name) =>
+        name.startsWith("evolution-lifecycle.lock.building-"));
+      assert.equal(names.length, 1);
+      const buildingPath = path.join(artifactDir, names[0]);
+      utimesSync(buildingPath, new Date(0), new Date(0));
+      announceBuilding(buildingPath);
+      await buildingMayResume;
+    },
+    async generateCreatorEdits() { return { status: "failed", summary: "unused" }; },
+    async runEvaluator() { return { status: "failed", summary: "unused" }; },
+  });
+  const secondHost = createGitCreatorEvolutionHost({
+    workspaceRoot: root,
+    lifecycleLockLeaseMs: 100,
+    lifecycleLockHeartbeatMs: 20,
+    lifecycleLockNow: () => 10_000,
+    async generateCreatorEdits() { return { status: "failed", summary: "unused" }; },
+    async runEvaluator() { return { status: "failed", summary: "unused" }; },
+  });
+  try {
+    firstRun = firstHost.withLifecycleLock({ runId, workspaceRoot: root }, async () => undefined);
+    const buildingPath = await Promise.race([
+      buildingCreated,
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("the lock has no deterministic post-mkdir/pre-owner boundary")),
+        250,
+      )),
+    ]);
+    assert.match(
+      path.basename(buildingPath),
+      new RegExp(`^evolution-lifecycle\\.lock\\.building-${process.pid}-[0-9a-f-]{36}$`, "u"),
+    );
+    secondRun = secondHost.withLifecycleLock({ runId, workspaceRoot: root }, async () => {
+      announceSecond();
+      await secondMayFinish;
+    });
+    await secondEntered;
+    assert.equal(existsSync(buildingPath), true, "GC deleted a live pre-owner claimant");
+    releaseSecond();
+    await secondRun;
+    resumeBuilding();
+    await firstRun;
+  } finally {
+    releaseSecond?.();
+    resumeBuilding?.();
+    await Promise.allSettled([firstRun, secondRun].filter(Boolean));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a duplicate lifecycle lock wait observes caller cancellation", async () => {
   const root = createRepository();
   const runId = "git-run-lock-cancel";
@@ -984,11 +1056,12 @@ test("orphan claim and building cleanup share one per-acquisition deletion cap",
   const root = createRepository();
   const runId = "git-run-lock-claim-gc-cap";
   const artifactDir = path.join(root, ".unclecode", "artifacts", runId);
+  const deadPid = 2_147_483_647;
   const claims = [
     ...Array.from({ length: 10 }, () =>
       path.join(artifactDir, `evolution-lifecycle.lock.claim-${randomUUID()}`)),
     ...Array.from({ length: 10 }, () =>
-      path.join(artifactDir, `evolution-lifecycle.lock.building-${randomUUID()}`)),
+      path.join(artifactDir, `evolution-lifecycle.lock.building-${deadPid}-${randomUUID()}`)),
   ];
   for (const claim of claims) {
     mkdirSync(claim, { recursive: true });
@@ -1016,17 +1089,24 @@ test("lock acquisition safely garbage-collects orphan building claims", async ()
   const runId = "git-run-lock-building-gc";
   const artifactDir = path.join(root, ".unclecode", "artifacts", runId);
   const prefix = "evolution-lifecycle.lock.building-";
-  const orphan = path.join(artifactDir, `${prefix}${randomUUID()}`);
-  const dead = path.join(artifactDir, `${prefix}${randomUUID()}`);
-  const live = path.join(artifactDir, `${prefix}${randomUUID()}`);
-  const recent = path.join(artifactDir, `${prefix}${randomUUID()}`);
-  const misnamed = path.join(artifactDir, `${prefix}not-a-uuid`);
-  const linked = path.join(artifactDir, `${prefix}${randomUUID()}`);
+  const deadPid = 2_147_483_647;
+  const orphan = path.join(artifactDir, `${prefix}${deadPid}-${randomUUID()}`);
+  const dead = path.join(artifactDir, `${prefix}${deadPid}-${randomUUID()}`);
+  const live = path.join(artifactDir, `${prefix}${process.pid}-${randomUUID()}`);
+  const recent = path.join(artifactDir, `${prefix}${deadPid}-${randomUUID()}`);
+  const misnamed = path.join(artifactDir, `${prefix}${process.pid}-not-a-uuid`);
+  const zeroPid = path.join(artifactDir, `${prefix}0-${randomUUID()}`);
+  const paddedPid = path.join(artifactDir, `${prefix}0${process.pid}-${randomUUID()}`);
+  const oversizedPid = path.join(artifactDir, `${prefix}2147483648-${randomUUID()}`);
+  const linked = path.join(artifactDir, `${prefix}${deadPid}-${randomUUID()}`);
   mkdirSync(orphan, { recursive: true });
   mkdirSync(dead, { recursive: true });
   mkdirSync(live, { recursive: true });
   mkdirSync(recent, { recursive: true });
   mkdirSync(misnamed, { recursive: true });
+  mkdirSync(zeroPid, { recursive: true });
+  mkdirSync(paddedPid, { recursive: true });
+  mkdirSync(oversizedPid, { recursive: true });
   writeFileSync(path.join(dead, "owner.json"), `${JSON.stringify({
     version: 1,
     pid: 2_147_483_647,
@@ -1046,6 +1126,9 @@ test("lock acquisition safely garbage-collects orphan building claims", async ()
   utimesSync(orphan, new Date(0), new Date(0));
   utimesSync(dead, new Date(0), new Date(0));
   utimesSync(live, new Date(0), new Date(0));
+  utimesSync(zeroPid, new Date(0), new Date(0));
+  utimesSync(paddedPid, new Date(0), new Date(0));
+  utimesSync(oversizedPid, new Date(0), new Date(0));
   const host = createGitCreatorEvolutionHost({
     workspaceRoot: root,
     lifecycleLockLeaseMs: 100,
@@ -1061,6 +1144,9 @@ test("lock acquisition safely garbage-collects orphan building claims", async ()
     assert.equal(existsSync(live), true, "live building claim was deleted");
     assert.equal(existsSync(recent), true, "recent ownerless building claim was deleted");
     assert.equal(existsSync(misnamed), true, "misnamed building path was treated as a claim");
+    assert.equal(existsSync(zeroPid), true, "zero PID building path was treated as a claim");
+    assert.equal(existsSync(paddedPid), true, "padded PID building path was treated as a claim");
+    assert.equal(existsSync(oversizedPid), true, "oversized PID building path was treated as a claim");
     assert.equal(existsSync(linked), true, "symlinked building claim was followed or deleted");
     assert.equal(readFileSync(path.join(outside, "sentinel.txt"), "utf8"), "keep\n");
   } finally {
