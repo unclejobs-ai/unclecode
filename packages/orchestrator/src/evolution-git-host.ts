@@ -1286,7 +1286,8 @@ async function garbageCollectOrphanPreparationClaims(
   input: { readonly leaseMs: number; readonly now: () => number },
 ): Promise<void> {
   const parent = dirname(lockPath);
-  const claimPattern = new RegExp(`^${basename(lockPath).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}\\.claim-${UUID}$`, "u");
+  const lockName = basename(lockPath).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const claimPattern = new RegExp(`^${lockName}\\.(?:claim|building)-${UUID}$`, "u");
   const directory = await opendir(parent);
   let visited = 0;
   let deleted = 0;

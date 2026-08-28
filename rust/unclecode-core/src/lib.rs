@@ -64,6 +64,7 @@ pub mod responses_input;
 pub mod runtime;
 pub mod sensitive_input_command;
 pub mod session;
+mod session_safe_io;
 pub mod session_listing;
 pub mod sessions_command;
 pub mod setup_report;

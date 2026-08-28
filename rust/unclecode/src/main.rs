@@ -161,8 +161,9 @@ use unclecode_core::responses_input::{
 use unclecode_core::runtime::{run_command, run_shell_command, RuntimeCommand};
 use unclecode_core::sensitive_input_command::resolve_sensitive_input_cancel_result_json;
 use unclecode_core::session::{
-    persist_work_shell_session_snapshot_json, resume_work_shell_session_json, session_paths,
-    SessionLog, WorkShellSessionSnapshot, WorkShellSessionStore,
+    persist_work_shell_session_snapshot_json, resume_work_shell_session_json,
+    scan_session_persistence_notices_json, session_paths, SessionLog, WorkShellSessionSnapshot,
+    WorkShellSessionStore,
 };
 use unclecode_core::sessions_command::resolve_sessions_command_json;
 use unclecode_core::sha256::{sha256_base64url_bytes, sha256_hex_bytes};
@@ -4378,6 +4379,14 @@ fn run_native_auth_command(args: &[OsString]) -> Result<u8, String> {
 
 fn run_native_session_command(args: &[OsString]) -> Result<u8, String> {
     match args.first().and_then(|arg| arg.to_str()) {
+        Some("scan-notices") => {
+            let root_dir = args
+                .get(1)
+                .map(PathBuf::from)
+                .ok_or("Usage: unclecode rust session scan-notices <root-dir>")?;
+            println!("{}", scan_session_persistence_notices_json(&root_dir)?);
+            Ok(0)
+        }
         Some("paths") => {
             let root_dir = args
                 .get(1)
@@ -4525,7 +4534,7 @@ fn run_native_session_command(args: &[OsString]) -> Result<u8, String> {
             println!("{json}");
             Ok(0)
         }
-        _ => Err("Usage: unclecode rust session <persist <session-id> <model> <mode> <state> <trace-mode|-> <reasoning-effort|->|persist-json|list|resume <session-id>|resume-json <session-id>|paths <root-dir> <project-path> <session-id>>".to_string()),
+        _ => Err("Usage: unclecode rust session <scan-notices <root-dir>|persist <session-id> <model> <mode> <state> <trace-mode|-> <reasoning-effort|->|persist-json|list|resume <session-id>|resume-json <session-id>|paths <root-dir> <project-path> <session-id>>".to_string()),
     }
 }
 

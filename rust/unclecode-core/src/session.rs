@@ -2,13 +2,13 @@ use std::cmp::Reverse;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::model_registry::is_openai_reasoning_effort;
 use crate::redaction::redact_secrets;
 use crate::session_listing::{parse_session_list_item, parse_session_resume_summary};
 pub use crate::session_listing::{SessionListItem, SessionResumeSummary};
+use crate::session_safe_io::AnchoredSessionRoot;
 use crate::sha256::sha256_hex;
 use crate::time_iso::{unix_millis_to_iso, utc_now_iso};
 use serde_json::{json, Map, Value};
@@ -21,7 +21,8 @@ const MAX_AGENT_CONSOLE_JOBS: usize = 128;
 const MAX_AGENT_CONSOLE_EVOLUTION_PROPOSALS: usize = 32;
 const MAX_RESUME_ENTRY_CHARS: usize = 600;
 const SESSION_NOTICE_VERSION: u8 = 1;
-static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+const MAX_SESSION_NOTICE_BYTES: usize = 4 * 1024;
+const MAX_SESSION_NOTICE_FILES: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEvent {
@@ -133,36 +134,44 @@ impl WorkShellSessionStore {
         &self,
         snapshot: &WorkShellSessionSnapshot,
     ) -> io::Result<()> {
+        let root = AnchoredSessionRoot::open(&self.root_dir)?;
         let paths = session_paths(
             &self.root_dir,
             Path::new(&snapshot.project_path),
             &snapshot.session_id,
         );
-        fs::create_dir_all(&paths.session_dir)?;
-        fs::create_dir_all(&paths.project_memory_dir)?;
-        fs::create_dir_all(&paths.research_artifacts_dir)?;
+        root.create_dir_all(self.relative_path(&paths.session_dir)?)?;
+        root.create_dir_all(self.relative_path(&paths.project_memory_dir)?)?;
+        root.create_dir_all(self.relative_path(&paths.research_artifacts_dir)?)?;
 
         let records = build_work_shell_records(snapshot);
-        let mut existing_count = count_lines(&paths.event_log_path)?;
+        let event_log_path = self.relative_path(&paths.event_log_path)?;
+        let mut existing_count = count_anchored_lines(&root, event_log_path)?;
         let mut updated_at = String::new();
-        let mut event_log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&paths.event_log_path)?;
+        let mut event_lines = String::new();
         for record in &records {
             updated_at = record.timestamp.clone();
             existing_count += 1;
-            writeln!(event_log, "{}", record.to_json(&snapshot.session_id))?;
+            event_lines.push_str(&record.to_json(&snapshot.session_id));
+            event_lines.push('\n');
         }
+        root.append_all(event_log_path, event_lines.as_bytes())?;
 
         let checkpoint = build_checkpoint_json(snapshot, existing_count, &updated_at);
-        write_atomic_durable(&paths.checkpoint_path, checkpoint.as_bytes())?;
-        self.persist_checkpoint_notice(&snapshot.session_id, existing_count)
+        root.write_atomic_durable(
+            self.relative_path(&paths.checkpoint_path)?,
+            checkpoint.as_bytes(),
+        )?;
+        self.persist_checkpoint_notice(&root, &snapshot.session_id, existing_count)
     }
 
-    fn persist_checkpoint_notice(&self, session_id: &str, revision: usize) -> io::Result<()> {
-        let notice_dir = self.root_dir.join("notifications");
-        let notice_path = notice_dir.join(format!(
+    fn persist_checkpoint_notice(
+        &self,
+        root: &AnchoredSessionRoot,
+        session_id: &str,
+        revision: usize,
+    ) -> io::Result<()> {
+        let notice_path = Path::new("notifications").join(format!(
             "{}.notice.json",
             to_opaque_id(session_id, "session")
         ));
@@ -172,7 +181,16 @@ impl WorkShellSessionStore {
             "revision": revision,
         }))
         .map_err(io::Error::other)?;
-        write_atomic_durable(&notice_path, &notice)
+        root.write_atomic_durable(&notice_path, &notice)
+    }
+
+    fn relative_path<'a>(&self, path: &'a Path) -> io::Result<&'a Path> {
+        path.strip_prefix(&self.root_dir).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "session path escaped the anchored session root",
+            )
+        })
     }
 
     pub fn list_session_lines(&self, project_path: &Path) -> io::Result<Vec<SessionLine>> {
@@ -610,6 +628,55 @@ pub fn session_paths(root_dir: &Path, project_path: &Path, session_id: &str) -> 
     }
 }
 
+pub fn scan_session_persistence_notices_json(root_dir: &Path) -> Result<String, String> {
+    let root = match AnchoredSessionRoot::open_existing(root_dir) {
+        Ok(root) => root,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok("[]".to_string()),
+        Err(error) => {
+            return Err(format!(
+                "Failed to anchor session persistence root: {error}"
+            ))
+        }
+    };
+    let files = match root.read_bounded_regular_files(
+        Path::new("notifications"),
+        MAX_SESSION_NOTICE_FILES,
+        MAX_SESSION_NOTICE_BYTES,
+    ) {
+        Ok(files) => files,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(format!(
+                "Failed to scan session persistence notices: {error}"
+            ))
+        }
+    };
+    let notices = files
+        .into_iter()
+        .filter(|(name, _)| is_session_notice_file_name(name))
+        .filter_map(|(name, bytes)| {
+            String::from_utf8(bytes)
+                .ok()
+                .map(|contents| json!({ "name": name, "contents": contents }))
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&notices)
+        .map_err(|error| format!("Failed to serialize session persistence notices: {error}"))
+}
+
+fn is_session_notice_file_name(name: &str) -> bool {
+    let Some(digest) = name
+        .strip_prefix("session-")
+        .and_then(|value| value.strip_suffix(".notice.json"))
+    else {
+        return false;
+    };
+    digest.len() == 20
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn to_opaque_project_bucket(project_path: &Path) -> String {
     let canonical = fs::canonicalize(project_path).unwrap_or_else(|_| project_path.to_path_buf());
     let mut normalized = canonical.to_string_lossy().replace('\\', "/");
@@ -626,39 +693,12 @@ fn to_opaque_id(value: &str, prefix: &str) -> String {
     format!("{}-{}", prefix, &sha256_hex(value)[..20])
 }
 
-fn count_lines(path: &Path) -> io::Result<usize> {
-    match fs::read_to_string(path) {
+fn count_anchored_lines(root: &AnchoredSessionRoot, path: &Path) -> io::Result<usize> {
+    match root.read_to_string(path) {
         Ok(raw) => Ok(raw.lines().filter(|line| !line.trim().is_empty()).count()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
         Err(error) => Err(error),
     }
-}
-
-fn write_atomic_durable(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "durable file has no parent"))?;
-    fs::create_dir_all(parent)?;
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid durable file name"))?;
-    let nonce = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(".{file_name}.tmp-{}-{nonce}", std::process::id()));
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        OpenOptions::new().read(true).open(parent)?.sync_all()
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
 }
 
 fn sanitize_agent_console_snapshot(value: &Value) -> Option<Value> {

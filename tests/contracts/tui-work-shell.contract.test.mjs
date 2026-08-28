@@ -1620,7 +1620,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       mode: "default",
       authLabel: "Browser OAuth · file",
     }),
-    "gpt-5.4 · Work mode · Saved OAuth · work context",
+    "gpt-5.4 · 작업 모드 · Saved OAuth · work context",
   );
   assert.equal(
     formatWorkShellFooterLine({

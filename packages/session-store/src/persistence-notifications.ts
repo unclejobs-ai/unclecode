@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
-import { constants, watch, type FSWatcher } from "node:fs";
-import { lstat, open, opendir } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { watch, type FSWatcher } from "node:fs";
+import { lstat } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+
+import { runRustCommandSync } from "./rust-command.js";
 
 const NOTICE_DIRECTORY = "notifications";
 const NOTICE_FILE = /^session-[a-f0-9]{20}\.notice\.json$/u;
@@ -32,22 +34,18 @@ function noticeFileName(sessionId: string): string {
   return `session-${digest}.notice.json`;
 }
 
-async function readNotice(path: string): Promise<SessionPersistenceNotice | undefined> {
-  let handle;
+function readNotice(name: string, contents: string): SessionPersistenceNotice | undefined {
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const stat = await handle.stat();
-    if (!stat.isFile() || stat.size < 2 || stat.size > MAX_NOTICE_BYTES) return undefined;
-    const bytes = Buffer.alloc(Number(stat.size));
-    const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
-    if (bytesRead !== bytes.length) return undefined;
-    const parsed = JSON.parse(bytes.toString("utf8")) as unknown;
+    if (Buffer.byteLength(contents) < 2 || Buffer.byteLength(contents) > MAX_NOTICE_BYTES) {
+      return undefined;
+    }
+    const parsed = JSON.parse(contents) as unknown;
     if (
       !isRecord(parsed)
       || parsed.version !== 1
       || typeof parsed.sessionId !== "string"
       || !SESSION_ID.test(parsed.sessionId)
-      || basename(path) !== noticeFileName(parsed.sessionId)
+      || name !== noticeFileName(parsed.sessionId)
       || !Number.isSafeInteger(parsed.revision)
       || Number(parsed.revision) < 1
     ) {
@@ -60,17 +58,50 @@ async function readNotice(path: string): Promise<SessionPersistenceNotice | unde
     };
   } catch {
     return undefined;
-  } finally {
-    await handle?.close().catch(() => undefined);
   }
 }
 
-async function isRealDirectory(path: string): Promise<boolean> {
+function scanNotices(rootDir: string): SessionPersistenceNotice[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(
+      runRustCommandSync(
+        ["rust", "session", "scan-notices", rootDir],
+        process.cwd(),
+      ),
+    ) as unknown;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed) || parsed.length > MAX_NOTICE_FILES) return [];
+  const notices: SessionPersistenceNotice[] = [];
+  for (const item of parsed) {
+    if (
+      !isRecord(item)
+      || typeof item.name !== "string"
+      || !NOTICE_FILE.test(item.name)
+      || typeof item.contents !== "string"
+    ) {
+      continue;
+    }
+    const notice = readNotice(item.name, item.contents);
+    if (notice) notices.push(notice);
+  }
+  return notices;
+}
+
+type DirectoryIdentity = {
+  readonly device: number | bigint;
+  readonly inode: number | bigint;
+};
+
+async function realDirectoryIdentity(path: string): Promise<DirectoryIdentity | undefined> {
   try {
     const stat = await lstat(path);
-    return stat.isDirectory() && !stat.isSymbolicLink();
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return undefined;
+    return { device: stat.dev, inode: stat.ino };
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -86,7 +117,7 @@ export async function watchSessionPersistenceNotices(input: {
   const rootDir = resolve(input.rootDir);
   const parentDir = dirname(rootDir);
   const noticeDir = getSessionPersistenceNoticeDir(rootDir);
-  if (!(await isRealDirectory(parentDir))) {
+  if (!(await realDirectoryIdentity(parentDir))) {
     throw new Error("Session persistence notification parent is unavailable or unsafe.");
   }
 
@@ -97,7 +128,7 @@ export async function watchSessionPersistenceNotices(input: {
   let rescanRequested = false;
 
   async function attach(path: string): Promise<void> {
-    if (stopped || watchers.has(path) || !(await isRealDirectory(path))) return;
+    if (stopped || watchers.has(path) || !(await realDirectoryIdentity(path))) return;
     const watcher = watch(path, { persistent: true }, () => {
       void scheduleScan();
     });
@@ -112,27 +143,14 @@ export async function watchSessionPersistenceNotices(input: {
   async function scan(): Promise<void> {
     await attach(rootDir);
     await attach(noticeDir);
-    let directory;
-    try {
-      directory = await opendir(noticeDir);
-    } catch {
-      return;
-    }
-    let visited = 0;
-    try {
-      for await (const entry of directory) {
-        if (visited >= MAX_NOTICE_FILES) break;
-        visited += 1;
-        if (!entry.isFile() || !NOTICE_FILE.test(entry.name)) continue;
-        const notice = await readNotice(join(noticeDir, entry.name));
-        if (!notice) continue;
-        const previous = revisions.get(notice.sessionId) ?? 0;
-        if (notice.revision <= previous) continue;
-        await input.onNotice(notice);
-        revisions.set(notice.sessionId, notice.revision);
-      }
-    } finally {
-      await directory.close().catch(() => undefined);
+    // The Rust owner opens the root and notification directory with O_NOFOLLOW,
+    // enumerates the stable directory descriptor, and opens every receipt with
+    // openat(O_NOFOLLOW). Unsupported platforms and unsafe paths fail closed.
+    for (const notice of scanNotices(rootDir)) {
+      const previous = revisions.get(notice.sessionId) ?? 0;
+      if (notice.revision <= previous) continue;
+      await input.onNotice(notice);
+      revisions.set(notice.sessionId, notice.revision);
     }
   }
 

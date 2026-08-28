@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -96,6 +96,63 @@ test("notification watcher ignores malformed, oversized, misnamed, and symlink r
   });
   try {
     assert.deepEqual(received, [{ version: 1, sessionId: "session-good", revision: 3 }]);
+  } finally {
+    watcher.stop();
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("notification watcher refuses a symlinked notification directory", async () => {
+  const parent = await mkdtemp(path.join(tmpdir(), "unclecode-notice-dir-link-"));
+  const rootDir = path.join(parent, "sessions");
+  const outside = path.join(parent, "outside");
+  await mkdir(rootDir, { recursive: true });
+  await writeNotice(outside, "outside-session", 17);
+  await symlink(getSessionPersistenceNoticeDir(outside), getSessionPersistenceNoticeDir(rootDir));
+
+  const received = [];
+  const watcher = await watchSessionPersistenceNotices({
+    rootDir,
+    onNotice(notice) { received.push(notice); },
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(received, []);
+    assert.deepEqual(
+      JSON.parse(await readFile(path.join(
+        getSessionPersistenceNoticeDir(outside),
+        noticeFile("outside-session"),
+      ), "utf8")),
+      { version: 1, sessionId: "outside-session", revision: 17 },
+    );
+  } finally {
+    watcher.stop();
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("notification watcher refuses a symlinked session root", async () => {
+  const parent = await mkdtemp(path.join(tmpdir(), "unclecode-notice-root-link-"));
+  const outside = path.join(parent, "outside");
+  const rootDir = path.join(parent, "sessions");
+  await writeNotice(outside, "outside-root-session", 23);
+  await symlink(outside, rootDir);
+
+  const received = [];
+  const watcher = await watchSessionPersistenceNotices({
+    rootDir,
+    onNotice(notice) { received.push(notice); },
+  });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(received, []);
+    assert.deepEqual(
+      JSON.parse(await readFile(path.join(
+        getSessionPersistenceNoticeDir(outside),
+        noticeFile("outside-root-session"),
+      ), "utf8")),
+      { version: 1, sessionId: "outside-root-session", revision: 23 },
+    );
   } finally {
     watcher.stop();
     await rm(parent, { recursive: true, force: true });
