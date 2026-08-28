@@ -1,13 +1,17 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdtemp, realpath, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, realpath, rm, rmdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 
-const DEFAULT_PROCESS_LIMIT = 1_024;
+const CGROUP_ROOT = "/sys/fs/cgroup";
+const DEFAULT_PROCESS_LIMIT = 64;
 const DEFAULT_OPEN_FILE_LIMIT = 256;
-const DEFAULT_MEMORY_KIB = 8 * 1024 * 1024;
+const DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024;
+const DEFAULT_CPU_QUOTA_MICROS = 100_000;
+const CPU_PERIOD_MICROS = 100_000;
 const TERMINATION_GRACE_MS = 100;
+const DOMAIN_EMPTY_TIMEOUT_MS = 5_000;
 
 export type ContainedEvolutionCommandResult = {
   readonly status: "completed" | "failed" | "timeout" | "cancelled";
@@ -40,12 +44,19 @@ export async function runContainedEvolutionCommand(input: {
   readonly readablePaths?: readonly string[];
   readonly signal?: AbortSignal;
   readonly platform?: NodeJS.Platform;
+  readonly maxProcesses?: number;
+  readonly maxMemoryBytes?: number;
 }): Promise<ContainedEvolutionCommandResult> {
   const platform = input.platform ?? process.platform;
-  if (platform !== "darwin" && platform !== "linux") {
+  if (platform === "darwin") {
+    throw new EvolutionSandboxUnavailableError(
+      "macOS evolution evaluation is unavailable: sandbox-exec has no host-enforced containment domain for detached descendants.",
+    );
+  }
+  if (platform !== "linux") {
     throw new EvolutionSandboxUnavailableError(`No evolution sandbox is supported on ${platform}.`);
   }
-  validateBounds(input.timeoutMs, input.maxOutputBytes);
+  validateBounds(input.timeoutMs, input.maxOutputBytes, input.maxProcesses, input.maxMemoryBytes);
   input.signal?.throwIfAborted();
 
   const [cwd, workspaceRoot, command] = await Promise.all([
@@ -56,30 +67,27 @@ export async function runContainedEvolutionCommand(input: {
   if (!isContained(workspaceRoot, cwd)) {
     throw new Error("Evolution command cwd escapes its workspace root.");
   }
-  const sandbox = await resolvePlatformSandbox(platform, input.environment.PATH);
-  const privateTemp = await mkdtemp(join(tmpdir(), "unclecode-evolution-sandbox-"));
+  const sandbox = await resolvePlatformSandbox(input.environment.PATH);
+  const containment = await createLinuxContainmentDomain({
+    maxProcesses: input.maxProcesses ?? DEFAULT_PROCESS_LIMIT,
+    maxMemoryBytes: input.maxMemoryBytes ?? DEFAULT_MEMORY_BYTES,
+  });
+  let privateTemp: string | undefined;
   try {
+    privateTemp = await mkdtemp(join(tmpdir(), "unclecode-evolution-sandbox-"));
+    const writablePaths = await normalizeExistingPaths([privateTemp]);
     const readablePaths = await normalizeExistingPaths([
       cwd,
       command,
       dirname(dirname(command)),
+      ...writablePaths,
       ...(input.readablePaths ?? []),
     ]);
-    const writablePaths = await normalizeExistingPaths([privateTemp]);
-    const sandboxCommand = platform === "darwin"
-      ? {
-          command: sandbox,
-          args: ["-p", darwinProfile(readablePaths, writablePaths), command, ...input.args],
-        }
-      : {
-          command: sandbox,
-          args: linuxBubblewrapArgs(cwd, command, input.args, readablePaths, writablePaths),
-        };
     return await spawnOwnedProcessGroup({
       ...input,
       cwd,
-      command: sandboxCommand.command,
-      args: sandboxCommand.args,
+      command: sandbox,
+      args: linuxBubblewrapArgs(cwd, command, input.args, readablePaths, writablePaths),
       environment: {
         ...input.environment,
         HOME: privateTemp,
@@ -95,10 +103,14 @@ export async function runContainedEvolutionCommand(input: {
         ALL_PROXY: "",
         all_proxy: "",
       },
-      platform,
+      containment,
     });
   } finally {
-    await rm(privateTemp, { recursive: true, force: true });
+    try {
+      await containment.dispose();
+    } finally {
+      if (privateTemp) await rm(privateTemp, { recursive: true, force: true });
+    }
   }
 }
 
@@ -110,18 +122,26 @@ async function spawnOwnedProcessGroup(input: {
   readonly timeoutMs: number;
   readonly maxOutputBytes: number;
   readonly signal?: AbortSignal;
-  readonly platform: "darwin" | "linux";
+  readonly containment: LinuxContainmentDomain;
 }): Promise<ContainedEvolutionCommandResult> {
   const cpuSeconds = Math.max(1, Math.ceil(input.timeoutMs / 1_000) + 1);
-  const memoryLimit = input.platform === "linux" ? `ulimit -v ${DEFAULT_MEMORY_KIB}; ` : "";
-  const processLimit = input.platform === "linux" ? `ulimit -u ${DEFAULT_PROCESS_LIMIT}` : "";
   const limits = [
+    "set -eu",
+    'containment_root="$1"',
+    "shift",
+    'printf "%s" "$$" > "$containment_root/cgroup.procs"',
     `ulimit -t ${cpuSeconds}`,
     `ulimit -n ${DEFAULT_OPEN_FILE_LIMIT}`,
-    processLimit,
-    `${memoryLimit}exec \"$@\"`,
-  ].filter(Boolean).join("; ");
-  const child = spawn("/bin/sh", ["-c", limits, "unclecode-evolution", input.command, ...input.args], {
+    'exec "$@"',
+  ].join("; ");
+  const child = spawn("/bin/sh", [
+    "-c",
+    limits,
+    "unclecode-evolution",
+    input.containment.path,
+    input.command,
+    ...input.args,
+  ], {
     cwd: input.cwd,
     env: input.environment,
     detached: true,
@@ -136,11 +156,12 @@ async function spawnOwnedProcessGroup(input: {
     if (terminal) return;
     terminal = cause;
     const pid = child.pid;
-    if (!pid) return;
     termination = (async () => {
-      killProcessGroup(pid, "SIGTERM");
+      await input.containment.kill();
+      if (pid) killProcessGroup(pid, "SIGTERM");
       await delay(TERMINATION_GRACE_MS);
-      killProcessGroup(pid, "SIGKILL");
+      await input.containment.kill();
+      if (pid) killProcessGroup(pid, "SIGKILL");
     })();
   };
   const append = (current: Buffer, chunk: Buffer): Buffer => {
@@ -179,6 +200,8 @@ async function spawnOwnedProcessGroup(input: {
   clearTimeout(timeout);
   input.signal?.removeEventListener("abort", onAbort);
   await termination;
+  const retainedDescendants = await input.containment.isPopulated();
+  await input.containment.killAndWaitEmpty();
 
   const output = {
     stdout: stdout.toString("utf8"),
@@ -188,6 +211,13 @@ async function spawnOwnedProcessGroup(input: {
   if (terminal === "cancelled") return { status: "cancelled", ...output };
   if (terminal === "output") {
     return { status: "failed", ...output, stderr: `${output.stderr}\nEvolution command exceeded its output bound.`.trim() };
+  }
+  if (retainedDescendants) {
+    return {
+      status: "failed",
+      ...output,
+      stderr: `${output.stderr}\nEvolution command left descendant processes running.`.trim(),
+    };
   }
   if (settled.error || settled.code !== 0) {
     return {
@@ -200,8 +230,144 @@ async function spawnOwnedProcessGroup(input: {
   return { status: "completed", exitCode: 0, ...output };
 }
 
-async function resolvePlatformSandbox(platform: "darwin" | "linux", searchPath: string | undefined): Promise<string> {
-  if (platform === "darwin") return requireExecutable("/usr/bin/sandbox-exec");
+type LinuxContainmentDomain = {
+  readonly path: string;
+  readonly isPopulated: () => Promise<boolean>;
+  readonly kill: () => Promise<void>;
+  readonly killAndWaitEmpty: () => Promise<void>;
+  readonly dispose: () => Promise<void>;
+};
+
+async function createLinuxContainmentDomain(input: {
+  readonly maxProcesses: number;
+  readonly maxMemoryBytes: number;
+}): Promise<LinuxContainmentDomain> {
+  const root = await resolveDelegatedCgroupRoot();
+  const availableControllers = new Set((await readFile(join(root, "cgroup.controllers"), "utf8")).trim().split(/\s+/));
+  for (const required of ["cpu", "memory", "pids"]) {
+    if (!availableControllers.has(required)) {
+      throw new EvolutionSandboxUnavailableError(
+        `Linux evolution containment requires the delegated cgroup-v2 ${required} controller.`,
+      );
+    }
+  }
+  try {
+    const enabledControllers = new Set((await readFile(join(root, "cgroup.subtree_control"), "utf8")).trim().split(/\s+/));
+    const missing = ["cpu", "memory", "pids"].filter((controller) => !enabledControllers.has(controller));
+    if (missing.length > 0) {
+      await writeFile(join(root, "cgroup.subtree_control"), missing.map((controller) => `+${controller}`).join(" "));
+    }
+  } catch (error) {
+    throw unavailableCgroup("cannot enable aggregate controllers", error);
+  }
+
+  let domainPath: string | undefined;
+  try {
+    domainPath = await mkdtemp(join(root, "unclecode-evolution-"));
+    await writeFile(join(domainPath, "pids.max"), String(input.maxProcesses));
+    await writeFile(join(domainPath, "memory.max"), String(input.maxMemoryBytes));
+    await writeFile(join(domainPath, "cpu.max"), `${DEFAULT_CPU_QUOTA_MICROS} ${CPU_PERIOD_MICROS}`);
+    try {
+      await writeFile(join(domainPath, "memory.swap.max"), "0");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await access(join(domainPath, "cgroup.kill"), constants.W_OK);
+    await access(join(domainPath, "cgroup.events"), constants.R_OK);
+  } catch (error) {
+    if (domainPath) await removeEmptyCgroup(domainPath).catch(() => undefined);
+    throw unavailableCgroup("cannot create a bounded descendant domain", error);
+  }
+  const ownedDomainPath = domainPath;
+
+  let disposed = false;
+  const isPopulated = async (): Promise<boolean> => {
+    const events = await readFile(join(ownedDomainPath, "cgroup.events"), "utf8");
+    const populated = events.match(/^populated\s+([01])$/m)?.[1];
+    if (populated === undefined) {
+      throw new EvolutionSandboxUnavailableError("Linux evolution containment returned invalid cgroup.events data.");
+    }
+    return populated === "1";
+  };
+  const kill = async (): Promise<void> => {
+    if (!(await isPopulated())) return;
+    await writeFile(join(ownedDomainPath, "cgroup.kill"), "1");
+  };
+  const killAndWaitEmpty = async (): Promise<void> => {
+    const deadline = Date.now() + DOMAIN_EMPTY_TIMEOUT_MS;
+    while (await isPopulated()) {
+      await writeFile(join(ownedDomainPath, "cgroup.kill"), "1");
+      if (Date.now() >= deadline) {
+        throw new EvolutionSandboxUnavailableError(
+          "Linux evolution containment could not drain its descendant domain.",
+        );
+      }
+      await delay(20);
+    }
+  };
+  return {
+    path: ownedDomainPath,
+    isPopulated,
+    kill,
+    killAndWaitEmpty,
+    dispose: async (): Promise<void> => {
+      if (disposed) return;
+      await killAndWaitEmpty();
+      await removeEmptyCgroup(ownedDomainPath);
+      disposed = true;
+    },
+  };
+}
+
+async function resolveDelegatedCgroupRoot(): Promise<string> {
+  let root = process.env.UNCLECODE_EVOLUTION_CGROUP_ROOT;
+  if (!root) {
+    let membership: string;
+    try {
+      membership = await readFile("/proc/self/cgroup", "utf8");
+    } catch (error) {
+      throw unavailableCgroup("cannot read the process cgroup-v2 membership", error);
+    }
+    const relative = membership.split("\n")
+      .map((line) => line.match(/^0::(\/.*)$/)?.[1])
+      .find((value): value is string => value !== undefined);
+    if (!relative) {
+      throw new EvolutionSandboxUnavailableError("Linux evolution containment requires a unified cgroup-v2 hierarchy.");
+    }
+    root = join(CGROUP_ROOT, relative.replace(/^\/+/, ""));
+  }
+  let resolvedRoot: string;
+  let resolvedCgroupRoot: string;
+  try {
+    [resolvedRoot, resolvedCgroupRoot] = await Promise.all([realpath(root), realpath(CGROUP_ROOT)]);
+  } catch (error) {
+    throw unavailableCgroup("cannot resolve its delegated cgroup-v2 root", error);
+  }
+  if (!isContained(resolvedCgroupRoot, resolvedRoot)) {
+    throw new EvolutionSandboxUnavailableError("Linux evolution containment root escapes the cgroup-v2 hierarchy.");
+  }
+  try {
+    await access(resolvedRoot, constants.R_OK | constants.W_OK);
+  } catch (error) {
+    throw unavailableCgroup("requires a writable delegated cgroup-v2 root", error);
+  }
+  return resolvedRoot;
+}
+
+async function removeEmptyCgroup(path: string): Promise<void> {
+  try {
+    await rmdir(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+function unavailableCgroup(action: string, cause: unknown): EvolutionSandboxUnavailableError {
+  const detail = cause instanceof Error ? `: ${cause.message}` : "";
+  return new EvolutionSandboxUnavailableError(`Linux evolution containment ${action}${detail}`);
+}
+
+async function resolvePlatformSandbox(searchPath: string | undefined): Promise<string> {
   for (const name of ["bwrap", "bubblewrap"]) {
     const executable = await findExecutable(name, searchPath);
     if (executable) return executable;
@@ -237,31 +403,6 @@ async function findExecutable(name: string, searchPath: string | undefined): Pro
     }
   }
   return undefined;
-}
-
-function darwinProfile(readablePaths: readonly string[], writablePaths: readonly string[]): string {
-  const readRules = [
-    "/System",
-    "/usr",
-    "/bin",
-    "/sbin",
-    "/Library/Apple",
-    "/private/var/db/dyld",
-    ...readablePaths,
-  ].map((path) => `(subpath ${sandboxString(path)})`).join(" ");
-  const writeRules = writablePaths.map((path) => `(subpath ${sandboxString(path)})`).join(" ");
-  return [
-    "(version 1)",
-    "(deny default)",
-    "(allow process-fork)",
-    "(allow process-exec)",
-    "(allow signal (target self))",
-    "(allow sysctl-read)",
-    "(allow mach-lookup)",
-    "(allow file-read-metadata)",
-    `(allow file-read* (literal \"/\") (literal \"/dev/null\") (literal \"/dev/urandom\") ${readRules})`,
-    `(allow file-write* (literal \"/dev/null\") ${writeRules})`,
-  ].join("\n");
 }
 
 function linuxBubblewrapArgs(
@@ -301,10 +442,6 @@ function isContained(root: string, candidate: string): boolean {
   return normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}${sep}`);
 }
 
-function sandboxString(value: string): string {
-  return JSON.stringify(value);
-}
-
 function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pid, signal);
@@ -313,12 +450,24 @@ function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
-function validateBounds(timeoutMs: number, maxOutputBytes: number): void {
+function validateBounds(
+  timeoutMs: number,
+  maxOutputBytes: number,
+  maxProcesses: number | undefined,
+  maxMemoryBytes: number | undefined,
+): void {
   if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 3_600_000) {
     throw new RangeError("Evolution command timeout is invalid.");
   }
   if (!Number.isInteger(maxOutputBytes) || maxOutputBytes <= 0 || maxOutputBytes > 16 * 1024 * 1024) {
     throw new RangeError("Evolution command output bound is invalid.");
+  }
+  if (maxProcesses !== undefined && (!Number.isInteger(maxProcesses) || maxProcesses < 2 || maxProcesses > 4_096)) {
+    throw new RangeError("Evolution command process bound is invalid.");
+  }
+  if (maxMemoryBytes !== undefined
+    && (!Number.isInteger(maxMemoryBytes) || maxMemoryBytes < 16 * 1024 * 1024 || maxMemoryBytes > 16 * 1024 * 1024 * 1024)) {
+    throw new RangeError("Evolution command memory bound is invalid.");
   }
 }
 

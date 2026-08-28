@@ -7,6 +7,7 @@ import { Box, Text } from "ink";
 import React from "react";
 
 import type { ContextInspectorPalette } from "./work-shell-context-inspector-model.js";
+import { selectRecordedEvolutionProposalLines } from "./evolution-proposal-lines.js";
 import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
 import {
   agentConsoleStatusGlyph,
@@ -136,6 +137,10 @@ export function WorkShellAgentConsoleOverlay(props: {
   );
 
   const totalCost = formatAgentConsoleTotalCost(props.snapshot);
+  const recordedEvolution = selectRecordedEvolutionProposalLines(
+    props.snapshot.evolutionProposals?.at(-1),
+    body,
+  );
 
   return (
     <Box
@@ -173,6 +178,14 @@ export function WorkShellAgentConsoleOverlay(props: {
           )}
         </Text>
       </Text>
+
+      {recordedEvolution.length > 0 ? (
+        <Box marginTop={1} flexDirection="column">
+          {recordedEvolution.map((line) => (
+            <Text key={line} color={props.palette.textMuted}>{line}</Text>
+          ))}
+        </Box>
+      ) : null}
 
       <Box marginTop={1} flexDirection="row">
         {twoPane ? roster : props.view.inspectorVisible ? inspectorPane : roster}

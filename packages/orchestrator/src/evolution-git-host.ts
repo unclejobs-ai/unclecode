@@ -1,5 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile as execFileCallback } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   lstat,
@@ -32,6 +33,9 @@ const GIT_OUTPUT_LIMIT = 16 * 1024 * 1024;
 const MAX_RECORD_BYTES = 1024 * 1024;
 const MAX_TREE_ENTRIES = 50_000;
 const MAX_HASHED_FILE_BYTES = 8 * 1024 * 1024;
+const PREPARATION_LOCK_TIMEOUT_MS = 30_000;
+const PREPARATION_LOCK_RETRY_MS = 20;
+const INCOMPLETE_LOCK_GRACE_MS = 5_000;
 const CANONICAL_UTC_MILLISECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 export type CreateGitCreatorEvolutionHostInput = {
@@ -77,7 +81,27 @@ export function createGitCreatorEvolutionHost(
   options: CreateGitCreatorEvolutionHostInput,
 ): CreatorEvolutionHost {
   const now = options.now ?? (() => new Date());
+  const lockContext = new AsyncLocalStorage<ReadonlySet<string>>();
+  const withRunLock = async <T>(root: string, runId: string, operation: () => Promise<T>): Promise<T> => {
+    const lockPath = evolutionPreparationLockPath(root, runId);
+    if (lockContext.getStore()?.has(lockPath)) return operation();
+    const lease = await acquirePreparationLock(lockPath);
+    const held = new Set(lockContext.getStore() ?? []);
+    held.add(lockPath);
+    return lockContext.run(held, async () => {
+      try {
+        return await operation();
+      } finally {
+        await lease.release();
+      }
+    });
+  };
   return {
+    async withLifecycleLock(input, operation) {
+      const root = await requireRepositoryRoot(input.workspaceRoot, options.workspaceRoot);
+      return withRunLock(root, input.runId, operation);
+    },
+
     async loadRecord({ runId }) {
       const workspaceRoot = await requireRepositoryRoot(options.workspaceRoot, options.workspaceRoot);
       const recordPath = evolutionArtifactPath(workspaceRoot, runId);
@@ -263,68 +287,73 @@ export function createGitCreatorEvolutionHost(
 
     async prepareCandidate({ runId, workspaceRoot, candidateId, branch, base }) {
       const root = await requireRepositoryRoot(workspaceRoot, workspaceRoot);
-      const paths = evolutionWorktreePaths(root, runId);
-      const journalPath = evolutionPreparationPath(root, runId);
-      const expectedResources: PreparationResource[] = [
-        { kind: "branch", identity: branch, status: "planned" },
-        { kind: "worktree", identity: paths.candidate, status: "planned" },
-        { kind: "baseline-worktree", identity: paths.baseline, status: "planned" },
-      ];
-      const existing = await loadPreparationJournal(journalPath);
-      if (!existing || !preparationJournalMatches(existing, {
-        runId,
-        workspaceRoot: root,
-        candidateId,
-        baseCommit: base.baseCommit,
-        branch,
-        resources: expectedResources,
-      }) || !(await preparationResourcesMatch(root, paths, branch, base.baseCommit))) {
-        await removePreparationResources(root, paths, branch);
-      }
-      const journal: PreparationJournal = {
-        version: 1,
-        runId,
-        workspaceRoot: root,
-        candidateId,
-        baseCommit: base.baseCommit,
-        branch,
-        resources: expectedResources,
-      };
-      await writePreparationJournal(journalPath, journal);
-      const acquire = async (
-        kind: EvolutionCleanupResource["kind"],
-        acquireResource: () => Promise<void>,
-      ): Promise<void> => {
-        const resource = journal.resources.find((entry) => entry.kind === kind);
-        if (!resource) throw new Error(`Evolution preparation journal omitted ${kind}.`);
-        resource.status = "acquiring";
-        await writePreparationJournal(journalPath, journal);
-        await options.onPreparationCheckpoint?.({ kind, identity: resource.identity });
-        await acquireResource();
-        resource.status = "acquired";
-        await writePreparationJournal(journalPath, journal);
-      };
-      try {
-        await mkdir(paths.root, { recursive: true, mode: 0o700 });
-        await acquire("baseline-worktree", () => ensureWorktree(root, paths.baseline, base.baseCommit, undefined));
-        await acquire("branch", () => ensureBranch(root, branch, base.baseCommit));
-        await acquire("worktree", () => ensureWorktree(root, paths.candidate, base.baseCommit, branch));
-        return {
+      return withRunLock(root, runId, async () => {
+        const paths = evolutionWorktreePaths(root, runId);
+        const journalPath = evolutionPreparationPath(root, runId);
+        const expectedResources: PreparationResource[] = [
+          { kind: "branch", identity: branch, status: "planned" },
+          { kind: "worktree", identity: paths.candidate, status: "planned" },
+          { kind: "baseline-worktree", identity: paths.baseline, status: "planned" },
+        ];
+        const loaded = await loadPreparationJournal(journalPath);
+        const existing = loaded.status === "valid" ? loaded.journal : undefined;
+        const expectedJournal = {
+          runId,
+          workspaceRoot: root,
           candidateId,
+          baseCommit: base.baseCommit,
           branch,
-          worktree: paths.candidate,
-          baselineWorktree: paths.baseline,
-          resources: expectedResources.map(({ kind, identity }) => ({ kind, identity })),
+          resources: expectedResources,
         };
-      } catch (error) {
-        try {
-          await removePreparationResources(root, paths, branch);
-          await rm(journalPath, { force: true });
-        } catch {
-          // Keep the journal when cleanup cannot complete so the next retry can recover it.
+        if (!existing || !preparationJournalMatches(existing, expectedJournal)
+          || !(await preparationResourcesMatch(root, paths, branch, base.baseCommit))) {
+          if (existing) {
+            const prior = validatePreparationJournalResources(root, runId, existing);
+            await removePreparationResources(root, prior.paths, prior.branch);
+          } else {
+            await recoverDeterministicPreparationResources(root, paths);
+          }
         }
-        throw error;
-      }
+        const journal: PreparationJournal = {
+          version: 1,
+          ...expectedJournal,
+        };
+        await writePreparationJournal(journalPath, journal);
+        const acquire = async (
+          kind: EvolutionCleanupResource["kind"],
+          acquireResource: () => Promise<void>,
+        ): Promise<void> => {
+          const resource = journal.resources.find((entry) => entry.kind === kind);
+          if (!resource) throw new Error(`Evolution preparation journal omitted ${kind}.`);
+          resource.status = "acquiring";
+          await writePreparationJournal(journalPath, journal);
+          await options.onPreparationCheckpoint?.({ kind, identity: resource.identity });
+          await acquireResource();
+          resource.status = "acquired";
+          await writePreparationJournal(journalPath, journal);
+        };
+        try {
+          await mkdir(paths.root, { recursive: true, mode: 0o700 });
+          await acquire("baseline-worktree", () => ensureWorktree(root, paths.baseline, base.baseCommit, undefined));
+          await acquire("branch", () => ensureBranch(root, branch, base.baseCommit));
+          await acquire("worktree", () => ensureWorktree(root, paths.candidate, base.baseCommit, branch));
+          return {
+            candidateId,
+            branch,
+            worktree: paths.candidate,
+            baselineWorktree: paths.baseline,
+            resources: expectedResources.map(({ kind, identity }) => ({ kind, identity })),
+          };
+        } catch (error) {
+          try {
+            await removePreparationResources(root, paths, branch);
+            await rm(journalPath, { force: true });
+          } catch {
+            // Keep the journal when cleanup cannot complete so the next retry can recover it.
+          }
+          throw error;
+        }
+      });
     },
 
     async snapshotProtectedAssets({ candidate, assets }) {
@@ -404,30 +433,40 @@ export function createGitCreatorEvolutionHost(
     },
 
     async cleanup({ runId, workspaceRoot, candidate, resources, retainCandidate, reason }) {
-      return cleanupCandidate(runId, workspaceRoot, candidate, resources, retainCandidate, reason);
+      const root = await requireRepositoryRoot(workspaceRoot, options.workspaceRoot);
+      return withRunLock(root, runId, () => cleanupCandidate(
+        runId,
+        workspaceRoot,
+        candidate,
+        resources,
+        retainCandidate,
+        reason,
+      ));
     },
 
     async record({ result }) {
       const root = await requireRepositoryRoot(options.workspaceRoot, options.workspaceRoot);
-      const recordPath = evolutionArtifactPath(root, result.projection.runId);
-      const body = `${JSON.stringify({ version: 1, result }, null, 2)}\n`;
-      if (Buffer.byteLength(body) > MAX_RECORD_BYTES) {
-        throw new Error("Evolution proposal record exceeds its metadata bound.");
-      }
-      await mkdir(dirname(recordPath), { recursive: true, mode: 0o700 });
-      const temporary = `${recordPath}.tmp-${process.pid}`;
-      try {
-        await writeFile(temporary, body, { encoding: "utf8", mode: 0o600 });
-        await rename(temporary, recordPath);
-      } finally {
-        await rm(temporary, { force: true });
-      }
-      await rm(evolutionPreparationPath(root, result.projection.runId), { force: true });
-      try {
-        options.recordAgentOps?.(result);
-      } catch {
-        // AgentOps is observability; the session-owned artifact is authoritative.
-      }
+      return withRunLock(root, result.projection.runId, async () => {
+        const recordPath = evolutionArtifactPath(root, result.projection.runId);
+        const body = `${JSON.stringify({ version: 1, result }, null, 2)}\n`;
+        if (Buffer.byteLength(body) > MAX_RECORD_BYTES) {
+          throw new Error("Evolution proposal record exceeds its metadata bound.");
+        }
+        await mkdir(dirname(recordPath), { recursive: true, mode: 0o700 });
+        const temporary = `${recordPath}.tmp-${process.pid}-${randomUUID()}`;
+        try {
+          await writeFile(temporary, body, { encoding: "utf8", mode: 0o600 });
+          await rename(temporary, recordPath);
+        } finally {
+          await rm(temporary, { force: true });
+        }
+        await rm(evolutionPreparationPath(root, result.projection.runId), { force: true });
+        try {
+          options.recordAgentOps?.(result);
+        } catch {
+          // AgentOps is observability; the session-owned artifact is authoritative.
+        }
+      });
     },
   };
 }
@@ -742,10 +781,14 @@ async function preparationResourcesMatch(
 async function removePreparationResources(
   root: string,
   paths: ReturnType<typeof evolutionWorktreePaths>,
-  branch: string,
+  branch: string | undefined,
 ): Promise<void> {
+  if (branch !== undefined && !isSafeEvolutionBranch(branch)) {
+    throw new Error("Evolution preparation branch identity is unsafe.");
+  }
   for (const worktree of [paths.candidate, paths.baseline]) {
     if (!(await pathExists(worktree))) continue;
+    await assertSafePreparationWorktree(root, paths.root, worktree);
     try {
       await git(root, ["worktree", "remove", "--force", worktree]);
     } catch {
@@ -753,12 +796,16 @@ async function removePreparationResources(
       await git(root, ["worktree", "prune"]);
     }
   }
-  if (await gitSucceeds(root, ["show-ref", "--verify", `refs/heads/${branch}`])) {
+  if (branch && await gitSucceeds(root, ["show-ref", "--verify", `refs/heads/${branch}`])) {
     await git(root, ["branch", "-D", branch]);
   }
 }
 
-async function loadPreparationJournal(path: string): Promise<PreparationJournal | undefined> {
+type LoadedPreparationJournal =
+  | { readonly status: "missing" | "corrupt" }
+  | { readonly status: "valid"; readonly journal: PreparationJournal };
+
+async function loadPreparationJournal(path: string): Promise<LoadedPreparationJournal> {
   try {
     const raw = await readFile(path, "utf8");
     if (Buffer.byteLength(raw) > MAX_RECORD_BYTES) throw new Error("Evolution preparation journal is oversized.");
@@ -780,11 +827,75 @@ async function loadPreparationJournal(path: string): Promise<PreparationJournal 
     ) {
       throw new Error("Evolution preparation journal is invalid.");
     }
-    return parsed as PreparationJournal;
+    return { status: "valid", journal: parsed as PreparationJournal };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
+    return { status: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "corrupt" };
   }
+}
+
+function validatePreparationJournalResources(
+  root: string,
+  requestedRunId: string,
+  journal: PreparationJournal,
+): { readonly paths: ReturnType<typeof evolutionWorktreePaths>; readonly branch: string } {
+  if (journal.workspaceRoot !== root || journal.runId !== requestedRunId
+    || !isSafeEvolutionBranch(journal.branch)
+    || journal.branch !== `unclecode/evolve/${journal.candidateId}`) {
+    throw new Error("Evolution preparation journal identity is unsafe.");
+  }
+  const paths = evolutionWorktreePaths(root, journal.runId);
+  const expected: Array<Pick<EvolutionCleanupResource, "kind" | "identity">> = [
+    { kind: "branch", identity: journal.branch },
+    { kind: "worktree", identity: paths.candidate },
+    { kind: "baseline-worktree", identity: paths.baseline },
+  ];
+  expected.sort(compareResources);
+  const actual: Array<Pick<EvolutionCleanupResource, "kind" | "identity">> = journal.resources
+    .map(({ kind, identity }) => ({ kind, identity }));
+  actual.sort(compareResources);
+  if (canonicalJson(actual) !== canonicalJson(expected)) {
+    throw new Error("Evolution preparation journal resource identity is unsafe.");
+  }
+  return { paths, branch: journal.branch };
+}
+
+async function recoverDeterministicPreparationResources(
+  root: string,
+  paths: ReturnType<typeof evolutionWorktreePaths>,
+): Promise<void> {
+  const entries = await listWorktrees(root);
+  const candidateEntry = entries.find((entry) => resolve(entry.path) === paths.candidate);
+  const baselineEntry = entries.find((entry) => resolve(entry.path) === paths.baseline);
+  if (baselineEntry?.branch !== undefined) {
+    throw new Error("Deterministic baseline worktree unexpectedly owns a branch.");
+  }
+  let checkedOutBranch: string | undefined;
+  if (candidateEntry?.branch !== undefined) {
+    if (!candidateEntry.branch.startsWith("refs/heads/")) {
+      throw new Error("Deterministic candidate worktree has an unsafe branch identity.");
+    }
+    checkedOutBranch = candidateEntry.branch.slice("refs/heads/".length);
+    if (!isSafeEvolutionBranch(checkedOutBranch)) {
+      throw new Error("Deterministic candidate worktree has an unsafe branch identity.");
+    }
+  }
+  await removePreparationResources(root, paths, checkedOutBranch);
+}
+
+async function assertSafePreparationWorktree(root: string, worktreeRoot: string, worktree: string): Promise<void> {
+  if (!isContained(root, worktreeRoot) || !isContained(worktreeRoot, worktree)) {
+    throw new Error("Evolution preparation worktree escapes its deterministic root.");
+  }
+  const stats = await lstat(worktree);
+  if (stats.isSymbolicLink()) throw new Error("Evolution preparation worktree cannot be a symbolic link.");
+  const actual = await realpath(worktree);
+  if (!isContained(root, actual) || !isContained(worktreeRoot, actual)) {
+    throw new Error("Evolution preparation worktree resolves outside its deterministic root.");
+  }
+}
+
+function isSafeEvolutionBranch(branch: string): boolean {
+  return /^unclecode\/evolve\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(branch);
 }
 
 function preparationJournalMatches(
@@ -810,7 +921,7 @@ function compareResources(
 async function writePreparationJournal(path: string, journal: PreparationJournal): Promise<void> {
   const directory = dirname(path);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const temporary = `${path}.tmp-${process.pid}`;
+  const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
   const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC, 0o600);
   try {
     await handle.writeFile(`${JSON.stringify(journal, null, 2)}\n`, "utf8");
@@ -828,6 +939,104 @@ async function writePreparationJournal(path: string, journal: PreparationJournal
     }
   } catch {
     // Some filesystems do not support directory fsync; the file itself is synced.
+  }
+}
+
+type PreparationLockOwner = {
+  readonly version: 1;
+  readonly pid: number;
+  readonly token: string;
+  readonly createdAt: number;
+};
+
+async function acquirePreparationLock(lockPath: string): Promise<{ readonly release: () => Promise<void> }> {
+  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + PREPARATION_LOCK_TIMEOUT_MS;
+  const owner: PreparationLockOwner = {
+    version: 1,
+    pid: process.pid,
+    token: randomUUID(),
+    createdAt: Date.now(),
+  };
+  const ownerPath = join(lockPath, "owner.json");
+  while (true) {
+    try {
+      await mkdir(lockPath, { mode: 0o700 });
+      try {
+        const handle = await open(ownerPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+        try {
+          await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+      } catch (error) {
+        await rm(lockPath, { recursive: true, force: true });
+        throw error;
+      }
+      return {
+        release: async (): Promise<void> => {
+          let current: PreparationLockOwner | undefined;
+          try {
+            current = await readPreparationLockOwner(ownerPath);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+            throw error;
+          }
+          if (current?.token !== owner.token) {
+            throw new Error("Evolution preparation lock ownership changed before release.");
+          }
+          const released = `${lockPath}.released-${owner.token}`;
+          await rename(lockPath, released);
+          await rm(released, { recursive: true, force: true });
+        },
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+
+    const current = await readPreparationLockOwner(ownerPath).catch(() => undefined);
+    const stale = current ? !isProcessAlive(current.pid) : await incompleteLockIsStale(lockPath);
+    if (stale) {
+      const quarantine = `${lockPath}.stale-${randomUUID()}`;
+      try {
+        await rename(lockPath, quarantine);
+        await rm(quarantine, { recursive: true, force: true });
+        continue;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for the evolution lifecycle lock.");
+    await delay(PREPARATION_LOCK_RETRY_MS);
+  }
+}
+
+async function readPreparationLockOwner(path: string): Promise<PreparationLockOwner> {
+  const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<PreparationLockOwner>;
+  if (parsed.version !== 1 || !Number.isInteger(parsed.pid) || (parsed.pid ?? 0) <= 0
+    || typeof parsed.token !== "string" || parsed.token.length > 128
+    || !Number.isFinite(parsed.createdAt)) {
+    throw new Error("Evolution preparation lock owner is invalid.");
+  }
+  return parsed as PreparationLockOwner;
+}
+
+async function incompleteLockIsStale(lockPath: string): Promise<boolean> {
+  try {
+    return Date.now() - (await lstat(lockPath)).mtimeMs >= INCOMPLETE_LOCK_GRACE_MS;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 
@@ -1035,9 +1244,17 @@ function evolutionPreparationPath(root: string, runId: string): string {
   return join(root, ".unclecode", "artifacts", safeIdentity(runId), "evolution-preparation.json");
 }
 
+function evolutionPreparationLockPath(root: string, runId: string): string {
+  return join(root, ".unclecode", "artifacts", safeIdentity(runId), "evolution-lifecycle.lock");
+}
+
 function safeIdentity(value: string): string {
   const safe = value.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 96);
   return safe || "evolution-run";
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
 function splitNul(value: string): readonly string[] {

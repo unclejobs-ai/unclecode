@@ -360,7 +360,7 @@ test("a retry adopts every journaled partial-preparation boundary deterministica
       const runId = `git-run-retry-${phase}`;
       const candidateId = `candidate-retry-${phase}`;
       const branch = `unclecode/evolve/${candidateId}`;
-      const baseHostOptions = {
+      const host = createGitCreatorEvolutionHost({
         workspaceRoot: root,
         async generateCreatorEdits() {
           return { status: "failed", summary: "unused" };
@@ -368,42 +368,45 @@ test("a retry adopts every journaled partial-preparation boundary deterministica
         async runEvaluator() {
           return { status: "failed", summary: "unused" };
         },
-      };
-      const recoveryHost = createGitCreatorEvolutionHost(baseHostOptions);
-      let recovered;
-      let recoveryStarted = false;
-      const interruptedHost = createGitCreatorEvolutionHost({
-        ...baseHostOptions,
-        async onPreparationCheckpoint(checkpoint) {
-          if (checkpoint.kind !== phase || recoveryStarted) return;
-          recoveryStarted = true;
-          recovered = await recoveryHost.prepareCandidate({
-            runId,
-            workspaceRoot: root,
-            candidateId,
-            branch,
-            base,
-          });
-        },
       });
-      let base;
       try {
-        base = await interruptedHost.resolveBase({
+        const base = await host.resolveBase({
           runId,
           workspaceRoot: root,
           snapshotTargets: ["skills/creator.md", "AGENTS.md", "host/evaluator.json", "bench/held-out.json"],
         });
-        const adopted = await interruptedHost.prepareCandidate({
+        const worktreeRoot = path.join(root, ".unclecode", "evolution-worktrees", runId);
+        const baselineWorktree = path.join(worktreeRoot, "baseline");
+        const candidateWorktree = path.join(worktreeRoot, "candidate");
+        const journalPath = path.join(root, ".unclecode", "artifacts", runId, "evolution-preparation.json");
+        mkdirSync(path.dirname(journalPath), { recursive: true });
+        mkdirSync(worktreeRoot, { recursive: true });
+        git(root, ["worktree", "add", "--detach", baselineWorktree, base.baseCommit]);
+        if (phase !== "baseline-worktree") git(root, ["branch", branch, base.baseCommit]);
+        if (phase === "worktree") git(root, ["worktree", "add", candidateWorktree, branch]);
+        const statuses = {
+          "baseline-worktree": phase === "baseline-worktree" ? "acquiring" : "acquired",
+          branch: phase === "branch" ? "acquiring" : phase === "baseline-worktree" ? "planned" : "acquired",
+          worktree: phase === "worktree" ? "acquiring" : "planned",
+        };
+        writeFileSync(journalPath, `${JSON.stringify({
+          version: 1,
           runId,
           workspaceRoot: root,
           candidateId,
+          baseCommit: base.baseCommit,
           branch,
-          base,
-        });
-        assert.equal(recoveryStarted, true);
-        assert.equal(recovered.worktree, adopted.worktree);
+          resources: [
+            { kind: "branch", identity: branch, status: statuses.branch },
+            { kind: "worktree", identity: candidateWorktree, status: statuses.worktree },
+            { kind: "baseline-worktree", identity: baselineWorktree, status: statuses["baseline-worktree"] },
+          ],
+        }, null, 2)}\n`);
+
+        const adopted = await host.prepareCandidate({ runId, workspaceRoot: root, candidateId, branch, base });
         assert.equal(git(adopted.worktree, ["rev-parse", "HEAD"]), base.baseCommit);
-        await interruptedHost.cleanup({
+        assert.equal(git(adopted.worktree, ["branch", "--show-current"]), branch);
+        await host.cleanup({
           runId,
           workspaceRoot: root,
           candidate: adopted,
@@ -415,6 +418,258 @@ test("a retry adopts every journaled partial-preparation boundary deterministica
         rmSync(root, { recursive: true, force: true });
       }
     });
+  }
+});
+
+test("a mismatched journal cleans the prior recorded branch before preparing the new identity", async () => {
+  const root = createRepository();
+  const runId = "git-run-mismatched-journal";
+  const baseOptions = {
+    workspaceRoot: root,
+    async generateCreatorEdits() { return { status: "failed", summary: "unused" }; },
+    async runEvaluator() { return { status: "failed", summary: "unused" }; },
+  };
+  const firstHost = createGitCreatorEvolutionHost(baseOptions);
+  const secondHost = createGitCreatorEvolutionHost(baseOptions);
+  try {
+    const base = await firstHost.resolveBase({
+      runId,
+      workspaceRoot: root,
+      snapshotTargets: ["skills/creator.md", "AGENTS.md", "host/evaluator.json", "bench/held-out.json"],
+    });
+    const priorBranch = "unclecode/evolve/candidate-prior-journal";
+    await firstHost.prepareCandidate({
+      runId,
+      workspaceRoot: root,
+      candidateId: "candidate-prior-journal",
+      branch: priorBranch,
+      base,
+    });
+
+    const nextBranch = "unclecode/evolve/candidate-next-journal";
+    const prepared = await secondHost.prepareCandidate({
+      runId,
+      workspaceRoot: root,
+      candidateId: "candidate-next-journal",
+      branch: nextBranch,
+      base,
+    });
+
+    assert.equal(git(root, ["for-each-ref", "--format=%(refname:short)", `refs/heads/${priorBranch}`]), "");
+    assert.equal(git(root, ["rev-parse", "--abbrev-ref", nextBranch]), nextBranch);
+    await secondHost.cleanup({
+      runId,
+      workspaceRoot: root,
+      candidate: prepared,
+      resources: prepared.resources,
+      retainCandidate: false,
+      reason: "test cleanup",
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a corrupt journal recovers only deterministic contained worktrees and their checked-out branch", async () => {
+  const root = createRepository();
+  const runId = "git-run-corrupt-journal";
+  const journalPath = path.join(root, ".unclecode", "artifacts", runId, "evolution-preparation.json");
+  const options = {
+    workspaceRoot: root,
+    async generateCreatorEdits() { return { status: "failed", summary: "unused" }; },
+    async runEvaluator() { return { status: "failed", summary: "unused" }; },
+  };
+  const interruptedHost = createGitCreatorEvolutionHost(options);
+  const recoveryHost = createGitCreatorEvolutionHost(options);
+  try {
+    const base = await interruptedHost.resolveBase({
+      runId,
+      workspaceRoot: root,
+      snapshotTargets: ["skills/creator.md", "AGENTS.md", "host/evaluator.json", "bench/held-out.json"],
+    });
+    const priorBranch = "unclecode/evolve/candidate-corrupt-prior";
+    await interruptedHost.prepareCandidate({
+      runId,
+      workspaceRoot: root,
+      candidateId: "candidate-corrupt-prior",
+      branch: priorBranch,
+      base,
+    });
+    writeFileSync(journalPath, "{ definitely-not-json\n");
+
+    const nextBranch = "unclecode/evolve/candidate-corrupt-recovered";
+    const prepared = await recoveryHost.prepareCandidate({
+      runId,
+      workspaceRoot: root,
+      candidateId: "candidate-corrupt-recovered",
+      branch: nextBranch,
+      base,
+    });
+
+    assert.equal(git(root, ["for-each-ref", "--format=%(refname:short)", `refs/heads/${priorBranch}`]), "");
+    assert.equal(git(prepared.worktree, ["branch", "--show-current"]), nextBranch);
+    await recoveryHost.cleanup({
+      runId,
+      workspaceRoot: root,
+      candidate: prepared,
+      resources: prepared.resources,
+      retainCandidate: false,
+      reason: "test cleanup",
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("corrupt-journal recovery rejects a deterministic worktree symlink escape", async () => {
+  const root = createRepository();
+  const outside = realpathSync(mkdtempSync(path.join(tmpdir(), "uc-evolution-outside-")));
+  const runId = "git-run-corrupt-escape";
+  const worktreeRoot = path.join(root, ".unclecode", "evolution-worktrees", runId);
+  const candidateWorktree = path.join(worktreeRoot, "candidate");
+  const journalPath = path.join(root, ".unclecode", "artifacts", runId, "evolution-preparation.json");
+  const host = createGitCreatorEvolutionHost({
+    workspaceRoot: root,
+    async generateCreatorEdits() { return { status: "failed", summary: "unused" }; },
+    async runEvaluator() { return { status: "failed", summary: "unused" }; },
+  });
+  try {
+    const base = await host.resolveBase({
+      runId,
+      workspaceRoot: root,
+      snapshotTargets: ["skills/creator.md", "AGENTS.md", "host/evaluator.json", "bench/held-out.json"],
+    });
+    mkdirSync(worktreeRoot, { recursive: true });
+    mkdirSync(path.dirname(journalPath), { recursive: true });
+    writeFileSync(path.join(outside, "sentinel.txt"), "keep\n");
+    symlinkSync(outside, candidateWorktree, "dir");
+    writeFileSync(journalPath, "corrupt\n");
+
+    await assert.rejects(
+      host.prepareCandidate({
+        runId,
+        workspaceRoot: root,
+        candidateId: "candidate-corrupt-escape",
+        branch: "unclecode/evolve/candidate-corrupt-escape",
+        base,
+      }),
+      /symbolic link|outside its deterministic root/i,
+    );
+    assert.equal(readFileSync(path.join(outside, "sentinel.txt"), "utf8"), "keep\n");
+    assert.equal(realpathSync(candidateWorktree), outside);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("a sealed preparation journal is adopted without duplicating resources", async () => {
+  const root = createRepository();
+  const runId = "git-run-sealed-journal";
+  const candidateId = "candidate-sealed-journal";
+  const branch = `unclecode/evolve/${candidateId}`;
+  const options = {
+    workspaceRoot: root,
+    async generateCreatorEdits() { return { status: "failed", summary: "unused" }; },
+    async runEvaluator() { return { status: "failed", summary: "unused" }; },
+  };
+  const firstHost = createGitCreatorEvolutionHost(options);
+  const recoveryHost = createGitCreatorEvolutionHost(options);
+  try {
+    const base = await firstHost.resolveBase({
+      runId,
+      workspaceRoot: root,
+      snapshotTargets: ["skills/creator.md", "AGENTS.md", "host/evaluator.json", "bench/held-out.json"],
+    });
+    const first = await firstHost.prepareCandidate({ runId, workspaceRoot: root, candidateId, branch, base });
+    const sealedJournal = JSON.parse(readFileSync(
+      path.join(root, ".unclecode", "artifacts", runId, "evolution-preparation.json"),
+      "utf8",
+    ));
+    assert.deepEqual(sealedJournal.resources.map((resource) => resource.status), ["acquired", "acquired", "acquired"]);
+
+    const adopted = await recoveryHost.prepareCandidate({ runId, workspaceRoot: root, candidateId, branch, base });
+    assert.deepEqual(adopted, first);
+    assert.equal(
+      git(root, ["worktree", "list", "--porcelain"]).split("\n").filter((line) => line.startsWith("worktree ")).length,
+      3,
+    );
+    await recoveryHost.cleanup({
+      runId,
+      workspaceRoot: root,
+      candidate: adopted,
+      resources: adopted.resources,
+      retainCandidate: false,
+      reason: "test cleanup",
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("two host instances serialize one run across preparation, evaluation, and recording", async () => {
+  const root = createRepository();
+  const runId = "git-run-cross-instance";
+  let creatorCalls = 0;
+  let releaseFirstCreator;
+  const firstCreatorReleased = new Promise((resolve) => { releaseFirstCreator = resolve; });
+  let announceFirstCreator;
+  const firstCreatorEntered = new Promise((resolve) => { announceFirstCreator = resolve; });
+  const makeHost = () => createGitCreatorEvolutionHost({
+    workspaceRoot: root,
+    now: () => new Date(NOW),
+    async generateCreatorEdits() {
+      creatorCalls += 1;
+      if (creatorCalls === 1) {
+        announceFirstCreator();
+        await firstCreatorReleased;
+      }
+      return {
+        status: "completed",
+        summary: "creator edit",
+        edits: [{ path: "skills/creator.md", content: "creator v2\n" }],
+      };
+    },
+    async runEvaluator(input) {
+      const check = (score) => [{ id: "content", status: "passed", score, durationMs: 1 }];
+      return {
+        status: "completed",
+        environmentHash: input.expectedEnvironmentHash,
+        baseline: { score: 0.7, summary: "baseline", checks: check(0.7) },
+        candidate: { score: 0.9, summary: "candidate", checks: check(0.9) },
+      };
+    },
+  });
+  const first = new CreatorEvolutionService({ config: config(), host: makeHost(), now: () => new Date(NOW) });
+  const second = new CreatorEvolutionService({ config: config(), host: makeHost(), now: () => new Date(NOW) });
+  const runInput = {
+    runId,
+    workspaceRoot: root,
+    prompt: "Create a stronger creator skill.",
+    creatorId: "isolated-creator",
+    mutableTargets: ["skills/creator.md"],
+    dispatchEvolutionProposed: dispatch().run,
+    signal: new AbortController().signal,
+  };
+  try {
+    const firstRun = first.run(runInput);
+    await firstCreatorEntered;
+    const secondRun = second.run(runInput);
+    const secondFinishedEarly = await Promise.race([
+      secondRun.then(() => true, () => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 150)),
+    ]);
+    releaseFirstCreator();
+    const [firstResult, secondResult] = await Promise.all([firstRun, secondRun]);
+
+    assert.equal(secondFinishedEarly, false, "a second host crossed the active lifecycle lock");
+    assert.equal(creatorCalls, 1, "the recorded result should be replayed instead of rerunning the creator");
+    assert.equal(firstResult.projection.id, secondResult.projection.id);
+    assert.equal(firstResult.status, "pr-ready");
+    assert.equal(secondResult.status, "pr-ready");
+  } finally {
+    releaseFirstCreator();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

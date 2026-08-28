@@ -151,6 +151,10 @@ export type CreatorEvolutionResult = {
 };
 
 export type CreatorEvolutionHost = {
+  withLifecycleLock?<T>(
+    input: { readonly runId: string; readonly workspaceRoot: string },
+    operation: () => Promise<T>,
+  ): Promise<T>;
   loadRecord(input: { readonly runId: string }): Promise<{ readonly result: CreatorEvolutionResult } | undefined>;
   verifyRecordedCandidate(input: {
     readonly result: CreatorEvolutionResult;
@@ -310,7 +314,18 @@ export class CreatorEvolutionService {
   }
 
   /** Revalidates retained candidate evidence after downstream completion hooks. */
-  async verifyFresh(result: CreatorEvolutionResult): Promise<CreatorEvolutionResult> {
+  verifyFresh(result: CreatorEvolutionResult): Promise<CreatorEvolutionResult> {
+    const execution = this.retained.get(result.projection.id);
+    const operation = (): Promise<CreatorEvolutionResult> => this.verifyFreshLocked(result);
+    return execution && this.host.withLifecycleLock
+      ? this.host.withLifecycleLock({
+          runId: execution.input.runId,
+          workspaceRoot: execution.input.workspaceRoot,
+        }, operation)
+      : operation();
+  }
+
+  private async verifyFreshLocked(result: CreatorEvolutionResult): Promise<CreatorEvolutionResult> {
     if (!result.recorded || result.status !== "pr-ready") return result;
     const execution = this.retained.get(result.projection.id);
     if (
@@ -375,7 +390,14 @@ export class CreatorEvolutionService {
     });
   }
 
-  private async execute(input: CreatorEvolutionRunInput): Promise<CreatorEvolutionResult> {
+  private execute(input: CreatorEvolutionRunInput): Promise<CreatorEvolutionResult> {
+    const operation = (): Promise<CreatorEvolutionResult> => this.executeLocked(input);
+    return this.host.withLifecycleLock
+      ? this.host.withLifecycleLock({ runId: input.runId, workspaceRoot: input.workspaceRoot }, operation)
+      : operation();
+  }
+
+  private async executeLocked(input: CreatorEvolutionRunInput): Promise<CreatorEvolutionResult> {
     const loaded = await this.host.loadRecord({ runId: input.runId });
     if (loaded?.result.recorded === true) {
       if (loaded.result.status !== "pr-ready") return loaded.result;
