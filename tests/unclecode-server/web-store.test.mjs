@@ -1,0 +1,123 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import { createControlRoomStore, parseSseFrames } from "../../apps/godness-web/src/control-room-store.js";
+
+test("web store loads one bounded snapshot and applies SSE refresh without duplicate connections", async () => {
+  let fetches = 0;
+  const requests = [];
+  const projection = { version: 1, generatedAt: 1, runs: [{ id: "s1", revision: 1, locale: "en", state: "running" }] };
+  const fetchImpl = async (url, init = {}) => {
+    fetches += 1;
+    requests.push({ url: String(url), init });
+    if (String(url).endsWith("/control-room")) {
+      return new Response(JSON.stringify(projection), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(null, { status: 204 });
+  };
+  const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl, connectEvents: false });
+  const seen = [];
+  const unsubscribe = store.subscribe(() => seen.push(store.getSnapshot().status));
+  await store.start();
+  await store.start();
+  unsubscribe();
+
+  assert.equal(store.getSnapshot().status, "ready");
+  assert.equal(store.getSnapshot().data.runs[0].id, "s1");
+  assert.equal(fetches, 1);
+  assert.deepEqual(seen, ["loading", "ready"]);
+  assert.equal(requests[0].init.headers.authorization, "Bearer secret");
+});
+
+test("web store actions expose pending, denied, and conflict states without mutating run data", async () => {
+  const projection = { version: 1, generatedAt: 1, runs: [{ id: "s1", revision: 4, locale: "ko", state: "running" }] };
+  const fetchImpl = async (url, init = {}) => {
+    if (String(url).endsWith("/control-room")) return new Response(JSON.stringify(projection), { status: 200 });
+    assert.equal(init.headers["idempotency-key"].length > 0, true);
+    return new Response(JSON.stringify({ ok: false, code: "revision_conflict", message: "changed", revision: 5 }), { status: 409 });
+  };
+  const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl, connectEvents: false });
+  await store.start();
+  const result = await store.action("s1", "pause", 4);
+
+  assert.equal(result.ok, false);
+  assert.equal(store.getSnapshot().actions.s1.status, "conflict");
+  assert.equal(store.getSnapshot().data.runs[0].revision, 4);
+});
+
+test("SSE parser preserves event ids and ignores incomplete frames", () => {
+  const parsed = parseSseFrames("id: 7\nevent: quality.updated\ndata: {\"gate\":\"refine\"}\n\nid: 8\nevent: run.updated\n");
+  assert.deepEqual(parsed.events, [{ id: 7, event: "quality.updated", data: { gate: "refine" } }]);
+  assert.match(parsed.rest, /id: 8/);
+});
+
+test("web store reuses the idempotency key after an ambiguous network failure", async () => {
+  const projection = { version: 1, generatedAt: 1, runs: [{ id: "s1", revision: 4, locale: "en", state: "running" }] };
+  const keys = [];
+  let actionCalls = 0;
+  const fetchImpl = async (url, init = {}) => {
+    if (String(url).endsWith("/control-room")) return new Response(JSON.stringify(projection), { status: 200 });
+    keys.push(init.headers["idempotency-key"]);
+    actionCalls += 1;
+    if (actionCalls === 1) throw new TypeError("connection reset after write");
+    return new Response(JSON.stringify({ ok: true, revision: 5, state: "paused" }), { status: 200 });
+  };
+  const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl, connectEvents: false });
+  await store.start();
+  assert.equal((await store.action("s1", "pause", 4)).code, "network_error");
+  assert.equal((await store.action("s1", "pause", 4)).ok, true);
+  assert.equal(keys.length, 2);
+  assert.equal(keys[1], keys[0]);
+});
+
+test("web store reconnects the event stream for the selected run", async () => {
+  const requests = [];
+  const fetchImpl = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    requests.push({ pathname, headers: init.headers ?? {} });
+    if (pathname === "/control-room") {
+      return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs: [
+        { id: "s1", revision: 1 },
+        { id: "s2", revision: 1 },
+      ] }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(new ReadableStream({ start() {} }), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+  const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl });
+  await store.start();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(requests.some(request => request.pathname === "/sessions/s1/events"), true);
+
+  store.selectSession("s2");
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(requests.some(request => request.pathname === "/sessions/s2/events"), true);
+  store.stop();
+});
+
+test("web store resets an expired cursor before reconnecting", async () => {
+  const eventHeaders = [];
+  let eventCalls = 0;
+  const fetchImpl = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname === "/control-room") {
+      return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs: [{ id: "s1", revision: 1 }] }), { status: 200 });
+    }
+    eventHeaders.push(init.headers ?? {});
+    eventCalls += 1;
+    if (eventCalls === 1) {
+      return new Response("id: 7\nevent: run.updated\ndata: {}\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+    }
+    if (eventCalls === 2) return new Response(JSON.stringify({ error: { code: "event_cursor_expired" } }), { status: 409 });
+    return new Response(new ReadableStream({ start() {} }), { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl });
+  await store.start();
+  await new Promise(resolve => setTimeout(resolve, 1_100));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(eventHeaders[1]?.["last-event-id"], "7");
+  assert.equal(eventHeaders[2]?.["last-event-id"], undefined);
+  store.stop();
+});
