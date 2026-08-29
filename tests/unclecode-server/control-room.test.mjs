@@ -79,6 +79,75 @@ test("control-room projection is bounded, redacted, and honest about unproven qu
   assert.match(projection.runs[0].system.diagnostics[0].error, /\[REDACTED\]/);
 });
 
+test("control-room preserves authoritative critic provenance through terminal promotion", () => {
+  const projection = createControlRoomProjection({
+    generatedAt: 101,
+    sessions: [{
+      sessionId: "session-completed", projectPath: "/workspace/project", locale: "en",
+      state: "completed", revision: 8,
+      agentConsole: { qualityReview: {
+        runId: "run-completed", graphId: "graph-completed", profile: "deep",
+        currentStage: "promote", iteration: 0, refineCount: 0, pivotCount: 0,
+        latestDecision: "proceed", history: [{
+          event: "gate", stage: "critic", decision: "proceed", iteration: 0,
+          failures: [], evidenceRefs: ["run.json", "critic.json"], artifactRefs: [],
+          artifactHash: "sha256:run-artifact",
+          reviewedArtifactHash: "sha256:workspace-manifest",
+          currentArtifactHash: "sha256:workspace-manifest",
+          reviewerRunId: "run-completed:critic:0",
+          independentVerification: true, stale: false, startedAt: 50,
+        }, {
+          event: "completed", stage: "promote", decision: "proceed", iteration: 0,
+          failures: [], evidenceRefs: ["run.json"], artifactRefs: [],
+          independentVerification: false, stale: false, startedAt: 60,
+        }],
+      } },
+    }],
+  });
+  const [run] = projection.runs;
+  assert.equal(run.quality.independentVerification, true);
+  assert.deepEqual(run.artifacts, [
+    { ref: "run.json", stale: false, verified: true },
+    { ref: "critic.json", stale: false, verified: true },
+  ]);
+  assert.notEqual(run.artifacts[1]?.hash, "sha256:run-artifact");
+});
+
+test("control-room rejects critic provenance from an earlier quality iteration", () => {
+  const projection = createControlRoomProjection({
+    generatedAt: 102,
+    sessions: [{
+      sessionId: "session-stale-critic", projectPath: "/workspace/project", locale: "en",
+      state: "completed", revision: 9,
+      agentConsole: { qualityReview: {
+        runId: "run-stale-critic", graphId: "graph-stale-critic", profile: "deep",
+        currentStage: "promote", iteration: 2, refineCount: 1, pivotCount: 0,
+        latestDecision: "proceed", history: [{
+          event: "gate", stage: "critic", decision: "proceed", iteration: 1,
+          failures: [], evidenceRefs: ["critic-iteration-1.json"], artifactRefs: [],
+          artifactHash: "sha256:iteration-1", reviewedArtifactHash: "sha256:manifest-1",
+          currentArtifactHash: "sha256:manifest-1", reviewerRunId: "critic:1",
+          independentVerification: true, stale: false, startedAt: 40,
+        }, {
+          event: "refine", stage: "critic", decision: "refine", iteration: 2,
+          failures: [], evidenceRefs: [], artifactRefs: [], independentVerification: false,
+          stale: false, startedAt: 50,
+        }, {
+          event: "completed", stage: "promote", decision: "proceed", iteration: 2,
+          failures: [], evidenceRefs: ["run-iteration-2.json"],
+          artifactRefs: ["run-iteration-2.json"], independentVerification: false,
+          stale: false, startedAt: 60,
+        }],
+      } },
+    }],
+  });
+  const [run] = projection.runs;
+  assert.equal(run.quality.independentVerification, false);
+  assert.deepEqual(run.artifacts, [
+    { ref: "run-iteration-2.json", stale: false, verified: false },
+  ]);
+});
+
 test("bounded event journal replays strictly after cursor and detects expiry", () => {
   const journal = new BoundedEventJournal({ capacity: 3 });
   const one = journal.publish("session-1", "run.updated", { revision: 1 });
@@ -271,7 +340,7 @@ test("projection preserves failed, cancelled, recorded creator, stale-artifact, 
   assert.equal("rawCandidateOutput" in projection.runs[2].evolve[0], false);
   assert.equal("unknownCandidateMetadata" in projection.runs[2].evolve[0], false);
   assert.doesNotMatch(JSON.stringify(projection.runs[2].evolve), /must-not-cross-control-room/);
-  assert.deepEqual(projection.runs[2].artifacts[0], { ref: "candidate.patch", hash: "sha256:old", stale: true, verified: false });
+  assert.deepEqual(projection.runs[2].artifacts[0], { ref: "candidate.patch", stale: true, verified: false });
   assert.equal(projection.system.cleanup[0].status, "pending");
 });
 

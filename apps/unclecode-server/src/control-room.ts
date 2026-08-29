@@ -295,6 +295,72 @@ function diagnosticsFrom(consoleRecord: Readonly<Record<string, unknown>>): read
   }));
 }
 
+function stringList(record: Readonly<Record<string, unknown>>, key: string): readonly string[] {
+  const values = record[key];
+  return Array.isArray(values)
+    ? values.filter((value): value is string => typeof value === "string")
+    : [];
+}
+
+function isFreshHashBoundAttestation(entry: Readonly<Record<string, unknown>> | undefined): boolean {
+  return entry !== undefined
+    && entry.decision === "proceed"
+    && typeof entry.reviewerRunId === "string"
+    && typeof entry.artifactHash === "string"
+    && typeof entry.reviewedArtifactHash === "string"
+    && entry.reviewedArtifactHash === entry.currentArtifactHash
+    && entry.independentVerification === true
+    && entry.stale !== true;
+}
+
+function isFreshIndependentCritic(entry: Readonly<Record<string, unknown>> | undefined): boolean {
+  return entry?.event === "gate" && entry.stage === "critic" && isFreshHashBoundAttestation(entry);
+}
+
+function terminalQualityAggregate(
+  history: readonly Readonly<Record<string, unknown>>[],
+): Readonly<Record<string, unknown>> | undefined {
+  const terminalIndex = history.findLastIndex((entry) => entry.event === "completed");
+  if (terminalIndex < 0) {
+    const latest = history.at(-1);
+    return latest ? { ...latest, authoritativeCriticVerification: isFreshIndependentCritic(latest) } : undefined;
+  }
+  const terminal = history[terminalIndex];
+  if (!terminal) return undefined;
+  let review = isFreshHashBoundAttestation(terminal) ? terminal : undefined;
+  if (!review && terminal.decision === "proceed" && terminal.stale !== true) {
+    for (let index = terminalIndex - 1; index >= 0; index -= 1) {
+      const candidate = history[index];
+      if (candidate?.event === "refine" || candidate?.event === "pivot") break;
+      if (candidate?.iteration === terminal.iteration && isFreshIndependentCritic(candidate)) {
+        review = candidate;
+        break;
+      }
+    }
+  }
+  const terminalArtifactRefs = stringList(terminal, "artifactRefs");
+  const reviewArtifactRefs = review ? stringList(review, "artifactRefs") : [];
+  const artifactRefs = terminalArtifactRefs.length > 0
+    ? terminalArtifactRefs
+    : reviewArtifactRefs.length > 0 ? reviewArtifactRefs : review ? stringList(review, "evidenceRefs") : [];
+  return {
+    ...terminal,
+    artifactRefs,
+    ...(typeof terminal.artifactHash === "string" ? { artifactHash: terminal.artifactHash }
+      : typeof review?.artifactHash === "string" ? { artifactHash: review.artifactHash } : {}),
+    ...(typeof terminal.reviewedArtifactHash === "string" ? { reviewedArtifactHash: terminal.reviewedArtifactHash }
+      : typeof review?.reviewedArtifactHash === "string" ? { reviewedArtifactHash: review.reviewedArtifactHash } : {}),
+    ...(typeof terminal.currentArtifactHash === "string" ? { currentArtifactHash: terminal.currentArtifactHash }
+      : typeof review?.currentArtifactHash === "string" ? { currentArtifactHash: review.currentArtifactHash } : {}),
+    ...(typeof terminal.reviewerRunId === "string" ? { reviewerRunId: terminal.reviewerRunId }
+      : typeof review?.reviewerRunId === "string" ? { reviewerRunId: review.reviewerRunId } : {}),
+    authoritativeCriticVerification: terminal.decision === "proceed"
+      && terminal.stale !== true && isFreshHashBoundAttestation(review),
+    independentVerification: terminal.decision === "proceed"
+      && terminal.stale !== true && isFreshHashBoundAttestation(review),
+  };
+}
+
 function artifactsFrom(history: readonly Readonly<Record<string, unknown>>[]): ControlRoomRun["artifacts"] {
   const seen = new Set<string>();
   const output: Array<ControlRoomRun["artifacts"][number]> = [];
@@ -303,14 +369,9 @@ function artifactsFrom(history: readonly Readonly<Record<string, unknown>>[]): C
     for (const refValue of refs) {
       if (typeof refValue !== "string" || seen.has(refValue) || output.length >= MAX_ARTIFACTS) continue;
       seen.add(refValue);
-      const reviewerEvidence = (entry.stage === "critic" || entry.stage === "promote")
-        && typeof entry.reviewerRunId === "string"
-        && entry.independentVerification === true
-        && entry.stale !== true
-        && entry.decision === "proceed";
+      const reviewerEvidence = entry.authoritativeCriticVerification === true;
       output.push({
         ref: redactText(refValue, 320),
-        ...(typeof entry.artifactHash === "string" ? { hash: redactText(entry.artifactHash, 160) } : {}),
         stale: entry.stale === true,
         verified: reviewerEvidence,
       });
@@ -326,19 +387,16 @@ function projectRun(session: RuntimeSessionSource): ControlRoomRun {
   const qualityRecorded = qualityRecord !== undefined
     || typeof graphRecord?.qualityProfile === "string";
   const history = arrayOfRecords(qualityRecord?.history, MAX_HISTORY);
-  const stage = stringField(qualityRecord, "currentStage", stringField(graphRecord, "currentStage", "unknown"));
-  const gate = stringField(qualityRecord, "latestDecision", stringField(graphRecord, "gateStatus", "unproven"));
-  const latest = history.at(-1);
+  const aggregate = terminalQualityAggregate(history);
+  const stage = stringField(aggregate, "stage", stringField(qualityRecord, "currentStage", stringField(graphRecord, "currentStage", "unknown")));
+  const gate = stringField(aggregate, "decision", stringField(qualityRecord, "latestDecision", stringField(graphRecord, "gateStatus", "unproven")));
+  const latest = aggregate ?? history.at(-1);
   const failures = Array.isArray(latest?.failures)
     ? latest.failures.filter((value): value is string => typeof value === "string").slice(0, 32).map(value => redactText(value, 320))
     : [];
-  const currentReview = history.at(-1);
+  const currentReview = aggregate ?? history.at(-1);
   const independentVerification = currentReview !== undefined
-    && (currentReview.stage === "critic" || currentReview.stage === "promote")
-    && typeof currentReview.reviewerRunId === "string"
-    && booleanField(currentReview, "independentVerification")
-    && !booleanField(currentReview, "stale")
-    && currentReview.decision === "proceed";
+    && booleanField(currentReview, "authoritativeCriticVerification");
   const profile = stringField(qualityRecord, "profile", stringField(graphRecord, "qualityProfile", "unknown"));
   const metadata = isRecord(session.metadata) ? session.metadata : {};
   const attentionReason = session.state === "requires_action"
@@ -388,7 +446,7 @@ function projectRun(session: RuntimeSessionSource): ControlRoomRun {
     },
     agents: arrayOfRecords(consoleRecord.agents, 64),
     jobs: arrayOfRecords(consoleRecord.jobs, 64),
-    artifacts: artifactsFrom(history),
+    artifacts: artifactsFrom(aggregate ? [aggregate] : history),
     evolve,
     system: { diagnostics: diagnosticsFrom(consoleRecord) },
   };

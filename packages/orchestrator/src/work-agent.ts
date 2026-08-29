@@ -264,6 +264,17 @@ type QualityTerminal = {
   readonly nodeId?: string;
 };
 
+type QualityTerminalProvenance = {
+  readonly evidenceRefs: readonly string[];
+  readonly artifactRefs: readonly string[];
+  readonly artifactHash?: string | undefined;
+  readonly reviewedArtifactHash?: string | undefined;
+  readonly currentArtifactHash?: string | undefined;
+  readonly reviewerRunId?: string | undefined;
+  readonly stale: boolean;
+  readonly independentVerification: boolean;
+};
+
 type QualityRuntimeState = {
   readonly runId: string;
   readonly graphId: string;
@@ -280,6 +291,7 @@ type QualityRuntimeState = {
   refineCount: number;
   pivotCount: number;
   iteration: number;
+  terminalProvenance?: QualityTerminalProvenance;
   terminal?: QualityTerminal;
   completed: boolean;
 };
@@ -287,6 +299,10 @@ type QualityRuntimeState = {
 type QualityDecisionDetail = {
   readonly nodeId?: string | undefined;
   readonly artifactHash?: string | undefined;
+  readonly reviewedArtifactHash?: string | undefined;
+  readonly currentArtifactHash?: string | undefined;
+  readonly reviewerRunId?: string | undefined;
+  readonly stale?: boolean | undefined;
   readonly evidenceRefs?: readonly string[] | undefined;
   readonly independentVerification?: boolean | undefined;
   readonly route?: BalancedPrewalkRoute | undefined;
@@ -677,6 +693,22 @@ export class WorkAgent<
     detail: QualityDecisionDetail = {},
   ): void {
     const failures = [...new Set(decision.failures)];
+    const reason = decisionReason(decision);
+    const reviewedArtifactHash = detail.reviewedArtifactHash ?? detail.artifactHash;
+    const currentArtifactHash = detail.currentArtifactHash ?? reviewedArtifactHash;
+    const stale = detail.stale
+      ?? (reviewedArtifactHash !== undefined
+        && currentArtifactHash !== undefined
+        && reviewedArtifactHash !== currentArtifactHash);
+    const reviewerRunId = detail.reviewerRunId
+      ?? ((stage === "critic" || stage === "promote") && detail.route
+        ? `${state.runId}:${stage}:${state.iteration}`
+        : undefined);
+    const evidenceRefs = [...new Set(detail.evidenceRefs ?? [])];
+    const artifactRefs = [...new Set(
+      detail.artifactRefs
+        ?? ((stage === "critic" || stage === "promote") ? evidenceRefs : []),
+    )];
     for (const failure of failures) {
       if (!state.failures.includes(failure)) state.failures.push(failure);
     }
@@ -690,7 +722,7 @@ export class WorkAgent<
       iteration: state.iteration,
       ...(detail.nodeId ? { nodeId: detail.nodeId } : {}),
       ...(detail.nodeAttempt === undefined ? {} : { nodeAttempt: detail.nodeAttempt }),
-      ...(detail.artifactRefs ? { artifactRefs: [...detail.artifactRefs] } : {}),
+      ...(artifactRefs.length > 0 ? { artifactRefs } : {}),
       ...(detail.route
         ? {
             provider: detail.route.provider,
@@ -701,18 +733,36 @@ export class WorkAgent<
       decision: decision.action,
       refineCount: state.refineCount,
       pivotCount: state.pivotCount,
-      evidenceRefs: detail.evidenceRefs ?? [],
+      evidenceRefs,
       failures,
+      reason,
       ...(detail.artifactHash ? { artifactHash: detail.artifactHash } : {}),
+      ...(reviewedArtifactHash ? { reviewedArtifactHash } : {}),
+      ...(currentArtifactHash ? { currentArtifactHash } : {}),
+      ...(reviewerRunId ? { reviewerRunId } : {}),
+      stale: stale ?? false,
       independentVerification: detail.independentVerification ?? false,
       startedAt: Date.now(),
     });
 
+    if (stage === "critic" || stage === "promote") {
+      state.terminalProvenance = {
+        evidenceRefs,
+        artifactRefs,
+        ...(detail.artifactHash ? { artifactHash: detail.artifactHash } : {}),
+        ...(reviewedArtifactHash ? { reviewedArtifactHash } : {}),
+        ...(currentArtifactHash ? { currentArtifactHash } : {}),
+        ...(reviewerRunId ? { reviewerRunId } : {}),
+        stale: stale ?? false,
+        independentVerification: detail.independentVerification ?? false,
+      };
+    }
+
     if (decision.action !== "refine" && decision.action !== "pivot" && decision.action !== "block") {
       return;
     }
-    const reason = decisionReason(decision);
     if (decision.action === "refine") {
+      delete state.terminalProvenance;
       state.refineCount += 1;
       state.iteration += 1;
       this.emitTrace({
@@ -735,6 +785,7 @@ export class WorkAgent<
         startedAt: Date.now(),
       });
     } else if (decision.action === "pivot") {
+      delete state.terminalProvenance;
       state.pivotCount += 1;
       state.iteration += 1;
       this.emitTrace({
@@ -897,6 +948,12 @@ export class WorkAgent<
     stage: QualityHarnessStage,
     input: {
       readonly evidenceRefs?: readonly string[] | undefined;
+      readonly artifactRefs?: readonly string[] | undefined;
+      readonly artifactHash?: string | undefined;
+      readonly reviewedArtifactHash?: string | undefined;
+      readonly currentArtifactHash?: string | undefined;
+      readonly reviewerRunId?: string | undefined;
+      readonly stale?: boolean | undefined;
       readonly failures?: readonly string[] | undefined;
       readonly independentVerification?: boolean | undefined;
     } = {},
@@ -904,6 +961,20 @@ export class WorkAgent<
     if (state.completed) return;
     state.completed = true;
     const startedAt = Date.now();
+    const provenance = state.terminalProvenance;
+    const evidenceRefs = [...new Set([
+      ...(provenance?.evidenceRefs ?? []),
+      ...(input.evidenceRefs ?? []),
+    ])];
+    const artifactRefs = [...new Set([
+      ...(provenance?.artifactRefs ?? []),
+      ...(input.artifactRefs ?? []),
+    ])];
+    const artifactHash = input.artifactHash ?? provenance?.artifactHash;
+    const reviewedArtifactHash = input.reviewedArtifactHash ?? provenance?.reviewedArtifactHash;
+    const currentArtifactHash = input.currentArtifactHash ?? provenance?.currentArtifactHash;
+    const reviewerRunId = input.reviewerRunId ?? provenance?.reviewerRunId;
+    const stale = input.stale ?? provenance?.stale;
     this.emitTrace({
       type: "quality.completed",
       level: "high-signal",
@@ -914,9 +985,17 @@ export class WorkAgent<
       iteration: state.iteration,
       decision,
       completedStages: [...state.completedStages],
-      evidenceRefs: input.evidenceRefs ?? [],
+      evidenceRefs,
+      ...(artifactRefs.length > 0 ? { artifactRefs } : {}),
+      ...(artifactHash ? { artifactHash } : {}),
+      ...(reviewedArtifactHash ? { reviewedArtifactHash } : {}),
+      ...(currentArtifactHash ? { currentArtifactHash } : {}),
+      ...(reviewerRunId ? { reviewerRunId } : {}),
+      ...(stale === undefined ? {} : { stale }),
       failures: [...new Set([...(input.failures ?? []), ...state.failures])],
-      independentVerification: input.independentVerification ?? false,
+      independentVerification: input.independentVerification
+        ?? provenance?.independentVerification
+        ?? false,
       startedAt,
       completedAt: Date.now(),
     });
@@ -1510,6 +1589,9 @@ export class WorkAgent<
             criticGateStatus = "block";
             this.recordQualityDecision(quality, "critic", staleArtifactDecision("critic"), {
               artifactHash: completionArtifact.artifactHash,
+              reviewedArtifactHash: completionManifestHash,
+              currentArtifactHash: postCriticManifest.artifactHash,
+              stale: true,
               evidenceRefs: [completionArtifact.path, criticArtifact.path],
               independentVerification: false,
               route: criticRoute,
@@ -1594,6 +1676,9 @@ export class WorkAgent<
             failures,
           }, {
             artifactHash: completionArtifact.artifactHash,
+            reviewedArtifactHash: completionManifestHash,
+            currentArtifactHash: completionManifestHash,
+            stale: false,
             evidenceRefs: [completionArtifact.path, criticArtifact.path],
             independentVerification: criticIndependent,
             route: criticRoute,
@@ -1744,6 +1829,9 @@ export class WorkAgent<
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
         this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
           artifactHash: completionArtifact.artifactHash,
+          reviewedArtifactHash: completionManifestHash,
+          currentArtifactHash: prePromoteManifest.artifactHash,
+          stale: true,
           evidenceRefs: [completionArtifact.path],
           independentVerification: false,
         });
@@ -1799,6 +1887,9 @@ export class WorkAgent<
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
         this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
           artifactHash: completionArtifact.artifactHash,
+          reviewedArtifactHash: completionManifestHash,
+          currentArtifactHash: postPromoteManifest.artifactHash,
+          stale: true,
           evidenceRefs: [completionArtifact.path],
           independentVerification: false,
           ...(promoteRoute ? { route: promoteRoute } : {}),
@@ -1836,6 +1927,9 @@ export class WorkAgent<
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
         this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
           artifactHash: completionArtifact.artifactHash,
+          reviewedArtifactHash: completionManifestHash,
+          currentArtifactHash: completionManifest.artifactHash,
+          stale: true,
           evidenceRefs: [completionArtifact.path],
           independentVerification: false,
           ...(promoteRoute ? { route: promoteRoute } : {}),
@@ -1974,6 +2068,9 @@ export class WorkAgent<
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
         this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
           artifactHash: completionArtifact.artifactHash,
+          reviewedArtifactHash: completionManifestHash,
+          currentArtifactHash: postCompletionManifest.artifactHash,
+          stale: true,
           evidenceRefs: [completionArtifact.path],
           independentVerification: false,
           ...(promoteRoute ? { route: promoteRoute } : {}),

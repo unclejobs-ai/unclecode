@@ -130,6 +130,44 @@ export type WorkGraph = {
   readonly approval: "pending" | "approved" | "rejected";
 };
 
+export const MAX_QUALITY_REVIEW_HISTORY = 32;
+
+export type QualityReviewHistoryEntry = {
+  readonly event: "gate" | "refine" | "pivot" | "completed";
+  readonly stage: QualityHarnessStage;
+  readonly decision: QualityGateStatus;
+  readonly iteration: number;
+  readonly reason?: string;
+  readonly failures: readonly string[];
+  readonly evidenceRefs: readonly string[];
+  readonly artifactRefs: readonly string[];
+  readonly artifactHash?: string;
+  readonly reviewedArtifactHash?: string;
+  readonly currentArtifactHash?: string;
+  readonly reviewerId?: string;
+  readonly reviewerRunId?: string;
+  readonly provider?: string;
+  readonly model?: string;
+  readonly route?: "direct" | "frontier" | "commodity" | "fallback";
+  readonly count?: number;
+  readonly limit?: number;
+  readonly independentVerification: boolean;
+  readonly stale: boolean;
+  readonly startedAt: number;
+};
+
+export type QualityReviewProjection = {
+  readonly runId: string;
+  readonly graphId: string;
+  readonly profile?: QualityProfile;
+  readonly currentStage?: QualityHarnessStage;
+  readonly iteration?: number;
+  readonly refineCount: number;
+  readonly pivotCount: number;
+  readonly latestDecision: QualityGateStatus;
+  readonly history: readonly QualityReviewHistoryEntry[];
+};
+
 export const MAX_EVOLUTION_PROPOSALS = 32;
 
 export type EvolutionCleanupResourceProjection = {
@@ -422,6 +460,7 @@ export type AgentConsoleSnapshot = {
   readonly manifest?: PersistedPromptManifest;
   readonly pendingDecision?: AskUserQuestionRequest;
   readonly workGraph?: WorkGraph;
+  readonly qualityReview?: QualityReviewProjection;
   readonly evolutionProposals?: readonly EvolutionProposalProjection[];
   readonly activity: readonly ToolActivity[];
   readonly agents: readonly AgentRun[];
@@ -469,6 +508,7 @@ export function createAgentConsoleSnapshot(
       ? { pendingDecision: copyAskUserQuestionRequest(input.pendingDecision) }
       : {}),
     ...(input.workGraph ? { workGraph: copyWorkGraph(input.workGraph) } : {}),
+    ...(input.qualityReview ? { qualityReview: copyQualityReview(input.qualityReview) } : {}),
     ...(input.evolutionProposals && input.evolutionProposals.length > 0
       ? { evolutionProposals: input.evolutionProposals.slice(-MAX_EVOLUTION_PROPOSALS).map(copyEvolutionProposal) }
       : {}),
@@ -606,6 +646,42 @@ function copyWorkGraph(graph: WorkGraph): WorkGraph {
       attempt: node.attempt ?? 0,
       artifactRefs: [...(node.artifactRefs ?? [])],
       reviewRequired: node.reviewRequired ?? false,
+    })),
+  };
+}
+
+function copyQualityReview(projection: QualityReviewProjection): QualityReviewProjection {
+  return {
+    runId: projection.runId.slice(0, 256),
+    graphId: projection.graphId.slice(0, 256),
+    ...(projection.profile === undefined ? {} : { profile: projection.profile }),
+    ...(projection.currentStage === undefined ? {} : { currentStage: projection.currentStage }),
+    ...(projection.iteration === undefined ? {} : { iteration: projection.iteration }),
+    refineCount: projection.refineCount,
+    pivotCount: projection.pivotCount,
+    latestDecision: projection.latestDecision,
+    history: projection.history.slice(-MAX_QUALITY_REVIEW_HISTORY).map((entry) => ({
+      event: entry.event,
+      stage: entry.stage,
+      decision: entry.decision,
+      iteration: entry.iteration,
+      ...(entry.reason === undefined ? {} : { reason: entry.reason.slice(0, 2_000) }),
+      failures: entry.failures.slice(0, 32).map((failure) => failure.slice(0, 500)),
+      evidenceRefs: entry.evidenceRefs.slice(0, 64).map((reference) => reference.slice(0, 1_000)),
+      artifactRefs: entry.artifactRefs.slice(0, 64).map((reference) => reference.slice(0, 1_000)),
+      ...(entry.artifactHash === undefined ? {} : { artifactHash: entry.artifactHash.slice(0, 256) }),
+      ...(entry.reviewedArtifactHash === undefined ? {} : { reviewedArtifactHash: entry.reviewedArtifactHash.slice(0, 256) }),
+      ...(entry.currentArtifactHash === undefined ? {} : { currentArtifactHash: entry.currentArtifactHash.slice(0, 256) }),
+      ...(entry.reviewerId === undefined ? {} : { reviewerId: entry.reviewerId.slice(0, 256) }),
+      ...(entry.reviewerRunId === undefined ? {} : { reviewerRunId: entry.reviewerRunId.slice(0, 256) }),
+      ...(entry.provider === undefined ? {} : { provider: entry.provider.slice(0, 128) }),
+      ...(entry.model === undefined ? {} : { model: entry.model.slice(0, 256) }),
+      ...(entry.route === undefined ? {} : { route: entry.route }),
+      ...(entry.count === undefined ? {} : { count: entry.count }),
+      ...(entry.limit === undefined ? {} : { limit: entry.limit }),
+      independentVerification: entry.independentVerification,
+      stale: entry.stale,
+      startedAt: entry.startedAt,
     })),
   };
 }
@@ -872,6 +948,9 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     ? parseAskUserQuestionRequest(record.pendingDecision)
     : undefined;
   const workGraph = hasOwn(record, "workGraph") ? parseWorkGraph(record.workGraph) : undefined;
+  const qualityReview = hasOwn(record, "qualityReview")
+    ? parseQualityReviewProjection(record.qualityReview)
+    : undefined;
   const evolutionProposals = hasOwn(record, "evolutionProposals")
     ? parseEvolutionProposals(record.evolutionProposals)
     : undefined;
@@ -885,6 +964,7 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     (hasOwn(record, "manifest") && !manifest)
     || (hasOwn(record, "pendingDecision") && !pendingDecision)
     || (hasOwn(record, "workGraph") && !workGraph)
+    || (hasOwn(record, "qualityReview") && !qualityReview)
     || (hasOwn(record, "evolutionProposals") && !evolutionProposals)
     || (hasOwn(record, "mainUsage") && !mainUsage)
     || (hasOwn(record, "totalUsage") && !totalUsage)
@@ -925,6 +1005,7 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     ...(manifest ? { manifest } : {}),
     ...(pendingDecision ? { pendingDecision } : {}),
     ...(workGraph ? { workGraph } : {}),
+    ...(qualityReview ? { qualityReview } : {}),
     ...(evolutionProposals && evolutionProposals.length > 0 ? { evolutionProposals } : {}),
     activity,
     agents,
@@ -1425,6 +1506,95 @@ function parseWorkGraph(value: unknown): WorkGraph | undefined {
     iteration,
     approval: record.approval,
     nodes: parsedNodes,
+  };
+}
+
+function parseQualityReviewProjection(value: unknown): QualityReviewProjection | undefined {
+  const record = asRecord(value);
+  if (
+    !record
+    || !isNonEmptyString(record.runId)
+    || !isNonEmptyString(record.graphId)
+    || (hasOwn(record, "profile") && (typeof record.profile !== "string" || !QUALITY_PROFILE_SET.has(record.profile)))
+    || (hasOwn(record, "currentStage") && (typeof record.currentStage !== "string" || !QUALITY_HARNESS_STAGE_SET.has(record.currentStage)))
+    || (hasOwn(record, "iteration") && !isNonNegativeInteger(record.iteration))
+    || !isNonNegativeInteger(record.refineCount)
+    || !isNonNegativeInteger(record.pivotCount)
+    || typeof record.latestDecision !== "string"
+    || !QUALITY_GATE_STATUS_SET.has(record.latestDecision)
+    || !Array.isArray(record.history)
+    || record.history.length > MAX_QUALITY_REVIEW_HISTORY
+  ) return undefined;
+  const history = record.history.map(parseQualityReviewHistoryEntry);
+  if (history.some((entry) => entry === undefined)) return undefined;
+  return {
+    runId: record.runId,
+    graphId: record.graphId,
+    ...(typeof record.profile === "string" && QUALITY_PROFILE_SET.has(record.profile)
+      ? { profile: record.profile as QualityProfile }
+      : {}),
+    ...(typeof record.currentStage === "string" && QUALITY_HARNESS_STAGE_SET.has(record.currentStage)
+      ? { currentStage: record.currentStage as QualityHarnessStage }
+      : {}),
+    ...(isNonNegativeInteger(record.iteration) ? { iteration: record.iteration } : {}),
+    refineCount: record.refineCount,
+    pivotCount: record.pivotCount,
+    latestDecision: record.latestDecision as QualityGateStatus,
+    history: history.filter((entry): entry is QualityReviewHistoryEntry => entry !== undefined),
+  };
+}
+
+function parseQualityReviewHistoryEntry(value: unknown): QualityReviewHistoryEntry | undefined {
+  const record = asRecord(value);
+  const failures = parseStringList(record?.failures);
+  const evidenceRefs = parseStringList(record?.evidenceRefs);
+  const artifactRefs = parseStringList(record?.artifactRefs);
+  if (
+    !record
+    || (record.event !== "gate" && record.event !== "refine" && record.event !== "pivot" && record.event !== "completed")
+    || typeof record.stage !== "string" || !QUALITY_HARNESS_STAGE_SET.has(record.stage)
+    || typeof record.decision !== "string" || !QUALITY_GATE_STATUS_SET.has(record.decision)
+    || !isNonNegativeInteger(record.iteration)
+    || (hasOwn(record, "reason") && !isNonEmptyString(record.reason))
+    || !failures || failures.length > 32
+    || !evidenceRefs || evidenceRefs.length > 64
+    || !artifactRefs || artifactRefs.length > 64
+    || (hasOwn(record, "artifactHash") && !isNonEmptyString(record.artifactHash))
+    || (hasOwn(record, "reviewedArtifactHash") && !isNonEmptyString(record.reviewedArtifactHash))
+    || (hasOwn(record, "currentArtifactHash") && !isNonEmptyString(record.currentArtifactHash))
+    || (hasOwn(record, "reviewerId") && !isNonEmptyString(record.reviewerId))
+    || (hasOwn(record, "reviewerRunId") && !isNonEmptyString(record.reviewerRunId))
+    || (hasOwn(record, "provider") && !isNonEmptyString(record.provider))
+    || (hasOwn(record, "model") && !isNonEmptyString(record.model))
+    || (hasOwn(record, "route") && record.route !== "direct" && record.route !== "frontier" && record.route !== "commodity" && record.route !== "fallback")
+    || (hasOwn(record, "count") && !isNonNegativeInteger(record.count))
+    || (hasOwn(record, "limit") && !isNonNegativeInteger(record.limit))
+    || typeof record.independentVerification !== "boolean"
+    || typeof record.stale !== "boolean"
+    || !isNonNegativeFinite(record.startedAt)
+  ) return undefined;
+  return {
+    event: record.event,
+    stage: record.stage as QualityHarnessStage,
+    decision: record.decision as QualityGateStatus,
+    iteration: record.iteration,
+    ...(typeof record.reason === "string" ? { reason: record.reason } : {}),
+    failures,
+    evidenceRefs,
+    artifactRefs,
+    ...(typeof record.artifactHash === "string" ? { artifactHash: record.artifactHash } : {}),
+    ...(typeof record.reviewedArtifactHash === "string" ? { reviewedArtifactHash: record.reviewedArtifactHash } : {}),
+    ...(typeof record.currentArtifactHash === "string" ? { currentArtifactHash: record.currentArtifactHash } : {}),
+    ...(typeof record.reviewerId === "string" ? { reviewerId: record.reviewerId } : {}),
+    ...(typeof record.reviewerRunId === "string" ? { reviewerRunId: record.reviewerRunId } : {}),
+    ...(typeof record.provider === "string" ? { provider: record.provider } : {}),
+    ...(typeof record.model === "string" ? { model: record.model } : {}),
+    ...(typeof record.route === "string" ? { route: record.route as NonNullable<QualityReviewHistoryEntry["route"]> } : {}),
+    ...(typeof record.count === "number" ? { count: record.count } : {}),
+    ...(typeof record.limit === "number" ? { limit: record.limit } : {}),
+    independentVerification: record.independentVerification,
+    stale: record.stale,
+    startedAt: record.startedAt,
   };
 }
 

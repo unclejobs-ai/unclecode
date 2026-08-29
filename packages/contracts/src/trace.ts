@@ -427,7 +427,13 @@ export type QualityGateEvaluatedTraceEvent = QualityTraceBase & {
   readonly pivotCount: number;
   readonly evidenceRefs: readonly string[];
   readonly failures: readonly string[];
+  readonly reason: string;
   readonly artifactHash?: string;
+  readonly reviewedArtifactHash?: string;
+  readonly currentArtifactHash?: string;
+  readonly reviewerRunId?: string;
+  /** Explicit invalidation result; consumers must never infer this from prose. */
+  readonly stale?: boolean;
   readonly independentVerification: boolean;
 };
 
@@ -458,6 +464,13 @@ export type QualityCompletedTraceEvent = QualityTraceBase & {
   readonly completedStages: readonly QualityHarnessStage[];
   readonly evidenceRefs: readonly string[];
   readonly failures: readonly string[];
+  /** Hash bound by the quality gate; not a digest for every artifactRefs item. */
+  readonly artifactHash?: string;
+  readonly reviewedArtifactHash?: string;
+  readonly currentArtifactHash?: string;
+  readonly reviewerRunId?: string;
+  /** Freshness of the terminal review/artifact binding. */
+  readonly stale?: boolean;
   readonly independentVerification: boolean;
   readonly completedAt: number;
 };

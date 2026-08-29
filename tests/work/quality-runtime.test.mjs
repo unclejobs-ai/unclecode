@@ -1543,3 +1543,31 @@ test("a workspace mutation inside beforeRunComplete invalidates reviewer evidenc
     rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("successful completion preserves fresh critic provenance in the terminal trace", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-terminal-provenance-"));
+  const traces = [];
+  try {
+    const agent = createDirectoryQualityAgent({ workspace, traces });
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+    assert.equal(result.qualityStatus, "proceed");
+    const critic = traces.find((event) =>
+      event.type === "quality.gate_evaluated"
+      && event.stage === "critic"
+      && event.decision === "proceed");
+    const completed = traces.find((event) => event.type === "quality.completed");
+    assert.ok(critic?.reviewerRunId);
+    assert.equal(critic.stale, false);
+    assert.equal(critic.reviewedArtifactHash, critic.currentArtifactHash);
+    assert.deepEqual(critic.artifactRefs, critic.evidenceRefs);
+    assert.equal(completed?.reviewerRunId, critic.reviewerRunId);
+    assert.equal(completed?.artifactHash, critic.artifactHash);
+    assert.equal(completed?.reviewedArtifactHash, critic.reviewedArtifactHash);
+    assert.equal(completed?.currentArtifactHash, critic.currentArtifactHash);
+    assert.equal(completed?.independentVerification, true);
+    assert.deepEqual(completed?.artifactRefs, critic.artifactRefs);
+    assert.deepEqual(completed?.evidenceRefs, critic.evidenceRefs);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});

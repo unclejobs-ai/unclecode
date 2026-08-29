@@ -1579,3 +1579,114 @@ test("agent lifecycle reducer accepts run events only against the job the run ow
   assert.equal(settled.jobs[0]?.status, "completed");
   assert.deepEqual(settled.jobs[1], queued.jobs[1], "another job never settles with a foreign run");
 });
+
+test("quality completion preserves fresh same-iteration critic provenance", () => {
+  const critic = applyTraceEventToAgentConsole(initialConsole, {
+    type: "quality.gate_evaluated",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "critic",
+    iteration: 0,
+    decision: "proceed",
+    evidenceRefs: ["run.json", "critic.json"],
+    artifactRefs: ["critic.json"],
+    artifactHash: "sha256:verified",
+    reviewedArtifactHash: "sha256:verified",
+    currentArtifactHash: "sha256:verified",
+    provider: "anthropic",
+    model: "claude-review",
+    route: "frontier",
+    reviewerRunId: "critic-run-0",
+    independentVerification: true,
+    stale: false,
+    startedAt: 20,
+  });
+  const completed = applyTraceEventToAgentConsole(critic, {
+    type: "quality.completed",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "promote",
+    iteration: 0,
+    decision: "proceed",
+    evidenceRefs: ["run.json"],
+    artifactHash: "sha256:verified",
+    reviewedArtifactHash: "sha256:verified",
+    currentArtifactHash: "sha256:verified",
+    independentVerification: true,
+    stale: false,
+    startedAt: 40,
+  });
+  const terminal = completed.qualityReview?.history.at(-1);
+  assert.equal(terminal?.independentVerification, true);
+  assert.equal(terminal?.reviewerRunId, "critic-run-0");
+  assert.deepEqual(terminal?.artifactRefs, ["run.json", "critic.json"]);
+});
+
+test("quality completion rejects stale-iteration and promote-only reviewer provenance", () => {
+  const oldCritic = applyTraceEventToAgentConsole(initialConsole, {
+    type: "quality.gate_evaluated",
+    runId: "run-quality-stale",
+    graphId: "goal-quality-stale",
+    profile: "deep",
+    stage: "critic",
+    iteration: 1,
+    decision: "proceed",
+    artifactRefs: ["old-critic.json"],
+    artifactHash: "sha256:old",
+    reviewedArtifactHash: "sha256:old",
+    currentArtifactHash: "sha256:old",
+    reviewerRunId: "critic-run-1",
+    independentVerification: true,
+    stale: false,
+    startedAt: 10,
+  });
+  const refined = applyTraceEventToAgentConsole(oldCritic, {
+    type: "quality.refine_requested",
+    runId: "run-quality-stale",
+    graphId: "goal-quality-stale",
+    profile: "deep",
+    stage: "work",
+    iteration: 2,
+    decision: "refine",
+    count: 1,
+    limit: 3,
+    startedAt: 20,
+  });
+  const promote = applyTraceEventToAgentConsole(refined, {
+    type: "quality.gate_evaluated",
+    runId: "run-quality-stale",
+    graphId: "goal-quality-stale",
+    profile: "deep",
+    stage: "promote",
+    iteration: 2,
+    decision: "proceed",
+    artifactRefs: ["promote.json"],
+    artifactHash: "sha256:new",
+    reviewedArtifactHash: "sha256:new",
+    currentArtifactHash: "sha256:new",
+    reviewerRunId: "promote-run-2",
+    independentVerification: true,
+    stale: false,
+    startedAt: 30,
+  });
+  const terminal = applyTraceEventToAgentConsole(promote, {
+    type: "quality.completed",
+    runId: "run-quality-stale",
+    graphId: "goal-quality-stale",
+    profile: "deep",
+    stage: "promote",
+    iteration: 2,
+    decision: "proceed",
+    artifactHash: "sha256:new",
+    reviewedArtifactHash: "sha256:new",
+    currentArtifactHash: "sha256:new",
+    independentVerification: true,
+    stale: false,
+    startedAt: 40,
+  }).qualityReview?.history.at(-1);
+  assert.equal(terminal?.independentVerification, false);
+  assert.equal(terminal?.reviewerRunId, undefined);
+  assert.deepEqual(terminal?.artifactRefs, []);
+});

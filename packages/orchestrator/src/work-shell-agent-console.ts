@@ -8,6 +8,10 @@ import {
   type AgentRunUsage,
   type AgentRunUsageRoute,
   type AsyncJob,
+  MAX_QUALITY_REVIEW_HISTORY,
+  type QualityReviewHistoryEntry,
+  type QualityReviewProjection,
+  type QualityProfile,
   type TerminalAgentRunStatus,
   type ToolActivity,
   type WorkNodeStatus,
@@ -708,18 +712,6 @@ function applyWorkLifecycleEvent(
     return parsed;
   }
 
-  const graph = snapshot.workGraph;
-  if (!graph || readNonEmptyString(trace, "graphId") !== graph.id) {
-    return snapshot;
-  }
-
-  if (event.type === "work.approved") {
-    return createAgentConsoleSnapshot({
-      ...snapshot,
-      workGraph: { ...graph, approval: "approved" },
-    });
-  }
-
   if (
     event.type === "quality.stage_started"
     || event.type === "quality.gate_evaluated"
@@ -727,18 +719,22 @@ function applyWorkLifecycleEvent(
     || event.type === "quality.pivot_requested"
     || event.type === "quality.completed"
   ) {
+    const graph = snapshot.workGraph;
+    const graphId = readNonEmptyString(trace, "graphId");
+    if (!graphId || (graph && graphId !== graph.id)) return snapshot;
     const stage = readQualityStage(trace.stage);
     const iteration = readNonNegativeInteger(trace.iteration);
-    if (!stage || iteration === undefined || iteration < graph.iteration) return snapshot;
+    const currentIteration = graph?.iteration ?? snapshot.qualityReview?.iteration ?? 0;
+    if (!stage || iteration === undefined || iteration < currentIteration) return snapshot;
     const gateStatus = event.type === "quality.stage_started"
-      ? graph.gateStatus
+      ? graph?.gateStatus ?? snapshot.qualityReview?.latestDecision ?? "unproven"
       : readQualityGateStatus(trace.decision);
     if (!gateStatus) return snapshot;
 
     const nodeId = readNonEmptyString(trace, "nodeId");
     const nodeAttempt = readNonNegativeInteger(trace.nodeAttempt);
     const artifactRefs = readQualityArtifactRefs(trace.artifactRefs);
-    const nodes = nodeId
+    const nodes = nodeId && graph
       ? graph.nodes.map((node) => {
           if (node.id !== nodeId) return node;
           return {
@@ -750,16 +746,25 @@ function applyWorkLifecycleEvent(
               : { artifactRefs: [...new Set([...node.artifactRefs, ...artifactRefs])] }),
           };
         })
-      : graph.nodes;
+      : graph?.nodes;
+    const qualityReview = event.type === "quality.stage_started"
+      ? projectQualityStage(snapshot.qualityReview, trace, stage, iteration)
+      : projectQualityReview(snapshot.qualityReview, trace, event.type, stage, gateStatus, iteration);
+    if (!qualityReview) return snapshot;
     return createAgentConsoleSnapshot({
       ...snapshot,
-      workGraph: {
-        ...graph,
-        currentStage: stage,
-        gateStatus,
-        iteration,
-        nodes,
-      },
+      ...(graph && nodes ? { workGraph: { ...graph, currentStage: stage, gateStatus, iteration, nodes } } : {}),
+      qualityReview,
+    });
+  }
+
+  const graph = snapshot.workGraph;
+  if (!graph || readNonEmptyString(trace, "graphId") !== graph.id) return snapshot;
+
+  if (event.type === "work.approved") {
+    return createAgentConsoleSnapshot({
+      ...snapshot,
+      workGraph: { ...graph, approval: "approved" },
     });
   }
 
@@ -792,6 +797,158 @@ function applyWorkLifecycleEvent(
         candidate.id === node.id ? { ...candidate, status } : candidate),
     },
   });
+}
+
+function projectQualityStage(
+  current: QualityReviewProjection | undefined,
+  trace: TraceRecord,
+  stage: QualityReviewHistoryEntry["stage"],
+  iteration: number,
+): QualityReviewProjection | undefined {
+  const runId = readNonEmptyString(trace, "runId");
+  const graphId = readNonEmptyString(trace, "graphId");
+  const profile = readQualityProfile(trace.profile);
+  if (!runId || !graphId || !profile) return undefined;
+  const sameRun = current?.runId === runId && current.graphId === graphId;
+  return {
+    runId,
+    graphId,
+    profile,
+    currentStage: stage,
+    iteration,
+    refineCount: sameRun ? current.refineCount : 0,
+    pivotCount: sameRun ? current.pivotCount : 0,
+    latestDecision: sameRun ? current.latestDecision : "unproven",
+    history: sameRun ? current.history : [],
+  };
+}
+
+function projectQualityReview(
+  current: QualityReviewProjection | undefined,
+  trace: TraceRecord,
+  type: "quality.gate_evaluated" | "quality.refine_requested" | "quality.pivot_requested" | "quality.completed",
+  stage: QualityReviewHistoryEntry["stage"],
+  decision: QualityReviewHistoryEntry["decision"],
+  iteration: number,
+): QualityReviewProjection | undefined {
+  const runId = readNonEmptyString(trace, "runId");
+  const graphId = readNonEmptyString(trace, "graphId");
+  const startedAt = readTimestamp(trace, "startedAt");
+  const profile = readQualityProfile(trace.profile);
+  if (!runId || !graphId || !profile || startedAt === undefined) return undefined;
+  const sameRun = current?.runId === runId && current.graphId === graphId;
+  const baseHistory = sameRun ? current.history : [];
+  const failures = readQualityArtifactRefs(trace.failures) ?? [];
+  const evidenceRefs = readQualityArtifactRefs(trace.evidenceRefs) ?? [];
+  const artifactRefs = readQualityArtifactRefs(trace.artifactRefs) ?? [];
+  const reason = readNonEmptyString(trace, "reason");
+  const provider = readNonEmptyString(trace, "provider");
+  const model = readNonEmptyString(trace, "model");
+  const artifactHash = readNonEmptyString(trace, "artifactHash");
+  const reviewedArtifactHash = readNonEmptyString(trace, "reviewedArtifactHash");
+  const currentArtifactHash = readNonEmptyString(trace, "currentArtifactHash");
+  const reviewerRunId = readNonEmptyString(trace, "reviewerRunId")
+    ?? readNonEmptyString(trace, "agentRunId");
+  const routeValue = readNonEmptyString(trace, "route");
+  const route = routeValue === "direct" || routeValue === "frontier"
+    || routeValue === "commodity" || routeValue === "fallback" ? routeValue : undefined;
+  const count = readNonNegativeInteger(trace.count);
+  const limit = readNonNegativeInteger(trace.limit);
+  const refineCount = type === "quality.refine_requested"
+    ? count ?? (sameRun ? current.refineCount : 0)
+    : readNonNegativeInteger(trace.refineCount) ?? (sameRun ? current.refineCount : 0);
+  const pivotCount = type === "quality.pivot_requested"
+    ? count ?? (sameRun ? current.pivotCount : 0)
+    : readNonNegativeInteger(trace.pivotCount) ?? (sameRun ? current.pivotCount : 0);
+  const stale = trace.stale === true;
+  const verifiedCritic = type === "quality.completed"
+    && stage === "promote"
+    && decision === "proceed"
+    && trace.independentVerification === true
+    && !stale
+    ? findVerifiedCritic(baseHistory, iteration, { artifactHash, reviewedArtifactHash, currentArtifactHash })
+    : undefined;
+  const terminalArtifactRefs = verifiedCritic
+    ? [...new Set([...artifactRefs, ...evidenceRefs, ...verifiedCritic.artifactRefs, ...verifiedCritic.evidenceRefs])].slice(0, 64)
+    : artifactRefs;
+  const entry: QualityReviewHistoryEntry = {
+    event: type === "quality.gate_evaluated" ? "gate"
+      : type === "quality.refine_requested" ? "refine"
+        : type === "quality.pivot_requested" ? "pivot" : "completed",
+    stage,
+    decision,
+    iteration,
+    ...(reason ? { reason } : {}),
+    failures,
+    evidenceRefs,
+    artifactRefs: terminalArtifactRefs,
+    ...(artifactHash ? { artifactHash } : verifiedCritic?.artifactHash ? { artifactHash: verifiedCritic.artifactHash } : {}),
+    ...(reviewedArtifactHash ? { reviewedArtifactHash } : verifiedCritic?.reviewedArtifactHash ? { reviewedArtifactHash: verifiedCritic.reviewedArtifactHash } : {}),
+    ...(currentArtifactHash ? { currentArtifactHash } : verifiedCritic?.currentArtifactHash ? { currentArtifactHash: verifiedCritic.currentArtifactHash } : {}),
+    ...(verifiedCritic?.reviewerId ? { reviewerId: verifiedCritic.reviewerId }
+      : provider && model ? { reviewerId: `${stage}:${provider}:${model}` } : {}),
+    ...(reviewerRunId ? { reviewerRunId } : verifiedCritic?.reviewerRunId ? { reviewerRunId: verifiedCritic.reviewerRunId } : {}),
+    ...(provider ? { provider } : verifiedCritic?.provider ? { provider: verifiedCritic.provider } : {}),
+    ...(model ? { model } : verifiedCritic?.model ? { model: verifiedCritic.model } : {}),
+    ...(route ? { route } : verifiedCritic?.route ? { route: verifiedCritic.route } : {}),
+    ...(count === undefined ? {} : { count }),
+    ...(limit === undefined ? {} : { limit }),
+    independentVerification: type === "quality.completed"
+      ? verifiedCritic !== undefined
+      : trace.independentVerification === true,
+    stale,
+    startedAt,
+  };
+  return {
+    runId,
+    graphId,
+    profile,
+    currentStage: stage,
+    iteration,
+    refineCount,
+    pivotCount,
+    latestDecision: decision,
+    history: [...baseHistory, entry].slice(-MAX_QUALITY_REVIEW_HISTORY),
+  };
+}
+
+function findVerifiedCritic(
+  history: readonly QualityReviewHistoryEntry[],
+  iteration: number,
+  terminalHashes: {
+    readonly artifactHash: string | undefined;
+    readonly reviewedArtifactHash: string | undefined;
+    readonly currentArtifactHash: string | undefined;
+  },
+): QualityReviewHistoryEntry | undefined {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const entry = history[index];
+    if (entry?.event === "refine" || entry?.event === "pivot") break;
+    if (
+      !entry || entry.iteration !== iteration || entry.event !== "gate" || entry.stage !== "critic"
+      || entry.decision !== "proceed" || !entry.independentVerification || entry.stale
+      || !entry.reviewerRunId || !qualityHashesAgree(entry) || !qualityHashesAgree(terminalHashes)
+    ) continue;
+    const criticHash = entry.currentArtifactHash ?? entry.reviewedArtifactHash ?? entry.artifactHash;
+    const terminalHash = terminalHashes.currentArtifactHash ?? terminalHashes.reviewedArtifactHash ?? terminalHashes.artifactHash;
+    if (criticHash && terminalHash && criticHash !== terminalHash) continue;
+    return entry;
+  }
+  return undefined;
+}
+
+function qualityHashesAgree(value: {
+  readonly reviewedArtifactHash?: string | undefined;
+  readonly currentArtifactHash?: string | undefined;
+}): boolean {
+  return !value.reviewedArtifactHash || !value.currentArtifactHash
+    || value.reviewedArtifactHash === value.currentArtifactHash;
+}
+
+function readQualityProfile(value: unknown): QualityProfile | undefined {
+  return value === "minimal" || value === "standard" || value === "deep" || value === "creator"
+    ? value
+    : undefined;
 }
 
 function readWorkNodeStatus(value: unknown): WorkNodeStatus | undefined {
