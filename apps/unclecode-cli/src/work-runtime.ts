@@ -256,7 +256,8 @@ export async function runWorkCli(
     return;
   }
 
-  const session = await loadWorkCliBootstrap({ argv });
+  const parsed = parseArgs([...argv]);
+  const session = await loadWorkCliBootstrap({ argv, role: parsed.prompt ? "owner" : "client" });
   if (session.prompt) {
     const result = await session.agent.runTurn(session.prompt);
     process.stdout.write(`${result.text}\n`);

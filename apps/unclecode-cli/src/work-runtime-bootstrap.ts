@@ -194,10 +194,22 @@ export function createWorkExecutorAgent(input: {
 
 export type WorkCliBootstrapInput = {
   argv: readonly string[];
+  role?: "owner" | "client" | undefined;
   env?: NodeJS.ProcessEnv | undefined;
   userHomeDir?: string | undefined;
   lspBridge?: GuardianLspBridge | undefined;
 };
+
+export function createRuntimeClientAgent(): StartReplAgent {
+  return {
+    async runTurn() {
+      throw new Error("The TUI client must execute turns through the runtime owner attachment.");
+    },
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+  };
+}
 
 export type WorkCliBootstrapResult = {
   agent: StartReplAgent;
@@ -441,6 +453,7 @@ export async function loadWorkCliBootstrap(
   input: WorkCliBootstrapInput,
 ): Promise<WorkCliBootstrapResult> {
   const env = input.env ?? process.env;
+  const runtimeRole = input.role ?? "owner";
   const userHomeDir = input.userHomeDir ?? env.HOME;
   const { cwd, provider, model, reasoning, sessionId, prompt, engine } = parseArgs([
     ...input.argv,
@@ -555,12 +568,14 @@ export async function loadWorkCliBootstrap(
         }
       : {}),
   });
-  const directAgent = await createConfiguredCodingAgent(
-    config.apiKey,
-    config.model,
-    config.reasoning,
-    config.mode,
-  );
+  const directAgent = runtimeRole === "owner"
+    ? await createConfiguredCodingAgent(
+        config.apiKey,
+        config.model,
+        config.reasoning,
+        config.mode,
+      )
+    : undefined;
   const directRuntimeProvider = resolveRuntimeProvider(config.provider);
   const reviewSelection = resolveQualityReviewSelection({
     directProvider: directRuntimeProvider,
@@ -577,21 +592,23 @@ export async function loadWorkCliBootstrap(
         model: reviewSelection.model,
         allowProblematicOpenAIAuth: true,
       });
-  const reviewAgent = await createRuntimeCodingAgent({
-    provider: resolveRuntimeProvider(reviewConfig.provider),
-    apiKey: reviewConfig.apiKey,
-    model: reviewConfig.model,
-    cwd,
-    reasoning: reviewConfig.reasoning,
-    mode: reviewConfig.mode,
-    toolAccess: "none",
-    ...(reviewConfig.baseUrl ? { baseUrl: reviewConfig.baseUrl } : {}),
-    ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
-    ...(reviewConfig.openAIRuntime ? { openAIRuntime: reviewConfig.openAIRuntime } : {}),
-    ...(reviewConfig.openAIAccountId !== undefined
-      ? { openAIAccountId: reviewConfig.openAIAccountId }
-      : {}),
-  });
+  const reviewAgent = runtimeRole === "owner"
+    ? await createRuntimeCodingAgent({
+        provider: resolveRuntimeProvider(reviewConfig.provider),
+        apiKey: reviewConfig.apiKey,
+        model: reviewConfig.model,
+        cwd,
+        reasoning: reviewConfig.reasoning,
+        mode: reviewConfig.mode,
+        toolAccess: "none",
+        ...(reviewConfig.baseUrl ? { baseUrl: reviewConfig.baseUrl } : {}),
+        ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
+        ...(reviewConfig.openAIRuntime ? { openAIRuntime: reviewConfig.openAIRuntime } : {}),
+        ...(reviewConfig.openAIAccountId !== undefined
+          ? { openAIAccountId: reviewConfig.openAIAccountId }
+          : {}),
+      })
+    : undefined;
 
   const pluginHost = new PluginHost();
   const recorder = createAgentOpsRecorder({
@@ -627,9 +644,9 @@ export async function loadWorkCliBootstrap(
     }),
   });
 
-  const agent = new WorkAgent({
-    directAgent,
-    reviewAgent,
+  const ownerAgent = directAgent && reviewAgent ? new WorkAgent({
+      directAgent,
+      reviewAgent,
     createExecutorAgent: async (settings) => createWorkExecutorAgent({
       cwd,
       env,
@@ -667,7 +684,8 @@ export async function loadWorkCliBootstrap(
         signal: guardianInput.signal,
       });
     },
-  });
+  }) : undefined;
+  const agent: StartReplAgent = ownerAgent ?? createRuntimeClientAgent();
 
   const refreshAuthState = async (): Promise<{
     authLabel: string;
@@ -685,7 +703,7 @@ export async function loadWorkCliBootstrap(
     }
     const status = await resolveRustOpenAIAuthStatus({ cwd, env });
     const resolved = await resolveRustOpenAIAuth({ cwd, env });
-    directAgent.refreshAuthToken(resolved.status === "ok" ? resolved.bearerToken : "");
+    directAgent?.refreshAuthToken(resolved.status === "ok" ? resolved.bearerToken : "");
     return {
       authLabel: resolveWorkShellAuthLabel({
         engine: activeEngine,
@@ -831,7 +849,7 @@ export async function loadWorkCliBootstrap(
       ...(resumedSession?.initialAgentConsole
         ? { initialAgentConsole: resumedSession.initialAgentConsole }
         : {}),
-      interactionBridge: directAgent.getInteractionBridge(),
+      ...(directAgent ? { interactionBridge: directAgent.getInteractionBridge() } : {}),
       reloadWorkspaceContext: async (workspaceRoot: string) => {
         const refreshedBootstrap = await ingestWorkspaceBootstrapContext({
           cwd: workspaceRoot,
