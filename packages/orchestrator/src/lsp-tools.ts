@@ -27,6 +27,7 @@ type ValidatedTextEdit = { readonly range: ProtocolRange; readonly newText: stri
 
 export type LspToolRegistryOptions = {
   readonly resolveServer?: LspServerResolver;
+  readonly forceKillDelayMs?: number;
 };
 
 function pathEscapesWorkspace(root: string, target: string): boolean {
@@ -399,7 +400,7 @@ export function createLspToolRegistry(options: LspToolRegistryOptions = {}): Too
     const config = resolveServer(filePath, path.extname(filePath), cwd);
     if (!config) throw new Error(`No native language server is configured for ${requestedPath}`);
     const timeoutMs = resolveTimeout(input);
-    const client = new LspJsonRpcClient(config, cwd, timeoutMs, handlerOptions.signal);
+    const client = new LspJsonRpcClient(config, cwd, timeoutMs, handlerOptions.signal, options.forceKillDelayMs);
     try {
       await client.start();
       const uri = pathToFileURL(filePath).href;
@@ -453,7 +454,13 @@ export function createLspToolRegistry(options: LspToolRegistryOptions = {}): Too
     const text = await readFile(filePath, "utf8");
     const config = resolveServer(filePath, path.extname(filePath), cwd);
     if (!config) throw new Error(`No native language server is configured for ${requestedPath}`);
-    const client = new LspJsonRpcClient(config, cwd, resolveTimeout(input), handlerOptions.signal);
+    const client = new LspJsonRpcClient(
+      config,
+      cwd,
+      resolveTimeout(input),
+      handlerOptions.signal,
+      options.forceKillDelayMs,
+    );
     try {
       await client.start();
       const uri = pathToFileURL(filePath).href;
