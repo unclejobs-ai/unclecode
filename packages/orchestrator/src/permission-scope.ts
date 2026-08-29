@@ -154,12 +154,14 @@ const CONTAINER_CLIENTS = new Set(["docker", "podman"]);
 const CLUSTER_CLIENTS = new Set(["helm", "kubectl"]);
 const TASK_RUNNERS = new Set(["just", "make", "task"]);
 const PACKAGE_MANAGERS = new Set(["bun", "npm", "pnpm", "yarn"]);
-const LOCAL_GIT_SUBCOMMANDS = new Set([
+const SAFE_LOCAL_GIT_SUBCOMMANDS = new Set([
+  "ls-files", "ls-tree", "merge-base", "name-rev", "rev-parse", "version",
+]);
+const KNOWN_GIT_PROJECT_SUBCOMMANDS = new Set([
   "add", "am", "apply", "archive", "bisect", "blame", "branch", "checkout",
-  "cherry-pick", "clean", "clone", "commit", "config", "describe", "diff",
-  "fetch", "grep", "init", "log", "ls-files", "mv", "pull", "rebase",
-  "reflog", "remote", "reset", "restore", "revert", "rev-parse", "rm", "show",
-  "sparse-checkout", "stash", "status", "switch", "tag", "worktree",
+  "cherry-pick", "clean", "commit", "describe", "grep", "init", "log", "mv",
+  "rebase", "reflog", "remote", "reset", "restore", "revert", "rm", "show",
+  "sparse-checkout", "stash", "tag",
 ]);
 const GIT_NETWORK_SUBCOMMANDS = new Set(["clone", "fetch", "pull"]);
 const GIT_HOOK_SUBCOMMANDS = new Set([
@@ -358,7 +360,7 @@ function isReadOnlyGitConfig(arguments_: readonly string[]): boolean {
   return hasReadSelector;
 }
 
-function hasTarCallbackOption(arguments_: readonly string[]): boolean {
+function hasTarExecutableInputOption(arguments_: readonly string[]): boolean {
   const exactOptions = new Set([
     "--checkpoint-action",
     "--info-script",
@@ -379,15 +381,26 @@ function hasTarCallbackOption(arguments_: readonly string[]): boolean {
     "--to-c",
     "--use-c",
   ];
-  return arguments_.some((token, index) => {
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const token = arguments_[index] ?? "";
+    if (token === "--") return false;
     const normalized = token.toLowerCase();
-    return exactOptions.has(normalized)
+    if (
+      exactOptions.has(normalized)
       || optionPrefixes.some((prefix) => normalized.startsWith(prefix))
+      // A GNU tar file list is executable input: unless verbatim mode is in
+      // force, entries may themselves be options (including another -T).
+      // The classifier cannot inspect or bind that recursive input, so every
+      // spelling remains an exact, non-persistable approval boundary.
+      || normalized.startsWith("--files")
       // `-I` can appear in a short-option cluster, and tar also accepts its
       // historical dashless option bundle in the first argument.
       || /^-[^-]*I/.test(token)
-      || (index === 0 && /^[^-\s]*I/.test(token));
-  });
+      || /^-[^-]*T/.test(token)
+      || (index === 0 && /^[^-\s]*[IT]/.test(token))
+    ) return true;
+  }
+  return false;
 }
 
 function packageSubcommandIndex(tokens: readonly string[], start: number): number | undefined {
@@ -414,17 +427,23 @@ function packageSubcommandIndex(tokens: readonly string[], start: number): numbe
   return undefined;
 }
 
-function gitSubcommand(tokens: readonly string[], start: number): string | undefined {
+function gitCommand(tokens: readonly string[], start: number): {
+  readonly subcommand: string;
+  readonly index: number;
+} | undefined {
   const optionsWithValue = new Set(["-c", "-C", "--exec-path", "--git-dir", "--namespace", "--work-tree"]);
   for (let index = start; index < tokens.length; index += 1) {
     const token = tokens[index] ?? "";
-    if (token === "--") return tokens[index + 1]?.toLowerCase();
+    if (token === "--") {
+      const subcommand = tokens[index + 1]?.toLowerCase();
+      return subcommand ? { subcommand, index: index + 1 } : undefined;
+    }
     if (optionsWithValue.has(token)) {
       index += 1;
       continue;
     }
     if (token.startsWith("-")) continue;
-    return token.toLowerCase();
+    return { subcommand: token.toLowerCase(), index };
   }
   return undefined;
 }
@@ -471,12 +490,16 @@ function directShellApproval(
   let executable = executableName(tokens[commandIndex] ?? "");
 
   let wrapperDepth = 0;
+  let hasTarOptionsAssignment = false;
   while (executable === "env" || SIMPLE_COMMAND_WRAPPERS.has(executable)) {
     wrapperDepth += 1;
     if (wrapperDepth > MAX_NESTED_COMMAND_DEPTH) return "ambiguous-wrapper";
     commandIndex += 1;
     if (executable === "env") {
-      while (commandIndex < tokens.length && ASSIGNMENT_PATTERN.test(tokens[commandIndex] ?? "")) commandIndex += 1;
+      while (commandIndex < tokens.length && ASSIGNMENT_PATTERN.test(tokens[commandIndex] ?? "")) {
+        if (/^TAR_OPTIONS=/i.test(tokens[commandIndex] ?? "")) hasTarOptionsAssignment = true;
+        commandIndex += 1;
+      }
     }
     if (tokens[commandIndex]?.startsWith("-")) return "ambiguous-wrapper";
     executable = executableName(tokens[commandIndex] ?? "");
@@ -522,14 +545,42 @@ function directShellApproval(
     return executable.startsWith("deploy") ? "deploy" : executable.startsWith("release") ? "release" : "package-publish";
   }
   if (/\.(?:bash|fish|ksh|sh|zsh)$/.test(executable)) return "ambiguous-wrapper";
+  if (
+    executable === "tar"
+    && (hasTarOptionsAssignment || hasTarExecutableInputOption(tokens.slice(commandIndex + 1)))
+  ) {
+    return "project-code";
+  }
   if (/[\\/]/.test(tokens[commandIndex] ?? "")) return "unknown-executable";
 
   if (executable === "git") {
-    const globalArguments = tokens.slice(commandIndex + 1);
-    if (globalArguments.some((token) => token === "-c" || token.startsWith("--config-env"))) {
+    const command = gitCommand(tokens, commandIndex + 1);
+    const subcommand = command?.subcommand;
+    const globalArguments = tokens.slice(commandIndex + 1, command?.index ?? tokens.length);
+    if (
+      subcommand === undefined
+      && globalArguments.length === 1
+      && ["-h", "--version"].includes(globalArguments[0]?.toLowerCase() ?? "")
+    ) return undefined;
+    if (globalArguments.some((token) =>
+      token === "-c"
+      || /^-c.+/.test(token)
+      || token.startsWith("--config-env")
+    )) {
       return "ambiguous-wrapper";
     }
-    const subcommand = gitSubcommand(tokens, commandIndex + 1);
+    if (globalArguments.some((token) =>
+      token === "-p"
+      || token === "--paginate"
+      || token === "--exec-path"
+      || token.startsWith("--exec-path=")
+      || token === "-C"
+      || token.startsWith("--git-dir")
+      || token.startsWith("--namespace")
+      || token.startsWith("--work-tree")
+    )) {
+      return "project-code";
+    }
     if (subcommand === "push") return "git-push";
     if (subcommand === "send-pack") return "git-push";
     // The current branch is runtime state unavailable to this layer, so every
@@ -553,7 +604,12 @@ function directShellApproval(
       const configArguments = configIndex < 0 ? [] : tokens.slice(configIndex + 1);
       return isReadOnlyGitConfig(configArguments) ? undefined : "project-code";
     }
-    return subcommand && LOCAL_GIT_SUBCOMMANDS.has(subcommand) ? undefined : "ambiguous-wrapper";
+    // Only built-ins with no command options that enable filters, pagers,
+    // hooks, or mutations inherit shell autonomy. All other known Git work is
+    // exact project-code approval; unknown aliases remain ambiguous because
+    // repository configuration can map them to arbitrary shell commands.
+    if (subcommand && SAFE_LOCAL_GIT_SUBCOMMANDS.has(subcommand)) return undefined;
+    return subcommand && KNOWN_GIT_PROJECT_SUBCOMMANDS.has(subcommand) ? "project-code" : "ambiguous-wrapper";
   }
 
   const subcommand = firstSubcommand(tokens, commandIndex + 1);
@@ -683,9 +739,6 @@ function directShellApproval(
   }
   if (["dotnet", "gem", "twine"].includes(executable)) {
     return isExactClientInspection(tokens, commandIndex + 1) ? undefined : "project-code";
-  }
-  if (executable === "tar" && hasTarCallbackOption(tokens.slice(commandIndex + 1))) {
-    return "project-code";
   }
   const knownExecutable = SAFE_LOCAL_EXECUTABLES.has(executable)
     || PACKAGE_MANAGERS.has(executable)

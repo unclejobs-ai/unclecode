@@ -57,6 +57,76 @@ const MODEL_SHELL_CONTROL_ENV = new Set([
   "UNCLECODE_SERVER_URL",
   "UNCLECODE_SESSION_STORE_ROOT",
 ]);
+const MODEL_SHELL_EXECUTION_CONTROL_ENV = new Set([
+  "_JAVA_OPTIONS",
+  "BASHOPTS",
+  "BASH_ENV",
+  "BUN_OPTIONS",
+  "CLASSPATH",
+  "DOTNET_STARTUP_HOOKS",
+  "EDITOR",
+  "ENV",
+  "GIT_ASKPASS",
+  "GIT_DIFF_OPTS",
+  "GIT_EDITOR",
+  "GIT_EXEC_PATH",
+  "GIT_EXTERNAL_DIFF",
+  "GIT_PAGER",
+  "GIT_PROXY_COMMAND",
+  "GIT_SEQUENCE_EDITOR",
+  "GIT_SSH",
+  "GIT_SSH_COMMAND",
+  "GNUMAKEFLAGS",
+  "GRADLE_OPTS",
+  "JAVA_TOOL_OPTIONS",
+  "JDK_JAVA_OPTIONS",
+  "LESS",
+  "LESSCLOSE",
+  "LESSOPEN",
+  "LUA_CPATH",
+  "LUA_INIT",
+  "LUA_PATH",
+  "MAKEFILES",
+  "MAKEFLAGS",
+  "MANPAGER",
+  "MAVEN_OPTS",
+  "MFLAGS",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "PAGER",
+  "PERL5LIB",
+  "PERL5OPT",
+  "PHPRC",
+  "PHP_INI_SCAN_DIR",
+  "PROMPT_COMMAND",
+  "PYTHONHOME",
+  "PYTHONINSPECT",
+  "PYTHONPATH",
+  "PYTHONSTARTUP",
+  "PYTHONWARNINGS",
+  "R_ENVIRON",
+  "R_PROFILE",
+  "R_PROFILE_USER",
+  "RIPGREP_CONFIG_PATH",
+  "RUBYLIB",
+  "RUBYOPT",
+  "RUSTC_WORKSPACE_WRAPPER",
+  "RUSTC_WRAPPER",
+  "SHELLOPTS",
+  "SSH_ASKPASS",
+  "TAR_OPTIONS",
+  "VISUAL",
+  "ZDOTDIR",
+]);
+
+function isModelShellExecutionControlEnvironment(name: string): boolean {
+  if (MODEL_SHELL_EXECUTION_CONTROL_ENV.has(name)) return true;
+  if (name.startsWith("DYLD_")) return true;
+  if (["LD_AUDIT", "LD_LIBRARY_PATH", "LD_PRELOAD"].includes(name)) return true;
+  if (name.startsWith("GIT_CONFIG")) return true;
+  if (["CORECLR_ENABLE_PROFILING", "CORECLR_PROFILER", "CORECLR_PROFILER_PATH"].includes(name)) return true;
+  return /^NPM_CONFIG_(?:GLOBALCONFIG|NODE_OPTIONS|ONLOAD_SCRIPT|SCRIPT_SHELL|USERCONFIG)$/.test(name);
+}
 
 /**
  * Shell children inherit ordinary build configuration but never the runtime
@@ -70,6 +140,10 @@ export function createModelShellEnvironment(source: NodeJS.ProcessEnv): NodeJS.P
     if (MODEL_SHELL_PRIVATE_ENV_PATTERN.test(name)) continue;
     if (MODEL_SHELL_PRIVATE_ENV_VALUE_PATTERN.test(value)) continue;
     if (MODEL_SHELL_CONTROL_ENV.has(normalizedName)) continue;
+    // Authorization binds the displayed command, not ambient process state.
+    // Drop variables that can source code, install callbacks, inject tool
+    // options, or replace a pager/filter after policy evaluation.
+    if (isModelShellExecutionControlEnvironment(normalizedName)) continue;
     if (normalizedName.startsWith("UNCLECODE_CONFIG__") || normalizedName.startsWith("UNCLECODE_SUBMIT__")) continue;
     environment[name] = value;
   }

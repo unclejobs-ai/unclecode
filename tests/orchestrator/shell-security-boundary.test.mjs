@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 
 import {
@@ -120,7 +121,12 @@ test("one-shot shell classes and project code re-prompt through yolo and a persi
 test("statically inspectable local commands remain eligible for autonomous execution", () => {
   for (const command of [
     "git ls-files",
+    "git ls-files -- -C",
+    "git --no-pager ls-files",
+    "git --version",
     "git config --get core.fsmonitor",
+    "git rev-parse --show-toplevel",
+    "git ls-tree HEAD",
     "docker --version",
     "podman --help",
     "kubectl version --client",
@@ -131,12 +137,105 @@ test("statically inspectable local commands remain eligible for autonomous execu
     "vercel --version",
     "wrangler --help",
     "tar -tf artifact.tgz",
+    "tar -cf out.tar src",
+    "tar -cf out.tar -- -T",
     "tsc --noEmit",
     "rg -n TODO src",
     "sed -n '1,20p' README.md",
     "printf '%s\\n' ok",
   ]) {
     assert.equal(resolveOneShotShellApproval({ toolName: "run_shell", input: { command } }), undefined, command);
+  }
+});
+
+test("every tar files-from form is exact non-persistable project code", () => {
+  const commands = [
+    "tar -cf out.tar -T options.txt",
+    "tar --files-from options.txt -cf out.tar",
+    "tar --files-from=options.txt -cf out.tar",
+    "tar --files-f=options.txt -cf out.tar",
+    "tar -Toptions.txt -cf out.tar",
+    "tar -cfT out.tar options.txt",
+    "tar cfT out.tar options.txt",
+    "command tar --verbatim-files-from -T options.txt -cf out.tar",
+    "command env TAR_OPTIONS=--files-from=options.txt tar -cf out.tar src",
+    "bash -c 'tar --null -T outer.txt -cf out.tar'",
+    "/usr/bin/tar -cf out.tar -T options.txt",
+  ];
+
+  for (const command of commands) {
+    const approval = resolveOneShotShellApproval({ toolName: "run_shell", input: { command } });
+    assert.equal(approval?.kind, "project-code", command);
+    assert.equal(approval.scope.key, `bash:once:${command}`);
+  }
+});
+
+test("git autonomy is limited to option-aware read-only built-ins", () => {
+  const commands = [
+    "git log --ext-diff -p",
+    "git show --ext-diff HEAD",
+    "git grep --textconv needle",
+    "git archive --format=custom HEAD",
+    "git reset --hard HEAD",
+    "git branch -D release",
+    "git --paginate ls-files",
+    "git --exec-path=./bin ls-files",
+    "git -C ../outside ls-files",
+    "git -cdiff.external=./scripts/publish log -p",
+  ];
+
+  for (const command of commands) {
+    const approval = resolveOneShotShellApproval({ toolName: "run_shell", input: { command } });
+    assert.ok(approval, command);
+    assert.equal(approval.scope.key, `bash:once:${command}`);
+  }
+});
+
+test("an executable Git diff callback cannot pass through a persisted bash grant", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-git-callback-"));
+  const callback = path.join(root, "diff-callback.sh");
+  const marker = path.join(root, "callback-ran");
+  const command = "git show --ext-diff --format= HEAD";
+
+  try {
+    writeFileSync(callback, "#!/bin/sh\n: > callback-ran\n", "utf8");
+    chmodSync(callback, 0o700);
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    execFileSync("git", ["config", "user.name", "UncleCode Test"], { cwd: root });
+    execFileSync("git", ["config", "user.email", "test@unclecode.invalid"], { cwd: root });
+    execFileSync("git", ["config", "diff.external", callback], { cwd: root });
+    writeFileSync(path.join(root, "fixture.txt"), "first\n", "utf8");
+    execFileSync("git", ["add", "fixture.txt"], { cwd: root });
+    execFileSync("git", ["commit", "-qm", "first"], { cwd: root });
+    writeFileSync(path.join(root, "fixture.txt"), "second\n", "utf8");
+    execFileSync("git", ["add", "fixture.txt"], { cwd: root });
+    execFileSync("git", ["commit", "-qm", "second"], { cwd: root });
+
+    execFileSync("git", ["show", "--ext-diff", "--format=", "HEAD"], { cwd: root });
+    assert.equal(existsSync(marker), true, "fixture must prove that the Git option executes diff.external");
+    unlinkSync(marker);
+
+    const invoked = [];
+    const executor = createPolicyAwareToolExecutor({
+      definitions: [RUN_SHELL_DEFINITION],
+      handlers: {
+        run_shell: async () => {
+          invoked.push(command);
+          execFileSync("git", ["show", "--ext-diff", "--format=", "HEAD"], { cwd: root });
+          return { content: "ran" };
+        },
+      },
+      policyProfile: resolveModeExecutionPolicyProfile({ mode: "yolo", envShellOptIn: false }),
+      runtimeMode: "yolo",
+      permissionRuleStore: createCanonicalPermissionRuleStore([{ kind: "tool", key: "bash" }]),
+    });
+    const result = await executor.execute({ toolName: "run_shell", input: { command }, cwd: root });
+
+    assert.equal(result.isError, true);
+    assert.deepEqual(invoked, []);
+    assert.equal(existsSync(marker), false, "policy must stop the callback before dispatch");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -167,6 +266,13 @@ test("known control clients and callback-bearing inspections never inherit a bas
     "tar -I ./scripts/compress -cf artifact.tar src",
     "tar -cfI artifact.tar ./scripts/compress src",
     "tar cfI artifact.tar ./scripts/compress src",
+    "tar -cf out.tar -T options.txt",
+    "tar --files-from options.txt -cf out.tar",
+    "tar --files-from=options.txt -cf out.tar",
+    "tar --files-f=options.txt -cf out.tar",
+    "tar -Toptions.txt -cf out.tar",
+    "tar -cfT out.tar options.txt",
+    "tar cfT out.tar options.txt",
   ];
 
   for (const command of commands) {
@@ -273,12 +379,42 @@ test("model shell environment drops owner discovery and ambient credentials", ()
     UNCLECODE_SERVER_URL: "http://127.0.0.1:4321",
     UNCLECODE_DATA_ROOT: "/Users/example/.unclecode",
     UNCLECODE_CONFIG__OWNER_TOKEN: "owner-secret",
+    BASH_ENV: "./scripts/bash-env.sh",
+    ENV: "./scripts/sh-env.sh",
+    ZDOTDIR: "./dotfiles",
+    NODE_OPTIONS: "--require=./scripts/node-hook.cjs",
+    PYTHONSTARTUP: "./scripts/python-startup.py",
+    PYTHONPATH: "./python-hooks",
+    RUBYOPT: "-r./scripts/ruby-hook.rb",
+    RUBYLIB: "./ruby-hooks",
+    PERL5OPT: "-Mproject_hook",
+    PERL5LIB: "./perl-hooks",
+    GIT_CONFIG_COUNT: "1",
+    GIT_EXTERNAL_DIFF: "./scripts/diff-hook.sh",
+    GIT_DIFF_OPTS: "--stat",
+    GIT_PAGER: "./scripts/pager.sh",
+    PAGER: "./scripts/pager.sh",
+    LESS: "-R",
+    TAR_OPTIONS: "--files-from=options.txt",
+    LD_PRELOAD: "./native-hook.so",
+    DYLD_INSERT_LIBRARIES: "./native-hook.dylib",
+    RIPGREP_CONFIG_PATH: "./ripgrep.conf",
+    MAKEFLAGS: "--eval=all:;./scripts/make-hook.sh",
+    JAVA_TOOL_OPTIONS: "-javaagent:./agent.jar",
+    PHP_INI_SCAN_DIR: "./php-config",
+    RUSTC_WRAPPER: "./scripts/rustc-wrapper.sh",
+    HTTP_PROXY: "http://proxy.example:8080",
+    LANG: "ko_KR.UTF-8",
+    CC: "clang",
     SAFE_BUILD_FLAG: "1",
   });
 
   assert.deepEqual(environment, {
     PATH: "/usr/bin",
     HOME: "/Users/example",
+    HTTP_PROXY: "http://proxy.example:8080",
+    LANG: "ko_KR.UTF-8",
+    CC: "clang",
     SAFE_BUILD_FLAG: "1",
     UNCLECODE_ALLOW_RUN_SHELL: "1",
   });
