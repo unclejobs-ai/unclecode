@@ -359,6 +359,44 @@ test("creator profile alone never fabricates isolation or benchmark attestations
   assert.deepEqual(projection.runs[0].evolve, []);
 });
 
+test("control-room publishes only bounded cache telemetry fields with a measurable hit rate", () => {
+  const projection = createControlRoomProjection({
+    generatedAt: 201,
+    sessions: [],
+    system: {
+      caches: [{
+        name: "provider-system-prompt token=super-secret",
+        hits: 3,
+        misses: 1,
+        evictions: 2,
+        byteEvictions: 1,
+        invalidations: 4,
+        currentSize: 5,
+        maxEntries: 64,
+        maxRetainedBytes: 2_097_152,
+        retainedBytesEstimate: 12_345,
+        prompt: "must-not-cross-control-room",
+      }],
+    },
+  });
+
+  assert.deepEqual(projection.system.caches, [{
+    name: "provider-system-prompt token=[REDACTED]",
+    hits: 3,
+    misses: 1,
+    hitRate: 0.75,
+    evictions: 2,
+    byteEvictions: 1,
+    invalidations: 4,
+    currentSize: 5,
+    maxEntries: 64,
+    maxRetainedBytes: 2_097_152,
+    retainedBytesEstimate: 12_345,
+  }]);
+  assert.doesNotMatch(JSON.stringify(projection.system), /must-not-cross-control-room/);
+  assert.doesNotMatch(JSON.stringify(projection.system), /super-secret/);
+});
+
 test("legacy sessions do not fabricate SCC promotion provenance", () => {
   const projection = createControlRoomProjection({
     generatedAt: 202,
@@ -398,6 +436,29 @@ test("persistent runtime discovers opaque checkpoints and restores only explicit
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("persistent runtime includes injected serializable cache telemetry", async () => {
+  const source = await readPersistentRuntime(
+    "/path/that/does/not/exist",
+    new LiveRuntimeControlRegistry(),
+    () => [{
+      name: "repo-map",
+      hits: 8,
+      misses: 2,
+      evictions: 1,
+      byteEvictions: 1,
+      invalidations: 3,
+      currentSize: 2,
+      maxEntries: 8,
+      maxRetainedBytes: 67_108_864,
+      retainedBytesEstimate: 1_024,
+    }],
+  );
+
+  assert.equal(source.system.caches[0].name, "repo-map");
+  assert.equal(source.system.caches[0].retainedBytesEstimate, 1_024);
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(source.system.caches)));
 });
 
 test("runtime adapter does not queue cancel behind a pending pause", async () => {

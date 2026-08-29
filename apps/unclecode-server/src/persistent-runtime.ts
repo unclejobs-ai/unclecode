@@ -3,7 +3,11 @@ import { join } from "node:path";
 
 import { BoundedEventJournal, type EventJournal } from "./event-journal.js";
 import { createRuntimeAdapter, type RuntimeAdapter, type RuntimeControlPort, type RuntimeControlRequest, type RuntimeControlResult } from "./runtime-adapter.js";
-import type { RuntimeReadSource, RuntimeSessionSource } from "./control-room.js";
+import type {
+  RuntimeCacheTelemetrySnapshot,
+  RuntimeReadSource,
+  RuntimeSessionSource,
+} from "./control-room.js";
 import type { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
 
 const MAX_CHECKPOINTS = 128;
@@ -169,7 +173,11 @@ async function readCheckpoint(path: string, controls: LiveRuntimeControlRegistry
   }
 }
 
-export async function readPersistentRuntime(rootDir: string, controls: LiveRuntimeControlRegistry): Promise<RuntimeReadSource> {
+export async function readPersistentRuntime(
+  rootDir: string,
+  controls: LiveRuntimeControlRegistry,
+  readCacheTelemetry?: () => readonly RuntimeCacheTelemetrySnapshot[],
+): Promise<RuntimeReadSource> {
   const paths = await checkpointPaths(rootDir);
   const settled = await Promise.all(paths.map(path => readCheckpoint(path, controls)));
   const bySessionId = new Map(
@@ -186,8 +194,19 @@ export async function readPersistentRuntime(rootDir: string, controls: LiveRunti
       providers: [],
       plugins: [],
       cleanup: [],
+      caches: readCacheTelemetrySafely(readCacheTelemetry),
     },
   };
+}
+
+function readCacheTelemetrySafely(
+  readCacheTelemetry: (() => readonly RuntimeCacheTelemetrySnapshot[]) | undefined,
+): readonly RuntimeCacheTelemetrySnapshot[] {
+  try {
+    return readCacheTelemetry?.() ?? [];
+  } catch {
+    return [];
+  }
 }
 
 export function createPersistentRuntimeAdapter(input: {
@@ -195,6 +214,7 @@ export function createPersistentRuntimeAdapter(input: {
   readonly controls?: LiveRuntimeControlRegistry;
   readonly journal?: EventJournal;
   readonly journalCapacity?: number;
+  readonly readCacheTelemetry?: () => readonly RuntimeCacheTelemetrySnapshot[];
 }): {
   readonly adapter: RuntimeAdapter;
   readonly controls: LiveRuntimeControlRegistry;
@@ -208,7 +228,7 @@ export function createPersistentRuntimeAdapter(input: {
     controls,
     journal,
     adapter: createRuntimeAdapter({
-      read: () => readPersistentRuntime(input.rootDir, controls),
+      read: () => readPersistentRuntime(input.rootDir, controls, input.readCacheTelemetry),
       controls,
     }),
   };

@@ -6,6 +6,7 @@ const MAX_HISTORY = 64;
 const MAX_DIAGNOSTICS = 32;
 const MAX_ARTIFACTS = 64;
 const MAX_EVOLUTION_PROPOSALS = 32;
+const MAX_CACHE_TELEMETRY = 32;
 const MAX_TEXT = 800;
 
 export type ControlRoomLocale = "en" | "ko";
@@ -35,6 +36,20 @@ export type RuntimeSessionSource = {
   };
 };
 
+export type RuntimeCacheTelemetrySnapshot = {
+  readonly name: string;
+  readonly hits: number;
+  readonly misses: number;
+  readonly hitRate?: number;
+  readonly evictions: number;
+  readonly byteEvictions: number;
+  readonly invalidations: number;
+  readonly currentSize: number;
+  readonly maxEntries: number;
+  readonly maxRetainedBytes: number;
+  readonly retainedBytesEstimate: number;
+};
+
 export type RuntimeReadSource = {
   readonly generatedAt: number;
   readonly sessions: readonly RuntimeSessionSource[];
@@ -42,6 +57,7 @@ export type RuntimeReadSource = {
     readonly providers?: readonly Readonly<Record<string, unknown>>[];
     readonly plugins?: readonly Readonly<Record<string, unknown>>[];
     readonly cleanup?: readonly Readonly<Record<string, unknown>>[];
+    readonly caches?: readonly RuntimeCacheTelemetrySnapshot[];
   };
 };
 
@@ -142,6 +158,36 @@ function sanitizeRecord(input: Readonly<Record<string, unknown>>): Readonly<Reco
     else if (isRecord(value)) output[key] = sanitizeRecord(value);
   }
   return output;
+}
+
+function cacheTelemetry(
+  value: readonly RuntimeCacheTelemetrySnapshot[] | undefined,
+): readonly RuntimeCacheTelemetrySnapshot[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isRecord).slice(0, MAX_CACHE_TELEMETRY).map((entry) => {
+    const nonnegative = (key: string) => {
+      const candidate = entry[key];
+      return typeof candidate === "number" && Number.isFinite(candidate)
+        ? Math.max(0, candidate)
+        : 0;
+    };
+    const hits = nonnegative("hits");
+    const misses = nonnegative("misses");
+    const lookups = hits + misses;
+    return {
+      name: redactText(entry.name, 120),
+      hits,
+      misses,
+      hitRate: lookups > 0 ? hits / lookups : 0,
+      evictions: nonnegative("evictions"),
+      byteEvictions: nonnegative("byteEvictions"),
+      invalidations: nonnegative("invalidations"),
+      currentSize: nonnegative("currentSize"),
+      maxEntries: nonnegative("maxEntries"),
+      maxRetainedBytes: nonnegative("maxRetainedBytes"),
+      retainedBytesEstimate: nonnegative("retainedBytesEstimate"),
+    };
+  });
 }
 
 function projectedRecord(
@@ -458,6 +504,11 @@ export function createControlRoomProjection(source: RuntimeReadSource): ControlR
     generatedAt: source.generatedAt,
     bounds: { runs: MAX_RUNS, contextSources: MAX_CONTEXT_SOURCES, history: MAX_HISTORY },
     runs: source.sessions.slice(0, MAX_RUNS).map(projectRun),
-    system: source.system,
+    system: source.system
+      ? {
+          ...source.system,
+          ...(source.system.caches ? { caches: cacheTelemetry(source.system.caches) } : {}),
+        }
+      : undefined,
   };
 }

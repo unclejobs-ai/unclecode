@@ -3,9 +3,12 @@ export type CacheTelemetrySnapshot = {
   readonly hits: number;
   readonly misses: number;
   readonly evictions: number;
+  /** Evictions required specifically to enforce the retained-byte budget. */
+  readonly byteEvictions: number;
   readonly invalidations: number;
   readonly currentSize: number;
   readonly maxEntries: number;
+  readonly maxRetainedBytes: number;
   /** Estimated serialized key and value bytes retained by live entries. */
   readonly retainedBytesEstimate: number;
 };
@@ -26,30 +29,41 @@ export type InstrumentedLruCache<K, V> = {
 export function createInstrumentedLruCache<K, V>(options: {
   readonly name: string;
   readonly maxEntries: number;
+  readonly maxRetainedBytes: number;
   readonly estimateEntryBytes?: (key: K, value: V) => number;
 }): InstrumentedLruCache<K, V> {
   const maxEntries = Number.isFinite(options.maxEntries)
     ? Math.max(1, Math.floor(options.maxEntries))
     : 1;
+  const maxRetainedBytes = Number.isFinite(options.maxRetainedBytes)
+    ? Math.max(1, Math.floor(options.maxRetainedBytes))
+    : 1;
   const entries = new Map<K, { readonly value: V; readonly retainedBytes: number }>();
   let hits = 0;
   let misses = 0;
   let evictions = 0;
+  let byteEvictions = 0;
   let invalidations = 0;
   let retainedBytesEstimate = 0;
 
   function estimateEntryBytes(key: K, value: V): number {
-    const estimated = options.estimateEntryBytes
-      ? options.estimateEntryBytes(key, value)
-      : estimateSerializedBytes([key, value]);
-    return Number.isFinite(estimated) ? Math.max(0, Math.floor(estimated)) : 0;
+    try {
+      const estimated = options.estimateEntryBytes
+        ? options.estimateEntryBytes(key, value)
+        : estimateSerializedBytes([key, value]);
+      return Number.isFinite(estimated)
+        ? Math.max(0, Math.floor(estimated))
+        : maxRetainedBytes + 1;
+    } catch {
+      return maxRetainedBytes + 1;
+    }
   }
 
   function deleteEntry(key: K): boolean {
     const entry = entries.get(key);
     if (!entry) return false;
     entries.delete(key);
-    retainedBytesEstimate -= entry.retainedBytes;
+    retainedBytesEstimate = Math.max(0, retainedBytesEstimate - entry.retainedBytes);
     return true;
   }
 
@@ -69,6 +83,11 @@ export function createInstrumentedLruCache<K, V>(options: {
     set(key, value) {
       deleteEntry(key);
       const retainedBytes = estimateEntryBytes(key, value);
+      if (retainedBytes > maxRetainedBytes) {
+        evictions += 1;
+        byteEvictions += 1;
+        return;
+      }
       entries.set(key, { value, retainedBytes });
       retainedBytesEstimate += retainedBytes;
 
@@ -76,6 +95,15 @@ export function createInstrumentedLruCache<K, V>(options: {
         const oldest = entries.keys().next();
         if (oldest.done) break;
         if (deleteEntry(oldest.value)) evictions += 1;
+      }
+
+      while (retainedBytesEstimate > maxRetainedBytes) {
+        const oldest = entries.keys().next();
+        if (oldest.done) break;
+        if (deleteEntry(oldest.value)) {
+          evictions += 1;
+          byteEvictions += 1;
+        }
       }
     },
 
@@ -106,9 +134,11 @@ export function createInstrumentedLruCache<K, V>(options: {
         hits,
         misses,
         evictions,
+        byteEvictions,
         invalidations,
         currentSize: entries.size,
         maxEntries,
+        maxRetainedBytes,
         retainedBytesEstimate,
       };
     },
@@ -120,6 +150,8 @@ function estimateSerializedBytes(value: unknown): number {
     const serialized = JSON.stringify(value);
     return new TextEncoder().encode(serialized ?? String(value)).byteLength;
   } catch {
-    return new TextEncoder().encode(String(value)).byteLength;
+    // A cyclic or otherwise non-serializable value has no trustworthy bounded
+    // estimate. Reject it through the cache's oversized-entry path.
+    return Number.POSITIVE_INFINITY;
   }
 }

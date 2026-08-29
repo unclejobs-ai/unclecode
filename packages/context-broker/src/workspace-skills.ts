@@ -1,4 +1,4 @@
-import type { SkillMetadata } from "@unclecode/contracts";
+import { createInstrumentedLruCache, type SkillMetadata } from "@unclecode/contracts";
 import os from "node:os";
 import path from "node:path";
 
@@ -28,19 +28,40 @@ export type WorkspaceSkillMetadata = SkillMetadata & {
 };
 
 const HOME_DIR = os.homedir();
-const skillMetadataCache = new Map<string, readonly WorkspaceSkillMetadata[]>();
+const SKILL_METADATA_CACHE_MAX_ENTRIES = 32;
+const SKILL_METADATA_CACHE_MAX_RETAINED_BYTES = 2 * 1024 * 1024;
+const skillMetadataCache = createInstrumentedLruCache<string, readonly WorkspaceSkillMetadata[]>({
+  name: "workspace-skill-metadata",
+  maxEntries: SKILL_METADATA_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: SKILL_METADATA_CACHE_MAX_RETAINED_BYTES,
+  estimateEntryBytes(key, metadata) {
+    return 64 + key.length * 2 + metadata.reduce((total, skill) => total + 192 + [
+      skill.name,
+      skill.description,
+      skill.source,
+      skill.commandType,
+      skill.path,
+      skill.scope,
+      ...(skill.paths ?? []),
+    ].reduce((subtotal, value) => subtotal + 32 + (value?.length ?? 0) * 2, 0), 0);
+  },
+});
+
+export function getWorkspaceSkillCacheTelemetrySnapshot() {
+  return skillMetadataCache.snapshot();
+}
 
 function getSkillCacheKey(cwd: string, homeDir: string): string {
-  return `${path.resolve(cwd)}::${path.resolve(homeDir)}`;
+  return JSON.stringify([path.resolve(cwd), path.resolve(homeDir)]);
 }
 
 export function clearWorkspaceSkillCache(cwd?: string, homeDir = HOME_DIR): void {
   if (!cwd) {
-    skillMetadataCache.clear();
+    skillMetadataCache.invalidateAll();
     return;
   }
 
-  skillMetadataCache.delete(getSkillCacheKey(cwd, homeDir));
+  skillMetadataCache.invalidate(getSkillCacheKey(cwd, homeDir));
 }
 
 export async function discoverSkillMetadata(
@@ -48,9 +69,9 @@ export async function discoverSkillMetadata(
   homeDir = HOME_DIR,
 ): Promise<readonly WorkspaceSkillMetadata[]> {
   const cacheKey = getSkillCacheKey(cwd, homeDir);
-  const cached = skillMetadataCache.get(cacheKey);
-  if (cached) {
-    return cached;
+  const cached = skillMetadataCache.lookup(cacheKey);
+  if (cached.hit) {
+    return cached.value;
   }
 
   const parsed = JSON.parse(

@@ -22,7 +22,13 @@ import type { ControlRoomProjection } from "./control-room.js";
 
 export { BoundedEventJournal } from "./event-journal.js";
 export { createControlRoomProjection } from "./control-room.js";
-export type { ControlRoomProjection, ControlRoomRun, RuntimeReadSource, RuntimeSessionSource } from "./control-room.js";
+export type {
+  ControlRoomProjection,
+  ControlRoomRun,
+  RuntimeCacheTelemetrySnapshot,
+  RuntimeReadSource,
+  RuntimeSessionSource,
+} from "./control-room.js";
 export { CONTROL_ACTIONS, createRuntimeAdapter } from "./runtime-adapter.js";
 export type { ControlAction, RuntimeAdapter, RuntimeControlPort, RuntimeControlRequest, RuntimeControlResult } from "./runtime-adapter.js";
 export { createPersistentRuntimeAdapter, LiveRuntimeControlRegistry, readPersistentRuntime } from "./persistent-runtime.js";

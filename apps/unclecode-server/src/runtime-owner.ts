@@ -13,6 +13,7 @@ import { readRuntimeAdmissionRevision } from "./runtime-admission-ledger.js";
 import { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
 import { openRuntimeLedger } from "./runtime-ledger.js";
 import { attachWorkShellRuntime, type WorkShellControlEngine } from "./work-shell-control.js";
+import type { RuntimeCacheTelemetrySnapshot } from "./control-room.js";
 import {
   RUNTIME_OWNER_PROTOCOL,
   currentBootIdentity,
@@ -48,6 +49,7 @@ export async function startPersistentRuntimeOwner(input: {
   readonly sessionId?: string | undefined;
   readonly projectPath?: string | undefined;
   readonly resolveProcessStartIdentity?: ((pid: number) => Promise<string | null>) | undefined;
+  readonly readCacheTelemetry?: (() => readonly RuntimeCacheTelemetrySnapshot[]) | undefined;
 }): Promise<{
   readonly lease: RuntimeOwnerLease;
   readonly controls: LiveRuntimeControlRegistry;
@@ -81,6 +83,7 @@ export async function startPersistentRuntimeOwner(input: {
     rootDir: input.rootDir,
     ...(input.controls ? { controls: input.controls } : {}),
     journal,
+    ...(input.readCacheTelemetry ? { readCacheTelemetry: input.readCacheTelemetry } : {}),
   });
   const engines = input.engines ?? new LiveRuntimeEngineRegistry({
     ...(input.createSession ? {

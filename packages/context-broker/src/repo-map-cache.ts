@@ -7,7 +7,8 @@ type RepoMapCacheEntry = {
   readonly repoMap: RepoMap;
 };
 
-const REPO_MAP_ENTRY_RETAINED_BYTES_ESTIMATE = 192;
+const REPO_MAP_ENTRY_RETAINED_BYTES_ESTIMATE = 96;
+const REPO_MAP_CACHE_MAX_RETAINED_BYTES = 64 * 1024 * 1024;
 
 function estimateRepoMapCacheEntryBytes(cacheKey: string, entry: RepoMapCacheEntry): number {
   const map = entry.repoMap;
@@ -17,17 +18,33 @@ function estimateRepoMapCacheEntryBytes(cacheKey: string, entry: RepoMapCacheEnt
     + entry.rootDir.length
     + map.generatedAt.length
     + map.gitHeadSha.length;
+  const measuredEntryBytes = map.entries.reduce(
+    (total, mapEntry) => total
+      + REPO_MAP_ENTRY_RETAINED_BYTES_ESTIMATE
+      + mapEntry.path.length * 2
+      + mapEntry.lastModified.length * 2,
+    0,
+  );
+  const unmaterializedEntryCount = Math.max(0, entryCount - map.entries.length);
 
-  // Avoid serializing every path on the synchronous cache-write path. This is a
-  // coarse retained-memory estimate based on JS string storage and typical entry fields.
-  return summaryCodeUnits * 2 + entryCount * REPO_MAP_ENTRY_RETAINED_BYTES_ESTIMATE;
+  // Account for every retained path. A fixed per-entry estimate alone lets a
+  // repository with long valid paths exceed the advertised byte budget while
+  // telemetry still reports a small cache. `totalFiles` can exceed the
+  // materialized list, so keep a conservative allowance for omitted entries.
+  return summaryCodeUnits * 2
+    + measuredEntryBytes
+    + unmaterializedEntryCount * REPO_MAP_ENTRY_RETAINED_BYTES_ESTIMATE;
 }
 
-export function createRepoMapCache(options?: { readonly maxEntries?: number }) {
+export function createRepoMapCache(options?: {
+  readonly maxEntries?: number;
+  readonly maxRetainedBytes?: number;
+}) {
   const maxEntries = Math.max(1, options?.maxEntries ?? 8);
   const entries = createInstrumentedLruCache<string, RepoMapCacheEntry>({
     name: "repo-map",
     maxEntries,
+    maxRetainedBytes: options?.maxRetainedBytes ?? REPO_MAP_CACHE_MAX_RETAINED_BYTES,
     estimateEntryBytes: estimateRepoMapCacheEntryBytes,
   });
 

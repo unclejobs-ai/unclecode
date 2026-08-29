@@ -51,14 +51,20 @@ const PROVIDER_DERIVATION_CACHE_MAX_ENTRIES = 64;
 const runtimeReasoningEffortCache = createInstrumentedLruCache<string, string | undefined>({
   name: "provider-reasoning-effort",
   maxEntries: PROVIDER_DERIVATION_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: 64 * 1024,
+  estimateEntryBytes: (key, value) => 64 + (key.length + (value?.length ?? 0)) * 2,
 });
 const providerSystemPromptCache = createInstrumentedLruCache<string, string>({
   name: "provider-system-prompt",
   maxEntries: PROVIDER_DERIVATION_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: 2 * 1024 * 1024,
+  estimateEntryBytes: (key, value) => 64 + (key.length + value.length) * 2,
 });
 const providerToolPolicyCache = createInstrumentedLruCache<string, ProviderToolPolicy>({
   name: "provider-tool-policy",
   maxEntries: PROVIDER_DERIVATION_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: 256 * 1024,
+  estimateEntryBytes: (key) => 128 + key.length * 2,
 });
 
 export function getProviderCacheTelemetrySnapshot(): readonly CacheTelemetrySnapshot[] {

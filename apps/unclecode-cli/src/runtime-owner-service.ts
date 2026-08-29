@@ -1,4 +1,6 @@
 import { createWorkShellPaneRuntime, runWorkShellInlineCommand } from "@unclecode/orchestrator";
+import { getContextBrokerCacheTelemetrySnapshot } from "@unclecode/context-broker";
+import { getProviderCacheTelemetrySnapshot } from "@unclecode/providers";
 import {
   defaultRuntimeOwnerPaths,
   startPersistentRuntimeOwner,
@@ -70,6 +72,10 @@ async function main(): Promise<void> {
     leasePath,
     tokenPath,
     createSession,
+    readCacheTelemetry: () => [
+      ...getProviderCacheTelemetrySnapshot(),
+      ...getContextBrokerCacheTelemetrySnapshot(),
+    ],
     ...(ownerId ? { ownerId } : {}),
     ...(bootId ? { bootId } : {}),
   });

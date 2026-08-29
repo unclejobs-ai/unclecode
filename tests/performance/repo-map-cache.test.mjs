@@ -59,6 +59,7 @@ test("createRepoMapCache reuses a repo map for the same root and git head", asyn
   assert.equal(snapshot.invalidations, 0);
   assert.equal(snapshot.currentSize, 1);
   assert.equal(snapshot.maxEntries, 8);
+  assert.ok(snapshot.maxRetainedBytes > 0);
   assert.ok(snapshot.retainedBytesEstimate > 0);
 });
 
@@ -234,14 +235,15 @@ test("createRepoMapCache preserves the prior exact entry when a refresh loader f
   assert.equal(cache.snapshot().invalidations, 0);
 });
 
-test("createRepoMapCache estimates a large map without serializing every entry", async () => {
+test("createRepoMapCache estimates a large map from retained entry fields", async () => {
   const cache = createRepoMapCache();
-  const entries = new Proxy([], {
-    get(target, property, receiver) {
-      if (property === "length") return 100_000;
-      throw new Error(`repo-map estimator walked entries via ${String(property)}`);
-    },
-  });
+  const entries = Array.from({ length: 100_000 }, (_, index) => ({
+    path: `src/generated/file-${index}.ts`,
+    lastModified: "2026-04-05T00:00:00.000Z",
+    lineCount: 1,
+    changeFrequency: 1,
+    hotspotScore: 1,
+  }));
 
   await cache.load({
     rootDir: "/large-repo",
@@ -259,4 +261,66 @@ test("createRepoMapCache estimates a large map without serializing every entry",
   const snapshot = cache.snapshot();
   assert.equal(snapshot.currentSize, 1);
   assert.ok(snapshot.retainedBytesEstimate > 10_000_000);
+});
+
+test("createRepoMapCache rejects a long retained path that exceeds its byte budget", async () => {
+  const cache = createRepoMapCache({ maxEntries: 8, maxRetainedBytes: 1_000 });
+  const load = () => cache.load({
+    rootDir: "/long-path-repo",
+    gitHeadSha: "head-a",
+    loader: async () => ({
+      rootDir: "/long-path-repo",
+      generatedAt: "2026-04-05T00:00:00.000Z",
+      gitHeadSha: "head-a",
+      entries: [{
+        path: `src/${"nested-".repeat(500)}file.ts`,
+        lastModified: "2026-04-05T00:00:00.000Z",
+        lineCount: 1,
+        changeFrequency: 1,
+        hotspotScore: 1,
+      }],
+      totalFiles: 1,
+      totalLines: 1,
+    }),
+  });
+
+  assert.equal((await load()).cacheHit, false);
+  assert.equal(cache.snapshot().currentSize, 0);
+  assert.equal(cache.snapshot().byteEvictions, 1);
+  assert.equal((await load()).cacheHit, false);
+});
+
+test("createRepoMapCache does not retain a single map larger than its byte budget", async () => {
+  const cache = createRepoMapCache({ maxEntries: 8, maxRetainedBytes: 1_000 });
+  let loadCount = 0;
+  const load = () => cache.load({
+    rootDir: "/oversized-repo",
+    gitHeadSha: "head-a",
+    loader: async () => {
+      loadCount += 1;
+      return {
+        rootDir: "/oversized-repo",
+        generatedAt: "2026-04-05T00:00:00.000Z",
+        gitHeadSha: "head-a",
+        entries: Array.from({ length: 100 }, (_, index) => ({
+          path: `src/file-${index}.ts`,
+          lastModified: "2026-04-05T00:00:00.000Z",
+          lineCount: 1,
+          changeFrequency: 1,
+          hotspotScore: 1,
+        })),
+        totalFiles: 100,
+        totalLines: 100,
+      };
+    },
+  });
+
+  assert.equal((await load()).cacheHit, false);
+  assert.equal((await load()).cacheHit, false);
+  const snapshot = cache.snapshot();
+  assert.equal(loadCount, 2);
+  assert.equal(snapshot.currentSize, 0);
+  assert.equal(snapshot.retainedBytesEstimate, 0);
+  assert.equal(snapshot.maxRetainedBytes, 1_000);
+  assert.equal(snapshot.byteEvictions, 2);
 });

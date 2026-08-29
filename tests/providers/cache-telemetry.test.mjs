@@ -31,6 +31,8 @@ test("provider system-prompt cache reports hits, misses, exact invalidation, and
   assert.equal(afterHit.misses - before.misses, 1);
   assert.equal(afterHit.hits - before.hits, 1);
   assert.equal(afterHit.currentSize, 1);
+  assert.equal(afterHit.maxRetainedBytes, 2 * 1024 * 1024);
+  assert.equal(afterHit.byteEvictions, 0);
   assert.ok(afterHit.retainedBytesEstimate > appendix.length);
   assert.equal(invalidateProviderSystemPromptCache(appendix), true);
   assert.equal(invalidateProviderSystemPromptCache(appendix), false);
