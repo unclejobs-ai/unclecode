@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 
 import {
   assembleContextPacket,
+  defaultRepoMapCache,
   estimateTokens,
   getTokenBudget,
 } from "@unclecode/context-broker";
@@ -94,5 +95,41 @@ describe("context packet utilities", () => {
     assert.equal(packet.gitHeadSha, "0".repeat(40));
     assert.equal(packet.freshness.status, "fresh");
     assert.equal(packet.repoMap.totalFiles, 1);
+  });
+
+  it("refreshes the cached repo map when tracked content changes at the same HEAD", async () => {
+    const repoDir = mkdtempSync(path.join(os.tmpdir(), "unclecode-same-head-cache-"));
+
+    execFileSync("git", ["init"], { cwd: repoDir, encoding: "utf8" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repoDir, encoding: "utf8" });
+    execFileSync("git", ["config", "user.name", "Test User"], { cwd: repoDir, encoding: "utf8" });
+    writeFileSync(path.join(repoDir, "notes.txt"), "line one\n", "utf8");
+    execFileSync("git", ["add", "notes.txt"], { cwd: repoDir, encoding: "utf8" });
+    execFileSync("git", ["commit", "-m", "init"], { cwd: repoDir, encoding: "utf8" });
+
+    const before = defaultRepoMapCache.snapshot();
+    const cleanPacket = await assembleContextPacket({ rootDir: repoDir, mode: "default" });
+
+    writeFileSync(path.join(repoDir, "notes.txt"), "line one\nline two\n", "utf8");
+
+    const firstDirtyPacket = await assembleContextPacket({ rootDir: repoDir, mode: "default" });
+
+    writeFileSync(path.join(repoDir, "notes.txt"), "line one\nline two\nline three\n", "utf8");
+
+    const secondDirtyPacket = await assembleContextPacket({ rootDir: repoDir, mode: "default" });
+    const reusedDirtyPacket = await assembleContextPacket({ rootDir: repoDir, mode: "default" });
+    const after = defaultRepoMapCache.snapshot();
+
+    assert.equal(firstDirtyPacket.gitHeadSha, cleanPacket.gitHeadSha);
+    assert.equal(secondDirtyPacket.gitHeadSha, cleanPacket.gitHeadSha);
+    assert.equal(secondDirtyPacket.repoMap.gitHeadSha, cleanPacket.gitHeadSha);
+    assert.equal(cleanPacket.repoMap.entries[0]?.lineCount, 1);
+    assert.equal(firstDirtyPacket.repoMap.entries[0]?.lineCount, 2);
+    assert.equal(secondDirtyPacket.repoMap.entries[0]?.lineCount, 3);
+    assert.equal(reusedDirtyPacket.repoMap.entries[0]?.lineCount, 3);
+    assert.equal(secondDirtyPacket.freshness.status, "fresh");
+    assert.equal(after.misses - before.misses, 3);
+    assert.equal(after.hits - before.hits, 1);
+    assert.equal(after.invalidations - before.invalidations, 2);
   });
 });

@@ -26,15 +26,16 @@ struct WorktreeFingerprint {
 }
 
 pub fn get_repo_map_cache_token(root_dir: &Path) -> String {
-    match run_git(root_dir, &["rev-parse", "HEAD"]) {
-        Ok(output) => output.trim().to_string(),
-        Err(_) => ZERO_SHA.to_string(),
+    let git_head_sha = get_git_head_sha(root_dir);
+    match get_worktree_fingerprint(root_dir) {
+        Ok(worktree) => format!("{git_head_sha}:{}", worktree.fingerprint),
+        Err(_) => format!("{git_head_sha}:unavailable"),
     }
 }
 
 pub fn build_repo_map_json(root_dir: &Path) -> Result<String, String> {
     let generated_at = utc_now_iso();
-    let git_head_sha = get_repo_map_cache_token(root_dir);
+    let git_head_sha = get_git_head_sha(root_dir);
     let tracked_files_output = run_git(root_dir, &["ls-files"])?;
     let (last_modified_output, change_frequency_output) = if git_head_sha == ZERO_SHA {
         (String::new(), String::new())
@@ -120,6 +121,13 @@ pub fn build_repo_map_json(root_dir: &Path) -> Result<String, String> {
         "totalLines": total_lines
     }))
     .map_err(|error| error.to_string())
+}
+
+fn get_git_head_sha(root_dir: &Path) -> String {
+    match run_git(root_dir, &["rev-parse", "HEAD"]) {
+        Ok(output) => output.trim().to_string(),
+        Err(_) => ZERO_SHA.to_string(),
+    }
 }
 
 pub fn build_worktree_fingerprint_json(root_dir: &Path) -> Result<String, String> {
