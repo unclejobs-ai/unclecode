@@ -36,6 +36,7 @@ import {
   type CodingAgentTraceEvent,
   type OrchestratedWorkAgentTraceEvent,
   type WorkShellChatEntry,
+  type WorkShellReplaySafePauseCheckpoint,
   type WorkShellReasoningConfig,
   type WorkShellPromptManifestResolver,
 } from "@unclecode/orchestrator";
@@ -80,6 +81,7 @@ export type StartReplOptions = {
   initialEntries?: readonly WorkShellChatEntry[] | undefined;
   initialSessionSummary?: string | undefined;
   initialAgentConsole?: AgentConsoleSnapshot | undefined;
+  initialPauseCheckpoint?: WorkShellReplaySafePauseCheckpoint | undefined;
   initialLastSubmittedContextReceiptId?: string | undefined;
   interactionBridge?: WorkShellInteractionBridge | undefined;
   reloadWorkspaceContext?: ((cwd: string) => Promise<readonly string[]>) | undefined;

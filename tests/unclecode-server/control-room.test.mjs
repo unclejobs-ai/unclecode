@@ -514,6 +514,61 @@ test("persistent runtime discovers opaque checkpoints and restores only explicit
   }
 });
 
+test("persistent runtime projects only matching replay-safe approval pauses and preserves revision", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "unclecode-control-room-paused-"));
+  try {
+    const sessions = path.join(root, "projects", "project-paused", "sessions");
+    await mkdir(sessions, { recursive: true });
+    const base = {
+      projectPath: "/tmp/project",
+      state: "paused",
+      uiLocale: "en",
+      metadata: { ownerMutationRevision: 41 },
+      agentConsole: {
+        pendingDecision: {
+          kind: "user-decision",
+          id: "decision-safe",
+          questions: [{ id: "q", question: "Continue?", options: [{ label: "Yes" }] }],
+        },
+      },
+    };
+    await writeFile(path.join(sessions, "safe.checkpoint.json"), JSON.stringify({
+      ...base,
+      sessionId: "safe-paused",
+      pauseCheckpoint: {
+        turnId: "turn-safe",
+        boundary: "before_approval",
+        decisionId: "decision-safe",
+        attachmentRefs: [],
+        artifactRefs: [],
+      },
+    }));
+    await writeFile(path.join(sessions, "unsafe.checkpoint.json"), JSON.stringify({
+      ...base,
+      sessionId: "unsafe-paused",
+      pauseCheckpoint: {
+        turnId: "turn-unsafe",
+        boundary: "after_provider",
+        decisionId: "decision-safe",
+        attachmentRefs: [],
+        artifactRefs: [],
+      },
+    }));
+
+    const source = await readPersistentRuntime(root, new LiveRuntimeControlRegistry());
+    const byId = new Map(source.sessions.map(session => [session.sessionId, session]));
+    assert.equal(byId.get("safe-paused")?.state, "paused");
+    assert.equal(byId.get("safe-paused")?.revision, 41);
+    assert.equal(byId.get("safe-paused")?.metadata?.recoveryStatus, "replay_safe_pause_restored");
+    assert.equal(byId.get("safe-paused")?.metadata?.decisionId, "decision-safe");
+    assert.equal(byId.get("unsafe-paused")?.state, "failed");
+    assert.equal(byId.get("unsafe-paused")?.revision, 41);
+    assert.equal(byId.get("unsafe-paused")?.metadata?.recoveryStatus, "non_resumable_owner_restart");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("persistent runtime includes injected serializable cache telemetry", async () => {
   const source = await readPersistentRuntime(
     "/path/that/does/not/exist",

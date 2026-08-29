@@ -38,6 +38,7 @@ import {
 } from "./work-shell-engine-submit.js";
 import {
   createWorkShellSessionSnapshotInput,
+  parseWorkShellReplaySafePauseCheckpoint,
   type WorkShellSessionState,
 } from "./work-shell-engine-persistence.js";
 import {
@@ -133,6 +134,7 @@ import type { WorkAgentControlRuntime } from "./work-agent-run-controller.js";
 import type { WorkAgentTurnResult } from "./work-agent.js";
 import type {
   WorkShellDurablePauseCheckpoint,
+  WorkShellReplaySafePauseCheckpoint,
   WorkShellSessionSnapshotInput,
 } from "./work-shell-engine-persistence.js";
 import type {
@@ -412,6 +414,7 @@ export type WorkShellEngineOptions<Reasoning extends WorkShellReasoningConfig> =
   readonly modelWindow?: number | undefined;
   readonly contextProfile?: ContextProfileId | undefined;
   readonly initialAgentConsole?: AgentConsoleSnapshot | undefined;
+  readonly initialPauseCheckpoint?: WorkShellReplaySafePauseCheckpoint | undefined;
   readonly interactionBridge?: WorkShellInteractionBridge | undefined;
 };
 
@@ -916,6 +919,7 @@ export class WorkShellEngine<
     | undefined;
   private state: WorkShellEngineState<Reasoning>;
   private readonly pauseController: CooperativePauseController;
+  private durablePauseCheckpoint: WorkShellDurablePauseCheckpoint | undefined;
   private pendingDecision: PendingDecision | undefined;
   /**
    * Lifecycle events reduce here first, in arrival order, so a burst is
@@ -992,9 +996,20 @@ export class WorkShellEngine<
       contextSourceActionsEnabled: input.mutateContextSource !== undefined,
       contextAdviceActionsEnabled: input.resolveContextSuggestion !== undefined,
     };
+    const restoredPause = parseWorkShellReplaySafePauseCheckpoint(
+      input.options.initialPauseCheckpoint,
+      this.state.agentConsole.pendingDecision?.id,
+    );
+    this.durablePauseCheckpoint = restoredPause;
     this.pauseController = new CooperativePauseController({
       onStateChanged: (turnLifecycle) => this.setState({ turnLifecycle }),
+      ...(restoredPause
+        ? { initialPaused: { turnId: restoredPause.turnId, boundary: restoredPause.boundary } }
+        : {}),
     });
+    if (restoredPause) {
+      this.state = { ...this.state, turnLifecycle: this.pauseController.snapshot() };
+    }
     this.lastCompletedTurnSnapshot = resolveLastCompletedTurn(
       input.options.initialEntries ?? this.state.entries,
     );
@@ -1036,6 +1051,9 @@ export class WorkShellEngine<
       summary: this.lastSessionSummary,
       traceMode: this.state.traceMode,
       ownerMutationRevision: revision,
+      ...(state === "paused" && this.durablePauseCheckpoint
+        ? { pauseCheckpoint: this.durablePauseCheckpoint }
+        : {}),
     }));
   }
 
@@ -1051,7 +1069,9 @@ export class WorkShellEngine<
   }
 
   resumeTurn(): boolean {
-    return this.pauseController.resume();
+    const resumed = this.pauseController.resume();
+    if (resumed) this.durablePauseCheckpoint = undefined;
+    return resumed;
   }
 
   updateTerminalColumns(columns: number): void {
@@ -1116,7 +1136,7 @@ export class WorkShellEngine<
     this.interactionBridge?.bind({
       ask: (request, signal) => this.openDecision(request, signal),
     });
-    this.clearResumedPendingDecision();
+    if (!this.durablePauseCheckpoint) this.clearResumedPendingDecision();
     // A lifecycle burst is one render, not one render per event: the console
     // reduction, the busy status, the trace buffer, and any verbose trace entry
     // are all staged and fanned out once per publish window.
@@ -1150,7 +1170,16 @@ export class WorkShellEngine<
 
     try {
       this.setQueuedCount(await this.loadQueuedSubmitCount());
-      await this.persistSessionSnapshot("idle", this.lastSessionSummary).catch(() => undefined);
+      if (this.durablePauseCheckpoint) {
+        await this.enqueueSessionSnapshotWrite(this.buildSessionSnapshotInput({
+          state: "paused",
+          summary: this.lastSessionSummary,
+          traceMode: this.state.traceMode,
+          pauseCheckpoint: this.durablePauseCheckpoint,
+        })).catch(() => undefined);
+      } else {
+        await this.persistSessionSnapshot("idle", this.lastSessionSummary).catch(() => undefined);
+      }
 
       const contextState = await loadInitialWorkShellLifecycleState({
         cwd: this.options.cwd,
@@ -3267,6 +3296,7 @@ export class WorkShellEngine<
       attachmentRefs: this.activeAttachmentRefs,
       artifactRefs,
     };
+    this.durablePauseCheckpoint = pauseCheckpoint;
     this.lastSessionSummary = `Turn paused at ${boundary}.`;
     return this.enqueueSessionSnapshotWrite(this.buildSessionSnapshotInput({
       state: "paused",

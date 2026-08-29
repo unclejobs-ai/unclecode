@@ -1,4 +1,8 @@
-import { runRustCommand } from "@unclecode/orchestrator";
+import {
+  parseWorkShellReplaySafePauseCheckpoint,
+  runRustCommand,
+  type WorkShellReplaySafePauseCheckpoint,
+} from "@unclecode/orchestrator";
 import { getSessionStoreRoot } from "@unclecode/session-store";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -77,6 +81,7 @@ export async function loadResumedWorkSession(input: {
   contextLine: string;
   initialEntries: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[];
   initialAgentConsole?: AgentConsoleSnapshot;
+  initialPauseCheckpoint?: WorkShellReplaySafePauseCheckpoint;
   initialSessionSummary?: string;
 }> {
   const stdout = await runRustCommand(
@@ -112,6 +117,9 @@ export async function loadResumedWorkSession(input: {
       : {}),
     ...(resumed.initialAgentConsole
       ? { initialAgentConsole: resumed.initialAgentConsole }
+      : {}),
+    ...(resumed.initialPauseCheckpoint
+      ? { initialPauseCheckpoint: resumed.initialPauseCheckpoint }
       : {}),
   };
 }
@@ -220,10 +228,12 @@ function parseRustResumedWorkSession(stdout: string): {
   readonly contextLine: string;
   readonly initialEntries: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[];
   readonly initialAgentConsole?: AgentConsoleSnapshot;
+  readonly initialPauseCheckpoint?: WorkShellReplaySafePauseCheckpoint;
   readonly initialSessionSummary?: string;
 } {
   const parsed = JSON.parse(stdout) as {
     sessionId?: unknown;
+    state?: unknown;
     traceMode?: unknown;
     reasoningEffort?: unknown;
     lastSubmittedContextReceiptId?: unknown;
@@ -231,6 +241,7 @@ function parseRustResumedWorkSession(stdout: string): {
     initialEntries?: unknown;
     initialSessionSummary?: unknown;
     agentConsole?: unknown;
+    pauseCheckpoint?: unknown;
   };
   const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId : undefined;
   if (!sessionId) {
@@ -249,13 +260,20 @@ function parseRustResumedWorkSession(stdout: string): {
           || ((entry as { role?: unknown }).role === "tool"))
         && typeof (entry as { text?: unknown }).text === "string")
     : [];
-  // The resume boundary is the only place unrecoverable work settles: the
-  // parser gate rebuilds the safe projection, then a run or job that was still
-  // active when the process died becomes `interrupted` exactly once, before the
-  // snapshot reaches engine state.
   const parsedAgentConsole = parseAgentConsoleSnapshot(parsed.agentConsole);
+  const initialPauseCheckpoint = parsed.state === "paused"
+    ? parseWorkShellReplaySafePauseCheckpoint(
+        parsed.pauseCheckpoint,
+        parsedAgentConsole?.pendingDecision?.id,
+      )
+    : undefined;
+  // The resume boundary is the only place unrecoverable work settles. A
+  // matching approval pause is display-safe and performs no replay; everything
+  // else is interrupted exactly once before it reaches engine state.
   const initialAgentConsole = parsedAgentConsole
-    ? markUnrecoverableAgentConsoleWorkInterrupted(parsedAgentConsole)
+    ? initialPauseCheckpoint
+      ? parsedAgentConsole
+      : markUnrecoverableAgentConsoleWorkInterrupted(parsedAgentConsole)
     : undefined;
   return {
     sessionId,
@@ -270,6 +288,7 @@ function parseRustResumedWorkSession(stdout: string): {
       ? { initialSessionSummary: parsed.initialSessionSummary }
       : {}),
     ...(initialAgentConsole ? { initialAgentConsole } : {}),
+    ...(initialPauseCheckpoint ? { initialPauseCheckpoint } : {}),
   };
 }
 

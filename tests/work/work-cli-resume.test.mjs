@@ -91,6 +91,161 @@ test("loadResumedWorkSession restores persisted trace mode and reasoning overrid
   });
 });
 
+test("loadResumedWorkSession rehydrates only a replay-safe approval pause with matching decision identity", async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-work-resume-paused-"));
+  const sessionStoreRoot = path.join(cwd, ".state");
+  const env = { ...process.env, UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot };
+  await persistWorkShellSessionSnapshot({
+    cwd,
+    env,
+    sessionId: "work-session-paused",
+    model: "gpt-5.4",
+    mode: "ultrawork",
+    state: "paused",
+    summary: "Turn paused at before_approval.",
+    traceMode: "minimal",
+    entries: [{ role: "user", text: "apply the change" }],
+    agentConsole: {
+      profileId: "build",
+      pendingDecision: {
+        kind: "user-decision",
+        id: "decision-resume-1",
+        title: "Continue?",
+        questions: [{
+          id: "continue",
+          question: "Continue this operation?",
+          options: [{ label: "Continue" }, { label: "Cancel" }],
+        }],
+      },
+      activity: [],
+      agents: [{
+        id: "run-paused",
+        displayName: "Paused worker",
+        agentType: "executor",
+        status: "waiting",
+        startedAt: 10,
+      }],
+      jobs: [{
+        id: "job-paused",
+        type: "executor",
+        label: "Paused step",
+        status: "running",
+        queuedAt: 5,
+        startedAt: 10,
+      }],
+    },
+    pauseCheckpoint: {
+      turnId: "turn-resume-1",
+      boundary: "before_approval",
+      decisionId: "decision-resume-1",
+      contextReceiptId: "receipt-resume-1",
+      attachmentRefs: [],
+      artifactRefs: ["artifact:sha256:resume"],
+    },
+  });
+
+  const resumed = await loadResumedWorkSession({
+    cwd,
+    env,
+    sessionId: "work-session-paused",
+  });
+
+  assert.deepEqual(resumed.initialPauseCheckpoint, {
+    turnId: "turn-resume-1",
+    boundary: "before_approval",
+    decisionId: "decision-resume-1",
+    contextReceiptId: "receipt-resume-1",
+    attachmentRefs: [],
+    artifactRefs: ["artifact:sha256:resume"],
+  });
+  assert.equal(resumed.initialAgentConsole?.pendingDecision?.id, "decision-resume-1");
+  assert.equal(resumed.initialAgentConsole?.agents[0]?.status, "waiting");
+  assert.equal(resumed.initialAgentConsole?.jobs[0]?.status, "running");
+});
+
+test("loadResumedWorkSession rejects in-doubt pause identity and settles active work", async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-work-resume-unsafe-pause-"));
+  const sessionStoreRoot = path.join(cwd, ".state");
+  const env = { ...process.env, UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot };
+  await persistWorkShellSessionSnapshot({
+    cwd,
+    env,
+    sessionId: "work-session-unsafe-pause",
+    model: "gpt-5.4",
+    mode: "ultrawork",
+    state: "paused",
+    summary: "Turn paused at after_provider.",
+    traceMode: "minimal",
+    agentConsole: {
+      profileId: "build",
+      pendingDecision: {
+        kind: "user-decision",
+        id: "decision-live",
+        questions: [{ id: "q", question: "Continue?", options: [{ label: "Yes" }] }],
+      },
+      activity: [],
+      agents: [{
+        id: "run-unsafe",
+        displayName: "Unsafe worker",
+        agentType: "executor",
+        status: "running",
+        startedAt: 10,
+      }],
+      jobs: [],
+    },
+    pauseCheckpoint: {
+      turnId: "turn-unsafe",
+      boundary: "before_approval",
+      decisionId: "decision-stale",
+      attachmentRefs: [],
+      artifactRefs: [],
+    },
+  });
+
+  const resumed = await loadResumedWorkSession({ cwd, env, sessionId: "work-session-unsafe-pause" });
+
+  assert.equal(resumed.initialPauseCheckpoint, undefined);
+  assert.equal(resumed.initialAgentConsole?.agents[0]?.status, "interrupted");
+});
+
+test("loadResumedWorkSession never restores a stale pause checkpoint from a non-paused snapshot", async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-work-resume-stale-pause-"));
+  const sessionStoreRoot = path.join(cwd, ".state");
+  const env = { ...process.env, UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot };
+  await persistWorkShellSessionSnapshot({
+    cwd,
+    env,
+    sessionId: "work-session-stale-pause",
+    model: "gpt-5.4",
+    mode: "default",
+    state: "idle",
+    summary: "Idle checkpoint with stale pause data.",
+    traceMode: "minimal",
+    agentConsole: {
+      profileId: "build",
+      pendingDecision: {
+        kind: "user-decision",
+        id: "decision-stale-state",
+        questions: [{ id: "q", question: "Continue?", options: [{ label: "Yes" }] }],
+      },
+      activity: [],
+      agents: [],
+      jobs: [],
+    },
+    pauseCheckpoint: {
+      turnId: "turn-stale-state",
+      boundary: "before_approval",
+      decisionId: "decision-stale-state",
+      attachmentRefs: [],
+      artifactRefs: [],
+    },
+  });
+
+  const resumed = await loadResumedWorkSession({ cwd, env, sessionId: "work-session-stale-pause" });
+
+  assert.equal(resumed.initialPauseCheckpoint, undefined);
+});
+
 test("loadResumedWorkSession falls back to legacy session memory summaries when checkpoints have no transcript entries", async () => {
   const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-work-resume-legacy-"));
   const sessionStoreRoot = path.join(cwd, ".state");

@@ -362,6 +362,67 @@ function createEngine(overrides = {}) {
   };
 }
 
+test("WorkShellEngine restores a replay-safe approval pause without rerunning or overwriting it", async () => {
+  let providerCalls = 0;
+  const checkpoint = {
+    turnId: "turn-restored-1",
+    boundary: "before_approval",
+    decisionId: "decision-restored-1",
+    contextReceiptId: "receipt-restored-1",
+    attachmentRefs: [],
+    artifactRefs: ["artifact:sha256:restored"],
+  };
+  const { engine, calls } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      initialPauseCheckpoint: checkpoint,
+      initialAgentConsole: {
+        profileId: "build",
+        pendingDecision: {
+          kind: "user-decision",
+          id: "decision-restored-1",
+          title: "Continue?",
+          questions: [{ id: "continue", question: "Continue?", options: [{ label: "Yes" }] }],
+        },
+        activity: [],
+        agents: [],
+        jobs: [],
+      },
+    },
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn() {
+        providerCalls += 1;
+        return { text: "must not run" };
+      },
+    },
+  });
+
+  await engine.initialize();
+
+  assert.deepEqual(engine.getTurnLifecycle(), {
+    state: "paused",
+    turnId: "turn-restored-1",
+    boundary: "before_approval",
+  });
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-restored-1");
+  assert.equal(providerCalls, 0);
+  assert.equal(calls.snapshots.at(-1)?.state, "paused");
+  assert.deepEqual(calls.snapshots.at(-1)?.pauseCheckpoint, checkpoint);
+  await engine.persistRuntimeRevision(17);
+  assert.equal(calls.snapshots.at(-1)?.ownerMutationRevision, 17);
+  assert.deepEqual(calls.snapshots.at(-1)?.pauseCheckpoint, checkpoint);
+  assert.equal(engine.resumeTurn(), false, "a recovered pause has no detached continuation to auto-rerun");
+});
+
 test("WorkShellEngine acknowledges pause only after the provider settles and resumes the same turn", async () => {
   let releaseProvider;
   let providerCalls = 0;

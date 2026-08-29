@@ -73,6 +73,7 @@ pub struct SessionLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkShellResume {
     pub session_id: String,
+    pub state: String,
     pub trace_mode: Option<String>,
     pub ui_locale: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -294,6 +295,11 @@ impl WorkShellSessionStore {
         else {
             return Ok(None);
         };
+        let state = parsed
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
         let trace_mode = parsed
             .get("metadata")
             .and_then(|value| value.get("traceMode"))
@@ -354,6 +360,7 @@ impl WorkShellSessionStore {
             .and_then(sanitize_pause_checkpoint);
         Ok(Some(WorkShellResume {
             session_id: parsed_session_id,
+            state,
             trace_mode,
             ui_locale,
             reasoning_effort,
@@ -463,6 +470,7 @@ pub fn resume_work_shell_session_json(
     };
     serde_json::to_string(&json!({
         "sessionId": resumed.session_id,
+        "state": resumed.state,
         "traceMode": resumed.trace_mode,
         "uiLocale": resumed.ui_locale,
         "reasoningEffort": resumed.reasoning_effort,
@@ -1951,6 +1959,7 @@ mod tests {
             .resume_work_shell_session(&project, "paused-session")
             .expect("resume")
             .expect("resumed");
+        assert_eq!(resumed.state, "paused");
         let checkpoint = resumed.pause_checkpoint.expect("pause checkpoint");
         assert_eq!(checkpoint["turnId"], "turn-paused-1");
         assert_eq!(checkpoint["activeNode"]["attempt"], 2);

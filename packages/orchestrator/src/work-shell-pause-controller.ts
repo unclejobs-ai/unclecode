@@ -84,7 +84,11 @@ export class CooperativePauseController {
 
   constructor(input: {
     readonly onStateChanged?: ((snapshot: WorkShellPauseSnapshot) => void) | undefined;
+    readonly initialPaused?: WorkShellPauseReceipt | undefined;
   } = {}) {
+    if (input.initialPaused) {
+      this.#snapshot = Object.freeze({ state: "paused", ...input.initialPaused });
+    }
     if (input.onStateChanged) this.#listeners.add(input.onStateChanged);
   }
 

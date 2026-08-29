@@ -1,6 +1,8 @@
 import { lstat, opendir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { parseWorkShellReplaySafePauseCheckpoint } from "@unclecode/orchestrator";
+
 import { BoundedEventJournal, type EventJournal } from "./event-journal.js";
 import { createRuntimeAdapter, type RuntimeAdapter, type RuntimeControlPort, type RuntimeControlRequest, type RuntimeControlResult } from "./runtime-adapter.js";
 import type {
@@ -145,12 +147,28 @@ async function readCheckpoint(path: string, controls: LiveRuntimeControlRegistry
       ? metadata.ownerMutationRevision
       : 0;
     const checkpointState = stateOf(parsed.state);
+    const pendingDecision = agentConsole && isRecord(agentConsole.pendingDecision)
+      ? agentConsole.pendingDecision
+      : undefined;
+    const replaySafePause = checkpointState === "paused"
+      ? parseWorkShellReplaySafePauseCheckpoint(
+          parsed.pauseCheckpoint,
+          typeof pendingDecision?.id === "string" ? pendingDecision.id : undefined,
+        )
+      : undefined;
     const wasInFlight = checkpointState === "running"
       || checkpointState === "pause_pending"
-      || checkpointState === "paused";
-    const recoveredMetadata = wasInFlight
-      ? { ...(metadata ?? {}), recoveryStatus: "non_resumable_owner_restart", checkpointState }
-      : metadata;
+      || (checkpointState === "paused" && !replaySafePause);
+    const recoveredMetadata = replaySafePause
+      ? {
+          ...(metadata ?? {}),
+          recoveryStatus: "replay_safe_pause_restored",
+          checkpointState,
+          decisionId: replaySafePause.decisionId,
+        }
+      : wasInFlight
+        ? { ...(metadata ?? {}), recoveryStatus: "non_resumable_owner_restart", checkpointState }
+        : metadata;
     const persisted: RuntimeSessionSource = {
       sessionId: parsed.sessionId,
       projectPath: parsed.projectPath,

@@ -942,6 +942,9 @@ export async function loadWorkCliBootstrap(
       ...(resumedSession?.initialAgentConsole
         ? { initialAgentConsole: resumedSession.initialAgentConsole }
         : {}),
+      ...(resumedSession?.initialPauseCheckpoint
+        ? { initialPauseCheckpoint: resumedSession.initialPauseCheckpoint }
+        : {}),
       ...(directAgent ? { interactionBridge: directAgent.getInteractionBridge() } : {}),
       reloadWorkspaceContext: async (workspaceRoot: string) => {
         const refreshedBootstrap = await ingestWorkspaceBootstrapContext({
