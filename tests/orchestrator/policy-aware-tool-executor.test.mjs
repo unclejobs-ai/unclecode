@@ -161,8 +161,10 @@ test("risky tool metadata requires confirmation even when execution policy defau
   assert.match(result.content, /confirmation.*not granted/i);
 });
 
-test("release-sensitive shell actions require fresh one-shot approval despite autonomy and a bash grant", async () => {
+test("one-shot shell actions require fresh approval despite autonomy and a bash grant", async () => {
   const commands = [
+    "git ls-files",
+    "git config --get core.fsmonitor",
     "git push origin main",
     "git switch main && git merge feature/release-safety",
     "npm publish --access public",
@@ -273,6 +275,12 @@ test("ambiguous shell wrappers fail closed before an autonomy or persisted bash 
     "git status --short",
     "git diff --stat",
     "git config core.fsmonitor ./scripts/fsmonitor",
+    "git ls-files",
+    "git config --get core.fsmonitor",
+    "git rev-parse --show-toplevel",
+    "git ls-tree HEAD",
+    "git merge-base HEAD main",
+    "git name-rev HEAD",
     "git log --ext-diff -p",
     "git show --ext-diff HEAD",
     "git grep --textconv needle",
@@ -316,8 +324,9 @@ test("ambiguous shell wrappers fail closed before an autonomy or persisted bash 
 
 test("autonomy keeps only statically inspectable local shell commands prompt-free", async () => {
   const commands = [
-    "git ls-files",
-    "git config --get core.fsmonitor",
+    "git --version",
+    "git version",
+    "git -h",
     "docker --version",
     "kubectl version --client",
     "gh --version",

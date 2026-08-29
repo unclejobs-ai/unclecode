@@ -154,19 +154,6 @@ const CONTAINER_CLIENTS = new Set(["docker", "podman"]);
 const CLUSTER_CLIENTS = new Set(["helm", "kubectl"]);
 const TASK_RUNNERS = new Set(["just", "make", "task"]);
 const PACKAGE_MANAGERS = new Set(["bun", "npm", "pnpm", "yarn"]);
-const SAFE_LOCAL_GIT_SUBCOMMANDS = new Set([
-  "ls-files", "ls-tree", "merge-base", "name-rev", "rev-parse", "version",
-]);
-const KNOWN_GIT_PROJECT_SUBCOMMANDS = new Set([
-  "add", "am", "apply", "archive", "bisect", "blame", "branch", "checkout",
-  "cherry-pick", "clean", "commit", "describe", "grep", "init", "log", "mv",
-  "rebase", "reflog", "remote", "reset", "restore", "revert", "rm", "show",
-  "sparse-checkout", "stash", "tag",
-]);
-const GIT_NETWORK_SUBCOMMANDS = new Set(["clone", "fetch", "pull"]);
-const GIT_HOOK_SUBCOMMANDS = new Set([
-  "am", "checkout", "cherry-pick", "commit", "rebase", "switch", "worktree",
-]);
 const DYNAMIC_SHELL_PATTERN = /(?:`|\$\(|\$\{|\$[A-Za-z_])/;
 const ASSIGNMENT_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const RELEASE_TASK_PATTERN = /^(?:deploy|publish|release)(?::|$)/;
@@ -332,34 +319,6 @@ function isExactClientInspection(
   );
 }
 
-function isReadOnlyGitConfig(arguments_: readonly string[]): boolean {
-  let hasReadSelector = false;
-  const selectors = new Set([
-    "--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l",
-  ]);
-  const modifiers = new Set([
-    "--fixed-value", "--includes", "--local", "--global", "--system", "--worktree",
-    "--name-only", "--no-includes", "--null", "-z", "--show-origin", "--show-scope",
-  ]);
-  const optionsWithValue = new Set(["--default", "--type"]);
-
-  for (let index = 0; index < arguments_.length; index += 1) {
-    const token = arguments_[index] ?? "";
-    if (selectors.has(token)) {
-      hasReadSelector = true;
-      continue;
-    }
-    if (modifiers.has(token) || token.startsWith("--type=")) continue;
-    if (optionsWithValue.has(token)) {
-      if (index + 1 >= arguments_.length) return false;
-      index += 1;
-      continue;
-    }
-    if (token.startsWith("-")) return false;
-  }
-  return hasReadSelector;
-}
-
 function hasTarExecutableInputOption(arguments_: readonly string[]): boolean {
   const exactOptions = new Set([
     "--checkpoint-action",
@@ -423,27 +382,6 @@ function packageSubcommandIndex(tokens: readonly string[], start: number): numbe
     }
     if (token.startsWith("-")) continue;
     return index;
-  }
-  return undefined;
-}
-
-function gitCommand(tokens: readonly string[], start: number): {
-  readonly subcommand: string;
-  readonly index: number;
-} | undefined {
-  const optionsWithValue = new Set(["-c", "-C", "--exec-path", "--git-dir", "--namespace", "--work-tree"]);
-  for (let index = start; index < tokens.length; index += 1) {
-    const token = tokens[index] ?? "";
-    if (token === "--") {
-      const subcommand = tokens[index + 1]?.toLowerCase();
-      return subcommand ? { subcommand, index: index + 1 } : undefined;
-    }
-    if (optionsWithValue.has(token)) {
-      index += 1;
-      continue;
-    }
-    if (token.startsWith("-")) continue;
-    return { subcommand: token.toLowerCase(), index };
   }
   return undefined;
 }
@@ -554,62 +492,13 @@ function directShellApproval(
   if (/[\\/]/.test(tokens[commandIndex] ?? "")) return "unknown-executable";
 
   if (executable === "git") {
-    const command = gitCommand(tokens, commandIndex + 1);
-    const subcommand = command?.subcommand;
-    const globalArguments = tokens.slice(commandIndex + 1, command?.index ?? tokens.length);
-    if (
-      subcommand === undefined
-      && globalArguments.length === 1
-      && ["-h", "--version"].includes(globalArguments[0]?.toLowerCase() ?? "")
-    ) return undefined;
-    if (globalArguments.some((token) =>
-      token === "-c"
-      || /^-c.+/.test(token)
-      || token.startsWith("--config-env")
-    )) {
-      return "ambiguous-wrapper";
-    }
-    if (globalArguments.some((token) =>
-      token === "-p"
-      || token === "--paginate"
-      || token === "--exec-path"
-      || token.startsWith("--exec-path=")
-      || token === "-C"
-      || token.startsWith("--git-dir")
-      || token.startsWith("--namespace")
-      || token.startsWith("--work-tree")
-    )) {
-      return "project-code";
-    }
-    if (subcommand === "push") return "git-push";
-    if (subcommand === "send-pack") return "git-push";
-    // The current branch is runtime state unavailable to this layer, so every
-    // merge is guarded rather than guessing whether it updates main.
-    if (subcommand === "merge") return "git-merge";
-    if (subcommand && GIT_NETWORK_SUBCOMMANDS.has(subcommand)) return "external-client";
-    if (subcommand && GIT_HOOK_SUBCOMMANDS.has(subcommand)) return "project-code";
-    if (subcommand === "archive" && globalArguments.some((token) => token.startsWith("--remote"))) {
-      return "external-client";
-    }
-    if (subcommand === "status" || subcommand === "diff") {
-      // Both commands can execute repository-configured callbacks
-      // (core.fsmonitor, diff.external, and textconv). The policy layer cannot
-      // prove those callbacks disabled from this argv alone.
-      return "project-code";
-    }
-    if (subcommand === "config") {
-      const configIndex = tokens.findIndex(
-        (token, index) => index > commandIndex && token.toLowerCase() === "config",
-      );
-      const configArguments = configIndex < 0 ? [] : tokens.slice(configIndex + 1);
-      return isReadOnlyGitConfig(configArguments) ? undefined : "project-code";
-    }
-    // Only built-ins with no command options that enable filters, pagers,
-    // hooks, or mutations inherit shell autonomy. All other known Git work is
-    // exact project-code approval; unknown aliases remain ambiguous because
-    // repository configuration can map them to arbitrary shell commands.
-    if (subcommand && SAFE_LOCAL_GIT_SUBCOMMANDS.has(subcommand)) return undefined;
-    return subcommand && KNOWN_GIT_PROJECT_SUBCOMMANDS.has(subcommand) ? "project-code" : "ambiguous-wrapper";
+    const arguments_ = tokens.slice(commandIndex + 1).map((token) => token.toLowerCase());
+    const exactInspection = arguments_.length === 0
+      || (arguments_.length === 1 && ["-h", "--version", "version"].includes(arguments_[0] ?? ""));
+    // Repository config, hooks, filters, partial-clone helpers and extensions
+    // can all execute code from apparently read-only Git subcommands. Keep
+    // only Git's exact, built-in usage/version forms outside fresh approval.
+    return exactInspection ? undefined : "project-code";
   }
 
   const subcommand = firstSubcommand(tokens, commandIndex + 1);

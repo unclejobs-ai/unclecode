@@ -99,6 +99,7 @@ const MODEL_SHELL_EXECUTION_CONTROL_ENV = new Set([
   "PHPRC",
   "PHP_INI_SCAN_DIR",
   "PROMPT_COMMAND",
+  "PSMODULEPATH",
   "PYTHONHOME",
   "PYTHONINSPECT",
   "PYTHONPATH",
@@ -121,6 +122,7 @@ const MODEL_SHELL_EXECUTION_CONTROL_ENV = new Set([
 
 function isModelShellExecutionControlEnvironment(name: string): boolean {
   if (MODEL_SHELL_EXECUTION_CONTROL_ENV.has(name)) return true;
+  if (name.startsWith("BASH_FUNC_") || name.endsWith("%%")) return true;
   if (name.startsWith("DYLD_")) return true;
   if (["LD_AUDIT", "LD_LIBRARY_PATH", "LD_PRELOAD"].includes(name)) return true;
   if (name.startsWith("GIT_CONFIG")) return true;
@@ -139,6 +141,7 @@ export function createModelShellEnvironment(source: NodeJS.ProcessEnv): NodeJS.P
     const normalizedName = name.toUpperCase();
     if (MODEL_SHELL_PRIVATE_ENV_PATTERN.test(name)) continue;
     if (MODEL_SHELL_PRIVATE_ENV_VALUE_PATTERN.test(value)) continue;
+    if (/^\s*\(\)\s*\{/.test(value)) continue;
     if (MODEL_SHELL_CONTROL_ENV.has(normalizedName)) continue;
     // Authorization binds the displayed command, not ambient process state.
     // Drop variables that can source code, install callbacks, inject tool

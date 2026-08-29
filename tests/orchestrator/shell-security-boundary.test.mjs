@@ -74,6 +74,7 @@ test("one-shot shell classes and project code re-prompt through yolo and a persi
     "kubectl get secrets",
     "gh issue create --title release",
     "git status --short",
+    "git ls-files",
     "tar --to-command=./scripts/upload -xf artifact.tar",
     "printf ok > output.txt",
     "rg TODO src/*.ts",
@@ -120,13 +121,10 @@ test("one-shot shell classes and project code re-prompt through yolo and a persi
 
 test("statically inspectable local commands remain eligible for autonomous execution", () => {
   for (const command of [
-    "git ls-files",
-    "git ls-files -- -C",
-    "git --no-pager ls-files",
+    "git",
+    "git -h",
     "git --version",
-    "git config --get core.fsmonitor",
-    "git rev-parse --show-toplevel",
-    "git ls-tree HEAD",
+    "git version",
     "docker --version",
     "podman --help",
     "kubectl version --client",
@@ -170,8 +168,21 @@ test("every tar files-from form is exact non-persistable project code", () => {
   }
 });
 
-test("git autonomy is limited to option-aware read-only built-ins", () => {
+test("all Git work outside exact built-in inspection is one-shot project code", () => {
   const commands = [
+    "git ls-files",
+    "git --help",
+    "git ls-files -- -C",
+    "git --no-pager ls-files",
+    "git config --get core.fsmonitor",
+    "git rev-parse --show-toplevel",
+    "git ls-tree HEAD",
+    "git merge-base HEAD main",
+    "git name-rev HEAD",
+    "git status --short",
+    "git diff --stat",
+    "git push origin main",
+    "git merge feature",
     "git log --ext-diff -p",
     "git show --ext-diff HEAD",
     "git grep --textconv needle",
@@ -186,7 +197,7 @@ test("git autonomy is limited to option-aware read-only built-ins", () => {
 
   for (const command of commands) {
     const approval = resolveOneShotShellApproval({ toolName: "run_shell", input: { command } });
-    assert.ok(approval, command);
+    assert.equal(approval?.kind, "project-code", command);
     assert.equal(approval.scope.key, `bash:once:${command}`);
   }
 });
@@ -234,6 +245,98 @@ test("an executable Git diff callback cannot pass through a persisted bash grant
     assert.equal(result.isError, true);
     assert.deepEqual(invoked, []);
     assert.equal(existsSync(marker), false, "policy must stop the callback before dispatch");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an apparently read-only Git command cannot dispatch a configured fsmonitor hook", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-git-fsmonitor-"));
+  const callback = path.join(root, "fsmonitor-hook.sh");
+  const marker = path.join(root, "fsmonitor-ran");
+  const command = "git ls-files";
+
+  try {
+    writeFileSync(callback, "#!/bin/sh\n: > fsmonitor-ran\nprintf 'unclecode-token\\n'\n", "utf8");
+    chmodSync(callback, 0o700);
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    execFileSync("git", ["config", "core.fsmonitor", callback], { cwd: root });
+    execFileSync("git", ["config", "core.fsmonitorHookVersion", "2"], { cwd: root });
+    writeFileSync(path.join(root, "fixture.txt"), "fixture\n", "utf8");
+    execFileSync("git", ["add", "fixture.txt"], { cwd: root });
+
+    execFileSync("git", ["ls-files"], { cwd: root });
+    assert.equal(existsSync(marker), true, "fixture must prove ls-files can invoke core.fsmonitor");
+    unlinkSync(marker);
+
+    const invoked = [];
+    const executor = createPolicyAwareToolExecutor({
+      definitions: [RUN_SHELL_DEFINITION],
+      handlers: {
+        run_shell: async () => {
+          invoked.push(command);
+          execFileSync("git", ["ls-files"], { cwd: root });
+          return { content: "ran" };
+        },
+      },
+      policyProfile: resolveModeExecutionPolicyProfile({ mode: "yolo", envShellOptIn: false }),
+      runtimeMode: "yolo",
+      permissionRuleStore: createCanonicalPermissionRuleStore([{ kind: "tool", key: "bash" }]),
+    });
+    const result = await executor.execute({ toolName: "run_shell", input: { command }, cwd: root });
+
+    assert.equal(result.isError, true);
+    assert.deepEqual(invoked, []);
+    assert.equal(existsSync(marker), false, "policy must stop fsmonitor before dispatch");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a partial-clone read cannot dispatch an ext remote helper before approval", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-git-promisor-"));
+  const callback = path.join(root, "remote-helper.sh");
+  const marker = path.join(root, "remote-helper-ran");
+  const command = "git ls-tree HEAD";
+  const childEnvironment = { ...process.env, GIT_ALLOW_PROTOCOL: "ext" };
+
+  try {
+    writeFileSync(callback, "#!/bin/sh\n: > remote-helper-ran\nexit 1\n", "utf8");
+    chmodSync(callback, 0o700);
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    execFileSync("git", ["config", "core.repositoryformatversion", "1"], { cwd: root });
+    execFileSync("git", ["config", "extensions.partialClone", "origin"], { cwd: root });
+    execFileSync("git", ["config", "remote.origin.promisor", "true"], { cwd: root });
+    execFileSync("git", ["config", "remote.origin.partialCloneFilter", "blob:none"], { cwd: root });
+    execFileSync("git", ["config", "remote.origin.url", `ext::${callback}`], { cwd: root });
+    writeFileSync(path.join(root, ".git", "refs", "heads", "main"), `${"1".repeat(40)}\n`, "utf8");
+
+    assert.throws(() => execFileSync("git", ["ls-tree", "HEAD"], {
+      cwd: root,
+      env: childEnvironment,
+      stdio: "ignore",
+    }));
+    assert.equal(existsSync(marker), true, "fixture must prove lazy object lookup reached git-remote-ext");
+    unlinkSync(marker);
+
+    const invoked = [];
+    const executor = createPolicyAwareToolExecutor({
+      definitions: [RUN_SHELL_DEFINITION],
+      handlers: {
+        run_shell: async () => {
+          invoked.push(command);
+          return { content: "ran" };
+        },
+      },
+      policyProfile: resolveModeExecutionPolicyProfile({ mode: "yolo", envShellOptIn: false }),
+      runtimeMode: "yolo",
+      permissionRuleStore: createCanonicalPermissionRuleStore([{ kind: "tool", key: "bash" }]),
+    });
+    const result = await executor.execute({ toolName: "run_shell", input: { command }, cwd: root });
+
+    assert.equal(result.isError, true);
+    assert.deepEqual(invoked, []);
+    assert.equal(existsSync(marker), false, "policy must stop the remote helper before dispatch");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -403,6 +506,10 @@ test("model shell environment drops owner discovery and ambient credentials", ()
     JAVA_TOOL_OPTIONS: "-javaagent:./agent.jar",
     PHP_INI_SCAN_DIR: "./php-config",
     RUSTC_WRAPPER: "./scripts/rustc-wrapper.sh",
+    PSModulePath: "./powershell-modules",
+    "BASH_FUNC_git%%": "() { ./scripts/git-hook.sh; }",
+    "legacy_function%%": "ignored",
+    LEGACY_SHELL_FUNCTION: "() { ./scripts/legacy-hook.sh; }",
     HTTP_PROXY: "http://proxy.example:8080",
     LANG: "ko_KR.UTF-8",
     CC: "clang",
@@ -418,6 +525,30 @@ test("model shell environment drops owner discovery and ambient credentials", ()
     SAFE_BUILD_FLAG: "1",
     UNCLECODE_ALLOW_RUN_SHELL: "1",
   });
+});
+
+test("exported shell functions cannot replace a model-approved command", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-shell-function-env-"));
+  const marker = path.join(root, "function-ran");
+  const functionName = "BASH_FUNC_git%%";
+  const source = {
+    PATH: process.env.PATH,
+    MARKER_PATH: marker,
+    [functionName]: "() { : > \"$MARKER_PATH\"; command git \"$@\"; }",
+  };
+
+  try {
+    execFileSync("/bin/bash", ["-c", "git --version"], { env: source });
+    assert.equal(existsSync(marker), true, "fixture must prove Bash imported and executed the function");
+    unlinkSync(marker);
+
+    execFileSync("/bin/bash", ["-c", "git --version"], {
+      env: createModelShellEnvironment(source),
+    });
+    assert.equal(existsSync(marker), false, "the sanitized child must execute the real Git binary");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("the real shell child receives the sanitized replacement environment", async () => {
