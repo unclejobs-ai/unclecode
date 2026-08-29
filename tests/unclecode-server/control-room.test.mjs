@@ -55,12 +55,16 @@ test("control-room projection is bounded, redacted, and honest about unproven qu
         pluginDiagnostics: [{
           runId: "run-1",
           source: "workspace",
-          trust: "workspace-trusted",
+          trustLane: "workspace-trusted",
           pluginId: "external-scc",
-          hook: "runClassified",
+          pluginName: "external-scc",
+          hookName: "runClassified",
           status: "error",
-          error: "token=super-secret Stop hook failed: zod/v3",
-          dedupeKey: "sha256:diag",
+          errorName: "PluginHookError",
+          errorMessage: "token=super-secret Stop hook failed at /Users/alice/private/plugin.mjs: zod/v3",
+          exitStatus: "2",
+          dedupeKey: `sha256:${"c".repeat(64)}`,
+          startedAt: 50,
         }],
       },
       context: {
@@ -76,7 +80,18 @@ test("control-room projection is bounded, redacted, and honest about unproven qu
   assert.equal(projection.runs[0].quality.provenance, "Quality Engine (SCC)");
   assert.equal(projection.runs[0].context.included.length, 64);
   assert.doesNotMatch(JSON.stringify(projection), /super-secret|\/workspace\/private/);
-  assert.match(projection.runs[0].system.diagnostics[0].error, /\[REDACTED\]/);
+  assert.deepEqual(projection.runs[0].system.diagnostics[0], {
+    runId: "run-1",
+    source: "workspace",
+    trust: "workspace-trusted",
+    pluginId: "external-scc",
+    hook: "runClassified",
+    status: "error",
+    exitStatus: "2",
+    error: "token=[REDACTED] Stop hook failed at [PATH] zod/v3",
+    dedupeKey: `sha256:${"c".repeat(64)}`,
+  });
+  assert.doesNotMatch(JSON.stringify(projection.runs[0].system.diagnostics), /alice|super-secret/);
 });
 
 test("control-room projects bounded user decisions without changing answer identities", () => {

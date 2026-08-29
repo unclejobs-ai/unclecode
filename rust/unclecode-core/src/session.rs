@@ -18,6 +18,7 @@ const MAX_AGENT_CONSOLE_BYTES: usize = 32 * 1024;
 const MAX_AGENT_CONSOLE_ACTIVITY: usize = 80;
 const MAX_AGENT_CONSOLE_AGENTS: usize = 128;
 const MAX_AGENT_CONSOLE_JOBS: usize = 128;
+const MAX_AGENT_CONSOLE_PLUGIN_DIAGNOSTICS: usize = 64;
 const MAX_AGENT_CONSOLE_QUALITY_HISTORY: usize = 32;
 const MAX_AGENT_CONSOLE_EVOLUTION_PROPOSALS: usize = 32;
 const MAX_RESUME_ENTRY_CHARS: usize = 600;
@@ -819,6 +820,20 @@ fn sanitize_agent_console_snapshot(value: &Value) -> Option<Value> {
             Value::Array(evolution_proposals),
         );
     }
+    if let Some(plugin_diagnostics) = source.get("pluginDiagnostics") {
+        let plugin_diagnostics = plugin_diagnostics.as_array()?;
+        let start = plugin_diagnostics
+            .len()
+            .saturating_sub(MAX_AGENT_CONSOLE_PLUGIN_DIAGNOSTICS);
+        let plugin_diagnostics = plugin_diagnostics[start..]
+            .iter()
+            .map(sanitize_plugin_diagnostic)
+            .collect::<Option<Vec<_>>>()?;
+        snapshot.insert(
+            "pluginDiagnostics".to_string(),
+            Value::Array(plugin_diagnostics),
+        );
+    }
 
     let activity = source.get("activity")?.as_array()?;
     let start = activity.len().saturating_sub(MAX_AGENT_CONSOLE_ACTIVITY);
@@ -957,6 +972,11 @@ fn fit_agent_console_snapshot(mut snapshot: Map<String, Value>) -> Map<String, V
     }
 
     trim_oldest_entries(&mut snapshot, "activity", |_| false);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    trim_oldest_entries(&mut snapshot, "pluginDiagnostics", |_| false);
     if console_fits(&snapshot) {
         return snapshot;
     }
@@ -1364,6 +1384,27 @@ fn sanitize_agent_run(value: &Value) -> Option<Value> {
 
 fn sanitize_async_job(value: &Value) -> Option<Value> {
     copy_known_fields(value, ASYNC_JOB_FIELDS).map(Value::Object)
+}
+
+fn sanitize_plugin_diagnostic(value: &Value) -> Option<Value> {
+    copy_known_fields(
+        value,
+        &[
+            "runId",
+            "source",
+            "trustLane",
+            "pluginId",
+            "pluginName",
+            "hookName",
+            "status",
+            "errorName",
+            "errorMessage",
+            "exitStatus",
+            "dedupeKey",
+            "startedAt",
+        ],
+    )
+    .map(Value::Object)
 }
 
 fn sanitize_agent_run_usage(value: &Value) -> Option<Value> {

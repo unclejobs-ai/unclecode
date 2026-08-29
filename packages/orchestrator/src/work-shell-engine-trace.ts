@@ -396,6 +396,14 @@ export function applyWorkShellTraceEvent<
     flushStreamingReasoning();
   }
 
+  // External plugin failures are durable operator diagnostics, not verbose
+  // tool chatter. The source-labelled line is appended exactly once by the
+  // plugin host's per-run dedupe and therefore survives the existing session
+  // snapshot while remaining visible in minimal mode.
+  if (input.event.type === "plugin.diagnostic" && line.trim().length > 0) {
+    input.appendEntries({ role: "system", text: line });
+  }
+
   if (line.trim().length > 0 && input.state.traceMode === "verbose") {
     input.pushTraceLine(line);
   }

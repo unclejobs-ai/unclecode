@@ -8,6 +8,37 @@ import { createUsageRecorder } from "./usage-recorder-fixture.mjs";
 const initialConsole = Object.freeze({ profileId: "build", activity: [], agents: [], jobs: [] });
 const TEST_USAGE_ROUTE = { provider: "openai", model: "gpt-5.6-sol" };
 
+test("plugin diagnostics retain canonical trust and exit status through console persistence", () => {
+  const projected = applyTraceEventToAgentConsole(initialConsole, {
+    type: "plugin.diagnostic",
+    level: "high-signal",
+    runId: "run-plugin-roundtrip",
+    source: "cached",
+    trustLane: "cached-external",
+    pluginId: "cached-reviewer",
+    pluginName: "cached-reviewer",
+    hookName: "runClassified",
+    status: "error",
+    errorName: "PluginHookError",
+    errorMessage: `Failed in /tmp/private/plugin.mjs api_key=raw-secret ${"z".repeat(400)}`,
+    exitStatus: "17",
+    dedupeKey: `sha256:${"b".repeat(64)}`,
+    startedAt: 101,
+  });
+  const resumed = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(projected)));
+  const [diagnostic] = resumed?.pluginDiagnostics ?? [];
+
+  assert.equal(diagnostic?.source, "cached");
+  assert.equal(diagnostic?.trustLane, "cached-external");
+  assert.equal(diagnostic?.pluginName, "cached-reviewer");
+  assert.equal(diagnostic?.hookName, "runClassified");
+  assert.equal(diagnostic?.exitStatus, "17");
+  assert.match(diagnostic?.errorMessage ?? "", /\[PATH\]/);
+  assert.match(diagnostic?.errorMessage ?? "", /api_key=\[REDACTED\]/);
+  assert.ok(Array.from(diagnostic?.errorMessage ?? "").length <= 240);
+  assert.doesNotMatch(JSON.stringify(resumed), /private|raw-secret/);
+});
+
 test("tool activity reducer records a safe lifecycle without raw tool output", () => {
   const running = applyTraceEventToAgentConsole(initialConsole, {
     type: "tool.started",

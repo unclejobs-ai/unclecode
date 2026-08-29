@@ -485,6 +485,22 @@ export type AgentControlPort = {
 export const AGENT_CONSOLE_TABS = ["agents", "jobs", "plan"] as const;
 export type AgentConsoleTab = (typeof AGENT_CONSOLE_TABS)[number];
 
+/** Bounded, redacted diagnostic safe for traces, checkpoints, and operator projections. */
+export type PluginDiagnosticProjection = {
+  readonly runId: string;
+  readonly source: "memory" | "workspace" | "cached";
+  readonly trustLane: "host-provided" | "workspace-trusted" | "cached-external";
+  readonly pluginId: string;
+  readonly pluginName: string;
+  readonly hookName: string;
+  readonly status: "error";
+  readonly errorName: string;
+  readonly errorMessage: string;
+  readonly exitStatus?: string | undefined;
+  readonly dedupeKey: string;
+  readonly startedAt: number;
+};
+
 export type AgentConsoleSnapshot = {
   readonly profileId: ContextProfileId;
   readonly securityApprovals?: readonly PersistedSecurityApprovalRule[];
@@ -493,6 +509,7 @@ export type AgentConsoleSnapshot = {
   readonly workGraph?: WorkGraph;
   readonly qualityReview?: QualityReviewProjection;
   readonly evolutionProposals?: readonly EvolutionProposalProjection[];
+  readonly pluginDiagnostics?: readonly PluginDiagnosticProjection[];
   readonly activity: readonly ToolActivity[];
   readonly agents: readonly AgentRun[];
   readonly jobs: readonly AsyncJob[];
@@ -545,6 +562,9 @@ export function createAgentConsoleSnapshot(
     ...(input.qualityReview ? { qualityReview: copyQualityReview(input.qualityReview) } : {}),
     ...(input.evolutionProposals && input.evolutionProposals.length > 0
       ? { evolutionProposals: input.evolutionProposals.slice(-MAX_EVOLUTION_PROPOSALS).map(copyEvolutionProposal) }
+      : {}),
+    ...(input.pluginDiagnostics && input.pluginDiagnostics.length > 0
+      ? { pluginDiagnostics: input.pluginDiagnostics.slice(-MAX_PERSISTED_PLUGIN_DIAGNOSTICS).map(copyPluginDiagnostic) }
       : {}),
     activity: input.activity.map((activity) => ({
       id: activity.id,
@@ -975,6 +995,20 @@ function copyAgentUsageTotals(usage: AgentUsageTotals): AgentUsageTotals {
 }
 
 const MAX_PERSISTED_TOOL_ACTIVITY = 80;
+const MAX_PERSISTED_PLUGIN_DIAGNOSTICS = 64;
+export const MAX_PLUGIN_DIAGNOSTIC_FIELD_CHARS = 240;
+const PLUGIN_DIAGNOSTIC_DEDUPE_KEY = /^sha256:[a-f0-9]{64}$/;
+const PLUGIN_DIAGNOSTIC_TRUST_BY_SOURCE = {
+  memory: "host-provided",
+  workspace: "workspace-trusted",
+  cached: "cached-external",
+} as const;
+const PLUGIN_DIAGNOSTIC_SECRET_PATTERNS = [
+  /\bBearer\s+[^\s,;]+/gi,
+  /\b(?:sk|ghp|xoxb)-[A-Za-z0-9_-]{8,}\b/g,
+  /\b(?:api[_-]?key|token|secret|password)\s*[=:]\s*[^\s,;]+/gi,
+] as const;
+const PLUGIN_DIAGNOSTIC_PATH_PATTERN = /(^|[\s([{"'=])(?:\.{1,2}\/|\/|[A-Za-z]:\\)[^\s,;)\]}"']+/g;
 const WORK_NODE_STATUS_SET = new Set<string>(WORK_NODE_STATUSES);
 const QUALITY_PROFILE_SET = new Set<string>(QUALITY_PROFILES);
 const QUALITY_HARNESS_STAGE_SET = new Set<string>(QUALITY_HARNESS_STAGES);
@@ -1017,6 +1051,9 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
   const evolutionProposals = hasOwn(record, "evolutionProposals")
     ? parseEvolutionProposals(record.evolutionProposals)
     : undefined;
+  const pluginDiagnostics = hasOwn(record, "pluginDiagnostics")
+    ? parsePluginDiagnostics(record.pluginDiagnostics)
+    : undefined;
   const mainUsage = hasOwn(record, "mainUsage") ? parseAgentRunUsage(record.mainUsage) : undefined;
   const totalUsage = hasOwn(record, "totalUsage")
     ? parseAgentUsageTotals(record.totalUsage)
@@ -1030,6 +1067,7 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     || (hasOwn(record, "workGraph") && !workGraph)
     || (hasOwn(record, "qualityReview") && !qualityReview)
     || (hasOwn(record, "evolutionProposals") && !evolutionProposals)
+    || (hasOwn(record, "pluginDiagnostics") && !pluginDiagnostics)
     || (hasOwn(record, "mainUsage") && !mainUsage)
     || (hasOwn(record, "totalUsage") && !totalUsage)
     || !Array.isArray(activityValue)
@@ -1072,11 +1110,100 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     ...(workGraph ? { workGraph } : {}),
     ...(qualityReview ? { qualityReview } : {}),
     ...(evolutionProposals && evolutionProposals.length > 0 ? { evolutionProposals } : {}),
+    ...(pluginDiagnostics && pluginDiagnostics.length > 0 ? { pluginDiagnostics } : {}),
     activity,
     agents,
     jobs,
     ...(mainUsage ? { mainUsage } : {}),
     ...(totalUsage ? { totalUsage } : {}),
+  });
+}
+
+function copyPluginDiagnostic(diagnostic: PluginDiagnosticProjection): PluginDiagnosticProjection {
+  return {
+    runId: boundedPluginDiagnosticField(diagnostic.runId),
+    source: diagnostic.source,
+    trustLane: diagnostic.trustLane,
+    pluginId: boundedPluginDiagnosticField(diagnostic.pluginId),
+    pluginName: boundedPluginDiagnosticField(diagnostic.pluginName),
+    hookName: boundedPluginDiagnosticField(diagnostic.hookName),
+    status: "error",
+    errorName: boundedPluginDiagnosticField(diagnostic.errorName),
+    errorMessage: boundedPluginDiagnosticField(diagnostic.errorMessage),
+    ...(diagnostic.exitStatus === undefined
+      ? {}
+      : { exitStatus: boundedPluginDiagnosticField(diagnostic.exitStatus) }),
+    dedupeKey: boundedPluginDiagnosticField(diagnostic.dedupeKey),
+    startedAt: diagnostic.startedAt,
+  };
+}
+
+function boundedPluginDiagnosticField(value: string): string {
+  let projected = value.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ");
+  for (const pattern of PLUGIN_DIAGNOSTIC_SECRET_PATTERNS) {
+    projected = projected.replace(pattern, (match) => {
+      const key = match.match(/^(api[_-]?key|token|secret|password)/i)?.[1];
+      return key ? `${key}=[REDACTED]` : "[REDACTED]";
+    });
+  }
+  projected = projected.replace(
+    PLUGIN_DIAGNOSTIC_PATH_PATTERN,
+    (_match, prefix: string) => `${prefix}[PATH]`,
+  );
+  const chars = Array.from(projected.trim());
+  return chars.length <= MAX_PLUGIN_DIAGNOSTIC_FIELD_CHARS
+    ? chars.join("")
+    : `${chars.slice(0, MAX_PLUGIN_DIAGNOSTIC_FIELD_CHARS - 1).join("")}…`;
+}
+
+export function createPluginDiagnosticProjection(
+  diagnostic: PluginDiagnosticProjection,
+): PluginDiagnosticProjection {
+  return copyPluginDiagnostic(diagnostic);
+}
+
+function parsePluginDiagnostics(value: unknown): readonly PluginDiagnosticProjection[] | undefined {
+  if (!Array.isArray(value) || value.length > MAX_PERSISTED_PLUGIN_DIAGNOSTICS) return undefined;
+  const parsed = value.map(parsePluginDiagnosticProjection);
+  return parsed.every((item): item is PluginDiagnosticProjection => item !== undefined)
+    ? parsed
+    : undefined;
+}
+
+export function parsePluginDiagnosticProjection(value: unknown): PluginDiagnosticProjection | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  const source = record.source;
+  const trustLane = record.trustLane;
+  const strings = ["runId", "pluginId", "pluginName", "hookName", "errorName", "errorMessage", "dedupeKey"] as const;
+  if (
+    (source !== "memory" && source !== "workspace" && source !== "cached")
+    || (trustLane !== "host-provided" && trustLane !== "workspace-trusted" && trustLane !== "cached-external")
+    || PLUGIN_DIAGNOSTIC_TRUST_BY_SOURCE[source] !== trustLane
+    || record.status !== "error"
+    || !strings.every((key) => typeof record[key] === "string" && record[key].trim().length > 0)
+    || !PLUGIN_DIAGNOSTIC_DEDUPE_KEY.test(record.dedupeKey as string)
+    || (record.exitStatus !== undefined
+      && (typeof record.exitStatus !== "string" || record.exitStatus.trim().length === 0))
+    || typeof record.startedAt !== "number"
+    || !Number.isFinite(record.startedAt)
+    || record.startedAt < 0
+  ) {
+    return undefined;
+  }
+  return createPluginDiagnosticProjection({
+    runId: record.runId as string,
+    source,
+    trustLane,
+    pluginId: record.pluginId as string,
+    pluginName: record.pluginName as string,
+    hookName: record.hookName as string,
+    status: "error",
+    errorName: record.errorName as string,
+    errorMessage: record.errorMessage as string,
+    ...(typeof record.exitStatus === "string" ? { exitStatus: record.exitStatus } : {}),
+    dedupeKey: record.dedupeKey as string,
+    startedAt: record.startedAt,
   });
 }
 

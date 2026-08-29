@@ -248,6 +248,7 @@ export function mergeAgentConsoleLifecycle(
     ...(pending.workGraph === undefined ? {} : { workGraph: pending.workGraph }),
     ...(pending.qualityReview === undefined ? {} : { qualityReview: pending.qualityReview }),
     ...(pending.evolutionProposals === undefined ? {} : { evolutionProposals: pending.evolutionProposals }),
+    ...(pending.pluginDiagnostics === undefined ? {} : { pluginDiagnostics: pending.pluginDiagnostics }),
     activity: pending.activity,
     agents: pending.agents,
     jobs: pending.jobs,

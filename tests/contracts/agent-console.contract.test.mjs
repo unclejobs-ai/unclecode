@@ -463,6 +463,44 @@ test("agent-console resume parser round-trips every safe lifecycle field", () =>
   assert.doesNotMatch(JSON.stringify(parsed), /must disappear/);
 });
 
+test("agent-console round-trips only bounded redacted plugin diagnostics", () => {
+  const parsed = parseAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents: [],
+    jobs: [],
+    pluginDiagnostics: [
+      {
+        runId: "run-plugin-1",
+        source: "workspace",
+        trustLane: "workspace-trusted",
+        pluginId: "workspace-reviewer",
+        pluginName: "workspace-reviewer",
+        hookName: "runClassified",
+        status: "error",
+        errorName: "PluginHookError",
+        errorMessage: `Failure at /Users/alice/private/plugin.mjs token=super-secret ${"x".repeat(400)}`,
+        exitStatus: "2",
+        dedupeKey: `sha256:${"a".repeat(64)}`,
+        startedAt: 42,
+      },
+    ],
+  });
+
+  const roundTripped = parseAgentConsoleSnapshot(
+    JSON.parse(JSON.stringify(parsed)),
+  );
+  const [diagnostic] = roundTripped?.pluginDiagnostics ?? [];
+  assert.equal(diagnostic?.source, "workspace");
+  assert.equal(diagnostic?.trustLane, "workspace-trusted");
+  assert.equal(diagnostic?.hookName, "runClassified");
+  assert.equal(diagnostic?.exitStatus, "2");
+  assert.match(diagnostic?.errorMessage ?? "", /\[PATH\]/);
+  assert.match(diagnostic?.errorMessage ?? "", /token=\[REDACTED\]/);
+  assert.ok(Array.from(diagnostic?.errorMessage ?? "").length <= 240);
+  assert.doesNotMatch(JSON.stringify(roundTripped), /alice|super-secret/);
+});
+
 test("agent-console resume parser defaults legacy snapshots to empty lifecycle arrays", () => {
   const parsed = parseAgentConsoleSnapshot({
     profileId: "explore",

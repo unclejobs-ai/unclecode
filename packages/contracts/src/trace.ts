@@ -1,6 +1,7 @@
 import type {
   AskUserQuestionResult,
   EvolutionProposalProjection,
+  PluginDiagnosticProjection,
   TerminalAgentRunStatus,
   TerminalAsyncJobStatus,
   WorkGraph,
@@ -490,21 +491,9 @@ export type EvolutionProposedTraceEvent = {
  * Bounded, redacted projection of one external plugin invocation failure.
  * The in-process Quality Engine is builtin and never emits this event.
  */
-export type PluginDiagnosticTraceEvent = {
+export type PluginDiagnosticTraceEvent = PluginDiagnosticProjection & {
   readonly type: "plugin.diagnostic";
   readonly level: "high-signal";
-  readonly runId: string;
-  readonly source: "memory" | "workspace" | "cached";
-  readonly trustLane: "host-provided" | "workspace-trusted" | "cached-external";
-  readonly pluginId: string;
-  readonly pluginName: string;
-  readonly hookName: string;
-  readonly status: "error";
-  readonly errorName: string;
-  readonly errorMessage: string;
-  readonly exitStatus?: string | undefined;
-  readonly dedupeKey: string;
-  readonly startedAt: number;
 };
 
 export type ExecutionTraceEvent =

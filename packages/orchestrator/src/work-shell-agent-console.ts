@@ -35,6 +35,10 @@ export function applyTraceEventToAgentConsole(
   if (evolutionSnapshot !== snapshot) {
     return evolutionSnapshot;
   }
+  const diagnosticSnapshot = applyPluginDiagnosticEvent(snapshot, event);
+  if (diagnosticSnapshot !== snapshot) {
+    return diagnosticSnapshot;
+  }
   const lifecycleSnapshot = applyAgentLifecycleEvent(snapshot, event, usageRecorder);
   if (lifecycleSnapshot !== snapshot) {
     return lifecycleSnapshot;
@@ -68,6 +72,33 @@ function applyEvolutionProposalEvent(
     ...snapshot,
     evolutionProposals: [...retained, proposal].slice(-32),
   }) ?? snapshot;
+}
+
+function applyPluginDiagnosticEvent(
+  snapshot: AgentConsoleSnapshot,
+  event: { readonly type: string },
+): AgentConsoleSnapshot {
+  if (event.type !== "plugin.diagnostic") return snapshot;
+  const trace = asRecord(event);
+  if (!trace) return snapshot;
+  const parsed = parseAgentConsoleSnapshot({
+    ...snapshot,
+    pluginDiagnostics: [...(snapshot.pluginDiagnostics ?? []), {
+      runId: trace.runId,
+      source: trace.source,
+      trustLane: trace.trustLane,
+      pluginId: trace.pluginId,
+      pluginName: trace.pluginName,
+      hookName: trace.hookName,
+      status: trace.status,
+      errorName: trace.errorName,
+      errorMessage: trace.errorMessage,
+      exitStatus: trace.exitStatus,
+      dedupeKey: trace.dedupeKey,
+      startedAt: trace.startedAt,
+    }],
+  });
+  return parsed ?? snapshot;
 }
 
 /**

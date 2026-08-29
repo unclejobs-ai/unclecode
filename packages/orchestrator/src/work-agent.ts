@@ -9,24 +9,25 @@ import {
   type QualityRunProjection,
   type RiskLevel,
 } from "@second-claude/core";
-import type {
-  OrchestratorStepTraceEvent,
-  EvolutionProposedTraceEvent,
-  PluginDiagnosticTraceEvent,
-  QualityCompletedTraceEvent,
-  QualityGateEvaluatedTraceEvent,
-  QualityGateStatus,
-  QualityHarnessStage,
-  QualityPivotRequestedTraceEvent,
-  QualityProfile,
-  QualityRefineRequestedTraceEvent,
-  QualityStageStartedTraceEvent,
-  WorkApprovedTraceEvent,
-  WorkGraph,
-  WorkNode,
-  WorkNodeStatus,
-  WorkProposedTraceEvent,
-  WorkStatusTraceEvent,
+import {
+  createPluginDiagnosticProjection,
+  type OrchestratorStepTraceEvent,
+  type EvolutionProposedTraceEvent,
+  type PluginDiagnosticTraceEvent,
+  type QualityCompletedTraceEvent,
+  type QualityGateEvaluatedTraceEvent,
+  type QualityGateStatus,
+  type QualityHarnessStage,
+  type QualityPivotRequestedTraceEvent,
+  type QualityProfile,
+  type QualityRefineRequestedTraceEvent,
+  type QualityStageStartedTraceEvent,
+  type WorkApprovedTraceEvent,
+  type WorkGraph,
+  type WorkNode,
+  type WorkNodeStatus,
+  type WorkProposedTraceEvent,
+  type WorkStatusTraceEvent,
 } from "@unclecode/contracts";
 import {
   type PluginDecisionAggregate,
@@ -2937,44 +2938,26 @@ export class WorkAgent<
   }
 }
 
-const PLUGIN_DIAGNOSTIC_FIELD_MAX_CHARS = 240;
-const PLUGIN_DIAGNOSTIC_SECRET_PATTERNS = [
-  /\bBearer\s+[^\s]+/gi,
-  /\bsk-[A-Za-z0-9_-]{8,}/g,
-  /\b(token|api[_-]?key|secret|password)=([^\s&]+)/gi,
-] as const;
-
-function boundedPluginDiagnosticField(value: string): string {
-  let projected = value.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ");
-  for (const pattern of PLUGIN_DIAGNOSTIC_SECRET_PATTERNS) {
-    projected = projected.replace(pattern, (match, key: string | undefined) =>
-      key ? `${key}=[redacted]` : "[redacted]");
-  }
-  const chars = Array.from(projected.trim());
-  return chars.length <= PLUGIN_DIAGNOSTIC_FIELD_MAX_CHARS
-    ? chars.join("")
-    : `${chars.slice(0, PLUGIN_DIAGNOSTIC_FIELD_MAX_CHARS - 1).join("")}…`;
-}
-
 function projectPluginInvocationDiagnostic(
   diagnostic: PluginInvocationDiagnostic & { readonly source: "memory" | "workspace" | "cached" },
 ): PluginDiagnosticTraceEvent {
+  const projection = createPluginDiagnosticProjection({
+    runId: diagnostic.runId,
+    source: diagnostic.source,
+    trustLane: diagnostic.trustLane as "host-provided" | "workspace-trusted" | "cached-external",
+    pluginId: diagnostic.pluginId,
+    pluginName: diagnostic.pluginName,
+    hookName: diagnostic.hookName,
+    status: "error",
+    errorName: diagnostic.errorName,
+    errorMessage: diagnostic.errorMessage,
+    ...(diagnostic.exitStatus ? { exitStatus: diagnostic.exitStatus } : {}),
+    dedupeKey: `sha256:${createHash("sha256").update(diagnostic.dedupeKey).digest("hex")}`,
+    startedAt: Date.now(),
+  });
   return {
     type: "plugin.diagnostic",
     level: "high-signal",
-    runId: boundedPluginDiagnosticField(diagnostic.runId),
-    source: diagnostic.source,
-    trustLane: diagnostic.trustLane as "host-provided" | "workspace-trusted" | "cached-external",
-    pluginId: boundedPluginDiagnosticField(diagnostic.pluginId),
-    pluginName: boundedPluginDiagnosticField(diagnostic.pluginName),
-    hookName: boundedPluginDiagnosticField(diagnostic.hookName),
-    status: "error",
-    errorName: boundedPluginDiagnosticField(diagnostic.errorName),
-    errorMessage: boundedPluginDiagnosticField(diagnostic.errorMessage),
-    ...(diagnostic.exitStatus
-      ? { exitStatus: boundedPluginDiagnosticField(diagnostic.exitStatus) }
-      : {}),
-    dedupeKey: `sha256:${createHash("sha256").update(diagnostic.dedupeKey).digest("hex")}`,
-    startedAt: Date.now(),
+    ...projection,
   };
 }

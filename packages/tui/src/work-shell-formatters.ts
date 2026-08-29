@@ -1,5 +1,6 @@
 import type { ExecutionTraceEvent } from "@unclecode/contracts";
 import {
+  getWorkShellMessages,
   runRustCommandSync,
   type WorkShellUiLocale,
 } from "@unclecode/orchestrator";
@@ -21,6 +22,20 @@ export function formatAgentTraceLine(
   event: ExecutionTraceEvent,
   uiLocale: WorkShellUiLocale = "en",
 ): string {
+  if (event.type === "plugin.diagnostic") {
+    const labels = getWorkShellMessages(uiLocale).pluginDiagnostic;
+    return [
+      labels.externalPlugin,
+      `${labels.source} ${event.source}`,
+      `${labels.trust} ${event.trustLane}`,
+      `${labels.plugin} ${event.pluginName}`,
+      `${labels.hook} ${event.hookName}`,
+      `${labels.status} ${labels.errorStatus}`,
+      ...(event.exitStatus ? [`${labels.exit} ${event.exitStatus}`] : []),
+      `${labels.error} ${event.errorName}: ${event.errorMessage}`,
+      `${labels.dedupe} ${event.dedupeKey}`,
+    ].join(" · ");
+  }
   const key = JSON.stringify(event);
   const cached = rustTraceLineCache.get(key);
   if (cached !== undefined) {

@@ -1,5 +1,8 @@
 import { basename } from "node:path";
-import type { ControlRoomPendingDecision } from "@unclecode/contracts";
+import {
+  parsePluginDiagnosticProjection,
+  type ControlRoomPendingDecision,
+} from "@unclecode/contracts";
 import {
   SYSTEM_OBSERVABILITY_BOUNDS,
   projectSystemObservability,
@@ -64,7 +67,7 @@ export type ControlRoomDiagnostic = {
   readonly pluginId: string;
   readonly hook: string;
   readonly status: string;
-  readonly exitStatus?: number;
+  readonly exitStatus?: string;
   readonly error: string;
   readonly dedupeKey: string;
 };
@@ -383,17 +386,21 @@ function contextSources(values: readonly RuntimeContextSource[] | undefined): re
 
 function diagnosticsFrom(consoleRecord: Readonly<Record<string, unknown>>): readonly ControlRoomDiagnostic[] {
   const input = Array.isArray(consoleRecord.pluginDiagnostics) ? consoleRecord.pluginDiagnostics : [];
-  return input.filter(isRecord).slice(-MAX_DIAGNOSTICS).map(item => ({
-    runId: stringField(item, "runId", "unknown"),
-    source: stringField(item, "source", "external"),
-    trust: stringField(item, "trust", "unknown"),
-    pluginId: stringField(item, "pluginId", "unknown"),
-    hook: stringField(item, "hook", "unknown"),
-    status: stringField(item, "status", "error"),
-    ...(typeof item.exitStatus === "number" ? { exitStatus: item.exitStatus } : {}),
-    error: redactText(item.error ?? "Plugin invocation failed"),
-    dedupeKey: stringField(item, "dedupeKey", "unknown"),
-  }));
+  return input.slice(-MAX_DIAGNOSTICS).flatMap((item) => {
+    const diagnostic = parsePluginDiagnosticProjection(item);
+    if (!diagnostic) return [];
+    return [{
+      runId: diagnostic.runId,
+      source: diagnostic.source,
+      trust: diagnostic.trustLane,
+      pluginId: diagnostic.pluginId,
+      hook: diagnostic.hookName,
+      status: diagnostic.status,
+      ...(diagnostic.exitStatus === undefined ? {} : { exitStatus: diagnostic.exitStatus }),
+      error: diagnostic.errorMessage,
+      dedupeKey: diagnostic.dedupeKey,
+    }];
+  });
 }
 
 function stringList(record: Readonly<Record<string, unknown>>, key: string): readonly string[] {
