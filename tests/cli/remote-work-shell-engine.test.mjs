@@ -83,6 +83,36 @@ test("remote adapter rejects a late stale poll instead of regressing owner state
   engine.dispose();
 });
 
+test("remote adapter dispose aborts an in-flight owner poll and settles initialize", async () => {
+  let reads = 0;
+  let pollStarted;
+  let pollAborted = false;
+  const started = new Promise((resolve) => { pollStarted = resolve; });
+  const client = {
+    async readEngineState(_sessionId, options = {}) {
+      reads += 1;
+      if (reads === 1) {
+        return { ok: true, revision: 1, state: { mode: "standard" }, result: null };
+      }
+      pollStarted();
+      return await new Promise((resolve, reject) => {
+        options.signal?.addEventListener("abort", () => {
+          pollAborted = true;
+          const error = new Error("poll detached");
+          error.name = "AbortError";
+          reject(error);
+        }, { once: true });
+      });
+    },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "detach-poll");
+  const initializing = engine.initialize();
+  await started;
+  engine.dispose();
+  await initializing;
+  assert.equal(pollAborted, true);
+});
+
 test("remote adapter surfaces a decision conflict without retrying against a changed decision", async () => {
   let revision = 1;
   let state = { agentConsole: { pendingDecision: { id: "decision-a" } } };
