@@ -1,5 +1,6 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -251,6 +252,8 @@ mod cli_work;
 const TS_ENTRYPOINT: &str = "apps/unclecode-cli/dist/index.js";
 const TS_WORK_ENTRYPOINT: &str = "apps/unclecode-cli/dist/work-entry.js";
 const NODE_NO_EXPERIMENTAL_WARNING: &str = "--no-warnings=ExperimentalWarning";
+const RUST_COMMAND_INPUT_FILE_ENV: &str = "UNCLECODE_RUST_INPUT_FILE";
+const MAX_RUST_COMMAND_INPUT_BYTES: usize = 8 * 1024 * 1024;
 
 fn main() -> ExitCode {
     let started_at = Instant::now();
@@ -781,6 +784,138 @@ fn npm_executable_name() -> &'static str {
     }
 }
 
+fn open_rust_command_input_file(path: &Path) -> Result<File, String> {
+    if !path.is_absolute() {
+        return Err(format!(
+            "{RUST_COMMAND_INPUT_FILE_ENV} must contain an absolute path"
+        ));
+    }
+
+    let before = fs::symlink_metadata(path)
+        .map_err(|error| format!("Failed to inspect Rust command input file: {error}"))?;
+    if before.file_type().is_symlink() || !before.file_type().is_file() {
+        return Err("Rust command input must be a regular, non-symlink file".to_string());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+        if before.permissions().mode() & 0o777 != 0o600 {
+            return Err("Rust command input file permissions must be 0600".to_string());
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        const O_NOFOLLOW: i32 = 0x20000;
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        ))]
+        const O_NOFOLLOW: i32 = 0x100;
+        #[cfg(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        )))]
+        const O_NOFOLLOW: i32 = 0;
+
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| format!("Failed to open Rust command input file: {error}"))?;
+        let after = file.metadata().map_err(|error| {
+            format!("Failed to inspect opened Rust command input file: {error}")
+        })?;
+        if !after.file_type().is_file()
+            || before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || after.nlink() != 1
+        {
+            return Err("Rust command input file changed while it was being opened".to_string());
+        }
+        if after.len() > MAX_RUST_COMMAND_INPUT_BYTES as u64 {
+            return Err(format!(
+                "Rust command input exceeds the {MAX_RUST_COMMAND_INPUT_BYTES}-byte limit"
+            ));
+        }
+        return Ok(file);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .map_err(|error| format!("Failed to open Rust command input file: {error}"))?;
+        let metadata = file.metadata().map_err(|error| {
+            format!("Failed to inspect opened Rust command input file: {error}")
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err("Rust command input must be a regular, non-symlink file".to_string());
+        }
+        if metadata.len() > MAX_RUST_COMMAND_INPUT_BYTES as u64 {
+            return Err(format!(
+                "Rust command input exceeds the {MAX_RUST_COMMAND_INPUT_BYTES}-byte limit"
+            ));
+        }
+        return Ok(file);
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|error| format!("Failed to open Rust command input file: {error}"))
+}
+
+fn read_rust_command_input_bytes_from<R: Read>(
+    input_path: Option<&OsStr>,
+    stdin: R,
+) -> Result<Vec<u8>, String> {
+    let mut reader: Box<dyn Read> = match input_path {
+        Some(path) => Box::new(open_rust_command_input_file(Path::new(path))?),
+        None => Box::new(stdin),
+    };
+    let mut input = Vec::new();
+    reader
+        .by_ref()
+        .take((MAX_RUST_COMMAND_INPUT_BYTES + 1) as u64)
+        .read_to_end(&mut input)
+        .map_err(|error| format!("Failed to read Rust command input: {error}"))?;
+    if input.len() > MAX_RUST_COMMAND_INPUT_BYTES {
+        return Err(format!(
+            "Rust command input exceeds the {MAX_RUST_COMMAND_INPUT_BYTES}-byte limit"
+        ));
+    }
+    Ok(input)
+}
+
+fn read_rust_command_input_bytes() -> Result<Vec<u8>, String> {
+    read_rust_command_input_bytes_from(
+        env::var_os(RUST_COMMAND_INPUT_FILE_ENV).as_deref(),
+        io::stdin(),
+    )
+}
+
+fn read_rust_command_input_string() -> Result<String, String> {
+    String::from_utf8(read_rust_command_input_bytes()?)
+        .map_err(|error| format!("Rust command input must be valid UTF-8: {error}"))
+}
+
 fn run_native_rust_command(args: &[OsString], started_at: Instant) -> Result<u8, String> {
     match args.first().and_then(|arg| arg.to_str()) {
         Some("queue-smoke") => {
@@ -821,10 +956,7 @@ fn run_native_rust_command(args: &[OsString], started_at: Instant) -> Result<u8,
             Ok(0)
         }
         Some("sha256") => {
-            let mut input = Vec::new();
-            io::stdin()
-                .read_to_end(&mut input)
-                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let input = read_rust_command_input_bytes()?;
             println!("{}", sha256_hex_bytes(&input));
             Ok(0)
         }
@@ -2085,10 +2217,7 @@ fn run_native_context_command(args: &[OsString]) -> Result<u8, String> {
                 .get(2)
                 .and_then(|arg| arg.to_str())
                 .ok_or("Usage: unclecode rust context guidance <cwd> <home-dir|->")?;
-            let mut skills_json = String::new();
-            io::stdin()
-                .read_to_string(&mut skills_json)
-                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let skills_json = read_rust_command_input_string()?;
             println!(
                 "{}",
                 build_workspace_guidance_json(
@@ -2120,10 +2249,7 @@ fn run_native_context_command(args: &[OsString]) -> Result<u8, String> {
         }
         Some("freshness") => {
             let root_dir = context_root_arg(args, "freshness")?;
-            let mut packet_json = String::new();
-            io::stdin()
-                .read_to_string(&mut packet_json)
-                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let packet_json = read_rust_command_input_string()?;
             println!("{}", check_freshness_json(Path::new(root_dir), &packet_json)?);
             Ok(0)
         }
@@ -2136,10 +2262,7 @@ fn run_native_context_command(args: &[OsString]) -> Result<u8, String> {
             Ok(0)
         }
         Some("estimate-tokens") => {
-            let mut input = String::new();
-            io::stdin()
-                .read_to_string(&mut input)
-                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let input = read_rust_command_input_string()?;
             println!("{}", estimate_context_tokens(&input));
             Ok(0)
         }
@@ -2150,10 +2273,7 @@ fn run_native_context_command(args: &[OsString]) -> Result<u8, String> {
                 .unwrap_or("10")
                 .parse::<usize>()
                 .map_err(|error| format!("Invalid hotspot count: {error}"))?;
-            let mut repo_map_json = String::new();
-            io::stdin()
-                .read_to_string(&mut repo_map_json)
-                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let repo_map_json = read_rust_command_input_string()?;
             println!("{}", detect_hotspots_json(&repo_map_json, top_n)?);
             Ok(0)
         }
@@ -2176,10 +2296,7 @@ fn run_native_context_command(args: &[OsString]) -> Result<u8, String> {
                 .get(3)
                 .and_then(|arg| arg.to_str())
                 .filter(|value| *value != "-");
-            let mut repo_map_json = String::new();
-            io::stdin()
-                .read_to_string(&mut repo_map_json)
-                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let repo_map_json = read_rust_command_input_string()?;
             println!(
                 "{}",
                 build_context_selection_json(Path::new(root_dir), mode, since_sha, &repo_map_json)?
@@ -4955,10 +5072,7 @@ fn run_native_aci_command(args: &[OsString]) -> Result<u8, String> {
             let path = args
                 .get(1)
                 .ok_or("Usage: unclecode rust aci write-atomic-no-symlinks <path>")?;
-            let mut content = String::new();
-            io::stdin()
-                .read_to_string(&mut content)
-                .map_err(|error| format!("Failed to read stdin: {error}"))?;
+            let content = read_rust_command_input_string()?;
             write_text_file_atomically_no_symlinks(&cwd, PathBuf::from(path), &content)
                 .map_err(|error| error.to_string())?;
             println!("Wrote {}", path.to_string_lossy());
@@ -5296,6 +5410,7 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::ffi::OsString;
+    use std::io::Cursor;
     use std::sync::{Mutex, MutexGuard};
 
     static QUEUE_TEST_WORK_CWD_LOCK: Mutex<()> = Mutex::new(());
@@ -5360,6 +5475,110 @@ mod tests {
             find_repo_root_from(&root.join("rust/unclecode/src")),
             Some(root.to_path_buf())
         );
+    }
+
+    #[test]
+    fn rust_command_input_uses_the_private_file_instead_of_stdin() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-command-input-{}-regular",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create command input test directory");
+        let input_path = root.join("input");
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&input_path)
+            .expect("create private input file");
+        file.write_all(b"file payload")
+            .expect("write private input");
+        drop(file);
+
+        let input = read_rust_command_input_bytes_from(
+            Some(input_path.as_os_str()),
+            Cursor::new(b"stdin payload"),
+        )
+        .expect("read private command input");
+
+        assert_eq!(input, b"file payload");
+        fs::remove_dir_all(root).expect("clean command input test directory");
+    }
+
+    #[test]
+    fn rust_command_input_keeps_bounded_stdin_compatibility() {
+        let input = read_rust_command_input_bytes_from(None, Cursor::new(b"stdin payload"))
+            .expect("read stdin fallback");
+
+        assert_eq!(input, b"stdin payload");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_command_input_rejects_symlink_files() {
+        use std::os::unix::fs::{symlink, OpenOptionsExt};
+
+        let root = env::temp_dir().join(format!(
+            "unclecode-command-input-{}-symlink",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create symlink input test directory");
+        let target_path = root.join("target");
+        let mut target = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&target_path)
+            .expect("create symlink target");
+        target.write_all(b"secret").expect("write symlink target");
+        drop(target);
+        let input_path = root.join("input");
+        symlink(&target_path, &input_path).expect("create input symlink");
+
+        let error = read_rust_command_input_bytes_from(
+            Some(input_path.as_os_str()),
+            Cursor::new(Vec::<u8>::new()),
+        )
+        .expect_err("symlink input must fail closed");
+
+        assert!(error.contains("regular, non-symlink file"), "{error}");
+        fs::remove_dir_all(root).expect("clean symlink input test directory");
+    }
+
+    #[test]
+    fn rust_command_input_rejects_oversized_files() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-command-input-{}-oversized",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create oversized input test directory");
+        let input_path = root.join("input");
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(&input_path)
+            .expect("create oversized input file");
+        file.set_len((MAX_RUST_COMMAND_INPUT_BYTES + 1) as u64)
+            .expect("size oversized input");
+        drop(file);
+
+        let error = read_rust_command_input_bytes_from(
+            Some(input_path.as_os_str()),
+            Cursor::new(Vec::<u8>::new()),
+        )
+        .expect_err("oversized input must fail closed");
+
+        assert!(error.contains("exceeds the 8388608-byte limit"), "{error}");
+        fs::remove_dir_all(root).expect("clean oversized input test directory");
     }
 
     #[test]

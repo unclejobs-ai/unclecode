@@ -28,7 +28,7 @@
     "rust:test": "cargo test --workspace",
     "rust:build": "cargo build --workspace",
     "build": "node -e \"require('node:fs').rmSync('dist-work', { recursive: true, force: true })\" && tsc -b tsconfig.json && tsc -p tsconfig.work.json",
-    "test:context-broker": "node --disable-warning=ExperimentalWarning --conditions=source --import tsx --test tests/context-broker/*.test.mjs",
+    "test:context-broker": "node --disable-warning=ExperimentalWarning --conditions=source --import tsx --test --test-concurrency=1 tests/context-broker/*.test.mjs",
     "test:agentops-db": "node --disable-warning=ExperimentalWarning --conditions=source --import tsx --test tests/agentops-db/*.test.mjs",
     "test:session-store": "node --disable-warning=ExperimentalWarning --conditions=source --import tsx --test tests/session-store/*.test.mjs",
     "test:memory-bus": "node --disable-warning=ExperimentalWarning --conditions=source --import tsx --test tests/memory-bus/*.test.mjs",
