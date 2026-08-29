@@ -149,6 +149,7 @@ function makeHost(overrides = {}) {
   const records = [];
   const candidateSnapshots = [...(overrides.candidateSnapshots ?? [candidateSnapshot()])];
   const protectedSnapshots = [...(overrides.protectedSnapshots ?? [protectedSnapshot()])];
+  let lifecycleLockTail = Promise.resolve();
   const state = {
     calls,
     records,
@@ -156,16 +157,45 @@ function makeHost(overrides = {}) {
     creatorCount: 0,
     evaluatorCount: 0,
     cleanupCount: 0,
+    lifecycleLockCount: 0,
+    lifecycleLockDepth: 0,
   };
   const host = {
     state,
+    ...(overrides.withLifecycleLock === true ? {
+      async withLifecycleLock(input, operation) {
+        state.lifecycleLockCount += 1;
+        state.lifecycleLockInputs ??= [];
+        state.lifecycleLockInputs.push(input);
+        const predecessor = lifecycleLockTail;
+        let release;
+        lifecycleLockTail = new Promise((resolve) => { release = resolve; });
+        await predecessor;
+        state.lifecycleLockDepth = 1;
+        try {
+          return await operation();
+        } finally {
+          state.lifecycleLockDepth = 0;
+          release();
+        }
+      },
+    } : {}),
     async loadRecord({ runId }) {
       calls.push(`load:${runId}`);
       return records.find((entry) => entry.result.projection.runId === runId);
     },
-    async verifyRecordedCandidate() {
+    async verifyRecordedCandidate(input) {
       calls.push("verify-recorded");
-      return overrides.recordedVerificationFailures ?? [];
+      assert.equal(
+        overrides.withLifecycleLock === true ? state.lifecycleLockDepth : 0,
+        overrides.withLifecycleLock === true ? 1 : 0,
+        "recorded candidate verification must run under the lifecycle lock when configured",
+      );
+      state.recordedVerificationInputs ??= [];
+      state.recordedVerificationInputs.push(input);
+      return typeof overrides.recordedVerificationFailures === "function"
+        ? await overrides.recordedVerificationFailures()
+        : (overrides.recordedVerificationFailures ?? []);
     },
     async resolveBase() {
       calls.push("resolve-base");
@@ -866,6 +896,89 @@ test("duplicate and crash-resume invocation reuse one recorded candidate without
   assert.deepEqual(resumed, first);
   assert.equal(host.state.prepareCount, 1, "recorded crash-resume state must not create another worktree");
   assert.equal(lifecycleDispatch.count, 1, "recorded crash-resume state must not redispatch validation");
+});
+
+test("post-hook freshness idempotently revalidates a disk-resumed retained candidate under the lifecycle lock", async () => {
+  let retainedCandidateMutated = false;
+  const host = makeHost({
+    withLifecycleLock: true,
+    recordedVerificationFailures: () => retainedCandidateMutated
+      ? ["EVOLUTION_CANDIDATE_STALE"]
+      : [],
+  });
+  const lifecycleDispatch = makeDispatch();
+  const input = runInput(lifecycleDispatch.dispatch);
+  const firstService = new CreatorEvolutionService({
+    config: config(),
+    host,
+    now: () => new Date(NOW),
+  });
+  const first = await firstService.run(input);
+  assert.equal(first.status, "pr-ready");
+
+  const resumedService = new CreatorEvolutionService({
+    config: config(),
+    host,
+    now: () => new Date(NOW),
+  });
+  const resumed = await resumedService.run(input);
+  assert.equal(resumed.status, "pr-ready");
+  assert.equal(lifecycleDispatch.count, 1, "disk resume must not redispatch proposal validation");
+  await assert.rejects(
+    resumedService.verifyFresh(structuredClone(resumed)),
+    /freshness verification context is unavailable/,
+    "a cloned or deserialized PR-ready result must not bypass its service-bound freshness context",
+  );
+
+  retainedCandidateMutated = true;
+  const [verified, concurrent] = await Promise.all([
+    resumedService.verifyFresh(resumed),
+    resumedService.verifyFresh(resumed),
+  ]);
+  const repeated = await resumedService.verifyFresh(resumed);
+
+  assert.equal(verified.status, "stale");
+  assert.equal(concurrent.status, "stale");
+  assert.equal(repeated.status, "stale");
+  assert.deepEqual(concurrent, verified, "queued verification must observe the authoritative stale terminal result");
+  assert.deepEqual(repeated, verified, "repeated verification must not resurrect the original PR-ready result");
+  assert.equal(verified.recorded, true);
+  assert.equal(verified.projection.stale, true);
+  assert.ok(verified.projection.failures.includes("EVOLUTION_CANDIDATE_STALE"));
+  assert.equal(verified.projection.cleanup.status, "completed");
+  assert.deepEqual(
+    verified.projection.cleanup.resources
+      .filter((resource) => resource.kind === "branch" || resource.kind === "worktree")
+      .map(({ kind, status }) => ({ kind, status })),
+    [
+      { kind: "branch", status: "removed" },
+      { kind: "worktree", status: "removed" },
+    ],
+  );
+  assert.equal(host.state.records.length, 1);
+  assert.equal(host.state.records[0].result.status, "stale", "stale invalidation must replace the persisted record");
+  assert.equal(host.state.cleanupCount, 2, "retained branch and worktree must be cleaned after invalidation");
+  assert.equal(lifecycleDispatch.count, 1, "post-hook invalidation must not redispatch creator or quality hooks");
+  assert.equal(host.state.prepareCount, 1, "post-hook invalidation must not create another candidate");
+  assert.equal(host.state.lifecycleLockDepth, 0);
+  assert.equal(host.state.lifecycleLockCount, 4, "initial run, resume, and both queued checks take the lifecycle lock");
+  assert.deepEqual(
+    host.state.lifecycleLockInputs.map(({ runId, workspaceRoot, signal }) => ({ runId, workspaceRoot, signal })),
+    Array.from({ length: 4 }, () => ({
+      runId: input.runId,
+      workspaceRoot: input.workspaceRoot,
+      signal: input.signal,
+    })),
+  );
+  assert.equal(host.state.recordedVerificationInputs.length, 2, "resume and one post-hook check revalidate the record");
+  for (const verification of host.state.recordedVerificationInputs) {
+    assert.equal(verification.workspaceRoot, input.workspaceRoot);
+    assert.deepEqual(verification.mutableTargets, input.mutableTargets);
+    assert.equal(verification.evaluator.id, config().evaluator.id);
+    assert.equal(verification.suite.id, config().suite.id);
+    assert.equal(verification.evaluatorEnvironmentHash, config().evaluatorEnvironmentHash);
+    assert.equal(verification.attestorId, config().attestorId);
+  }
 });
 
 test("a changed expected evaluator environment stales a recorded PR-ready proposal", async () => {

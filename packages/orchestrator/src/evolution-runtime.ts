@@ -322,6 +322,20 @@ type TerminalInput = {
   readonly context?: EvolutionValidationContext;
 };
 
+type EvolutionVerificationInput = Pick<
+  CreatorEvolutionRunInput,
+  "runId" | "workspaceRoot" | "mutableTargets" | "signal"
+>;
+
+function verificationInput(input: CreatorEvolutionRunInput): EvolutionVerificationInput {
+  return Object.freeze({
+    runId: input.runId,
+    workspaceRoot: input.workspaceRoot,
+    mutableTargets: Object.freeze([...input.mutableTargets]),
+    signal: input.signal,
+  });
+}
+
 /**
  * UncleCode-owned creator lifecycle. Every filesystem, process, evaluator,
  * attestation, persistence, and cleanup side effect is an explicit host
@@ -333,6 +347,8 @@ export class CreatorEvolutionService {
   private readonly now: () => Date;
   private readonly inFlight = new Map<string, Promise<CreatorEvolutionResult>>();
   private readonly retained = new Map<string, EvolutionExecution>();
+  private readonly verificationInputs = new WeakMap<CreatorEvolutionResult, EvolutionVerificationInput>();
+  private readonly freshnessOutcomes = new WeakMap<CreatorEvolutionResult, CreatorEvolutionResult>();
 
   constructor(input: {
     readonly config: CreatorEvolutionConfig;
@@ -361,20 +377,52 @@ export class CreatorEvolutionService {
 
   /** Revalidates retained candidate evidence after downstream completion hooks. */
   verifyFresh(result: CreatorEvolutionResult): Promise<CreatorEvolutionResult> {
+    const settled = this.freshnessOutcomes.get(result);
+    if (settled) return Promise.resolve(settled);
     const execution = this.retained.get(result.projection.id);
+    const input = execution?.input ?? this.verificationInputs.get(result);
+    if (result.recorded && result.status === "pr-ready" && !input) {
+      return Promise.reject(new Error("Creator evolution freshness verification context is unavailable."));
+    }
     const operation = (): Promise<CreatorEvolutionResult> => this.verifyFreshLocked(result);
-    return execution && this.host.withLifecycleLock
+    return input && this.host.withLifecycleLock
       ? this.host.withLifecycleLock({
-        runId: execution.input.runId,
-        workspaceRoot: execution.input.workspaceRoot,
-        signal: execution.input.signal,
+        runId: input.runId,
+        workspaceRoot: input.workspaceRoot,
+        signal: input.signal,
         }, operation)
       : operation();
   }
 
   private async verifyFreshLocked(result: CreatorEvolutionResult): Promise<CreatorEvolutionResult> {
+    const settled = this.freshnessOutcomes.get(result);
+    if (settled) return settled;
     if (!result.recorded || result.status !== "pr-ready") return result;
     const execution = this.retained.get(result.projection.id);
+    const retainedInput = execution?.input ?? this.verificationInputs.get(result);
+    if (!execution && retainedInput) {
+      let failures: readonly string[];
+      try {
+        failures = await this.host.verifyRecordedCandidate({
+          result,
+          workspaceRoot: retainedInput.workspaceRoot,
+          mutableTargets: retainedInput.mutableTargets,
+          evaluator: this.config.evaluator,
+          policyAssets: this.config.policyAssets,
+          suite: this.config.suite,
+          evaluatorEnvironmentHash: this.config.evaluatorEnvironmentHash,
+          attestorId: this.config.attestorId,
+          maxAttestationAgeMs: this.config.maxAttestationAgeMs,
+        });
+      } catch {
+        failures = ["EVOLUTION_CANDIDATE_STALE"];
+      }
+      if (failures.length === 0) return result;
+      const invalidated = await this.invalidateRecorded(retainedInput, result, [...new Set(failures)]);
+      this.freshnessOutcomes.set(result, invalidated);
+      this.verificationInputs.delete(result);
+      return invalidated;
+    }
     if (
       !execution?.base
       || !execution.candidate
@@ -383,7 +431,7 @@ export class CreatorEvolutionService {
       || !result.proposal
       || !result.context
     ) {
-      return result;
+      throw new Error("Creator evolution freshness verification context is incomplete.");
     }
 
     const failures: string[] = [];
@@ -435,14 +483,20 @@ export class CreatorEvolutionService {
     } catch {
       failures.push("EVOLUTION_CANDIDATE_STALE");
     }
-    if (failures.length === 0) return result;
-    return this.finish(execution, {
+    if (failures.length === 0) {
+      this.retained.delete(result.projection.id);
+      this.verificationInputs.set(result, verificationInput(execution.input));
+      return result;
+    }
+    const invalidated = await this.finish(execution, {
       status: "stale",
       failures: [...new Set(failures)],
       summary: "Candidate or protected host evidence changed after completion validation.",
       proposal: result.proposal,
       context: result.context,
     });
+    this.freshnessOutcomes.set(result, invalidated);
+    return invalidated;
   }
 
   private execute(input: CreatorEvolutionRunInput): Promise<CreatorEvolutionResult> {
@@ -482,9 +536,9 @@ export class CreatorEvolutionService {
         hostFailures = ["EVOLUTION_CANDIDATE_STALE"];
       }
       const failures = [...new Set([...identityFailures, ...hostFailures])];
-      return failures.length === 0
-        ? loaded.result
-        : this.invalidateRecorded(input, loaded.result, failures);
+      if (failures.length !== 0) return this.invalidateRecorded(input, loaded.result, failures);
+      this.verificationInputs.set(loaded.result, verificationInput(input));
+      return loaded.result;
     }
 
     const createdAt = canonicalNow(this.now);
@@ -959,7 +1013,7 @@ export class CreatorEvolutionService {
   }
 
   private async invalidateRecorded(
-    input: CreatorEvolutionRunInput,
+    input: EvolutionVerificationInput,
     result: CreatorEvolutionResult,
     verificationFailures: readonly string[],
   ): Promise<CreatorEvolutionResult> {
