@@ -47,6 +47,7 @@ export const EXECUTION_TRACE_EVENT_TYPES = [
   "quality.pivot_requested",
   "quality.completed",
   "evolution.proposed",
+  "plugin.diagnostic",
 ] as const;
 
 export type ExecutionTraceEventType = (typeof EXECUTION_TRACE_EVENT_TYPES)[number];
@@ -485,6 +486,27 @@ export type EvolutionProposedTraceEvent = {
   readonly startedAt: number;
 };
 
+/**
+ * Bounded, redacted projection of one external plugin invocation failure.
+ * The in-process Quality Engine is builtin and never emits this event.
+ */
+export type PluginDiagnosticTraceEvent = {
+  readonly type: "plugin.diagnostic";
+  readonly level: "high-signal";
+  readonly runId: string;
+  readonly source: "memory" | "workspace" | "cached";
+  readonly trustLane: "host-provided" | "workspace-trusted" | "cached-external";
+  readonly pluginId: string;
+  readonly pluginName: string;
+  readonly hookName: string;
+  readonly status: "error";
+  readonly errorName: string;
+  readonly errorMessage: string;
+  readonly exitStatus?: string | undefined;
+  readonly dedupeKey: string;
+  readonly startedAt: number;
+};
+
 export type ExecutionTraceEvent =
   | TurnStartedTraceEvent
   | ProviderRouteTraceEvent
@@ -515,4 +537,5 @@ export type ExecutionTraceEvent =
   | QualityRefineRequestedTraceEvent
   | QualityPivotRequestedTraceEvent
   | QualityCompletedTraceEvent
-  | EvolutionProposedTraceEvent;
+  | EvolutionProposedTraceEvent
+  | PluginDiagnosticTraceEvent;

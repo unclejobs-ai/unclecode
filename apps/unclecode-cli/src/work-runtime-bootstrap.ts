@@ -218,6 +218,7 @@ export type WorkCliBootstrapResult = {
   agent: StartReplAgent;
   prompt: string;
   options: StartReplOptions;
+  dispose?: (() => void | Promise<void>) | undefined;
 };
 
 async function runInlineCommand(input: {
@@ -894,6 +895,7 @@ export async function loadWorkCliBootstrap(
   return {
     agent,
     prompt: prompt ?? "",
+    dispose: () => pluginHost.dispose(),
     options: {
       provider: resolveRuntimeProvider(config.provider),
       model: config.model,

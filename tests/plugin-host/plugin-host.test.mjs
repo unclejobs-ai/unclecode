@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -66,6 +67,25 @@ test("PluginHost dispatches lifecycle events to registered hooks", async () => {
   assert.deepEqual(calls, ["before:write_file", "after:write_file:ok", "done:tr_x:accepted"]);
 });
 
+test("tool and file hook dispatch rejects a missing run scope instead of globally deduping as unscoped", async () => {
+  const diagnostics = [];
+  const host = new PluginHost({ onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) });
+  host.register("workspace-tools", {
+    toolExecuteBefore: () => { throw new Error("tool hook failed"); },
+    fileEdited: () => { throw new Error("file hook failed"); },
+  }, "workspace");
+
+  await assert.rejects(
+    () => host.dispatchToolExecuteBefore({ toolName: "write_file", input: {} }),
+    /runId/i,
+  );
+  await assert.rejects(
+    () => host.dispatchFileEdited({ path: "src/a.ts", sha256: "sha256:a" }),
+    /runId/i,
+  );
+  assert.deepEqual(diagnostics, [], "a scope contract error is not attributed to a plugin hook");
+});
+
 test("PluginHost.loadEntries instantiates plugin entries via context", async () => {
   const host = new PluginHost();
   const seen = [];
@@ -82,6 +102,100 @@ test("PluginHost.loadEntries instantiates plugin entries via context", async () 
   ]);
   assert.equal(seen.length, 1);
   assert.equal(host.list().length, 1);
+});
+
+test("same-source registration replacement disposes the previous hooks exactly once", async () => {
+  const host = new PluginHost();
+  const calls = [];
+  let disposed = 0;
+  await host.register("audit", {
+    runStarted: () => calls.push("old"),
+    dispose: () => { disposed += 1; },
+  });
+
+  await host.register("audit", {
+    runStarted: () => calls.push("new"),
+  });
+  await host.dispatchRunStarted({ runId: "run-replaced" });
+
+  assert.equal(disposed, 1);
+  assert.deepEqual(calls, ["new"]);
+  assert.deepEqual(host.list().map(({ name, source }) => ({ name, source })), [
+    { name: "audit", source: "memory" },
+  ]);
+});
+
+test("reloading entries removes the previous listener and unload is source-aware", async () => {
+  const host = new PluginHost();
+  const events = new EventEmitter();
+  const seen = [];
+  let generation = 0;
+  const entry = async () => {
+    const current = ++generation;
+    const listener = () => seen.push(current);
+    events.on("tick", listener);
+    return {
+      runStarted: () => seen.push(`run:${current}`),
+      dispose: () => events.off("tick", listener),
+    };
+  };
+
+  await host.loadEntries(process.cwd(), [{ name: "watcher", entry }]);
+  await host.loadEntries(process.cwd(), [{ name: "watcher", entry }]);
+
+  assert.equal(events.listenerCount("tick"), 1);
+  events.emit("tick");
+  await host.dispatchRunStarted({ runId: "run-reload" });
+  assert.deepEqual(seen, [2, "run:2"]);
+  assert.equal(await host.unload("watcher", "workspace"), false);
+  assert.equal(events.listenerCount("tick"), 1);
+  assert.equal(await host.unload("watcher", "memory"), true);
+  assert.equal(events.listenerCount("tick"), 0);
+  assert.deepEqual(host.list(), []);
+});
+
+test("workspace registration cannot replace the trusted SCC built-in identity", async () => {
+  const host = new PluginHost();
+  pluginHost.registerBuiltInSccQualityEngine(host, { workspaceRoot: process.cwd() });
+  const original = host.list()[0];
+
+  await assert.rejects(
+    () => host.register("scc-quality-engine", {
+      planCreated: () => ({ action: "proceed" }),
+    }, "workspace"),
+    /conflict|source|built-?in/i,
+  );
+
+  assert.equal(host.list().length, 1);
+  assert.equal(host.list()[0], original);
+  assert.equal(host.list()[0].source, "builtin");
+});
+
+test("dispose removes every hook and listener exactly once and remains idempotent", async () => {
+  const host = new PluginHost();
+  const events = new EventEmitter();
+  let disposed = 0;
+  const listener = () => {};
+  events.on("tick", listener);
+  await host.register("listener", {
+    runStarted: () => {},
+    dispose: async () => {
+      await Promise.resolve();
+      events.off("tick", listener);
+      disposed += 1;
+    },
+  });
+
+  await Promise.all([host.dispose(), host.dispose()]);
+  await host.dispose();
+
+  assert.equal(disposed, 1);
+  assert.equal(events.listenerCount("tick"), 0);
+  assert.deepEqual(host.list(), []);
+  await assert.rejects(
+    () => host.register("late", {}),
+    /disposed/i,
+  );
 });
 
 test("decision hooks aggregate deterministically and a block cannot be overridden", async () => {
@@ -267,4 +381,147 @@ test("loadFromDisk respects requireTrust:false escape hatch", async () => {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("loadFromDisk reloads a workspace plugin without duplicate hooks or retained cleanup", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "uc-plugin-reload-"));
+  const env = {};
+  try {
+    const pluginsDir = join(workspace, ".unclecode", "plugins");
+    mkdirSync(pluginsDir, { recursive: true });
+    writeFileSync(
+      join(pluginsDir, "reloadable.mjs"),
+      `export default ({ env }) => {
+        const generation = Number(env.PLUGIN_GENERATION ?? "0") + 1;
+        env.PLUGIN_GENERATION = String(generation);
+        return {
+          runStarted: () => { env.PLUGIN_CALLS = String(generation); },
+          dispose: () => { env.PLUGIN_DISPOSED = String(Number(env.PLUGIN_DISPOSED ?? "0") + 1); },
+        };
+      };`,
+    );
+    const host = new PluginHost();
+
+    assert.deepEqual(
+      [...await host.loadFromDisk(workspace, { env, requireTrust: false })],
+      ["reloadable"],
+    );
+    assert.deepEqual(
+      [...await host.loadFromDisk(workspace, { env, requireTrust: false })],
+      ["reloadable"],
+    );
+    assert.equal(env.PLUGIN_DISPOSED, "1");
+    assert.equal(host.list().length, 1);
+
+    await host.dispatchRunStarted({ runId: "run-disk-reload" });
+    assert.equal(env.PLUGIN_CALLS, "2");
+    rmSync(join(pluginsDir, "reloadable.mjs"));
+    assert.deepEqual(
+      [...await host.loadFromDisk(workspace, { env, requireTrust: false })],
+      [],
+    );
+    assert.equal(env.PLUGIN_DISPOSED, "2");
+    assert.deepEqual(host.list(), []);
+    await host.dispose();
+    assert.equal(env.PLUGIN_DISPOSED, "2", "host disposal must not re-clean an unloaded plugin");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("external hook failures emit one source-labelled diagnostic per run and preserve the cause", async () => {
+  const diagnostics = [];
+  const host = new PluginHost({ onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) });
+  const failure = new Error("Stop hook failed: zod/v3");
+  host.register("claude-mem", {
+    runClassified: () => {
+      throw failure;
+    },
+  }, "cached");
+  pluginHost.registerBuiltInSccQualityEngine(host, { workspaceRoot: process.cwd() });
+
+  const event = {
+    runId: "run-plugin-diagnostic",
+    prompt: "review this",
+    complexity: "complex",
+    risk: "high",
+    creatorIntent: false,
+    proposedProfile: "deep",
+  };
+  await assert.rejects(() => host.dispatchRunClassified(event), (error) => error === failure);
+  await assert.rejects(() => host.dispatchRunClassified(event), (error) => error === failure);
+
+  assert.deepEqual(diagnostics, [{
+    runId: "run-plugin-diagnostic",
+    source: "cached",
+    trustLane: "cached-external",
+    pluginId: "claude-mem",
+    pluginName: "claude-mem",
+    hookName: "runClassified",
+    status: "error",
+    errorName: "Error",
+    errorMessage: "Stop hook failed: zod/v3",
+    exitStatus: undefined,
+    dedupeKey: "cached:claude-mem:runClassified:Error:Stop hook failed: zod/v3",
+  }]);
+  assert.equal(
+    diagnostics.some((diagnostic) => diagnostic.pluginName === "scc-quality-engine"),
+    false,
+    "an external adapter failure must never be attributed to the built-in Quality Engine",
+  );
+});
+
+test("workspace context and decision failures are typed independently for each run", async () => {
+  const diagnostics = [];
+  const host = new PluginHost({ onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) });
+  host.register("workspace-review", {
+    contextContribute: () => {
+      throw new Error("context unavailable");
+    },
+    beforeNodeDispatch: () => {
+      throw Object.assign(new Error("review process failed"), { exitStatus: 2 });
+    },
+  }, "workspace");
+
+  await assert.rejects(() => host.dispatchContextContribute({
+    runId: "run-a",
+    graphId: "quality-graph",
+    profile: "standard",
+    stage: "work",
+  }), /context unavailable/);
+  const graph = qualityGraph();
+  await assert.rejects(() => host.dispatchBeforeNodeDispatch({
+    runId: "run-b",
+    graph,
+    node: graph.nodes[0],
+  }), /review process failed/);
+
+  assert.deepEqual(
+    diagnostics.map(({ runId, source, trustLane, hookName, exitStatus }) => ({
+      runId, source, trustLane, hookName, exitStatus,
+    })),
+    [
+      { runId: "run-a", source: "workspace", trustLane: "workspace-trusted", hookName: "contextContribute", exitStatus: undefined },
+      { runId: "run-b", source: "workspace", trustLane: "workspace-trusted", hookName: "beforeNodeDispatch", exitStatus: "2" },
+    ],
+  );
+});
+
+test("a failing diagnostic sink cannot replace the external hook's original cause", async () => {
+  const hookFailure = new Error("Stop hook failed: zod/v3");
+  const host = new PluginHost({
+    onDiagnostic: () => {
+      throw new Error("diagnostic transport unavailable");
+    },
+  });
+  host.register("workspace-stop-adapter", {
+    runCompleted: () => {
+      throw hookFailure;
+    },
+  }, "workspace");
+
+  await assert.rejects(
+    () => host.dispatchRunCompleted({ runId: "run-sink-failure", status: "failed" }),
+    (error) => error === hookFailure,
+  );
 });

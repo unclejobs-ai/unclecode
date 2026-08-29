@@ -59,6 +59,7 @@ const HookKeysSchema = z.object({
   beforeRunComplete: z.function().optional(),
   contextContribute: z.function().optional(),
   evolutionProposed: z.function().optional(),
+  dispose: z.function().optional(),
 });
 
 export type PluginDecisionAction = "proceed" | "refine" | "pivot" | "block" | "unproven";
@@ -166,9 +167,9 @@ export const MAX_CONTEXT_CONTRIBUTION_CHARS = 2_000;
 export const MAX_CONTEXT_CONTRIBUTION_TOTAL_CHARS = 6_000;
 
 export type PluginHooks = {
-  toolExecuteBefore?: (event: { toolName: string; input: Record<string, unknown> }) => Promise<void> | void;
-  toolExecuteAfter?: (event: { toolName: string; output: string; isError: boolean }) => Promise<void> | void;
-  fileEdited?: (event: { path: string; sha256: string }) => Promise<void> | void;
+  toolExecuteBefore?: (event: { runId: string; toolName: string; input: Record<string, unknown> }) => Promise<void> | void;
+  toolExecuteAfter?: (event: { runId: string; toolName: string; output: string; isError: boolean }) => Promise<void> | void;
+  fileEdited?: (event: { runId: string; path: string; sha256: string }) => Promise<void> | void;
   sessionCompacted?: (event: { sessionId: string; messagesBefore: number; messagesAfter: number }) => Promise<void> | void;
   runStarted?: (event: { runId: string; persona?: string }) => Promise<void> | void;
   runCompleted?: (event: { runId: string; status: string }) => Promise<void> | void;
@@ -179,6 +180,7 @@ export type PluginHooks = {
   beforeRunComplete?: (event: PluginBeforeRunCompleteEvent) => Promise<PluginLifecycleDecision | void> | PluginLifecycleDecision | void;
   contextContribute?: (event: PluginContextContributeEvent) => Promise<PluginContextContribution | void> | PluginContextContribution | void;
   evolutionProposed?: (event: PluginEvolutionProposedEvent) => Promise<PluginLifecycleDecision | void> | PluginLifecycleDecision | void;
+  dispose?: () => Promise<void> | void;
 };
 
 export type PluginContext = {
@@ -190,28 +192,121 @@ export type PluginContext = {
 export type PluginRegistration = {
   readonly name: string;
   readonly hooks: PluginHooks;
-  readonly source: "memory" | "workspace" | "builtin";
+  readonly source: PluginSource;
+};
+
+export type PluginSource = "memory" | "workspace" | "cached" | "builtin";
+export type PluginTrustLane =
+  | "host-provided"
+  | "workspace-trusted"
+  | "cached-external"
+  | "builtin-trusted";
+export type PluginHookName = Exclude<keyof PluginHooks, "dispose">;
+
+export type PluginInvocationDiagnostic = {
+  readonly runId: string;
+  readonly source: PluginSource;
+  readonly trustLane: PluginTrustLane;
+  readonly pluginId: string;
+  readonly pluginName: string;
+  readonly hookName: PluginHookName;
+  readonly status: "error";
+  readonly errorName: string;
+  readonly errorMessage: string;
+  readonly exitStatus: string | undefined;
+  readonly dedupeKey: string;
+};
+
+export type PluginHostOptions = {
+  readonly onDiagnostic?: (diagnostic: PluginInvocationDiagnostic) => void;
 };
 
 export type PluginEntry = (ctx: PluginContext) => PluginHooks | Promise<PluginHooks>;
 
 export class PluginHost {
   private readonly registrations: PluginRegistration[] = [];
+  private readonly diagnosticKeysByRun = new Map<string, Set<string>>();
+  private readonly pendingCleanupByName = new Map<string, Promise<void>>();
+  private readonly onDiagnostic: ((diagnostic: PluginInvocationDiagnostic) => void) | undefined;
+  private disposed = false;
+  private disposePromise: Promise<void> | undefined;
 
-  register(name: string, hooks: PluginHooks, source: PluginRegistration["source"] = "memory"): void {
-    HookKeysSchema.parse(hooks);
-    this.registrations.push({ name, hooks, source });
+  constructor(options: PluginHostOptions = {}) {
+    this.onDiagnostic = options.onDiagnostic;
   }
 
-  registerBuiltIn(name: string, hooks: PluginHooks): void {
-    this.register(name, hooks, "builtin");
+  async register(
+    name: string,
+    hooks: PluginHooks,
+    source: PluginRegistration["source"] = "memory",
+  ): Promise<void> {
+    this.assertActive();
+    HookKeysSchema.parse(hooks);
+    const pendingCleanup = this.pendingCleanupByName.get(name);
+    if (pendingCleanup) {
+      await pendingCleanup;
+      this.assertActive();
+    }
+
+    const conflicting = this.registrations.find(
+      (registration) => registration.name === name && registration.source !== source,
+    );
+    if (conflicting) {
+      throw new PluginRegistrationConflictError(name, conflicting.source, source);
+    }
+
+    const existingIndex = this.registrations.findIndex(
+      (registration) => registration.name === name && registration.source === source,
+    );
+    if (existingIndex === -1) {
+      this.registrations.push({ name, hooks, source });
+      return;
+    }
+
+    const existing = this.registrations[existingIndex];
+    if (!existing) return;
+    this.registrations.splice(existingIndex, 1);
+    this.diagnosticKeysByRun.clear();
+    const cleanupResult = existing.hooks.dispose?.();
+    if (!isPromiseLike(cleanupResult)) {
+      this.registrations.splice(
+        Math.min(existingIndex, this.registrations.length),
+        0,
+        { name, hooks, source },
+      );
+      return;
+    }
+    const cleanup = Promise.resolve(cleanupResult);
+    this.pendingCleanupByName.set(name, cleanup);
+    try {
+      await cleanup;
+    } finally {
+      if (this.pendingCleanupByName.get(name) === cleanup) {
+        this.pendingCleanupByName.delete(name);
+      }
+    }
+    this.assertActive();
+    this.registrations.splice(
+      Math.min(existingIndex, this.registrations.length),
+      0,
+      { name, hooks, source },
+    );
+  }
+
+  registerBuiltIn(name: string, hooks: PluginHooks): Promise<void> {
+    return this.register(name, hooks, "builtin");
   }
 
   async loadEntries(workspaceRoot: string, entries: ReadonlyArray<{ name: string; entry: PluginEntry }>, env: NodeJS.ProcessEnv = process.env): Promise<void> {
     for (const { name, entry } of entries) {
       const log = (message: string) => process.stderr.write(`[plugin:${name}] ${message}\n`);
       const hooks = await entry({ workspaceRoot, env, log });
-      this.register(name, hooks, "memory");
+      try {
+        await this.register(name, hooks, "memory");
+      } catch (error) {
+        await hooks.dispose?.();
+        throw error;
+      }
     }
   }
 
@@ -225,11 +320,15 @@ export class PluginHost {
   ): Promise<ReadonlyArray<string>> {
     const requireTrust = options.requireTrust ?? true;
     const dir = resolve(workspaceRoot, ".unclecode", "plugins");
-    if (!existsSync(dir)) return [];
-    const files = readdirSync(dir).filter(
-      (name) => name.endsWith(".ts") || name.endsWith(".mjs") || name.endsWith(".js"),
-    );
-    if (files.length === 0) return [];
+    const files = existsSync(dir)
+      ? readdirSync(dir)
+          .filter((name) => name.endsWith(".ts") || name.endsWith(".mjs") || name.endsWith(".js"))
+          .sort()
+      : [];
+    if (files.length === 0) {
+      await this.unloadMissing("workspace", new Set());
+      return [];
+    }
     if (requireTrust && !isWorkspaceTrusted(workspaceRoot, options.homeDir)) {
       throw new PluginTrustError(resolve(workspaceRoot));
     }
@@ -246,9 +345,15 @@ export class PluginHost {
       if (typeof entry !== "function") continue;
       const log = (message: string) => process.stderr.write(`[plugin:${name}] ${message}\n`);
       const hooks = await entry({ workspaceRoot, env, log });
-      this.register(name, hooks, "workspace");
+      try {
+        await this.register(name, hooks, "workspace");
+      } catch (error) {
+        await hooks.dispose?.();
+        throw error;
+      }
       loaded.push(name);
     }
+    await this.unloadMissing("workspace", new Set(loaded));
     return loaded;
   }
 
@@ -256,48 +361,87 @@ export class PluginHost {
     return this.registrations.slice();
   }
 
-  async dispatchToolExecuteBefore(event: { toolName: string; input: Record<string, unknown> }): Promise<void> {
+  async unload(name: string, source?: PluginSource): Promise<boolean> {
+    if (this.disposed) return false;
+    const pendingCleanup = this.pendingCleanupByName.get(name);
+    if (pendingCleanup) await pendingCleanup;
+    if (this.disposed) return false;
+
+    const removed = this.registrations.filter(
+      (registration) => registration.name === name && (source === undefined || registration.source === source),
+    );
+    if (removed.length === 0) return false;
+    const removedSet = new Set(removed);
+    for (let index = this.registrations.length - 1; index >= 0; index -= 1) {
+      const registration = this.registrations[index];
+      if (registration && removedSet.has(registration)) this.registrations.splice(index, 1);
+    }
+    this.diagnosticKeysByRun.clear();
+    await disposeRegistrations(removed);
+    return true;
+  }
+
+  dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    this.disposed = true;
+    const registrations = this.registrations.splice(0);
+    const pendingCleanups = [...this.pendingCleanupByName.values()];
+    this.diagnosticKeysByRun.clear();
+    this.disposePromise = (async () => {
+      const pendingResults = await Promise.allSettled(pendingCleanups);
+      const cleanupResults = await Promise.allSettled(
+        registrations.map((registration) => this.disposeRegistration(registration)),
+      );
+      throwCleanupFailures([...pendingResults, ...cleanupResults]);
+    })();
+    return this.disposePromise;
+  }
+
+  async dispatchToolExecuteBefore(event: { runId: string; toolName: string; input: Record<string, unknown> }): Promise<void> {
+    requirePluginInvocationRunId(event);
     for (const reg of this.registrations) {
-      await reg.hooks.toolExecuteBefore?.(event);
+      await this.invokeExternalHook(reg, "toolExecuteBefore", event, () => reg.hooks.toolExecuteBefore?.(event));
     }
   }
 
-  async dispatchToolExecuteAfter(event: { toolName: string; output: string; isError: boolean }): Promise<void> {
+  async dispatchToolExecuteAfter(event: { runId: string; toolName: string; output: string; isError: boolean }): Promise<void> {
+    requirePluginInvocationRunId(event);
     for (const reg of this.registrations) {
-      await reg.hooks.toolExecuteAfter?.(event);
+      await this.invokeExternalHook(reg, "toolExecuteAfter", event, () => reg.hooks.toolExecuteAfter?.(event));
     }
   }
 
-  async dispatchFileEdited(event: { path: string; sha256: string }): Promise<void> {
+  async dispatchFileEdited(event: { runId: string; path: string; sha256: string }): Promise<void> {
+    requirePluginInvocationRunId(event);
     for (const reg of this.registrations) {
-      await reg.hooks.fileEdited?.(event);
+      await this.invokeExternalHook(reg, "fileEdited", event, () => reg.hooks.fileEdited?.(event));
     }
   }
 
   async dispatchSessionCompacted(event: { sessionId: string; messagesBefore: number; messagesAfter: number }): Promise<void> {
     for (const reg of this.registrations) {
-      await reg.hooks.sessionCompacted?.(event);
+      await this.invokeExternalHook(reg, "sessionCompacted", event, () => reg.hooks.sessionCompacted?.(event));
     }
   }
 
   async dispatchRunStarted(event: { runId: string; persona?: string }): Promise<void> {
     for (const reg of this.registrations) {
-      await reg.hooks.runStarted?.(event);
+      await this.invokeExternalHook(reg, "runStarted", event, () => reg.hooks.runStarted?.(event));
     }
   }
 
   async dispatchRunCompleted(event: { runId: string; status: string }): Promise<void> {
     for (const reg of this.registrations) {
-      await reg.hooks.runCompleted?.(event);
+      await this.invokeExternalHook(reg, "runCompleted", event, () => reg.hooks.runCompleted?.(event));
     }
   }
 
   async dispatchRunClassified(event: PluginRunClassifiedEvent): Promise<PluginDecisionAggregate> {
-    return this.dispatchDecision(event, (hooks, value) => hooks.runClassified?.(value));
+    return this.dispatchDecision("runClassified", event, (hooks, value) => hooks.runClassified?.(value));
   }
 
   async dispatchPlanCreated(event: PluginPlanCreatedEvent): Promise<PluginDecisionAggregate> {
-    return this.dispatchDecision(event, (hooks, value) => hooks.planCreated?.(value));
+    return this.dispatchDecision("planCreated", event, (hooks, value) => hooks.planCreated?.(value));
   }
 
   async dispatchBeforeNodeDispatch(
@@ -308,7 +452,13 @@ export class PluginHost {
     let action: PluginDecisionAction = "proceed";
     let blocked = false;
     for (const reg of this.registrations) {
-      const raw = await reg.hooks.beforeNodeDispatch?.({ ...event, node });
+      const hookEvent = { ...event, node };
+      const raw = await this.invokeExternalHook(
+        reg,
+        "beforeNodeDispatch",
+        hookEvent,
+        () => reg.hooks.beforeNodeDispatch?.(hookEvent),
+      );
       if (raw === undefined) continue;
       const decision = parseDecision(raw, reg.name);
       decisions.push(attributeDecision(reg.name, decision));
@@ -322,15 +472,15 @@ export class PluginHost {
   }
 
   async dispatchAfterNodeCompleted(event: PluginAfterNodeCompletedEvent): Promise<PluginDecisionAggregate> {
-    return this.dispatchDecision(event, (hooks, value) => hooks.afterNodeCompleted?.(value));
+    return this.dispatchDecision("afterNodeCompleted", event, (hooks, value) => hooks.afterNodeCompleted?.(value));
   }
 
   async dispatchBeforeRunComplete(event: PluginBeforeRunCompleteEvent): Promise<PluginDecisionAggregate> {
-    return this.dispatchDecision(event, (hooks, value) => hooks.beforeRunComplete?.(value));
+    return this.dispatchDecision("beforeRunComplete", event, (hooks, value) => hooks.beforeRunComplete?.(value));
   }
 
   async dispatchEvolutionProposed(event: PluginEvolutionProposedEvent): Promise<PluginDecisionAggregate> {
-    return this.dispatchDecision(event, (hooks, value) => hooks.evolutionProposed?.(value));
+    return this.dispatchDecision("evolutionProposed", event, (hooks, value) => hooks.evolutionProposed?.(value));
   }
 
   async dispatchContextContribute(
@@ -340,7 +490,12 @@ export class PluginHost {
     let remaining = MAX_CONTEXT_CONTRIBUTION_TOTAL_CHARS;
     for (const reg of this.registrations) {
       if (remaining === 0) break;
-      const raw = await reg.hooks.contextContribute?.(event);
+      const raw = await this.invokeExternalHook(
+        reg,
+        "contextContribute",
+        event,
+        () => reg.hooks.contextContribute?.(event),
+      );
       if (raw === undefined) continue;
       if (!raw || typeof raw !== "object" || typeof raw.content !== "string") {
         throw new TypeError(`Plugin ${reg.name} returned an invalid context contribution.`);
@@ -357,6 +512,7 @@ export class PluginHost {
   }
 
   private async dispatchDecision<Event>(
+    hookName: PluginHookName,
     event: Event,
     invoke: (
       hooks: PluginHooks,
@@ -366,7 +522,12 @@ export class PluginHost {
     const decisions: AttributedPluginDecision[] = [];
     let action: PluginDecisionAction = "proceed";
     for (const reg of this.registrations) {
-      const raw = await invoke(reg.hooks, event);
+      const raw = await this.invokeExternalHook(
+        reg,
+        hookName,
+        event,
+        () => invoke(reg.hooks, event),
+      );
       if (raw === undefined) continue;
       const decision = parseDecision(raw, reg.name);
       decisions.push(attributeDecision(reg.name, decision));
@@ -374,6 +535,151 @@ export class PluginHost {
     }
     return aggregateDecision(action, decisions);
   }
+
+  private async invokeExternalHook<Result>(
+    registration: PluginRegistration,
+    hookName: PluginHookName,
+    event: unknown,
+    invoke: () => Result | Promise<Result>,
+  ): Promise<Result> {
+    try {
+      return await invoke();
+    } catch (cause) {
+      if (registration.source !== "builtin") {
+        this.emitInvocationDiagnostic(registration, hookName, event, cause);
+      }
+      throw cause;
+    }
+  }
+
+  private emitInvocationDiagnostic(
+    registration: PluginRegistration,
+    hookName: PluginHookName,
+    event: unknown,
+    cause: unknown,
+  ): void {
+    const runId = pluginInvocationRunId(event);
+    const errorName = cause instanceof Error && cause.name ? cause.name : "Error";
+    const errorMessage = cause instanceof Error ? cause.message : String(cause);
+    const dedupeKey = `${registration.source}:${registration.name}:${hookName}:${errorName}:${errorMessage}`;
+    let keys = this.diagnosticKeysByRun.get(runId);
+    if (!keys) {
+      if (this.diagnosticKeysByRun.size >= 256) {
+        const oldest = this.diagnosticKeysByRun.keys().next().value as string | undefined;
+        if (oldest !== undefined) this.diagnosticKeysByRun.delete(oldest);
+      }
+      keys = new Set<string>();
+      this.diagnosticKeysByRun.set(runId, keys);
+    }
+    if (keys.has(dedupeKey)) return;
+    keys.add(dedupeKey);
+    const exitStatus = pluginErrorExitStatus(cause);
+    try {
+      this.onDiagnostic?.({
+        runId,
+        source: registration.source,
+        trustLane: pluginTrustLane(registration.source),
+        pluginId: registration.name,
+        pluginName: registration.name,
+        hookName,
+        status: "error",
+        errorName,
+        errorMessage,
+        exitStatus,
+        dedupeKey,
+      });
+    } catch {
+      // Diagnostics are observational. A broken telemetry sink must not replace
+      // the plugin hook cause that determines the existing gate semantics.
+    }
+  }
+
+  private async disposeRegistration(registration: PluginRegistration): Promise<void> {
+    await registration.hooks.dispose?.();
+  }
+
+  private async unloadMissing(source: PluginSource, activeNames: ReadonlySet<string>): Promise<void> {
+    const staleNames = [...new Set(
+      this.registrations
+        .filter((registration) => registration.source === source && !activeNames.has(registration.name))
+        .map((registration) => registration.name),
+    )];
+    for (const name of staleNames) await this.unload(name, source);
+  }
+
+  private assertActive(): void {
+    if (this.disposed) throw new Error("PluginHost has been disposed.");
+  }
+}
+
+export class PluginRegistrationConflictError extends Error {
+  readonly pluginName: string;
+  readonly existingSource: PluginSource;
+  readonly incomingSource: PluginSource;
+
+  constructor(pluginName: string, existingSource: PluginSource, incomingSource: PluginSource) {
+    super(
+      `Plugin registration conflict for ${pluginName}: ${incomingSource} cannot replace ${existingSource}.`,
+    );
+    this.name = "PluginRegistrationConflictError";
+    this.pluginName = pluginName;
+    this.existingSource = existingSource;
+    this.incomingSource = incomingSource;
+  }
+}
+
+async function disposeRegistrations(registrations: readonly PluginRegistration[]): Promise<void> {
+  const results = await Promise.allSettled(
+    registrations.map(async (registration) => registration.hooks.dispose?.()),
+  );
+  throwCleanupFailures(results);
+}
+
+function throwCleanupFailures(results: readonly PromiseSettledResult<void>[]): void {
+  const failures = results
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => result.reason);
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) {
+    throw new AggregateError(failures, "Multiple plugin cleanup callbacks failed.");
+  }
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<void> {
+  return Boolean(value && typeof value === "object" && "then" in value
+    && typeof (value as { readonly then?: unknown }).then === "function");
+}
+
+function pluginInvocationRunId(event: unknown): string {
+  if (event && typeof event === "object") {
+    const record = event as { runId?: unknown; sessionId?: unknown };
+    if (typeof record.runId === "string" && record.runId.trim()) return record.runId;
+    if (typeof record.sessionId === "string" && record.sessionId.trim()) {
+      return `session:${record.sessionId}`;
+    }
+  }
+  return "unscoped";
+}
+
+function requirePluginInvocationRunId(event: { readonly runId?: unknown }): string {
+  if (typeof event.runId !== "string" || event.runId.trim().length === 0) {
+    throw new TypeError("Plugin tool/file hook dispatch requires a non-empty runId.");
+  }
+  return event.runId;
+}
+
+function pluginTrustLane(source: PluginSource): PluginTrustLane {
+  if (source === "builtin") return "builtin-trusted";
+  if (source === "workspace") return "workspace-trusted";
+  if (source === "cached") return "cached-external";
+  return "host-provided";
+}
+
+function pluginErrorExitStatus(cause: unknown): string | undefined {
+  if (!cause || typeof cause !== "object") return undefined;
+  const value = (cause as { exitStatus?: unknown; status?: unknown }).exitStatus
+    ?? (cause as { status?: unknown }).status;
+  return typeof value === "string" || typeof value === "number" ? String(value) : undefined;
 }
 
 const DECISION_PRECEDENCE: Readonly<Record<PluginDecisionAction, number>> = {

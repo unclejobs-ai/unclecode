@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   classifyQualityProfile,
@@ -11,6 +11,7 @@ import {
 import type {
   OrchestratorStepTraceEvent,
   EvolutionProposedTraceEvent,
+  PluginDiagnosticTraceEvent,
   QualityCompletedTraceEvent,
   QualityGateEvaluatedTraceEvent,
   QualityGateStatus,
@@ -28,6 +29,7 @@ import type {
 } from "@unclecode/contracts";
 import {
   type PluginDecisionAggregate,
+  type PluginInvocationDiagnostic,
   PluginHost,
 } from "@unclecode/plugin-host";
 
@@ -129,7 +131,8 @@ export type OrchestratedWorkAgentTraceEvent<TraceEvent extends { readonly type: 
   | QualityRefineRequestedTraceEvent
   | QualityPivotRequestedTraceEvent
   | QualityCompletedTraceEvent
-  | EvolutionProposedTraceEvent;
+  | EvolutionProposedTraceEvent
+  | PluginDiagnosticTraceEvent;
 
 export interface OrchestratedWorkTurnAgent<
   Attachment,
@@ -591,6 +594,14 @@ export class WorkAgent<
   setTraceListener(listener?: ((event: OrchestratedWorkAgentTraceEvent<TraceEvent>) => void) | undefined): void {
     this.traceListener = listener;
     this.directAgent.setTraceListener(listener ? (event) => this.emitTrace(event) : undefined);
+  }
+
+  /** Production plugin-host telemetry enters the same run trace as provider and quality events. */
+  recordPluginDiagnostic(diagnostic: PluginInvocationDiagnostic): void {
+    if (diagnostic.source === "builtin") return;
+    this.emitTrace(projectPluginInvocationDiagnostic(
+      diagnostic as PluginInvocationDiagnostic & { readonly source: "memory" | "workspace" | "cached" },
+    ));
   }
 
   updateRuntimeSettings(settings: { reasoning?: Reasoning | undefined; model?: string | undefined }): void {
@@ -2166,4 +2177,46 @@ export class WorkAgent<
       // Trace visibility must not break the work loop.
     }
   }
+}
+
+const PLUGIN_DIAGNOSTIC_FIELD_MAX_CHARS = 240;
+const PLUGIN_DIAGNOSTIC_SECRET_PATTERNS = [
+  /\bBearer\s+[^\s]+/gi,
+  /\bsk-[A-Za-z0-9_-]{8,}/g,
+  /\b(token|api[_-]?key|secret|password)=([^\s&]+)/gi,
+] as const;
+
+function boundedPluginDiagnosticField(value: string): string {
+  let projected = value.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ");
+  for (const pattern of PLUGIN_DIAGNOSTIC_SECRET_PATTERNS) {
+    projected = projected.replace(pattern, (match, key: string | undefined) =>
+      key ? `${key}=[redacted]` : "[redacted]");
+  }
+  const chars = Array.from(projected.trim());
+  return chars.length <= PLUGIN_DIAGNOSTIC_FIELD_MAX_CHARS
+    ? chars.join("")
+    : `${chars.slice(0, PLUGIN_DIAGNOSTIC_FIELD_MAX_CHARS - 1).join("")}…`;
+}
+
+function projectPluginInvocationDiagnostic(
+  diagnostic: PluginInvocationDiagnostic & { readonly source: "memory" | "workspace" | "cached" },
+): PluginDiagnosticTraceEvent {
+  return {
+    type: "plugin.diagnostic",
+    level: "high-signal",
+    runId: boundedPluginDiagnosticField(diagnostic.runId),
+    source: diagnostic.source,
+    trustLane: diagnostic.trustLane as "host-provided" | "workspace-trusted" | "cached-external",
+    pluginId: boundedPluginDiagnosticField(diagnostic.pluginId),
+    pluginName: boundedPluginDiagnosticField(diagnostic.pluginName),
+    hookName: boundedPluginDiagnosticField(diagnostic.hookName),
+    status: "error",
+    errorName: boundedPluginDiagnosticField(diagnostic.errorName),
+    errorMessage: boundedPluginDiagnosticField(diagnostic.errorMessage),
+    ...(diagnostic.exitStatus
+      ? { exitStatus: boundedPluginDiagnosticField(diagnostic.exitStatus) }
+      : {}),
+    dedupeKey: `sha256:${createHash("sha256").update(diagnostic.dedupeKey).digest("hex")}`,
+    startedAt: Date.now(),
+  };
 }
