@@ -8105,7 +8105,7 @@ test("WorkShellEngine keeps the console snapshot when a durable write fails and 
     false,
   );
 
-  engine.dispose();
+  await assert.rejects(engine.dispose(), /ENOSPC: no space left on device/u);
 });
 
 test("WorkShellEngine treats a cleared work turn as cancellation, not assistant output", async () => {
@@ -8553,6 +8553,61 @@ test("WorkShellEngine dispose observes a background console checkpoint already i
   await assert.rejects(disposal, /ENOSPC: background checkpoint failed/u);
 });
 
+test("WorkShellEngine dispose rejects an unsuperseded background failure that already settled", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-settled-failed-write");
+  await waitFor(() => writes.length === 2, "the timer-fired background checkpoint");
+  writes[1].reject(new Error("ENOSPC: settled background checkpoint failed"));
+  await delay(0);
+
+  const disposal = engine.dispose();
+  assert.equal(engine.dispose(), disposal, "dispose remains idempotent after failure settlement");
+  await assert.rejects(disposal, /ENOSPC: settled background checkpoint failed/u);
+});
+
+test("WorkShellEngine successful checkpoint supersedes a settled background failure", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-superseded-failed-write");
+  await waitFor(() => writes.length === 2, "the timer-fired background checkpoint");
+  writes[1].reject(new Error("ENOSPC: superseded background checkpoint failed"));
+  await delay(0);
+
+  const modePersist = engine.setMode("analyze");
+  await waitFor(() => writes.length === 3, "the successful superseding checkpoint");
+  writes[2].resolve();
+  await modePersist;
+
+  const disposal = engine.dispose();
+  assert.equal(engine.dispose(), disposal, "dispose remains idempotent after supersession");
+  await disposal;
+});
+
 test("WorkShellEngine shutdown flushes pending console timers before awaiting durable writes", async () => {
   const writes = [];
   const { engine, emitTrace } = createAgentConsoleEngine({
@@ -8604,6 +8659,32 @@ test("WorkShellEngine shutdown reports a failed final durable write", async () =
   writes[1].reject(new Error("ENOSPC: no space left on device"));
 
   await assert.rejects(shutdown, /ENOSPC: no space left on device/u);
+});
+
+test("WorkShellEngine shutdown reports an unsuperseded background failure that already settled", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-settled-shutdown-failure");
+  await waitFor(() => writes.length === 2, "the timer-fired background checkpoint");
+  writes[1].reject(new Error("ENOSPC: settled shutdown checkpoint failed"));
+  await delay(0);
+
+  await assert.rejects(
+    engine.shutdown({ timeoutMs: 1_000 }),
+    /ENOSPC: settled shutdown checkpoint failed/u,
+  );
 });
 
 // ---------------------------------------------------------------------------

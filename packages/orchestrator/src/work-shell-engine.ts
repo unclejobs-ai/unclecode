@@ -806,6 +806,11 @@ export class WorkShellEngine<
   private sessionSnapshotWriteDrain: Promise<void> | undefined;
   private sessionSnapshotWriteQueue: Promise<void> = Promise.resolve();
   private readonly sessionSnapshotWritesInFlight = new Set<Promise<void>>();
+  private sessionSnapshotWriteGeneration = 0;
+  private sessionSnapshotDurabilityFailure: {
+    generation: number;
+    error: Error;
+  } | undefined;
   private disposal: Promise<void> | undefined;
 
   constructor(input: WorkShellEngineInput<Attachment, Reasoning, TraceEvent>) {
@@ -1112,7 +1117,11 @@ export class WorkShellEngine<
     this.disposal = Promise.all([
       finalCheckpoint,
       ...this.sessionSnapshotWritesInFlight,
-    ]).then(() => undefined);
+    ]).then(() => {
+      if (this.sessionSnapshotDurabilityFailure) {
+        throw this.sessionSnapshotDurabilityFailure.error;
+      }
+    });
     return this.disposal;
   }
 
@@ -3245,10 +3254,31 @@ export class WorkShellEngine<
       resolveWrite = resolve;
       rejectWrite = reject;
     });
+    const generation = ++this.sessionSnapshotWriteGeneration;
     this.sessionSnapshotWritesInFlight.add(write);
     void write.then(
-      () => this.sessionSnapshotWritesInFlight.delete(write),
-      () => this.sessionSnapshotWritesInFlight.delete(write),
+      () => {
+        this.sessionSnapshotWritesInFlight.delete(write);
+        if (
+          this.sessionSnapshotDurabilityFailure
+          && this.sessionSnapshotDurabilityFailure.generation <= generation
+        ) {
+          this.sessionSnapshotDurabilityFailure = undefined;
+        }
+      },
+      (error: unknown) => {
+        this.sessionSnapshotWritesInFlight.delete(write);
+        if (
+          !this.sessionSnapshotDurabilityFailure
+          || this.sessionSnapshotDurabilityFailure.generation <= generation
+        ) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.sessionSnapshotDurabilityFailure = {
+            generation,
+            error: new Error(message.slice(0, 1_024) || "Durable session write failed."),
+          };
+        }
+      },
     );
     this.pendingSessionSnapshotWrite = {
       input,
