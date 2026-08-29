@@ -2668,8 +2668,8 @@ export class WorkShellEngine<
         const abortController = this.startActiveTurnAbortController();
         this.beginSubmitPreparation();
         const turnId = `turn-${this.sessionId}-${turnEpoch}`;
-        this.pauseController.beginTurn(turnId);
         try {
+          if (!await this.pauseController.beginTurn(turnId, abortController.signal)) return;
           const prepared = await this.prepareProviderContext(turnId, isCurrentTurn);
           if (prepared === "blocked") {
             this.pauseQueueAfterProofBlock(turnEpoch);
@@ -2777,8 +2777,8 @@ export class WorkShellEngine<
         const abortController = this.startActiveTurnAbortController();
         this.beginSubmitPreparation();
         const turnId = `turn-${this.sessionId}-${turnEpoch}`;
-        this.pauseController.beginTurn(turnId);
         try {
+          if (!await this.pauseController.beginTurn(turnId, abortController.signal)) return;
           const preflight = await resolveWorkShellChatPreflight({
             line: route.line,
             cwd: this.options.cwd,

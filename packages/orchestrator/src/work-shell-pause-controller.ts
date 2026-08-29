@@ -59,6 +59,23 @@ function abortError(message: string): Error {
   return error;
 }
 
+function waitForSettlementOrAbort(settlement: Promise<void>, signal?: AbortSignal): Promise<boolean> {
+  if (!signal) return settlement.then(() => true);
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (completed: boolean) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve(completed);
+    };
+    const onAbort = () => finish(false);
+    signal.addEventListener("abort", onAbort, { once: true });
+    void settlement.then(() => finish(true));
+  });
+}
+
 function operationBoundaries(operation: "provider.request" | "policy.evaluate" | "approval.wait" | "tool.dispatch"): {
   readonly before: WorkShellPauseBoundary;
   readonly after: WorkShellPauseBoundary;
@@ -82,6 +99,8 @@ export class CooperativePauseController {
   #pauseAcknowledgement: Deferred<WorkShellPauseReceipt> | undefined;
   #pauseTransition: PauseTransition | undefined;
   #nonInterruptibleOperations = 0;
+  #unsettledOperations = 0;
+  #operationsSettled: Deferred<void> | undefined;
 
   constructor(input: {
     readonly onStateChanged?: ((snapshot: WorkShellPauseSnapshot) => void) | undefined;
@@ -102,17 +121,26 @@ export class CooperativePauseController {
     return () => { this.#listeners.delete(listener); };
   }
 
-  beginTurn(turnId: string): void {
+  async beginTurn(turnId: string, signal?: AbortSignal): Promise<boolean> {
     if (!turnId.trim()) throw new Error("A cooperative turn requires an identity.");
-    if (this.#snapshot.state === "running" || this.#snapshot.state === "pause_pending" || this.#snapshot.state === "paused") {
-      throw new Error("A cooperative turn is already active.");
+    const assertInactive = () => {
+      if (this.#snapshot.state === "running" || this.#snapshot.state === "pause_pending" || this.#snapshot.state === "paused") {
+        throw new Error("A cooperative turn is already active.");
+      }
+    };
+    assertInactive();
+    while (this.#unsettledOperations > 0) {
+      const settlement = this.#operationsSettled;
+      if (!settlement) throw new Error("A cooperative turn lost its operation settlement gate.");
+      if (!await waitForSettlementOrAbort(settlement.promise, signal)) return false;
+      // Another waiter may have claimed the turn after the shared drain.
+      assertInactive();
     }
-    if (this.#nonInterruptibleOperations > 0) {
-      throw new Error("A cooperative turn still has noninterruptible work settling.");
-    }
+    if (signal?.aborted) return false;
     this.#pauseAcknowledgement = undefined;
     this.#pauseTransition = undefined;
     this.#publish({ state: "running", turnId });
+    return true;
   }
 
   requestPause(): Promise<WorkShellPauseReceipt> {
@@ -179,6 +207,8 @@ export class CooperativePauseController {
   ): Promise<Value> {
     const boundaries = operationBoundaries(operation);
     await this.checkpoint(boundaries.before, persist);
+    if (this.#unsettledOperations === 0) this.#operationsSettled = deferred<void>();
+    this.#unsettledOperations += 1;
     this.#nonInterruptibleOperations += 1;
     let result: Value;
     let failure: unknown;
@@ -190,9 +220,18 @@ export class CooperativePauseController {
     } finally {
       this.#nonInterruptibleOperations -= 1;
     }
-    await this.checkpoint(boundaries.after, persist);
-    if (failure !== undefined) throw failure;
-    return result;
+    try {
+      await this.checkpoint(boundaries.after, persist);
+      if (failure !== undefined) throw failure;
+      return result;
+    } finally {
+      this.#unsettledOperations -= 1;
+      if (this.#unsettledOperations === 0) {
+        const settlement = this.#operationsSettled;
+        this.#operationsSettled = undefined;
+        settlement?.resolve(undefined);
+      }
+    }
   }
 
   resume(): boolean {

@@ -6704,6 +6704,11 @@ test("WorkShellEngine resumes interrupted queued follow-ups after the next chat 
   engine.interruptTurn();
   assert.equal(engine.getState().queuePaused, true);
   const thirdTurn = engine.handleSubmit("third");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(prompts, ["first"]);
+
+  releaseFirst();
+  await firstTurn;
   while (typeof releaseThird !== "function") {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
@@ -6713,11 +6718,6 @@ test("WorkShellEngine resumes interrupted queued follow-ups after the next chat 
 
   assert.deepEqual(prompts, ["first", "third", "second"]);
   assert.equal(engine.getState().queuePaused, false);
-
-  releaseFirst();
-  await firstTurn;
-
-  assert.deepEqual(prompts, ["first", "third", "second"]);
 });
 
 test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {

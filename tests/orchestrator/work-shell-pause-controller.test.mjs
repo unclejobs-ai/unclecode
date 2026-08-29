@@ -88,6 +88,39 @@ test("cancel is distinct from pause and releases a paused checkpoint as cancelle
   assert.equal(controller.resume(), false);
 });
 
+test("a cancelled turn's ignored operation drains before a new turn begins, while the new wait remains cancellable", async () => {
+  const controller = new CooperativePauseController();
+  controller.beginTurn("turn-old");
+  let releaseOperation;
+  const operation = controller.runNonInterruptible(
+    "provider.request",
+    () => new Promise((resolve) => { releaseOperation = resolve; }),
+    async () => undefined,
+  );
+  await tick();
+  assert.equal(controller.cancel(), true);
+
+  const cancelledWait = new AbortController();
+  const cancelledBegin = controller.beginTurn("turn-cancelled-wait", cancelledWait.signal);
+  cancelledWait.abort();
+  assert.equal(await cancelledBegin, false);
+  assert.equal(controller.snapshot().turnId, "turn-old");
+
+  let nextBegan = false;
+  const nextBegin = controller.beginTurn("turn-next").then((began) => {
+    nextBegan = began;
+    return began;
+  });
+  await tick();
+  assert.equal(nextBegan, false);
+
+  releaseOperation("late-result");
+  await assert.rejects(operation, { name: "AbortError" });
+  assert.equal(await nextBegin, true);
+  assert.equal(controller.snapshot().state, "running");
+  assert.equal(controller.snapshot().turnId, "turn-next");
+});
+
 test("an irreversible tool stays pause_pending until the handler settles, then pauses at after_tool", async () => {
   const controller = new CooperativePauseController();
   controller.beginTurn("turn-tool");
