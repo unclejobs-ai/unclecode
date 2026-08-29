@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import React from "react";
 import { renderContextInspectorOverlay } from "../../packages/tui/src/work-shell-context-inspector.tsx";
 import { renderDebugFrame, waitForSettledFrame } from "../tui/work-shell-render-harness.mjs";
 
 import { CONTEXT_DESK_GROUPS } from "@unclecode/contracts";
+import { createOmpWorkerProvider, createOmpWorkerRunner } from "@unclecode/providers";
+import { LiveRuntimeEngineRegistry } from "../../apps/unclecode-server/src/runtime-engine-rpc.ts";
 
 import {
   WorkShellEngine,
@@ -6248,6 +6253,119 @@ test("WorkShellEngine soft-interrupts a busy turn and ignores late assistant out
   );
   assert.deepEqual(bridgeWrites, []);
   assert.deepEqual(memoryWrites, []);
+});
+
+test("WorkShellEngine shutdown aborts the active turn and fails visibly when its provider will not settle", async () => {
+  let releaseTurn;
+  let turnSignal;
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(_prompt, _attachments, options) {
+        turnSignal = options?.signal;
+        await new Promise(resolve => { releaseTurn = resolve; });
+        return { text: "late shutdown result" };
+      },
+    },
+  });
+
+  await engine.initialize();
+  const turn = engine.handleSubmit("hold provider open");
+  while (!turnSignal) await new Promise(resolve => setImmediate(resolve));
+  try {
+    await assert.rejects(
+      engine.shutdown({ timeoutMs: 25 }),
+      /did not settle/i,
+    );
+    assert.equal(turnSignal.aborted, true);
+  } finally {
+    releaseTurn?.();
+    await turn;
+    engine.dispose();
+  }
+});
+
+test("owner shutdown waits for a SIGTERM-ignoring provider process group to be SIGKILLed", {
+  skip: process.platform === "win32" ? "process-group settlement is POSIX-only" : false,
+}, async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "unclecode-owner-child-shutdown-"));
+  const entryPath = path.join(workspace, "stubborn-provider.mjs");
+  const pidPath = path.join(workspace, "provider.pid");
+  const termPath = path.join(workspace, "provider.term");
+  const readyPath = path.join(workspace, "provider.ready");
+  let childPid;
+  writeFileSync(entryPath, [
+    'import { writeFileSync } from "node:fs";',
+    `writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));`,
+    `process.on("SIGTERM", () => writeFileSync(${JSON.stringify(termPath)}, "SIGTERM"));`,
+    `writeFileSync(${JSON.stringify(readyPath)}, "ready");`,
+    "process.stdin.resume();",
+    "setInterval(() => {}, 1_000);",
+    "",
+  ].join("\n"), "utf8");
+
+  const provider = createOmpWorkerProvider({
+    cwd: workspace,
+    reasoning: supportedReasoning,
+    env: {},
+    runWorker: createOmpWorkerRunner({
+      env: {},
+      bunPath: process.execPath,
+      workerEntryPath: entryPath,
+      forceKillDelayMs: 500,
+    }),
+  });
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      runTurn(prompt, attachments, options) {
+        return provider.runTurn(prompt, attachments, options);
+      },
+    },
+    options: {
+      provider: "omp",
+      model: "kimi-code/k3",
+      mode: "default",
+      authLabel: "omp-managed",
+      reasoning: supportedReasoning,
+      cwd: workspace,
+      contextSummaryLines: [],
+    },
+  });
+  const registry = new LiveRuntimeEngineRegistry();
+
+  try {
+    await engine.initialize();
+    registry.attach("child-shutdown", engine, { projectPath: workspace });
+    const turn = engine.handleSubmit("hold provider child open");
+    const deadline = Date.now() + 5_000;
+    while (!existsSync(readyPath) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(existsSync(readyPath), true, "the production provider child must install its signal handler");
+    childPid = Number(readFileSync(pidPath, "utf8"));
+
+    await registry.disposeAll();
+    await turn;
+
+    assert.equal(readFileSync(termPath, "utf8"), "SIGTERM");
+    assert.throws(
+      () => process.kill(childPid, 0),
+      (error) => error?.code === "ESRCH",
+      "owner shutdown cannot return while the provider process group is alive",
+    );
+  } finally {
+    if (Number.isInteger(childPid)) {
+      try { process.kill(-childPid, "SIGKILL"); } catch {}
+    }
+    try { await registry.disposeAll(); } catch {}
+    engine.dispose();
+    rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test("WorkShellEngine retracts a bridge when interruption lands during publication", async () => {

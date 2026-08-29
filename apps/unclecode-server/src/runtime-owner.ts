@@ -64,7 +64,16 @@ export async function startPersistentRuntimeOwner(input: {
       createSession: async (request) => {
         const created = await input.createSession!(request);
         const revisionClock = created.revisionClock ?? { value: 0 };
-        const mutationArbiter = new RuntimeSessionMutationArbiter(revisionClock);
+        const revisionEngine = created.engine as typeof created.engine & {
+          bindRuntimeRevisionClock?: ((clock: { readonly value: number }) => void) | undefined;
+          persistRuntimeRevision?: ((revision: number) => Promise<void>) | undefined;
+        };
+        revisionEngine.bindRuntimeRevisionClock?.(revisionClock);
+        const mutationArbiter = new RuntimeSessionMutationArbiter(revisionClock, {
+          ...(revisionEngine.persistRuntimeRevision ? {
+            persistAcceptedRevision: (revision) => revisionEngine.persistRuntimeRevision!(revision),
+          } : {}),
+        });
         const detachControl = attachWorkShellRuntime(controls, {
           sessionId: request.sessionId,
           projectPath: created.projectPath,
@@ -90,7 +99,8 @@ export async function startPersistentRuntimeOwner(input: {
   const notices = await watchSessionPersistenceNotices({
     rootDir: input.rootDir,
     onNotice(notice) {
-      const revision = engines.publishDurableRevision(notice.sessionId, notice.revision) ?? notice.revision;
+      const live = engines.read(notice.sessionId);
+      const revision = live.ok ? live.revision : notice.revision;
       journal.publish(notice.sessionId, "run.updated", { kind: "checkpoint", revision });
     },
   });

@@ -11,5 +11,20 @@ export async function readRestoredSessionRevision(input: {
     projectPath: input.projectPath,
     sessionId: input.sessionId,
   });
-  return Math.max(restored.checkpoint?.eventCount ?? 0, restored.records.length);
+  const revision = restored.metadata.ownerMutationRevision;
+  return Number.isSafeInteger(revision) && Number(revision) >= 0 ? Number(revision) : 0;
+}
+
+/** Bind the restored owner clock before initialization can emit a checkpoint. */
+export async function initializeRestoredRuntimeEngine(
+  engine: {
+    readonly initialize: () => Promise<void>;
+    readonly bindRuntimeRevisionClock?: ((clock: { readonly value: number }) => void) | undefined;
+  },
+  restoredRevision: number,
+): Promise<{ value: number }> {
+  const revisionClock = { value: restoredRevision };
+  engine.bindRuntimeRevisionClock?.(revisionClock);
+  await engine.initialize();
+  return revisionClock;
 }

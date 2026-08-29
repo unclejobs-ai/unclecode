@@ -126,6 +126,7 @@ function isMissingEntrypoint(error: unknown): boolean {
 
 export type RunRustCommandOptions = {
   readonly signal?: AbortSignal | undefined;
+  readonly forceKillDelayMs?: number | undefined;
 };
 
 function createAbortError(): Error {
@@ -138,16 +139,16 @@ function isAbortSignalError(error: unknown, signal?: AbortSignal | undefined): b
   return Boolean(signal?.aborted) || (error instanceof Error && error.name === "AbortError");
 }
 
-function killChildProcess(child: ReturnType<typeof spawn>): void {
+function signalChildProcess(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
   if (process.platform !== "win32" && child.pid) {
     try {
-      process.kill(-child.pid);
+      process.kill(-child.pid, signal);
       return;
     } catch {
       // Fall back to killing the direct child if process-group signalling is unavailable.
     }
   }
-  child.kill();
+  child.kill(signal);
 }
 
 async function runRustCommandWithStdin(
@@ -171,6 +172,8 @@ async function runRustCommandWithStdin(
       stdio: ["pipe", "pipe", "pipe"],
     });
     let settled = false;
+    let aborted = false;
+    let forceTimer: NodeJS.Timeout | undefined;
     let stdout = "";
     let stderr = "";
     const settle = (kind: "resolve" | "reject", value: string | Error) => {
@@ -178,6 +181,7 @@ async function runRustCommandWithStdin(
         return;
       }
       settled = true;
+      if (forceTimer) clearTimeout(forceTimer);
       options.signal?.removeEventListener("abort", onAbort);
       if (kind === "resolve") {
         resolvePromise(String(value));
@@ -186,8 +190,15 @@ async function runRustCommandWithStdin(
       reject(value);
     };
     const onAbort = () => {
-      killChildProcess(child);
-      settle("reject", createAbortError());
+      if (aborted) return;
+      aborted = true;
+      signalChildProcess(child, "SIGTERM");
+      forceTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          signalChildProcess(child, "SIGKILL");
+        }
+      }, Math.max(0, options.forceKillDelayMs ?? 2_000));
+      forceTimer.unref();
     };
     options.signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.setEncoding("utf8");
@@ -200,6 +211,10 @@ async function runRustCommandWithStdin(
     });
     child.on("error", (error) => settle("reject", error));
     child.on("close", (code) => {
+      if (aborted) {
+        settle("reject", createAbortError());
+        return;
+      }
       if (code === 0) {
         settle("resolve", stdout);
         return;

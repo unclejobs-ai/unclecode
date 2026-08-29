@@ -4458,6 +4458,7 @@ fn run_native_session_command(args: &[OsString]) -> Result<u8, String> {
                     reasoning_effort,
                     ui_locale: None,
                     last_submitted_context_receipt_id: None,
+                    owner_mutation_revision: None,
                     entries: vec![],
                     agent_console: None,
                     pause_checkpoint: None,

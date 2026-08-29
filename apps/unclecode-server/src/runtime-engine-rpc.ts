@@ -213,15 +213,33 @@ export class LiveRuntimeEngineRegistry {
   async disposeAll(): Promise<void> {
     const attached = [...this.#engines.values()];
     this.#engines.clear();
+    const failures: string[] = [];
     for (const item of attached) {
       item.unsubscribe();
-      const interrupt = (item.engine as unknown as { interruptTurn?: (() => void) | undefined }).interruptTurn;
-      if (typeof interrupt === "function") {
-        try { Reflect.apply(interrupt, item.engine, []); } catch {}
+      const lifecycle = item.engine as unknown as {
+        shutdown?: ((input?: { readonly timeoutMs?: number }) => Promise<boolean> | boolean) | undefined;
+        interruptTurn?: (() => void) | undefined;
+      };
+      try {
+        if (typeof lifecycle.shutdown === "function") {
+          const settled = await Reflect.apply(lifecycle.shutdown, item.engine, []);
+          if (settled === false) failures.push("Runtime engine shutdown did not settle provider/tool children.");
+        } else if (typeof lifecycle.interruptTurn === "function") {
+          Reflect.apply(lifecycle.interruptTurn, item.engine, []);
+        }
+      } catch (error) {
+        failures.push(error instanceof Error ? error.message : String(error));
       }
-      await item.arbiter.settle();
-      await item.dispose?.();
+      if (!await item.arbiter.settle()) {
+        failures.push("Runtime mutation arbiter did not settle active provider/tool work.");
+      }
+      try {
+        await item.dispose?.();
+      } catch (error) {
+        failures.push(error instanceof Error ? error.message : String(error));
+      }
     }
+    if (failures.length > 0) throw new Error(`Runtime owner shutdown did not settle cleanly: ${failures.join("; ")}`);
   }
 
   #descriptor(sessionId: string, attached: Attached): RuntimeSessionDescriptor {

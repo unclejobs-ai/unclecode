@@ -33,6 +33,7 @@ export async function persistWorkShellSessionSnapshot(input: {
   readonly traceMode?: "minimal" | "verbose" | undefined;
   readonly reasoningEffort?: ModeReasoningEffort | undefined;
   readonly lastSubmittedContextReceiptId?: string | undefined;
+  readonly ownerMutationRevision?: number | undefined;
   readonly entries?: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[] | undefined;
   readonly agentConsole?: AgentConsoleSnapshot | undefined;
   readonly pauseCheckpoint?: WorkShellDurablePauseCheckpoint | undefined;
@@ -49,6 +50,7 @@ export async function persistWorkShellSessionSnapshot(input: {
       traceMode: input.traceMode,
       reasoningEffort: input.reasoningEffort,
       lastSubmittedContextReceiptId: input.lastSubmittedContextReceiptId,
+      ownerMutationRevision: input.ownerMutationRevision,
       entries: input.entries ?? [],
       ...(input.agentConsole
         ? { agentConsole: createAgentConsoleSnapshot(input.agentConsole) }

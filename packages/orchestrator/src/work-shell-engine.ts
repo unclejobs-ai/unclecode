@@ -875,6 +875,9 @@ export class WorkShellEngine<
   private activeTurnEpoch = 0;
   private activeAttachmentRefs: readonly string[] = [];
   private activeTurnAbortController: AbortController | undefined;
+  private runtimeRevisionClock: { readonly value: number } | undefined;
+  private readonly activeTurnSettlements = new Set<Promise<void>>();
+  private disposed = false;
   private queueAutoDrainPaused = false;
   private workBoardRebuildGeneration = 0;
   private workBoardQueuedItemsSnapshot: readonly { readonly id: number; readonly line: string }[] = [];
@@ -978,6 +981,27 @@ export class WorkShellEngine<
 
   getTurnLifecycle(): WorkShellPauseSnapshot {
     return this.pauseController.snapshot();
+  }
+
+  bindRuntimeRevisionClock(clock: { readonly value: number }): void {
+    this.runtimeRevisionClock = clock;
+  }
+
+  persistRuntimeRevision(revision: number): Promise<void> {
+    const lifecycle = this.pauseController.snapshot();
+    const state: WorkShellSessionState = lifecycle.state === "pause_pending" || lifecycle.state === "paused"
+      ? lifecycle.state
+      : this.pendingDecision
+        ? "requires_action"
+        : this.state.isBusy
+          ? "running"
+          : "idle";
+    return this.enqueueSessionSnapshotWrite(this.buildSessionSnapshotInput({
+      state,
+      summary: this.lastSessionSummary,
+      traceMode: this.state.traceMode,
+      ownerMutationRevision: revision,
+    }));
   }
 
   requestTurnPause(): Promise<WorkShellPauseReceipt> {
@@ -1113,6 +1137,8 @@ export class WorkShellEngine<
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     this.pauseController.cancel();
     this.agent.setTraceListener(undefined);
     this.flushAgentConsole();
@@ -1120,6 +1146,44 @@ export class WorkShellEngine<
     this.agent.getAgentControlRuntime?.()?.clear("Work Shell closed.");
     this.settlePendingDecision({ status: "unavailable", reason: "Work Shell closed." });
     this.interactionBridge?.unbind("Work Shell closed.");
+  }
+
+  /**
+   * Owner-only async shutdown. Abort is only the request; returning requires
+   * the provider/tool continuation itself to have settled. A signal-deaf
+   * implementation is surfaced as an owner shutdown failure instead of being
+   * detached and leaked.
+   */
+  async shutdown(input: { readonly timeoutMs?: number | undefined } = {}): Promise<boolean> {
+    const timeoutMs = Math.max(0, input.timeoutMs ?? 5_000);
+    if (this.state.isBusy) this.interruptTurn();
+    else this.activeTurnAbortController?.abort();
+    const deadline = Date.now() + timeoutMs;
+    while (this.activeTurnSettlements.size > 0) {
+      const active = [...this.activeTurnSettlements];
+      const remaining = Math.max(0, deadline - Date.now());
+      const settled = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), remaining);
+        Promise.allSettled(active).then(() => {
+          clearTimeout(timer);
+          resolve(true);
+        });
+      });
+      if (!settled) {
+        throw new Error("Work Shell shutdown did not settle the active provider/tool turn.");
+      }
+    }
+    const remaining = Math.max(0, deadline - Date.now());
+    const writesSettled = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), remaining);
+      this.sessionSnapshotWriteQueue.then(() => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+    if (!writesSettled) throw new Error("Work Shell shutdown did not settle durable session writes.");
+    this.dispose();
+    return true;
   }
 
   // ---------------------------------------------------------------------
@@ -2501,7 +2565,13 @@ export class WorkShellEngine<
       : this.activeTurnEpoch;
     this.activeTurnEpoch = turnEpoch;
 
-    await this.executeSubmitRoute(route, pendingAttachments, turnEpoch);
+    const execution = this.executeSubmitRoute(route, pendingAttachments, turnEpoch);
+    this.activeTurnSettlements.add(execution);
+    try {
+      await execution;
+    } finally {
+      this.activeTurnSettlements.delete(execution);
+    }
     if (this.shouldSkipQueueDrainAfterTurn(turnEpoch, route.kind)) {
       return;
     }
@@ -2988,6 +3058,7 @@ export class WorkShellEngine<
     readonly summary: string;
     readonly traceMode: WorkShellTraceMode;
     readonly pauseCheckpoint?: WorkShellDurablePauseCheckpoint | undefined;
+    readonly ownerMutationRevision?: number | undefined;
   }): WorkShellSessionSnapshotInput {
     const overrideReasoningEffort =
       this.state.reasoning.support.status === "supported" &&
@@ -3007,6 +3078,7 @@ export class WorkShellEngine<
       traceMode: input.traceMode,
       reasoningEffort: overrideReasoningEffort,
       lastSubmittedContextReceiptId: this.lastSubmittedContextReceiptId,
+      ownerMutationRevision: input.ownerMutationRevision ?? this.runtimeRevisionClock?.value,
       entries: this.state.entries,
       agentConsole: this.state.agentConsole,
       ...(input.pauseCheckpoint ? { pauseCheckpoint: input.pauseCheckpoint } : {}),

@@ -9,7 +9,7 @@ import { formatWorkShellError } from "@unclecode/tui";
 
 import { loadWorkCliBootstrap } from "./work-runtime-bootstrap.js";
 import { createManagedDashboardInput, type ManagedDashboardSession } from "./work-runtime-dashboard.js";
-import { readRestoredSessionRevision } from "./runtime-session-revision.js";
+import { initializeRestoredRuntimeEngine, readRestoredSessionRevision } from "./runtime-session-revision.js";
 
 function readFlag(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -49,12 +49,12 @@ const createSession: RuntimeSessionFactory = async (request) => {
     ...(process.env.HOME ? { userHomeDir: process.env.HOME } : {}),
   });
   const runtime = createWorkShellPaneRuntime({ ...dashboardInput.paneRuntime, onExit() {} });
-  await runtime.engine.initialize();
+  const revisionClock = await initializeRestoredRuntimeEngine(runtime.engine, restoredRevision);
   return {
     engine: runtime.engine,
     projectPath: request.projectPath,
     provider: session.options.provider,
-    revisionClock: { value: restoredRevision },
+    revisionClock,
     dispose: () => runtime.engine.dispose(),
   };
 };

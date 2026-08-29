@@ -149,6 +149,151 @@ test("concurrent async calls with one idempotency key execute the engine method 
   assert.equal(calls, 1);
 });
 
+test("one accepted mutation persists its reserved owner revision exactly once before execution", async () => {
+  const persisted = [];
+  let calls = 0;
+  const clock = { value: 6 };
+  const arbiter = new RuntimeSessionMutationArbiter(clock, {
+    async persistAcceptedRevision(revision) { persisted.push(revision); },
+  });
+  const input = {
+    idempotencyKey: "durable-revision",
+    fingerprint: "set-mode-deep",
+    expectedRevision: 6,
+    execute() {
+      calls += 1;
+      assert.deepEqual(persisted, [7], "execution cannot start before its accepted revision is durable");
+      return "deep";
+    },
+    conflict: revision => ({ ok: false, revision }),
+    invalidReuse: revision => ({ ok: false, revision }),
+    complete: (result, revision) => ({ ok: true, result, revision }),
+    fail: (error, revision) => ({ ok: false, error, revision }),
+  };
+
+  const first = await arbiter.mutate(input);
+  const replay = await arbiter.mutate(input);
+  assert.deepEqual(first, { ok: true, result: "deep", revision: 7 });
+  assert.deepEqual(replay, first);
+  assert.equal(calls, 1);
+  assert.deepEqual(persisted, [7]);
+});
+
+test("failed accepted-revision persistence rolls back admission without executing", async () => {
+  let calls = 0;
+  const clock = { value: 6 };
+  const arbiter = new RuntimeSessionMutationArbiter(clock, {
+    async persistAcceptedRevision() { throw new Error("disk unavailable"); },
+  });
+  const result = await arbiter.mutate({
+    idempotencyKey: "failed-durable-revision",
+    fingerprint: "set-mode-deep",
+    expectedRevision: 6,
+    execute() { calls += 1; return "deep"; },
+    conflict: revision => ({ ok: false, code: "conflict", revision }),
+    invalidReuse: revision => ({ ok: false, code: "reuse", revision }),
+    complete: (output, revision) => ({ ok: true, output, revision }),
+    fail: (error, revision) => ({ ok: false, code: error.message, revision }),
+  });
+
+  assert.deepEqual(result, { ok: false, code: "disk unavailable", revision: 6 });
+  assert.equal(calls, 0, "the engine mutation cannot run before revision durability succeeds");
+  assert.equal(clock.value, 6, "failed persistence cannot publish an accepted revision");
+});
+
+test("a later mutation cannot reserve or depend on an unpublished revision", async () => {
+  let markFirstPersistenceStarted;
+  const firstPersistenceStarted = new Promise(resolve => { markFirstPersistenceStarted = resolve; });
+  let releaseFirstPersistence;
+  const firstPersistenceGate = new Promise(resolve => { releaseFirstPersistence = resolve; });
+  const persisted = [];
+  const calls = [];
+  const clock = { value: 6 };
+  const arbiter = new RuntimeSessionMutationArbiter(clock, {
+    async persistAcceptedRevision(revision) {
+      persisted.push(revision);
+      if (revision === 7) {
+        markFirstPersistenceStarted();
+        await firstPersistenceGate;
+        throw new Error("first revision was not durable");
+      }
+    },
+  });
+  const mutation = (idempotencyKey, expectedRevision, label) => arbiter.mutate({
+    idempotencyKey,
+    fingerprint: label,
+    expectedRevision,
+    execute() { calls.push(label); return label; },
+    conflict: revision => ({ ok: false, code: "conflict", revision }),
+    invalidReuse: revision => ({ ok: false, code: "reuse", revision }),
+    complete: (output, revision) => ({ ok: true, output, revision }),
+    fail: (error, revision) => ({ ok: false, code: error.message, revision }),
+  });
+
+  const first = mutation("first-unpublished", 6, "first");
+  await firstPersistenceStarted;
+  assert.equal(clock.value, 6, "a reserved revision cannot be published before persistence succeeds");
+  const dependent = mutation("dependent-unpublished", 7, "dependent");
+  releaseFirstPersistence();
+
+  assert.deepEqual(await first, { ok: false, code: "first revision was not durable", revision: 6 });
+  assert.deepEqual(await dependent, { ok: false, code: "conflict", revision: 6 });
+  assert.deepEqual(persisted, [7], "the dependent revision must never reach persistence");
+  assert.deepEqual(calls, [], "neither engine mutation may execute");
+  assert.equal(clock.value, 6);
+});
+
+test("a stale cross-client cancel remains preemptive after multiple control admissions", async () => {
+  const clock = { value: 10 };
+  const arbiter = new RuntimeSessionMutationArbiter(clock);
+  let releaseTurn;
+  const turn = arbiter.mutate({
+    idempotencyKey: "active-turn",
+    fingerprint: "submit",
+    expectedRevision: 10,
+    execute: () => new Promise(resolve => { releaseTurn = resolve; }),
+    conflict: revision => ({ ok: false, code: "conflict", revision }),
+    invalidReuse: revision => ({ ok: false, code: "reuse", revision }),
+    complete: (output, revision) => ({ ok: true, output, revision }),
+    fail: (error, revision) => ({ ok: false, code: error.message, revision }),
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const mutateControl = (key, expectedRevision) => arbiter.mutate({
+    idempotencyKey: key,
+    fingerprint: key,
+    expectedRevision,
+    lane: "control",
+    execute: () => key,
+    conflict: revision => ({ ok: false, code: "conflict", revision }),
+    invalidReuse: revision => ({ ok: false, code: "reuse", revision }),
+    complete: (output, revision) => ({ ok: true, output, revision }),
+    fail: (error, revision) => ({ ok: false, code: error.message, revision }),
+  });
+  assert.equal((await mutateControl("pause", 11)).ok, true);
+  assert.equal((await mutateControl("approval", 12)).ok, true);
+  assert.equal(clock.value, 13);
+
+  let cancelled = 0;
+  const staleCancel = await arbiter.mutate({
+    idempotencyKey: "stale-cancel",
+    fingerprint: "cancel-from-client-at-11",
+    expectedRevision: 11,
+    lane: "cancel",
+    execute() { cancelled += 1; releaseTurn("cancelled"); return "cancelled"; },
+    conflict: revision => ({ ok: false, code: "conflict", revision }),
+    invalidReuse: revision => ({ ok: false, code: "reuse", revision }),
+    complete: (output, revision) => ({ ok: true, output, revision }),
+    fail: (error, revision) => ({ ok: false, code: error.message, revision }),
+  });
+  assert.equal(staleCancel.ok, true);
+  assert.equal(cancelled, 1);
+  assert.equal((await turn).ok, true);
+
+  const staleNonCancel = await mutateControl("stale-control", 11);
+  assert.equal(staleNonCancel.ok, false);
+  assert.equal(staleNonCancel.code, "conflict", "only cancel may bypass a stale client revision");
+});
+
 test("different create keys for one session share one owner-side engine construction", async () => {
   let constructions = 0;
   let release;
@@ -313,4 +458,18 @@ test("an active submitted turn does not retain the owner lane needed to pause it
   assert.equal(pauseCalls, 1);
   releaseTurn();
   await turn;
+});
+
+test("owner disposal reports a non-settling engine instead of silently dropping it", async () => {
+  let disposed = false;
+  const engine = fakeEngine("shutdown-refusal");
+  engine.shutdown = async () => false;
+  const registry = new LiveRuntimeEngineRegistry();
+  registry.attach("shutdown-refusal", engine, {
+    projectPath: "/work/shutdown-refusal",
+    dispose: () => { disposed = true; },
+  });
+
+  await assert.rejects(registry.disposeAll(), /did not settle/i);
+  assert.equal(disposed, true, "owned subscriptions still need deterministic cleanup on failure");
 });

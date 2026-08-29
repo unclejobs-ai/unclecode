@@ -18,6 +18,7 @@ export type WorkShellSessionSnapshotInput = {
   traceMode: WorkShellTraceMode;
   reasoningEffort?: ModeReasoningEffort | undefined;
   lastSubmittedContextReceiptId?: string | undefined;
+  ownerMutationRevision?: number | undefined;
   entries?: readonly WorkShellChatEntry[] | undefined;
   agentConsole?: AgentConsoleSnapshot | undefined;
   pauseCheckpoint?: WorkShellDurablePauseCheckpoint | undefined;

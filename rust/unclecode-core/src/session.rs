@@ -56,6 +56,7 @@ pub struct WorkShellSessionSnapshot {
     pub ui_locale: Option<String>,
     pub reasoning_effort: Option<String>,
     pub last_submitted_context_receipt_id: Option<String>,
+    pub owner_mutation_revision: Option<usize>,
     pub entries: Vec<WorkShellTranscriptEntry>,
     pub agent_console: Option<Value>,
     pub pause_checkpoint: Option<Value>,
@@ -76,6 +77,7 @@ pub struct WorkShellResume {
     pub ui_locale: Option<String>,
     pub reasoning_effort: Option<String>,
     pub last_submitted_context_receipt_id: Option<String>,
+    pub owner_mutation_revision: Option<usize>,
     pub summary: String,
     pub entries: Vec<WorkShellTranscriptEntry>,
     pub agent_console: Option<Value>,
@@ -168,7 +170,11 @@ impl WorkShellSessionStore {
             self.relative_path(&paths.checkpoint_path)?,
             checkpoint.as_bytes(),
         )?;
-        self.persist_checkpoint_notice(&root, &snapshot.session_id, existing_count)
+        // Owner mutations and append-only session events have distinct clocks.
+        // New snapshots carry the accepted owner revision explicitly; legacy
+        // writers fall back to the event count only when that field is absent.
+        let notice_revision = snapshot.owner_mutation_revision.unwrap_or(existing_count);
+        self.persist_checkpoint_notice(&root, &snapshot.session_id, notice_revision)
     }
 
     fn persist_checkpoint_notice(
@@ -312,6 +318,11 @@ impl WorkShellSessionStore {
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
             .map(str::to_string);
+        let owner_mutation_revision = parsed
+            .get("metadata")
+            .and_then(|value| value.get("ownerMutationRevision"))
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok());
         let summary = parsed
             .get("taskSummary")
             .and_then(|value| value.get("summary"))
@@ -347,6 +358,7 @@ impl WorkShellSessionStore {
             ui_locale,
             reasoning_effort,
             last_submitted_context_receipt_id,
+            owner_mutation_revision,
             summary,
             entries,
             agent_console,
@@ -401,6 +413,10 @@ pub fn persist_work_shell_session_snapshot_json(
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string);
+    let owner_mutation_revision = parsed
+        .get("ownerMutationRevision")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
     let entries = parsed
         .get("entries")
         .and_then(Value::as_array)
@@ -425,6 +441,7 @@ pub fn persist_work_shell_session_snapshot_json(
             ui_locale,
             reasoning_effort,
             last_submitted_context_receipt_id,
+            owner_mutation_revision,
             entries,
             agent_console,
             pause_checkpoint,
@@ -1702,6 +1719,9 @@ fn build_checkpoint_json(
             json!(receipt_id),
         );
     }
+    if let Some(revision) = snapshot.owner_mutation_revision {
+        metadata.insert("ownerMutationRevision".to_string(), json!(revision));
+    }
 
     let entries = minimize_resume_entries(&snapshot.entries);
 
@@ -1832,6 +1852,7 @@ mod tests {
                 ui_locale: Some("ko".to_string()),
                 reasoning_effort: Some("high".to_string()),
                 last_submitted_context_receipt_id: Some("receipt-submitted".to_string()),
+                owner_mutation_revision: Some(7),
                 entries: vec![
                     WorkShellTranscriptEntry {
                         role: "user".to_string(),
@@ -1864,6 +1885,7 @@ mod tests {
             Some("receipt-submitted".to_string())
         );
         assert_eq!(resumed.summary, "Chat: inspect repo");
+        assert_eq!(resumed.owner_mutation_revision, Some(7));
         assert_eq!(resumed.entries.len(), 2);
         assert_eq!(resumed.entries[0].text, "inspect repo");
         assert_eq!(resumed.entries[1].text, "repo inspected");
@@ -2825,6 +2847,7 @@ mod tests {
                 ui_locale: None,
                 reasoning_effort: None,
                 last_submitted_context_receipt_id: None,
+                owner_mutation_revision: None,
                 entries,
                 agent_console: None,
                 pause_checkpoint: None,

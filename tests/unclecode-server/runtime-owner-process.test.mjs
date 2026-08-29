@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,6 +8,7 @@ import test from "node:test";
 import { RuntimeOwnerClient } from "../../apps/unclecode-server/src/runtime-owner-client.ts";
 import { LiveRuntimeEngineRegistry } from "../../apps/unclecode-server/src/runtime-engine-rpc.ts";
 import { startPersistentRuntimeOwner } from "../../apps/unclecode-server/src/runtime-owner.ts";
+import { persistWorkShellSessionSnapshot } from "../../packages/orchestrator/src/work-shell-session.ts";
 
 async function startFixture(root, leasePath, tokenPath) {
   const child = spawn(process.execPath, [
@@ -154,4 +155,42 @@ test("lease publication failure closes the listener, watcher, and attached engin
   }));
   assert.equal(disposed, true);
   assert.deepEqual(engines.list(), []);
+});
+
+test("Rust persistence notice publishes the explicit owner mutation revision through the owner watcher", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-notice-revision-"));
+  const projectPath = join(root, "workspace");
+  const sessionId = "notice-owner-revision";
+  const owner = await startPersistentRuntimeOwner({
+    rootDir: root,
+    leasePath: join(root, "runtime-owner.json"),
+    tokenPath: join(root, "server.token"),
+  });
+  t.after(async () => {
+    await owner.stop();
+    await rm(root, { recursive: true, force: true });
+  });
+  await mkdir(projectPath);
+
+  await persistWorkShellSessionSnapshot({
+    cwd: projectPath,
+    env: { ...process.env, UNCLECODE_SESSION_STORE_ROOT: root },
+    sessionId,
+    model: "test-model",
+    mode: "standard",
+    state: "paused",
+    summary: "explicit owner mutation revision",
+    traceMode: "minimal",
+    ownerMutationRevision: 37,
+    entries: [],
+  });
+
+  const deadline = Date.now() + 5_000;
+  let checkpoint;
+  while (Date.now() < deadline) {
+    checkpoint = owner.journal.replay(sessionId).events.find(event => event.data?.kind === "checkpoint");
+    if (checkpoint) break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(checkpoint?.data?.revision, 37);
 });

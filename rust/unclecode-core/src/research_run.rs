@@ -103,6 +103,7 @@ pub fn research_run_report(
             ui_locale: None,
             reasoning_effort: None,
             last_submitted_context_receipt_id: None,
+            owner_mutation_revision: None,
             entries: vec![],
             agent_console: None,
             pause_checkpoint: None,

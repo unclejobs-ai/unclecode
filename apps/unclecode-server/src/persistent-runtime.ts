@@ -126,7 +126,11 @@ async function readCheckpoint(path: string, controls: LiveRuntimeControlRegistry
     if (!isRecord(parsed) || typeof parsed.sessionId !== "string" || typeof parsed.projectPath !== "string") return null;
     const metadata = isRecord(parsed.metadata) ? parsed.metadata : undefined;
     const agentConsole = isRecord(parsed.agentConsole) ? parsed.agentConsole : undefined;
-    const eventCount = typeof parsed.eventCount === "number" && Number.isSafeInteger(parsed.eventCount) ? parsed.eventCount : 0;
+    const ownerMutationRevision = typeof metadata?.ownerMutationRevision === "number"
+      && Number.isSafeInteger(metadata.ownerMutationRevision)
+      && metadata.ownerMutationRevision >= 0
+      ? metadata.ownerMutationRevision
+      : 0;
     const checkpointState = stateOf(parsed.state);
     const wasInFlight = checkpointState === "running"
       || checkpointState === "pause_pending"
@@ -139,7 +143,7 @@ async function readCheckpoint(path: string, controls: LiveRuntimeControlRegistry
       projectPath: parsed.projectPath,
       locale: localeOf(parsed),
       state: wasInFlight ? "failed" : checkpointState,
-      revision: controls.revision(parsed.sessionId) ?? eventCount,
+      revision: controls.revision(parsed.sessionId) ?? ownerMutationRevision,
       ...(typeof parsed.updatedAt === "string" ? { updatedAt: parsed.updatedAt } : {}),
       ...(recoveredMetadata ? { metadata: recoveredMetadata } : {}),
       ...(agentConsole ? { agentConsole } : {}),

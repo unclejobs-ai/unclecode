@@ -107,6 +107,9 @@ export function sanitizeSessionMetadata(value: unknown): SessionMetadata {
               : value.lastSubmittedContextReceiptId,
         }
       : {}),
+    ...(Number.isSafeInteger(value.ownerMutationRevision) && Number(value.ownerMutationRevision) >= 0
+      ? { ownerMutationRevision: Number(value.ownerMutationRevision) }
+      : {}),
     ...(pendingAction ? { pendingAction } : {}),
     ...(value.pendingAction === null ? { pendingAction: null } : {}),
     ...(postTurnSummary !== undefined ? { postTurnSummary } : {}),
