@@ -561,7 +561,7 @@ test("WorkShellEngine can suspend at a pending approval without cancelling or an
   });
 
   assert.equal(engine.resumeTurn(), true);
-  assert.equal(engine.answerPendingDecisionByIndex(1), true);
+  assert.equal(engine.answerPendingDecisionByIndex(1, "pause-at-approval"), true);
   await decision;
   await turn;
   assert.equal(engine.getTurnLifecycle().state, "completed");
@@ -4837,9 +4837,9 @@ test("WorkShellEngine answers and cancels a pending decision by one-key methods"
   // Out-of-range indices are rejected up front (handlePendingDecisionReply
   // is void, so the range check is the only guard) and keep the decision
   // pending for a later reply.
-  assert.equal(engine.answerPendingDecisionByIndex(0), false);
-  assert.equal(engine.answerPendingDecisionByIndex(99), false);
-  assert.equal(engine.answerPendingDecisionByIndex(1.5), false);
+  assert.equal(engine.answerPendingDecisionByIndex(0, "decision-one-key"), false);
+  assert.equal(engine.answerPendingDecisionByIndex(99, "decision-one-key"), false);
+  assert.equal(engine.answerPendingDecisionByIndex(1.5, "decision-one-key"), false);
   assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-one-key");
   assert.equal((await Promise.race([result, Promise.resolve("pending")])), "pending");
 
@@ -4854,8 +4854,57 @@ test("WorkShellEngine answers and cancels a pending decision by one-key methods"
   assert.equal(engine.getState().agentConsole.pendingDecision, undefined);
   // A settled decision cannot be settled twice: the pending identity guard
   // makes both one-key methods no-ops after the fact.
-  assert.equal(engine.answerPendingDecisionByIndex(1), false);
-  assert.equal(engine.cancelPendingDecision(), false);
+  assert.equal(engine.answerPendingDecisionByIndex(1, "decision-one-key"), false);
+  assert.equal(engine.cancelPendingDecision("decision-one-key"), false);
+});
+
+test("WorkShellEngine never settles replacement decision B with delayed controls for A", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  const { engine } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+    },
+  });
+  await engine.initialize();
+
+  const resultA = interactionBridge.ask({
+    id: "decision-a",
+    title: "First choice",
+    questions: [{
+      id: "first",
+      question: "Choose first.",
+      options: [{ label: "One" }, { label: "Two" }],
+    }],
+  });
+  assert.equal(engine.cancelPendingDecision("decision-a"), true);
+  assert.deepEqual(await resultA, { status: "cancelled" });
+
+  const resultB = interactionBridge.ask({
+    id: "decision-b",
+    title: "Replacement choice",
+    questions: [{
+      id: "replacement",
+      question: "Choose replacement.",
+      options: [{ label: "Keep" }, { label: "Replace" }],
+    }],
+  });
+  assert.equal(engine.answerPendingDecisionByIndex(1, "decision-a"), false);
+  assert.equal(engine.cancelPendingDecision("decision-a"), false);
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-b");
+  assert.equal(await Promise.race([resultB, Promise.resolve("pending")]), "pending");
+
+  assert.equal(engine.answerPendingDecisionByIndex(2, "decision-b"), true);
+  assert.deepEqual(await resultB, {
+    status: "answered",
+    answers: [{ id: "replacement", selectedOptions: ["Replace"] }],
+  });
 });
 
 test("WorkShellEngine settles only the exact pending typed user decision", async () => {
@@ -4910,8 +4959,8 @@ test("WorkShellEngine one-key decision methods refuse multi-question and absent 
   });
   await engine.initialize();
 
-  assert.equal(engine.answerPendingDecisionByIndex(1), false);
-  assert.equal(engine.cancelPendingDecision(), false);
+  assert.equal(engine.answerPendingDecisionByIndex(1, "absent-decision"), false);
+  assert.equal(engine.cancelPendingDecision("absent-decision"), false);
 
   const result = interactionBridge.ask({
     id: "decision-multi",
@@ -4932,10 +4981,10 @@ test("WorkShellEngine one-key decision methods refuse multi-question and absent 
   assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-multi");
   // Multi-question decisions need typed `question-id: n` replies; digits
   // must stay ordinary input instead of half-answering.
-  assert.equal(engine.answerPendingDecisionByIndex(1), false);
+  assert.equal(engine.answerPendingDecisionByIndex(1, "decision-multi"), false);
   assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-multi");
 
-  assert.equal(engine.cancelPendingDecision(), true);
+  assert.equal(engine.cancelPendingDecision("decision-multi"), true);
 
   assert.deepEqual(await result, { status: "cancelled" });
   assert.equal(engine.getState().agentConsole.pendingDecision, undefined);

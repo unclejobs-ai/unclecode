@@ -37,7 +37,7 @@ export type WorkShellControlEngine = {
   resumeTurn(): boolean;
   resumeQueueItems(): Promise<void>;
   handleSubmit(message: string): Promise<void>;
-  answerPendingDecisionByIndex(index: number, decisionId?: string): boolean;
+  answerPendingDecisionByIndex(index: number, decisionId: string): boolean;
   answerPendingUserDecision(decisionId: string, answers: readonly AskUserQuestionAnswer[]): boolean;
   getAgentControlPort(): {
     steer(agentRunId: string, message: string): Promise<{ readonly status: string; readonly message?: string }>;

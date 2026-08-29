@@ -334,7 +334,9 @@ async function routeRequest(input: { readonly req: IncomingMessage; readonly res
     if (typeof idempotencyKey !== "string" || idempotencyKey.length < 1 || idempotencyKey.length > 160) {
       return writeError(res, 400, "missing_idempotency_key", "Idempotency-Key is required.");
     }
-    const body = await readJson(req);
+    const parsedBody = await readJsonRequest(req, res);
+    if (!parsedBody.ok) return;
+    const body = parsedBody.body;
     if (!isRecord(body) || typeof body.sessionId !== "string" || !/^[A-Za-z0-9._-]+$/.test(body.sessionId)
       || typeof body.projectPath !== "string" || !isAbsolute(body.projectPath)
       || (body.provider !== undefined && typeof body.provider !== "string")
@@ -385,7 +387,9 @@ async function routeRequest(input: { readonly req: IncomingMessage; readonly res
     if (typeof idempotencyKey !== "string" || idempotencyKey.length < 1 || idempotencyKey.length > 160) {
       return writeError(res, 400, "missing_idempotency_key", "Idempotency-Key is required.");
     }
-    const body = await readJson(req);
+    const parsedBody = await readJsonRequest(req, res);
+    if (!parsedBody.ok) return;
+    const body = parsedBody.body;
     if (!isRecord(body) || !Number.isSafeInteger(body.expectedRevision) || !Array.isArray(body.args)) {
       return writeError(res, 400, "invalid_body", "expectedRevision and args are required.");
     }
@@ -418,13 +422,9 @@ async function routeRequest(input: { readonly req: IncomingMessage; readonly res
     if (!options.handlers.control) return writeError(res, 404, "not_available", "Runtime controls are unavailable.");
     const action = actionMatch[2] as ControlAction;
     if (!(CONTROL_ACTIONS as readonly string[]).includes(action)) return writeError(res, 404, "unknown_action", "Unknown control action.");
-    let body: unknown;
-    try {
-      body = await readJson(req);
-    } catch (error) {
-      const code = error instanceof Error && error.message === "payload_too_large" ? "payload_too_large" : "invalid_json";
-      return writeError(res, code === "payload_too_large" ? 413 : 400, code, code === "payload_too_large" ? "Request body is too large." : "Request body is not valid JSON.");
-    }
+    const parsedBody = await readJsonRequest(req, res);
+    if (!parsedBody.ok) return;
+    const body = parsedBody.body;
     if (!isRecord(body) || !Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 0) {
       return writeError(res, 400, "invalid_body", "expectedRevision must be a non-negative integer.");
     }
@@ -461,7 +461,9 @@ async function routeRequest(input: { readonly req: IncomingMessage; readonly res
   if (url.pathname === "/tools/invoke") {
     if (method !== "POST") return methodNotAllowed(res, ["POST"]);
     if (!options.handlers.invokeTool) return writeError(res, 404, "not_available", "Direct tool invocation is unavailable.");
-    const body = await readJson(req);
+    const parsedBody = await readJsonRequest(req, res);
+    if (!parsedBody.ok) return;
+    const body = parsedBody.body;
     return writeJson(res, 200, await options.handlers.invokeTool(body as ToolInvokeRequest));
   }
   return writeError(res, 404, "not_found", `No route for ${method} ${url.pathname}.`);
@@ -604,6 +606,24 @@ function readJson(req: IncomingMessage): Promise<unknown> {
     });
     req.on("error", reject);
   });
+}
+
+async function readJsonRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<{ readonly ok: true; readonly body: unknown } | { readonly ok: false }> {
+  try {
+    return { ok: true, body: await readJson(req) };
+  } catch (error) {
+    const payloadTooLarge = error instanceof Error && error.message === "payload_too_large";
+    writeError(
+      res,
+      payloadTooLarge ? 413 : 400,
+      payloadTooLarge ? "payload_too_large" : "invalid_json",
+      payloadTooLarge ? "Request body is too large." : "Request body is not valid JSON.",
+    );
+    return { ok: false };
+  }
 }
 
 export function makeStubHandlers(): ServerHandlers {

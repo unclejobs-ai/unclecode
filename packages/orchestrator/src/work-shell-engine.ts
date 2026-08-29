@@ -2516,12 +2516,12 @@ export class WorkShellEngine<
    * path as a typed line, everything else is a no-op that keeps the decision
    * pending (multi-question requests need typed `id: n` answers).
    */
-  answerPendingDecisionByIndex(index: number, decisionId?: string): boolean {
+  answerPendingDecisionByIndex(index: number, decisionId: string): boolean {
     const pending = this.pendingDecision;
     const question = pending?.request.questions.length === 1
       ? pending.request.questions[0]
       : undefined;
-    if (!pending || !question || (decisionId !== undefined && pending.request.id !== decisionId)) {
+    if (!pending || !question || pending.request.id !== decisionId) {
       return false;
     }
     if (!Number.isSafeInteger(index) || index < 1 || index > question.options.length) {
@@ -2545,8 +2545,8 @@ export class WorkShellEngine<
   }
 
   /** Esc on the decision bar: `/cancel` through the same settle guard. */
-  cancelPendingDecision(): boolean {
-    if (!this.pendingDecision) {
+  cancelPendingDecision(decisionId: string): boolean {
+    if (!this.pendingDecision || this.pendingDecision.request.id !== decisionId) {
       return false;
     }
     this.handlePendingDecisionReply("/cancel");

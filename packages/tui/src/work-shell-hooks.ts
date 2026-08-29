@@ -386,8 +386,8 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   // Decision bar (main-screen UX overhaul) — one-key replies and Esc cancel
   // for a pending AskUserQuestion. Both optional so hosts without decision
   // plumbing keep digits and Esc on their existing meanings.
-  answerPendingDecisionByIndex?(index: number, decisionId?: string): boolean;
-  cancelPendingDecision?(): boolean;
+  answerPendingDecisionByIndex?(index: number, decisionId: string): boolean;
+  cancelPendingDecision?(decisionId: string): boolean;
   removeQueueItem?(id: number): Promise<boolean>;
   moveQueueItem?(id: number, direction: "up" | "down"): Promise<boolean>;
   clearQueueItems?(): Promise<void>;
@@ -771,8 +771,8 @@ export function useWorkShellInputController(input: {
   readonly pendingDecisionId?: string | undefined;
   readonly decisionOptionCount?: number | undefined;
   /** Decision bar capability probes — wired by engines that own decisions. */
-  readonly answerPendingDecisionByIndex?: ((index: number, decisionId?: string) => boolean) | undefined;
-  readonly cancelPendingDecision?: (() => boolean) | undefined;
+  readonly answerPendingDecisionByIndex?: ((index: number, decisionId: string) => boolean) | undefined;
+  readonly cancelPendingDecision?: ((decisionId: string) => boolean) | undefined;
   readonly queueOverlayOpen?: boolean | undefined;
   readonly queueSelectedId?: number | undefined;
   readonly moveQueueSelection?: ((delta: -1 | 1) => void) | undefined;
@@ -1119,15 +1119,16 @@ export function useWorkShellInputController(input: {
     // decision, so consuming it here keeps the Rust Esc ladder (busy-turn
     // interrupt, overlay close) untouched whenever no decision is pending.
     if (shellActionOwnership === "decision") {
-      if (key.escape && input.cancelPendingDecision) {
+      if (key.escape && input.cancelPendingDecision && input.pendingDecisionId) {
         escapeResetArmedAtRef.current = undefined;
-        input.cancelPendingDecision();
+        input.cancelPendingDecision(input.pendingDecisionId);
         return;
       }
       const oneKeyIndex = Number(value);
       if (
         !key.escape
         && input.answerPendingDecisionByIndex
+        && input.pendingDecisionId
         && Number.isSafeInteger(oneKeyIndex)
         && oneKeyIndex >= 1
       ) {
@@ -1909,12 +1910,15 @@ export function useWorkShellPaneState<
     ...(decisionOptionCount !== undefined ? { decisionOptionCount } : {}),
     ...(input.engine.answerPendingDecisionByIndex
       ? {
-          answerPendingDecisionByIndex: (index: number, decisionId?: string) =>
+          answerPendingDecisionByIndex: (index: number, decisionId: string) =>
             input.engine.answerPendingDecisionByIndex?.(index, decisionId) ?? false,
         }
       : {}),
     ...(input.engine.cancelPendingDecision
-      ? { cancelPendingDecision: () => input.engine.cancelPendingDecision?.() ?? false }
+      ? {
+          cancelPendingDecision: (decisionId: string) =>
+            input.engine.cancelPendingDecision?.(decisionId) ?? false,
+        }
       : {}),
     queueOverlayOpen,
     ...(queueSelectedId !== undefined ? { queueSelectedId } : {}),

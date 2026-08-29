@@ -479,7 +479,7 @@ test("remote adapter surfaces a decision conflict without retrying against a cha
     },
   };
   const engine = await createRemoteWorkShellEngine(client, "decision-conflict");
-  await assert.rejects(engine.answerPendingDecisionByIndex(1), /Engine revision changed/);
+  await assert.rejects(engine.answerPendingDecisionByIndex(1, "decision-a"), /Engine revision changed/);
   assert.equal(attempts, 1, "an index cannot be replayed against a different pending decision identity");
   assert.equal(engine.getState().agentConsole.pendingDecision.id, "decision-a");
   engine.dispose();

@@ -16,6 +16,7 @@ import { boundedRuntimeRpcError } from "./runtime-error-redaction.js";
 export type { RuntimeSessionRevisionClock } from "./runtime-mutation-arbiter.js";
 
 const MAX_PENDING_SESSION_CREATIONS = 256;
+const MAX_RUNTIME_DECISION_ID_LENGTH = 160;
 
 export const RUNTIME_ENGINE_METHODS = [
   "handleSubmit", "toggleToolHistoryDisplay", "setMode", "openSessionsPanel", "interruptTurn",
@@ -106,6 +107,95 @@ function hasInterruptibleTurn(attached: Attached): boolean {
   if (lifecycle?.state && !["idle", "completed", "cancelled"].includes(lifecycle.state)) return true;
   const state = attached.engine.getState() as { readonly isBusy?: unknown } | null;
   return state?.isBusy === true;
+}
+
+type ExactDecisionInvocation =
+  | {
+      readonly method: "answerPendingDecisionByIndex";
+      readonly args: readonly [index: number, decisionId: string];
+      readonly decisionId: string;
+    }
+  | {
+      readonly method: "cancelPendingDecision";
+      readonly args: readonly [decisionId: string];
+      readonly decisionId: string;
+    };
+
+type DecisionInvocationValidation =
+  | { readonly kind: "unrelated" }
+  | { readonly kind: "invalid"; readonly message: string }
+  | { readonly kind: "valid"; readonly invocation: ExactDecisionInvocation };
+
+function validRuntimeDecisionId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.trim().length > 0
+    && value.length <= MAX_RUNTIME_DECISION_ID_LENGTH;
+}
+
+function validateDecisionInvocation(
+  method: string,
+  args: readonly unknown[],
+): DecisionInvocationValidation {
+  if (method === "answerPendingDecisionByIndex") {
+    const [index, decisionId] = args;
+    if (
+      args.length !== 2
+      || !Number.isSafeInteger(index)
+      || (index as number) < 1
+      || !validRuntimeDecisionId(decisionId)
+    ) {
+      return {
+        kind: "invalid",
+        message: "answerPendingDecisionByIndex requires [positiveIntegerIndex, decisionId].",
+      };
+    }
+    return {
+      kind: "valid",
+      invocation: {
+        method,
+        args: [index as number, decisionId],
+        decisionId,
+      },
+    };
+  }
+  if (method === "cancelPendingDecision") {
+    const [decisionId] = args;
+    if (args.length !== 1 || !validRuntimeDecisionId(decisionId)) {
+      return {
+        kind: "invalid",
+        message: "cancelPendingDecision requires [decisionId].",
+      };
+    }
+    return {
+      kind: "valid",
+      invocation: {
+        method,
+        args: [decisionId],
+        decisionId,
+      },
+    };
+  }
+  return { kind: "unrelated" };
+}
+
+function canSettleExactPendingDecision(
+  attached: Attached,
+  invocation: ExactDecisionInvocation,
+): boolean {
+  const state = attached.engine.getState() as {
+    readonly agentConsole?: {
+      readonly pendingDecision?: {
+        readonly id?: unknown;
+        readonly questions?: unknown;
+      } | undefined;
+    } | undefined;
+  } | null;
+  const pending = state?.agentConsole?.pendingDecision;
+  if (pending?.id !== invocation.decisionId) return false;
+  if (invocation.method === "cancelPendingDecision") return true;
+  if (!Array.isArray(pending.questions) || pending.questions.length !== 1) return false;
+  const question = pending.questions[0] as { readonly options?: unknown } | undefined;
+  return Array.isArray(question?.options) && invocation.args[0] <= question.options.length;
 }
 
 export type RuntimeEngineRpcResponse =
@@ -586,6 +676,19 @@ export class LiveRuntimeEngineRegistry {
     if (typeof method !== "function") {
       return { ok: false, code: "invalid_method", message: "Engine does not implement this method.", revision: attached.clock.value };
     }
+    const decisionValidation = validateDecisionInvocation(input.method, input.args);
+    if (decisionValidation.kind === "invalid") {
+      return {
+        ok: false,
+        code: "invalid_action",
+        message: decisionValidation.message,
+        revision: attached.clock.value,
+      };
+    }
+    const exactDecision = decisionValidation.kind === "valid"
+      ? decisionValidation.invocation
+      : undefined;
+    const invocationArgs = exactDecision?.args ?? input.args;
     return attached.arbiter.mutate<unknown, RuntimeEngineRpcResponse>({
       idempotencyKey: input.idempotencyKey,
       fingerprint,
@@ -606,10 +709,17 @@ export class LiveRuntimeEngineRegistry {
             precondition: () => hasInterruptibleTurn(attached) ? undefined : false,
             didMutate: (result: unknown) => result !== false,
           }
+        : exactDecision
+          ? {
+              precondition: () => canSettleExactPendingDecision(attached, exactDecision) ? undefined : false,
+              didMutate: (result: unknown) => result !== false,
+            }
         : {}),
-      execute: () => Reflect.apply(method, attached.engine, input.args),
+      execute: () => Reflect.apply(method, attached.engine, invocationArgs),
       complete: (result, revision) => input.method === "interruptTurn" && result === false
         ? { ok: false, code: "invalid_action", message: "No admitted or active turn could be cancelled.", revision }
+        : exactDecision && result === false
+          ? { ok: false, code: "invalid_action", message: "The pending decision changed or is no longer actionable.", revision }
         : {
             ok: true,
             revision,

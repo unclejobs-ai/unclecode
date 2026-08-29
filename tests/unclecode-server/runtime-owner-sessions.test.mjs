@@ -13,6 +13,7 @@ import {
 import { RuntimeSessionMutationArbiter } from "../../apps/unclecode-server/src/runtime-mutation-arbiter.ts";
 import { LiveRuntimeControlRegistry } from "../../apps/unclecode-server/src/persistent-runtime.ts";
 import { startPersistentRuntimeOwner } from "../../apps/unclecode-server/src/runtime-owner.ts";
+import { RuntimeOwnerClient } from "../../apps/unclecode-server/src/runtime-owner-client.ts";
 import {
   processStartIdentity,
   readRuntimeOwnerLease,
@@ -42,6 +43,46 @@ function fakeEngine(label) {
     async handleSubmit() {},
     answerPendingDecisionByIndex: () => false,
     getAgentControlPort: () => ({ async steer() { return { status: "rejected" }; } }),
+  };
+}
+
+function fakeDecisionEngine(label) {
+  let pendingDecision;
+  let answerCalls = 0;
+  let cancelCalls = 0;
+  const decision = (id) => ({
+    kind: "user-decision",
+    id,
+    title: id,
+    questions: [{
+      id: "choice",
+      question: "Choose.",
+      options: [{ label: "One" }, { label: "Two" }],
+    }],
+  });
+  return {
+    get answerCalls() { return answerCalls; },
+    get cancelCalls() { return cancelCalls; },
+    get pendingDecisionId() { return pendingDecision?.id; },
+    replacePendingDecision(id) { pendingDecision = decision(id); },
+    getState: () => ({
+      label,
+      isBusy: true,
+      agentConsole: pendingDecision ? { pendingDecision } : {},
+    }),
+    subscribe: () => () => {},
+    answerPendingDecisionByIndex(index, decisionId) {
+      answerCalls += 1;
+      if (pendingDecision?.id !== decisionId || index < 1 || index > 2) return false;
+      pendingDecision = undefined;
+      return true;
+    },
+    cancelPendingDecision(decisionId) {
+      cancelCalls += 1;
+      if (pendingDecision?.id !== decisionId) return false;
+      pendingDecision = undefined;
+      return true;
+    },
   };
 }
 
@@ -804,6 +845,137 @@ test("idle engine RPC cancel is rejected before admission without consuming a re
   assert.equal(clock.value, 0);
   assert.equal(interruptCalls, 0, "the idle interrupt must be rejected before execution");
   await engines.disposeAll();
+});
+
+test("decision RPC schema and identity reject delayed A controls after B replaces it at the same revision", async () => {
+  const clock = { value: 0 };
+  const engines = new LiveRuntimeEngineRegistry();
+  const engine = fakeDecisionEngine("direct-decision-race");
+  engines.attach("direct-decision-race", engine, {
+    projectPath: "/work/direct-decision-race",
+    revisionClock: clock,
+  });
+  engine.replacePendingDecision("decision-a");
+  engine.replacePendingDecision("decision-b");
+
+  const invoke = (method, args, idempotencyKey) => engines.invoke({
+    sessionId: "direct-decision-race",
+    method,
+    args,
+    expectedRevision: 0,
+    idempotencyKey,
+  });
+  for (const [method, args, key] of [
+    ["answerPendingDecisionByIndex", [1], "missing-answer-id"],
+    ["answerPendingDecisionByIndex", [0, "decision-b"], "unsafe-answer-index"],
+    ["answerPendingDecisionByIndex", [1, " "], "blank-answer-id"],
+    ["answerPendingDecisionByIndex", [1, "x".repeat(161)], "oversized-answer-id"],
+    ["cancelPendingDecision", [], "missing-cancel-id"],
+    ["cancelPendingDecision", [""], "blank-cancel-id"],
+  ]) {
+    const rejected = await invoke(method, args, key);
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.code, "invalid_action");
+    assert.equal(rejected.revision, 0);
+  }
+
+  const delayedAnswer = await invoke(
+    "answerPendingDecisionByIndex",
+    [1, "decision-a"],
+    "delayed-answer-a",
+  );
+  const delayedCancel = await invoke(
+    "cancelPendingDecision",
+    ["decision-a"],
+    "delayed-cancel-a",
+  );
+  assert.equal(delayedAnswer.ok, false);
+  assert.equal(delayedCancel.ok, false);
+  assert.equal(delayedAnswer.revision, 0);
+  assert.equal(delayedCancel.revision, 0);
+  assert.equal(engine.pendingDecisionId, "decision-b");
+  assert.equal(engine.answerCalls, 0);
+  assert.equal(engine.cancelCalls, 0);
+  assert.equal(clock.value, 0);
+
+  const accepted = await invoke(
+    "answerPendingDecisionByIndex",
+    [2, "decision-b"],
+    "answer-b",
+  );
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.result, true);
+  assert.equal(accepted.revision, 1);
+  assert.equal(engine.pendingDecisionId, undefined);
+  assert.equal(engine.answerCalls, 1);
+  await engines.disposeAll();
+});
+
+test("owner HTTP RPC keeps replacement decision B pending for delayed A answer and cancel", async (t) => {
+  const rootDir = await mkdtemp(join(tmpdir(), "unclecode-owner-decision-race-"));
+  const projectPath = join(rootDir, "workspace");
+  const engine = fakeDecisionEngine("http-decision-race");
+  await mkdir(projectPath);
+  const owner = await startPersistentRuntimeOwner({
+    rootDir,
+    leasePath: join(rootDir, "owner.json"),
+    tokenPath: join(rootDir, "server.token"),
+    async createSession() {
+      return { engine, projectPath };
+    },
+  });
+  t.after(async () => {
+    await owner.stop();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+  const client = await RuntimeOwnerClient.connect(owner.lease);
+  const created = await client.createRuntimeSession({
+    sessionId: "http-decision-race",
+    projectPath,
+    idempotencyKey: "create-http-decision-race",
+  });
+  assert.equal(created.ok, true);
+  engine.replacePendingDecision("decision-a");
+  engine.replacePendingDecision("decision-b");
+
+  const delayedAnswer = await client.invokeEngineMethod({
+    sessionId: "http-decision-race",
+    method: "answerPendingDecisionByIndex",
+    args: [1, "decision-a"],
+    expectedRevision: 0,
+    idempotencyKey: "http-delayed-answer-a",
+  });
+  const delayedCancel = await client.invokeEngineMethod({
+    sessionId: "http-decision-race",
+    method: "cancelPendingDecision",
+    args: ["decision-a"],
+    expectedRevision: 0,
+    idempotencyKey: "http-delayed-cancel-a",
+  });
+  const stateAfterStaleControls = await client.readEngineState("http-decision-race");
+
+  assert.equal(delayedAnswer.ok, false);
+  assert.equal(delayedCancel.ok, false);
+  assert.equal(delayedAnswer.revision, 0);
+  assert.equal(delayedCancel.revision, 0);
+  assert.equal(stateAfterStaleControls.ok, true);
+  assert.equal(stateAfterStaleControls.revision, 0);
+  assert.equal(stateAfterStaleControls.state.agentConsole.pendingDecision.id, "decision-b");
+  assert.equal(engine.answerCalls, 0);
+  assert.equal(engine.cancelCalls, 0);
+
+  const accepted = await client.invokeEngineMethod({
+    sessionId: "http-decision-race",
+    method: "cancelPendingDecision",
+    args: ["decision-b"],
+    expectedRevision: 0,
+    idempotencyKey: "http-cancel-b",
+  });
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.result, true);
+  assert.equal(accepted.revision, 1);
+  assert.equal(engine.pendingDecisionId, undefined);
+  assert.equal(engine.cancelCalls, 1);
 });
 
 test("timed-out admission persistence leaves the revision unpublished and releases the admission tail", async () => {

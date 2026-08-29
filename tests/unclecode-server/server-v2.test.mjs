@@ -79,6 +79,54 @@ test("typed controls validate body, revision, and idempotency", async () => {
   }
 });
 
+test("all JSON RPC routes map malformed and oversized bodies without invoking handlers", async () => {
+  const { handlers } = fixture();
+  const calls = [];
+  const server = await startServer({
+    port: 0,
+    authToken: TOKEN,
+    handlers: {
+      ...handlers,
+      async createRuntimeSession(input) { calls.push(["create", input]); return { ok: true }; },
+      async invokeEngineMethod(input) { calls.push(["method", input]); return { ok: true }; },
+      async invokeTool(input) { calls.push(["tool", input]); return { isError: false }; },
+    },
+  });
+  const routes = [
+    ["create", "/runtime/sessions", { "idempotency-key": "bad-create-json" }],
+    ["method", "/runtime/sessions/s1/methods/setMode", { "idempotency-key": "bad-method-json" }],
+    ["tool", "/tools/invoke", {}],
+  ];
+  try {
+    for (const [name, path, extraHeaders] of routes) {
+      const malformed = await fetch(`${server.url}${path}`, {
+        method: "POST",
+        headers: headers({
+          "content-type": "application/json",
+          ...extraHeaders,
+        }),
+        body: "{",
+      });
+      assert.equal(malformed.status, 400, `${name} malformed status`);
+      assert.equal((await malformed.json()).error.code, "invalid_json", `${name} malformed code`);
+
+      const oversized = await fetch(`${server.url}${path}`, {
+        method: "POST",
+        headers: headers({
+          "content-type": "application/json",
+          ...extraHeaders,
+        }),
+        body: JSON.stringify({ padding: "x".repeat(70_000) }),
+      });
+      assert.equal(oversized.status, 413, `${name} oversized status`);
+      assert.equal((await oversized.json()).error.code, "payload_too_large", `${name} oversized code`);
+    }
+    assert.deepEqual(calls, []);
+  } finally {
+    await server.stop();
+  }
+});
+
 test("typed decision endpoint rejects malformed answers before runtime admission", async () => {
   const { handlers, calls } = fixture();
   const server = await startServer({ port: 0, handlers, authToken: TOKEN });

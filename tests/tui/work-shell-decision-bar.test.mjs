@@ -128,6 +128,7 @@ function createDecisionPaneEngine(decision, overrides = {}) {
   const answeredIndexes = [];
   const answeredDecisionIds = [];
   const cancelCalls = [];
+  const cancelledDecisionIds = [];
   let state = {
     entries: [{ role: "user", text: "run the migration" }],
     model: "gpt-5.4",
@@ -158,6 +159,7 @@ function createDecisionPaneEngine(decision, overrides = {}) {
     answeredIndexes,
     answeredDecisionIds,
     cancelCalls,
+    cancelledDecisionIds,
     engine: {
       getState: () => state,
       subscribe: (listener) => {
@@ -176,8 +178,9 @@ function createDecisionPaneEngine(decision, overrides = {}) {
         answeredDecisionIds.push(decisionId);
         return true;
       },
-      cancelPendingDecision: () => {
+      cancelPendingDecision: (decisionId) => {
         cancelCalls.push(true);
+        cancelledDecisionIds.push(decisionId);
         return true;
       },
     },
@@ -294,8 +297,8 @@ test("pressing 1 answers the pending decision without typing into the draft", as
   }
 });
 
-test("pressing Esc cancels the pending decision", async () => {
-  const { engine, answeredIndexes, cancelCalls } = createDecisionPaneEngine(
+test("pressing Esc cancels the exact pending decision", async () => {
+  const { engine, answeredIndexes, cancelCalls, cancelledDecisionIds } = createDecisionPaneEngine(
     SINGLE_QUESTION_DECISION,
   );
   const { stdin, instance, getOutput } = renderWorkShellPane(engine);
@@ -308,6 +311,7 @@ test("pressing Esc cancels the pending decision", async () => {
     await waitForCondition(() => cancelCalls.length === 1);
 
     assert.deepEqual(cancelCalls, [true]);
+    assert.deepEqual(cancelledDecisionIds, ["decision-bar-1"]);
     assert.deepEqual(answeredIndexes, []);
   } finally {
     instance.unmount();
