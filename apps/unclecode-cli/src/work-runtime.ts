@@ -169,6 +169,15 @@ function hasPendingOwnerDecision(state: Readonly<Record<string, unknown>>): bool
     && (agentConsole as { readonly pendingDecision?: unknown }).pendingDecision !== undefined;
 }
 
+function isTerminalOwnerState(state: Readonly<Record<string, unknown>>): boolean {
+  if (hasPendingOwnerDecision(state)) return false;
+  const lifecycle = state.turnLifecycle;
+  return typeof lifecycle === "object"
+    && lifecycle !== null
+    && ((lifecycle as { readonly state?: unknown }).state === "completed"
+      || (lifecycle as { readonly state?: unknown }).state === "cancelled");
+}
+
 function workShellPanelLines(state: Readonly<Record<string, unknown>>): readonly string[] {
   const panel = state.panel;
   if (typeof panel !== "object" || panel === null) return [];
@@ -269,26 +278,42 @@ async function runPromptThroughPersistentOwner(
     idempotencyKey: `prompt-${randomUUID()}`,
   });
   if (!created.ok) throw new Error(created.message);
-  const attached = await client.attachRuntimeSession(created.session.sessionId);
-  if (!attached.ok) throw new Error(attached.message);
+  let attached: Awaited<ReturnType<RuntimeOwnerClient["attachRuntimeSession"]>>;
+  try {
+    attached = await client.attachRuntimeSession(created.session.sessionId);
+    if (!attached.ok) throw new Error(attached.message);
+  } catch (error) {
+    if (parsed.sessionId === undefined) {
+      await client.releaseRuntimeSession(created.session.sessionId);
+    }
+    throw error;
+  }
 
   const engine = await createRemoteWorkShellEngine(
     client,
     attached.session.sessionId,
   ) as RemotePromptEngine;
-  const baselineEntryCount = workShellEntries(engine.getState()).length;
-  const state = await waitForOwnerPromptState(engine, parsed.prompt);
-  const transcriptLines = workShellEntries(state)
-    .slice(baselineEntryCount)
-    .filter((entry) => entry.role !== "user")
-    .map((entry) => entry.text);
-  const lines = transcriptLines.length > 0
-    ? transcriptLines
-    : hasPendingOwnerDecision(state)
-      ? workShellPanelLines(state)
-      : [];
-  if (lines.length > 0) {
-    (dependencies.writeOutput ?? ((text: string) => { process.stdout.write(text); }))(`${lines.join("\n")}\n`);
+  let releaseTerminalSession = false;
+  try {
+    const baselineEntryCount = workShellEntries(engine.getState()).length;
+    const state = await waitForOwnerPromptState(engine, parsed.prompt);
+    releaseTerminalSession = isTerminalOwnerState(state);
+    const transcriptLines = workShellEntries(state)
+      .slice(baselineEntryCount)
+      .filter((entry) => entry.role !== "user")
+      .map((entry) => entry.text);
+    const lines = transcriptLines.length > 0
+      ? transcriptLines
+      : hasPendingOwnerDecision(state)
+        ? workShellPanelLines(state)
+        : [];
+    if (lines.length > 0) {
+      (dependencies.writeOutput ?? ((text: string) => { process.stdout.write(text); }))(`${lines.join("\n")}\n`);
+    }
+  } finally {
+    if (releaseTerminalSession) {
+      await client.releaseRuntimeSession(attached.session.sessionId);
+    }
   }
 }
 

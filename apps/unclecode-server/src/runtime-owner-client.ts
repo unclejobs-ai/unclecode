@@ -133,6 +133,14 @@ export class RuntimeOwnerClient {
     return await response.json() as RuntimeSessionAttachResponse;
   }
 
+  async releaseRuntimeSession(sessionId: string): Promise<{ readonly ok: true; readonly released: boolean }> {
+    const response = await this.#fetch(`/runtime/sessions/${encodeURIComponent(sessionId)}/release`, {
+      method: "POST",
+    });
+    if (!response.ok) throw new Error(`Runtime session release failed (${response.status}).`);
+    return await response.json() as { readonly ok: true; readonly released: boolean };
+  }
+
   async invokeEngineMethod(input: {
     readonly sessionId: string;
     readonly method: string;

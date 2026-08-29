@@ -53,6 +53,7 @@ export async function startPersistentRuntimeOwner(input: {
   readonly projectPath?: string | undefined;
   readonly resolveProcessStartIdentity?: ((pid: number) => Promise<string | null>) | undefined;
   readonly readCacheTelemetry?: (() => RuntimeCacheTelemetryReadResult) | undefined;
+  readonly leaseWatchIntervalMs?: number | undefined;
 }): Promise<{
   readonly lease: RuntimeOwnerLease;
   readonly controls: LiveRuntimeControlRegistry;
@@ -170,6 +171,7 @@ export async function startPersistentRuntimeOwner(input: {
       listRuntimeSessions: () => engines.list(),
       createRuntimeSession: (request) => engines.create(request),
       attachRuntimeSession: (sessionId) => engines.attachSession(sessionId),
+      releaseRuntimeSession: (sessionId) => engines.releaseSession(sessionId),
     },
     authToken: token,
     runtimeOwner: { protocol: RUNTIME_OWNER_PROTOCOL, ownerId, bootId },
@@ -213,12 +215,12 @@ export async function startPersistentRuntimeOwner(input: {
     }
     throw error;
   }
-  return {
-    lease,
-    controls,
-    journal,
-    engines,
-    async stop() {
+  let leaseWatchTimer: NodeJS.Timeout | undefined;
+  let stopPromise: Promise<void> | undefined;
+  const stop = (): Promise<void> => {
+    stopPromise ??= (async () => {
+      if (leaseWatchTimer) clearTimeout(leaseWatchTimer);
+      leaseWatchTimer = undefined;
       try {
         await server.stop();
       } finally {
@@ -233,7 +235,48 @@ export async function startPersistentRuntimeOwner(input: {
         }
       }
       const current = await readRuntimeOwnerLease(input.leasePath);
-      if (current?.ownerId === ownerId) await unlink(input.leasePath).catch(() => undefined);
-    },
+      if (runtimeOwnerLeaseMatches(current, lease)) {
+        await unlink(input.leasePath).catch(() => undefined);
+      }
+    })();
+    return stopPromise;
   };
+  const watchIntervalMs = Number.isFinite(input.leaseWatchIntervalMs)
+    ? Math.max(10, Math.floor(input.leaseWatchIntervalMs!))
+    : 1_000;
+  const scheduleLeaseWatch = () => {
+    if (stopPromise || leaseWatchTimer) return;
+    leaseWatchTimer = setTimeout(async () => {
+      leaseWatchTimer = undefined;
+      const current = await readRuntimeOwnerLease(input.leasePath);
+      if (!runtimeOwnerLeaseMatches(current, lease)) {
+        await stop();
+        return;
+      }
+      scheduleLeaseWatch();
+    }, watchIntervalMs);
+    leaseWatchTimer.unref?.();
+  };
+  scheduleLeaseWatch();
+  return {
+    lease,
+    controls,
+    journal,
+    engines,
+    stop,
+  };
+}
+
+function runtimeOwnerLeaseMatches(
+  current: RuntimeOwnerLease | null,
+  expected: RuntimeOwnerLease,
+): current is RuntimeOwnerLease {
+  return Boolean(
+    current
+    && current.ownerId === expected.ownerId
+    && current.bootId === expected.bootId
+    && current.pid === expected.pid
+    && current.processStartId === expected.processStartId
+    && current.endpoint === expected.endpoint,
+  );
 }

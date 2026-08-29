@@ -197,6 +197,7 @@ export type ServerHandlers = {
   listRuntimeSessions?(): unknown;
   createRuntimeSession?(input: { readonly sessionId: string; readonly projectPath: string; readonly provider?: string | undefined; readonly model?: string | undefined; readonly reasoning?: string | undefined; readonly resume?: boolean | undefined; readonly idempotencyKey: string }): Promise<unknown>;
   attachRuntimeSession?(sessionId: string): unknown;
+  releaseRuntimeSession?(sessionId: string): Promise<boolean>;
 };
 
 export type ServerOptions = {
@@ -358,6 +359,16 @@ async function routeRequest(input: { readonly req: IncomingMessage; readonly res
     if (method !== "POST") return methodNotAllowed(res, ["POST"]);
     if (!options.handlers.attachRuntimeSession) return writeError(res, 404, "not_available", "Runtime session attachment is unavailable.");
     return writeJson(res, 200, options.handlers.attachRuntimeSession(runtimeAttachMatch[1] ?? ""));
+  }
+
+  const runtimeReleaseMatch = /^\/runtime\/sessions\/([A-Za-z0-9._-]+)\/release$/.exec(url.pathname);
+  if (runtimeReleaseMatch) {
+    if (method !== "POST") return methodNotAllowed(res, ["POST"]);
+    if (!options.handlers.releaseRuntimeSession) return writeError(res, 404, "not_available", "Runtime session release is unavailable.");
+    return writeJson(res, 200, {
+      ok: true,
+      released: await options.handlers.releaseRuntimeSession(runtimeReleaseMatch[1] ?? ""),
+    });
   }
 
   const engineStateMatch = /^\/runtime\/sessions\/([A-Za-z0-9._-]+)\/state$/.exec(url.pathname);

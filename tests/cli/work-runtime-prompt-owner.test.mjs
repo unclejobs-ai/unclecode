@@ -26,6 +26,7 @@ test("one-shot Work prompt runs through the owner and prints its terminal transc
   const creates = [];
   const attaches = [];
   const invokes = [];
+  const releases = [];
   const output = [];
   let localBootstraps = 0;
   const terminalState = {
@@ -56,6 +57,10 @@ test("one-shot Work prompt runs through the owner and prints its terminal transc
       invokes.push(input);
       return { ok: true, revision: 2, state: terminalState, result: undefined };
     },
+    async releaseRuntimeSession(sessionId) {
+      releases.push(sessionId);
+      return { ok: true, released: true };
+    },
   };
 
   await runWorkCli(["--cwd", process.cwd(), "--provider", "openai", "summarize owner state"], {
@@ -83,10 +88,12 @@ test("one-shot Work prompt runs through the owner and prints its terminal transc
   assert.ok(invokes[0].idempotencyKey.length > 0);
   assert.notEqual(invokes[0].idempotencyKey, creates[0].idempotencyKey);
   assert.deepEqual(output, ["OWNER_TRANSCRIPT_RESULT\n"]);
+  assert.deepEqual(releases, [creates[0].sessionId], "a terminal one-shot session must release its owner resources");
 });
 
 test("piped Work input becomes one owner prompt without constructing a local runtime", async () => {
   const invokes = [];
+  const releases = [];
   const output = [];
   const argv = await resolveWorkEntrypointArgs([], {
     stdinIsTTY: false,
@@ -118,6 +125,10 @@ test("piped Work input becomes one owner prompt without constructing a local run
       invokes.push(input);
       return { ok: true, revision: 2, state: terminalState, result: undefined };
     },
+    async releaseRuntimeSession(sessionId) {
+      releases.push(sessionId);
+      return { ok: true, released: true };
+    },
   };
 
   assert.deepEqual(argv, ["summarize from stdin\nwith exact payload"]);
@@ -132,6 +143,7 @@ test("piped Work input becomes one owner prompt without constructing a local run
   assert.equal(invokes.length, 1);
   assert.deepEqual(invokes[0].args, ["summarize from stdin\nwith exact payload"]);
   assert.deepEqual(output, ["PIPE_OWNER_RESULT\n"]);
+  assert.deepEqual(releases, [invokes[0].sessionId]);
 });
 
 test("empty piped Work input exits without opening an interactive runtime", async () => {
@@ -148,11 +160,38 @@ test("empty piped Work input exits without opening an interactive runtime", asyn
   assert.equal(argv, undefined);
 });
 
+test("a newly created owner session is released when attach fails", async () => {
+  const releases = [];
+  const client = {
+    async createRuntimeSession(input) {
+      return { ok: true, session: successfulSession(input.sessionId) };
+    },
+    async attachRuntimeSession() {
+      return { ok: false, code: "attach_failed", message: "cannot attach" };
+    },
+    async releaseRuntimeSession(sessionId) {
+      releases.push(sessionId);
+      return { ok: true, released: true };
+    },
+  };
+
+  await assert.rejects(
+    runWorkCli(["--cwd", process.cwd(), "never submitted"], {
+      connectOwner: async () => client,
+      loadInteractiveSession: async () => { throw new Error("local bootstrap must stay unreachable"); },
+      writeOutput() {},
+    }),
+    /cannot attach/,
+  );
+  assert.equal(releases.length, 1, "a failed attach must not strand its freshly created owner session");
+});
+
 test("one-shot Work prompt returns at an owner decision and settles its client request", async () => {
   const output = [];
   const invokes = [];
   let reads = 0;
   let clientRequestAborted = 0;
+  const releases = [];
   const decisionState = {
     ...idleState,
     entries: [{ role: "user", text: "deploy safely" }],
@@ -194,6 +233,10 @@ test("one-shot Work prompt returns at an owner decision and settles its client r
         }, { once: true });
       });
     },
+    async releaseRuntimeSession(sessionId) {
+      releases.push(sessionId);
+      return { ok: true, released: true };
+    },
   };
 
   await runWorkCli(["--cwd", process.cwd(), "deploy safely"], {
@@ -211,11 +254,13 @@ test("one-shot Work prompt returns at an owner decision and settles its client r
   assert.equal(reads, readsAtReturn, "one-shot cleanup must leave no polling handle behind");
   assert.equal(invokes.some((input) => input.method === "interruptTurn"), false,
     "client detach must not cancel the owner-held decision");
+  assert.deepEqual(releases, [], "a pending owner decision must remain attachable");
 });
 
 test("one-shot Work prompt resumes an explicit owner session idempotently", async () => {
   const creates = [];
   const invokes = [];
+  const releases = [];
   const client = {
     async createRuntimeSession(input) {
       creates.push(input);
@@ -244,6 +289,10 @@ test("one-shot Work prompt resumes an explicit owner session idempotently", asyn
         result: undefined,
       };
     },
+    async releaseRuntimeSession(sessionId) {
+      releases.push(sessionId);
+      return { ok: true, released: true };
+    },
   };
 
   await runWorkCli(["--cwd", process.cwd(), "--session-id", "work-existing", "continue"], {
@@ -257,11 +306,13 @@ test("one-shot Work prompt resumes an explicit owner session idempotently", asyn
   assert.equal(creates[0].resume, true);
   assert.equal(invokes.length, 1, "resume must not duplicate the submitted owner turn");
   assert.equal(invokes[0].expectedRevision, 7);
+  assert.deepEqual(releases, ["work-existing"]);
 });
 
 test("one-shot Work prompt recovers a committed owner turn after its response is lost", async () => {
   const output = [];
   const invokes = [];
+  const releases = [];
   let state = idleState;
   let revision = 1;
   const client = {
@@ -293,6 +344,10 @@ test("one-shot Work prompt recovers a committed owner turn after its response is
       error.code = "ECONNRESET";
       throw error;
     },
+    async releaseRuntimeSession(sessionId) {
+      releases.push(sessionId);
+      return { ok: true, released: true };
+    },
   };
 
   await runWorkCli(["--cwd", process.cwd(), "finish exactly once"], {
@@ -303,4 +358,5 @@ test("one-shot Work prompt recovers a committed owner turn after its response is
 
   assert.equal(invokes.length, 1, "a lost response must never replay an admitted owner turn");
   assert.deepEqual(output, ["committed owner transcript\n"]);
+  assert.equal(releases.length, 1, "recovered terminal state must release the owner session exactly once");
 });
