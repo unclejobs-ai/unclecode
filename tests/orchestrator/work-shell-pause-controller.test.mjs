@@ -120,6 +120,33 @@ test("an irreversible tool stays pause_pending until the handler settles, then p
   assert.equal(await tool, "written-once");
 });
 
+test("a provider waiting on approval can pause at its durable pre-approval boundary before the answer arrives", async () => {
+  const controller = new CooperativePauseController();
+  controller.beginTurn("turn-approval");
+  const durable = [];
+  const persist = async (snapshot) => { durable.push(snapshot.boundary); };
+  let answerApproval;
+  const provider = controller.runNonInterruptible(
+    "provider.request",
+    () => new Promise((resolve) => { answerApproval = resolve; }),
+    persist,
+  );
+  await tick();
+
+  const pause = controller.requestPause();
+  const checkpoint = controller.checkpoint("before_approval", persist);
+  const receipt = await pause;
+
+  assert.equal(receipt.boundary, "before_approval");
+  assert.equal(controller.snapshot().state, "paused");
+  assert.deepEqual(durable, ["before_approval"]);
+  assert.equal(controller.resume(), true);
+  await checkpoint;
+
+  answerApproval("approved");
+  assert.equal(await provider, "approved");
+});
+
 test("overlapping approval checkpoints share one durable transition and one resume gate", async () => {
   const controller = new CooperativePauseController();
   controller.beginTurn("turn-approval-overlap");

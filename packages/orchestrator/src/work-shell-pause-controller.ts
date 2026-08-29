@@ -138,7 +138,11 @@ export class CooperativePauseController {
     // A node may settle while a parallel sibling (or nested tool dispatch)
     // remains in flight. Defer acknowledgement until the last irreversible
     // operation reaches its own post-operation checkpoint.
-    if (this.#nonInterruptibleOperations > 0) return;
+    // A provider turn can be waiting on a Work Shell decision while it still
+    // owns the outer provider operation. The engine only requests this exact
+    // boundary after publishing that pending decision, so it is safe to
+    // suspend without waiting for the answer that pause is intended to defer.
+    if (this.#nonInterruptibleOperations > 0 && boundary !== "before_approval") return;
     const turnId = this.#snapshot.turnId;
     if (!turnId) throw new Error("Pause checkpoint lost the active turn identity.");
 
