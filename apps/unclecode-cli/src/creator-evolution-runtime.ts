@@ -25,12 +25,36 @@ const CREATOR_POST_ABORT_SETTLEMENT_GRACE_MS = 1_000;
 const EVALUATOR_TIMEOUT_MS = 5 * 60_000;
 const MAX_OUTPUT_BYTES = 16_384;
 
+export type HostHeldOutEvaluation = {
+  readonly baselineResult: unknown;
+  readonly candidateResult: unknown;
+  readonly verification: {
+    readonly providerRunId: string;
+    readonly fullVerificationMatrix: {
+      readonly status: "passed";
+      readonly artifactHash: string;
+    };
+    readonly independentFinalReview: {
+      readonly status: "passed";
+      readonly reviewerId: string;
+      readonly artifactHash: string;
+    };
+  };
+};
+
 export function createWorkCreatorEvolutionService(input: {
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
   readonly reasoning: AppReasoningConfig;
   readonly recorder: AgentOpsRecorder;
   readonly createCreatorAgent: () => WorkTurnAgent | Promise<WorkTurnAgent>;
+  /** Host-only live evaluator. Candidate output cannot provide or replace this callback. */
+  readonly evaluateHeldOutWorktrees?: ((input: {
+    readonly runId: string;
+    readonly baselineWorktree: string;
+    readonly candidateWorktree: string;
+    readonly signal: AbortSignal;
+  }) => Promise<HostHeldOutEvaluation>) | undefined;
   /** Optional operational override; production defaults to the ten-minute creator budget. */
   readonly creatorTimeoutMs?: number;
   /** Creator providers receive abort, then this finite grace before their edit envelope is detached. */
@@ -125,27 +149,57 @@ export function createWorkCreatorEvolutionService(input: {
     },
     async runEvaluator(request): Promise<EvolutionEvaluatorResult> {
       try {
+        if (!input.evaluateHeldOutWorktrees) {
+          const unavailable: EvolutionBenchmarkResult = {
+            score: 0,
+            summary: "Host integrated held-out evaluation is unavailable; offline fixtures cannot authorize this candidate.",
+            checks: [{ id: "held-out-v1", status: "passed", score: 0, durationMs: 0 }],
+          };
+          return {
+            status: "completed",
+            environmentHash: request.expectedEnvironmentHash,
+            integratedProof: {
+              status: "unproven",
+              reasons: ["HOST_HELD_OUT_EVALUATION_UNAVAILABLE"],
+            },
+            baseline: unavailable,
+            candidate: unavailable,
+          };
+        }
         const outcome = await runBounded(
           request.signal,
           request.timeoutMs,
           async (signal) => {
             signal.throwIfAborted();
-            const report = runHeldOutComparison({
-              suiteRoot: join(input.cwd, "benchmarks", "held-out", "v1"),
-              candidatePath: join(
-                input.cwd,
-                "benchmarks",
-                "held-out",
-                "v1",
-                "candidate.fixture.json",
-              ),
+            const evaluation = await input.evaluateHeldOutWorktrees!({
+              runId: request.runId,
+              baselineWorktree: request.baselineWorktree,
+              candidateWorktree: request.candidateWorktree,
+              signal,
             });
             signal.throwIfAborted();
-            return report;
+            assertHeldOutResultIdentity(
+              evaluation.baselineResult,
+              request.proofContext.baseCommit,
+              "baseline",
+            );
+            assertHeldOutResultIdentity(
+              evaluation.candidateResult,
+              request.proofContext.candidateCommit,
+              "candidate",
+            );
+            const report = runHeldOutComparison({
+              suiteRoot: join(input.cwd, "benchmarks", "held-out", "v1"),
+              baselineResult: evaluation.baselineResult,
+              candidateResult: evaluation.candidateResult,
+              trustedProof: evaluation.verification,
+            });
+            signal.throwIfAborted();
+            return { evaluation, report };
           },
         );
         if (outcome.status !== "completed") return outcome;
-        const report = outcome.value;
+        const { evaluation, report } = outcome.value;
         const baseline: EvolutionBenchmarkResult = {
           score: report.baseline.qualityPercent / 100,
           summary: boundUtf8(
@@ -172,12 +226,35 @@ export function createWorkCreatorEvolutionService(input: {
             durationMs: 0,
           }],
         };
+        const metrics = heldOutObservedMetrics(report);
+        const proofEvidence = {
+          ...request.proofContext,
+          providerRunId: evaluation.verification.providerRunId,
+          verificationMatrixArtifactHash: evaluation.verification.fullVerificationMatrix.artifactHash,
+          independentReviewerId: evaluation.verification.independentFinalReview.reviewerId,
+          independentReviewArtifactHash: evaluation.verification.independentFinalReview.artifactHash,
+          baselineResultHash: benchmarkResultHash(baseline),
+          candidateResultHash: benchmarkResultHash(candidate),
+          baselineObservationHash: sha256(canonicalJson(evaluation.baselineResult)),
+          candidateObservationHash: sha256(canonicalJson(evaluation.candidateResult)),
+          metrics,
+          metricsHash: sha256(canonicalJson(metrics)),
+          observedAt: new Date().toISOString(),
+        };
         return {
           status: "completed",
           environmentHash: request.expectedEnvironmentHash,
           integratedProof: {
             status: report.integratedProof.status,
             reasons: [...report.integratedProof.reasons],
+            ...(report.integratedProof.status === "proven"
+              ? {
+                  binding: {
+                    ...proofEvidence,
+                    proofHash: sha256(canonicalJson(proofEvidence)),
+                  },
+                }
+              : {}),
           },
           baseline,
           candidate,
@@ -209,6 +286,41 @@ export function createWorkCreatorEvolutionService(input: {
     },
   });
   return new CreatorEvolutionService({ config, host });
+}
+
+function heldOutObservedMetrics(report: {
+  readonly baseline: Record<string, unknown>;
+  readonly candidate: Record<string, unknown>;
+  readonly comparison: Record<string, unknown>;
+}): Readonly<Record<string, number>> {
+  const metrics: Record<string, number> = {};
+  const collect = (prefix: string, value: unknown): void => {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      metrics[prefix] = value;
+      return;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    for (const [key, nested] of Object.entries(value)) collect(`${prefix}.${key}`, nested);
+  };
+  collect("baseline", report.baseline);
+  collect("candidate", report.candidate);
+  collect("comparison", report.comparison);
+  return metrics;
+}
+
+function assertHeldOutResultIdentity(value: unknown, expectedCommit: string, label: string): void {
+  if (
+    !value
+    || typeof value !== "object"
+    || (value as { evidenceMode?: unknown }).evidenceMode !== "live-provider"
+    || (value as { commit?: unknown }).commit !== expectedCommit
+  ) {
+    throw new Error(`Host ${label} held-out result is not bound to the evaluated worktree commit.`);
+  }
+}
+
+function benchmarkResultHash(result: EvolutionBenchmarkResult): string {
+  return sha256(canonicalJson({ score: result.score, checks: result.checks }));
 }
 
 type BoundedOutcome<T> =

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -17,6 +18,10 @@ const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function sha(value) {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
 function createRepository() {
@@ -305,9 +310,132 @@ test("production creator uses the trusted held-out closure and rejects offline s
     assert.equal(result.projection.evaluatorId, "unclecode-held-out-evaluator-v1");
     assert.equal(result.projection.heldOutBenchmarkId, "unclecode-held-out-v1");
     assert.equal(result.projection.comparison?.passed, true);
+    assert.equal(result.projection.comparison?.baselineScore, 0);
+    assert.equal(result.projection.comparison?.candidateScore, 0);
     assert.equal(result.status, "rejected");
     assert.ok(result.projection.failures.includes("EVOLUTION_INTEGRATED_PROOF_UNPROVEN"));
     assert.equal(records.length, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("host evaluation reads each isolated candidate and produces candidate-bound results", async () => {
+  const root = createRepository();
+  const records = [];
+  const evaluatedCandidates = [];
+  const evaluateHeldOutWorktrees = async ({ runId, baselineWorktree, candidateWorktree, signal }) => {
+    signal.throwIfAborted();
+    const creator = readFileSync(path.join(candidateWorktree, "skills", "creator.md"), "utf8");
+    const candidateScore = creator === "creator v2\n" ? 0.8 : 0.9;
+    evaluatedCandidates.push({ runId, baselineWorktree, candidateWorktree, creator });
+    const baseline = JSON.parse(readFileSync(
+      path.join(baselineWorktree, "benchmarks", "held-out", "v1", "baseline.json"),
+      "utf8",
+    ));
+    const candidate = JSON.parse(readFileSync(
+      path.join(candidateWorktree, "benchmarks", "held-out", "v1", "candidate.fixture.json"),
+      "utf8",
+    ));
+    baseline.evidenceMode = "live-provider";
+    baseline.commit = git(baselineWorktree, ["rev-parse", "HEAD"]);
+    candidate.evidenceMode = "live-provider";
+    candidate.commit = git(candidateWorktree, ["rev-parse", "HEAD"]);
+    for (const entry of candidate.cases) entry.score = candidateScore;
+    return {
+      baselineResult: baseline,
+      candidateResult: candidate,
+      verification: {
+        providerRunId: `host-provider-${runId}`,
+        fullVerificationMatrix: {
+          status: "passed",
+          artifactHash: sha(`matrix:${runId}:${candidate.commit}`),
+        },
+        independentFinalReview: {
+          status: "passed",
+          reviewerId: `host-reviewer-${runId}`,
+          artifactHash: sha(`review:${runId}:${candidate.commit}`),
+        },
+      },
+    };
+  };
+  const runCandidate = async (runId, content) => createWorkCreatorEvolutionService({
+    cwd: root,
+    env: { ...process.env },
+    reasoning: {},
+    recorder: fakeRecorder(records),
+    evaluateHeldOutWorktrees,
+    createCreatorAgent: () => fakeAgent(async () => ({
+      text: JSON.stringify({ files: [{ path: "skills/creator.md", content }] }),
+    })),
+  }).run(evolutionInput(root, runId, new AbortController().signal));
+
+  try {
+    const first = await runCandidate("creator-bound-v2", "creator v2\n");
+    const second = await runCandidate("creator-bound-v3", "creator v3\n");
+
+    assert.equal(first.status, "pr-ready");
+    assert.equal(second.status, "pr-ready");
+    assert.equal(first.projection.comparison?.candidateScore, 0.8);
+    assert.equal(second.projection.comparison?.candidateScore, 0.9);
+    assert.notEqual(first.projection.hashes.candidateArtifact, second.projection.hashes.candidateArtifact);
+    assert.equal(first.projection.humanApproval, "pending");
+    assert.equal(second.projection.humanApproval, "pending");
+    assert.deepEqual(evaluatedCandidates.map((entry) => entry.creator), ["creator v2\n", "creator v3\n"]);
+    assert.ok(evaluatedCandidates.every((entry) => entry.baselineWorktree !== entry.candidateWorktree));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the offline plus-8.8 fixture cannot authorize an unrelated isolated candidate", async () => {
+  const root = createRepository();
+  const records = [];
+  try {
+    const service = createWorkCreatorEvolutionService({
+      cwd: root,
+      env: { ...process.env },
+      reasoning: {},
+      recorder: fakeRecorder(records),
+      createCreatorAgent: () => fakeAgent(async () => ({
+        text: '{"files":[{"path":"skills/creator.md","content":"unrelated candidate\\n"}]}',
+      })),
+      async evaluateHeldOutWorktrees({ runId, baselineWorktree, candidateWorktree }) {
+        const baseline = JSON.parse(readFileSync(
+          path.join(baselineWorktree, "benchmarks", "held-out", "v1", "baseline.json"),
+          "utf8",
+        ));
+        const fixture = JSON.parse(readFileSync(
+          path.join(candidateWorktree, "benchmarks", "held-out", "v1", "candidate.fixture.json"),
+          "utf8",
+        ));
+        baseline.evidenceMode = "live-provider";
+        baseline.commit = git(baselineWorktree, ["rev-parse", "HEAD"]);
+        fixture.evidenceMode = "live-provider";
+        return {
+          baselineResult: baseline,
+          candidateResult: fixture,
+          verification: {
+            providerRunId: `host-provider-${runId}`,
+            fullVerificationMatrix: { status: "passed", artifactHash: sha(`matrix:${runId}`) },
+            independentFinalReview: {
+              status: "passed",
+              reviewerId: `host-reviewer-${runId}`,
+              artifactHash: sha(`review:${runId}`),
+            },
+          },
+        };
+      },
+    });
+    const result = await service.run(evolutionInput(
+      root,
+      "creator-unrelated-fixture",
+      new AbortController().signal,
+    ));
+
+    assert.equal(result.status, "failed");
+    assert.ok(result.projection.failures.includes("EVOLUTION_EVALUATOR_FAILED"));
+    assert.equal(result.projection.comparison, undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

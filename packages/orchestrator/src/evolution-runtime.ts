@@ -47,6 +47,41 @@ export type EvolutionBenchmarkResult = {
   readonly checks: readonly EvolutionCheckResult[];
 };
 
+export type EvolutionEvaluationProofContext = {
+  readonly runId: string;
+  readonly proposalId: string;
+  readonly candidateId: string;
+  readonly creatorId: string;
+  readonly baseCommit: string;
+  readonly candidateCommit: string;
+  readonly baselineWorktreeHash: string;
+  readonly candidateWorktreeHash: string;
+  readonly candidateArtifactHash: string;
+  readonly evaluatorHash: string;
+  readonly evaluatorAssetsHash: string;
+  readonly evaluatorEnvironmentHash: string;
+  readonly suiteHash: string;
+  readonly suiteAssetsHash: string;
+  readonly manifestHash: string;
+  readonly thresholdsHash: string;
+  readonly thresholdAssetHash: string;
+};
+
+export type EvolutionEvaluationProofBinding = EvolutionEvaluationProofContext & {
+  readonly providerRunId: string;
+  readonly verificationMatrixArtifactHash: string;
+  readonly independentReviewerId: string;
+  readonly independentReviewArtifactHash: string;
+  readonly baselineResultHash: string;
+  readonly candidateResultHash: string;
+  readonly baselineObservationHash: string;
+  readonly candidateObservationHash: string;
+  readonly metrics: Readonly<Record<string, number>>;
+  readonly metricsHash: string;
+  readonly observedAt: string;
+  readonly proofHash: string;
+};
+
 export type EvolutionEvaluatorResult =
   | {
       readonly status: "completed";
@@ -54,6 +89,7 @@ export type EvolutionEvaluatorResult =
       readonly integratedProof: {
         readonly status: "proven" | "unproven";
         readonly reasons: readonly string[];
+        readonly binding?: EvolutionEvaluationProofBinding | undefined;
       };
       readonly baseline: EvolutionBenchmarkResult;
       readonly candidate: EvolutionBenchmarkResult;
@@ -219,6 +255,7 @@ export type CreatorEvolutionHost = {
     readonly evaluator: Readonly<EvolutionEvaluatorDefinition>;
     readonly suite: Readonly<EvolutionSuiteDefinition>;
     readonly expectedEnvironmentHash: string;
+    readonly proofContext: Readonly<EvolutionEvaluationProofContext>;
     readonly timeoutMs: number;
     readonly maxOutputBytes: number;
     readonly signal: AbortSignal;
@@ -353,7 +390,11 @@ export class CreatorEvolutionService {
       result.projection.hashes.evaluatorEnvironment !== this.config.evaluatorEnvironmentHash
       || result.proposal.validationEvidence.length !== 1
       || result.proposal.validationEvidence[0]?.artifactHash
-        !== evaluationEvidenceArtifactHash(execution.candidateSnapshot, this.config.evaluatorEnvironmentHash)
+        !== evaluationEvidenceArtifactHash(
+          execution.candidateSnapshot,
+          this.config.evaluatorEnvironmentHash,
+          execution.evaluation?.integratedProof.binding?.proofHash,
+        )
     ) {
       failures.push("EVOLUTION_EVALUATION_ENVIRONMENT_MISMATCH");
     }
@@ -666,6 +707,7 @@ export class CreatorEvolutionService {
       });
     }
 
+    const proofContext = evaluationProofContext(execution, this.config);
     let evaluatorResult: EvolutionEvaluatorResult;
     try {
       evaluatorResult = await this.host.runEvaluator({
@@ -675,6 +717,7 @@ export class CreatorEvolutionService {
         evaluator: this.config.evaluator,
         suite: this.config.suite,
         expectedEnvironmentHash: this.config.evaluatorEnvironmentHash,
+        proofContext,
         timeoutMs: this.config.bounds.evaluatorTimeoutMs,
         maxOutputBytes: this.config.bounds.maxOutputBytes,
         signal: input.signal,
@@ -703,6 +746,9 @@ export class CreatorEvolutionService {
       execution.evaluation,
       this.config.suite,
       this.config.evaluatorEnvironmentHash,
+      proofContext,
+      canonicalNow(this.now),
+      this.config.maxAttestationAgeMs,
     );
     if (evaluationFailures.length > 0) {
       return this.finish(execution, {
@@ -799,6 +845,7 @@ export class CreatorEvolutionService {
         artifactHash: evaluationEvidenceArtifactHash(
           execution.candidateSnapshot,
           this.config.evaluatorEnvironmentHash,
+          execution.evaluation.integratedProof.binding?.proofHash,
         ),
         producerId: input.creatorId,
         result: "pass",
@@ -1335,6 +1382,9 @@ function validateEvaluation(
   evaluation: Extract<EvolutionEvaluatorResult, { readonly status: "completed" }>,
   suite: Readonly<EvolutionSuiteDefinition>,
   expectedEnvironmentHash: string,
+  expectedProofContext: Readonly<EvolutionEvaluationProofContext>,
+  evaluatedAt: string,
+  maximumProofAgeMs: number,
 ): string[] {
   const failures = new Set<string>();
   if (!SHA256.test(evaluation.environmentHash)) failures.add("EVOLUTION_EVALUATION_ENVIRONMENT_INVALID");
@@ -1347,6 +1397,41 @@ function validateEvaluation(
     || evaluation.integratedProof.reasons.some((reason) => typeof reason !== "string" || reason.length === 0)
   ) {
     failures.add("EVOLUTION_INTEGRATED_PROOF_INVALID");
+  }
+  if (evaluation.integratedProof.status === "proven") {
+    const binding = evaluation.integratedProof.binding;
+    const observedAtMs = Date.parse(binding?.observedAt ?? "");
+    const evaluatedAtMs = Date.parse(evaluatedAt);
+    const metrics = binding?.metrics;
+    const contextMatches = binding !== undefined && (Object.keys(expectedProofContext) as (keyof EvolutionEvaluationProofContext)[])
+      .every((key) => binding[key] === expectedProofContext[key]);
+    const metricsValid = metrics !== undefined
+      && Object.keys(metrics).length > 0
+      && Object.entries(metrics).every(([key, value]) => key.length > 0 && Number.isFinite(value));
+    if (
+      evaluation.integratedProof.reasons.length !== 0
+      || binding === undefined
+      || !contextMatches
+      || binding.baselineResultHash !== benchmarkResultHash(evaluation.baseline)
+      || binding.candidateResultHash !== benchmarkResultHash(evaluation.candidate)
+      || !SHA256.test(binding.baselineObservationHash)
+      || !SHA256.test(binding.candidateObservationHash)
+      || !binding.providerRunId.trim()
+      || !SHA256.test(binding.verificationMatrixArtifactHash)
+      || !binding.independentReviewerId.trim()
+      || binding.independentReviewerId === expectedProofContext.creatorId
+      || !SHA256.test(binding.independentReviewArtifactHash)
+      || !metricsValid
+      || binding.metricsHash !== canonicalHash(metrics)
+      || !CANONICAL_UTC_MILLISECONDS.test(binding.observedAt)
+      || !Number.isFinite(observedAtMs)
+      || !Number.isFinite(evaluatedAtMs)
+      || observedAtMs > evaluatedAtMs
+      || evaluatedAtMs - observedAtMs > maximumProofAgeMs
+      || binding.proofHash !== evaluationProofHash(binding)
+    ) {
+      failures.add("EVOLUTION_INTEGRATED_PROOF_INVALID");
+    }
   }
   const expectedChecks = suite.checks.map((entry) => entry.id);
   for (const result of [evaluation.baseline, evaluation.candidate]) {
@@ -1366,6 +1451,15 @@ function validateEvaluation(
   return [...failures];
 }
 
+function evaluationProofHash(binding: EvolutionEvaluationProofBinding): string {
+  const { proofHash: _proofHash, ...evidence } = binding;
+  return canonicalHash(evidence);
+}
+
+function benchmarkResultHash(result: EvolutionBenchmarkResult): string {
+  return canonicalHash({ score: result.score, checks: result.checks });
+}
+
 function sanitizeEvaluation(
   evaluation: Extract<EvolutionEvaluatorResult, { readonly status: "completed" }>,
 ): Extract<EvolutionEvaluatorResult, { readonly status: "completed" }> {
@@ -1379,6 +1473,14 @@ function sanitizeEvaluation(
     integratedProof: {
       status: integratedProof.status,
       reasons: integratedProof.reasons.map((reason) => boundedSummary(reason)),
+      ...(integratedProof.binding === undefined
+        ? {}
+        : {
+            binding: {
+              ...integratedProof.binding,
+              metrics: { ...integratedProof.binding.metrics },
+            },
+          }),
     },
     baseline: {
       score: evaluation.baseline.score,
@@ -1533,10 +1635,12 @@ function candidateArtifactHash(snapshot: EvolutionCandidateSnapshot): string {
 function evaluationEvidenceArtifactHash(
   snapshot: EvolutionCandidateSnapshot,
   evaluatorEnvironmentHash: string,
+  proofHash: string | undefined,
 ): string {
   return canonicalHash({
     candidateArtifact: candidateArtifactHash(snapshot),
     evaluatorEnvironmentHash,
+    proofHash,
   });
 }
 
@@ -1550,6 +1654,52 @@ function protectedAssetPaths(config: Readonly<CreatorEvolutionConfig>): readonly
     ...config.policyAssets,
     ...config.suite.assets,
   ])].sort();
+}
+
+function evaluationProofContext(
+  execution: EvolutionExecution,
+  config: Readonly<CreatorEvolutionConfig>,
+): EvolutionEvaluationProofContext {
+  if (!execution.base || !execution.candidate || !execution.candidateSnapshot || !execution.protectedSnapshot) {
+    throw new Error("Evolution proof context requires a sealed candidate and protected snapshot.");
+  }
+  const protectedByPath = new Map(execution.protectedSnapshot.entries.map((entry) => [entry.path, entry]));
+  const assetHash = (paths: readonly string[]): string => canonicalHash(paths
+    .map((path) => protectedByPath.get(path))
+    .filter((entry): entry is EvolutionAssetDigest => entry !== undefined)
+    .map(({ path, sha256, kind, size }) => ({ path, sha256, kind, size }))
+    .sort((left, right) => left.path.localeCompare(right.path)));
+  const manifest = config.suite.assets.find((path) => path.endsWith("/manifest.json") || path === "manifest.json");
+  const thresholdAsset = config.suite.assets.find((path) => path.endsWith("/thresholds.json") || path === "thresholds.json");
+  return {
+    runId: execution.input.runId,
+    proposalId: execution.proposalId,
+    candidateId: execution.candidateId,
+    creatorId: execution.input.creatorId,
+    baseCommit: execution.base.baseCommit,
+    candidateCommit: execution.candidateSnapshot.candidateCommit,
+    baselineWorktreeHash: canonicalHash({
+      path: execution.candidate.baselineWorktree,
+      commit: execution.base.baseCommit,
+    }),
+    candidateWorktreeHash: canonicalHash({
+      path: execution.candidate.worktree,
+      commit: execution.candidateSnapshot.candidateCommit,
+    }),
+    candidateArtifactHash: candidateArtifactHash(execution.candidateSnapshot),
+    evaluatorHash: execution.evaluatorHash,
+    evaluatorAssetsHash: assetHash(config.evaluator.assets),
+    evaluatorEnvironmentHash: config.evaluatorEnvironmentHash,
+    suiteHash: execution.suiteHash,
+    suiteAssetsHash: assetHash(config.suite.assets),
+    manifestHash: manifest === undefined
+      ? assetHash(config.suite.assets)
+      : protectedByPath.get(manifest)?.sha256 ?? canonicalHash({ missing: manifest }),
+    thresholdsHash: execution.thresholdsHash,
+    thresholdAssetHash: thresholdAsset === undefined
+      ? execution.thresholdsHash
+      : protectedByPath.get(thresholdAsset)?.sha256 ?? canonicalHash({ missing: thresholdAsset }),
+  };
 }
 
 function finiteScore(value: number): boolean {

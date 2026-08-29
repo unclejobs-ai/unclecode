@@ -106,14 +106,18 @@ export function loadHeldOutSuite(suiteRoot = DEFAULT_HELD_OUT_SUITE_ROOT) {
 export function runHeldOutComparison({
   suiteRoot = DEFAULT_HELD_OUT_SUITE_ROOT,
   candidatePath = DEFAULT_HELD_OUT_CANDIDATE,
+  baselineResult,
+  candidateResult,
   trustedProof,
 } = {}) {
   const suite = loadHeldOutSuite(suiteRoot);
-  const candidate = parseJsonFile(path.resolve(candidatePath));
+  const baseline = baselineResult ?? suite.baseline;
+  const candidate = candidateResult ?? parseJsonFile(path.resolve(candidatePath));
   const caseDefinitions = suite.cases.cases;
+  if (baselineResult !== undefined) validateResult(baseline, caseDefinitions, "baseline");
   validateResult(candidate, caseDefinitions, "candidate");
 
-  const baselineSummary = summarizeResult(suite.baseline, caseDefinitions);
+  const baselineSummary = summarizeResult(baseline, caseDefinitions);
   const candidateSummary = summarizeResult(candidate, caseDefinitions);
   const domainDeltas = Object.fromEntries(HELD_OUT_DOMAINS.map((domain) => [
     domain,
@@ -151,7 +155,7 @@ export function runHeldOutComparison({
     },
   };
   const comparisonPassed = Object.values(gates).every((gate) => gate.passed);
-  const proof = integratedProof(candidate, suite.baseline, comparisonPassed, trustedProof);
+  const proof = integratedProof(candidate, baseline, comparisonPassed, trustedProof);
 
   return {
     schemaVersion: 1,

@@ -19,6 +19,46 @@ function sha(value) {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
+function canonicalJson(value) {
+  if (value === null || ["string", "boolean", "number"].includes(typeof value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+}
+
+function canonicalHash(value) {
+  return sha(canonicalJson(value));
+}
+
+function bindEvaluation(result, proofContext, mutateBinding = (binding) => binding) {
+  const metrics = {
+    "baseline.score": result.baseline.score,
+    "candidate.score": result.candidate.score,
+    "comparison.delta": result.candidate.score - result.baseline.score,
+  };
+  const evidence = mutateBinding({
+    ...proofContext,
+    providerRunId: `provider:${proofContext.runId}`,
+    verificationMatrixArtifactHash: sha(`matrix:${proofContext.runId}`),
+    independentReviewerId: `reviewer:${proofContext.runId}`,
+    independentReviewArtifactHash: sha(`review:${proofContext.runId}`),
+    baselineResultHash: canonicalHash({ score: result.baseline.score, checks: result.baseline.checks }),
+    candidateResultHash: canonicalHash({ score: result.candidate.score, checks: result.candidate.checks }),
+    baselineObservationHash: canonicalHash(result.baseline),
+    candidateObservationHash: canonicalHash(result.candidate),
+    metrics,
+    metricsHash: canonicalHash(metrics),
+    observedAt: NOW,
+  });
+  return {
+    ...result,
+    integratedProof: {
+      status: "proven",
+      reasons: [],
+      binding: { ...evidence, proofHash: canonicalHash(evidence) },
+    },
+  };
+}
+
 function config(overrides = {}) {
   return {
     evaluator: {
@@ -183,7 +223,13 @@ function makeHost(overrides = {}) {
       assert.equal(Object.isFrozen(input.evaluator), true);
       assert.equal(Object.isFrozen(input.suite), true);
       assert.deepEqual(input.suite.checks.map((entry) => entry.id), ["contract", "regression"]);
-      return overrides.evaluationResult ?? evaluation();
+      const result = overrides.evaluationResult ?? evaluation();
+      return result.status === "completed"
+        && result.integratedProof.status === "proven"
+        && result.integratedProof.binding === undefined
+        && overrides.preserveEvaluationProof !== true
+        ? bindEvaluation(result, input.proofContext, overrides.mutateProofBinding)
+        : result;
     },
     async resolveIsolation(input) {
       calls.push("resolve-isolation");
@@ -573,6 +619,7 @@ test("the evaluator receives one immutable same-suite comparison and failures ne
 
 test("passing comparison gates cannot promote without host-supplied integrated proof", async () => {
   const host = makeHost({
+    preserveEvaluationProof: true,
     evaluationResult: evaluation({
       integratedProof: {
         status: "unproven",
@@ -591,6 +638,53 @@ test("passing comparison gates cannot promote without host-supplied integrated p
   assert.equal(result.status, "rejected");
   assert.ok(result.projection.failures.includes("EVOLUTION_INTEGRATED_PROOF_UNPROVEN"));
   assert.equal(lifecycleDispatch.count, 0);
+});
+
+test("a proven status without a cryptographic host binding cannot promote", async () => {
+  const host = makeHost({
+    preserveEvaluationProof: true,
+    evaluationResult: evaluation({
+      integratedProof: { status: "proven", reasons: [] },
+    }),
+  });
+  const result = await new CreatorEvolutionService({
+    config: config(),
+    host,
+    now: () => new Date(NOW),
+  }).run(runInput(makeDispatch().dispatch));
+
+  assert.equal(result.status, "failed");
+  assert.ok(result.projection.failures.includes("EVOLUTION_INTEGRATED_PROOF_INVALID"));
+  assert.equal(host.state.cleanupCount, 1);
+});
+
+test("a self-consistent proof for another candidate, asset closure, result, metric, or time is rejected", async (t) => {
+  const mutations = {
+    "candidate artifact": (binding) => ({ ...binding, candidateArtifactHash: sha("unrelated candidate") }),
+    "base worktree": (binding) => ({ ...binding, baselineWorktreeHash: sha("other base worktree") }),
+    "manifest": (binding) => ({ ...binding, manifestHash: sha("other manifest") }),
+    "evaluator assets": (binding) => ({ ...binding, evaluatorAssetsHash: sha("other evaluator") }),
+    "suite assets": (binding) => ({ ...binding, suiteAssetsHash: sha("other suite") }),
+    "threshold asset": (binding) => ({ ...binding, thresholdAssetHash: sha("other thresholds") }),
+    "candidate result": (binding) => ({ ...binding, candidateResultHash: sha("other result") }),
+    "observed metrics": (binding) => ({ ...binding, metricsHash: sha("other metrics") }),
+    "stale timestamp": (binding) => ({ ...binding, observedAt: "2026-08-28T11:00:00.000Z" }),
+    "self review": (binding) => ({ ...binding, independentReviewerId: binding.creatorId }),
+  };
+  for (const [name, mutateProofBinding] of Object.entries(mutations)) {
+    await t.test(name, async () => {
+      const host = makeHost({ mutateProofBinding });
+      const result = await new CreatorEvolutionService({
+        config: config(),
+        host,
+        now: () => new Date(NOW),
+      }).run(runInput(makeDispatch().dispatch));
+
+      assert.equal(result.status, "failed");
+      assert.ok(result.projection.failures.includes("EVOLUTION_INTEGRATED_PROOF_INVALID"));
+      assert.equal(host.state.cleanupCount, 1);
+    });
+  }
 });
 
 test("candidate targets cannot overlap test, config, script, fixture, or protected assets", async (t) => {
