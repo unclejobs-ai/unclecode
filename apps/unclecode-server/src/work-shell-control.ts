@@ -2,6 +2,7 @@ import type { RuntimeSessionSource } from "./control-room.js";
 import { LiveRuntimeControlRegistry } from "./persistent-runtime.js";
 import type { RuntimeControlRequest, RuntimeControlResult } from "./runtime-adapter.js";
 import type { RuntimeSessionRevisionClock } from "./runtime-engine-rpc.js";
+import { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
 
 type DecisionOption = { readonly label: string };
 type PendingDecision = {
@@ -66,10 +67,12 @@ export function attachWorkShellRuntime(
     readonly provider?: string;
     readonly initialRevision?: number;
     readonly revisionClock?: RuntimeSessionRevisionClock | undefined;
+    readonly mutationArbiter?: RuntimeSessionMutationArbiter | undefined;
     readonly onChanged?: ((event: WorkShellRuntimeChange) => void) | undefined;
   },
 ): () => void {
   const revisionClock = input.revisionClock ?? { value: Math.max(0, input.initialRevision ?? 0) };
+  const mutationArbiter = input.mutationArbiter ?? new RuntimeSessionMutationArbiter(revisionClock);
 
   const emit = () => input.onChanged?.({
     sessionId: input.sessionId,
@@ -77,8 +80,8 @@ export function attachWorkShellRuntime(
     state: stateOf(input.engine),
   });
   const unsubscribe = input.engine.subscribe(() => {
-    if (!input.revisionClock) revisionClock.value += 1;
-    emit();
+    if (!input.mutationArbiter) mutationArbiter.publishAutonomous();
+    if (!mutationArbiter.isMutationActive() || stateOf(input.engine) === "pause_pending") emit();
   });
 
   const snapshot = (): RuntimeSessionSource => {
@@ -109,10 +112,13 @@ export function attachWorkShellRuntime(
 
   const detachRegistry = registry.attach(input.sessionId, {
     revision: () => revisionClock.value,
+    mutationArbiter,
     snapshot,
+    onCommitted(result) {
+      if (result.ok) emit();
+    },
     async control(request) {
       let result: RuntimeControlResult | undefined;
-      const revisionBeforeControl = revisionClock.value;
       try {
         if (request.action === "pause") {
           if (!input.engine.getState().isBusy) return deny("invalid_action", "Only a running turn can be paused.");
@@ -144,10 +150,6 @@ export function attachWorkShellRuntime(
           }
         } else {
           return deny("invalid_action", "Unknown runtime action.");
-        }
-        if (revisionClock.value === revisionBeforeControl) {
-          revisionClock.value += 1;
-          emit();
         }
         result = { ok: true, revision: revisionClock.value, state: stateOf(input.engine) };
       } catch (error) {

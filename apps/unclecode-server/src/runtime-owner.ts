@@ -8,6 +8,7 @@ import { BoundedEventJournal } from "./event-journal.js";
 import { makeControlRoomHandlers, startServer, ensureServerToken } from "./index.js";
 import { createPersistentRuntimeAdapter, LiveRuntimeControlRegistry } from "./persistent-runtime.js";
 import { LiveRuntimeEngineRegistry, type RuntimeSessionFactory } from "./runtime-engine-rpc.js";
+import { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
 import { attachWorkShellRuntime, type WorkShellControlEngine } from "./work-shell-control.js";
 import {
   RUNTIME_OWNER_PROTOCOL,
@@ -63,20 +64,21 @@ export async function startPersistentRuntimeOwner(input: {
       createSession: async (request) => {
         const created = await input.createSession!(request);
         const revisionClock = { value: 0 };
-        const unsubscribeRevision = created.engine.subscribe(() => { revisionClock.value += 1; });
+        const mutationArbiter = new RuntimeSessionMutationArbiter(revisionClock);
         const detachControl = attachWorkShellRuntime(controls, {
           sessionId: request.sessionId,
           projectPath: created.projectPath,
           engine: created.engine as WorkShellControlEngine,
           ...(created.provider ? { provider: created.provider } : {}),
           revisionClock,
+          mutationArbiter,
           onChanged(event) { journal.publish(event.sessionId, "run.updated", event); },
         });
         return {
           ...created,
           revisionClock,
+          mutationArbiter,
           async dispose() {
-            unsubscribeRevision();
             detachControl();
             await created.dispose?.();
           },

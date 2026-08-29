@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { BoundedEventJournal } from "./event-journal.js";
 import { createRuntimeAdapter, type RuntimeAdapter, type RuntimeControlPort, type RuntimeControlRequest, type RuntimeControlResult } from "./runtime-adapter.js";
 import type { RuntimeReadSource, RuntimeSessionSource } from "./control-room.js";
+import type { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
 
 const MAX_CHECKPOINTS = 128;
 const MAX_DIRECTORIES = 2_048;
@@ -11,7 +12,9 @@ const MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024;
 
 export type AttachedRuntimeControl = {
   readonly revision: () => number;
+  readonly mutationArbiter?: RuntimeSessionMutationArbiter | undefined;
   readonly snapshot?: (() => RuntimeSessionSource) | undefined;
+  readonly onCommitted?: ((result: RuntimeControlResult) => void) | undefined;
   readonly control: (request: RuntimeControlRequest) => Promise<RuntimeControlResult>;
 };
 
@@ -44,10 +47,31 @@ export class LiveRuntimeControlRegistry implements RuntimeControlPort {
     const attached = this.#controls.get(request.sessionId);
     if (!attached) return { ok: false, code: "not_attached", message: "Session is not attached to this runtime server." };
     const revision = attached.revision();
-    if (revision !== request.expectedRevision) {
-      return { ok: false, code: "revision_conflict", message: "Session revision changed.", revision };
+    if (!attached.mutationArbiter) {
+      if (revision !== request.expectedRevision) {
+        return { ok: false, code: "revision_conflict", message: "Session revision changed.", revision };
+      }
+      return attached.control(request);
     }
-    return attached.control(request);
+    const result = await attached.mutationArbiter.mutate<RuntimeControlResult, RuntimeControlResult>({
+      idempotencyKey: request.idempotencyKey,
+      fingerprint: JSON.stringify({ action: request.action, payload: request.payload, expectedRevision: request.expectedRevision }),
+      expectedRevision: request.expectedRevision,
+      ...(request.action === "cancel" ? { lane: "cancel" as const } : {}),
+      conflict: (current) => ({ ok: false, code: "revision_conflict", message: "Session revision changed.", revision: current }),
+      invalidReuse: (current) => ({ ok: false, code: "invalid_action", message: "Idempotency-Key was reused for another runtime action.", revision: current }),
+      execute: () => attached.control(request),
+      didMutate: (response) => response.ok,
+      complete: (response, current) => ({ ...response, revision: current }),
+      fail: (error, current) => ({
+        ok: false,
+        code: "invalid_action",
+        message: error instanceof Error ? error.message : String(error),
+        revision: current,
+      }),
+    });
+    attached.onCommitted?.(result);
+    return result;
   }
 }
 

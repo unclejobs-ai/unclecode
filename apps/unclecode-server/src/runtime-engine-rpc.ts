@@ -1,3 +1,10 @@
+import {
+  RuntimeSessionMutationArbiter,
+  type RuntimeSessionRevisionClock,
+} from "./runtime-mutation-arbiter.js";
+
+export type { RuntimeSessionRevisionClock } from "./runtime-mutation-arbiter.js";
+
 export const RUNTIME_ENGINE_METHODS = [
   "handleSubmit", "toggleToolHistoryDisplay", "setMode", "openSessionsPanel", "interruptTurn",
   "cancelSensitiveInput", "closeOverlay", "updateTerminalColumns", "updateTerminalRows",
@@ -16,8 +23,6 @@ export type RuntimeEngineSource = {
   getState(): unknown;
   subscribe(listener: () => void): () => void;
 };
-export type RuntimeSessionRevisionClock = { value: number };
-
 export type RuntimeSessionDescriptor = {
   readonly sessionId: string;
   readonly projectPath: string;
@@ -42,6 +47,7 @@ export type RuntimeSessionFactory = (input: Omit<RuntimeSessionCreateInput, "ide
   readonly projectPath: string;
   readonly provider?: string | undefined;
   readonly revisionClock?: RuntimeSessionRevisionClock | undefined;
+  readonly mutationArbiter?: RuntimeSessionMutationArbiter | undefined;
   readonly dispose?: (() => void | Promise<void>) | undefined;
 }>;
 
@@ -55,6 +61,7 @@ export type RuntimeSessionAttachResponse =
 
 type Attached = {
   readonly clock: RuntimeSessionRevisionClock;
+  readonly arbiter: RuntimeSessionMutationArbiter;
   readonly engine: RuntimeEngineSource;
   readonly projectPath?: string | undefined;
   readonly provider?: string | undefined;
@@ -62,7 +69,6 @@ type Attached = {
   readonly reasoning?: string | undefined;
   readonly dispose?: (() => void | Promise<void>) | undefined;
   readonly unsubscribe: () => void;
-  readonly receipts: Map<string, { readonly fingerprint: string; readonly response: RuntimeEngineRpcResponse }>;
 };
 
 export type RuntimeEngineRpcResponse =
@@ -72,6 +78,7 @@ export type RuntimeEngineRpcResponse =
 export class LiveRuntimeEngineRegistry {
   readonly #engines = new Map<string, Attached>();
   readonly #createReceipts = new Map<string, { readonly fingerprint: string; readonly promise: Promise<RuntimeSessionCreateResponse> }>();
+  readonly #sessionCreations = new Map<string, { readonly fingerprint: string; readonly promise: Promise<RuntimeSessionCreateResponse> }>();
   readonly #factory: RuntimeSessionFactory | undefined;
 
   constructor(input: { readonly createSession?: RuntimeSessionFactory | undefined } = {}) {
@@ -83,19 +90,22 @@ export class LiveRuntimeEngineRegistry {
     readonly provider?: string | undefined;
     readonly dispose?: (() => void | Promise<void>) | undefined;
     readonly revisionClock?: RuntimeSessionRevisionClock | undefined;
+    readonly mutationArbiter?: RuntimeSessionMutationArbiter | undefined;
   } = {}): () => void {
     const previous = this.#engines.get(sessionId);
     previous?.unsubscribe();
     let unsubscribe = () => {};
+    const clock = metadata.revisionClock ?? metadata.mutationArbiter?.clock ?? { value: 0 };
+    const arbiter = metadata.mutationArbiter ?? new RuntimeSessionMutationArbiter(clock);
     const attached = {
-      clock: metadata.revisionClock ?? { value: 0 },
+      clock,
+      arbiter,
       engine,
-      receipts: new Map(),
       ...metadata,
       unsubscribe: () => unsubscribe(),
     } satisfies Attached;
     unsubscribe = engine.subscribe(() => {
-      if (!metadata.revisionClock) attached.clock.value += 1;
+      attached.arbiter.publishAutonomous();
     });
     this.#engines.set(sessionId, attached);
     return () => {
@@ -122,9 +132,25 @@ export class LiveRuntimeEngineRegistry {
     if (prior) return prior.fingerprint === fingerprint
       ? prior.promise
       : Promise.resolve({ ok: false, code: "invalid_action", message: "Idempotency-Key was reused for another session creation." });
-    const promise = this.#createOnce(input);
+    const promise = this.#createCoalesced(input, fingerprint);
     this.#createReceipts.set(input.idempotencyKey, { fingerprint, promise });
     if (this.#createReceipts.size > 2_048) this.#createReceipts.delete(this.#createReceipts.keys().next().value as string);
+    return promise;
+  }
+
+  #createCoalesced(input: RuntimeSessionCreateInput, fingerprint: string): Promise<RuntimeSessionCreateResponse> {
+    const pending = this.#sessionCreations.get(input.sessionId);
+    if (pending) {
+      return pending.fingerprint === fingerprint
+        ? pending.promise
+        : Promise.resolve({ ok: false, code: "session_conflict", message: "Session creation is already in progress with different owner configuration." });
+    }
+    const promise = this.#createOnce(input).finally(() => {
+      if (this.#sessionCreations.get(input.sessionId)?.promise === promise) {
+        this.#sessionCreations.delete(input.sessionId);
+      }
+    });
+    this.#sessionCreations.set(input.sessionId, { fingerprint, promise });
     return promise;
   }
 
@@ -160,6 +186,7 @@ export class LiveRuntimeEngineRegistry {
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoning ? { reasoning: input.reasoning } : {}),
         ...(created.revisionClock ? { revisionClock: created.revisionClock } : {}),
+        ...(created.mutationArbiter ? { mutationArbiter: created.mutationArbiter } : {}),
         ...(created.dispose ? { dispose: created.dispose } : {}),
       });
       return { ok: true, session: this.#descriptor(input.sessionId, this.#engines.get(input.sessionId)!) };
@@ -211,13 +238,6 @@ export class LiveRuntimeEngineRegistry {
     const attached = this.#engines.get(input.sessionId);
     if (!attached) return { ok: false, code: "not_attached", message: "Session is not attached to the runtime owner." };
     const fingerprint = JSON.stringify({ method: input.method, args: input.args, expectedRevision: input.expectedRevision });
-    const prior = attached.receipts.get(input.idempotencyKey);
-    if (prior) return prior.fingerprint === fingerprint
-      ? prior.response
-      : { ok: false, code: "invalid_action", message: "Idempotency-Key was reused for another engine mutation.", revision: attached.clock.value };
-    if (attached.clock.value !== input.expectedRevision) {
-      return { ok: false, code: "revision_conflict", message: "Engine revision changed.", revision: attached.clock.value };
-    }
     if (!(RUNTIME_ENGINE_METHODS as readonly string[]).includes(input.method)) {
       return { ok: false, code: "invalid_method", message: "Engine method is not exposed.", revision: attached.clock.value };
     }
@@ -225,16 +245,21 @@ export class LiveRuntimeEngineRegistry {
     if (typeof method !== "function") {
       return { ok: false, code: "invalid_method", message: "Engine does not implement this method.", revision: attached.clock.value };
     }
-    try {
-      const before = attached.clock.value;
-      const result = await Reflect.apply(method, attached.engine, input.args);
-      if (attached.clock.value === before) attached.clock.value += 1;
-      const response = { ok: true, revision: attached.clock.value, state: attached.engine.getState(), result } as const;
-      attached.receipts.set(input.idempotencyKey, { fingerprint, response });
-      if (attached.receipts.size > 2_048) attached.receipts.delete(attached.receipts.keys().next().value as string);
-      return response;
-    } catch (error) {
-      return { ok: false, code: "invalid_action", message: error instanceof Error ? error.message : String(error), revision: attached.clock.value };
-    }
+    return attached.arbiter.mutate<unknown, RuntimeEngineRpcResponse>({
+      idempotencyKey: input.idempotencyKey,
+      fingerprint,
+      expectedRevision: input.expectedRevision,
+      ...(input.method === "interruptTurn" ? { lane: "cancel" as const } : {}),
+      conflict: (revision) => ({ ok: false, code: "revision_conflict", message: "Engine revision changed.", revision }),
+      invalidReuse: (revision) => ({ ok: false, code: "invalid_action", message: "Idempotency-Key was reused for another engine mutation.", revision }),
+      execute: () => Reflect.apply(method, attached.engine, input.args),
+      complete: (result, revision) => ({ ok: true, revision, state: attached.engine.getState(), result }),
+      fail: (error, revision) => ({
+        ok: false,
+        code: "invalid_action",
+        message: error instanceof Error ? error.message : String(error),
+        revision,
+      }),
+    });
   }
 }

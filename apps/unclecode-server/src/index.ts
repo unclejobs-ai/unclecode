@@ -22,6 +22,7 @@ export * from "./runtime-owner-discovery.js";
 export * from "./runtime-owner-client.js";
 export * from "./runtime-owner.js";
 export * from "./runtime-engine-rpc.js";
+export * from "./runtime-mutation-arbiter.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 

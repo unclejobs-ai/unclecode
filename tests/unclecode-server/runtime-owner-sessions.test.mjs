@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { LiveRuntimeEngineRegistry } from "../../apps/unclecode-server/src/runtime-engine-rpc.ts";
+import { RuntimeSessionMutationArbiter } from "../../apps/unclecode-server/src/runtime-mutation-arbiter.ts";
+import { LiveRuntimeControlRegistry } from "../../apps/unclecode-server/src/persistent-runtime.ts";
+import { attachWorkShellRuntime } from "../../apps/unclecode-server/src/work-shell-control.ts";
 
 function fakeEngine(label) {
   let state = { label, mode: "standard" };
@@ -107,4 +110,95 @@ test("revision conflicts do not bind receipts while accepted mutations replay ex
   assert.equal(changedPayload.ok, false);
   assert.equal(changedPayload.code, "invalid_action");
   assert.equal(mutations, 1, "retry payload cannot change under the accepted key");
+});
+
+test("concurrent async calls with one idempotency key execute the engine method once", async () => {
+  let calls = 0;
+  let release;
+  const engine = fakeEngine("async-key");
+  engine.setMode = async mode => {
+    calls += 1;
+    await new Promise(resolve => { release = resolve; });
+    return mode;
+  };
+  const registry = new LiveRuntimeEngineRegistry();
+  registry.attach("async-key", engine, { projectPath: "/work/async-key" });
+  const input = {
+    sessionId: "async-key", method: "setMode", args: ["deep"],
+    expectedRevision: 0, idempotencyKey: "same-async-call",
+  };
+
+  const first = registry.invoke(input);
+  const replay = registry.invoke(input);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1, "the pending receipt must be installed before awaiting the method");
+  release();
+  assert.deepEqual(await replay, await first);
+  assert.equal(calls, 1);
+});
+
+test("different create keys for one session share one owner-side engine construction", async () => {
+  let constructions = 0;
+  let release;
+  const registry = new LiveRuntimeEngineRegistry({
+    async createSession(input) {
+      constructions += 1;
+      await new Promise(resolve => { release = resolve; });
+      return { engine: fakeEngine(input.sessionId), projectPath: input.projectPath };
+    },
+  });
+  const first = registry.create({ sessionId: "one-agent", projectPath: "/work/one", idempotencyKey: "create-a" });
+  const second = registry.create({ sessionId: "one-agent", projectPath: "/work/one", idempotencyKey: "create-b" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(constructions, 1, "deduplication must happen before the session factory builds an agent");
+  release();
+  assert.deepEqual(await second, await first);
+  assert.equal(constructions, 1);
+});
+
+test("engine RPC and web control share one revision admission and execute one same-revision mutation", async () => {
+  const listeners = new Set();
+  let modeCalls = 0;
+  let submitCalls = 0;
+  let releaseMode;
+  const engine = {
+    getState: () => ({ isBusy: true, queuePaused: false, model: "test", mode: "standard", uiLocale: "en", agentConsole: {} }),
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    async setMode() { modeCalls += 1; await new Promise(resolve => { releaseMode = resolve; }); },
+    interruptTurn() {},
+    getTurnLifecycle: () => ({ state: "running", turnId: "turn-race" }),
+    async requestTurnPause() { return { turnId: "turn-race", boundary: "after_provider" }; },
+    resumeTurn: () => false,
+    async resumeQueueItems() {},
+    async handleSubmit() { submitCalls += 1; },
+    answerPendingDecisionByIndex: () => false,
+    getAgentControlPort: () => ({ async steer() { return { status: "delivered" }; } }),
+  };
+  const clock = { value: 0 };
+  const arbiter = new RuntimeSessionMutationArbiter(clock);
+  const engines = new LiveRuntimeEngineRegistry();
+  const controls = new LiveRuntimeControlRegistry();
+  engines.attach("shared-lane", engine, { projectPath: "/work/shared", revisionClock: clock, mutationArbiter: arbiter });
+  attachWorkShellRuntime(controls, {
+    sessionId: "shared-lane", projectPath: "/work/shared", engine,
+    revisionClock: clock, mutationArbiter: arbiter,
+  });
+
+  const engineMutation = engines.invoke({
+    sessionId: "shared-lane", method: "setMode", args: ["deep"],
+    expectedRevision: 0, idempotencyKey: "engine-race",
+  });
+  const webMutation = controls.control({
+    sessionId: "shared-lane", action: "follow-up", payload: { message: "next" },
+    expectedRevision: 0, idempotencyKey: "web-race",
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(modeCalls, 1);
+  assert.equal(submitCalls, 0, "the web mutation must wait behind the owner session arbiter");
+  releaseMode();
+  const [accepted, conflict] = await Promise.all([engineMutation, webMutation]);
+  assert.equal(accepted.ok, true);
+  assert.equal(conflict.ok, false);
+  assert.equal(conflict.code, "revision_conflict");
+  assert.equal(modeCalls + submitCalls, 1);
 });
