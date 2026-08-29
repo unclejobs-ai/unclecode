@@ -10,10 +10,24 @@ import {
 } from "./work-shell-engine-builtins.js";
 import { resolveWorkerBudget } from "./work-agent.js";
 import {
+  type BusySubmitDecision,
+  type QueueDrainStartDecision,
+  type QueueDrainStepDecision,
+  type QueuedSubmit,
+  isQueueItem,
+  parseBusySubmitDecision,
+  parseQueueDrainStartDecision,
+  parseQueueDrainStepDecision,
+  parseQueueLength,
+  parseQueuedSubmit,
+  parseQueuedSubmitList,
+} from "./work-shell-engine-queue-parse.js";
+import {
   executeInlineCommandSubmit,
   executeLocalCommandSubmit,
   executeSecureApiKeyEntrySubmit,
 } from "./work-shell-engine-command-runtime.js";
+import { resolveWorkShellBuiltinCommand } from "./work-shell-engine-commands.js";
 import {
   applyAuthIssueLinesToContextSummaryLines,
   reloadWorkShellContextState,
@@ -32,24 +46,10 @@ import {
   resolveSensitiveInputCancelState,
 } from "./work-shell-engine-lifecycle.js";
 import {
-  type BusySubmitDecision,
-  type QueueDrainStartDecision,
-  type QueueDrainStepDecision,
-  type QueuedSubmit,
-  isQueueItem,
-  parseBusySubmitDecision,
-  parseQueueDrainStartDecision,
-  parseQueueDrainStepDecision,
-  parseQueueLength,
-  parseQueuedSubmit,
-  parseQueuedSubmitList,
-} from "./work-shell-engine-queue-parse.js";
-import {
   resolveWorkShellSubmitRoute,
   type WorkShellSubmitRoute,
 } from "./work-shell-engine-submit.js";
 import {
-import { resolveWorkShellBuiltinCommand } from "./work-shell-engine-commands.js";
   createWorkShellSessionSnapshotInput,
   parseWorkShellReplaySafePauseCheckpoint,
   type WorkShellSessionState,
@@ -106,6 +106,11 @@ import {
 } from "./work-shell-agent-console-state.js";
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
 import {
+  deleteQueuedAttachmentArtifacts,
+  persistQueuedAttachments,
+  restoreQueuedAttachments,
+} from "./work-shell-queue-attachments.js";
+import {
   CONTEXT_DESK_COLLECTIONS,
   CONTEXT_DESK_GROUPS,
   CONTEXT_DESK_PANES,
@@ -127,11 +132,6 @@ import type {
   AgentControlPort,
   AgentControlReceipt,
   AgentRun,
-import {
-  deleteQueuedAttachmentArtifacts,
-  persistQueuedAttachments,
-  restoreQueuedAttachments,
-} from "./work-shell-queue-attachments.js";
   ContextDeskCollection,
   ContextDeskGroupId,
   ContextDeskPane,
@@ -1070,6 +1070,13 @@ export class WorkShellEngine<
       });
 
       this.setState(contextState);
+      if (recovered.length > 0) {
+        const noun = recovered.length === 1 ? "follow-up" : "follow-ups";
+        this.appendEntries({
+          role: "system",
+          text: `Recovered ${recovered.length} interrupted queued ${noun} as requires action. Use /queue to retry or discard.`,
+        });
+      }
     } catch (error: unknown) {
       this.appendEntries({
         role: "system",
@@ -1094,13 +1101,6 @@ export class WorkShellEngine<
    * Owner-only async shutdown. Abort is only the request; returning requires
    * the provider/tool continuation itself to have settled. A signal-deaf
    * implementation is surfaced as an owner shutdown failure instead of being
-      if (recovered.length > 0) {
-        const noun = recovered.length === 1 ? "follow-up" : "follow-ups";
-        this.appendEntries({
-          role: "system",
-          text: `Recovered ${recovered.length} interrupted queued ${noun} as requires action. Use /queue to retry or discard.`,
-        });
-      }
    * detached and leaked.
    */
   async shutdown(input: { readonly timeoutMs?: number | undefined } = {}): Promise<boolean> {
@@ -1516,30 +1516,6 @@ export class WorkShellEngine<
     });
   }
 
-  /**
-   * Context Desk — move focus across the Groups → Sources → Preview panes.
-   * `direction` is -1 (left) or +1 (right). The tuple has hard edges: neither
-   * end wraps, so holding a pane key parks focus on groups or preview instead
-   * of cycling the user past the pane they were aiming for.
-   */
-  moveContextInspectorPane(direction: number): void {
-    if (!this.state.contextInspectorOpen) {
-      return;
-    }
-    const current = CONTEXT_DESK_PANES.indexOf(this.state.contextInspectorPane);
-    const index = Math.min(
-      CONTEXT_DESK_PANES.length - 1,
-      Math.max(0, current + (direction >= 0 ? 1 : -1)),
-    );
-    const pane = CONTEXT_DESK_PANES[index];
-    if (pane !== undefined && pane !== this.state.contextInspectorPane) {
-      this.setState({ contextInspectorPane: pane });
-    }
-  }
-
-  /**
-   * Context Desk — the vertical key for whichever pane holds focus.
-   * `direction` is -1 (up) or +1 (down): groups walks the collection menu and
   /** Keyboard-owned Queue overlay mutations. IDs stay stable while rows move. */
   async removeQueueItem(id: number): Promise<boolean> {
     const removed = await this.removeQueuedSubmit(id);
@@ -1575,6 +1551,30 @@ export class WorkShellEngine<
     return discarded;
   }
 
+  /**
+   * Context Desk — move focus across the Groups → Sources → Preview panes.
+   * `direction` is -1 (left) or +1 (right). The tuple has hard edges: neither
+   * end wraps, so holding a pane key parks focus on groups or preview instead
+   * of cycling the user past the pane they were aiming for.
+   */
+  moveContextInspectorPane(direction: number): void {
+    if (!this.state.contextInspectorOpen) {
+      return;
+    }
+    const current = CONTEXT_DESK_PANES.indexOf(this.state.contextInspectorPane);
+    const index = Math.min(
+      CONTEXT_DESK_PANES.length - 1,
+      Math.max(0, current + (direction >= 0 ? 1 : -1)),
+    );
+    const pane = CONTEXT_DESK_PANES[index];
+    if (pane !== undefined && pane !== this.state.contextInspectorPane) {
+      this.setState({ contextInspectorPane: pane });
+    }
+  }
+
+  /**
+   * Context Desk — the vertical key for whichever pane holds focus.
+   * `direction` is -1 (up) or +1 (down): groups walks the collection menu and
    * reanchors the selection, sources walks the active collection, and preview
    * scrolls the selected row's body — expanded or not — without disturbing the
    * selection behind it.
@@ -2498,7 +2498,6 @@ export class WorkShellEngine<
     return true;
   }
 
-  /** Esc on the decision bar: `/cancel` through the same settle guard. */
   /** Settle one exact user decision without routing structured answers through chat input. */
   answerPendingUserDecision(
     decisionId: string,
@@ -2578,6 +2577,7 @@ export class WorkShellEngine<
     if (this.state.isBusy) {
       await this.handleBusySubmit(line, pendingAttachments);
       return;
+  /** Esc on the decision bar: `/cancel` through the same settle guard. */
     }
 
     const route = resolveWorkShellSubmitRoute({
@@ -2892,6 +2892,11 @@ export class WorkShellEngine<
       case "clear_queue":
         await this.handleBuiltinSubmit(decision.line, { kind: "queue-clear" });
         return;
+      case "queue_command": {
+        const command = resolveWorkShellBuiltinCommand(decision.line);
+        if (command) await this.handleBuiltinSubmit(decision.line, command);
+        return;
+      }
       case "cancel_turn":
         this.interruptTurn();
         return;
@@ -2913,11 +2918,6 @@ export class WorkShellEngine<
   }
 
   private async drainQueuedSubmits(): Promise<void> {
-      case "queue_command": {
-        const command = resolveWorkShellBuiltinCommand(decision.line);
-        if (command) await this.handleBuiltinSubmit(decision.line, command);
-        return;
-      }
     const start = await this.resolveQueueDrainStartDecision();
     if (start.action === "skip") {
       return;
@@ -2945,6 +2945,12 @@ export class WorkShellEngine<
           await this.quarantineQueuedSubmit(step.item.id, reason);
           this.workBoardQueuedItemsSnapshot = await this.listQueuedSubmits();
           this.setQueuedCount(await this.loadQueuedSubmitCount());
+          this.queueAutoDrainPaused = true;
+          this.setState({ queuePaused: true });
+          this.appendEntries({
+            role: "system",
+            text: `Queued follow-up #${step.item.id} requires action: ${reason}`,
+          });
           break;
         }
         this.appendEntries({ role: "system", text: step.message });
@@ -2985,12 +2991,6 @@ export class WorkShellEngine<
   private shouldSkipQueueDrainAfterTurn(
     turnEpoch: number,
     routeKind: WorkShellSubmitRoute["kind"],
-          this.queueAutoDrainPaused = true;
-          this.setState({ queuePaused: true });
-          this.appendEntries({
-            role: "system",
-            text: `Queued follow-up #${step.item.id} requires action: ${reason}`,
-          });
   ): boolean {
     const wasInterruptedTurn = this.queueDrainSkipTurnEpochs.delete(turnEpoch);
     if (wasInterruptedTurn) {
@@ -3064,6 +3064,9 @@ export class WorkShellEngine<
         return queuedItems;
       },
       clearQueuedItems: () => this.clearQueuedSubmits(),
+      removeQueuedItem: (id) => this.removeQueuedSubmit(id),
+      moveQueuedItem: (id, direction) => this.moveQueuedSubmit(id, direction),
+      resumeQueuedItems: () => this.resumeQueuedSubmits(),
       appendEntries: (...entries) => this.appendEntries(...entries),
       setState: (patch) => this.setState(patch),
       persistSessionSnapshot: (state, summary, traceMode) => this.persistSessionSnapshot(state, summary, traceMode),
@@ -3089,9 +3092,6 @@ export class WorkShellEngine<
   }
 
   private async handleInlineCommandSubmit(line: string, slashCommand: readonly string[]): Promise<void> {
-      removeQueuedItem: (id) => this.removeQueuedSubmit(id),
-      moveQueuedItem: (id, direction) => this.moveQueuedSubmit(id, direction),
-      resumeQueuedItems: () => this.resumeQueuedSubmits(),
     await executeInlineCommandSubmit<Reasoning>({
       line,
       slashCommand,
@@ -3404,7 +3404,50 @@ export class WorkShellEngine<
     return parseQueuedSubmit(stdout);
   }
 
+  private async ackQueuedSubmit(id: number): Promise<QueuedSubmit | undefined> {
+    return parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "ack-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+    ));
+  }
+
+  private async nackQueuedSubmit(id: number): Promise<QueuedSubmit | undefined> {
+    return parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "nack-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+    ));
+  }
+
+  private async quarantineQueuedSubmit(id: number, reason: string): Promise<QueuedSubmit | undefined> {
+    return parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "quarantine-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+      reason,
+    ));
+  }
+
+  private async retryQueuedSubmit(id: number): Promise<boolean> {
+    const item = parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "retry-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+    ));
+    await this.refreshQueuedSubmitSnapshot();
+    return item !== undefined;
+  }
+
+  private async discardQueuedSubmit(id: number): Promise<boolean> {
+    const item = parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "discard-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+    ));
+    if (!item) return false;
+    await deleteQueuedAttachmentArtifacts(this.queueCommandCwd(), item.attachmentRefs);
+    await this.refreshQueuedSubmitSnapshot();
+    return true;
+  }
+
   private async clearQueuedSubmits(): Promise<void> {
+    const pending = (await this.listQueuedSubmits()).filter((item) => item.status === "pending");
     await runRustCommand(["rust", "queue", "clear", this.sessionId], this.queueCommandCwd());
     await deleteQueuedAttachmentArtifacts(
       this.queueCommandCwd(),
@@ -3441,6 +3484,7 @@ export class WorkShellEngine<
     this.queueAutoDrainPaused = false;
     this.queueDrainSkipTurnEpochs.clear();
     this.setState({ queuePaused: false });
+    if (!this.state.isBusy) await this.drainQueuedSubmits();
   }
 
   private async loadQueuedSubmitCount(): Promise<number> {
@@ -3485,50 +3529,7 @@ export class WorkShellEngine<
       buildContextPanel: this.buildContextPanel,
       expanded: this.state.panel.title === "Context expanded",
     });
-  private async ackQueuedSubmit(id: number): Promise<QueuedSubmit | undefined> {
-    return parseQueuedSubmit(await runRustCommand(
-      ["rust", "queue", "ack-json", this.sessionId, String(id)],
-      this.queueCommandCwd(),
-    ));
-  }
-
-  private async nackQueuedSubmit(id: number): Promise<QueuedSubmit | undefined> {
-    return parseQueuedSubmit(await runRustCommand(
-      ["rust", "queue", "nack-json", this.sessionId, String(id)],
-      this.queueCommandCwd(),
-    ));
-  }
-
-  private async quarantineQueuedSubmit(id: number, reason: string): Promise<QueuedSubmit | undefined> {
-    return parseQueuedSubmit(await runRustCommand(
-      ["rust", "queue", "quarantine-json", this.sessionId, String(id)],
-      this.queueCommandCwd(),
-      reason,
-    ));
-  }
-
-  private async retryQueuedSubmit(id: number): Promise<boolean> {
-    const item = parseQueuedSubmit(await runRustCommand(
-      ["rust", "queue", "retry-json", this.sessionId, String(id)],
-      this.queueCommandCwd(),
-    ));
-    await this.refreshQueuedSubmitSnapshot();
-    return item !== undefined;
-  }
-
-  private async discardQueuedSubmit(id: number): Promise<boolean> {
-    const item = parseQueuedSubmit(await runRustCommand(
-      ["rust", "queue", "discard-json", this.sessionId, String(id)],
-      this.queueCommandCwd(),
-    ));
-    if (!item) return false;
-    await deleteQueuedAttachmentArtifacts(this.queueCommandCwd(), item.attachmentRefs);
-    await this.refreshQueuedSubmitSnapshot();
-    return true;
-  }
-
     this.currentContextSummaryLines = contextState.contextSummaryLines;
-    const pending = (await this.listQueuedSubmits()).filter((item) => item.status === "pending");
     this.setState({
       bridgeLines: contextState.bridgeLines,
       memoryLines: contextState.memoryLines,
@@ -3536,7 +3537,6 @@ export class WorkShellEngine<
     });
     await this.refreshContextPacket(true);
   }
-    if (!this.state.isBusy) await this.drainQueuedSubmits();
 
   private resolveContextLifecycleProfile(): string {
     return this.options.contextProfile

@@ -11,7 +11,8 @@ use unclecode_core::aci::{
 use unclecode_core::aci_edit::{line_edit_json, lint_failure_message, restore_file};
 use unclecode_core::aci_patch::{apply_unified_patch_json, parse_unified_diff_json};
 use unclecode_core::aci_safe::{
-    read_text_file_no_symlinks, write_text_file_atomically_no_symlinks,
+    delete_text_file_no_symlinks, read_text_file_no_symlinks,
+    write_text_file_atomically_no_symlinks,
 };
 use unclecode_core::aci_search::{find_files_json, glob_files, search_text, search_text_json};
 use unclecode_core::anthropic_request::{
@@ -4871,6 +4872,15 @@ fn run_native_aci_command(args: &[OsString]) -> Result<u8, String> {
         Some("delete") => {
             let path = args.get(1).ok_or("Usage: unclecode rust aci delete <path>")?;
             delete_text_file(&cwd, PathBuf::from(path)).map_err(|error| error.to_string())?;
+            println!("Deleted {}", path.to_string_lossy());
+            Ok(0)
+        }
+        Some("delete-no-symlinks") => {
+            let path = args
+                .get(1)
+                .ok_or("Usage: unclecode rust aci delete-no-symlinks <path>")?;
+            delete_text_file_no_symlinks(&cwd, PathBuf::from(path))
+                .map_err(|error| error.to_string())?;
             println!("Deleted {}", path.to_string_lossy());
             Ok(0)
         }

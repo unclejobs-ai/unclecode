@@ -23,7 +23,7 @@ pub fn resolve_drain_start_json(
 }
 
 pub fn resolve_drain_step_json(item_json: &str, queued_count: usize) -> Result<String, String> {
-    let item: Value = serde_json::from_str(item_json.trim())
+    let mut item: Value = serde_json::from_str(item_json.trim())
         .map_err(|error| format!("Invalid drain item JSON: {error}"))?;
     if item.is_null() {
         return serde_json::to_string(&json!({
@@ -43,15 +43,14 @@ pub fn resolve_drain_step_json(item_json: &str, queued_count: usize) -> Result<S
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .ok_or("Invalid drain item JSON: missing line")?;
+    let line = line.to_string();
+    item["line"] = Value::String(line.clone());
 
     serde_json::to_string(&json!({
         "action": "run",
         "queuedCount": queued_count.saturating_sub(1),
-        "message": format!("Running queued follow-up #{id}: {}", compact_preview(line, 72)),
-        "item": {
-            "id": id,
-            "line": line,
-        }
+        "message": format!("Running queued follow-up #{id}: {}", compact_preview(&line, 72)),
+        "item": item,
     }))
     .map_err(|error| format!("Failed to serialize drain step action: {error}"))
 }
@@ -74,6 +73,15 @@ fn resolve_busy_submit_value(line: &str, queued_count: usize) -> Value {
             "action": "clear_queue",
             "line": line,
             "message": "Queue cleared. Active turn is still running.",
+        });
+    }
+    if line == "/queue resume"
+        || line.starts_with("/queue remove ")
+        || line.starts_with("/queue move ")
+    {
+        return json!({
+            "action": "queue_command",
+            "line": line,
         });
     }
     if matches!(line, "/cancel" | "/interrupt" | "/stop") {

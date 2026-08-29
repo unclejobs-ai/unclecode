@@ -548,6 +548,19 @@ fn work_shell_builtin_submit_command(line: &str) -> Option<Value> {
     if let Some(tab) = work_shell_agent_console_tab(line) {
         return Some(json!({ "kind": "agent-console", "tab": tab }));
     }
+    let queue_parts = line.split_whitespace().collect::<Vec<_>>();
+    if let ["/queue", "remove", id] = queue_parts.as_slice() {
+        if id.parse::<u64>().is_ok_and(|value| value > 0) {
+            return Some(json!({ "kind": "queue-remove", "id": id.parse::<u64>().ok() }));
+        }
+    }
+    if let ["/queue", "move", id, direction @ ("up" | "down")] = queue_parts.as_slice() {
+        if id.parse::<u64>().is_ok_and(|value| value > 0) {
+            return Some(
+                json!({ "kind": "queue-move", "id": id.parse::<u64>().ok(), "direction": direction }),
+            );
+        }
+    }
     match line {
         "/exit" => Some(json!({ "kind": "exit" })),
         "/clear" => Some(json!({ "kind": "clear" })),
@@ -561,6 +574,7 @@ fn work_shell_builtin_submit_command(line: &str) -> Option<Value> {
         "/skills" => Some(json!({ "kind": "skills" })),
         "/queue" => Some(json!({ "kind": "queue" })),
         "/queue clear" => Some(json!({ "kind": "queue-clear" })),
+        "/queue resume" => Some(json!({ "kind": "queue-resume" })),
         "/cancel" | "/interrupt" | "/stop" => Some(json!({ "kind": "cancel" })),
         "/harness" => Some(json!({ "kind": "harness" })),
         "/auth key" => Some(json!({ "kind": "auth-key" })),
@@ -1222,6 +1236,26 @@ mod tests {
             .unwrap()["kind"],
             "queue-clear"
         );
+        let resume = serde_json::from_str::<Value>(
+            &work_shell_builtin_submit_command_json("/queue resume").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(resume["kind"], "queue-resume");
+
+        let remove = serde_json::from_str::<Value>(
+            &work_shell_builtin_submit_command_json("/queue remove 42").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(remove["kind"], "queue-remove");
+        assert_eq!(remove["id"], 42);
+
+        let moved = serde_json::from_str::<Value>(
+            &work_shell_builtin_submit_command_json("/queue move 42 up").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(moved["kind"], "queue-move");
+        assert_eq!(moved["id"], 42);
+        assert_eq!(moved["direction"], "up");
         assert_eq!(
             serde_json::from_str::<Value>(
                 &work_shell_builtin_submit_command_json("/cancel").unwrap()

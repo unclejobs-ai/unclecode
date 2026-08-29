@@ -704,7 +704,7 @@ function isSkillsBuiltinResult(value: unknown): value is {
   );
 }
 
-export const WORK_BOARD_PANEL_TITLE = "Work board";
+export const WORK_BOARD_PANEL_TITLE = "Queue · follow-ups";
 
 export type WorkShellQueueBuiltinInput = {
   readonly line: string;
@@ -713,13 +713,21 @@ export type WorkShellQueueBuiltinInput = {
   readonly mode?: string;
   readonly workerBudget?: number;
   readonly queuedCount?: number;
-  readonly queuedItems?: readonly { readonly id: number; readonly line: string }[];
+  readonly queuedItems?: readonly {
+    readonly id: number;
+    readonly line: string;
+    readonly attachmentCount?: number;
+    readonly createdAt?: number;
+    readonly status?: "pending" | "in-flight" | "requires-action";
+    readonly recoveryReason?: string | undefined;
+  }[];
   readonly transcriptText?: string;
   readonly queuePaused?: boolean;
   readonly blockedReason?: string;
   readonly activePromptPreview?: string;
   readonly lastCompletedTurn?: { readonly user: string; readonly assistant: string };
   readonly terminalColumns?: number;
+  readonly nowMs?: number;
 };
 
 const READ_ONLY_GUARD_BLOCKED_PATTERNS = [
@@ -843,9 +851,17 @@ export function buildWorkShellQueueBuiltinInput<Reasoning extends WorkShellReaso
   >;
   readonly workerBudget?: number;
   readonly queuedCount?: number;
-  readonly queuedItems?: readonly { readonly id: number; readonly line: string }[];
+  readonly queuedItems?: readonly {
+    readonly id: number;
+    readonly line: string;
+    readonly attachmentCount?: number;
+    readonly createdAt?: number;
+    readonly status?: "pending" | "in-flight" | "requires-action";
+    readonly recoveryReason?: string | undefined;
+  }[];
   readonly transcriptText?: string;
   readonly terminalColumns?: number;
+  readonly nowMs?: number;
   readonly contextSummaryLines?: readonly string[];
   readonly lastCompletedTurn?: { readonly user: string; readonly assistant: string };
 }): WorkShellQueueBuiltinInput {
@@ -870,6 +886,7 @@ export function buildWorkShellQueueBuiltinInput<Reasoning extends WorkShellReaso
     ...(activePromptPreview ? { activePromptPreview } : {}),
     ...(lastCompletedTurn ? { lastCompletedTurn } : {}),
     terminalColumns: input.terminalColumns ?? input.state.terminalColumns,
+    nowMs: input.nowMs ?? Date.now(),
   };
 }
 

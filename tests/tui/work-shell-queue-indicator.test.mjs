@@ -11,26 +11,26 @@ test("formatWorkShellQueueIndicator returns null for negative counts", () => {
   assert.equal(formatWorkShellQueueIndicator(-1), null);
 });
 
-test("formatWorkShellQueueIndicator renders count and /queue hint for 1 queued item", () => {
+test("formatWorkShellQueueIndicator renders count and /queue hint for 1 follow-up", () => {
   const result = formatWorkShellQueueIndicator(1);
   assert.ok(result !== null);
   assert.match(result, /1/);
-  assert.match(result, /queued/);
+  assert.match(result, /follow-up/);
   assert.match(result, /\/queue/);
 });
 
-test("formatWorkShellQueueIndicator renders the correct count for multiple items", () => {
+test("formatWorkShellQueueIndicator renders the correct count for multiple follow-ups", () => {
   const result = formatWorkShellQueueIndicator(3);
   assert.ok(result !== null);
   assert.match(result, /3/);
-  assert.match(result, /queued/);
+  assert.match(result, /follow-ups/);
   assert.match(result, /\/queue/);
 });
 
 test("formatWorkShellQueueIndicator indicator string matches expected format", () => {
-  assert.equal(formatWorkShellQueueIndicator(2), "⋯ 2 queued · /queue");
+  assert.equal(formatWorkShellQueueIndicator(2), "⋯ 2 follow-ups · /queue");
 });
 
 test("formatWorkShellQueueIndicator marks interrupted queues as paused", () => {
-  assert.equal(formatWorkShellQueueIndicator(2, true), "⋯ 2 queued · paused · /queue clear");
+  assert.equal(formatWorkShellQueueIndicator(2, true), "⋯ 2 follow-ups · paused · /queue resume");
 });

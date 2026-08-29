@@ -63,7 +63,19 @@ const WORK_SHELL_EXTRA_SUGGESTION_ENTRIES = [
   },
   {
     command: "/queue",
-    description: "Show the current shell queue and active work state.",
+    description: "Manage ordered user follow-ups after the active turn.",
+  },
+  {
+    command: "/queue remove",
+    description: "Remove one queued follow-up by stable id.",
+  },
+  {
+    command: "/queue move",
+    description: "Move one queued follow-up up or down.",
+  },
+  {
+    command: "/queue resume",
+    description: "Resume follow-up execution after an interrupt.",
   },
   {
     command: "/interrupt",

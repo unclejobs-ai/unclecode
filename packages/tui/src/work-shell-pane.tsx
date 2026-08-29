@@ -191,6 +191,7 @@ export function WorkShellPane<
     transcriptScrollOffset,
     composerPreview,
     activePanel,
+    queueSelectedId,
     slashSuggestionCount,
     selectedSlashCommand,
     contextAdviceKeyActionsEnabled,
@@ -225,6 +226,7 @@ export function WorkShellPane<
       ? { refreshHomeState: props.refreshHomeState }
       : {}),
     shouldBlockSlashSubmit: props.shouldBlockSlashSubmit,
+    terminalColumns,
     terminalRows,
   });
 
@@ -472,6 +474,7 @@ export function WorkShellPane<
       {...(lastTurnDurationMs !== undefined ? { lastTurnDurationMs } : {})}
       {...(liveToolTraceLines ? { liveToolTraceLines } : {})}
       activePanel={activePanel}
+      {...(queueSelectedId !== undefined ? { queueSelectedId } : {})}
       {...(contextActionReceipt ? { contextActionReceipt } : {})}
       {...(contextPreviewReceipt ? { contextPreviewReceipt } : {})}
       {...(contextSubmittedReceipt ? { contextSubmittedReceipt } : {})}

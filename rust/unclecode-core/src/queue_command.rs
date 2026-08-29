@@ -35,6 +35,7 @@ pub fn resolve_queue_command_json(input_json: &str) -> Result<String, String> {
         "activePromptPreview": input.get("activePromptPreview").cloned().unwrap_or(Value::Null),
         "lastCompletedTurn": input.get("lastCompletedTurn").cloned().unwrap_or(Value::Null),
         "terminalColumns": input.get("terminalColumns").cloned().unwrap_or(Value::Null),
+        "nowMs": input.get("nowMs").cloned().unwrap_or(Value::Null),
     });
     let panel =
         serde_json::from_str::<Value>(&build_ux_panel_json("queue", &panel_input.to_string())?)
@@ -65,17 +66,20 @@ mod tests {
             parsed["entries"][1]["text"],
             "Queue shown. No queued work in this shell."
         );
-        assert_eq!(parsed["panel"]["title"], "Work board");
+        assert_eq!(parsed["panel"]["title"], "Queue · follow-ups");
         assert!(parsed["panel"]["lines"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|line| line.as_str().unwrap_or("").contains("State · idle")));
+            .any(|line| line
+                .as_str()
+                .unwrap_or("")
+                .contains("Idle · 0 total · 0 pending · 0 in flight · 0 requires action")));
         assert!(parsed["panel"]["lines"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|line| line.as_str().unwrap_or("").contains("Queued · 0")));
+            .any(|line| line.as_str().unwrap_or("").contains("Queue empty")));
     }
 
     #[test]
@@ -98,11 +102,14 @@ mod tests {
             parsed["entries"][1]["text"],
             "Queue cleared. Active turn is still running."
         );
-        assert_eq!(parsed["panel"]["title"], "Work board");
+        assert_eq!(parsed["panel"]["title"], "Queue · follow-ups");
         assert!(parsed["panel"]["lines"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|line| line.as_str().unwrap_or("").contains("State · running")));
+            .any(|line| line
+                .as_str()
+                .unwrap_or("")
+                .contains("Running · 0 total · 0 pending · 0 in flight · 0 requires action")));
     }
 }
