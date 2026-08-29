@@ -1951,20 +1951,20 @@ test("applyComposerEdit keeps emoji cursor movement and deletion on character bo
       value: "🙂한",
       cursorOffset: 3,
       input: "",
-      key: { delete: true },
+      key: { backspace: true },
       allowLineBreaks: false,
     }),
     { nextValue: "🙂", nextCursorOffset: 2, submitted: false },
   );
 });
 
-test("applyComposerEdit treats Ink delete events as terminal Backspace", () => {
+test("applyComposerEdit treats Ink backspace events as terminal Backspace", () => {
   assert.deepEqual(
     applyComposerEdit({
       value: "/u dd ddd",
       cursorOffset: "/u dd ddd".length,
       input: "",
-      key: { delete: true },
+      key: { backspace: true },
       allowLineBreaks: true,
     }),
     {

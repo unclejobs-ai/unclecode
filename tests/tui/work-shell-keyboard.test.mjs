@@ -518,6 +518,53 @@ test("Composer ignores repeated non-text control shortcuts", async () => {
   assert.deepEqual(submittedValues, []);
 });
 
+test("Composer maps raw Backspace and forward Delete to whole grapheme edits", async () => {
+  const family = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}";
+  const changedValues = [];
+
+  function ControlledComposerHarness() {
+    const [value, setValue] = React.useState("");
+    return React.createElement(Composer, {
+      value,
+      onChange: (nextValue) => {
+        changedValues.push(nextValue);
+        setValue(nextValue);
+      },
+      onSubmit: () => {},
+    });
+  }
+
+  const { stdin, instance } = renderWithInput(React.createElement(ControlledComposerHarness));
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stdin.write(`A${family}한`);
+    await waitForCondition(() => changedValues.at(-1) === `A${family}한`);
+
+    // Ink 7 maps DEL (0x7f) to Backspace. Each event must remove the whole
+    // grapheme to the left, including an extended ZWJ emoji sequence.
+    stdin.write("\u007f");
+    await waitForCondition(() => changedValues.at(-1) === `A${family}`);
+    stdin.write("\u007f");
+    await waitForCondition(() => changedValues.at(-1) === "A");
+
+    stdin.write(`${family}한`);
+    await waitForCondition(() => changedValues.at(-1) === `A${family}한`);
+    stdin.write("\u001b[D");
+    stdin.write("\u001b[D");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Ink 7 maps CSI 3~ to forward Delete. It must remove the whole grapheme
+    // to the right without changing the cursor's preceding text.
+    stdin.write("\u001b[3~");
+    await waitForCondition(() => changedValues.at(-1) === "A한");
+    assert.equal(changedValues.at(-1), "A한");
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
 test("Composer does not append new typing to a just-submitted stale parent value", async () => {
   const changedValues = [];
   const submittedValues = [];
