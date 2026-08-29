@@ -301,22 +301,31 @@ test("legacy sessions do not fabricate SCC promotion provenance", () => {
   assert.equal(projection.runs[0].quality.phase, "unknown");
 });
 
-test("persistent runtime discovers opaque session checkpoint filenames", async () => {
+test("persistent runtime discovers opaque checkpoints and restores only explicit owner revisions", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "unclecode-control-room-"));
   try {
     const sessions = path.join(root, "projects", "project-opaque", "sessions");
     await mkdir(sessions, { recursive: true });
-    await writeFile(path.join(sessions, "session-opaque.checkpoint.json"), JSON.stringify({
-      sessionId: "session-real",
+    await writeFile(path.join(sessions, "session-without-revision.checkpoint.json"), JSON.stringify({
+      sessionId: "session-without-revision",
       projectPath: "/tmp/project",
       state: "completed",
       eventCount: 12,
       uiLocale: "en",
     }));
+    await writeFile(path.join(sessions, "session-explicit-revision.checkpoint.json"), JSON.stringify({
+      sessionId: "session-explicit-revision",
+      projectPath: "/tmp/project",
+      state: "completed",
+      eventCount: 99,
+      uiLocale: "en",
+      metadata: { ownerMutationRevision: 37 },
+    }));
     const source = await readPersistentRuntime(root, new LiveRuntimeControlRegistry());
-    assert.equal(source.sessions.length, 1);
-    assert.equal(source.sessions[0].sessionId, "session-real");
-    assert.equal(source.sessions[0].revision, 12);
+    assert.equal(source.sessions.length, 2);
+    const revisions = new Map(source.sessions.map(session => [session.sessionId, session.revision]));
+    assert.equal(revisions.get("session-without-revision"), 0, "event count must never impersonate an owner revision");
+    assert.equal(revisions.get("session-explicit-revision"), 37, "the explicit owner revision must restore exactly");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
