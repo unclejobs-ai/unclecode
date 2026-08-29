@@ -912,7 +912,9 @@ export async function loadWorkCliBootstrap(
           prompt: raw,
           ...(userHomeDir ? { userHomeDir } : {}),
         }),
-      recordTurn: (turn) => recorder.recordTurn(turn),
+      ...(runtimeRole === "owner"
+        ? { recordTurn: (turn) => recorder.recordTurn(turn) }
+        : {}),
       mutateContextSource: crpRuntime.mutateContextSource,
       undoContextSourceAction: crpRuntime.undoLastContextSourceAction,
       previewContextPacket: ({ sessionId, packet, profile }) =>
