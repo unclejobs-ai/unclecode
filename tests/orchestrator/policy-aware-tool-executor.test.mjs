@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createPolicyAwareToolExecutor } from "@unclecode/orchestrator";
+import {
+  createPolicyAwareToolExecutor,
+  resolveModeExecutionPolicyProfile,
+} from "@unclecode/orchestrator";
 
 function toolDefinition(name, mode, kind) {
   return {
@@ -155,6 +158,140 @@ test("risky tool metadata requires confirmation even when execution policy defau
   assert.deepEqual(invoked, []);
   assert.equal(result.isError, true);
   assert.match(result.content, /confirmation.*not granted/i);
+});
+
+test("release-sensitive shell actions require fresh one-shot approval despite autonomy", async () => {
+  const commands = [
+    "git push origin main",
+    "git switch main && git merge feature/release-safety",
+    "npm publish --access public",
+    "npm --workspace @scope/package publish",
+    "pnpm --filter web publish",
+    "pnpm run deploy",
+    "gh release create v1.2.3",
+    "vercel deploy --prod",
+    "bash -c 'git push origin main'",
+    "git push origin main",
+  ];
+  const invoked = [];
+  const questions = [];
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: {
+      ...createRecordingHandlers([]),
+      run_shell: async (input) => {
+        invoked.push(input.command);
+        return { content: "release-action-ran" };
+      },
+    },
+    policyProfile: resolveModeExecutionPolicyProfile({ mode: "yolo", envShellOptIn: false }),
+    runtimeMode: "yolo",
+    interactionBridge: {
+      async ask(request) {
+        questions.push(request);
+        return {
+          status: "answered",
+          answers: [{ id: "policy-confirmation", selectedOptions: ["Approve"] }],
+        };
+      },
+    },
+  });
+
+  for (const command of commands) {
+    const result = await executor.execute({
+      toolName: "run_shell",
+      input: { command },
+      cwd: "/tmp/policy-executor",
+    });
+    assert.equal(result.isError ?? false, false, command);
+  }
+
+  assert.deepEqual(invoked, commands);
+  assert.equal(questions.length, commands.length);
+  assert.ok(questions.every((request) =>
+    request.questions[0].options.every((option) => option.label !== "Always allow")
+  ));
+  questions.forEach((request, index) => {
+    assert.ok(request.questions[0].question.includes(JSON.stringify(commands[index])));
+  });
+});
+
+test("ambiguous shell wrappers fail closed before autonomy", async () => {
+  const commands = [
+    'eval "$RELEASE_COMMAND"',
+    "npm exec -- git push origin main",
+    "npx vercel deploy --prod",
+    "git -c alias.ship='push origin main' ship",
+    "sh ./scripts/ship.sh",
+    "./scripts/ship.sh",
+    "npm run ship",
+    "make ship",
+    "yarn deploy",
+    "vercel --prod",
+  ];
+  const invoked = [];
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: createRecordingHandlers(invoked),
+    policyProfile: resolveModeExecutionPolicyProfile({ mode: "ultrawork", envShellOptIn: false }),
+    runtimeMode: "ultrawork",
+  });
+
+  for (const command of commands) {
+    const result = await executor.execute({
+      toolName: "run_shell",
+      input: { command },
+      cwd: "/tmp/policy-executor",
+    });
+    assert.equal(result.isError, true, command);
+    assert.match(result.content, /not granted.*one-shot confirmation/i, command);
+  }
+
+  assert.deepEqual(invoked, []);
+});
+
+test("autonomy keeps ordinary local build and test shell commands prompt-free", async () => {
+  const commands = [
+    "npm test",
+    "npm run build",
+    "pnpm run lint",
+    "cargo test --workspace",
+    "make test",
+    "git status --short",
+    'printf "%s\\n" "release notes"',
+  ];
+  const invoked = [];
+  let prompts = 0;
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: {
+      ...createRecordingHandlers([]),
+      run_shell: async (input) => {
+        invoked.push(input.command);
+        return { content: "local-command-ran" };
+      },
+    },
+    policyProfile: resolveModeExecutionPolicyProfile({ mode: "yolo", envShellOptIn: false }),
+    runtimeMode: "yolo",
+    interactionBridge: {
+      async ask() {
+        prompts += 1;
+        return { status: "cancelled" };
+      },
+    },
+  });
+
+  for (const command of commands) {
+    const result = await executor.execute({
+      toolName: "run_shell",
+      input: { command },
+      cwd: "/tmp/policy-executor",
+    });
+    assert.equal(result.isError ?? false, false, command);
+  }
+
+  assert.deepEqual(invoked, commands);
+  assert.equal(prompts, 0);
 });
 
 test("every declared tool resource must be authorized before dispatch", async () => {

@@ -18,6 +18,7 @@ import type {
 } from "./tools.js";
 import type { WorkShellInteractionBridge } from "./work-shell-interaction-bridge.js";
 import { runExecutionNonInterruptible } from "./execution-pause.js";
+import { resolveOneShotShellApproval } from "./permission-scope.js";
 
 /**
  * The single request shape every provider and Pi loop uses to reach a tool.
@@ -151,6 +152,7 @@ async function isConfirmed(
   toolName: string,
   reason: string,
   signal: AbortSignal | undefined,
+  actionDetail?: string | undefined,
 ): Promise<boolean> {
   if (bridge === undefined) {
     return false;
@@ -160,7 +162,7 @@ async function isConfirmed(
     title: "Execution policy confirmation",
     questions: [{
       id: CONFIRMATION_QUESTION_ID,
-      question: `Allow ${toolName}? ${reason}`,
+      question: `Allow ${toolName}? ${actionDetail ? `${actionDetail} ` : ""}${reason}`,
       options: [
         { label: APPROVE_LABEL, description: "Run this tool call once." },
         { label: REJECT_LABEL, description: "Refuse this tool call." },
@@ -229,23 +231,32 @@ export function createPolicyAwareToolExecutor(
         return refuse(`${request.toolName} blocked by execution policy: ${denied.reason}`);
       }
 
+      const oneShotShellApproval = resolveOneShotShellApproval(request);
+
       const explicitCapabilityGrant = evaluations.every(
         (evaluation) =>
           evaluation.effect === "allow"
           && evaluation.matchedRule !== `${profile.id}.${evaluation.capability}.default`,
       );
-      const confirmationPolicy = input.confirmationPolicy === undefined
-        ? SHELL_AUTONOMY_MODES[runtimeMode] === true || explicitCapabilityGrant
-          ? "never"
-          : "risky"
-        : typeof input.confirmationPolicy === "function"
-          ? input.confirmationPolicy()
-          : input.confirmationPolicy;
-      const confirmation = resolveToolConfirmationDecision({
-        toolName: request.toolName,
-        metadata: definition?.metadata,
-        policy: confirmationPolicy,
-      });
+      const confirmationPolicy = oneShotShellApproval
+        ? "risky"
+        : input.confirmationPolicy === undefined
+          ? SHELL_AUTONOMY_MODES[runtimeMode] === true || explicitCapabilityGrant
+            ? "never"
+            : "risky"
+          : typeof input.confirmationPolicy === "function"
+            ? input.confirmationPolicy()
+            : input.confirmationPolicy;
+      const confirmation = oneShotShellApproval
+        ? {
+            effect: "prompt" as const,
+            reason: `${oneShotShellApproval.scope.label} requires fresh one-shot confirmation.`,
+          }
+        : resolveToolConfirmationDecision({
+            toolName: request.toolName,
+            metadata: definition?.metadata,
+            policy: confirmationPolicy,
+          });
       const promptReasons = [
         ...evaluations
           .filter((evaluation) => evaluation.effect === "prompt")
@@ -258,9 +269,10 @@ export function createPolicyAwareToolExecutor(
           "approval.wait",
           () => isConfirmed(
             input.interactionBridge,
-            request.toolName,
+            oneShotShellApproval?.scope.label ?? request.toolName,
             reason,
             request.signal,
+            oneShotShellApproval?.scope.detail,
           ),
         );
         if (!confirmed) {
