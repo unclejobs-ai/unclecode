@@ -13,10 +13,30 @@ printf '%s\\t%s\\n' "$*" "$payload" >> "$UNCLECODE_CACHE_TEST_LOG"
 case "$*" in
   "rust ux text attachment-preview") printf '%s\\n' '["Attachments cached"]' ;;
   "rust ux text inline-image-support") printf '%s\\n' "support:$TERM:$TERM_PROGRAM:$KITTY_WINDOW_ID" ;;
-  "rust ux text error-message") printf '%s\\n' 'formatted-error' ;;
+  "rust ux text error-message")
+    if [ "$payload" = "large-error-output" ]; then
+      head -c 2097152 /dev/zero | tr '\\000' 'E'
+    else
+      printf '%s\\n' 'formatted-error'
+    fi
+    ;;
   "rust ux text trace-line") printf '%s\\n' 'formatted-trace' ;;
-  "rust ux panel inline-command") printf '%s\\n' '{"title":"Cached panel","lines":["cached"]}' ;;
-  "rust ux text inline-command-summary") printf '%s\\n' 'cached-summary' ;;
+  "rust ux panel inline-command")
+    if [ "$payload" = '{"args":["large-panel-output"],"lines":[]}' ]; then
+      printf '%s' '{"title":"Cached panel","lines":["'
+      head -c 2097152 /dev/zero | tr '\\000' 'P'
+      printf '%s\\n' '"]}'
+    else
+      printf '%s\\n' '{"title":"Cached panel","lines":["cached"]}'
+    fi
+    ;;
+  "rust ux text inline-command-summary")
+    if [ "$payload" = '{"args":["large-summary-output"],"lines":[]}' ]; then
+      head -c 2097152 /dev/zero | tr '\\000' 'S'
+    else
+      printf '%s\\n' 'cached-summary'
+    fi
+    ;;
   *) printf '%s\\n' 'unsupported fake Rust command' >&2; exit 2 ;;
 esac
 `, "utf8");
@@ -157,6 +177,49 @@ test("formatter caches hit and enforce their error and trace entry limits", () =
   assert.equal(loggedCalls("rust ux text trace-line").length, 514, "trace retention must stay within 512 entries");
 });
 
+test("error formatting cache bypasses oversized request keys", () => {
+  const oversizedMessage = `oversized-error:${"E".repeat(2 * 1024 * 1024)}`;
+  const beforeOversizedKey = loggedCalls("rust ux text error-message").length;
+  assert.equal(formatWorkShellError(oversizedMessage), "formatted-error");
+  assert.equal(formatWorkShellError(oversizedMessage), "formatted-error");
+  assert.equal(
+    loggedCalls("rust ux text error-message").length,
+    beforeOversizedKey + 2,
+    "an oversized error message must not become a retained cache key",
+  );
+});
+
+test("error formatting cache bypasses oversized formatted values", () => {
+  const beforeOversizedValue = loggedCalls("rust ux text error-message").length;
+  assert.equal(formatWorkShellError("large-error-output").length, 2 * 1024 * 1024);
+  assert.equal(formatWorkShellError("large-error-output").length, 2 * 1024 * 1024);
+  assert.equal(
+    loggedCalls("rust ux text error-message").length,
+    beforeOversizedValue + 2,
+    "an oversized formatted error must not become a retained cache value",
+  );
+});
+
+test("trace formatting cache bypasses oversized serialized events", () => {
+  const oversizedEvent = {
+    type: "reasoning.delta",
+    level: "default",
+    provider: "openai",
+    model: "gpt-5.6-sol",
+    kind: "summary",
+    itemId: "oversized-trace",
+    delta: `oversized-trace:${"T".repeat(2 * 1024 * 1024)}`,
+  };
+  const before = loggedCalls("rust ux text trace-line").length;
+  assert.equal(formatAgentTraceLine(oversizedEvent), "formatted-trace");
+  assert.equal(formatAgentTraceLine(oversizedEvent), "formatted-trace");
+  assert.equal(
+    loggedCalls("rust ux text trace-line").length,
+    before + 2,
+    "an oversized serialized trace must not become a retained cache key",
+  );
+});
+
 test("inline command panel and summary caches hit and evict after 64 entries", () => {
   const firstPanel = buildInlineCommandPanel(["command-0"], ["line-0"]);
   assert.strictEqual(buildInlineCommandPanel(["command-0"], ["line-0"]), firstPanel);
@@ -182,4 +245,50 @@ test("inline command panel and summary caches hit and evict after 64 entries", (
   assert.equal(loggedCalls("rust ux text inline-command-summary").length, 65);
   formatInlineCommandResultSummary(["summary-0"], ["line-0"]);
   assert.equal(loggedCalls("rust ux text inline-command-summary").length, 66, "summary retention must stay within 64 entries");
+});
+
+test("inline command panel cache bypasses oversized requests", () => {
+  const oversizedLine = `oversized-panel:${"P".repeat(2 * 1024 * 1024)}`;
+  const beforeOversizedKey = loggedCalls("rust ux panel inline-command").length;
+  assert.equal(buildInlineCommandPanel(["oversized-panel"], [oversizedLine]).title, "Cached panel");
+  assert.equal(buildInlineCommandPanel(["oversized-panel"], [oversizedLine]).title, "Cached panel");
+  assert.equal(
+    loggedCalls("rust ux panel inline-command").length,
+    beforeOversizedKey + 2,
+    "oversized panel args and lines must not become a retained cache key",
+  );
+});
+
+test("inline command panel cache bypasses oversized panel values", () => {
+  const beforeOversizedValue = loggedCalls("rust ux panel inline-command").length;
+  assert.equal(buildInlineCommandPanel(["large-panel-output"], []).lines[0]?.length, 2 * 1024 * 1024);
+  assert.equal(buildInlineCommandPanel(["large-panel-output"], []).lines[0]?.length, 2 * 1024 * 1024);
+  assert.equal(
+    loggedCalls("rust ux panel inline-command").length,
+    beforeOversizedValue + 2,
+    "an oversized panel response must not become a retained cache value",
+  );
+});
+
+test("inline command summary cache bypasses oversized requests", () => {
+  const oversizedLine = `oversized-summary:${"S".repeat(2 * 1024 * 1024)}`;
+  const beforeOversizedKey = loggedCalls("rust ux text inline-command-summary").length;
+  assert.equal(formatInlineCommandResultSummary(["oversized-summary"], [oversizedLine]), "cached-summary");
+  assert.equal(formatInlineCommandResultSummary(["oversized-summary"], [oversizedLine]), "cached-summary");
+  assert.equal(
+    loggedCalls("rust ux text inline-command-summary").length,
+    beforeOversizedKey + 2,
+    "oversized summary args and lines must not become a retained cache key",
+  );
+});
+
+test("inline command summary cache bypasses oversized summary values", () => {
+  const beforeOversizedValue = loggedCalls("rust ux text inline-command-summary").length;
+  assert.equal(formatInlineCommandResultSummary(["large-summary-output"], []).length, 2 * 1024 * 1024);
+  assert.equal(formatInlineCommandResultSummary(["large-summary-output"], []).length, 2 * 1024 * 1024);
+  assert.equal(
+    loggedCalls("rust ux text inline-command-summary").length,
+    beforeOversizedValue + 2,
+    "an oversized summary response must not become a retained cache value",
+  );
 });

@@ -1,28 +1,32 @@
-import type { ExecutionTraceEvent } from "@unclecode/contracts";
+import { createInstrumentedLruCache, type ExecutionTraceEvent } from "@unclecode/contracts";
 import {
   getWorkShellMessages,
   runRustCommandSync,
   type WorkShellUiLocale,
 } from "@unclecode/orchestrator";
 
-const rustTraceLineCache = new Map<string, string>();
-const rustErrorMessageCache = new Map<string, string>();
 const TRACE_LINE_CACHE_MAX_ENTRIES = 512;
 const ERROR_MESSAGE_CACHE_MAX_ENTRIES = 64;
-
-function cacheFormatted<T>(cache: Map<string, T>, key: string, value: T, maxEntries: number): void {
-  if (cache.has(key)) cache.delete(key);
-  cache.set(key, value);
-  while (cache.size > maxEntries) cache.delete(cache.keys().next().value as string);
-}
+const TRACE_LINE_CACHE_MAX_RETAINED_BYTES = 512 * 1024;
+const ERROR_MESSAGE_CACHE_MAX_RETAINED_BYTES = 128 * 1024;
+const rustTraceLineCache = createInstrumentedLruCache<string, string>({
+  name: "tui-rust-trace-lines",
+  maxEntries: TRACE_LINE_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: TRACE_LINE_CACHE_MAX_RETAINED_BYTES,
+});
+const rustErrorMessageCache = createInstrumentedLruCache<string, string>({
+  name: "tui-rust-error-messages",
+  maxEntries: ERROR_MESSAGE_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: ERROR_MESSAGE_CACHE_MAX_RETAINED_BYTES,
+});
 
 export function formatWorkShellError(message: string): string {
-  const cached = rustErrorMessageCache.get(message);
-  if (cached !== undefined) {
-    return cached;
+  const cached = rustErrorMessageCache.lookup(message);
+  if (cached.hit) {
+    return cached.value;
   }
   const formatted = runRustCommandSync(["rust", "ux", "text", "error-message"], process.cwd(), message).trimEnd();
-  cacheFormatted(rustErrorMessageCache, message, formatted, ERROR_MESSAGE_CACHE_MAX_ENTRIES);
+  rustErrorMessageCache.set(message, formatted);
   return formatted;
 }
 
@@ -45,12 +49,12 @@ export function formatAgentTraceLine(
     ].join(" · ");
   }
   const key = JSON.stringify(event);
-  const cached = rustTraceLineCache.get(key);
-  if (cached !== undefined) {
-    return cached;
+  const cached = rustTraceLineCache.lookup(key);
+  if (cached.hit) {
+    return cached.value;
   }
   const line = runRustCommandSync(["rust", "ux", "text", "trace-line"], process.cwd(), key).trimEnd();
-  cacheFormatted(rustTraceLineCache, key, line, TRACE_LINE_CACHE_MAX_ENTRIES);
+  rustTraceLineCache.set(key, line);
   return line;
 }
 

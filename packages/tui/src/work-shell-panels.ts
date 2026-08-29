@@ -1,4 +1,5 @@
 import type { WorkShellPanel } from "./work-shell-view.js";
+import { createInstrumentedLruCache } from "@unclecode/contracts";
 import { resolveWorkShellSlashArgHint, runRustCommandSync } from "@unclecode/orchestrator";
 import {
   formatAuthLabelForDisplay,
@@ -9,17 +10,19 @@ import {
 
 export { formatAuthLabelForDisplay } from "./work-shell-auth-panels.js";
 
-const inlineCommandPanelCache = new Map<string, WorkShellPanel>();
-const inlineCommandSummaryCache = new Map<string, string>();
 const INLINE_COMMAND_CACHE_MAX_ENTRIES = 64;
-
-function cacheInlineCommand<T>(cache: Map<string, T>, key: string, value: T): void {
-  if (cache.has(key)) cache.delete(key);
-  cache.set(key, value);
-  while (cache.size > INLINE_COMMAND_CACHE_MAX_ENTRIES) {
-    cache.delete(cache.keys().next().value as string);
-  }
-}
+const INLINE_COMMAND_PANEL_CACHE_MAX_RETAINED_BYTES = 1024 * 1024;
+const INLINE_COMMAND_SUMMARY_CACHE_MAX_RETAINED_BYTES = 512 * 1024;
+const inlineCommandPanelCache = createInstrumentedLruCache<string, WorkShellPanel>({
+  name: "tui-inline-command-panels",
+  maxEntries: INLINE_COMMAND_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: INLINE_COMMAND_PANEL_CACHE_MAX_RETAINED_BYTES,
+});
+const inlineCommandSummaryCache = createInstrumentedLruCache<string, string>({
+  name: "tui-inline-command-summaries",
+  maxEntries: INLINE_COMMAND_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: INLINE_COMMAND_SUMMARY_CACHE_MAX_RETAINED_BYTES,
+});
 
 function parseRustPanel(raw: string, expectedTitle?: string): WorkShellPanel {
   const parsed = JSON.parse(raw) as unknown;
@@ -59,9 +62,9 @@ export function refineInlineCommandPanelLines(input: {
 
 export function buildInlineCommandPanel(args: readonly string[], lines: readonly string[]): WorkShellPanel {
   const key = JSON.stringify({ args, lines });
-  const cached = inlineCommandPanelCache.get(key);
-  if (cached) {
-    return cached;
+  const cached = inlineCommandPanelCache.lookup(key);
+  if (cached.hit) {
+    return cached.value;
   }
   const panel = parseRustPanel(
     runRustCommandSync(
@@ -70,22 +73,22 @@ export function buildInlineCommandPanel(args: readonly string[], lines: readonly
       key,
     ),
   );
-  cacheInlineCommand(inlineCommandPanelCache, key, panel);
+  inlineCommandPanelCache.set(key, panel);
   return panel;
 }
 
 export function formatInlineCommandResultSummary(args: readonly string[], lines: readonly string[]): string {
   const key = JSON.stringify({ args, lines });
-  const cached = inlineCommandSummaryCache.get(key);
-  if (cached) {
-    return cached;
+  const cached = inlineCommandSummaryCache.lookup(key);
+  if (cached.hit) {
+    return cached.value;
   }
   const summary = runRustCommandSync(
     ["rust", "ux", "text", "inline-command-summary"],
     process.cwd(),
     key,
   ).trimEnd();
-  cacheInlineCommand(inlineCommandSummaryCache, key, summary);
+  inlineCommandSummaryCache.set(key, summary);
   return summary;
 }
 
