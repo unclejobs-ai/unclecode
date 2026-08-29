@@ -77,11 +77,6 @@ export type AskUserQuestionResult =
   | { readonly status: "timed_out"; readonly answers: readonly AskUserQuestionAnswer[] }
   | { readonly status: "unavailable"; readonly reason: string };
 
-export const WORK_NODE_STATUSES = [
-  "proposed",
-  "approved",
-  "ready",
-  "running",
 /** Bounded, display-safe pending decision exposed by the Control Room API. */
 export type ControlRoomPendingDecision = {
   readonly kind: "security-approval" | "user-decision";
@@ -105,6 +100,11 @@ export type ControlRoomDecisionPayload = {
   readonly answers: readonly AskUserQuestionAnswer[];
 };
 
+export const WORK_NODE_STATUSES = [
+  "proposed",
+  "approved",
+  "ready",
+  "running",
   "blocked",
   "requires_action",
   "completed",
@@ -629,8 +629,8 @@ function copyPersistedPromptManifest(manifest: PersistedPromptManifest): Persist
 }
 
 function copyAskUserQuestionRequest(request: AskUserQuestionRequest): AskUserQuestionRequest {
-    kind: request.kind ?? "user-decision",
   return {
+    kind: request.kind ?? "user-decision",
     id: request.id,
     ...(request.title === undefined ? {} : { title: request.title }),
     questions: request.questions.map((question) => ({

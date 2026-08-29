@@ -7,6 +7,7 @@ import {
   AGENT_RUN_STATUSES,
   ASYNC_JOB_STATUSES,
   MAX_LIFECYCLE_SUMMARY_CHARS,
+  WORK_NODE_STATUSES,
   boundLifecycleSummary,
   createAgentConsoleSnapshot,
   isAskUserQuestionAnswered,
@@ -45,6 +46,36 @@ test("agent-console distinguishes answered questions from non-answer outcomes", 
     }),
     false,
   );
+});
+
+test("agent-console keeps decision types outside the exact work-node status tuple", () => {
+  assert.deepEqual(WORK_NODE_STATUSES, [
+    "proposed",
+    "approved",
+    "ready",
+    "running",
+    "blocked",
+    "requires_action",
+    "completed",
+    "failed",
+    "cancelled",
+  ]);
+  for (const kind of ["security-approval", "user-decision"]) {
+    const snapshot = createAgentConsoleSnapshot({
+      profileId: "review",
+      pendingDecision: {
+        kind,
+        id: `${kind}-1`,
+        questions: [{
+          id: "choice",
+          question: "Continue?",
+          options: [{ label: "Continue" }, { label: "Stop" }],
+        }],
+      },
+      activity: [],
+    });
+    assert.equal(snapshot.pendingDecision?.kind, kind);
+  }
 });
 
 test("agent-console refuses work dispatch until graph approval", () => {
