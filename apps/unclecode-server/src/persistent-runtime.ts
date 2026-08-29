@@ -6,11 +6,14 @@ import { parseWorkShellReplaySafePauseCheckpoint } from "@unclecode/orchestrator
 import { BoundedEventJournal, type EventJournal } from "./event-journal.js";
 import { createRuntimeAdapter, type RuntimeAdapter, type RuntimeControlPort, type RuntimeControlRequest, type RuntimeControlResult } from "./runtime-adapter.js";
 import type {
-  RuntimeCacheTelemetrySnapshot,
   RuntimeReadSource,
   RuntimeSessionSource,
 } from "./control-room.js";
-import type { RuntimeSystemObservabilitySource } from "./system-observability.js";
+import type {
+  RuntimeCacheTelemetryReadResult,
+  RuntimeCacheTelemetryReport,
+  RuntimeSystemObservabilitySource,
+} from "./system-observability.js";
 import type { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
 import { boundedRuntimeRpcError } from "./runtime-error-redaction.js";
 
@@ -196,7 +199,7 @@ async function readCheckpoint(path: string, controls: LiveRuntimeControlRegistry
 export async function readPersistentRuntime(
   rootDir: string,
   controls: LiveRuntimeControlRegistry,
-  readCacheTelemetry?: () => readonly RuntimeCacheTelemetrySnapshot[],
+  readCacheTelemetry?: () => RuntimeCacheTelemetryReadResult,
   readSystemObservability?: () => RuntimeSystemObservabilitySource,
 ): Promise<RuntimeReadSource> {
   const paths = await checkpointPaths(rootDir);
@@ -210,6 +213,25 @@ export async function readPersistentRuntime(
     .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
   const systemEvidence = readSystemObservabilitySafely(readSystemObservability);
   const cacheEvidence = readCacheTelemetrySafely(readCacheTelemetry);
+  const ownerCacheTelemetry = systemEvidence.value.cacheTelemetry;
+  const cacheTelemetry: RuntimeCacheTelemetryReport = {
+    caches: [
+      ...(systemEvidence.value.caches ?? []),
+      ...cacheEvidence.caches,
+    ],
+    sources: [
+      ...(ownerCacheTelemetry?.sources ?? []),
+      ...cacheEvidence.sources,
+    ],
+    sourceFailures: (ownerCacheTelemetry?.sourceFailures ?? 0) + (cacheEvidence.sourceFailures ?? 0),
+    projectionFailures: (ownerCacheTelemetry?.projectionFailures ?? 0) + (cacheEvidence.projectionFailures ?? 0),
+    truncated: ownerCacheTelemetry?.truncated === true || cacheEvidence.truncated === true,
+  };
+  const cacheTelemetryAvailable = cacheTelemetry.sources.length > 0
+    && cacheTelemetry.sources.every(source => source.status === "available" && source.failureCount === 0)
+    && (cacheTelemetry.sourceFailures ?? 0) === 0
+    && (cacheTelemetry.projectionFailures ?? 0) === 0
+    && cacheTelemetry.truncated !== true;
   return {
     generatedAt: Date.now(),
     sessions,
@@ -217,9 +239,15 @@ export async function readPersistentRuntime(
       ...systemEvidence.value,
       evidenceSources: {
         owner: systemEvidence.status,
-        cacheTelemetry: cacheEvidence.status,
+        cacheTelemetry: cacheTelemetryAvailable ? "available" : "unavailable",
       },
-      caches: cacheEvidence.value,
+      caches: cacheTelemetry.caches,
+      cacheTelemetry: {
+        sources: cacheTelemetry.sources,
+        sourceFailures: cacheTelemetry.sourceFailures,
+        projectionFailures: cacheTelemetry.projectionFailures,
+        truncated: cacheTelemetry.truncated,
+      },
     },
   };
 }
@@ -236,13 +264,32 @@ function readSystemObservabilitySafely(
 }
 
 function readCacheTelemetrySafely(
-  readCacheTelemetry: (() => readonly RuntimeCacheTelemetrySnapshot[]) | undefined,
-): { readonly status: "available" | "unavailable"; readonly value: readonly RuntimeCacheTelemetrySnapshot[] } {
-  if (!readCacheTelemetry) return { status: "unavailable", value: [] };
+  readCacheTelemetry: (() => RuntimeCacheTelemetryReadResult) | undefined,
+): RuntimeCacheTelemetryReport {
+  if (!readCacheTelemetry) {
+    return {
+      caches: [],
+      sources: [{ name: "runtime-cache-telemetry", status: "unavailable", failureCount: 0 }],
+    };
+  }
   try {
-    return { status: "available", value: readCacheTelemetry() };
+    const result = readCacheTelemetry();
+    if (Array.isArray(result)) {
+      return {
+        caches: result,
+        sources: [{ name: "runtime-cache-telemetry", status: "available", failureCount: 0 }],
+      };
+    }
+    if (!isRecord(result) || !Array.isArray(result.caches) || !Array.isArray(result.sources)) {
+      throw new Error("Cache telemetry reader returned an invalid report.");
+    }
+    return result as RuntimeCacheTelemetryReport;
   } catch {
-    return { status: "unavailable", value: [] };
+    return {
+      caches: [],
+      sources: [{ name: "runtime-cache-telemetry", status: "unavailable", failureCount: 1 }],
+      sourceFailures: 1,
+    };
   }
 }
 
@@ -251,7 +298,7 @@ export function createPersistentRuntimeAdapter(input: {
   readonly controls?: LiveRuntimeControlRegistry;
   readonly journal?: EventJournal;
   readonly journalCapacity?: number;
-  readonly readCacheTelemetry?: () => readonly RuntimeCacheTelemetrySnapshot[];
+  readonly readCacheTelemetry?: () => RuntimeCacheTelemetryReadResult;
   readonly readSystemObservability?: () => RuntimeSystemObservabilitySource;
 }): {
   readonly adapter: RuntimeAdapter;

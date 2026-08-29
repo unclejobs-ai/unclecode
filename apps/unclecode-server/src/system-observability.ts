@@ -9,6 +9,7 @@ export const SYSTEM_OBSERVABILITY_BOUNDS = Object.freeze({
   pluginsPerHost: 64,
   cleanup: 128,
   caches: 32,
+  cacheSources: 32,
 });
 
 export type RuntimeEvidenceAuthentication = "authenticated" | "missing" | "unverified";
@@ -80,6 +81,24 @@ export type RuntimeCacheTelemetrySnapshot = {
   readonly retainedBytesEstimate: number;
 };
 
+export type RuntimeCacheTelemetrySourceEvidence = {
+  readonly name: string;
+  readonly status: RuntimeEvidenceSourceStatus;
+  readonly failureCount: number;
+};
+
+export type RuntimeCacheTelemetryReport = {
+  readonly caches: readonly RuntimeCacheTelemetrySnapshot[];
+  readonly sources: readonly RuntimeCacheTelemetrySourceEvidence[];
+  readonly sourceFailures?: number | undefined;
+  readonly projectionFailures?: number | undefined;
+  readonly truncated?: boolean | undefined;
+};
+
+export type RuntimeCacheTelemetryReadResult =
+  | RuntimeCacheTelemetryReport
+  | readonly RuntimeCacheTelemetrySnapshot[];
+
 export type RuntimeSystemObservabilitySource = {
   readonly evidenceSources?: {
     readonly owner: RuntimeEvidenceSourceStatus;
@@ -124,6 +143,7 @@ export type RuntimeSystemObservabilitySource = {
   readonly pluginHosts?: readonly RuntimePluginHostEvidence[] | undefined;
   readonly cleanup?: readonly RuntimeCleanupEvidence[] | undefined;
   readonly caches?: readonly RuntimeCacheTelemetrySnapshot[] | undefined;
+  readonly cacheTelemetry?: Omit<RuntimeCacheTelemetryReport, "caches"> | undefined;
 };
 
 export type ControlRoomSystemProjection = Required<RuntimeSystemObservabilitySource>;
@@ -227,27 +247,95 @@ function projectCleanup(value: unknown): RuntimeCleanupEvidence | undefined {
   return { kind, identity: boundedText(value.identity), status, recordedAt: timestamp(value.recordedAt) };
 }
 
-function projectCaches(value: unknown): readonly RuntimeCacheTelemetrySnapshot[] {
-  if (!Array.isArray(value)) return [];
-  return value.slice(0, SYSTEM_OBSERVABILITY_BOUNDS.caches).flatMap((candidate) => {
-    if (!isRecord(candidate)) return [];
-    const hits = count(candidate.hits);
-    const misses = count(candidate.misses);
+function telemetryCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : undefined;
+}
+
+function projectCaches(value: unknown): {
+  readonly values: readonly RuntimeCacheTelemetrySnapshot[];
+  readonly failures: number;
+  readonly truncated: boolean;
+} {
+  if (!Array.isArray(value)) {
+    return { values: [], failures: value === undefined ? 0 : 1, truncated: false };
+  }
+  let failures = 0;
+  const values = value.slice(0, SYSTEM_OBSERVABILITY_BOUNDS.caches).flatMap((candidate) => {
+    if (!isRecord(candidate) || typeof candidate.name !== "string" || candidate.name.length === 0) {
+      failures += 1;
+      return [];
+    }
+    const hits = telemetryCount(candidate.hits);
+    const misses = telemetryCount(candidate.misses);
+    const evictions = telemetryCount(candidate.evictions);
+    const byteEvictions = telemetryCount(candidate.byteEvictions);
+    const invalidations = telemetryCount(candidate.invalidations);
+    const currentSize = telemetryCount(candidate.currentSize);
+    const maxEntries = telemetryCount(candidate.maxEntries);
+    const maxRetainedBytes = telemetryCount(candidate.maxRetainedBytes);
+    const retainedBytesEstimate = telemetryCount(candidate.retainedBytesEstimate);
+    if (hits === undefined || misses === undefined || evictions === undefined
+      || byteEvictions === undefined || invalidations === undefined || currentSize === undefined
+      || maxEntries === undefined || maxRetainedBytes === undefined || retainedBytesEstimate === undefined) {
+      failures += 1;
+      return [];
+    }
     const lookups = hits + misses;
     return [{
       name: boundedText(candidate.name, 120),
       hits,
       misses,
       hitRate: lookups > 0 ? hits / lookups : 0,
-      evictions: count(candidate.evictions),
-      byteEvictions: count(candidate.byteEvictions),
-      invalidations: count(candidate.invalidations),
-      currentSize: count(candidate.currentSize),
-      maxEntries: count(candidate.maxEntries),
-      maxRetainedBytes: count(candidate.maxRetainedBytes),
-      retainedBytesEstimate: count(candidate.retainedBytesEstimate),
+      evictions,
+      byteEvictions,
+      invalidations,
+      currentSize,
+      maxEntries,
+      maxRetainedBytes,
+      retainedBytesEstimate,
     }];
   });
+  return {
+    values,
+    failures,
+    truncated: value.length > SYSTEM_OBSERVABILITY_BOUNDS.caches,
+  };
+}
+
+function projectCacheSources(value: unknown): {
+  readonly values: readonly RuntimeCacheTelemetrySourceEvidence[];
+  readonly failures: number;
+  readonly truncated: boolean;
+} {
+  if (!Array.isArray(value)) {
+    return { values: [], failures: value === undefined ? 0 : 1, truncated: false };
+  }
+  let failures = 0;
+  const values = value.slice(0, SYSTEM_OBSERVABILITY_BOUNDS.cacheSources).flatMap((candidate) => {
+    if (!isRecord(candidate) || typeof candidate.name !== "string" || candidate.name.length === 0
+      || (candidate.status !== "available" && candidate.status !== "unavailable")) {
+      failures += 1;
+      return [];
+    }
+    const failureCount = telemetryCount(candidate.failureCount);
+    if (failureCount === undefined) {
+      failures += 1;
+      return [];
+    }
+    const projected: RuntimeCacheTelemetrySourceEvidence = {
+      name: boundedText(candidate.name, 120),
+      status: candidate.status === "available" ? "available" : "unavailable",
+      failureCount,
+    };
+    return [projected];
+  });
+  return {
+    values,
+    failures,
+    truncated: value.length > SYSTEM_OBSERVABILITY_BOUNDS.cacheSources,
+  };
 }
 
 export function projectSystemObservability(source: RuntimeSystemObservabilitySource | undefined): ControlRoomSystemProjection {
@@ -255,6 +343,24 @@ export function projectSystemObservability(source: RuntimeSystemObservabilitySou
   const resources: Readonly<Record<string, unknown>> = isRecord(source?.resources) ? source.resources : {};
   const journal: Readonly<Record<string, unknown>> = isRecord(source?.journal) ? source.journal : {};
   const engines: Readonly<Record<string, unknown>> = isRecord(source?.engines) ? source.engines : {};
+  const rawCacheTelemetry: Readonly<Record<string, unknown>> = isRecord(source?.cacheTelemetry)
+    ? source.cacheTelemetry
+    : {};
+  const projectedCaches = projectCaches(source?.caches);
+  const projectedCacheSources = projectCacheSources(rawCacheTelemetry.sources);
+  const inheritedProjectionFailures = count(rawCacheTelemetry.projectionFailures);
+  const projectionFailures = inheritedProjectionFailures
+    + projectedCaches.failures
+    + projectedCacheSources.failures;
+  const sourceFailures = projectedCacheSources.values.reduce(
+    (total, cacheSource) => total + cacheSource.failureCount,
+    0,
+  );
+  const hasExplicitCacheSources = Array.isArray(rawCacheTelemetry.sources);
+  const cacheSourcesHealthy = !hasExplicitCacheSources || (
+    projectedCacheSources.values.length > 0
+    && projectedCacheSources.values.every(item => item.status === "available" && item.failureCount === 0)
+  );
   const resourceTypes = Array.isArray(resources.byType)
     ? resources.byType.slice(0, SYSTEM_OBSERVABILITY_BOUNDS.activeResourceTypes).flatMap((candidate: unknown) =>
         isRecord(candidate) && typeof candidate.type === "string"
@@ -264,7 +370,14 @@ export function projectSystemObservability(source: RuntimeSystemObservabilitySou
   return {
     evidenceSources: {
       owner: source?.evidenceSources?.owner === "available" ? "available" : "unavailable",
-      cacheTelemetry: source?.evidenceSources?.cacheTelemetry === "available" ? "available" : "unavailable",
+      cacheTelemetry: source?.evidenceSources?.cacheTelemetry === "available"
+        && cacheSourcesHealthy
+        && projectionFailures === 0
+        && rawCacheTelemetry.truncated !== true
+        && !projectedCaches.truncated
+        && !projectedCacheSources.truncated
+        ? "available"
+        : "unavailable",
     },
     memory: {
       rssBytes: count(memory.rssBytes),
@@ -308,7 +421,15 @@ export function projectSystemObservability(source: RuntimeSystemObservabilitySou
       .map(projectPluginHost).filter((item): item is RuntimePluginHostEvidence => item !== undefined),
     cleanup: (source?.cleanup ?? []).slice(-SYSTEM_OBSERVABILITY_BOUNDS.cleanup)
       .map(projectCleanup).filter((item): item is RuntimeCleanupEvidence => item !== undefined),
-    caches: projectCaches(source?.caches),
+    caches: projectedCaches.values,
+    cacheTelemetry: {
+      sources: projectedCacheSources.values,
+      sourceFailures,
+      projectionFailures,
+      truncated: rawCacheTelemetry.truncated === true
+        || projectedCaches.truncated
+        || projectedCacheSources.truncated,
+    },
   };
 }
 

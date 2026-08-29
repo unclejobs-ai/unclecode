@@ -391,6 +391,7 @@ test("System projection whitelists, bounds, and redacts every backend inventory"
     pluginsPerHost: 64,
     cleanup: 128,
     caches: 32,
+    cacheSources: 32,
   });
   assert.equal(projection.system.providers.length, 32);
   assert.deepEqual(projection.system.evidenceSources, {
@@ -429,6 +430,125 @@ test("failed owner and cache evidence reads project unavailable instead of healt
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }
+});
+
+test("malformed cache evidence reports a bounded read failure instead of failing the GET", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "unclecode-system-malformed-cache-report-"));
+  try {
+    const source = await readPersistentRuntime(
+      rootDir,
+      new LiveRuntimeControlRegistry(),
+      () => null,
+    );
+    const projection = createControlRoomProjection(source);
+
+    assert.equal(projection.system.evidenceSources.cacheTelemetry, "unavailable");
+    assert.deepEqual(projection.system.caches, []);
+    assert.deepEqual(projection.system.cacheTelemetry.sources, [{
+      name: "runtime-cache-telemetry",
+      status: "unavailable",
+      failureCount: 1,
+    }]);
+    assert.equal(projection.system.cacheTelemetry.sourceFailures, 1);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("partial cache evidence stays unavailable and retains bounded per-source failures", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "unclecode-system-partial-cache-"));
+  try {
+    const source = await readPersistentRuntime(
+      rootDir,
+      new LiveRuntimeControlRegistry(),
+      () => ({
+        caches: [{
+          name: "provider-cache token=super-secret",
+          hits: 4,
+          misses: 1,
+          evictions: 0,
+          byteEvictions: 0,
+          invalidations: 0,
+          currentSize: 1,
+          maxEntries: 4,
+          maxRetainedBytes: 1_024,
+          retainedBytesEstimate: 128,
+        }],
+        sources: [
+          { name: "provider", status: "available", failureCount: 0 },
+          { name: "per-session-lsp", status: "unavailable", failureCount: 1 },
+        ],
+      }),
+    );
+    const projection = createControlRoomProjection(source);
+
+    assert.equal(projection.system.evidenceSources.cacheTelemetry, "unavailable");
+    assert.deepEqual(projection.system.cacheTelemetry, {
+      sources: [
+        { name: "provider", status: "available", failureCount: 0 },
+        { name: "per-session-lsp", status: "unavailable", failureCount: 1 },
+      ],
+      sourceFailures: 1,
+      projectionFailures: 0,
+      truncated: false,
+    });
+    assert.equal(projection.system.caches[0].hitRate, 0.8);
+    assert.doesNotMatch(JSON.stringify(projection.system), /super-secret/);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("malformed cache snapshots are rejected instead of projected as healthy zeroes", () => {
+  const projection = createControlRoomProjection({
+    generatedAt: 1,
+    sessions: [],
+    system: {
+      evidenceSources: { owner: "available", cacheTelemetry: "available" },
+      cacheTelemetry: {
+        sources: [{ name: "broken-source", status: "available", failureCount: 0 }],
+        sourceFailures: 0,
+        projectionFailures: 0,
+        truncated: false,
+      },
+      caches: [{ name: "missing-metrics", hits: 2 }],
+    },
+  });
+
+  assert.equal(projection.system.evidenceSources.cacheTelemetry, "unavailable");
+  assert.deepEqual(projection.system.caches, []);
+  assert.equal(projection.system.cacheTelemetry.projectionFailures, 1);
+});
+
+test("cache snapshots beyond the response bound are marked truncated instead of projection failures", () => {
+  const caches = Array.from({ length: 33 }, (_, index) => ({
+    name: `bounded-${index}`,
+    hits: index,
+    misses: 1,
+    evictions: 0,
+    byteEvictions: 0,
+    invalidations: 0,
+    currentSize: 1,
+    maxEntries: 4,
+    maxRetainedBytes: 1_024,
+    retainedBytesEstimate: 128,
+  }));
+  const projection = createControlRoomProjection({
+    generatedAt: 1,
+    sessions: [],
+    system: {
+      evidenceSources: { owner: "available", cacheTelemetry: "available" },
+      cacheTelemetry: {
+        sources: [{ name: "bounded-source", status: "available", failureCount: 0 }],
+      },
+      caches,
+    },
+  });
+
+  assert.equal(projection.system.caches.length, 32);
+  assert.equal(projection.system.cacheTelemetry.truncated, true);
+  assert.equal(projection.system.cacheTelemetry.projectionFailures, 0);
+  assert.equal(projection.system.evidenceSources.cacheTelemetry, "unavailable");
 });
 
 test("repeated control-room GET reads recorded evidence without running a child probe", async () => {

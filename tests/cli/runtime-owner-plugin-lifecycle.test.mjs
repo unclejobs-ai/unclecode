@@ -5,8 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { PluginHost } from "@unclecode/plugin-host";
-import { createRuntimeOwnerSessionDisposer } from "../../apps/unclecode-cli/src/runtime-owner-service.ts";
+import * as runtimeOwnerService from "../../apps/unclecode-cli/src/runtime-owner-service.ts";
 import { startPersistentRuntimeOwner } from "../../apps/unclecode-server/src/runtime-owner.ts";
+
+const { createRuntimeOwnerSessionDisposer } = runtimeOwnerService;
 
 function fakeEngine(label, disposed) {
   const listeners = new Set();
@@ -31,6 +33,31 @@ function fakeEngine(label, disposed) {
     },
   };
 }
+
+test("runtime owner cache evidence covers global caches and marks session LSP telemetry unavailable", () => {
+  assert.equal(typeof runtimeOwnerService.readRuntimeOwnerCacheTelemetry, "function");
+  const report = runtimeOwnerService.readRuntimeOwnerCacheTelemetry();
+  const cacheNames = report.caches.map(cache => cache.name);
+  const sources = new Map(report.sources.map(source => [source.name, source]));
+
+  assert.ok(cacheNames.includes("orchestrator-extension-manifests"));
+  assert.ok(cacheNames.includes("orchestrator-app-reasoning-config"));
+  assert.deepEqual(sources.get("extension-manifest"), {
+    name: "extension-manifest",
+    status: "available",
+    failureCount: 0,
+  });
+  assert.deepEqual(sources.get("app-reasoning-config"), {
+    name: "app-reasoning-config",
+    status: "available",
+    failureCount: 0,
+  });
+  assert.deepEqual(sources.get("per-session-lsp"), {
+    name: "per-session-lsp",
+    status: "unavailable",
+    failureCount: 0,
+  });
+});
 
 test("runtime owner disposes each session plugin host exactly once on release and owner stop", async () => {
   const rootDir = await mkdtemp(join(tmpdir(), "unclecode-owner-plugin-lifecycle-"));

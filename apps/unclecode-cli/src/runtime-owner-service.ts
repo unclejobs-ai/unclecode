@@ -1,4 +1,10 @@
-import { createWorkShellPaneRuntime, runWorkShellInlineCommand } from "@unclecode/orchestrator";
+import {
+  createWorkShellPaneRuntime,
+  getAppReasoningConfigCacheTelemetrySnapshot,
+  getExtensionRegistryCacheTelemetrySnapshot,
+  runWorkShellInlineCommand,
+} from "@unclecode/orchestrator";
+import type { CacheTelemetrySnapshot } from "@unclecode/contracts";
 import { getContextBrokerCacheTelemetrySnapshot } from "@unclecode/context-broker";
 import { getProviderCacheTelemetrySnapshot } from "@unclecode/providers";
 import {
@@ -24,6 +30,64 @@ const resolveInline = (
   runInlineCommand: (args: readonly string[], onProgress?: ((line: string) => void) | undefined) => Promise<readonly string[]>,
   onProgress?: ((line: string) => void) | undefined,
 ) => runWorkShellInlineCommand(args, runInlineCommand, formatWorkShellError, onProgress);
+
+const MAX_RUNTIME_OWNER_CACHE_SNAPSHOTS = 32;
+const MAX_RUNTIME_OWNER_CACHE_SOURCES = 32;
+
+type RuntimeOwnerCacheTelemetryReport = {
+  readonly caches: readonly CacheTelemetrySnapshot[];
+  readonly sources: readonly {
+    readonly name: string;
+    readonly status: "available" | "unavailable";
+    readonly failureCount: number;
+  }[];
+};
+
+function readCacheSource(
+  name: string,
+  reader: (() => readonly CacheTelemetrySnapshot[]) | undefined,
+): RuntimeOwnerCacheTelemetryReport {
+  if (!reader) {
+    return {
+      caches: [],
+      sources: [{ name, status: "unavailable", failureCount: 0 }],
+    };
+  }
+  try {
+    return {
+      caches: reader(),
+      sources: [{ name, status: "available", failureCount: 0 }],
+    };
+  } catch {
+    return {
+      caches: [],
+      sources: [{ name, status: "unavailable", failureCount: 1 }],
+    };
+  }
+}
+
+export function readRuntimeOwnerCacheTelemetry() {
+  const reports = [
+    readCacheSource("provider", getProviderCacheTelemetrySnapshot),
+    readCacheSource("context-broker", getContextBrokerCacheTelemetrySnapshot),
+    readCacheSource("extension-manifest", () => [getExtensionRegistryCacheTelemetrySnapshot()]),
+    readCacheSource("app-reasoning-config", () => [getAppReasoningConfigCacheTelemetrySnapshot()]),
+    // LSP diagnostic caches live inside session-scoped clients today and have
+    // no side-effect-free owner snapshot. Keep the missing source explicit
+    // until sessions expose that evidence; an empty healthy row would lie.
+    readCacheSource("per-session-lsp", undefined),
+  ];
+  const caches = reports.flatMap(report => report.caches);
+  const sources = reports.flatMap(report => report.sources);
+  return {
+    caches: caches.slice(0, MAX_RUNTIME_OWNER_CACHE_SNAPSHOTS),
+    sources: sources.slice(0, MAX_RUNTIME_OWNER_CACHE_SOURCES),
+    sourceFailures: sources.reduce((total, source) => total + source.failureCount, 0),
+    projectionFailures: 0,
+    truncated: caches.length > MAX_RUNTIME_OWNER_CACHE_SNAPSHOTS
+      || sources.length > MAX_RUNTIME_OWNER_CACHE_SOURCES,
+  };
+}
 
 export function createRuntimeOwnerSessionDisposer(
   engine: { readonly dispose: () => void | Promise<void> },
@@ -102,10 +166,7 @@ async function main(): Promise<void> {
     leasePath,
     tokenPath,
     createSession,
-    readCacheTelemetry: () => [
-      ...getProviderCacheTelemetrySnapshot(),
-      ...getContextBrokerCacheTelemetrySnapshot(),
-    ],
+    readCacheTelemetry: readRuntimeOwnerCacheTelemetry,
     ...(ownerId ? { ownerId } : {}),
     ...(bootId ? { bootId } : {}),
   });
