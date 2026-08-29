@@ -1,8 +1,20 @@
-import { runRustCommandSync } from "@unclecode/orchestrator";
-
 const WORK_SHELL_MODE_CYCLE = ["default", "yolo", "ultrawork", "analyze", "search"] as const;
+const RUST_WHITESPACE_AT_EDGES = /^\p{White_Space}+|\p{White_Space}+$/gu;
+const RUST_I64_MAX = 9_223_372_036_854_775_807n;
 
 type WorkShellCycleMode = (typeof WORK_SHELL_MODE_CYCLE)[number];
+
+// Keep the former `rust ux input-action|submit-action` wire semantics while
+// resolving in-process. Rust's `str::trim` and serde `as_i64` boundaries are
+// deliberately narrower than JavaScript's native trim/number behavior. The
+// generated parity hashes in work-shell-input-action.test.mjs guard both.
+function trimRustWhitespace(value: string): string {
+  return value.replace(RUST_WHITESPACE_AT_EDGES, "");
+}
+
+function isPositiveRustI64(value: number): boolean {
+  return Number.isInteger(value) && value > 0 && BigInt(value) <= RUST_I64_MAX;
+}
 
 export type WorkShellInputAction =
   | { readonly type: "none" }
@@ -47,10 +59,31 @@ export function resolveWorkShellInputAction(input: {
   if (!input.key.ctrl && !input.key.tab && !input.key.upArrow && !input.key.downArrow && !input.key.escape) {
     return { type: "none" };
   }
-
-  return JSON.parse(
-    runRustCommandSync(["rust", "ux", "input-action"], process.cwd(), JSON.stringify(input)),
-  ) as WorkShellInputAction;
+  const slashOpen = trimRustWhitespace(input.input).startsWith("/")
+    && isPositiveRustI64(input.slashSuggestionCount);
+  if (input.key.ctrl && input.value === "c") {
+    return input.isBusy ? { type: "interrupt-turn" } : { type: "exit" };
+  }
+  if (input.key.tab && input.key.shift && !input.isBusy && !slashOpen) {
+    const index = WORK_SHELL_MODE_CYCLE.indexOf(input.currentMode as WorkShellCycleMode);
+    const nextMode = WORK_SHELL_MODE_CYCLE[index < 0 ? 0 : (index + 1) % WORK_SHELL_MODE_CYCLE.length]
+      ?? WORK_SHELL_MODE_CYCLE[0];
+    return { type: "cycle-mode", nextMode };
+  }
+  if (input.key.tab && slashOpen) {
+    return { type: "complete-slash", value: `${input.selectedSlashCommand ?? input.input} ` };
+  }
+  if (input.key.upArrow && slashOpen) return { type: "move-slash-selection", direction: "previous" };
+  if (input.key.downArrow && slashOpen) return { type: "move-slash-selection", direction: "next" };
+  if (!input.key.escape) return { type: "none" };
+  if (input.hasSensitiveInput) return { type: "cancel-sensitive-input" };
+  if (input.hasSlashPicker) return { type: "close-slash-picker" };
+  if (input.hasOverlayOpen) return { type: "close-overlay" };
+  if (input.isBusy) return { type: "interrupt-turn" };
+  if (trimRustWhitespace(input.input)) {
+    return input.escapeResetArmed ? { type: "clear-input" } : { type: "none" };
+  }
+  return input.hasRequestSessionsView ? { type: "none" } : { type: "open-engine-sessions" };
 }
 
 export function resolveWorkShellSubmitAction(input: {
@@ -60,9 +93,18 @@ export function resolveWorkShellSubmitAction(input: {
   readonly selectedSlashCommand?: string;
   readonly activePanelTitle?: string;
 }): WorkShellSubmitAction {
-  return JSON.parse(
-    runRustCommandSync(["rust", "ux", "submit-action"], process.cwd(), JSON.stringify(input)),
-  ) as WorkShellSubmitAction;
+  const line = trimRustWhitespace(input.value);
+  if (!line) return { type: "noop" };
+  if (input.isBusy || line === "/auth") return { type: "submit", line, clearInput: true };
+  if (input.activePanelTitle === "Model picker" && !line.startsWith("/")) {
+    return { type: "submit", line: `/model ${line}`, clearInput: true };
+  }
+  if (input.shouldBlockSlashSubmit) {
+    return input.selectedSlashCommand
+      ? { type: "submit-suggestion", line: input.selectedSlashCommand, clearInput: true }
+      : { type: "noop" };
+  }
+  return { type: "submit", line, clearInput: true };
 }
 
 /**
