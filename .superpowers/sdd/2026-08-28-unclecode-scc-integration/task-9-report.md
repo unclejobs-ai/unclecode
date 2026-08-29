@@ -57,6 +57,7 @@ Provider calls and irreversible tool handlers are non-interruptible regions. A r
 8. The real Rust bridge initially failed because computed service code was absent from `dist-work`. The work build now explicitly emits the owner-service entry.
 9. The real Ctrl+O smoke exposed an autonomous-revision race that terminated Ink with `Engine revision changed`. Mutations are serialized and one stale revision refresh/retry preserves the same key/payload.
 10. The existing TUI quality assertion expected the ambiguous text `branch+worktree present`; Task 8's truthful current/historical distinction renders `current branch+worktree present`. The fixture now asserts the authoritative wording.
+11. A forced owner-startup timeout initially left its detached service alive. The launcher now reaps that exact child with bounded TERM/KILL fallback; the real-process regression observes no matching service after rejection.
 
 ## Verification
 
@@ -64,17 +65,67 @@ Provider calls and irreversible tool handlers are non-interruptible regions. A r
 - `cargo build --quiet -p unclecode`: pass.
 - `npm run test:orchestrator --silent`: 536 pass, 0 fail.
 - `npm run test:server --silent`: 40 pass, 0 fail.
-- `npm run test:cli --silent`: 101 pass, 0 fail.
+- `npm run test:cli --silent`: 102 pass, 0 fail.
 - `npm run test:work --silent`: 444 pass, 0 fail, 7 platform skips.
-- Detached owner process tests: 3 pass, including first-client SIGKILL, exact reattach, simultaneous first clients, and explicit cleanup.
+- `npm run test:tui --silent`: 496 pass, 0 fail, including the authoritative `current branch+worktree present` history/current wording.
+- `npm run test:contracts --silent`: 273 pass, 0 fail.
+- `npm run check --silent`: pass.
+- `npm run lint --silent`: pass (`Checked 100 files`; no fixes applied).
+- `git diff --check`: pass.
+- Detached owner process tests: 4 pass, including first-client SIGKILL, exact reattach, simultaneous first clients, timed-out-startup reaping, and explicit cleanup.
 - Runtime owner discovery/session/process/control focused tests: pass, including real child process restart/checkpoint recovery and exact idempotency.
 - Task 4 quality workspace focused suite after wording correction: 14 pass, 0 fail.
 - Built tmux smoke: `bin → Rust → Node → Ink → detached owner` passed. It proved prompt input, Korean locale projection, Ctrl+O draft preservation/tool-history-only behavior, TUI pane loss, same PID/endpoint/session reattach, monotonic revision preservation, and listener/lease cleanup. PIDs/endpoints were ephemeral and are not retained here.
-- Full TUI/check/lint/contracts and final leak/diff checks: recorded in the final verification update below.
+- Final process audit found no Task 9 owner-service, runtime-QA, or UncleCode tmux process after explicit shutdown. The built smoke independently verified the endpoint stopped accepting connections and both lease and listener were removed.
 
 ## Changed ownership surfaces
 
 New Task 9 modules include the pause controller/execution context, owner discovery/client/service/engine RPC, remote TUI adapter, detached launcher, process fixtures, and focused runtime-owner/TUI smoke tests. Integration changes touch WorkShell engine/session/persistence/agent/tool checkpoints, contract session states, server routes/read model/CLI, TUI engine injection, CLI startup, the work build entry list, and narrowly related test fixtures.
+
+Task 9 is split into reviewable commits:
+
+- `52ed257` — persistent owner/discovery/IPC primitives, cooperative pause controller, and focused process/contract tests.
+- `8c4a50b` — attach-only TUI/server cutover, owner-service work build entry, remote adapter injection, and integration fixtures.
+- `ce9ceff` — bounded cleanup and real-process regression for a timed-out detached owner startup.
+
+Exact files contained in those Task 9 commits:
+
+```text
+.superpowers/sdd/2026-08-28-unclecode-scc-integration/task-9-report.md
+apps/unclecode-cli/src/remote-work-shell-engine.ts
+apps/unclecode-cli/src/runtime-owner-launcher.ts
+apps/unclecode-cli/src/runtime-owner-service.ts
+apps/unclecode-cli/src/work-runtime.ts
+apps/unclecode-server/src/cli.ts
+apps/unclecode-server/src/control-room.ts
+apps/unclecode-server/src/index.ts
+apps/unclecode-server/src/persistent-runtime.ts
+apps/unclecode-server/src/runtime-engine-rpc.ts
+apps/unclecode-server/src/runtime-owner-client.ts
+apps/unclecode-server/src/runtime-owner-discovery.ts
+apps/unclecode-server/src/runtime-owner.ts
+packages/contracts/src/engine.ts
+packages/orchestrator/src/execution-pause.ts
+packages/orchestrator/src/index.ts
+packages/orchestrator/src/work-shell-pause-controller.ts
+packages/tui/src/dashboard-render.tsx
+scripts/runtime-qa/runtime-owner-client-fixture.mjs
+scripts/runtime-qa/runtime-owner-fixture.mjs
+scripts/runtime-qa/runtime-owner-tui-smoke.mjs
+tests/cli/remote-work-shell-engine.test.mjs
+tests/cli/runtime-owner-detached.test.mjs
+tests/contracts/event.contract.test.mjs
+tests/contracts/unclecode-cli.contract.test.mjs
+tests/orchestrator/work-shell-pause-controller.test.mjs
+tests/unclecode-server/cli-startup.test.mjs
+tests/unclecode-server/evolution-transport.e2e.test.mjs
+tests/unclecode-server/runtime-owner-discovery.test.mjs
+tests/unclecode-server/runtime-owner-process.test.mjs
+tests/unclecode-server/runtime-owner-sessions.test.mjs
+tsconfig.work.json
+```
+
+The integration worktree also contains pre-existing user and Task 7/8 changes. Mixed WorkShell checkpoint, tool/agent, and Task 8 wording-fixture hunks were deliberately preserved rather than reset or claimed wholesale; their branch-wide integration remains visible in the working tree.
 
 ## Concerns and follow-up seams
 
