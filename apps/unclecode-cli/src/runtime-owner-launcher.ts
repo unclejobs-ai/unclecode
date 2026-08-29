@@ -33,6 +33,30 @@ function ownerServiceCommand(): readonly [string, readonly string[]] {
   return [process.execPath, sourceMode ? ["--import", "tsx", entry] : [entry]];
 }
 
+function waitForChildExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const finish = (exited: boolean) => {
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref();
+    child.once("exit", onExit);
+  });
+}
+
+async function reapFailedOwnerStartup(child: ReturnType<typeof spawn>): Promise<void> {
+  child.stderr?.destroy();
+  if (await waitForChildExit(child, 0)) return;
+  child.kill("SIGTERM");
+  if (await waitForChildExit(child, 500)) return;
+  child.kill("SIGKILL");
+  await waitForChildExit(child, 500);
+}
+
 export async function spawnDetachedRuntimeOwner(input: {
   readonly leasePath: string;
   readonly tokenPath: string;
@@ -68,10 +92,12 @@ export async function spawnDetachedRuntimeOwner(input: {
       return lease;
     }
     if (exited) {
+      child.stderr?.destroy();
       const detail = startupError.trim().replace(/[\r\n]+/g, " ").slice(0, 512);
       throw new Error(`Detached runtime owner exited before publishing a healthy lease (${exited.code ?? exited.signal ?? "unknown"})${detail ? `: ${detail}` : "."}`);
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
+  await reapFailedOwnerStartup(child);
   throw new Error("Timed out waiting for the detached runtime owner service.");
 }

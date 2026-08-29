@@ -7,7 +7,35 @@ import { createInterface } from "node:readline";
 import test from "node:test";
 
 import { RuntimeOwnerClient, probeRuntimeOwner } from "../../apps/unclecode-server/src/index.ts";
-import { runtimeOwnerServiceEnvironment } from "../../apps/unclecode-cli/src/runtime-owner-launcher.ts";
+import {
+  runtimeOwnerServiceEnvironment,
+  spawnDetachedRuntimeOwner,
+} from "../../apps/unclecode-cli/src/runtime-owner-launcher.ts";
+
+async function processesForLease(leasePath) {
+  const child = spawn("ps", ["ax", "-o", "pid=,command="], { stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", chunk => { output += chunk; });
+  await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", code => code === 0 ? resolve() : reject(new Error(`ps exited ${code}`)));
+  });
+  return output.split("\n")
+    .filter(line => line.includes("runtime-owner-service") && line.includes(leasePath))
+    .map(line => Number.parseInt(line.trim().split(/\s+/, 1)[0], 10))
+    .filter(Number.isFinite);
+}
+
+async function waitForNoLeaseProcess(leasePath, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  let pids = await processesForLease(leasePath);
+  while (pids.length > 0 && Date.now() <= deadline) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    pids = await processesForLease(leasePath);
+  }
+  return pids;
+}
 
 function waitForExit(pid, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
@@ -113,4 +141,21 @@ test("owner service environment forwards runtime config but drops unrelated secr
   assert.equal(env.HOME, "/safe/home");
   assert.equal(env.OPENAI_API_KEY, "provider-key");
   assert.equal(env.RANDOM_APP_SECRET, undefined);
+});
+
+test("timed-out detached owner startup reaps the exact spawned service", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-timeout-"));
+  const leasePath = join(root, "owner.json");
+  await assert.rejects(
+    spawnDetachedRuntimeOwner({ leasePath, tokenPath: join(root, "owner.token"), timeoutMs: -1 }),
+    /Timed out waiting/,
+  );
+  const leakedPids = await waitForNoLeaseProcess(leasePath);
+  try {
+    assert.deepEqual(leakedPids, []);
+  } finally {
+    for (const pid of leakedPids) {
+      try { process.kill(pid, "SIGKILL"); } catch {}
+    }
+  }
 });
