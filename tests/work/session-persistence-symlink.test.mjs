@@ -136,15 +136,24 @@ test("actual Work Shell persistence cannot be redirected by a sessions-directory
   let fifoWriter;
   try {
     assert.deepEqual(received.map((notice) => notice.revision), [4]);
-    const running = persist(workspaceRoot, sessionStoreRoot, sessionId);
+    // Attach the rejection assertion before releasing the FIFO barrier. The
+    // hardened persistence path rejects the non-file event log immediately
+    // after the writer connects, before this test can complete the directory
+    // swap and attach a later rejection handler.
+    const rejected = assert.rejects(
+      persist(workspaceRoot, sessionStoreRoot, sessionId),
+      /symbolic-link|symlink|unsafe|refus/iu,
+    );
     fifoWriter = await waitForFifoReader(eventLog);
     await rename(sessionDirectory, parkedDirectory);
     await symlink(outside, sessionDirectory);
-    await fifoWriter.writeFile("\n");
+    // Closing the connected writer releases either implementation shape: the
+    // current regular-file check has already rejected the FIFO, while a reader
+    // waiting for bytes observes EOF without a racy EPIPE write.
     await fifoWriter.close();
     fifoWriter = undefined;
 
-    await assert.rejects(running, /symbolic-link|symlink|unsafe|refus/iu);
+    await rejected;
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.deepEqual(received.map((notice) => notice.revision), [4]);
     await assertOutsideUnchanged(outside);
