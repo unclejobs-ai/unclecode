@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { LiveRuntimeEngineRegistry } from "../../apps/unclecode-server/src/runtime-engine-rpc.ts";
 import { RuntimeSessionMutationArbiter } from "../../apps/unclecode-server/src/runtime-mutation-arbiter.ts";
 import { LiveRuntimeControlRegistry } from "../../apps/unclecode-server/src/persistent-runtime.ts";
+import { startPersistentRuntimeOwner } from "../../apps/unclecode-server/src/runtime-owner.ts";
+import {
+  processStartIdentity,
+  readRuntimeOwnerLease,
+} from "../../apps/unclecode-server/src/runtime-owner-discovery.ts";
 import { attachWorkShellRuntime } from "../../apps/unclecode-server/src/work-shell-control.ts";
 
 function fakeEngine(label) {
@@ -15,6 +23,46 @@ function fakeEngine(label) {
     setMode(mode) { state = { ...state, mode }; for (const listener of listeners) listener(); },
   };
 }
+
+test("production owner lease publishes its verifiable process-start identity", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "unclecode-owner-process-start-"));
+  const leasePath = join(rootDir, "owner.json");
+  let owner;
+  try {
+    const expectedProcessStartId = await processStartIdentity(process.pid);
+    assert.ok(expectedProcessStartId);
+    owner = await startPersistentRuntimeOwner({
+      rootDir,
+      leasePath,
+      tokenPath: join(rootDir, "server.token"),
+    });
+
+    assert.equal(owner.lease.processStartId, expectedProcessStartId);
+    assert.equal((await readRuntimeOwnerLease(leasePath))?.processStartId, expectedProcessStartId);
+  } finally {
+    await owner?.stop();
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("production owner fails closed when its process-start identity is unavailable", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "unclecode-owner-missing-process-start-"));
+  const leasePath = join(rootDir, "owner.json");
+  try {
+    const settled = await startPersistentRuntimeOwner({
+      rootDir,
+      leasePath,
+      tokenPath: join(rootDir, "server.token"),
+      resolveProcessStartIdentity: async () => null,
+    }).then(owner => ({ owner }), error => ({ error }));
+    if ("owner" in settled) await settled.owner.stop();
+
+    assert.match(settled.error?.message ?? "", /process-start identity/i);
+    assert.equal(await readRuntimeOwnerLease(leasePath), null);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
 
 test("one owner creates and independently revisions multiple workspace sessions", async () => {
   const created = [];
@@ -232,6 +280,60 @@ test("one accepted mutation persists its reserved owner revision exactly once be
   assert.deepEqual(persisted, [7]);
 });
 
+test("owner admission stays bounded by a tiny durable reservation instead of the full transcript checkpoint", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "unclecode-owner-admission-latency-"));
+  const projectPath = join(rootDir, "workspace");
+  const transcript = Array.from({ length: 10_000 }, (_, index) => ({
+    role: "assistant",
+    text: `${index}:${"x".repeat(240)}`,
+  }));
+  const transcriptBytes = Buffer.byteLength(JSON.stringify(transcript));
+  let legacyCheckpointCalls = 0;
+  let owner;
+  try {
+    await mkdir(projectPath);
+    const engine = fakeEngine("large-transcript");
+    engine.getState = () => ({ label: "large-transcript", mode: "standard", transcript });
+    engine.setMode = () => {};
+    engine.persistRuntimeRevision = async () => {
+      legacyCheckpointCalls += 1;
+      await new Promise(() => {});
+    };
+    owner = await startPersistentRuntimeOwner({
+      rootDir,
+      leasePath: join(rootDir, "owner.json"),
+      tokenPath: join(rootDir, "server.token"),
+      async createSession() { return { engine, projectPath }; },
+    });
+    const created = await owner.engines.create({
+      sessionId: "large-transcript",
+      projectPath,
+      idempotencyKey: "create-large-transcript",
+    });
+    assert.equal(created.ok, true);
+
+    const admitted = await Promise.race([
+      owner.engines.invoke({
+        sessionId: "large-transcript",
+        method: "setMode",
+        args: ["deep"],
+        expectedRevision: 0,
+        idempotencyKey: "bounded-admission",
+      }),
+      new Promise(resolve => setTimeout(() => resolve({ timedOut: true }), 500)),
+    ]);
+
+    assert.equal(transcript.length, 10_000);
+    assert.ok(transcriptBytes > 2_000_000, `the proof must exercise a nontrivial transcript; got ${transcriptBytes} bytes`);
+    assert.equal(admitted.timedOut, undefined, "durable admission must finish within 500ms");
+    assert.equal(admitted.ok, true, JSON.stringify(admitted));
+    assert.equal(legacyCheckpointCalls, 0, "admission cannot call the full session/Agent Console checkpoint hook");
+  } finally {
+    await owner?.stop().catch(() => undefined);
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
 test("failed accepted-revision persistence rolls back admission without executing", async () => {
   let calls = 0;
   const clock = { value: 6 };
@@ -252,6 +354,93 @@ test("failed accepted-revision persistence rolls back admission without executin
   assert.deepEqual(result, { ok: false, code: "disk unavailable", revision: 6 });
   assert.equal(calls, 0, "the engine mutation cannot run before revision durability succeeds");
   assert.equal(clock.value, 6, "failed persistence cannot publish an accepted revision");
+});
+
+test("idle pause fails precondition without reserving or publishing a revision", async () => {
+  const persisted = [];
+  const clock = { value: 0 };
+  const arbiter = new RuntimeSessionMutationArbiter(clock, {
+    async persistAcceptedRevision(revision) { persisted.push(revision); },
+  });
+  const controls = new LiveRuntimeControlRegistry();
+  const engine = {
+    getState: () => ({ isBusy: false, queuePaused: false, model: "test", mode: "standard", uiLocale: "en", agentConsole: {} }),
+    subscribe: () => () => {},
+    getTurnLifecycle: () => ({ state: "idle" }),
+    async requestTurnPause() { throw new Error("idle pause must not execute"); },
+    resumeTurn: () => false,
+    interruptTurn: () => false,
+    async resumeQueueItems() {},
+    async handleSubmit() {},
+    answerPendingDecisionByIndex: () => false,
+    getAgentControlPort: () => ({ async steer() { return { status: "not_delivered" }; } }),
+  };
+  attachWorkShellRuntime(controls, {
+    sessionId: "idle-pause",
+    projectPath: "/work/idle-pause",
+    engine,
+    revisionClock: clock,
+    mutationArbiter: arbiter,
+  });
+
+  const result = await controls.control({
+    sessionId: "idle-pause",
+    action: "pause",
+    expectedRevision: 0,
+    idempotencyKey: "idle-pause",
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "invalid_action");
+  assert.equal(result.revision, 0);
+  assert.equal(clock.value, 0);
+  assert.deepEqual(persisted, []);
+});
+
+test("timed-out admission persistence leaves the revision unpublished and releases the admission tail", async () => {
+  let persistenceCalls = 0;
+  let timedOutSignal;
+  let engineCalls = 0;
+  const clock = { value: 3 };
+  const arbiter = new RuntimeSessionMutationArbiter(clock, {
+    persistAcceptedRevisionTimeoutMs: 20,
+    async persistAcceptedRevision(_revision, signal) {
+      persistenceCalls += 1;
+      if (persistenceCalls === 1) {
+        timedOutSignal = signal;
+        await new Promise(() => {});
+      }
+    },
+  });
+  const mutate = (idempotencyKey, expectedRevision) => arbiter.mutate({
+    idempotencyKey,
+    fingerprint: idempotencyKey,
+    expectedRevision,
+    execute() { engineCalls += 1; return idempotencyKey; },
+    conflict: revision => ({ ok: false, code: "conflict", revision }),
+    invalidReuse: revision => ({ ok: false, code: "reuse", revision }),
+    complete: (output, revision) => ({ ok: true, output, revision }),
+    fail: (error, revision) => ({ ok: false, code: error.message, revision }),
+  });
+
+  const timedOut = await Promise.race([
+    mutate("stuck-persistence", 3),
+    new Promise(resolve => setTimeout(() => resolve({ ok: false, code: "test deadline", revision: clock.value }), 100)),
+  ]);
+  assert.deepEqual(timedOut, {
+    ok: false,
+    code: "Runtime admission persistence timed out after 20ms.",
+    revision: 3,
+  });
+  assert.equal(clock.value, 3);
+  assert.equal(timedOutSignal?.aborted, true, "timeout must fence a late atomic rename from regressing the ledger");
+  assert.equal(engineCalls, 0);
+
+  assert.deepEqual(await mutate("after-timeout", 3), {
+    ok: true,
+    output: "after-timeout",
+    revision: 4,
+  });
+  assert.equal(engineCalls, 1);
 });
 
 test("a later mutation cannot reserve or depend on an unpublished revision", async () => {
@@ -345,6 +534,52 @@ test("a stale cross-client cancel remains preemptive after multiple control admi
   const staleNonCancel = await mutateControl("stale-control", 11);
   assert.equal(staleNonCancel.ok, false);
   assert.equal(staleNonCancel.code, "conflict", "only cancel may bypass a stale client revision");
+});
+
+test("cancel queued during durable submit admission executes before provider start", async () => {
+  let markSubmitPersistenceStarted;
+  const submitPersistenceStarted = new Promise(resolve => { markSubmitPersistenceStarted = resolve; });
+  let releaseSubmitPersistence;
+  const submitPersistenceGate = new Promise(resolve => { releaseSubmitPersistence = resolve; });
+  const order = [];
+  const clock = { value: 0 };
+  const arbiter = new RuntimeSessionMutationArbiter(clock, {
+    async persistAcceptedRevision(revision) {
+      if (revision === 1) {
+        markSubmitPersistenceStarted();
+        await submitPersistenceGate;
+      }
+    },
+  });
+  const submit = arbiter.mutate({
+    idempotencyKey: "persisting-submit",
+    fingerprint: "submit",
+    expectedRevision: 0,
+    onAdmitted() { order.push("submit-admitted"); },
+    execute() { order.push("provider-started"); return "submitted"; },
+    conflict: revision => ({ ok: false, code: "conflict", revision }),
+    invalidReuse: revision => ({ ok: false, code: "reuse", revision }),
+    complete: (output, revision) => ({ ok: true, output, revision }),
+    fail: (error, revision) => ({ ok: false, code: error.message, revision }),
+  });
+  await submitPersistenceStarted;
+  const cancel = arbiter.mutate({
+    idempotencyKey: "cancel-persisting-submit",
+    fingerprint: "cancel",
+    expectedRevision: 0,
+    lane: "cancel",
+    execute() { order.push("cancelled"); return "cancelled"; },
+    conflict: revision => ({ ok: false, code: "conflict", revision }),
+    invalidReuse: revision => ({ ok: false, code: "reuse", revision }),
+    complete: (output, revision) => ({ ok: true, output, revision }),
+    fail: (error, revision) => ({ ok: false, code: error.message, revision }),
+  });
+
+  releaseSubmitPersistence();
+  const [submitResult, cancelResult] = await Promise.all([submit, cancel]);
+  assert.equal(submitResult.ok, true);
+  assert.equal(cancelResult.ok, true);
+  assert.deepEqual(order, ["submit-admitted", "cancelled", "provider-started"]);
 });
 
 test("different create keys for one session share one owner-side engine construction", async () => {

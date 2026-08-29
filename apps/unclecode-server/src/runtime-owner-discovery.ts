@@ -20,6 +20,7 @@ export type RuntimeOwnerLease = {
   readonly protocol: typeof RUNTIME_OWNER_PROTOCOL;
   readonly ownerId: string;
   readonly pid: number;
+  readonly processStartId: string;
   readonly bootId: string;
   readonly endpoint: string;
   /** Reference only. The bearer token itself never enters the discovery file. */
@@ -118,6 +119,8 @@ function parseLease(value: unknown): RuntimeOwnerLease | null {
     || typeof value.pid !== "number"
     || !Number.isSafeInteger(value.pid)
     || value.pid <= 0
+    || typeof value.processStartId !== "string"
+    || value.processStartId.length === 0
     || typeof value.bootId !== "string"
     || value.bootId.length === 0
     || typeof value.endpoint !== "string"

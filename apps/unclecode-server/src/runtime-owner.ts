@@ -8,11 +8,13 @@ import { BoundedEventJournal } from "./event-journal.js";
 import { makeControlRoomHandlers, startServer, ensureServerToken } from "./index.js";
 import { createPersistentRuntimeAdapter, LiveRuntimeControlRegistry } from "./persistent-runtime.js";
 import { LiveRuntimeEngineRegistry, type RuntimeSessionFactory } from "./runtime-engine-rpc.js";
+import { persistRuntimeAdmissionRevision } from "./runtime-admission-ledger.js";
 import { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
 import { attachWorkShellRuntime, type WorkShellControlEngine } from "./work-shell-control.js";
 import {
   RUNTIME_OWNER_PROTOCOL,
   currentBootIdentity,
+  processStartIdentity,
   publishRuntimeOwnerLease,
   readRuntimeOwnerLease,
   type RuntimeOwnerLease,
@@ -43,6 +45,7 @@ export async function startPersistentRuntimeOwner(input: {
   readonly bootId?: string | undefined;
   readonly sessionId?: string | undefined;
   readonly projectPath?: string | undefined;
+  readonly resolveProcessStartIdentity?: ((pid: number) => Promise<string | null>) | undefined;
 }): Promise<{
   readonly lease: RuntimeOwnerLease;
   readonly controls: LiveRuntimeControlRegistry;
@@ -52,6 +55,8 @@ export async function startPersistentRuntimeOwner(input: {
 }> {
   const ownerId = input.ownerId ?? randomUUID();
   const bootId = input.bootId ?? currentBootIdentity();
+  const processStartId = await (input.resolveProcessStartIdentity ?? processStartIdentity)(process.pid);
+  if (!processStartId) throw new Error("Cannot establish the runtime owner process-start identity.");
   const token = ensureServerToken(input.tokenPath);
   const journal = input.journal ?? new BoundedEventJournal();
   const { adapter, controls } = createPersistentRuntimeAdapter({
@@ -66,13 +71,18 @@ export async function startPersistentRuntimeOwner(input: {
         const revisionClock = created.revisionClock ?? { value: 0 };
         const revisionEngine = created.engine as typeof created.engine & {
           bindRuntimeRevisionClock?: ((clock: { readonly value: number }) => void) | undefined;
-          persistRuntimeRevision?: ((revision: number) => Promise<void>) | undefined;
         };
         revisionEngine.bindRuntimeRevisionClock?.(revisionClock);
         const mutationArbiter = new RuntimeSessionMutationArbiter(revisionClock, {
-          ...(revisionEngine.persistRuntimeRevision ? {
-            persistAcceptedRevision: (revision) => revisionEngine.persistRuntimeRevision!(revision),
-          } : {}),
+          persistAcceptedRevision: async (revision, signal) => {
+            await persistRuntimeAdmissionRevision({
+              rootDir: input.rootDir,
+              projectPath: created.projectPath,
+              sessionId: request.sessionId,
+              revision,
+              signal,
+            });
+          },
         });
         const detachControl = attachWorkShellRuntime(controls, {
           sessionId: request.sessionId,
@@ -129,6 +139,7 @@ export async function startPersistentRuntimeOwner(input: {
     protocol: RUNTIME_OWNER_PROTOCOL,
     ownerId,
     pid: process.pid,
+    processStartId,
     bootId,
     endpoint: server.url,
     tokenPath: input.tokenPath,

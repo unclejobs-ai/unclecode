@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { createSessionStore } from "../../packages/session-store/src/index.ts";
 import { persistWorkShellSessionSnapshot } from "../../packages/orchestrator/src/work-shell-session.ts";
+import {
+  persistRuntimeAdmissionRevision,
+  runtimeAdmissionRecordPath,
+} from "../../apps/unclecode-server/src/runtime-admission-ledger.ts";
 import {
   initializeRestoredRuntimeEngine,
   readRestoredSessionRevision,
@@ -106,6 +110,43 @@ test("owner restart binds the restored revision before initialization persists a
     assert.equal(await readRestoredSessionRevision({
       rootDir, projectPath, sessionId, resume: true,
     }), 29, "initialization must not wipe the durable owner revision");
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("owner restart recovers the exact admitted revision when a crash precedes the next full checkpoint", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "unclecode-admission-crash-revision-"));
+  const projectPath = join(rootDir, "workspace");
+  const sessionId = "crash-after-admission";
+  try {
+    await mkdir(projectPath);
+    await persistWorkShellSessionSnapshot({
+      cwd: projectPath,
+      env: { ...process.env, UNCLECODE_SESSION_STORE_ROOT: rootDir },
+      sessionId,
+      model: "test-model",
+      mode: "standard",
+      state: "running",
+      summary: "checkpoint before the admitted mutation",
+      traceMode: "minimal",
+      ownerMutationRevision: 9,
+      entries: [{ role: "assistant", text: "the long execution has not checkpointed yet" }],
+    });
+    await persistRuntimeAdmissionRevision({ rootDir, projectPath, sessionId, revision: 10 });
+    await assert.rejects(
+      persistRuntimeAdmissionRevision({ rootDir, projectPath, sessionId, revision: 9 }),
+      /cannot regress/i,
+    );
+
+    const ledgerStat = await stat(runtimeAdmissionRecordPath(rootDir, { projectPath, sessionId }));
+    assert.ok(ledgerStat.size < 256, `the admission record must stay tiny; wrote ${ledgerStat.size} bytes`);
+    assert.equal(await readRestoredSessionRevision({
+      rootDir,
+      projectPath,
+      sessionId,
+      resume: true,
+    }), 10, "restart must prefer the durable admission over the stale full checkpoint");
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }

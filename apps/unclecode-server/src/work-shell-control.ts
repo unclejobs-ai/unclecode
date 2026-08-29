@@ -121,6 +121,33 @@ export function attachWorkShellRuntime(
     onCommitted(result) {
       if (result.ok) emit();
     },
+    precondition(request) {
+      if (request.action === "pause" && !input.engine.getState().isBusy) {
+        return deny("invalid_action", "Only a running turn can be paused.");
+      }
+      if (request.action === "resume" && input.engine.getTurnLifecycle().state !== "paused") {
+        return deny("invalid_action", "Only a cooperatively paused turn can be resumed.");
+      }
+      if (request.action === "follow-up" && !messageFrom(request)) {
+        return deny("invalid_action", "A follow-up message is required.");
+      }
+      if (request.action === "steer") {
+        const agentRunId = request.payload?.agentRunId;
+        if (!messageFrom(request) || typeof agentRunId !== "string" || agentRunId.trim().length === 0) {
+          return deny("invalid_action", "Steer requires an explicit agentRunId and message.");
+        }
+      }
+      if (request.action === "approve") {
+        const pending = input.engine.getState().agentConsole.pendingDecision;
+        if (request.payload?.decision !== "approve_once" || pending?.kind !== "security-approval" || pending.questions.length !== 1) {
+          return deny("denied", "Only an explicit one-shot security approval can be approved here.");
+        }
+        if ((pending.questions[0]?.options.findIndex(option => option.label === "Approve") ?? -1) < 0) {
+          return deny("denied", "The security approval is no longer pending.");
+        }
+      }
+      return undefined;
+    },
     async control(request) {
       let result: RuntimeControlResult | undefined;
       try {

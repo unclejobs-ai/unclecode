@@ -9,20 +9,53 @@ type MutationReceipt<Result> = {
 
 export type RuntimeMutationLane = "normal" | "control" | "cancel";
 
+type PersistAcceptedRevision = (revision: number, signal: AbortSignal) => Promise<void>;
+
+async function persistWithTimeout(
+  persist: PersistAcceptedRevision,
+  revision: number,
+  timeoutMs: number,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const abortController = new AbortController();
+  try {
+    await Promise.race([
+      Promise.resolve().then(() => persist(revision, abortController.signal)),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => {
+            abortController.abort();
+            reject(new Error(`Runtime admission persistence timed out after ${timeoutMs}ms.`));
+          },
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export class RuntimeSessionMutationArbiter {
   readonly clock: RuntimeSessionRevisionClock;
   readonly #receipts = new Map<string, MutationReceipt<unknown>>();
   #admissionTail: Promise<void> = Promise.resolve();
+  #cancelAdmissionTail: Promise<void> = Promise.resolve();
   #normalTail: Promise<void> = Promise.resolve();
   readonly #active = new Set<Promise<unknown>>();
   #activeMutations = 0;
-  readonly #persistAcceptedRevision: ((revision: number) => Promise<void>) | undefined;
+  readonly #persistAcceptedRevision: PersistAcceptedRevision | undefined;
+  readonly #persistAcceptedRevisionTimeoutMs: number;
 
   constructor(clock: RuntimeSessionRevisionClock = { value: 0 }, input: {
-    readonly persistAcceptedRevision?: ((revision: number) => Promise<void>) | undefined;
+    readonly persistAcceptedRevision?: PersistAcceptedRevision | undefined;
+    readonly persistAcceptedRevisionTimeoutMs?: number | undefined;
   } = {}) {
     this.clock = clock;
     this.#persistAcceptedRevision = input.persistAcceptedRevision;
+    this.#persistAcceptedRevisionTimeoutMs = Number.isFinite(input.persistAcceptedRevisionTimeoutMs)
+      ? Math.max(1, Math.floor(input.persistAcceptedRevisionTimeoutMs!))
+      : 5_000;
   }
 
   isMutationActive(): boolean {
@@ -68,6 +101,7 @@ export class RuntimeSessionMutationArbiter {
     readonly conflict: (revision: number) => Result;
     readonly invalidReuse: (revision: number) => Result;
     readonly onAdmitted?: ((revision: number) => void) | undefined;
+    readonly precondition?: (() => Promise<Output | undefined> | Output | undefined) | undefined;
     readonly execute: () => Promise<Output> | Output;
     readonly didMutate?: ((output: Output) => boolean) | undefined;
     readonly complete: (output: Output, revision: number) => Result;
@@ -100,9 +134,29 @@ export class RuntimeSessionMutationArbiter {
         return { accepted: false, result: input.conflict(this.clock.value) };
       }
 
+      if (input.precondition) {
+        try {
+          const preconditionOutput = await input.precondition();
+          if (preconditionOutput !== undefined && input.didMutate?.(preconditionOutput) === false) {
+            return {
+              accepted: false,
+              result: input.complete(preconditionOutput, this.clock.value),
+            };
+          }
+        } catch (error) {
+          return { accepted: false, result: input.fail(error, this.clock.value) };
+        }
+      }
+
       const acceptedRevision = this.clock.value + 1;
       try {
-        await this.#persistAcceptedRevision?.(acceptedRevision);
+        if (this.#persistAcceptedRevision) {
+          await persistWithTimeout(
+            this.#persistAcceptedRevision,
+            acceptedRevision,
+            this.#persistAcceptedRevisionTimeoutMs,
+          );
+        }
       } catch (error) {
         return { accepted: false, result: input.fail(error, this.clock.value) };
       }
@@ -113,6 +167,9 @@ export class RuntimeSessionMutationArbiter {
       return { accepted: true, revision: acceptedRevision };
     });
     this.#admissionTail = admission.then(() => undefined, () => undefined);
+    if (input.lane === "cancel") {
+      this.#cancelAdmissionTail = admission.then(() => undefined, () => undefined);
+    }
 
     const execute = async (acceptedRevision: number): Promise<Result> => {
       let output: Output | undefined;
@@ -131,7 +188,15 @@ export class RuntimeSessionMutationArbiter {
 
     const runAdmitted = async (): Promise<Result> => {
       const outcome = await admission;
-      return outcome.accepted ? execute(outcome.revision) : outcome.result;
+      if (!outcome.accepted) return outcome.result;
+      if (input.lane === "normal" || input.lane === undefined) {
+        // A cancel already queued while this mutation was becoming durable
+        // must consume the admitted turn before provider/tool work begins.
+        // Snapshot only the cancel tail: pause/steer remain safe-boundary
+        // controls and do not delay normal execution unnecessarily.
+        await this.#cancelAdmissionTail;
+      }
+      return execute(outcome.revision);
     };
     const admitted = input.lane === "normal" || input.lane === undefined
       ? this.#normalTail.then(runAdmitted)

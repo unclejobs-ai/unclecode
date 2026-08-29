@@ -1,4 +1,5 @@
 import { createSessionStore } from "@unclecode/session-store";
+import { readRuntimeAdmissionRevision } from "@unclecode/server";
 
 export async function readRestoredSessionRevision(input: {
   readonly rootDir: string;
@@ -7,12 +8,16 @@ export async function readRestoredSessionRevision(input: {
   readonly resume?: boolean | undefined;
 }): Promise<number> {
   if (input.resume !== true) return 0;
-  const restored = await createSessionStore({ rootDir: input.rootDir }).resumeSession({
-    projectPath: input.projectPath,
-    sessionId: input.sessionId,
-  });
+  const [restored, admittedRevision] = await Promise.all([
+    createSessionStore({ rootDir: input.rootDir }).resumeSession({
+      projectPath: input.projectPath,
+      sessionId: input.sessionId,
+    }),
+    readRuntimeAdmissionRevision(input),
+  ]);
   const revision = restored.metadata.ownerMutationRevision;
-  return Number.isSafeInteger(revision) && Number(revision) >= 0 ? Number(revision) : 0;
+  const checkpointRevision = Number.isSafeInteger(revision) && Number(revision) >= 0 ? Number(revision) : 0;
+  return Math.max(checkpointRevision, admittedRevision);
 }
 
 /** Bind the restored owner clock before initialization can emit a checkpoint. */

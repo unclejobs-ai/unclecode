@@ -17,6 +17,7 @@ function lease(overrides = {}) {
     protocol: RUNTIME_OWNER_PROTOCOL,
     ownerId: "owner-1",
     pid: process.pid,
+    processStartId: "fixture-process-start",
     bootId: "boot-test",
     endpoint: "http://127.0.0.1:43123",
     tokenPath: "/tmp/token-reference",
