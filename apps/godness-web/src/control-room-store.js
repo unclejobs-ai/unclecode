@@ -20,6 +20,7 @@ function idempotencyKey() {
 }
 
 const MAX_SSE_BUFFER_CHARS = 1024 * 1024;
+const CONTROL_ROOM_DISCOVERY_INTERVAL_MS = 1_000;
 
 export function normalizeLoopbackServerUrl(value) {
   let url
@@ -95,7 +96,12 @@ export function createControlRoomStore(options = {}) {
   let stopped = false;
   let eventAbort = null;
   let eventReader = null;
+  let eventSessionId = null;
+  let eventStreamLive = false;
+  let blockedEventSessionId = null;
+  let blockedEventError = null;
   let reconnectTimer = null;
+  let discoveryTimer = null;
   let refreshQueued = false;
   let activeSessionId = null;
   let credentialGeneration = 0;
@@ -124,6 +130,7 @@ export function createControlRoomStore(options = {}) {
     credentialGeneration += 1
     token = ""
     disconnectEventStream()
+    clearConnectionTimers()
     emit({
       ...snapshot,
       status: "auth_required",
@@ -158,11 +165,29 @@ export function createControlRoomStore(options = {}) {
       const actions = Object.fromEntries(Object.entries(snapshot.actions).filter(([sessionId]) => activeRunIds.has(sessionId)));
       for (const sessionId of retryKeys.keys()) if (!activeRunIds.has(sessionId)) retryKeys.delete(sessionId);
       for (const sessionId of lastEventIds.keys()) if (!activeRunIds.has(sessionId)) lastEventIds.delete(sessionId);
-      emit({ ...snapshot, status: "ready", auth: "ready", connection: connectEvents ? (snapshot.connection === "live" ? "live" : "connecting") : "offline", data: body, actions, error: null });
+      if (blockedEventSessionId && !activeRunIds.has(blockedEventSessionId)) {
+        blockedEventSessionId = null;
+        blockedEventError = null;
+      }
+      emit({
+        ...snapshot,
+        status: "ready",
+        auth: "ready",
+        connection: connectEvents
+          ? eventStreamLive
+            ? "live"
+            : blockedEventSessionId
+              ? "offline"
+              : "connecting"
+          : "offline",
+        data: body,
+        actions,
+        error: blockedEventSessionId ? blockedEventError : null,
+      });
       return snapshot;
     } catch (error) {
       if (generation !== credentialGeneration) return snapshot
-      emit({ ...snapshot, status: snapshot.data ? "ready" : "error", connection: "offline", error: error instanceof Error ? error.message : String(error) });
+      emit({ ...snapshot, status: snapshot.data ? "ready" : "error", connection: eventStreamLive ? "live" : "offline", error: error instanceof Error ? error.message : String(error) });
       return snapshot;
     }
   };
@@ -173,13 +198,23 @@ export function createControlRoomStore(options = {}) {
     queueMicrotask(async () => {
       refreshQueued = false;
       if (stopped) return;
-      await load();
+      const result = await load();
+      if (result.status === "ready") void connect();
     });
+  };
+
+  const clearConnectionTimers = () => {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    if (discoveryTimer) clearTimeout(discoveryTimer);
+    reconnectTimer = null;
+    discoveryTimer = null;
   };
 
   const disconnectEventStream = () => {
     eventAbort?.abort();
     eventAbort = null;
+    eventSessionId = null;
+    eventStreamLive = false;
     const reader = eventReader;
     eventReader = null;
     if (reader) void reader.cancel().catch(() => {});
@@ -190,11 +225,20 @@ export function createControlRoomStore(options = {}) {
     const sessionId = runs.some(run => run.id === activeSessionId)
       ? activeSessionId
       : runs[0]?.id;
-    if (!connectEvents || !sessionId || stopped) return;
+    if (!connectEvents || stopped) return;
+    if (!sessionId) {
+      disconnectEventStream();
+      return;
+    }
+    if (blockedEventSessionId === sessionId) return;
+    if (eventAbort && eventSessionId === sessionId) return;
     activeSessionId = sessionId;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = null;
     disconnectEventStream();
     const controller = new AbortController();
     eventAbort = controller;
+    eventSessionId = sessionId;
     const lastEventId = lastEventIds.get(sessionId) ?? 0;
     emit({ ...snapshot, connection: "connecting" });
     let reader = null;
@@ -222,6 +266,7 @@ export function createControlRoomStore(options = {}) {
         lastEventIds.delete(sessionId);
         await load();
         if (stopped || eventAbort !== controller) return;
+        disconnectEventStream();
         return connect(false);
       }
       if (!response.ok || !response.body) throw new Error(`Event stream returned ${response.status}.`);
@@ -229,6 +274,9 @@ export function createControlRoomStore(options = {}) {
         await response.body.cancel();
         return;
       }
+      blockedEventSessionId = null;
+      blockedEventError = null;
+      eventStreamLive = true;
       emit({ ...snapshot, connection: "live", error: null });
       reader = response.body.getReader();
       eventReader = reader;
@@ -251,9 +299,22 @@ export function createControlRoomStore(options = {}) {
       if (!stopped) throw new Error("Event stream disconnected.");
     } catch (error) {
       if (stopped || controller.signal.aborted || eventAbort !== controller) return;
-      emit({ ...snapshot, connection: "offline", error: error instanceof Error ? error.message : String(error) });
+      if (reader) await reader.cancel().catch(() => {});
+      eventAbort = null;
+      eventSessionId = null;
+      eventStreamLive = false;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!retryable) {
+        blockedEventSessionId = sessionId;
+        blockedEventError = message;
+      }
+      emit({ ...snapshot, connection: "offline", error: message });
       if (!retryable) return;
-      reconnectTimer = setTimeout(() => void connect(), 1_000);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        void connect();
+      }, 1_000);
     } finally {
       if (reader) {
         if (eventReader === reader) eventReader = null;
@@ -262,12 +323,26 @@ export function createControlRoomStore(options = {}) {
     }
   };
 
+  const scheduleDiscovery = () => {
+    if (!connectEvents || stopped || !token || discoveryTimer) return;
+    discoveryTimer = setTimeout(() => {
+      discoveryTimer = null;
+      void (async () => {
+        if (stopped || !token) return;
+        const result = await load();
+        if (!stopped && result.status === "ready") void connect();
+        scheduleDiscovery();
+      })();
+    }, CONTROL_ROOM_DISCOVERY_INTERVAL_MS);
+  };
+
   const start = async () => {
     if (startPromise) return startPromise;
     stopped = false;
     startPromise = (async () => {
       await load();
       if (snapshot.status === "ready") void connect();
+      scheduleDiscovery();
       return snapshot;
     })();
     return startPromise;
@@ -285,14 +360,16 @@ export function createControlRoomStore(options = {}) {
     stop() {
       stopped = true;
       disconnectEventStream();
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      reconnectTimer = null;
+      clearConnectionTimers();
+      blockedEventSessionId = null;
+      blockedEventError = null;
       startPromise = null;
       emit({ ...snapshot, connection: "offline" });
     },
     async refresh() {
       const result = await load()
       if (result.status === "ready" && result.connection !== "live") void connect()
+      scheduleDiscovery()
       return result
     },
     async authenticate(credentials) {
@@ -310,8 +387,9 @@ export function createControlRoomStore(options = {}) {
       }
       stopped = true
       disconnectEventStream()
-      if (reconnectTimer) clearTimeout(reconnectTimer)
-      reconnectTimer = null
+      clearConnectionTimers()
+      blockedEventSessionId = null
+      blockedEventError = null
       baseUrl = nextBaseUrl
       token = nextToken
       credentialGeneration += 1
@@ -333,8 +411,9 @@ export function createControlRoomStore(options = {}) {
       token = ""
       stopped = true
       disconnectEventStream()
-      if (reconnectTimer) clearTimeout(reconnectTimer)
-      reconnectTimer = null
+      clearConnectionTimers()
+      blockedEventSessionId = null
+      blockedEventError = null
       startPromise = null
       emit({
         ...snapshot,
@@ -350,6 +429,8 @@ export function createControlRoomStore(options = {}) {
       const next = String(sessionId ?? "");
       if (!next || next === activeSessionId) return;
       activeSessionId = next;
+      blockedEventSessionId = null;
+      blockedEventError = null;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       reconnectTimer = null;
       disconnectEventStream();

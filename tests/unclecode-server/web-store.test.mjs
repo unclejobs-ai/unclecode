@@ -285,7 +285,7 @@ test("web store reuses the idempotency key after an ambiguous network failure", 
   assert.equal(keys[1], keys[0]);
 });
 
-test("web store reconnects the event stream for the selected run", async () => {
+test("web store reconnects the event stream for the selected run", async context => {
   const requests = [];
   const fetchImpl = async (url, init = {}) => {
     const pathname = new URL(String(url)).pathname;
@@ -302,6 +302,7 @@ test("web store reconnects the event stream for the selected run", async () => {
     });
   };
   const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl });
+  context.after(() => store.stop());
   await store.start();
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(requests.some(request => request.pathname === "/sessions/s1/events"), true);
@@ -310,6 +311,160 @@ test("web store reconnects the event stream for the selected run", async () => {
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(requests.some(request => request.pathname === "/sessions/s2/events"), true);
   store.stop();
+});
+
+test("web store discovers the first run after starting from an empty projection", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let runs = [];
+  let activeStreams = 0;
+  let eventRequests = 0;
+  const fetchImpl = async url => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname === "/control-room") {
+      return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs }), { status: 200 });
+    }
+    eventRequests += 1;
+    activeStreams += 1;
+    return new Response(new ReadableStream({
+      start() {},
+      cancel() { activeStreams -= 1; },
+    }), { status: 200 });
+  };
+  const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl });
+  context.after(() => store.stop());
+  await store.start();
+  assert.deepEqual(store.getSnapshot().data.runs, []);
+
+  runs = [{ id: "s1", revision: 1 }];
+  context.mock.timers.tick(1_000);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(store.getSnapshot().data.runs[0]?.id, "s1");
+  assert.equal(eventRequests, 1);
+  assert.equal(activeStreams, 1);
+  store.stop();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(activeStreams, 0);
+});
+
+test("web store discovers changes to unselected runs without a selected-run event", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let runs = [{ id: "s1", revision: 1 }, { id: "s2", revision: 1 }];
+  const eventPaths = [];
+  const fetchImpl = async url => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname === "/control-room") {
+      return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs }), { status: 200 });
+    }
+    eventPaths.push(pathname);
+    return new Response(new ReadableStream({ start() {} }), { status: 200 });
+  };
+  const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl });
+  context.after(() => store.stop());
+  await store.start();
+  await new Promise(resolve => setImmediate(resolve));
+
+  runs = [{ id: "s1", revision: 1 }, { id: "s2", revision: 2 }, { id: "s3", revision: 1 }];
+  context.mock.timers.tick(1_000);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(store.getSnapshot().data.runs.find(run => run.id === "s2")?.revision, 2);
+  assert.equal(store.getSnapshot().data.runs.some(run => run.id === "s3"), true);
+  assert.deepEqual(eventPaths, ["/sessions/s1/events"]);
+  store.stop();
+});
+
+test("web store retries a failed event invalidation without waiting for another event", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let controlRoomRequests = 0;
+  let eventRequests = 0;
+  let eventController;
+  const fetchImpl = async url => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname === "/control-room") {
+      controlRoomRequests += 1;
+      if (controlRoomRequests === 2) throw new TypeError("temporary projection read failure");
+      const revision = controlRoomRequests >= 3 ? 2 : 1;
+      return new Response(JSON.stringify({ version: 1, generatedAt: revision, runs: [{ id: "s1", revision }] }), { status: 200 });
+    }
+    eventRequests += 1;
+    return new Response(new ReadableStream({
+      start(controller) { eventController = controller; },
+    }), { status: 200 });
+  };
+  const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl });
+  context.after(() => store.stop());
+  await store.start();
+  await new Promise(resolve => setImmediate(resolve));
+
+  eventController.enqueue(new TextEncoder().encode("id: 1\nevent: run.updated\ndata: {}\n\n"));
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(controlRoomRequests, 2);
+  assert.equal(store.getSnapshot().data.runs[0].revision, 1);
+
+  context.mock.timers.tick(1_000);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(controlRoomRequests, 3);
+  assert.equal(store.getSnapshot().data.runs[0].revision, 2);
+  assert.equal(store.getSnapshot().connection, "live");
+  assert.equal(eventRequests, 1);
+  store.stop();
+});
+
+test("web store keeps discovery and reconnect subscriptions singular and cleans them up", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let controlRoomRequests = 0;
+  let eventRequests = 0;
+  let activeStreams = 0;
+  let maxActiveStreams = 0;
+  const streamControllers = [];
+  const fetchImpl = async url => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname === "/control-room") {
+      controlRoomRequests += 1;
+      return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs: [{ id: "s1", revision: 1 }] }), { status: 200 });
+    }
+    eventRequests += 1;
+    activeStreams += 1;
+    maxActiveStreams = Math.max(maxActiveStreams, activeStreams);
+    return new Response(new ReadableStream({
+      start(controller) { streamControllers.push(controller); },
+      cancel() { activeStreams -= 1; },
+    }), { status: 200 });
+  };
+  const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl });
+  context.after(() => store.stop());
+  await store.start();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(activeStreams, 1);
+
+  activeStreams -= 1;
+  streamControllers[0].close();
+  await new Promise(resolve => setImmediate(resolve));
+  context.mock.timers.tick(1_000);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(eventRequests, 2);
+  assert.equal(activeStreams, 1);
+
+  context.mock.timers.tick(1_000);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(controlRoomRequests, 3);
+  assert.equal(eventRequests, 2);
+  assert.equal(maxActiveStreams, 1);
+
+  store.stop();
+  await new Promise(resolve => setImmediate(resolve));
+  const requestsAfterStop = controlRoomRequests;
+  context.mock.timers.tick(10_000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(activeStreams, 0);
+  assert.equal(controlRoomRequests, requestsAfterStop);
 });
 
 test("web store keeps an independent replay cursor for each selected run", async () => {
@@ -344,7 +499,7 @@ test("web store keeps an independent replay cursor for each selected run", async
   store.stop();
 });
 
-test("web store performs one authoritative recovery for an expired cursor without looping", async () => {
+test("web store performs one authoritative recovery for an expired cursor without looping", async context => {
   const eventHeaders = [];
   let eventCalls = 0;
   let controlRoomCalls = 0;
@@ -363,13 +518,14 @@ test("web store performs one authoritative recovery for an expired cursor withou
     return new Response(new ReadableStream({ start() {} }), { status: 200 });
   };
   const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl });
+  context.after(() => store.stop());
   await store.start();
   await new Promise(resolve => setTimeout(resolve, 1_100));
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(eventHeaders[1]?.["last-event-id"], "7");
   assert.equal(eventHeaders[2]?.["last-event-id"], undefined);
   assert.equal(eventCalls, 3);
-  assert.equal(controlRoomCalls, 3);
+  assert.equal(controlRoomCalls, 4);
   assert.equal(store.getSnapshot().connection, "offline");
   assert.match(store.getSnapshot().error, /expired/i);
   store.stop();
