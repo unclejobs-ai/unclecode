@@ -3,6 +3,17 @@ import { randomUUID } from "node:crypto";
 
 type State = Readonly<Record<string, unknown>>;
 
+// Client-local attachment health only. This overlay is never sent to the
+// owner, persisted, or allowed to advance the authoritative owner revision.
+type RemoteConnectionProjection = {
+  readonly state: "disconnected" | "reconnecting";
+  readonly attempt: number;
+  readonly retryInMs: number;
+};
+
+const POLL_INTERVAL_MS = 100;
+const MAX_RECONNECT_DELAY_MS = 2_000;
+
 const STABLE_CONFLICT_RETRY_METHODS = new Set([
   "setMode",
   "updateTerminalColumns",
@@ -32,41 +43,79 @@ export async function createRemoteWorkShellEngine(
 ): Promise<object> {
   const initial = await client.readEngineState(sessionId);
   if (!initial.ok) throw new Error(initial.message);
-  let state = initial.state as State;
+  let ownerState = initial.state as State;
+  let state = ownerState;
   let revision = initial.revision;
   const listeners = new Set<(state: State) => void>();
   let timer: NodeJS.Timeout | undefined;
   let polling = false;
   let disposed = false;
+  let reconnectAttempt = 0;
   let pollAbort: AbortController | undefined;
   const invocationAborts = new Set<AbortController>();
   let invocationTail: Promise<void> = Promise.resolve();
 
-  const publish = (next: unknown, nextRevision: number): boolean => {
-    if (nextRevision <= revision) return false;
-    revision = nextRevision;
-    state = next as State;
+  const notify = (next: State) => {
+    state = next;
     for (const listener of listeners) listener(state);
+  };
+  const publish = (next: unknown, nextRevision: number): boolean => {
+    const recovered = state.remoteConnection !== undefined;
+    if (nextRevision > revision) {
+      revision = nextRevision;
+      ownerState = next as State;
+    } else if (!recovered) {
+      return false;
+    }
+    notify(ownerState);
     return true;
+  };
+  const projectConnection = (connection: RemoteConnectionProjection) => {
+    notify({ ...ownerState, remoteConnection: connection });
   };
   const readLatest = async (signal?: AbortSignal) => {
     const response = await client.readEngineState(sessionId, signal ? { signal } : undefined);
     if (response.ok) publish(response.state, response.revision);
     return response;
   };
-  const refresh = async () => {
-    if (polling || disposed) return;
+  const reconnectDelay = () => Math.min(
+    POLL_INTERVAL_MS * (2 ** Math.min(Math.max(reconnectAttempt - 1, 0), 30)),
+    MAX_RECONNECT_DELAY_MS,
+  );
+  const refresh = async (): Promise<number> => {
+    if (polling || disposed) return POLL_INTERVAL_MS;
     polling = true;
     const controller = new AbortController();
     pollAbort = controller;
     try {
       await readLatest(controller.signal);
+      reconnectAttempt = 0;
+      return POLL_INTERVAL_MS;
     } catch (error) {
-      if (!controller.signal.aborted) throw error;
+      if (controller.signal.aborted || disposed) return POLL_INTERVAL_MS;
+      reconnectAttempt += 1;
+      const retryInMs = reconnectDelay();
+      projectConnection({ state: "disconnected", attempt: reconnectAttempt, retryInMs });
+      return retryInMs;
     } finally {
       if (pollAbort === controller) pollAbort = undefined;
       polling = false;
     }
+  };
+  const schedulePoll = (delayMs: number) => {
+    if (disposed || listeners.size === 0 || timer) return;
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (disposed || listeners.size === 0) return;
+      if (reconnectAttempt > 0) {
+        projectConnection({ state: "reconnecting", attempt: reconnectAttempt, retryInMs: 0 });
+      }
+      void refresh().then(
+        (nextDelayMs) => { schedulePoll(nextDelayMs); },
+        () => { schedulePoll(MAX_RECONNECT_DELAY_MS); },
+      );
+    }, delayMs);
+    timer.unref?.();
   };
   const invoke = async (method: string, args: readonly unknown[]) => {
     if (disposed) throw new Error("Remote runtime attachment is closed.");
@@ -107,13 +156,10 @@ export async function createRemoteWorkShellEngine(
     getTurnLifecycle: () => state.turnLifecycle ?? { state: "idle" },
     subscribe(listener: (state: State) => void) {
       listeners.add(listener);
-      if (!timer) {
-        timer = setInterval(() => { void refresh(); }, 100);
-        timer.unref?.();
-      }
+      schedulePoll(POLL_INTERVAL_MS);
       return () => {
         listeners.delete(listener);
-        if (listeners.size === 0 && timer) { clearInterval(timer); timer = undefined; }
+        if (listeners.size === 0 && timer) { clearTimeout(timer); timer = undefined; }
       };
     },
     async initialize() { await refresh(); },
@@ -126,7 +172,7 @@ export async function createRemoteWorkShellEngine(
       }
       invocationAborts.clear();
       listeners.clear();
-      if (timer) clearInterval(timer);
+      if (timer) clearTimeout(timer);
       timer = undefined;
     },
   };
