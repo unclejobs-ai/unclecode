@@ -6,7 +6,13 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import test from "node:test";
 
-import { RuntimeOwnerClient, probeRuntimeOwner, readRuntimeOwnerLease } from "../../apps/unclecode-server/src/index.ts";
+import {
+  RuntimeOwnerClient,
+  probeRuntimeOwner,
+  processStartIdentity,
+  readRuntimeOwnerLease,
+  startPersistentRuntimeOwner,
+} from "../../apps/unclecode-server/src/index.ts";
 import {
   runtimeOwnerServiceEnvironment,
   spawnDetachedRuntimeOwner,
@@ -218,4 +224,190 @@ test("detached owner spawn errors reject promptly without publishing a lease", a
     /Failed to spawn detached runtime owner/,
   );
   await assert.rejects(readFile(leasePath, "utf8"));
+});
+
+function flagValue(args, name) {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : undefined;
+}
+
+function spawnLeaseChild(args, options, {
+  foreignOwner = false,
+  foreignStart = false,
+  foreignBoot = false,
+  replaceAfterPublish = false,
+  hang = false,
+} = {}) {
+  const leasePath = flagValue(args, "--lease-path");
+  const tokenPath = flagValue(args, "--token-path");
+  const ownerId = flagValue(args, "--owner-id") ?? "fixture-owner";
+  const bootId = flagValue(args, "--boot-id") ?? "fixture-boot";
+  const script = `
+const { writeFileSync } = require("node:fs");
+function writeLease(overrides) {
+  writeFileSync(${JSON.stringify(leasePath)}, JSON.stringify({
+    version: 1,
+    protocol: "unclecode-runtime-owner/1",
+    ownerId: ${JSON.stringify(foreignOwner ? "foreign-owner" : ownerId)},
+    pid: process.pid,
+    bootId: ${JSON.stringify(foreignBoot ? "foreign-boot" : bootId)},
+    processStartId: ${JSON.stringify(foreignStart ? "foreign-process-start" : "fixture-process-start")},
+    endpoint: "http://127.0.0.1:49999",
+    tokenPath: ${JSON.stringify(tokenPath)},
+    startedAt: Date.now(),
+    ...overrides,
+  }));
+}
+writeLease({});
+if (${replaceAfterPublish}) {
+  writeLease({
+    ownerId: "replacement-owner",
+    processStartId: "replacement-process-start",
+  });
+}
+if (${hang}) {
+  setInterval(() => {}, 1 << 30);
+} else {
+  setTimeout(() => process.exit(23), 30);
+}
+`;
+  return spawn(process.execPath, ["-e", script], options);
+}
+
+function spawnLeaseThenExit(args, options, identity = {}) {
+  return spawnLeaseChild(args, options, identity);
+}
+
+async function rejectDetachedStartup(input, pattern) {
+  await assert.rejects(spawnDetachedRuntimeOwner(input), pattern);
+}
+
+function fixtureOwnerOptions(root, extras = {}) {
+  return {
+    leasePath: join(root, "owner.json"),
+    tokenPath: join(root, "owner.token"),
+    timeoutMs: 1_000,
+    resolveProcessStartIdentity: async () => "fixture-process-start",
+    ...extras,
+  };
+}
+
+test("early owner exit removes only its exact owner and process-start lease", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-early-exit-"));
+  const leasePath = join(root, "owner.json");
+  const seen = {};
+  await assert.rejects(
+    spawnDetachedRuntimeOwner({
+      leasePath,
+      tokenPath: join(root, "owner.token"),
+      timeoutMs: 1_000,
+      resolveProcessStartIdentity: async () => "fixture-process-start",
+      spawnProcess: (_command, args, options) => {
+        seen.ownerId = flagValue(args, "--owner-id");
+        seen.bootId = flagValue(args, "--boot-id");
+        return spawnLeaseThenExit(args, options);
+      },
+    }),
+    /exited before publishing a healthy lease \(23\)/,
+  );
+  assert.equal(typeof seen.ownerId, "string");
+  assert.ok(seen.ownerId.length > 0);
+  assert.equal(typeof seen.bootId, "string");
+  await assert.rejects(readFile(leasePath, "utf8"));
+});
+
+test("failed startup preserves a same-PID lease with foreign owner or process-start identity", async () => {
+  for (const identity of [{ foreignOwner: true }, { foreignStart: true }, { foreignBoot: true }]) {
+    const root = await mkdtemp(join(tmpdir(), "unclecode-owner-aba-"));
+    const leasePath = join(root, "owner.json");
+    await rejectDetachedStartup({
+      ...fixtureOwnerOptions(root),
+      spawnProcess: (_command, args, options) => spawnLeaseThenExit(args, options, identity),
+    }, /exited before publishing a healthy lease \(23\)/);
+    const retained = JSON.parse(await readFile(leasePath, "utf8"));
+    if (identity.foreignOwner) assert.equal(retained.ownerId, "foreign-owner");
+    if (identity.foreignStart) assert.equal(retained.processStartId, "foreign-process-start");
+    if (identity.foreignBoot) assert.equal(retained.bootId, "foreign-boot");
+  }
+});
+
+test("early owner exit preserves a same-PID replacement lease", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-replace-exit-"));
+  const leasePath = join(root, "owner.json");
+  await rejectDetachedStartup({
+    ...fixtureOwnerOptions(root),
+    spawnProcess: (_command, args, options) => spawnLeaseChild(args, options, { replaceAfterPublish: true }),
+  }, /exited before publishing a healthy lease \(23\)/);
+  const retained = JSON.parse(await readFile(leasePath, "utf8"));
+  assert.equal(retained.ownerId, "replacement-owner");
+  assert.equal(retained.processStartId, "replacement-process-start");
+});
+
+test("timed-out unhealthy startup removes only its exact owner lease", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-unhealthy-"));
+  const leasePath = join(root, "owner.json");
+  let child;
+  try {
+    await rejectDetachedStartup({
+      ...fixtureOwnerOptions(root, { timeoutMs: 250 }),
+      spawnProcess: (_command, args, options) => {
+        child = spawnLeaseChild(args, options, { hang: true });
+        return child;
+      },
+    }, /Timed out waiting/);
+    await assert.rejects(readFile(leasePath, "utf8"));
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
+});
+
+test("timed-out startup preserves a same-PID foreign or replacement lease", async () => {
+  for (const identity of [
+    { foreignOwner: true },
+    { foreignStart: true },
+    { foreignBoot: true },
+    { replaceAfterPublish: true },
+  ]) {
+    const root = await mkdtemp(join(tmpdir(), "unclecode-owner-timeout-aba-"));
+    const leasePath = join(root, "owner.json");
+    let child;
+    try {
+      await rejectDetachedStartup({
+        ...fixtureOwnerOptions(root, { timeoutMs: 250 }),
+        spawnProcess: (_command, args, options) => {
+          child = spawnLeaseChild(args, options, { ...identity, hang: true });
+          return child;
+        },
+      }, /Timed out waiting/);
+      const retained = JSON.parse(await readFile(leasePath, "utf8"));
+      if (identity.foreignOwner) assert.equal(retained.ownerId, "foreign-owner");
+      if (identity.foreignStart) assert.equal(retained.processStartId, "foreign-process-start");
+      if (identity.foreignBoot) assert.equal(retained.bootId, "foreign-boot");
+      if (identity.replaceAfterPublish) {
+        assert.equal(retained.ownerId, "replacement-owner");
+        assert.equal(retained.processStartId, "replacement-process-start");
+      }
+    } finally {
+      if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
+  }
+});
+
+test("published runtime owner lease includes a real process-start identity", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-publish-start-"));
+  const leasePath = join(root, "owner.json");
+  const owner = await startPersistentRuntimeOwner({
+    rootDir: root,
+    leasePath,
+    tokenPath: join(root, "owner.token"),
+    ownerId: "published-owner",
+    bootId: "published-boot",
+  });
+  t.after(() => owner.stop());
+  const published = await readRuntimeOwnerLease(leasePath);
+  assert.equal(published?.ownerId, "published-owner");
+  assert.equal(published.bootId, "published-boot");
+  assert.equal(typeof published.processStartId, "string");
+  assert.ok(published.processStartId.length > 0);
+  assert.equal(published.processStartId, await processStartIdentity(published.pid));
 });

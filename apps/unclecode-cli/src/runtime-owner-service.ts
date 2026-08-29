@@ -63,11 +63,15 @@ async function main(): Promise<void> {
   const defaults = defaultRuntimeOwnerPaths(process.env.HOME);
   const leasePath = readFlag("--lease-path") ?? defaults.leasePath;
   const tokenPath = readFlag("--token-path") ?? defaults.tokenPath;
+  const ownerId = readFlag("--owner-id");
+  const bootId = readFlag("--boot-id");
   const owner = await startPersistentRuntimeOwner({
     rootDir: getSessionStoreRoot(process.env),
     leasePath,
     tokenPath,
     createSession,
+    ...(ownerId ? { ownerId } : {}),
+    ...(bootId ? { bootId } : {}),
   });
   let stopping = false;
   const stop = async () => {
