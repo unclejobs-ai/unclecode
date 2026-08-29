@@ -162,8 +162,11 @@ test("known control clients and callback-bearing inspections never inherit a bas
     "git config core.fsmonitor ./scripts/fsmonitor",
     "git config --unset core.fsmonitor",
     "tar --checkpoint=1 --checkpoint-action=exec=./scripts/publish -cf out.tar .",
+    "tar --checkpoint-act=exec=./scripts/publish -cf out.tar .",
     "tar --to-command=./scripts/upload -xf artifact.tar",
     "tar -I ./scripts/compress -cf artifact.tar src",
+    "tar -cfI artifact.tar ./scripts/compress src",
+    "tar cfI artifact.tar ./scripts/compress src",
   ];
 
   for (const command of commands) {

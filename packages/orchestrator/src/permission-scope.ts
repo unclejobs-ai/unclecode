@@ -369,20 +369,24 @@ function hasTarCallbackOption(arguments_: readonly string[]): boolean {
     "--use-compress-program",
   ]);
   const optionPrefixes = [
-    "--checkpoint-action=",
-    "--info-script=",
-    "--new-volume-script=",
-    "--rmt-command=",
-    "--rsh-command=",
-    "--to-command=",
-    "--use-compress-program=",
+    // GNU tar accepts unique long-option abbreviations. Match the shortest
+    // unambiguous callback-bearing prefixes instead of only their full names.
+    "--checkpoint",
+    "--info",
+    "--new-v",
+    "--rmt",
+    "--rsh",
+    "--to-c",
+    "--use-c",
   ];
-  return arguments_.some((token) => {
+  return arguments_.some((token, index) => {
     const normalized = token.toLowerCase();
     return exactOptions.has(normalized)
       || optionPrefixes.some((prefix) => normalized.startsWith(prefix))
-      || token === "-I"
-      || token.startsWith("-I");
+      // `-I` can appear in a short-option cluster, and tar also accepts its
+      // historical dashless option bundle in the first argument.
+      || /^-[^-]*I/.test(token)
+      || (index === 0 && /^[^-\s]*I/.test(token));
   });
 }
 

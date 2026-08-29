@@ -274,8 +274,10 @@ test("ambiguous shell wrappers fail closed before an autonomy or persisted bash 
     "git diff --stat",
     "git config core.fsmonitor ./scripts/fsmonitor",
     "tar --checkpoint-action=exec=./scripts/publish -cf out.tar .",
+    "tar --checkpoint-act=exec=./scripts/publish -cf out.tar .",
     "tar --to-command=./scripts/upload -xf artifact.tar",
     "tar -I ./scripts/compress -cf artifact.tar src",
+    "tar cfI artifact.tar ./scripts/compress src",
     "printf ok > output.txt",
     "rg TODO src/*.ts",
   ];
