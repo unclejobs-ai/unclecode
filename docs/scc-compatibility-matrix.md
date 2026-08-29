@@ -14,7 +14,7 @@ UncleCode owns execution, providers, tools, policy, context, sessions, traces, a
 Pinned core SHA-256:
 
 ```text
-f5b71941fef1c4cc1751695336ca98f4dbd314fa118d05fb226caa25d17b58ae
+a541566920e0326d66dd2204cb3331d717e73f64da60608b879bfd5f9c8673d7
 ```
 
 The package is installed from built bytes and does not compile during installation. For local SCC development, build and pack SCC first, then use `SECOND_CLAUDE_CORE_TARBALL=<tarball> npm run core:use-local`. The override is intentionally non-persistent.
