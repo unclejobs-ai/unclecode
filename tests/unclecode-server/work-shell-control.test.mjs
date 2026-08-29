@@ -21,7 +21,7 @@ function fakeEngine() {
         id: "approval-1",
         questions: [{ id: "policy-confirmation", question: "Allow?", options: [{ label: "Approve" }, { label: "Reject" }] }],
       },
-      activity: [], agents: [], jobs: [], profileId: "balanced",
+      activity: [], agents: [{ id: "agent-2", status: "running" }], jobs: [], profileId: "balanced",
     },
   };
   const listeners = new Set();
@@ -104,8 +104,17 @@ test("WorkShell live adapter fails closed for ambiguous approvals and steer targ
 
   const approve = await controls.control({ sessionId: "live-2", action: "approve", expectedRevision: 1, idempotencyKey: "a" });
   const steer = await controls.control({ sessionId: "live-2", action: "steer", expectedRevision: 1, idempotencyKey: "s", payload: { message: "guess target" } });
+  const staleSteer = await controls.control({
+    sessionId: "live-2",
+    action: "steer",
+    expectedRevision: 1,
+    idempotencyKey: "stale-agent",
+    payload: { agentRunId: "agent-that-ended", message: "must not move" },
+  });
   assert.equal(approve.code, "denied");
   assert.equal(steer.code, "invalid_action");
+  assert.equal(staleSteer.code, "denied");
+  assert.equal(controls.snapshot("live-2").revision, 1, "rejected controls cannot consume owner revisions");
   assert.deepEqual(engine.calls, []);
 });
 

@@ -1,7 +1,7 @@
 import { lstat, opendir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { BoundedEventJournal } from "./event-journal.js";
+import { BoundedEventJournal, type EventJournal } from "./event-journal.js";
 import { createRuntimeAdapter, type RuntimeAdapter, type RuntimeControlPort, type RuntimeControlRequest, type RuntimeControlResult } from "./runtime-adapter.js";
 import type { RuntimeReadSource, RuntimeSessionSource } from "./control-room.js";
 import type { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
@@ -57,13 +57,18 @@ export class LiveRuntimeControlRegistry implements RuntimeControlPort {
     }
     const result = await attached.mutationArbiter.mutate<RuntimeControlResult, RuntimeControlResult>({
       idempotencyKey: request.idempotencyKey,
-      fingerprint: JSON.stringify({ action: request.action, payload: request.payload, expectedRevision: request.expectedRevision }),
+      fingerprint: {
+        action: request.action,
+        payload: request.payload ?? null,
+        expectedRevision: request.expectedRevision,
+      },
       expectedRevision: request.expectedRevision,
       ...(request.action === "cancel"
         ? { lane: "cancel" as const }
         : request.action === "follow-up"
           ? {}
           : { lane: "control" as const }),
+      ...(request.action === "pause" ? { bindsCancelGeneration: true } : {}),
       conflict: (current) => ({ ok: false, code: "revision_conflict", message: "Session revision changed.", revision: current }),
       invalidReuse: (current) => ({ ok: false, code: "invalid_action", message: "Idempotency-Key was reused for another runtime action.", revision: current }),
       ...(attached.onAdmitted ? { onAdmitted: () => attached.onAdmitted?.(request) } : {}),
@@ -188,12 +193,12 @@ export async function readPersistentRuntime(rootDir: string, controls: LiveRunti
 export function createPersistentRuntimeAdapter(input: {
   readonly rootDir: string;
   readonly controls?: LiveRuntimeControlRegistry;
-  readonly journal?: BoundedEventJournal;
+  readonly journal?: EventJournal;
   readonly journalCapacity?: number;
 }): {
   readonly adapter: RuntimeAdapter;
   readonly controls: LiveRuntimeControlRegistry;
-  readonly journal: BoundedEventJournal;
+  readonly journal: EventJournal;
 } {
   const controls = input.controls ?? new LiveRuntimeControlRegistry();
   const journal = input.journal ?? new BoundedEventJournal(

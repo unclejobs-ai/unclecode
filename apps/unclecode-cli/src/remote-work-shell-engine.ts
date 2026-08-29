@@ -180,7 +180,18 @@ export async function createRemoteWorkShellEngine(
           try {
             response = await ownerClient.invokeEngineMethod(request);
             if (response.ok) {
-              publish(response.state, response.revision, requestSequence, "mutation");
+              if ("state" in response) {
+                publish(response.state, response.revision, requestSequence, "mutation");
+              } else {
+                // Mutation receipts intentionally exclude the potentially
+                // multi-megabyte live projection. Publish the durable revision
+                // fence first, then obtain authoritative state through the
+                // dedicated read endpoint.
+                if (response.revision > revision) revision = response.revision;
+                readableRequestSequenceFloor = stateRequestSequence + 1;
+                acceptedStateRequestSequence = Math.max(acceptedStateRequestSequence, requestSequence);
+                await readLatest(controller.signal);
+              }
             }
             break;
           } catch (error) {

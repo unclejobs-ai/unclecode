@@ -364,3 +364,32 @@ test("runtime adapter does not queue cancel behind a pending pause", async () =>
   releasePause();
   await pause;
 });
+
+test("runtime adapter delegates stale targeted cancel admission to the owner arbiter", async () => {
+  let calls = 0;
+  const adapter = createRuntimeAdapter({
+    async read() {
+      return {
+        generatedAt: Date.now(),
+        sessions: [{ sessionId: "targeted", projectPath: "/tmp", locale: "en", state: "running", revision: 13 }],
+        system: { providers: [], plugins: [], cleanup: [] },
+      };
+    },
+    controls: {
+      async control(request) {
+        calls += 1;
+        assert.equal(request.expectedRevision, 11);
+        return { ok: true, revision: 14, state: "cancelled" };
+      },
+    },
+  });
+
+  const result = await adapter.control({
+    sessionId: "targeted",
+    action: "cancel",
+    expectedRevision: 11,
+    idempotencyKey: "cancel-turn-11",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 1, "only the owner arbiter may decide whether stale cancel targets the active generation");
+});

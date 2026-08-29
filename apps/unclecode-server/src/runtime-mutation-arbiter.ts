@@ -1,3 +1,9 @@
+import {
+  canonicalMutationFingerprint,
+  type LookupMutationResult,
+  type RuntimeLedger,
+} from "./runtime-ledger.js";
+
 export type RuntimeSessionRevisionClock = { value: number };
 
 type MutationReceipt<Result> = {
@@ -10,6 +16,12 @@ type MutationReceipt<Result> = {
 export type RuntimeMutationLane = "normal" | "control" | "cancel";
 
 type PersistAcceptedRevision = (revision: number, signal: AbortSignal) => Promise<void>;
+
+export type RuntimeMutationLedgerBinding = {
+  readonly ledger: RuntimeLedger;
+  readonly sessionId: string;
+  readonly domain: string;
+};
 
 async function persistWithTimeout(
   persist: PersistAcceptedRevision,
@@ -43,33 +55,56 @@ export class RuntimeSessionMutationArbiter {
   #cancelAdmissionTail: Promise<void> = Promise.resolve();
   #normalTail: Promise<void> = Promise.resolve();
   readonly #active = new Set<Promise<unknown>>();
+  readonly #activeNormalGenerations = new Set<number>();
   #activeMutations = 0;
   readonly #persistAcceptedRevision: PersistAcceptedRevision | undefined;
   readonly #persistAcceptedRevisionTimeoutMs: number;
+  readonly #ledgerBinding: RuntimeMutationLedgerBinding | undefined;
 
   constructor(clock: RuntimeSessionRevisionClock = { value: 0 }, input: {
     readonly persistAcceptedRevision?: PersistAcceptedRevision | undefined;
     readonly persistAcceptedRevisionTimeoutMs?: number | undefined;
+    readonly ledger?: RuntimeLedger | undefined;
+    readonly sessionId?: string | undefined;
+    readonly domain?: string | undefined;
   } = {}) {
     this.clock = clock;
     this.#persistAcceptedRevision = input.persistAcceptedRevision;
     this.#persistAcceptedRevisionTimeoutMs = Number.isFinite(input.persistAcceptedRevisionTimeoutMs)
       ? Math.max(1, Math.floor(input.persistAcceptedRevisionTimeoutMs!))
       : 5_000;
+    if (input.ledger) {
+      if (!input.sessionId || !input.domain) {
+        throw new TypeError("Runtime mutation ledger bindings require sessionId and domain.");
+      }
+      this.#ledgerBinding = { ledger: input.ledger, sessionId: input.sessionId, domain: input.domain };
+      this.clock.value = input.ledger.seedSessionRevision(input.sessionId, this.clock.value);
+    }
   }
 
   isMutationActive(): boolean {
     return this.#activeMutations > 0;
   }
 
+  hasCancellableMutation(): boolean {
+    return this.#activeNormalGenerations.size > 0;
+  }
+
   publishAutonomous(): number {
-    if (this.#activeMutations === 0) this.clock.value += 1;
+    if (this.#activeMutations === 0) {
+      const next = this.clock.value + 1;
+      this.clock.value = this.#ledgerBinding
+        ? this.#ledgerBinding.ledger.seedSessionRevision(this.#ledgerBinding.sessionId, next)
+        : next;
+    }
     return this.clock.value;
   }
 
   publishDurable(revision: number): number {
     if (Number.isSafeInteger(revision) && revision > this.clock.value) {
-      this.clock.value = revision;
+      this.clock.value = this.#ledgerBinding
+        ? this.#ledgerBinding.ledger.seedSessionRevision(this.#ledgerBinding.sessionId, revision)
+        : revision;
     }
     return this.clock.value;
   }
@@ -95,9 +130,10 @@ export class RuntimeSessionMutationArbiter {
 
   mutate<Output, Result>(input: {
     readonly idempotencyKey: string;
-    readonly fingerprint: string;
+    readonly fingerprint: unknown;
     readonly expectedRevision: number;
     readonly lane?: RuntimeMutationLane | undefined;
+    readonly bindsCancelGeneration?: boolean | undefined;
     readonly conflict: (revision: number) => Result;
     readonly invalidReuse: (revision: number) => Result;
     readonly onAdmitted?: ((revision: number) => void) | undefined;
@@ -107,9 +143,15 @@ export class RuntimeSessionMutationArbiter {
     readonly complete: (output: Output, revision: number) => Result;
     readonly fail: (error: unknown, revision: number) => Result;
   }): Promise<Result> {
+    let canonicalFingerprint: string;
+    try {
+      canonicalFingerprint = canonicalMutationFingerprint(input.fingerprint);
+    } catch (error) {
+      return Promise.resolve(input.fail(error, this.clock.value));
+    }
     const prior = this.#receipts.get(input.idempotencyKey) as MutationReceipt<Result> | undefined;
     if (prior) {
-      return prior.fingerprint === input.fingerprint
+      return prior.fingerprint === canonicalFingerprint
         ? prior.promise
         : Promise.resolve(input.invalidReuse(this.clock.value));
     }
@@ -119,17 +161,53 @@ export class RuntimeSessionMutationArbiter {
       | { readonly accepted: true; readonly revision: number }
       | { readonly accepted: false; readonly result: Result };
 
+    const durableResult = (lookup: Exclude<LookupMutationResult, { kind: "miss" }>): Admission => {
+      const ledgerRevision = this.#ledgerBinding?.ledger.getSessionState(this.#ledgerBinding.sessionId)?.revision
+        ?? lookup.acceptedRevision;
+      if (ledgerRevision > this.clock.value) this.clock.value = ledgerRevision;
+      if (lookup.kind === "mismatch") {
+        return { accepted: false, result: input.invalidReuse(this.clock.value) };
+      }
+      if ((lookup.status === "completed" || lookup.status === "failed") && "result" in lookup) {
+        return { accepted: false, result: lookup.result as Result };
+      }
+      return {
+        accepted: false,
+        result: input.fail(
+          new Error(`Runtime mutation receipt is ${lookup.status === "admitted" ? "in doubt" : lookup.status}; automatic re-execution is fenced.`),
+          lookup.acceptedRevision,
+        ),
+      };
+    };
+
     // Serialize only revision validation and durable publication. The lane is
     // released before engine execution, so a long provider/tool turn cannot
     // block pause, approval, steer, or cancel. Keeping clock publication after
     // persistence also prevents a later mutation from depending on a revision
     // that can still fail to become durable.
     const admission = this.#admissionTail.then(async (): Promise<Admission> => {
+      if (this.#ledgerBinding) {
+        try {
+          const lookup = this.#ledgerBinding.ledger.lookupMutation({
+            sessionId: this.#ledgerBinding.sessionId,
+            domain: this.#ledgerBinding.domain,
+            idempotencyKey: input.idempotencyKey,
+            fingerprint: input.fingerprint,
+          });
+          if (lookup.kind !== "miss") return durableResult(lookup);
+        } catch (error) {
+          return { accepted: false, result: input.fail(error, this.clock.value) };
+        }
+      }
+      const oldestActiveNormalGeneration = this.#activeNormalGenerations.size === 0
+        ? undefined
+        : Math.min(...this.#activeNormalGenerations);
       const stalePreemptiveCancel = input.lane === "cancel"
-        && this.#activeMutations > 0
+        && oldestActiveNormalGeneration !== undefined
         && Number.isSafeInteger(input.expectedRevision)
         && input.expectedRevision >= 0
-        && input.expectedRevision < this.clock.value;
+        && input.expectedRevision < this.clock.value
+        && input.expectedRevision + 1 >= oldestActiveNormalGeneration;
       if (this.clock.value !== input.expectedRevision && !stalePreemptiveCancel) {
         return { accepted: false, result: input.conflict(this.clock.value) };
       }
@@ -148,9 +226,18 @@ export class RuntimeSessionMutationArbiter {
         }
       }
 
-      const acceptedRevision = this.clock.value + 1;
+      let acceptedRevision = this.clock.value + 1;
       try {
-        if (this.#persistAcceptedRevision) {
+        if (this.#ledgerBinding) {
+          const admitted = this.#ledgerBinding.ledger.admitMutation({
+            sessionId: this.#ledgerBinding.sessionId,
+            domain: this.#ledgerBinding.domain,
+            idempotencyKey: input.idempotencyKey,
+            fingerprint: input.fingerprint,
+          });
+          if (admitted.kind !== "admitted") return durableResult(admitted);
+          acceptedRevision = admitted.acceptedRevision;
+        } else if (this.#persistAcceptedRevision) {
           await persistWithTimeout(
             this.#persistAcceptedRevision,
             acceptedRevision,
@@ -162,6 +249,9 @@ export class RuntimeSessionMutationArbiter {
       }
       this.clock.value = acceptedRevision;
       this.#activeMutations += 1;
+      if (input.lane === "normal" || input.lane === undefined || input.bindsCancelGeneration === true) {
+        this.#activeNormalGenerations.add(acceptedRevision);
+      }
       receipt.accepted = true;
       input.onAdmitted?.(acceptedRevision);
       return { accepted: true, revision: acceptedRevision };
@@ -180,10 +270,38 @@ export class RuntimeSessionMutationArbiter {
         failure = error;
       } finally {
         this.#activeMutations -= 1;
+        if (input.lane === "normal" || input.lane === undefined || input.bindsCancelGeneration === true) {
+          this.#activeNormalGenerations.delete(acceptedRevision);
+        }
       }
-      return failure === undefined
-        ? input.complete(output as Output, acceptedRevision)
-        : input.fail(failure, acceptedRevision);
+      let result: Result;
+      let status: "completed" | "failed";
+      try {
+        if (failure === undefined) {
+          result = input.complete(output as Output, acceptedRevision);
+          status = "completed";
+        } else {
+          result = input.fail(failure, acceptedRevision);
+          status = "failed";
+        }
+      } catch (error) {
+        result = input.fail(error, acceptedRevision);
+        status = "failed";
+      }
+      if (this.#ledgerBinding) {
+        try {
+          this.#ledgerBinding.ledger.completeMutation({
+            sessionId: this.#ledgerBinding.sessionId,
+            domain: this.#ledgerBinding.domain,
+            idempotencyKey: input.idempotencyKey,
+            status,
+            result,
+          });
+        } catch (error) {
+          return input.fail(error, acceptedRevision);
+        }
+      }
+      return result;
     };
 
     const runAdmitted = async (): Promise<Result> => {
@@ -204,7 +322,7 @@ export class RuntimeSessionMutationArbiter {
     if (input.lane === "normal" || input.lane === undefined) {
       this.#normalTail = admitted.then(() => undefined, () => undefined);
     }
-    receipt = { fingerprint: input.fingerprint, promise: admitted, settled: false, accepted: false };
+    receipt = { fingerprint: canonicalFingerprint, promise: admitted, settled: false, accepted: false };
     this.#receipts.set(input.idempotencyKey, receipt as MutationReceipt<unknown>);
     this.#active.add(admitted);
     void admitted.finally(() => {

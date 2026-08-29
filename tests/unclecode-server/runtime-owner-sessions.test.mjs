@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { LiveRuntimeEngineRegistry } from "../../apps/unclecode-server/src/runtime-engine-rpc.ts";
+import { openRuntimeLedger } from "../../apps/unclecode-server/src/runtime-ledger.ts";
+import {
+  persistRuntimeAdmissionRevision,
+  readRuntimeAdmissionRevision,
+} from "../../apps/unclecode-server/src/runtime-admission-ledger.ts";
 import { RuntimeSessionMutationArbiter } from "../../apps/unclecode-server/src/runtime-mutation-arbiter.ts";
 import { LiveRuntimeControlRegistry } from "../../apps/unclecode-server/src/persistent-runtime.ts";
 import { startPersistentRuntimeOwner } from "../../apps/unclecode-server/src/runtime-owner.ts";
@@ -15,12 +20,28 @@ import {
 import { attachWorkShellRuntime } from "../../apps/unclecode-server/src/work-shell-control.ts";
 
 function fakeEngine(label) {
-  let state = { label, mode: "standard" };
+  let state = {
+    label,
+    mode: "standard",
+    isBusy: false,
+    queuePaused: false,
+    model: "test-model",
+    uiLocale: "en",
+    agentConsole: {},
+  };
   const listeners = new Set();
   return {
     getState: () => state,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     setMode(mode) { state = { ...state, mode }; for (const listener of listeners) listener(); },
+    interruptTurn: () => false,
+    getTurnLifecycle: () => ({ state: "idle" }),
+    async requestTurnPause() { throw new Error("no active turn"); },
+    resumeTurn: () => false,
+    async resumeQueueItems() {},
+    async handleSubmit() {},
+    answerPendingDecisionByIndex: () => false,
+    getAgentControlPort: () => ({ async steer() { return { status: "rejected" }; } }),
   };
 }
 
@@ -60,6 +81,117 @@ test("production owner fails closed when its process-start identity is unavailab
     assert.match(settled.error?.message ?? "", /process-start identity/i);
     assert.equal(await readRuntimeOwnerLease(leasePath), null);
   } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("production owner fails closed before publishing when its single ledger is corrupt", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "unclecode-owner-corrupt-ledger-"));
+  const ledgerDirectory = join(rootDir, "runtime-owner-v1");
+  const leasePath = join(rootDir, "owner.json");
+  try {
+    await mkdir(ledgerDirectory, { recursive: true });
+    await writeFile(join(ledgerDirectory, "owner.db"), "not sqlite");
+    await assert.rejects(
+      startPersistentRuntimeOwner({
+        rootDir,
+        leasePath,
+        tokenPath: join(rootDir, "server.token"),
+      }),
+      /runtime ledger/i,
+    );
+    assert.equal(await readRuntimeOwnerLease(leasePath), null);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("owner migrates the legacy revision once and makes SQLite the only admission authority", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "unclecode-owner-ledger-migration-"));
+  const projectPath = join(rootDir, "workspace");
+  const sessionId = "legacy-migration";
+  let owner;
+  try {
+    await mkdir(projectPath);
+    await persistRuntimeAdmissionRevision({ rootDir, projectPath, sessionId, revision: 37 });
+    owner = await startPersistentRuntimeOwner({
+      rootDir,
+      leasePath: join(rootDir, "owner.json"),
+      tokenPath: join(rootDir, "server.token"),
+      async createSession(request) {
+        return { engine: fakeEngine(request.sessionId), projectPath: request.projectPath };
+      },
+    });
+    const created = await owner.engines.create({ sessionId, projectPath, idempotencyKey: "create-legacy" });
+    assert.equal(created.ok, true);
+    assert.equal(created.session.revision, 37);
+    const changed = await owner.engines.invoke({
+      sessionId,
+      method: "setMode",
+      args: ["deep"],
+      expectedRevision: 37,
+      idempotencyKey: "first-sqlite-mutation",
+    });
+    assert.equal(changed.ok, true, JSON.stringify(changed));
+    assert.equal(changed.revision, 38);
+    await owner.stop();
+    owner = undefined;
+
+    const ledger = openRuntimeLedger({ dbPath: join(rootDir, "runtime-owner-v1", "owner.db") });
+    assert.equal(ledger.getSessionState(sessionId)?.revision, 38);
+    ledger.close();
+    assert.equal(
+      await readRuntimeAdmissionRevision({ rootDir, projectPath, sessionId }),
+      37,
+      "new admissions cannot race or overwrite the legacy bootstrap file",
+    );
+  } finally {
+    await owner?.stop();
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("owner startup recovers admitted receipts as in-doubt before serving mutations", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "unclecode-owner-in-doubt-"));
+  const projectPath = join(rootDir, "workspace");
+  const sessionId = "owner-crash-window";
+  const dbPath = join(rootDir, "runtime-owner-v1", "owner.db");
+  let ledger = openRuntimeLedger({ dbPath });
+  ledger.admitMutation({
+    sessionId,
+    domain: "runtime-session",
+    idempotencyKey: "crashed-mode",
+    fingerprint: { method: "setMode", args: ["deep"], expectedRevision: 0 },
+  });
+  ledger.close();
+  let executions = 0;
+  let owner;
+  try {
+    await mkdir(projectPath);
+    owner = await startPersistentRuntimeOwner({
+      rootDir,
+      leasePath: join(rootDir, "owner.json"),
+      tokenPath: join(rootDir, "server.token"),
+      async createSession(request) {
+        const engine = fakeEngine(request.sessionId);
+        const original = engine.setMode;
+        engine.setMode = mode => { executions += 1; original(mode); };
+        return { engine, projectPath: request.projectPath };
+      },
+    });
+    await owner.engines.create({ sessionId, projectPath, idempotencyKey: "create-after-crash" });
+    const result = await owner.engines.invoke({
+      sessionId,
+      method: "setMode",
+      args: ["deep"],
+      expectedRevision: 0,
+      idempotencyKey: "crashed-mode",
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.message, /in.doubt/i);
+    assert.equal(executions, 0);
+  } finally {
+    await owner?.stop();
     await rm(rootDir, { recursive: true, force: true });
   }
 });
@@ -197,6 +329,172 @@ test("concurrent async calls with one idempotency key execute the engine method 
   assert.equal(calls, 1);
 });
 
+test("durable receipt replay survives hot eviction and cannot cancel a newer turn", { timeout: 30_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-receipt-eviction-"));
+  const ledger = openRuntimeLedger({ dbPath: join(root, "owner.db") });
+  const clock = { value: 0 };
+  const arbiter = new RuntimeSessionMutationArbiter(clock, {
+    ledger,
+    sessionId: "receipt-eviction",
+    domain: "runtime-session",
+  });
+  let releaseOldTurn;
+  let releaseNewTurn;
+  let cancelCalls = 0;
+  const resultCallbacks = {
+    conflict: revision => ({ ok: false, code: "conflict", revision }),
+    invalidReuse: revision => ({ ok: false, code: "reuse", revision }),
+    complete: (output, revision) => ({ ok: true, output, revision }),
+    fail: (error, revision) => ({ ok: false, code: error.message, revision }),
+  };
+  try {
+    const oldTurn = arbiter.mutate({
+      ...resultCallbacks,
+      idempotencyKey: "old-turn",
+      fingerprint: { method: "submit", message: "old" },
+      expectedRevision: 0,
+      execute: () => new Promise(resolve => { releaseOldTurn = resolve; }),
+    });
+    while (!releaseOldTurn) await new Promise(resolve => setImmediate(resolve));
+    const oldCancelInput = {
+      ...resultCallbacks,
+      idempotencyKey: "cancel-old-turn",
+      fingerprint: { method: "cancel", target: "old-turn" },
+      expectedRevision: 1,
+      lane: "cancel",
+      execute() {
+        cancelCalls += 1;
+        releaseOldTurn("old-cancelled");
+        return "cancelled";
+      },
+    };
+    const firstCancel = await arbiter.mutate(oldCancelInput);
+    await oldTurn;
+
+    for (let index = 0; index < 2_048; index += 1) {
+      const settled = await arbiter.mutate({
+        ...resultCallbacks,
+        idempotencyKey: `churn-${String(index)}`,
+        fingerprint: { method: "control", index },
+        expectedRevision: clock.value,
+        lane: "control",
+        execute: () => index,
+      });
+      assert.equal(settled.ok, true);
+    }
+
+    const newTurn = arbiter.mutate({
+      ...resultCallbacks,
+      idempotencyKey: "new-turn",
+      fingerprint: { method: "submit", message: "new" },
+      expectedRevision: clock.value,
+      execute: () => new Promise(resolve => { releaseNewTurn = resolve; }),
+    });
+    while (!releaseNewTurn) await new Promise(resolve => setImmediate(resolve));
+
+    assert.deepEqual(await arbiter.mutate(oldCancelInput), firstCancel);
+    assert.equal(cancelCalls, 1, "an evicted old cancellation must replay without touching the new turn");
+    releaseNewTurn("new-completed");
+    assert.equal((await newTurn).ok, true);
+  } finally {
+    releaseOldTurn?.("cleanup");
+    releaseNewTurn?.("cleanup");
+    await arbiter.settle();
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("durable terminal receipts replay canonically after restart and changed reuse fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-receipt-restart-"));
+  const dbPath = join(root, "owner.db");
+  let ledger = openRuntimeLedger({ dbPath });
+  let executions = 0;
+  const callbacks = {
+    conflict: revision => ({ ok: false, code: "conflict", revision }),
+    invalidReuse: revision => ({ ok: false, code: "reuse", revision }),
+    complete: (output, revision) => ({ ok: true, output, revision }),
+    fail: (error, revision) => ({ ok: false, code: error.message, revision }),
+  };
+  const firstArbiter = new RuntimeSessionMutationArbiter({ value: 0 }, {
+    ledger,
+    sessionId: "restart-terminal",
+    domain: "runtime-session",
+  });
+  const input = {
+    ...callbacks,
+    idempotencyKey: "canonical-key",
+    fingerprint: { method: "setMode", args: [{ alpha: 1, beta: 2 }] },
+    expectedRevision: 0,
+    execute() { executions += 1; return "deep"; },
+  };
+  const accepted = await firstArbiter.mutate(input);
+  ledger.close();
+
+  ledger = openRuntimeLedger({ dbPath });
+  const restarted = new RuntimeSessionMutationArbiter({ value: 0 }, {
+    ledger,
+    sessionId: "restart-terminal",
+    domain: "runtime-session",
+  });
+  try {
+    const replay = await restarted.mutate({
+      ...input,
+      fingerprint: { args: [{ beta: 2, alpha: 1 }], method: "setMode" },
+      execute() { executions += 1; return "must-not-run"; },
+    });
+    assert.deepEqual(replay, accepted);
+    assert.equal(executions, 1);
+    const changed = await restarted.mutate({ ...input, fingerprint: { method: "setMode", args: ["minimal"] } });
+    assert.equal(changed.ok, false);
+    assert.equal(changed.code, "reuse");
+    assert.equal(executions, 1);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("crash-window admission becomes in-doubt and is never automatically re-executed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-receipt-in-doubt-"));
+  const dbPath = join(root, "owner.db");
+  let ledger = openRuntimeLedger({ dbPath });
+  ledger.admitMutation({
+    sessionId: "crash-window",
+    domain: "runtime-session",
+    idempotencyKey: "admitted-before-crash",
+    fingerprint: { method: "handleSubmit", args: ["ship"] },
+  });
+  ledger.close();
+  ledger = openRuntimeLedger({ dbPath });
+  assert.equal(ledger.recoverInDoubt(), 1);
+  let executions = 0;
+  const arbiter = new RuntimeSessionMutationArbiter({ value: 0 }, {
+    ledger,
+    sessionId: "crash-window",
+    domain: "runtime-session",
+  });
+  try {
+    const result = await arbiter.mutate({
+      idempotencyKey: "admitted-before-crash",
+      fingerprint: { args: ["ship"], method: "handleSubmit" },
+      expectedRevision: 0,
+      execute() { executions += 1; },
+      conflict: revision => ({ ok: false, code: "conflict", revision }),
+      invalidReuse: revision => ({ ok: false, code: "reuse", revision }),
+      complete: (_output, revision) => ({ ok: true, revision }),
+      fail: (error, revision) => ({ ok: false, code: error.message, revision }),
+    });
+    assert.equal(result.ok, false);
+    assert.match(result.code, /in.doubt/i);
+    assert.equal(result.revision, 1);
+    assert.equal(executions, 0);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("shared owner arbiter cancels an admitted handleSubmit before projected busy state", async () => {
   let releaseBlocker;
   let admitted = 0;
@@ -280,7 +578,7 @@ test("one accepted mutation persists its reserved owner revision exactly once be
   assert.deepEqual(persisted, [7]);
 });
 
-test("owner admission stays bounded by a tiny durable reservation instead of the full transcript checkpoint", async () => {
+test("owner admission stays bounded by a tiny durable reservation instead of the full transcript checkpoint", async (t) => {
   const rootDir = await mkdtemp(join(tmpdir(), "unclecode-owner-admission-latency-"));
   const projectPath = join(rootDir, "workspace");
   const transcript = Array.from({ length: 10_000 }, (_, index) => ({
@@ -312,6 +610,7 @@ test("owner admission stays bounded by a tiny durable reservation instead of the
     });
     assert.equal(created.ok, true);
 
+    const admissionStarted = performance.now();
     const admitted = await Promise.race([
       owner.engines.invoke({
         sessionId: "large-transcript",
@@ -322,12 +621,45 @@ test("owner admission stays bounded by a tiny durable reservation instead of the
       }),
       new Promise(resolve => setTimeout(() => resolve({ timedOut: true }), 500)),
     ]);
+    const admissionElapsedMs = performance.now() - admissionStarted;
 
     assert.equal(transcript.length, 10_000);
     assert.ok(transcriptBytes > 2_000_000, `the proof must exercise a nontrivial transcript; got ${transcriptBytes} bytes`);
     assert.equal(admitted.timedOut, undefined, "durable admission must finish within 500ms");
     assert.equal(admitted.ok, true, JSON.stringify(admitted));
+    assert.equal("state" in admitted, false, "mutation receipts cannot embed the full live engine projection");
+    const receiptBytes = Buffer.byteLength(JSON.stringify(admitted));
+    assert.ok(receiptBytes < 256, "the terminal receipt must remain tiny");
+    t.diagnostic(`admission_latency elapsed_ms=${admissionElapsedMs.toFixed(3)} upper_bound_ms=500 transcript_bytes=${transcriptBytes} receipt_bytes=${receiptBytes}`);
     assert.equal(legacyCheckpointCalls, 0, "admission cannot call the full session/Agent Console checkpoint hook");
+
+    await owner.stop();
+    owner = undefined;
+    let replayExecutions = 0;
+    const replayEngine = fakeEngine("large-transcript-replay");
+    replayEngine.getState = () => ({ label: "large-transcript-replay", mode: "standard", transcript });
+    replayEngine.setMode = () => { replayExecutions += 1; };
+    owner = await startPersistentRuntimeOwner({
+      rootDir,
+      leasePath: join(rootDir, "owner.json"),
+      tokenPath: join(rootDir, "server.token"),
+      async createSession() { return { engine: replayEngine, projectPath }; },
+    });
+    const recreated = await owner.engines.create({
+      sessionId: "large-transcript",
+      projectPath,
+      idempotencyKey: "recreate-large-transcript",
+    });
+    assert.equal(recreated.ok, true);
+    const replayed = await owner.engines.invoke({
+      sessionId: "large-transcript",
+      method: "setMode",
+      args: ["deep"],
+      expectedRevision: 0,
+      idempotencyKey: "bounded-admission",
+    });
+    assert.deepEqual(replayed, admitted, "restart replay must return the exact bounded semantic result");
+    assert.equal(replayExecutions, 0, "restart replay cannot execute the engine mutation again");
   } finally {
     await owner?.stop().catch(() => undefined);
     await rm(rootDir, { recursive: true, force: true });
@@ -394,6 +726,36 @@ test("idle pause fails precondition without reserving or publishing a revision",
   assert.equal(result.revision, 0);
   assert.equal(clock.value, 0);
   assert.deepEqual(persisted, []);
+});
+
+test("idle engine RPC cancel is rejected before admission without consuming a revision", async () => {
+  let interruptCalls = 0;
+  const clock = { value: 0 };
+  const engines = new LiveRuntimeEngineRegistry();
+  const engine = fakeEngine("idle-rpc-cancel");
+  engine.interruptTurn = () => {
+    interruptCalls += 1;
+    return false;
+  };
+  engines.attach("idle-rpc-cancel", engine, {
+    projectPath: "/work/idle-rpc-cancel",
+    revisionClock: clock,
+  });
+
+  const result = await engines.invoke({
+    sessionId: "idle-rpc-cancel",
+    method: "interruptTurn",
+    args: [],
+    expectedRevision: 0,
+    idempotencyKey: "idle-rpc-cancel",
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "invalid_action");
+  assert.equal(result.revision, 0);
+  assert.equal(clock.value, 0);
+  assert.equal(interruptCalls, 0, "the idle interrupt must be rejected before execution");
+  await engines.disposeAll();
 });
 
 test("timed-out admission persistence leaves the revision unpublished and releases the admission tail", async () => {
@@ -534,6 +896,37 @@ test("a stale cross-client cancel remains preemptive after multiple control admi
   const staleNonCancel = await mutateControl("stale-control", 11);
   assert.equal(staleNonCancel.ok, false);
   assert.equal(staleNonCancel.code, "conflict", "only cancel may bypass a stale client revision");
+
+  let releaseNewTurn;
+  const newTurn = arbiter.mutate({
+    idempotencyKey: "new-active-turn",
+    fingerprint: { method: "submit", target: "new-turn" },
+    expectedRevision: clock.value,
+    execute: () => new Promise(resolve => { releaseNewTurn = resolve; }),
+    conflict: revision => ({ ok: false, code: "conflict", revision }),
+    invalidReuse: revision => ({ ok: false, code: "reuse", revision }),
+    complete: (output, revision) => ({ ok: true, output, revision }),
+    fail: (error, revision) => ({ ok: false, code: error.message, revision }),
+  });
+  while (!releaseNewTurn) await new Promise(resolve => setImmediate(resolve));
+  const beforeWrongCancel = clock.value;
+  const wrongGeneration = await arbiter.mutate({
+    idempotencyKey: "wrong-generation-cancel",
+    fingerprint: { method: "cancel", target: "old-turn" },
+    expectedRevision: 11,
+    lane: "cancel",
+    execute() { cancelled += 1; return "must-not-cancel"; },
+    conflict: revision => ({ ok: false, code: "conflict", revision }),
+    invalidReuse: revision => ({ ok: false, code: "reuse", revision }),
+    complete: (output, revision) => ({ ok: true, output, revision }),
+    fail: (error, revision) => ({ ok: false, code: error.message, revision }),
+  });
+  assert.equal(wrongGeneration.ok, false);
+  assert.equal(wrongGeneration.code, "conflict");
+  assert.equal(clock.value, beforeWrongCancel, "an old-turn cancellation cannot reserve a new-turn revision");
+  assert.equal(cancelled, 1);
+  releaseNewTurn("completed");
+  await newTurn;
 });
 
 test("cancel queued during durable submit admission executes before provider start", async () => {
@@ -599,6 +992,72 @@ test("different create keys for one session share one owner-side engine construc
   release();
   assert.deepEqual(await second, await first);
   assert.equal(constructions, 1);
+});
+
+test("idle owner sessions use one teardown path and remain bounded across 2.5k churn", { timeout: 30_000 }, async () => {
+  let disposed = 0;
+  const registry = new LiveRuntimeEngineRegistry({
+    maxIdleSessions: 32,
+    async createSession(input) {
+      return {
+        engine: fakeEngine(input.sessionId),
+        projectPath: input.projectPath,
+        dispose() { disposed += 1; },
+      };
+    },
+  });
+  for (let index = 0; index < 2_500; index += 1) {
+    const created = await registry.create({
+      sessionId: `churn-${String(index)}`,
+      projectPath: `/work/${String(index)}`,
+      idempotencyKey: `create-${String(index)}`,
+    });
+    assert.equal(created.ok, true);
+  }
+  await registry.settleTeardowns();
+  assert.ok(registry.list().length <= 32, `idle registry retained ${String(registry.list().length)} sessions`);
+  assert.ok(disposed >= 2_468, `only ${String(disposed)} idle sessions were disposed`);
+  await registry.disposeAll();
+});
+
+test("bounded idle teardown never evicts an active turn or an attached client", async () => {
+  let releaseTurn;
+  const disposed = [];
+  const registry = new LiveRuntimeEngineRegistry({
+    maxIdleSessions: 1,
+    async createSession(input) {
+      const engine = fakeEngine(input.sessionId);
+      if (input.sessionId === "active-turn") {
+        engine.setMode = async () => new Promise(resolve => { releaseTurn = resolve; });
+      }
+      return {
+        engine,
+        projectPath: input.projectPath,
+        dispose() { disposed.push(input.sessionId); },
+      };
+    },
+  });
+  await registry.create({ sessionId: "attached-client", projectPath: "/work/client", idempotencyKey: "create-client" });
+  assert.equal(registry.attachSession("attached-client").ok, true);
+  await registry.create({ sessionId: "active-turn", projectPath: "/work/active", idempotencyKey: "create-active" });
+  const turn = registry.invoke({
+    sessionId: "active-turn",
+    method: "setMode",
+    args: ["deep"],
+    expectedRevision: 0,
+    idempotencyKey: "active-call",
+  });
+  while (!releaseTurn) await new Promise(resolve => setImmediate(resolve));
+  await registry.create({ sessionId: "idle-candidate", projectPath: "/work/idle", idempotencyKey: "create-idle" });
+  await registry.settleTeardowns();
+  assert.equal(registry.read("active-turn").ok, true, "active provider/tool work cannot be evicted");
+  assert.equal(registry.attachSession("attached-client").ok, true, "an attached client lease cannot be evicted");
+
+  releaseTurn();
+  await turn;
+  assert.equal(await registry.releaseSession("attached-client"), true);
+  assert.ok(disposed.includes("attached-client"));
+  await registry.disposeAll();
 });
 
 test("engine RPC and web control share one revision admission and execute one same-revision mutation", async () => {

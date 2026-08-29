@@ -39,6 +39,22 @@ export type AdmitMutationResult =
       readonly acceptedRevision: number;
     };
 
+export type LookupMutationInput = AdmitMutationInput;
+
+export type LookupMutationResult =
+  | { readonly kind: "miss" }
+  | {
+      readonly kind: "replay";
+      readonly status: MutationReceiptStatus;
+      readonly acceptedRevision: number;
+      readonly result?: unknown;
+    }
+  | {
+      readonly kind: "mismatch";
+      readonly status: MutationReceiptStatus;
+      readonly acceptedRevision: number;
+    };
+
 export type CompleteMutationInput = {
   readonly sessionId: string;
   readonly domain: string;
@@ -129,6 +145,7 @@ export type UsageTotalsSnapshot = {
 type SqlRow = Record<string, SQLOutputValue>;
 
 export interface RuntimeLedger {
+  lookupMutation(input: LookupMutationInput): LookupMutationResult;
   admitMutation(input: AdmitMutationInput): AdmitMutationResult;
   completeMutation(input: CompleteMutationInput): void;
   recoverInDoubt(): number;
@@ -137,8 +154,13 @@ export interface RuntimeLedger {
   snapshotUsageTotals(sessionId: string): UsageTotalsSnapshot;
   appendRuntimeEvent(input: AppendRuntimeEventInput): RuntimeEvent;
   replayRuntimeEvents(sessionId: string, afterSeq: number): ReplayRuntimeEventsResult;
+  seedSessionRevision(sessionId: string, revision: number): number;
   getSessionState(sessionId: string): RuntimeSessionState | undefined;
   close(): void;
+}
+
+export function canonicalMutationFingerprint(value: unknown): string {
+  return canonicalJson(value, DEFAULT_FINGERPRINT_MAX_BYTES, "mutation fingerprint");
 }
 
 export function openRuntimeLedger(options: OpenRuntimeLedgerOptions): RuntimeLedger {
@@ -190,6 +212,25 @@ class SqliteRuntimeLedger implements RuntimeLedger {
     private readonly maxEventsPerSession: number,
   ) {}
 
+  lookupMutation(input: LookupMutationInput): LookupMutationResult {
+    this.assertOpen();
+    const sessionId = boundedIdentifier(input.sessionId, "sessionId", 512);
+    const domain = boundedIdentifier(input.domain, "domain", 128);
+    const idempotencyKey = boundedIdentifier(input.idempotencyKey, "idempotencyKey", 512);
+    const fingerprint = canonicalJson(input.fingerprint, this.fingerprintMaxBytes, "mutation fingerprint");
+    const existing = row(
+      this.db
+        .prepare(
+          `SELECT fingerprint_json, status, accepted_revision, result_json
+           FROM mutation_receipts
+           WHERE session_id = ? AND domain = ? AND idempotency_key = ?`,
+        )
+        .get(sessionId, domain, idempotencyKey),
+    );
+    if (existing === undefined) return { kind: "miss" };
+    return receiptLookupResult(existing, fingerprint);
+  }
+
   admitMutation(input: AdmitMutationInput): AdmitMutationResult {
     this.assertOpen();
     const sessionId = boundedIdentifier(input.sessionId, "sessionId", 512);
@@ -209,18 +250,7 @@ class SqliteRuntimeLedger implements RuntimeLedger {
           .get(sessionId, domain, idempotencyKey),
       );
       if (existing !== undefined) {
-        const status = receiptStatus(existing.status);
-        const acceptedRevision = safeIntegerColumn(existing.accepted_revision, "accepted_revision");
-        if (existing.fingerprint_json !== fingerprint) {
-          return { kind: "mismatch", status, acceptedRevision };
-        }
-        const resultJson = nullableStringColumn(existing.result_json, "result_json");
-        return {
-          kind: "replay",
-          status,
-          acceptedRevision,
-          ...(resultJson === null ? {} : { result: JSON.parse(resultJson) as unknown }),
-        };
+        return receiptLookupResult(existing, fingerprint);
       }
 
       this.db.prepare("UPDATE runtime_sessions SET revision = revision + 1 WHERE session_id = ?").run(sessionId);
@@ -441,11 +471,16 @@ class SqliteRuntimeLedger implements RuntimeLedger {
         .get(normalized),
     );
     if (session === undefined) {
-      return { kind: "events", lowWatermark: 1, nextEventSeq: 1, events: [] };
+      return {
+        kind: normalizedAfterSeq === 0 ? "events" : "expired",
+        lowWatermark: 1,
+        nextEventSeq: 1,
+        events: [],
+      };
     }
     const lowWatermark = safeIntegerColumn(session.event_low_watermark, "event_low_watermark");
     const nextEventSeq = safeIntegerColumn(session.next_event_seq, "next_event_seq");
-    if (normalizedAfterSeq < lowWatermark - 1) {
+    if (normalizedAfterSeq < lowWatermark - 1 || normalizedAfterSeq > nextEventSeq - 1) {
       return { kind: "expired", lowWatermark, nextEventSeq, events: [] };
     }
     const values = this.db
@@ -464,6 +499,23 @@ class SqliteRuntimeLedger implements RuntimeLedger {
         payload: JSON.parse(stringColumn(value.payload_json, "payload_json")) as unknown,
       })),
     };
+  }
+
+  seedSessionRevision(sessionId: string, revision: number): number {
+    this.assertOpen();
+    const normalized = boundedIdentifier(sessionId, "sessionId", 512);
+    const normalizedRevision = nonNegativeSafeInteger(revision, "revision");
+    return inImmediateTransaction(this.db, () => {
+      ensureSession(this.db, normalized);
+      this.db
+        .prepare("UPDATE runtime_sessions SET revision = ? WHERE session_id = ? AND revision < ?")
+        .run(normalizedRevision, normalized, normalizedRevision);
+      const session = requiredRow(
+        this.db.prepare("SELECT revision FROM runtime_sessions WHERE session_id = ?").get(normalized),
+        `session ${normalized}`,
+      );
+      return safeIntegerColumn(session.revision, "revision");
+    });
   }
 
   getSessionState(sessionId: string): RuntimeSessionState | undefined {
@@ -489,8 +541,11 @@ class SqliteRuntimeLedger implements RuntimeLedger {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    this.db.close();
+    try {
+      this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } finally {
+      this.db.close();
+    }
   }
 
   private assertOpen(): void {
@@ -866,6 +921,21 @@ function pragmaNumber(db: DatabaseSync, name: "application_id" | "user_version")
 function receiptStatus(value: SQLOutputValue | undefined): MutationReceiptStatus {
   if (value === "admitted" || value === "completed" || value === "failed" || value === "in_doubt") return value;
   throw new Error("Runtime ledger contains an invalid receipt status.");
+}
+
+function receiptLookupResult(existing: SqlRow, fingerprint: string): Exclude<LookupMutationResult, { kind: "miss" }> {
+  const status = receiptStatus(existing.status);
+  const acceptedRevision = safeIntegerColumn(existing.accepted_revision, "accepted_revision");
+  if (existing.fingerprint_json !== fingerprint) {
+    return { kind: "mismatch", status, acceptedRevision };
+  }
+  const resultJson = nullableStringColumn(existing.result_json, "result_json");
+  return {
+    kind: "replay",
+    status,
+    acceptedRevision,
+    ...(resultJson === null ? {} : { result: JSON.parse(resultJson) as unknown }),
+  };
 }
 
 function row(value: unknown): SqlRow | undefined {

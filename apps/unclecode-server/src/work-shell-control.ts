@@ -9,6 +9,7 @@ type PendingDecision = {
   readonly kind: "security-approval" | "user-decision";
   readonly questions: readonly { readonly options: readonly DecisionOption[] }[];
 };
+type AgentRun = { readonly id: string; readonly status?: string | undefined };
 
 export type WorkShellControlEngine = {
   getState(): {
@@ -17,7 +18,10 @@ export type WorkShellControlEngine = {
     readonly model: string;
     readonly mode: string;
     readonly uiLocale: "en" | "ko";
-    readonly agentConsole: Readonly<Record<string, unknown>> & { readonly pendingDecision?: PendingDecision | undefined };
+    readonly agentConsole: Readonly<Record<string, unknown>> & {
+      readonly pendingDecision?: PendingDecision | undefined;
+      readonly agents?: readonly AgentRun[] | undefined;
+    };
   };
   subscribe(listener: () => void): () => void;
   interruptTurn(): boolean | void;
@@ -131,10 +135,28 @@ export function attachWorkShellRuntime(
       if (request.action === "follow-up" && !messageFrom(request)) {
         return deny("invalid_action", "A follow-up message is required.");
       }
+      if (request.action === "cancel") {
+        const lifecycle = input.engine.getTurnLifecycle();
+        const activeLifecycle = lifecycle.state === "running"
+          || lifecycle.state === "pause_pending"
+          || lifecycle.state === "paused";
+        if (!activeLifecycle && !input.engine.getState().isBusy && !mutationArbiter.hasCancellableMutation()) {
+          return deny("invalid_action", "No admitted or active turn could be cancelled.");
+        }
+      }
       if (request.action === "steer") {
         const agentRunId = request.payload?.agentRunId;
         if (!messageFrom(request) || typeof agentRunId !== "string" || agentRunId.trim().length === 0) {
           return deny("invalid_action", "Steer requires an explicit agentRunId and message.");
+        }
+        const agents = input.engine.getState().agentConsole.agents;
+        const target = agents?.find(agent => agent.id === agentRunId.trim());
+        const settled = target?.status === "completed"
+          || target?.status === "failed"
+          || target?.status === "cancelled"
+          || target?.status === "interrupted";
+        if (agents && (!target || settled)) {
+          return deny("denied", "The selected agent run is no longer available for steering.");
         }
       }
       if (request.action === "approve") {

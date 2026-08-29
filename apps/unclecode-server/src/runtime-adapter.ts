@@ -1,4 +1,5 @@
 import { createControlRoomProjection, type ControlRoomProjection, type RuntimeReadSource } from "./control-room.js";
+import { canonicalMutationFingerprint } from "./runtime-ledger.js";
 
 export const CONTROL_ACTIONS = ["pause", "resume", "cancel", "approve", "steer", "follow-up"] as const;
 export type ControlAction = (typeof CONTROL_ACTIONS)[number];
@@ -37,7 +38,7 @@ export function createRuntimeAdapter(input: {
   const pendingReceipts = new Map<string, PendingReceipt>();
   const lifecycleTransitionTails = new Map<string, Promise<void>>();
 
-  const fingerprint = (request: RuntimeControlRequest): string => JSON.stringify({
+  const fingerprint = (request: RuntimeControlRequest): string => canonicalMutationFingerprint({
     action: request.action,
     expectedRevision: request.expectedRevision,
     payload: request.payload ?? null,
@@ -58,8 +59,17 @@ export function createRuntimeAdapter(input: {
     const source = await input.read();
     const session = source.sessions.find(item => item.sessionId === request.sessionId);
     if (!session) return { ok: false, code: "not_found", message: "Unknown session." };
-    if (session.revision !== request.expectedRevision) {
-      return { ok: false, code: "revision_conflict", message: "Session revision changed.", revision: session.revision };
+    // A targeted cancel is admitted against the immutable turn generation by
+    // the owner arbiter, so a stale projection must not reject it here. Other
+    // controls retain this cheap boundary check before reaching test doubles or
+    // legacy control ports that do not own an arbiter.
+    if (request.action !== "cancel" && session.revision !== request.expectedRevision) {
+      return {
+        ok: false,
+        code: "revision_conflict",
+        message: "Session revision changed.",
+        revision: session.revision,
+      };
     }
     return await input.controls.control(request);
   };

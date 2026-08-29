@@ -15,7 +15,10 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 
-import { openRuntimeLedger } from "../../apps/unclecode-server/src/runtime-ledger.ts";
+import {
+  canonicalMutationFingerprint,
+  openRuntimeLedger,
+} from "../../apps/unclecode-server/src/runtime-ledger.ts";
 
 const tempDirectories = [];
 
@@ -102,6 +105,76 @@ test("mutation admission is atomic, canonical, durable, and detects changed fing
     nextEventSeq: 1,
     eventLowWatermark: 1,
   });
+  ledger.close();
+});
+
+test("mutation fingerprints share one bounded canonical representation", () => {
+  assert.equal(
+    canonicalMutationFingerprint({ action: "steer", payload: { message: "review", agentRunId: "agent-1" } }),
+    canonicalMutationFingerprint({ payload: { agentRunId: "agent-1", message: "review" }, action: "steer" }),
+  );
+  assert.throws(
+    () => canonicalMutationFingerprint({ message: "x".repeat(4_096) }),
+    /fingerprint exceeds the 4096 byte limit/i,
+  );
+});
+
+test("receipt lookup is non-mutating and distinguishes replay from changed reuse", () => {
+  const ledger = openRuntimeLedger({ dbPath: makeLedgerPath() });
+  const ref = {
+    sessionId: "session-lookup",
+    domain: "runtime-session",
+    idempotencyKey: "control-1",
+  };
+
+  assert.deepEqual(ledger.lookupMutation({ ...ref, fingerprint: { action: "pause" } }), { kind: "miss" });
+  assert.equal(ledger.getSessionState("session-lookup"), undefined, "a lookup miss cannot create revision state");
+  assert.deepEqual(
+    ledger.admitMutation({ ...ref, fingerprint: { action: "pause" } }),
+    { kind: "admitted", acceptedRevision: 1 },
+  );
+  ledger.completeMutation({
+    ...ref,
+    status: "completed",
+    result: { ok: true, revision: 1, state: "paused" },
+  });
+  assert.deepEqual(
+    ledger.lookupMutation({ ...ref, fingerprint: { action: "pause" } }),
+    {
+      kind: "replay",
+      status: "completed",
+      acceptedRevision: 1,
+      result: { ok: true, revision: 1, state: "paused" },
+    },
+  );
+  assert.deepEqual(
+    ledger.lookupMutation({ ...ref, fingerprint: { action: "resume" } }),
+    { kind: "mismatch", status: "completed", acceptedRevision: 1 },
+  );
+  ledger.close();
+});
+
+test("legacy bootstrap revisions seed monotonically without minting receipts", () => {
+  const ledger = openRuntimeLedger({ dbPath: makeLedgerPath() });
+
+  assert.equal(ledger.seedSessionRevision("session-seed", 37), 37);
+  assert.equal(ledger.seedSessionRevision("session-seed", 12), 37);
+  assert.equal(ledger.seedSessionRevision("session-seed", 41), 41);
+  assert.deepEqual(ledger.getSessionState("session-seed"), {
+    sessionId: "session-seed",
+    revision: 41,
+    nextEventSeq: 1,
+    eventLowWatermark: 1,
+  });
+  assert.deepEqual(
+    ledger.admitMutation({
+      sessionId: "session-seed",
+      domain: "runtime-session",
+      idempotencyKey: "after-bootstrap",
+      fingerprint: { method: "setMode", args: ["deep"] },
+    }),
+    { kind: "admitted", acceptedRevision: 42 },
+  );
   ledger.close();
 });
 
@@ -334,6 +407,30 @@ test("runtime event sequence survives restart and reports replay expiry after bo
     revision: 0,
     nextEventSeq: 7,
     eventLowWatermark: 4,
+  });
+  ledger.close();
+});
+
+test("unknown and future event cursors expire while the current tip remains valid", () => {
+  const ledger = openRuntimeLedger({ dbPath: makeLedgerPath() });
+  assert.deepEqual(ledger.replayRuntimeEvents("unknown-session", 1), {
+    kind: "expired",
+    lowWatermark: 1,
+    nextEventSeq: 1,
+    events: [],
+  });
+  ledger.appendRuntimeEvent({ sessionId: "cursor-session", type: "ready", payload: null });
+  assert.deepEqual(ledger.replayRuntimeEvents("cursor-session", 1), {
+    kind: "events",
+    lowWatermark: 1,
+    nextEventSeq: 2,
+    events: [],
+  });
+  assert.deepEqual(ledger.replayRuntimeEvents("cursor-session", 2), {
+    kind: "expired",
+    lowWatermark: 1,
+    nextEventSeq: 2,
+    events: [],
   });
   ledger.close();
 });

@@ -104,11 +104,15 @@ test("remote tool-history toggle retries one non-receipted revision conflict exa
 test("remote tool-history toggle replays a lost response with one receipt identity", async () => {
   let revision = 6;
   let state = { traceMode: "minimal" };
+  let reads = 0;
   let executions = 0;
   const receipts = new Map();
   const attempts = [];
   const client = {
-    async readEngineState() { return { ok: true, revision, state, result: null }; },
+    async readEngineState() {
+      reads += 1;
+      return { ok: true, revision, state, result: null };
+    },
     async invokeEngineMethod(input) {
       attempts.push(input);
       const cached = receipts.get(input.idempotencyKey);
@@ -116,7 +120,7 @@ test("remote tool-history toggle replays a lost response with one receipt identi
       executions += 1;
       revision = 7;
       state = { traceMode: "verbose" };
-      const response = { ok: true, revision, state, result: undefined };
+      const response = { ok: true, revision, result: undefined };
       receipts.set(input.idempotencyKey, response);
       const error = new Error("socket closed after owner committed receipt");
       error.code = "ECONNRESET";
@@ -130,6 +134,7 @@ test("remote tool-history toggle replays a lost response with one receipt identi
   assert.equal(attempts.length, 2);
   assert.equal(attempts[0].idempotencyKey, attempts[1].idempotencyKey);
   assert.equal(attempts[0].expectedRevision, attempts[1].expectedRevision);
+  assert.equal(reads, 2, "a receipt-sized replay must refresh authoritative owner state exactly once");
   assert.equal(engine.getState().traceMode, "verbose");
   engine.dispose();
 });
