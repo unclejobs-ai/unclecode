@@ -343,6 +343,26 @@ type QualityDecisionDetail = {
   readonly artifactRefs?: readonly string[] | undefined;
 };
 
+export type WorkSafetyDomain =
+  | "creator"
+  | "auth"
+  | "credentials"
+  | "access-control"
+  | "destructive-data"
+  | "billing"
+  | "deploy"
+  | "release";
+
+export type WorkMutationBoundary = "read-only" | "mutation" | "ambiguous";
+
+export type WorkSafetyBoundary = {
+  readonly domains: readonly WorkSafetyDomain[];
+  readonly creatorIntent: boolean;
+  readonly risk: RiskLevel;
+  readonly mutation: WorkMutationBoundary;
+  readonly requiresOrchestration: boolean;
+};
+
 class QualityLifecycleStop extends Error {
   constructor() {
     super("Quality lifecycle terminated explicitly.");
@@ -350,15 +370,120 @@ class QualityLifecycleStop extends Error {
   }
 }
 
-function creatorIntentFromPrompt(prompt: string): boolean {
-  return /\b(?:create|evolve|author|modify)\b[\s\S]{0,80}\b(?:agent|plugin|skill|benchmark|quality\s+policy)\b/iu.test(prompt);
+type MultilingualTerms = {
+  readonly en: readonly string[];
+  readonly ko: readonly string[];
+};
+
+const CREATOR_ASSET_TERMS: MultilingualTerms = {
+  en: ["agent", "plugin", "skill", "benchmark", "quality policy"],
+  ko: ["에이전트", "플러그인", "스킬", "벤치마크", "품질 정책"],
+};
+
+const MUTATION_TERMS: MultilingualTerms = {
+  en: [
+    "add", "author", "build", "change", "charge", "configure", "create", "delete",
+    "deploy", "drop", "evolve", "grant", "implement", "modify", "publish", "purge",
+    "refund", "release", "remove", "reset", "revoke", "rotate", "set", "truncate",
+    "update", "wipe",
+  ],
+  ko: [
+    "추가", "작성", "구축", "변경", "과금", "설정해", "생성", "만들어", "삭제",
+    "배포", "폐기", "진화", "부여", "구현", "수정", "게시", "정리", "환불",
+    "출시", "제거", "초기화", "회수", "교체", "재설정",
+  ],
+};
+
+const READ_ONLY_TERMS: MultilingualTerms = {
+  en: [
+    "audit", "check", "describe", "explain", "inspect", "list", "review", "show",
+    "status", "tell me", "what", "why", "how",
+  ],
+  ko: ["감사", "알려", "확인", "설명", "조회", "목록", "검토", "보여", "상태", "뭐", "무엇", "왜", "어떻게"],
+};
+
+const SAFETY_DOMAIN_TERMS: ReadonlyArray<readonly [Exclude<WorkSafetyDomain, "creator">, MultilingualTerms]> = [
+  ["credentials", {
+    en: ["api key", "credential", "credentials", "password", "secret", "token"],
+    ko: ["api 키", "자격 증명", "인증 정보", "비밀번호", "암호", "시크릿", "토큰"],
+  }],
+  ["access-control", {
+    en: ["access control", "acl", "authorization", "permission", "role"],
+    ko: ["접근 제어", "접근 권한", "인가", "권한", "역할"],
+  }],
+  ["destructive-data", {
+    en: ["database table", "database", "customer data", "production data", "records", "table"],
+    ko: ["데이터베이스 테이블", "데이터베이스", "고객 데이터", "운영 데이터", "레코드", "테이블"],
+  }],
+  ["billing", {
+    en: ["billing", "charge", "invoice", "payment", "refund", "subscription"],
+    ko: ["결제", "과금", "청구", "송장", "환불", "구독", "요금제"],
+  }],
+  ["deploy", {
+    en: ["deploy", "deployment"],
+    ko: ["배포"],
+  }],
+  ["release", {
+    en: ["package publish", "publish", "release"],
+    ko: ["패키지 게시", "게시", "릴리스", "출시"],
+  }],
+  ["auth", {
+    en: ["auth", "authentication", "login", "oauth", "sign in"],
+    ko: ["인증", "로그인", "오어스", "사인인"],
+  }],
+];
+
+function normalizedEnglish(prompt: string): string {
+  return ` ${prompt.toLocaleLowerCase("en-US").replace(/[^a-z0-9]+/g, " ").trim()} `;
 }
 
-function riskFromPrompt(prompt: string): RiskLevel {
-  if (/\b(?:production|payment|billing|credential|secret|authorization|security-critical)\b/iu.test(prompt)) {
-    return "high";
-  }
-  return "low";
+function containsTerms(prompt: string, terms: MultilingualTerms): boolean {
+  const english = normalizedEnglish(prompt);
+  return terms.en.some((term) => english.includes(` ${term} `))
+    || terms.ko.some((term) => prompt.includes(term));
+}
+
+/**
+ * Typed safety routing boundary for operator-authored prompts. The tables are
+ * deliberately bilingual and the result is consumed before any agent with
+ * workspace tools is dispatched.
+ */
+export function classifyWorkSafetyBoundary(prompt: string): WorkSafetyBoundary {
+  const creatorAsset = containsTerms(prompt, CREATOR_ASSET_TERMS);
+  const mutationSignal = containsTerms(prompt, MUTATION_TERMS);
+  const readOnlySignal = containsTerms(prompt, READ_ONLY_TERMS);
+  const creatorIntent = creatorAsset && mutationSignal;
+  const domains: WorkSafetyDomain[] = [
+    ...(creatorIntent ? ["creator" as const] : []),
+    ...SAFETY_DOMAIN_TERMS
+      .filter(([, terms]) => containsTerms(prompt, terms))
+      .map(([domain]) => domain),
+  ];
+  const distinctDomains = [...new Set(domains)];
+  const mutation: WorkMutationBoundary = mutationSignal && !readOnlySignal
+    ? "mutation"
+    : readOnlySignal && !mutationSignal
+      ? "read-only"
+      : distinctDomains.length > 0
+        ? "ambiguous"
+        : "read-only";
+  const highImpact = distinctDomains.some((domain) => domain !== "creator");
+  return {
+    domains: distinctDomains,
+    creatorIntent,
+    risk: highImpact ? "high" : "low",
+    mutation,
+    requiresOrchestration: distinctDomains.length > 0 && mutation !== "read-only",
+  };
+}
+
+function creatorMutableTargets(prompt: string): readonly string[] {
+  const explicit = [...new Set(buildComplexTasks(prompt).flatMap((task) => task.writePaths))]
+    .sort((left, right) => left.localeCompare(right));
+  if (explicit.length > 0) return explicit;
+  if (containsTerms(prompt, { en: ["plugin"], ko: ["플러그인"] })) return [".unclecode/plugins"];
+  if (containsTerms(prompt, { en: ["agent", "skill"], ko: ["에이전트", "스킬"] })) return ["skills"];
+  return [];
 }
 
 function decisionReason(decision: PluginDecisionAggregate): string {
@@ -489,6 +614,19 @@ function staleArtifactDecision(stage: "critic" | "promote"): PluginDecisionAggre
       failures: [code],
     }],
     failures: [code],
+  };
+}
+
+function staleDirectWorkspaceDecision(): PluginDecisionAggregate {
+  return {
+    action: "block",
+    decisions: [{
+      pluginName: "unclecode-runtime",
+      action: "block",
+      reason: "The direct-turn workspace manifest changed during completion; mutation evidence is stale.",
+      failures: ["DIRECT_WORKSPACE_MANIFEST_CHANGED_DURING_COMPLETION"],
+    }],
+    failures: ["DIRECT_WORKSPACE_MANIFEST_CHANGED_DURING_COMPLETION"],
   };
 }
 
@@ -752,11 +890,14 @@ export class WorkAgent<
     this.directAgent.updateMode?.(mode);
   }
 
-  private createQualityState(prompt: string, complexity: WorkIntent): QualityRuntimeState {
+  private createQualityState(
+    complexity: WorkIntent,
+    safety: WorkSafetyBoundary,
+  ): QualityRuntimeState {
     const runId = `quality-${randomUUID()}`;
     const graphId = `goal-${runId}`;
-    const risk = this.qualityRisk ?? riskFromPrompt(prompt);
-    const creatorIntent = creatorIntentFromPrompt(prompt);
+    const risk = this.qualityRisk ?? safety.risk;
+    const creatorIntent = safety.creatorIntent;
     const profile = classifyQualityProfile({
       complexity,
       risk,
@@ -1176,6 +1317,188 @@ export class WorkAgent<
   }
 
   /**
+   * Creator work never enters the ordinary direct/worker runtime. The creator
+   * service owns its isolated Git worktree and returns a proposal whose type
+   * keeps human approval pending; this method has no promotion capability.
+   */
+  private async runCreatorEvolutionTurn(
+    state: QualityRuntimeState,
+    prompt: string,
+    signal: AbortSignal,
+  ): Promise<WorkAgentTurnResult> {
+    state.graph = {
+      ...this.directQualityGraph(state),
+      currentStage: "promote",
+    };
+    state.completedStages.add("work");
+    this.emitQualityStage(state, "work");
+    const targets = creatorMutableTargets(prompt);
+    const producerId = `creator:${this.directRoute.provider}:${this.directRoute.model}`;
+    const block = (failure: string, reason: string): WorkAgentTurnResult => {
+      this.recordQualityDecision(state, "promote", {
+        action: "block",
+        decisions: [{
+          pluginName: "unclecode-evolution-runtime",
+          action: "block",
+          reason,
+          failures: [failure],
+        }],
+        failures: [failure],
+      }, { independentVerification: false });
+      return this.terminateQuality(state);
+    };
+    if (!this.creatorEvolutionService) {
+      return block(
+        "CREATOR_EVOLUTION_LIFECYCLE_UNAVAILABLE",
+        "Creator work requires the isolated evolution runtime before any mutation-capable execution.",
+      );
+    }
+
+    let evolution: Awaited<ReturnType<CreatorEvolutionService["run"]>>;
+    try {
+      evolution = await this.creatorEvolutionService.run({
+        runId: state.runId,
+        workspaceRoot: this.workspaceRoot,
+        prompt,
+        creatorId: producerId,
+        mutableTargets: targets,
+        dispatchEvolutionProposed: (event) => this.pluginHost!.dispatchEvolutionProposed(event),
+        signal,
+      });
+    } catch (error) {
+      return block(
+        "CREATOR_EVOLUTION_EXECUTION_FAILED",
+        `Creator evolution failed before isolated completion: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    if (evolution.recorded) {
+      this.emitTrace({
+        type: "evolution.proposed",
+        level: "high-signal",
+        runId: state.runId,
+        recorded: true,
+        proposal: evolution.projection,
+        startedAt: Date.parse(evolution.projection.createdAt),
+      });
+    }
+    // The evolution service's distinct held-out evaluator is the creator
+    // critic; no ordinary tool-capable quality agent is dispatched for it.
+    state.completedStages.add("critic");
+    state.completedStages.add("promote");
+    const artifactHash = evolution.proposal?.validationEvidence[0]?.artifactHash
+      ?? evolution.projection.hashes.candidateArtifact
+      ?? `sha256:${createHash("sha256").update(JSON.stringify(evolution.projection)).digest("hex")}`;
+    const completedAt = new Date().toISOString();
+    const validation = evolution.proposal?.validationEvidence[0];
+    const evidence: GateEvidence[] = validation && evolution.proposal
+      ? [{
+          kind: "artifact",
+          artifactHash,
+          producerId,
+          result: validation.result,
+          timestamp: validation.timestamp,
+        }, {
+          kind: "reviewer",
+          artifactHash,
+          producerId,
+          reviewerId: evolution.proposal.evaluatorId,
+          result: validation.result,
+          timestamp: validation.timestamp,
+        }]
+      : [{
+          kind: "artifact",
+          artifactHash,
+          producerId,
+          result: evolution.status === "pr-ready" ? "pass" : "fail",
+          timestamp: completedAt,
+        }];
+    const projection: QualityRunProjection = {
+      runId: state.runId,
+      profile: state.profile,
+      currentStage: "promote",
+      currentPhase: "act",
+      score: null,
+      failures: [...evolution.projection.failures],
+      iteration: state.iteration,
+      refineCount: state.refineCount,
+      pivotCount: state.pivotCount,
+      gateDecision: evolution.status === "pr-ready" ? "proceed" : "block",
+      completedStages: [...state.completedStages],
+    };
+    let completion = await this.pluginHost!.dispatchBeforeRunComplete({
+      runId: state.runId,
+      graph: state.graph,
+      projection,
+      evidence,
+      currentArtifactHash: artifactHash,
+      producerId,
+      independentReviewerAvailable: evolution.status === "pr-ready",
+      reviewRequired: true,
+      evolution: {
+        proposalId: evolution.projection.id,
+        state: evolution.status,
+        recorded: evolution.recorded,
+        stale: evolution.projection.stale,
+        ...(evolution.proposal === undefined ? {} : { proposal: evolution.proposal }),
+        ...(evolution.context === undefined ? {} : { context: evolution.context }),
+      },
+    });
+
+    if (evolution.status === "pr-ready") {
+      try {
+        evolution = await this.creatorEvolutionService.verifyFresh(evolution);
+        if (evolution.status !== "pr-ready" || evolution.projection.stale) {
+          const failures = evolution.projection.failures.length > 0
+            ? evolution.projection.failures
+            : ["CREATOR_EVOLUTION_STALE"];
+          completion = {
+            action: "block",
+            decisions: [{
+              pluginName: "unclecode-evolution-runtime",
+              action: "block",
+              reason: "Creator evolution changed during completion validation.",
+              failures,
+            }],
+            failures,
+          };
+        }
+      } catch {
+        completion = {
+          action: "block",
+          decisions: [{
+            pluginName: "unclecode-evolution-runtime",
+            action: "block",
+            reason: "Creator evolution freshness could not be proven.",
+            failures: ["CREATOR_EVOLUTION_FRESHNESS_FAILED"],
+          }],
+          failures: ["CREATOR_EVOLUTION_FRESHNESS_FAILED"],
+        };
+      }
+    }
+
+    this.recordQualityDecision(state, "promote", completion, {
+      artifactHash,
+      evidenceRefs: [...evolution.projection.artifactRefs],
+      independentVerification: evolution.status === "pr-ready",
+    });
+    if (state.terminal) return this.terminateQuality(state);
+    const qualityStatus = completion.action;
+    this.completeQuality(state, qualityStatus, "promote", {
+      evidenceRefs: [...evolution.projection.artifactRefs],
+      failures: completion.failures,
+      independentVerification: evolution.status === "pr-ready",
+    });
+    const location = evolution.projection.isolatedBranch
+      ? ` Isolated candidate: ${evolution.projection.isolatedBranch}.`
+      : "";
+    return {
+      text: `${evolution.projection.summary}${location} Human promotion remains required; the primary workspace was not promoted.`,
+      qualityStatus,
+    };
+  }
+
+  /**
    * Simple and research turns have no planner or execution DAG. They still
    * cross the in-process SCC completion boundary with one bounded artifact
    * bound to the provider result. Minimal completion can proceed without a
@@ -1213,6 +1536,7 @@ export class WorkAgent<
       const summary = status === "cancelled"
         ? "Direct provider turn cancelled."
         : `Direct provider turn failed: ${error instanceof Error ? error.message : String(error)}`;
+      const workspaceManifest = state.artifacts.captureWorkspaceInventoryManifest();
       const artifact = state.artifacts.persistDirectTurn({
         intent,
         iteration: state.iteration,
@@ -1220,6 +1544,7 @@ export class WorkAgent<
         summary,
         completedAt: new Date().toISOString(),
         status,
+        workspaceManifest,
       });
       state.completedStages.add("work");
       this.recordQualityDecision(state, "work", {
@@ -1245,6 +1570,7 @@ export class WorkAgent<
       throw error;
     }
 
+    const workspaceManifest = state.artifacts.captureWorkspaceInventoryManifest();
     const artifact = state.artifacts.persistDirectTurn({
       intent,
       iteration: state.iteration,
@@ -1252,12 +1578,13 @@ export class WorkAgent<
       summary: directResult.text,
       completedAt: new Date().toISOString(),
       status: "completed",
+      workspaceManifest,
     });
     const evidence: GateEvidence[] = [{
       kind: "artifact",
       artifactHash: artifact.artifactHash,
       producerId,
-      result: "pass",
+      result: workspaceManifest.evidenceStatus === "supported" ? "pass" : "fail",
       timestamp: new Date().toISOString(),
     }];
     state.completedStages.add("work");
@@ -1284,6 +1611,43 @@ export class WorkAgent<
       independentReviewerAvailable: false,
       reviewRequired: state.profile !== "minimal",
     });
+    const currentManifest = state.artifacts.captureWorkspaceInventoryManifest();
+    if (workspaceManifest.evidenceStatus === "unsupported") {
+      this.recordUnsupportedOwnershipDecision(state, "work", workspaceManifest.unsupportedEntries, {
+        artifactHash: artifact.artifactHash,
+        reviewedArtifactHash: workspaceManifest.artifactHash,
+        currentArtifactHash: currentManifest.artifactHash,
+        stale: true,
+        evidenceRefs: [artifact.path],
+        independentVerification: false,
+        route,
+      });
+      return this.terminateQuality(state);
+    }
+    if (currentManifest.evidenceStatus === "unsupported") {
+      this.recordUnsupportedOwnershipDecision(state, "work", currentManifest.unsupportedEntries, {
+        artifactHash: artifact.artifactHash,
+        reviewedArtifactHash: workspaceManifest.artifactHash,
+        currentArtifactHash: currentManifest.artifactHash,
+        stale: true,
+        evidenceRefs: [artifact.path],
+        independentVerification: false,
+        route,
+      });
+      return this.terminateQuality(state);
+    }
+    if (currentManifest.artifactHash !== workspaceManifest.artifactHash) {
+      this.recordQualityDecision(state, "work", staleDirectWorkspaceDecision(), {
+        artifactHash: artifact.artifactHash,
+        reviewedArtifactHash: workspaceManifest.artifactHash,
+        currentArtifactHash: currentManifest.artifactHash,
+        stale: true,
+        evidenceRefs: [artifact.path],
+        independentVerification: false,
+        route,
+      });
+      return this.terminateQuality(state);
+    }
     const decision = observed;
     this.recordQualityDecision(state, "work", decision, {
       artifactHash: artifact.artifactHash,
@@ -1352,15 +1716,18 @@ export class WorkAgent<
       return await this.runMainTurn(prompt, attachments, turnOptions);
     }
 
+    const safety = classifyWorkSafetyBoundary(classificationPrompt);
     const classifiedIntent = this.pluginHost ? classifyWorkIntent(classificationPrompt, this.mode) : undefined;
-    let effectiveIntent = classifiedIntent;
-    const quality = classifiedIntent ? this.createQualityState(classificationPrompt, classifiedIntent) : undefined;
-    if (quality && this.pluginHost && classifiedIntent) {
+    let effectiveIntent = classifiedIntent && safety.requiresOrchestration
+      ? "complex"
+      : classifiedIntent;
+    const quality = effectiveIntent ? this.createQualityState(effectiveIntent, safety) : undefined;
+    if (quality && this.pluginHost && effectiveIntent) {
       this.emitQualityStage(quality, "explore");
       const classified = await this.pluginHost.dispatchRunClassified({
         runId: quality.runId,
         prompt: classificationPrompt,
-        complexity: classifiedIntent,
+        complexity: effectiveIntent,
         risk: quality.risk,
         creatorIntent: quality.creatorIntent,
         proposedProfile: quality.profile,
@@ -1370,6 +1737,9 @@ export class WorkAgent<
         this.recordQualityDecision(quality, "explore", classified);
       }
       if (quality.terminal) return this.terminateQuality(quality);
+    }
+    if (quality?.profile === "creator" && this.pluginHost) {
+      return await this.runCreatorEvolutionTurn(quality, classificationPrompt, turnSignal);
     }
 
     // Empty until the plan is accepted; the controller refuses any dispatch

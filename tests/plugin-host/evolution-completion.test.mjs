@@ -16,17 +16,28 @@ const proposal = {
   heldOutBenchmarkId: "held-out-v1",
   baselineScore: 0.7,
   candidateScore: 0.85,
-  validationEvidence: [{
-    kind: "metric",
-    artifactHash: "sha256:candidate",
-    producerId: "creator-1",
-    result: "pass",
-    timestamp: "2026-08-28T12:00:00.000Z",
-  }],
+  validationEvidence: [
+    {
+      kind: "artifact",
+      artifactHash: "sha256:candidate",
+      producerId: "creator-1",
+      result: "pass",
+      timestamp: "2026-08-28T12:00:00.000Z",
+    },
+    {
+      kind: "reviewer",
+      artifactHash: "sha256:candidate",
+      producerId: "creator-1",
+      reviewerId: "evaluator-1",
+      result: "pass",
+      timestamp: "2026-08-28T12:00:00.000Z",
+    },
+  ],
   humanApproval: "pending",
 };
 
 const context = {
+  currentArtifactHash: "sha256:candidate",
   evaluatorAssets: ["host/evaluator.json"],
   policyAssets: ["AGENTS.md"],
   benchmarkAssets: ["bench/held-out.json"],

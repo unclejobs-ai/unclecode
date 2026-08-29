@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -83,16 +84,27 @@ function createRecordedEvolutionService(order, state = "pr-ready", recorded = tr
         heldOutBenchmarkId: "held-out-suite-v1",
         baselineScore: 0.7,
         candidateScore: 0.9,
-        validationEvidence: [{
-          kind: "metric",
-          artifactHash: evolutionHash,
-          producerId: input.creatorId,
-          result: "pass",
-          timestamp,
-        }],
+        validationEvidence: [
+          {
+            kind: "artifact",
+            artifactHash: evolutionHash,
+            producerId: input.creatorId,
+            result: "pass",
+            timestamp,
+          },
+          {
+            kind: "reviewer",
+            artifactHash: evolutionHash,
+            producerId: input.creatorId,
+            reviewerId: "held-out-evaluator",
+            result: "pass",
+            timestamp,
+          },
+        ],
         humanApproval: "pending",
       };
       const context = {
+        currentArtifactHash: evolutionHash,
         evaluatorAssets: ["host/evaluator.json"],
         policyAssets: ["AGENTS.md"],
         benchmarkAssets: ["bench/held-out.json"],
@@ -493,7 +505,7 @@ async function persistAndResumeTracePrefix(workspace, traces, endIndex, sessionI
   });
 }
 
-test("creator promote invokes the recorded evolution lifecycle before completion and rechecks freshness", async () => {
+test("creator routing invokes the recorded evolution lifecycle before completion and rechecks freshness", async () => {
   const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-creator-evolution-"));
   const order = [];
   const creatorEvolutionService = createRecordedEvolutionService(order);
@@ -517,8 +529,10 @@ test("creator promote invokes the recorded evolution lifecycle before completion
       "create and refactor an agent skill using v1 foundation and integration safely",
     );
 
-    assert.equal(result.qualityStatus, "proceed");
-    assert.deepEqual(harness.reviewCalls, ["critic", "promote"]);
+    assert.equal(result.qualityStatus, "proceed", JSON.stringify({ result, traces: harness.traces }, null, 2));
+    assert.deepEqual(harness.plannerCalls, []);
+    assert.deepEqual(harness.workerCalls, []);
+    assert.deepEqual(harness.reviewCalls, []);
     assert.equal(harness.evolutionEvents.length, 1);
     assert.equal(harness.completionEvents.length, 1);
     assert.equal(harness.completionEvents[0].evolution?.recorded, true);
@@ -534,6 +548,44 @@ test("creator promote invokes the recorded evolution lifecycle before completion
     assert.ok(evolutionTraceIndex >= 0);
     assert.ok(evolutionTraceIndex < completionTraceIndex);
     assert.equal(harness.traces[evolutionTraceIndex].proposal.humanApproval, "pending");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("creator profile enters isolated evolution before any mutation-capable direct or worker execution", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-creator-isolated-first-"));
+  const primaryAsset = path.join(workspace, "skills", "creator.md");
+  const order = [];
+  const service = createRecordedEvolutionService(order);
+  const originalRun = service.run.bind(service);
+  service.run = async (input) => {
+    assert.deepEqual(input.mutableTargets, ["skills/creator.md"]);
+    assert.equal(readFileSync(primaryAsset, "utf8"), "primary workspace\n");
+    return originalRun(input);
+  };
+  const harness = createLoopHarness({
+    workspace,
+    plans: [plan("v1")],
+    criticVerdicts: [verdict()],
+    creatorEvolutionService: service,
+  });
+
+  mkdirSync(path.dirname(primaryAsset), { recursive: true });
+  writeFileSync(primaryAsset, "primary workspace\n");
+
+  try {
+    const result = await harness.agent.runTurn(
+      "create an agent skill in skills/creator.md without changing the primary workspace",
+    );
+
+    assert.equal(result.qualityStatus, "proceed", JSON.stringify({ result, traces: harness.traces }, null, 2));
+    assert.deepEqual(harness.plannerCalls, []);
+    assert.deepEqual(harness.workerCalls, []);
+    assert.deepEqual(harness.reviewCalls, []);
+    assert.equal(readFileSync(primaryAsset, "utf8"), "primary workspace\n");
+    assert.deepEqual(order, ["evolution:run", "evolution:fresh"]);
+    assert.equal(harness.completionEvents[0]?.evolution?.state, "pr-ready");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -642,6 +694,59 @@ test("direct simple completion refine reruns with fresh identity and resumes int
   }
 });
 
+test("direct completion evidence binds the actual post-tool workspace manifest", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-direct-manifest-"));
+  const harness = createDirectLoopHarness({
+    workspace,
+    directTexts: ["changed the workspace"],
+    onDirect() {
+      writeFileSync(path.join(workspace, "direct-change.txt"), "post-tool state\n");
+    },
+  });
+
+  try {
+    const result = await harness.agent.runTurn("hello");
+    assert.equal(result.qualityStatus, "proceed");
+    const completed = harness.traces.find((event) => event.type === "quality.completed");
+    const artifact = JSON.parse(readFileSync(
+      path.join(workspace, completed.evidenceRefs[0]),
+      "utf8",
+    ));
+    assert.equal(artifact.workspaceManifest.evidenceStatus, "supported");
+    assert.ok(artifact.workspaceManifest.files.some((entry) =>
+      entry.path === "direct-change.txt" && entry.kind === "file"
+    ));
+    assert.match(artifact.workspaceManifest.artifactHash, /^sha256:[a-f0-9]{64}$/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("direct completion fails closed when the post-tool manifest changes during completion hooks", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-direct-stale-manifest-"));
+  const harness = createDirectLoopHarness({
+    workspace,
+    directTexts: ["stable answer"],
+    onBeforeRunComplete() {
+      writeFileSync(path.join(workspace, "concurrent-change.txt"), "stale\n");
+      return { action: "proceed" };
+    },
+  });
+
+  try {
+    const result = await harness.agent.runTurn("hello");
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /workspace manifest changed/i);
+    const staleGate = harness.traces.find((event) =>
+      event.type === "quality.gate_evaluated" && event.stale === true
+    );
+    assert.equal(staleGate?.decision, "block");
+    assert.notEqual(staleGate?.reviewedArtifactHash, staleGate?.currentArtifactHash);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("direct research completion refine reruns but remains unproven without review", async () => {
   const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-direct-research-refine-"));
   const harness = createDirectLoopHarness({
@@ -703,7 +808,7 @@ test("direct standard completion refine reruns but cannot promote unreviewed out
   }
 });
 
-test("direct creator completion stays blocked instead of accepting an external refine", async () => {
+test("creator completion without isolated evolution stays blocked before direct execution", async () => {
   const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-direct-creator-block-"));
   const harness = createDirectLoopHarness({
     workspace,
@@ -716,7 +821,7 @@ test("direct creator completion stays blocked instead of accepting an external r
     const result = await harness.agent.runTurn("create an agent skill");
 
     assert.equal(result.qualityStatus, "block");
-    assert.equal(harness.directCalls.length, 1);
+    assert.equal(harness.directCalls.length, 0);
     assert.equal(harness.traces.some((event) => event.type === "quality.refine_requested"), false);
     assert.equal(harness.traces.some((event) =>
       event.type === "quality.stage_started" && event.stage === "promote"
@@ -725,6 +830,25 @@ test("direct creator completion stays blocked instead of accepting an external r
     assert.equal(terminal?.profile, "creator");
     assert.equal(terminal?.decision, "block");
     assert.ok(terminal?.failures.includes("CREATOR_EVOLUTION_LIFECYCLE_UNAVAILABLE"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("ambiguous safety mutations escalate from research routing into the worker pipeline", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-safety-escalation-"));
+  const harness = createDirectLoopHarness({
+    workspace,
+    mode: "search",
+    plans: [plan("v1")],
+    criticVerdicts: [verdict()],
+  });
+
+  try {
+    await harness.agent.runTurn("production auth settings");
+    assert.deepEqual(harness.directCalls, []);
+    assert.equal(harness.plannerCalls.length, 1);
+    assert.equal(harness.workerCalls.length, 2);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

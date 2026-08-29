@@ -167,6 +167,14 @@ export type QualityWorkspaceInventory = {
   readonly materialInputs: readonly QualityMaterialInput[];
 };
 
+export type QualityWorkspaceInventoryManifest = {
+  readonly artifactHash: `sha256:${string}`;
+  readonly evidenceStatus: QualityWorkspaceEvidenceStatus;
+  readonly unsupportedEntries: readonly QualityWorkspaceEntry[];
+  readonly files: readonly QualityWorkspaceEntry[];
+  readonly materialInputs: readonly QualityMaterialInput[];
+};
+
 export type QualityMaterialInput = QualityWorkspaceEntry & {
   readonly entries: number;
 };
@@ -398,6 +406,29 @@ export class QualityArtifactStore {
       files,
       materialInputs: QUALITY_MATERIAL_INPUT_ROOTS.map((relativePath) =>
         this.snapshotMaterialInput(relativePath)),
+    };
+  }
+
+  /** A bounded whole-workspace fingerprint suitable for direct tool turns. */
+  captureWorkspaceInventoryManifest(): QualityWorkspaceInventoryManifest {
+    const inventory = this.captureWorkspaceInventory();
+    const allEntries: readonly QualityWorkspaceEntry[] = [
+      ...inventory.files,
+      ...inventory.materialInputs,
+    ];
+    const unsupportedEntries = allEntries.filter((entry) =>
+      entry.kind === "unreadable" || entry.kind === "symlink" || entry.kind === "special");
+    const body = {
+      schemaVersion: 1,
+      kind: "workspace-inventory-manifest",
+      files: inventory.files,
+      materialInputs: inventory.materialInputs,
+    } as const;
+    return {
+      artifactHash: sha256(stableJson(body)),
+      evidenceStatus: unsupportedEntries.length === 0 ? "supported" : "unsupported",
+      unsupportedEntries,
+      ...inventory,
     };
   }
 
@@ -883,6 +914,7 @@ export class QualityArtifactStore {
     readonly summary: string;
     readonly completedAt: string;
     readonly status: "completed" | "failed" | "cancelled";
+    readonly workspaceManifest: QualityWorkspaceInventoryManifest;
   }): PersistedQualityArtifact {
     const iteration = input.iteration ?? 0;
     const fileName = iteration === 0
@@ -897,6 +929,7 @@ export class QualityArtifactStore {
       producerId: input.producerId,
       summary: input.summary.slice(0, 8_000),
       status: input.status,
+      workspaceManifest: input.workspaceManifest,
       completedAt: input.completedAt,
     });
   }
