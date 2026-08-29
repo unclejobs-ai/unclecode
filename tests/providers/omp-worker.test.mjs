@@ -372,7 +372,7 @@ test("runOmpWorkerMain restricts the isolated OMP loop to workspace file tools",
   assert.equal(options.settings.get("tools.approvalMode"), "write");
 });
 
-test("contained OMP replacements perform ordinary workspace read, grep, and find under the Node contract runner", async () => {
+test("Node contract execution fails closed instead of reopening OMP workspace paths", async () => {
   const workspace = mkdtempSync(path.join(tmpdir(), "unclecode-omp-tools-"));
   try {
     mkdirSync(path.join(workspace, "src"));
@@ -380,26 +380,18 @@ test("contained OMP replacements perform ordinary workspace read, grep, and find
     const tools = new Map(createOmpWorkspaceTools(realpathSync(workspace), (definition) => definition)
       .map((tool) => [tool.name, tool]));
 
-    const readResult = await tools.get("read").execute("read-1", { path: "src/one.txt" });
-    assert.equal(readResult.content[0].text, "alpha\nbeta\n");
-
-    const grepResult = await tools.get("grep").execute("grep-1", { path: "src", pattern: "beta" });
-    assert.equal(grepResult.content[0].text, "src/one.txt:2:beta");
-    const findResult = await tools.get("find").execute("find-1", { path: "src/**/*.txt" });
-    assert.equal(findResult.content[0].text, "src/one.txt");
-    const globResult = await tools.get("glob").execute("glob-1", { path: "src/**/*.txt" });
-    assert.equal(globResult.content[0].text, findResult.content[0].text);
-
-    await assert.rejects(
-      tools.get("write").execute("write-1", { path: "src/two.txt", content: "needle\n" }),
-      /secure anchored workspace writes require the isolated Bun worker/i,
-    );
+    for (const operation of [
+      () => tools.get("read").execute("read-1", { path: "src/one.txt" }),
+      () => tools.get("grep").execute("grep-1", { path: "src", pattern: "beta" }),
+      () => tools.get("glob").execute("glob-1", { path: "src/**/*.txt" }),
+      () => tools.get("write").execute("write-1", { path: "src/two.txt", content: "needle\n" }),
+    ]) await assert.rejects(operation, /secure anchored workspace/i);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
 });
 
-test("Bun-side OMP writes stay functional and reject a deterministic parent-symlink race", () => {
+test("Bun-side OMP file tools stay functional and reject deterministic read/write parent races", () => {
   const root = mkdtempSync(path.join(tmpdir(), "unclecode-omp-openat-"));
   try {
     const fixture = path.join(
@@ -416,14 +408,61 @@ test("Bun-side OMP writes stay functional and reject a deterministic parent-syml
     });
     assert.equal(run.status, 0, run.stderr || run.stdout);
     assert.deepEqual(JSON.parse(run.stdout), {
+      read: "alpha\nbeta\n",
+      list: "one.txt",
+      grep: "src/one.txt:2:beta",
+      glob: "src/one.txt",
       wrote: "changed\n",
       raceHookCalls: 1,
       raceRejected: true,
       outside: "outside-owner-data\n",
       original: "inside\n",
+      readRaceHookCalls: 1,
+      readRaceResult: "rejected",
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Windows OMP read, write, and edit route through the hardened Rust ACI boundary", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "unclecode-omp-windows-"));
+  try {
+    writeFileSync(path.join(workspace, "target.txt"), "needle\n");
+    const calls = [];
+    const runRustAci = async (args, cwd, stdin) => {
+      calls.push({ args, cwd, stdin });
+      return args[2] === "read-bounded-no-symlinks" ? "needle\n" : "Wrote target.txt\n";
+    };
+    const tools = new Map(createOmpWorkspaceTools(
+      realpathSync(workspace),
+      (definition) => definition,
+      { platform: "win32", runRustAci },
+    ).map((tool) => [tool.name, tool]));
+
+    assert.equal(
+      (await tools.get("read").execute("read", { path: "target.txt" })).content[0].text,
+      "needle\n",
+    );
+    await tools.get("write").execute("write", { path: "target.txt", content: "written\n" });
+    await tools.get("edit").execute("edit", {
+      path: "target.txt",
+      old_string: "needle",
+      new_string: "changed",
+    });
+    await assert.rejects(
+      tools.get("grep").execute("grep", { path: ".", pattern: "needle" }),
+      /secure Windows workspace search is unavailable/i,
+    );
+
+    assert.deepEqual(calls.map((call) => [call.args[2], call.args[3], call.stdin]), [
+      ["read-bounded-no-symlinks", "target.txt", undefined],
+      ["write-atomic-no-symlinks", "target.txt", "written\n"],
+      ["read-bounded-no-symlinks", "target.txt", undefined],
+      ["write-atomic-no-symlinks", "target.txt", "changed\n"],
+    ]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
   }
 });
 

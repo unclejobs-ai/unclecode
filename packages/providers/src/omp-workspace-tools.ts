@@ -5,16 +5,18 @@ import {
   fstatSync,
   fsyncSync,
   ftruncateSync,
+  readSync,
   writeSync,
 } from "node:fs";
 import {
   lstat,
   open,
-  readdir,
   realpath,
   stat,
 } from "node:fs/promises";
 import path from "node:path";
+
+import { runRustCommand } from "./rust-command.js";
 
 const MAX_TEXT_BYTES = 256 * 1024;
 const MAX_SEARCH_FILES = 2_000;
@@ -40,12 +42,19 @@ type OmpWorkspaceTool = {
 };
 
 type OmpWorkspaceToolOptions = {
+  /** Platform seam for exercising the Windows Rust boundary on non-Windows CI. */
+  readonly platform?: NodeJS.Platform;
+  /** Rust ACI transport seam; production uses the shared provider Rust bridge. */
+  readonly runRustAci?: typeof runRustCommand;
+  /** Test seam that can widen the validation/open race without weakening the secure open itself. */
+  readonly beforeAnchoredReadOpen?: () => void | Promise<void>;
   /** Test seam that can widen the validation/open race without weakening the secure open itself. */
   readonly beforeAnchoredWriteOpen?: () => void | Promise<void>;
 };
 
 type AnchoredOpenBackend = {
   openAt(directoryFd: number, name: string, flags: number, mode: number): number;
+  readDirectory(directoryFd: number): readonly string[];
 };
 
 const BUN_FFI_SPECIFIER = "bun:ffi";
@@ -67,9 +76,9 @@ export async function canonicalizeOmpWorkspaceRoot(cwd: string): Promise<string>
 }
 
 /**
- * Build replacements for OMP's ambient file tools. Every path is validated by
- * UncleCode before direct filesystem I/O; none of these tools spawns a process
- * or opens a network connection.
+ * Build replacements for OMP's ambient file tools. POSIX operations use Bun's
+ * descriptor-relative boundary; Windows file I/O delegates to UncleCode's
+ * hardened Rust ACI boundary. None of these tools opens a network connection.
  */
 export function createOmpWorkspaceTools(
   workspaceRoot: string,
@@ -77,6 +86,8 @@ export function createOmpWorkspaceTools(
   options: OmpWorkspaceToolOptions = {},
 ): readonly OmpWorkspaceTool[] {
   const result = (text: string) => ({ content: [{ type: "text" as const, text }] as const });
+  const platform = options.platform ?? process.platform;
+  const rustAci = options.runRustAci ?? runRustCommand;
   const tools: OmpWorkspaceTool[] = [
     {
       name: "read",
@@ -91,15 +102,23 @@ export function createOmpWorkspaceTools(
         const target = await resolveContainedExistingPath(workspaceRoot, requireString(params.path, "path"));
         const targetStat = await lstat(target);
         if (targetStat.isSymbolicLink()) throw new OmpWorkspacePathError("Symbolic-link file targets are not allowed.");
+        await options.beforeAnchoredReadOpen?.();
         if (targetStat.isDirectory()) {
-          const entries = (await readdir(target, { withFileTypes: true }))
+          const entries = (await listAnchoredWorkspaceDirectory(workspaceRoot, target, platform))
             .slice(0, MAX_SEARCH_RESULTS)
             .map((entry) => `${entry.name}${entry.isDirectory() ? "/" : ""}`)
             .sort();
           return result(entries.join("\n"));
         }
         if (!targetStat.isFile()) throw new OmpWorkspacePathError("Read target must be a regular file or directory.");
-        return result(await readBoundedUtf8File(target, signal));
+        return result(await readBoundedUtf8File(
+          workspaceRoot,
+          target,
+          targetStat.size,
+          platform,
+          rustAci,
+          signal,
+        ));
       },
     },
     {
@@ -115,7 +134,7 @@ export function createOmpWorkspaceTools(
         const content = requireString(params.content, "content");
         const target = await resolveContainedWritablePath(workspaceRoot, requireString(params.path, "path"));
         await options.beforeAnchoredWriteOpen?.();
-        await writeNoFollow(workspaceRoot, target, content, signal);
+        await writeNoFollow(workspaceRoot, target, content, platform, rustAci, signal);
         await assertExistingPathContained(workspaceRoot, target);
         return result(`Wrote ${Buffer.byteLength(content, "utf8")} bytes to ${displayPath(workspaceRoot, target)}.`);
       },
@@ -134,7 +153,19 @@ export function createOmpWorkspaceTools(
         const newString = requireString(params.new_string, "new_string");
         if (oldString.length === 0) throw new Error("old_string must not be empty.");
         const target = await resolveContainedExistingPath(workspaceRoot, requireString(params.path, "path"));
-        const original = await readBoundedUtf8File(target, signal);
+        const targetStat = await lstat(target);
+        if (!targetStat.isFile() || targetStat.isSymbolicLink()) {
+          throw new OmpWorkspacePathError("Edit target must be a regular file.");
+        }
+        await options.beforeAnchoredReadOpen?.();
+        const original = await readBoundedUtf8File(
+          workspaceRoot,
+          target,
+          targetStat.size,
+          platform,
+          rustAci,
+          signal,
+        );
         const first = original.indexOf(oldString);
         if (first < 0) throw new Error("old_string was not found in the target file.");
         if (original.indexOf(oldString, first + oldString.length) >= 0) {
@@ -145,6 +176,8 @@ export function createOmpWorkspaceTools(
           workspaceRoot,
           target,
           `${original.slice(0, first)}${newString}${original.slice(first + oldString.length)}`,
+          platform,
+          rustAci,
           signal,
         );
         await assertExistingPathContained(workspaceRoot, target);
@@ -167,6 +200,7 @@ export function createOmpWorkspaceTools(
           workspaceRoot,
           optionalString(params.path, "path") ?? ".",
         );
+        await options.beforeAnchoredReadOpen?.();
         let expression: RegExp;
         try {
           expression = new RegExp(pattern, params.case === true ? "g" : "gi");
@@ -174,11 +208,18 @@ export function createOmpWorkspaceTools(
           throw new Error(`Invalid regular expression: ${error instanceof Error ? error.message : String(error)}`);
         }
         const matches: string[] = [];
-        for (const file of await collectWorkspaceFiles(target, signal)) {
+        for (const file of await collectWorkspaceFiles(workspaceRoot, target, platform, signal)) {
           if (matches.length >= MAX_SEARCH_RESULTS) break;
           let text: string;
           try {
-            text = await readBoundedUtf8File(file, signal);
+            text = await readBoundedUtf8File(
+              workspaceRoot,
+              file,
+              undefined,
+              platform,
+              rustAci,
+              signal,
+            );
           } catch {
             continue;
           }
@@ -206,12 +247,13 @@ export function createOmpWorkspaceTools(
         const pattern = optionalString(params.path, "path") ?? "**/*";
         validateRelativePath(pattern);
         await assertFindPatternContained(workspaceRoot, pattern);
+        await options.beforeAnchoredReadOpen?.();
         const requestedLimit = typeof params.limit === "number" && Number.isFinite(params.limit)
           ? Math.floor(params.limit)
           : MAX_SEARCH_RESULTS;
         const limit = Math.max(1, Math.min(MAX_SEARCH_RESULTS, requestedLimit));
         const matcher = globToRegExp(pattern.replaceAll("\\", "/"));
-        const files = await collectWorkspaceFiles(workspaceRoot, signal);
+        const files = await collectWorkspaceFiles(workspaceRoot, workspaceRoot, platform, signal);
         return result(files
           .map((file) => displayPath(workspaceRoot, file))
           .filter((relative) => matcher.test(relative))
@@ -308,18 +350,65 @@ function assertLexicallyContained(workspaceRoot: string, candidate: string): voi
   throw new OmpWorkspacePathError("Path resolves outside the workspace.");
 }
 
-async function readBoundedUtf8File(target: string, signal?: AbortSignal): Promise<string> {
+async function readBoundedUtf8File(
+  workspaceRoot: string,
+  target: string,
+  expectedBytes: number | undefined,
+  platform: NodeJS.Platform,
+  rustAci: typeof runRustCommand,
+  signal?: AbortSignal,
+): Promise<string> {
   throwIfAborted(signal);
-  const handle = await open(target, constants.O_RDONLY | noFollowFlag());
+  if (platform === "win32") {
+    if (expectedBytes === undefined) {
+      throw new OmpWorkspacePathError("Secure Windows workspace search is unavailable.");
+    }
+    if (expectedBytes > MAX_TEXT_BYTES) {
+      throw new Error(`File exceeds the ${MAX_TEXT_BYTES}-byte OMP boundary.`);
+    }
+    const content = await rustAci(
+      [
+        "rust",
+        "aci",
+        "read-bounded-no-symlinks",
+        displayPath(workspaceRoot, target),
+        String(expectedBytes),
+        String(MAX_TEXT_BYTES),
+      ],
+      workspaceRoot,
+      undefined,
+      process.env,
+      { signal },
+    );
+    if (content.includes("\0")) throw new Error("Binary files are not supported by the OMP workspace tools.");
+    return content;
+  }
+
+  const descriptor = await openAnchoredWorkspaceEntry(
+    workspaceRoot,
+    target,
+    constants.O_RDONLY | nonBlockingFlag(),
+    0,
+    true,
+  );
   try {
-    const metadata = await handle.stat();
+    const metadata = fstatSync(descriptor);
     if (!metadata.isFile()) throw new OmpWorkspacePathError("Target must be a regular file.");
     if (metadata.size > MAX_TEXT_BYTES) throw new Error(`File exceeds the ${MAX_TEXT_BYTES}-byte OMP boundary.`);
-    const content = await handle.readFile("utf8");
+    const bytes = Buffer.alloc(metadata.size + 1);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      throwIfAborted(signal);
+      const read = readSync(descriptor, bytes, offset, bytes.byteLength - offset, offset);
+      if (read === 0) break;
+      offset += read;
+    }
+    if (offset !== metadata.size) throw new Error("File size changed during the OMP workspace read.");
+    const content = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, offset));
     if (content.includes("\0")) throw new Error("Binary files are not supported by the OMP workspace tools.");
     return content;
   } finally {
-    await handle.close();
+    closeSync(descriptor);
   }
 }
 
@@ -327,17 +416,30 @@ async function writeNoFollow(
   workspaceRoot: string,
   target: string,
   content: string,
+  platform: NodeJS.Platform,
+  rustAci: typeof runRustCommand,
   signal?: AbortSignal,
 ): Promise<void> {
   throwIfAborted(signal);
   if (Buffer.byteLength(content, "utf8") > MAX_TEXT_BYTES) {
     throw new Error(`Content exceeds the ${MAX_TEXT_BYTES}-byte OMP boundary.`);
   }
-  const descriptor = await openAnchoredWorkspaceFile(
+  if (platform === "win32") {
+    await rustAci(
+      ["rust", "aci", "write-atomic-no-symlinks", displayPath(workspaceRoot, target)],
+      workspaceRoot,
+      content,
+      process.env,
+      { signal },
+    );
+    return;
+  }
+  const descriptor = await openAnchoredWorkspaceEntry(
     workspaceRoot,
     target,
     constants.O_WRONLY | constants.O_CREAT | nonBlockingFlag(),
     0o644,
+    false,
   );
   try {
     const metadata = fstatSync(descriptor);
@@ -358,32 +460,36 @@ async function writeNoFollow(
 }
 
 /**
- * Open a workspace file relative to directory descriptors, never by reopening
+ * Open a workspace entry relative to directory descriptors, never by reopening
  * a pathname that was validated earlier. OMP's worker is Bun, whose FFI gives
  * us POSIX openat(2); Node and platforms without O_NOFOLLOW fail closed for
- * writes because their pathname-only APIs cannot close the parent-symlink
+ * access because their pathname-only APIs cannot close the parent-symlink
  * validation/open race.
  */
-async function openAnchoredWorkspaceFile(
+async function openAnchoredWorkspaceEntry(
   workspaceRoot: string,
   target: string,
   flags: number,
   mode: number,
+  allowRoot: boolean,
 ): Promise<number> {
   const noFollow = noFollowFlag();
   const directory = directoryFlag();
   if (noFollow === 0 || directory === 0) {
-    throw new OmpWorkspacePathError("Secure anchored workspace writes are unavailable on this platform.");
+    throw new OmpWorkspacePathError("Secure anchored workspace access is unavailable on this platform.");
   }
 
   const relative = path.relative(workspaceRoot, target);
-  if (!relative || relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
-    throw new OmpWorkspacePathError("Write target must remain below the workspace root.");
+  if (relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
+    throw new OmpWorkspacePathError("Target must remain below the workspace root.");
   }
-  const segments = relative.split(path.sep);
-  const fileName = segments.pop();
+  if (!relative && !allowRoot) throw new OmpWorkspacePathError("Write target must remain below the workspace root.");
+  const segments = relative ? relative.split(path.sep) : [];
+  const fileName = segments.pop() ?? ".";
   if (!fileName || fileName === "." || fileName === "..") {
-    throw new OmpWorkspacePathError("Write target must name a workspace file.");
+    if (!(allowRoot && fileName === ".")) {
+      throw new OmpWorkspacePathError("Write target must name a workspace file.");
+    }
   }
 
   const backend = await loadAnchoredOpenBackend();
@@ -399,7 +505,7 @@ async function openAnchoredWorkspaceFile(
         0,
       );
       if (nextFd < 0) {
-        throw new OmpWorkspacePathError("Workspace write parent changed or contains a symbolic link.");
+        throw new OmpWorkspacePathError("Workspace parent changed or contains a symbolic link.");
       }
       if (ownedDirectoryFd !== undefined) closeSync(ownedDirectoryFd);
       ownedDirectoryFd = nextFd;
@@ -445,7 +551,7 @@ async function openAnchoredWorkspaceFile(
       }
     }
     if (descriptor < 0) {
-      throw new OmpWorkspacePathError("Workspace write target changed or is a symbolic link.");
+      throw new OmpWorkspacePathError("Workspace target changed or is a symbolic link.");
     }
     return descriptor;
   } finally {
@@ -458,7 +564,7 @@ async function loadAnchoredOpenBackend(): Promise<AnchoredOpenBackend> {
   if (anchoredOpenBackendPromise) return anchoredOpenBackendPromise;
   anchoredOpenBackendPromise = (async () => {
     if (!process.versions.bun) {
-      throw new OmpWorkspacePathError("Secure anchored workspace writes require the isolated Bun worker.");
+      throw new OmpWorkspacePathError("Secure anchored workspace access requires the isolated Bun worker.");
     }
     const libraryPath = process.platform === "darwin"
       ? "/usr/lib/libSystem.B.dylib"
@@ -468,28 +574,67 @@ async function loadAnchoredOpenBackend(): Promise<AnchoredOpenBackend> {
           ? "libc.so.7"
           : undefined;
     if (!libraryPath) {
-      throw new OmpWorkspacePathError("Secure anchored workspace writes are unavailable on this platform.");
+      throw new OmpWorkspacePathError("Secure anchored workspace access is unavailable on this platform.");
     }
     try {
       const ffi = await import(BUN_FFI_SPECIFIER) as unknown as {
         dlopen(
           library: string,
           symbols: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
-        ): { readonly symbols: { readonly openat: (...args: unknown[]) => number } };
+        ): { readonly symbols: {
+          readonly openat: (...args: unknown[]) => number;
+          readonly dup: (...args: unknown[]) => number;
+          readonly fdopendir: (...args: unknown[]) => number;
+          readonly readdir: (...args: unknown[]) => number;
+          readonly closedir: (...args: unknown[]) => number;
+        } };
         ptr(buffer: Uint8Array): number | bigint;
+        toArrayBuffer(pointer: number | bigint, byteOffset: number, byteLength: number): ArrayBuffer;
       };
       const library = ffi.dlopen(libraryPath, {
         openat: { args: ["i32", "ptr", "i32", "u32"], returns: "i32" },
+        dup: { args: ["i32"], returns: "i32" },
+        fdopendir: { args: ["i32"], returns: "ptr" },
+        readdir: { args: ["ptr"], returns: "ptr" },
+        closedir: { args: ["ptr"], returns: "i32" },
       });
       return {
         openAt(directoryFd, name, openFlags, mode) {
           const nulTerminatedName = Buffer.from(`${name}\0`, "utf8");
           return Number(library.symbols.openat(directoryFd, ffi.ptr(nulTerminatedName), openFlags, mode));
         },
+        readDirectory(directoryFd) {
+          const duplicate = Number(library.symbols.dup(directoryFd));
+          if (duplicate < 0) throw new OmpWorkspacePathError("Could not duplicate the anchored directory handle.");
+          const directoryPointer = library.symbols.fdopendir(duplicate);
+          if (!directoryPointer) {
+            closeSync(duplicate);
+            throw new OmpWorkspacePathError("Could not open the anchored directory stream.");
+          }
+          const names: string[] = [];
+          try {
+            while (true) {
+              const entryPointer = library.symbols.readdir(directoryPointer);
+              if (!entryPointer) break;
+              const header = Buffer.from(ffi.toArrayBuffer(entryPointer, 0, 24));
+              const recordLength = header.readUInt16LE(16);
+              const nameOffset = process.platform === "darwin" ? 21 : 19;
+              if (recordLength <= nameOffset || recordLength > 4_096) continue;
+              const record = Buffer.from(ffi.toArrayBuffer(entryPointer, 0, recordLength));
+              const nul = record.indexOf(0, nameOffset);
+              if (nul < 0) continue;
+              const name = record.toString("utf8", nameOffset, nul);
+              if (name && name !== "." && name !== "..") names.push(name);
+            }
+          } finally {
+            library.symbols.closedir(directoryPointer);
+          }
+          return names;
+        },
       };
     } catch (error) {
       throw new OmpWorkspacePathError(
-        `Secure anchored workspace writes could not initialize: ${error instanceof Error ? error.message : String(error)}`,
+        `Secure anchored workspace access could not initialize: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   })();
@@ -513,22 +658,100 @@ function nonBlockingFlag(): number {
   return typeof constants.O_NONBLOCK === "number" ? constants.O_NONBLOCK : 0;
 }
 
-async function collectWorkspaceFiles(target: string, signal?: AbortSignal): Promise<string[]> {
-  const targetStat = await lstat(target);
-  if (targetStat.isSymbolicLink()) throw new OmpWorkspacePathError("Symbolic-link search roots are not allowed.");
-  if (targetStat.isFile()) return [target];
-  if (!targetStat.isDirectory()) return [];
+type AnchoredDirectoryEntry = {
+  readonly name: string;
+  isDirectory(): boolean;
+  isFile(): boolean;
+};
+
+async function listAnchoredWorkspaceDirectory(
+  workspaceRoot: string,
+  target: string,
+  platform: NodeJS.Platform,
+): Promise<readonly AnchoredDirectoryEntry[]> {
+  if (platform === "win32") {
+    throw new OmpWorkspacePathError("Secure Windows workspace directory listing is unavailable.");
+  }
+  const descriptor = await openAnchoredWorkspaceEntry(
+    workspaceRoot,
+    target,
+    constants.O_RDONLY | directoryFlag() | nonBlockingFlag(),
+    0,
+    true,
+  );
+  try {
+    const metadata = fstatSync(descriptor);
+    if (!metadata.isDirectory()) throw new OmpWorkspacePathError("Target must be a directory.");
+    const backend = await loadAnchoredOpenBackend();
+    const entries: AnchoredDirectoryEntry[] = [];
+    for (const name of backend.readDirectory(descriptor)) {
+      const candidate = path.join(target, name);
+      assertLexicallyContained(workspaceRoot, candidate);
+      let childDescriptor: number | undefined;
+      try {
+        childDescriptor = await openAnchoredWorkspaceEntry(
+          workspaceRoot,
+          candidate,
+          constants.O_RDONLY | nonBlockingFlag(),
+          0,
+          false,
+        );
+        const child = fstatSync(childDescriptor);
+        if (!child.isDirectory() && !child.isFile()) continue;
+        entries.push({
+          name,
+          isDirectory: () => child.isDirectory(),
+          isFile: () => child.isFile(),
+        });
+      } catch {
+        // A disappearing entry or a symbolic link is omitted, never reopened.
+      } finally {
+        if (childDescriptor !== undefined) closeSync(childDescriptor);
+      }
+    }
+    return entries;
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+async function collectWorkspaceFiles(
+  workspaceRoot: string,
+  target: string,
+  platform: NodeJS.Platform,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  if (platform === "win32") {
+    throw new OmpWorkspacePathError("Secure Windows workspace search is unavailable.");
+  }
+  const targetDescriptor = await openAnchoredWorkspaceEntry(
+    workspaceRoot,
+    target,
+    constants.O_RDONLY | nonBlockingFlag(),
+    0,
+    true,
+  );
+  let targetIsFile = false;
+  let targetIsDirectory = false;
+  try {
+    const targetStat = fstatSync(targetDescriptor);
+    targetIsFile = targetStat.isFile();
+    targetIsDirectory = targetStat.isDirectory();
+  } finally {
+    closeSync(targetDescriptor);
+  }
+  if (targetIsFile) return [target];
+  if (!targetIsDirectory) return [];
 
   const files: string[] = [];
   const directories = [target];
   while (directories.length > 0 && files.length < MAX_SEARCH_FILES) {
     throwIfAborted(signal);
     const directory = directories.pop()!;
-    const entries = await readdir(directory, { withFileTypes: true });
+    const entries = await listAnchoredWorkspaceDirectory(workspaceRoot, directory, platform);
     for (const entry of entries) {
       if (files.length >= MAX_SEARCH_FILES) break;
       const candidate = path.join(directory, entry.name);
-      if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) directories.push(candidate);
       else if (entry.isFile()) files.push(candidate);
     }
