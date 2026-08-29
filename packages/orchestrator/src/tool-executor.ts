@@ -17,6 +17,7 @@ import type {
   ToolResult,
 } from "./tools.js";
 import type { WorkShellInteractionBridge } from "./work-shell-interaction-bridge.js";
+import { runExecutionNonInterruptible } from "./execution-pause.js";
 
 /**
  * The single request shape every provider and Pi loop uses to reach a tool.
@@ -212,13 +213,16 @@ export function createPolicyAwareToolExecutor(
       const profile = resolveProfile();
       const runtimeMode = resolveRuntimeMode();
       const { path, command } = request.input;
-      const evaluations = capabilities.map((capability) =>
-        evaluateExecutionPolicy(profile, {
-          capability,
-          runtimeMode,
-          ...(typeof path === "string" && path.length > 0 ? { path } : {}),
-          ...(typeof command === "string" && command.length > 0 ? { command } : {}),
-        })
+      const evaluations = await runExecutionNonInterruptible(
+        "policy.evaluate",
+        async () => capabilities.map((capability) =>
+          evaluateExecutionPolicy(profile, {
+            capability,
+            runtimeMode,
+            ...(typeof path === "string" && path.length > 0 ? { path } : {}),
+            ...(typeof command === "string" && command.length > 0 ? { command } : {}),
+          })
+        ),
       );
       const denied = evaluations.find((evaluation) => evaluation.effect === "deny");
       if (denied !== undefined) {
@@ -250,11 +254,14 @@ export function createPolicyAwareToolExecutor(
       ];
       if (promptReasons.length > 0) {
         const reason = [...new Set(promptReasons)].join(" ");
-        const confirmed = await isConfirmed(
-          input.interactionBridge,
-          request.toolName,
-          reason,
-          request.signal,
+        const confirmed = await runExecutionNonInterruptible(
+          "approval.wait",
+          () => isConfirmed(
+            input.interactionBridge,
+            request.toolName,
+            reason,
+            request.signal,
+          ),
         );
         if (!confirmed) {
           return refuse(
@@ -263,10 +270,13 @@ export function createPolicyAwareToolExecutor(
         }
       }
 
-      return await handler(
-        request.input,
-        request.cwd,
-        request.signal ? { signal: request.signal } : {},
+      return await runExecutionNonInterruptible(
+        "tool.dispatch",
+        () => handler(
+          request.input,
+          request.cwd,
+          request.signal ? { signal: request.signal } : {},
+        ),
       );
     },
   };

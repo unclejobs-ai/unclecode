@@ -4456,9 +4456,11 @@ fn run_native_session_command(args: &[OsString]) -> Result<u8, String> {
                     summary,
                     trace_mode,
                     reasoning_effort,
+                    ui_locale: None,
                     last_submitted_context_receipt_id: None,
                     entries: vec![],
                     agent_console: None,
+                    pause_checkpoint: None,
                 })
                 .map_err(|error| format!("Failed to persist session snapshot: {error}"))?;
             println!("Persisted {session_id}");

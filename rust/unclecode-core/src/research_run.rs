@@ -100,10 +100,12 @@ pub fn research_run_report(
             state: "idle".to_string(),
             summary: summary.clone(),
             trace_mode: None,
+            ui_locale: None,
             reasoning_effort: None,
             last_submitted_context_receipt_id: None,
             entries: vec![],
             agent_console: None,
+            pause_checkpoint: None,
         })
         .map_err(|error| format!("Failed to persist research session: {error}"))?;
 

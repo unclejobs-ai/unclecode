@@ -23,6 +23,8 @@ const MAX_RESUME_ENTRY_CHARS: usize = 600;
 const SESSION_NOTICE_VERSION: u8 = 1;
 const MAX_SESSION_NOTICE_BYTES: usize = 4 * 1024;
 const MAX_SESSION_NOTICE_FILES: usize = 128;
+const MAX_PAUSE_CHECKPOINT_REFS: usize = 64;
+const MAX_PAUSE_CHECKPOINT_STRING_CHARS: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEvent {
@@ -51,10 +53,12 @@ pub struct WorkShellSessionSnapshot {
     pub state: String,
     pub summary: String,
     pub trace_mode: Option<String>,
+    pub ui_locale: Option<String>,
     pub reasoning_effort: Option<String>,
     pub last_submitted_context_receipt_id: Option<String>,
     pub entries: Vec<WorkShellTranscriptEntry>,
     pub agent_console: Option<Value>,
+    pub pause_checkpoint: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,11 +73,13 @@ pub struct SessionLine {
 pub struct WorkShellResume {
     pub session_id: String,
     pub trace_mode: Option<String>,
+    pub ui_locale: Option<String>,
     pub reasoning_effort: Option<String>,
     pub last_submitted_context_receipt_id: Option<String>,
     pub summary: String,
     pub entries: Vec<WorkShellTranscriptEntry>,
     pub agent_console: Option<Value>,
+    pub pause_checkpoint: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -288,6 +294,12 @@ impl WorkShellSessionStore {
             .and_then(Value::as_str)
             .filter(|value| *value == "minimal" || *value == "verbose")
             .map(str::to_string);
+        let ui_locale = parsed
+            .get("metadata")
+            .and_then(|value| value.get("uiLocale"))
+            .and_then(Value::as_str)
+            .filter(|value| *value == "en" || *value == "ko")
+            .map(str::to_string);
         let reasoning_effort = parsed
             .get("metadata")
             .and_then(|value| value.get("reasoningEffort"))
@@ -326,14 +338,19 @@ impl WorkShellSessionStore {
         let agent_console = parsed
             .get("agentConsole")
             .and_then(sanitize_agent_console_snapshot);
+        let pause_checkpoint = parsed
+            .get("pauseCheckpoint")
+            .and_then(sanitize_pause_checkpoint);
         Ok(Some(WorkShellResume {
             session_id: parsed_session_id,
             trace_mode,
+            ui_locale,
             reasoning_effort,
             last_submitted_context_receipt_id,
             summary,
             entries,
             agent_console,
+            pause_checkpoint,
         }))
     }
 
@@ -369,6 +386,11 @@ pub fn persist_work_shell_session_snapshot_json(
         .and_then(Value::as_str)
         .filter(|value| *value == "minimal" || *value == "verbose")
         .map(str::to_string);
+    let ui_locale = parsed
+        .get("uiLocale")
+        .and_then(Value::as_str)
+        .filter(|value| *value == "en" || *value == "ko")
+        .map(str::to_string);
     let reasoning_effort = parsed
         .get("reasoningEffort")
         .and_then(Value::as_str)
@@ -387,6 +409,9 @@ pub fn persist_work_shell_session_snapshot_json(
     let agent_console = parsed
         .get("agentConsole")
         .and_then(sanitize_agent_console_snapshot);
+    let pause_checkpoint = parsed
+        .get("pauseCheckpoint")
+        .and_then(sanitize_pause_checkpoint);
 
     store
         .persist_work_shell_snapshot(&WorkShellSessionSnapshot {
@@ -397,10 +422,12 @@ pub fn persist_work_shell_session_snapshot_json(
             state: state.to_string(),
             summary: summary.to_string(),
             trace_mode,
+            ui_locale,
             reasoning_effort,
             last_submitted_context_receipt_id,
             entries,
             agent_console,
+            pause_checkpoint,
         })
         .map_err(|error| format!("Failed to persist session snapshot: {error}"))?;
     Ok(session_id.to_string())
@@ -420,6 +447,7 @@ pub fn resume_work_shell_session_json(
     serde_json::to_string(&json!({
         "sessionId": resumed.session_id,
         "traceMode": resumed.trace_mode,
+        "uiLocale": resumed.ui_locale,
         "reasoningEffort": resumed.reasoning_effort,
         "lastSubmittedContextReceiptId": resumed.last_submitted_context_receipt_id,
         "contextLine": format!("Resumed session: {session_id}"),
@@ -1281,6 +1309,62 @@ fn sanitize_usage_event_ids(value: &Value) -> Option<Value> {
     ))
 }
 
+fn bounded_pause_string(value: &Value) -> Option<Value> {
+    let input = value.as_str()?.trim();
+    if input.is_empty() {
+        return None;
+    }
+    Some(Value::String(
+        input.chars().take(MAX_PAUSE_CHECKPOINT_STRING_CHARS).collect(),
+    ))
+}
+
+fn sanitize_pause_refs(value: &Value) -> Option<Value> {
+    Some(Value::Array(
+        value
+            .as_array()?
+            .iter()
+            .take(MAX_PAUSE_CHECKPOINT_REFS)
+            .filter_map(bounded_pause_string)
+            .collect(),
+    ))
+}
+
+fn sanitize_pause_checkpoint(value: &Value) -> Option<Value> {
+    let source = value.as_object()?;
+    let mut checkpoint = Map::new();
+    checkpoint.insert("turnId".to_string(), bounded_pause_string(source.get("turnId")?)?);
+    checkpoint.insert("boundary".to_string(), bounded_pause_string(source.get("boundary")?)?);
+    for field in ["currentStage", "gateStatus", "decisionId", "contextReceiptId"] {
+        if let Some(value) = source.get(field).and_then(bounded_pause_string) {
+            checkpoint.insert(field.to_string(), value);
+        }
+    }
+    if let Some(iteration) = source.get("iteration").and_then(Value::as_u64) {
+        checkpoint.insert("iteration".to_string(), json!(iteration.min(u32::MAX as u64)));
+    }
+    if let Some(active) = source.get("activeNode").and_then(Value::as_object) {
+        if let (Some(id), Some(attempt)) = (
+            active.get("id").and_then(bounded_pause_string),
+            active.get("attempt").and_then(Value::as_u64),
+        ) {
+            checkpoint.insert("activeNode".to_string(), json!({
+                "id": id,
+                "attempt": attempt.min(u32::MAX as u64),
+            }));
+        }
+    }
+    checkpoint.insert(
+        "attachmentRefs".to_string(),
+        source.get("attachmentRefs").and_then(sanitize_pause_refs).unwrap_or_else(|| json!([])),
+    );
+    checkpoint.insert(
+        "artifactRefs".to_string(),
+        source.get("artifactRefs").and_then(sanitize_pause_refs).unwrap_or_else(|| json!([])),
+    );
+    Some(Value::Object(checkpoint))
+}
+
 fn sanitize_prompt_manifest(value: &Value) -> Option<Value> {
     let mut manifest = copy_known_fields(
         value,
@@ -1524,6 +1608,11 @@ fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShel
         .as_ref()
         .map(|trace_mode| format!(",\"traceMode\":\"{}\"", escape_json(trace_mode)))
         .unwrap_or_default();
+    let metadata_locale = snapshot
+        .ui_locale
+        .as_ref()
+        .map(|locale| format!(",\"uiLocale\":\"{}\"", escape_json(locale)))
+        .unwrap_or_default();
     let metadata_reasoning = snapshot
         .reasoning_effort
         .as_ref()
@@ -1552,11 +1641,12 @@ fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShel
         WorkShellRecord {
             timestamp: now_timestamp(),
             checkpoint_json: format!(
-                "{{\"type\":\"metadata\",\"metadata\":{{\"model\":\"{}\",\"taskSummary\":\"{}\",\"isUltraworkMode\":{}{}{}{}}}}}",
+                "{{\"type\":\"metadata\",\"metadata\":{{\"model\":\"{}\",\"taskSummary\":\"{}\",\"isUltraworkMode\":{}{}{}{}{}}}}}",
                 escape_json(&snapshot.model),
                 escape_json(&snapshot.summary),
                 if snapshot.mode == "ultrawork" { "true" } else { "false" },
                 metadata_trace,
+                metadata_locale,
                 metadata_reasoning,
                 metadata_context_receipt,
             ),
@@ -1600,6 +1690,9 @@ fn build_checkpoint_json(
     if let Some(trace_mode) = &snapshot.trace_mode {
         metadata.insert("traceMode".to_string(), json!(trace_mode));
     }
+    if let Some(ui_locale) = &snapshot.ui_locale {
+        metadata.insert("uiLocale".to_string(), json!(ui_locale));
+    }
     if let Some(reasoning_effort) = &snapshot.reasoning_effort {
         metadata.insert("reasoningEffort".to_string(), json!(reasoning_effort));
     }
@@ -1629,6 +1722,7 @@ fn build_checkpoint_json(
             .map(|entry| json!({ "role": entry.role, "text": entry.text }))
             .collect::<Vec<_>>(),
         "agentConsole": snapshot.agent_console.clone(),
+        "pauseCheckpoint": snapshot.pause_checkpoint.clone(),
     }))
     .unwrap_or_else(|_| "{}".to_string())
 }
@@ -1735,6 +1829,7 @@ mod tests {
                 state: "idle".to_string(),
                 summary: "Chat: inspect repo".to_string(),
                 trace_mode: Some("verbose".to_string()),
+                ui_locale: Some("ko".to_string()),
                 reasoning_effort: Some("high".to_string()),
                 last_submitted_context_receipt_id: Some("receipt-submitted".to_string()),
                 entries: vec![
@@ -1748,6 +1843,7 @@ mod tests {
                     },
                 ],
                 agent_console: None,
+                pause_checkpoint: None,
             })
             .expect("persist snapshot");
 
@@ -1762,6 +1858,7 @@ mod tests {
             .expect("resumed");
         assert_eq!(resumed.session_id, "work-session-1");
         assert_eq!(resumed.trace_mode, Some("verbose".to_string()));
+        assert_eq!(resumed.ui_locale, Some("ko".to_string()));
         assert_eq!(
             resumed.last_submitted_context_receipt_id,
             Some("receipt-submitted".to_string())
@@ -1771,6 +1868,54 @@ mod tests {
         assert_eq!(resumed.entries[0].text, "inspect repo");
         assert_eq!(resumed.entries[1].text, "repo inspected");
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn pause_checkpoint_is_bounded_allow_listed_and_resumable() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-pause-checkpoint-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let project = env::current_dir().expect("cwd");
+        let store = WorkShellSessionStore::new(&root);
+        let payload = json!({
+            "sessionId": "paused-session",
+            "model": "gpt-5.4",
+            "mode": "normal",
+            "state": "paused",
+            "summary": "Turn paused at before_tool.",
+            "entries": [],
+            "pauseCheckpoint": {
+                "turnId": "turn-paused-1",
+                "boundary": "before_tool",
+                "activeNode": { "id": "worker-1", "attempt": 2, "prompt": "secret" },
+                "currentStage": "work",
+                "gateStatus": "refine",
+                "iteration": 3,
+                "decisionId": "decision-1",
+                "contextReceiptId": "receipt-1",
+                "attachmentRefs": ["image:image/png:clipboard.png"],
+                "artifactRefs": ["artifact:sha256:abc"],
+                "providerHeaders": { "authorization": "Bearer secret" }
+            }
+        }).to_string();
+
+        persist_work_shell_session_snapshot_json(&store, &project, &payload)
+            .expect("persist pause checkpoint");
+        let resumed = store
+            .resume_work_shell_session(&project, "paused-session")
+            .expect("resume")
+            .expect("resumed");
+        let checkpoint = resumed.pause_checkpoint.expect("pause checkpoint");
+        assert_eq!(checkpoint["turnId"], "turn-paused-1");
+        assert_eq!(checkpoint["activeNode"]["attempt"], 2);
+        assert_eq!(checkpoint["artifactRefs"][0], "artifact:sha256:abc");
+        let serialized = serde_json::to_string(&checkpoint).expect("serialize checkpoint");
+        assert!(!serialized.contains("providerHeaders"));
+        assert!(!serialized.contains("authorization"));
+        assert!(!serialized.contains("prompt"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2677,10 +2822,12 @@ mod tests {
                 state: "idle".to_string(),
                 summary: "Chat: minimize".to_string(),
                 trace_mode: Some("minimal".to_string()),
+                ui_locale: None,
                 reasoning_effort: None,
                 last_submitted_context_receipt_id: None,
                 entries,
                 agent_console: None,
+                pause_checkpoint: None,
             })
             .expect("persist snapshot");
 

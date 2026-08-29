@@ -10,6 +10,7 @@ import type {
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 import { createAgentConsoleSnapshot } from "@unclecode/contracts";
 import { createAgentConsoleViewState } from "./work-shell-agent-console-state.js";
+import type { WorkShellPauseSnapshot } from "./work-shell-pause-controller.js";
 
 type BuildContextPanel<Reasoning extends WorkShellReasoningConfig> = (
   contextSummaryLines: readonly string[],
@@ -102,6 +103,7 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     traceMode: decision.traceMode,
     composerMode: decision.composerMode,
     isBusy: decision.isBusy,
+    turnLifecycle: { state: "idle" } satisfies WorkShellPauseSnapshot,
     busyStatus: undefined,
     currentTurnStartedAt: undefined,
     lastTurnDurationMs: undefined,

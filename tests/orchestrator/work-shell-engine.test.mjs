@@ -91,6 +91,14 @@ import {
   resolveSecureApiKeyEntrySubmission,
   writeWorkShellRememberCommand,
 } from "../../packages/orchestrator/src/work-shell-engine-operations.ts";
+
+function stripWorkShellLanguageInstruction(prompt) {
+  if (!/^(?:Respond in English for this session\.|현재 세션의 사용자 언어를 따라)/u.test(prompt)) {
+    return prompt;
+  }
+  const separator = prompt.indexOf("\n\n");
+  return separator < 0 ? prompt : prompt.slice(separator + 2);
+}
 import {
   createCollapsedContextPanel,
   createRecentSessionsLoadingPanel,
@@ -347,6 +355,140 @@ function createEngine(overrides = {}) {
     },
   };
 }
+
+test("WorkShellEngine acknowledges pause only after the provider settles and resumes the same turn", async () => {
+  let releaseProvider;
+  let providerCalls = 0;
+  const { engine, calls } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      updateMode() {},
+      setTraceListener() {},
+      async runTurn() {
+        providerCalls += 1;
+        return new Promise((resolve) => { releaseProvider = resolve; });
+      },
+    },
+  });
+  await engine.initialize();
+
+  const turn = engine.handleSubmit("keep the same turn");
+  while (!releaseProvider) await new Promise((resolve) => setImmediate(resolve));
+  const turnId = engine.getTurnLifecycle().turnId;
+  let acknowledged = false;
+  const pause = engine.requestTurnPause().then((receipt) => {
+    acknowledged = true;
+    return receipt;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(engine.getTurnLifecycle().state, "pause_pending");
+  assert.equal(acknowledged, false);
+  assert.equal(providerCalls, 1);
+
+  releaseProvider({ text: "provider finished" });
+  const receipt = await pause;
+  assert.equal(receipt.turnId, turnId);
+  assert.equal(receipt.boundary, "after_provider");
+  assert.equal(engine.getTurnLifecycle().state, "paused");
+  assert.ok(calls.snapshots.some((snapshot) => snapshot.state === "paused"));
+
+  assert.equal(engine.resumeTurn(), true);
+  await turn;
+  assert.equal(providerCalls, 1, "resume must not create a second user or provider turn");
+  assert.equal(engine.getTurnLifecycle().state, "completed");
+});
+
+test("WorkShellEngine can suspend at a pending approval without cancelling or answering it", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  let decision;
+  const { engine, calls } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+      initialLastSubmittedContextReceiptId: "receipt-pause-1",
+      initialAgentConsole: {
+        profileId: "build",
+        activity: [],
+        agents: [],
+        jobs: [],
+        workGraph: {
+          id: "graph-pause",
+          qualityProfile: "deep",
+          currentStage: "critic",
+          gateStatus: "refine",
+          iteration: 2,
+          approval: "approved",
+          nodes: [{
+            id: "critic-1", title: "Independent review", prompt: "review",
+            status: "requires_action", dependsOn: [], fileOwnership: [],
+            evidenceRefs: [], stage: "critic", role: "critic", attempt: 3,
+            artifactRefs: ["artifact:sha256:abc"], reviewRequired: true,
+          }],
+        },
+      },
+    },
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn() {
+        decision = interactionBridge.ask({
+          id: "pause-at-approval",
+          title: "Permission",
+          questions: [{
+            id: "permission",
+            question: "Proceed?",
+            options: [{ label: "Approve" }, { label: "Reject" }],
+            recommended: 0,
+          }],
+        });
+        const answer = await decision;
+        return { text: answer.status };
+      },
+    },
+  });
+  await engine.initialize();
+
+  const turn = engine.handleSubmit("needs approval", [{
+    type: "image", mimeType: "image/png", displayName: "clipboard.png",
+    path: "(clipboard)", dataUrl: "data:image/png;base64,AA==",
+  }]);
+  while (!engine.getState().agentConsole.pendingDecision) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const receipt = await engine.requestTurnPause();
+
+  assert.equal(receipt.boundary, "before_approval");
+  assert.equal(engine.getTurnLifecycle().state, "paused");
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "pause-at-approval");
+  const paused = calls.snapshots.find((snapshot) => snapshot.state === "paused");
+  assert.deepEqual(paused?.pauseCheckpoint, {
+    turnId: receipt.turnId,
+    boundary: "before_approval",
+    activeNode: { id: "critic-1", attempt: 3 },
+    currentStage: "critic",
+    gateStatus: "refine",
+    iteration: 2,
+    decisionId: "pause-at-approval",
+    contextReceiptId: "receipt-pause-1",
+    attachmentRefs: ["image:image/png:clipboard.png"],
+    artifactRefs: ["artifact:sha256:abc"],
+  });
+
+  assert.equal(engine.resumeTurn(), true);
+  assert.equal(engine.answerPendingDecisionByIndex(1), true);
+  await decision;
+  await turn;
+  assert.equal(engine.getTurnLifecycle().state, "completed");
+});
 
 test("work-shell command helpers classify builtins, local commands, and reusable panels/prompts", () => {
   assert.deepEqual(resolveWorkShellBuiltinCommand("/help"), { kind: "help" });
@@ -6354,6 +6496,43 @@ test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
 
   assert.deepEqual(prompts, ["first", "second"]);
   assert.ok(engine.getState().entries.some((entry) => /Running queued follow-up #1: second/.test(entry.text)));
+});
+
+test("WorkShellEngine keeps a queued follow-up stable while paused and drains it once after resume", async () => {
+  let releaseFirst;
+  const prompts = [];
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
+          await new Promise((resolve) => { releaseFirst = resolve; });
+        }
+        return { text: `reply:${userPrompt}` };
+      },
+    },
+  });
+  await engine.initialize();
+  const firstTurn = engine.handleSubmit("first");
+  while (!releaseFirst) await new Promise((resolve) => setImmediate(resolve));
+  await engine.handleSubmit("second");
+  assert.equal(engine.getState().queuedCount, 1);
+
+  const pause = engine.requestTurnPause();
+  releaseFirst();
+  const receipt = await pause;
+  assert.equal(receipt.boundary, "after_provider");
+  assert.deepEqual(prompts, ["first"]);
+  assert.equal(engine.getState().queuedCount, 1);
+
+  assert.equal(engine.resumeTurn(), true);
+  await firstTurn;
+  assert.deepEqual(prompts, ["first", "second"]);
+  assert.equal(engine.getState().queuedCount, 0);
 });
 
 function createBusyEngine() {

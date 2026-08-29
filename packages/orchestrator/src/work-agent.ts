@@ -59,6 +59,12 @@ import {
   type QualityWorkspaceEntry,
 } from "./quality-runtime.js";
 import type { CreatorEvolutionService } from "./evolution-runtime.js";
+import {
+  checkpointExecutionPause,
+  type ExecutionPausePort,
+  runExecutionNonInterruptible,
+  withExecutionPausePort,
+} from "./execution-pause.js";
 
 type ReasoningLike = {
   readonly effort: string;
@@ -384,6 +390,7 @@ export class WorkAgent<
   TraceEvent extends { readonly type: string },
   Reasoning extends ReasoningLike,
 > {
+  readonly supportsCooperativePause = true as const;
   private readonly directAgent: OrchestratedWorkTurnAgent<Attachment, TraceEvent, Reasoning>;
   private readonly reviewAgent: OrchestratedWorkTurnAgent<Attachment, TraceEvent, Reasoning> | undefined;
   private readonly createExecutorAgent: ExecutorAgentFactory<Attachment, TraceEvent, Reasoning> | undefined;
@@ -1073,10 +1080,23 @@ export class WorkAgent<
    * is live and yields a single typed outcome; a plain parent abort keeps its
    * ordinary `AbortError` semantics.
    */
-  async runTurn(prompt: string, attachments: readonly Attachment[] = [], options: { readonly signal?: AbortSignal | undefined } = {}): Promise<WorkAgentTurnResult> {
+  async runTurn(
+    prompt: string,
+    attachments: readonly Attachment[] = [],
+    options: {
+      readonly signal?: AbortSignal | undefined;
+      readonly classificationPrompt?: string | undefined;
+      readonly pause?: ExecutionPausePort | undefined;
+    } = {},
+  ): Promise<WorkAgentTurnResult> {
     const epoch = this.runController.beginTurn(options.signal);
     try {
-      const result = await this.runTurnInEpoch(prompt, attachments, epoch);
+      const result = await withExecutionPausePort(options.pause, () =>
+        this.runTurnInEpoch(
+          prompt,
+          attachments,
+          epoch,
+        ));
       return epoch.isCleared() ? CLEARED_TURN_RESULT : result;
     } catch (error) {
       if (epoch.isCleared()) {
@@ -1224,6 +1244,7 @@ export class WorkAgent<
           const context = await this.qualityContext(quality, "work");
           let outcome: Awaited<ReturnType<WorkAgentRunController<Attachment, TraceEvent, Reasoning>["runTask"]>>;
           try {
+            await checkpointExecutionPause("between_nodes");
             outcome = await this.runController.runTask({
               graphId: activeGraphId,
               task: {
@@ -1336,6 +1357,7 @@ export class WorkAgent<
           return { id: task.id, summary: outcome.text, status: "completed" };
         }
 
+        await checkpointExecutionPause("between_nodes");
         const outcome = await this.runController.runTask({
           graphId: activeGraphId,
           task,
@@ -1664,6 +1686,10 @@ export class WorkAgent<
         return this.terminateQuality(quality);
       }
       throw error;
+    }
+
+    if (result.kind === "complex") {
+      await checkpointExecutionPause("between_nodes");
     }
 
     if (result.kind !== "complex") {

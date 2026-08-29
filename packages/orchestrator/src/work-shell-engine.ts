@@ -36,7 +36,17 @@ import {
   resolveWorkShellSubmitRoute,
   type WorkShellSubmitRoute,
 } from "./work-shell-engine-submit.js";
-import { createWorkShellSessionSnapshotInput } from "./work-shell-engine-persistence.js";
+import {
+  createWorkShellSessionSnapshotInput,
+  type WorkShellSessionState,
+} from "./work-shell-engine-persistence.js";
+import {
+  CooperativePauseController,
+  type WorkShellPauseBoundary,
+  type WorkShellPauseReceipt,
+  type WorkShellPauseSnapshot,
+} from "./work-shell-pause-controller.js";
+import type { ExecutionPausePort } from "./execution-pause.js";
 import {
   buildWorkShellContextPacketPreviewLines,
   composeWorkShellTurnPromptFromPacket,
@@ -110,7 +120,10 @@ import type {
 } from "@unclecode/contracts";
 import type { WorkAgentControlRuntime } from "./work-agent-run-controller.js";
 import type { WorkAgentTurnResult } from "./work-agent.js";
-import type { WorkShellSessionSnapshotInput } from "./work-shell-engine-persistence.js";
+import type {
+  WorkShellDurablePauseCheckpoint,
+  WorkShellSessionSnapshotInput,
+} from "./work-shell-engine-persistence.js";
 import type {
   MemoryLineageAdapter,
   PromoteScopedMemoryInput,
@@ -445,6 +458,8 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
   readonly modelWindow: number;
   readonly queuedCount: number;
   readonly queuePaused: boolean;
+  /** Turn suspension is independent from queue pause and AbortSignal cancellation. */
+  readonly turnLifecycle: WorkShellPauseSnapshot;
   readonly terminalColumns: number;
   readonly terminalRows?: number | undefined;
   // Context Inspector (Sprint 2): cursor highlight index into the navigable
@@ -467,8 +482,17 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
 };
 
 export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkShellReasoningConfig> {
+  readonly supportsCooperativePause?: true | undefined;
   clear(): void;
-  runTurn(prompt: string, attachments?: readonly Attachment[], options?: { readonly signal?: AbortSignal | undefined }): Promise<WorkAgentTurnResult>;
+  runTurn(
+    prompt: string,
+    attachments?: readonly Attachment[],
+    options?: {
+      readonly signal?: AbortSignal | undefined;
+      readonly classificationPrompt?: string | undefined;
+      readonly pause?: ExecutionPausePort | undefined;
+    },
+  ): Promise<WorkAgentTurnResult>;
   updateRuntimeSettings(settings: { reasoning?: Reasoning | undefined; model?: string | undefined }): void;
   updateMode?(mode: string): void;
   setTraceListener(listener?: ((event: TraceEvent) => void) | undefined): void;
@@ -519,7 +543,7 @@ export type WorkShellEngineInput<
     sessionId: string;
     model: string;
     mode: string;
-    state: "running" | "idle" | "requires_action";
+    state: WorkShellSessionState;
     summary: string;
     traceMode?: WorkShellTraceMode | undefined;
   }) => Promise<void>;
@@ -728,10 +752,11 @@ export class WorkShellEngine<
     sessionId: string;
     model: string;
     mode: string;
-    state: "running" | "idle" | "requires_action";
+    state: WorkShellSessionState;
     summary: string;
     traceMode?: WorkShellTraceMode | undefined;
     agentConsole?: AgentConsoleSnapshot | undefined;
+    pauseCheckpoint?: WorkShellDurablePauseCheckpoint | undefined;
   }) => Promise<void>;
   private readonly resolveReasoningCommand: (
     input: string,
@@ -848,6 +873,7 @@ export class WorkShellEngine<
   private cachedContextPacket: ContextPacketView | undefined;
   private cachedInspectorSourceList: readonly InspectorSource[] = [];
   private activeTurnEpoch = 0;
+  private activeAttachmentRefs: readonly string[] = [];
   private activeTurnAbortController: AbortController | undefined;
   private queueAutoDrainPaused = false;
   private workBoardRebuildGeneration = 0;
@@ -856,6 +882,7 @@ export class WorkShellEngine<
     | { readonly user: string; readonly assistant: string }
     | undefined;
   private state: WorkShellEngineState<Reasoning>;
+  private readonly pauseController: CooperativePauseController;
   private pendingDecision: PendingDecision | undefined;
   /**
    * Lifecycle events reduce here first, in arrival order, so a burst is
@@ -932,6 +959,9 @@ export class WorkShellEngine<
       contextSourceActionsEnabled: input.mutateContextSource !== undefined,
       contextAdviceActionsEnabled: input.resolveContextSuggestion !== undefined,
     };
+    this.pauseController = new CooperativePauseController({
+      onStateChanged: (turnLifecycle) => this.setState({ turnLifecycle }),
+    });
     this.lastCompletedTurnSnapshot = resolveLastCompletedTurn(
       input.options.initialEntries ?? this.state.entries,
     );
@@ -939,6 +969,30 @@ export class WorkShellEngine<
 
   getState(): WorkShellEngineState<Reasoning> {
     return this.state;
+  }
+
+  /** Stable identity used by the session store and the loopback control room. */
+  getSessionId(): string {
+    return this.sessionId;
+  }
+
+  getTurnLifecycle(): WorkShellPauseSnapshot {
+    return this.pauseController.snapshot();
+  }
+
+  requestTurnPause(): Promise<WorkShellPauseReceipt> {
+    const requested = this.pauseController.requestPause();
+    if (this.pendingDecision && this.pauseController.snapshot().state === "pause_pending") {
+      void this.pauseController.checkpoint(
+        "before_approval",
+        () => this.pauseCheckpointForEpoch(this.activeTurnEpoch, "before_approval"),
+      ).catch(() => undefined);
+    }
+    return requested;
+  }
+
+  resumeTurn(): boolean {
+    return this.pauseController.resume();
   }
 
   updateTerminalColumns(columns: number): void {
@@ -1059,6 +1113,7 @@ export class WorkShellEngine<
   }
 
   dispose(): void {
+    this.pauseController.cancel();
     this.agent.setTraceListener(undefined);
     this.flushAgentConsole();
     this.clearAgentConsoleTimers();
@@ -2129,6 +2184,7 @@ export class WorkShellEngine<
     this.queueDrainSkipTurnEpochs.add(interruptedTurnEpoch);
     this.queueAutoDrainPaused = this.queuedCountCache > 0;
     this.activeTurnEpoch = interruptedIdleEpoch;
+    this.pauseController.cancel();
     this.activeTurnAbortController?.abort();
     const lastTurnDurationMs = this.state.currentTurnStartedAt === undefined
       ? undefined
@@ -2468,8 +2524,9 @@ export class WorkShellEngine<
       case "prompt-command": {
         const abortController = this.startActiveTurnAbortController();
         this.beginSubmitPreparation();
+        const turnId = `turn-${this.sessionId}-${turnEpoch}`;
+        this.pauseController.beginTurn(turnId);
         try {
-          const turnId = `turn-${this.sessionId}-${turnEpoch}`;
           const prepared = await this.prepareProviderContext(turnId, isCurrentTurn);
           if (prepared === "blocked") {
             this.pauseQueueAfterProofBlock(turnEpoch);
@@ -2504,11 +2561,13 @@ export class WorkShellEngine<
             sessionId: this.sessionId,
             buildStatusPanel: this.buildStatusPanel,
             autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
-            runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(
-              contextPacket ? this.composeProviderPrompt(contextPacket, prompt) : prompt,
+            runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.runAgentTurnAtPauseBoundary({
+              turnEpoch,
+              prompt: contextPacket ? this.composeProviderPrompt(contextPacket, prompt) : prompt,
+              classificationPrompt: prompt,
               attachments,
-              { signal: abortController.signal },
-            ),
+              signal: abortController.signal,
+            }),
             isTurnActive: isCurrentTurn,
             publishContextBridge: this.publishContextBridge,
             writeScopedMemory: this.writeScopedMemory,
@@ -2546,6 +2605,10 @@ export class WorkShellEngine<
             && contextReceipt
             && isCurrentTurn()
           ) {
+            // Context advice is deliberately supersedable by the next user
+            // turn. Finish the durable provider turn before awaiting it so a
+            // second turn never inherits the previous cooperative lifecycle.
+            await this.finishCooperativeTurn(turnEpoch);
             await this.refreshContextAdvice(
               contextReceipt,
               contextPacket,
@@ -2553,6 +2616,7 @@ export class WorkShellEngine<
             );
           }
         } finally {
+          await this.finishCooperativeTurn(turnEpoch);
           this.clearActiveTurnAbortController(abortController);
           this.clearSubmitPreparationIfStillPending(isCurrentTurn);
         }
@@ -2567,8 +2631,9 @@ export class WorkShellEngine<
       case "chat": {
         const abortController = this.startActiveTurnAbortController();
         this.beginSubmitPreparation();
+        const turnId = `turn-${this.sessionId}-${turnEpoch}`;
+        this.pauseController.beginTurn(turnId);
         try {
-          const turnId = `turn-${this.sessionId}-${turnEpoch}`;
           const preflight = await resolveWorkShellChatPreflight({
             line: route.line,
             cwd: this.options.cwd,
@@ -2625,11 +2690,13 @@ export class WorkShellEngine<
             sessionId: this.sessionId,
             buildStatusPanel: this.buildStatusPanel,
             autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
-            runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.agent.runTurn(
-              contextPacket ? this.composeProviderPrompt(contextPacket, prompt) : prompt,
+            runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.runAgentTurnAtPauseBoundary({
+              turnEpoch,
+              prompt: contextPacket ? this.composeProviderPrompt(contextPacket, prompt) : prompt,
+              classificationPrompt: prompt,
               attachments,
-              { signal: abortController.signal },
-            ),
+              signal: abortController.signal,
+            }),
             isTurnActive: isCurrentTurn,
             publishContextBridge: this.publishContextBridge,
             writeScopedMemory: this.writeScopedMemory,
@@ -2667,6 +2734,10 @@ export class WorkShellEngine<
             && contextReceipt
             && isCurrentTurn()
           ) {
+            // Context advice is deliberately supersedable by the next user
+            // turn. Finish the durable provider turn before awaiting it so a
+            // second turn never inherits the previous cooperative lifecycle.
+            await this.finishCooperativeTurn(turnEpoch);
             await this.refreshContextAdvice(
               contextReceipt,
               contextPacket,
@@ -2674,6 +2745,7 @@ export class WorkShellEngine<
             );
           }
         } finally {
+          await this.finishCooperativeTurn(turnEpoch);
           this.clearActiveTurnAbortController(abortController);
           this.clearSubmitPreparationIfStillPending(isCurrentTurn);
         }
@@ -2912,9 +2984,10 @@ export class WorkShellEngine<
    * the same reasoning override, receipt pointer, and console projection.
    */
   private buildSessionSnapshotInput(input: {
-    readonly state: "running" | "idle" | "requires_action";
+    readonly state: WorkShellSessionState;
     readonly summary: string;
     readonly traceMode: WorkShellTraceMode;
+    readonly pauseCheckpoint?: WorkShellDurablePauseCheckpoint | undefined;
   }): WorkShellSessionSnapshotInput {
     const overrideReasoningEffort =
       this.state.reasoning.support.status === "supported" &&
@@ -2936,11 +3009,12 @@ export class WorkShellEngine<
       lastSubmittedContextReceiptId: this.lastSubmittedContextReceiptId,
       entries: this.state.entries,
       agentConsole: this.state.agentConsole,
+      ...(input.pauseCheckpoint ? { pauseCheckpoint: input.pauseCheckpoint } : {}),
     });
   }
 
   private async persistSessionSnapshot(
-    state: "running" | "idle" | "requires_action",
+    state: WorkShellSessionState,
     summary: string,
     traceMode = this.state.traceMode,
   ): Promise<void> {
@@ -2973,7 +3047,7 @@ export class WorkShellEngine<
 
   private async persistSessionSnapshotForEpoch(
     turnEpoch: number,
-    state: "running" | "idle" | "requires_action",
+    state: WorkShellSessionState,
     summary: string,
     traceMode = this.state.traceMode,
   ): Promise<void> {
@@ -2981,6 +3055,106 @@ export class WorkShellEngine<
       return;
     }
     await this.persistSessionSnapshot(state, summary, traceMode);
+  }
+
+  private pauseCheckpointForEpoch(
+    turnEpoch: number,
+    boundary: WorkShellPauseBoundary,
+  ): Promise<void> {
+    if (turnEpoch !== this.activeTurnEpoch) return Promise.resolve();
+    const lifecycle = this.pauseController.snapshot();
+    const turnId = lifecycle.turnId;
+    if (!turnId) return Promise.reject(new Error("Pause checkpoint lost the active turn identity."));
+    const console = this.state.agentConsole;
+    const graph = console.workGraph;
+    const activeNode = graph?.nodes.find((node) => node.status === "running" || node.status === "requires_action");
+    const artifactRefs = [...new Set([
+      ...(activeNode?.artifactRefs ?? []),
+      ...(graph?.nodes.flatMap((node) => node.artifactRefs) ?? []),
+    ])].filter((ref) => ref.trim().length > 0).slice(0, 64);
+    const pauseCheckpoint: WorkShellDurablePauseCheckpoint = {
+      turnId,
+      boundary,
+      ...(activeNode ? { activeNode: { id: activeNode.id, attempt: activeNode.attempt } } : {}),
+      ...(graph ? {
+        currentStage: graph.currentStage,
+        gateStatus: graph.gateStatus,
+        iteration: graph.iteration,
+      } : {}),
+      ...(console.pendingDecision?.id ? { decisionId: console.pendingDecision.id } : {}),
+      ...(this.lastSubmittedContextReceiptId ? { contextReceiptId: this.lastSubmittedContextReceiptId } : {}),
+      attachmentRefs: this.activeAttachmentRefs,
+      artifactRefs,
+    };
+    this.lastSessionSummary = `Turn paused at ${boundary}.`;
+    return this.enqueueSessionSnapshotWrite(this.buildSessionSnapshotInput({
+      state: "paused",
+      summary: this.lastSessionSummary,
+      traceMode: this.state.traceMode,
+      pauseCheckpoint,
+    }));
+  }
+
+  private executionPausePort(turnEpoch: number): ExecutionPausePort {
+    const persist = (snapshot: WorkShellPauseSnapshot) => this.pauseCheckpointForEpoch(
+      turnEpoch,
+      snapshot.boundary ?? "before_completion",
+    );
+    return {
+      checkpoint: (boundary) => this.pauseController.checkpoint(boundary, persist),
+      runNonInterruptible: (operation, run) => this.pauseController.runNonInterruptible(
+        operation,
+        run,
+        persist,
+      ),
+    };
+  }
+
+  private async runAgentTurnAtPauseBoundary(input: {
+    readonly turnEpoch: number;
+    readonly prompt: string;
+    readonly classificationPrompt: string;
+    readonly attachments?: readonly Attachment[] | undefined;
+    readonly signal: AbortSignal;
+  }): Promise<WorkAgentTurnResult> {
+    this.activeAttachmentRefs = (input.attachments ?? []).map((attachment, index) => {
+      const value = attachment as unknown as Record<string, unknown>;
+      const label = [value.type, value.mimeType, value.displayName]
+        .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+        .join(":");
+      return (label || `attachment-${index + 1}`).slice(0, 256);
+    }).slice(0, 32);
+    const run = () => this.agent.runTurn(
+      input.prompt,
+      input.attachments,
+      {
+        signal: input.signal,
+        classificationPrompt: input.classificationPrompt,
+        pause: this.executionPausePort(input.turnEpoch),
+      },
+    );
+    try {
+      if (this.agent.supportsCooperativePause) return await run();
+      return await this.pauseController.runNonInterruptible(
+        "provider.request",
+        run,
+        (snapshot) => this.pauseCheckpointForEpoch(
+          input.turnEpoch,
+          snapshot.boundary ?? "after_provider",
+        ),
+      );
+    } finally {
+      this.activeAttachmentRefs = [];
+    }
+  }
+
+  private async finishCooperativeTurn(turnEpoch: number): Promise<void> {
+    if (turnEpoch !== this.activeTurnEpoch) return;
+    await this.pauseController.checkpoint(
+      "before_completion",
+      () => this.pauseCheckpointForEpoch(turnEpoch, "before_completion"),
+    );
+    this.pauseController.complete();
   }
 
   private async pushQueuedSubmit(line: string): Promise<{ readonly id: number; readonly line: string }> {
