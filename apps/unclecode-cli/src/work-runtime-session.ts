@@ -9,6 +9,7 @@ import path from "node:path";
 import {
   isModeReasoningEffort,
   markUnrecoverableAgentConsoleWorkInterrupted,
+  MAX_QUALITY_REVIEW_HISTORY,
   parseAgentConsoleSnapshot,
   type AgentConsoleSnapshot,
   type ModeReasoningEffort,
@@ -54,6 +55,12 @@ export type RustResolvedOpenAIAuth = {
   readonly reason: string | null;
 };
 
+export type WorkRuntimeTranscriptEntry = {
+  readonly id?: string;
+  readonly role: "system" | "user" | "assistant" | "tool";
+  readonly text: string;
+};
+
 export function deriveAuthIssueLines(input: WorkRuntimeAuthIssueInput): readonly string[] {
   if (input.authStatus?.expiresAt === "insufficient-scope") {
     return ["Auth issue: saved OAuth lacks model.request scope. Use /auth key, OPENAI_API_KEY, or browser OAuth with OPENAI_OAUTH_CLIENT_ID."];
@@ -76,10 +83,11 @@ export async function loadResumedWorkSession(input: {
 }): Promise<{
   sessionId: string;
   initialTraceMode?: "minimal" | "verbose";
+  initialUiLocale?: "en" | "ko";
   reasoningEffort?: ModeReasoningEffort;
   lastSubmittedContextReceiptId?: string;
   contextLine: string;
-  initialEntries: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[];
+  initialEntries: readonly WorkRuntimeTranscriptEntry[];
   initialAgentConsole?: AgentConsoleSnapshot;
   initialPauseCheckpoint?: WorkShellReplaySafePauseCheckpoint;
   initialSessionSummary?: string;
@@ -104,6 +112,7 @@ export async function loadResumedWorkSession(input: {
     ...(resumed.traceMode
       ? { initialTraceMode: resumed.traceMode }
       : {}),
+    ...(resumed.uiLocale ? { initialUiLocale: resumed.uiLocale } : {}),
     ...(resumed.reasoningEffort
       ? { reasoningEffort: resumed.reasoningEffort }
       : {}),
@@ -127,7 +136,7 @@ export async function loadResumedWorkSession(input: {
 async function loadLegacySessionSummaryEntries(input: {
   sessionId: string;
   env: NodeJS.ProcessEnv;
-}): Promise<readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[]> {
+}): Promise<readonly WorkRuntimeTranscriptEntry[]> {
   const memoryPath = path.join(
     getSessionStoreRoot(input.env),
     "memory",
@@ -149,20 +158,14 @@ async function loadLegacySessionSummaryEntries(input: {
   }
 }
 
-function parseLegacySessionSummary(summary: string): readonly {
-  readonly role: "system" | "user" | "assistant" | "tool";
-  readonly text: string;
-}[] {
+function parseLegacySessionSummary(summary: string): readonly WorkRuntimeTranscriptEntry[] {
   const matched = /^Q:\s*(.*?)\s*·\s*A:\s*(.*)$/s.exec(summary);
   if (!matched) {
     return [];
   }
   const question = matched[1] ?? "";
   const answer = matched[2] ?? "";
-  const entries = [] as {
-    readonly role: "system" | "user" | "assistant" | "tool";
-    readonly text: string;
-  }[];
+  const entries: WorkRuntimeTranscriptEntry[] = [];
   if (question.trim().length > 0) {
     entries.push({ role: "user", text: question.trim() });
   }
@@ -223,10 +226,11 @@ export async function resolveRustOpenAIAuth(input: {
 function parseRustResumedWorkSession(stdout: string): {
   readonly sessionId: string;
   readonly traceMode?: "minimal" | "verbose";
+  readonly uiLocale?: "en" | "ko";
   readonly reasoningEffort?: ModeReasoningEffort;
   readonly lastSubmittedContextReceiptId?: string;
   readonly contextLine: string;
-  readonly initialEntries: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[];
+  readonly initialEntries: readonly WorkRuntimeTranscriptEntry[];
   readonly initialAgentConsole?: AgentConsoleSnapshot;
   readonly initialPauseCheckpoint?: WorkShellReplaySafePauseCheckpoint;
   readonly initialSessionSummary?: string;
@@ -235,6 +239,7 @@ function parseRustResumedWorkSession(stdout: string): {
     sessionId?: unknown;
     state?: unknown;
     traceMode?: unknown;
+    uiLocale?: unknown;
     reasoningEffort?: unknown;
     lastSubmittedContextReceiptId?: unknown;
     contextLine?: unknown;
@@ -248,17 +253,31 @@ function parseRustResumedWorkSession(stdout: string): {
     throw new Error("Rust session resume returned no session id.");
   }
   const traceMode = parsed.traceMode;
+  const uiLocale = parsed.uiLocale;
   const reasoningEffort = parsed.reasoningEffort;
   const lastSubmittedContextReceiptId = parsed.lastSubmittedContextReceiptId;
   const initialEntries = Array.isArray(parsed.initialEntries)
-    ? parsed.initialEntries.filter((entry): entry is { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string } =>
-        Boolean(entry)
-        && typeof entry === "object"
-        && (((entry as { role?: unknown }).role === "system")
-          || ((entry as { role?: unknown }).role === "user")
-          || ((entry as { role?: unknown }).role === "assistant")
-          || ((entry as { role?: unknown }).role === "tool"))
-        && typeof (entry as { text?: unknown }).text === "string")
+    ? parsed.initialEntries.flatMap((entry): WorkRuntimeTranscriptEntry[] => {
+        if (!entry || typeof entry !== "object") return [];
+        const candidate = entry as { id?: unknown; role?: unknown; text?: unknown };
+        if (
+          (candidate.role !== "system"
+            && candidate.role !== "user"
+            && candidate.role !== "assistant"
+            && candidate.role !== "tool")
+          || typeof candidate.text !== "string"
+        ) {
+          return [];
+        }
+        const id = typeof candidate.id === "string" && candidate.id.trim().length > 0
+          ? candidate.id
+          : undefined;
+        return [{
+          ...(id ? { id } : {}),
+          role: candidate.role,
+          text: candidate.text,
+        }];
+      })
     : [];
   const parsedAgentConsole = parseAgentConsoleSnapshot(parsed.agentConsole);
   const initialPauseCheckpoint = parsed.state === "paused"
@@ -273,11 +292,12 @@ function parseRustResumedWorkSession(stdout: string): {
   const initialAgentConsole = parsedAgentConsole
     ? initialPauseCheckpoint
       ? parsedAgentConsole
-      : markUnrecoverableAgentConsoleWorkInterrupted(parsedAgentConsole)
+      : markInterruptedQualityRun(markUnrecoverableAgentConsoleWorkInterrupted(parsedAgentConsole))
     : undefined;
   return {
     sessionId,
     ...(traceMode === "minimal" || traceMode === "verbose" ? { traceMode } : {}),
+    ...(uiLocale === "en" || uiLocale === "ko" ? { uiLocale } : {}),
     ...(isModeReasoningEffort(reasoningEffort) ? { reasoningEffort } : {}),
     ...(typeof lastSubmittedContextReceiptId === "string" && lastSubmittedContextReceiptId.trim()
       ? { lastSubmittedContextReceiptId }
@@ -289,6 +309,48 @@ function parseRustResumedWorkSession(stdout: string): {
       : {}),
     ...(initialAgentConsole ? { initialAgentConsole } : {}),
     ...(initialPauseCheckpoint ? { initialPauseCheckpoint } : {}),
+  };
+}
+
+function markInterruptedQualityRun(snapshot: AgentConsoleSnapshot): AgentConsoleSnapshot {
+  const quality = snapshot.qualityReview;
+  if (!quality || quality.history.at(-1)?.event === "completed") return snapshot;
+  const interruptedAt = Date.now();
+  const completion = {
+    event: "completed" as const,
+    stage: quality.currentStage ?? snapshot.workGraph?.currentStage ?? "work" as const,
+    decision: "unproven" as const,
+    iteration: quality.iteration ?? snapshot.workGraph?.iteration ?? 0,
+    reason: "The quality run was interrupted before it could be resumed safely.",
+    failures: ["QUALITY_RUN_INTERRUPTED"],
+    evidenceRefs: [],
+    artifactRefs: [],
+    independentVerification: false,
+    stale: true,
+    startedAt: interruptedAt,
+  };
+  return {
+    ...snapshot,
+    qualityReview: {
+      ...quality,
+      currentStage: completion.stage,
+      iteration: completion.iteration,
+      latestDecision: "unproven",
+      history: [...quality.history, completion].slice(-MAX_QUALITY_REVIEW_HISTORY),
+    },
+    ...(snapshot.workGraph
+      ? {
+          workGraph: {
+            ...snapshot.workGraph,
+            currentStage: completion.stage,
+            gateStatus: "unproven" as const,
+            nodes: snapshot.workGraph.nodes.map(node =>
+              node.status === "completed" || node.status === "failed" || node.status === "cancelled" || node.status === "blocked"
+                ? node
+                : { ...node, status: "failed" as const }),
+          },
+        }
+      : {}),
   };
 }
 

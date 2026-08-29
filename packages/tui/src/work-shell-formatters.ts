@@ -1,5 +1,8 @@
 import type { ExecutionTraceEvent } from "@unclecode/contracts";
-import { runRustCommandSync } from "@unclecode/orchestrator";
+import {
+  runRustCommandSync,
+  type WorkShellUiLocale,
+} from "@unclecode/orchestrator";
 
 const rustTraceLineCache = new Map<string, string>();
 const rustErrorMessageCache = new Map<string, string>();
@@ -14,7 +17,10 @@ export function formatWorkShellError(message: string): string {
   return formatted;
 }
 
-export function formatAgentTraceLine(event: ExecutionTraceEvent): string {
+export function formatAgentTraceLine(
+  event: ExecutionTraceEvent,
+  uiLocale: WorkShellUiLocale = "en",
+): string {
   const key = JSON.stringify(event);
   const cached = rustTraceLineCache.get(key);
   if (cached !== undefined) {

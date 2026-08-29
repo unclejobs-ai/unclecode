@@ -31,10 +31,15 @@ export async function persistWorkShellSessionSnapshot(input: {
   readonly state: WorkShellSessionState;
   readonly summary: string;
   readonly traceMode?: "minimal" | "verbose" | undefined;
+  readonly uiLocale?: "en" | "ko" | undefined;
   readonly reasoningEffort?: ModeReasoningEffort | undefined;
   readonly lastSubmittedContextReceiptId?: string | undefined;
   readonly ownerMutationRevision?: number | undefined;
-  readonly entries?: readonly { readonly role: "system" | "user" | "assistant" | "tool"; readonly text: string }[] | undefined;
+  readonly entries?: readonly {
+    readonly id?: string | undefined;
+    readonly role: "system" | "user" | "assistant" | "tool";
+    readonly text: string;
+  }[] | undefined;
   readonly agentConsole?: AgentConsoleSnapshot | undefined;
   readonly pauseCheckpoint?: WorkShellDurablePauseCheckpoint | undefined;
 }): Promise<void> {
@@ -48,6 +53,7 @@ export async function persistWorkShellSessionSnapshot(input: {
       state: input.state,
       summary: input.summary,
       traceMode: input.traceMode,
+      uiLocale: input.uiLocale,
       reasoningEffort: input.reasoningEffort,
       lastSubmittedContextReceiptId: input.lastSubmittedContextReceiptId,
       ownerMutationRevision: input.ownerMutationRevision,

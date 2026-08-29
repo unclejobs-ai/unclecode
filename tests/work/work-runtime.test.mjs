@@ -150,6 +150,48 @@ test("loadResumedWorkSession reports missing session ids honestly", async () => 
   }
 });
 
+test("Rust CLI persist-json to resume-json preserves transcript ids and accepts legacy missing ids", async () => {
+  const originalEnv = { ...process.env };
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-runtime-entry-id-"));
+  const fakeHome = path.join(workspaceRoot, "home");
+  const env = {
+    ...originalEnv,
+    HOME: fakeHome,
+    UNCLECODE_SESSION_STORE_ROOT: path.join(workspaceRoot, "session-store"),
+    ...preserveRustToolchainEnv(originalEnv),
+  };
+
+  try {
+    await persistWorkShellSessionSnapshot({
+      cwd: workspaceRoot,
+      env,
+      sessionId: "work-entry-id-roundtrip",
+      model: "gpt-5.6-sol",
+      mode: "analyze",
+      state: "idle",
+      summary: "Chat: transcript identity roundtrip",
+      entries: [
+        { id: "entry-user-stable", role: "user", text: "첫 질문" },
+        { id: "entry-assistant-stable", role: "assistant", text: "첫 답변" },
+        { role: "user", text: "legacy entry without an id" },
+      ],
+    });
+
+    const resumed = await loadResumedWorkSession({
+      cwd: workspaceRoot,
+      sessionId: "work-entry-id-roundtrip",
+      env,
+    });
+    assert.deepEqual(resumed.initialEntries, [
+      { id: "entry-user-stable", role: "user", text: "첫 질문" },
+      { id: "entry-assistant-stable", role: "assistant", text: "첫 답변" },
+      { role: "user", text: "legacy entry without an id" },
+    ]);
+  } finally {
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("loadWorkCliBootstrap returns prompt plus shell bootstrap state without starting the repl", async () => {
   const originalEnv = { ...process.env };
   const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-work-runtime-bootstrap-"));

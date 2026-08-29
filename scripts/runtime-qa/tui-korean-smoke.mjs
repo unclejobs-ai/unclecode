@@ -64,7 +64,7 @@ export async function runKoreanBusyTuiSmoke({ port, tmp, observations }) {
     await pressEnter(session);
     const busyPane = await waitForPane(
       session,
-      /preparing context|thinking|Working|Enter queues follow-up/,
+      /컨텍스트 준비 중|생각 중|작업 중|후속 요청 대기열 추가/,
       busyPaneFile,
     );
     assert.doesNotMatch(
@@ -79,7 +79,12 @@ export async function runKoreanBusyTuiSmoke({ port, tmp, observations }) {
 
     assert.equal(requestDelta, 1, `Korean busy QA should make one provider call, got ${requestDelta}`);
     assert.match(pane, new RegExp(escapeRegExp(koreanBusyResponseText)));
-    assert.match(busyPane, /preparing context|thinking|Working|Enter queues follow-up/);
+    assert.match(busyPane, /컨텍스트 준비 중|생각 중|작업 중|후속 요청 대기열 추가/);
+    assert.doesNotMatch(
+      busyPane,
+      /Preparing context|Thinking|Working|Enter queues follow-up/,
+      "Korean work status must not leak English runtime guidance",
+    );
     assert.doesNotMatch(
       busyPane,
       lowerBusyActivityRowPattern("thinking"),

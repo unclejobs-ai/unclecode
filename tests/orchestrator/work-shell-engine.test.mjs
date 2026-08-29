@@ -3097,8 +3097,8 @@ test("createInitialWorkShellEngineState derives the shell defaults from options"
   assert.equal(defaultState.composerMode, "default");
   assert.equal(defaultState.isBusy, false);
   assert.deepEqual(defaultState.entries, [
-    { role: "user", text: "inspect repo" },
-    { role: "assistant", text: "repo inspected" },
+    { id: "entry-0", role: "user", text: "inspect repo" },
+    { id: "entry-1", role: "assistant", text: "repo inspected" },
   ]);
 });
 
@@ -3124,8 +3124,8 @@ test("work-shell state helpers append entries and update auth/busy transitions d
   };
 
   assert.deepEqual(withEntries.entries, [
-    { role: "system", text: "hello" },
-    { role: "assistant", text: "world" },
+    { id: "entry-0", role: "system", text: "hello" },
+    { id: "entry-1", role: "assistant", text: "world" },
   ]);
   assert.equal(withAuth.authLabel, "oauth-file");
   assert.deepEqual(withAuth.authLauncherLines, ["Saved auth found."]);
@@ -3293,17 +3293,31 @@ test("WorkShellEngine handles /clear without UI-owned business logic", async () 
   assert.deepEqual(engine.getState().entries, [{ role: "system", text: "Conversation cleared." }]);
 });
 
-test("WorkShellEngine /clear clears stale work board done snapshot", async () => {
+test("WorkShellEngine queue never mixes completed turn history into follow-ups", async () => {
   const { engine } = createEngine();
 
   await engine.initialize();
   await engine.handleSubmit("hello");
   await engine.handleSubmit("/queue");
-  assert.ok(engine.getState().panel?.lines.some((line) => /Done · 1/.test(line)));
+  assert.equal(engine.getState().panel.title, "Queue · follow-ups");
+  assert.ok(!engine.getState().panel.lines.some((line) => /Done|hello →/.test(line)));
 
   await engine.handleSubmit("/clear");
   await engine.handleSubmit("/queue");
-  assert.ok(engine.getState().panel?.lines.some((line) => /Done · 0/.test(line)));
+  assert.equal(engine.getState().panel.title, "Queue · follow-ups");
+  assert.ok(!engine.getState().panel.lines.some((line) => /Done|hello →/.test(line)));
+});
+
+test("WorkShellEngine replaces a queue overlay with the security policy projection", async () => {
+  const { engine } = createEngine();
+
+  await engine.initialize();
+  await engine.handleSubmit("/queue");
+  await engine.handleSubmit("/policy");
+
+  assert.equal(engine.getState().panel.title, "Security policy");
+  assert.match(engine.getState().panel.lines.join("\n"), /Security approval only/);
+  assert.doesNotMatch(engine.getState().panel.lines.join("\n"), /follow-ups/);
 });
 
 test("WorkShellEngine applies /reasoning updates and syncs agent runtime settings", async () => {
@@ -3660,7 +3674,9 @@ test("WorkShellEngine sends the manifest-owned provider prompt for a resolved pa
   await engine.handleSubmit("write focused tests");
 
   assert.deepEqual(manifestInputs, [{ packet, userPrompt: "write focused tests" }]);
-  assert.deepEqual(providerPrompts, ["manifest-owned:packet-manifest-1:write focused tests"]);
+  assert.deepEqual(providerPrompts, [
+    "Respond in English for this session. Preserve code, paths, commands, and proper names when needed.\n\nmanifest-owned:packet-manifest-1:write focused tests",
+  ]);
   assert.deepEqual(engine.getState().agentConsole.manifest, packet.manifest);
   assert.deepEqual(calls.snapshots.at(-1)?.agentConsole?.manifest, packet.manifest);
 });
@@ -4818,7 +4834,9 @@ test("WorkShellEngine answers and cancels a pending decision by one-key methods"
   assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-one-key");
   assert.equal((await Promise.race([result, Promise.resolve("pending")])), "pending");
 
-  assert.equal(engine.answerPendingDecisionByIndex(2), true);
+  assert.equal(engine.answerPendingDecisionByIndex(2, "stale-decision"), false);
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-one-key");
+  assert.equal(engine.answerPendingDecisionByIndex(2, "decision-one-key"), true);
 
   assert.deepEqual(await result, {
     status: "answered",
@@ -4831,7 +4849,6 @@ test("WorkShellEngine answers and cancels a pending decision by one-key methods"
   assert.equal(engine.cancelPendingDecision(), false);
 });
 
-test("WorkShellEngine one-key decision methods refuse multi-question and absent decisions", async () => {
 test("WorkShellEngine settles only the exact pending typed user decision", async () => {
   const interactionBridge = createWorkShellInteractionBridge();
   const { engine } = createEngine({
@@ -4868,6 +4885,7 @@ test("WorkShellEngine settles only the exact pending typed user decision", async
   assert.equal(engine.answerPendingUserDecision("typed-decision", [{ id: "lane", selectedOptions: ["Canary"] }]), false);
 });
 
+test("WorkShellEngine one-key decision methods refuse multi-question and absent decisions", async () => {
   const interactionBridge = createWorkShellInteractionBridge();
   const { engine } = createEngine({
     options: {
@@ -6195,7 +6213,7 @@ test("WorkShellEngine keeps a lightweight busy status even outside verbose trace
   assert.match(engine.getState().busyStatus ?? "", /read/i);
   assert.deepEqual(
     engine.getState().entries,
-    [{ role: "tool", text: "read\n5ms" }],
+    [{ id: "entry-0", role: "tool", text: "read\n5ms" }],
     "a completed read appends the assembled tool detail entry even in minimal trace mode",
   );
   assert.deepEqual(engine.getState().traceLines, []);
@@ -6650,18 +6668,19 @@ test("WorkShellEngine resumes interrupted queued follow-ups after the next chat 
       updateRuntimeSettings() {},
       setTraceListener() {},
       async runTurn(prompt) {
-        prompts.push(prompt);
-        if (prompt === "first") {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
           await new Promise((resolve) => {
             releaseFirst = resolve;
           });
         }
-        if (prompt === "third") {
+        if (userPrompt === "third") {
           await new Promise((resolve) => {
             releaseThird = resolve;
           });
         }
-        return { text: `reply:${prompt}` };
+        return { text: `reply:${userPrompt}` };
       },
     },
   });
@@ -6701,13 +6720,14 @@ test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
       updateRuntimeSettings() {},
       setTraceListener() {},
       async runTurn(prompt) {
-        prompts.push(prompt);
-        if (prompt === "first") {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
           await new Promise((resolve) => {
             releaseFirst = resolve;
           });
         }
-        return { text: `reply:${prompt}` };
+        return { text: `reply:${userPrompt}` };
       },
     },
   });
@@ -6718,17 +6738,22 @@ test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
-  await engine.handleSubmit("second");
+  await engine.handleSubmit("second", [{ id: "queued-attachment" }]);
   assert.ok(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)));
   assert.ok(engine.getState().entries.some((entry) => /run automatically/.test(entry.text)));
   assert.ok(engine.getState().entries.some((entry) => /\/queue shows backlog/.test(entry.text)));
   await engine.handleSubmit("/queue");
-  assert.equal(engine.getState().panel?.title, "Work board");
-  assert.ok(engine.getState().panel?.lines.some((line) => line === "Board"));
-  assert.ok(engine.getState().panel?.lines.some((line) => /Queued · 1/.test(line)));
-  assert.ok(engine.getState().panel?.lines.some((line) => /#1 second/.test(line)));
-  assert.ok(engine.getState().panel?.lines.some((line) => /Enter queues follow-up/.test(line)));
-  assert.ok(engine.getState().panel?.lines.some((line) => /\/queue clear drops queued follow-ups/.test(line)));
+  assert.equal(engine.getState().panel?.title, "Queue · follow-ups");
+  assert.ok(
+    engine
+      .getState()
+      .panel?.lines.some((line) =>
+        /Running · 1 total · 1 pending · 0 in flight · 0 requires action/.test(line),
+      ),
+  );
+  assert.ok(engine.getState().panel?.lines.some((line) => /Next · id 1 · pending(?: · wait \d+s)? · second · 1 attachment/.test(line)));
+  assert.ok(engine.getState().panel?.lines.some((line) => /Enter queues one follow-up exactly once/.test(line)));
+  assert.ok(engine.getState().panel?.lines.some((line) => /\/queue clear · \/queue resume/.test(line)));
 
   releaseFirst();
   await firstTurn;
@@ -6783,13 +6808,14 @@ function createBusyEngine() {
       updateRuntimeSettings() {},
       setTraceListener() {},
       async runTurn(prompt) {
-        prompts.push(prompt);
-        if (prompt === "first") {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
           await new Promise((resolve) => {
             releaseTurn = resolve;
           });
         }
-        return { text: `reply:${prompt}` };
+        return { text: `reply:${userPrompt}` };
       },
     },
   });
@@ -6875,7 +6901,8 @@ test("WorkShellEngine opens the agent console while a busy turn waits on a decis
         updateRuntimeSettings() {},
         setTraceListener() {},
         async runTurn(prompt) {
-          prompts.push(prompt);
+          const userPrompt = stripWorkShellLanguageInstruction(prompt);
+          prompts.push(userPrompt);
           // The turn stays in flight while it waits on the operator, so the
           // shell is genuinely busy with a decision open — the exact state the
           // console has to stay reachable in.
@@ -6895,7 +6922,7 @@ test("WorkShellEngine opens the agent console while a busy turn waits on a decis
           await new Promise((resolve) => {
             releaseTurn = resolve;
           });
-          return { text: `reply:${prompt}` };
+          return { text: `reply:${userPrompt}` };
         },
       },
     });
@@ -7075,13 +7102,14 @@ test("WorkShellEngine clears queued follow-ups while busy", async () => {
       updateRuntimeSettings() {},
       setTraceListener() {},
       async runTurn(prompt) {
-        prompts.push(prompt);
-        if (prompt === "first") {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
           await new Promise((resolve) => {
             releaseFirst = resolve;
           });
         }
-        return { text: `reply:${prompt}` };
+        return { text: `reply:${userPrompt}` };
       },
     },
   });
@@ -7102,9 +7130,15 @@ test("WorkShellEngine clears queued follow-ups while busy", async () => {
     engine.getState().entries.filter((entry) => /Queue shown/.test(entry.text)).length,
     0,
   );
-  assert.equal(engine.getState().panel?.title, "Work board");
-  assert.ok(engine.getState().panel?.lines.some((line) => /Queued · 0/.test(line)));
-  assert.ok(engine.getState().panel?.lines.some((line) => /Running · 1/.test(line)));
+  assert.equal(engine.getState().panel?.title, "Queue · follow-ups");
+  assert.ok(
+    engine
+      .getState()
+      .panel?.lines.some((line) =>
+        /Running · 0 total · 0 pending · 0 in flight · 0 requires action/.test(line),
+      ),
+  );
+  assert.ok(engine.getState().panel?.lines.some((line) => /Queue empty/.test(line)));
 
   releaseFirst();
   await firstTurn;
@@ -7231,24 +7265,24 @@ test("WorkShellEngine queue panel keeps follow-up separation across terminal wid
   engine.updateTerminalColumns(80);
   await engine.handleSubmit("/queue");
   const narrowLines = engine.getState().panel?.lines ?? [];
-  assert.equal(engine.getState().panel?.title, "Work board");
+  assert.equal(engine.getState().panel?.title, "Queue · follow-ups");
   assert.ok(
-    !narrowLines.some((line) => /Queued ·/.test(line) && /Done ·/.test(line)),
-    "80-column layout should use 2×2 rows instead of a single four-column header",
+    narrowLines.some((line) => /Queue = user follow-ups/.test(line) && /Plan\/PDCA/.test(line)),
+    "80-column layout should explain that Queue and Plan/PDCA are different models",
   );
 
   engine.updateTerminalColumns(120);
   let wideLines = engine.getState().panel?.lines ?? [];
   for (let attempt = 0; attempt < 50; attempt += 1) {
     wideLines = engine.getState().panel?.lines ?? [];
-    if (wideLines.some((line) => /Queued ·/.test(line) && /Done ·/.test(line))) {
+    if (wideLines.some((line) => /Queue = user follow-ups/.test(line))) {
       break;
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.ok(
-    wideLines.some((line) => /Queued ·/.test(line) && /Done ·/.test(line)),
-    "wide layout should rebuild on resize without re-running /queue",
+    wideLines.some((line) => /Queue = user follow-ups/.test(line) && /Agents|agents/.test(line)),
+    "wide layout should preserve Queue/Plan/Agents separation without re-running /queue",
   );
 });
 
@@ -7360,6 +7394,180 @@ test("WorkShellEngine can restore a persisted trace mode for a resumed work sess
   await engine.initialize();
 
   assert.equal(engine.getState().traceMode, "verbose");
+});
+
+test("WorkShellEngine Ctrl+O path reprojects retained tool history through the one persisted trace mode", async () => {
+  const retained = [
+    { id: "tool-running", role: "tool", text: "bash npm test\nrunning" },
+    { id: "tool-done", role: "tool", text: "bash npm test\n12 lines · 34ms\npassed" },
+    { id: "tool-error", role: "tool", text: "read missing.txt\nENOENT · 2ms\nmissing" },
+    { id: "approval", role: "tool", text: "Security approval · write_file\nAllowed once" },
+  ];
+  const { engine, calls } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      initialTraceMode: "minimal",
+      initialEntries: retained,
+    },
+  });
+  await engine.initialize();
+  const before = engine.getState().entries;
+
+  await engine.toggleToolHistoryDisplay();
+  assert.equal(engine.getState().traceMode, "verbose");
+  assert.deepEqual(engine.getState().entries, before);
+  assert.equal(calls.snapshots.at(-1)?.traceMode, "verbose");
+
+  await engine.toggleToolHistoryDisplay();
+  assert.equal(engine.getState().traceMode, "minimal");
+  assert.deepEqual(engine.getState().entries, before);
+  assert.equal(calls.snapshots.at(-1)?.traceMode, "minimal");
+});
+
+test("WorkShellEngine keeps the session locale stable when a later sentence uses another language", async () => {
+  const { engine, calls } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      initialUiLocale: "ko",
+    },
+  });
+  await engine.initialize();
+
+  await engine.handleSubmit("이 파일을 설명해 주세요");
+  assert.equal(engine.getState().uiLocale, "ko");
+  assert.match(calls.turns[0], /^현재 세션의 사용자 언어를 따라 한국어로 답변하세요/u);
+  assert.doesNotMatch(calls.turns[0], /Respond in English/u);
+  assert.equal(calls.snapshots.at(-1)?.uiLocale, "ko");
+
+  await engine.handleSubmit("Explain the next file in English");
+  assert.equal(engine.getState().uiLocale, "ko");
+  assert.match(calls.turns[1], /^현재 세션의 사용자 언어를 따라 한국어로 답변하세요/u);
+  assert.doesNotMatch(calls.turns[1], /Respond in English/u);
+  assert.equal(calls.snapshots.at(-1)?.uiLocale, "ko");
+});
+
+test("WorkShellEngine locks the first prose language across opposite terminal locales", async () => {
+  const previousLcAll = process.env.LC_ALL;
+  try {
+    for (const fixture of [
+      {
+        terminal: "en_US.UTF-8",
+        initial: "en",
+        first: "첫 요청을 처리해 주세요",
+        later: "Explain the next file",
+        expected: "ko",
+        instruction: /^현재 세션의 사용자 언어를 따라 한국어로 답변하세요/u,
+      },
+      {
+        terminal: "ko_KR.UTF-8",
+        initial: "ko",
+        first: "Handle the first request",
+        later: "다음 파일도 설명해 주세요",
+        expected: "en",
+        instruction: /^Respond in English for this session/u,
+      },
+    ]) {
+      process.env.LC_ALL = fixture.terminal;
+      const { engine, calls } = createEngine({
+        options: {
+          provider: "openai",
+          model: "gpt-5.4",
+          mode: "default",
+          authLabel: "api-key-env",
+          reasoning: supportedReasoning,
+          cwd: "/repo",
+          contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+        },
+      });
+      await engine.initialize();
+      assert.equal(engine.getState().uiLocale, fixture.initial);
+      assert.equal(engine.getState().uiLocaleLocked, false);
+
+      await engine.handleSubmit(fixture.first);
+      assert.equal(engine.getState().uiLocale, fixture.expected);
+      assert.equal(engine.getState().uiLocaleLocked, true);
+      assert.match(calls.turns[0], fixture.instruction);
+
+      await engine.handleSubmit(fixture.later);
+      assert.equal(engine.getState().uiLocale, fixture.expected);
+      assert.match(calls.turns[1], fixture.instruction);
+    }
+  } finally {
+    if (previousLcAll === undefined) delete process.env.LC_ALL;
+    else process.env.LC_ALL = previousLcAll;
+  }
+});
+
+test("WorkShellEngine ignores local command prose until the first provider-bound request", async () => {
+  const previousLcAll = process.env.LC_ALL;
+  try {
+    for (const fixture of [
+      {
+        terminal: "en_US.UTF-8",
+        command: "/remember session keep this note",
+        first: "첫 요청을 처리해 주세요",
+        initial: "en",
+        expected: "ko",
+      },
+      {
+        terminal: "ko_KR.UTF-8",
+        command: "/remember session 이 메모를 보관해 주세요",
+        first: "Handle the first request",
+        initial: "ko",
+        expected: "en",
+      },
+    ]) {
+      process.env.LC_ALL = fixture.terminal;
+      const { engine, calls } = createEngine();
+      await engine.initialize();
+
+      await engine.handleSubmit(fixture.command);
+      assert.equal(engine.getState().uiLocale, fixture.initial);
+      assert.equal(engine.getState().uiLocaleLocked, false);
+      assert.deepEqual(calls.turns, []);
+
+      await engine.handleSubmit(fixture.first);
+      assert.equal(engine.getState().uiLocale, fixture.expected);
+      assert.equal(engine.getState().uiLocaleLocked, true);
+      assert.equal(calls.turns.length, 1);
+    }
+  } finally {
+    if (previousLcAll === undefined) delete process.env.LC_ALL;
+    else process.env.LC_ALL = previousLcAll;
+  }
+});
+
+test("WorkShellEngine detects locale from prompt-command focus instead of slash syntax", async () => {
+  const previousLcAll = process.env.LC_ALL;
+  try {
+    process.env.LC_ALL = "ko_KR.UTF-8";
+    const { engine, calls } = createEngine({
+      resolveWorkShellSlashCommand(input) {
+        return input.startsWith("/review") ? ["prompt", "review", ...input.split(/\s+/u).slice(1)] : undefined;
+      },
+    });
+    await engine.initialize();
+
+    await engine.handleSubmit("/review Handle the authentication flow");
+    assert.equal(engine.getState().uiLocale, "en");
+    assert.equal(engine.getState().uiLocaleLocked, true);
+    assert.match(calls.turns[0], /^Respond in English for this session/u);
+  } finally {
+    if (previousLcAll === undefined) delete process.env.LC_ALL;
+    else process.env.LC_ALL = previousLcAll;
+  }
 });
 
 test("WorkShellEngine keeps bridge bookkeeping and unproven memory out of the transcript", async () => {
@@ -7630,6 +7838,33 @@ test("WorkShellEngine delivers a trimmed steer as control input and leaves the s
   assert.equal(engine.getState().entries.some((entry) => entry.text.includes("narrow the diff")), false);
 });
 
+test("WorkShellEngine binds a steer draft to the run selected when composition begins", async () => {
+  const { engine, calls, control, emitTrace } = createAgentConsoleEngine();
+  await engine.initialize();
+
+  emitRunStarted(emitTrace, "run-a");
+  emitRunStarted(emitTrace, "run-b", { startedAt: 50 });
+  engine.openAgentConsole("agents");
+  engine.beginAgentSteer();
+  assert.deepEqual(engine.getState().agentSteerTarget, {
+    kind: "agent-steer",
+    agentRunId: "run-a",
+  });
+
+  // The selected run settles while the operator is still composing. Even if
+  // the cursor now points at run B, the stale draft must never retarget B.
+  emitRunSettled(emitTrace, "run-a", { summary: "A completed." });
+  engine.moveAgentConsoleCursor(1);
+  await engine.handleSubmit("do not retarget this");
+
+  assert.deepEqual(control.steer, []);
+  assert.deepEqual(calls.turns, []);
+  assert.equal(engine.getState().composerMode, "default");
+  assert.equal(engine.getState().agentSteerTarget, undefined);
+  assert.equal(engine.getState().agentConsoleView.receipt?.status, "rejected");
+  assert.match(engine.getState().agentConsoleView.receipt?.message ?? "", /run-a|finished/i);
+});
+
 test("WorkShellEngine cancels a selected run exactly once and only after confirmation", async () => {
   const { engine, control, emitTrace } = createAgentConsoleEngine();
   await engine.initialize();
@@ -7794,7 +8029,7 @@ test("WorkShellEngine treats a cleared work turn as cancellation, not assistant 
       updateMode() {},
       setTraceListener() {},
       async runTurn(prompt) {
-        prompts.push(prompt);
+        prompts.push(stripWorkShellLanguageInstruction(prompt));
         return { text: "Work turn cancelled by the operator.", cancelled: true };
       },
     },

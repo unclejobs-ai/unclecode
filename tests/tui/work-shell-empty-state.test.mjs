@@ -182,6 +182,11 @@ test("empty conversation renders the starter prompts and the opener hint", async
       assert.match(frame, new RegExp(`${index + 1}  ${prompt}`));
     }
     assert.match(frame, /\/ commands · @ attach a file · ! shell · \? keys/);
+    assert.doesNotMatch(
+      frame,
+      /(?:Tweet|X\.com|embed (?:a )?(?:tweet|post)|Vite \+ React)/i,
+      "UncleCode starter chrome must not inherit social/embed template copy",
+    );
     // `? keys` is advertised with its binding in place; Ctrl+O never shows.
     assert.doesNotMatch(frame, /Ctrl\+O/);
   } finally {
@@ -352,6 +357,7 @@ test("wide empty conversation renders the wordmark above the starter block", asy
     assert.ok(frame.includes(`${index + 1}  ${prompt}`));
   }
   assert.match(frame, /\/ commands · @ attach a file · ! shell · \? keys/);
+  assert.doesNotMatch(frame, /(?:Tweet|X\.com|embed (?:a )?(?:tweet|post)|Vite \+ React)/i);
 });
 
 test("narrow empty conversation skips the wordmark and keeps the text block", async () => {

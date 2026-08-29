@@ -96,3 +96,76 @@ test("composer overflow labels remain one terminal row at the minimum width", ()
   assert.equal(line.includes("\n"), false);
   assert.equal(getDisplayWidth(line), 12);
 });
+
+test("composer edits never split a committed IME grapheme", () => {
+  const family = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}";
+  const value = `A\u1112\u1161\u11ab${family}e\u0301`;
+
+  const left = composer.applyComposerEdit({
+    value,
+    cursorOffset: value.length,
+    input: "",
+    key: { leftArrow: true },
+    allowLineBreaks: true,
+  });
+  assert.equal(left.nextCursorOffset, value.length - "e\u0301".length);
+
+  const backspace = composer.applyComposerEdit({
+    value,
+    cursorOffset: left.nextCursorOffset,
+    input: "",
+    key: { backspace: true },
+    allowLineBreaks: true,
+  });
+  assert.equal(backspace.nextValue, "A\u1112\u1161\u11abe\u0301");
+
+  const deleteCluster = composer.applyComposerEdit({
+    value,
+    cursorOffset: value.length,
+    input: "",
+    key: { delete: true },
+    allowLineBreaks: true,
+  });
+  assert.equal(deleteCluster.nextValue, `A\u1112\u1161\u11ab${family}`);
+
+  const committed = composer.applyComposerEdit({
+    value: "",
+    cursorOffset: 0,
+    input: "한",
+    key: {},
+    allowLineBreaks: true,
+  });
+  assert.deepEqual(committed, {
+    nextValue: "한",
+    nextCursorOffset: 1,
+    submitted: false,
+  });
+});
+
+test("composer forward Delete removes the committed grapheme to the right of the cursor", () => {
+  const value = "앞한글뒤";
+  const cursorOffset = "앞한".length;
+
+  assert.deepEqual(
+    composer.applyComposerEdit({
+      value,
+      cursorOffset,
+      input: "",
+      key: { delete: true, forwardDelete: true },
+      allowLineBreaks: true,
+    }),
+    {
+      nextValue: "앞한뒤",
+      nextCursorOffset: cursorOffset,
+      submitted: false,
+    },
+  );
+});
+
+test("composer recognizes only terminal CSI 3~ as forward Delete", () => {
+  assert.equal(composer.isForwardDeleteTerminalInput("\u001b[3~"), true);
+  assert.equal(composer.isForwardDeleteTerminalInput(Buffer.from("\u001b[3~")), true);
+  assert.equal(composer.isForwardDeleteTerminalInput("\u007f"), false);
+  assert.equal(composer.isForwardDeleteTerminalInput("\b"), false);
+  assert.equal(composer.isForwardDeleteTerminalInput("x"), false);
+});

@@ -1,5 +1,6 @@
 import type { AgentConsoleSnapshot, ModeReasoningEffort } from "@unclecode/contracts";
 import type { WorkShellChatEntry, WorkShellTraceMode } from "./work-shell-engine.js";
+import type { WorkShellUiLocale } from "./work-shell-locale.js";
 
 export type WorkShellSessionState =
   | "running"
@@ -16,6 +17,7 @@ export type WorkShellSessionSnapshotInput = {
   state: WorkShellSessionState;
   summary: string;
   traceMode: WorkShellTraceMode;
+  uiLocale: WorkShellUiLocale;
   reasoningEffort?: ModeReasoningEffort | undefined;
   lastSubmittedContextReceiptId?: string | undefined;
   ownerMutationRevision?: number | undefined;

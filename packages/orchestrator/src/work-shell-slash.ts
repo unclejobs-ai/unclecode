@@ -49,6 +49,8 @@ const WORK_SHELL_QUICK_PICK_COMMANDS = [
   "/agents",
   "/jobs",
   "/todo",
+  "/review",
+  "/policy",
   "/model",
   "/auth status",
   "/queue",
@@ -57,6 +59,10 @@ const WORK_SHELL_QUICK_PICK_COMMANDS = [
 ] as const;
 
 const WORK_SHELL_EXTRA_SUGGESTION_ENTRIES = [
+  {
+    command: "/policy",
+    description: "Show canonical session security approval rules and effective scopes.",
+  },
   {
     command: "/auth key",
     description: "Open secure API key entry in this shell.",

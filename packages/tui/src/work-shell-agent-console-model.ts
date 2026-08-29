@@ -5,13 +5,15 @@ import type {
   AgentRunStatus,
   AsyncJob,
   AsyncJobStatus,
+  QualityReviewHistoryEntry,
   ToolActivity,
   WorkNode,
   WorkNodeStatus,
 } from "@unclecode/contracts";
-import type { AgentConsoleSelection } from "@unclecode/orchestrator";
+import { getWorkShellMessages, type AgentConsoleSelection } from "@unclecode/orchestrator";
 
 import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
+import { selectRecordedEvolutionProposalLines } from "./evolution-proposal-lines.js";
 import {
   agentConsoleStatusGlyph,
   boundBlock,
@@ -91,17 +93,28 @@ export type AgentConsoleInspector = {
 export function selectWorkGraphHudRows(
   snapshot: AgentConsoleSnapshot,
   width: number,
-  uiLocale: "en" | "ko" = "en",
+  options: { readonly expanded?: boolean; readonly uiLocale?: "en" | "ko" } = {},
 ): readonly string[] {
+  const uiLocale = options.uiLocale ?? "en";
+  const messages = getWorkShellMessages(uiLocale);
   const graph = snapshot.workGraph;
+  const review = snapshot.qualityReview;
   if (!graph || graph.nodes.length === 0) {
-    return [];
+    if (!review?.profile || !review.currentStage || review.iteration === undefined) return [];
+    return [boundRow(
+      `${uiLocale === "ko" ? "품질 엔진" : messages.qualityEngine} · ${localizedQualityProfile(review.profile, uiLocale)} · ${localizedQualityStage(review.currentStage, uiLocale)}`
+      + ` · PDCA ${localizedPdcaPhase(review.currentStage, uiLocale)}`
+      + ` · ${messages.gate} ${localizedGateDecision(review.latestDecision, uiLocale)} · ${uiLocale === "ko" ? "반복" : "iteration"} ${review.iteration}`,
+      boundWidth(width),
+    )];
   }
 
   const bound = boundWidth(width);
   const completed = graph.nodes.filter((node) => node.status === "completed").length;
-  // Quiet hierarchy: current task → remaining stage → blocker → optional
-  // completed detail. Explicit Plan expansion remains the only full roster.
+  const isQualityGraph = graph.qualityProfile !== undefined;
+  // Quiet hierarchy: current task → remaining stage → blocker →
+  // optional completed detail. Each role contributes at most one nearby row,
+  // and explicit Plan expansion remains the only surface that shows all nodes.
   const nearby = ([
     graph.nodes.find((node) => node.status === "running"),
     graph.nodes.find((node) => node.status === "ready" || node.status === "approved" || node.status === "proposed"),
@@ -111,8 +124,33 @@ export function selectWorkGraphHudRows(
   ] satisfies readonly (WorkNode | undefined)[])
     .filter((node): node is WorkNode => node !== undefined)
     .filter((node, index, nodes) => nodes.indexOf(node) === index);
-  const visible = nearby.slice(0, WORK_GRAPH_HUD_ROWS);
+  const visible = options.expanded ? graph.nodes : nearby.slice(0, WORK_GRAPH_HUD_ROWS);
+  const hidden = graph.nodes.length - visible.length;
   const titleBudget = Math.max(8, Math.min(40, bound - 24));
+
+  if (isQualityGraph) {
+    const remaining = graph.nodes.length - completed;
+    return [
+      boundRow(
+        `${uiLocale === "ko" ? "품질 엔진" : messages.qualityEngine} · ${localizedQualityProfile(graph.qualityProfile, uiLocale)} · ${localizedQualityStage(graph.currentStage, uiLocale)}`
+        + ` · PDCA ${localizedPdcaPhase(graph.currentStage, uiLocale)}`
+        + ` · ${messages.gate} ${localizedGateDecision(graph.gateStatus, uiLocale)} · ${uiLocale === "ko" ? "반복" : "iteration"} ${graph.iteration}`,
+        bound,
+      ),
+      ...visible.map((node) => truncateForDisplayWidth(
+        `${HUD_INDENT}${qualityNodeGlyph(node.status)} `
+        + `${boundRow(node.title || node.id, titleBudget)}`
+        + ` · ${localizedWorkNodeStatus(node.status, uiLocale)}`,
+        bound,
+      )),
+      ...(options.expanded && hidden > 0 ? [`${HUD_INDENT}… +${hidden} ${uiLocale === "ko" ? "더 있음" : "more"}`] : []),
+      boundRow(
+        `${completed}/${graph.nodes.length} ${uiLocale === "ko" ? "완료" : "complete"} · ${remaining} ${uiLocale === "ko" ? "남음" : "remaining"}`
+        + (options.expanded ? (uiLocale === "ko" ? " · Ctrl+T 축소" : " · Ctrl+T compact") : (uiLocale === "ko" ? " · Ctrl+T 전체 계획" : " · Ctrl+T full plan")),
+        bound,
+      ),
+    ];
+  }
 
   return [
     boundRow(`${graph.goal ?? graph.id} · ${completed}/${graph.nodes.length}`, bound),
@@ -122,7 +160,160 @@ export function selectWorkGraphHudRows(
       + ` · ${localizedWorkNodeStatus(node.status, uiLocale)}`,
       bound,
     )),
+    ...(options.expanded && hidden > 0 ? [`${HUD_INDENT}… +${hidden}${uiLocale === "ko" ? "개 더 있음" : " more"}`] : []),
   ];
+}
+
+function qualityPdcaPhase(
+  stage: "explore" | "plan" | "work" | "critic" | "promote",
+): "plan" | "do" | "check" | "act" {
+  if (stage === "explore" || stage === "plan") return "plan";
+  if (stage === "work") return "do";
+  if (stage === "critic") return "check";
+  return "act";
+}
+
+function localizedPdcaPhase(
+  stage: "explore" | "plan" | "work" | "critic" | "promote",
+  uiLocale: "en" | "ko",
+): string {
+  if (uiLocale === "en") return qualityPdcaPhase(stage);
+  switch (qualityPdcaPhase(stage)) {
+    case "plan": return "계획";
+    case "do": return "실행";
+    case "check": return "점검";
+    case "act": return "개선";
+  }
+}
+
+function qualityNodeGlyph(status: WorkNodeStatus): string {
+  if (status === "completed") return "✓";
+  if (status === "running") return "●";
+  if (status === "failed" || status === "cancelled") return "×";
+  if (status === "blocked" || status === "requires_action") return "◆";
+  return "○";
+}
+
+export function selectQualityReviewLines(
+  snapshot: AgentConsoleSnapshot,
+  width: number,
+  uiLocale: "en" | "ko" = "en",
+): readonly string[] {
+  const m = getWorkShellMessages(uiLocale);
+  const graph = snapshot.workGraph;
+  const review = snapshot.qualityReview;
+  if (!graph && !review) return [uiLocale === "ko" ? "품질 검토 사용 불가 · 활성 품질 실행 없음" : "Quality review unavailable · no active quality run"];
+  const bound = boundWidth(width);
+  const profile = graph?.qualityProfile ?? review?.profile;
+  const stage = graph?.currentStage ?? review?.currentStage;
+  const iteration = graph?.iteration ?? review?.iteration;
+  const gate = graph?.gateStatus ?? review?.latestDecision;
+  if (!profile || !stage || iteration === undefined || !gate) {
+    return [uiLocale === "ko" ? "품질 검토 사용 불가 · 품질 상태 불완전" : "Quality review unavailable · incomplete quality projection"];
+  }
+  const criticNodes = (graph?.nodes ?? []).filter((node) => node.role === "critic" || node.stage === "critic");
+  const findings = criticNodes.filter((node) => node.status === "failed" || node.status === "blocked");
+  const latest = review?.history.at(-1);
+  const evidenceReview = selectLastEvidenceBearingReview(review?.history) ?? latest;
+  const evolution = (snapshot.evolutionProposals ?? [])
+    .filter(proposal => review?.runId === undefined || proposal.runId === review.runId)
+    .at(-1);
+  return [
+    boundRow(
+      `${uiLocale === "ko" ? "품질 엔진" : "Quality Engine"} (SCC) · ${localizedQualityProfile(profile, uiLocale)} · ${localizedQualityStage(stage, uiLocale)}`
+      + ` · PDCA ${localizedPdcaPhase(stage, uiLocale)} · ${uiLocale === "ko" ? "반복" : "iteration"} ${iteration}`,
+      bound,
+    ),
+    boundRow(`${m.gate} · ${localizedGateDecision(gate, uiLocale)}`, bound),
+    ...(latest?.event === "completed"
+      ? [boundRow(`${uiLocale === "ko" ? "완료" : "Completion"} · ${localizedQualityStage(latest.stage, uiLocale)} · ${localizedGateDecision(latest.decision, uiLocale)}`, bound)]
+      : []),
+    ...(gate === "unproven"
+      ? [boundRow(uiLocale === "ko" ? "미입증 · 독립 검토 증거가 없거나 만료됨" : "Unproven · independent review evidence is missing or stale", bound)]
+      : []),
+    ...(findings.length > 0
+      ? findings.map((node) => boundRow(`${uiLocale === "ko" ? "발견" : "Finding"} · ${node.title || node.id} · ${localizedWorkNodeStatus(node.status, uiLocale)}`, bound))
+      : [boundRow(
+          profile === "minimal"
+            ? (uiLocale === "ko" ? "비평 · 최소 프로필에서는 필요 없음" : "Critic · not required by minimal profile")
+            : (uiLocale === "ko"
+              ? `비평 결과 · ${criticNodes.length === 0 ? "기록 없음" : "열린 항목 없음"}`
+              : `Critic findings · ${criticNodes.length === 0 ? "not recorded" : "none open"}`),
+          bound,
+        )]),
+    ...(evidenceReview?.reason ? [boundRow(`${m.reason} · ${evidenceReview.reason}`, bound)] : []),
+    ...((evidenceReview?.failures.length ?? 0) > 0
+      ? evidenceReview!.failures.map((failure) => boundRow(`${m.failure} · ${failure}`, bound))
+      : []),
+    ...(evidenceReview?.reviewerId
+      ? [boundRow(`${m.reviewer} · ${evidenceReview.reviewerId} · ${evidenceReview.independentVerification ? m.independent : m.notIndependent}`, bound)]
+      : []),
+    ...(evidenceReview && !evidenceReview.reviewerId
+      ? [boundRow(`${uiLocale === "ko" ? "검증" : "Verification"} · ${evidenceReview.independentVerification ? m.independent : m.notIndependent}`, bound)]
+      : []),
+    ...(evidenceReview?.reviewerRunId ? [boundRow(`${uiLocale === "ko" ? "검토 실행" : "Reviewer run"} · ${evidenceReview.reviewerRunId}`, bound)] : []),
+    ...(evidenceReview?.route || evidenceReview?.provider || evidenceReview?.model
+      ? [boundRow(`${m.route} · ${[evidenceReview.route, evidenceReview.provider, evidenceReview.model].filter(Boolean).join(" · ")}`, bound)]
+      : []),
+    ...(evidenceReview?.reviewedArtifactHash
+      ? [boundRow(`${uiLocale === "ko" ? "검토 해시" : "Reviewed hash"} · ${evidenceReview.reviewedArtifactHash}`, bound)]
+      : []),
+    ...(evidenceReview?.currentArtifactHash
+      ? [boundRow(`${uiLocale === "ko" ? "현재 해시" : "Current hash"} · ${evidenceReview.currentArtifactHash}${evidenceReview.stale ? ` · ${m.stale}` : ` · ${m.current}`}`, bound)]
+      : []),
+    ...(!evidenceReview?.reviewedArtifactHash && evidenceReview?.artifactHash
+      ? [boundRow(`${uiLocale === "ko" ? "산출물 해시" : "Artifact hash"} · ${evidenceReview.artifactHash}${evidenceReview.stale ? ` · ${m.stale}` : ""}`, bound)]
+      : []),
+    ...(evidenceReview?.count !== undefined && evidenceReview.limit !== undefined
+      ? [boundRow(`${uiLocale === "ko"
+        ? (evidenceReview.event === "pivot" ? "전환 시도" : "개선 시도")
+        : `${evidenceReview.event === "pivot" ? "Pivot" : "Refine"} attempt`} · ${evidenceReview.count}/${evidenceReview.limit}`, bound)]
+      : []),
+    ...(evidenceReview && evidenceReview.evidenceRefs.length > 0
+      ? [boundRow(`${m.evidence} · ${evidenceReview.evidenceRefs.join(", ")}`, bound)]
+      : []),
+    ...(review ? [boundRow(uiLocale === "ko"
+      ? `기록 · 개선 ${review.refineCount} · 전환 ${review.pivotCount}`
+      : `History · ${review.refineCount} refine · ${review.pivotCount} pivot`, bound)] : []),
+    ...selectRecordedEvolutionProposalLines(evolution, bound),
+    boundRow(uiLocale === "ko" ? "정리 · 인계/종합 전용" : "Promote · handoff/synthesis only", bound),
+  ];
+}
+
+function localizedWorkNodeStatus(status: WorkNodeStatus, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return workNodeStatusLabel(status);
+  const labels: Record<WorkNodeStatus, string> = {
+    proposed: "제안", approved: "승인", ready: "준비", running: "실행 중", completed: "완료",
+    failed: "실패", blocked: "차단", cancelled: "취소", requires_action: "조치 필요",
+  };
+  return labels[status];
+}
+
+function selectLastEvidenceBearingReview(
+  history: readonly QualityReviewHistoryEntry[] | undefined,
+): QualityReviewHistoryEntry | undefined {
+  if (!history) return undefined;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const entry = history[index];
+    if (
+      entry
+      && entry.event === "gate"
+      && (
+        entry.failures.length > 0
+        || entry.evidenceRefs.length > 0
+        || entry.artifactRefs.length > 0
+        || entry.artifactHash !== undefined
+        || entry.reviewedArtifactHash !== undefined
+        || entry.currentArtifactHash !== undefined
+        || entry.reviewerId !== undefined
+        || entry.reviewerRunId !== undefined
+        || entry.route !== undefined
+      )
+    ) {
+      return entry;
+    }
+  }
+  return undefined;
 }
 
 /** A job the operator is still waiting on, dispatched or not. */
@@ -272,7 +463,7 @@ export function selectAgentConsoleInspector(
     case "jobs":
       return inspectAsyncJob(snapshot, selection.job, now, width, uiLocale);
     case "plan":
-      return inspectWorkNode(selection.node, width, uiLocale);
+      return inspectWorkNode(selection.node, width, snapshot.workGraph, snapshot.qualityReview, uiLocale);
   }
 }
 
@@ -433,6 +624,8 @@ function inspectAsyncJob(
 function inspectWorkNode(
   node: WorkNode,
   width: number,
+  graph?: AgentConsoleSnapshot["workGraph"],
+  qualityReview?: AgentConsoleSnapshot["qualityReview"],
   uiLocale: "en" | "ko" = "en",
 ): AgentConsoleInspector {
   const bound = boundWidth(width);
@@ -459,13 +652,82 @@ function inspectWorkNode(
         : formatCount(node.evidenceRefs.length, "ref", "refs"),
     });
   }
+  if (node.artifactRefs?.length > 0) {
+    facts.push({ label: "Artifacts", value: node.artifactRefs.join(", ") });
+  }
+  if (node.stage) facts.push({ label: "Stage", value: localizedQualityStage(node.stage, uiLocale) });
+  if (node.role) facts.push({ label: "Role", value: localizedQualityRole(node.role, uiLocale) });
+  if (node.attempt !== undefined) facts.push({ label: "Attempt", value: String(node.attempt) });
+  if (node.reviewRequired !== undefined) {
+    facts.push({
+      label: "Review",
+      value: node.reviewRequired
+        ? (uiLocale === "ko" ? "필수" : "required")
+        : (uiLocale === "ko" ? "필수 아님" : "not required"),
+    });
+  }
+  if (graph?.gateStatus) facts.push({ label: "Gate", value: graph.gateStatus });
+  const completedReview = qualityReview?.history.findLast((entry) => entry.event === "completed");
+  if (completedReview) {
+    facts.push({
+      label: "Completion",
+      value: `${localizedQualityStage(completedReview.stage, uiLocale)} · ${localizedGateDecision(completedReview.decision, uiLocale)}`,
+    });
+  }
+  const reviewEntries = qualityReview?.history.filter((entry) =>
+    entry.artifactRefs.some((reference) => node.artifactRefs.includes(reference))) ?? [];
+  const latestReview = selectLastEvidenceBearingReview(reviewEntries)
+    ?? selectLastEvidenceBearingReview(qualityReview?.history)
+    ?? qualityReview?.history.at(-1);
+  if (latestReview?.reviewerId) {
+    facts.push({
+      label: "Reviewer",
+      value: `${latestReview.reviewerId} · ${latestReview.independentVerification
+        ? (uiLocale === "ko" ? "독립" : "independent")
+        : (uiLocale === "ko" ? "독립 아님" : "not independent")}`,
+    });
+  }
+  if (latestReview?.reviewerRunId) {
+    facts.push({ label: "Reviewer run", value: latestReview.reviewerRunId });
+  }
+  if (latestReview?.route || latestReview?.provider || latestReview?.model) {
+    facts.push({
+      label: "Route",
+      value: [latestReview.route, latestReview.provider, latestReview.model].filter(Boolean).join(" · "),
+    });
+  }
+  if (latestReview?.reviewedArtifactHash) {
+    facts.push({ label: "Reviewed hash", value: latestReview.reviewedArtifactHash });
+  }
+  if (latestReview?.currentArtifactHash) {
+    facts.push({
+      label: "Current hash",
+      value: `${latestReview.currentArtifactHash}${latestReview.stale
+        ? (uiLocale === "ko" ? " · 만료" : " · stale")
+        : (uiLocale === "ko" ? " · 현재" : " · current")}`,
+    });
+  } else if (latestReview?.artifactHash) {
+    facts.push({
+      label: "Artifact hash",
+      value: `${latestReview.artifactHash}${latestReview.stale ? (uiLocale === "ko" ? " · 만료" : " · stale") : ""}`,
+    });
+  }
+  if (latestReview?.count !== undefined && latestReview.limit !== undefined) {
+    facts.push({ label: "Attempt", value: `${latestReview.count}/${latestReview.limit}` });
+  }
 
   return composeInspector({
     title: node.title || node.id,
     subtitle: `${uiLocale === "ko" ? "작업" : "task"} · ${localizedWorkNodeStatus(node.status, uiLocale)}`,
     tone: STATUS_TONES[node.status],
     facts,
-    timeline: [],
+    timeline: latestReview
+      ? [
+          ...(latestReview.reason ? [`${uiLocale === "ko" ? "이유" : "Reason"} · ${latestReview.reason}`] : []),
+          ...latestReview.failures.map((failure) => `${uiLocale === "ko" ? "실패" : "Failure"} · ${failure}`),
+          ...latestReview.evidenceRefs.map((evidence) => `${uiLocale === "ko" ? "증거" : "Evidence"} · ${evidence}`),
+        ]
+      : [],
     hiddenTimelineCount: 0,
     bound,
   });
@@ -549,15 +811,6 @@ function localizedAsyncJobStatus(status: AsyncJobStatus, uiLocale: "en" | "ko"):
   } as const)[status];
 }
 
-function localizedWorkNodeStatus(status: WorkNodeStatus, uiLocale: "en" | "ko"): string {
-  if (uiLocale === "en") return workNodeStatusLabel(status);
-  const labels: Record<WorkNodeStatus, string> = {
-    proposed: "제안", approved: "승인", ready: "준비", running: "실행 중", completed: "완료",
-    failed: "실패", blocked: "차단", cancelled: "취소", requires_action: "조치 필요",
-  };
-  return labels[status];
-}
-
 function localizedAgentType(agentType: string, uiLocale: "en" | "ko"): string {
   if (uiLocale === "en") return agentType;
   return ({
@@ -580,3 +833,22 @@ function localizedJobType(jobType: string, uiLocale: "en" | "ko"): string {
   } as Readonly<Record<string, string>>)[jobType] ?? jobType;
 }
 
+function localizedQualityStage(stage: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return stage;
+  return ({ explore: "탐색", plan: "계획", work: "작업", critic: "비평", promote: "정리" } as Readonly<Record<string, string>>)[stage] ?? stage;
+}
+
+function localizedQualityProfile(profile: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return profile;
+  return ({ minimal: "최소", standard: "표준", deep: "심층", creator: "창작" } as Readonly<Record<string, string>>)[profile] ?? profile;
+}
+
+function localizedQualityRole(role: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return role;
+  return ({ explorer: "탐색", planner: "계획", worker: "작업", critic: "비평", promoter: "정리" } as Readonly<Record<string, string>>)[role] ?? role;
+}
+
+function localizedGateDecision(decision: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return decision;
+  return ({ proceed: "진행", refine: "개선", pivot: "전환", block: "차단", unproven: "미입증" } as Readonly<Record<string, string>>)[decision] ?? decision;
+}

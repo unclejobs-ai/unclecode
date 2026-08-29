@@ -1472,8 +1472,23 @@ test("quality traces project stage, gate, iteration, node attempt, and artifacts
     nodeId: "task-1",
     nodeAttempt: 2,
     artifactRefs: [".unclecode/artifacts/run-quality/task-1-attempt-2.json"],
+    artifactHash: "sha256:worker-v2",
+    reviewedArtifactHash: "sha256:manifest-reviewed",
+    currentArtifactHash: "sha256:manifest-current",
+    evidenceRefs: ["evidence:test-output"],
+    failures: ["critic found stale behavior"],
+    reason: "Critic found stale behavior in the Korean queue path.",
+    refineCount: 1,
+    pivotCount: 0,
+    provider: "anthropic",
+    model: "claude-review",
+    route: "frontier",
+    reviewerRunId: "review-run-critic-2",
+    stale: false,
+    independentVerification: true,
     startedAt: 20,
   });
+  assert.ok(gated.qualityReview, "quality review must be projected before persistence");
   const resumed = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(gated)));
 
   assert.equal(resumed?.workGraph?.currentStage, "work");
@@ -1483,6 +1498,56 @@ test("quality traces project stage, gate, iteration, node attempt, and artifacts
   assert.deepEqual(resumed?.workGraph?.nodes[0]?.artifactRefs, [
     ".unclecode/artifacts/run-quality/task-1-attempt-2.json",
   ]);
+  assert.deepEqual(resumed?.qualityReview, {
+    runId: "run-quality",
+    graphId: "goal-quality",
+    profile: "standard",
+    currentStage: "work",
+    iteration: 2,
+    refineCount: 1,
+    pivotCount: 0,
+    latestDecision: "refine",
+    history: [{
+      event: "gate",
+      stage: "work",
+      decision: "refine",
+      iteration: 2,
+      reason: "Critic found stale behavior in the Korean queue path.",
+      failures: ["critic found stale behavior"],
+      evidenceRefs: ["evidence:test-output"],
+      artifactRefs: [".unclecode/artifacts/run-quality/task-1-attempt-2.json"],
+      artifactHash: "sha256:worker-v2",
+      reviewedArtifactHash: "sha256:manifest-reviewed",
+      currentArtifactHash: "sha256:manifest-current",
+      reviewerId: "work:anthropic:claude-review",
+      reviewerRunId: "review-run-critic-2",
+      provider: "anthropic",
+      model: "claude-review",
+      route: "frontier",
+      independentVerification: true,
+      stale: false,
+      startedAt: 20,
+    }],
+  });
+
+  const requested = applyTraceEventToAgentConsole(resumed, {
+    type: "quality.refine_requested",
+    runId: "run-quality",
+    graphId: "goal-quality",
+    profile: "standard",
+    stage: "work",
+    iteration: 3,
+    decision: "refine",
+    count: 2,
+    limit: 3,
+    reason: "Same plan, another bounded correction.",
+    startedAt: 25,
+  });
+  const resumedRequest = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(requested)));
+  assert.equal(resumedRequest?.qualityReview?.refineCount, 2);
+  assert.equal(resumedRequest?.qualityReview?.history.at(-1)?.event, "refine");
+  assert.equal(resumedRequest?.qualityReview?.history.at(-1)?.count, 2);
+  assert.equal(resumedRequest?.qualityReview?.history.at(-1)?.limit, 3);
 
   const completed = applyTraceEventToAgentConsole(resumed, {
     type: "quality.completed",
@@ -1498,6 +1563,112 @@ test("quality traces project stage, gate, iteration, node attempt, and artifacts
   assert.equal(completed.workGraph?.currentStage, "promote");
   assert.equal(completed.workGraph?.gateStatus, "unproven");
   assert.equal(completed.workGraph?.iteration, 3);
+  assert.equal(completed.qualityReview?.history.length, 2);
+  assert.equal(completed.qualityReview?.history.at(-1)?.event, "completed");
+  assert.equal(completed.qualityReview?.latestDecision, "unproven");
+});
+
+test("quality completion preserves only proven critic provenance and bounded artifacts", () => {
+  const criticStarted = applyTraceEventToAgentConsole(initialConsole, {
+    type: "quality.stage_started",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "critic",
+    iteration: 3,
+    startedAt: 10,
+  });
+  const criticGate = applyTraceEventToAgentConsole(criticStarted, {
+    type: "quality.gate_evaluated",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "critic",
+    iteration: 3,
+    decision: "proceed",
+    evidenceRefs: ["run.json", "critic.json"],
+    artifactRefs: ["critic-artifact.json"],
+    artifactHash: "sha256:verified",
+    reviewedArtifactHash: "sha256:verified",
+    currentArtifactHash: "sha256:verified",
+    provider: "anthropic",
+    model: "claude-review",
+    route: "frontier",
+    reviewerRunId: "critic-run-3",
+    independentVerification: true,
+    stale: false,
+    startedAt: 20,
+  });
+  const promoteStarted = applyTraceEventToAgentConsole(criticGate, {
+    type: "quality.stage_started",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "promote",
+    iteration: 3,
+    startedAt: 30,
+  });
+  const completed = applyTraceEventToAgentConsole(promoteStarted, {
+    type: "quality.completed",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "promote",
+    iteration: 3,
+    decision: "proceed",
+    evidenceRefs: ["run.json"],
+    independentVerification: true,
+    startedAt: 40,
+  });
+  const terminal = completed.qualityReview?.history.at(-1);
+  assert.equal(terminal?.independentVerification, true);
+  assert.equal(terminal?.reviewerRunId, "critic-run-3");
+  assert.equal(terminal?.provider, "anthropic");
+  assert.equal(terminal?.model, "claude-review");
+  assert.equal(terminal?.route, "frontier");
+  assert.equal(terminal?.artifactHash, "sha256:verified");
+  assert.deepEqual(terminal?.artifactRefs, [
+    "run.json",
+    "critic-artifact.json",
+    "critic.json",
+  ]);
+
+  const staleGate = applyTraceEventToAgentConsole(criticStarted, {
+    type: "quality.gate_evaluated",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "critic",
+    iteration: 3,
+    decision: "proceed",
+    reviewerRunId: "critic-run-stale",
+    independentVerification: true,
+    stale: true,
+    startedAt: 21,
+  });
+  const stalePromote = applyTraceEventToAgentConsole(staleGate, {
+    type: "quality.stage_started",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "promote",
+    iteration: 3,
+    startedAt: 31,
+  });
+  const unproven = applyTraceEventToAgentConsole(stalePromote, {
+    type: "quality.completed",
+    runId: "run-quality-terminal",
+    graphId: "goal-quality-terminal",
+    profile: "deep",
+    stage: "promote",
+    iteration: 3,
+    decision: "unproven",
+    independentVerification: true,
+    startedAt: 41,
+  }).qualityReview?.history.at(-1);
+  assert.equal(unproven?.independentVerification, false);
+  assert.equal(unproven?.reviewerRunId, undefined);
+  assert.deepEqual(unproven?.artifactRefs, []);
 });
 
 test("agent lifecycle reducer accepts run events only against the job the run owns", () => {
@@ -1578,115 +1749,4 @@ test("agent lifecycle reducer accepts run events only against the job the run ow
   assert.equal(settled.agents[0]?.status, "completed");
   assert.equal(settled.jobs[0]?.status, "completed");
   assert.deepEqual(settled.jobs[1], queued.jobs[1], "another job never settles with a foreign run");
-});
-
-test("quality completion preserves fresh same-iteration critic provenance", () => {
-  const critic = applyTraceEventToAgentConsole(initialConsole, {
-    type: "quality.gate_evaluated",
-    runId: "run-quality-terminal",
-    graphId: "goal-quality-terminal",
-    profile: "deep",
-    stage: "critic",
-    iteration: 0,
-    decision: "proceed",
-    evidenceRefs: ["run.json", "critic.json"],
-    artifactRefs: ["critic.json"],
-    artifactHash: "sha256:verified",
-    reviewedArtifactHash: "sha256:verified",
-    currentArtifactHash: "sha256:verified",
-    provider: "anthropic",
-    model: "claude-review",
-    route: "frontier",
-    reviewerRunId: "critic-run-0",
-    independentVerification: true,
-    stale: false,
-    startedAt: 20,
-  });
-  const completed = applyTraceEventToAgentConsole(critic, {
-    type: "quality.completed",
-    runId: "run-quality-terminal",
-    graphId: "goal-quality-terminal",
-    profile: "deep",
-    stage: "promote",
-    iteration: 0,
-    decision: "proceed",
-    evidenceRefs: ["run.json"],
-    artifactHash: "sha256:verified",
-    reviewedArtifactHash: "sha256:verified",
-    currentArtifactHash: "sha256:verified",
-    independentVerification: true,
-    stale: false,
-    startedAt: 40,
-  });
-  const terminal = completed.qualityReview?.history.at(-1);
-  assert.equal(terminal?.independentVerification, true);
-  assert.equal(terminal?.reviewerRunId, "critic-run-0");
-  assert.deepEqual(terminal?.artifactRefs, ["run.json", "critic.json"]);
-});
-
-test("quality completion rejects stale-iteration and promote-only reviewer provenance", () => {
-  const oldCritic = applyTraceEventToAgentConsole(initialConsole, {
-    type: "quality.gate_evaluated",
-    runId: "run-quality-stale",
-    graphId: "goal-quality-stale",
-    profile: "deep",
-    stage: "critic",
-    iteration: 1,
-    decision: "proceed",
-    artifactRefs: ["old-critic.json"],
-    artifactHash: "sha256:old",
-    reviewedArtifactHash: "sha256:old",
-    currentArtifactHash: "sha256:old",
-    reviewerRunId: "critic-run-1",
-    independentVerification: true,
-    stale: false,
-    startedAt: 10,
-  });
-  const refined = applyTraceEventToAgentConsole(oldCritic, {
-    type: "quality.refine_requested",
-    runId: "run-quality-stale",
-    graphId: "goal-quality-stale",
-    profile: "deep",
-    stage: "work",
-    iteration: 2,
-    decision: "refine",
-    count: 1,
-    limit: 3,
-    startedAt: 20,
-  });
-  const promote = applyTraceEventToAgentConsole(refined, {
-    type: "quality.gate_evaluated",
-    runId: "run-quality-stale",
-    graphId: "goal-quality-stale",
-    profile: "deep",
-    stage: "promote",
-    iteration: 2,
-    decision: "proceed",
-    artifactRefs: ["promote.json"],
-    artifactHash: "sha256:new",
-    reviewedArtifactHash: "sha256:new",
-    currentArtifactHash: "sha256:new",
-    reviewerRunId: "promote-run-2",
-    independentVerification: true,
-    stale: false,
-    startedAt: 30,
-  });
-  const terminal = applyTraceEventToAgentConsole(promote, {
-    type: "quality.completed",
-    runId: "run-quality-stale",
-    graphId: "goal-quality-stale",
-    profile: "deep",
-    stage: "promote",
-    iteration: 2,
-    decision: "proceed",
-    artifactHash: "sha256:new",
-    reviewedArtifactHash: "sha256:new",
-    currentArtifactHash: "sha256:new",
-    independentVerification: true,
-    stale: false,
-    startedAt: 40,
-  }).qualityReview?.history.at(-1);
-  assert.equal(terminal?.independentVerification, false);
-  assert.equal(terminal?.reviewerRunId, undefined);
-  assert.deepEqual(terminal?.artifactRefs, []);
 });

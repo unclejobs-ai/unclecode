@@ -204,6 +204,7 @@ export function formatAttachmentTraceLine(event: {
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 
 export type WorkShellChatEntry = {
+  readonly id?: string;
   readonly role: "system" | "user" | "assistant" | "tool";
   readonly text: string;
 };
@@ -382,6 +383,7 @@ export interface WorkShellAgent<Attachment, TraceEvent, Reasoning extends WorkSh
    * as undelivered instead of pretending they were queued.
    */
   getAgentControlRuntime?(): WorkAgentControlRuntime | undefined;
+  getCanonicalPermissionRules?(): readonly import("./permission-scope.js").CanonicalPermissionRule[];
 }
 
 export type WorkShellEngineInput<
@@ -2483,12 +2485,12 @@ export class WorkShellEngine<
    * path as a typed line, everything else is a no-op that keeps the decision
    * pending (multi-question requests need typed `id: n` answers).
    */
-  answerPendingDecisionByIndex(index: number): boolean {
+  answerPendingDecisionByIndex(index: number, decisionId?: string): boolean {
     const pending = this.pendingDecision;
     const question = pending?.request.questions.length === 1
       ? pending.request.questions[0]
       : undefined;
-    if (!pending || !question) {
+    if (!pending || !question || (decisionId !== undefined && pending.request.id !== decisionId)) {
       return false;
     }
     if (!Number.isSafeInteger(index) || index < 1 || index > question.options.length) {
@@ -2511,6 +2513,7 @@ export class WorkShellEngine<
     return true;
   }
 
+  /** Esc on the decision bar: `/cancel` through the same settle guard. */
   cancelPendingDecision(): boolean {
     if (!this.pendingDecision) {
       return false;
@@ -2577,7 +2580,6 @@ export class WorkShellEngine<
     if (this.state.isBusy) {
       await this.handleBusySubmit(line, pendingAttachments);
       return;
-  /** Esc on the decision bar: `/cancel` through the same settle guard. */
     }
 
     const route = resolveWorkShellSubmitRoute({
@@ -3045,6 +3047,7 @@ export class WorkShellEngine<
       listAvailableSkills: this.listAvailableSkills,
       loadNamedSkill: this.loadNamedSkill,
       toolLines: this.toolLines,
+      listCanonicalPermissionRules: () => this.agent.getCanonicalPermissionRules?.() ?? [],
       clearAgent: () => this.agent.clear(),
       interruptTurn: () => this.interruptTurn(),
       updateRuntimeSettings: (settings) => this.agent.updateRuntimeSettings(settings),
@@ -3160,6 +3163,9 @@ export class WorkShellEngine<
         this.state.reasoning.effort === "high")
         ? this.state.reasoning.effort
         : undefined;
+    const durableAgentConsole = this.pendingAgentConsole === undefined
+      ? this.state.agentConsole
+      : mergeAgentConsoleLifecycle(this.pendingAgentConsole, this.state.agentConsole);
     return createWorkShellSessionSnapshotInput({
       cwd: this.options.cwd,
       sessionId: this.sessionId,
@@ -3173,7 +3179,10 @@ export class WorkShellEngine<
       lastSubmittedContextReceiptId: this.lastSubmittedContextReceiptId,
       ownerMutationRevision: input.ownerMutationRevision ?? this.runtimeRevisionClock?.value,
       entries: this.state.entries,
-      agentConsole: this.state.agentConsole,
+      agentConsole: createAgentConsoleSnapshot({
+        ...durableAgentConsole,
+        securityApprovals: this.agent.getCanonicalPermissionRules?.() ?? [],
+      }),
       ...(input.pauseCheckpoint ? { pauseCheckpoint: input.pauseCheckpoint } : {}),
     });
   }
@@ -3245,6 +3254,10 @@ export class WorkShellEngine<
         currentStage: graph.currentStage,
         gateStatus: graph.gateStatus,
         iteration: graph.iteration,
+      } : console.qualityReview ? {
+        ...(console.qualityReview.currentStage ? { currentStage: console.qualityReview.currentStage } : {}),
+        gateStatus: console.qualityReview.latestDecision,
+        ...(console.qualityReview.iteration !== undefined ? { iteration: console.qualityReview.iteration } : {}),
       } : {}),
       ...(console.pendingDecision?.id ? { decisionId: console.pendingDecision.id } : {}),
       ...(this.lastSubmittedContextReceiptId ? { contextReceiptId: this.lastSubmittedContextReceiptId } : {}),

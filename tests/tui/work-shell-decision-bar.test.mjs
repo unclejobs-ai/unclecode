@@ -6,10 +6,16 @@ import { render } from "ink";
 import React from "react";
 
 import { WorkShellPane } from "../../packages/tui/src/index.tsx";
+import { formatWorkShellDecisionKindLabel } from "../../packages/tui/src/work-shell-view.tsx";
 import {
   getWorkShellSlashSuggestions,
   shouldBlockSlashSubmit,
 } from "../../packages/orchestrator/src/index.ts";
+
+test("decision discriminant names security approval and user choice separately", () => {
+  assert.equal(formatWorkShellDecisionKindLabel("security-approval"), "Security approval");
+  assert.equal(formatWorkShellDecisionKindLabel("user-decision"), "User decision");
+});
 
 function createInkInput() {
   const input = new PassThrough();
@@ -79,6 +85,7 @@ function getLastWorkFrame(output) {
 }
 
 const SINGLE_QUESTION_DECISION = {
+  kind: "user-decision",
   id: "decision-bar-1",
   title: "Execution choice",
   questions: [{
@@ -90,6 +97,7 @@ const SINGLE_QUESTION_DECISION = {
 };
 
 const MULTI_QUESTION_DECISION = {
+  kind: "user-decision",
   id: "decision-bar-2",
   title: "Scope",
   questions: [
@@ -118,6 +126,7 @@ const DECISION_PANEL_LINES = [
 
 function createDecisionPaneEngine(decision, overrides = {}) {
   const answeredIndexes = [];
+  const answeredDecisionIds = [];
   const cancelCalls = [];
   let state = {
     entries: [{ role: "user", text: "run the migration" }],
@@ -147,6 +156,7 @@ function createDecisionPaneEngine(decision, overrides = {}) {
 
   return {
     answeredIndexes,
+    answeredDecisionIds,
     cancelCalls,
     engine: {
       getState: () => state,
@@ -161,8 +171,9 @@ function createDecisionPaneEngine(decision, overrides = {}) {
       handleSubmit: async () => {},
       setMode: async () => {},
       openSessionsPanel: async () => {},
-      answerPendingDecisionByIndex: (index) => {
+      answerPendingDecisionByIndex: (index, decisionId) => {
         answeredIndexes.push(index);
+        answeredDecisionIds.push(decisionId);
         return true;
       },
       cancelPendingDecision: () => {
@@ -214,7 +225,7 @@ test("a pending single-question decision renders the interactive bar above the c
     const frame = getLastWorkFrame(getOutput());
 
     // Header, numbered options with the recommended marker, and the key hint.
-    assert.match(frame, /◆ Execution choice/);
+    assert.match(frame, /◆ User decision · Execution choice/);
     assert.match(frame, /1\. Safe \(recommended\)/);
     assert.match(frame, /2\. Fast/);
     assert.match(frame, /1-2 answer · Esc cancel · or type/);
@@ -248,7 +259,7 @@ test("a pending multi-question decision renders one pointer line", async () => {
     );
     const frame = getLastWorkFrame(getOutput());
 
-    assert.match(frame, /◆ Scope · 2 questions · type answers · \/cancel/);
+    assert.match(frame, /◆ User decision · Scope · 2 questions · type answers · \/cancel/);
     assert.match(frame, /type answers · Esc cancels decision · \/cancel/);
     // No one-key options are advertised for a multi-question decision.
     assert.doesNotMatch(frame, /1\. Shallow/);
@@ -260,7 +271,7 @@ test("a pending multi-question decision renders one pointer line", async () => {
 });
 
 test("pressing 1 answers the pending decision without typing into the draft", async () => {
-  const { engine, answeredIndexes, cancelCalls } = createDecisionPaneEngine(
+  const { engine, answeredIndexes, answeredDecisionIds, cancelCalls } = createDecisionPaneEngine(
     SINGLE_QUESTION_DECISION,
   );
   const { stdin, instance, getOutput } = renderWorkShellPane(engine);
@@ -273,6 +284,7 @@ test("pressing 1 answers the pending decision without typing into the draft", as
     await waitForCondition(() => answeredIndexes.length === 1);
 
     assert.deepEqual(answeredIndexes, [1]);
+    assert.deepEqual(answeredDecisionIds, ["decision-bar-1"]);
     assert.deepEqual(cancelCalls, []);
     // The digit was consumed as the reply, not typed as draft text.
     assert.doesNotMatch(getLastWorkFrame(getOutput()), /› 1/);

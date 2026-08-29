@@ -385,7 +385,7 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   // Decision bar (main-screen UX overhaul) — one-key replies and Esc cancel
   // for a pending AskUserQuestion. Both optional so hosts without decision
   // plumbing keep digits and Esc on their existing meanings.
-  answerPendingDecisionByIndex?(index: number): boolean;
+  answerPendingDecisionByIndex?(index: number, decisionId?: string): boolean;
   cancelPendingDecision?(): boolean;
   removeQueueItem?(id: number): Promise<boolean>;
   moveQueueItem?(id: number, direction: "up" | "down"): Promise<boolean>;
@@ -742,6 +742,7 @@ export function useWorkShellInputController(input: {
   readonly currentMode: string;
   readonly onExit: () => void;
   readonly onRequestSessionsView?: (() => void) | undefined;
+  readonly toggleQualityPlan?: (() => void) | undefined;
   readonly toggleToolHistoryDisplay?: (() => void | Promise<void>) | undefined;
   readonly openEngineSessions: () => void;
   readonly cycleMode: (nextMode: string) => void | Promise<void>;
@@ -766,9 +767,10 @@ export function useWorkShellInputController(input: {
    * agent console snapshot because the controller has no snapshot of its own.
    */
   readonly decisionPending?: boolean | undefined;
+  readonly pendingDecisionId?: string | undefined;
   readonly decisionOptionCount?: number | undefined;
   /** Decision bar capability probes — wired by engines that own decisions. */
-  readonly answerPendingDecisionByIndex?: ((index: number) => boolean) | undefined;
+  readonly answerPendingDecisionByIndex?: ((index: number, decisionId?: string) => boolean) | undefined;
   readonly cancelPendingDecision?: (() => boolean) | undefined;
   readonly queueOverlayOpen?: boolean | undefined;
   readonly queueSelectedId?: number | undefined;
@@ -920,6 +922,17 @@ export function useWorkShellInputController(input: {
   );
 
   useInput((value, key) => {
+    const ctrlTCount = value.split("\u0014").length - 1;
+    if (
+      input.toggleQualityPlan
+      && (ctrlTCount > 0 || (key.ctrl && value.toLowerCase() === "t"))
+    ) {
+      escapeResetArmedAtRef.current = undefined;
+      for (let index = 0; index < Math.max(1, ctrlTCount); index += 1) {
+        input.toggleQualityPlan();
+      }
+      return;
+    }
     const ctrlOCount = value.split("\u000f").length - 1;
     if (input.toggleToolHistoryDisplay && (ctrlOCount > 0 || (key.ctrl && value.toLowerCase() === "o"))) {
       escapeResetArmedAtRef.current = undefined;
@@ -1118,7 +1131,7 @@ export function useWorkShellInputController(input: {
         && oneKeyIndex >= 1
       ) {
         escapeResetArmedAtRef.current = undefined;
-        input.answerPendingDecisionByIndex(oneKeyIndex);
+        input.answerPendingDecisionByIndex(oneKeyIndex, input.pendingDecisionId);
         return;
       }
     }
@@ -1854,6 +1867,15 @@ export function useWorkShellPaneState<
     ...(input.engine.toggleToolHistoryDisplay
       ? { toggleToolHistoryDisplay: () => input.engine.toggleToolHistoryDisplay!() }
       : {}),
+    ...(engineState.agentConsole?.workGraph?.qualityProfile
+      ? {
+          toggleQualityPlan: () => {
+            const view = input.engine.getState().agentConsoleView;
+            if (view?.open && view.tab === "plan") input.engine.closeAgentConsole?.();
+            else input.engine.openAgentConsole?.("plan");
+          },
+        }
+      : {}),
     openEngineSessions,
     cycleMode,
     shouldBlockSlashSubmit: input.shouldBlockSlashSubmit,
@@ -1879,11 +1901,12 @@ export function useWorkShellPaneState<
     // engine capability probes, so the ladder can answer or cancel with one
     // key while the decision is on screen.
     decisionPending,
+    ...(pendingDecisionRequest?.id ? { pendingDecisionId: pendingDecisionRequest.id } : {}),
     ...(decisionOptionCount !== undefined ? { decisionOptionCount } : {}),
     ...(input.engine.answerPendingDecisionByIndex
       ? {
-          answerPendingDecisionByIndex: (index: number) =>
-            input.engine.answerPendingDecisionByIndex?.(index) ?? false,
+          answerPendingDecisionByIndex: (index: number, decisionId?: string) =>
+            input.engine.answerPendingDecisionByIndex?.(index, decisionId) ?? false,
         }
       : {}),
     ...(input.engine.cancelPendingDecision

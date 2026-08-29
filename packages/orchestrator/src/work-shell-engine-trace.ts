@@ -334,7 +334,7 @@ export function applyWorkShellTraceEvent<
 >(input: {
   state: WorkShellEngineState<Reasoning>;
   event: TraceEvent;
-  formatAgentTraceLine: (event: TraceEvent) => string;
+  formatAgentTraceLine: (event: TraceEvent, uiLocale?: "en" | "ko") => string;
   setState: (patch: Partial<WorkShellEngineState<Reasoning>>) => void;
   appendEntries: (...entries: readonly WorkShellChatEntry[]) => void;
   pushTraceLine: (line: string) => void;
@@ -380,7 +380,7 @@ export function applyWorkShellTraceEvent<
     }
   }
 
-  const line = input.formatAgentTraceLine(input.event);
+  const line = input.formatAgentTraceLine(input.event, input.state.uiLocale);
   const busyPatch = createTraceEventBusyPatch({
     state: input.state,
     event: input.event,

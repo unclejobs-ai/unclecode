@@ -15,6 +15,7 @@ type TelemetryOverlayInput = {
   readonly width: number;
   readonly borderColor: string;
   readonly palette: ContextInspectorPalette;
+  readonly uiLocale?: "en" | "ko";
 };
 
 type UsageTotals = {
@@ -54,6 +55,7 @@ const EMPTY_TOTALS: UsageTotals = {
 };
 
 export function renderCacheTelemetryOverlay(input: TelemetryOverlayInput): React.ReactNode {
+  const ko = input.uiLocale === "ko";
   const totals = collectSnapshotUsage(input.snapshot);
   const totalInputTokens =
     totals.inputTokens + totals.cacheReadTokens + totals.cacheWriteTokens;
@@ -67,16 +69,16 @@ export function renderCacheTelemetryOverlay(input: TelemetryOverlayInput): React
   const contentWidth = Math.max(28, input.width - 4);
   const compact = input.width < 88;
   const statCells = [
-    { label: "CACHE STATE", value: state, color: stateColor },
-    { label: "REUSE", value: formatPercent(reuseRatio), color: input.palette.assistant },
+    { label: ko ? "캐시 상태" : "CACHE STATE", value: ko ? ({ WAITING: "대기", HIT: "적중", MISS: "미적중" } as const)[state] : state, color: stateColor },
+    { label: ko ? "재사용" : "REUSE", value: formatPercent(reuseRatio), color: input.palette.assistant },
     {
-      label: "SAVED · EST",
+      label: ko ? "절감 · 추정" : "SAVED · EST",
       value: formatSavings(totals),
       color: totals.cacheSavingsUnknown && totals.cacheSavingsUsd === 0
         ? input.palette.textMuted
         : input.palette.success,
     },
-    { label: "COST · EST", value: formatUsd(totals.costUsd), color: input.palette.text },
+    { label: ko ? "비용 · 추정" : "COST · EST", value: formatUsd(totals.costUsd), color: input.palette.text },
   ];
   const ledgers = buildUsageLedgerRows(input.snapshot);
 
@@ -89,7 +91,7 @@ export function renderCacheTelemetryOverlay(input: TelemetryOverlayInput): React
       flexDirection="column"
       width={input.width}
     >
-      {renderTelemetryHeader("Cache Telemetry", "Live provider evidence", input.palette, compact)}
+      {renderTelemetryHeader(ko ? "캐시 원격 측정" : "Cache Telemetry", ko ? "실시간 제공자 증거" : "Live provider evidence", input.palette, compact, input.uiLocale ?? "en")}
       <Box marginTop={1} flexDirection={compact ? "column" : "row"} gap={compact ? 0 : 2}>
         {statCells.map((cell) => (
           <Box key={cell.label} flexDirection="column" minWidth={compact ? undefined : 15}>
@@ -100,37 +102,39 @@ export function renderCacheTelemetryOverlay(input: TelemetryOverlayInput): React
       </Box>
 
       <Box marginTop={1} flexDirection="column">
-        <Text color={input.palette.textDim}>PROMPT INPUT</Text>
+        <Text color={input.palette.textDim}>{ko ? "프롬프트 입력" : "PROMPT INPUT"}</Text>
         <Text>
           <Text color={input.palette.assistant}>{renderUsageBar(reuseRatio, Math.min(32, Math.max(12, contentWidth - 28)))}</Text>
-          <Text color={input.palette.textMuted}>{`  ${formatTokens(totals.cacheReadTokens)} reused`}</Text>
+          <Text color={input.palette.textMuted}>{`  ${formatTokens(totals.cacheReadTokens)} ${ko ? "재사용" : "reused"}`}</Text>
         </Text>
         <Text color={input.palette.textMuted}>
-          {`${formatTokens(totalInputTokens)} total  ·  ${formatTokens(totals.cacheWriteTokens)} cache write  ·  ${formatTokens(totals.outputTokens)} output`}
+          {`${formatTokens(totalInputTokens)} ${ko ? "전체" : "total"}  ·  ${formatTokens(totals.cacheWriteTokens)} ${ko ? "캐시 쓰기" : "cache write"}  ·  ${formatTokens(totals.outputTokens)} ${ko ? "출력" : "output"}`}
         </Text>
       </Box>
 
       <Box marginTop={1} flexDirection="column">
-        <Text color={input.palette.textDim}>LEDGER · CURRENT SESSION</Text>
+        <Text color={input.palette.textDim}>{ko ? "원장 · 현재 세션" : "LEDGER · CURRENT SESSION"}</Text>
         {ledgers.length === 0 ? (
-          <Text color={input.palette.textMuted}>No provider usage recorded yet. Send one model turn to populate this view.</Text>
+          <Text color={input.palette.textMuted}>{ko ? "아직 제공자 사용 기록이 없습니다. 모델 요청을 보내면 이 보기가 채워집니다." : "No provider usage recorded yet. Send one model turn to populate this view."}</Text>
         ) : ledgers.map((row) => renderUsageLedgerRow(
           row,
           compact,
           contentWidth,
           input.palette,
+          input.uiLocale ?? "en",
         ))}
       </Box>
 
       <Box marginTop={1} justifyContent="space-between">
-        <Text color={input.palette.textMuted}>/cache cache  ·  /agents history</Text>
-        <Text color={input.palette.textDim}>Esc close</Text>
+        <Text color={input.palette.textMuted}>{ko ? "/cache 캐시  ·  /agents 기록" : "/cache cache  ·  /agents history"}</Text>
+        <Text color={input.palette.textDim}>{ko ? "Esc 닫기" : "Esc close"}</Text>
       </Box>
     </Box>
   );
 }
 
 export function renderAgentHistoryOverlay(input: TelemetryOverlayInput): React.ReactNode {
+  const ko = input.uiLocale === "ko";
   const agents = [...input.snapshot.agents].sort(compareAgents);
   const running = agents.filter((agent) => agent.status === "running" || agent.status === "waiting").length;
   const failed = agents.filter((agent) => agent.status === "failed" || agent.status === "interrupted").length;
@@ -147,40 +151,40 @@ export function renderAgentHistoryOverlay(input: TelemetryOverlayInput): React.R
       flexDirection="column"
       width={input.width}
     >
-      {renderTelemetryHeader("Agent History", "Current-session runs", input.palette, compact)}
+      {renderTelemetryHeader(ko ? "에이전트 기록" : "Agent History", ko ? "현재 세션 실행" : "Current-session runs", input.palette, compact, input.uiLocale ?? "en")}
       <Box marginTop={1} gap={3}>
-        <Text><Text color={input.palette.warning} bold>{running}</Text><Text color={input.palette.textMuted}> active</Text></Text>
-        <Text><Text color={input.palette.text} bold>{agents.length}</Text><Text color={input.palette.textMuted}> total</Text></Text>
-        <Text><Text color={failed > 0 ? input.palette.warning : input.palette.textMuted} bold>{failed}</Text><Text color={input.palette.textMuted}> failed</Text></Text>
-        <Text><Text color={input.palette.success} bold>{formatUsd(totalCost)}</Text><Text color={input.palette.textMuted}> cost</Text></Text>
+        <Text><Text color={input.palette.warning} bold>{running}</Text><Text color={input.palette.textMuted}>{ko ? " 활성" : " active"}</Text></Text>
+        <Text><Text color={input.palette.text} bold>{agents.length}</Text><Text color={input.palette.textMuted}>{ko ? " 전체" : " total"}</Text></Text>
+        <Text><Text color={failed > 0 ? input.palette.warning : input.palette.textMuted} bold>{failed}</Text><Text color={input.palette.textMuted}>{ko ? " 실패" : " failed"}</Text></Text>
+        <Text><Text color={input.palette.success} bold>{formatUsd(totalCost)}</Text><Text color={input.palette.textMuted}>{ko ? " 비용" : " cost"}</Text></Text>
       </Box>
 
       <Box marginTop={1} flexDirection="column">
-        <Text color={input.palette.textDim}>RUNS · NEWEST FIRST</Text>
+        <Text color={input.palette.textDim}>{ko ? "실행 · 최신순" : "RUNS · NEWEST FIRST"}</Text>
         {agents.length === 0 ? (
           <Box flexDirection="column">
-            <Text color={input.palette.textMuted}>No delegated agent runs in this session.</Text>
-            {input.snapshot.mainUsage ? renderMainRun(input.snapshot.mainUsage, input.palette) : null}
+            <Text color={input.palette.textMuted}>{ko ? "이 세션에 위임된 에이전트 실행이 없습니다." : "No delegated agent runs in this session."}</Text>
+            {input.snapshot.mainUsage ? renderMainRun(input.snapshot.mainUsage, input.palette, input.uiLocale ?? "en") : null}
           </Box>
-        ) : agents.map((agent) => renderAgentRow(agent, contentWidth, input.palette, compact))}
+        ) : agents.map((agent) => renderAgentRow(agent, contentWidth, input.palette, compact, input.uiLocale ?? "en"))}
       </Box>
 
       {input.snapshot.jobs.length > 0 ? (
         <Box marginTop={1} flexDirection="column">
-          <Text color={input.palette.textDim}>RECENT JOBS</Text>
+          <Text color={input.palette.textDim}>{ko ? "최근 작업" : "RECENT JOBS"}</Text>
           {input.snapshot.jobs.slice(-4).reverse().map((job) => (
             <Text key={job.id}>
               <Text color={resolveStatusColor(job.status, input.palette)}>{statusGlyph(job.status)}</Text>
               <Text color={input.palette.text}>{` ${truncateForDisplayWidth(job.label, Math.max(12, contentWidth - 24))}`}</Text>
-              <Text color={input.palette.textMuted}>{`  ${job.status}`}</Text>
+              <Text color={input.palette.textMuted}>{`  ${localizeStatus(job.status, input.uiLocale ?? "en")}`}</Text>
             </Text>
           ))}
         </Box>
       ) : null}
 
       <Box marginTop={1} justifyContent="space-between">
-        <Text color={input.palette.textMuted}>/agents history  ·  /cache cache</Text>
-        <Text color={input.palette.textDim}>Esc close</Text>
+        <Text color={input.palette.textMuted}>{ko ? "/agents 기록  ·  /cache 캐시" : "/agents history  ·  /cache cache"}</Text>
+        <Text color={input.palette.textDim}>{ko ? "Esc 닫기" : "Esc close"}</Text>
       </Box>
     </Box>
   );
@@ -191,12 +195,13 @@ function renderTelemetryHeader(
   subtitle: string,
   palette: ContextInspectorPalette,
   compact: boolean,
+  uiLocale: "en" | "ko" = "en",
 ): React.ReactNode {
   const titleText = (
     <Text><Text color={palette.assistant} bold>{`▤ ${title}`}</Text><Text color={palette.textMuted}>{`  ${subtitle}`}</Text></Text>
   );
   const controls = (
-    <Text><Text color={palette.assistant} bold>[C]</Text><Text color={palette.textMuted}> Cache  </Text><Text color={palette.assistant} bold>[A]</Text><Text color={palette.textMuted}> Agents</Text></Text>
+    <Text><Text color={palette.assistant} bold>[C]</Text><Text color={palette.textMuted}>{uiLocale === "ko" ? " 캐시  " : " Cache  "}</Text><Text color={palette.assistant} bold>[A]</Text><Text color={palette.textMuted}>{uiLocale === "ko" ? " 에이전트" : " Agents"}</Text></Text>
   );
   return compact
     ? <Box flexDirection="column">{titleText}{controls}</Box>
@@ -215,6 +220,7 @@ function renderAgentRow(
   width: number,
   palette: ContextInspectorPalette,
   compact: boolean,
+  uiLocale: "en" | "ko" = "en",
 ): React.ReactNode {
   const usage = normalizeUsage(agent.usage);
   const detail = agent.currentActivity ?? agent.summary ?? agent.errorSummary;
@@ -233,19 +239,19 @@ function renderAgentRow(
         <Text color={resolveStatusColor(agent.status, palette)}>{statusGlyph(agent.status)}</Text>
         <Text color={palette.text} bold>{` ${padDisplay(truncateForDisplayWidth(agent.displayName, labelWidth), labelWidth)} `}</Text>
         <Text color={palette.textMuted}>{`${padDisplay(agent.agentType, typeWidth)} `}</Text>
-        <Text color={palette.assistant}>{`${padDisplay(formatTokens(usage.inputTokens), tokenWidth)} in `}</Text>
+        <Text color={palette.assistant}>{`${padDisplay(formatTokens(usage.inputTokens), tokenWidth)} ${uiLocale === "ko" ? "입력" : "in"} `}</Text>
         <Text color={palette.success}>{formatUsd(usage.costUsd)}</Text>
       </Text>
       {(agent.usage?.routes ?? []).map((route, index) => compact
         ? (
           <Box key={`${agent.id}:route:${index}`} flexDirection="column">
             <Text color={palette.textMuted}>{`  ├ ${truncateForDisplayWidth(`${route.provider}/${route.model}`, bound)}`}</Text>
-            <Text color={palette.assistant}>{`  │ ${truncateForDisplayWidth(formatRouteCache(route), bound)}`}</Text>
+            <Text color={palette.assistant}>{`  │ ${truncateForDisplayWidth(formatRouteCache(route, uiLocale), bound)}`}</Text>
           </Box>
         )
         : (
           <Text key={`${agent.id}:route:${index}`} color={palette.textMuted}>
-            {`  ├ ${truncateForDisplayWidth(`${route.provider}/${route.model}  ·  ${formatRouteCache(route)}`, bound)}`}
+            {`  ├ ${truncateForDisplayWidth(`${route.provider}/${route.model}  ·  ${formatRouteCache(route, uiLocale)}`, bound)}`}
           </Text>
         ))}
       {detail ? <Text color={palette.textMuted}>{`  └ ${truncateForDisplayWidth(detail, bound)}`}</Text> : null}
@@ -253,13 +259,13 @@ function renderAgentRow(
   );
 }
 
-function renderMainRun(usage: AgentRunUsage, palette: ContextInspectorPalette): React.ReactNode {
+function renderMainRun(usage: AgentRunUsage, palette: ContextInspectorPalette, uiLocale: "en" | "ko" = "en"): React.ReactNode {
   const totals = normalizeUsage(usage);
   return (
     <Text>
       <Text color={palette.success}>●</Text>
-      <Text color={palette.text} bold>{" Main conversation  "}</Text>
-      <Text color={palette.assistant}>{`${formatTokens(totals.inputTokens)} in  `}</Text>
+      <Text color={palette.text} bold>{uiLocale === "ko" ? " 메인 대화  " : " Main conversation  "}</Text>
+      <Text color={palette.assistant}>{`${formatTokens(totals.inputTokens)} ${uiLocale === "ko" ? "입력" : "in"}  `}</Text>
       <Text color={palette.success}>{formatUsd(totals.costUsd)}</Text>
     </Text>
   );
@@ -277,23 +283,25 @@ function renderUsageLedgerRow(
   compact: boolean,
   contentWidth: number,
   palette: ContextInspectorPalette,
+  uiLocale: "en" | "ko" = "en",
 ): React.ReactNode {
-  const route = row.provider && row.model ? `${row.provider}/${row.model}` : "provider/model unavailable";
+  const rowLabel = uiLocale === "ko" && row.label === "Main conversation" ? "메인 대화" : row.label;
+  const route = row.provider && row.model ? `${row.provider}/${row.model}` : (uiLocale === "ko" ? "제공자/모델 사용 불가" : "provider/model unavailable");
   const glyph = row.active ? "◐" : "●";
   const glyphColor = row.active ? palette.warning : palette.textMuted;
-  const cacheEvidence = formatRouteCache(row.usage);
-  const savings = `${formatSavings(row.usage)} saved`;
+  const cacheEvidence = formatRouteCache(row.usage, uiLocale);
+  const savings = `${formatSavings(row.usage)} ${uiLocale === "ko" ? "절감" : "saved"}`;
   const savingsColor = row.usage.cacheSavingsUnknown && row.usage.cacheSavingsUsd === 0
     ? palette.textMuted
     : palette.success;
   if (compact) {
     return (
       <Box key={row.id} flexDirection="column" marginBottom={1}>
-        <Text><Text color={glyphColor}>{glyph}</Text><Text color={palette.text} bold>{` ${row.label}`}</Text></Text>
+        <Text><Text color={glyphColor}>{glyph}</Text><Text color={palette.text} bold>{` ${rowLabel}`}</Text></Text>
         <Text color={palette.textMuted}>{`  ${truncateForDisplayWidth(route, Math.max(12, contentWidth - 2))}`}</Text>
         <Text color={palette.assistant}>{`  ${truncateForDisplayWidth(cacheEvidence, Math.max(12, contentWidth - 2))}`}</Text>
         <Text>
-          <Text color={palette.textMuted}>{`  ${formatTokens(row.usage.inputTokens)} input  ·  `}</Text>
+          <Text color={palette.textMuted}>{`  ${formatTokens(row.usage.inputTokens)} ${uiLocale === "ko" ? "입력" : "input"}  ·  `}</Text>
           <Text color={savingsColor}>{savings}</Text>
         </Text>
       </Box>
@@ -304,9 +312,9 @@ function renderUsageLedgerRow(
     <Box key={row.id} flexDirection="column">
       <Text>
         <Text color={glyphColor}>{glyph}</Text>
-        <Text color={palette.text} bold>{` ${padDisplay(row.label, 18)} `}</Text>
+        <Text color={palette.text} bold>{` ${padDisplay(rowLabel, 18)} `}</Text>
         <Text color={palette.textMuted}>{`${padDisplay(route, routeWidth)}  `}</Text>
-        <Text color={palette.textMuted}>{`${padDisplay(formatTokens(row.usage.inputTokens), 8)} input `}</Text>
+        <Text color={palette.textMuted}>{`${padDisplay(formatTokens(row.usage.inputTokens), 8)} ${uiLocale === "ko" ? "입력" : "input"} `}</Text>
         <Text color={savingsColor}>{savings}</Text>
       </Text>
       <Text color={palette.assistant}>
@@ -398,8 +406,16 @@ function addUsage(left: UsageTotals, right: UsageTotals): UsageTotals {
 
 function formatRouteCache(
   usage: { readonly cacheReadTokens?: number; readonly cacheWriteTokens?: number },
+  uiLocale: "en" | "ko" = "en",
 ): string {
-  return `${formatTokens(usage.cacheReadTokens ?? 0)} cache read  ·  ${formatTokens(usage.cacheWriteTokens ?? 0)} cache write`;
+  return uiLocale === "ko"
+    ? `${formatTokens(usage.cacheReadTokens ?? 0)} 캐시 읽기  ·  ${formatTokens(usage.cacheWriteTokens ?? 0)} 캐시 쓰기`
+    : `${formatTokens(usage.cacheReadTokens ?? 0)} cache read  ·  ${formatTokens(usage.cacheWriteTokens ?? 0)} cache write`;
+}
+
+function localizeStatus(status: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale !== "ko") return status;
+  return ({ running: "실행 중", waiting: "대기", completed: "완료", failed: "실패", interrupted: "중단", queued: "대기열" } as Readonly<Record<string, string>>)[status] ?? status;
 }
 
 /**

@@ -113,47 +113,49 @@ export function buildContextInspectorControls(input: {
   readonly pane?: ContextDeskPane | undefined;
   /** Painted pane width in cells; omit for the unabridged copy. */
   readonly width?: number | undefined;
+  readonly uiLocale?: "en" | "ko";
 }): string {
+  const ko = input.uiLocale === "ko";
   if (!input.expanded && input.pane === "groups") {
     return joinContextInspectorControls([
-      { text: "↑↓ collection", required: true },
-      { text: "←→ pane", required: true },
-      { text: "Esc close", required: true },
+      { text: ko ? "↑↓ 모음" : "↑↓ collection", required: true },
+      { text: ko ? "←→ 창" : "←→ pane", required: true },
+      { text: ko ? "Esc 닫기" : "Esc close", required: true },
     ], input.width);
   }
   if (!input.expanded && input.pane === "preview") {
     return joinContextInspectorControls([
-      { text: "↑↓ scroll", required: true },
-      { text: "←→ pane", required: true },
-      { text: "Esc close", required: true },
+      { text: ko ? "↑↓ 스크롤" : "↑↓ scroll", required: true },
+      { text: ko ? "←→ 창" : "←→ pane", required: true },
+      { text: ko ? "Esc 닫기" : "Esc close", required: true },
     ], input.width);
   }
   const { capabilities } = input;
   const actionable = input.actionsEnabled;
   const firstSegment: ContextInspectorControlSegment = {
     text: input.expanded
-      ? "↑↓ scroll · Enter back"
+      ? (ko ? "↑↓ 스크롤 · Enter 돌아가기" : "↑↓ scroll · Enter back")
       : capabilities.preview
-        ? "↑↓ move · Enter details"
-        : "↑↓ move",
+        ? (ko ? "↑↓ 이동 · Enter 상세" : "↑↓ move · Enter details")
+        : (ko ? "↑↓ 이동" : "↑↓ move"),
     required: true,
   };
   const optionalSegments: readonly ContextInspectorControlSegment[] = [
     ...(actionable && capabilities.delivery !== undefined
-      ? [{ text: capabilities.delivery === "include" ? "Space include" : "Space hold back" }]
+      ? [{ text: capabilities.delivery === "include" ? (ko ? "Space 포함" : "Space include") : (ko ? "Space 보류" : "Space hold back") }]
       : []),
     ...(actionable && capabilities.unpin
-      ? [{ text: "P unpin" }]
+      ? [{ text: ko ? "P 고정 해제" : "P unpin" }]
       : actionable && capabilities.pin
-        ? [{ text: "P pin" }]
+        ? [{ text: ko ? "P 고정" : "P pin" }]
         : []),
-    ...(actionable && input.undoAvailable ? [{ text: "U undo" }] : []),
+    ...(actionable && input.undoAvailable ? [{ text: ko ? "U 실행 취소" : "U undo" }] : []),
   ];
-  const exitSegment: ContextInspectorControlSegment = { text: "Esc close", required: true };
+  const exitSegment: ContextInspectorControlSegment = { text: ko ? "Esc 닫기" : "Esc close", required: true };
   if (input.expanded) {
     return joinContextInspectorControls([firstSegment, exitSegment], input.width);
   }
-  const paneSegment: ContextInspectorControlSegment = { text: "←→ pane", required: true };
+  const paneSegment: ContextInspectorControlSegment = { text: ko ? "←→ 창" : "←→ pane", required: true };
   const legacy = [firstSegment, ...optionalSegments, exitSegment, paneSegment];
   if (
     input.width === undefined
@@ -190,8 +192,10 @@ export function renderContextInspectorOverlay(input: {
   readonly contextAdviceUnavailable?: string | undefined;
   readonly contextAdviceActionsEnabled?: boolean | undefined;
   readonly terminalRows?: number;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   const activePane = input.activePane ?? "sources";
+  const ko = input.uiLocale === "ko";
   const activeCollection = input.activeCollection ?? "all";
   const rows = buildContextInspectorRows(input.packet);
   const overview = buildContextInspectorOverview({
@@ -219,18 +223,19 @@ export function renderContextInspectorOverlay(input: {
     undoAvailable: input.actionReceipt?.canUndo ?? false,
     pane: activePane,
     width: contentWidth,
+    uiLocale: input.uiLocale ?? "en",
   });
 
   return (
     <Box marginTop={1} borderStyle="round" borderColor={input.borderColor} paddingX={1} flexDirection="column">
       <Text>
-        <Text color={palette.assistant} bold>{"Context Desk"}</Text>
+        <Text color={palette.assistant} bold>{ko ? "컨텍스트 작업대" : "Context Desk"}</Text>
         <Text color={palette.textDim}>
           {truncateForDisplayWidth(
             input.width < 76
-              ? " · next answer"
-              : " · what reaches the next answer",
-            Math.max(4, contentWidth - getDisplayWidth("Context Desk")),
+              ? (ko ? " · 다음 응답" : " · next answer")
+              : (ko ? " · 다음 응답에 포함되는 내용" : " · what reaches the next answer"),
+            Math.max(4, contentWidth - getDisplayWidth(ko ? "컨텍스트 작업대" : "Context Desk")),
           )}
         </Text>
       </Text>
@@ -240,11 +245,13 @@ export function renderContextInspectorOverlay(input: {
           palette,
           modelWindow: input.modelWindow,
           contentWidth,
+          uiLocale: input.uiLocale ?? "en",
         })}
         {renderContextInspectorPacketProof({
           modelWindow: input.modelWindow,
           width: contentWidth,
           palette,
+          uiLocale: input.uiLocale ?? "en",
           ...(input.previewReceipt ? { previewReceipt: input.previewReceipt } : {}),
           ...(input.submittedReceipt ? { submittedReceipt: input.submittedReceipt } : {}),
           ...(input.packetChange ? { packetChange: input.packetChange } : {}),
@@ -272,6 +279,7 @@ export function renderContextInspectorOverlay(input: {
             ? { adviceUnavailable: input.contextAdviceUnavailable }
             : {}),
           adviceActionsEnabled: input.contextAdviceActionsEnabled ?? false,
+          uiLocale: input.uiLocale ?? "en",
         })}
         <Text color={palette.textMuted}>{controls}</Text>
       </Box>

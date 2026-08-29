@@ -136,6 +136,10 @@ test("agent-console only coalesces completed routine read and search evidence", 
 test("agent-console journal snapshot restores one pending decision and running work node", () => {
   const snapshot = createAgentConsoleSnapshot({
     profileId: "review",
+    securityApprovals: [
+      { kind: "tool", key: "bash" },
+      { kind: "tool", key: "write_file" },
+    ],
     pendingDecision: {
       kind: "user-decision",
       id: "decision-1",
@@ -167,6 +171,10 @@ test("agent-console journal snapshot restores one pending decision and running w
     activity: [],
   });
   assert.equal(snapshot.pendingDecision.kind, "user-decision");
+  assert.deepEqual(snapshot.securityApprovals, [
+    { kind: "tool", key: "bash" },
+    { kind: "tool", key: "write_file" },
+  ]);
 
   assert.equal(snapshot.pendingDecision?.id, "decision-1");
   assert.equal(snapshot.workGraph?.nodes[0]?.status, "running");
@@ -414,7 +422,6 @@ test("agent-console resume parser round-trips every safe lifecycle field", () =>
       summary: "Mapped the execution path",
       errorSummary: "one retried tool call",
       usage: {
-        eventIds: ["usage-run-1"],
         inputTokens: 120,
         outputTokens: 45,
         cacheReadTokens: 12,
@@ -437,7 +444,6 @@ test("agent-console resume parser round-trips every safe lifecycle field", () =>
     },
   ]);
   assert.deepEqual(parsed?.mainUsage, {
-    eventIds: ["usage-main-1"],
     inputTokens: 300,
     outputTokens: 90,
     cacheReadTokens: 24,
@@ -446,7 +452,6 @@ test("agent-console resume parser round-trips every safe lifecycle field", () =>
       {
         provider: "openai",
         model: "gpt-5.6-sol",
-        eventIds: ["usage-main-1"],
         inputTokens: 300,
         outputTokens: 90,
         cacheReadTokens: 24,

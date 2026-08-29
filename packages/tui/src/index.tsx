@@ -22,5 +22,6 @@ export * from "./work-shell-input.js";
 export * from "./work-shell-pane.js";
 export * from "./work-shell-panels.js";
 export * from "./text-width.js";
+export * from "./terminal-theme.js";
 export * from "./work-shell-view.js";
 export type { TuiShellHomeState } from "./shell-state.js";

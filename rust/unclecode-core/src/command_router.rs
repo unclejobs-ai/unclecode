@@ -128,19 +128,19 @@ const WORK_SHELL_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand {
         command: "/agents",
         route: &["agents"],
-        description: "에이전트 실행 상태와 transcript를 엽니다",
+        description: "Open agent run status and transcripts.",
         aliases: &[],
     },
     BuiltinSlashCommand {
         command: "/jobs",
         route: &["jobs"],
-        description: "백그라운드 job 상태를 엽니다",
+        description: "Open background job status.",
         aliases: &[],
     },
     BuiltinSlashCommand {
         command: "/todo",
         route: &["todo"],
-        description: "현재 WorkGraph 진행 상태를 엽니다",
+        description: "Open current WorkGraph progress.",
         aliases: &[],
     },
     BuiltinSlashCommand {
@@ -571,6 +571,7 @@ fn work_shell_builtin_submit_command(line: &str) -> Option<Value> {
         "/status" => Some(json!({ "kind": "status" })),
         "/sessions" => Some(json!({ "kind": "sessions" })),
         "/tools" => Some(json!({ "kind": "tools" })),
+        "/policy" => Some(json!({ "kind": "policy" })),
         "/skills" => Some(json!({ "kind": "skills" })),
         "/queue" => Some(json!({ "kind": "queue" })),
         "/queue clear" => Some(json!({ "kind": "queue-clear" })),

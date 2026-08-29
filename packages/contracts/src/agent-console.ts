@@ -71,6 +71,11 @@ export type AskUserQuestionRequest = {
   readonly questions: readonly AskUserQuestion[];
 };
 
+export type PersistedSecurityApprovalRule = {
+  readonly kind: "tool";
+  readonly key: string;
+};
+
 export type AskUserQuestionResult =
   | { readonly status: "answered"; readonly answers: readonly AskUserQuestionAnswer[] }
   | { readonly status: "cancelled" }
@@ -183,6 +188,7 @@ export type QualityReviewHistoryEntry = {
 export type QualityReviewProjection = {
   readonly runId: string;
   readonly graphId: string;
+  /** Current lifecycle state, including graph-less minimal turns. */
   readonly profile?: QualityProfile;
   readonly currentStage?: QualityHarnessStage;
   readonly iteration?: number;
@@ -481,6 +487,7 @@ export type AgentConsoleTab = (typeof AGENT_CONSOLE_TABS)[number];
 
 export type AgentConsoleSnapshot = {
   readonly profileId: ContextProfileId;
+  readonly securityApprovals?: readonly PersistedSecurityApprovalRule[];
   readonly manifest?: PersistedPromptManifest;
   readonly pendingDecision?: AskUserQuestionRequest;
   readonly workGraph?: WorkGraph;
@@ -527,6 +534,9 @@ export function createAgentConsoleSnapshot(
 ): AgentConsoleSnapshot {
   return {
     profileId: input.profileId,
+    ...(input.securityApprovals && input.securityApprovals.length > 0
+      ? { securityApprovals: copySecurityApprovalRules(input.securityApprovals) }
+      : {}),
     ...(input.manifest ? { manifest: copyPersistedPromptManifest(input.manifest) } : {}),
     ...(input.pendingDecision
       ? { pendingDecision: copyAskUserQuestionRequest(input.pendingDecision) }
@@ -646,6 +656,25 @@ function copyAskUserQuestionRequest(request: AskUserQuestionRequest): AskUserQue
   };
 }
 
+function copySecurityApprovalRules(
+  rules: readonly PersistedSecurityApprovalRule[],
+): readonly PersistedSecurityApprovalRule[] {
+  const unique = new Map<string, PersistedSecurityApprovalRule>();
+  for (const rule of rules) {
+    if (rule.kind === "tool" && isSafePermissionRuleKey(rule.key)) {
+      unique.set(rule.key, { kind: "tool", key: rule.key });
+    }
+  }
+  return [...unique.values()];
+}
+
+function isSafePermissionRuleKey(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 128
+    && /^[A-Za-z0-9_.:-]+$/.test(value);
+}
+
 function copyWorkGraph(graph: WorkGraph): WorkGraph {
   return {
     id: graph.id,
@@ -695,10 +724,16 @@ function copyQualityReview(projection: QualityReviewProjection): QualityReviewPr
       evidenceRefs: entry.evidenceRefs.slice(0, 64).map((reference) => reference.slice(0, 1_000)),
       artifactRefs: entry.artifactRefs.slice(0, 64).map((reference) => reference.slice(0, 1_000)),
       ...(entry.artifactHash === undefined ? {} : { artifactHash: entry.artifactHash.slice(0, 256) }),
-      ...(entry.reviewedArtifactHash === undefined ? {} : { reviewedArtifactHash: entry.reviewedArtifactHash.slice(0, 256) }),
-      ...(entry.currentArtifactHash === undefined ? {} : { currentArtifactHash: entry.currentArtifactHash.slice(0, 256) }),
+      ...(entry.reviewedArtifactHash === undefined
+        ? {}
+        : { reviewedArtifactHash: entry.reviewedArtifactHash.slice(0, 256) }),
+      ...(entry.currentArtifactHash === undefined
+        ? {}
+        : { currentArtifactHash: entry.currentArtifactHash.slice(0, 256) }),
       ...(entry.reviewerId === undefined ? {} : { reviewerId: entry.reviewerId.slice(0, 256) }),
-      ...(entry.reviewerRunId === undefined ? {} : { reviewerRunId: entry.reviewerRunId.slice(0, 256) }),
+      ...(entry.reviewerRunId === undefined
+        ? {}
+        : { reviewerRunId: entry.reviewerRunId.slice(0, 256) }),
       ...(entry.provider === undefined ? {} : { provider: entry.provider.slice(0, 128) }),
       ...(entry.model === undefined ? {} : { model: entry.model.slice(0, 256) }),
       ...(entry.route === undefined ? {} : { route: entry.route }),
@@ -972,6 +1007,9 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
   const pendingDecision = hasOwn(record, "pendingDecision")
     ? parseAskUserQuestionRequest(record.pendingDecision)
     : undefined;
+  const securityApprovals = hasOwn(record, "securityApprovals")
+    ? parseSecurityApprovalRules(record.securityApprovals)
+    : undefined;
   const workGraph = hasOwn(record, "workGraph") ? parseWorkGraph(record.workGraph) : undefined;
   const qualityReview = hasOwn(record, "qualityReview")
     ? parseQualityReviewProjection(record.qualityReview)
@@ -988,6 +1026,7 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
   if (
     (hasOwn(record, "manifest") && !manifest)
     || (hasOwn(record, "pendingDecision") && !pendingDecision)
+    || (hasOwn(record, "securityApprovals") && !securityApprovals)
     || (hasOwn(record, "workGraph") && !workGraph)
     || (hasOwn(record, "qualityReview") && !qualityReview)
     || (hasOwn(record, "evolutionProposals") && !evolutionProposals)
@@ -1027,6 +1066,7 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
 
   return createAgentConsoleSnapshot({
     profileId: record.profileId,
+    ...(securityApprovals && securityApprovals.length > 0 ? { securityApprovals } : {}),
     ...(manifest ? { manifest } : {}),
     ...(pendingDecision ? { pendingDecision } : {}),
     ...(workGraph ? { workGraph } : {}),
@@ -1428,7 +1468,6 @@ function parseAskUserQuestionRequest(value: unknown): AskUserQuestionRequest | u
   if (hasOwn(record, "title") && !isNonEmptyString(record.title)) {
     return undefined;
   }
-
   if (
     hasOwn(record, "kind")
     && record.kind !== "security-approval"
@@ -1436,6 +1475,7 @@ function parseAskUserQuestionRequest(value: unknown): AskUserQuestionRequest | u
   ) {
     return undefined;
   }
+
   const questions = record.questions.map(parseAskUserQuestion);
   if (questions.some((question) => question === undefined)) {
     return undefined;
@@ -1444,12 +1484,29 @@ function parseAskUserQuestionRequest(value: unknown): AskUserQuestionRequest | u
     (question): question is AskUserQuestion => question !== undefined,
   );
 
-    kind: record.kind === "security-approval" ? "security-approval" : "user-decision",
   return {
+    kind: record.kind === "security-approval" ? "security-approval" : "user-decision",
     id: record.id,
     ...(typeof record.title === "string" ? { title: record.title } : {}),
     questions: parsedQuestions,
   };
+}
+
+function parseSecurityApprovalRules(value: unknown): readonly PersistedSecurityApprovalRule[] | undefined {
+  if (!Array.isArray(value) || value.length > 256) return undefined;
+  const rules: PersistedSecurityApprovalRule[] = [];
+  const seen = new Set<string>();
+  for (const candidate of value) {
+    const record = asRecord(candidate);
+    if (!record || record.kind !== "tool" || !isSafePermissionRuleKey(record.key)) {
+      return undefined;
+    }
+    if (!seen.has(record.key)) {
+      seen.add(record.key);
+      rules.push({ kind: "tool", key: record.key });
+    }
+  }
+  return rules;
 }
 
 function parseAskUserQuestion(value: unknown): AskUserQuestion | undefined {
@@ -1548,8 +1605,11 @@ function parseQualityReviewProjection(value: unknown): QualityReviewProjection |
     !record
     || !isNonEmptyString(record.runId)
     || !isNonEmptyString(record.graphId)
-    || (hasOwn(record, "profile") && (typeof record.profile !== "string" || !QUALITY_PROFILE_SET.has(record.profile)))
-    || (hasOwn(record, "currentStage") && (typeof record.currentStage !== "string" || !QUALITY_HARNESS_STAGE_SET.has(record.currentStage)))
+    || (hasOwn(record, "profile")
+      && (typeof record.profile !== "string" || !QUALITY_PROFILE_SET.has(record.profile)))
+    || (hasOwn(record, "currentStage")
+      && (typeof record.currentStage !== "string"
+        || !QUALITY_HARNESS_STAGE_SET.has(record.currentStage)))
     || (hasOwn(record, "iteration") && !isNonNegativeInteger(record.iteration))
     || !isNonNegativeInteger(record.refineCount)
     || !isNonNegativeInteger(record.pivotCount)
@@ -1557,7 +1617,9 @@ function parseQualityReviewProjection(value: unknown): QualityReviewProjection |
     || !QUALITY_GATE_STATUS_SET.has(record.latestDecision)
     || !Array.isArray(record.history)
     || record.history.length > MAX_QUALITY_REVIEW_HISTORY
-  ) return undefined;
+  ) {
+    return undefined;
+  }
   const history = record.history.map(parseQualityReviewHistoryEntry);
   if (history.some((entry) => entry === undefined)) return undefined;
   return {
@@ -1585,13 +1647,18 @@ function parseQualityReviewHistoryEntry(value: unknown): QualityReviewHistoryEnt
   if (
     !record
     || (record.event !== "gate" && record.event !== "refine" && record.event !== "pivot" && record.event !== "completed")
-    || typeof record.stage !== "string" || !QUALITY_HARNESS_STAGE_SET.has(record.stage)
-    || typeof record.decision !== "string" || !QUALITY_GATE_STATUS_SET.has(record.decision)
+    || typeof record.stage !== "string"
+    || !QUALITY_HARNESS_STAGE_SET.has(record.stage)
+    || typeof record.decision !== "string"
+    || !QUALITY_GATE_STATUS_SET.has(record.decision)
     || !isNonNegativeInteger(record.iteration)
     || (hasOwn(record, "reason") && !isNonEmptyString(record.reason))
-    || !failures || failures.length > 32
-    || !evidenceRefs || evidenceRefs.length > 64
-    || !artifactRefs || artifactRefs.length > 64
+    || !failures
+    || failures.length > 32
+    || !evidenceRefs
+    || evidenceRefs.length > 64
+    || !artifactRefs
+    || artifactRefs.length > 64
     || (hasOwn(record, "artifactHash") && !isNonEmptyString(record.artifactHash))
     || (hasOwn(record, "reviewedArtifactHash") && !isNonEmptyString(record.reviewedArtifactHash))
     || (hasOwn(record, "currentArtifactHash") && !isNonEmptyString(record.currentArtifactHash))
@@ -1599,13 +1666,19 @@ function parseQualityReviewHistoryEntry(value: unknown): QualityReviewHistoryEnt
     || (hasOwn(record, "reviewerRunId") && !isNonEmptyString(record.reviewerRunId))
     || (hasOwn(record, "provider") && !isNonEmptyString(record.provider))
     || (hasOwn(record, "model") && !isNonEmptyString(record.model))
-    || (hasOwn(record, "route") && record.route !== "direct" && record.route !== "frontier" && record.route !== "commodity" && record.route !== "fallback")
+    || (hasOwn(record, "route")
+      && record.route !== "direct"
+      && record.route !== "frontier"
+      && record.route !== "commodity"
+      && record.route !== "fallback")
     || (hasOwn(record, "count") && !isNonNegativeInteger(record.count))
     || (hasOwn(record, "limit") && !isNonNegativeInteger(record.limit))
     || typeof record.independentVerification !== "boolean"
     || typeof record.stale !== "boolean"
     || !isNonNegativeFinite(record.startedAt)
-  ) return undefined;
+  ) {
+    return undefined;
+  }
   return {
     event: record.event,
     stage: record.stage as QualityHarnessStage,
@@ -1616,13 +1689,19 @@ function parseQualityReviewHistoryEntry(value: unknown): QualityReviewHistoryEnt
     evidenceRefs,
     artifactRefs,
     ...(typeof record.artifactHash === "string" ? { artifactHash: record.artifactHash } : {}),
-    ...(typeof record.reviewedArtifactHash === "string" ? { reviewedArtifactHash: record.reviewedArtifactHash } : {}),
-    ...(typeof record.currentArtifactHash === "string" ? { currentArtifactHash: record.currentArtifactHash } : {}),
+    ...(typeof record.reviewedArtifactHash === "string"
+      ? { reviewedArtifactHash: record.reviewedArtifactHash }
+      : {}),
+    ...(typeof record.currentArtifactHash === "string"
+      ? { currentArtifactHash: record.currentArtifactHash }
+      : {}),
     ...(typeof record.reviewerId === "string" ? { reviewerId: record.reviewerId } : {}),
     ...(typeof record.reviewerRunId === "string" ? { reviewerRunId: record.reviewerRunId } : {}),
     ...(typeof record.provider === "string" ? { provider: record.provider } : {}),
     ...(typeof record.model === "string" ? { model: record.model } : {}),
-    ...(typeof record.route === "string" ? { route: record.route as NonNullable<QualityReviewHistoryEntry["route"]> } : {}),
+    ...(typeof record.route === "string"
+      ? { route: record.route as NonNullable<QualityReviewHistoryEntry["route"]> }
+      : {}),
     ...(typeof record.count === "number" ? { count: record.count } : {}),
     ...(typeof record.limit === "number" ? { limit: record.limit } : {}),
     independentVerification: record.independentVerification,

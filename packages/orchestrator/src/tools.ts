@@ -388,8 +388,8 @@ export function parseAskUserQuestionRequest(input: Record<string, unknown>): Ask
   }
 
   const questionIds = new Set<string>();
-    kind: "user-decision",
   return {
+    kind: "user-decision",
     id: input.id.trim(),
     ...(typeof input.title === "string" && input.title.trim().length > 0 ? { title: input.title.trim() } : {}),
     questions: input.questions.map((question) => parseAskUserQuestion(question, questionIds)),
@@ -551,6 +551,7 @@ export function createToolRuntime(input: {
   readonly allowedTools?: readonly string[] | undefined;
   readonly policyProfile?: ExecutionPolicyProfile | (() => ExecutionPolicyProfile) | undefined;
   readonly runtimeMode?: string | (() => string) | undefined;
+  readonly permissionRuleStore?: import("./permission-scope.js").CanonicalPermissionRuleStore | undefined;
 }): ToolRuntime {
   const registry = createToolRegistry(input);
   return {
@@ -563,6 +564,7 @@ export function createToolRuntime(input: {
         envShellOptIn: process.env.UNCLECODE_ALLOW_RUN_SHELL === "1",
       }),
       runtimeMode: input.runtimeMode ?? "local",
+      ...(input.permissionRuleStore ? { permissionRuleStore: input.permissionRuleStore } : {}),
       ...(input.interactionBridge ? { interactionBridge: input.interactionBridge } : {}),
     }),
   };

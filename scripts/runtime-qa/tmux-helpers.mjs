@@ -5,8 +5,8 @@ import { escapeRegExp, run, sleep } from "./cli-helpers.mjs";
 const runtimeTmuxSocketName = `unclecode-runtime-qa-${process.pid}`;
 const DEFAULT_PANE_WAIT_TIMEOUT_MS = 30_000;
 const PANE_POLL_INTERVAL_MS = 100;
-export const READY_LAST_STATUS_PATTERN = /Ready · last(?: reply)?(?: \d+(?:\.\d+)?s)?/;
-export const IDLE_COMPOSER_PATTERN = /Enter send · Shift\+Enter newline/;
+export const READY_LAST_STATUS_PATTERN = /(?:Ready · last(?: reply)?(?: \d+(?:\.\d+)?s)?|준비 완료 · 최근(?: 응답)?(?: \d+(?:\.\d+)?s)?)/;
+export const IDLE_COMPOSER_PATTERN = /(?:Enter send · Shift\+Enter newline|Enter 전송 · Shift\+Enter 줄바꿈)/;
 
 export function runtimeTmuxArgs(args) {
   return ["-f", "/dev/null", "-L", runtimeTmuxSocketName, ...args];

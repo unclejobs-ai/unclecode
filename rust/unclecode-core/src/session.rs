@@ -18,6 +18,7 @@ const MAX_AGENT_CONSOLE_BYTES: usize = 32 * 1024;
 const MAX_AGENT_CONSOLE_ACTIVITY: usize = 80;
 const MAX_AGENT_CONSOLE_AGENTS: usize = 128;
 const MAX_AGENT_CONSOLE_JOBS: usize = 128;
+const MAX_AGENT_CONSOLE_QUALITY_HISTORY: usize = 32;
 const MAX_AGENT_CONSOLE_EVOLUTION_PROPOSALS: usize = 32;
 const MAX_RESUME_ENTRY_CHARS: usize = 600;
 const SESSION_NOTICE_VERSION: u8 = 1;
@@ -40,6 +41,7 @@ pub struct SessionLog {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkShellTranscriptEntry {
+    pub id: Option<String>,
     pub role: String,
     pub text: String,
 }
@@ -345,6 +347,11 @@ impl WorkShellSessionStore {
                         let role = entry.get("role").and_then(Value::as_str)?;
                         let text = entry.get("text").and_then(Value::as_str)?;
                         Some(WorkShellTranscriptEntry {
+                            id: entry
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .filter(|id| !id.trim().is_empty())
+                                .map(str::to_string),
                             role: role.to_string(),
                             text: text.to_string(),
                         })
@@ -480,9 +487,16 @@ pub fn resume_work_shell_session_json(
         "initialEntries": resumed
             .entries
             .into_iter()
-            .map(|entry| json!({ "role": entry.role, "text": entry.text }))
+            .map(|entry| {
+                let mut value = json!({ "role": entry.role, "text": entry.text });
+                if let Some(id) = entry.id {
+                    value["id"] = json!(id);
+                }
+                value
+            })
             .collect::<Vec<_>>(),
         "agentConsole": resumed.agent_console,
+        "pauseCheckpoint": resumed.pause_checkpoint,
     }))
     .map(Some)
     .map_err(|error| format!("Failed to serialize resumed session: {error}"))
@@ -512,6 +526,11 @@ fn parse_transcript_entries(items: &[Value]) -> Vec<WorkShellTranscriptEntry> {
             }
             let text = entry.get("text").and_then(Value::as_str)?;
             Some(WorkShellTranscriptEntry {
+                id: entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                    .map(str::to_string),
                 role: role.to_string(),
                 text: minimize_resume_entry_text(text),
             })
@@ -533,6 +552,7 @@ fn minimize_resume_entries(entries: &[WorkShellTranscriptEntry]) -> Vec<WorkShel
         .iter()
         .filter(|entry| is_resume_entry_role(&entry.role))
         .map(|entry| WorkShellTranscriptEntry {
+            id: entry.id.clone(),
             role: entry.role.clone(),
             text: minimize_resume_entry_text(&entry.text),
         })
@@ -779,6 +799,12 @@ fn sanitize_agent_console_snapshot(value: &Value) -> Option<Value> {
     if let Some(work_graph) = source.get("workGraph") {
         snapshot.insert("workGraph".to_string(), sanitize_work_graph(work_graph)?);
     }
+    if let Some(quality_review) = source.get("qualityReview") {
+        snapshot.insert(
+            "qualityReview".to_string(),
+            sanitize_quality_review(quality_review)?,
+        );
+    }
     if let Some(evolution_proposals) = source.get("evolutionProposals") {
         let evolution_proposals = evolution_proposals.as_array()?;
         let start = evolution_proposals
@@ -970,6 +996,11 @@ fn fit_agent_console_snapshot(mut snapshot: Map<String, Value>) -> Map<String, V
         return snapshot;
     }
 
+    trim_quality_history(&mut snapshot);
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
     trim_evolution_proposals(&mut snapshot);
     if console_fits(&snapshot) {
         return snapshot;
@@ -981,6 +1012,11 @@ fn fit_agent_console_snapshot(mut snapshot: Map<String, Value>) -> Map<String, V
     }
 
     snapshot.remove("workGraph");
+    if console_fits(&snapshot) {
+        return snapshot;
+    }
+
+    snapshot.remove("qualityReview");
     if console_fits(&snapshot) {
         return snapshot;
     }
@@ -1115,6 +1151,28 @@ fn compact_pending_decision(snapshot: &mut Map<String, Value>) {
                 option.remove("description");
             }
         }
+    }
+}
+
+fn trim_quality_history(snapshot: &mut Map<String, Value>) {
+    loop {
+        if console_fits(snapshot) {
+            return;
+        }
+        let Some(history) = snapshot
+            .get_mut("qualityReview")
+            .and_then(Value::as_object_mut)
+            .and_then(|review| review.get_mut("history"))
+            .and_then(Value::as_array_mut)
+        else {
+            return;
+        };
+        // Keep the latest record so an interrupted or completed gate remains
+        // honest after resume even when older audit detail must be spent.
+        if history.len() <= 1 {
+            return;
+        }
+        history.remove(0);
     }
 }
 
@@ -1465,7 +1523,19 @@ fn sanitize_pending_decision(value: &Value) -> Option<Value> {
 }
 
 fn sanitize_work_graph(value: &Value) -> Option<Value> {
-    let mut graph = copy_known_fields(value, &["id", "approval"])?;
+    let mut graph = copy_known_fields(
+        value,
+        &[
+            "id",
+            "goal",
+            "constraints",
+            "qualityProfile",
+            "currentStage",
+            "gateStatus",
+            "iteration",
+            "approval",
+        ],
+    )?;
     let nodes = value
         .as_object()?
         .get("nodes")?
@@ -1482,7 +1552,13 @@ fn sanitize_work_graph(value: &Value) -> Option<Value> {
                     "dependsOn",
                     "fileOwnership",
                     "manifestId",
+                    "acceptanceCriteria",
                     "evidenceRefs",
+                    "stage",
+                    "role",
+                    "attempt",
+                    "artifactRefs",
+                    "reviewRequired",
                 ],
             )
             .map(Value::Object)
@@ -1490,6 +1566,61 @@ fn sanitize_work_graph(value: &Value) -> Option<Value> {
         .collect::<Option<Vec<_>>>()?;
     graph.insert("nodes".to_string(), Value::Array(nodes));
     Some(Value::Object(graph))
+}
+
+fn sanitize_quality_review(value: &Value) -> Option<Value> {
+    let source = value.as_object()?;
+    let mut review = copy_known_fields(
+        value,
+        &[
+            "runId",
+            "graphId",
+            "profile",
+            "currentStage",
+            "iteration",
+            "refineCount",
+            "pivotCount",
+            "latestDecision",
+        ],
+    )?;
+    let history = source.get("history")?.as_array()?;
+    let start = history
+        .len()
+        .saturating_sub(MAX_AGENT_CONSOLE_QUALITY_HISTORY);
+    let history = history[start..]
+        .iter()
+        .map(|entry| {
+            copy_known_fields(
+                entry,
+                &[
+                    "event",
+                    "stage",
+                    "decision",
+                    "iteration",
+                    "reason",
+                    "failures",
+                    "evidenceRefs",
+                    "artifactRefs",
+                    "artifactHash",
+                    "reviewedArtifactHash",
+                    "currentArtifactHash",
+                    "reviewerId",
+                    "reviewerRunId",
+                    "provider",
+                    "model",
+                    "route",
+                    "count",
+                    "limit",
+                    "independentVerification",
+                    "stale",
+                    "startedAt",
+                ],
+            )
+            .map(Value::Object)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    review.insert("history".to_string(), Value::Array(history));
+    Some(Value::Object(review))
 }
 
 fn sanitize_evolution_proposal(value: &Value) -> Option<Value> {
@@ -1768,7 +1899,7 @@ fn build_checkpoint_json(
         "mode": "normal",
         "entries": entries
             .into_iter()
-            .map(|entry| json!({ "role": entry.role, "text": entry.text }))
+            .map(|entry| json!({ "id": entry.id, "role": entry.role, "text": entry.text }))
             .collect::<Vec<_>>(),
         "agentConsole": snapshot.agent_console.clone(),
         "pauseCheckpoint": snapshot.pause_checkpoint.clone(),
@@ -1884,10 +2015,12 @@ mod tests {
                 owner_mutation_revision: Some(7),
                 entries: vec![
                     WorkShellTranscriptEntry {
+                        id: Some("entry-user".to_string()),
                         role: "user".to_string(),
                         text: "inspect repo".to_string(),
                     },
                     WorkShellTranscriptEntry {
+                        id: Some("entry-assistant".to_string()),
                         role: "assistant".to_string(),
                         text: "repo inspected".to_string(),
                     },
@@ -1916,6 +2049,8 @@ mod tests {
         assert_eq!(resumed.summary, "Chat: inspect repo");
         assert_eq!(resumed.owner_mutation_revision, Some(7));
         assert_eq!(resumed.entries.len(), 2);
+        assert_eq!(resumed.entries[0].id.as_deref(), Some("entry-user"));
+        assert_eq!(resumed.entries[1].id.as_deref(), Some("entry-assistant"));
         assert_eq!(resumed.entries[0].text, "inspect repo");
         assert_eq!(resumed.entries[1].text, "repo inspected");
 
@@ -2909,11 +3044,13 @@ mod tests {
             "x".repeat(MAX_RESUME_ENTRY_CHARS + 50)
         );
         let mut entries = vec![WorkShellTranscriptEntry {
+            id: None,
             role: "ignored".to_string(),
             text: "should not persist".to_string(),
         }];
         for index in 0..30 {
             entries.push(WorkShellTranscriptEntry {
+                id: Some(format!("entry-{index}")),
                 role: "user".to_string(),
                 text: format!("{index}: {long_text}"),
             });

@@ -150,6 +150,7 @@ export interface OrchestratedWorkTurnAgent<
   setTraceListener(listener?: ((event: TraceEvent) => void) | undefined): void;
   updateRuntimeSettings(settings: { reasoning?: Reasoning | undefined; model?: string | undefined }): void;
   updateMode?(mode: string): void;
+  getCanonicalPermissionRules?(): readonly import("./permission-scope.js").CanonicalPermissionRule[];
   runTurn(
     prompt: string,
     attachments?: readonly Attachment[],
@@ -595,6 +596,10 @@ export class WorkAgent<
 
   getAgentControlRuntime(): WorkAgentControlRuntime {
     return this.runController.getControlRuntime();
+  }
+
+  getCanonicalPermissionRules(): readonly import("./permission-scope.js").CanonicalPermissionRule[] {
+    return this.directAgent.getCanonicalPermissionRules?.() ?? [];
   }
 
   clear(): void {

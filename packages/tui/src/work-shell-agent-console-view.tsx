@@ -18,6 +18,7 @@ import {
   formatAgentConsoleTotalCost,
   selectAgentConsoleInspector,
   selectAgentConsoleRows,
+  selectQualityReviewLines,
   selectWorkGraphHudRows,
   type AgentConsoleInspector,
   type AgentConsoleRow,
@@ -40,7 +41,7 @@ const CONSOLE_ROSTER_WINDOW = 10;
 const CONSOLE_KEY_HINTS = "j/k move · Tab pane · s steer · x cancel · r continue · Esc close";
 
 /** `  ◐ body` — the leading glyph is the only part that carries colour. */
-const HUD_ROW_RE = /^ {2}([◐○●▲✕⊘]) (.*)$/;
+const HUD_ROW_RE = /^ {2}([✓●○×◆◐▲✕⊘]) (.*)$/;
 
 export function WorkShellAgentConsoleHud(props: {
   readonly snapshot: AgentConsoleSnapshot;
@@ -49,7 +50,11 @@ export function WorkShellAgentConsoleHud(props: {
   readonly now?: number;
   readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
-  const rows = selectWorkGraphHudRows(props.snapshot, props.width, props.uiLocale ?? "en");
+  const rows = selectWorkGraphHudRows(
+    props.snapshot,
+    props.width,
+    { uiLocale: props.uiLocale ?? "en" },
+  );
   if (rows.length === 0) {
     return null;
   }
@@ -139,10 +144,12 @@ export function WorkShellAgentConsoleOverlay(props: {
   );
 
   const totalCost = formatAgentConsoleTotalCost(props.snapshot);
-  const recordedEvolution = selectRecordedEvolutionProposalLines(
-    props.snapshot.evolutionProposals?.at(-1),
-    body,
-  );
+  const qualityReview = props.view.tab === "plan"
+    ? selectQualityReviewLines(props.snapshot, body, uiLocale)
+    : [];
+  const recordedEvolution = qualityReview.length === 0
+    ? selectRecordedEvolutionProposalLines(props.snapshot.evolutionProposals?.at(-1), body)
+    : [];
 
   return (
     <Box
@@ -182,6 +189,14 @@ export function WorkShellAgentConsoleOverlay(props: {
           )}
         </Text>
       </Text>
+
+      {qualityReview.length > 0 ? (
+        <Box marginTop={1} flexDirection="column">
+          {qualityReview.map((line) => (
+            <Text key={line} color={props.palette.textMuted}>{line}</Text>
+          ))}
+        </Box>
+      ) : null}
 
       {recordedEvolution.length > 0 ? (
         <Box marginTop={1} flexDirection="column">
@@ -280,7 +295,22 @@ function localizeInspectorLabel(label: string, uiLocale: "en" | "ko"): string {
     Owns: "소유 경로",
     Acceptance: "승인 기준",
     Evidence: "증거",
+    Artifacts: "산출물",
+    Stage: "단계",
+    Role: "역할",
+    Attempt: "시도",
+    Review: "검토",
+    Gate: "게이트",
+    Completion: "완료",
+    Reviewer: "검토자",
+    "Reviewer run": "검토 실행",
+    Route: "경로",
+    "Reviewed hash": "검토 해시",
+    "Current hash": "현재 해시",
+    "Artifact hash": "산출물 해시",
+    Tokens: "토큰",
     Cost: "비용",
+    Model: "모델",
   } as Readonly<Record<string, string>>)[label] ?? label;
 }
 
@@ -330,6 +360,9 @@ const AgentConsoleHudLine = React.memo(function AgentConsoleHudLine(props: {
 });
 
 const HUD_GLYPH_TONES: Readonly<Record<string, AgentConsoleRowTone>> = {
+  "✓": "success",
+  "×": "danger",
+  "◆": "warning",
   "◐": "active",
   "●": "success",
   "▲": "warning",

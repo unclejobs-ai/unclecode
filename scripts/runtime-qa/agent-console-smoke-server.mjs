@@ -28,8 +28,9 @@ const PLAN = ["alpha", "beta"].map((lane, index) => ({
   writePaths: [`docs/agent-console-qa-${lane}.md`],
 }));
 
-// One loopback server scripts both boundaries. Gemini requests receive the
-// fixed planner/final replies; executor requests park until released or closed.
+// One loopback server scripts both boundaries. The balanced-prewalk frontier
+// lane (Gemini) and commodity lane (OMP) both park until the console controls
+// them; planner/review/promote requests keep deterministic fixed replies.
 export function startAgentConsoleControlServer() {
   const geminiRequests = [];
   const lanes = [];
@@ -59,6 +60,19 @@ export function startAgentConsoleControlServer() {
       streaming ? "text/event-stream" : "application/json",
       streaming ? `data: ${body}\n\n` : body,
     );
+  };
+
+  const parkLane = (lane, res, finish) => {
+    if (released.has(lane)) {
+      finish();
+      return;
+    }
+    parked.set(lane, finish);
+    res.on("close", () => {
+      if (parked.get(lane) === finish) {
+        parked.delete(lane);
+      }
+    });
   };
 
   const recordLane = (lane) => {
@@ -102,16 +116,7 @@ export function startAgentConsoleControlServer() {
       res,
       lane === "alpha" ? ALPHA_FIRST_TEXT : BETA_UNREACHED_TEXT,
     );
-    if (released.has(lane)) {
-      finish();
-      return;
-    }
-    parked.set(lane, finish);
-    res.on("close", () => {
-      if (parked.get(lane) === finish) {
-        parked.delete(lane);
-      }
-    });
+    parkLane(lane, res, finish);
   };
 
   const server = http.createServer((req, res) => {
@@ -127,7 +132,24 @@ export function startAgentConsoleControlServer() {
       }
       const prompt = latestGeminiUserText(JSON.parse(body || "{}"));
       geminiRequests.push({ url: req.url ?? "", prompt });
-      respondGemini(req, res, prompt.includes(PLANNER_MARKER) ? JSON.stringify(PLAN) : FINAL_TEXT);
+      if (prompt.includes(PLANNER_MARKER)) {
+        respondGemini(req, res, JSON.stringify(PLAN));
+        return;
+      }
+      if (prompt.includes(STEER_MARKER)) {
+        lanes.push("steer");
+        recordLane("steer");
+        respondGemini(req, res, ALPHA_STEERED_TEXT);
+        return;
+      }
+      if (prompt.includes(ALPHA_MARKER)) {
+        const lane = resolveExecutorLane(prompt);
+        lanes.push(lane);
+        recordLane(lane);
+        parkLane(lane, res, () => respondGemini(req, res, ALPHA_FIRST_TEXT));
+        return;
+      }
+      respondGemini(req, res, FINAL_TEXT);
     });
   });
 

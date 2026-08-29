@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { runRustCommandSync } from "@unclecode/orchestrator";
+import { formatWorkShellModeLabelForLocale } from "@unclecode/orchestrator";
 
 import type { GitFacts } from "./facts.js";
 import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
@@ -174,10 +175,11 @@ function formatCompactWindow(modelWindow: number): string {
 export function formatWorkShellSessionFactsGroup(input: {
   readonly model: string;
   readonly mode: string;
+  readonly uiLocale?: "en" | "ko";
 }): string {
   return joinFooterFacts([
     input.model.trim(),
-    resolveWorkShellModeLabel(input.mode),
+    resolveWorkShellModeLabel(input.mode, input.uiLocale ?? "en"),
   ]);
 }
 
@@ -263,23 +265,25 @@ function compactWorkShellAuthLabel(authLabel: string): string {
 }
 
 const modeLabelCache = new Map<string, string>();
+const MODE_LABEL_CACHE_MAX_ENTRIES = 32;
 
-function resolveWorkShellModeLabel(mode: string): string {
+function resolveWorkShellModeLabel(mode: string, uiLocale: "en" | "ko"): string {
   const normalized = mode.trim().toLowerCase();
   if (normalized.length === 0) {
     return "";
   }
 
-  const cached = modeLabelCache.get(normalized);
+  const cacheKey = `${uiLocale}:${normalized}`;
+  const cached = modeLabelCache.get(cacheKey);
   if (cached !== undefined) {
     return cached;
   }
 
-  const label = runRustCommandSync(
-    ["rust", "ux", "text", "mode-label"],
-    process.cwd(),
-    normalized,
-  ).trim();
-  modeLabelCache.set(normalized, label);
+  const label = formatWorkShellModeLabelForLocale(normalized, uiLocale);
+  if (modeLabelCache.has(cacheKey)) modeLabelCache.delete(cacheKey);
+  modeLabelCache.set(cacheKey, label);
+  while (modeLabelCache.size > MODE_LABEL_CACHE_MAX_ENTRIES) {
+    modeLabelCache.delete(modeLabelCache.keys().next().value as string);
+  }
   return label;
 }

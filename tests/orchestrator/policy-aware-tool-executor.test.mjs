@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createCanonicalPermissionRuleStore,
   createPolicyAwareToolExecutor,
   resolveModeExecutionPolicyProfile,
 } from "@unclecode/orchestrator";
@@ -160,7 +161,7 @@ test("risky tool metadata requires confirmation even when execution policy defau
   assert.match(result.content, /confirmation.*not granted/i);
 });
 
-test("release-sensitive shell actions require fresh one-shot approval despite autonomy", async () => {
+test("release-sensitive shell actions require fresh one-shot approval despite autonomy and a bash grant", async () => {
   const commands = [
     "git push origin main",
     "git switch main && git merge feature/release-safety",
@@ -186,6 +187,7 @@ test("release-sensitive shell actions require fresh one-shot approval despite au
   ];
   const invoked = [];
   const questions = [];
+  const store = createCanonicalPermissionRuleStore([{ kind: "tool", key: "bash" }]);
   const executor = createPolicyAwareToolExecutor({
     definitions: DEFINITIONS,
     handlers: {
@@ -197,6 +199,7 @@ test("release-sensitive shell actions require fresh one-shot approval despite au
     },
     policyProfile: resolveModeExecutionPolicyProfile({ mode: "yolo", envShellOptIn: false }),
     runtimeMode: "yolo",
+    permissionRuleStore: store,
     interactionBridge: {
       async ask(request) {
         questions.push(request);
@@ -225,9 +228,10 @@ test("release-sensitive shell actions require fresh one-shot approval despite au
   questions.forEach((request, index) => {
     assert.ok(request.questions[0].question.includes(JSON.stringify(commands[index])));
   });
+  assert.deepEqual(store.list(), [{ kind: "tool", key: "bash" }]);
 });
 
-test("ambiguous shell wrappers fail closed before autonomy", async () => {
+test("ambiguous shell wrappers fail closed before an autonomy or persisted bash grant", async () => {
   const commands = [
     'eval "$RELEASE_COMMAND"',
     "npm exec -- git push origin main",
@@ -255,6 +259,7 @@ test("ambiguous shell wrappers fail closed before autonomy", async () => {
     handlers: createRecordingHandlers(invoked),
     policyProfile: resolveModeExecutionPolicyProfile({ mode: "ultrawork", envShellOptIn: false }),
     runtimeMode: "ultrawork",
+    permissionRuleStore: createCanonicalPermissionRuleStore([{ kind: "tool", key: "bash" }]),
   });
 
   for (const command of commands) {
@@ -388,4 +393,222 @@ test("one approval prompts once and invokes a risky handler once", async () => {
   assert.equal(result.isError ?? false, false);
   assert.deepEqual(invoked, ["write_file"]);
   assert.equal(questions.length, 1);
+});
+
+test("concurrent always-allow prompts once, stores one canonical rule, and authorizes the next action", async () => {
+  const invoked = [];
+  const questions = [];
+  const store = createCanonicalPermissionRuleStore();
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: createRecordingHandlers(invoked),
+    policyProfile: { id: "test.default-allow", mode: "enforce", defaultEffect: "allow", rules: [] },
+    runtimeMode: "default",
+    permissionRuleStore: store,
+    interactionBridge: {
+      async ask(request) {
+        questions.push(request);
+        return {
+          status: "answered",
+          answers: [{ id: "policy-confirmation", selectedOptions: ["Always allow"] }],
+        };
+      },
+    },
+  });
+
+  const request = (command) => executor.execute({
+    toolName: "run_shell",
+    input: { command },
+    cwd: "/tmp/policy-executor",
+  });
+  await Promise.all([request("echo one"), request("echo two")]);
+  await request("echo three");
+
+  assert.equal(questions.length, 1);
+  assert.match(questions[0].title, /Security approval · bash/);
+  assert.deepEqual(store.list(), [{ kind: "tool", key: "bash" }]);
+  assert.deepEqual(invoked, ["run_shell", "run_shell", "run_shell"]);
+});
+
+test("concurrent approve-once authorizes only the prompt owner and re-prompts the waiter", async () => {
+  const invoked = [];
+  const prompts = [];
+  const answers = [];
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: {
+      ...createRecordingHandlers(invoked),
+      write_file: async (input) => {
+        invoked.push(input.path);
+        return { content: `${input.path}-ran` };
+      },
+    },
+    policyProfile: { id: "test.default-allow", mode: "enforce", defaultEffect: "allow", rules: [] },
+    runtimeMode: "default",
+    interactionBridge: {
+      ask(request) {
+        prompts.push(request);
+        return new Promise((resolve) => answers.push(resolve));
+      },
+    },
+  });
+
+  const first = executor.execute({
+    toolName: "write_file",
+    input: { path: "a.txt", content: "a" },
+    cwd: "/tmp/policy-executor",
+  });
+  const second = executor.execute({
+    toolName: "write_file",
+    input: { path: "b.txt", content: "b" },
+    cwd: "/tmp/policy-executor",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prompts.length, 1);
+  answers.shift()({
+    status: "answered",
+    answers: [{ id: "policy-confirmation", selectedOptions: ["Approve"] }],
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(invoked, ["a.txt"]);
+  assert.equal(prompts.length, 2);
+  answers.shift()({
+    status: "answered",
+    answers: [{ id: "policy-confirmation", selectedOptions: ["Approve"] }],
+  });
+  await Promise.all([first, second]);
+  assert.deepEqual(invoked, ["a.txt", "b.txt"]);
+});
+
+test("aborting an approval owner releases a waiter to re-prompt without stale execution", async () => {
+  const invoked = [];
+  const prompts = [];
+  const answers = [];
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: {
+      ...createRecordingHandlers(invoked),
+      write_file: async (input) => {
+        invoked.push(input.path);
+        return { content: `${input.path}-ran` };
+      },
+    },
+    policyProfile: { id: "test.default-allow", mode: "enforce", defaultEffect: "allow", rules: [] },
+    runtimeMode: "default",
+    interactionBridge: {
+      ask(request, signal) {
+        prompts.push(request);
+        return new Promise((resolve) => {
+          answers.push(resolve);
+          signal?.addEventListener("abort", () => resolve({ status: "cancelled" }), { once: true });
+        });
+      },
+    },
+  });
+  const ownerController = new AbortController();
+  const owner = executor.execute({
+    toolName: "write_file",
+    input: { path: "owner.txt", content: "a" },
+    cwd: "/tmp/policy-executor",
+    signal: ownerController.signal,
+  });
+  const waiter = executor.execute({
+    toolName: "write_file",
+    input: { path: "waiter.txt", content: "b" },
+    cwd: "/tmp/policy-executor",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  ownerController.abort();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(prompts.length, 2);
+  answers.at(-1)({
+    status: "answered",
+    answers: [{ id: "policy-confirmation", selectedOptions: ["Approve"] }],
+  });
+  const [ownerResult, waiterResult] = await Promise.all([owner, waiter]);
+  assert.equal(ownerResult.isError, true);
+  assert.equal(waiterResult.isError ?? false, false);
+  assert.deepEqual(invoked, ["waiter.txt"]);
+});
+
+test("aborting an approval waiter does not cancel the owner or consume its once result", async () => {
+  const invoked = [];
+  const prompts = [];
+  let resolveOwner;
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: {
+      ...createRecordingHandlers(invoked),
+      write_file: async (input) => {
+        invoked.push(input.path);
+        return { content: `${input.path}-ran` };
+      },
+    },
+    policyProfile: { id: "test.default-allow", mode: "enforce", defaultEffect: "allow", rules: [] },
+    runtimeMode: "default",
+    interactionBridge: {
+      ask(request) {
+        prompts.push(request);
+        return new Promise((resolve) => { resolveOwner = resolve; });
+      },
+    },
+  });
+  const waiterController = new AbortController();
+  const owner = executor.execute({
+    toolName: "write_file",
+    input: { path: "owner.txt", content: "a" },
+    cwd: "/tmp/policy-executor",
+  });
+  const waiter = executor.execute({
+    toolName: "write_file",
+    input: { path: "waiter.txt", content: "b" },
+    cwd: "/tmp/policy-executor",
+    signal: waiterController.signal,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  waiterController.abort();
+  resolveOwner({
+    status: "answered",
+    answers: [{ id: "policy-confirmation", selectedOptions: ["Approve"] }],
+  });
+  const [ownerResult, waiterResult] = await Promise.all([owner, waiter]);
+
+  assert.equal(ownerResult.isError ?? false, false);
+  assert.equal(waiterResult.isError, true);
+  assert.equal(prompts.length, 1);
+  assert.deepEqual(invoked, ["owner.txt"]);
+});
+
+test("an approval resolved after abort is stale and never starts execution", async () => {
+  const invoked = [];
+  let resolveAnswer;
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: createRecordingHandlers(invoked),
+    policyProfile: { id: "test.default-allow", mode: "enforce", defaultEffect: "allow", rules: [] },
+    runtimeMode: "default",
+    interactionBridge: {
+      ask() {
+        return new Promise((resolve) => { resolveAnswer = resolve; });
+      },
+    },
+  });
+  const controller = new AbortController();
+  const pending = executor.execute({
+    toolName: "write_file",
+    input: { path: "late.txt", content: "late" },
+    cwd: "/tmp/policy-executor",
+    signal: controller.signal,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+  resolveAnswer({
+    status: "answered",
+    answers: [{ id: "policy-confirmation", selectedOptions: ["Approve"] }],
+  });
+  const result = await pending;
+  assert.equal(result.isError, true);
+  assert.deepEqual(invoked, []);
 });

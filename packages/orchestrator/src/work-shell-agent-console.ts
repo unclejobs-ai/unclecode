@@ -753,13 +753,25 @@ function applyWorkLifecycleEvent(
     if (!qualityReview) return snapshot;
     return createAgentConsoleSnapshot({
       ...snapshot,
-      ...(graph && nodes ? { workGraph: { ...graph, currentStage: stage, gateStatus, iteration, nodes } } : {}),
+      ...(graph && nodes
+        ? {
+            workGraph: {
+              ...graph,
+              currentStage: stage,
+              gateStatus,
+              iteration,
+              nodes,
+            },
+          }
+        : {}),
       qualityReview,
     });
   }
 
   const graph = snapshot.workGraph;
-  if (!graph || readNonEmptyString(trace, "graphId") !== graph.id) return snapshot;
+  if (!graph || readNonEmptyString(trace, "graphId") !== graph.id) {
+    return snapshot;
+  }
 
   if (event.type === "work.approved") {
     return createAgentConsoleSnapshot({
@@ -850,15 +862,19 @@ function projectQualityReview(
   const reviewerRunId = readNonEmptyString(trace, "reviewerRunId")
     ?? readNonEmptyString(trace, "agentRunId");
   const routeValue = readNonEmptyString(trace, "route");
-  const route = routeValue === "direct" || routeValue === "frontier"
-    || routeValue === "commodity" || routeValue === "fallback" ? routeValue : undefined;
+  const route = routeValue === "direct"
+    || routeValue === "frontier"
+    || routeValue === "commodity"
+    || routeValue === "fallback"
+    ? routeValue
+    : undefined;
   const count = readNonNegativeInteger(trace.count);
   const limit = readNonNegativeInteger(trace.limit);
   const refineCount = type === "quality.refine_requested"
-    ? count ?? (sameRun ? current.refineCount : 0)
+    ? readNonNegativeInteger(trace.count) ?? (sameRun ? current.refineCount : 0)
     : readNonNegativeInteger(trace.refineCount) ?? (sameRun ? current.refineCount : 0);
   const pivotCount = type === "quality.pivot_requested"
-    ? count ?? (sameRun ? current.pivotCount : 0)
+    ? readNonNegativeInteger(trace.count) ?? (sameRun ? current.pivotCount : 0)
     : readNonNegativeInteger(trace.pivotCount) ?? (sameRun ? current.pivotCount : 0);
   const stale = trace.stale === true;
   const verifiedCritic = type === "quality.completed"
@@ -866,15 +882,28 @@ function projectQualityReview(
     && decision === "proceed"
     && trace.independentVerification === true
     && !stale
-    ? findVerifiedCritic(baseHistory, iteration, { artifactHash, reviewedArtifactHash, currentArtifactHash })
+    ? findVerifiedCritic(baseHistory, iteration, {
+        artifactHash,
+        reviewedArtifactHash,
+        currentArtifactHash,
+      })
     : undefined;
   const terminalArtifactRefs = verifiedCritic
-    ? [...new Set([...artifactRefs, ...evidenceRefs, ...verifiedCritic.artifactRefs, ...verifiedCritic.evidenceRefs])].slice(0, 64)
+    ? [...new Set([
+        ...artifactRefs,
+        ...evidenceRefs,
+        ...verifiedCritic.artifactRefs,
+        ...verifiedCritic.evidenceRefs,
+      ])].slice(0, 64)
     : artifactRefs;
   const entry: QualityReviewHistoryEntry = {
-    event: type === "quality.gate_evaluated" ? "gate"
-      : type === "quality.refine_requested" ? "refine"
-        : type === "quality.pivot_requested" ? "pivot" : "completed",
+    event: type === "quality.gate_evaluated"
+      ? "gate"
+      : type === "quality.refine_requested"
+        ? "refine"
+        : type === "quality.pivot_requested"
+          ? "pivot"
+          : "completed",
     stage,
     decision,
     iteration,
@@ -882,13 +911,28 @@ function projectQualityReview(
     failures,
     evidenceRefs,
     artifactRefs: terminalArtifactRefs,
-    ...(artifactHash ? { artifactHash } : verifiedCritic?.artifactHash ? { artifactHash: verifiedCritic.artifactHash } : {}),
-    ...(reviewedArtifactHash ? { reviewedArtifactHash } : verifiedCritic?.reviewedArtifactHash ? { reviewedArtifactHash: verifiedCritic.reviewedArtifactHash } : {}),
-    ...(currentArtifactHash ? { currentArtifactHash } : verifiedCritic?.currentArtifactHash ? { currentArtifactHash: verifiedCritic.currentArtifactHash } : {}),
-    ...(verifiedCritic?.reviewerId ? { reviewerId: verifiedCritic.reviewerId }
+    ...(artifactHash
+      ? { artifactHash }
+      : verifiedCritic?.artifactHash ? { artifactHash: verifiedCritic.artifactHash } : {}),
+    ...(reviewedArtifactHash
+      ? { reviewedArtifactHash }
+      : verifiedCritic?.reviewedArtifactHash
+        ? { reviewedArtifactHash: verifiedCritic.reviewedArtifactHash }
+        : {}),
+    ...(currentArtifactHash
+      ? { currentArtifactHash }
+      : verifiedCritic?.currentArtifactHash
+        ? { currentArtifactHash: verifiedCritic.currentArtifactHash }
+        : {}),
+    ...(verifiedCritic?.reviewerId
+      ? { reviewerId: verifiedCritic.reviewerId }
       : provider && model ? { reviewerId: `${stage}:${provider}:${model}` } : {}),
-    ...(reviewerRunId ? { reviewerRunId } : verifiedCritic?.reviewerRunId ? { reviewerRunId: verifiedCritic.reviewerRunId } : {}),
-    ...(provider ? { provider } : verifiedCritic?.provider ? { provider: verifiedCritic.provider } : {}),
+    ...(reviewerRunId
+      ? { reviewerRunId }
+      : verifiedCritic?.reviewerRunId ? { reviewerRunId: verifiedCritic.reviewerRunId } : {}),
+    ...(provider
+      ? { provider }
+      : verifiedCritic?.provider ? { provider: verifiedCritic.provider } : {}),
     ...(model ? { model } : verifiedCritic?.model ? { model: verifiedCritic.model } : {}),
     ...(route ? { route } : verifiedCritic?.route ? { route: verifiedCritic.route } : {}),
     ...(count === undefined ? {} : { count }),
@@ -923,14 +967,22 @@ function findVerifiedCritic(
 ): QualityReviewHistoryEntry | undefined {
   for (let index = history.length - 1; index >= 0; index -= 1) {
     const entry = history[index];
-    if (entry?.event === "refine" || entry?.event === "pivot") break;
     if (
-      !entry || entry.iteration !== iteration || entry.event !== "gate" || entry.stage !== "critic"
-      || entry.decision !== "proceed" || !entry.independentVerification || entry.stale
-      || !entry.reviewerRunId || !qualityHashesAgree(entry) || !qualityHashesAgree(terminalHashes)
+      !entry
+      || entry.iteration !== iteration
+      || entry.event !== "gate"
+      || entry.stage !== "critic"
+      || entry.decision !== "proceed"
+      || entry.independentVerification !== true
+      || entry.stale
+      || !entry.reviewerRunId
+      || !qualityHashesAgree(entry)
+      || !qualityHashesAgree(terminalHashes)
     ) continue;
     const criticHash = entry.currentArtifactHash ?? entry.reviewedArtifactHash ?? entry.artifactHash;
-    const terminalHash = terminalHashes.currentArtifactHash ?? terminalHashes.reviewedArtifactHash ?? terminalHashes.artifactHash;
+    const terminalHash = terminalHashes.currentArtifactHash
+      ?? terminalHashes.reviewedArtifactHash
+      ?? terminalHashes.artifactHash;
     if (criticHash && terminalHash && criticHash !== terminalHash) continue;
     return entry;
   }
@@ -941,7 +993,8 @@ function qualityHashesAgree(value: {
   readonly reviewedArtifactHash?: string | undefined;
   readonly currentArtifactHash?: string | undefined;
 }): boolean {
-  return !value.reviewedArtifactHash || !value.currentArtifactHash
+  return !value.reviewedArtifactHash
+    || !value.currentArtifactHash
     || value.reviewedArtifactHash === value.currentArtifactHash;
 }
 

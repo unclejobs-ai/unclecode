@@ -28,6 +28,7 @@ export type ResolvedWorkShellBuiltinCommand =
   | { readonly kind: "status" }
   | { readonly kind: "sessions" }
   | { readonly kind: "tools" }
+  | { readonly kind: "policy" }
   | { readonly kind: "skills" }
   | { readonly kind: "queue" }
   | { readonly kind: "queue-clear" }
@@ -110,6 +111,7 @@ function isBuiltinCommand(value: unknown): value is ResolvedWorkShellBuiltinComm
     "status",
     "sessions",
     "tools",
+    "policy",
     "skills",
     "queue",
     "queue-clear",

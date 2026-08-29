@@ -35,6 +35,7 @@ import type {
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 import type { WorkShellSubmitRoute } from "./work-shell-engine-submit.js";
 import type { AgentConsoleTab, ContextPacketView } from "@unclecode/contracts";
+import { createPermissionPolicyPanel, type CanonicalPermissionRule } from "./permission-scope.js";
 
 type WorkShellBuiltinCommand = Extract<
   WorkShellSubmitRoute,
@@ -115,6 +116,7 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
   listAvailableSkills: (cwd: string) => Promise<readonly WorkShellSkillListItem[]>;
   loadNamedSkill: (name: string, cwd: string) => Promise<WorkShellLoadedSkill>;
   toolLines: readonly string[];
+  listCanonicalPermissionRules?: (() => readonly CanonicalPermissionRule[]) | undefined;
   clearAgent: () => void;
   interruptTurn: () => void;
   updateRuntimeSettings: (settings: {
@@ -331,6 +333,11 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
     }
     case "tools":
       input.appendEntries(...createToolsBuiltinResult(input.line, input.toolLines));
+      return;
+    case "policy":
+      input.setState({
+        panel: createPermissionPolicyPanel(input.listCanonicalPermissionRules?.() ?? []),
+      });
       return;
     case "queue": {
       const queuedItems = input.queuedItems ? await input.queuedItems() : undefined;

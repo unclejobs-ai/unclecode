@@ -22,6 +22,7 @@ function renderContextInspectorSourceRow(input: {
   readonly maxDetailLines: number;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   const { row, palette } = input;
   const { item } = row;
@@ -33,8 +34,8 @@ function renderContextInspectorSourceRow(input: {
   const tokenLabel = formatContextTokenEstimate(item.tokenEstimate);
   const parts = [
     label,
-    ...(sourceCount > 1 ? [`${sourceCount} sources`] : []),
-    ...(row.heldBack ? ["held"] : pinned ? ["pinned"] : []),
+    ...(sourceCount > 1 ? [input.uiLocale === "ko" ? `소스 ${sourceCount}개` : `${sourceCount} sources`] : []),
+    ...(row.heldBack ? [input.uiLocale === "ko" ? "보류" : "held"] : pinned ? [input.uiLocale === "ko" ? "고정" : "pinned"] : []),
     tokenLabel,
   ];
   // The row prefix ("› " + status glyph) paints 4 cells; one trailing cell of
@@ -178,6 +179,7 @@ function renderVisibleSourceRows(input: {
   readonly maxDetailLines: number;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   return input.visibleRows.map((row, index) => renderContextInspectorSourceRow({
     row,
@@ -187,6 +189,7 @@ function renderVisibleSourceRows(input: {
     maxDetailLines: input.maxDetailLines,
     width: input.width,
     palette: input.palette,
+    ...(input.uiLocale ? { uiLocale: input.uiLocale } : {}),
   }));
 }
 
@@ -197,6 +200,7 @@ function renderContextInspectorDetailReader(input: {
   readonly maxRows: number;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   const layout = resolveWorkShellContextDetailLayout({
     item: input.row.item,
@@ -215,11 +219,12 @@ function renderContextInspectorDetailReader(input: {
   const visibleCount = Math.max(1, rowsAfterAboveMarker - (hasBelow ? 1 : 0));
   const visibleLines = lines.slice(offset, offset + visibleCount);
   const detailHeading = truncateForDisplayWidth(
-    `Detail · ${sanitizeContextPreview(input.row.item.label)}`,
+    `${input.uiLocale === "ko" ? "상세" : "Detail"} · ${sanitizeContextPreview(input.row.item.label)}`,
     input.width,
   );
-  const detailSuffix = detailHeading.startsWith("Detail")
-    ? detailHeading.slice("Detail".length)
+  const detailLabel = input.uiLocale === "ko" ? "상세" : "Detail";
+  const detailSuffix = detailHeading.startsWith(detailLabel)
+    ? detailHeading.slice(detailLabel.length)
     : "";
 
   return (
@@ -228,10 +233,10 @@ function renderContextInspectorDetailReader(input: {
         {"─".repeat(Math.min(64, Math.max(24, input.width - 4)))}
       </Text>
       <Text>
-        <Text color={input.palette.assistant} bold>{"Detail"}</Text>
+        <Text color={input.palette.assistant} bold>{detailLabel}</Text>
         <Text color={input.palette.textDim}>{detailSuffix}</Text>
       </Text>
-      {offset > 0 ? <Text color={input.palette.textDim}>{`  … ${offset} lines above`}</Text> : null}
+      {offset > 0 ? <Text color={input.palette.textDim}>{input.uiLocale === "ko" ? `  … 위에 ${offset}줄` : `  … ${offset} lines above`}</Text> : null}
       {visibleLines.map((line, index) => (
         <Text key={`context-detail-${offset + index}`} color={input.palette.text}>
           {line.length > 0 ? line : " "}
@@ -239,7 +244,7 @@ function renderContextInspectorDetailReader(input: {
       ))}
       {offset + visibleLines.length < lines.length ? (
         <Text color={input.palette.textDim}>
-          {`  … ${lines.length - offset - visibleLines.length} lines below`}
+          {input.uiLocale === "ko" ? `  … 아래에 ${lines.length - offset - visibleLines.length}줄` : `  … ${lines.length - offset - visibleLines.length} lines below`}
         </Text>
       ) : null}
     </Box>
@@ -263,6 +268,7 @@ export function renderContextInspectorGroupedViewport(input: {
   readonly marginTop?: number | undefined;
   /** Empty-state copy when this collection has no rows of its own. */
   readonly emptyMessage?: string | undefined;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   const detailRow = input.expandedId
     ? input.rows.find((row) => row.item.id === input.expandedId)
@@ -275,6 +281,7 @@ export function renderContextInspectorGroupedViewport(input: {
       maxRows: input.maxRows,
       width: input.width,
       palette: input.palette,
+      ...(input.uiLocale ? { uiLocale: input.uiLocale } : {}),
     });
   }
   const visible = buildContextInspectorViewportPlan({
@@ -286,11 +293,11 @@ export function renderContextInspectorGroupedViewport(input: {
   return (
     <Box marginTop={input.marginTop ?? 1} flexDirection="column">
       {input.rows.length === 0 ? (
-        <Text color={input.palette.textMuted}>{input.emptyMessage ?? "No context sources yet."}</Text>
+        <Text color={input.palette.textMuted}>{input.emptyMessage ?? (input.uiLocale === "ko" ? "아직 컨텍스트 소스가 없습니다." : "No context sources yet.")}</Text>
       ) : (
         <>
           {visible.showHiddenBefore ? (
-            <Text color={input.palette.textDim}>{`  … ${visible.hiddenBefore} more above`}</Text>
+            <Text color={input.palette.textDim}>{input.uiLocale === "ko" ? `  … 위에 ${visible.hiddenBefore}개 더 있음` : `  … ${visible.hiddenBefore} more above`}</Text>
           ) : null}
           {renderVisibleSourceRows({
             visibleRows: visible.rows,
@@ -301,9 +308,10 @@ export function renderContextInspectorGroupedViewport(input: {
             maxDetailLines: visible.detailLineLimit,
             width: input.width,
             palette: input.palette,
+            ...(input.uiLocale ? { uiLocale: input.uiLocale } : {}),
           })}
           {visible.showHiddenAfter ? (
-            <Text color={input.palette.textDim}>{`  … ${visible.hiddenAfter} more below`}</Text>
+            <Text color={input.palette.textDim}>{input.uiLocale === "ko" ? `  … 아래에 ${visible.hiddenAfter}개 더 있음` : `  … ${visible.hiddenAfter} more below`}</Text>
           ) : null}
         </>
       )}

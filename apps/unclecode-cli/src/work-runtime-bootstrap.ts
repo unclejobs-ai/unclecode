@@ -629,6 +629,9 @@ export async function loadWorkCliBootstrap(
     cwd,
     reasoning,
     mode,
+    ...(resumedSession?.initialAgentConsole?.securityApprovals
+      ? { initialPermissionRules: resumedSession.initialAgentConsole.securityApprovals }
+      : {}),
     ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
     ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
     ...(config.openAIRuntime ? { openAIRuntime: config.openAIRuntime } : {}),

@@ -18,6 +18,93 @@ export type OneShotShellApproval = {
   readonly scope: CanonicalPermissionScope;
 };
 
+export type CanonicalPermissionRule = {
+  readonly key: string;
+  readonly kind: "tool";
+};
+
+export type CanonicalPermissionRuleStore = {
+  has(rule: CanonicalPermissionRule): boolean;
+  add(rule: CanonicalPermissionRule): void;
+  list(): readonly CanonicalPermissionRule[];
+};
+
+export function isCanonicalPermissionRule(value: unknown): value is CanonicalPermissionRule {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as { readonly kind?: unknown; readonly key?: unknown };
+  return candidate.kind === "tool"
+    && typeof candidate.key === "string"
+    && candidate.key.length > 0
+    && candidate.key.length <= 128
+    && /^[A-Za-z0-9_.:-]+$/.test(candidate.key);
+}
+
+export function createCanonicalPermissionRuleStore(
+  initialRules: readonly unknown[] = [],
+): CanonicalPermissionRuleStore {
+  const rules = new Map<string, CanonicalPermissionRule>();
+  for (const rule of initialRules) {
+    if (isCanonicalPermissionRule(rule)) {
+      rules.set(`${rule.kind}:${rule.key}`, { ...rule });
+    }
+  }
+  return {
+    has(rule) {
+      return rules.has(`${rule.kind}:${rule.key}`);
+    },
+    add(rule) {
+      if (isCanonicalPermissionRule(rule)) {
+        rules.set(`${rule.kind}:${rule.key}`, { ...rule });
+      }
+    },
+    list() {
+      return [...rules.values()].map((rule) => ({ ...rule }));
+    },
+  };
+}
+
+export function createPermissionPolicyPanel(
+  rules: readonly CanonicalPermissionRule[],
+): { readonly title: "Security policy"; readonly lines: readonly string[] } {
+  const lines = [`Session approvals · ${rules.length}`];
+  for (const rule of rules) {
+    lines.push(rule.key === "bash"
+      ? "- bash · tool-wide · all shell commands through bash"
+      : `- ${rule.key} · tool-wide`);
+  }
+  if (rules.length === 0) lines.push("- none · risky actions still require approval");
+  lines.push("Security approval only · quality gates and user decisions are separate.");
+  return { title: "Security policy", lines };
+}
+
+/**
+ * One permission vocabulary for the policy question, stored rule, matcher and
+ * `/policy` projection. Shell confirmation is intentionally tool-wide: the
+ * runtime executes the complete compound command through one bash boundary,
+ * so pretending an `&&`/pipe/redirection can be safely reduced to one inner
+ * executable would display a narrower grant than the action actually runs.
+ */
+export function resolveCanonicalPermissionScope(input: {
+  readonly toolName: string;
+  readonly input: Readonly<Record<string, unknown>>;
+}): CanonicalPermissionScope {
+  void input.input;
+  if (input.toolName === "run_shell") {
+    return {
+      kind: "tool",
+      key: "bash",
+      label: "bash",
+      detail: "All shell commands executed by bash in this workspace session.",
+    };
+  }
+  return {
+    kind: "tool",
+    key: input.toolName,
+    label: input.toolName,
+    detail: `All ${input.toolName} actions in this workspace session.`,
+  };
+}
+
 const SHELL_GRAMMAR_WORDS = new Set([
   "case",
   "coproc",
@@ -448,4 +535,17 @@ export function resolveOneShotShellApproval(input: {
         : `This ${label} action can change external or release state. Exact command: ${JSON.stringify(command)}.`,
     },
   };
+}
+
+export function createCanonicalPermissionRule(
+  scope: CanonicalPermissionScope,
+): CanonicalPermissionRule {
+  return { kind: scope.kind, key: scope.key };
+}
+
+export function matchesCanonicalPermissionRule(
+  rule: CanonicalPermissionRule,
+  request: { readonly toolName: string; readonly input: Readonly<Record<string, unknown>> },
+): boolean {
+  return rule.kind === "tool" && rule.key === resolveCanonicalPermissionScope(request).key;
 }

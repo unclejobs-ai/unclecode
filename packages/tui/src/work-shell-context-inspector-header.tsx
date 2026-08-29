@@ -62,10 +62,11 @@ export function formatContextInspectorPacketProofLines(input: {
   readonly packetChange?: ContextPacketChangeClassification | undefined;
   readonly modelWindow: number;
   readonly width: number;
+  readonly uiLocale?: "en" | "ko";
 }): readonly string[] {
   if (input.packetChange?.kind === "meaning-change") {
     return [truncateForDisplayWidth(
-      "Review before sending · context changed",
+      input.uiLocale === "ko" ? "전송 전 검토 · 컨텍스트 변경됨" : "Review before sending · context changed",
       input.width,
     )];
   }
@@ -73,7 +74,7 @@ export function formatContextInspectorPacketProofLines(input: {
   if (input.previewReceipt?.state === "previewed") {
     const estimate = formatContextReceiptTokenEstimate(input.previewReceipt);
     return [truncateForDisplayWidth(
-      `Next request · ready to send · ${estimate} / ${formatContextWindow(input.modelWindow)}`,
+      input.uiLocale === "ko" ? `다음 요청 · 전송 준비 · ${estimate} / ${formatContextWindow(input.modelWindow)}` : `Next request · ready to send · ${estimate} / ${formatContextWindow(input.modelWindow)}`,
       input.width,
     )];
   }
@@ -81,7 +82,7 @@ export function formatContextInspectorPacketProofLines(input: {
   if (input.submittedReceipt?.state === "submitted") {
     const sent = input.submittedReceipt.sourceRefs.filter((source) => source.includedInModel).length;
     return [truncateForDisplayWidth(
-      `Last request · sent · ${sent} ${sent === 1 ? "source" : "sources"} · ${formatContextReceiptTokenEstimate(input.submittedReceipt)}`,
+      input.uiLocale === "ko" ? `최근 요청 · 전송됨 · 소스 ${sent}개 · ${formatContextReceiptTokenEstimate(input.submittedReceipt)}` : `Last request · sent · ${sent} ${sent === 1 ? "source" : "sources"} · ${formatContextReceiptTokenEstimate(input.submittedReceipt)}`,
       input.width,
     )];
   }
@@ -96,6 +97,7 @@ export function renderContextInspectorPacketProof(input: {
   readonly modelWindow: number;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   const lines = formatContextInspectorPacketProofLines(input);
   if (lines.length === 0) {
@@ -122,27 +124,29 @@ export function renderContextInspectorBudgetLine(input: {
   readonly modelWindow: number;
   /** Painted row width; omit for the unabridged helper output. */
   readonly contentWidth?: number | undefined;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   const budgetWindow = input.modelWindow > 0 ? input.modelWindow : 200_000;
   const tokenEstimateState = input.packet.tokenEstimateState ?? "estimated";
   const windowLabel = formatContextWindow(budgetWindow);
   const tokenLabel = formatContextTokenEstimate(input.packet.tokenEstimate, tokenEstimateState);
   const warnings = input.packet.sourceCounts.warnings;
+  const sourceTitle = input.uiLocale === "ko" ? "소스" : "Sources";
   const fullLine = [
-    "Sources",
-    `${input.packet.sourceCounts.included} sent`,
-    `${input.packet.sourceCounts.excluded} held`,
-    ...(warnings > 0 ? [`${warnings} ${warnings === 1 ? "warning" : "warnings"}`] : []),
+    sourceTitle,
+    input.uiLocale === "ko" ? `${input.packet.sourceCounts.included}개 전송` : `${input.packet.sourceCounts.included} sent`,
+    input.uiLocale === "ko" ? `${input.packet.sourceCounts.excluded}개 보류` : `${input.packet.sourceCounts.excluded} held`,
+    ...(warnings > 0 ? [input.uiLocale === "ko" ? `경고 ${warnings}개` : `${warnings} ${warnings === 1 ? "warning" : "warnings"}`] : []),
     `${tokenLabel} / ${windowLabel}`,
   ].join(" · ");
   const paintedLine = input.contentWidth === undefined
     ? fullLine
     : truncateForDisplayWidth(fullLine, Math.max(1, Math.trunc(input.contentWidth)));
   const sourceLabel = input.contentWidth === undefined
-    ? "Sources"
-    : truncateForDisplayWidth("Sources", Math.max(1, Math.trunc(input.contentWidth)));
-  const remainder = paintedLine.startsWith("Sources")
-    ? paintedLine.slice("Sources".length)
+    ? sourceTitle
+    : truncateForDisplayWidth(sourceTitle, Math.max(1, Math.trunc(input.contentWidth)));
+  const remainder = paintedLine.startsWith(sourceTitle)
+    ? paintedLine.slice(sourceTitle.length)
     : "";
   return (
     <Text>
@@ -187,26 +191,29 @@ export function renderContextInspectorReceipt(input: {
   readonly receipt?: ContextPacketViewActionReceipt | undefined;
   readonly width: number;
   readonly palette: ContextInspectorPalette;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   if (!input.receipt) {
     return null;
   }
   if (!input.receipt.succeeded) {
     const maxWidth = Math.max(32, input.width - 12);
-    const status = input.receipt.canUndo ? "undo still ready" : "undo unavailable";
+    const status = input.uiLocale === "ko"
+      ? (input.receipt.canUndo ? "실행 취소 가능" : "실행 취소 불가")
+      : (input.receipt.canUndo ? "undo still ready" : "undo unavailable");
     const separatorsWidth = 6;
     const messageWidth = Math.max(
       8,
-      maxWidth - "Not changed".length - status.length - separatorsWidth,
+      maxWidth - (input.uiLocale === "ko" ? "변경 없음" : "Not changed").length - status.length - separatorsWidth,
     );
     const body = [
-      "Not changed",
+      input.uiLocale === "ko" ? "변경 없음" : "Not changed",
       truncateForDisplayWidth(input.receipt.message, messageWidth),
       status,
     ].join(" · ");
     return (
       <Text>
-        <Text color={input.palette.warning} bold>{"Proof"}</Text>
+        <Text color={input.palette.warning} bold>{input.uiLocale === "ko" ? "증명" : "Proof"}</Text>
         <Text color={input.palette.borderSoft}>{" · "}</Text>
         <Text color={input.palette.text}>{body}</Text>
       </Text>
@@ -215,16 +222,18 @@ export function renderContextInspectorReceipt(input: {
   const effect = formatContextActionEffect(input.receipt);
   const body = truncateForDisplayWidth(
     [
-      CONTEXT_ACTION_LABELS[input.receipt.action],
+      input.uiLocale === "ko"
+        ? ({ pin: "고정됨", unpin: "고정 해제", "hold-back": "보류됨", include: "포함됨", preview: "미리 봄", refresh: "새로 고침", compare: "비교됨", undo: "실행 취소됨" } as const)[input.receipt.action]
+        : CONTEXT_ACTION_LABELS[input.receipt.action],
       input.receipt.sourceLabel,
       ...(effect ? [effect] : []),
-      input.receipt.canUndo ? "undo ready" : "undo unavailable",
+      input.uiLocale === "ko" ? (input.receipt.canUndo ? "실행 취소 가능" : "실행 취소 불가") : (input.receipt.canUndo ? "undo ready" : "undo unavailable"),
     ].join(" · "),
     Math.max(32, input.width - 12),
   );
   return (
     <Text>
-      <Text color={input.palette.success} bold>{"Proof"}</Text>
+      <Text color={input.palette.success} bold>{input.uiLocale === "ko" ? "증명" : "Proof"}</Text>
       <Text color={input.palette.borderSoft}>{" · "}</Text>
       <Text color={input.palette.text}>{body}</Text>
     </Text>

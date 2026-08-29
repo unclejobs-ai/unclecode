@@ -283,7 +283,7 @@ test("the shell header shows the session identity when no caller supplies a hint
     const output = getOutput();
     assert.match(
       output,
-      /gemini-3-pro · 작업 모드/,
+      /gemini-3-pro · Work mode/,
       "the header must carry the model and mode label when no headerHint is supplied",
     );
     assert.doesNotMatch(
@@ -330,7 +330,7 @@ test("the shell header carries the auth warning chip when auth needs action", as
     assert.ok(headerLine !== undefined, "the header wordmark line should render");
     assert.match(
       headerLine,
-      /gpt-5\.4 · 작업 모드 · No auth/,
+      /gpt-5\.4 · Work mode · No auth/,
       "the auth warning chip should ride after the session facts on the header row",
     );
   } finally {

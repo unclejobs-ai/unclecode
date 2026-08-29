@@ -246,6 +246,7 @@ export function mergeAgentConsoleLifecycle(
     ...(current.manifest === undefined ? {} : { manifest: current.manifest }),
     ...(current.pendingDecision === undefined ? {} : { pendingDecision: current.pendingDecision }),
     ...(pending.workGraph === undefined ? {} : { workGraph: pending.workGraph }),
+    ...(pending.qualityReview === undefined ? {} : { qualityReview: pending.qualityReview }),
     ...(pending.evolutionProposals === undefined ? {} : { evolutionProposals: pending.evolutionProposals }),
     activity: pending.activity,
     agents: pending.agents,

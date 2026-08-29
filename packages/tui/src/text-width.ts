@@ -53,6 +53,14 @@ function createGraphemeSegmenter(): GraphemeSegmenter | undefined {
 
 const graphemeSegmenter = createGraphemeSegmenter();
 
+// CSI plus OSC (BEL/ST terminated). Width functions must never charge styling
+// or a hyperlink escape sequence as visible terminal cells.
+const ANSI_SEQUENCE_PATTERN = /\u001B(?:\][^\u0007]*(?:\u0007|\u001B\\)|\[[0-?]*[ -/]*[@-~])/gu;
+
+export function stripAnsiForDisplay(value: string): string {
+  return value.replace(ANSI_SEQUENCE_PATTERN, "");
+}
+
 export function segmentDisplayGraphemes(value: string): readonly string[] {
   if (value.length === 0) return [];
   if (!graphemeSegmenter) return Array.from(value);
@@ -114,7 +122,7 @@ function getGraphemeWidth(grapheme: string): number {
 
 export function getDisplayWidth(value: string): number {
   let width = 0;
-  for (const grapheme of segmentDisplayGraphemes(value)) {
+  for (const grapheme of segmentDisplayGraphemes(stripAnsiForDisplay(value))) {
     width += getGraphemeWidth(grapheme);
   }
   return width;
@@ -123,6 +131,11 @@ export function getDisplayWidth(value: string): number {
 export function sliceByDisplayWidth(value: string, maxWidth: number): string {
   if (maxWidth <= 0) return "";
 
+  // Returning half of a CSI/OSC sequence corrupts the remaining terminal
+  // frame. Bounded plain-text projections already own their color at the Ink
+  // `<Text>` boundary, so strip inline styling before grapheme slicing just
+  // as the width and wrapping paths do.
+  value = stripAnsiForDisplay(value);
   let width = 0;
   let output = "";
   for (const grapheme of segmentDisplayGraphemes(value)) {
@@ -161,6 +174,7 @@ export function truncateForDisplayWidth(value: string, maxWidth: number): string
  * runs without spaces still wrap safely.
  */
 export function wrapDisplayTextFast(value: string, width: number): readonly string[] {
+  value = stripAnsiForDisplay(value);
   if (width <= 0) {
     return value.length > 0 ? [value] : [];
   }

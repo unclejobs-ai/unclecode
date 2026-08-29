@@ -235,6 +235,82 @@ test("the Korean visible inspector localizes agent and job enum chrome while pre
   assert.doesNotMatch(jobFrame, /work-node · running|Owner/);
 });
 
+test("the Korean plan inspector localizes counts, review state, hashes and evidence labels", async () => {
+  const base = runningSnapshot();
+  const reviewedNode = {
+    ...base.workGraph.nodes[1],
+    stage: "critic",
+    role: "critic",
+    attempt: 2,
+    reviewRequired: true,
+    acceptanceCriteria: ["criterion payload", "두 번째 기준 payload"],
+    evidenceRefs: ["evidence:user-value"],
+    artifactRefs: ["artifact:user-value"],
+  };
+  const snapshot = {
+    ...base,
+    workGraph: {
+      ...base.workGraph,
+      qualityProfile: "deep",
+      currentStage: "critic",
+      gateStatus: "refine",
+      iteration: 2,
+      nodes: base.workGraph.nodes.map((node, index) => index === 1 ? reviewedNode : node),
+    },
+    qualityReview: {
+      profile: "deep",
+      currentStage: "critic",
+      latestDecision: "refine",
+      iteration: 2,
+      refineCount: 1,
+      pivotCount: 0,
+      failures: ["failure:user-value"],
+      history: [{
+        event: "gate",
+        stage: "critic",
+        decision: "refine",
+        iteration: 2,
+        failures: ["failure:user-value"],
+        evidenceRefs: ["evidence:user-value"],
+        artifactRefs: ["artifact:user-value"],
+        reviewedArtifactHash: "sha256:reviewed-user-value",
+        currentArtifactHash: "sha256:current-user-value",
+        stale: true,
+        reviewerId: "reviewer:user-value",
+        reviewerRunId: "review-run:user-value",
+        independentVerification: false,
+        reason: "reason:user-value",
+      }],
+    },
+  };
+  const frame = await renderFrame({
+    uiLocale: "ko",
+    agentConsole: snapshot,
+    agentConsoleView: consoleView({ tab: "plan", cursor: 1, inspectorVisible: true }),
+  }, 100);
+
+  assert.match(frame, /승인 기준\s+기준 2개/);
+  assert.match(frame, /증거\s+참조 1개/);
+  assert.match(frame, /검토\s+필수/);
+  assert.match(frame, /검토자\s+reviewer:user-value · 독립 아님/);
+  assert.match(frame, /현재 해시\s+sha256:current-user-value · 만료/);
+  assert.match(frame, /이유 · reason:user-value/);
+  assert.match(frame, /실패 · failure:user-value/);
+  assert.match(frame, /증거 · evidence:user-value/);
+  assert.doesNotMatch(frame, /criteria|refs|required|not independent|stale|Reason ·|Failure ·|Evidence ·/);
+  for (const payload of [
+    "artifact:user-value",
+    "reviewer:user-value",
+    "sha256:reviewed-user-value",
+    "sha256:current-user-value",
+    "reason:user-value",
+    "failure:user-value",
+    "evidence:user-value",
+  ]) {
+    assert.match(frame, new RegExp(payload.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+});
+
 /**
  * Ink writes one whole frame per render in debug mode and the harness
  * accumulates them, so physical-height assertions must read the newest frame.

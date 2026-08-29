@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getDisplayWidth, truncateForDisplayWidth, wrapDisplayTextFast } from "../../packages/tui/src/text-width.ts";
+import {
+  getDisplayWidth,
+  segmentDisplayGraphemes,
+  truncateForDisplayWidth,
+  wrapDisplayTextFast,
+} from "../../packages/tui/src/text-width.ts";
 
 test("wrapDisplayTextFast wraps at word boundaries", () => {
   assert.deepEqual(wrapDisplayTextFast("abc def", 4), ["abc", "def"]);
@@ -31,6 +36,23 @@ test("truncateForDisplayWidth avoids splitting Hangul and emoji graphemes", () =
   assert.equal(getDisplayWidth(truncateForDisplayWidth("한글응답", 4)), 4);
   assert.equal(truncateForDisplayWidth("🙂테스트", 3), "🙂");
   assert.equal(getDisplayWidth(truncateForDisplayWidth("🙂테스트", 3)), 2);
+});
+
+test("display cells keep jamo, combining marks, ZWJ emoji, and ANSI styling out of cursor math", () => {
+  const decomposedHangul = "\u1112\u1161\u11ab";
+  const combiningLatin = "e\u0301";
+  const zwjFamily = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}";
+
+  assert.deepEqual(segmentDisplayGraphemes(`${decomposedHangul}${combiningLatin}${zwjFamily}`), [
+    decomposedHangul,
+    combiningLatin,
+    zwjFamily,
+  ]);
+  assert.equal(getDisplayWidth(decomposedHangul), 2);
+  assert.equal(getDisplayWidth(combiningLatin), 1);
+  assert.equal(getDisplayWidth(zwjFamily), 2);
+  assert.equal(getDisplayWidth("\u001b[31m한글\u001b[0m"), 4);
+  assert.equal(truncateForDisplayWidth("\u001b[31m한글응답\u001b[0m", 3), "한");
 });
 
 /**

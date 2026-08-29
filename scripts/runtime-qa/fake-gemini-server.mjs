@@ -71,9 +71,9 @@ export function startGeminiServer(onRequest) {
             prompt: "If this appears for a greeting, YOLO routing regressed.",
           },
         ]);
-      } else if (currentUserRequest === realUseQueuedPromptText) {
+      } else if (matchesRuntimeQaUserRequest(currentUserRequest, realUseQueuedPromptText)) {
         text = realUseQueuedResponseText;
-      } else if (currentUserRequest === realUseFirstPromptText) {
+      } else if (matchesRuntimeQaUserRequest(currentUserRequest, realUseFirstPromptText)) {
         text = realUseFirstResponseText;
       } else if (currentUserRequest === "hi") {
         text = yoloGreetingResponseText;
@@ -81,7 +81,7 @@ export function startGeminiServer(onRequest) {
         text = fullTuiResponseText;
       } else if (currentUserRequest.includes("runtime TTY QA")) {
         text = ttyResponseText;
-      } else if (currentUserRequest === koreanBusyPromptText) {
+      } else if (matchesRuntimeQaUserRequest(currentUserRequest, koreanBusyPromptText)) {
         text = koreanBusyResponseText;
       } else if (currentUserRequest === parallelModeKoreanPromptText) {
         text = parallelModeKoreanLeakyResponseText;
@@ -100,7 +100,10 @@ export function startGeminiServer(onRequest) {
         });
         res.end(payload);
       };
-      if (currentUserRequest === koreanBusyPromptText || currentUserRequest === realUseFirstPromptText) {
+      if (
+        matchesRuntimeQaUserRequest(currentUserRequest, koreanBusyPromptText)
+        || matchesRuntimeQaUserRequest(currentUserRequest, realUseFirstPromptText)
+      ) {
         setTimeout(respond, 1200);
         return;
       }
@@ -115,6 +118,10 @@ export function startGeminiServer(onRequest) {
       });
     });
   });
+}
+
+function matchesRuntimeQaUserRequest(currentUserRequest, expected) {
+  return currentUserRequest === expected || currentUserRequest.endsWith(`\n\n${expected}`);
 }
 
 function latestGeminiUserText(parsed) {
@@ -156,8 +163,16 @@ function latestGeminiFunctionResponse(parsed) {
 export function extractRuntimeQaUserRequest(requestText) {
   const marker = "\n\nUser request:\n";
   const markerOffset = requestText.lastIndexOf(marker);
-  if (markerOffset >= 0) {
-    return requestText.slice(markerOffset + marker.length).trim();
+  let userRequest = markerOffset >= 0
+    ? requestText.slice(markerOffset + marker.length).trim()
+    : requestText.trim();
+  const qualityContextOffset = userRequest.indexOf("\n\n<quality_engine_context>");
+  if (qualityContextOffset >= 0) {
+    userRequest = userRequest.slice(0, qualityContextOffset).trim();
   }
-  return requestText.trim();
+  userRequest = userRequest.replace(
+    /^(?:Respond in English for this session\. Preserve code, paths, commands, and proper names when needed\.|현재 세션의 사용자 언어를 따라 한국어로 답변하세요\. 코드, 경로, 명령, 고유 명칭은 필요한 경우 원문을 유지하세요\.)\n\n/u,
+    "",
+  );
+  return userRequest.trim();
 }

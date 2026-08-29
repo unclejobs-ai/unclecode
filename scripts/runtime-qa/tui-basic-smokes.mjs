@@ -173,7 +173,7 @@ export async function runYoloGreetingTuiSmoke({ port, tmp, observations }) {
     const requestDelta = observations.length - beforeRequests;
 
     assert.equal(requestDelta, 1, `YOLO greeting should make one provider call, got ${requestDelta}`);
-    assert.match(pane, /YOLO 모드/);
+    assert.match(pane, /YOLO mode/);
     assert.match(pane, new RegExp(yoloGreetingResponseText));
     assert.match(pane, READY_LAST_STATUS_PATTERN);
     assert.doesNotMatch(pane, /Work context · session state/);

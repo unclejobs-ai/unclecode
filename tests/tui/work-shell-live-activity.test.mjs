@@ -91,7 +91,7 @@ test("busy WorkShellView renders one inline activity in the composer dock", asyn
   // The activity row is pinned directly above the dock's hint row — the busy
   // display rides with the input, and the top status row is idle-only.
   const activityIndex = rows.indexOf(spinnerLines[0]);
-  const hintIndex = rows.findIndex((row) => row.includes("Enter queues follow-up"));
+  const hintIndex = rows.findIndex((row) => row.includes("Enter queue"));
   assert.ok(hintIndex > activityIndex, `activity row should sit above the hint row, received:\n${frame}`);
   // User entries also carry a `◇` badge, so the idle row is asserted by its
   // text: no `◇ Ready` while the busy dock row owns the frame.
@@ -277,11 +277,11 @@ test("WorkShellView render keeps the light-terminal status frame visible", async
   const statusFrame = getLastWorkShellFrame(output);
   const headerLine = statusFrame.split("\n").find((line) => line.includes("UncleCode"));
   assert.ok(headerLine !== undefined, "the header wordmark line should render");
-  assert.match(headerLine, /gpt-5\.4 · YOLO 모드/u);
+  assert.match(headerLine, /gpt-5\.4 · YOLO mode/u);
   const idleLine = statusFrame.split("\n").find((line) => line.includes("◇"));
   assert.ok(idleLine !== undefined, "the idle status row should render");
   assert.match(idleLine, /◇ Ready\s*$/u);
-  assert.doesNotMatch(idleLine, /gpt-5\.4|YOLO 모드/u);
+  assert.doesNotMatch(idleLine, /gpt-5\.4|YOLO mode/u);
   assert.doesNotMatch(output, /Saved OAuth/);
   // A fresh session reports no timing rather than the words "no reply yet".
   assert.doesNotMatch(output, /no reply yet/);
@@ -575,7 +575,7 @@ test("the busy status row states live agent and job counts before activity and e
     lines[0],
     /4 agents · 4 jobs · Reading context · \d+s\s*$/u,
   );
-  assert.doesNotMatch(lines[0], /gpt-5\.4|작업 모드/u, "identity belongs to the header, not the busy row");
+  assert.doesNotMatch(lines[0], /gpt-5\.4|Work mode/u, "identity belongs to the header, not the busy row");
 });
 
 test("the status row counts a job and its owning agent once", async () => {
@@ -644,7 +644,7 @@ test("an auth warning rides the header while the busy row counts live work", asy
   assert.ok(headerLine !== undefined, "the header wordmark line should render");
   assert.match(
     headerLine,
-    /gpt-5\.4 · 작업 모드 · OAuth · needs API key/u,
+    /gpt-5\.4 · Work mode · OAuth · needs API key/u,
     "the auth warning chip should ride after the session facts on the header row",
   );
 });

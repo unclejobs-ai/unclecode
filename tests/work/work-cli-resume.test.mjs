@@ -20,6 +20,7 @@ test("loadResumedWorkSession restores persisted trace mode and reasoning overrid
     state: "idle",
     summary: "Chat: inspect repo",
     traceMode: "verbose",
+    uiLocale: "ko",
     reasoningEffort: "low",
     entries: [
       { role: "user", text: "inspect repo" },
@@ -58,6 +59,7 @@ test("loadResumedWorkSession restores persisted trace mode and reasoning overrid
 
   assert.equal(resumed.sessionId, "work-session-42");
   assert.equal(resumed.initialTraceMode, "verbose");
+  assert.equal(resumed.initialUiLocale, "ko");
   assert.equal(resumed.reasoningEffort, "low");
   assert.match(resumed.contextLine, /Resumed session: work-session-42/);
   assert.equal(resumed.initialSessionSummary, "Chat: inspect repo");
@@ -357,6 +359,52 @@ test("loadResumedWorkSession round-trips safe lifecycle records and settles unre
     entries: [{ role: "user", text: "dispatch the plan" }],
     agentConsole: {
       profileId: "build",
+      workGraph: {
+        id: "graph-interrupted",
+        goal: "Finish the interrupted change",
+        qualityProfile: "deep",
+        currentStage: "work",
+        gateStatus: "proceed",
+        iteration: 1,
+        approval: "approved",
+        nodes: [{
+          id: "node-interrupted",
+          title: "Implement",
+          prompt: "Implement safely",
+          status: "running",
+          dependsOn: [],
+          fileOwnership: ["src/runtime.ts"],
+          acceptanceCriteria: ["Tests pass"],
+          evidenceRefs: [],
+          stage: "work",
+          role: "worker",
+          attempt: 1,
+          artifactRefs: [],
+          reviewRequired: true,
+        }],
+      },
+      qualityReview: {
+        runId: "quality-interrupted",
+        graphId: "graph-interrupted",
+        profile: "deep",
+        currentStage: "work",
+        iteration: 1,
+        refineCount: 0,
+        pivotCount: 0,
+        latestDecision: "proceed",
+        history: [{
+          event: "gate",
+          stage: "work",
+          decision: "proceed",
+          iteration: 1,
+          failures: [],
+          evidenceRefs: [],
+          artifactRefs: [],
+          independentVerification: false,
+          stale: false,
+          startedAt: 20,
+        }],
+      },
       activity: [],
       agents: [
         {
@@ -465,6 +513,11 @@ test("loadResumedWorkSession round-trips safe lifecycle records and settles unre
   assert.equal(resumedConsole.mainUsage?.cacheReadTokens, 400);
   assert.equal(resumedConsole.mainUsage?.eventIds, undefined);
   assert.equal(resumedConsole.mainUsage?.routes?.[0]?.eventIds, undefined);
+  assert.equal(resumedConsole.qualityReview?.latestDecision, "unproven");
+  assert.equal(resumedConsole.qualityReview?.history.at(-1)?.event, "completed");
+  assert.deepEqual(resumedConsole.qualityReview?.history.at(-1)?.failures, ["QUALITY_RUN_INTERRUPTED"]);
+  assert.equal(resumedConsole.workGraph?.gateStatus, "unproven");
+  assert.equal(resumedConsole.workGraph?.nodes[0]?.status, "failed");
 
   // Unrecoverable work settles exactly once: interrupted records gain one
   // completion stamped at the resume, settled records keep their own.
