@@ -159,3 +159,18 @@ test("timed-out detached owner startup reaps the exact spawned service", async (
     }
   }
 });
+
+test("detached owner spawn errors reject promptly without publishing a lease", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-spawn-error-"));
+  const leasePath = join(root, "owner.json");
+  await assert.rejects(
+    spawnDetachedRuntimeOwner({
+      leasePath,
+      tokenPath: join(root, "owner.token"),
+      timeoutMs: 1_000,
+      spawnProcess: (_command, args, options) => spawn("/definitely/missing/unclecode-owner", args, options),
+    }),
+    /Failed to spawn detached runtime owner/,
+  );
+  await assert.rejects(readFile(leasePath, "utf8"));
+});

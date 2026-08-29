@@ -6,6 +6,8 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { RuntimeOwnerClient } from "../../apps/unclecode-server/src/runtime-owner-client.ts";
+import { LiveRuntimeEngineRegistry } from "../../apps/unclecode-server/src/runtime-engine-rpc.ts";
+import { startPersistentRuntimeOwner } from "../../apps/unclecode-server/src/runtime-owner.ts";
 
 async function startFixture(root, leasePath, tokenPath) {
   const child = spawn(process.execPath, [
@@ -127,4 +129,29 @@ test("owner restart discovers a real checkpoint and marks interrupted work non-r
   assert.equal(recovered?.quality.profile, "deep");
   assert.equal(recovered?.quality.stage, "critic");
   assert.equal(recovered?.quality.iteration, 2);
+});
+
+test("lease publication failure closes the listener, watcher, and attached engines", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-publish-failure-"));
+  const leasePath = join(root, "lease-is-a-directory");
+  const tokenParent = join(root, "token-parent");
+  await mkdir(leasePath);
+  await mkdir(tokenParent, { mode: 0o700 });
+  let disposed = false;
+  const engines = new LiveRuntimeEngineRegistry();
+  engines.attach("attached", {
+    getState: () => ({}),
+    subscribe: () => () => {},
+  }, {
+    projectPath: root,
+    dispose: () => { disposed = true; },
+  });
+  await assert.rejects(startPersistentRuntimeOwner({
+    rootDir: root,
+    leasePath,
+    tokenPath: join(tokenParent, "server.token"),
+    engines,
+  }));
+  assert.equal(disposed, true);
+  assert.deepEqual(engines.list(), []);
 });

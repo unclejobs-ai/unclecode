@@ -126,7 +126,14 @@ export async function startPersistentRuntimeOwner(input: {
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     ...(input.projectPath ? { projectPath: input.projectPath } : {}),
   };
-  await publishRuntimeOwnerLease(input.leasePath, lease);
+  try {
+    await publishRuntimeOwnerLease(input.leasePath, lease);
+  } catch (error) {
+    notices.stop();
+    await server.stop();
+    await engines.disposeAll();
+    throw error;
+  }
   return {
     lease,
     controls,

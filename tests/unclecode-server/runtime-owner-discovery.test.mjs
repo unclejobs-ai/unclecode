@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import {
   ensureRuntimeOwner,
   readRuntimeOwnerLease,
 } from "../../apps/unclecode-server/src/runtime-owner-discovery.ts";
+import { ensureServerToken } from "../../apps/unclecode-server/src/index.ts";
 
 function lease(overrides = {}) {
   return {
@@ -90,4 +91,67 @@ test("a live compatible lease with failed identity health is replaced, never tru
 
   assert.equal(starts, 1);
   assert.equal(result.ownerId, "owner-2");
+});
+
+test("stale empty and truncated discovery locks are recovered", async () => {
+  for (const [name, body] of [["empty", ""], ["truncated", "{\"pid\":"]]) {
+    const root = await mkdtemp(join(tmpdir(), `unclecode-owner-${name}-`));
+    const leasePath = join(root, "runtime-owner.json");
+    const lockPath = join(root, "runtime-owner.lock");
+    await writeFile(lockPath, body, { mode: 0o600 });
+    const old = new Date(Date.now() - 5_000);
+    await utimes(lockPath, old, old);
+    const replacement = lease({ ownerId: `owner-${name}` });
+    const result = await ensureRuntimeOwner({
+      leasePath, lockPath, bootId: "boot-test",
+      resolveProcessStartIdentity: async () => "claimant-start",
+      health: async candidate => candidate.ownerId === replacement.ownerId,
+      startOwner: async () => replacement,
+    });
+    assert.equal(result.ownerId, replacement.ownerId);
+  }
+});
+
+test("a live reused PID cannot preserve a lock from another process start", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-pid-reuse-"));
+  const leasePath = join(root, "runtime-owner.json");
+  const lockPath = join(root, "runtime-owner.lock");
+  await writeFile(lockPath, JSON.stringify({
+    pid: process.pid,
+    bootId: "boot-test",
+    claimId: "old-claim",
+    processStartId: "old-process-start",
+    claimedAt: Date.now(),
+  }), { mode: 0o600 });
+  const replacement = lease({ ownerId: "owner-after-pid-reuse" });
+  const result = await ensureRuntimeOwner({
+    leasePath, lockPath, bootId: "boot-test",
+    resolveProcessStartIdentity: async () => "current-process-start",
+    health: async candidate => candidate.ownerId === replacement.ownerId,
+    startOwner: async () => replacement,
+  });
+  assert.equal(result.ownerId, replacement.ownerId);
+});
+
+test("server token creation rejects symlinks and insecure legacy permissions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-token-"));
+  const secureParent = join(root, "secure");
+  const target = join(root, "target-token");
+  await writeFile(target, "x".repeat(64), { mode: 0o600 });
+  await chmod(root, 0o700);
+  await mkdir(secureParent, { mode: 0o700 });
+  await symlink(target, join(secureParent, "server.token"));
+  assert.throws(() => ensureServerToken(join(secureParent, "server.token")), /regular file/);
+
+  const insecureParent = join(root, "insecure");
+  await mkdir(insecureParent, { mode: 0o755 });
+  assert.equal(ensureServerToken(join(insecureParent, "server.token")).length, 64);
+
+  const validParent = join(root, "valid");
+  await mkdir(validParent, { mode: 0o700 });
+  const tokenPath = join(validParent, "server.token");
+  const token = ensureServerToken(tokenPath);
+  assert.equal(token.length, 64);
+  await chmod(tokenPath, 0o644);
+  assert.throws(() => ensureServerToken(tokenPath), /permissions must be 0600/);
 });

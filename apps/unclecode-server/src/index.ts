@@ -1,6 +1,17 @@
 /** Loopback-first UncleCode control-room HTTP + SSE server. */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  chmodSync,
+  constants as fsConstants,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -31,17 +42,71 @@ function defaultTokenPath(): string {
 }
 
 export function ensureServerToken(tokenPath: string = defaultTokenPath()): string {
-  if (existsSync(tokenPath)) {
-    const existing = readFileSync(tokenPath, "utf8").trim();
-    if (existing.length >= 32) return existing;
+  const parent = dirname(tokenPath);
+  mkdirSync(parent, { recursive: true, mode: 0o700 });
+  let parentStat = lstatSync(parent);
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) {
+    throw new Error("Runtime token parent must be a real directory.");
   }
-  mkdirSync(dirname(tokenPath), { recursive: true });
-  const token = randomBytes(32).toString("hex");
-  writeFileSync(tokenPath, token);
+  if (typeof process.getuid === "function" && parentStat.uid !== process.getuid()) {
+    throw new Error("Runtime token parent is not owned by the current user.");
+  }
+  if (process.platform !== "win32" && (parentStat.mode & 0o077) !== 0) {
+    chmodSync(parent, 0o700);
+    parentStat = lstatSync(parent);
+    if ((parentStat.mode & 0o077) !== 0) {
+      throw new Error("Runtime token parent permissions must be 0700.");
+    }
+  }
+
+  const readValidated = (): string => {
+    const stat = lstatSync(tokenPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Runtime token must be a regular file.");
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      throw new Error("Runtime token is not owned by the current user.");
+    }
+    if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
+      throw new Error("Runtime token permissions must be 0600.");
+    }
+    if (stat.size > 4_096) throw new Error("Runtime token file is unexpectedly large.");
+    const readFd = openSync(tokenPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    let existing: string;
+    try {
+      const openedStat = fstatSync(readFd);
+      if (!openedStat.isFile() || openedStat.dev !== stat.dev || openedStat.ino !== stat.ino) {
+        throw new Error("Runtime token identity changed while opening it.");
+      }
+      existing = readFileSync(readFd, "utf8").trim();
+    } finally {
+      closeSync(readFd);
+    }
+    if (existing.length < 32) throw new Error("Runtime token file is invalid.");
+    return existing;
+  };
+
   try {
-    chmodSync(tokenPath, 0o600);
-  } catch {
-    // Best effort on platforms without chmod semantics.
+    return readValidated();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  const token = randomBytes(32).toString("hex");
+  let fd: number | undefined;
+  try {
+    fd = openSync(
+      tokenPath,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error("Runtime token must be a regular file.");
+    writeFileSync(fd, token, "utf8");
+    fsyncSync(fd);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return readValidated();
+    throw error;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
   return token;
 }

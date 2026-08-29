@@ -10,6 +10,8 @@ import {
 } from "node:fs/promises";
 import { hostname, platform, uptime } from "node:os";
 import { dirname, isAbsolute } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 export const RUNTIME_OWNER_PROTOCOL = "unclecode-runtime-owner/1" as const;
 
@@ -27,7 +29,17 @@ export type RuntimeOwnerLease = {
   readonly projectPath?: string | undefined;
 };
 
-type OwnerLock = { readonly pid: number; readonly bootId: string; readonly claimId: string };
+type OwnerLock = {
+  readonly pid: number;
+  readonly bootId: string;
+  readonly claimId: string;
+  readonly processStartId: string;
+  readonly claimedAt: number;
+};
+
+const execFileAsync = promisify(execFile);
+const LOCK_WRITE_GRACE_MS = 250;
+const LOCK_MAX_AGE_MS = 30_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -55,6 +67,24 @@ function isPidAlive(pid: number): boolean {
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+export async function processStartIdentity(pid: number): Promise<string | null> {
+  if (!isPidAlive(pid)) return null;
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    const fields = stat.slice(close + 2).split(/\s+/);
+    const startTicks = fields[19];
+    if (startTicks) return `proc:${startTicks}`;
+  } catch {}
+  try {
+    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "lstart="]);
+    const started = stdout.trim().replace(/\s+/g, " ");
+    return started ? `ps:${started}` : null;
+  } catch {
+    return null;
   }
 }
 
@@ -120,11 +150,16 @@ export async function publishRuntimeOwnerLease(path: string, lease: RuntimeOwner
   try {
     await handle.writeFile(`${JSON.stringify(lease)}\n`, "utf8");
     await handle.sync();
-  } finally {
     await handle.close();
+    await rename(temporary, path);
+    await chmod(path, 0o600).catch(() => undefined);
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  } finally {
+    await handle.close().catch(() => undefined);
   }
-  await rename(temporary, path);
-  await chmod(path, 0o600).catch(() => undefined);
 }
 
 async function isAttachable(
@@ -140,17 +175,48 @@ async function isAttachable(
   );
 }
 
-async function removeDeadLock(lockPath: string, bootId: string): Promise<void> {
+async function removeDeadLock(
+  lockPath: string,
+  bootId: string,
+  identity: (pid: number) => Promise<string | null>,
+  now: number,
+): Promise<void> {
   try {
-    const value: unknown = JSON.parse(await readFile(lockPath, "utf8"));
-    if (!isRecord(value)) return;
+    const stat = await lstat(lockPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return;
+    const ageMs = Math.max(0, now - stat.mtimeMs);
+    let value: unknown;
+    try {
+      value = JSON.parse(await readFile(lockPath, "utf8"));
+    } catch {
+      if (ageMs >= LOCK_WRITE_GRACE_MS) await unlink(lockPath).catch(() => undefined);
+      return;
+    }
+    if (!isRecord(value)) {
+      if (ageMs >= LOCK_WRITE_GRACE_MS) await unlink(lockPath).catch(() => undefined);
+      return;
+    }
     const lock = value as Partial<OwnerLock>;
-    if (lock.bootId !== bootId || !isPidAlive(Number(lock.pid))) {
+    const validShape = Number.isSafeInteger(lock.pid)
+      && Number(lock.pid) > 0
+      && typeof lock.claimId === "string"
+      && lock.claimId.length > 0
+      && typeof lock.processStartId === "string"
+      && lock.processStartId.length > 0
+      && typeof lock.claimedAt === "number"
+      && Number.isFinite(lock.claimedAt);
+    const actualStartId = validShape ? await identity(Number(lock.pid)) : null;
+    if (
+      !validShape
+      || lock.bootId !== bootId
+      || actualStartId === null
+      || actualStartId !== lock.processStartId
+      || now - Number(lock.claimedAt) > LOCK_MAX_AGE_MS
+    ) {
       await unlink(lockPath).catch(() => undefined);
     }
   } catch {
-    // A claimant may still be writing its tiny lock record. Waiters retry
-    // rather than deleting an identity they cannot prove stale.
+    // The next bounded retry revalidates the lock identity.
   }
 }
 
@@ -161,10 +227,14 @@ export async function ensureRuntimeOwner(input: {
   readonly health: (lease: RuntimeOwnerLease) => Promise<boolean>;
   readonly startOwner: () => Promise<RuntimeOwnerLease>;
   readonly timeoutMs?: number | undefined;
+  readonly resolveProcessStartIdentity?: ((pid: number) => Promise<string | null>) | undefined;
 }): Promise<RuntimeOwnerLease> {
   const bootId = input.bootId ?? currentBootIdentity();
   const deadline = Date.now() + (input.timeoutMs ?? 10_000);
   await mkdir(dirname(input.lockPath), { recursive: true, mode: 0o700 });
+  const resolveIdentity = input.resolveProcessStartIdentity ?? processStartIdentity;
+  const claimantStartId = await resolveIdentity(process.pid);
+  if (!claimantStartId) throw new Error("Cannot establish the runtime owner claimant process identity.");
 
   while (Date.now() <= deadline) {
     const existing = await readRuntimeOwnerLease(input.leasePath);
@@ -173,7 +243,13 @@ export async function ensureRuntimeOwner(input: {
     let lock: Awaited<ReturnType<typeof open>> | undefined;
     try {
       lock = await open(input.lockPath, "wx", 0o600);
-      await lock.writeFile(JSON.stringify({ pid: process.pid, bootId, claimId: randomUUID() } satisfies OwnerLock));
+      await lock.writeFile(JSON.stringify({
+        pid: process.pid,
+        bootId,
+        claimId: randomUUID(),
+        processStartId: claimantStartId,
+        claimedAt: Date.now(),
+      } satisfies OwnerLock));
       await lock.sync();
 
       const raced = await readRuntimeOwnerLease(input.leasePath);
@@ -187,7 +263,7 @@ export async function ensureRuntimeOwner(input: {
       return started;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      await removeDeadLock(input.lockPath, bootId);
+      await removeDeadLock(input.lockPath, bootId, resolveIdentity, Date.now());
       await new Promise((resolve) => setTimeout(resolve, 5));
     } finally {
       if (lock) {

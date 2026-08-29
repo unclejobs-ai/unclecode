@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { unlink } from "node:fs/promises";
 
 import {
   probeRuntimeOwner,
@@ -54,16 +55,25 @@ async function reapFailedOwnerStartup(child: ReturnType<typeof spawn>): Promise<
   child.kill("SIGTERM");
   if (await waitForChildExit(child, 500)) return;
   child.kill("SIGKILL");
-  await waitForChildExit(child, 500);
+  if (!await waitForChildExit(child, 2_000)) {
+    throw new Error("Detached runtime owner did not settle after SIGKILL.");
+  }
+}
+
+async function removeExactChildLease(leasePath: string, childPid: number | undefined): Promise<void> {
+  if (!childPid) return;
+  const lease = await readRuntimeOwnerLease(leasePath);
+  if (lease?.pid === childPid) await unlink(leasePath).catch(() => undefined);
 }
 
 export async function spawnDetachedRuntimeOwner(input: {
   readonly leasePath: string;
   readonly tokenPath: string;
   readonly timeoutMs?: number | undefined;
+  readonly spawnProcess?: typeof spawn | undefined;
 }): Promise<RuntimeOwnerLease> {
   const [command, baseArgs] = ownerServiceCommand();
-  const child = spawn(command, [
+  const child = (input.spawnProcess ?? spawn)(command, [
     ...baseArgs,
     "--lease-path", input.leasePath,
     "--token-path", input.tokenPath,
@@ -84,6 +94,8 @@ export async function spawnDetachedRuntimeOwner(input: {
 
   const deadline = Date.now() + (input.timeoutMs ?? 15_000);
   let exited: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+  let spawnFailure: Error | undefined;
+  child.once("error", (error) => { spawnFailure = error; });
   child.once("exit", (code, signal) => { exited = { code, signal }; });
   while (Date.now() <= deadline) {
     const lease = await readRuntimeOwnerLease(input.leasePath);
@@ -96,8 +108,14 @@ export async function spawnDetachedRuntimeOwner(input: {
       const detail = startupError.trim().replace(/[\r\n]+/g, " ").slice(0, 512);
       throw new Error(`Detached runtime owner exited before publishing a healthy lease (${exited.code ?? exited.signal ?? "unknown"})${detail ? `: ${detail}` : "."}`);
     }
+    if (spawnFailure) {
+      await reapFailedOwnerStartup(child);
+      await removeExactChildLease(input.leasePath, child.pid);
+      throw new Error(`Failed to spawn detached runtime owner: ${spawnFailure.message}`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   await reapFailedOwnerStartup(child);
+  await removeExactChildLease(input.leasePath, child.pid);
   throw new Error("Timed out waiting for the detached runtime owner service.");
 }
