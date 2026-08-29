@@ -63,15 +63,16 @@ Provider calls and irreversible tool handlers are non-interruptible regions. A r
 
 - `npm run build --silent`: pass.
 - `cargo build --quiet -p unclecode`: pass.
-- `npm run test:orchestrator --silent`: 536 pass, 0 fail.
-- `npm run test:server --silent`: 40 pass, 0 fail.
-- `npm run test:cli --silent`: 102 pass, 0 fail.
+- `npm run test:orchestrator --silent`: 537 pass, 0 fail.
+- `npm run test:server --silent`: 51 pass, 0 fail.
+- `npm run test:cli --silent`: 109 pass, 0 fail.
 - `npm run test:work --silent`: 444 pass, 0 fail, 7 platform skips.
-- `npm run test:tui --silent`: 496 pass, 0 fail, including the authoritative `current branch+worktree present` history/current wording.
+- `npm run test:tui --silent`: 498 pass, 0 fail, including the authoritative `current branch+worktree present` history/current wording and the two prompt-ownership regressions.
 - `npm run test:contracts --silent`: 273 pass, 0 fail.
 - `npm run check --silent`: pass.
 - `npm run lint --silent`: pass (`Checked 100 files`; no fixes applied).
 - `git diff --check`: pass.
+- `cargo test --workspace`: 514 pass, 0 fail (88 CLI/bin + 1 integration + 425 core).
 - Detached owner process tests: 4 pass, including first-client SIGKILL, exact reattach, simultaneous first clients, timed-out-startup reaping, and explicit cleanup.
 - Runtime owner discovery/session/process/control focused tests: pass, including real child process restart/checkpoint recovery and exact idempotency.
 - Task 4 quality workspace focused suite after wording correction: 14 pass, 0 fail.
@@ -87,6 +88,19 @@ Task 9 is split into reviewable commits:
 - `52ed257` — persistent owner/discovery/IPC primitives, cooperative pause controller, and focused process/contract tests.
 - `8c4a50b` — attach-only TUI/server cutover, owner-service work build entry, remote adapter injection, and integration fixtures.
 - `ce9ceff` — bounded cleanup and real-process regression for a timed-out detached owner startup.
+- `8f486ee` — initial Task 9 verification and architecture report.
+- `ce9e5cd` — committed the previously missing owner control attachment so clean heads are self-contained.
+- `f0d4a1e` — one shared per-session mutation arbiter with pending receipts, fingerprints, atomic revision admission, and preemptive cancellation.
+- `f324308` — one shared pause transition/persist/suspension gate across overlapping checkpoints and approvals.
+- `677fe1d` — monotonic remote publication plus an explicit identity-stable retry allowlist.
+- `66f9c1b` — async owner/engine shutdown that aborts and boundedly settles active provider/tool work.
+- `df0bfa9` — persisted and restored the single owner session revision.
+- `0c4970e` — hardened lock, process identity, token directory/file, symlink, lease publication, and startup failure paths.
+- `055117c` and `f91e0c0` — removed client-side agent construction; TUI/server attachments carry serializable configuration only.
+- `4e6e0e6` — persisted the complete safe-boundary pause checkpoint through the Rust/session path.
+- `bd254aa` — bounded client fetch cancellation and remote detach regression.
+- `c5a6710` — deterministic detached-child startup/exit settlement, long request bounds, and concurrent first-client recovery.
+- `fb06a33` — prompt-owner stabilization: explicit steer reset epoch, monotonic local draft/cursor acknowledgement, and authoritative Agent Console compose ownership.
 
 Exact files contained in those Task 9 commits:
 
@@ -126,6 +140,55 @@ tsconfig.work.json
 ```
 
 The integration worktree also contains pre-existing user and Task 7/8 changes. Mixed WorkShell checkpoint, tool/agent, and Task 8 wording-fixture hunks were deliberately preserved rather than reset or claimed wholesale; their branch-wide integration remains visible in the working tree.
+
+## Independent-review fix round 1 closure
+
+Every initial Critical, Important, and Minor finding is mapped to a committed correction and focused evidence:
+
+| Finding | Closure | Evidence |
+|---|---|---|
+| Clean head missing `work-shell-control` and pause hunks | `ce9e5cd`, `4e6e0e6` | synthetic clean checkout build; focused engine/persistence/Rust pause tests |
+| Engine/control duplicate execution and split revisions | `f0d4a1e` | async same-key executes once; engine/control race; same-revision winner exactly once; changed fingerprint conflicts; accepted key exact-replays |
+| Pause lost wakeup/approval overlap | `f324308` | two overlapping checkpoints share one persistence and are released by one resume; approval remains pending |
+| Late stale remote publication | `677fe1d` | a late lower revision is rejected by poll and invocation publication |
+| Unsafe decision retry | `677fe1d` | only stable methods retry; changed decision identity surfaces conflict |
+| Cancel blocked behind pause | `f0d4a1e`, `f324308` | cancel during `pause_pending` preempts and settles without waiting for resume |
+| Live provider/tool shutdown | `66f9c1b` | owner shutdown aborts, waits boundedly, and disposes live provider/tool continuations |
+| Restart revision reset/split clock | `df0bfa9` | durable restored revision remains monotonic through restart and autonomous publication |
+| Incomplete durable pause receipt | `4e6e0e6` | turn/boundary, node/attempt, SCC stage/gate/iteration, decision, context, attachment, artifact refs round-trip and flush before pause acknowledgement |
+| Truncated locks/PID reuse | `0c4970e` | real filesystem empty/truncated lock recovery, process-start mismatch, stale claim, and live wrong-identity cases |
+| Insecure/symlinked token | `0c4970e` | 0700 parent, atomic 0600 no-follow token, parent/token symlink rejection, insecure legacy rejection |
+| Duplicate factory/client agent construction | `055117c`, `f91e0c0` | concurrent different-key session creation constructs once; bootstrap/remote clients are attachment/config only |
+| Spawn/lease publication cleanup | `0c4970e`, `c5a6710` | spawn error, nonzero/signal exit, lease-publish failure, TERM→KILL settlement, simultaneous first clients, bounded failure cleanup |
+| Unbounded fetch/detach poll | `bd254aa`, `c5a6710` | request timeout/AbortController and detach-aborts-poll tests exit naturally |
+| Missing report accounting | this report | includes `8f486ee` and every fix-round commit above |
+
+Final fix-round commands and results:
+
+```text
+npm run build --silent && npm run check --silent && npm run lint --silent
+  exit 0; Checked 100 files; no fixes applied
+
+npm run test:tui --silent
+  498 pass, 0 fail, 178.485s
+
+npm run test:contracts --silent
+  273 pass, 0 fail
+
+npm run test:work --silent
+  444 pass, 0 fail, 7 supported-platform containment skips, 90.700s
+
+cargo test --workspace
+  514 pass, 0 fail
+
+node --disable-warning=ExperimentalWarning --conditions=source --import tsx \
+  scripts/runtime-qa/runtime-owner-tui-smoke.mjs
+  pass: bin -> Rust -> Node -> Ink -> detached owner; revision increased after reattach;
+  Korean prompt/locale and Ctrl+O tool-history-only draft preservation passed;
+  explicit shutdown removed owner listener and lease
+```
+
+The final synthetic staged/committed TUI tree built cleanly and its focused suite passed 48/48. That suite includes delayed controlled-parent acknowledgement with rapid subsequent input, stale cursor rejection, first-character Agent Console ownership over hidden telemetry, Escape draft disposal, Ctrl+O, queue, and all six entry/reflow tests. Startup diagnostics deliberately use ignored detached stdio after handoff to prevent inherited-pipe EPIPE and terminal-handle leaks; failed startup still reports deterministic exit code/signal, while bounded lease/health evidence remains the diagnostic source.
 
 ## Concerns and follow-up seams
 
