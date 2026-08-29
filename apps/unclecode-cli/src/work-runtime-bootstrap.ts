@@ -717,11 +717,17 @@ export async function loadWorkCliBootstrap(
   const pluginHost = new PluginHost({
     onDiagnostic: (diagnostic) => recordPluginDiagnostic?.(diagnostic),
   });
-  registerBuiltInSccQualityEngine(pluginHost, { workspaceRoot: cwd, env });
-  await pluginHost.loadFromDisk(cwd, {
-    env,
-    ...(input.userHomeDir ? { homeDir: input.userHomeDir } : {}),
-  });
+  let pluginHostDisposal: Promise<void> | undefined;
+  const disposePluginHost = (): Promise<void> => {
+    pluginHostDisposal ??= pluginHost.dispose();
+    return pluginHostDisposal;
+  };
+  try {
+    registerBuiltInSccQualityEngine(pluginHost, { workspaceRoot: cwd, env });
+    await pluginHost.loadFromDisk(cwd, {
+      env,
+      ...(input.userHomeDir ? { homeDir: input.userHomeDir } : {}),
+    });
   const creatorEvolutionService = createWorkCreatorEvolutionService({
     cwd,
     env,
@@ -925,7 +931,7 @@ export async function loadWorkCliBootstrap(
   return {
     agent,
     prompt: prompt ?? "",
-    dispose: () => pluginHost.dispose(),
+    dispose: disposePluginHost,
     readObservability: () => ({
       provider: {
         provider: directRuntimeProvider,
@@ -1084,4 +1090,8 @@ export async function loadWorkCliBootstrap(
         crpRuntime.refreshCondensedHistory(),
     },
   };
+  } catch (error) {
+    await disposePluginHost();
+    throw error;
+  }
 }

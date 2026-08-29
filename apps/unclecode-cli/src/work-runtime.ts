@@ -54,18 +54,21 @@ export const resolveWorkShellInlineCommand = (
   );
 
 export function createManagedDashboardProps(
-  session: ManagedDashboardSession,
+  session: ManagedDashboardSession & {
+    readonly dispose?: (() => void | Promise<void>) | undefined;
+  },
   paneEngine?: object,
 ): TuiRenderOptions<TuiShellHomeState> {
-  return createManagedWorkShellDashboardProps(
-    {
+  return {
+    ...createManagedWorkShellDashboardProps({
       ...createManagedDashboardInput(withDefaultWorkSessionLaunch(session), {
-      resolveWorkShellInlineCommand,
-      ...(process.env.HOME ? { userHomeDir: process.env.HOME } : {}),
+        resolveWorkShellInlineCommand,
+        ...(process.env.HOME ? { userHomeDir: process.env.HOME } : {}),
       }),
       ...(paneEngine ? { paneEngine: paneEngine as never } : {}),
-    },
-  );
+    }),
+    ...(session.dispose ? { dispose: session.dispose } : {}),
+  };
 }
 
 export function createWorkShellDashboardProps(
@@ -76,9 +79,14 @@ export function createWorkShellDashboardProps(
 }
 
 function withDefaultWorkSessionLaunch(
-  session: ManagedDashboardSession,
-): ManagedDashboardSession {
+  session: ManagedDashboardSession & {
+    readonly dispose?: (() => void | Promise<void>) | undefined;
+  },
+): ManagedDashboardSession & {
+  readonly dispose?: (() => void | Promise<void>) | undefined;
+} {
   return {
+    ...session,
     agent: session.agent,
     options: {
       ...session.options,
@@ -106,7 +114,7 @@ type DisposableRemoteEngine = object & {
 export type PersistentOwnerWorkShellController = {
   readonly initialProps: TuiRenderOptions<TuiShellHomeState>;
   readonly embeddedWorkPane: NonNullable<Awaited<ReturnType<typeof createEmbeddedWorkPaneController<TuiShellHomeState>>>>;
-  readonly dispose: () => void;
+  readonly dispose: () => Promise<void>;
 };
 
 async function connectPersistentRuntimeOwner(): Promise<RuntimeOwnerClient> {
@@ -133,7 +141,12 @@ type RemotePromptEngine = {
 type WorkCliDependencies = {
   readonly connectOwner?: (() => Promise<RuntimeOwnerClient>) | undefined;
   readonly loadInteractiveSession?: typeof loadWorkCliBootstrap | undefined;
+  readonly startInteractiveSession?: typeof startRepl | undefined;
   readonly writeOutput?: ((text: string) => void) | undefined;
+};
+
+type WorkSessionLoadDependencies = {
+  readonly loadSession?: typeof loadWorkCliBootstrap | undefined;
 };
 
 function workShellEntries(state: Readonly<Record<string, unknown>>): readonly {
@@ -348,11 +361,16 @@ export async function createPersistentOwnerWorkShellController(input: {
   let disposed = false;
   const attachments = new Set<DisposableRemoteEngine>();
   const sessions = new Map<string, ManagedDashboardSession>();
-  const dispose = () => {
+  let embeddedWorkPane: Awaited<ReturnType<typeof createEmbeddedWorkPaneController<TuiShellHomeState>>>;
+  const dispose = async () => {
     if (disposed) return;
     disposed = true;
-    for (const attachment of attachments) attachment.dispose();
-    attachments.clear();
+    try {
+      await embeddedWorkPane?.dispose?.();
+    } finally {
+      for (const attachment of attachments) attachment.dispose();
+      attachments.clear();
+    }
   };
   const createSnapshot = async (
     target: ManagedDashboardSession,
@@ -382,12 +400,22 @@ export async function createPersistentOwnerWorkShellController(input: {
       },
     }) as DisposableRemoteEngine;
     attachments.add(remoteEngine);
-    return createManagedDashboardProps(attachedSession, remoteEngine);
+    let snapshotDisposed = false;
+    const disposeSnapshot = () => {
+      if (snapshotDisposed) return;
+      snapshotDisposed = true;
+      attachments.delete(remoteEngine);
+      remoteEngine.dispose();
+    };
+    return {
+      ...createManagedDashboardProps(attachedSession, remoteEngine),
+      dispose: disposeSnapshot,
+    };
   };
 
   try {
     const initialProps = await createSnapshot(input.session, input.resume === true);
-    const embeddedWorkPane = await createEmbeddedWorkPaneController<TuiShellHomeState>({
+    embeddedWorkPane = await createEmbeddedWorkPaneController<TuiShellHomeState>({
       loadSnapshot: async (forwardedArgs = []) => {
         if (forwardedArgs.length === 0) return initialProps;
         const switched = resolveSwitchedSession(input.session, forwardedArgs);
@@ -397,7 +425,7 @@ export async function createPersistentOwnerWorkShellController(input: {
     if (!embeddedWorkPane) throw new Error("Remote Work pane failed to initialize.");
     return { initialProps, embeddedWorkPane, dispose };
   } catch (error) {
-    dispose();
+    await dispose();
     throw error;
   }
 }
@@ -427,93 +455,104 @@ export async function startRepl(
       ...controller.embeddedWorkPane,
     });
   } finally {
-    controller.dispose();
+    await controller.dispose();
   }
 }
 
 export async function loadWorkShellDashboardProps(
   argv: readonly string[] = [],
+  dependencies: WorkSessionLoadDependencies = {},
 ): Promise<EmbeddedWorkDashboardSnapshot<TuiShellHomeState>> {
-  const session = await loadWorkCliBootstrap({ argv });
-  if (session.prompt) {
-    throw new Error("Cannot build work-shell dashboard props for prompt mode.");
-  }
+  const session = await (dependencies.loadSession ?? loadWorkCliBootstrap)({ argv });
+  try {
+    if (session.prompt) {
+      throw new Error("Cannot build work-shell dashboard props for prompt mode.");
+    }
 
-  const homeState = session.options.refreshHomeState
-    ? await session.options.refreshHomeState()
-    : session.options.homeState;
-  return createManagedDashboardProps({
-    ...session,
-    options: {
-      ...session.options,
-      homeState,
-    },
-  });
+    const homeState = session.options.refreshHomeState
+      ? await session.options.refreshHomeState()
+      : session.options.homeState;
+    return createManagedDashboardProps({
+      ...session,
+      options: {
+        ...session.options,
+        homeState,
+      },
+    });
+  } catch (error) {
+    await session.dispose?.();
+    throw error;
+  }
 }
 
 export async function smokeWorkShellRuntime(
   argv: readonly string[] = [],
+  dependencies: WorkSessionLoadDependencies = {},
 ): Promise<readonly string[]> {
-  const session = await loadWorkCliBootstrap({ argv });
-  if (session.prompt) {
-    throw new Error("Cannot smoke-test interactive TUI with a prompt.");
-  }
-
-  const input = createManagedDashboardInput(
-    { agent: session.agent, options: {
-      ...session.options,
-      launchWorkSession:
-        session.options.launchWorkSession ??
-        ((forwardedArgs: readonly string[] = []) => runWorkCli(forwardedArgs)),
-    } },
-    {
-      resolveWorkShellInlineCommand,
-      ...(process.env.HOME ? { userHomeDir: process.env.HOME } : {}),
-    },
-  );
-  const props = createManagedWorkShellDashboardProps(input);
-  const lines = ["Work shell TUI smoke OK"];
-
-  if (!props.renderWorkPane) {
-    throw new Error("renderWorkPane is not connected.");
-  }
-  if (!props.runAction) {
-    throw new Error("runAction is not connected.");
-  }
-  if (!props.runSession) {
-    throw new Error("runSession is not connected.");
-  }
-  if (!props.launchWorkSession) {
-    throw new Error("launchWorkSession is not connected.");
-  }
-
-  const mcpServerName = props.mcpServers?.[0]?.name;
-  const mcpLines = await props.runAction({
-    actionId: "mcp-inspect",
-    ...(mcpServerName ? { prompt: mcpServerName } : {}),
-  });
-  if (!mcpLines.some((line) => /MCP server inspect|No MCP server selected/i.test(line))) {
-    throw new Error("MCP inspect smoke did not return an inspect result.");
-  }
-  lines.push("MCP inspect action connected");
-
-  const researchLines = await props.runAction({ actionId: "research-status" });
-  if (!researchLines.some((line) => /Work context status|Context brief status|Latest context/i.test(line))) {
-    throw new Error("Work context status smoke did not return a status result.");
-  }
-  lines.push("Work context status action connected");
-
-  if (props.sessions?.[0]) {
-    const resumeLines = await props.runSession(props.sessions[0].sessionId);
-    if (!resumeLines.some((line) => /Resume|Resuming session|Workspace context|Context/i.test(line))) {
-      throw new Error("History resume smoke did not return session context.");
+  const session = await (dependencies.loadSession ?? loadWorkCliBootstrap)({ argv });
+  try {
+    if (session.prompt) {
+      throw new Error("Cannot smoke-test interactive TUI with a prompt.");
     }
-    lines.push("History resume action connected");
-  } else {
-    lines.push("History resume action connected (no saved sessions)");
-  }
 
-  return lines;
+    const input = createManagedDashboardInput(
+      { agent: session.agent, options: {
+        ...session.options,
+        launchWorkSession:
+          session.options.launchWorkSession ??
+          ((forwardedArgs: readonly string[] = []) => runWorkCli(forwardedArgs)),
+      } },
+      {
+        resolveWorkShellInlineCommand,
+        ...(process.env.HOME ? { userHomeDir: process.env.HOME } : {}),
+      },
+    );
+    const props = createManagedWorkShellDashboardProps(input);
+    const lines = ["Work shell TUI smoke OK"];
+
+    if (!props.renderWorkPane) {
+      throw new Error("renderWorkPane is not connected.");
+    }
+    if (!props.runAction) {
+      throw new Error("runAction is not connected.");
+    }
+    if (!props.runSession) {
+      throw new Error("runSession is not connected.");
+    }
+    if (!props.launchWorkSession) {
+      throw new Error("launchWorkSession is not connected.");
+    }
+
+    const mcpServerName = props.mcpServers?.[0]?.name;
+    const mcpLines = await props.runAction({
+      actionId: "mcp-inspect",
+      ...(mcpServerName ? { prompt: mcpServerName } : {}),
+    });
+    if (!mcpLines.some((line) => /MCP server inspect|No MCP server selected/i.test(line))) {
+      throw new Error("MCP inspect smoke did not return an inspect result.");
+    }
+    lines.push("MCP inspect action connected");
+
+    const researchLines = await props.runAction({ actionId: "research-status" });
+    if (!researchLines.some((line) => /Work context status|Context brief status|Latest context/i.test(line))) {
+      throw new Error("Work context status smoke did not return a status result.");
+    }
+    lines.push("Work context status action connected");
+
+    if (props.sessions?.[0]) {
+      const resumeLines = await props.runSession(props.sessions[0].sessionId);
+      if (!resumeLines.some((line) => /Resume|Resuming session|Workspace context|Context/i.test(line))) {
+        throw new Error("History resume smoke did not return session context.");
+      }
+      lines.push("History resume action connected");
+    } else {
+      lines.push("History resume action connected (no saved sessions)");
+    }
+
+    return lines;
+  } finally {
+    await session.dispose?.();
+  }
 }
 
 export async function runWorkCli(
@@ -540,5 +579,9 @@ export async function runWorkCli(
   }
 
   const session = await (dependencies.loadInteractiveSession ?? loadWorkCliBootstrap)({ argv, role: "client" });
-  await startRepl(session.agent, session.options);
+  try {
+    await (dependencies.startInteractiveSession ?? startRepl)(session.agent, session.options);
+  } finally {
+    await session.dispose?.();
+  }
 }

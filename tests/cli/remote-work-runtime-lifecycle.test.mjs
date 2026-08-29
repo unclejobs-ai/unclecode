@@ -87,7 +87,7 @@ async function flushPoll() {
   await Promise.resolve();
 }
 
-test("persistent owner controller remounts and switches sessions without bootstrapping a second owner", async () => {
+test("persistent owner controller remounts and switches sessions without bootstrapping a second owner", async (t) => {
   const createController = workRuntime.createPersistentOwnerWorkShellController;
   assert.equal(typeof createController, "function");
   const sessions = new Map();
@@ -126,6 +126,7 @@ test("persistent owner controller remounts and switches sessions without bootstr
       return client;
     },
   });
+  t.after(() => controller.dispose());
 
   const firstMount = unwrapPaneEngine(controller.initialProps);
   const remount = unwrapPaneEngine(controller.initialProps);
@@ -140,10 +141,10 @@ test("persistent owner controller remounts and switches sessions without bootstr
   assert.deepEqual(creates.map((input) => input.resume), [false, true]);
   assert.deepEqual(attaches, ["work-1", "work-2"]);
   assert.equal(replacementConnections, 0, "healthy session switching must reuse the existing owner endpoint");
+  await assert.rejects(firstMount.engine.setMode("standard"), /attachment is closed/i,
+    "switching snapshots must close the old attachment immediately");
 
-  await firstMount.engine.setMode("deep");
   controller.dispose();
-  await assert.rejects(firstMount.engine.setMode("standard"), /attachment is closed/i);
   await assert.rejects(switchedPane.engine.setMode("standard"), /attachment is closed/i);
 });
 
