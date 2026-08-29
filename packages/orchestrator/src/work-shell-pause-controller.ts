@@ -81,6 +81,7 @@ export class CooperativePauseController {
   #snapshot: WorkShellPauseSnapshot = { state: "idle" };
   #pauseAcknowledgement: Deferred<WorkShellPauseReceipt> | undefined;
   #pauseTransition: PauseTransition | undefined;
+  #nonInterruptibleOperations = 0;
 
   constructor(input: {
     readonly onStateChanged?: ((snapshot: WorkShellPauseSnapshot) => void) | undefined;
@@ -105,6 +106,9 @@ export class CooperativePauseController {
     if (!turnId.trim()) throw new Error("A cooperative turn requires an identity.");
     if (this.#snapshot.state === "running" || this.#snapshot.state === "pause_pending" || this.#snapshot.state === "paused") {
       throw new Error("A cooperative turn is already active.");
+    }
+    if (this.#nonInterruptibleOperations > 0) {
+      throw new Error("A cooperative turn still has noninterruptible work settling.");
     }
     this.#pauseAcknowledgement = undefined;
     this.#pauseTransition = undefined;
@@ -131,6 +135,10 @@ export class CooperativePauseController {
     if (this.#snapshot.state === "cancelled") throw abortError("Turn cancelled while suspended.");
     if (this.#pauseTransition) return this.#pauseTransition.suspension;
     if (this.#snapshot.state !== "pause_pending") return;
+    // A node may settle while a parallel sibling (or nested tool dispatch)
+    // remains in flight. Defer acknowledgement until the last irreversible
+    // operation reaches its own post-operation checkpoint.
+    if (this.#nonInterruptibleOperations > 0) return;
     const turnId = this.#snapshot.turnId;
     if (!turnId) throw new Error("Pause checkpoint lost the active turn identity.");
 
@@ -167,6 +175,7 @@ export class CooperativePauseController {
   ): Promise<Value> {
     const boundaries = operationBoundaries(operation);
     await this.checkpoint(boundaries.before, persist);
+    this.#nonInterruptibleOperations += 1;
     let result: Value;
     let failure: unknown;
     try {
@@ -174,6 +183,8 @@ export class CooperativePauseController {
     } catch (error) {
       failure = error;
       result = undefined as Value;
+    } finally {
+      this.#nonInterruptibleOperations -= 1;
     }
     await this.checkpoint(boundaries.after, persist);
     if (failure !== undefined) throw failure;

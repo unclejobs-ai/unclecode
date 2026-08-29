@@ -759,8 +759,9 @@ export class WorkAgent<
     attachments: readonly Attachment[],
     options: { readonly signal?: AbortSignal | undefined },
   ): Promise<{ text: string }> {
-    return this.runController.withDirectAgent(() =>
-      this.directAgent.runTurn(prompt, attachments, options));
+    return runExecutionNonInterruptible("provider.request", () =>
+      this.runController.withDirectAgent(() =>
+        this.directAgent.runTurn(prompt, attachments, options)));
   }
 
   private runInternalTurn(
@@ -771,7 +772,7 @@ export class WorkAgent<
     // Swapping the listener is only safe while holding the shared agent's slot:
     // otherwise this turn would overwrite a live executor's scoped listener and
     // then hand the unscoped shell listener back under it.
-    return this.runController.withDirectAgent(async () => {
+    return runExecutionNonInterruptible("provider.request", () => this.runController.withDirectAgent(async () => {
       const outerListener = this.traceListener;
       // Planner and guardian turns stay invisible as provider brackets, but
       // their spend is real: forward usage only, unscoped, so it lands on the
@@ -790,7 +791,7 @@ export class WorkAgent<
       } finally {
         this.directAgent.setTraceListener(outerListener ? (event) => this.emitTrace(event) : undefined);
       }
-    });
+    }));
   }
 
   /**
@@ -814,7 +815,10 @@ export class WorkAgent<
       if (outerListener && event.type === "usage.recorded") this.emitTrace(event);
     });
     try {
-      const result = await this.reviewAgent.runTurn(prompt, [], { signal });
+      const result = await runExecutionNonInterruptible(
+        "provider.request",
+        () => this.reviewAgent!.runTurn(prompt, [], { signal }),
+      );
       return { ...result, routeObservations };
     } finally {
       this.reviewAgent.setTraceListener(undefined);
@@ -1888,21 +1892,24 @@ export class WorkAgent<
           let outcome: Awaited<ReturnType<WorkAgentRunController<Attachment, TraceEvent, Reasoning>["runTask"]>>;
           let producerAgentRunId: string | undefined;
           try {
-            outcome = await this.runController.runTask({
-              graphId: activeGraphId,
-              jobKey: qualityJobKey(quality, node),
-              task: {
-                id: node.id,
-                summary: node.title,
-                prompt: appendQualityContext(node.prompt, context),
-              },
-              signal: turnSignal,
-              preferDirect: route.executor !== "commodity",
-              onDispatchStarting: (agentRunId) => {
-                producerAgentRunId = agentRunId;
-                this.emitQualityStage(quality, "work", route, agentRunId, node);
-              },
-            });
+            outcome = await runExecutionNonInterruptible(
+              "provider.request",
+              () => this.runController.runTask({
+                graphId: activeGraphId,
+                jobKey: qualityJobKey(quality, node),
+                task: {
+                  id: node.id,
+                  summary: node.title,
+                  prompt: appendQualityContext(node.prompt, context),
+                },
+                signal: turnSignal,
+                preferDirect: route.executor !== "commodity",
+                onDispatchStarting: (agentRunId) => {
+                  producerAgentRunId = agentRunId;
+                  this.emitQualityStage(quality, "work", route, agentRunId, node);
+                },
+              }),
+            );
           } catch (error) {
             const summary = `Executor failed: ${error instanceof Error ? error.message : String(error)}`;
             await this.finishTerminalQualityNode(quality, node, "failed", summary, route);
@@ -2003,11 +2010,14 @@ export class WorkAgent<
           return { id: task.id, summary: outcome.text, status: "completed" };
         }
 
-        const outcome = await this.runController.runTask({
-          graphId: activeGraphId,
-          task,
-          signal: turnSignal,
-        });
+        const outcome = await runExecutionNonInterruptible(
+          "provider.request",
+          () => this.runController.runTask({
+            graphId: activeGraphId,
+            task,
+            signal: turnSignal,
+          }),
+        );
         return { id: task.id, summary: outcome.text, status: outcome.status };
       },
       isComplexTaskSuccessful: (taskResult) => taskResult.status === "completed",
@@ -2741,12 +2751,16 @@ export class WorkAgent<
               };
             }
           },
+          onTaskSettled: async () => {
+            await checkpointExecutionPause("between_nodes");
+          },
         });
       } catch (error) {
         if (error instanceof QualityLifecycleStop && quality?.terminal) {
           return this.terminateQuality(quality);
         }
         if (error instanceof QualityLifecycleStop && quality?.pendingIteration) {
+          await checkpointExecutionPause("between_quality_iterations");
           prepareNextQualityIteration();
           result = undefined;
           continue;
@@ -2768,6 +2782,7 @@ export class WorkAgent<
         return this.terminateQuality(quality);
       }
       if (quality?.pendingIteration) {
+        await checkpointExecutionPause("between_quality_iterations");
         prepareNextQualityIteration();
         result = undefined;
       }

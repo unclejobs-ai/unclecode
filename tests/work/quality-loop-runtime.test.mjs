@@ -13,7 +13,9 @@ import test from "node:test";
 
 import {
   applyTraceEventToAgentConsole,
+  CooperativePauseController,
   persistWorkShellSessionSnapshot,
+  runExecutionNonInterruptible,
   WorkAgent,
 } from "@unclecode/orchestrator";
 import { parseAgentConsoleSnapshot } from "@unclecode/contracts";
@@ -211,6 +213,28 @@ function deferred() {
   return { promise, resolve };
 }
 
+function createPauseRuntime(turnId) {
+  const persisted = [];
+  const controller = new CooperativePauseController();
+  controller.beginTurn(turnId);
+  const persist = async (snapshot) => {
+    persisted.push(snapshot);
+  };
+  return {
+    controller,
+    persisted,
+    port: {
+      checkpoint: (boundary) => controller.checkpoint(boundary, persist),
+      runNonInterruptible: (operation, run) =>
+        controller.runNonInterruptible(operation, run, persist),
+    },
+  };
+}
+
+function nextEventLoopTurn() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 const refineFinding = {
   kind: "implementation",
   severity: "medium",
@@ -351,7 +375,10 @@ function createLoopHarness(input) {
       };
     },
   });
-  agent.setTraceListener((event) => traces.push(event));
+  agent.setTraceListener((event) => {
+    traces.push(event);
+    input.onTrace?.(event);
+  });
   return {
     agent,
     traces,
@@ -504,6 +531,208 @@ async function persistAndResumeTracePrefix(workspace, traces, endIndex, sessionI
     sessionId,
   });
 }
+
+test("a multi-node WorkAgent pauses after each settled DAG node and resumes without replay", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-loop-node-pause-"));
+  const foundationHookEntered = deferred();
+  const releaseFoundationHook = deferred();
+  const toolEffects = [];
+  const pause = createPauseRuntime("quality-node-pause");
+  const harness = createLoopHarness({
+    workspace,
+    plans: [plan("v1")],
+    criticVerdicts: [verdict()],
+    async onWorker({ part }) {
+      await runExecutionNonInterruptible("tool.dispatch", async () => {
+        toolEffects.push(part);
+      });
+    },
+    async onNodeCompleted({ node }) {
+      if (node.id === "v1-foundation") {
+        foundationHookEntered.resolve();
+        await releaseFoundationHook.promise;
+      }
+      return { action: "proceed" };
+    },
+  });
+  const run = harness.agent.runTurn(
+    "refactor v1 foundation and integration safely",
+    [],
+    { pause: pause.port },
+  );
+
+  try {
+    await foundationHookEntered.promise;
+    const receiptPromise = pause.controller.requestPause();
+    releaseFoundationHook.resolve();
+    const receipt = await receiptPromise;
+    const workerCallsAtPause = harness.workerCalls.map(({ part }) => part);
+    const pausedConsole = reduceTracePrefix(harness.traces, harness.traces.length - 1);
+
+    assert.equal(pause.controller.resume(), true);
+    const result = await run;
+
+    assert.equal(receipt.boundary, "between_nodes");
+    assert.deepEqual(pause.persisted.map(({ boundary }) => boundary), ["between_nodes"]);
+    assert.deepEqual(workerCallsAtPause, ["foundation"]);
+    assert.equal(
+      pausedConsole.workGraph?.nodes.find((node) => node.id === "v1-foundation")?.status,
+      "completed",
+    );
+    assert.notEqual(
+      pausedConsole.workGraph?.nodes.find((node) => node.id === "v1-integration")?.status,
+      "running",
+    );
+    assert.deepEqual(result, { text: "reviewed handoff", qualityStatus: "proceed" });
+    assert.deepEqual(harness.workerCalls.map(({ part }) => part), ["foundation", "integration"]);
+    assert.deepEqual(toolEffects, ["foundation", "integration"]);
+    assert.deepEqual(harness.reviewCalls, ["critic", "promote"]);
+  } finally {
+    releaseFoundationHook.resolve();
+    pause.controller.cancel();
+    await run.catch(() => undefined);
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a parallel WorkAgent pauses only after sibling provider and tool work settles, without replay", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-loop-parallel-pause-"));
+  const foundationHookEntered = deferred();
+  const releaseFoundationHook = deferred();
+  const integrationToolEntered = deferred();
+  const releaseIntegrationTool = deferred();
+  const toolEffects = [];
+  const pause = createPauseRuntime("quality-parallel-pause");
+  const harness = createLoopHarness({
+    workspace,
+    plans: [parallelPlan("v1")],
+    criticVerdicts: [verdict()],
+    parallelWorkers: true,
+    async onWorker({ part }) {
+      await runExecutionNonInterruptible("tool.dispatch", async () => {
+        toolEffects.push(part);
+        if (part === "integration") {
+          integrationToolEntered.resolve();
+          await releaseIntegrationTool.promise;
+        }
+      });
+    },
+    async onNodeCompleted({ node }) {
+      if (node.id === "v1-foundation") {
+        foundationHookEntered.resolve();
+        await releaseFoundationHook.promise;
+      }
+      return { action: "proceed" };
+    },
+  });
+  const run = harness.agent.runTurn(
+    "refactor v1 foundation and integration safely",
+    [],
+    { pause: pause.port },
+  );
+
+  try {
+    await Promise.all([foundationHookEntered.promise, integrationToolEntered.promise]);
+    let acknowledged = false;
+    const receiptPromise = pause.controller.requestPause().then((receipt) => {
+      acknowledged = true;
+      return receipt;
+    });
+    releaseFoundationHook.resolve();
+    await nextEventLoopTurn();
+    await nextEventLoopTurn();
+    assert.equal(acknowledged, false, "a sibling provider/tool remains noninterruptible");
+
+    releaseIntegrationTool.resolve();
+    const receipt = await receiptPromise;
+    const pausedConsole = reduceTracePrefix(harness.traces, harness.traces.length - 1);
+    assert.equal(pause.controller.resume(), true);
+    const result = await run;
+
+    assert.equal(receipt.boundary, "after_provider");
+    assert.deepEqual(pause.persisted.map(({ boundary }) => boundary), ["after_provider"]);
+    assert.equal(
+      pausedConsole.workGraph?.nodes.find((node) => node.id === "v1-foundation")?.status,
+      "completed",
+    );
+    assert.equal(
+      pausedConsole.workGraph?.nodes.find((node) => node.id === "v1-integration")?.status,
+      "running",
+    );
+    assert.deepEqual(result, { text: "reviewed handoff", qualityStatus: "proceed" });
+    assert.deepEqual(harness.workerCalls.map(({ part }) => part).sort(), ["foundation", "integration"]);
+    assert.deepEqual(toolEffects.sort(), ["foundation", "integration"]);
+    assert.deepEqual(harness.reviewCalls, ["critic", "promote"]);
+  } finally {
+    releaseFoundationHook.resolve();
+    releaseIntegrationTool.resolve();
+    pause.controller.cancel();
+    await run.catch(() => undefined);
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a WorkAgent pauses between quality iterations and resumes the retry without replay", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-loop-iteration-pause-"));
+  const toolEffects = [];
+  const pause = createPauseRuntime("quality-iteration-pause");
+  const refineGateObserved = deferred();
+  let receiptPromise;
+  const harness = createLoopHarness({
+    workspace,
+    plans: [plan("v1")],
+    criticVerdicts: [verdict([refineFinding]), verdict()],
+    async onWorker({ part, ordinal }) {
+      await runExecutionNonInterruptible("tool.dispatch", async () => {
+        toolEffects.push(`${part}:${ordinal}`);
+      });
+    },
+    onTrace(event) {
+      if (event.type === "quality.gate_evaluated" && event.decision === "refine") {
+        receiptPromise = pause.controller.requestPause();
+        refineGateObserved.resolve();
+      }
+    },
+  });
+  const run = harness.agent.runTurn(
+    "refactor v1 foundation and integration safely",
+    [],
+    { pause: pause.port },
+  );
+
+  try {
+    await refineGateObserved.promise;
+    const receipt = await receiptPromise;
+    const workerCallsAtPause = harness.workerCalls.map(({ part, ordinal }) => `${part}:${ordinal}`);
+    assert.equal(pause.controller.resume(), true);
+    const result = await run;
+
+    assert.equal(receipt.boundary, "between_quality_iterations");
+    assert.deepEqual(
+      pause.persisted.map(({ boundary }) => boundary),
+      ["between_quality_iterations"],
+    );
+    assert.deepEqual(workerCallsAtPause, ["foundation:1", "integration:2"]);
+    assert.deepEqual(result, { text: "reviewed handoff", qualityStatus: "proceed" });
+    assert.deepEqual(harness.workerCalls.map(({ part, ordinal }) => `${part}:${ordinal}`), [
+      "foundation:1",
+      "integration:2",
+      "foundation:3",
+      "integration:4",
+    ]);
+    assert.deepEqual(toolEffects, [
+      "foundation:1",
+      "integration:2",
+      "foundation:3",
+      "integration:4",
+    ]);
+    assert.deepEqual(harness.reviewCalls, ["critic", "critic", "promote"]);
+  } finally {
+    pause.controller.cancel();
+    await run.catch(() => undefined);
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
 
 test("creator routing invokes the recorded evolution lifecycle before completion and rechecks freshness", async () => {
   const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-creator-evolution-"));

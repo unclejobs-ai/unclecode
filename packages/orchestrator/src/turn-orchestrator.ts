@@ -226,6 +226,10 @@ export async function runGoalTaskExecutorPool<Task extends ComplexPlanTask, Resu
   readonly ownershipRegistry?: FileOwnershipRegistry | undefined;
   readonly onTrace?: TurnOrchestratorTraceListener | undefined;
   readonly onStatus?: ((task: Task, status: WorkNodeStatus) => void) | undefined;
+  readonly onTaskSettled?: (
+    task: Task,
+    status: Extract<WorkNodeStatus, "completed" | "failed" | "cancelled" | "blocked">,
+  ) => void | Promise<void>;
 }): Promise<readonly Result[]> {
   const violation = findGoalTaskPlanViolation(input.tasks);
   if (violation) {
@@ -250,6 +254,7 @@ export async function runGoalTaskExecutorPool<Task extends ComplexPlanTask, Resu
       if (blockedResult !== undefined) {
         results.set(task.id, blockedResult);
       }
+      await input.onTaskSettled?.(task, "blocked");
     }
     if (blocked.length > 0) {
       continue;
@@ -276,21 +281,23 @@ export async function runGoalTaskExecutorPool<Task extends ComplexPlanTask, Resu
       ownershipRegistry,
       executeTask: async (task) => {
         input.onStatus?.(task, "running");
+        let result: Result;
         try {
-          const result = await input.executeTask(task);
-          input.onStatus?.(
-            task,
-            input.resolveResultStatus?.(result) ?? (input.isSuccessful(result) ? "completed" : "failed"),
-          );
-          return result;
+          result = await input.executeTask(task);
         } catch (error) {
           input.onStatus?.(task, "failed");
           const failedResult = input.createFailedResult?.(task, error);
+          await input.onTaskSettled?.(task, "failed");
           if (failedResult === undefined) {
             throw error;
           }
           return failedResult;
         }
+        const status = input.resolveResultStatus?.(result)
+          ?? (input.isSuccessful(result) ? "completed" : "failed");
+        input.onStatus?.(task, status);
+        await input.onTaskSettled?.(task, status);
+        return result;
       },
       ...(input.onTrace ? { onTrace: input.onTrace } : {}),
     });
@@ -347,6 +354,10 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
       readonly onTrace?: TurnOrchestratorTraceListener | undefined;
       readonly onPlan?: ((tasks: readonly Task[]) => void | Promise<void>) | undefined;
       readonly onTaskStatus?: ((task: Task, status: WorkNodeStatus) => void) | undefined;
+      readonly onTaskSettled?: ((
+        task: Task,
+        status: Extract<WorkNodeStatus, "completed" | "failed" | "cancelled" | "blocked">,
+      ) => void | Promise<void>) | undefined;
     }): Promise<
       | { readonly kind: "simple"; readonly text: string }
       | { readonly kind: "research"; readonly text: string }
@@ -426,6 +437,7 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
             ownershipRegistry: input.ownershipRegistry ?? new FileOwnershipRegistry(),
             ...(input.onTrace ? { onTrace: input.onTrace } : {}),
             ...(input.onTaskStatus ? { onStatus: input.onTaskStatus } : {}),
+            ...(input.onTaskSettled ? { onTaskSettled: input.onTaskSettled } : {}),
           })
         : await runBoundedExecutorPool({
             tasks,
