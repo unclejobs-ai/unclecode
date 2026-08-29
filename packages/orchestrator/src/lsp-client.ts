@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createInstrumentedLruCache } from "@unclecode/contracts";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -32,7 +33,10 @@ type DiagnosticWaiter = {
   readonly timer: NodeJS.Timeout;
 };
 const FORCE_KILL_DELAY_MS = 2_000;
-
+const MAX_LSP_FRAME_BYTES = 16 * 1024 * 1024;
+const MAX_LSP_INPUT_BUFFER_BYTES = 32 * 1024 * 1024;
+const MAX_PUBLISHED_DIAGNOSTIC_URIS = 512;
+const MAX_PUBLISHED_DIAGNOSTIC_BYTES = 8 * 1024 * 1024;
 
 function abortError(): Error {
   const error = new Error("The LSP request was aborted.");
@@ -97,7 +101,11 @@ export class LspJsonRpcClient {
   private buffer = Buffer.alloc(0);
   private nextRequestId = 1;
   private readonly pending = new Map<number, PendingRequest>();
-  private readonly publishedDiagnostics = new Map<string, unknown[]>();
+  private readonly publishedDiagnostics = createInstrumentedLruCache<string, unknown[]>({
+    name: "lsp-published-diagnostics",
+    maxEntries: MAX_PUBLISHED_DIAGNOSTIC_URIS,
+    maxRetainedBytes: MAX_PUBLISHED_DIAGNOSTIC_BYTES,
+  });
   private readonly diagnosticWaiters = new Map<string, Set<DiagnosticWaiter>>();
   private stderr = "";
   private closed = false;
@@ -199,8 +207,8 @@ export class LspJsonRpcClient {
   }
 
   waitForPublishedDiagnostics(uri: string, timeoutMs = this.timeoutMs): Promise<{ received: boolean; items: unknown[] }> {
-    const current = this.publishedDiagnostics.get(uri);
-    if (current) return Promise.resolve({ received: true, items: current });
+    const current = this.publishedDiagnostics.lookup(uri);
+    if (current.hit) return Promise.resolve({ received: true, items: current.value });
     const { promise, resolve } = Promise.withResolvers<{ received: boolean; items: unknown[] }>();
     let waiter: DiagnosticWaiter;
     const timer = setTimeout(() => {
@@ -236,7 +244,7 @@ export class LspJsonRpcClient {
       }
       this.rejectPending(new Error(`${this.config.id} session closed`));
       this.settleDiagnosticWaiters();
-      this.publishedDiagnostics.clear();
+      this.publishedDiagnostics.invalidateAll();
       this.buffer = Buffer.alloc(0);
     }
     await this.terminateChild();
@@ -250,6 +258,10 @@ export class LspJsonRpcClient {
 
   private consume(chunk: Buffer): void {
     this.buffer = Buffer.concat([this.buffer, chunk]);
+    if (this.buffer.length > MAX_LSP_INPUT_BUFFER_BYTES) {
+      this.fail(new Error(`${this.config.id} exceeded the 32 MiB LSP input buffer limit`));
+      return;
+    }
     while (true) {
       const headerEnd = this.buffer.indexOf("\r\n\r\n");
       if (headerEnd < 0) return;
@@ -260,6 +272,10 @@ export class LspJsonRpcClient {
         return;
       }
       const bodyLength = Number(lengthMatch[1]);
+      if (!Number.isSafeInteger(bodyLength) || bodyLength < 0 || bodyLength > MAX_LSP_FRAME_BYTES) {
+        this.fail(new Error(`${this.config.id} sent an oversized LSP frame`));
+        return;
+      }
       const bodyStart = headerEnd + 4;
       if (this.buffer.length < bodyStart + bodyLength) return;
       const body = this.buffer.subarray(bodyStart, bodyStart + bodyLength).toString("utf8");
@@ -330,7 +346,7 @@ export class LspJsonRpcClient {
     void this.terminationPromise.catch(() => undefined);
     this.rejectPending(failure);
     this.settleDiagnosticWaiters();
-    this.publishedDiagnostics.clear();
+    this.publishedDiagnostics.invalidateAll();
     this.buffer = Buffer.alloc(0);
   }
 

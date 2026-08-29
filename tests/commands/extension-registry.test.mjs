@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import {
   clearExtensionRegistryCache,
+  getExtensionRegistryCacheTelemetrySnapshot,
   getWorkShellSlashSuggestions,
   loadExtensionConfigOverlays,
   loadExtensionManifestSummaries,
@@ -123,4 +124,36 @@ test("clearExtensionRegistryCache refreshes cached extension slash suggestions",
   const refreshed = getWorkShellSlashSuggestions("/focus", { workspaceRoot: cwd }).map((item) => item.command);
   assert.ok(!refreshed.includes("/focus"));
   assert.ok(refreshed.includes("/focus2"));
+});
+
+test("extension manifest cache evicts the least-recent workspace and reports bounded retention", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-extension-cache-bound-"));
+  clearExtensionRegistryCache();
+  const before = getExtensionRegistryCacheTelemetrySnapshot();
+
+  try {
+    const workspaces = Array.from({ length: 33 }, (_, index) => path.join(root, `workspace-${index}`));
+    for (const [index, workspaceRoot] of workspaces.entries()) {
+      writeManifest(workspaceRoot, "focus.json", {
+        name: "focus-tools",
+        status: { lines: [`v${index}`] },
+      });
+      loadExtensionManifestSummaries({ workspaceRoot });
+    }
+
+    writeManifest(workspaces[0], "focus.json", {
+      name: "focus-tools",
+      status: { lines: ["reloaded-after-eviction"] },
+    });
+    const reloaded = loadExtensionManifestSummaries({ workspaceRoot: workspaces[0] });
+    const after = getExtensionRegistryCacheTelemetrySnapshot();
+
+    assert.deepEqual(reloaded[0]?.statusLines, ["reloaded-after-eviction"]);
+    assert.ok(after.currentSize <= 32, "manifest retention must stay within 32 workspaces");
+    assert.ok(after.evictions > before.evictions, "workspace churn must be visible as an eviction");
+    assert.ok(after.retainedBytesEstimate <= after.maxRetainedBytes);
+  } finally {
+    clearExtensionRegistryCache();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

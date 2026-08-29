@@ -1,10 +1,12 @@
 import type {
+  CacheTelemetrySnapshot,
   ModeBackgroundTaskPolicy,
   ModeEditingPolicy,
   ModeExplanationStyle,
   ModeProfileId,
   ModeSearchDepth,
 } from "@unclecode/contracts";
+import { createInstrumentedLruCache } from "@unclecode/contracts";
 import { homedir } from "node:os";
 import path from "node:path";
 
@@ -36,7 +38,13 @@ type ExtensionManifestPayload = {
   readonly summaries: readonly ExtensionManifestSummary[];
 };
 
-const manifestCache = new Map<string, ExtensionManifestPayload>();
+const MANIFEST_CACHE_MAX_ENTRIES = 32;
+const MANIFEST_CACHE_MAX_RETAINED_BYTES = 4 * 1024 * 1024;
+const manifestCache = createInstrumentedLruCache<string, ExtensionManifestPayload>({
+  name: "orchestrator-extension-manifests",
+  maxEntries: MANIFEST_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: MANIFEST_CACHE_MAX_RETAINED_BYTES,
+});
 let extensionRegistryCacheGeneration = 0;
 
 type ExtensionRegistryInput = {
@@ -61,22 +69,26 @@ function getManifestCacheKey(input: ExtensionRegistryInput = {}): string {
 export function clearExtensionRegistryCache(input?: ExtensionRegistryInput): void {
   extensionRegistryCacheGeneration += 1;
   if (!input?.workspaceRoot && !input?.userHomeDir) {
-    manifestCache.clear();
+    manifestCache.invalidateAll();
     return;
   }
 
-  manifestCache.delete(getManifestCacheKey(input));
+  manifestCache.invalidate(getManifestCacheKey(input));
 }
 
 export function getExtensionRegistryCacheGeneration(): number {
   return extensionRegistryCacheGeneration;
 }
 
+export function getExtensionRegistryCacheTelemetrySnapshot(): CacheTelemetrySnapshot {
+  return manifestCache.snapshot();
+}
+
 function loadExtensionManifestPayload(input: ExtensionRegistryInput = {}): ExtensionManifestPayload {
   const cacheKey = getManifestCacheKey(input);
-  const cached = manifestCache.get(cacheKey);
-  if (cached) {
-    return cached;
+  const cached = manifestCache.lookup(cacheKey);
+  if (cached.hit) {
+    return cached.value;
   }
 
   const workspaceRoot = input.workspaceRoot ?? process.cwd();

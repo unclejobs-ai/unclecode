@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { loadConfig } from "@unclecode/orchestrator";
+import {
+  getAppReasoningConfigCacheTelemetrySnapshot,
+  loadConfig,
+} from "@unclecode/orchestrator";
 import { OpenAIProvider, createRuntimeProvider } from "@unclecode/providers";
 import {
   loadWorkCliBootstrap,
@@ -64,6 +67,34 @@ test("loadConfig resolves injected env auth, model, and home extension overlays"
     assert.equal(config.model, "deepseek-reasoner");
     assert.equal(config.baseUrl, "https://injected.example/v1/chat/completions");
     assert.equal(config.mode, "analyze");
+  } finally {
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("reasoning config cache reports eviction under model churn and remains byte bounded", async () => {
+  const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-reasoning-cache-bound-"));
+  const env = {
+    PATH: process.env.PATH,
+    HOME: workspaceRoot,
+    LLM_PROVIDER: "deepseek",
+    DEEPSEEK_API_KEY: "cache-test-key",
+  };
+  const before = getAppReasoningConfigCacheTelemetrySnapshot();
+
+  try {
+    for (let index = 0; index < 65; index += 1) {
+      await loadConfig({
+        cwd: workspaceRoot,
+        env,
+        model: `cache-churn-${process.pid}-${Date.now()}-${index}`,
+      });
+    }
+    const after = getAppReasoningConfigCacheTelemetrySnapshot();
+
+    assert.ok(after.currentSize <= 64, "reasoning retention must stay within 64 configurations");
+    assert.ok(after.evictions > before.evictions, "model churn must be visible as an eviction");
+    assert.ok(after.retainedBytesEstimate <= after.maxRetainedBytes);
   } finally {
     rmSync(workspaceRoot, { recursive: true, force: true });
   }

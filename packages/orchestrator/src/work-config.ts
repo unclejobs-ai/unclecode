@@ -1,4 +1,5 @@
 import { explainUncleCodeConfig } from "@unclecode/config-core";
+import { createInstrumentedLruCache, type CacheTelemetrySnapshot } from "@unclecode/contracts";
 import { isModeReasoningEffort } from "@unclecode/contracts";
 import {
   type ModeProfileId,
@@ -35,7 +36,13 @@ const envSchema = z.object({
   GEMINI_MODEL: z.string().min(1).default("gemini-2.5-flash"),
 });
 
-const appReasoningConfigCache = new Map<string, AppReasoningConfig>();
+const APP_REASONING_CACHE_MAX_ENTRIES = 64;
+const APP_REASONING_CACHE_MAX_RETAINED_BYTES = 256 * 1024;
+const appReasoningConfigCache = createInstrumentedLruCache<string, AppReasoningConfig>({
+  name: "orchestrator-app-reasoning-config",
+  maxEntries: APP_REASONING_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: APP_REASONING_CACHE_MAX_RETAINED_BYTES,
+});
 
 export type AppReasoningConfig = {
   effort: ModeReasoningEffort | "unsupported";
@@ -79,9 +86,9 @@ function resolveReasoningConfig(input: {
     mode: input.mode,
     override: input.override ?? null,
   });
-  const cached = appReasoningConfigCache.get(cacheKey);
-  if (cached) {
-    return cached;
+  const cached = appReasoningConfigCache.lookup(cacheKey);
+  if (cached.hit) {
+    return cached.value;
   }
   const raw = runRustCommandSync(
     [
@@ -103,6 +110,10 @@ function resolveReasoningConfig(input: {
   }
   appReasoningConfigCache.set(cacheKey, parsed);
   return parsed;
+}
+
+export function getAppReasoningConfigCacheTelemetrySnapshot(): CacheTelemetrySnapshot {
+  return appReasoningConfigCache.snapshot();
 }
 
 function isAppReasoningConfig(value: unknown): value is AppReasoningConfig {
