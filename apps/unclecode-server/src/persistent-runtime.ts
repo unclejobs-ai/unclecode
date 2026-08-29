@@ -56,7 +56,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function stateOf(value: unknown): RuntimeSessionSource["state"] {
-  if (value === "running" || value === "paused" || value === "requires_action" || value === "completed" || value === "failed" || value === "cancelled") return value;
+  if (value === "running" || value === "pause_pending" || value === "paused" || value === "requires_action" || value === "completed" || value === "failed" || value === "cancelled") return value;
   return "idle";
 }
 
@@ -99,14 +99,21 @@ async function readCheckpoint(path: string, controls: LiveRuntimeControlRegistry
     const metadata = isRecord(parsed.metadata) ? parsed.metadata : undefined;
     const agentConsole = isRecord(parsed.agentConsole) ? parsed.agentConsole : undefined;
     const eventCount = typeof parsed.eventCount === "number" && Number.isSafeInteger(parsed.eventCount) ? parsed.eventCount : 0;
+    const checkpointState = stateOf(parsed.state);
+    const wasInFlight = checkpointState === "running"
+      || checkpointState === "pause_pending"
+      || checkpointState === "paused";
+    const recoveredMetadata = wasInFlight
+      ? { ...(metadata ?? {}), recoveryStatus: "non_resumable_owner_restart", checkpointState }
+      : metadata;
     const persisted: RuntimeSessionSource = {
       sessionId: parsed.sessionId,
       projectPath: parsed.projectPath,
       locale: localeOf(parsed),
-      state: stateOf(parsed.state),
+      state: wasInFlight ? "failed" : checkpointState,
       revision: controls.revision(parsed.sessionId) ?? eventCount,
       ...(typeof parsed.updatedAt === "string" ? { updatedAt: parsed.updatedAt } : {}),
-      ...(metadata ? { metadata } : {}),
+      ...(recoveredMetadata ? { metadata: recoveredMetadata } : {}),
       ...(agentConsole ? { agentConsole } : {}),
       context: {
         included: [],

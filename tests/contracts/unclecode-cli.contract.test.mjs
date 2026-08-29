@@ -904,7 +904,7 @@ test("startup router keeps interactive boot behind dynamic imports without nativ
   assert.doesNotMatch(binSource, /temporary Node fallback/);
   assert.match(
     workTsconfig,
-    /"include"\s*:\s*\[\s*"apps\/unclecode-cli\/src\/work-entry\.ts"\s*\]/,
+    /"include"\s*:\s*\[\s*"apps\/unclecode-cli\/src\/work-entry\.ts",\s*"apps\/unclecode-cli\/src\/runtime-owner-service\.ts"\s*\]/,
   );
   assert.doesNotMatch(workTsconfig, /"src\/\*\*\/*.ts"/);
   assert.equal(

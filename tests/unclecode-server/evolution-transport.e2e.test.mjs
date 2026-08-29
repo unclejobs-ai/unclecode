@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -7,6 +6,7 @@ import test from "node:test";
 
 import { persistWorkShellSessionSnapshot } from "@unclecode/orchestrator";
 import { createControlRoomStore } from "../../apps/godness-web/src/control-room-store.js";
+import { defaultRuntimeOwnerPaths, startPersistentRuntimeOwner } from "../../apps/unclecode-server/src/index.ts";
 
 function proposal(state = "pr-ready") {
   const fresh = state === "pr-ready";
@@ -92,49 +92,17 @@ async function waitFor(assertion, timeoutMs = 2_000) {
 }
 
 async function startStandaloneServer(root, sessionStoreRoot) {
-  const child = spawn(
-    process.execPath,
-    [
-      "--disable-warning=ExperimentalWarning",
-      "--conditions=source",
-      "--import",
-      "tsx",
-      "apps/unclecode-server/src/cli.ts",
-    ],
-    {
-      cwd: new URL("../..", import.meta.url),
-      env: {
-        ...process.env,
-        HOME: root,
-        UNCLECODE_SESSION_STORE_ROOT: sessionStoreRoot,
-        UNCLECODE_SERVER_HOST: "127.0.0.1",
-        UNCLECODE_SERVER_PORT: "0",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  let output = "";
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => { output += chunk; });
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk) => { output += chunk; });
-  const url = await waitFor(() => {
-    const match = output.match(/unclecode-server listening on (http:\/\/127\.0\.0\.1:\d+)/u);
-    assert.ok(match?.[1], output);
-    return match[1];
-  }, 5_000);
-  const token = (await readFile(path.join(root, ".unclecode", "server.token"), "utf8")).trim();
+  const paths = defaultRuntimeOwnerPaths(root);
+  const owner = await startPersistentRuntimeOwner({
+    rootDir: sessionStoreRoot,
+    leasePath: paths.leasePath,
+    tokenPath: paths.tokenPath,
+  });
+  const token = (await readFile(paths.tokenPath, "utf8")).trim();
   return {
-    child,
     token,
-    url,
-    async stop() {
-      child.kill("SIGTERM");
-      await Promise.race([
-        new Promise((resolve) => child.once("close", resolve)),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("standalone server did not stop")), 2_000)),
-      ]);
-    },
+    url: owner.lease.endpoint,
+    stop: owner.stop,
   };
 }
 
@@ -169,7 +137,7 @@ async function readReplayIds(url, token, sessionId, count) {
   }
 }
 
-test("actual Work Shell persistence refreshes the real web store through standalone bearer SSE", async () => {
+test("actual Work Shell persistence refreshes the real owner web store through bearer SSE", async () => {
   const root = await mkdtemp(
     path.join(tmpdir(), "unclecode-evolution-transport-"),
   );

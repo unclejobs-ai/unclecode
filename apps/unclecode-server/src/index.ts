@@ -2,7 +2,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 import { BoundedEventJournal, type JournalEvent, type JournalReplay } from "./event-journal.js";
@@ -16,6 +16,12 @@ export { CONTROL_ACTIONS, createRuntimeAdapter } from "./runtime-adapter.js";
 export type { ControlAction, RuntimeAdapter, RuntimeControlPort, RuntimeControlRequest, RuntimeControlResult } from "./runtime-adapter.js";
 export { createPersistentRuntimeAdapter, LiveRuntimeControlRegistry, readPersistentRuntime } from "./persistent-runtime.js";
 export type { AttachedRuntimeControl } from "./persistent-runtime.js";
+export { attachWorkShellRuntime } from "./work-shell-control.js";
+export type { WorkShellControlEngine, WorkShellRuntimeChange } from "./work-shell-control.js";
+export * from "./runtime-owner-discovery.js";
+export * from "./runtime-owner-client.js";
+export * from "./runtime-owner.js";
+export * from "./runtime-engine-rpc.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -74,6 +80,11 @@ export type ServerHealth = {
   readonly pid: number;
   readonly startedAt: number;
   readonly uptimeMs: number;
+  readonly runtimeOwner?: {
+    readonly protocol: string;
+    readonly ownerId: string;
+    readonly bootId: string;
+  } | undefined;
 };
 
 export type ServerSessionSummary = {
@@ -101,6 +112,11 @@ export type ServerHandlers = {
   readRun?(sessionId: string): Promise<ControlRoomProjection["runs"][number] | null>;
   control?(request: RuntimeControlRequest): Promise<RuntimeControlResult>;
   subscribeEvents?(sessionId: string, afterId: number, write: (event: JournalEvent) => void): EventSubscription;
+  readEngineState?(sessionId: string): unknown;
+  invokeEngineMethod?(input: { readonly sessionId: string; readonly method: string; readonly args: readonly unknown[]; readonly expectedRevision: number; readonly idempotencyKey: string }): Promise<unknown>;
+  listRuntimeSessions?(): unknown;
+  createRuntimeSession?(input: { readonly sessionId: string; readonly projectPath: string; readonly provider?: string | undefined; readonly model?: string | undefined; readonly reasoning?: string | undefined; readonly resume?: boolean | undefined; readonly idempotencyKey: string }): Promise<unknown>;
+  attachRuntimeSession?(sessionId: string): unknown;
 };
 
 export type ServerOptions = {
@@ -110,6 +126,7 @@ export type ServerOptions = {
   readonly authToken?: string;
   readonly insecure?: boolean;
   readonly heartbeatMs?: number;
+  readonly runtimeOwner?: ServerHealth["runtimeOwner"];
 };
 
 export function makeControlRoomHandlers(input: { readonly adapter: RuntimeAdapter; readonly journal?: BoundedEventJournal }): ServerHandlers {
@@ -196,7 +213,13 @@ async function routeRequest(input: { readonly req: IncomingMessage; readonly res
 
   if (url.pathname === "/health") {
     if (method !== "GET") return methodNotAllowed(res, ["GET"]);
-    const body: ServerHealth = { ok: true, pid: process.pid, startedAt, uptimeMs: Date.now() - startedAt };
+    const body: ServerHealth = {
+      ok: true,
+      pid: process.pid,
+      startedAt,
+      uptimeMs: Date.now() - startedAt,
+      ...(options.runtimeOwner ? { runtimeOwner: options.runtimeOwner } : {}),
+    };
     return writeJson(res, 200, body);
   }
 
@@ -211,6 +234,71 @@ async function routeRequest(input: { readonly req: IncomingMessage; readonly res
     if (method !== "GET") return methodNotAllowed(res, ["GET"]);
     if (!options.handlers.readControlRoom) return writeError(res, 404, "not_available", "Control-room projection is unavailable.");
     return writeJson(res, 200, await options.handlers.readControlRoom());
+  }
+
+  if (url.pathname === "/runtime/sessions") {
+    if (method === "GET") {
+      if (!options.handlers.listRuntimeSessions) return writeError(res, 404, "not_available", "Runtime session registry is unavailable.");
+      return writeJson(res, 200, { sessions: options.handlers.listRuntimeSessions() });
+    }
+    if (method !== "POST") return methodNotAllowed(res, ["GET", "POST"]);
+    if (!options.handlers.createRuntimeSession) return writeError(res, 404, "not_available", "Runtime session factory is unavailable.");
+    const idempotencyKey = req.headers["idempotency-key"];
+    if (typeof idempotencyKey !== "string" || idempotencyKey.length < 1 || idempotencyKey.length > 160) {
+      return writeError(res, 400, "missing_idempotency_key", "Idempotency-Key is required.");
+    }
+    const body = await readJson(req);
+    if (!isRecord(body) || typeof body.sessionId !== "string" || !/^[A-Za-z0-9._-]+$/.test(body.sessionId)
+      || typeof body.projectPath !== "string" || !isAbsolute(body.projectPath)
+      || (body.provider !== undefined && typeof body.provider !== "string")
+      || (body.model !== undefined && typeof body.model !== "string")
+      || (body.reasoning !== undefined && typeof body.reasoning !== "string")
+      || (body.resume !== undefined && typeof body.resume !== "boolean")) {
+      return writeError(res, 400, "invalid_body", "A safe sessionId and absolute projectPath are required.");
+    }
+    return writeJson(res, 200, await options.handlers.createRuntimeSession({
+      sessionId: body.sessionId,
+      projectPath: body.projectPath,
+      ...(typeof body.provider === "string" ? { provider: body.provider } : {}),
+      ...(typeof body.model === "string" ? { model: body.model } : {}),
+      ...(typeof body.reasoning === "string" ? { reasoning: body.reasoning } : {}),
+      ...(typeof body.resume === "boolean" ? { resume: body.resume } : {}),
+      idempotencyKey,
+    }));
+  }
+
+  const runtimeAttachMatch = /^\/runtime\/sessions\/([A-Za-z0-9._-]+)\/attach$/.exec(url.pathname);
+  if (runtimeAttachMatch) {
+    if (method !== "POST") return methodNotAllowed(res, ["POST"]);
+    if (!options.handlers.attachRuntimeSession) return writeError(res, 404, "not_available", "Runtime session attachment is unavailable.");
+    return writeJson(res, 200, options.handlers.attachRuntimeSession(runtimeAttachMatch[1] ?? ""));
+  }
+
+  const engineStateMatch = /^\/runtime\/sessions\/([A-Za-z0-9._-]+)\/state$/.exec(url.pathname);
+  if (engineStateMatch) {
+    if (method !== "GET") return methodNotAllowed(res, ["GET"]);
+    if (!options.handlers.readEngineState) return writeError(res, 404, "not_available", "Runtime engine RPC is unavailable.");
+    return writeJson(res, 200, options.handlers.readEngineState(engineStateMatch[1] ?? ""));
+  }
+  const engineMethodMatch = /^\/runtime\/sessions\/([A-Za-z0-9._-]+)\/methods\/([A-Za-z0-9._-]+)$/.exec(url.pathname);
+  if (engineMethodMatch) {
+    if (method !== "POST") return methodNotAllowed(res, ["POST"]);
+    if (!options.handlers.invokeEngineMethod) return writeError(res, 404, "not_available", "Runtime engine RPC is unavailable.");
+    const idempotencyKey = req.headers["idempotency-key"];
+    if (typeof idempotencyKey !== "string" || idempotencyKey.length < 1 || idempotencyKey.length > 160) {
+      return writeError(res, 400, "missing_idempotency_key", "Idempotency-Key is required.");
+    }
+    const body = await readJson(req);
+    if (!isRecord(body) || !Number.isSafeInteger(body.expectedRevision) || !Array.isArray(body.args)) {
+      return writeError(res, 400, "invalid_body", "expectedRevision and args are required.");
+    }
+    return writeJson(res, 200, await options.handlers.invokeEngineMethod({
+      sessionId: engineMethodMatch[1] ?? "",
+      method: engineMethodMatch[2] ?? "",
+      args: body.args,
+      expectedRevision: Number(body.expectedRevision),
+      idempotencyKey,
+    }));
   }
 
   const runMatch = /^\/sessions\/([A-Za-z0-9._-]+)$/.exec(url.pathname);

@@ -1,6 +1,11 @@
+import { runWorkShellInlineCommand } from "@unclecode/orchestrator";
+import { randomUUID } from "node:crypto";
 import {
-  runWorkShellInlineCommand,
-} from "@unclecode/orchestrator";
+  RuntimeOwnerClient,
+  defaultRuntimeOwnerPaths,
+  ensureRuntimeOwner,
+  probeRuntimeOwner,
+} from "@unclecode/server";
 import {
   createEmbeddedWorkPaneController,
   createManagedWorkShellDashboardProps,
@@ -25,6 +30,8 @@ import {
   type StartReplAgent,
   type StartReplOptions,
 } from "./work-runtime-dashboard.js";
+import { createRemoteWorkShellEngine } from "./remote-work-shell-engine.js";
+import { spawnDetachedRuntimeOwner } from "./runtime-owner-launcher.js";
 
 export { loadWorkCliBootstrap } from "./work-runtime-bootstrap.js";
 export { loadResumedWorkSession } from "./work-runtime-session.js";
@@ -47,12 +54,16 @@ export const resolveWorkShellInlineCommand = (
 
 export function createManagedDashboardProps(
   session: ManagedDashboardSession,
+  paneEngine?: object,
 ): TuiRenderOptions<TuiShellHomeState> {
   return createManagedWorkShellDashboardProps(
-    createManagedDashboardInput(withDefaultWorkSessionLaunch(session), {
+    {
+      ...createManagedDashboardInput(withDefaultWorkSessionLaunch(session), {
       resolveWorkShellInlineCommand,
       ...(process.env.HOME ? { userHomeDir: process.env.HOME } : {}),
-    }),
+      }),
+      ...(paneEngine ? { paneEngine: paneEngine as never } : {}),
+    },
   );
 }
 
@@ -91,8 +102,45 @@ export async function startRepl(
   agent: StartReplAgent,
   options: StartReplOptions,
 ): Promise<void> {
-  const session = withDefaultWorkSessionLaunch({ agent, options });
-  const initialProps = createManagedDashboardProps(session);
+  const requestedSessionId = options.sessionId ?? `work-${randomUUID()}`;
+  const session = withDefaultWorkSessionLaunch({
+    agent,
+    options: {
+      ...options,
+      sessionId: requestedSessionId,
+    },
+  });
+  const paths = defaultRuntimeOwnerPaths(process.env.HOME);
+  const lease = await ensureRuntimeOwner({
+    leasePath: paths.leasePath,
+    lockPath: paths.lockPath,
+    health: probeRuntimeOwner,
+    startOwner: () => spawnDetachedRuntimeOwner({
+      leasePath: paths.leasePath,
+      tokenPath: paths.tokenPath,
+    }),
+  });
+  const client = await RuntimeOwnerClient.connect(lease);
+  const created = await client.createRuntimeSession({
+    sessionId: requestedSessionId,
+    projectPath: options.cwd,
+    provider: options.provider,
+    model: options.model,
+    ...(options.reasoning.effort !== "unsupported" ? { reasoning: options.reasoning.effort } : {}),
+    resume: options.sessionId !== undefined,
+    idempotencyKey: `tui-${randomUUID()}`,
+  });
+  if (!created.ok) {
+    throw new Error(created.message);
+  }
+  const attached = await client.attachRuntimeSession(created.session.sessionId);
+  if (!attached.ok) throw new Error(attached.message);
+  const ownerSessionId = attached.session.sessionId;
+  const remoteEngine = await createRemoteWorkShellEngine(client, ownerSessionId);
+  const initialProps = createManagedDashboardProps(
+    { ...session, options: { ...session.options, sessionId: ownerSessionId } },
+    remoteEngine,
+  );
   const embeddedWorkPane = await createEmbeddedWorkPaneController<TuiShellHomeState>({
     loadSnapshot: async (forwardedArgs = []) => {
       if (forwardedArgs.length === 0) {

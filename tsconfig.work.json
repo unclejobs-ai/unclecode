@@ -8,6 +8,9 @@
     "sourceMap": true,
     "tsBuildInfoFile": "./dist-work/.tsbuildinfo"
   },
-  "include": ["apps/unclecode-cli/src/work-entry.ts"],
+  "include": [
+    "apps/unclecode-cli/src/work-entry.ts",
+    "apps/unclecode-cli/src/runtime-owner-service.ts"
+  ],
   "exclude": ["dist-work/**", "node_modules/**", "Leonxlnx-claude-code/**"]
 }

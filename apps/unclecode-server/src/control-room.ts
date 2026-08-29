@@ -9,7 +9,7 @@ const MAX_EVOLUTION_PROPOSALS = 32;
 const MAX_TEXT = 800;
 
 export type ControlRoomLocale = "en" | "ko";
-export type RuntimeSessionState = "idle" | "running" | "paused" | "requires_action" | "completed" | "failed" | "cancelled";
+export type RuntimeSessionState = "idle" | "running" | "pause_pending" | "paused" | "requires_action" | "completed" | "failed" | "cancelled";
 
 export type RuntimeContextSource = {
   readonly id: string;
