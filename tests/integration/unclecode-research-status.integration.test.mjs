@@ -42,15 +42,19 @@ test("built unclecode work repl exposes context status commands", () => {
   const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-work-context-repl-"));
 
   try {
-    const result = spawnSync("node", [builtCliEntrypoint, "work"], {
-      cwd,
-      input: "/context\n/research status\n/exit\n",
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        UNCLECODE_SESSION_STORE_ROOT: path.join(cwd, ".state"),
+    const result = spawnSync(
+      "node",
+      [builtCliEntrypoint, "work", "--engine", "native"],
+      {
+        cwd,
+        input: "/context\n/research status\n/exit\n",
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          UNCLECODE_SESSION_STORE_ROOT: path.join(cwd, ".state"),
+        },
       },
-    });
+    );
 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /UncleCode ·/);

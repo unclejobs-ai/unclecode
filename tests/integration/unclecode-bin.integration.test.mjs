@@ -160,7 +160,16 @@ test("root bin wrapper runs work prompt on the Rust provider loop", async () => 
     const address = server.address();
     assert.equal(typeof address, "object");
     const result = await runNodeAsync(
-      [binEntrypoint, "work", "--provider", "openai", "say", "ok"],
+      [
+        binEntrypoint,
+        "work",
+        "--engine",
+        "native",
+        "--provider",
+        "openai",
+        "say",
+        "ok",
+      ],
       {
         cwd: tempDir,
         env: {
@@ -215,18 +224,21 @@ test("root bin wrapper runs empty work as a Rust line session with CJK prompt te
     await listen(server);
     const address = server.address();
     assert.equal(typeof address, "object");
-    const result = await runNodeAsync([binEntrypoint, "work"], {
-      cwd: tempDir,
-      input: "하이 🙂\n/exit\n",
-      env: {
-        ...process.env,
-        HOME: tempDir,
-        OPENAI_API_KEY: "sk-work-repl-test",
-        OPENAI_AUTH_TOKEN: "",
-        OPENAI_MODEL: "gpt-5.5",
-        OPENAI_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+    const result = await runNodeAsync(
+      [binEntrypoint, "work", "--engine", "native"],
+      {
+        cwd: tempDir,
+        input: "하이 🙂\n/exit\n",
+        env: {
+          ...process.env,
+          HOME: tempDir,
+          OPENAI_API_KEY: "sk-work-repl-test",
+          OPENAI_AUTH_TOKEN: "",
+          OPENAI_MODEL: "gpt-5.5",
+          OPENAI_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+        },
       },
-    });
+    );
 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /UncleCode · OpenAI/);
@@ -267,17 +279,20 @@ test("root bin work session treats nested unclecode as REPL guidance, not a prom
     await listen(server);
     const address = server.address();
     assert.equal(typeof address, "object");
-    const result = await runNodeAsync([binEntrypoint, "work"], {
-      cwd: tempDir,
-      input: "unclecode\nunclecode auth status\n/auth login\n/exit\n",
-      env: {
-        ...process.env,
-        HOME: tempDir,
-        OPENAI_API_KEY: "sk-work-reentry-test",
-        OPENAI_AUTH_TOKEN: "",
-        OPENAI_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+    const result = await runNodeAsync(
+      [binEntrypoint, "work", "--engine", "native"],
+      {
+        cwd: tempDir,
+        input: "unclecode\nunclecode auth status\n/auth login\n/exit\n",
+        env: {
+          ...process.env,
+          HOME: tempDir,
+          OPENAI_API_KEY: "sk-work-reentry-test",
+          OPENAI_AUTH_TOKEN: "",
+          OPENAI_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+        },
       },
-    });
+    );
 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Already inside UncleCode/);
@@ -319,17 +334,20 @@ test("root bin work session collapses OpenAI missing-scope JSON into guidance", 
     await listen(server);
     const address = server.address();
     assert.equal(typeof address, "object");
-    const result = await runNodeAsync([binEntrypoint, "work"], {
-      cwd: tempDir,
-      input: "하이\n/exit\n",
-      env: {
-        ...process.env,
-        HOME: tempDir,
-        OPENAI_API_KEY: "sk-work-scope-test",
-        OPENAI_AUTH_TOKEN: "",
-        OPENAI_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+    const result = await runNodeAsync(
+      [binEntrypoint, "work", "--engine", "native"],
+      {
+        cwd: tempDir,
+        input: "하이\n/exit\n",
+        env: {
+          ...process.env,
+          HOME: tempDir,
+          OPENAI_API_KEY: "sk-work-scope-test",
+          OPENAI_AUTH_TOKEN: "",
+          OPENAI_BASE_URL: `http://127.0.0.1:${address.port}/v1`,
+        },
       },
-    });
+    );
 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /OpenAI OAuth lacks model\.request scope/);
@@ -347,16 +365,19 @@ test("root bin wrapper opens Rust work help without provider credentials", async
   );
 
   try {
-    const result = await runNodeAsync([binEntrypoint, "work"], {
-      cwd: tempDir,
-      input: "/help\n/status\n/exit\n",
-      env: {
-        ...process.env,
-        HOME: tempDir,
-        OPENAI_API_KEY: "",
-        OPENAI_AUTH_TOKEN: "",
+    const result = await runNodeAsync(
+      [binEntrypoint, "work", "--engine", "native"],
+      {
+        cwd: tempDir,
+        input: "/help\n/status\n/exit\n",
+        env: {
+          ...process.env,
+          HOME: tempDir,
+          OPENAI_API_KEY: "",
+          OPENAI_AUTH_TOKEN: "",
+        },
       },
-    });
+    );
 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /UncleCode · OpenAI/);
@@ -1266,28 +1287,96 @@ test("root bin wrapper handles mode set and status on the Rust path", () => {
       {
         cwd: tempDir,
         encoding: "utf8",
+        env: {
+          ...process.env,
+          LC_ALL: "en_US.UTF-8",
+          LC_MESSAGES: "ko_KR.UTF-8",
+          LANGUAGE: "ko_KR:en_US",
+          LANG: "ko_KR.UTF-8",
+        },
       },
     );
 
     assert.equal(setResult.status, 0, setResult.stderr);
     assert.match(setResult.stdout, /Active mode saved: yolo/);
-    assert.match(setResult.stdout, /Label: YOLO 모드/);
+    assert.match(setResult.stdout, /Label: YOLO mode/);
 
     const savedConfig = JSON.parse(
       readFileSync(path.join(tempDir, ".unclecode", "config.json"), "utf8"),
     );
     assert.equal(savedConfig.mode, "yolo");
 
-    const statusResult = spawnSync("node", [binEntrypoint, "mode", "status"], {
-      cwd: tempDir,
-      encoding: "utf8",
-    });
+    const statusResult = spawnSync(
+      "node",
+      [binEntrypoint, "mode", "status"],
+      {
+        cwd: tempDir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          LC_ALL: "en_US.UTF-8",
+          LC_MESSAGES: "ko_KR.UTF-8",
+          LANGUAGE: "ko_KR:en_US",
+          LANG: "ko_KR.UTF-8",
+        },
+      },
+    );
+
+    assert.equal(statusResult.status, 0, statusResult.stderr);
+    assert.match(statusResult.stdout, /Active mode: yolo/);
+    assert.match(statusResult.stdout, /Label: YOLO mode/);
+    assert.match(statusResult.stdout, /Source: project config/);
+    assert.match(statusResult.stdout, /Background tasks: preferred/);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("root bin wrapper localizes mode labels for an explicit Korean locale", () => {
+  const tempDir = mkdtempSync(
+    path.join(tmpdir(), "unclecode-bin-mode-korean-"),
+  );
+
+  try {
+    const result = spawnSync(
+      "node",
+      [binEntrypoint, "mode", "set", "yolo"],
+      {
+        cwd: tempDir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          LC_ALL: "ko_KR.UTF-8",
+          LC_MESSAGES: "en_US.UTF-8",
+          LANGUAGE: "en_US",
+          LANG: "en_US.UTF-8",
+        },
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Active mode saved: yolo/);
+    assert.match(result.stdout, /Label: YOLO 모드/);
+
+    const statusResult = spawnSync(
+      "node",
+      [binEntrypoint, "mode", "status"],
+      {
+        cwd: tempDir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          LC_ALL: "ko_KR.UTF-8",
+          LC_MESSAGES: "en_US.UTF-8",
+          LANGUAGE: "en_US",
+          LANG: "en_US.UTF-8",
+        },
+      },
+    );
 
     assert.equal(statusResult.status, 0, statusResult.stderr);
     assert.match(statusResult.stdout, /Active mode: yolo/);
     assert.match(statusResult.stdout, /Label: YOLO 모드/);
-    assert.match(statusResult.stdout, /Source: project config/);
-    assert.match(statusResult.stdout, /Background tasks: preferred/);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
@@ -1327,9 +1416,11 @@ test("root bin wrapper handles model catalog on the Rust path", () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Provider: OpenAI/);
-  assert.match(result.stdout, /Default model: gpt-5\.5/);
+  assert.match(result.stdout, /Default model: gpt-5\.6-sol/);
   assert.match(result.stdout, /Active model: gpt-5\.4/);
-  assert.match(result.stdout, /gpt-5\.5 · reasoning medium/);
+  assert.match(result.stdout, /gpt-5\.6-sol · reasoning medium/);
+  assert.match(result.stdout, /gpt-5\.6-terra · reasoning medium/);
+  assert.match(result.stdout, /gpt-5\.6-luna · reasoning medium/);
 });
 
 test("root bin wrapper handles slash model route on the Rust path without leaking proxy credentials", () => {

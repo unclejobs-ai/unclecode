@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import http from "node:http";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -8,6 +10,7 @@ const repoRoot = path.resolve(new URL("../..", import.meta.url).pathname);
 const binEntrypoint = path.join(repoRoot, "bin", "unclecode.cjs");
 
 test("work provider accepts GEMINI_API_BASE_URL as a native Gemini base URL alias", async () => {
+  const tempDir = mkdtempSync(path.join(tmpdir(), "unclecode-gemini-alias-"));
   const observed = [];
   const server = http.createServer((req, res) => {
     let body = "";
@@ -43,6 +46,8 @@ test("work provider accepts GEMINI_API_BASE_URL as a native Gemini base URL alia
       [
         binEntrypoint,
         "work",
+        "--engine",
+        "native",
         "--provider",
         "gemini",
         "--model",
@@ -51,6 +56,8 @@ test("work provider accepts GEMINI_API_BASE_URL as a native Gemini base URL alia
       ],
       {
         ...process.env,
+        HOME: tempDir,
+        UNCLECODE_SESSION_STORE_ROOT: path.join(tempDir, ".state"),
         UNCLECODE_MODE: "default",
         GEMINI_BASE_URL: "",
         GEMINI_API_BASE_URL: `http://127.0.0.1:${port}/v1beta`,
@@ -74,6 +81,7 @@ test("work provider accepts GEMINI_API_BASE_URL as a native Gemini base URL alia
     assert.equal(observed[0].text, "Say hello through the alias provider.");
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    rmSync(tempDir, { recursive: true, force: true });
   }
 });
 

@@ -515,6 +515,8 @@ fn select_public_work_route(
 ) -> PublicWorkRoute {
     if cli_work::work_args_request_metadata(work_args) {
         PublicWorkRoute::RustNative
+    } else if cli_work::work_args_request_native_engine(work_args) {
+        PublicWorkRoute::RustNative
     } else if cli_work::work_args_have_prompt(work_args) || !stdin_is_tty {
         PublicWorkRoute::TypescriptOwner
     } else if should_launch_work_tui(work_args, stdin_is_tty, stdout_is_tty) {
@@ -5410,6 +5412,19 @@ mod tests {
                 true
             ),
             PublicWorkRoute::TypescriptTui
+        );
+        assert_eq!(
+            select_public_work_route(
+                &[
+                    OsString::from("--engine"),
+                    OsString::from("native"),
+                    OsString::from("summarize the repo"),
+                ],
+                false,
+                false,
+            ),
+            PublicWorkRoute::RustNative,
+            "an explicit native engine must bypass the persistent TypeScript owner"
         );
 
         for (stdin_is_tty, stdout_is_tty) in

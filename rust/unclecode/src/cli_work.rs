@@ -89,6 +89,13 @@ pub fn work_args_request_metadata(args: &[OsString]) -> bool {
     parsed.show_help || parsed.show_tools
 }
 
+pub fn work_args_request_native_engine(args: &[OsString]) -> bool {
+    parse_work_args(args, PathBuf::from("."))
+        .engine
+        .as_deref()
+        == Some("native")
+}
+
 pub fn run_top_level_work_command(args: &[OsString]) -> Result<u8, String> {
     let parsed = parse_work_args(
         args,
