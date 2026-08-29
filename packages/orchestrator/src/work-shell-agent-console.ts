@@ -19,6 +19,13 @@ import {
 } from "@unclecode/contracts";
 
 const MAX_TOOL_ACTIVITY = 80;
+const QUALITY_STAGE_RANK: Readonly<Record<QualityReviewHistoryEntry["stage"], number>> = {
+  explore: 0,
+  plan: 1,
+  work: 2,
+  critic: 3,
+  promote: 4,
+};
 
 type TraceRecord = Record<string, unknown>;
 
@@ -755,33 +762,68 @@ function applyWorkLifecycleEvent(
     if (!graphId || (graph && graphId !== graph.id)) return snapshot;
     const stage = readQualityStage(trace.stage);
     const iteration = readNonNegativeInteger(trace.iteration);
-    const currentIteration = graph?.iteration ?? snapshot.qualityReview?.iteration ?? 0;
+    const graphIteration = graph?.iteration ?? 0;
+    const reviewIteration = snapshot.qualityReview?.iteration ?? 0;
+    const currentIteration = Math.max(graphIteration, reviewIteration);
     if (!stage || iteration === undefined || iteration < currentIteration) return snapshot;
     const gateStatus = event.type === "quality.stage_started"
       ? graph?.gateStatus ?? snapshot.qualityReview?.latestDecision ?? "unproven"
       : readQualityGateStatus(trace.decision);
     if (!gateStatus) return snapshot;
 
+    const currentStage = reviewIteration > graphIteration
+      ? snapshot.qualityReview?.currentStage
+      : graph?.currentStage ?? snapshot.qualityReview?.currentStage;
+    const sameIteration = iteration === currentIteration;
+    const terminalAtCurrentIteration = snapshot.qualityReview?.history.some((entry) =>
+      entry.event === "completed" && entry.iteration === currentIteration
+    ) ?? false;
+    if (
+      sameIteration
+      && (
+        terminalAtCurrentIteration
+        || (currentStage !== undefined && QUALITY_STAGE_RANK[stage] < QUALITY_STAGE_RANK[currentStage])
+      )
+    ) {
+      return snapshot;
+    }
+
     const nodeId = readNonEmptyString(trace, "nodeId");
     const nodeAttempt = readNonNegativeInteger(trace.nodeAttempt);
     const artifactRefs = readQualityArtifactRefs(trace.artifactRefs);
     const nodes = nodeId && graph
-      ? graph.nodes.map((node) => {
-          if (node.id !== nodeId) return node;
-          return {
-            ...node,
-            stage,
-            ...(nodeAttempt === undefined ? {} : { attempt: Math.max(node.attempt, nodeAttempt) }),
-            ...(artifactRefs === undefined
-              ? {}
-              : { artifactRefs: [...new Set([...node.artifactRefs, ...artifactRefs])] }),
-          };
-        })
+      ? (() => {
+          let changed = false;
+          const projected = graph.nodes.map((node) => {
+            if (node.id !== nodeId) return node;
+            const attempt = nodeAttempt === undefined ? node.attempt : Math.max(node.attempt, nodeAttempt);
+            const nextArtifactRefs = artifactRefs === undefined
+              ? node.artifactRefs
+              : [...new Set([...node.artifactRefs, ...artifactRefs])];
+            if (
+              node.stage === stage
+              && node.attempt === attempt
+              && nextArtifactRefs.length === node.artifactRefs.length
+            ) return node;
+            changed = true;
+            return { ...node, stage, attempt, artifactRefs: nextArtifactRefs };
+          });
+          return changed ? projected : graph.nodes;
+        })()
       : graph?.nodes;
     const qualityReview = event.type === "quality.stage_started"
       ? projectQualityStage(snapshot.qualityReview, trace, stage, iteration)
       : projectQualityReview(snapshot.qualityReview, trace, event.type, stage, gateStatus, iteration);
     if (!qualityReview) return snapshot;
+    if (
+      qualityReview === snapshot.qualityReview
+      && (!graph || (
+        graph.currentStage === stage
+        && graph.gateStatus === gateStatus
+        && graph.iteration === iteration
+        && nodes === graph.nodes
+      ))
+    ) return snapshot;
     return createAgentConsoleSnapshot({
       ...snapshot,
       ...(graph && nodes
@@ -853,6 +895,11 @@ function projectQualityStage(
   const profile = readQualityProfile(trace.profile);
   if (!runId || !graphId || !profile) return undefined;
   const sameRun = current?.runId === runId && current.graphId === graphId;
+  if (
+    sameRun
+    && current.currentStage === stage
+    && current.iteration === iteration
+  ) return current;
   return {
     runId,
     graphId,
@@ -974,6 +1021,9 @@ function projectQualityReview(
     stale,
     startedAt,
   };
+  if (sameRun && baseHistory.some((candidate) => qualityHistoryIdentity(candidate) === qualityHistoryIdentity(entry))) {
+    return current;
+  }
   return {
     runId,
     graphId,
@@ -985,6 +1035,32 @@ function projectQualityReview(
     latestDecision: decision,
     history: [...baseHistory, entry].slice(-MAX_QUALITY_REVIEW_HISTORY),
   };
+}
+
+function qualityHistoryIdentity(entry: QualityReviewHistoryEntry): string {
+  return JSON.stringify([
+    entry.event,
+    entry.stage,
+    entry.decision,
+    entry.iteration,
+    entry.startedAt,
+    entry.reason ?? null,
+    entry.failures,
+    entry.evidenceRefs,
+    entry.artifactRefs,
+    entry.artifactHash ?? null,
+    entry.reviewedArtifactHash ?? null,
+    entry.currentArtifactHash ?? null,
+    entry.reviewerId ?? null,
+    entry.reviewerRunId ?? null,
+    entry.provider ?? null,
+    entry.model ?? null,
+    entry.route ?? null,
+    entry.count ?? null,
+    entry.limit ?? null,
+    entry.independentVerification,
+    entry.stale,
+  ]);
 }
 
 function findVerifiedCritic(

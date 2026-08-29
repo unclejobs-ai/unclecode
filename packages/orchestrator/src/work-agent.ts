@@ -2631,11 +2631,19 @@ export class WorkAgent<
       let result: Awaited<ReturnType<typeof orchestrator.run>> | undefined;
       while (!result) {
       try {
+        // Research remains a distinct classification for profile selection and
+        // observability, but deep quality cannot use the direct research fast
+        // path: it must own an explicit graph and cross critic/promote gates.
+        // The same complex executor also preserves the bounded retry,
+        // cancellation, and pause/resume checkpoints for this path.
+        const executionIntent = effectiveIntent === "research" && quality?.profile === "deep"
+          ? "complex"
+          : effectiveIntent;
         result = await orchestrator.run({
           prompt,
           mode: this.mode,
           maxWorkers: this.createExecutorAgent ? resolveWorkerBudget(this.mode) : 1,
-          ...(effectiveIntent ? { intent: effectiveIntent } : {}),
+          ...(executionIntent ? { intent: executionIntent } : {}),
           ...(this.traceListener ? { onTrace: (event) => this.emitTrace(event) } : {}),
           onPlan: async (tasks) => {
             const startedAt = Date.now();

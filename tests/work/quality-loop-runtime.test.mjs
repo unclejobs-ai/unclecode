@@ -976,11 +976,13 @@ test("direct completion fails closed when the post-tool manifest changes during 
   }
 });
 
-test("direct research completion refine reruns but remains unproven without review", async () => {
-  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-direct-research-refine-"));
+test("deep research completion refine reruns the DAG and crosses a fresh critic and promote", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-research-refine-"));
   const harness = createDirectLoopHarness({
     workspace,
     mode: "search",
+    plans: [plan("v1")],
+    criticVerdicts: [verdict(), verdict()],
     onBeforeRunComplete({ ordinal }) {
       return ordinal === 1
         ? { action: "refine", reason: "research needs a narrower answer" }
@@ -991,19 +993,18 @@ test("direct research completion refine reruns but remains unproven without revi
   try {
     const result = await harness.agent.runTurn("explain auth");
 
-    assert.equal(result.qualityStatus, "unproven");
-    assert.equal(result.text, "direct answer 2");
-    assert.equal(harness.directCalls.length, 2);
-    assert.deepEqual(harness.reviewCalls, []);
-    assert.equal(harness.traces.some((event) =>
-      event.type === "quality.stage_started" && ["critic", "promote"].includes(event.stage)
-    ), false);
-    const gates = harness.traces.filter((event) => event.type === "quality.gate_evaluated");
-    assert.deepEqual(gates.map((event) => event.decision), ["refine", "unproven"]);
-    assert.ok(gates.at(-1).failures.includes("MISSING_CRITIC_STAGE"));
-    assert.ok(gates.at(-1).failures.includes("MISSING_PROMOTE_STAGE"));
+    assert.equal(result.qualityStatus, "proceed");
+    assert.equal(result.text, "reviewed handoff");
+    assert.equal(harness.directCalls.length, 0);
+    assert.equal(harness.plannerCalls.length, 1);
+    assert.equal(harness.workerCalls.length, 4);
+    assert.deepEqual(harness.reviewCalls, ["critic", "promote", "critic", "promote"]);
+    assert.equal(harness.traces.filter((event) => event.type === "quality.refine_requested").length, 1);
+    assert.equal(harness.traces.filter((event) =>
+      event.type === "quality.stage_started" && event.stage === "critic"
+    ).length, 2);
     assert.equal(harness.traces.at(-1)?.type, "quality.completed");
-    assert.equal(harness.traces.at(-1)?.decision, "unproven");
+    assert.equal(harness.traces.at(-1)?.decision, "proceed");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

@@ -412,11 +412,12 @@ test("quality classification uses the operator request instead of injected works
   }
 });
 
-test("research turns are classified as deep and reach SCC completion instead of bypassing the plugin host", async () => {
+test("deep research runs an explicit DAG with an independent critic and promote lifecycle", async () => {
   const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-research-"));
   const classifications = [];
   const traces = [];
-  let providerCalls = 0;
+  const directCalls = [];
+  const reviewCalls = [];
   const host = new PluginHost();
   registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
   host.register("research-observer", {
@@ -430,38 +431,149 @@ test("research turns are classified as deep and reach SCC completion instead of 
     updateRuntimeSettings() {},
     setTraceListener() {},
     async runTurn(prompt) {
-      providerCalls += 1;
-      assert.match(prompt, /SCC Quality Engine \(deep\/work\)/);
-      return { text: "research answer" };
+      directCalls.push(prompt);
+      if (prompt.includes("<goal_task_planner>")) return { text: qualityPlan };
+      if (prompt.includes("Implement login.ts")) {
+        writeFileSync(path.join(workspace, "login.ts"), "export const login = true;\n");
+        return { text: "research pattern complete" };
+      }
+      if (prompt.includes("Implement session.ts")) {
+        writeFileSync(path.join(workspace, "session.ts"), "export const session = true;\n");
+        return { text: "research follow-up complete" };
+      }
+      throw new Error(`unexpected research direct prompt: ${prompt}`);
+    },
+  };
+  const reviewAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      reviewCalls.push(prompt);
+      if (prompt.includes("<quality_critic_read_only>")) return { text: passingCriticVerdict };
+      if (prompt.includes("<quality_promote_read_only>")) return { text: "research handoff" };
+      throw new Error(`unexpected research review prompt: ${prompt}`);
     },
   };
 
   try {
     const agent = new orchestrator.WorkAgent({
       directAgent,
+      reviewAgent,
       mode: "search",
       reasoning: supportedReasoning,
       model: "gpt-5.4",
       workspaceRoot: workspace,
       pluginHost: host,
       directRoute: { provider: "openai", model: "gpt-5.4" },
+      reviewRoute: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
+      reviewRouteEvidence: "declared",
+      async runExecutableGuardianChecks() {
+        return {
+          checks: [{ name: "research-validation", status: "passed", summary: "research PASS" }],
+          summary: "research PASS",
+        };
+      },
     });
     agent.setTraceListener((event) => traces.push(event));
 
     const result = await agent.runTurn("explain auth");
 
-    assert.equal(result.text, "research answer");
-    assert.equal(result.qualityStatus, "unproven");
-    assert.equal(providerCalls, 1);
+    assert.equal(result.text, "research handoff");
+    assert.equal(result.qualityStatus, "proceed");
     assert.deepEqual(
       classifications.map(({ complexity, proposedProfile }) => ({ complexity, proposedProfile })),
       [{ complexity: "research", proposedProfile: "deep" }],
     );
-    const gate = traces.find((event) => event.type === "quality.gate_evaluated");
-    assert.equal(gate?.decision, "unproven");
-    assert.ok(gate?.failures.includes("MISSING_CRITIC_STAGE"));
-    assert.ok(gate?.failures.includes("MISSING_PROMOTE_STAGE"));
-    assert.equal(gate?.independentVerification, false);
+    assert.ok(traces.some((event) => event.type === "work.proposed" && event.graph.nodes.length === 2));
+    assert.deepEqual(
+      traces.filter((event) => event.type === "quality.stage_started").map((event) => event.stage),
+      ["explore", "plan", "work", "work", "critic", "promote"],
+    );
+    const critic = traces.find((event) =>
+      event.type === "quality.gate_evaluated" && event.stage === "critic"
+    );
+    assert.equal(critic?.decision, "proceed");
+    assert.equal(critic?.provider, "anthropic");
+    assert.equal(critic?.independentVerification, true);
+    assert.ok(directCalls.some((prompt) => prompt.includes("<goal_task_planner>")));
+    assert.ok(reviewCalls.some((prompt) => prompt.includes("<quality_critic_read_only>")));
+    assert.ok(reviewCalls.some((prompt) => prompt.includes("<quality_promote_read_only>")));
+    assert.equal(traces.at(-1)?.type, "quality.completed");
+    assert.equal(traces.at(-1)?.decision, "proceed");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("deep research remains honestly unproven when no independent provider exists", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-research-unproven-"));
+  const traces = [];
+  const reviewCalls = [];
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      if (prompt.includes("<goal_task_planner>")) return { text: qualityPlan };
+      if (prompt.includes("Implement login.ts")) {
+        writeFileSync(path.join(workspace, "login.ts"), "login\n");
+        return { text: "login complete" };
+      }
+      if (prompt.includes("Implement session.ts")) {
+        writeFileSync(path.join(workspace, "session.ts"), "session\n");
+        return { text: "session complete" };
+      }
+      throw new Error(`unexpected fallback research prompt: ${prompt}`);
+    },
+  };
+  const reviewAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn(prompt) {
+      reviewCalls.push(prompt);
+      return { text: passingCriticVerdict };
+    },
+  };
+
+  try {
+    const agent = new orchestrator.WorkAgent({
+      directAgent,
+      reviewAgent,
+      mode: "search",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+      reviewRoute: { provider: "openai", model: "gpt-5.5" },
+      reviewRouteEvidence: "declared",
+      async runExecutableGuardianChecks() {
+        return {
+          checks: [{ name: "research-validation", status: "passed", summary: "research PASS" }],
+          summary: "research PASS",
+        };
+      },
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    const result = await agent.runTurn("explain auth");
+
+    assert.equal(result.qualityStatus, "unproven");
+    assert.equal(reviewCalls.length, 1, "an unproven critic cannot enter promote");
+    assert.deepEqual(
+      traces.filter((event) => event.type === "quality.stage_started").map((event) => event.stage),
+      ["explore", "plan", "work", "work", "critic"],
+    );
+    const critic = traces.find((event) =>
+      event.type === "quality.gate_evaluated" && event.stage === "critic"
+    );
+    assert.equal(critic?.decision, "unproven");
+    assert.equal(critic?.independentVerification, false);
+    assert.ok(critic?.failures.includes("INDEPENDENT_PROVIDER_UNAVAILABLE"));
     assert.equal(traces.at(-1)?.type, "quality.completed");
     assert.equal(traces.at(-1)?.decision, "unproven");
   } finally {

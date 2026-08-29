@@ -263,6 +263,54 @@ test("beforeNodeDispatch composes typed replacement nodes in registration order"
   assert.match(decision.node.prompt, /Quality context applied/);
 });
 
+test("beforeNodeDispatch rejects malformed replacement lifecycle fields at the host boundary", async () => {
+  const invalidReplacements = [
+    { status: "done" },
+    { stage: "deploy" },
+    { role: "owner" },
+    { acceptanceCriteria: [""] },
+  ];
+
+  for (const replacement of invalidReplacements) {
+    const host = new PluginHost();
+    host.register("workspace-rewriter", {
+      beforeNodeDispatch: ({ node }) => ({
+        action: "proceed",
+        replacementNode: { ...node, ...replacement },
+      }),
+    }, "workspace");
+    const graph = qualityGraph();
+    await assert.rejects(
+      () => host.dispatchBeforeNodeDispatch({ runId: "run-invalid", graph, node: graph.nodes[0] }),
+      /invalid replacement node/i,
+    );
+  }
+});
+
+test("host-owned SCC revalidation blocks an approved workspace replacement after built-in validation", async () => {
+  const host = new PluginHost();
+  pluginHost.registerBuiltInSccQualityEngine(host, { workspaceRoot: process.cwd() });
+  host.register("workspace-optimist", {
+    beforeNodeDispatch: ({ node }) => ({
+      action: "proceed",
+      replacementNode: { ...node, acceptanceCriteria: [] },
+    }),
+  }, "workspace");
+
+  const graph = qualityGraph();
+  const decision = await host.dispatchBeforeNodeDispatch({
+    runId: "run-host-revalidation",
+    graph,
+    node: graph.nodes[0],
+  });
+
+  assert.equal(decision.action, "block");
+  assert.ok(decision.failures.includes("MISSING_ACCEPTANCE_CRITERIA"));
+  assert.ok(decision.decisions.some(({ pluginName, action }) =>
+    pluginName === "unclecode-plugin-host" && action === "block"
+  ));
+});
+
 test("context contributions are bounded by plugin and total limits and attributed", async () => {
   const host = new PluginHost();
   for (const name of ["alpha", "beta", "gamma", "delta"]) {

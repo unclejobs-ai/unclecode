@@ -37,12 +37,15 @@ import {
   type RiskLevel,
   type UncleCodeComplexity,
 } from "@second-claude/core";
-import type {
-  QualityHarnessStage,
-  QualityProfile,
-  WorkGraph,
-  WorkNode,
-  WorkNodeDispatchOutcome,
+import {
+  QUALITY_HARNESS_STAGES,
+  WORK_NODE_ROLES,
+  WORK_NODE_STATUSES,
+  type QualityHarnessStage,
+  type QualityProfile,
+  type WorkGraph,
+  type WorkNode,
+  type WorkNodeDispatchOutcome,
 } from "@unclecode/contracts";
 import { z } from "zod";
 
@@ -526,6 +529,11 @@ export class PluginHost {
         node = parseReplacementNode(raw.replacementNode, reg.name);
       }
     }
+    const revalidation = validateReplacementNodeForDispatch(event, node);
+    if (revalidation.action !== "proceed") {
+      decisions.push(attributeDecision("unclecode-plugin-host", revalidation));
+      action = strongerDecision(action, revalidation.action);
+    }
     return aggregateDecision(action, decisions, { node });
   }
 
@@ -852,28 +860,54 @@ function copyReplacementNode(node: WorkNode): WorkNode {
   };
 }
 
+const NonEmptyReplacementStringSchema = z.string().trim().min(1);
+const ReplacementNodeSchema = z.object({
+  id: NonEmptyReplacementStringSchema,
+  title: NonEmptyReplacementStringSchema,
+  prompt: NonEmptyReplacementStringSchema,
+  status: z.enum(WORK_NODE_STATUSES),
+  dependsOn: z.array(NonEmptyReplacementStringSchema),
+  fileOwnership: z.array(NonEmptyReplacementStringSchema),
+  manifestId: NonEmptyReplacementStringSchema.optional(),
+  acceptanceCriteria: z.array(NonEmptyReplacementStringSchema).optional(),
+  evidenceRefs: z.array(NonEmptyReplacementStringSchema),
+  stage: z.enum(QUALITY_HARNESS_STAGES),
+  role: z.enum(WORK_NODE_ROLES),
+  attempt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  artifactRefs: z.array(NonEmptyReplacementStringSchema),
+  reviewRequired: z.boolean(),
+}).strict();
+
 function parseReplacementNode(value: unknown, pluginName: string): WorkNode {
-  if (!value || typeof value !== "object") {
+  const parsed = ReplacementNodeSchema.safeParse(value);
+  if (!parsed.success) {
     throw new TypeError(`Plugin ${pluginName} returned an invalid replacement node.`);
   }
-  const node = value as Partial<WorkNode>;
-  if (
-    typeof node.id !== "string"
-    || !node.id.trim()
-    || typeof node.title !== "string"
-    || typeof node.prompt !== "string"
-    || !Array.isArray(node.dependsOn)
-    || !Array.isArray(node.fileOwnership)
-    || !Array.isArray(node.evidenceRefs)
-    || !Array.isArray(node.artifactRefs)
-    || typeof node.attempt !== "number"
-    || !Number.isSafeInteger(node.attempt)
-    || node.attempt < 0
-    || typeof node.reviewRequired !== "boolean"
-  ) {
-    throw new TypeError(`Plugin ${pluginName} returned an invalid replacement node.`);
+  const { manifestId, acceptanceCriteria, ...required } = parsed.data;
+  return copyReplacementNode({
+    ...required,
+    ...(manifestId === undefined ? {} : { manifestId }),
+    ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
+  });
+}
+
+function validateReplacementNodeForDispatch(
+  event: PluginBeforeNodeDispatchEvent,
+  node: WorkNode,
+): PluginLifecycleDecision {
+  const nodeIndex = event.graph.nodes.findIndex((candidate) => candidate.id === event.node.id);
+  if (nodeIndex < 0 || node.id !== event.node.id) {
+    return {
+      action: "block",
+      reason: "A replacement node must preserve the approved graph node identity.",
+      failures: ["REPLACEMENT_NODE_ID_MISMATCH"],
+    };
   }
-  return copyReplacementNode(node as WorkNode);
+  const graph = {
+    ...event.graph,
+    nodes: event.graph.nodes.map((candidate, index) => index === nodeIndex ? node : candidate),
+  };
+  return validationDecision(validatePlan(planForCore(graph)));
 }
 
 function planForCore(graph: WorkGraph): {

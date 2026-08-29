@@ -1702,6 +1702,135 @@ test("quality completion preserves only proven critic provenance and bounded art
   assert.deepEqual(unproven?.artifactRefs, []);
 });
 
+test("quality projection is idempotent across live and restored trace replay", () => {
+  const stage = {
+    type: "quality.stage_started",
+    runId: "run-replay",
+    graphId: "graph-replay",
+    profile: "deep",
+    stage: "work",
+    iteration: 0,
+    startedAt: 10,
+  };
+  let snapshot = applyTraceEventToAgentConsole(initialConsole, stage);
+  assert.strictEqual(applyTraceEventToAgentConsole(snapshot, stage), snapshot);
+
+  const events = [
+    {
+      type: "quality.gate_evaluated",
+      runId: "run-replay",
+      graphId: "graph-replay",
+      profile: "deep",
+      stage: "work",
+      iteration: 0,
+      decision: "proceed",
+      artifactHash: "sha256:worker",
+      startedAt: 20,
+    },
+    {
+      type: "quality.refine_requested",
+      runId: "run-replay",
+      graphId: "graph-replay",
+      profile: "deep",
+      stage: "critic",
+      iteration: 1,
+      decision: "refine",
+      count: 1,
+      limit: 3,
+      startedAt: 30,
+    },
+    {
+      type: "quality.pivot_requested",
+      runId: "run-replay",
+      graphId: "graph-replay",
+      profile: "deep",
+      stage: "critic",
+      iteration: 2,
+      decision: "pivot",
+      count: 1,
+      limit: 2,
+      startedAt: 40,
+    },
+    {
+      type: "quality.completed",
+      runId: "run-replay",
+      graphId: "graph-replay",
+      profile: "deep",
+      stage: "promote",
+      iteration: 2,
+      decision: "unproven",
+      startedAt: 50,
+    },
+  ];
+
+  for (const event of events) {
+    snapshot = applyTraceEventToAgentConsole(snapshot, event);
+    assert.strictEqual(applyTraceEventToAgentConsole(snapshot, event), snapshot);
+    const restored = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(snapshot)));
+    assert.ok(restored);
+    assert.strictEqual(applyTraceEventToAgentConsole(restored, event), restored);
+  }
+  assert.deepEqual(snapshot.qualityReview?.history.map(({ event }) => event), [
+    "gate", "refine", "pivot", "completed",
+  ]);
+});
+
+test("quality projection cannot regress a stage or overwrite same-iteration completion", () => {
+  const critic = applyTraceEventToAgentConsole(initialConsole, {
+    type: "quality.stage_started",
+    runId: "run-monotonic",
+    graphId: "graph-monotonic",
+    profile: "deep",
+    stage: "critic",
+    iteration: 3,
+    startedAt: 30,
+  });
+  const promote = applyTraceEventToAgentConsole(critic, {
+    type: "quality.stage_started",
+    runId: "run-monotonic",
+    graphId: "graph-monotonic",
+    profile: "deep",
+    stage: "promote",
+    iteration: 3,
+    startedAt: 40,
+  });
+
+  for (const stage of ["work", "critic"]) {
+    assert.strictEqual(applyTraceEventToAgentConsole(promote, {
+      type: "quality.stage_started",
+      runId: "run-monotonic",
+      graphId: "graph-monotonic",
+      profile: "deep",
+      stage,
+      iteration: 3,
+      startedAt: 20,
+    }), promote);
+  }
+
+  const completed = applyTraceEventToAgentConsole(promote, {
+    type: "quality.completed",
+    runId: "run-monotonic",
+    graphId: "graph-monotonic",
+    profile: "deep",
+    stage: "promote",
+    iteration: 3,
+    decision: "unproven",
+    startedAt: 50,
+  });
+  assert.strictEqual(applyTraceEventToAgentConsole(completed, {
+    type: "quality.gate_evaluated",
+    runId: "run-monotonic",
+    graphId: "graph-monotonic",
+    profile: "deep",
+    stage: "promote",
+    iteration: 3,
+    decision: "block",
+    startedAt: 60,
+  }), completed);
+  assert.equal(completed.qualityReview?.currentStage, "promote");
+  assert.equal(completed.qualityReview?.latestDecision, "unproven");
+});
+
 test("agent lifecycle reducer accepts run events only against the job the run owns", () => {
   const queued = applyTraceEventToAgentConsole(queuedRuntimeConsole, {
     ...queuedRuntimeJob,
