@@ -69,6 +69,11 @@ test("one-shot shell classes and project code re-prompt through yolo and a persi
     "npm run build",
     "cargo check --workspace",
     "make test",
+    "docker run --rm alpine true",
+    "kubectl get secrets",
+    "gh issue create --title release",
+    "git status --short",
+    "tar --to-command=./scripts/upload -xf artifact.tar",
     "printf ok > output.txt",
     "rg TODO src/*.ts",
   ];
@@ -114,13 +119,57 @@ test("one-shot shell classes and project code re-prompt through yolo and a persi
 
 test("statically inspectable local commands remain eligible for autonomous execution", () => {
   for (const command of [
-    "git status --short",
+    "git ls-files",
+    "git config --get core.fsmonitor",
+    "docker --version",
+    "podman --help",
+    "kubectl version --client",
+    "helm version",
+    "gh --version",
+    "glab help",
+    "hub version",
+    "vercel --version",
+    "wrangler --help",
+    "tar -tf artifact.tgz",
     "tsc --noEmit",
     "rg -n TODO src",
     "sed -n '1,20p' README.md",
     "printf '%s\\n' ok",
   ]) {
     assert.equal(resolveOneShotShellApproval({ toolName: "run_shell", input: { command } }), undefined, command);
+  }
+});
+
+test("known control clients and callback-bearing inspections never inherit a bash grant", () => {
+  const commands = [
+    "docker run --rm alpine true",
+    "podman rm release-container",
+    "kubectl get secrets",
+    "kubectl exec deploy/app -- sh -c release",
+    "helm list",
+    "gh issue create --title release",
+    "gh workflow run deploy.yml",
+    "glab issue create --title release",
+    "hub issue create -m release",
+    "vercel env rm API_KEY production",
+    "netlify env:unset API_KEY",
+    "wrangler secret delete API_KEY",
+    "firebase functions:delete publishRelease",
+    "fly secrets unset API_KEY",
+    "railway variables delete API_KEY",
+    "git status --short",
+    "git diff --stat",
+    "git config core.fsmonitor ./scripts/fsmonitor",
+    "git config --unset core.fsmonitor",
+    "tar --checkpoint=1 --checkpoint-action=exec=./scripts/publish -cf out.tar .",
+    "tar --to-command=./scripts/upload -xf artifact.tar",
+    "tar -I ./scripts/compress -cf artifact.tar src",
+  ];
+
+  for (const command of commands) {
+    const approval = resolveOneShotShellApproval({ toolName: "run_shell", input: { command } });
+    assert.ok(approval, command);
+    assert.equal(approval.scope.key, `bash:once:${command}`);
   }
 });
 
@@ -156,6 +205,7 @@ test("runtime owner files and loopback control clients are hard-denied before an
   const commands = [
     "cat ~/.unclecode/server.token",
     "cat ~/.uncl*/server.tok*",
+    "cat ~/[.]uncl*/server[.]tok*",
     "cat $HOME/.uncl?code/server.tok?n",
     "cat \"$HOME/.uncl\"ecode/runtime-owner-v1.json",
     "cp $HOME/.unclecode/runtime-owner-v1.lock ./lease",

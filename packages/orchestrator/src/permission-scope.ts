@@ -150,6 +150,8 @@ const EXTERNAL_CLIENTS = new Set([
   "rsync", "scp", "sftp", "socat", "ssh", "telnet", "wget",
 ]);
 const DEPLOY_CLIENTS = new Set(["firebase", "fly", "netlify", "render", "vercel", "wrangler"]);
+const CONTAINER_CLIENTS = new Set(["docker", "podman"]);
+const CLUSTER_CLIENTS = new Set(["helm", "kubectl"]);
 const TASK_RUNNERS = new Set(["just", "make", "task"]);
 const PACKAGE_MANAGERS = new Set(["bun", "npm", "pnpm", "yarn"]);
 const LOCAL_GIT_SUBCOMMANDS = new Set([
@@ -307,6 +309,83 @@ function firstSubcommand(tokens: readonly string[], start: number): string | und
   return undefined;
 }
 
+function isExactClientInspection(
+  tokens: readonly string[],
+  start: number,
+  extraForms: readonly (readonly string[])[] = [],
+): boolean {
+  const arguments_ = tokens.slice(start).map((token) => token.toLowerCase());
+  const forms: readonly (readonly string[])[] = [
+    ["--help"],
+    ["-h"],
+    ["--version"],
+    ["-v"],
+    ["help"],
+    ["version"],
+    ...extraForms,
+  ];
+  return forms.some((form) =>
+    form.length === arguments_.length
+    && form.every((value, index) => value === arguments_[index])
+  );
+}
+
+function isReadOnlyGitConfig(arguments_: readonly string[]): boolean {
+  let hasReadSelector = false;
+  const selectors = new Set([
+    "--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l",
+  ]);
+  const modifiers = new Set([
+    "--fixed-value", "--includes", "--local", "--global", "--system", "--worktree",
+    "--name-only", "--no-includes", "--null", "-z", "--show-origin", "--show-scope",
+  ]);
+  const optionsWithValue = new Set(["--default", "--type"]);
+
+  for (let index = 0; index < arguments_.length; index += 1) {
+    const token = arguments_[index] ?? "";
+    if (selectors.has(token)) {
+      hasReadSelector = true;
+      continue;
+    }
+    if (modifiers.has(token) || token.startsWith("--type=")) continue;
+    if (optionsWithValue.has(token)) {
+      if (index + 1 >= arguments_.length) return false;
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("-")) return false;
+  }
+  return hasReadSelector;
+}
+
+function hasTarCallbackOption(arguments_: readonly string[]): boolean {
+  const exactOptions = new Set([
+    "--checkpoint-action",
+    "--info-script",
+    "--new-volume-script",
+    "--rmt-command",
+    "--rsh-command",
+    "--to-command",
+    "--use-compress-program",
+  ]);
+  const optionPrefixes = [
+    "--checkpoint-action=",
+    "--info-script=",
+    "--new-volume-script=",
+    "--rmt-command=",
+    "--rsh-command=",
+    "--to-command=",
+    "--use-compress-program=",
+  ];
+  return arguments_.some((token) => {
+    const normalized = token.toLowerCase();
+    return exactOptions.has(normalized)
+      || optionPrefixes.some((prefix) => normalized.startsWith(prefix))
+      || token === "-I"
+      || token.startsWith("-I");
+  });
+}
+
 function packageSubcommandIndex(tokens: readonly string[], start: number): number | undefined {
   const optionsWithValue = new Set([
     "--cwd",
@@ -457,6 +536,19 @@ function directShellApproval(
     if (subcommand === "archive" && globalArguments.some((token) => token.startsWith("--remote"))) {
       return "external-client";
     }
+    if (subcommand === "status" || subcommand === "diff") {
+      // Both commands can execute repository-configured callbacks
+      // (core.fsmonitor, diff.external, and textconv). The policy layer cannot
+      // prove those callbacks disabled from this argv alone.
+      return "project-code";
+    }
+    if (subcommand === "config") {
+      const configIndex = tokens.findIndex(
+        (token, index) => index > commandIndex && token.toLowerCase() === "config",
+      );
+      const configArguments = configIndex < 0 ? [] : tokens.slice(configIndex + 1);
+      return isReadOnlyGitConfig(configArguments) ? undefined : "project-code";
+    }
     return subcommand && LOCAL_GIT_SUBCOMMANDS.has(subcommand) ? undefined : "ambiguous-wrapper";
   }
 
@@ -500,7 +592,7 @@ function directShellApproval(
     (executable === "cargo" && subcommand === "publish")
     || (executable === "gem" && subcommand === "push")
     || (executable === "twine" && subcommand === "upload")
-    || ((executable === "docker" || executable === "podman") && subcommand === "push")
+    || (CONTAINER_CLIENTS.has(executable) && subcommand === "push")
     || (executable === "dotnet" && tokens.slice(commandIndex + 1, commandIndex + 4).map((token) => token.toLowerCase()).join(" ").startsWith("nuget push"))
   ) {
     return "package-publish";
@@ -515,20 +607,34 @@ function directShellApproval(
     const tail = tokens.slice(commandIndex + 1).map((token) => token.toLowerCase());
     if (tail[0] === "-m" && tail[1] === "twine" && tail[2] === "upload") return "package-publish";
   }
-  if (
-    DEPLOY_CLIENTS.has(executable)
-    && (
+  if (CONTAINER_CLIENTS.has(executable)) {
+    if (isExactClientInspection(tokens, commandIndex + 1)) return undefined;
+    return "external-client";
+  }
+  if (DEPLOY_CLIENTS.has(executable)) {
+    if (isExactClientInspection(tokens, commandIndex + 1)) return undefined;
+    if (
       subcommand === "deploy"
       || (executable === "fly" && subcommand === "release")
       || (executable === "vercel" && subcommand === undefined)
-    )
-  ) {
-    return "deploy";
+    ) return "deploy";
+    return "external-client";
   }
-  if (executable === "railway" && subcommand === "up") return "deploy";
-  if (executable === "helm" && (subcommand === "install" || subcommand === "upgrade")) return "deploy";
-  if (executable === "kubectl" && ["apply", "create", "delete", "patch", "replace", "rollout", "set"].includes(subcommand ?? "")) {
-    return "deploy";
+  if (executable === "railway") {
+    if (subcommand === "up") return "deploy";
+    if (isExactClientInspection(tokens, commandIndex + 1)) return undefined;
+    return "external-client";
+  }
+  if (CLUSTER_CLIENTS.has(executable)) {
+    if (
+      (executable === "helm" && ["delete", "install", "rollback", "uninstall", "upgrade"].includes(subcommand ?? ""))
+      || (executable === "kubectl" && [
+        "annotate", "apply", "autoscale", "cordon", "create", "delete", "drain", "edit",
+        "expose", "label", "patch", "replace", "rollout", "scale", "set", "taint", "uncordon",
+      ].includes(subcommand ?? ""))
+    ) return "deploy";
+    if (isExactClientInspection(tokens, commandIndex + 1, [["version", "--client"]])) return undefined;
+    return "external-client";
   }
   if (TASK_RUNNERS.has(executable)) {
     if (RELEASE_TASK_PATTERN.test(subcommand ?? "")) {
@@ -545,6 +651,8 @@ function directShellApproval(
     if (releaseIndex >= 0) return "release";
     const pullRequestIndex = tail.findIndex((token) => token === "pr" || token === "pull-request");
     if (pullRequestIndex >= 0 && tail.slice(pullRequestIndex + 1).includes("merge")) return "git-merge";
+    if (isExactClientInspection(tokens, commandIndex + 1)) return undefined;
+    return "external-client";
   }
   if (executable === "glab") {
     const tail = tokens.slice(commandIndex + 1).map((token) => token.toLowerCase());
@@ -552,20 +660,32 @@ function directShellApproval(
     if (tail.includes("release")) return "release";
     const mergeRequestIndex = tail.findIndex((token) => token === "mr" || token === "merge-request");
     if (mergeRequestIndex >= 0 && tail.slice(mergeRequestIndex + 1).includes("merge")) return "git-merge";
+    if (isExactClientInspection(tokens, commandIndex + 1)) return undefined;
+    return "external-client";
   }
-  if (executable === "hub" && (subcommand === "merge" || subcommand === "release")) {
-    return subcommand === "merge" ? "git-merge" : "release";
+  if (executable === "hub") {
+    if (subcommand === "merge" || subcommand === "release") {
+      return subcommand === "merge" ? "git-merge" : "release";
+    }
+    if (isExactClientInspection(tokens, commandIndex + 1)) return undefined;
+    return "external-client";
   }
-  if (executable === "semantic-release") return "release";
-  if (executable === "changeset" && subcommand === "publish") return "package-publish";
+  if (executable === "semantic-release") {
+    return isExactClientInspection(tokens, commandIndex + 1) ? undefined : "release";
+  }
+  if (executable === "changeset") {
+    if (subcommand === "publish") return "package-publish";
+    return isExactClientInspection(tokens, commandIndex + 1) ? undefined : "project-code";
+  }
+  if (["dotnet", "gem", "twine"].includes(executable)) {
+    return isExactClientInspection(tokens, commandIndex + 1) ? undefined : "project-code";
+  }
+  if (executable === "tar" && hasTarCallbackOption(tokens.slice(commandIndex + 1))) {
+    return "project-code";
+  }
   const knownExecutable = SAFE_LOCAL_EXECUTABLES.has(executable)
     || PACKAGE_MANAGERS.has(executable)
-    || TASK_RUNNERS.has(executable)
-    || DEPLOY_CLIENTS.has(executable)
-    || [
-      "changeset", "docker", "dotnet", "firebase", "fly", "gem", "gh", "glab", "helm", "hub",
-      "kubectl", "podman", "railway", "semantic-release", "twine", "vercel", "wrangler",
-    ].includes(executable);
+    || TASK_RUNNERS.has(executable);
   return knownExecutable ? undefined : "unknown-executable";
 }
 
@@ -635,7 +755,13 @@ export function resolveRuntimeControlPlaneShellDenial(input: {
   // Removing quoting and escaping catches simple shell concatenation such as
   // `.uncl"ecode"/server.token`; the whole `.unclecode` owner directory is
   // reserved because wildcard reads would otherwise recover the same secrets.
-  const compact = command.toLowerCase().replace(/[\\'"\s]/g, "");
+  const compact = command
+    .toLowerCase()
+    .replace(/[\\'"\s]/g, "")
+    // A one-character bracket class is the same literal character after shell
+    // expansion. Normalize it before matching reserved state names so
+    // `[.]uncl*` and `server[.]tok*` cannot downgrade a hard denial to a prompt.
+    .replace(/\[([^\[\]])\]/g, "$1");
   if (
     compact.includes(".unclecode")
     || /(?:^|[~/])\.uncl/.test(compact)
