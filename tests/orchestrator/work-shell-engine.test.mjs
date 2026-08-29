@@ -6287,6 +6287,29 @@ test("WorkShellEngine shutdown aborts the active turn and fails visibly when its
   }
 });
 
+test("an admitted remote turn cancelled before busy state never reaches the provider", async () => {
+  let providerCalls = 0;
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn() { providerCalls += 1; return { text: "must not run" }; },
+    },
+  });
+  await engine.initialize();
+
+  engine.admitRuntimeTurn();
+  assert.equal(engine.getState().isBusy, false);
+  assert.equal(engine.interruptTurn(), true);
+  await engine.handleSubmit("accepted before projected busy");
+
+  assert.equal(providerCalls, 0);
+  assert.equal(engine.getState().isBusy, false);
+  assert.match(engine.getState().entries.at(-1)?.text ?? "", /cancelled before it started/i);
+  assert.equal(engine.interruptTurn(), false, "an idle cancel must not report success");
+});
+
 test("owner shutdown waits for a SIGTERM-ignoring provider process group to be SIGKILLed", {
   skip: process.platform === "win32" ? "process-group settlement is POSIX-only" : false,
 }, async () => {

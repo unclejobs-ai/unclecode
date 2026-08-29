@@ -149,6 +149,59 @@ test("concurrent async calls with one idempotency key execute the engine method 
   assert.equal(calls, 1);
 });
 
+test("shared owner arbiter cancels an admitted handleSubmit before projected busy state", async () => {
+  let releaseBlocker;
+  let admitted = 0;
+  let cancelled = 0;
+  let interruptCalls = 0;
+  let submitCalls = 0;
+  const engine = fakeEngine("pre-busy-cancel");
+  engine.setMode = async () => new Promise(resolve => { releaseBlocker = resolve; });
+  engine.admitRuntimeTurn = () => { admitted += 1; };
+  engine.interruptTurn = () => {
+    interruptCalls += 1;
+    if (admitted <= cancelled) return false;
+    cancelled += 1;
+    return true;
+  };
+  engine.handleSubmit = async () => {
+    if (cancelled > 0) { cancelled -= 1; admitted -= 1; return; }
+    admitted -= 1;
+    submitCalls += 1;
+  };
+  const registry = new LiveRuntimeEngineRegistry();
+  registry.attach("pre-busy-cancel", engine, { projectPath: "/work/pre-busy" });
+
+  const blocker = registry.invoke({
+    sessionId: "pre-busy-cancel", method: "setMode", args: ["deep"],
+    expectedRevision: 0, idempotencyKey: "block-normal-execution",
+  });
+  while (!releaseBlocker) await new Promise(resolve => setImmediate(resolve));
+  const admittedSubmit = registry.invoke({
+    sessionId: "pre-busy-cancel", method: "handleSubmit", args: ["must not start"],
+    expectedRevision: 1, idempotencyKey: "admitted-submit",
+  });
+  while (registry.read("pre-busy-cancel").revision < 2) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(admitted, 1);
+
+  const cancelInput = {
+    sessionId: "pre-busy-cancel", method: "interruptTurn", args: [],
+    expectedRevision: 2, idempotencyKey: "pre-busy-cancel",
+  };
+  const cancel = await registry.invoke(cancelInput);
+  assert.equal(cancel.ok, true);
+  assert.deepEqual(await registry.invoke(cancelInput), cancel, "an exact retry must replay the accepted cancellation");
+  const changedRetry = await registry.invoke({ ...cancelInput, args: ["changed-payload"] });
+  assert.equal(changedRetry.ok, false);
+  assert.equal(changedRetry.code, "invalid_action");
+  assert.equal(interruptCalls, 1, "replay and invalid key reuse must not consume the admission twice");
+  releaseBlocker();
+  await Promise.all([blocker, admittedSubmit]);
+  assert.equal(submitCalls, 0, "the accepted submit must consume its pre-start cancellation");
+});
+
 test("one accepted mutation persists its reserved owner revision exactly once before execution", async () => {
   const persisted = [];
   let calls = 0;

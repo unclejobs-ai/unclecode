@@ -875,6 +875,8 @@ export class WorkShellEngine<
   private activeTurnEpoch = 0;
   private activeAttachmentRefs: readonly string[] = [];
   private activeTurnAbortController: AbortController | undefined;
+  private admittedRuntimeTurns = 0;
+  private cancelledAdmittedRuntimeTurns = 0;
   private runtimeRevisionClock: { readonly value: number } | undefined;
   private readonly activeTurnSettlements = new Set<Promise<void>>();
   private disposed = false;
@@ -2238,10 +2240,20 @@ export class WorkShellEngine<
     return cursor < 0 || cursor >= sources.length ? undefined : sources[cursor];
   }
 
-  interruptTurn(): void {
+  /** Marks a remotely accepted submit before its long execution leaves the owner admission lane. */
+  admitRuntimeTurn(): void {
+    this.admittedRuntimeTurns += 1;
+  }
+
+  interruptTurn(): boolean {
     if (!this.state.isBusy) {
+      if (this.cancelledAdmittedRuntimeTurns < this.admittedRuntimeTurns) {
+        this.cancelledAdmittedRuntimeTurns += 1;
+        this.appendEntries({ role: "system", text: "Turn cancelled before it started." });
+        return true;
+      }
       this.appendEntries({ role: "system", text: "No active turn to interrupt." });
-      return;
+      return false;
     }
     const interruptedTurnEpoch = this.activeTurnEpoch;
     const interruptedIdleEpoch = interruptedTurnEpoch + 1;
@@ -2267,6 +2279,15 @@ export class WorkShellEngine<
       ...(lastTurnDurationMs !== undefined ? { lastTurnDurationMs } : {}),
     });
     void this.persistSessionSnapshotForEpoch(interruptedIdleEpoch, "idle", "Turn interrupted.").catch(() => undefined);
+    return true;
+  }
+
+  private consumeRuntimeTurnAdmission(): boolean {
+    if (this.admittedRuntimeTurns === 0) return true;
+    this.admittedRuntimeTurns -= 1;
+    if (this.cancelledAdmittedRuntimeTurns === 0) return true;
+    this.cancelledAdmittedRuntimeTurns -= 1;
+    return false;
   }
 
   private startActiveTurnAbortController(): AbortController {
@@ -2489,6 +2510,7 @@ export class WorkShellEngine<
     value: string,
     pendingAttachments?: readonly Attachment[],
   ): Promise<void> {
+    if (!this.consumeRuntimeTurnAdmission()) return;
     // The steer composer owns the whole submit: an empty line still leaves the
     // mode rather than falling through into the chat router.
     if (this.state.composerMode === "agent-steer") {

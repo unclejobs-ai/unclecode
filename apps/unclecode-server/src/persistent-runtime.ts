@@ -15,6 +15,7 @@ export type AttachedRuntimeControl = {
   readonly mutationArbiter?: RuntimeSessionMutationArbiter | undefined;
   readonly snapshot?: (() => RuntimeSessionSource) | undefined;
   readonly onCommitted?: ((result: RuntimeControlResult) => void) | undefined;
+  readonly onAdmitted?: ((request: RuntimeControlRequest) => void) | undefined;
   readonly control: (request: RuntimeControlRequest) => Promise<RuntimeControlResult>;
 };
 
@@ -64,6 +65,7 @@ export class LiveRuntimeControlRegistry implements RuntimeControlPort {
           : { lane: "control" as const }),
       conflict: (current) => ({ ok: false, code: "revision_conflict", message: "Session revision changed.", revision: current }),
       invalidReuse: (current) => ({ ok: false, code: "invalid_action", message: "Idempotency-Key was reused for another runtime action.", revision: current }),
+      ...(attached.onAdmitted ? { onAdmitted: () => attached.onAdmitted?.(request) } : {}),
       execute: () => attached.control(request),
       didMutate: (response) => response.ok,
       complete: (response, current) => ({ ...response, revision: current }),

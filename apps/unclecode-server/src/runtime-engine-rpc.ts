@@ -288,8 +288,13 @@ export class LiveRuntimeEngineRegistry {
           : {}),
       conflict: (revision) => ({ ok: false, code: "revision_conflict", message: "Engine revision changed.", revision }),
       invalidReuse: (revision) => ({ ok: false, code: "invalid_action", message: "Idempotency-Key was reused for another engine mutation.", revision }),
+      ...(input.method === "handleSubmit" && typeof (attached.engine as { admitRuntimeTurn?: unknown }).admitRuntimeTurn === "function"
+        ? { onAdmitted: () => Reflect.apply((attached.engine as unknown as { admitRuntimeTurn: () => void }).admitRuntimeTurn, attached.engine, []) }
+        : {}),
       execute: () => Reflect.apply(method, attached.engine, input.args),
-      complete: (result, revision) => ({ ok: true, revision, state: attached.engine.getState(), result }),
+      complete: (result, revision) => input.method === "interruptTurn" && result === false
+        ? { ok: false, code: "invalid_action", message: "No admitted or active turn could be cancelled.", revision }
+        : { ok: true, revision, state: attached.engine.getState(), result },
       fail: (error, revision) => ({
         ok: false,
         code: "invalid_action",

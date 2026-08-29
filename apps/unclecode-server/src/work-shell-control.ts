@@ -20,7 +20,8 @@ export type WorkShellControlEngine = {
     readonly agentConsole: Readonly<Record<string, unknown>> & { readonly pendingDecision?: PendingDecision | undefined };
   };
   subscribe(listener: () => void): () => void;
-  interruptTurn(): void;
+  interruptTurn(): boolean | void;
+  admitRuntimeTurn?(): void;
   getTurnLifecycle(): {
     readonly state: "idle" | "running" | "pause_pending" | "paused" | "cancelled" | "completed";
     readonly turnId?: string | undefined;
@@ -114,6 +115,9 @@ export function attachWorkShellRuntime(
     revision: () => revisionClock.value,
     mutationArbiter,
     snapshot,
+    onAdmitted(request) {
+      if (request.action === "follow-up") input.engine.admitRuntimeTurn?.();
+    },
     onCommitted(result) {
       if (result.ok) emit();
     },
@@ -126,7 +130,9 @@ export function attachWorkShellRuntime(
         } else if (request.action === "resume") {
           if (!input.engine.resumeTurn()) return deny("invalid_action", "Only a cooperatively paused turn can be resumed.");
         } else if (request.action === "cancel") {
-          if (input.engine.getState().isBusy) input.engine.interruptTurn();
+          if (input.engine.interruptTurn() === false) {
+            return deny("invalid_action", "No admitted or active turn could be cancelled.");
+          }
         } else if (request.action === "follow-up") {
           const message = messageFrom(request);
           if (!message) return deny("invalid_action", "A follow-up message is required.");

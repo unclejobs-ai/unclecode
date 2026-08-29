@@ -67,6 +67,7 @@ export class RuntimeSessionMutationArbiter {
     readonly lane?: RuntimeMutationLane | undefined;
     readonly conflict: (revision: number) => Result;
     readonly invalidReuse: (revision: number) => Result;
+    readonly onAdmitted?: ((revision: number) => void) | undefined;
     readonly execute: () => Promise<Output> | Output;
     readonly didMutate?: ((output: Output) => boolean) | undefined;
     readonly complete: (output: Output, revision: number) => Result;
@@ -108,6 +109,7 @@ export class RuntimeSessionMutationArbiter {
       this.clock.value = acceptedRevision;
       this.#activeMutations += 1;
       receipt.accepted = true;
+      input.onAdmitted?.(acceptedRevision);
       return { accepted: true, revision: acceptedRevision };
     });
     this.#admissionTail = admission.then(() => undefined, () => undefined);
