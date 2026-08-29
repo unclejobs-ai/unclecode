@@ -202,3 +202,45 @@ test("engine RPC and web control share one revision admission and execute one sa
   assert.equal(conflict.code, "revision_conflict");
   assert.equal(modeCalls + submitCalls, 1);
 });
+
+test("owner disposal aborts and settles a live provider or tool mutation before returning", async () => {
+  let started = false;
+  let interrupted = false;
+  let release;
+  let disposed = false;
+  const engine = fakeEngine("shutdown-live-turn");
+  engine.handleSubmit = async () => {
+    started = true;
+    await new Promise(resolve => { release = resolve; });
+    throw new Error("turn aborted by owner shutdown");
+  };
+  engine.interruptTurn = () => {
+    interrupted = true;
+    release?.();
+  };
+  const registry = new LiveRuntimeEngineRegistry();
+  registry.attach("shutdown-live-turn", engine, {
+    projectPath: "/work/shutdown",
+    dispose: () => { disposed = true; },
+  });
+  const turn = registry.invoke({
+    sessionId: "shutdown-live-turn", method: "handleSubmit", args: ["run provider/tool"],
+    expectedRevision: 0, idempotencyKey: "live-turn",
+  });
+  while (!started) await new Promise(resolve => setImmediate(resolve));
+
+  let settled;
+  try {
+    settled = await Promise.race([
+      Promise.all([registry.disposeAll(), turn]),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("owner shutdown did not settle the live turn")), 200)),
+    ]);
+  } finally {
+    release?.();
+  }
+  const [, result] = settled;
+  assert.equal(interrupted, true);
+  assert.equal(disposed, true);
+  assert.equal(result.ok, false);
+  assert.match(result.message, /aborted by owner shutdown/);
+});

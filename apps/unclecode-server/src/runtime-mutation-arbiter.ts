@@ -24,6 +24,27 @@ export class RuntimeSessionMutationArbiter {
     return this.clock.value;
   }
 
+  async settle(timeoutMs = 5_000): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    while (Date.now() <= deadline) {
+      const tail = this.#normalTail;
+      const remaining = Math.max(0, deadline - Date.now());
+      const tailSettled = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), remaining);
+        tail.then(() => {
+          clearTimeout(timer);
+          resolve(true);
+        }, () => {
+          clearTimeout(timer);
+          resolve(true);
+        });
+      });
+      if (!tailSettled) return false;
+      if (tail === this.#normalTail && this.#activeMutations === 0) return true;
+    }
+    return false;
+  }
+
   mutate<Output, Result>(input: {
     readonly idempotencyKey: string;
     readonly fingerprint: string;

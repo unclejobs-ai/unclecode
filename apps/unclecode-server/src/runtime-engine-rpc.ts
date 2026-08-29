@@ -206,6 +206,11 @@ export class LiveRuntimeEngineRegistry {
     this.#engines.clear();
     for (const item of attached) {
       item.unsubscribe();
+      const interrupt = (item.engine as unknown as { interruptTurn?: (() => void) | undefined }).interruptTurn;
+      if (typeof interrupt === "function") {
+        try { Reflect.apply(interrupt, item.engine, []); } catch {}
+      }
+      await item.arbiter.settle();
       await item.dispose?.();
     }
   }
