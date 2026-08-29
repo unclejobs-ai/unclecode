@@ -148,7 +148,9 @@ test("SSE abort cleanup releases every subscription across 100 reconnects", asyn
       assert.equal(response.status, 200);
       controller.abort();
     }
-    await new Promise(resolve => setTimeout(resolve, 20));
+    for (let attempt = 0; attempt < 100 && journal.stats.activeSubscriptions > 0; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
     assert.equal(journal.stats.activeSubscriptions, 0);
     assert.equal(journal.stats.subscriberSessions, 0);
   } finally {

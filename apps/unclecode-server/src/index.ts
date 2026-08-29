@@ -16,7 +16,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
-import { BoundedEventJournal, type JournalEvent, type JournalReplay } from "./event-journal.js";
+import { BoundedEventJournal, type EventJournal, type JournalEvent, type JournalReplay } from "./event-journal.js";
 import { CONTROL_ACTIONS, type ControlAction, type RuntimeAdapter, type RuntimeControlRequest, type RuntimeControlResult } from "./runtime-adapter.js";
 import type { ControlRoomProjection } from "./control-room.js";
 
@@ -35,6 +35,7 @@ export * from "./runtime-owner.js";
 export * from "./runtime-engine-rpc.js";
 export * from "./runtime-mutation-arbiter.js";
 export * from "./runtime-admission-ledger.js";
+export * from "./runtime-ledger.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -196,7 +197,11 @@ export type ServerOptions = {
   readonly runtimeOwner?: ServerHealth["runtimeOwner"];
 };
 
-export function makeControlRoomHandlers(input: { readonly adapter: RuntimeAdapter; readonly journal?: BoundedEventJournal }): ServerHandlers {
+export function makeControlRoomHandlers(input: {
+  readonly adapter: RuntimeAdapter;
+  readonly journal?: EventJournal;
+  readonly publishControlResults?: boolean;
+}): ServerHandlers {
   const journal = input.journal ?? new BoundedEventJournal();
   return {
     async listSessions() {
@@ -211,7 +216,9 @@ export function makeControlRoomHandlers(input: { readonly adapter: RuntimeAdapte
     async readRun(sessionId) { return (await input.adapter.readProjection()).runs.find(run => run.id === sessionId) ?? null; },
     async control(request) {
       const result = await input.adapter.control(request);
-      if (result.ok) journal.publish(request.sessionId, "run.updated", { revision: result.revision, state: result.state, action: request.action });
+      if (result.ok && input.publishControlResults !== false) {
+        journal.publish(request.sessionId, "run.updated", { revision: result.revision, state: result.state, action: request.action });
+      }
       return result;
     },
     subscribeEvents(sessionId, afterId, write) { return journal.subscribeAfter(sessionId, afterId, write); },
