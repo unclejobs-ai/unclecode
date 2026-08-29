@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 
 const workspaceRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -14,7 +15,25 @@ const vendorTarball = path.join(
   "vendor/second-claude/second-claude-core-4.0.0.tgz",
 );
 const expectedSha256 =
-  "607e335bfdb24ef11068088b23e927488bfd7c09ee2fde37a8b38dd9ce64c3a1";
+  "f5b71941fef1c4cc1751695336ca98f4dbd314fa118d05fb226caa25d17b58ae";
+
+function readTarballEntry(tarball, expectedPath) {
+  const archive = gunzipSync(readFileSync(tarball));
+  for (let offset = 0; offset + 512 <= archive.length;) {
+    const header = archive.subarray(offset, offset + 512);
+    const name = header.subarray(0, 100).toString("utf8").replace(/\0.*$/s, "");
+    if (name.length === 0) break;
+    const sizeText = header.subarray(124, 136).toString("ascii").replace(/\0.*$/s, "").trim();
+    const size = Number.parseInt(sizeText || "0", 8);
+    assert.equal(Number.isSafeInteger(size), true, `invalid tar entry size for ${name}`);
+    const contentOffset = offset + 512;
+    if (name === expectedPath) {
+      return archive.subarray(contentOffset, contentOffset + size);
+    }
+    offset = contentOffset + Math.ceil(size / 512) * 512;
+  }
+  assert.fail(`vendored release is missing ${expectedPath}`);
+}
 
 test("the installed SCC core is the reviewed vendored release and passes its shared fixture", async () => {
   assert.equal(
@@ -35,6 +54,15 @@ test("the installed SCC core is the reviewed vendored release and passes its sha
     "file:vendor/second-claude/second-claude-core-4.0.0.tgz",
   );
 
+  const installedRoot = path.join(workspaceRoot, "node_modules/@second-claude/core");
+  for (const relativePath of ["dist/index.js", "fixtures/quality-contract.json"]) {
+    assert.deepEqual(
+      readFileSync(path.join(installedRoot, relativePath)),
+      readTarballEntry(vendorTarball, `package/${relativePath}`),
+      `installed @second-claude/core ${relativePath} must match the vendored release`,
+    );
+  }
+
   const core = await import("@second-claude/core");
   const fixture = JSON.parse(
     readFileSync(
@@ -44,6 +72,15 @@ test("the installed SCC core is the reviewed vendored release and passes its sha
       ),
       "utf8",
     ),
+  );
+  const warningGate = fixture.cases.find(
+    (fixtureCase) => fixtureCase.id === "warning-reviewer-does-not-prove-gate",
+  );
+  assert.ok(warningGate, "installed-warning-gate fixture must be present");
+  assert.equal(
+    core.evaluateGate(warningGate.input),
+    "unproven",
+    "installed-warning-gate must not proceed",
   );
   const operations = {
     evaluateGate: (input) => core.evaluateGate(input),
