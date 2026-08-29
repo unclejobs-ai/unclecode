@@ -18,6 +18,8 @@ const OWNER_ENV_NAMES = new Set([
   "HOME", "PATH", "USER", "LOGNAME", "TMPDIR", "SHELL", "LANG", "LC_ALL",
   "LC_CTYPE", "TERM", "NO_COLOR", "FORCE_COLOR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
   "XDG_CACHE_HOME", "SystemRoot", "WINDIR", "ComSpec", "PATHEXT",
+  "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy",
+  "NO_PROXY", "no_proxy",
 ]);
 
 type OwnerLeaseIdentity = {

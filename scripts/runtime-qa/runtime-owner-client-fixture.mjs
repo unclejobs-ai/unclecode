@@ -44,5 +44,23 @@ for (let attempt = 0; attempt < 3; attempt += 1) {
   expectedRevision = latest.revision;
 }
 if (!changed.ok) throw new Error(changed.message);
-process.stdout.write(`${JSON.stringify({ lease, sessionId, revision: changed.revision })}\n`);
+let providerText;
+const providerPrompt = process.env.UNCLECODE_RUNTIME_OWNER_PROVIDER_PROMPT?.trim();
+if (providerPrompt) {
+  const providerResult = await client.invokeEngineMethod({
+    sessionId,
+    method: "handleSubmit",
+    args: [providerPrompt],
+    expectedRevision: changed.revision,
+    idempotencyKey: "detached-owner-provider-probe",
+  });
+  if (!providerResult.ok) throw new Error(providerResult.message);
+  const providerState = await client.readEngineState(sessionId);
+  if (!providerState.ok) throw new Error(providerState.message);
+  providerText = providerState.state.entries
+    ?.filter(entry => entry?.role === "assistant")
+    .at(-1)?.text;
+  changed = providerResult;
+}
+process.stdout.write(`${JSON.stringify({ lease, sessionId, revision: changed.revision, providerText })}\n`);
 setInterval(() => {}, 60_000);

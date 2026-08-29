@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -82,11 +83,16 @@ async function stopOwnersForHome(home) {
   }
 }
 
-async function startClientFixture(home) {
+async function startClientFixture(home, envOverrides = {}, workspace = process.cwd()) {
   const fixture = new URL("../../scripts/runtime-qa/runtime-owner-client-fixture.mjs", import.meta.url);
-  const child = spawn(process.execPath, ["--import", "tsx", fixture.pathname, process.cwd()], {
+  const child = spawn(process.execPath, ["--import", "tsx", fixture.pathname, workspace], {
     cwd: process.cwd(),
-    env: { ...process.env, HOME: home, GEMINI_API_KEY: "test-only-key" },
+    env: {
+      ...process.env,
+      HOME: home,
+      GEMINI_API_KEY: "test-only-key",
+      ...envOverrides,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const errors = [];
@@ -188,10 +194,92 @@ test("owner service environment forwards runtime config but drops unrelated secr
   const env = runtimeOwnerServiceEnvironment({
     HOME: "/safe/home", PATH: "/bin", UNCLECODE_DATA_ROOT: "/data",
     OPENAI_API_KEY: "provider-key", RANDOM_APP_SECRET: "must-not-cross-boundary",
+    npm_config_proxy: "http://package-manager-only.invalid",
+    PROXY_AUTH_TOKEN: "must-not-cross-boundary",
   });
   assert.equal(env.HOME, "/safe/home");
   assert.equal(env.OPENAI_API_KEY, "provider-key");
   assert.equal(env.RANDOM_APP_SECRET, undefined);
+  assert.equal(env.npm_config_proxy, undefined);
+  assert.equal(env.PROXY_AUTH_TOKEN, undefined);
+});
+
+test("owner service environment forwards every documented provider proxy key", () => {
+  const env = runtimeOwnerServiceEnvironment({
+    HTTPS_PROXY: "http://upper-https.proxy",
+    https_proxy: "http://lower-https.proxy",
+    HTTP_PROXY: "http://upper-http.proxy",
+    http_proxy: "http://lower-http.proxy",
+    ALL_PROXY: "socks5://upper-all.proxy",
+    all_proxy: "socks5://lower-all.proxy",
+    NO_PROXY: ".upper.internal",
+    no_proxy: ".lower.internal",
+  });
+
+  assert.deepEqual(env, {
+    HTTPS_PROXY: "http://upper-https.proxy",
+    https_proxy: "http://lower-https.proxy",
+    HTTP_PROXY: "http://upper-http.proxy",
+    http_proxy: "http://lower-http.proxy",
+    ALL_PROXY: "socks5://upper-all.proxy",
+    all_proxy: "socks5://lower-all.proxy",
+    NO_PROXY: ".upper.internal",
+    no_proxy: ".lower.internal",
+  });
+});
+
+test("detached owner propagates proxy settings into a native provider request", async () => {
+  const home = await mkdtemp(join(tmpdir(), "unclecode-owner-proxy-"));
+  const observed = [];
+  const proxy = createServer((req, res) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", () => {
+      observed.push({ url: req.url, body: JSON.parse(body || "{}") });
+      const response = JSON.stringify({
+        candidates: [{ content: { parts: [{ text: "OWNER_PROXY_OK" }] } }],
+        usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 },
+      });
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(response),
+      });
+      res.end(response);
+    });
+  });
+  await new Promise((resolve, reject) => {
+    proxy.once("error", reject);
+    proxy.listen(0, "127.0.0.1", resolve);
+  });
+  let fixture;
+  try {
+    const address = proxy.address();
+    assert.equal(typeof address, "object");
+    fixture = await startClientFixture(home, {
+      UNCLECODE_WORK_ENGINE: "native",
+      UNCLECODE_RUNTIME_OWNER_PROVIDER_PROMPT: "route through detached proxy",
+      GEMINI_API_BASE_URL: "http://provider.invalid/v1beta",
+      HTTP_PROXY: `http://127.0.0.1:${address.port}`,
+      http_proxy: "",
+      NO_PROXY: "",
+      no_proxy: "",
+      RANDOM_APP_SECRET: "must-not-cross-boundary",
+    }, home);
+
+    assert.equal(fixture.ready.providerText, "OWNER_PROXY_OK");
+    assert.equal(observed.length, 1);
+    assert.match(observed[0].url, /^http:\/\/provider\.invalid\/v1beta\/models\/gemini-2\.5-flash:generateContent$/);
+    assert.match(
+      observed[0].body.contents?.[0]?.parts?.[0]?.text ?? "",
+      /User request:\nroute through detached proxy/,
+    );
+  } finally {
+    if (fixture) await stopFixtureProcess(fixture).catch(() => undefined);
+    await stopOwnersForHome(home);
+    await new Promise(resolve => proxy.close(resolve));
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("timed-out detached owner startup reaps the exact spawned service", async () => {
