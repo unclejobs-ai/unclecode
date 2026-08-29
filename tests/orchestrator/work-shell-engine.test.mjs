@@ -8414,6 +8414,30 @@ test("WorkShellEngine dispose is awaitable through its final console checkpoint"
   assert.equal(disposed, true);
 });
 
+test("WorkShellEngine dispose rejects when its final console checkpoint cannot be written", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-failed-final-write");
+  const disposal = engine.dispose();
+  assert.equal(engine.dispose(), disposal, "dispose remains idempotent while the flush is pending");
+  await waitFor(() => writes.length === 2, "the dispose checkpoint");
+  writes[1].reject(new Error("ENOSPC: no space left on device"));
+
+  await assert.rejects(disposal, /ENOSPC: no space left on device/u);
+});
+
 test("WorkShellEngine shutdown flushes pending console timers before awaiting durable writes", async () => {
   const writes = [];
   const { engine, emitTrace } = createAgentConsoleEngine({
@@ -8442,6 +8466,29 @@ test("WorkShellEngine shutdown flushes pending console timers before awaiting du
 
   writes[1].resolve();
   assert.equal(await shutdown, true);
+});
+
+test("WorkShellEngine shutdown reports a failed final durable write", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-failed-shutdown-write");
+  const shutdown = engine.shutdown({ timeoutMs: 1_000 });
+  await waitFor(() => writes.length === 2, "the shutdown checkpoint");
+  writes[1].reject(new Error("ENOSPC: no space left on device"));
+
+  await assert.rejects(shutdown, /ENOSPC: no space left on device/u);
 });
 
 // ---------------------------------------------------------------------------

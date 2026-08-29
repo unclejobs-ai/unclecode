@@ -1137,12 +1137,18 @@ export class WorkShellEngine<
     }
     const disposal = this.dispose();
     const remaining = Math.max(0, deadline - Date.now());
-    const writesSettled = await new Promise<boolean>((resolve) => {
+    const writesSettled = await new Promise<boolean>((resolve, reject) => {
       const timer = setTimeout(() => resolve(false), remaining);
-      disposal.then(() => {
-        clearTimeout(timer);
-        resolve(true);
-      });
+      disposal.then(
+        () => {
+          clearTimeout(timer);
+          resolve(true);
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
     });
     if (!writesSettled) throw new Error("Work Shell shutdown did not settle durable session writes.");
     return true;
@@ -1391,7 +1397,7 @@ export class WorkShellEngine<
     }
     this.agentConsolePersistTimer = setTimeout(() => {
       this.agentConsolePersistTimer = undefined;
-      void this.persistAgentConsoleSnapshot();
+      void this.persistAgentConsoleSnapshot().catch(() => undefined);
     }, AGENT_CONSOLE_PERSIST_INTERVAL_MS);
     this.agentConsolePersistTimer.unref();
   }
@@ -1442,15 +1448,11 @@ export class WorkShellEngine<
     const snapshot = this.state.agentConsole;
     const active = snapshot.agents.some((agent) => !isSettledAgentRun(agent))
       || snapshot.jobs.some((job) => !isSettledAsyncJob(job));
-    try {
-      await this.enqueueSessionSnapshotWrite(this.buildSessionSnapshotInput({
-        state: active ? "running" : "idle",
-        summary: this.lastSessionSummary,
-        traceMode: this.state.traceMode,
-      }));
-    } catch {
-      /* durable-write failure is retried by the next lifecycle event */
-    }
+    await this.enqueueSessionSnapshotWrite(this.buildSessionSnapshotInput({
+      state: active ? "running" : "idle",
+      summary: this.lastSessionSummary,
+      traceMode: this.state.traceMode,
+    }));
   }
 
   async openSessionsPanel(): Promise<void> {
