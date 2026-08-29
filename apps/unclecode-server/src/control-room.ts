@@ -9,6 +9,7 @@ import {
   type ControlRoomSystemProjection,
   type RuntimeSystemObservabilitySource,
 } from "./system-observability.js";
+import { redactRuntimeDiagnostic } from "./runtime-error-redaction.js";
 
 export type { RuntimeCacheTelemetrySnapshot } from "./system-observability.js";
 
@@ -143,10 +144,7 @@ function arrayOfRecords(value: unknown, limit: number): readonly Readonly<Record
 
 function redactText(value: unknown, max = MAX_TEXT): string {
   const text = typeof value === "string" ? value : value == null ? "" : String(value);
-  const redacted = text
-    .replace(/\b(?:api[_-]?key|token|secret|password)\s*[=:]\s*[^\s,;]+/gi, match => `${match.split(/[=:]/, 1)[0]}=[REDACTED]`)
-    .replace(/\b(?:sk|ghp|xoxb)-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]");
-  return redacted.length > max ? `${redacted.slice(0, max - 1)}…` : redacted;
+  return redactRuntimeDiagnostic(text, max);
 }
 
 function sanitizeRecord(input: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>> {
@@ -397,7 +395,7 @@ function diagnosticsFrom(consoleRecord: Readonly<Record<string, unknown>>): read
       hook: diagnostic.hookName,
       status: diagnostic.status,
       ...(diagnostic.exitStatus === undefined ? {} : { exitStatus: diagnostic.exitStatus }),
-      error: diagnostic.errorMessage,
+      error: redactText(diagnostic.errorMessage, 512),
       dedupeKey: diagnostic.dedupeKey,
     }];
   });

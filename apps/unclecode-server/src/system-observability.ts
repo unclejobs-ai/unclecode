@@ -1,3 +1,5 @@
+import { redactRuntimeDiagnostic } from "./runtime-error-redaction.js";
+
 const MAX_SYSTEM_TEXT = 160;
 
 export const SYSTEM_OBSERVABILITY_BOUNDS = Object.freeze({
@@ -154,10 +156,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function boundedText(value: unknown, max = MAX_SYSTEM_TEXT): string {
   const text = typeof value === "string" ? value : value == null ? "" : String(value);
-  const redacted = text
-    .replace(/\b(?:api[_-]?key|token|secret|password)\s*[=:]\s*[^\s,;]+/gi, match => `${match.split(/[=:]/, 1)[0]}=[REDACTED]`)
-    .replace(/\b(?:sk|ghp|xoxb)-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]");
-  return redacted.length > max ? `${redacted.slice(0, max - 1)}…` : redacted;
+  return redactRuntimeDiagnostic(text, max);
 }
 
 function count(value: unknown): number {

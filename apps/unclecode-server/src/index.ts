@@ -39,6 +39,7 @@ export { createPersistentRuntimeAdapter, LiveRuntimeControlRegistry, readPersist
 export type { AttachedRuntimeControl } from "./persistent-runtime.js";
 export { attachWorkShellRuntime } from "./work-shell-control.js";
 export type { WorkShellControlEngine, WorkShellRuntimeChange } from "./work-shell-control.js";
+export { boundedRuntimeRpcError, redactRuntimeDiagnostic } from "./runtime-error-redaction.js";
 export * from "./runtime-owner-discovery.js";
 export * from "./runtime-owner-client.js";
 export * from "./runtime-owner.js";

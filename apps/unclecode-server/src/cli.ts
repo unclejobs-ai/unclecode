@@ -6,6 +6,7 @@ import {
   readRuntimeOwnerLease,
   type RuntimeOwnerLease,
 } from "./index.js";
+import { boundedRuntimeRpcError } from "./runtime-error-redaction.js";
 
 async function waitForOwner(timeoutMs: number): Promise<RuntimeOwnerLease> {
   const { leasePath } = defaultRuntimeOwnerPaths(process.env.HOME);
@@ -31,6 +32,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  process.stderr.write(`unclecode-server failed: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(`unclecode-server failed: ${boundedRuntimeRpcError(error)}\n`);
   process.exitCode = 1;
 });

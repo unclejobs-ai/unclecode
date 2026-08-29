@@ -233,7 +233,11 @@ export function attachWorkShellRuntime(
             return deny("invalid_action", "Steer requires an explicit agentRunId and message.");
           }
           const receipt = await input.engine.getAgentControlPort().steer(agentRunId.trim(), message);
-          if (receipt.status !== "delivered") return deny("denied", receipt.message ?? "The steer was not delivered.");
+          if (receipt.status !== "delivered") {
+            return deny("denied", receipt.message
+              ? boundedRuntimeRpcError(receipt.message)
+              : "The steer was not delivered.");
+          }
         } else if (request.action === "approve") {
           const pending = input.engine.getState().agentConsole.pendingDecision;
           if (!validSecurityApproval(pending, request.payload)) {

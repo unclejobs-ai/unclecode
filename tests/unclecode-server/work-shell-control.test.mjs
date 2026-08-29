@@ -129,6 +129,40 @@ test("WorkShell live adapter fails closed for ambiguous approvals and steer targ
   assert.deepEqual(engine.calls, []);
 });
 
+test("WorkShell rejected steer receipts expose only bounded redacted diagnostics", async () => {
+  const controls = new LiveRuntimeControlRegistry();
+  const engine = fakeEngine();
+  const secret = "steer-client-secret";
+  engine.getAgentControlPort = () => ({
+    async steer() {
+      return {
+        status: "not_delivered",
+        message: `Authorization: Basic ${secret} ${"x".repeat(2_000)}`,
+      };
+    },
+  });
+  attachWorkShellRuntime(controls, {
+    sessionId: "redacted-steer-receipt",
+    projectPath: "/tmp/p",
+    engine,
+    initialRevision: 2,
+  });
+
+  const result = await controls.control({
+    sessionId: "redacted-steer-receipt",
+    action: "steer",
+    expectedRevision: 2,
+    idempotencyKey: "redacted-steer",
+    payload: { agentRunId: "agent-2", message: "continue" },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "denied");
+  assert.doesNotMatch(result.message, new RegExp(secret));
+  assert.match(result.message, /Authorization: Basic \[REDACTED\]/);
+  assert.ok(result.message.length <= 512);
+});
+
 test("WorkShell approval rejects delayed A after A settled and same-scope B opened at the same revision", async () => {
   const controls = new LiveRuntimeControlRegistry();
   const engine = fakeEngine();
