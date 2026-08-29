@@ -64,6 +64,18 @@ test("one owner creates and independently revisions multiple workspace sessions"
   assert.deepEqual(disposed.sort(), ["alpha", "beta"]);
 });
 
+test("durable persistence notices advance but never regress the attached session clock", () => {
+  const registry = new LiveRuntimeEngineRegistry();
+  registry.attach("restored", fakeEngine("restored"), {
+    projectPath: "/work/restored",
+    revisionClock: { value: 7 },
+  });
+  assert.equal(registry.publishDurableRevision("restored", 11), 11);
+  assert.equal(registry.read("restored").revision, 11);
+  assert.equal(registry.publishDurableRevision("restored", 9), 11);
+  assert.equal(registry.read("restored").revision, 11);
+});
+
 test("session id cannot be rebound to a different workspace", async () => {
   const registry = new LiveRuntimeEngineRegistry({
     async createSession(input) { return { engine: fakeEngine(input.sessionId), projectPath: input.projectPath }; },

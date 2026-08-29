@@ -9,6 +9,7 @@ import { formatWorkShellError } from "@unclecode/tui";
 
 import { loadWorkCliBootstrap } from "./work-runtime-bootstrap.js";
 import { createManagedDashboardInput, type ManagedDashboardSession } from "./work-runtime-dashboard.js";
+import { readRestoredSessionRevision } from "./runtime-session-revision.js";
 
 function readFlag(name: string): string | undefined {
   const index = process.argv.indexOf(name);
@@ -22,6 +23,13 @@ const resolveInline = (
 ) => runWorkShellInlineCommand(args, runInlineCommand, formatWorkShellError, onProgress);
 
 const createSession: RuntimeSessionFactory = async (request) => {
+  const rootDir = getSessionStoreRoot(process.env);
+  const restoredRevision = await readRestoredSessionRevision({
+    rootDir,
+    projectPath: request.projectPath,
+    sessionId: request.sessionId,
+    resume: request.resume,
+  });
   const loaded = await loadWorkCliBootstrap({
     argv: [
       "--cwd", request.projectPath,
@@ -46,6 +54,7 @@ const createSession: RuntimeSessionFactory = async (request) => {
     engine: runtime.engine,
     projectPath: request.projectPath,
     provider: session.options.provider,
+    revisionClock: { value: restoredRevision },
     dispose: () => runtime.engine.dispose(),
   };
 };

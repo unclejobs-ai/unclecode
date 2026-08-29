@@ -24,6 +24,13 @@ export class RuntimeSessionMutationArbiter {
     return this.clock.value;
   }
 
+  publishDurable(revision: number): number {
+    if (Number.isSafeInteger(revision) && revision > this.clock.value) {
+      this.clock.value = revision;
+    }
+    return this.clock.value;
+  }
+
   async settle(timeoutMs = 5_000): Promise<boolean> {
     const deadline = Date.now() + Math.max(0, timeoutMs);
     while (Date.now() <= deadline) {

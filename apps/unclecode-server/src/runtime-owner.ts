@@ -63,7 +63,7 @@ export async function startPersistentRuntimeOwner(input: {
     ...(input.createSession ? {
       createSession: async (request) => {
         const created = await input.createSession!(request);
-        const revisionClock = { value: 0 };
+        const revisionClock = created.revisionClock ?? { value: 0 };
         const mutationArbiter = new RuntimeSessionMutationArbiter(revisionClock);
         const detachControl = attachWorkShellRuntime(controls, {
           sessionId: request.sessionId,
@@ -90,7 +90,8 @@ export async function startPersistentRuntimeOwner(input: {
   const notices = await watchSessionPersistenceNotices({
     rootDir: input.rootDir,
     onNotice(notice) {
-      journal.publish(notice.sessionId, "run.updated", { kind: "checkpoint", revision: notice.revision });
+      const revision = engines.publishDurableRevision(notice.sessionId, notice.revision) ?? notice.revision;
+      journal.publish(notice.sessionId, "run.updated", { kind: "checkpoint", revision });
     },
   });
   let server;

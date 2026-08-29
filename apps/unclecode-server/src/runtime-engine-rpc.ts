@@ -126,6 +126,10 @@ export class LiveRuntimeEngineRegistry {
       .sort((a, b) => a.sessionId.localeCompare(b.sessionId));
   }
 
+  publishDurableRevision(sessionId: string, revision: number): number | undefined {
+    return this.#engines.get(sessionId)?.arbiter.publishDurable(revision);
+  }
+
   create(input: RuntimeSessionCreateInput): Promise<RuntimeSessionCreateResponse> {
     const fingerprint = JSON.stringify({ sessionId: input.sessionId, projectPath: input.projectPath, provider: input.provider, model: input.model, reasoning: input.reasoning, resume: input.resume });
     const prior = this.#createReceipts.get(input.idempotencyKey);
