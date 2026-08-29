@@ -43,6 +43,7 @@ const MAX_ORPHAN_CLAIM_DELETIONS = 16;
 const MAX_PROCESS_ID = 2_147_483_647;
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 const CANONICAL_UTC_MILLISECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const SHA256 = /^sha256:[a-f0-9]{64}$/;
 
 export type CreateGitCreatorEvolutionHostInput = {
   readonly workspaceRoot: string;
@@ -178,6 +179,7 @@ export function createGitCreatorEvolutionHost(
       const worktree = projection.isolatedWorktree;
       const baseCommit = projection.hashes.baseCommit;
       const candidateCommit = projection.hashes.candidateCommit;
+      const evaluationProofHash = input.result.evaluationProofHash;
       const expectedPaths = evolutionWorktreePaths(root, projection.runId);
       if (
         !proposal
@@ -192,6 +194,8 @@ export function createGitCreatorEvolutionHost(
         || proposal.isolatedBranch !== branch
         || proposal.isolatedWorktree !== worktree
         || projection.hashes.evaluatorEnvironment !== input.evaluatorEnvironmentHash
+        || !evaluationProofHash
+        || !SHA256.test(evaluationProofHash)
       ) {
         failures.add("EVOLUTION_CANDIDATE_STALE");
         return [...failures];
@@ -255,12 +259,26 @@ export function createGitCreatorEvolutionHost(
           })),
           changedAssets,
         };
+        const expectedEvidenceHash = evaluationEvidenceArtifactHash(
+          snapshot,
+          input.evaluatorEnvironmentHash,
+          evaluationProofHash,
+        );
+        const [artifactEvidence, reviewerEvidence] = proposal.validationEvidence;
         if (
           snapshot.patchHash !== projection.hashes.patch
           || candidateArtifactHash(snapshot) !== projection.hashes.candidateArtifact
-          || proposal.validationEvidence.length !== 1
-          || proposal.validationEvidence[0]?.artifactHash
-            !== evaluationEvidenceArtifactHash(snapshot, input.evaluatorEnvironmentHash)
+          || proposal.validationEvidence.length !== 2
+          || artifactEvidence?.kind !== "artifact"
+          || artifactEvidence.artifactHash !== expectedEvidenceHash
+          || artifactEvidence.producerId !== proposal.creatorId
+          || artifactEvidence.result !== "pass"
+          || context.currentArtifactHash !== expectedEvidenceHash
+          || reviewerEvidence?.kind !== "reviewer"
+          || reviewerEvidence.artifactHash !== expectedEvidenceHash
+          || reviewerEvidence.producerId !== proposal.creatorId
+          || reviewerEvidence.reviewerId !== proposal.evaluatorId
+          || reviewerEvidence.result !== "pass"
         ) {
           failures.add("EVOLUTION_CANDIDATE_STALE");
         }
@@ -1745,10 +1763,12 @@ function candidateArtifactHash(snapshot: EvolutionCandidateSnapshot): string {
 function evaluationEvidenceArtifactHash(
   snapshot: EvolutionCandidateSnapshot,
   evaluatorEnvironmentHash: string,
+  proofHash: string,
 ): string {
   return metadataHash({
     candidateArtifact: candidateArtifactHash(snapshot),
     evaluatorEnvironmentHash,
+    proofHash,
   });
 }
 

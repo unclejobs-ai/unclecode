@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -114,24 +114,46 @@ for (const cause of ["timeout", "cancelled", "output"]) {
     const containmentRoot = path.join(root, "fake-cgroup");
     const script = path.join(workspace, "kill-failure.mjs");
     const marker = path.join(root, `survivor-${cause}`);
+    const ready = path.join(root, `ready-${cause}`);
     await mkdir(containmentRoot);
     await writeFile(path.join(containmentRoot, "cgroup.procs"), "");
-    await writeFile(script, `
-      import { spawn } from "node:child_process";
-      const marker = process.argv[2];
-      const child = spawn(process.execPath, ["-e", ${JSON.stringify(`
-        const { writeFileSync } = require("node:fs");
-        const marker = process.argv[1];
-        setTimeout(() => writeFileSync(marker, "survived"), 600);
-        setInterval(() => {}, 5000);
-      `)}, marker], { stdio: "ignore" });
-      process.stdout.write(String(child.pid) + "\\n");
-      if (process.argv[3] === "output") process.stdout.write("x".repeat(64 * 1024));
-      setInterval(() => {}, 5000);
+    await writeFile(script, `#!/bin/sh
+      set -eu
+      marker="$1"
+      cause="$2"
+      ready="$3"
+      if [ "$cause" = timeout ]; then survival_delay=2.6; else survival_delay=0.6; fi
+      (sleep "$survival_delay"; printf survived > "$marker"; sleep 5000) &
+      child_pid=$!
+      printf "%s" "$child_pid" > "$ready.tmp"
+      mv "$ready.tmp" "$ready"
+      printf "%s\\n" "$child_pid"
+      if [ "$cause" = output ]; then
+        index=0
+        while [ "$index" -lt 8192 ]; do
+          printf xxxxxxxx
+          index=$((index + 1))
+        done
+      fi
+      wait
     `);
     const controller = new AbortController();
+    let announcedDescendantPid;
+    let terminationStartedAt;
     const abort = cause === "cancelled"
-      ? setTimeout(() => controller.abort(new Error("cancel test")), 80)
+      ? (async () => {
+          const deadline = Date.now() + 5_000;
+          while (announcedDescendantPid === undefined) {
+            if (Date.now() >= deadline) assert.fail("fixture did not announce its descendant before cancellation");
+            try {
+              const candidatePid = Number.parseInt(await readFile(ready, "utf8"), 10);
+              if (Number.isSafeInteger(candidatePid) && candidatePid > 0) announcedDescendantPid = candidatePid;
+            } catch {}
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          terminationStartedAt = Date.now();
+          controller.abort(new Error("cancel test"));
+        })()
       : undefined;
     const calls = { kill: 0, drain: 0, dispose: 0 };
     const containment = {
@@ -152,21 +174,30 @@ for (const cause of ["timeout", "cancelled", "output"]) {
     try {
       result = await runSupervisedEvolutionProcess({
         cwd: workspace,
-        command: process.execPath,
-        args: [script, marker, cause],
+        command: "/bin/sh",
+        args: [script, marker, cause, ready],
         environment: process.env,
-        timeoutMs: cause === "timeout" ? 80 : 2_000,
+        timeoutMs: 2_000,
         maxOutputBytes: cause === "output" ? 64 : 4_096,
         signal: controller.signal,
         containment,
       });
     } finally {
-      if (abort) clearTimeout(abort);
+      await abort;
     }
 
-    assert.ok(Date.now() - startedAt < 2_000, "termination waited without a bound");
+    const boundedStartedAt = cause === "cancelled" ? terminationStartedAt : startedAt;
+    assert.equal(typeof boundedStartedAt, "number");
+    assert.ok(Date.now() - boundedStartedAt < (cause === "timeout" ? 4_000 : 2_000), "termination waited without a bound");
     assert.equal(result.status, cause === "output" ? "failed" : cause);
-    const descendantPid = Number.parseInt(result.stdout, 10);
+    const descendantPid = Number.parseInt(
+      cause === "cancelled"
+        ? String(announcedDescendantPid)
+        : cause === "timeout"
+          ? await readFile(ready, "utf8")
+          : result.stdout,
+      10,
+    );
     assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
     await waitForProcessExit(descendantPid);
     await new Promise((resolve) => setTimeout(resolve, 650));

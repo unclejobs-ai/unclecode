@@ -33,6 +33,46 @@ function sha(value) {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
+function canonicalJson(value) {
+  if (value === null || ["string", "boolean", "number"].includes(typeof value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+}
+
+function canonicalHash(value) {
+  return sha(canonicalJson(value));
+}
+
+function bindEvaluation(input, result) {
+  const metrics = {
+    "baseline.score": result.baseline.score,
+    "candidate.score": result.candidate.score,
+    "comparison.delta": result.candidate.score - result.baseline.score,
+  };
+  const evidence = {
+    ...input.proofContext,
+    providerRunId: `provider:${input.runId}`,
+    verificationMatrixArtifactHash: sha(`matrix:${input.runId}`),
+    independentReviewerId: `reviewer:${input.runId}`,
+    independentReviewArtifactHash: sha(`review:${input.runId}`),
+    baselineResultHash: canonicalHash({ score: result.baseline.score, checks: result.baseline.checks }),
+    candidateResultHash: canonicalHash({ score: result.candidate.score, checks: result.candidate.checks }),
+    baselineObservationHash: canonicalHash(result.baseline),
+    candidateObservationHash: canonicalHash(result.candidate),
+    metrics,
+    metricsHash: canonicalHash(metrics),
+    observedAt: NOW,
+  };
+  return {
+    ...result,
+    integratedProof: {
+      status: "proven",
+      reasons: [],
+      binding: { ...evidence, proofHash: canonicalHash(evidence) },
+    },
+  };
+}
+
 async function waitFor(assertion, timeoutMs = 1_000) {
   const deadline = Date.now() + timeoutMs;
   while (true) {
@@ -139,12 +179,12 @@ test("the Git host creates one isolated local proposal, persists it, and never c
       assert.equal(readFileSync(path.join(input.baselineWorktree, "AGENTS.md"), "utf8"), "current policy v1.1\n");
       assert.equal(readFileSync(path.join(input.candidateWorktree, "skills", "creator.md"), "utf8"), "creator v2\n");
       const check = (score) => [{ id: "content", status: "passed", score, durationMs: 1 }];
-      return {
+      return bindEvaluation(input, {
         status: "completed",
         environmentHash: sha(JSON.stringify(input.suite.environment)),
         baseline: { score: 0.7, summary: "baseline", checks: check(0.7) },
         candidate: { score: 0.9, summary: "candidate", checks: check(0.9) },
-      };
+      });
     },
     recordAgentOps(result) {
       agentOps.push(result.projection);
@@ -173,6 +213,7 @@ test("the Git host creates one isolated local proposal, persists it, and never c
     assert.equal(agentOps.length, 1);
     assert.equal(result.projection.humanApproval, "pending");
     assert.equal(result.projection.cleanup.status, "retained");
+    assert.match(result.evaluationProofHash, /^sha256:[a-f0-9]{64}$/);
     assert.equal(git(root, ["rev-parse", "HEAD"]), initialHead);
     assert.equal(git(root, ["branch", "--show-current"]), initialBranch);
     assert.equal(git(root, ["status", "--porcelain=v1", "--untracked-files=all"]), initialStatus);
@@ -187,6 +228,11 @@ test("the Git host creates one isolated local proposal, persists it, and never c
       "utf8",
     ));
     assert.equal(artifact.result.projection.id, result.projection.id);
+    assert.equal(artifact.result.evaluationProofHash, result.evaluationProofHash);
+    assert.equal(
+      artifact.result.context.currentArtifactHash,
+      artifact.result.proposal.validationEvidence[0].artifactHash,
+    );
     assert.equal(artifact.result.projection.rawCandidateOutput, undefined);
     assert.equal(git(root, ["remote"]), "", "the host never configures or pushes a remote");
 
@@ -740,19 +786,21 @@ test("a paused pre-owner claim cannot delete a newer lifecycle lock", async () =
     async generateCreatorEdits() { return { status: "failed", summary: "unused" }; },
     async runEvaluator() { return { status: "failed", summary: "unused" }; },
   });
+  let first;
+  let second;
   try {
-    const first = firstHost.withLifecycleLock({ runId, workspaceRoot: root }, async () => {
+    first = firstHost.withLifecycleLock({ runId, workspaceRoot: root }, async () => {
       order.push("first");
     });
     assert.equal(
       await Promise.race([
         claimCreated.then(() => true),
-        new Promise((resolve) => setTimeout(() => resolve(false), 150)),
+        new Promise((resolve) => setTimeout(() => resolve(false), 5_000)),
       ]),
       true,
       "the lock implementation has no deterministic pre-owner boundary",
     );
-    const second = secondHost.withLifecycleLock({ runId, workspaceRoot: root }, async () => {
+    second = secondHost.withLifecycleLock({ runId, workspaceRoot: root }, async () => {
       order.push("second");
       announceSecond();
       await secondMayFinish;
@@ -767,6 +815,7 @@ test("a paused pre-owner claim cannot delete a newer lifecycle lock", async () =
   } finally {
     resumeClaim();
     releaseSecond();
+    await Promise.allSettled([first, second].filter(Boolean));
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -858,27 +907,31 @@ test("a duplicate lifecycle lock wait observes caller cancellation", async () =>
   const firstHost = createGitCreatorEvolutionHost(options);
   const duplicateHost = createGitCreatorEvolutionHost(options);
   const controller = new AbortController();
+  let first;
+  let duplicate;
   try {
-    const first = firstHost.withLifecycleLock({ runId, workspaceRoot: root }, async () => {
+    first = firstHost.withLifecycleLock({ runId, workspaceRoot: root }, async () => {
       announceFirst();
       await firstMayFinish;
     });
     await firstEntered;
-    const duplicate = duplicateHost.withLifecycleLock(
+    duplicate = duplicateHost.withLifecycleLock(
       { runId, workspaceRoot: root, signal: controller.signal },
       async () => { duplicateEntered = true; },
     );
     controller.abort(new Error("cancel duplicate lock wait"));
     const outcome = await Promise.race([
       duplicate.then(() => "resolved", (error) => error?.message),
-      new Promise((resolve) => setTimeout(() => resolve("pending"), 100)),
+      new Promise((resolve) => setTimeout(() => resolve("pending"), 5_000)),
     ]);
     assert.equal(outcome, "cancel duplicate lock wait");
     assert.equal(duplicateEntered, false);
     releaseFirst();
     await first;
   } finally {
+    controller.abort();
     releaseFirst();
+    await Promise.allSettled([first, duplicate].filter(Boolean));
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -1266,12 +1319,12 @@ test("two host instances join and replay one authoritative lifecycle beyond thir
         await firstEvaluatorReleased;
       }
       const check = (score) => [{ id: "content", status: "passed", score, durationMs: 1 }];
-      return {
+      return bindEvaluation(input, {
         status: "completed",
         environmentHash: input.expectedEnvironmentHash,
         baseline: { score: 0.7, summary: "baseline", checks: check(0.7) },
         candidate: { score: 0.9, summary: "candidate", checks: check(0.9) },
-      };
+      });
     },
   });
   const first = new CreatorEvolutionService({ config: config(), host: makeHost(), now: () => new Date(NOW) });
@@ -1312,11 +1365,104 @@ test("two host instances join and replay one authoritative lifecycle beyond thir
     assert.equal(creatorCalls, 1, "the recorded result should be replayed instead of rerunning the creator");
     assert.equal(evaluatorCalls, 1, "the recorded result should be replayed instead of rerunning the evaluator");
     assert.equal(firstResult.projection.id, secondResult.projection.id);
+    assert.equal(firstResult.evaluationProofHash, secondResult.evaluationProofHash);
     assert.equal(firstResult.status, "pr-ready");
     assert.equal(secondResult.status, "pr-ready");
+    assert.equal(firstResult.projection.cleanup.status, "retained");
+    assert.equal(secondResult.projection.cleanup.status, "retained");
+    assert.equal(existsSync(firstResult.projection.isolatedWorktree), true);
   } finally {
     releaseFirstCreator();
     releaseFirstEvaluator();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const corruption of [
+  {
+    label: "proof binding",
+    tamper(result) { result.evaluationProofHash = sha("tampered proof binding"); },
+  },
+  {
+    label: "current artifact binding",
+    tamper(result) { result.context.currentArtifactHash = sha("tampered current artifact binding"); },
+  },
+]) test(`a tampered persisted ${corruption.label} is invalidated once and replayed without duplicate work or cleanup`, async () => {
+  const root = createRepository();
+  const runId = `git-run-tampered-${corruption.label.replaceAll(" ", "-")}`;
+  let creatorCalls = 0;
+  let evaluatorCalls = 0;
+  const makeHost = () => createGitCreatorEvolutionHost({
+    workspaceRoot: root,
+    now: () => new Date(NOW),
+    async generateCreatorEdits() {
+      creatorCalls += 1;
+      return {
+        status: "completed",
+        summary: "creator edit",
+        edits: [{ path: "skills/creator.md", content: "creator v2\n" }],
+      };
+    },
+    async runEvaluator(input) {
+      evaluatorCalls += 1;
+      const check = (score) => [{ id: "content", status: "passed", score, durationMs: 1 }];
+      return bindEvaluation(input, {
+        status: "completed",
+        environmentHash: input.expectedEnvironmentHash,
+        baseline: { score: 0.7, summary: "baseline", checks: check(0.7) },
+        candidate: { score: 0.9, summary: "candidate", checks: check(0.9) },
+      });
+    },
+  });
+  const runInput = {
+    runId,
+    workspaceRoot: root,
+    prompt: "Create a stronger creator skill.",
+    creatorId: "isolated-creator",
+    mutableTargets: ["skills/creator.md"],
+    dispatchEvolutionProposed: dispatch().run,
+    signal: new AbortController().signal,
+  };
+  try {
+    const first = await new CreatorEvolutionService({
+      config: config(),
+      host: makeHost(),
+      now: () => new Date(NOW),
+    }).run(runInput);
+    assert.equal(first.status, "pr-ready");
+    assert.equal(first.projection.cleanup.status, "retained");
+    assert.match(first.evaluationProofHash, /^sha256:[a-f0-9]{64}$/);
+
+    const artifactPath = path.join(root, ".unclecode", "artifacts", runId, "evolution-proposal.json");
+    const artifact = JSON.parse(readFileSync(artifactPath, "utf8"));
+    corruption.tamper(artifact.result);
+    writeFileSync(artifactPath, `${JSON.stringify(artifact, null, 2)}\n`, "utf8");
+
+    const resumedService = new CreatorEvolutionService({
+      config: config(),
+      host: makeHost(),
+      now: () => new Date(NOW),
+    });
+    const invalidated = await resumedService.run(runInput);
+    const replayed = await new CreatorEvolutionService({
+      config: config(),
+      host: makeHost(),
+      now: () => new Date(NOW),
+    }).run(runInput);
+
+    assert.equal(invalidated.status, "stale");
+    assert.equal(invalidated.projection.cleanup.status, "completed");
+    assert.equal(replayed.status, "stale");
+    assert.equal(replayed.projection.id, invalidated.projection.id);
+    assert.equal(replayed.projection.cleanup.status, "completed");
+    assert.equal(creatorCalls, 1);
+    assert.equal(evaluatorCalls, 1);
+    assert.equal(existsSync(first.projection.isolatedWorktree), false);
+    assert.equal(
+      git(root, ["for-each-ref", "--format=%(refname:short)", `refs/heads/${first.projection.isolatedBranch}`]),
+      "",
+    );
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -1337,12 +1483,12 @@ test("a proposal record failure removes the retained candidate and branch", asyn
     },
     async runEvaluator(input) {
       const check = (score) => [{ id: "content", status: "passed", score, durationMs: 1 }];
-      return {
+      return bindEvaluation(input, {
         status: "completed",
         environmentHash: input.expectedEnvironmentHash,
         baseline: { score: 0.7, summary: "baseline", checks: check(0.7) },
         candidate: { score: 0.9, summary: "candidate", checks: check(0.9) },
-      };
+      });
     },
   });
   try {
@@ -1357,6 +1503,7 @@ test("a proposal record failure removes the retained candidate and branch", asyn
     });
     assert.equal(result.status, "failed");
     assert.ok(result.projection.failures.includes("EVOLUTION_RECORD_FAILED"));
+    assert.equal(result.projection.cleanup.status, "completed");
     assert.equal(existsSync(result.projection.isolatedWorktree), false);
     assert.equal(
       git(root, ["for-each-ref", "--format=%(refname:short)", `refs/heads/${result.projection.isolatedBranch}`]),

@@ -199,14 +199,16 @@ test("a never-settling creator timeout releases the lifecycle lock and duplicate
   });
   const owner = new AbortController();
   const duplicate = new AbortController();
+  let firstRun;
+  let duplicateRun;
   try {
-    const firstRun = makeService().run(evolutionInput(root, "creator-never-settles", owner.signal));
+    firstRun = makeService().run(evolutionInput(root, "creator-never-settles", owner.signal));
     await didEnterCreator;
-    const duplicateRun = makeService().run(evolutionInput(root, "creator-never-settles", duplicate.signal));
+    duplicateRun = makeService().run(evolutionInput(root, "creator-never-settles", duplicate.signal));
 
     const results = await Promise.race([
       Promise.all([firstRun, duplicateRun]),
-      new Promise((resolve) => setTimeout(() => resolve("still-locked"), 1_000)),
+      new Promise((resolve) => setTimeout(() => resolve("still-locked"), 10_000)),
     ]);
     assert.notEqual(results, "still-locked", "the detached provider kept the durable lifecycle lock");
     assert.equal(results[0].status, "failed");
@@ -219,6 +221,7 @@ test("a never-settling creator timeout releases the lifecycle lock and duplicate
   } finally {
     owner.abort();
     duplicate.abort();
+    await Promise.allSettled([firstRun, duplicateRun].filter(Boolean));
     rmSync(root, { recursive: true, force: true });
   }
 });

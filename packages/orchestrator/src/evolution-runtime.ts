@@ -186,6 +186,7 @@ export type CreatorEvolutionResult = {
   readonly status: EvolutionProposalProjection["state"];
   readonly recorded: boolean;
   readonly projection: EvolutionProposalProjection;
+  readonly evaluationProofHash?: string;
   readonly proposal?: EvolutionProposal;
   readonly context?: EvolutionValidationContext;
 };
@@ -386,15 +387,19 @@ export class CreatorEvolutionService {
     }
 
     const failures: string[] = [];
+    const expectedEvidenceHash = evaluationEvidenceArtifactHash(
+      execution.candidateSnapshot,
+      this.config.evaluatorEnvironmentHash,
+      execution.evaluation?.integratedProof.binding?.proofHash,
+    );
     if (
       result.projection.hashes.evaluatorEnvironment !== this.config.evaluatorEnvironmentHash
-      || result.proposal.validationEvidence.length !== 1
-      || result.proposal.validationEvidence[0]?.artifactHash
-        !== evaluationEvidenceArtifactHash(
-          execution.candidateSnapshot,
-          this.config.evaluatorEnvironmentHash,
-          execution.evaluation?.integratedProof.binding?.proofHash,
-        )
+      || result.context.currentArtifactHash !== expectedEvidenceHash
+      || !hasBoundEvolutionValidationEvidence(
+        result.proposal,
+        expectedEvidenceHash,
+        this.config.evaluator.id,
+      )
     ) {
       failures.push("EVOLUTION_EVALUATION_ENVIRONMENT_MISMATCH");
     }
@@ -830,6 +835,11 @@ export class CreatorEvolutionService {
       });
     }
 
+    const validationArtifactHash = evaluationEvidenceArtifactHash(
+      execution.candidateSnapshot,
+      this.config.evaluatorEnvironmentHash,
+      execution.evaluation.integratedProof.binding?.proofHash,
+    );
     const proposal: EvolutionProposal = {
       candidateId,
       creatorId: input.creatorId,
@@ -840,20 +850,27 @@ export class CreatorEvolutionService {
       heldOutBenchmarkId: this.config.suite.id,
       baselineScore: execution.evaluation.baseline.score,
       candidateScore: execution.evaluation.candidate.score,
-      validationEvidence: [{
-        kind: "metric",
-        artifactHash: evaluationEvidenceArtifactHash(
-          execution.candidateSnapshot,
-          this.config.evaluatorEnvironmentHash,
-          execution.evaluation.integratedProof.binding?.proofHash,
-        ),
-        producerId: input.creatorId,
-        result: "pass",
-        timestamp: createdAt,
-      }],
+      validationEvidence: [
+        {
+          kind: "artifact",
+          artifactHash: validationArtifactHash,
+          producerId: input.creatorId,
+          result: "pass",
+          timestamp: createdAt,
+        },
+        {
+          kind: "reviewer",
+          artifactHash: validationArtifactHash,
+          producerId: input.creatorId,
+          reviewerId: this.config.evaluator.id,
+          result: "pass",
+          timestamp: createdAt,
+        },
+      ],
       humanApproval: "pending",
     };
     const context: EvolutionValidationContext = {
+      currentArtifactHash: validationArtifactHash,
       evaluatorAssets: [...this.config.evaluator.assets],
       policyAssets: [...this.config.policyAssets],
       benchmarkAssets: [...this.config.suite.assets],
@@ -1058,6 +1075,9 @@ export class CreatorEvolutionService {
       status,
       recorded: false,
       projection,
+      ...(execution.evaluation?.integratedProof.binding?.proofHash === undefined
+        ? {}
+        : { evaluationProofHash: execution.evaluation.integratedProof.binding.proofHash }),
       ...(terminal.proposal === undefined ? {} : { proposal: terminal.proposal }),
       ...(terminal.context === undefined ? {} : { context: terminal.context }),
     };
@@ -1573,6 +1593,7 @@ function validateCurrentIsolation(
 ): string[] {
   if (!isolation) return ["MISSING_ISOLATION_ATTESTATION"];
   const failures = validateIsolationLocally(proposal, {
+    currentArtifactHash: proposal.validationEvidence[0]?.artifactHash ?? "",
     evaluatorAssets: [],
     policyAssets: [],
     benchmarkAssets: [],
@@ -1642,6 +1663,24 @@ function evaluationEvidenceArtifactHash(
     evaluatorEnvironmentHash,
     proofHash,
   });
+}
+
+function hasBoundEvolutionValidationEvidence(
+  proposal: EvolutionProposal,
+  artifactHash: string,
+  evaluatorId: string,
+): boolean {
+  const [artifact, reviewer] = proposal.validationEvidence;
+  return proposal.validationEvidence.length === 2
+    && artifact?.kind === "artifact"
+    && artifact.artifactHash === artifactHash
+    && artifact.producerId === proposal.creatorId
+    && artifact.result === "pass"
+    && reviewer?.kind === "reviewer"
+    && reviewer.artifactHash === artifactHash
+    && reviewer.producerId === proposal.creatorId
+    && reviewer.reviewerId === evaluatorId
+    && reviewer.result === "pass";
 }
 
 function candidateFingerprint(snapshot: EvolutionCandidateSnapshot): string {
