@@ -196,7 +196,9 @@ setInterval(() => {}, 1000);
 import { existsSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
-const descendant = spawn(process.execPath, [${JSON.stringify(descendantExecutable)}], { stdio: "ignore" });
+const descendant = spawn(process.execPath, [${JSON.stringify(descendantExecutable)}], {
+  stdio: ${JSON.stringify(options.inheritPipes ? ["ignore", "inherit", "inherit"] : "ignore")},
+});
 writeFileSync(${JSON.stringify(descendantPidPath)}, String(descendant.pid));
 const readyTimer = setInterval(() => {
   if (!existsSync(${JSON.stringify(descendantReadyPath)})) return;
@@ -305,6 +307,43 @@ test("ast_search settles descendants after the process-group leader exits normal
     assert.equal(processExists(pid), false, "normal AST completion must reap the group leader");
     assert.equal(processExists(descendantPid), false, "normal AST completion must terminate surviving descendants");
   } finally {
+    if (pid && processExists(pid)) process.kill(-pid, "SIGKILL");
+    if (descendantPid && processExists(descendantPid)) process.kill(descendantPid, "SIGKILL");
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ast_search settles from leader exit when a descendant inherits its output pipes", {
+  skip: process.platform === "win32" ? "POSIX process groups only" : false,
+  timeout: 5_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "unclecode-ast-inherited-pipes-"));
+  let pid;
+  let descendantPid;
+  let settlementTimer;
+  try {
+    const fixture = writeLeaderExitsFirstTool(root, "ast-inherited-pipes", { inheritPipes: true });
+    const ast = createAstToolRegistry({ executable: fixture.executable, forceKillDelayMs: 50 });
+    const invocation = ast.handlers.ast_search({ pattern: "$A", path: "." }, root);
+    pid = Number(await waitForFile(fixture.pidPath));
+    await waitForFile(fixture.readyPath);
+    descendantPid = Number(await waitForFile(fixture.descendantPidPath));
+    await waitForProcessExit(pid);
+
+    const result = await Promise.race([
+      invocation,
+      new Promise((_, reject) => {
+        settlementTimer = setTimeout(
+          () => reject(new Error("AST settlement waited for inherited output pipes to close")),
+          1_500,
+        );
+      }),
+    ]);
+    assert.deepEqual(JSON.parse(result.content), { matches: [], count: 0, truncated: false });
+    assert.equal(processExists(pid), false, "AST completion must leave the group leader reaped");
+    assert.equal(processExists(descendantPid), false, "AST completion must terminate the pipe-owning descendant");
+  } finally {
+    if (settlementTimer) clearTimeout(settlementTimer);
     if (pid && processExists(pid)) process.kill(-pid, "SIGKILL");
     if (descendantPid && processExists(descendantPid)) process.kill(descendantPid, "SIGKILL");
     rmSync(root, { recursive: true, force: true });

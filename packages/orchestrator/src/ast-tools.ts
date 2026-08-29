@@ -184,12 +184,12 @@ function runAstGrep(
     requestedFailure ??= error;
     if (!child.pid) fail(error);
   });
-  child.once("close", (code, terminatedBySignal) => {
+  child.once("exit", (code, terminatedBySignal) => {
     if (settled) return;
     settled = true;
     void (async () => {
       try {
-        await (requestedFailure ? processGroup.terminate() : processGroup.settle());
+        await processGroup.terminate();
         if (requestedFailure) {
           reject(requestedFailure);
           return;
