@@ -146,6 +146,61 @@ test("cleanup inventory prioritizes unresolved identities and counts pending row
   await disposing;
 });
 
+test("unique unresolved session factories are bounded before invocation while same-session creates coalesce", async () => {
+  let factoryCalls = 0;
+  const releaseFactories = [];
+  const registry = new LiveRuntimeEngineRegistry({
+    createSession(input) {
+      factoryCalls += 1;
+      return new Promise(resolve => {
+        releaseFactories.push(() => resolve({
+          engine: fakeEngine(input.sessionId),
+          projectPath: input.projectPath,
+        }));
+      });
+    },
+  });
+  let firstCreate;
+  let overflowCreate;
+  const initialCreates = [];
+  try {
+    for (let index = 0; index < 257; index += 1) {
+      const creating = registry.create({
+        sessionId: `pending-${index}`,
+        projectPath: `/workspace/${index}`,
+        idempotencyKey: `create-${index}`,
+      });
+      initialCreates.push(creating);
+      if (index === 0) firstCreate = creating;
+      if (index === 256) overflowCreate = creating;
+    }
+    assert.equal(factoryCalls, 256, "factory admission must stop before invoking an overflowing factory");
+    for (let index = 257; index < 20_000; index += 1) {
+      registry.create({
+        sessionId: `pending-${index}`,
+        projectPath: `/workspace/${index}`,
+        idempotencyKey: `create-${index}`,
+      });
+    }
+
+    const sameSessionCreate = registry.create({
+      sessionId: "pending-0",
+      projectPath: "/workspace/0",
+      idempotencyKey: "same-session-create",
+    });
+    assert.equal(sameSessionCreate, firstCreate, "a saturated registry still coalesces the existing session factory");
+    assert.equal(factoryCalls, 256, "20k unique requests must not grow factory work beyond the bound");
+    assert.equal(registry.systemSnapshot().engines.pendingCreations, 256);
+    const overflow = await overflowCreate;
+    assert.equal(overflow.ok, false);
+    assert.equal(overflow.code, "invalid_action");
+  } finally {
+    for (const release of releaseFactories) release();
+    await Promise.allSettled(initialCreates);
+    await registry.disposeAll();
+  }
+});
+
 test("disposeAll cannot be repopulated by a factory that resolves after shutdown begins", async () => {
   let resolveFactory;
   let disposeCalls = 0;
@@ -175,6 +230,53 @@ test("disposeAll cannot be repopulated by a factory that resolves after shutdown
     projectPath: "/workspace",
     idempotencyKey: "after-dispose",
   })).ok, false);
+});
+
+test("disposeAll drains late factory cleanup and aggregates its failure after an attached teardown fails", async () => {
+  let resolveFactory;
+  let lateDisposeCalls = 0;
+  const registry = new LiveRuntimeEngineRegistry({
+    createSession: () => new Promise(resolve => { resolveFactory = resolve; }),
+  });
+  registry.attach("attached", fakeEngine("attached"), {
+    projectPath: "/workspace",
+    dispose() { throw new Error("attached cleanup failed"); },
+  });
+  const creating = registry.create({
+    sessionId: "late",
+    projectPath: "/workspace",
+    idempotencyKey: "late-create-after-failure",
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  const disposalOutcome = registry.disposeAll().then(
+    () => ({ status: "fulfilled" }),
+    error => ({ status: "rejected", error }),
+  );
+  const earlyOutcome = await Promise.race([
+    disposalOutcome,
+    new Promise(resolve => setImmediate(() => resolve({ status: "pending" }))),
+  ]);
+  assert.equal(earlyOutcome.status, "pending", "an earlier teardown failure cannot skip a pending factory");
+
+  resolveFactory({
+    engine: fakeEngine("late"),
+    projectPath: "/workspace",
+    dispose() {
+      lateDisposeCalls += 1;
+      throw new Error("late cleanup failed");
+    },
+  });
+  const createResult = await creating;
+  const outcome = await disposalOutcome;
+
+  assert.equal(createResult.ok, false);
+  assert.equal(lateDisposeCalls, 1);
+  assert.equal(outcome.status, "rejected");
+  assert.match(outcome.error.message, /attached cleanup failed/);
+  assert.match(outcome.error.message, /late cleanup failed/);
+  assert.equal(registry.systemSnapshot().engines.pendingCreations, 0);
+  assert.equal(registry.systemSnapshot().engines.pendingTeardowns, 0);
 });
 
 test("a never-resolving session disposer times out instead of hanging owner teardown", async () => {

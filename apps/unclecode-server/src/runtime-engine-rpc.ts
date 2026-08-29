@@ -15,6 +15,8 @@ import { boundedRuntimeRpcError } from "./runtime-error-redaction.js";
 
 export type { RuntimeSessionRevisionClock } from "./runtime-mutation-arbiter.js";
 
+const MAX_PENDING_SESSION_CREATIONS = 256;
+
 export const RUNTIME_ENGINE_METHODS = [
   "handleSubmit", "toggleToolHistoryDisplay", "setMode", "openSessionsPanel", "interruptTurn",
   "cancelSensitiveInput", "closeOverlay", "updateTerminalColumns", "updateTerminalRows",
@@ -296,6 +298,13 @@ export class LiveRuntimeEngineRegistry {
         ? pending.promise
         : Promise.resolve({ ok: false, code: "session_conflict", message: "Session creation is already in progress with different owner configuration." });
     }
+    if (this.#sessionCreations.size >= MAX_PENDING_SESSION_CREATIONS) {
+      return Promise.resolve({
+        ok: false,
+        code: "invalid_action",
+        message: "Runtime owner has too many session creations in progress.",
+      });
+    }
     const promise = this.#createOnce(input).finally(() => {
       if (this.#sessionCreations.get(input.sessionId)?.promise === promise) {
         this.#sessionCreations.delete(input.sessionId);
@@ -324,11 +333,16 @@ export class LiveRuntimeEngineRegistry {
         ...(input.resume !== undefined ? { resume: input.resume } : {}),
       });
       if (this.#disposed) {
-        await withTimeout(
-          Promise.resolve(created.dispose?.()),
-          this.#teardownTimeoutMs,
-          "Late runtime session cleanup timed out.",
-        );
+        try {
+          await withTimeout(
+            Promise.resolve(created.dispose?.()),
+            this.#teardownTimeoutMs,
+            "Late runtime session cleanup timed out.",
+          );
+        } catch (error) {
+          this.#recordTeardownFailure(error);
+          throw error;
+        }
         return { ok: false, code: "invalid_action", message: "Runtime engine registry has been disposed." };
       }
       const raced = this.#engines.get(input.sessionId);
@@ -385,17 +399,35 @@ export class LiveRuntimeEngineRegistry {
     if (this.#sweepTimer) clearTimeout(this.#sweepTimer);
     this.#sweepTimer = undefined;
     for (const [sessionId, item] of [...this.#engines]) this.#scheduleTeardown(sessionId, item, true);
-    await this.settleTeardowns();
-    if (this.#sessionCreations.size > 0) {
-      await withTimeout(
-        Promise.allSettled([...this.#sessionCreations.values()].map(item => item.promise)),
-        this.#teardownTimeoutMs,
-        "Runtime session creation shutdown timed out.",
-      );
-      await this.settleTeardowns();
+    const failures: string[] = [];
+    const settle = async (): Promise<void> => {
+      try {
+        await this.settleTeardowns();
+      } catch (error) {
+        failures.push(boundedRuntimeFailure(error));
+      }
+    };
+    try {
+      await settle();
+      if (this.#sessionCreations.size > 0) {
+        try {
+          await withTimeout(
+            Promise.allSettled([...this.#sessionCreations.values()].map(item => item.promise)),
+            this.#teardownTimeoutMs,
+            "Runtime session creation shutdown timed out.",
+          );
+        } catch (error) {
+          failures.push(boundedRuntimeFailure(error));
+        }
+        await settle();
+      }
+    } finally {
+      this.#createReceipts.clear();
+      this.#sessionCreations.clear();
     }
-    this.#createReceipts.clear();
-    this.#sessionCreations.clear();
+    if (failures.length > 0) {
+      throw new Error(`Runtime owner cleanup did not settle cleanly: ${failures.join("; ")}`);
+    }
   }
 
   async #disposeAttached(item: Attached): Promise<void> {
@@ -446,16 +478,20 @@ export class LiveRuntimeEngineRegistry {
     ).catch((error: unknown) => {
       cleanup.status = "failed";
       cleanup.recordedAt = Date.now();
-      this.#teardownFailures.push(boundedRuntimeFailure(error));
-      if (this.#teardownFailures.length > SYSTEM_OBSERVABILITY_BOUNDS.cleanup) {
-        this.#teardownFailures.splice(0, this.#teardownFailures.length - SYSTEM_OBSERVABILITY_BOUNDS.cleanup);
-      }
+      this.#recordTeardownFailure(error);
     }).finally(() => {
       if (cleanup.status === "pending") cleanup.status = "completed";
       cleanup.recordedAt = Date.now();
       this.#teardowns.delete(teardown);
     });
     this.#teardowns.add(teardown);
+  }
+
+  #recordTeardownFailure(error: unknown): void {
+    this.#teardownFailures.push(boundedRuntimeFailure(error));
+    if (this.#teardownFailures.length > SYSTEM_OBSERVABILITY_BOUNDS.cleanup) {
+      this.#teardownFailures.splice(0, this.#teardownFailures.length - SYSTEM_OBSERVABILITY_BOUNDS.cleanup);
+    }
   }
 
   #boundCleanupInventory(): void {
