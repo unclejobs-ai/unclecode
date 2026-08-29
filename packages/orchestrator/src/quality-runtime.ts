@@ -164,6 +164,11 @@ export type QualityWorkspaceEntry = {
 
 export type QualityWorkspaceInventory = {
   readonly files: readonly QualityWorkspaceEntry[];
+  readonly materialInputs: readonly QualityMaterialInput[];
+};
+
+export type QualityMaterialInput = QualityWorkspaceEntry & {
+  readonly entries: number;
 };
 
 export type QualityReviewPacket = PersistedQualityArtifact & {
@@ -212,9 +217,19 @@ export const QUALITY_MANIFEST_MAX_FILE_BYTES = 64 * 1024 * 1024;
 export const QUALITY_MANIFEST_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
 export const QUALITY_REVIEW_PACKET_MAX_BYTES = 1024 * 1024;
 export const QUALITY_REVIEW_PACKET_MAX_FILE_BYTES = 256 * 1024;
+export const QUALITY_MATERIAL_INPUT_MAX_ENTRIES = 100_000;
 const QUALITY_REVIEW_PACKET_CONTENT_BUDGET = 768 * 1024;
 const QUALITY_HASH_BUFFER_BYTES = 64 * 1024;
 const QUALITY_INVENTORY_IGNORED_ROOTS = new Set([".git", ".unclecode", "node_modules", "target"]);
+const QUALITY_MATERIAL_INPUT_ROOTS = [
+  ".git",
+  ".unclecode/config.json",
+  ".unclecode/context/pinned-skills.json",
+  ".unclecode/extensions",
+  ".unclecode/plugins",
+  "node_modules",
+  "target",
+] as const;
 
 /** Strict critic wire contract: prose can never be mistaken for a passing review. */
 export function parseCriticVerdict(raw: string): ParsedCriticVerdict | undefined {
@@ -321,6 +336,13 @@ function inventoryEntryChanged(
   return before?.kind !== after?.kind || before?.sha256 !== after?.sha256;
 }
 
+function materialInputChanged(
+  before: QualityMaterialInput | undefined,
+  after: QualityMaterialInput | undefined,
+): boolean {
+  return inventoryEntryChanged(before, after) || before?.entries !== after?.entries;
+}
+
 export class QualityArtifactStore {
   readonly workspaceRoot: string;
   readonly runId: string;
@@ -372,7 +394,11 @@ export class QualityArtifactStore {
     if (candidatePaths.size > QUALITY_MANIFEST_MAX_ENTRIES) {
       files.push({ path: "[inventory-entry-limit]", kind: "unreadable", sha256: null });
     }
-    return { files };
+    return {
+      files,
+      materialInputs: QUALITY_MATERIAL_INPUT_ROOTS.map((relativePath) =>
+        this.snapshotMaterialInput(relativePath)),
+    };
   }
 
   /** Persist a content-addressed immutable packet whose exact canonical body is reviewed. */
@@ -383,6 +409,44 @@ export class QualityArtifactStore {
     const current = this.captureWorkspaceInventory(declaredPaths);
     const beforeByPath = new Map(input.baseline.files.map((entry) => [entry.path, entry] as const));
     const afterByPath = new Map(current.files.map((entry) => [entry.path, entry] as const));
+    const baselineMaterialInputs = input.baseline.materialInputs ?? [];
+    const currentMaterialInputs = current.materialInputs ?? [];
+    const beforeMaterialByPath = new Map(baselineMaterialInputs.map((entry) => [entry.path, entry] as const));
+    const afterMaterialByPath = new Map(currentMaterialInputs.map((entry) => [entry.path, entry] as const));
+    const materialInputUnsupportedEntries: QualityWorkspaceEntry[] = [];
+    for (const relativePath of QUALITY_MATERIAL_INPUT_ROOTS) {
+      const before = beforeMaterialByPath.get(relativePath);
+      const after = afterMaterialByPath.get(relativePath);
+      if (!before || !after) {
+        materialInputUnsupportedEntries.push({
+          path: `[material-input-inventory-missing]:${relativePath}`,
+          kind: "unreadable",
+          sha256: null,
+        });
+        continue;
+      }
+      if (
+        before.kind === "unreadable"
+        || before.kind === "symlink"
+        || before.kind === "special"
+        || after.kind === "unreadable"
+        || after.kind === "symlink"
+        || after.kind === "special"
+      ) {
+        materialInputUnsupportedEntries.push({
+          path: `[material-input-unsupported]:${relativePath}`,
+          kind: "unreadable",
+          sha256: null,
+        });
+      }
+      if (materialInputChanged(before, after)) {
+        materialInputUnsupportedEntries.push({
+          path: `[material-input-changed]:${relativePath}`,
+          kind: "unreadable",
+          sha256: null,
+        });
+      }
+    }
     const inventoryUnsupportedEntries = [...new Map(
       [...input.baseline.files, ...current.files]
         .filter((entry) => entry.kind === "unreadable")
@@ -439,6 +503,7 @@ export class QualityArtifactStore {
       })),
       changedPaths,
       undeclaredPaths,
+      materialInputs: currentMaterialInputs,
       files: packetFiles,
       workerArtifacts: input.workerArtifacts.map((artifact) => ({
         path: artifact.path,
@@ -466,6 +531,7 @@ export class QualityArtifactStore {
           iteration: input.iteration,
           changedPaths: changedPaths.slice(0, 256),
           undeclaredPaths: undeclaredPaths.slice(0, 256),
+          materialInputs: currentMaterialInputs,
           packetError: "QUALITY_REVIEW_PACKET_LIMIT_EXCEEDED",
         }
       : body;
@@ -473,6 +539,7 @@ export class QualityArtifactStore {
     const evidenceStatus = undeclaredPaths.length === 0
       && unsupportedPacketPaths.length === 0
       && inventoryUnsupportedEntries.length === 0
+      && materialInputUnsupportedEntries.length === 0
       && !requestTruncated
       && !oversized
       && declaredManifest.evidenceStatus === "supported"
@@ -510,6 +577,7 @@ export class QualityArtifactStore {
       undeclaredPaths,
       unsupportedEntries: [
         ...inventoryUnsupportedEntries,
+        ...materialInputUnsupportedEntries,
         ...declaredManifest.unsupportedEntries,
         ...unsupportedPacketPaths.map((entryPath) => ({
           path: entryPath,
@@ -552,6 +620,159 @@ export class QualityArtifactStore {
     // root exclusions bound generated/vendor state and the artifact store itself.
     this.collectWorkspaceInventoryPaths(this.workspaceRoot, "", paths, 0);
     return paths;
+  }
+
+  /**
+   * Fingerprint ignored dependency/build roots without reading their potentially
+   * huge contents. File identity, size, and nanosecond change timestamps make a
+   * post-baseline mutation observable; unsafe links and bounded-walk failures
+   * fail closed instead of becoming reviewer evidence.
+   */
+  private snapshotMaterialInput(relativeRoot: string): QualityMaterialInput {
+    const absoluteRoot = path.resolve(this.workspaceRoot, relativeRoot);
+    if (!isContainedPath(this.workspaceRoot, absoluteRoot)) {
+      return { path: relativeRoot, kind: "unreadable", sha256: null, entries: 0 };
+    }
+    let rootStats: ReturnType<typeof lstatSync>;
+    try {
+      rootStats = lstatSync(absoluteRoot);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? { path: relativeRoot, kind: "missing", sha256: null, entries: 0 }
+        : { path: relativeRoot, kind: "unreadable", sha256: null, entries: 0 };
+    }
+
+    const rootKind: QualityWorkspaceEntry["kind"] = rootStats.isDirectory()
+      ? "directory"
+      : rootStats.isFile()
+        ? "file"
+        : rootStats.isSymbolicLink()
+          ? "symlink"
+          : "special";
+    const hash = createHash("sha256");
+    if (relativeRoot === ".git") {
+      if ((rootKind !== "file" && rootKind !== "directory") || !this.hashRepositoryGitState(hash)) {
+        return { path: relativeRoot, kind: "unreadable", sha256: null, entries: 1 };
+      }
+      return {
+        path: relativeRoot,
+        kind: rootKind,
+        sha256: `sha256:${hash.digest("hex")}`,
+        entries: 1,
+      };
+    }
+    const state = { entries: 0, unsupported: false };
+    try {
+      this.hashMaterialInputMetadata(absoluteRoot, relativeRoot, hash, state, 0);
+    } catch {
+      return { path: relativeRoot, kind: "unreadable", sha256: null, entries: state.entries };
+    }
+    if (state.unsupported) {
+      return { path: relativeRoot, kind: "unreadable", sha256: null, entries: state.entries };
+    }
+    return {
+      path: relativeRoot,
+      kind: rootKind,
+      sha256: `sha256:${hash.digest("hex")}`,
+      entries: state.entries,
+    };
+  }
+
+  private hashRepositoryGitState(hash: ReturnType<typeof createHash>): boolean {
+    const commands = [
+      ["rev-parse", "--verify", "HEAD"],
+      ["rev-parse", "--abbrev-ref", "HEAD"],
+      ["diff", "--cached", "--raw", "-z", "--no-ext-diff"],
+      ["config", "--local", "--null", "--list"],
+    ] as const;
+    try {
+      for (const command of commands) {
+        const output = execFileSync("git", ["-C", this.workspaceRoot, ...command], {
+          encoding: "buffer",
+          env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+          maxBuffer: 8 * 1024 * 1024,
+          stdio: ["ignore", "pipe", "ignore"],
+        });
+        hash.update(stableJson({ command }));
+        hash.update(output);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private hashMaterialInputMetadata(
+    absolutePath: string,
+    relativePath: string,
+    hash: ReturnType<typeof createHash>,
+    state: { entries: number; unsupported: boolean },
+    depth: number,
+  ): void {
+    if (depth > QUALITY_MANIFEST_MAX_DEPTH || state.entries >= QUALITY_MATERIAL_INPUT_MAX_ENTRIES) {
+      throw new Error("Material input fingerprint limit exceeded");
+    }
+    const stats = lstatSync(absolutePath, { bigint: true });
+    state.entries += 1;
+    const kind = stats.isDirectory()
+      ? "directory"
+      : stats.isFile()
+        ? "file"
+        : stats.isSymbolicLink()
+          ? "symlink"
+          : "special";
+    let linkTarget: string | undefined;
+    if (kind === "symlink") {
+      linkTarget = readlinkSync(absolutePath);
+      let resolvedTarget: string;
+      try {
+        resolvedTarget = realpathSync.native(absolutePath);
+      } catch {
+        state.unsupported = true;
+        return;
+      }
+      if (!isContainedPath(this.workspaceRealRoot, resolvedTarget)) state.unsupported = true;
+    } else if (kind === "special") {
+      state.unsupported = true;
+    }
+    hash.update(stableJson({
+      path: relativePath,
+      kind,
+      device: String(stats.dev),
+      inode: String(stats.ino),
+      mode: String(stats.mode),
+      links: String(stats.nlink),
+      size: String(stats.size),
+      modifiedNs: String(stats.mtimeNs),
+      changedNs: String(stats.ctimeNs),
+      ...(linkTarget === undefined ? {} : { linkTarget }),
+    }));
+    if (kind !== "directory") return;
+
+    const directory = opendirSync(absolutePath);
+    const childNames: string[] = [];
+    try {
+      while (true) {
+        const child = directory.readSync();
+        if (!child) break;
+        childNames.push(child.name);
+        if (state.entries + childNames.length > QUALITY_MATERIAL_INPUT_MAX_ENTRIES) {
+          throw new Error("Material input fingerprint limit exceeded");
+        }
+      }
+    } finally {
+      directory.closeSync();
+    }
+    childNames.sort(compareStablePaths);
+    for (const childName of childNames) {
+      this.hashMaterialInputMetadata(
+        path.join(absolutePath, childName),
+        `${relativePath}/${childName}`,
+        hash,
+        state,
+        depth + 1,
+      );
+    }
   }
 
   private collectWorkspaceInventoryPaths(

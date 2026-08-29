@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   mkdirSync,
@@ -1500,6 +1501,165 @@ test("review packets reject undeclared workspace writes and become stale after m
     writeFileSync(path.join(workspace, "owned.ts"), "mutated after critic input\n");
     const stalePacket = store.persistReviewPacket(input);
     assert.notEqual(stalePacket.artifactHash, cleanPacket.artifactHash);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("review packets fail closed when an ignored material input changes after the plan baseline", () => {
+  for (const { materialPath, materialRoot } of [
+    { materialPath: "node_modules/runtime/index.js", materialRoot: "node_modules" },
+    { materialPath: "target/debug/runtime.bin", materialRoot: "target" },
+    { materialPath: ".unclecode/config.json", materialRoot: ".unclecode/config.json" },
+    { materialPath: ".unclecode/context/pinned-skills.json", materialRoot: ".unclecode/context/pinned-skills.json" },
+    { materialPath: ".unclecode/extensions/quality.json", materialRoot: ".unclecode/extensions" },
+    { materialPath: ".unclecode/plugins/quality.mjs", materialRoot: ".unclecode/plugins" },
+  ]) {
+    const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-material-input-"));
+    try {
+      writeFileSync(path.join(workspace, "owned.ts"), "before\n");
+      const absoluteMaterialPath = path.join(workspace, materialPath);
+      mkdirSync(path.dirname(absoluteMaterialPath), { recursive: true });
+      writeFileSync(absoluteMaterialPath, "trusted\n");
+      const store = new orchestrator.QualityArtifactStore(workspace, "material-input");
+      const baseline = store.captureWorkspaceInventory(["owned.ts"]);
+      writeFileSync(path.join(workspace, "owned.ts"), "after\n");
+      const input = {
+        graphId: "goal-material-input",
+        iteration: 0,
+        baseline,
+        request: "Change owned.ts.",
+        tasks: [{ id: "task-owned", acceptanceCriteria: ["done"], writePaths: ["owned.ts"] }],
+        results: [{ id: "task-owned", status: "completed", summary: "done" }],
+        workerArtifacts: [],
+        executableChecks: [{ name: "test", status: "passed", summary: "passed" }],
+      };
+      const trustedPacket = store.persistReviewPacket(input);
+      writeFileSync(absoluteMaterialPath, "altered\n");
+      const packet = store.persistReviewPacket(input);
+
+      assert.equal(trustedPacket.evidenceStatus, "supported", materialPath);
+      assert.equal(packet.evidenceStatus, "unsupported", materialPath);
+      assert.notEqual(packet.artifactHash, trustedPacket.artifactHash, materialPath);
+      assert.ok(
+        packet.unsupportedEntries.some((entry) =>
+          entry.path === `[material-input-changed]:${materialRoot}`),
+        materialPath,
+      );
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  }
+});
+
+test("review packets bind an unchanged dependency fingerprint without hashing dependency contents into the packet", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-material-binding-"));
+  try {
+    writeFileSync(path.join(workspace, "owned.ts"), "before\n");
+    mkdirSync(path.join(workspace, "node_modules/runtime"), { recursive: true });
+    writeFileSync(path.join(workspace, "node_modules/runtime/index.js"), "trusted dependency\n");
+    const store = new orchestrator.QualityArtifactStore(workspace, "material-binding");
+    const baseline = store.captureWorkspaceInventory(["owned.ts"]);
+    writeFileSync(path.join(workspace, "owned.ts"), "after\n");
+
+    const packet = store.persistReviewPacket({
+      graphId: "goal-material-binding",
+      iteration: 0,
+      baseline,
+      request: "Change owned.ts.",
+      tasks: [{ id: "task-owned", acceptanceCriteria: ["done"], writePaths: ["owned.ts"] }],
+      results: [{ id: "task-owned", status: "completed", summary: "done" }],
+      workerArtifacts: [],
+      executableChecks: [{ name: "test", status: "passed", summary: "passed" }],
+    });
+
+    assert.equal(packet.evidenceStatus, "supported");
+    assert.match(packet.canonicalContent, /"materialInputs"/);
+    assert.match(packet.canonicalContent, /"path": "node_modules"/);
+    assert.doesNotMatch(packet.canonicalContent, /trusted dependency/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("review packets invalidate linked-worktree evidence when its external HEAD changes", () => {
+  const repository = mkdtempSync(path.join(tmpdir(), "uc-quality-linked-repository-"));
+  const workspace = path.join(repository, "review-worktree");
+  try {
+    execFileSync("git", ["init", "--initial-branch=main", repository], { stdio: "ignore" });
+    writeFileSync(path.join(repository, ".gitignore"), ".unclecode/\n");
+    writeFileSync(path.join(repository, "owned.ts"), "before\n");
+    execFileSync("git", ["-C", repository, "add", ".gitignore", "owned.ts"]);
+    execFileSync(
+      "git",
+      ["-C", repository, "-c", "user.name=Quality Test", "-c", "user.email=quality@example.test", "commit", "-m", "baseline"],
+      { stdio: "ignore" },
+    );
+    execFileSync("git", ["-C", repository, "worktree", "add", "-b", "review", workspace], { stdio: "ignore" });
+
+    const store = new orchestrator.QualityArtifactStore(workspace, "linked-worktree");
+    const baseline = store.captureWorkspaceInventory(["owned.ts"]);
+    writeFileSync(path.join(workspace, "owned.ts"), "after\n");
+    const input = {
+      graphId: "goal-linked-worktree",
+      iteration: 0,
+      baseline,
+      request: "Change owned.ts.",
+      tasks: [{ id: "task-owned", acceptanceCriteria: ["done"], writePaths: ["owned.ts"] }],
+      results: [{ id: "task-owned", status: "completed", summary: "done" }],
+      workerArtifacts: [],
+      executableChecks: [{ name: "test", status: "passed", summary: "passed" }],
+    };
+    const trustedPacket = store.persistReviewPacket(input);
+    execFileSync(
+      "git",
+      ["-C", workspace, "-c", "user.name=Quality Test", "-c", "user.email=quality@example.test", "commit", "--allow-empty", "-m", "move head"],
+      { stdio: "ignore" },
+    );
+    const stalePacket = store.persistReviewPacket(input);
+
+    assert.equal(trustedPacket.evidenceStatus, "supported");
+    assert.equal(stalePacket.evidenceStatus, "unsupported");
+    assert.notEqual(stalePacket.artifactHash, trustedPacket.artifactHash);
+    assert.ok(stalePacket.unsupportedEntries.some((entry) => entry.path === "[material-input-changed]:.git"));
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("review packets ignore volatile git housekeeping when relevant repository state is unchanged", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-git-housekeeping-"));
+  try {
+    execFileSync("git", ["init", "--initial-branch=main", workspace], { stdio: "ignore" });
+    writeFileSync(path.join(workspace, ".gitignore"), ".unclecode/\n");
+    writeFileSync(path.join(workspace, "owned.ts"), "before\n");
+    execFileSync("git", ["-C", workspace, "add", ".gitignore", "owned.ts"]);
+    execFileSync(
+      "git",
+      ["-C", workspace, "-c", "user.name=Quality Test", "-c", "user.email=quality@example.test", "commit", "-m", "baseline"],
+      { stdio: "ignore" },
+    );
+
+    const store = new orchestrator.QualityArtifactStore(workspace, "git-housekeeping");
+    const baseline = store.captureWorkspaceInventory(["owned.ts"]);
+    writeFileSync(path.join(workspace, "owned.ts"), "after\n");
+    const input = {
+      graphId: "goal-git-housekeeping",
+      iteration: 0,
+      baseline,
+      request: "Change owned.ts.",
+      tasks: [{ id: "task-owned", acceptanceCriteria: ["done"], writePaths: ["owned.ts"] }],
+      results: [{ id: "task-owned", status: "completed", summary: "done" }],
+      workerArtifacts: [],
+      executableChecks: [{ name: "test", status: "passed", summary: "passed" }],
+    };
+    const beforeHousekeeping = store.persistReviewPacket(input);
+    execFileSync("git", ["-C", workspace, "status", "--short"], { stdio: "ignore" });
+    execFileSync("git", ["-C", workspace, "gc", "--prune=now"], { stdio: "ignore" });
+    const afterHousekeeping = store.persistReviewPacket(input);
+
+    assert.equal(afterHousekeeping.evidenceStatus, "supported");
+    assert.equal(afterHousekeeping.artifactHash, beforeHousekeeping.artifactHash);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
