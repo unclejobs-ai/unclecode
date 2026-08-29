@@ -110,6 +110,11 @@ test("the slash command picker consumes its keys before the Agent Console sees t
 
 test("Alt+A toggles the console from any non-secure composer state", () => {
   assert.deepEqual(decide({ ...ALT_A, open: false }), dispatch({ kind: "open" }));
+  assert.deepEqual(
+    decide({ value: "a", key: { meta: true, escape: true }, open: false }),
+    dispatch({ kind: "open" }),
+    "terminal parsers may retain the escape flag on the combined Alt+A chord",
+  );
   assert.deepEqual(decide({ ...ALT_A, open: true }), dispatch({ kind: "close" }));
   // A draft in the composer must not gate the toggle — only the console's
   // navigation keys are conditioned on an empty composer.
@@ -514,22 +519,21 @@ function createAgentConsoleEngine(overrides = {}) {
     setMode: async () => {},
     openSessionsPanel: async () => {},
     handleSubmit: async (line) => {
-      if (state.composerMode === "agent-steer") {
-        const selection = resolveAgentConsoleSelection(state.agentConsoleView, state.agentConsole);
-        calls.steer.push({
-          agentRunId: selection?.tab === "agents" ? selection.run.id : undefined,
-          message: line,
-        });
-        setState({
-          composerMode: "default",
-          agentConsoleView: settleAgentConsoleControl(state.agentConsoleView, {
-            status: "accepted",
-            message: "Steered.",
-          }),
-        });
-        return;
-      }
       calls.submitted.push(line);
+    },
+    submitAgentSteer: async (line) => {
+      const selection = resolveAgentConsoleSelection(state.agentConsoleView, state.agentConsole);
+      calls.steer.push({
+        agentRunId: selection?.tab === "agents" ? selection.run.id : undefined,
+        message: line,
+      });
+      setState({
+        composerMode: "default",
+        agentConsoleView: settleAgentConsoleControl(state.agentConsoleView, {
+          status: "accepted",
+          message: "Steered.",
+        }),
+      });
     },
     cancelSensitiveInput: () => {
       if (state.composerMode !== "agent-steer") {

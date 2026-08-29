@@ -11,19 +11,21 @@ import { runPromptInputTuiSmoke } from "./tui-prompt-input-smoke.mjs";
 import { runRealUseTuiStress } from "./tui-real-use-smoke.mjs";
 import { runScrollbackTuiSmoke } from "./tui-scrollback-smoke.mjs";
 import { runSlashLatencyTuiSmoke } from "./tui-slash-latency-smoke.mjs";
+import { runTmux } from "./tmux-helpers.mjs";
 
 export async function runTuiSmokeSuite({ port, tmp, observations }) {
-  const fullTuiSmoke = await runFullTuiSmoke({ port, tmp });
-  const reasoningCleanupTuiSmoke = await runReasoningCleanupTuiSmoke({ tmp, observations });
-  const yoloGreetingTuiSmoke = await runYoloGreetingTuiSmoke({ port, tmp, observations });
-  const koreanBusyTuiSmoke = await runKoreanBusyTuiSmoke({ port, tmp, observations });
-  const parallelModeKoreanTuiSmoke = await runParallelModeKoreanTuiSmoke({ port, tmp, observations });
-  const promptInputTuiSmoke = await runPromptInputTuiSmoke({ port, tmp, observations });
-  const realUseTuiStress = await runRealUseTuiStress({ port, tmp, observations });
-  const scrollbackTuiSmoke = await runScrollbackTuiSmoke({ port, tmp, observations });
-  const openAIStreamTuiSmoke = await runOpenAIStreamTuiSmoke({ tmp });
-  const contextContrastTuiSmoke = await runContextContrastTuiSmoke({ tmp });
-  const slashLatencyTuiSmoke = await runSlashLatencyTuiSmoke({ tmp });
+  const isolated = (label, run) => runWithRuntimeHome(tmp, label, run);
+  const fullTuiSmoke = await isolated("full", () => runFullTuiSmoke({ port, tmp }));
+  const reasoningCleanupTuiSmoke = await isolated("reasoning", () => runReasoningCleanupTuiSmoke({ tmp, observations }));
+  const yoloGreetingTuiSmoke = await isolated("yolo", () => runYoloGreetingTuiSmoke({ port, tmp, observations }));
+  const koreanBusyTuiSmoke = await isolated("korean", () => runKoreanBusyTuiSmoke({ port, tmp, observations }));
+  const parallelModeKoreanTuiSmoke = await isolated("parallel-ko", () => runParallelModeKoreanTuiSmoke({ port, tmp, observations }));
+  const promptInputTuiSmoke = await isolated("prompt-input", () => runPromptInputTuiSmoke({ port, tmp, observations }));
+  const realUseTuiStress = await isolated("real-use", () => runRealUseTuiStress({ port, tmp, observations }));
+  const scrollbackTuiSmoke = await isolated("scrollback", () => runScrollbackTuiSmoke({ port, tmp, observations }));
+  const openAIStreamTuiSmoke = await isolated("openai-stream", () => runOpenAIStreamTuiSmoke({ tmp }));
+  const contextContrastTuiSmoke = await isolated("context", () => runContextContrastTuiSmoke({ tmp }));
+  const slashLatencyTuiSmoke = await isolated("slash", () => runSlashLatencyTuiSmoke({ tmp }));
 
   return {
     fullTuiSmoke,
@@ -41,3 +43,12 @@ export async function runTuiSmokeSuite({ port, tmp, observations }) {
     slashLatencyTuiSmoke,
   };
 }
+
+export async function runWithRuntimeHome(tmp, label, run) {
+  const home = path.join(tmp, "runtime-homes", label);
+  await runTmux(["set-environment", "-g", "HOME", home]);
+  await runTmux(["set-environment", "-g", "USERPROFILE", home]);
+  await runTmux(["set-environment", "-g", "UNCLECODE_SESSION_STORE_ROOT", path.join(home, ".unclecode", "state")]);
+  return run();
+}
+import path from "node:path";

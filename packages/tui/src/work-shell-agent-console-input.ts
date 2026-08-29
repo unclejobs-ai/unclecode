@@ -111,9 +111,9 @@ export function resolveAgentConsoleInputDecision(
   }
   // `Alt+A` reaches ink as one keypress: the terminal writes `ESC` then `a`,
   // and `parse-keypress` reports `meta` with the escape byte stripped off the
-  // input. ink also sets `meta` for a bare `Escape`, so the escape flag has to
-  // be ruled out before the character is trusted.
-  if (input.key.meta === true && input.key.escape !== true && input.value.toLowerCase() === "a") {
+  // input. Some terminal/Ink combinations retain `escape` on that same chord;
+  // the non-empty `a` value distinguishes it from a bare Escape reliably.
+  if (input.key.meta === true && input.value.toLowerCase() === "a") {
     return act(input.open ? { kind: "close" } : { kind: "open" });
   }
   if (!input.open) {

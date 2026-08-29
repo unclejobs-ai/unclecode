@@ -3,7 +3,7 @@ import {
   type ClipboardImageAttachment,
   type ClipboardImageResult,
 } from "@unclecode/orchestrator";
-import { Box, Text, useCursor, useInput, useStdin, type DOMElement } from "ink";
+import { Box, Text, useCursor, useInput, type DOMElement } from "ink";
 import React, { useEffect, useRef, useState } from "react";
 
 import { getDisplayWidth, segmentDisplayGraphemes, truncateForDisplayWidth } from "./text-width.js";
@@ -20,12 +20,6 @@ const BRACKETED_PASTE_ARTIFACT_PATTERN = /(?:\u001b\[(?:200|201|990)~|\[(?:200|2
 const NON_TEXT_CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const COMPOSER_DEFAULT_VISIBLE_WIDTH = 72;
 const COMPOSER_MAX_VISIBLE_ROWS = 4;
-
-const FORWARD_DELETE_SEQUENCE = "\u001b[3~";
-
-export function isForwardDeleteTerminalInput(data: Buffer | string): boolean {
-  return data.toString() === FORWARD_DELETE_SEQUENCE;
-}
 
 export function isRawComposerEmpty(value: string, pendingValue?: string): boolean {
   return (pendingValue ?? value).length === 0;
@@ -62,8 +56,6 @@ export function applyComposerEdit(input: {
     readonly rightArrow?: boolean;
     readonly backspace?: boolean;
     readonly delete?: boolean;
-    /** Raw terminal input was CSI 3~, rather than the DEL byte used by Backspace. */
-    readonly forwardDelete?: boolean;
     readonly return?: boolean;
     readonly shift?: boolean;
   };
@@ -107,11 +99,7 @@ export function applyComposerEdit(input: {
     };
   }
 
-  // Ink 6 intentionally reports the ubiquitous terminal Backspace byte
-  // (0x7f) as `delete`, exactly like CSI 3~. The small raw-input seam below
-  // distinguishes the real forward-delete sequence; every other `delete`
-  // remains Backspace so ordinary keyboards do not reverse their behavior.
-  if (input.key.backspace || (input.key.delete && !input.key.forwardDelete)) {
+  if (input.key.backspace) {
     if (cursorOffset === 0) {
       return {
         nextValue: input.value,
@@ -128,7 +116,7 @@ export function applyComposerEdit(input: {
     };
   }
 
-  if (input.key.forwardDelete) {
+  if (input.key.delete) {
     if (cursorOffset === input.value.length) {
       return {
         nextValue: input.value,
@@ -492,7 +480,6 @@ export function Composer(props: {
   readonly resetEpoch?: number | undefined;
 }) {
   const { setCursorPosition } = useCursor();
-  const { stdin } = useStdin();
   const composerRef = useRef<DOMElement>(null);
   const [terminalOrigin, setTerminalOrigin] = useState<{ readonly x: number; readonly y: number }>();
   const [isPasting, setIsPasting] = useState(false);
@@ -502,7 +489,6 @@ export function Composer(props: {
   const resetEpochRef = useRef(props.resetEpoch);
   const pasteTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const suppressNextSubmitRef = useRef(false);
-  const forwardDeleteInputRef = useRef(false);
   // Ink's useInput rebinds when the handler identity changes, but Enter after
   // Ctrl+V can still observe a stale onSubmit/onClipboardImage closure from
   // the pre-attachment render. Always read the latest props through a ref.
@@ -547,19 +533,6 @@ export function Composer(props: {
     },
     [],
   );
-  // `useInput` intentionally erases the raw byte sequence for non-printable
-  // keys. Observe the same data event first and retain only the one bit it
-  // cannot expose: DEL (Backspace) versus CSI 3~ (forward Delete). This hook
-  // never mutates the draft and therefore remains outside keyboard ownership.
-  useEffect(() => {
-    const rememberDeleteKind = (data: Buffer | string): void => {
-      forwardDeleteInputRef.current = isForwardDeleteTerminalInput(data);
-    };
-    stdin.on("data", rememberDeleteKind);
-    return () => {
-      stdin.off("data", rememberDeleteKind);
-    };
-  }, [stdin]);
   useEffect(() => {
     const nextOrigin = getComposerAbsolutePosition(composerRef.current);
     setTerminalOrigin((current) => (
@@ -737,13 +710,9 @@ export function Composer(props: {
       value: currentValue,
       cursorOffset: currentCursorOffset,
       input,
-      key: {
-        ...key,
-        forwardDelete: key.delete && forwardDeleteInputRef.current,
-      },
+      key,
       allowLineBreaks: latestProps.mask === undefined,
     });
-    forwardDeleteInputRef.current = false;
 
     cursorOffsetRef.current = result.nextCursorOffset;
     setCursorOffset(result.nextCursorOffset);

@@ -1291,6 +1291,64 @@ test("an active submitted turn does not retain the owner lane needed to pause it
   await turn;
 });
 
+test("Agent Console view controls preempt an active submitted turn", async () => {
+  const listeners = new Set();
+  let releaseTurn;
+  const controls = [];
+  const engine = {
+    getState: () => ({ isBusy: true, agentConsoleView: { open: controls.includes("open") } }),
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    async handleSubmit() { await new Promise(resolve => { releaseTurn = resolve; }); },
+    openAgentConsole() { controls.push("open"); for (const listener of listeners) listener(); },
+    selectAgentConsoleTab(tab) { controls.push(`tab:${tab}`); },
+    moveAgentConsoleCursor(delta) { controls.push(`move:${delta}`); },
+    toggleAgentConsoleInspector() { controls.push("toggle-inspector"); },
+    async submitAgentSteer(message) { controls.push(`steer:${message}`); },
+    closeAgentConsole() { controls.push("close"); },
+  };
+  const registry = new LiveRuntimeEngineRegistry();
+  registry.attach("live-console-control", engine, { projectPath: "/work/live-console" });
+
+  const turn = registry.invoke({
+    sessionId: "live-console-control", method: "handleSubmit", args: ["keep working"],
+    expectedRevision: 0, idempotencyKey: "console-turn",
+  });
+  while (!releaseTurn) await new Promise(resolve => setImmediate(resolve));
+  const invokeControl = (method, args, idempotencyKey) => registry.invoke({
+    sessionId: "live-console-control", method, args,
+    expectedRevision: registry.read("live-console-control").revision, idempotencyKey,
+  });
+  const open = invokeControl("openAgentConsole", [], "console-open");
+  const result = await Promise.race([
+    open,
+    new Promise(resolve => setTimeout(() => resolve({ outcome: "blocked" }), 100)),
+  ]);
+
+  assert.equal(result.outcome, undefined, `Agent Console open must preempt the active turn: ${JSON.stringify(result)}`);
+  assert.equal(result.ok, true);
+  const replay = await registry.invoke({
+    sessionId: "live-console-control", method: "openAgentConsole", args: [],
+    expectedRevision: 1, idempotencyKey: "console-open",
+  });
+  assert.deepEqual(replay, result, "a reconnect may replay the exact receipt without opening twice");
+  for (const [method, args, key] of [
+    ["selectAgentConsoleTab", ["jobs"], "console-tab"],
+    ["moveAgentConsoleCursor", [1], "console-move"],
+    ["toggleAgentConsoleInspector", [], "console-toggle"],
+    ["submitAgentSteer", ["keep the evidence bounded"], "console-steer"],
+    ["closeAgentConsole", [], "console-close"],
+  ]) {
+    const controlled = await invokeControl(method, args, key);
+    assert.equal(controlled.ok, true);
+  }
+  assert.deepEqual(controls, [
+    "open", "tab:jobs", "move:1", "toggle-inspector",
+    "steer:keep the evidence bounded", "close",
+  ]);
+  releaseTurn();
+  await turn;
+});
+
 test("owner disposal reports a non-settling engine instead of silently dropping it", async () => {
   let disposed = false;
   const engine = fakeEngine("shutdown-refusal");

@@ -25,7 +25,7 @@ export const RUNTIME_ENGINE_METHODS = [
   "includeContextSourceAtCursor", "toggleContextInspectorExpanded", "undoLastContextSourceAction",
   "acceptContextSuggestion", "rejectContextSuggestion", "openAgentConsole", "closeAgentConsole",
   "selectAgentConsoleTab", "moveAgentConsoleCursor", "toggleAgentConsoleInspector", "beginAgentSteer",
-  "requestAgentCancel", "confirmAgentCancel", "continueSelectedAgent", "answerPendingDecisionByIndex",
+  "submitAgentSteer", "requestAgentCancel", "confirmAgentCancel", "continueSelectedAgent", "answerPendingDecisionByIndex",
   "cancelPendingDecision", "removeQueueItem", "moveQueueItem", "clearQueueItems", "resumeQueueItems",
   "retryQueueItem", "discardQueueItem", "recordTraceEvent", "requestTurnPause", "resumeTurn",
 ] as const;
@@ -35,6 +35,9 @@ export type RuntimeEngineMethod = (typeof RUNTIME_ENGINE_METHODS)[number];
 const CONTROL_ENGINE_METHODS = new Set<RuntimeEngineMethod>([
   "requestTurnPause", "resumeTurn", "answerPendingDecisionByIndex", "cancelPendingDecision",
   "beginAgentSteer", "requestAgentCancel", "confirmAgentCancel", "continueSelectedAgent",
+  "submitAgentSteer",
+  "openAgentConsole", "closeAgentConsole", "selectAgentConsoleTab", "moveAgentConsoleCursor",
+  "toggleAgentConsoleInspector",
 ]);
 export type RuntimeEngineSource = {
   getState(): unknown;

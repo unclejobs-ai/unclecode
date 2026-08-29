@@ -30,6 +30,11 @@ const SAFE_RECEIPT_RETRY_METHODS = new Set([
   "updateTerminalRows",
   "closeOverlay",
   "toggleToolHistoryDisplay",
+  "openAgentConsole",
+  "closeAgentConsole",
+  "selectAgentConsoleTab",
+  "moveAgentConsoleCursor",
+  "toggleAgentConsoleInspector",
 ]);
 
 const PREEMPTIVE_CONTROL_METHODS = new Set([
@@ -39,9 +44,15 @@ const PREEMPTIVE_CONTROL_METHODS = new Set([
   "answerPendingDecisionByIndex",
   "cancelPendingDecision",
   "beginAgentSteer",
+  "submitAgentSteer",
   "requestAgentCancel",
   "confirmAgentCancel",
   "continueSelectedAgent",
+  "openAgentConsole",
+  "closeAgentConsole",
+  "selectAgentConsoleTab",
+  "moveAgentConsoleCursor",
+  "toggleAgentConsoleInspector",
 ]);
 
 /**

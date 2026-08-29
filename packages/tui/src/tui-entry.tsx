@@ -14,14 +14,10 @@ import type { TuiShellHomeState } from "./shell-state.js";
 import { probeTerminalBackground } from "./terminal-theme.js";
 
 let rendererFallbackWarned = false;
-// The shell owns an alternate screen, so each changed frame repaints in full.
-// `incrementalRendering` must stay off on ink 6.8: its incremental log-update
-// rewinds the cursor one row short for frames with a trailing newline, so
-// every changed frame drifts down one row (verified in a real terminal:
-// changing rows stack). Fixed upstream in ink v7.0.0 (#910, commit c32da0b —
-// `cursorUp(previousLines.length - 1)`); flip this to true only together with
-// an ink ^7 bump. Column-shrink residue is handled by terminal-resize-clear.
-const DASHBOARD_RENDER_OPTIONS = { incrementalRendering: false } as const;
+// Ink 7 fixes the trailing-newline cursor rewind that made incremental frames
+// drift under Ink 6. Column-shrink residue remains handled by the terminal
+// resize clear, while ordinary streaming now updates only changed rows.
+const DASHBOARD_RENDER_OPTIONS = { incrementalRendering: true } as const;
 
 function warnIfRequestedRendererFallsBack(): void {
   const plan = resolveTuiRendererPlan();

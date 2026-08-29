@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+
+import { currentBootIdentity, processStartIdentity } from "@unclecode/server";
 
 import { binEntrypoint, repoRoot, reportPath, tmpPrefix } from "./runtime-qa/constants.mjs";
 import { persistReport } from "./runtime-qa/cli-helpers.mjs";
@@ -20,9 +22,9 @@ import {
   formatRuntimeQaCompactReport,
 } from "./runtime-qa/report-evidence.mjs";
 import { runAgentConsoleTuiSmoke } from "./runtime-qa/tui-basic-smokes.mjs";
-import { killRuntimeTmuxServer } from "./runtime-qa/tmux-helpers.mjs";
+import { killRuntimeTmuxServer, startRuntimeTmuxKeeper } from "./runtime-qa/tmux-helpers.mjs";
 import { runTtySmoke } from "./runtime-qa/tty-smoke.mjs";
-import { runTuiSmokeSuite } from "./runtime-qa/tui-suite-smokes.mjs";
+import { runTuiSmokeSuite, runWithRuntimeHome } from "./runtime-qa/tui-suite-smokes.mjs";
 
 if (!existsSync(binEntrypoint)) {
   throw new Error(`Missing UncleCode bin entrypoint: ${binEntrypoint}`);
@@ -30,6 +32,11 @@ if (!existsSync(binEntrypoint)) {
 
 const args = parseArgs(process.argv.slice(2));
 const tmp = mkdtempSync(path.join(tmpdir(), tmpPrefix));
+const qaHome = path.join(tmp, "home");
+mkdirSync(qaHome, { recursive: true });
+process.env.HOME = qaHome;
+process.env.USERPROFILE = qaHome;
+process.env.UNCLECODE_RUNTIME_QA_HOME_ROOT = qaHome;
 const observations = [];
 const openAIObservations = [];
 const anthropicObservations = [];
@@ -44,11 +51,16 @@ try {
     const toolCallSmoke = await runToolCallSmoke(server.port, observations);
     const openAIToolCallSmoke = await runOpenAIToolCallSmoke(openAIServer.port, openAIObservations);
     const anthropicToolCallSmoke = await runAnthropicToolCallSmoke(anthropicServer.port, anthropicObservations);
+    await startRuntimeTmuxKeeper();
     const ttySmoke = await runTtySmoke({ port: server.port, tmp, observations });
     const tuiSmokes = await runTuiSmokeSuite({ port: server.port, tmp, observations });
     // The Agent Console gate scripts its own provider and OMP executor
     // boundaries, so it needs no shared fake-provider port or observation log.
-    const agentConsoleTuiSmoke = await runAgentConsoleTuiSmoke({ tmp });
+    const agentConsoleTuiSmoke = await runWithRuntimeHome(
+      tmp,
+      "agent-console",
+      () => runAgentConsoleTuiSmoke({ tmp }),
+    );
     const providerSmokes = { toolCallSmoke, openAIToolCallSmoke, anthropicToolCallSmoke };
     const evidence = buildRuntimeEvidence({ ...providerSmokes, ...tuiSmokes });
     const report = {
@@ -96,7 +108,7 @@ try {
         "context expanded overlay uses readable foreground colors on light terminals",
         "slash commander first paint, warm reopen, filter, and model picker stay within latency budgets",
         "model-bound context packets expose included/excluded/warnings sections during real TUI turns",
-        "80-column and 120-column TUI resize captures do not overflow",
+        "60-, 80-, 100-, 120-, and 140-column TUI captures do not overflow",
         "Agent Console fans one work turn out to two live executor runs",
         "Alt+A opens the Agent Console roster and inspector over live runs",
         "steering a live agent run returns an accepted control receipt",
@@ -116,7 +128,47 @@ try {
   }
 } finally {
   await killRuntimeTmuxServer();
+  await stopRuntimeOwnersUnder(tmp);
   rmSync(tmp, { recursive: true, force: true });
+}
+
+async function stopRuntimeOwnersUnder(root) {
+  const leasePaths = findRuntimeOwnerLeases(root);
+  for (const leasePath of leasePaths) {
+    let lease;
+    try {
+      lease = JSON.parse(readFileSync(leasePath, "utf8"));
+    } catch {
+      continue;
+    }
+    if (
+      !Number.isSafeInteger(lease.pid)
+      || typeof lease.processStartId !== "string"
+      || lease.bootId !== currentBootIdentity()
+      || await processStartIdentity(lease.pid) !== lease.processStartId
+    ) {
+      continue;
+    }
+    process.kill(lease.pid, "SIGTERM");
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline && await processStartIdentity(lease.pid) === lease.processStartId) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (await processStartIdentity(lease.pid) === lease.processStartId) {
+      process.kill(lease.pid, "SIGKILL");
+    }
+  }
+}
+
+function findRuntimeOwnerLeases(root) {
+  if (!existsSync(root)) return [];
+  const leases = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const resolved = path.join(root, entry.name);
+    if (entry.isDirectory()) leases.push(...findRuntimeOwnerLeases(resolved));
+    else if (entry.isFile() && entry.name === "runtime-owner-v1.json") leases.push(resolved);
+  }
+  return leases;
 }
 
 function parseArgs(argv) {

@@ -39,6 +39,7 @@ import {
 
 
 const HEADER_PATTERN = /▤ Agent Console/;
+const CLOSED_PATTERN = /^(?![\s\S]*▤ Agent Console)[\s\S]*$/u;
 const COUNTS_PATTERN = /2 agents · 2 jobs/;
 const AGENTS_TAB_PATTERN = /\[Agents\]/;
 const JOBS_TAB_PATTERN = /\[Jobs\]/;
@@ -104,7 +105,9 @@ export async function runAgentConsoleTuiSmoke({ tmp }) {
     //    Each row is awaited on its own: a job counts as live the moment the
     //    plan queues it, so `2 jobs` can land a frame before the second
     //    executor run has actually opened.
-    await runTmux(["send-keys", "-t", live, "M-a"]);
+    // Kitty CSI-u represents Alt+A as one atomic terminal key event. Literal
+    // ESC+a can be split at a PTY boundary and become bare Escape plus `a`.
+    await runTmux(["send-keys", "-t", live, "-l", "\u001b[97;3u"]);
     await waitForPane(live, HEADER_PATTERN, consoleFile);
     await waitForPane(live, rowPattern(ALPHA, "running"), consoleFile);
     await waitForPane(live, rowPattern(BETA, "running"), consoleFile);
@@ -155,6 +158,7 @@ export async function runAgentConsoleTuiSmoke({ tmp }) {
     server.releaseLane("alpha");
     await waitForPane(live, /executor · completed/, settledFile);
     await runTmux(["send-keys", "-t", live, "Escape"]);
+    await waitForPane(live, CLOSED_PATTERN, settledFile);
     await waitForPane(live, READY_LAST_STATUS_PATTERN, settledFile);
     const settledPane = await waitForPane(live, IDLE_COMPOSER_PATTERN, settledFile);
     assert.doesNotMatch(settledPane, HEADER_PATTERN, "Esc should close the console");
@@ -175,8 +179,11 @@ export async function runAgentConsoleTuiSmoke({ tmp }) {
     assert.doesNotMatch(jobsPane, CRASH_PATTERN);
 
     await runTmux(["send-keys", "-t", live, "Escape"]);
+    await waitForPane(live, CLOSED_PATTERN, paneFile);
     await waitForPane(live, IDLE_COMPOSER_PATTERN, paneFile);
-    await submitLine(live, "/exit", paneFile);
+    // Exit belongs to the attached Ink client. A slash command is evaluated
+    // by the detached owner engine, whose onExit is intentionally a no-op.
+    await runTmux(["send-keys", "-t", live, "C-c"]);
     await waitForPane(live, /EXIT:/, paneFile);
 
     // 9. Resuming rebuilds the settled console without resurrecting a run that
@@ -262,4 +269,3 @@ async function readPersistedSessionId(sessionStoreRoot) {
   assert.ok(match, `the console turn should persist a resumable session, got:\n${listed.stdout}`);
   return match[1];
 }
-

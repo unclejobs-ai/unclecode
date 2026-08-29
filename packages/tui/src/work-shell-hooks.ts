@@ -379,6 +379,7 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   moveAgentConsoleCursor?(delta: number): void;
   toggleAgentConsoleInspector?(): void;
   beginAgentSteer?(): void;
+  submitAgentSteer?(value: string): Promise<void>;
   requestAgentCancel?(): void;
   confirmAgentCancel?(confirm: boolean): Promise<void>;
   continueSelectedAgent?(): Promise<void>;
@@ -1590,7 +1591,10 @@ export function useWorkShellPaneState<
       // A submission always returns the transcript to the newest entry:
       // the operator has moved on from reading history.
       setTranscriptAnchor(undefined);
-      return input.engine.handleSubmit(line, pendingClipboardAttachments);
+      return input.engine.getState().composerMode === "agent-steer"
+        && input.engine.submitAgentSteer !== undefined
+        ? input.engine.submitAgentSteer(line)
+        : input.engine.handleSubmit(line, pendingClipboardAttachments);
     },
     [input.engine, pendingClipboardAttachments],
   );

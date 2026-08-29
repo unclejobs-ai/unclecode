@@ -530,3 +530,35 @@ test("remote interrupt preempts a long submitted turn instead of waiting on invo
   await turn;
   engine.dispose();
 });
+
+test("remote agent console opens while a long submitted turn is still running", async () => {
+  let revision = 1;
+  let releaseSubmit;
+  let opens = 0;
+  const client = {
+    async readEngineState() {
+      return { ok: true, revision, state: { isBusy: true, agentConsoleView: { open: opens > 0, tab: "agents" } }, result: null };
+    },
+    async invokeEngineMethod(input) {
+      revision += 1;
+      if (input.method === "handleSubmit") {
+        await new Promise(resolve => { releaseSubmit = resolve; });
+      } else if (input.method === "openAgentConsole") {
+        opens += 1;
+      }
+      return { ok: true, revision, state: { isBusy: true, agentConsoleView: { open: opens > 0, tab: "agents" } }, result: undefined };
+    },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "preemptive-agent-console");
+  const turn = engine.handleSubmit("long turn");
+  await new Promise(resolve => setImmediate(resolve));
+  const opened = await Promise.race([
+    engine.openAgentConsole("agents"),
+    new Promise(resolve => setTimeout(() => resolve("blocked"), 100)),
+  ]);
+  assert.notEqual(opened, "blocked");
+  assert.equal(opens, 1);
+  releaseSubmit?.();
+  await turn;
+  engine.dispose();
+});

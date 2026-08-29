@@ -283,12 +283,8 @@ test("streaming publishes keep exactly one stable row on screen (no drift, no st
     `expected at least two streamed publishes, saw ${String(frameWrites)}`,
   );
 
-  // ink 6.8 note: incrementalRendering is disabled because its incremental
-  // cursor rewind drifts one row per changed frame (fixed upstream in v7,
-  // issue #910). The full-repaint mode rewrites every row each frame — the
-  // guard that matters is what a real terminal ends up showing: exactly one
-  // stable row and exactly one busy row. If someone flips the flag on ink 6,
-  // the drifted writes stack busy rows and this assertion fails.
+  // Ink 7's incremental renderer fixes the cursor rewind that stacked rows in
+  // Ink 6. The real-terminal guard remains exactly one stable and busy row.
   const stableRows = screenRowsContaining(screen, /STATIC CONVERSATION/u);
   assert.equal(stableRows.length, 1, `stable row must appear exactly once on screen:\n${screen.join("\n")}`);
   const busyRows = screenRowsContaining(screen, /busy frame \d+/u);
@@ -296,7 +292,7 @@ test("streaming publishes keep exactly one stable row on screen (no drift, no st
   assert.match(busyRows[0] ?? "", /busy frame \d+/u, "final frame must contain the latest busy row");
 });
 
-test("incrementalRendering stays off while ink is on the 6.x line", async () => {
+test("incrementalRendering is enabled with the pinned Ink 7 line", async () => {
   const entrySource = readFileSync(
     path.join(REPO_ROOT, "packages/tui/src/tui-entry.tsx"),
     "utf8",
@@ -306,12 +302,12 @@ test("incrementalRendering stays off while ink is on the 6.x line", async () => 
     "utf8",
   ));
   const inkConstraint = String(tuiPackage.dependencies?.ink ?? "");
-  assert.match(inkConstraint, /\^?6\./u, "if ink was bumped to ^7, re-enable incrementalRendering here and drop this pin");
+  assert.match(inkConstraint, /\^?7\./u);
 
   assert.match(
     entrySource,
-    /incrementalRendering:\s*false/u,
-    "ink 6.8's incremental log-update drifts one row per changed frame for trailing-newline frames (stacked rows in a real terminal; upstream fix in v7 #910). Keep the flag false until the ink ^7 bump.",
+    /incrementalRendering:\s*true/u,
+    "Ink 7 fixes incremental trailing-newline cursor rewind; keep the renderer and dependency pin aligned.",
   );
 });
 

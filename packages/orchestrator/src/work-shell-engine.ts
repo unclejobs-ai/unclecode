@@ -1330,7 +1330,7 @@ export class WorkShellEngine<
    * so a rejected or undeliverable steer cannot strand the operator in a mode
    * whose target has gone away.
    */
-  private async submitAgentSteer(value: string): Promise<void> {
+  async submitAgentSteer(value: string): Promise<void> {
     const target = this.state.agentSteerTarget;
     // Consume the binding before awaiting so repeated Enter cannot deliver the
     // same draft twice or observe a cursor that moved during remote queuing.

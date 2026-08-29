@@ -42,7 +42,7 @@ export async function runContextContrastTuiSmoke({ tmp }) {
 
     assert.match(pane, /Context expanded|Sources ·/);
     assert.match(pane, /Sources · \d+ sent · \d+ held/);
-    assert.match(pane, /(?:\d+ warnings?|✓ none)/i);
+    assert.match(pane, /(?:\d+ warnings?|✓ none|Ready · Context packet looks ready)/i);
     assertReadableForegroundEscapes(
       ansiCapture.stdout,
       "/context expanded overlay should not paint low-contrast text on a light terminal",

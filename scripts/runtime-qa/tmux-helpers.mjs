@@ -35,6 +35,13 @@ export async function killRuntimeTmuxServer() {
   await runTmux(["kill-server"], { allowFailure: true });
 }
 
+export async function startRuntimeTmuxKeeper() {
+  await runTmux([
+    "new-session", "-d", "-s", `unclecode-runtime-qa-keeper-${process.pid}`,
+    "sleep", "3600",
+  ]);
+}
+
 export async function sendKeys(session, line) {
   await runTmux(["send-keys", "-t", session, line, "C-m"]);
 }

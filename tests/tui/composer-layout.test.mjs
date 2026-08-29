@@ -123,7 +123,7 @@ test("composer edits never split a committed IME grapheme", () => {
     value,
     cursorOffset: value.length,
     input: "",
-    key: { delete: true },
+    key: { backspace: true },
     allowLineBreaks: true,
   });
   assert.equal(deleteCluster.nextValue, `A\u1112\u1161\u11ab${family}`);
@@ -151,7 +151,7 @@ test("composer forward Delete removes the committed grapheme to the right of the
       value,
       cursorOffset,
       input: "",
-      key: { delete: true, forwardDelete: true },
+      key: { delete: true },
       allowLineBreaks: true,
     }),
     {
@@ -160,12 +160,4 @@ test("composer forward Delete removes the committed grapheme to the right of the
       submitted: false,
     },
   );
-});
-
-test("composer recognizes only terminal CSI 3~ as forward Delete", () => {
-  assert.equal(composer.isForwardDeleteTerminalInput("\u001b[3~"), true);
-  assert.equal(composer.isForwardDeleteTerminalInput(Buffer.from("\u001b[3~")), true);
-  assert.equal(composer.isForwardDeleteTerminalInput("\u007f"), false);
-  assert.equal(composer.isForwardDeleteTerminalInput("\b"), false);
-  assert.equal(composer.isForwardDeleteTerminalInput("x"), false);
 });
