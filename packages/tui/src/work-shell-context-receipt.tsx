@@ -22,9 +22,9 @@ function formatCompactCount(value: number): string {
 export function formatContextReceiptTokenEstimate(input: {
   readonly tokenEstimate?: number | undefined;
   readonly tokenEstimateState: ContextPacketTokenEstimateState;
-}): string {
+}, uiLocale: "en" | "ko" = "en"): string {
   if (input.tokenEstimateState === "unknown" || input.tokenEstimate === undefined) {
-    return "unknown";
+    return uiLocale === "ko" ? "알 수 없음" : "unknown";
   }
   const estimate = formatCompactCount(input.tokenEstimate);
   return input.tokenEstimateState === "exact" ? estimate : `~${estimate}`;

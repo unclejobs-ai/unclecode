@@ -1105,8 +1105,17 @@ function renderRunbookLine(
   return <Text key={`rb-${index}-${line}`} color={W.textMuted}>{line}</Text>;
 }
 
-export function formatWorkShellPanelEmptyLines(panelTitle: string): readonly string[] {
+export function formatWorkShellPanelEmptyLines(
+  panelTitle: string,
+  uiLocale: "en" | "ko" = "en",
+): readonly string[] {
   const title = panelTitle.trim();
+  if (uiLocale === "ko") {
+    return [
+      title.length > 0 ? `아직 ${title} 세부 정보가 없습니다.` : "아직 패널 세부 정보가 없습니다.",
+      "계속 입력하거나 / 명령을 사용하세요.",
+    ];
+  }
   return [
     title.length > 0 ? `No details in ${title} yet.` : "No panel details yet.",
     "Keep typing, or use / for commands.",
@@ -2144,7 +2153,9 @@ const WorkShellPanelBlock = React.memo(function WorkShellPanelBlock(props: {
         minHeight={getWorkShellBottomDrawerMinHeight(props.panelDisplayMode, props.title, props.inputValue)}
       >
         {resolveQueuePanelVisibleLines(
-          localizedPanel.lines.length > 0 ? localizedPanel.lines : formatWorkShellPanelEmptyLines(localizedPanel.title),
+          localizedPanel.lines.length > 0
+            ? localizedPanel.lines
+            : formatWorkShellPanelEmptyLines(localizedPanel.title, props.uiLocale ?? "en"),
           props.title === "Queue · follow-ups" ? props.queueSelectedId : undefined,
         )
           .map((line, index) => {
@@ -2582,10 +2593,9 @@ const WORK_SHELL_CONTROL_RECEIPT_GLYPHS: Readonly<Record<AgentControlReceiptStat
   rejected: "✕",
 };
 
-const WORK_SHELL_CONTROL_RECEIPT_LABELS: Readonly<Record<AgentControlReceiptStatus, string>> = {
-  accepted: "Control accepted",
-  not_delivered: "Control not delivered",
-  rejected: "Control rejected",
+const WORK_SHELL_CONTROL_RECEIPT_LABELS: Readonly<Record<"en" | "ko", Readonly<Record<AgentControlReceiptStatus, string>>>> = {
+  en: { accepted: "Control accepted", not_delivered: "Control not delivered", rejected: "Control rejected" },
+  ko: { accepted: "제어 승인됨", not_delivered: "제어 전달 안 됨", rejected: "제어 거부됨" },
 };
 
 /**
@@ -2602,6 +2612,7 @@ function renderWorkShellAgentConsoleControl(input: {
   readonly snapshot: AgentConsoleSnapshot;
   readonly view: AgentConsoleViewState;
   readonly width: number;
+  readonly uiLocale?: "en" | "ko";
 }): React.ReactNode {
   const { control, receipt } = input.view;
   if (control.kind !== "confirm-cancel" && receipt === undefined) {
@@ -2611,13 +2622,15 @@ function renderWorkShellAgentConsoleControl(input: {
   const target = control.kind === "confirm-cancel"
     ? input.snapshot.agents.find((agent) => agent.id === control.agentRunId)
     : undefined;
+  const uiLocale = input.uiLocale ?? "en";
   return (
     <Box paddingLeft={2} flexDirection="column">
       {control.kind === "confirm-cancel" ? (
         <Text color={W.warning} bold>
           {truncateForDisplayWidth(
-            `⚠ Cancel ${flattenRowText(target?.displayName ?? control.agentRunId)}?`
-            + " y confirm · n keep running · Esc dismiss",
+            uiLocale === "ko"
+              ? `⚠ ${flattenRowText(target?.displayName ?? control.agentRunId)} 취소? y 확인 · n 계속 실행 · Esc 닫기`
+              : `⚠ Cancel ${flattenRowText(target?.displayName ?? control.agentRunId)}? y confirm · n keep running · Esc dismiss`,
             bound,
           )}
         </Text>
@@ -2625,7 +2638,7 @@ function renderWorkShellAgentConsoleControl(input: {
       {receipt ? (
         <Text color={receipt.status === "accepted" ? W.assistant : W.warning}>
           {truncateForDisplayWidth(
-            `${WORK_SHELL_CONTROL_RECEIPT_GLYPHS[receipt.status]} ${WORK_SHELL_CONTROL_RECEIPT_LABELS[receipt.status]}`,
+            `${WORK_SHELL_CONTROL_RECEIPT_GLYPHS[receipt.status]} ${WORK_SHELL_CONTROL_RECEIPT_LABELS[uiLocale][receipt.status]}`,
             bound,
           )}
         </Text>
@@ -3164,6 +3177,7 @@ export function WorkShellView(props: {
           snapshot: props.agentConsole,
           view: props.agentConsoleView,
           width: resolveWorkShellChromeWidth(props.terminalColumns),
+          uiLocale: props.uiLocale ?? "en",
         })}
       </Box>
     );

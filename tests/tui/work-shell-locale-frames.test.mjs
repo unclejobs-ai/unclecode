@@ -138,13 +138,16 @@ test("auxiliary auth, telemetry, and context overlays keep EN and KO chrome cons
     uiLocale: "ko", activePanel: { title: "Context expanded", lines: [] }, contextPacket,
     contextInspectorCursor: 0,
   });
-  assert.match(koContext, /컨텍스트 작업대|다음 응답|그룹|소스|미리보기|선택됨/u);
+  assert.match(koContext, /컨텍스트 작업대|다음 응답|그룹|모든 소스|지침|전송됨|보류됨|소스|미리보기|선택됨/u);
+  assert.match(koContext, /준비 · 컨텍스트 패킷이 다음 응답에 사용할 준비가 되었습니다/u);
   assert.ok(koContext.includes("Keep exact payload."), "context payload remains byte-for-byte");
-  assert.doesNotMatch(koContext, /Context Desk|what reaches the next answer|GROUPS|SOURCES|PREVIEW|Selected/);
+  assert.ok(koContext.includes("AGENTS.md"), "source identifiers remain byte-for-byte");
+  assert.doesNotMatch(koContext, /Context Desk|what reaches the next answer|GROUPS|SOURCES|PREVIEW|Selected|All sources|Guidance|Sent|Held|Context packet looks ready/);
   const enContext = await frame({
     uiLocale: "en", activePanel: { title: "Context expanded", lines: [] }, contextPacket,
     contextInspectorCursor: 0,
   });
-  assert.match(enContext, /Context Desk|GROUPS|SOURCES|PREVIEW|Selected/);
+  assert.match(enContext, /Context Desk|GROUPS|All sources|Guidance|Sent|Held|SOURCES|PREVIEW|Selected/);
+  assert.match(enContext, /Ready · Context packet looks ready for the next answer/);
   assert.doesNotMatch(enContext, /컨텍스트 작업대|다음 응답|그룹|미리보기|선택됨/u);
 });

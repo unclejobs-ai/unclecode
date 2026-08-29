@@ -30,6 +30,25 @@ type ContextInspectorSuggestionRow = {
   readonly heldBack: boolean;
 };
 
+type ContextInspectorLocale = "en" | "ko";
+
+const KO_CONTEXT_GROUPS: Readonly<Record<ContextInspectorHumanGroup, string>> = {
+  "Project instructions": "프로젝트 지침",
+  "Current conversation": "현재 대화",
+  "Saved memory": "저장된 메모리",
+  "Files & attachments": "파일 및 첨부 파일",
+  "Tool activity": "도구 활동",
+  "Other context": "기타 컨텍스트",
+};
+
+export function formatContextSourceGroup(
+  category: string,
+  uiLocale: ContextInspectorLocale = "en",
+): string {
+  const group = resolveContextSourceGroup(category);
+  return uiLocale === "ko" ? KO_CONTEXT_GROUPS[group] : group;
+}
+
 export function resolveContextSourceGroup(category: string): ContextInspectorHumanGroup {
   if (
     /^(workspace-guidance|workspace|provider-system-prompt)/i.test(category)
@@ -52,25 +71,40 @@ export function resolveContextSourceGroup(category: string): ContextInspectorHum
   return "Other context";
 }
 
-function formatSuggestionSourceLabel(row: ContextInspectorSuggestionRow): string {
-  return `${resolveContextSourceGroup(row.item.category)} · ${sanitizeContextPreview(row.item.label)}`;
+function formatSuggestionSourceLabel(
+  row: ContextInspectorSuggestionRow,
+  uiLocale: ContextInspectorLocale,
+): string {
+  return `${formatContextSourceGroup(row.item.category, uiLocale)} · ${sanitizeContextPreview(row.item.label)}`;
 }
 
 export function formatContextTokenEstimate(
   tokenEstimate: number | undefined,
   state: ContextPacketTokenEstimateState = tokenEstimate === undefined ? "unknown" : "estimated",
+  uiLocale: ContextInspectorLocale = "en",
 ): string {
   if (state === "unknown" || tokenEstimate === undefined) {
-    return "unknown token estimate";
+    return uiLocale === "ko" ? "토큰 추정치 알 수 없음" : "unknown token estimate";
   }
   const safeEstimate = Math.max(0, Math.trunc(tokenEstimate));
-  return state === "exact" ? `${safeEstimate}t exact` : `~${safeEstimate}t`;
+  return state === "exact"
+    ? (uiLocale === "ko" ? `${safeEstimate}t 정확` : `${safeEstimate}t exact`)
+    : `~${safeEstimate}t`;
 }
 
-function formatFreshnessPhrase(row: ContextInspectorSuggestionRow): string {
+function formatFreshnessPhrase(
+  row: ContextInspectorSuggestionRow,
+  uiLocale: ContextInspectorLocale,
+): string {
   const freshness = row.item.freshness;
   if (!freshness || (freshness.state !== "stale" && freshness.state !== "expired")) {
     return "";
+  }
+  if (uiLocale === "ko") {
+    const state = freshness.state === "stale" ? "오래됨" : "만료됨";
+    return freshness.turnLastSeen === undefined || freshness.turnLastSeen === null
+      ? state
+      : `${freshness.turnLastSeen}턴 이후 ${state}`;
   }
   const turnSuffix = freshness.turnLastSeen === undefined || freshness.turnLastSeen === null
     ? ""
@@ -82,7 +116,9 @@ export function resolveContextInspectorSuggestion(input: {
   readonly packet: ContextPacketView;
   readonly rows: readonly ContextInspectorSuggestionRow[];
   readonly budgetState: ContextInspectorBudgetState;
+  readonly uiLocale?: ContextInspectorLocale;
 }): ContextInspectorSuggestion {
+  const uiLocale = input.uiLocale ?? "en";
   const includedRows = input.rows.filter((row) => !row.heldBack && row.item.includedInModel !== false);
   const largestRow = includedRows.reduce<ContextInspectorSuggestionRow | undefined>((largest, row) => {
     if (!largest) {
@@ -92,10 +128,12 @@ export function resolveContextInspectorSuggestion(input: {
   }, undefined);
 
   if ((input.budgetState === "tight" || input.budgetState === "over") && largestRow) {
-    const freshnessPhrase = formatFreshnessPhrase(largestRow);
+    const freshnessPhrase = formatFreshnessPhrase(largestRow, uiLocale);
     return {
       tone: "warning",
-      message: `Budget is ${input.budgetState}. Largest source is ${formatSuggestionSourceLabel(largestRow)} at ${formatContextTokenEstimate(largestRow.item.tokenEstimate)}${freshnessPhrase ? ` and ${freshnessPhrase}` : ""}.`,
+      message: uiLocale === "ko"
+        ? `예산이 ${input.budgetState === "over" ? "초과되었습니다" : "빠듯합니다"}. 가장 큰 소스는 ${formatSuggestionSourceLabel(largestRow, uiLocale)}이며 ${formatContextTokenEstimate(largestRow.item.tokenEstimate, undefined, uiLocale)}${freshnessPhrase ? `, ${freshnessPhrase}` : ""}입니다.`
+        : `Budget is ${input.budgetState}. Largest source is ${formatSuggestionSourceLabel(largestRow, uiLocale)} at ${formatContextTokenEstimate(largestRow.item.tokenEstimate)}${freshnessPhrase ? ` and ${freshnessPhrase}` : ""}.`,
     };
   }
 
@@ -104,7 +142,9 @@ export function resolveContextInspectorSuggestion(input: {
   if (staleRow) {
     return {
       tone: "warning",
-      message: `Freshness risk: ${resolveContextSourceGroup(staleRow.item.category)} source needs refresh (${formatFreshnessPhrase(staleRow)}).`,
+      message: uiLocale === "ko"
+        ? `최신성 위험: ${formatContextSourceGroup(staleRow.item.category, uiLocale)} 소스를 새로 고쳐야 합니다(${formatFreshnessPhrase(staleRow, uiLocale)}).`
+        : `Freshness risk: ${resolveContextSourceGroup(staleRow.item.category)} source needs refresh (${formatFreshnessPhrase(staleRow, uiLocale)}).`,
     };
   }
 
@@ -118,6 +158,8 @@ export function resolveContextInspectorSuggestion(input: {
 
   return {
     tone: "success",
-    message: "Context packet looks ready for the next answer.",
+    message: uiLocale === "ko"
+      ? "컨텍스트 패킷이 다음 응답에 사용할 준비가 되었습니다."
+      : "Context packet looks ready for the next answer.",
   };
 }

@@ -338,6 +338,7 @@ export function buildContextInspectorOverview(input: {
   readonly packet: ContextPacketView;
   readonly rows: readonly ContextInspectorSourceRow[];
   readonly modelWindow: number;
+  readonly uiLocale?: "en" | "ko";
 }): ContextInspectorOverview {
   const budgetState = resolveContextInspectorBudgetState({
     packet: input.packet,
@@ -348,6 +349,7 @@ export function buildContextInspectorOverview(input: {
       packet: input.packet,
       rows: input.rows,
       budgetState,
+      uiLocale: input.uiLocale ?? "en",
     }),
   };
 }

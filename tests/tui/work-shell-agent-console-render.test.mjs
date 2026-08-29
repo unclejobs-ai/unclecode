@@ -548,6 +548,33 @@ test("an armed cancel confirmation asks an explicit question naming the selected
   assert.match(frame, /Esc dismiss/, "Esc is the accepted dismissal key");
 });
 
+test("Korean agent controls localize chrome while preserving the selected run name", async () => {
+  const confirm = await renderFrame(
+    {
+      uiLocale: "ko",
+      agentConsoleView: consoleView({
+        control: { kind: "confirm-cancel", agentRunId: "r1" },
+      }),
+    },
+    100,
+  );
+  assert.match(confirm, /⚠ RuntimeMap 취소\? y 확인 · n 계속 실행 · Esc 닫기/u);
+  assert.doesNotMatch(confirm, /Cancel RuntimeMap|y confirm|keep running|Esc dismiss/);
+
+  for (const [status, expected] of [
+    ["accepted", "제어 승인됨"],
+    ["not_delivered", "제어 전달 안 됨"],
+    ["rejected", "제어 거부됨"],
+  ]) {
+    const receipt = await renderFrame({
+      uiLocale: "ko",
+      agentConsoleView: consoleView({ receipt: { status, message: "RAW_ENGINE_MESSAGE" } }),
+    }, 100);
+    assert.match(receipt, new RegExp(expected, "u"));
+    assert.doesNotMatch(receipt, /Control accepted|Control not delivered|Control rejected|RAW_ENGINE_MESSAGE/);
+  }
+});
+
 test("a browsing console carries no cancel question and no outcome row", async () => {
   const frame = await renderFrame({ agentConsoleView: consoleView() }, 100);
 

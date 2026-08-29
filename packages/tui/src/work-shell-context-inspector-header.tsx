@@ -72,7 +72,7 @@ export function formatContextInspectorPacketProofLines(input: {
   }
 
   if (input.previewReceipt?.state === "previewed") {
-    const estimate = formatContextReceiptTokenEstimate(input.previewReceipt);
+    const estimate = formatContextReceiptTokenEstimate(input.previewReceipt, input.uiLocale ?? "en");
     return [truncateForDisplayWidth(
       input.uiLocale === "ko" ? `다음 요청 · 전송 준비 · ${estimate} / ${formatContextWindow(input.modelWindow)}` : `Next request · ready to send · ${estimate} / ${formatContextWindow(input.modelWindow)}`,
       input.width,
@@ -82,7 +82,7 @@ export function formatContextInspectorPacketProofLines(input: {
   if (input.submittedReceipt?.state === "submitted") {
     const sent = input.submittedReceipt.sourceRefs.filter((source) => source.includedInModel).length;
     return [truncateForDisplayWidth(
-      input.uiLocale === "ko" ? `최근 요청 · 전송됨 · 소스 ${sent}개 · ${formatContextReceiptTokenEstimate(input.submittedReceipt)}` : `Last request · sent · ${sent} ${sent === 1 ? "source" : "sources"} · ${formatContextReceiptTokenEstimate(input.submittedReceipt)}`,
+      input.uiLocale === "ko" ? `최근 요청 · 전송됨 · 소스 ${sent}개 · ${formatContextReceiptTokenEstimate(input.submittedReceipt, "ko")}` : `Last request · sent · ${sent} ${sent === 1 ? "source" : "sources"} · ${formatContextReceiptTokenEstimate(input.submittedReceipt)}`,
       input.width,
     )];
   }
@@ -129,7 +129,11 @@ export function renderContextInspectorBudgetLine(input: {
   const budgetWindow = input.modelWindow > 0 ? input.modelWindow : 200_000;
   const tokenEstimateState = input.packet.tokenEstimateState ?? "estimated";
   const windowLabel = formatContextWindow(budgetWindow);
-  const tokenLabel = formatContextTokenEstimate(input.packet.tokenEstimate, tokenEstimateState);
+  const tokenLabel = formatContextTokenEstimate(
+    input.packet.tokenEstimate,
+    tokenEstimateState,
+    input.uiLocale ?? "en",
+  );
   const warnings = input.packet.sourceCounts.warnings;
   const sourceTitle = input.uiLocale === "ko" ? "소스" : "Sources";
   const fullLine = [
@@ -171,20 +175,25 @@ const CONTEXT_ACTION_LABELS: Readonly<Record<ContextPacketViewAction, string>> =
  * What the action actually did to the packet, in tokens. The before/after
  * packet ids this used to print told the reader nothing about the effect.
  */
-function formatContextActionEffect(receipt: ContextPacketViewActionReceipt): string | undefined {
+function formatContextActionEffect(
+  receipt: ContextPacketViewActionReceipt,
+  uiLocale: "en" | "ko" = "en",
+): string | undefined {
   const { before, after } = receipt;
   if (!before || !after) {
     return undefined;
   }
   if (before.includedInModel !== after.includedInModel) {
-    const tokens = formatContextTokenEstimate(after.tokenEstimate);
-    return after.includedInModel ? `${tokens} now sent` : `${tokens} no longer sent`;
+    const tokens = formatContextTokenEstimate(after.tokenEstimate, undefined, uiLocale);
+    return after.includedInModel
+      ? (uiLocale === "ko" ? `${tokens} 전송됨` : `${tokens} now sent`)
+      : (uiLocale === "ko" ? `${tokens} 더 이상 전송 안 됨` : `${tokens} no longer sent`);
   }
   const delta = after.tokenEstimate - before.tokenEstimate;
   if (delta === 0) {
     return undefined;
   }
-  return `${delta > 0 ? "+" : "−"}${formatContextTokenEstimate(Math.abs(delta))}`;
+  return `${delta > 0 ? "+" : "−"}${formatContextTokenEstimate(Math.abs(delta), undefined, uiLocale)}`;
 }
 
 export function renderContextInspectorReceipt(input: {
@@ -219,7 +228,7 @@ export function renderContextInspectorReceipt(input: {
       </Text>
     );
   }
-  const effect = formatContextActionEffect(input.receipt);
+  const effect = formatContextActionEffect(input.receipt, input.uiLocale ?? "en");
   const body = truncateForDisplayWidth(
     [
       input.uiLocale === "ko"

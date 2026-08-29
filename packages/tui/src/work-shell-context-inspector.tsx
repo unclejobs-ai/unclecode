@@ -202,6 +202,7 @@ export function renderContextInspectorOverlay(input: {
     packet: input.packet,
     rows,
     modelWindow: input.modelWindow,
+    uiLocale: input.uiLocale ?? "en",
   });
   const contextPolicySuggestions = input.contextPolicySuggestions ?? [];
   const viewportMaxRows = computeContextOverlayViewportMaxRows({

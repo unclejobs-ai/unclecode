@@ -306,6 +306,10 @@ test("WorkShellView render keeps the light-terminal status frame visible", async
 
 test("WorkShellView renders an intentional empty state for blank panels", async () => {
   assert.deepEqual(formatWorkShellPanelEmptyLines("MCP"), ["No details in MCP yet.", "Keep typing, or use / for commands."]);
+  assert.deepEqual(formatWorkShellPanelEmptyLines("MCP", "ko"), [
+    "아직 MCP 세부 정보가 없습니다.",
+    "계속 입력하거나 / 명령을 사용하세요.",
+  ]);
 
   const { instance, getOutput } = renderDebugFrame(
     React.createElement(WorkShellView, {

@@ -95,6 +95,7 @@ export function computeWorkShellContextAdviceRows(input: {
 function resolveSourceLabel(
   packet: ContextPacketView,
   suggestion: ContextPolicySuggestion,
+  uiLocale: "en" | "ko" = "en",
 ): string {
   const source = [...packet.included, ...packet.excluded].find(
     (item) => item.id === suggestion.sourceId,
@@ -104,15 +105,15 @@ function resolveSourceLabel(
   }
   switch (suggestion.reasonCode) {
     case "stale-condensed-history":
-      return "recent conversation history";
+      return uiLocale === "ko" ? "최근 대화 기록" : "recent conversation history";
     case "expired-source":
-      return "expired context source";
+      return uiLocale === "ko" ? "만료된 컨텍스트 소스" : "expired context source";
     case "low-trust-token-hotspot":
-      return "oversized context source";
+      return uiLocale === "ko" ? "너무 큰 컨텍스트 소스" : "oversized context source";
     case "mandatory-guidance":
-      return "required project guidance";
+      return uiLocale === "ko" ? "필수 프로젝트 지침" : "required project guidance";
     default:
-      return "source from the previous packet";
+      return uiLocale === "ko" ? "이전 패킷의 소스" : "source from the previous packet";
   }
 }
 
@@ -161,13 +162,17 @@ export function renderWorkShellContextAdvice(input: {
               tokenEstimate: suggestion.estimatedTokenSaving,
               tokenEstimateState: "estimated",
             })}`;
-        const status = suggestion.status === "proposed" ? savings : suggestion.status;
+        const status = suggestion.status === "proposed"
+          ? savings
+          : input.uiLocale === "ko"
+            ? ({ accepted: "승인됨", rejected: "거부됨", stale: "오래됨" } as const)[suggestion.status]
+            : suggestion.status;
         const actionLabel = input.uiLocale === "ko"
           ? ({ keep: "유지", refresh: "새로 고침", summarize: "요약", "hold-back": "보류" } as const)[suggestion.action]
           : ACTION_LABELS[suggestion.action];
         const actionPrefix = `${selected ? "›" : "·"} ${actionLabel} · `;
         const statusSuffix = ` · ${status}`;
-        const sourceLabel = resolveSourceLabel(input.packet, suggestion);
+        const sourceLabel = resolveSourceLabel(input.packet, suggestion, input.uiLocale ?? "en");
         const labelWidth = Math.max(
           0,
           input.width - getDisplayWidth(actionPrefix) - getDisplayWidth(statusSuffix),
