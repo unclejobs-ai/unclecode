@@ -47,6 +47,7 @@ export function createControlRoomStore(options) {
   let startPromise = null;
   let stopped = false;
   let eventAbort = null;
+  let eventReader = null;
   let reconnectTimer = null;
   let refreshQueued = false;
   let activeSessionId = null;
@@ -73,6 +74,7 @@ export function createControlRoomStore(options) {
       const activeRunIds = new Set((body?.runs ?? []).map(run => run.id));
       const actions = Object.fromEntries(Object.entries(snapshot.actions).filter(([sessionId]) => activeRunIds.has(sessionId)));
       for (const sessionId of retryKeys.keys()) if (!activeRunIds.has(sessionId)) retryKeys.delete(sessionId);
+      for (const sessionId of lastEventIds.keys()) if (!activeRunIds.has(sessionId)) lastEventIds.delete(sessionId);
       emit({ ...snapshot, status: "ready", connection: snapshot.connection === "live" ? "live" : "connecting", data: body, actions, error: null });
       return snapshot;
     } catch (error) {
@@ -86,39 +88,65 @@ export function createControlRoomStore(options) {
     refreshQueued = true;
     queueMicrotask(async () => {
       refreshQueued = false;
+      if (stopped) return;
       await load();
     });
   };
 
-  const connect = async () => {
+  const disconnectEventStream = () => {
+    eventAbort?.abort();
+    eventAbort = null;
+    const reader = eventReader;
+    eventReader = null;
+    if (reader) void reader.cancel().catch(() => {});
+  };
+
+  const connect = async (allowExpiredRecovery = true) => {
     const runs = snapshot.data?.runs ?? [];
     const sessionId = runs.some(run => run.id === activeSessionId)
       ? activeSessionId
       : runs[0]?.id;
     if (!connectEvents || !sessionId || stopped) return;
     activeSessionId = sessionId;
-    eventAbort?.abort();
+    disconnectEventStream();
     const controller = new AbortController();
     eventAbort = controller;
     const lastEventId = lastEventIds.get(sessionId) ?? 0;
     emit({ ...snapshot, connection: "connecting" });
+    let reader = null;
     try {
       const response = await fetchImpl(`${baseUrl}/sessions/${encodeURIComponent(sessionId)}/events`, {
         headers: authHeaders({ accept: "text/event-stream", ...(lastEventId > 0 ? { "last-event-id": String(lastEventId) } : {}) }),
         signal: controller.signal,
       });
       if (response.status === 409) {
+        const body = await response.json().catch(() => null);
+        if (body?.error?.code !== "event_cursor_expired") {
+          const error = new Error(body?.error?.message ?? "Event stream returned 409.");
+          error.retryable = false;
+          throw error;
+        }
+        if (!allowExpiredRecovery) {
+          const error = new Error("Event replay cursor remained expired after authoritative recovery.");
+          error.retryable = false;
+          throw error;
+        }
         lastEventIds.delete(sessionId);
         await load();
-        if (!stopped && eventAbort === controller) reconnectTimer = setTimeout(() => void connect(), 0);
-        return;
+        if (stopped || eventAbort !== controller) return;
+        return connect(false);
       }
       if (!response.ok || !response.body) throw new Error(`Event stream returned ${response.status}.`);
+      if (stopped || controller.signal.aborted || eventAbort !== controller) {
+        await response.body.cancel();
+        return;
+      }
       emit({ ...snapshot, connection: "live", error: null });
-      const reader = response.body.getReader();
+      reader = response.body.getReader();
+      eventReader = reader;
       const decoder = new TextDecoder();
       let buffer = "";
-      while (!stopped) {
+      while (!stopped && !controller.signal.aborted && eventAbort === controller) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
@@ -136,7 +164,13 @@ export function createControlRoomStore(options) {
     } catch (error) {
       if (stopped || controller.signal.aborted || eventAbort !== controller) return;
       emit({ ...snapshot, connection: "offline", error: error instanceof Error ? error.message : String(error) });
+      if (error?.retryable === false) return;
       reconnectTimer = setTimeout(() => void connect(), 1_000);
+    } finally {
+      if (reader) {
+        if (eventReader === reader) eventReader = null;
+        reader.releaseLock();
+      }
     }
   };
 
@@ -160,7 +194,7 @@ export function createControlRoomStore(options) {
     },
     stop() {
       stopped = true;
-      eventAbort?.abort();
+      disconnectEventStream();
       if (reconnectTimer) clearTimeout(reconnectTimer);
       reconnectTimer = null;
       startPromise = null;
@@ -173,7 +207,7 @@ export function createControlRoomStore(options) {
       activeSessionId = next;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       reconnectTimer = null;
-      eventAbort?.abort();
+      disconnectEventStream();
       if (!stopped) void connect();
     },
     async action(sessionId, action, expectedRevision, payload) {

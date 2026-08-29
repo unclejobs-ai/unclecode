@@ -98,6 +98,42 @@ test("bounded event journal replays strictly after cursor and detects expiry", (
   assert.deepEqual(received, [four.id, five.id, 6]);
 });
 
+test("event journal expiry is scoped to the selected session", () => {
+  const journal = new BoundedEventJournal({ capacity: 3 });
+  const selected = journal.publish("selected", "run.updated", { revision: 1 });
+  for (let revision = 1; revision <= 4; revision += 1) {
+    journal.publish("other", "run.updated", { revision });
+  }
+
+  assert.deepEqual(journal.replay("selected", selected.id), { status: "ok", events: [] });
+});
+
+test("event journal expires a cursor ahead of its current lifetime", () => {
+  const journal = new BoundedEventJournal({ capacity: 3 });
+  journal.publish("selected", "run.updated", { revision: 1 });
+
+  assert.equal(journal.replay("selected", 20).status, "expired");
+});
+
+test("event journal bounds retained events and releases 100 reconnect subscriptions", () => {
+  const journal = new BoundedEventJournal({ capacity: 3 });
+  let deliveries = 0;
+  for (let reconnect = 0; reconnect < 100; reconnect += 1) {
+    const subscription = journal.subscribeAfter(`session-${reconnect}`, 0, () => { deliveries += 1; });
+    subscription.unsubscribe();
+    journal.publish(`session-${reconnect}`, "run.updated", { reconnect });
+  }
+
+  assert.deepEqual(journal.stats, {
+    retainedEvents: 3,
+    activeSubscriptions: 0,
+    subscriberSessions: 0,
+    replayWatermarks: 3,
+  });
+  journal.publish("session-99", "run.updated", { reconnect: 100 });
+  assert.equal(deliveries, 0);
+});
+
 test("runtime adapter enforces revision and idempotency at the live control boundary", async () => {
   let calls = 0;
   const adapter = createRuntimeAdapter({

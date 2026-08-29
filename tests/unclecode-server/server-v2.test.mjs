@@ -124,6 +124,38 @@ test("SSE streams events published after the connection is established", async (
   }
 });
 
+test("SSE rejects a partially numeric Last-Event-ID", async () => {
+  const { handlers } = fixture();
+  const server = await startServer({ port: 0, handlers, authToken: TOKEN });
+  try {
+    const response = await fetch(`${server.url}/sessions/s1/events`, {
+      headers: headers({ "last-event-id": "7junk" }),
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.code, "invalid_event_cursor");
+  } finally {
+    await server.stop();
+  }
+});
+
+test("SSE abort cleanup releases every subscription across 100 reconnects", async () => {
+  const { handlers, journal } = fixture();
+  const server = await startServer({ port: 0, handlers, authToken: TOKEN, heartbeatMs: 10_000 });
+  try {
+    for (let reconnect = 0; reconnect < 100; reconnect += 1) {
+      const controller = new AbortController();
+      const response = await fetch(`${server.url}/sessions/s1/events`, { headers: headers(), signal: controller.signal });
+      assert.equal(response.status, 200);
+      controller.abort();
+    }
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(journal.stats.activeSubscriptions, 0);
+    assert.equal(journal.stats.subscriberSessions, 0);
+  } finally {
+    await server.stop();
+  }
+});
+
 test("expired SSE cursors, invalid methods, unknown actions, and oversized bodies fail explicitly", async () => {
   const { handlers, journal } = fixture();
   for (let index = 0; index < 10; index += 1) journal.publish("s1", "run.updated", { revision: index });

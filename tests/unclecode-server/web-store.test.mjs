@@ -97,12 +97,46 @@ test("web store reconnects the event stream for the selected run", async () => {
   store.stop();
 });
 
-test("web store resets an expired cursor before reconnecting", async () => {
-  const eventHeaders = [];
-  let eventCalls = 0;
+test("web store keeps an independent replay cursor for each selected run", async () => {
+  const eventHeaders = { s1: [], s2: [] };
+  const eventCalls = { s1: 0, s2: 0 };
   const fetchImpl = async (url, init = {}) => {
     const pathname = new URL(String(url)).pathname;
     if (pathname === "/control-room") {
+      return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs: [{ id: "s1" }, { id: "s2" }] }), { status: 200 });
+    }
+    const sessionId = pathname.includes("/s1/") ? "s1" : "s2";
+    eventHeaders[sessionId].push(init.headers ?? {});
+    eventCalls[sessionId] += 1;
+    if (eventCalls[sessionId] === 1) {
+      const id = sessionId === "s1" ? 7 : 12;
+      return new Response(`id: ${id}\nevent: run.updated\ndata: {}\n\n`, { status: 200 });
+    }
+    return new Response(new ReadableStream({ start() {} }), { status: 200 });
+  };
+  const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl });
+  await store.start();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  store.selectSession("s2");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  store.selectSession("s1");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  store.selectSession("s2");
+  await new Promise(resolve => setTimeout(resolve, 20));
+
+  assert.equal(eventHeaders.s1[1]?.["last-event-id"], "7");
+  assert.equal(eventHeaders.s2[1]?.["last-event-id"], "12");
+  store.stop();
+});
+
+test("web store performs one authoritative recovery for an expired cursor without looping", async () => {
+  const eventHeaders = [];
+  let eventCalls = 0;
+  let controlRoomCalls = 0;
+  const fetchImpl = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname === "/control-room") {
+      controlRoomCalls += 1;
       return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs: [{ id: "s1", revision: 1 }] }), { status: 200 });
     }
     eventHeaders.push(init.headers ?? {});
@@ -110,14 +144,47 @@ test("web store resets an expired cursor before reconnecting", async () => {
     if (eventCalls === 1) {
       return new Response("id: 7\nevent: run.updated\ndata: {}\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
     }
-    if (eventCalls === 2) return new Response(JSON.stringify({ error: { code: "event_cursor_expired" } }), { status: 409 });
-    return new Response(new ReadableStream({ start() {} }), { status: 200, headers: { "content-type": "text/event-stream" } });
+    if (eventCalls <= 3) return new Response(JSON.stringify({ error: { code: "event_cursor_expired" } }), { status: 409 });
+    return new Response(new ReadableStream({ start() {} }), { status: 200 });
   };
   const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl });
   await store.start();
   await new Promise(resolve => setTimeout(resolve, 1_100));
-  await new Promise(resolve => setTimeout(resolve, 20));
+  await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(eventHeaders[1]?.["last-event-id"], "7");
   assert.equal(eventHeaders[2]?.["last-event-id"], undefined);
+  assert.equal(eventCalls, 3);
+  assert.equal(controlRoomCalls, 3);
+  assert.equal(store.getSnapshot().connection, "offline");
+  assert.match(store.getSnapshot().error, /expired/i);
   store.stop();
+});
+
+test("web store cancels the previous reader across 100 selected-session reconnects", async () => {
+  let activeStreams = 0;
+  let maxActiveStreams = 0;
+  const runs = Array.from({ length: 100 }, (_, index) => ({ id: `s${index}`, revision: 1 }));
+  const fetchImpl = async url => {
+    if (String(url).endsWith("/control-room")) {
+      return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs }), { status: 200 });
+    }
+    activeStreams += 1;
+    maxActiveStreams = Math.max(maxActiveStreams, activeStreams);
+    return new Response(new ReadableStream({
+      start() {},
+      cancel() { activeStreams -= 1; },
+    }), { status: 200 });
+  };
+  const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl });
+  await store.start();
+  await new Promise(resolve => setImmediate(resolve));
+  for (let index = 1; index < 100; index += 1) {
+    store.selectSession(`s${index}`);
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  store.stop();
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(maxActiveStreams, 1);
+  assert.equal(activeStreams, 0);
 });

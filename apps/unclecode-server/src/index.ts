@@ -428,7 +428,11 @@ async function routeRequest(input: { readonly req: IncomingMessage; readonly res
 
 function openEventStream(req: IncomingMessage, res: ServerResponse, options: ServerOptions, sessionId: string): void {
   const rawCursor = req.headers["last-event-id"];
-  const afterId = rawCursor === undefined ? 0 : Number.parseInt(String(rawCursor), 10);
+  const afterId = rawCursor === undefined
+    ? 0
+    : typeof rawCursor === "string" && /^(?:0|[1-9]\d*)$/.test(rawCursor)
+      ? Number(rawCursor)
+      : Number.NaN;
   if (!Number.isSafeInteger(afterId) || afterId < 0) return writeError(res, 400, "invalid_event_cursor", "Last-Event-ID must be a non-negative integer.");
 
   let unsubscribe = () => {};
@@ -482,6 +486,7 @@ function openEventStream(req: IncomingMessage, res: ServerResponse, options: Ser
     if (!res.write(`: heartbeat ${Date.now()}\n\n`)) closeSlowClient();
   }, Math.max(50, options.heartbeatMs ?? 15_000));
   heartbeat.unref?.();
+  req.once("aborted", cleanup);
   req.once("close", cleanup);
   res.once("close", cleanup);
 }
