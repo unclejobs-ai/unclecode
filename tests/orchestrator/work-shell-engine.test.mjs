@@ -5717,7 +5717,7 @@ test("WorkShellEngine clears stale auth issue context after auth recovers", asyn
   assert.match(contextText, /Loaded guidance: AGENTS\.md/);
 });
 
-test("WorkShellEngine shows auth progress while inline oauth is pending", async () => {
+test("WorkShellEngine shows the copyable auth URL while inline oauth is pending", async () => {
   let resolveInline;
   const inlinePromise = new Promise((resolve) => {
     resolveInline = resolve;

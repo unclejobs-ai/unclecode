@@ -302,10 +302,11 @@ test("runTuiSessionCenterAction auth logout reports remaining env auth honestly"
   }
 });
 
-test("runTuiSessionCenterAction completes browser login inline and writes credentials", async () => {
+test("runTuiSessionCenterAction prints the browser login URL and writes credentials", async () => {
   const cwd = makeTempWorkspace();
   const credentialsPath = path.join(cwd, "openai.json");
   const progress = [];
+  let authorizationUrl;
 
   try {
     const lines = await runTuiSessionCenterAction({
@@ -326,13 +327,17 @@ test("runTuiSessionCenterAction completes browser login inline and writes creden
           };
         },
       }),
-      waitForBrowserCallback: async ({ url }) => `${url}&code=browser-code`,
-      openExternalUrl: async () => undefined,
+      waitForBrowserCallback: async ({ url }) => {
+        authorizationUrl = url;
+        return `${url}&code=browser-code`;
+      },
       onProgress: (line) => progress.push(line),
     });
 
+    assert.match(authorizationUrl, /^https:\/\/auth\.openai\.com\/oauth\/authorize\?/);
     assert.deepEqual(progress, [
-      "Opening browser…",
+      "Open this URL in your browser:",
+      authorizationUrl,
       "Waiting for callback…",
       "Saving auth…",
       "Auth ready.",
