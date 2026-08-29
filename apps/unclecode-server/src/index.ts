@@ -19,7 +19,10 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { BoundedEventJournal, type EventJournal, type JournalEvent, type JournalReplay } from "./event-journal.js";
 import { CONTROL_ACTIONS, type ControlAction, type RuntimeAdapter, type RuntimeControlRequest, type RuntimeControlResult } from "./runtime-adapter.js";
 import type { ControlRoomProjection } from "./control-room.js";
-import type { ControlRoomDecisionPayload } from "@unclecode/contracts";
+import type {
+  ControlRoomApprovalPayload,
+  ControlRoomDecisionPayload,
+} from "@unclecode/contracts";
 
 export { BoundedEventJournal } from "./event-journal.js";
 export { createControlRoomProjection } from "./control-room.js";
@@ -424,6 +427,9 @@ async function routeRequest(input: { readonly req: IncomingMessage; readonly res
     if (action === "decision" && !isDecisionPayload(payload)) {
       return writeError(res, 400, "invalid_payload", "decision requires one exact decisionId and bounded typed answers.");
     }
+    if (action === "approve" && !isApprovalPayload(payload)) {
+      return writeError(res, 400, "invalid_payload", "approve requires one exact security decisionId.");
+    }
     const common = {
       sessionId: actionMatch[1] ?? "",
       expectedRevision: Number(body.expectedRevision),
@@ -431,7 +437,9 @@ async function routeRequest(input: { readonly req: IncomingMessage; readonly res
     };
     const request: RuntimeControlRequest = action === "decision"
       ? { ...common, action, payload: payload as ControlRoomDecisionPayload }
-      : { ...common, action, ...(payload ? { payload } : {}) };
+      : action === "approve"
+        ? { ...common, action, payload: payload as ControlRoomApprovalPayload }
+        : { ...common, action, ...(payload ? { payload } : {}) };
     const result = await options.handlers.control(request);
     if (result.ok) return writeJson(res, 200, result);
     const status = result.code === "not_found" ? 404 : result.code === "revision_conflict" ? 409 : result.code === "denied" ? 403 : 409;
@@ -532,6 +540,14 @@ function isDecisionPayload(value: unknown): value is ControlRoomDecisionPayload 
     return answer.customInput === undefined
       || (typeof answer.customInput === "string" && answer.customInput.trim().length > 0 && answer.customInput.length <= 800);
   });
+}
+
+function isApprovalPayload(value: unknown): value is ControlRoomApprovalPayload {
+  return isRecord(value)
+    && Object.keys(value).length === 2
+    && value.decision === "approve_once"
+    && typeof value.decisionId === "string"
+    && /^[A-Za-z0-9._:-]{1,160}$/.test(value.decisionId);
 }
 
 function writeJson(res: ServerResponse, status: number, body: unknown): void {

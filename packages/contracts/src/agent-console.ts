@@ -105,6 +105,12 @@ export type ControlRoomDecisionPayload = {
   readonly answers: readonly AskUserQuestionAnswer[];
 };
 
+/** One-shot approval mutation bound to one exact security prompt instance. */
+export type ControlRoomApprovalPayload = {
+  readonly decision: "approve_once";
+  readonly decisionId: string;
+};
+
 export const WORK_NODE_STATUSES = [
   "proposed",
   "approved",

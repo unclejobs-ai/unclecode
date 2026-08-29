@@ -1,6 +1,9 @@
 import { createControlRoomProjection, type ControlRoomProjection, type RuntimeReadSource } from "./control-room.js";
 import { canonicalMutationFingerprint } from "./runtime-ledger.js";
-import type { ControlRoomDecisionPayload } from "@unclecode/contracts";
+import type {
+  ControlRoomApprovalPayload,
+  ControlRoomDecisionPayload,
+} from "@unclecode/contracts";
 
 export const CONTROL_ACTIONS = ["pause", "resume", "cancel", "approve", "decision", "steer", "follow-up"] as const;
 export type ControlAction = (typeof CONTROL_ACTIONS)[number];
@@ -17,7 +20,11 @@ export type RuntimeControlRequest =
       readonly payload: ControlRoomDecisionPayload;
     }
   | RuntimeControlRequestBase & {
-      readonly action: Exclude<ControlAction, "decision">;
+      readonly action: "approve";
+      readonly payload: ControlRoomApprovalPayload;
+    }
+  | RuntimeControlRequestBase & {
+      readonly action: Exclude<ControlAction, "approve" | "decision">;
       readonly payload?: Readonly<Record<string, unknown>>;
     };
 

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type {
   AskUserQuestionRequest,
   ExecutionPolicyCapability,
@@ -187,7 +189,7 @@ async function isConfirmed(
       ];
   const request: AskUserQuestionRequest = {
     kind: "security-approval",
-    id: `${CONFIRMATION_QUESTION_ID}:${scope.key}`,
+    id: `${CONFIRMATION_QUESTION_ID}:${randomUUID()}`,
     title: `Security approval · ${scope.label}`,
     questions: [{
       id: CONFIRMATION_QUESTION_ID,

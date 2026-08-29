@@ -1,9 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   LiveRuntimeControlRegistry,
+  RuntimeSessionMutationArbiter,
   attachWorkShellRuntime,
+  openRuntimeLedger,
   readPersistentRuntime,
 } from "@unclecode/server";
 
@@ -52,8 +57,9 @@ function fakeEngine() {
     },
     async resumeQueueItems() { calls.push(["resume"]); publish({ isBusy: true, queuePaused: false }); },
     async handleSubmit(message) { calls.push(["submit", message]); publish({ isBusy: true, queuePaused: false }); },
-    answerPendingDecisionByIndex(index) {
-      calls.push(["approve", index]);
+    answerPendingDecisionByIndex(index, decisionId) {
+      if (decisionId !== undefined && state.agentConsole.pendingDecision?.id !== decisionId) return false;
+      calls.push(["approve", index, decisionId]);
       publish({ agentConsole: { ...state.agentConsole, pendingDecision: undefined } });
       return true;
     },
@@ -88,9 +94,9 @@ test("WorkShell live adapter routes typed controls through public engine APIs", 
   assert.equal(followUp.ok, true);
   const steer = await controls.control({ sessionId: "live-1", action: "steer", expectedRevision: 6, idempotencyKey: "s", payload: { agentRunId: "agent-2", message: "check tests" } });
   assert.equal(steer.ok, true);
-  const approve = await controls.control({ sessionId: "live-1", action: "approve", expectedRevision: 7, idempotencyKey: "a", payload: { decision: "approve_once" } });
+  const approve = await controls.control({ sessionId: "live-1", action: "approve", expectedRevision: 7, idempotencyKey: "a", payload: { decision: "approve_once", decisionId: "approval-1" } });
   assert.equal(approve.ok, true);
-  assert.deepEqual(engine.calls, [["pause"], ["submit", "continue in Korean"], ["steer", "agent-2", "check tests"], ["approve", 1]]);
+  assert.deepEqual(engine.calls, [["pause"], ["submit", "continue in Korean"], ["steer", "agent-2", "check tests"], ["approve", 1, "approval-1"]]);
   assert.deepEqual(events.map(event => event.revision), [5, 6, 7, 8]);
   engine.resumeTurn();
   engine.publishLifecycle({ state: "completed", turnId: "turn-1" });
@@ -121,6 +127,122 @@ test("WorkShell live adapter fails closed for ambiguous approvals and steer targ
   assert.equal(staleSteer.code, "denied");
   assert.equal(controls.snapshot("live-2").revision, 1, "rejected controls cannot consume owner revisions");
   assert.deepEqual(engine.calls, []);
+});
+
+test("WorkShell approval rejects delayed A after A settled and same-scope B opened at the same revision", async () => {
+  const controls = new LiveRuntimeControlRegistry();
+  const engine = fakeEngine();
+  const revisionClock = { value: 12 };
+  const mutationArbiter = new RuntimeSessionMutationArbiter(revisionClock);
+  attachWorkShellRuntime(controls, {
+    sessionId: "approval-race",
+    projectPath: "/tmp/p",
+    engine,
+    revisionClock,
+    mutationArbiter,
+  });
+  const delayedApprovalA = {
+    sessionId: "approval-race",
+    action: "approve",
+    expectedRevision: 12,
+    idempotencyKey: "approval-a-delayed",
+    payload: { decision: "approve_once", decisionId: "approval-1" },
+  };
+
+  engine.publishState({
+    agentConsole: {
+      ...engine.getState().agentConsole,
+      pendingDecision: {
+        kind: "security-approval",
+        id: "approval-2",
+        title: engine.getState().agentConsole.pendingDecision.title,
+        questions: engine.getState().agentConsole.pendingDecision.questions,
+      },
+    },
+  });
+  assert.equal(revisionClock.value, 12, "the owner revision intentionally stays unchanged across the prompt replacement");
+
+  const result = await controls.control(delayedApprovalA);
+  assert.equal(result.code, "denied");
+  assert.equal(revisionClock.value, 12, "a stale approval cannot consume a revision");
+  assert.equal(engine.getState().agentConsole.pendingDecision.id, "approval-2");
+  assert.deepEqual(engine.calls, []);
+});
+
+test("WorkShell approval identity survives durable idempotency replay across restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-approval-restart-"));
+  const dbPath = join(root, "owner.db");
+  let ledger = openRuntimeLedger({ dbPath });
+  const requestA = {
+    sessionId: "approval-restart",
+    action: "approve",
+    expectedRevision: 0,
+    idempotencyKey: "approval-a",
+    payload: { decision: "approve_once", decisionId: "approval-1" },
+  };
+  try {
+    const firstEngine = fakeEngine();
+    const firstControls = new LiveRuntimeControlRegistry();
+    const firstClock = { value: 0 };
+    attachWorkShellRuntime(firstControls, {
+      sessionId: requestA.sessionId,
+      projectPath: "/tmp/p",
+      engine: firstEngine,
+      revisionClock: firstClock,
+      mutationArbiter: new RuntimeSessionMutationArbiter(firstClock, {
+        ledger,
+        sessionId: requestA.sessionId,
+        domain: "runtime-control",
+      }),
+    });
+    const acceptedA = await firstControls.control(requestA);
+    assert.equal(acceptedA.ok, true);
+    assert.deepEqual(firstEngine.calls, [["approve", 1, "approval-1"]]);
+    ledger.close();
+
+    ledger = openRuntimeLedger({ dbPath });
+    const secondEngine = fakeEngine();
+    secondEngine.publishState({
+      agentConsole: {
+        ...secondEngine.getState().agentConsole,
+        pendingDecision: {
+          ...secondEngine.getState().agentConsole.pendingDecision,
+          id: "approval-2",
+        },
+      },
+    });
+    const secondControls = new LiveRuntimeControlRegistry();
+    const secondClock = { value: 0 };
+    attachWorkShellRuntime(secondControls, {
+      sessionId: requestA.sessionId,
+      projectPath: "/tmp/p",
+      engine: secondEngine,
+      revisionClock: secondClock,
+      mutationArbiter: new RuntimeSessionMutationArbiter(secondClock, {
+        ledger,
+        sessionId: requestA.sessionId,
+        domain: "runtime-control",
+      }),
+    });
+
+    assert.deepEqual(await secondControls.control(requestA), acceptedA, "an exact retry replays its terminal receipt");
+    const changedReuse = await secondControls.control({
+      ...requestA,
+      payload: { decision: "approve_once", decisionId: "approval-2" },
+    });
+    assert.equal(changedReuse.code, "invalid_action", "decision identity participates in the durable fingerprint");
+    const staleA = await secondControls.control({
+      ...requestA,
+      idempotencyKey: "approval-a-delayed-after-restart",
+      expectedRevision: acceptedA.revision,
+    });
+    assert.equal(staleA.code, "denied");
+    assert.equal(secondEngine.getState().agentConsole.pendingDecision.id, "approval-2");
+    assert.deepEqual(secondEngine.calls, []);
+  } finally {
+    ledger.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("WorkShell live adapter settles one exact typed user decision", async () => {

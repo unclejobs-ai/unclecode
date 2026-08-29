@@ -113,6 +113,33 @@ test("typed decision endpoint rejects malformed answers before runtime admission
   }
 });
 
+test("typed approval endpoint requires and preserves one exact decision identity", async () => {
+  const { handlers, calls } = fixture();
+  const server = await startServer({ port: 0, handlers, authToken: TOKEN });
+  try {
+    const missingIdentity = await fetch(`${server.url}/sessions/s1/actions/approve`, {
+      method: "POST",
+      headers: headers({ "content-type": "application/json", "idempotency-key": "approve-bad" }),
+      body: JSON.stringify({ expectedRevision: 2, payload: { decision: "approve_once" } }),
+    });
+    assert.equal(missingIdentity.status, 400);
+    assert.equal((await missingIdentity.json()).error.code, "invalid_payload");
+    assert.equal(calls.length, 0);
+
+    const payload = { decision: "approve_once", decisionId: "approval-call-17" };
+    const accepted = await fetch(`${server.url}/sessions/s1/actions/approve`, {
+      method: "POST",
+      headers: headers({ "content-type": "application/json", "idempotency-key": "approve-good" }),
+      body: JSON.stringify({ expectedRevision: 2, payload }),
+    });
+    assert.equal(accepted.status, 200);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].payload, payload);
+  } finally {
+    await server.stop();
+  }
+});
+
 test("SSE uses ids and Last-Event-ID replay", async () => {
   const { handlers, journal } = fixture();
   const first = journal.publish("s1", "run.updated", { revision: 1 });

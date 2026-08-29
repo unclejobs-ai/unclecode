@@ -41,3 +41,9 @@ export function canApproveOnce(decision) {
     && decision.questions.length === 1
     && decision.questions[0].options.some(option => option.label === 'Approve')
 }
+
+export function approvalPayloadFor(decision) {
+  return canApproveOnce(decision)
+    ? { decision: 'approve_once', decisionId: decision.id }
+    : null
+}

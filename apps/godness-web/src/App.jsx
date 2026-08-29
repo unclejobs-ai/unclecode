@@ -1,7 +1,7 @@
 import { useState, useSyncExternalStore } from 'react'
 import './App.css'
 import { evolutionEvidenceLabel } from './evolution-labels.js'
-import { canApproveOnce, normalizePendingDecision } from './pending-decision.js'
+import { approvalPayloadFor, canApproveOnce, normalizePendingDecision } from './pending-decision.js'
 import { SystemView } from './SystemView.jsx'
 import { normalizeSystemProjection, resolveControlRoomView } from './system-view.js'
 import { deriveWorkFocus } from './work-focus.js'
@@ -220,7 +220,7 @@ function PendingDecision({ run, copy, pending, onApprove, onDecision }) {
   const approvable = canApproveOnce(decision)
   const decisionFormKey = JSON.stringify([decision.id, decision.questions.map(question => [question.id, question.options.map(option => option.label)])])
   return <section className={`pending-decision pending-decision--${security ? 'security' : 'user'}`} aria-labelledby="pending-decision-title">
-    <div className="pending-decision__header"><div><span className="eyebrow">{security ? copy.securityApproval : copy.userDecision}</span><h2 id="pending-decision-title">{decision.title ?? (security ? copy.securityApproval : copy.userDecision)}</h2></div>{security && approvable && <button className="control--accent" disabled={pending} onClick={() => void onApprove()}>{copy.approve}</button>}</div>
+    <div className="pending-decision__header"><div><span className="eyebrow">{security ? copy.securityApproval : copy.userDecision}</span><h2 id="pending-decision-title">{decision.title ?? (security ? copy.securityApproval : copy.userDecision)}</h2></div>{security && approvable && <button className="control--accent" disabled={pending} onClick={() => void onApprove(approvalPayloadFor(decision))}>{copy.approve}</button>}</div>
     {security
       ? <DecisionQuestionList decision={decision} copy={copy} />
       : <UserDecisionForm key={decisionFormKey} decision={decision} copy={copy} pending={pending} onDecision={onDecision} />}
@@ -393,7 +393,7 @@ export default function App({ store }) {
       <ActionFeedback action={action} copy={copy} />
       {snapshot.error && <p className="inline-error" role="alert">{snapshot.error}</p>}
       <WorkFocus run={run} view={activeView} copy={copy} />
-      <PendingDecision run={run} copy={copy} pending={pending} onApprove={() => doAction('approve', { decision: 'approve_once' })} onDecision={payload => doAction('decision', payload)} />
+      <PendingDecision run={run} copy={copy} pending={pending} onApprove={payload => doAction('approve', payload)} onDecision={payload => doAction('decision', payload)} />
       <div className="workspace__body"><div className="workspace__main"><MainView view={activeView} run={run} projection={snapshot.data} copy={copy} pending={pending} onSteer={payload => doAction('steer', payload)} /></div><aside className="evidence-rail"><span className="eyebrow">{run.quality.recorded ? copy.qualityEngine : copy.noData}</span><div className="evidence-rail__gate"><strong>{copy.gates[run.quality.gate] ?? run.quality.gate}</strong><span>{run.quality.profile} · {copy.stages[run.quality.stage] ?? run.quality.stage}</span></div><Metric label="PDCA" value={copy.phases[run.quality.phase] ?? run.quality.phase} /><Metric label={copy.iteration} value={run.quality.iteration} mono /><Metric label={copy.independent} value={run.quality.independentVerification ? copy.verified : copy.unproven} /><div className="evidence-list"><span>{copy.evidence}</span>{run.artifacts.slice(0, 4).map(item => <code key={item.ref}>{item.hash ?? item.ref}</code>)}</div>{run.attentionReason && <p className="attention"><strong>{copy.attention}</strong>{run.attentionReason}</p>}</aside></div>
       <form className="follow-up" onSubmit={submitFollowUp}><label htmlFor="follow-up">{copy.followUp}</label><div><input id="follow-up" value={followUp} onChange={event => setFollowUp(event.target.value)} placeholder={copy.followUpPlaceholder} disabled={pending} /><button className="control--accent" disabled={pending || !followUp.trim()}>{copy.send}</button></div></form>
     </section>

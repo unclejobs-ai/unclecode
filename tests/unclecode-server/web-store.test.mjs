@@ -4,7 +4,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 import { createControlRoomStore, normalizeLoopbackServerUrl, parseSseFrames } from "../../apps/godness-web/src/control-room-store.js";
-import { canApproveOnce, normalizePendingDecision } from "../../apps/godness-web/src/pending-decision.js";
+import {
+  approvalPayloadFor,
+  canApproveOnce,
+  normalizePendingDecision,
+} from "../../apps/godness-web/src/pending-decision.js";
 import { readRuntimeBootstrap } from "../../apps/godness-web/src/runtime-bootstrap.js";
 import { deriveWorkFocus } from "../../apps/godness-web/src/work-focus.js";
 
@@ -132,6 +136,23 @@ test("web decisions keep security approval separate from typed user questions", 
 
   const appSource = await readFile(new URL("../../apps/godness-web/src/App.jsx", import.meta.url), "utf8");
   assert.doesNotMatch(appSource, /run\.state\s*===\s*['"]requires_action['"][^\n]*doAction\(['"]approve['"]/);
+});
+
+test("web approval payload is bound to the projected security decision identity", () => {
+  const approval = normalizePendingDecision({
+    kind: "security-approval",
+    id: "approval-call-17",
+    questions: [{ id: "allow", question: "Allow this tool?", options: [{ label: "Approve" }, { label: "Reject" }] }],
+  });
+  assert.deepEqual(approvalPayloadFor(approval), {
+    decision: "approve_once",
+    decisionId: "approval-call-17",
+  });
+  assert.equal(approvalPayloadFor(normalizePendingDecision({
+    kind: "user-decision",
+    id: "release-choice",
+    questions: [{ id: "lane", question: "Which lane?", options: [{ label: "Canary" }] }],
+  })), null);
 });
 
 test("work focus names an explicit user decision before a generic attention reason", () => {

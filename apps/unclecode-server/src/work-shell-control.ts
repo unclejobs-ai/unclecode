@@ -6,6 +6,7 @@ import { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
 import type {
   AskUserQuestionAnswer,
   AskUserQuestionRequest,
+  ControlRoomApprovalPayload,
   ControlRoomDecisionPayload,
 } from "@unclecode/contracts";
 
@@ -35,7 +36,7 @@ export type WorkShellControlEngine = {
   resumeTurn(): boolean;
   resumeQueueItems(): Promise<void>;
   handleSubmit(message: string): Promise<void>;
-  answerPendingDecisionByIndex(index: number): boolean;
+  answerPendingDecisionByIndex(index: number, decisionId?: string): boolean;
   answerPendingUserDecision(decisionId: string, answers: readonly AskUserQuestionAnswer[]): boolean;
   getAgentControlPort(): {
     steer(agentRunId: string, message: string): Promise<{ readonly status: string; readonly message?: string }>;
@@ -49,7 +50,7 @@ export type WorkShellRuntimeChange = {
 };
 
 function messageFrom(request: RuntimeControlRequest): string | undefined {
-  if (request.action === "decision") return undefined;
+  if (request.action !== "steer" && request.action !== "follow-up") return undefined;
   const value = request.payload?.message;
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
@@ -74,6 +75,17 @@ function validDecisionAnswers(
     return answer.customInput === undefined
       || (typeof answer.customInput === "string" && answer.customInput.trim().length > 0 && answer.customInput.length <= 800);
   });
+}
+
+function validSecurityApproval(
+  pending: AskUserQuestionRequest | undefined,
+  payload: ControlRoomApprovalPayload | undefined,
+): boolean {
+  return payload?.decision === "approve_once"
+    && pending?.kind === "security-approval"
+    && pending.id === payload.decisionId
+    && pending.questions.length === 1
+    && (pending.questions[0]?.options.findIndex(option => option.label === "Approve") ?? -1) >= 0;
 }
 
 function stateOf(engine: WorkShellControlEngine): RuntimeSessionSource["state"] {
@@ -185,11 +197,8 @@ export function attachWorkShellRuntime(
       }
       if (request.action === "approve") {
         const pending = input.engine.getState().agentConsole.pendingDecision;
-        if (request.payload?.decision !== "approve_once" || pending?.kind !== "security-approval" || pending.questions.length !== 1) {
-          return deny("denied", "Only an explicit one-shot security approval can be approved here.");
-        }
-        if ((pending.questions[0]?.options.findIndex(option => option.label === "Approve") ?? -1) < 0) {
-          return deny("denied", "The security approval is no longer pending.");
+        if (!validSecurityApproval(pending, request.payload)) {
+          return deny("denied", "The security approval changed or is no longer pending.");
         }
       }
       if (request.action === "decision" && !validDecisionAnswers(
@@ -226,11 +235,12 @@ export function attachWorkShellRuntime(
           if (receipt.status !== "delivered") return deny("denied", receipt.message ?? "The steer was not delivered.");
         } else if (request.action === "approve") {
           const pending = input.engine.getState().agentConsole.pendingDecision;
-          if (request.payload?.decision !== "approve_once" || pending?.kind !== "security-approval" || pending.questions.length !== 1) {
-            return deny("denied", "Only an explicit one-shot security approval can be approved here.");
+          if (!validSecurityApproval(pending, request.payload)) {
+            return deny("denied", "The security approval changed or is no longer pending.");
           }
-          const index = pending.questions[0]?.options.findIndex(option => option.label === "Approve") ?? -1;
-          if (index < 0 || !input.engine.answerPendingDecisionByIndex(index + 1)) {
+          const question = pending?.questions.length === 1 ? pending.questions[0] : undefined;
+          const index = question?.options.findIndex(option => option.label === "Approve") ?? -1;
+          if (index < 0 || !input.engine.answerPendingDecisionByIndex(index + 1, request.payload.decisionId)) {
             return deny("denied", "The security approval is no longer pending.");
           }
         } else if (request.action === "decision") {

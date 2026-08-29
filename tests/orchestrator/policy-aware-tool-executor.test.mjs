@@ -395,6 +395,37 @@ test("one approval prompts once and invokes a risky handler once", async () => {
   assert.equal(questions.length, 1);
 });
 
+test("sequential same-scope approvals receive distinct per-call decision identities", async () => {
+  const decisionIds = [];
+  const executor = createPolicyAwareToolExecutor({
+    definitions: DEFINITIONS,
+    handlers: createRecordingHandlers([]),
+    policyProfile: { id: "test.default-allow", mode: "enforce", defaultEffect: "allow", rules: [] },
+    runtimeMode: "default",
+    interactionBridge: {
+      async ask(request) {
+        decisionIds.push(request.id);
+        return { status: "cancelled" };
+      },
+    },
+  });
+
+  await executor.execute({
+    toolName: "write_file",
+    input: { path: "a.txt", content: "a" },
+    cwd: "/tmp/policy-executor",
+  });
+  await executor.execute({
+    toolName: "write_file",
+    input: { path: "b.txt", content: "b" },
+    cwd: "/tmp/policy-executor",
+  });
+
+  assert.equal(decisionIds.length, 2);
+  assert.notEqual(decisionIds[0], decisionIds[1]);
+  assert.ok(decisionIds.every(decisionId => /^[A-Za-z0-9._:-]{1,160}$/.test(decisionId)));
+});
+
 test("concurrent always-allow prompts once, stores one canonical rule, and authorizes the next action", async () => {
   const invoked = [];
   const questions = [];
