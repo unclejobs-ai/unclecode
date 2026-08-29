@@ -1306,21 +1306,17 @@ test("root bin wrapper handles mode set and status on the Rust path", () => {
     );
     assert.equal(savedConfig.mode, "yolo");
 
-    const statusResult = spawnSync(
-      "node",
-      [binEntrypoint, "mode", "status"],
-      {
-        cwd: tempDir,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          LC_ALL: "en_US.UTF-8",
-          LC_MESSAGES: "ko_KR.UTF-8",
-          LANGUAGE: "ko_KR:en_US",
-          LANG: "ko_KR.UTF-8",
-        },
+    const statusResult = spawnSync("node", [binEntrypoint, "mode", "status"], {
+      cwd: tempDir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        LC_ALL: "en_US.UTF-8",
+        LC_MESSAGES: "ko_KR.UTF-8",
+        LANGUAGE: "ko_KR:en_US",
+        LANG: "ko_KR.UTF-8",
       },
-    );
+    });
 
     assert.equal(statusResult.status, 0, statusResult.stderr);
     assert.match(statusResult.stdout, /Active mode: yolo/);
@@ -1338,41 +1334,33 @@ test("root bin wrapper localizes mode labels for an explicit Korean locale", () 
   );
 
   try {
-    const result = spawnSync(
-      "node",
-      [binEntrypoint, "mode", "set", "yolo"],
-      {
-        cwd: tempDir,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          LC_ALL: "ko_KR.UTF-8",
-          LC_MESSAGES: "en_US.UTF-8",
-          LANGUAGE: "en_US",
-          LANG: "en_US.UTF-8",
-        },
+    const result = spawnSync("node", [binEntrypoint, "mode", "set", "yolo"], {
+      cwd: tempDir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        LC_ALL: "ko_KR.UTF-8",
+        LC_MESSAGES: "en_US.UTF-8",
+        LANGUAGE: "en_US",
+        LANG: "en_US.UTF-8",
       },
-    );
+    });
 
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Active mode saved: yolo/);
     assert.match(result.stdout, /Label: YOLO 모드/);
 
-    const statusResult = spawnSync(
-      "node",
-      [binEntrypoint, "mode", "status"],
-      {
-        cwd: tempDir,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          LC_ALL: "ko_KR.UTF-8",
-          LC_MESSAGES: "en_US.UTF-8",
-          LANGUAGE: "en_US",
-          LANG: "en_US.UTF-8",
-        },
+    const statusResult = spawnSync("node", [binEntrypoint, "mode", "status"], {
+      cwd: tempDir,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        LC_ALL: "ko_KR.UTF-8",
+        LC_MESSAGES: "en_US.UTF-8",
+        LANGUAGE: "en_US",
+        LANG: "en_US.UTF-8",
       },
-    );
+    });
 
     assert.equal(statusResult.status, 0, statusResult.stderr);
     assert.match(statusResult.stdout, /Active mode: yolo/);

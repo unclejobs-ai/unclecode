@@ -73,7 +73,10 @@ test("safety boundary classifies English and Korean high-impact mutations with t
 
   for (const [prompt, domain] of cases) {
     const boundary = classifyWorkSafetyBoundary(prompt);
-    assert.ok(boundary.domains.includes(domain), `${prompt} should include ${domain}`);
+    assert.ok(
+      boundary.domains.includes(domain),
+      `${prompt} should include ${domain}`,
+    );
     assert.equal(boundary.mutation, "mutation", prompt);
     assert.equal(boundary.risk, "high", prompt);
     assert.equal(boundary.requiresOrchestration, true, prompt);

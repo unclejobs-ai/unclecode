@@ -19,13 +19,21 @@ const expectedSha256 =
 
 function readTarballEntry(tarball, expectedPath) {
   const archive = gunzipSync(readFileSync(tarball));
-  for (let offset = 0; offset + 512 <= archive.length;) {
+  for (let offset = 0; offset + 512 <= archive.length; ) {
     const header = archive.subarray(offset, offset + 512);
     const name = header.subarray(0, 100).toString("utf8").replace(/\0.*$/s, "");
     if (name.length === 0) break;
-    const sizeText = header.subarray(124, 136).toString("ascii").replace(/\0.*$/s, "").trim();
+    const sizeText = header
+      .subarray(124, 136)
+      .toString("ascii")
+      .replace(/\0.*$/s, "")
+      .trim();
     const size = Number.parseInt(sizeText || "0", 8);
-    assert.equal(Number.isSafeInteger(size), true, `invalid tar entry size for ${name}`);
+    assert.equal(
+      Number.isSafeInteger(size),
+      true,
+      `invalid tar entry size for ${name}`,
+    );
     const contentOffset = offset + 512;
     if (name === expectedPath) {
       return archive.subarray(contentOffset, contentOffset + size);
@@ -54,8 +62,14 @@ test("the installed SCC core is the reviewed vendored release and passes its sha
     "file:vendor/second-claude/second-claude-core-4.0.0.tgz",
   );
 
-  const installedRoot = path.join(workspaceRoot, "node_modules/@second-claude/core");
-  for (const relativePath of ["dist/index.js", "fixtures/quality-contract.json"]) {
+  const installedRoot = path.join(
+    workspaceRoot,
+    "node_modules/@second-claude/core",
+  );
+  for (const relativePath of [
+    "dist/index.js",
+    "fixtures/quality-contract.json",
+  ]) {
     assert.deepEqual(
       readFileSync(path.join(installedRoot, relativePath)),
       readTarballEntry(vendorTarball, `package/${relativePath}`),

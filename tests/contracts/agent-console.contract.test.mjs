@@ -66,11 +66,13 @@ test("agent-console keeps decision types outside the exact work-node status tupl
       pendingDecision: {
         kind,
         id: `${kind}-1`,
-        questions: [{
-          id: "choice",
-          question: "Continue?",
-          options: [{ label: "Continue" }, { label: "Stop" }],
-        }],
+        questions: [
+          {
+            id: "choice",
+            question: "Continue?",
+            options: [{ label: "Continue" }, { label: "Stop" }],
+          },
+        ],
       },
       activity: [],
     });
