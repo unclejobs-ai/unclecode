@@ -35,7 +35,7 @@ export function createRuntimeAdapter(input: {
   type PendingReceipt = { readonly fingerprint: string; readonly result: Promise<RuntimeControlResult> };
   const receipts = new Map<string, Receipt>();
   const pendingReceipts = new Map<string, PendingReceipt>();
-  const sessionTails = new Map<string, Promise<void>>();
+  const lifecycleTransitionTails = new Map<string, Promise<void>>();
 
   const fingerprint = (request: RuntimeControlRequest): string => JSON.stringify({
     action: request.action,
@@ -77,14 +77,25 @@ export function createRuntimeAdapter(input: {
       const pending = pendingReceipts.get(receiptKey);
       if (pending) return pending.fingerprint === requestFingerprint ? pending.result : mismatch();
 
-      const prior = sessionTails.get(request.sessionId) ?? Promise.resolve();
-      const result = prior.catch(() => undefined).then(() => execute(request));
-      const tail = result.then(() => undefined, () => undefined);
-      sessionTails.set(request.sessionId, tail);
+      // The owner-side RuntimeSessionMutationArbiter is the single revision
+      // and execution authority. Only mutually dependent pause/resume
+      // transitions retain local ordering. Cancel, approval, steer, follow-up,
+      // and pause relative to an active turn never wait on an adapter-wide tail.
+      const ordersLifecycleTransition = request.action === "pause" || request.action === "resume";
+      const prior = lifecycleTransitionTails.get(request.sessionId) ?? Promise.resolve();
+      const result = ordersLifecycleTransition
+        ? prior.catch(() => undefined).then(() => execute(request))
+        : execute(request);
       pendingReceipts.set(receiptKey, { fingerprint: requestFingerprint, result });
-      void tail.finally(() => {
-        if (sessionTails.get(request.sessionId) === tail) sessionTails.delete(request.sessionId);
-      });
+      if (ordersLifecycleTransition) {
+        const tail = result.then(() => undefined, () => undefined);
+        lifecycleTransitionTails.set(request.sessionId, tail);
+        void tail.finally(() => {
+          if (lifecycleTransitionTails.get(request.sessionId) === tail) {
+            lifecycleTransitionTails.delete(request.sessionId);
+          }
+        });
+      }
       try {
         const settled = await result;
         remember(receiptKey, { fingerprint: requestFingerprint, result: settled });

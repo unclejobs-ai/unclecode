@@ -256,3 +256,61 @@ test("owner disposal aborts and settles a live provider or tool mutation before 
   assert.equal(result.ok, false);
   assert.match(result.message, /aborted by owner shutdown/);
 });
+
+test("an active submitted turn does not retain the owner lane needed to pause it", async () => {
+  const listeners = new Set();
+  let lifecycle = { state: "idle" };
+  let releaseTurn;
+  let pauseCalls = 0;
+  const engine = {
+    getState: () => ({ isBusy: lifecycle.state !== "idle", queuePaused: false, model: "test", mode: "standard", uiLocale: "en", agentConsole: {} }),
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    async handleSubmit() {
+      lifecycle = { state: "running", turnId: "turn-live" };
+      for (const listener of listeners) listener();
+      await new Promise(resolve => { releaseTurn = resolve; });
+      lifecycle = { state: "idle" };
+    },
+    getTurnLifecycle: () => lifecycle,
+    async requestTurnPause() {
+      pauseCalls += 1;
+      lifecycle = { state: "paused", turnId: "turn-live", boundary: "after_provider" };
+      return { turnId: "turn-live", boundary: "after_provider" };
+    },
+    resumeTurn: () => false,
+    interruptTurn() { releaseTurn?.(); },
+    async resumeQueueItems() {},
+    answerPendingDecisionByIndex: () => false,
+    getAgentControlPort: () => ({ async steer() { return { status: "delivered" }; } }),
+  };
+  const clock = { value: 0 };
+  const arbiter = new RuntimeSessionMutationArbiter(clock);
+  const engines = new LiveRuntimeEngineRegistry();
+  const controls = new LiveRuntimeControlRegistry();
+  engines.attach("live-control", engine, { projectPath: "/work/live", revisionClock: clock, mutationArbiter: arbiter });
+  attachWorkShellRuntime(controls, {
+    sessionId: "live-control", projectPath: "/work/live", engine,
+    revisionClock: clock, mutationArbiter: arbiter,
+  });
+
+  const turn = engines.invoke({
+    sessionId: "live-control", method: "handleSubmit", args: ["keep working"],
+    expectedRevision: 0, idempotencyKey: "turn-live",
+  });
+  while (lifecycle.state !== "running") await new Promise(resolve => setImmediate(resolve));
+  const admittedRevision = engines.read("live-control").revision;
+  const pause = controls.control({
+    sessionId: "live-control", action: "pause",
+    expectedRevision: admittedRevision, idempotencyKey: "pause-live",
+  });
+  const result = await Promise.race([
+    pause,
+    new Promise(resolve => setTimeout(() => resolve({ outcome: "blocked", pauses: pauseCalls }), 100)),
+  ]);
+
+  assert.equal(result.outcome, undefined, `pause must reach the active turn: ${JSON.stringify(result)}`);
+  assert.equal(result.ok, true);
+  assert.equal(pauseCalls, 1);
+  releaseTurn();
+  await turn;
+});

@@ -285,3 +285,37 @@ test("persistent runtime discovers opaque session checkpoint filenames", async (
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("runtime adapter does not queue cancel behind a pending pause", async () => {
+  let revision = 4;
+  let releasePause;
+  let cancelCalls = 0;
+  const adapter = createRuntimeAdapter({
+    async read() {
+      return { generatedAt: Date.now(), sessions: [{ sessionId: "s1", projectPath: "/tmp", locale: "en", state: "running", revision }], system: { providers: [], plugins: [], cleanup: [] } };
+    },
+    controls: {
+      async control(request) {
+        if (request.action === "pause") {
+          await new Promise(resolve => { releasePause = resolve; });
+          revision += 1;
+          return { ok: true, revision, state: "paused" };
+        }
+        cancelCalls += 1;
+        revision += 1;
+        return { ok: true, revision, state: "cancelled" };
+      },
+    },
+  });
+  const pause = adapter.control({ sessionId: "s1", action: "pause", expectedRevision: 4, idempotencyKey: "pause" });
+  await new Promise(resolve => setImmediate(resolve));
+  const cancel = adapter.control({ sessionId: "s1", action: "cancel", expectedRevision: 4, idempotencyKey: "cancel" });
+  const cancelled = await Promise.race([
+    cancel,
+    new Promise(resolve => setTimeout(() => resolve({ ok: false, code: "blocked" }), 100)),
+  ]);
+  assert.equal(cancelled.ok, true);
+  assert.equal(cancelCalls, 1);
+  releasePause();
+  await pause;
+});

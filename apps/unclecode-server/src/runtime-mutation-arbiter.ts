@@ -3,12 +3,16 @@ export type RuntimeSessionRevisionClock = { value: number };
 type MutationReceipt<Result> = {
   readonly fingerprint: string;
   readonly promise: Promise<Result>;
+  settled: boolean;
 };
+
+export type RuntimeMutationLane = "normal" | "control" | "cancel";
 
 export class RuntimeSessionMutationArbiter {
   readonly clock: RuntimeSessionRevisionClock;
   readonly #receipts = new Map<string, MutationReceipt<unknown>>();
   #normalTail: Promise<void> = Promise.resolve();
+  readonly #active = new Set<Promise<unknown>>();
   #activeMutations = 0;
 
   constructor(clock: RuntimeSessionRevisionClock = { value: 0 }) {
@@ -34,20 +38,18 @@ export class RuntimeSessionMutationArbiter {
   async settle(timeoutMs = 5_000): Promise<boolean> {
     const deadline = Date.now() + Math.max(0, timeoutMs);
     while (Date.now() <= deadline) {
-      const tail = this.#normalTail;
+      const active = [...this.#active];
+      if (active.length === 0) return true;
       const remaining = Math.max(0, deadline - Date.now());
-      const tailSettled = await new Promise<boolean>((resolve) => {
+      const activeSettled = await new Promise<boolean>((resolve) => {
         const timer = setTimeout(() => resolve(false), remaining);
-        tail.then(() => {
-          clearTimeout(timer);
-          resolve(true);
-        }, () => {
+        Promise.allSettled(active).then(() => {
           clearTimeout(timer);
           resolve(true);
         });
       });
-      if (!tailSettled) return false;
-      if (tail === this.#normalTail && this.#activeMutations === 0) return true;
+      if (!activeSettled) return false;
+      if (this.#active.size === 0 && this.#activeMutations === 0) return true;
     }
     return false;
   }
@@ -56,7 +58,7 @@ export class RuntimeSessionMutationArbiter {
     readonly idempotencyKey: string;
     readonly fingerprint: string;
     readonly expectedRevision: number;
-    readonly lane?: "normal" | "cancel" | undefined;
+    readonly lane?: RuntimeMutationLane | undefined;
     readonly conflict: (revision: number) => Result;
     readonly invalidReuse: (revision: number) => Result;
     readonly execute: () => Promise<Output> | Output;
@@ -71,15 +73,23 @@ export class RuntimeSessionMutationArbiter {
         : Promise.resolve(input.invalidReuse(this.clock.value));
     }
 
+    const stalePreemptiveCancel = input.lane === "cancel"
+      && this.#activeMutations > 0
+      && input.expectedRevision === this.clock.value - 1;
+    if (this.clock.value !== input.expectedRevision && !stalePreemptiveCancel) {
+      return Promise.resolve(input.conflict(this.clock.value));
+    }
+
+    // Admission is the only atomic section. Reserve the accepted revision
+    // synchronously, install the pending receipt, then run the potentially
+    // long operation outside that section. Normal mutations retain execution
+    // ordering; lifecycle controls and cancellation can reach an active turn.
+    const acceptedRevision = this.clock.value + 1;
+    this.clock.value = acceptedRevision;
+    this.#activeMutations += 1;
+
     let receipt!: MutationReceipt<Result>;
     const execute = async (): Promise<Result> => {
-      if (this.clock.value !== input.expectedRevision) {
-        if (this.#receipts.get(input.idempotencyKey) === receipt) {
-          this.#receipts.delete(input.idempotencyKey);
-        }
-        return input.conflict(this.clock.value);
-      }
-      this.#activeMutations += 1;
       let output: Output | undefined;
       let failure: unknown;
       try {
@@ -89,26 +99,36 @@ export class RuntimeSessionMutationArbiter {
       } finally {
         this.#activeMutations -= 1;
       }
-      if (failure !== undefined || input.didMutate?.(output as Output) !== false) {
-        this.clock.value += 1;
+      const mutated = failure !== undefined || input.didMutate?.(output as Output) !== false;
+      if (!mutated && this.clock.value === acceptedRevision) {
+        this.clock.value = acceptedRevision - 1;
       }
       return failure === undefined
-        ? input.complete(output as Output, this.clock.value)
-        : input.fail(failure, this.clock.value);
+        ? input.complete(output as Output, mutated ? acceptedRevision : this.clock.value)
+        : input.fail(failure, acceptedRevision);
     };
 
-    const promise = input.lane === "cancel"
-      ? execute()
-      : this.#normalTail.then(execute);
-    if (input.lane !== "cancel") {
-      this.#normalTail = promise.then(() => undefined, () => undefined);
+    const admitted = input.lane === "normal" || input.lane === undefined
+      ? this.#normalTail.then(execute)
+      : Promise.resolve().then(execute);
+    if (input.lane === "normal" || input.lane === undefined) {
+      this.#normalTail = admitted.then(() => undefined, () => undefined);
     }
-    receipt = { fingerprint: input.fingerprint, promise };
+    receipt = { fingerprint: input.fingerprint, promise: admitted, settled: false };
     this.#receipts.set(input.idempotencyKey, receipt as MutationReceipt<unknown>);
-    if (this.#receipts.size > 2_048) {
-      const oldest = this.#receipts.keys().next().value as string | undefined;
-      if (oldest && oldest !== input.idempotencyKey) this.#receipts.delete(oldest);
-    }
-    return promise;
+    this.#active.add(admitted);
+    void admitted.finally(() => {
+      receipt.settled = true;
+      this.#active.delete(admitted);
+      if (this.#receipts.size > 2_048) {
+        for (const [key, candidate] of this.#receipts) {
+          if (candidate.settled && key !== input.idempotencyKey) {
+            this.#receipts.delete(key);
+            break;
+          }
+        }
+      }
+    });
+    return admitted;
   }
 }

@@ -19,6 +19,11 @@ export const RUNTIME_ENGINE_METHODS = [
 ] as const;
 
 export type RuntimeEngineMethod = (typeof RUNTIME_ENGINE_METHODS)[number];
+
+const CONTROL_ENGINE_METHODS = new Set<RuntimeEngineMethod>([
+  "requestTurnPause", "resumeTurn", "answerPendingDecisionByIndex", "cancelPendingDecision",
+  "beginAgentSteer", "requestAgentCancel", "confirmAgentCancel", "continueSelectedAgent",
+]);
 export type RuntimeEngineSource = {
   getState(): unknown;
   subscribe(listener: () => void): () => void;
@@ -258,7 +263,11 @@ export class LiveRuntimeEngineRegistry {
       idempotencyKey: input.idempotencyKey,
       fingerprint,
       expectedRevision: input.expectedRevision,
-      ...(input.method === "interruptTurn" ? { lane: "cancel" as const } : {}),
+      ...(input.method === "interruptTurn"
+        ? { lane: "cancel" as const }
+        : CONTROL_ENGINE_METHODS.has(input.method as RuntimeEngineMethod)
+          ? { lane: "control" as const }
+          : {}),
       conflict: (revision) => ({ ok: false, code: "revision_conflict", message: "Engine revision changed.", revision }),
       invalidReuse: (revision) => ({ ok: false, code: "invalid_action", message: "Idempotency-Key was reused for another engine mutation.", revision }),
       execute: () => Reflect.apply(method, attached.engine, input.args),

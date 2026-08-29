@@ -170,3 +170,35 @@ test("TUI boot attaches through discovery without a fixed port or split local re
   assert.match(source, /attachRuntimeSession\s*\(/);
   assert.match(source, /createRemoteWorkShellEngine\s*\(/);
 });
+
+test("remote interrupt preempts a long submitted turn instead of waiting on invocation order", async () => {
+  let revision = 1;
+  let releaseSubmit;
+  let interrupts = 0;
+  const client = {
+    async readEngineState() {
+      return { ok: true, revision, state: { isBusy: true, turnLifecycle: { state: "running", turnId: "turn-1" } }, result: null };
+    },
+    async invokeEngineMethod(input) {
+      revision += 1;
+      if (input.method === "handleSubmit") {
+        await new Promise(resolve => { releaseSubmit = resolve; });
+      } else if (input.method === "interruptTurn") {
+        interrupts += 1;
+        releaseSubmit?.();
+      }
+      return { ok: true, revision, state: { isBusy: input.method !== "interruptTurn", turnLifecycle: { state: input.method === "interruptTurn" ? "cancelled" : "running", turnId: "turn-1" } }, result: undefined };
+    },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "preemptive-interrupt");
+  const turn = engine.handleSubmit("long turn");
+  await new Promise(resolve => setImmediate(resolve));
+  const interrupted = await Promise.race([
+    engine.interruptTurn(),
+    new Promise(resolve => setTimeout(() => resolve("blocked"), 100)),
+  ]);
+  assert.notEqual(interrupted, "blocked");
+  assert.equal(interrupts, 1);
+  await turn;
+  engine.dispose();
+});

@@ -10,6 +10,18 @@ const STABLE_CONFLICT_RETRY_METHODS = new Set([
   "closeOverlay",
 ]);
 
+const PREEMPTIVE_CONTROL_METHODS = new Set([
+  "interruptTurn",
+  "requestTurnPause",
+  "resumeTurn",
+  "answerPendingDecisionByIndex",
+  "cancelPendingDecision",
+  "beginAgentSteer",
+  "requestAgentCancel",
+  "confirmAgentCancel",
+  "continueSelectedAgent",
+]);
+
 /**
  * Thin TUI projection over the owner process. Dispose detaches only this
  * polling subscriber; it never disposes the owner-held engine or active turn.
@@ -27,7 +39,7 @@ export async function createRemoteWorkShellEngine(
   let polling = false;
   let disposed = false;
   let pollAbort: AbortController | undefined;
-  let invocationAbort: AbortController | undefined;
+  const invocationAborts = new Set<AbortController>();
   let invocationTail: Promise<void> = Promise.resolve();
 
   const publish = (next: unknown, nextRevision: number): boolean => {
@@ -60,7 +72,7 @@ export async function createRemoteWorkShellEngine(
     if (disposed) throw new Error("Remote runtime attachment is closed.");
     const idempotencyKey = randomUUID();
     const controller = new AbortController();
-    invocationAbort = controller;
+    invocationAborts.add(controller);
     try {
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const response = await client.invokeEngineMethod({
@@ -80,10 +92,11 @@ export async function createRemoteWorkShellEngine(
       }
       throw new Error("Engine revision remained unstable after refresh.");
     } finally {
-      if (invocationAbort === controller) invocationAbort = undefined;
+      invocationAborts.delete(controller);
     }
   };
   const scheduleInvoke = (method: string, args: readonly unknown[]) => {
+    if (PREEMPTIVE_CONTROL_METHODS.has(method)) return invoke(method, args);
     const scheduled = invocationTail.then(() => invoke(method, args));
     invocationTail = scheduled.then(() => undefined, () => undefined);
     return scheduled;
@@ -108,8 +121,10 @@ export async function createRemoteWorkShellEngine(
       disposed = true;
       pollAbort?.abort();
       pollAbort = undefined;
-      invocationAbort?.abort(new Error("Remote runtime attachment closed."));
-      invocationAbort = undefined;
+      for (const controller of invocationAborts) {
+        controller.abort(new Error("Remote runtime attachment closed."));
+      }
+      invocationAborts.clear();
       listeners.clear();
       if (timer) clearInterval(timer);
       timer = undefined;

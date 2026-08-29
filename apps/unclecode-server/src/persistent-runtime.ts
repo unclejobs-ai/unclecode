@@ -57,7 +57,11 @@ export class LiveRuntimeControlRegistry implements RuntimeControlPort {
       idempotencyKey: request.idempotencyKey,
       fingerprint: JSON.stringify({ action: request.action, payload: request.payload, expectedRevision: request.expectedRevision }),
       expectedRevision: request.expectedRevision,
-      ...(request.action === "cancel" ? { lane: "cancel" as const } : {}),
+      ...(request.action === "cancel"
+        ? { lane: "cancel" as const }
+        : request.action === "follow-up"
+          ? {}
+          : { lane: "control" as const }),
       conflict: (current) => ({ ok: false, code: "revision_conflict", message: "Session revision changed.", revision: current }),
       invalidReuse: (current) => ({ ok: false, code: "invalid_action", message: "Idempotency-Key was reused for another runtime action.", revision: current }),
       execute: () => attached.control(request),
