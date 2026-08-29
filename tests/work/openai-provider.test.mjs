@@ -471,6 +471,42 @@ test("OpenAIProvider reuses one prompt cache key across a conversation", async (
   assert.equal(capturedBodies[1].prompt_cache_retention, "24h");
 });
 
+test("OpenAIProvider keeps the caller system appendix while hashing only the cache key", async () => {
+  let capturedBody;
+  const appendix = "Follow the workspace acceptance criteria exactly.";
+  const provider = new OpenAIProvider({
+    apiKey: "sk-test-123",
+    model: "gpt-5.4",
+    cwd: process.cwd(),
+    systemPrompt: appendix,
+    reasoning: {
+      effort: "medium",
+      source: "mode-default",
+      support: {
+        status: "supported",
+        defaultEffort: "medium",
+        supportedEfforts: ["low", "medium", "high"],
+      },
+    },
+    fetchImpl: async (_url, init) => {
+      capturedBody = JSON.parse(String(init?.body ?? "{}"));
+      return {
+        ok: true,
+        async json() {
+          return { choices: [{ message: { content: "ok" } }] };
+        },
+      };
+    },
+  });
+
+  await provider.runTurn("first");
+
+  assert.equal(capturedBody.messages[0].role, "system");
+  assert.match(capturedBody.messages[0].content, /Follow the workspace acceptance criteria exactly\./);
+  assert.doesNotMatch(capturedBody.messages[0].content, /^[a-f0-9]{64}$/);
+  assert.match(capturedBody.prompt_cache_key, /^unclecode-[a-f0-9]{40}$/);
+});
+
 test("OpenAIProvider.runTurn uses Rust chat completion when fetch is not injected", async () => {
   const originalBaseUrl = process.env.OPENAI_API_BASE_URL;
   const originalNoProxy = process.env.NO_PROXY;

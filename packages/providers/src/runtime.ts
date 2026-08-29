@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 
 import type {
+  CacheTelemetrySnapshot,
   ClipboardImageAttachment,
   ExecutionTraceEvent,
   ModeReasoningEffort,
   ToolMetadata,
 } from "@unclecode/contracts";
+import { createInstrumentedLruCache } from "@unclecode/contracts";
 
 import { estimateCostUsd } from "./model-pricing.js";
 import { runRustCommand, runRustCommandSync } from "./rust-command.js";
@@ -45,9 +47,37 @@ export type ProviderToolTraceEvent = Extract<
 export type ProviderInputAttachment = ClipboardImageAttachment;
 
 let cachedProviderToolLoopMax: number | undefined;
-const runtimeReasoningEffortCache = new Map<string, string | undefined>();
-const providerSystemPromptCache = new Map<string, string>();
-const providerToolPolicyCache = new Map<string, ProviderToolPolicy>();
+const PROVIDER_DERIVATION_CACHE_MAX_ENTRIES = 64;
+const runtimeReasoningEffortCache = createInstrumentedLruCache<string, string | undefined>({
+  name: "provider-reasoning-effort",
+  maxEntries: PROVIDER_DERIVATION_CACHE_MAX_ENTRIES,
+});
+const providerSystemPromptCache = createInstrumentedLruCache<string, string>({
+  name: "provider-system-prompt",
+  maxEntries: PROVIDER_DERIVATION_CACHE_MAX_ENTRIES,
+});
+const providerToolPolicyCache = createInstrumentedLruCache<string, ProviderToolPolicy>({
+  name: "provider-tool-policy",
+  maxEntries: PROVIDER_DERIVATION_CACHE_MAX_ENTRIES,
+});
+
+export function getProviderCacheTelemetrySnapshot(): readonly CacheTelemetrySnapshot[] {
+  return [
+    runtimeReasoningEffortCache.snapshot(),
+    providerSystemPromptCache.snapshot(),
+    providerToolPolicyCache.snapshot(),
+  ];
+}
+
+export function invalidateProviderSystemPromptCache(appendix?: string): boolean {
+  return providerSystemPromptCache.invalidate(createProviderSystemPromptCacheKey(appendix));
+}
+
+export function invalidateProviderDerivationCaches(): number {
+  return runtimeReasoningEffortCache.invalidateAll()
+    + providerSystemPromptCache.invalidateAll()
+    + providerToolPolicyCache.invalidateAll();
+}
 
 export function applyProviderAttachmentCaps(
   attachments: readonly ProviderInputAttachment[],
@@ -90,8 +120,9 @@ export type RuntimeReasoningConfig = {
 
 function resolveRuntimeReasoningEffort(reasoning: RuntimeReasoningConfig): string | undefined {
   const cacheKey = JSON.stringify(reasoning);
-  if (runtimeReasoningEffortCache.has(cacheKey)) {
-    return runtimeReasoningEffortCache.get(cacheKey);
+  const cached = runtimeReasoningEffortCache.lookup(cacheKey);
+  if (cached.hit) {
+    return cached.value;
   }
   const raw = runRustCommandSync(
     ["rust", "provider", "reasoning-effort"],
@@ -110,17 +141,22 @@ function resolveRuntimeReasoningEffort(reasoning: RuntimeReasoningConfig): strin
   return effort;
 }
 
+function createProviderSystemPromptCacheKey(appendix?: string): string {
+  return createHash("sha256").update(appendix ?? "").digest("hex");
+}
+
 function resolveProviderSystemPrompt(appendix?: string): string {
-  const key = appendix ?? "";
-  const cached = providerSystemPromptCache.get(key);
-  if (cached !== undefined) {
-    return cached;
+  // Keep arbitrary workspace guidance out of a second long-lived string key.
+  const key = createProviderSystemPromptCacheKey(appendix);
+  const cached = providerSystemPromptCache.lookup(key);
+  if (cached.hit) {
+    return cached.value;
   }
   const prompt = runRustCommandSync(
     ["rust", "provider", "system-prompt"],
     process.cwd(),
     process.env,
-    key,
+    appendix ?? "",
   ).trimEnd();
   providerSystemPromptCache.set(key, prompt);
   return prompt;
@@ -142,16 +178,17 @@ function resolveProviderToolPolicy(
   surface: ProviderToolPolicySurface,
   tools: readonly ToolDefinition[],
 ): ProviderToolPolicy {
-  const cacheKey = `${surface}\0${JSON.stringify(tools)}`;
-  const cached = providerToolPolicyCache.get(cacheKey);
-  if (cached) {
-    return cached;
+  const serializedTools = JSON.stringify(tools);
+  const cacheKey = `${surface}\0${createHash("sha256").update(serializedTools).digest("hex")}`;
+  const cached = providerToolPolicyCache.lookup(cacheKey);
+  if (cached.hit) {
+    return cached.value;
   }
   const raw = runRustCommandSync(
     ["rust", "provider", "tool-policy", surface],
     process.cwd(),
     process.env,
-    JSON.stringify(tools),
+    serializedTools,
   ).trim();
   const parsed = JSON.parse(raw) as unknown;
   if (

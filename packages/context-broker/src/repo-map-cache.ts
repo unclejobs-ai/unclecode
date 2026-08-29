@@ -1,13 +1,35 @@
+import { createInstrumentedLruCache } from "@unclecode/contracts";
+
 import type { RepoMap } from "./types.js";
 
 type RepoMapCacheEntry = {
-  readonly cacheKey: string;
+  readonly rootDir: string;
   readonly repoMap: RepoMap;
 };
 
+const REPO_MAP_ENTRY_RETAINED_BYTES_ESTIMATE = 192;
+
+function estimateRepoMapCacheEntryBytes(cacheKey: string, entry: RepoMapCacheEntry): number {
+  const map = entry.repoMap;
+  const reportedFiles = Number.isFinite(map.totalFiles) ? Math.max(0, map.totalFiles) : 0;
+  const entryCount = Math.max(map.entries.length, reportedFiles);
+  const summaryCodeUnits = cacheKey.length
+    + entry.rootDir.length
+    + map.generatedAt.length
+    + map.gitHeadSha.length;
+
+  // Avoid serializing every path on the synchronous cache-write path. This is a
+  // coarse retained-memory estimate based on JS string storage and typical entry fields.
+  return summaryCodeUnits * 2 + entryCount * REPO_MAP_ENTRY_RETAINED_BYTES_ESTIMATE;
+}
+
 export function createRepoMapCache(options?: { readonly maxEntries?: number }) {
   const maxEntries = Math.max(1, options?.maxEntries ?? 8);
-  const entries = new Map<string, RepoMapCacheEntry>();
+  const entries = createInstrumentedLruCache<string, RepoMapCacheEntry>({
+    name: "repo-map",
+    maxEntries,
+    estimateEntryBytes: estimateRepoMapCacheEntryBytes,
+  });
 
   return {
     async load(input: {
@@ -15,27 +37,28 @@ export function createRepoMapCache(options?: { readonly maxEntries?: number }) {
       readonly gitHeadSha: string;
       readonly loader: () => Promise<RepoMap>;
     }): Promise<{ readonly repoMap: RepoMap; readonly cacheHit: boolean }> {
-      const cacheKey = `${input.rootDir}::${input.gitHeadSha}`;
-      const cached = entries.get(cacheKey);
+      const cacheKey = JSON.stringify([input.rootDir, input.gitHeadSha]);
+      const cached = entries.lookup(cacheKey);
 
-      if (cached) {
-        entries.delete(cacheKey);
-        entries.set(cacheKey, cached);
-        return { repoMap: cached.repoMap, cacheHit: true };
+      if (cached.hit) {
+        return { repoMap: cached.value.repoMap, cacheHit: true };
       }
 
       const repoMap = await input.loader();
-      entries.set(cacheKey, { cacheKey, repoMap });
 
-      while (entries.size > maxEntries) {
-        const oldestKey = entries.keys().next().value;
-        if (typeof oldestKey !== "string") {
-          break;
+      for (const [entryKey, entry] of entries.entries()) {
+        if (entry.rootDir === input.rootDir && entryKey !== cacheKey) {
+          entries.invalidate(entryKey);
         }
-        entries.delete(oldestKey);
       }
 
+      entries.set(cacheKey, { rootDir: input.rootDir, repoMap });
+
       return { repoMap, cacheHit: false };
+    },
+
+    snapshot() {
+      return entries.snapshot();
     },
   };
 }
