@@ -47,6 +47,7 @@ export * from "./quality-runtime.js";
 export * from "./evolution-runtime.js";
 export * from "./evolution-git-host.js";
 export * from "./evolution-sandbox.js";
+export * from "./scc-v3-importer.js";
 export * from "./work-agent-run-controller.js";
 export * from "./work-shell-engine.js";
 export * from "./work-shell-agent-console.js";

@@ -20,6 +20,7 @@
     "benchmark:competitive": "npm run build --silent && cargo build --quiet -p unclecode && node scripts/competitive-benchmark.mjs",
     "benchmark:competitive:all": "npm run build --silent && cargo build --quiet -p unclecode && node scripts/competitive-benchmark.mjs --systems all",
     "core:use-local": "node scripts/use-local-second-claude-core.mjs",
+    "scc:import-v3:dry-run": "npm run build --silent && node scripts/scc-v3-import-dry-run.mjs",
     "qa:live:record": "npm run build --silent && cargo build --quiet -p unclecode && node scripts/unclecode-live-provider-qa.mjs --allow-blocked",
     "qa:stability": "npm run qa:health",
     "qa:health": "node scripts/unclecode-health-qa.mjs",

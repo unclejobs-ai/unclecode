@@ -41,7 +41,9 @@ The importer is deliberately dry-run only:
 - rejects symbolic links and paths that escape `.data`;
 - maps legacy phases, gates, reviewer evidence, event counts, and artifact hashes into planned UncleCode session-store, agentops-db, and artifact records;
 - marks Check/Act records without reviewer evidence as `unproven`;
-- omits external artifact references and never includes raw artifact or event payloads in its report;
+- rejects external artifact references, conflicting target records, malformed records, and oversized inputs instead of producing a partial plan;
+- emits a deterministic agentops migration receipt plan that skips an identical receipt and rejects target collisions;
+- never includes raw artifact or event payloads in its report and retains only bounded event counts;
 - fingerprints the source tree before and after inspection and reports whether it remained unchanged;
 - has no `--apply` mode and writes neither the source nor the destination.
 
