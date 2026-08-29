@@ -11,14 +11,25 @@ type RemoteConnectionProjection = {
   readonly retryInMs: number;
 };
 
+export type RemoteWorkShellEngineOptions = {
+  readonly reconnect?: ((input: {
+    readonly sessionId: string;
+    readonly signal: AbortSignal;
+  }) => Promise<RuntimeOwnerClient>) | undefined;
+};
+
 const POLL_INTERVAL_MS = 100;
 const MAX_RECONNECT_DELAY_MS = 2_000;
 
-const STABLE_CONFLICT_RETRY_METHODS = new Set([
+// These methods may be replayed only with the same owner receipt identity.
+// A pre-admission conflict can then refresh once, while a lost response
+// resolves from the authoritative receipt without executing the method twice.
+const SAFE_RECEIPT_RETRY_METHODS = new Set([
   "setMode",
   "updateTerminalColumns",
   "updateTerminalRows",
   "closeOverlay",
+  "toggleToolHistoryDisplay",
 ]);
 
 const PREEMPTIVE_CONTROL_METHODS = new Set([
@@ -40,12 +51,17 @@ const PREEMPTIVE_CONTROL_METHODS = new Set([
 export async function createRemoteWorkShellEngine(
   client: RuntimeOwnerClient,
   sessionId: string,
+  options: RemoteWorkShellEngineOptions = {},
 ): Promise<object> {
   const initial = await client.readEngineState(sessionId);
   if (!initial.ok) throw new Error(initial.message);
+  let ownerClient = client;
   let ownerState = initial.state as State;
   let state = ownerState;
   let revision = initial.revision;
+  let stateRequestSequence = 0;
+  let acceptedStateRequestSequence = 0;
+  let readableRequestSequenceFloor = 0;
   const listeners = new Set<(state: State) => void>();
   let timer: NodeJS.Timeout | undefined;
   let polling = false;
@@ -59,14 +75,33 @@ export async function createRemoteWorkShellEngine(
     state = next;
     for (const listener of listeners) listener(state);
   };
-  const publish = (next: unknown, nextRevision: number): boolean => {
-    const recovered = state.remoteConnection !== undefined;
-    if (nextRevision > revision) {
-      revision = nextRevision;
-      ownerState = next as State;
-    } else if (!recovered) {
+  const publish = (
+    next: unknown,
+    nextRevision: number,
+    requestSequence: number,
+    source: "read" | "mutation",
+  ): boolean => {
+    if (nextRevision < revision) return false;
+    if (
+      nextRevision === revision
+      && source === "read"
+      && (
+        requestSequence <= acceptedStateRequestSequence
+        || requestSequence < readableRequestSequenceFloor
+      )
+    ) {
       return false;
     }
+    if (nextRevision > revision) {
+      revision = nextRevision;
+    }
+    if (source === "mutation") {
+      // A completed owner mutation is newer than every read already in flight,
+      // even when the owner's durable admission revision is unchanged.
+      readableRequestSequenceFloor = stateRequestSequence + 1;
+    }
+    acceptedStateRequestSequence = Math.max(acceptedStateRequestSequence, requestSequence);
+    ownerState = next as State;
     notify(ownerState);
     return true;
   };
@@ -74,8 +109,12 @@ export async function createRemoteWorkShellEngine(
     notify({ ...ownerState, remoteConnection: connection });
   };
   const readLatest = async (signal?: AbortSignal) => {
-    const response = await client.readEngineState(sessionId, signal ? { signal } : undefined);
-    if (response.ok) publish(response.state, response.revision);
+    const requestSequence = ++stateRequestSequence;
+    const response = await ownerClient.readEngineState(
+      sessionId,
+      signal ? { signal } : undefined,
+    );
+    if (response.ok) publish(response.state, response.revision, requestSequence, "read");
     return response;
   };
   const reconnectDelay = () => Math.min(
@@ -88,8 +127,15 @@ export async function createRemoteWorkShellEngine(
     const controller = new AbortController();
     pollAbort = controller;
     try {
-      await readLatest(controller.signal);
+      if (reconnectAttempt > 0 && options.reconnect) {
+        const replacement = await options.reconnect({ sessionId, signal: controller.signal });
+        if (controller.signal.aborted || disposed) return POLL_INTERVAL_MS;
+        ownerClient = replacement;
+      }
+      const response = await readLatest(controller.signal);
+      if (!response.ok) throw new Error(response.message);
       reconnectAttempt = 0;
+      if (state.remoteConnection !== undefined) notify(ownerState);
       return POLL_INTERVAL_MS;
     } catch (error) {
       if (controller.signal.aborted || disposed) return POLL_INTERVAL_MS;
@@ -124,18 +170,34 @@ export async function createRemoteWorkShellEngine(
     invocationAborts.add(controller);
     try {
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const response = await client.invokeEngineMethod({
+        const request = {
           sessionId, method, args, expectedRevision: revision, idempotencyKey,
           signal: controller.signal,
-        });
+        };
+        let response: Awaited<ReturnType<RuntimeOwnerClient["invokeEngineMethod"]>>;
+        for (let replayAttempt = 0; ; replayAttempt += 1) {
+          const requestSequence = ++stateRequestSequence;
+          try {
+            response = await ownerClient.invokeEngineMethod(request);
+            if (response.ok) {
+              publish(response.state, response.revision, requestSequence, "mutation");
+            }
+            break;
+          } catch (error) {
+            if (
+              controller.signal.aborted
+              || replayAttempt > 0
+              || !SAFE_RECEIPT_RETRY_METHODS.has(method)
+            ) throw error;
+          }
+        }
         if (response.ok) {
-          publish(response.state, response.revision);
           return response.result;
         }
         if (
           response.code !== "revision_conflict"
           || attempt > 0
-          || !STABLE_CONFLICT_RETRY_METHODS.has(method)
+          || !SAFE_RECEIPT_RETRY_METHODS.has(method)
         ) throw new Error(response.message);
         await readLatest(controller.signal);
       }

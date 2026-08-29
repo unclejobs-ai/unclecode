@@ -1162,11 +1162,12 @@ test("obsolete root cli compatibility surfaces are removed after app/package sea
   assert.match(runtimeSource, /export async function startRepl\(/);
   assert.match(
     runtimeSource,
-    /createEmbeddedWorkPaneController<\s*TuiShellHomeState\s*>\(\{[\s\S]*loadSnapshot:[\s\S]*loadWorkShellDashboardProps\([\s\S]*withWorkSessionCwd\(forwardedArgs,\s*session\.options\.cwd\)/,
+    /export async function createPersistentOwnerWorkShellController\([\s\S]*createEmbeddedWorkPaneController<\s*TuiShellHomeState\s*>\(\{[\s\S]*loadSnapshot:[\s\S]*resolveSwitchedSession\(input\.session,\s*forwardedArgs\)[\s\S]*createSnapshot\(switched\.session,\s*switched\.resume\)/,
   );
+  assert.doesNotMatch(runtimeSource, /return\s+loadWorkShellDashboardProps\(/);
   assert.match(
     runtimeSource,
-    /renderEmbeddedWorkShellPaneDashboard\(\{[\s\S]*\.\.\.initialProps[\s\S]*\.\.\.\(embeddedWorkPane\s*\?\?\s*\{\}\)/,
+    /try\s*\{[\s\S]*renderEmbeddedWorkShellPaneDashboard\(\{[\s\S]*\.\.\.controller\.initialProps[\s\S]*\.\.\.controller\.embeddedWorkPane[\s\S]*finally\s*\{[\s\S]*controller\.dispose\(\)/,
   );
   assert.match(
     runtimeSource,

@@ -98,6 +98,153 @@ function withWorkSessionCwd(
   return ["--cwd", cwd, ...forwardedArgs];
 }
 
+type DisposableRemoteEngine = object & {
+  readonly dispose: () => void;
+};
+
+export type PersistentOwnerWorkShellController = {
+  readonly initialProps: TuiRenderOptions<TuiShellHomeState>;
+  readonly embeddedWorkPane: NonNullable<Awaited<ReturnType<typeof createEmbeddedWorkPaneController<TuiShellHomeState>>>>;
+  readonly dispose: () => void;
+};
+
+async function connectPersistentRuntimeOwner(): Promise<RuntimeOwnerClient> {
+  const paths = defaultRuntimeOwnerPaths(process.env.HOME);
+  const lease = await ensureRuntimeOwner({
+    leasePath: paths.leasePath,
+    lockPath: paths.lockPath,
+    health: probeRuntimeOwner,
+    startOwner: () => spawnDetachedRuntimeOwner({
+      leasePath: paths.leasePath,
+      tokenPath: paths.tokenPath,
+    }),
+  });
+  return RuntimeOwnerClient.connect(lease);
+}
+
+function resolveSwitchedSession(
+  session: ManagedDashboardSession,
+  forwardedArgs: readonly string[],
+): { readonly session: ManagedDashboardSession; readonly resume: boolean } {
+  const parsed = parseArgs([...withWorkSessionCwd(forwardedArgs, session.options.cwd)]);
+  if (parsed.prompt) throw new Error("Cannot open a prompt as an embedded Work session.");
+  const sessionId = parsed.sessionId ?? `work-${randomUUID()}`;
+  return {
+    session: {
+      agent: session.agent,
+      options: {
+        ...session.options,
+        cwd: parsed.cwd,
+        provider: parsed.provider ?? session.options.provider,
+        model: parsed.model ?? session.options.model,
+        reasoning: parsed.reasoning
+          ? { ...session.options.reasoning, effort: parsed.reasoning, source: "override" }
+          : session.options.reasoning,
+        sessionId,
+      },
+    },
+    resume: parsed.sessionId !== undefined,
+  };
+}
+
+async function createAndAttachOwnerSession(
+  client: RuntimeOwnerClient,
+  session: ManagedDashboardSession,
+  resume: boolean,
+): Promise<string> {
+  const sessionId = session.options.sessionId ?? `work-${randomUUID()}`;
+  const created = await client.createRuntimeSession({
+    sessionId,
+    projectPath: session.options.cwd,
+    provider: session.options.provider,
+    model: session.options.model,
+    ...(session.options.reasoning.effort !== "unsupported"
+      ? { reasoning: session.options.reasoning.effort }
+      : {}),
+    resume,
+    idempotencyKey: `tui-${randomUUID()}`,
+  });
+  if (!created.ok) throw new Error(created.message);
+  const attached = await client.attachRuntimeSession(created.session.sessionId);
+  if (!attached.ok) throw new Error(attached.message);
+  return attached.session.sessionId;
+}
+
+async function reattachOwnerSession(
+  client: RuntimeOwnerClient,
+  session: ManagedDashboardSession,
+): Promise<void> {
+  const sessionId = session.options.sessionId;
+  if (!sessionId) throw new Error("Remote Work session is missing an owner session id.");
+  const attached = await client.attachRuntimeSession(sessionId);
+  if (attached.ok) return;
+  await createAndAttachOwnerSession(client, session, true);
+}
+
+export async function createPersistentOwnerWorkShellController(input: {
+  readonly client: RuntimeOwnerClient;
+  readonly session: ManagedDashboardSession;
+  readonly resume?: boolean | undefined;
+  readonly reconnectOwner: () => Promise<RuntimeOwnerClient>;
+}): Promise<PersistentOwnerWorkShellController> {
+  let activeClient = input.client;
+  let disposed = false;
+  const attachments = new Set<DisposableRemoteEngine>();
+  const sessions = new Map<string, ManagedDashboardSession>();
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    for (const attachment of attachments) attachment.dispose();
+    attachments.clear();
+  };
+  const createSnapshot = async (
+    target: ManagedDashboardSession,
+    resume: boolean,
+  ): Promise<TuiRenderOptions<TuiShellHomeState>> => {
+    if (disposed) throw new Error("Persistent owner Work controller is closed.");
+    const ownerSessionId = await createAndAttachOwnerSession(activeClient, target, resume);
+    const attachedSession: ManagedDashboardSession = {
+      agent: target.agent,
+      options: { ...target.options, sessionId: ownerSessionId },
+    };
+    sessions.set(ownerSessionId, attachedSession);
+    const remoteEngine = await createRemoteWorkShellEngine(activeClient, ownerSessionId, {
+      reconnect: async ({ sessionId, signal }) => {
+        const replacement = await input.reconnectOwner();
+        if (signal.aborted || disposed) {
+          throw signal.reason ?? new Error("Remote Work attachment closed.");
+        }
+        const reconnectSession = sessions.get(sessionId);
+        if (!reconnectSession) throw new Error("Remote Work session metadata is unavailable.");
+        await reattachOwnerSession(replacement, reconnectSession);
+        if (signal.aborted || disposed) {
+          throw signal.reason ?? new Error("Remote Work attachment closed.");
+        }
+        activeClient = replacement;
+        return replacement;
+      },
+    }) as DisposableRemoteEngine;
+    attachments.add(remoteEngine);
+    return createManagedDashboardProps(attachedSession, remoteEngine);
+  };
+
+  try {
+    const initialProps = await createSnapshot(input.session, input.resume === true);
+    const embeddedWorkPane = await createEmbeddedWorkPaneController<TuiShellHomeState>({
+      loadSnapshot: async (forwardedArgs = []) => {
+        if (forwardedArgs.length === 0) return initialProps;
+        const switched = resolveSwitchedSession(input.session, forwardedArgs);
+        return createSnapshot(switched.session, switched.resume);
+      },
+    });
+    if (!embeddedWorkPane) throw new Error("Remote Work pane failed to initialize.");
+    return { initialProps, embeddedWorkPane, dispose };
+  } catch (error) {
+    dispose();
+    throw error;
+  }
+}
+
 export async function startRepl(
   agent: StartReplAgent,
   options: StartReplOptions,
@@ -110,52 +257,21 @@ export async function startRepl(
       sessionId: requestedSessionId,
     },
   });
-  const paths = defaultRuntimeOwnerPaths(process.env.HOME);
-  const lease = await ensureRuntimeOwner({
-    leasePath: paths.leasePath,
-    lockPath: paths.lockPath,
-    health: probeRuntimeOwner,
-    startOwner: () => spawnDetachedRuntimeOwner({
-      leasePath: paths.leasePath,
-      tokenPath: paths.tokenPath,
-    }),
-  });
-  const client = await RuntimeOwnerClient.connect(lease);
-  const created = await client.createRuntimeSession({
-    sessionId: requestedSessionId,
-    projectPath: options.cwd,
-    provider: options.provider,
-    model: options.model,
-    ...(options.reasoning.effort !== "unsupported" ? { reasoning: options.reasoning.effort } : {}),
+  const client = await connectPersistentRuntimeOwner();
+  const controller = await createPersistentOwnerWorkShellController({
+    client,
+    session,
     resume: options.sessionId !== undefined,
-    idempotencyKey: `tui-${randomUUID()}`,
+    reconnectOwner: connectPersistentRuntimeOwner,
   });
-  if (!created.ok) {
-    throw new Error(created.message);
+  try {
+    await renderEmbeddedWorkShellPaneDashboard({
+      ...controller.initialProps,
+      ...controller.embeddedWorkPane,
+    });
+  } finally {
+    controller.dispose();
   }
-  const attached = await client.attachRuntimeSession(created.session.sessionId);
-  if (!attached.ok) throw new Error(attached.message);
-  const ownerSessionId = attached.session.sessionId;
-  const remoteEngine = await createRemoteWorkShellEngine(client, ownerSessionId);
-  const initialProps = createManagedDashboardProps(
-    { ...session, options: { ...session.options, sessionId: ownerSessionId } },
-    remoteEngine,
-  );
-  const embeddedWorkPane = await createEmbeddedWorkPaneController<TuiShellHomeState>({
-    loadSnapshot: async (forwardedArgs = []) => {
-      if (forwardedArgs.length === 0) {
-        return initialProps;
-      }
-      return loadWorkShellDashboardProps(
-        withWorkSessionCwd(forwardedArgs, session.options.cwd),
-      );
-    },
-  });
-
-  await renderEmbeddedWorkShellPaneDashboard({
-    ...initialProps,
-    ...(embeddedWorkPane ?? {}),
-  });
 }
 
 export async function loadWorkShellDashboardProps(

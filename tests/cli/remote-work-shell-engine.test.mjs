@@ -73,6 +73,67 @@ test("remote adapter refreshes and retries one stale revision with the same idem
   engine.dispose();
 });
 
+test("remote tool-history toggle retries one non-receipted revision conflict exactly once", async () => {
+  let revision = 3;
+  let state = { traceMode: "minimal" };
+  const attempts = [];
+  const client = {
+    async readEngineState() { return { ok: true, revision, state, result: null }; },
+    async invokeEngineMethod(input) {
+      attempts.push(input);
+      if (attempts.length === 1) {
+        revision = 4;
+        return { ok: false, code: "revision_conflict", message: "Engine revision changed.", revision };
+      }
+      revision = 5;
+      state = { traceMode: "verbose" };
+      return { ok: true, revision, state, result: undefined };
+    },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "toggle-conflict");
+  await engine.toggleToolHistoryDisplay();
+
+  assert.equal(engine.getState().traceMode, "verbose");
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].idempotencyKey, attempts[1].idempotencyKey);
+  assert.equal(attempts[0].expectedRevision, 3);
+  assert.equal(attempts[1].expectedRevision, 4);
+  engine.dispose();
+});
+
+test("remote tool-history toggle replays a lost response with one receipt identity", async () => {
+  let revision = 6;
+  let state = { traceMode: "minimal" };
+  let executions = 0;
+  const receipts = new Map();
+  const attempts = [];
+  const client = {
+    async readEngineState() { return { ok: true, revision, state, result: null }; },
+    async invokeEngineMethod(input) {
+      attempts.push(input);
+      const cached = receipts.get(input.idempotencyKey);
+      if (cached) return cached;
+      executions += 1;
+      revision = 7;
+      state = { traceMode: "verbose" };
+      const response = { ok: true, revision, state, result: undefined };
+      receipts.set(input.idempotencyKey, response);
+      const error = new Error("socket closed after owner committed receipt");
+      error.code = "ECONNRESET";
+      throw error;
+    },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "toggle-lost-response");
+  await engine.toggleToolHistoryDisplay();
+
+  assert.equal(executions, 1, "receipt replay must never apply the toggle twice");
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].idempotencyKey, attempts[1].idempotencyKey);
+  assert.equal(attempts[0].expectedRevision, attempts[1].expectedRevision);
+  assert.equal(engine.getState().traceMode, "verbose");
+  engine.dispose();
+});
+
 test("remote adapter rejects a late stale poll instead of regressing owner state", async () => {
   let reads = 0;
   const client = {
@@ -86,6 +147,88 @@ test("remote adapter rejects a late stale poll instead of regressing owner state
   const engine = await createRemoteWorkShellEngine(client, "late-poll");
   await engine.initialize();
   assert.equal(engine.getState().mode, "deep");
+  engine.dispose();
+});
+
+test("remote adapter accepts same-revision completion without letting an older poll overwrite it", async () => {
+  let reads = 0;
+  let releaseOlderPoll;
+  const olderPollStarted = Promise.withResolvers();
+  const client = {
+    async readEngineState() {
+      reads += 1;
+      if (reads === 1) {
+        return {
+          ok: true,
+          revision: 5,
+          state: { isBusy: true, turnLifecycle: { state: "running", turnId: "turn-1" } },
+          result: null,
+        };
+      }
+      olderPollStarted.resolve();
+      return await new Promise((resolve) => { releaseOlderPoll = resolve; });
+    },
+    async invokeEngineMethod() {
+      return {
+        ok: true,
+        revision: 5,
+        state: { isBusy: false, turnLifecycle: { state: "completed", turnId: "turn-1" } },
+        result: true,
+      };
+    },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "same-revision-completion");
+  const olderPoll = engine.initialize();
+  await olderPollStarted.promise;
+  await engine.interruptTurn();
+  assert.equal(engine.getState().turnLifecycle.state, "completed");
+
+  releaseOlderPoll({
+    ok: true,
+    revision: 5,
+    state: { isBusy: true, turnLifecycle: { state: "running", turnId: "turn-1" } },
+    result: null,
+  });
+  await olderPoll;
+  assert.equal(
+    engine.getState().turnLifecycle.state,
+    "completed",
+    "a poll started before the completion response must not revive the turn",
+  );
+  engine.dispose();
+});
+
+test("remote adapter accepts same-revision completion after a later-started poll finishes first", async () => {
+  let reads = 0;
+  const completion = Promise.withResolvers();
+  const client = {
+    async readEngineState() {
+      reads += 1;
+      return {
+        ok: true,
+        revision: 5,
+        state: { isBusy: true, turnLifecycle: { state: "running", turnId: "turn-1" } },
+        result: null,
+      };
+    },
+    async invokeEngineMethod() {
+      return completion.promise;
+    },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "same-revision-late-completion");
+  const interrupt = engine.interruptTurn();
+  await engine.initialize();
+  assert.equal(reads, 2);
+
+  completion.resolve({
+    ok: true,
+    revision: 5,
+    state: { isBusy: false, turnLifecycle: { state: "completed", turnId: "turn-1" } },
+    result: true,
+  });
+  await interrupt;
+
+  assert.equal(engine.getState().turnLifecycle.state, "completed");
   engine.dispose();
 });
 
@@ -233,6 +376,64 @@ test("remote adapter releases polling resources after one hundred reconnect cycl
     [],
     "reconnect churn and disposal must return process handles to baseline",
   );
+});
+
+test("remote adapter rediscovers a replacement owner after repeated not-attached reads", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let originalReads = 0;
+  const originalClient = {
+    async readEngineState() {
+      originalReads += 1;
+      if (originalReads === 1) {
+        return { ok: true, revision: 8, state: { marker: "original-owner" }, result: null };
+      }
+      return {
+        ok: false,
+        code: "not_attached",
+        message: "Runtime session is not attached.",
+        revision: 8,
+      };
+    },
+  };
+  const replacementClient = {
+    async readEngineState() {
+      return { ok: true, revision: 9, state: { marker: "replacement-owner" }, result: null };
+    },
+  };
+  let reconnects = 0;
+  const engine = await createRemoteWorkShellEngine(originalClient, "owner-replacement", {
+    reconnect: async ({ sessionId, signal }) => {
+      assert.equal(sessionId, "owner-replacement");
+      assert.equal(signal.aborted, false);
+      reconnects += 1;
+      return reconnects === 1 ? originalClient : replacementClient;
+    },
+  });
+  const seen = [];
+  engine.subscribe((state) => { seen.push(state); });
+
+  t.mock.timers.tick(100);
+  await flushRemotePoll();
+  assert.equal(engine.getState().remoteConnection?.state, "disconnected");
+  t.mock.timers.tick(100);
+  await flushRemotePoll();
+  assert.equal(engine.getState().remoteConnection?.state, "disconnected");
+  t.mock.timers.tick(200);
+  await flushRemotePoll();
+
+  assert.equal(reconnects, 2);
+  assert.equal(engine.getState().marker, "replacement-owner");
+  assert.equal(engine.getState().remoteConnection, undefined);
+  assert.equal(
+    seen.filter((state) => state.remoteConnection?.state === "disconnected").length,
+    2,
+    "each non-OK owner response should remain visibly disconnected until re-attachment succeeds",
+  );
+  const readsBeforeDispose = originalReads;
+  engine.dispose();
+  t.mock.timers.tick(60_000);
+  await flushRemotePoll();
+  assert.equal(originalReads, readsBeforeDispose);
 });
 
 test("remote adapter dispose aborts its in-flight RPC without cancelling the owner turn", async () => {
