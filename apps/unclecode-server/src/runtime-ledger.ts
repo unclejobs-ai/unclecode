@@ -142,6 +142,12 @@ export type UsageTotalsSnapshot = {
   }[];
 };
 
+export type UsageTotalsSnapshotOptions = {
+  readonly mainIds?: readonly string[];
+  readonly agentIds?: readonly string[];
+  readonly includeRoutes?: boolean;
+};
+
 type SqlRow = Record<string, SQLOutputValue>;
 
 export interface RuntimeLedger {
@@ -151,7 +157,7 @@ export interface RuntimeLedger {
   recoverInDoubt(): number;
   reopenMutation(input: MutationReceiptRef): ReopenMutationResult;
   recordUsage(input: RecordUsageInput): RecordUsageResult;
-  snapshotUsageTotals(sessionId: string): UsageTotalsSnapshot;
+  snapshotUsageTotals(sessionId: string, options?: UsageTotalsSnapshotOptions): UsageTotalsSnapshot;
   appendRuntimeEvent(input: AppendRuntimeEventInput): RuntimeEvent;
   replayRuntimeEvents(sessionId: string, afterSeq: number): ReplayRuntimeEventsResult;
   seedSessionRevision(sessionId: string, revision: number): number;
@@ -381,6 +387,10 @@ class SqliteRuntimeLedger implements RuntimeLedger {
           : { kind: "scope_mismatch" };
       }
 
+      assertUsageTotalCanAccumulate(this.db, "usage_session_totals", [sessionId], counters);
+      if (mainId !== null) assertUsageTotalCanAccumulate(this.db, "usage_main_totals", [sessionId, mainId], counters);
+      if (agentId !== null) assertUsageTotalCanAccumulate(this.db, "usage_agent_totals", [sessionId, agentId], counters);
+      assertUsageTotalCanAccumulate(this.db, "usage_route_totals", [sessionId, provider, model], counters);
       this.db
         .prepare(
           `INSERT INTO usage_events (
@@ -398,19 +408,24 @@ class SqliteRuntimeLedger implements RuntimeLedger {
     });
   }
 
-  snapshotUsageTotals(sessionId: string): UsageTotalsSnapshot {
+  snapshotUsageTotals(sessionId: string, options?: UsageTotalsSnapshotOptions): UsageTotalsSnapshot {
     this.assertOpen();
     const normalized = boundedIdentifier(sessionId, "sessionId", 512);
+    const mainIds = options === undefined ? undefined : boundedIdentifierList(options.mainIds ?? [], "mainIds", 8);
+    const agentIds = options === undefined ? undefined : boundedIdentifierList(options.agentIds ?? [], "agentIds", 128);
+    if (options?.includeRoutes !== undefined && typeof options.includeRoutes !== "boolean") {
+      throw new TypeError("includeRoutes must be a boolean.");
+    }
     const sessionRow = row(this.db.prepare("SELECT * FROM usage_session_totals WHERE session_id = ?").get(normalized));
-    const mainRows = this.db
-      .prepare("SELECT * FROM usage_main_totals WHERE session_id = ? ORDER BY main_id")
-      .all(normalized) as SqlRow[];
-    const agentRows = this.db
-      .prepare("SELECT * FROM usage_agent_totals WHERE session_id = ? ORDER BY agent_id")
-      .all(normalized) as SqlRow[];
-    const routeRows = this.db
-      .prepare("SELECT * FROM usage_route_totals WHERE session_id = ? ORDER BY provider, model")
-      .all(normalized) as SqlRow[];
+    const mainRows = mainIds === undefined
+      ? this.db.prepare("SELECT * FROM usage_main_totals WHERE session_id = ? ORDER BY main_id").all(normalized) as SqlRow[]
+      : usageRowsForIds(this.db, "usage_main_totals", "main_id", normalized, mainIds);
+    const agentRows = agentIds === undefined
+      ? this.db.prepare("SELECT * FROM usage_agent_totals WHERE session_id = ? ORDER BY agent_id").all(normalized) as SqlRow[]
+      : usageRowsForIds(this.db, "usage_agent_totals", "agent_id", normalized, agentIds);
+    const routeRows = options === undefined || options.includeRoutes === true
+      ? this.db.prepare("SELECT * FROM usage_route_totals WHERE session_id = ? ORDER BY provider, model").all(normalized) as SqlRow[]
+      : [];
     return {
       session: sessionRow === undefined ? zeroUsageCounters() : usageCountersFromRow(sessionRow),
       byMain: mainRows.map((value) => ({
@@ -819,6 +834,33 @@ function upsertUsageTotal(
   ).run(...keys, ...usageCounterParameters(counters));
 }
 
+function assertUsageTotalCanAccumulate(
+  db: DatabaseSync,
+  table: "usage_session_totals" | "usage_main_totals" | "usage_agent_totals" | "usage_route_totals",
+  keys: readonly string[],
+  counters: UsageCounterVector,
+): void {
+  const keyColumns = table === "usage_session_totals"
+    ? ["session_id"]
+    : table === "usage_main_totals"
+      ? ["session_id", "main_id"]
+      : table === "usage_agent_totals"
+        ? ["session_id", "agent_id"]
+        : ["session_id", "provider", "model"];
+  const where = keyColumns.map(column => `${column} = ?`).join(" AND ");
+  const current = row(db.prepare(`SELECT * FROM ${table} WHERE ${where}`).get(...keys));
+  if (current === undefined) return;
+  const totals = usageCountersFromRow(current);
+  const safeIntegerFields = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const;
+  const finiteFields = ["cacheSavingsUsd", "costUsd"] as const;
+  if (safeIntegerFields.some(field => counters[field] > Number.MAX_SAFE_INTEGER - totals[field])) {
+    throw new RangeError("Usage total overflow would exceed the safe integer limit.");
+  }
+  if (finiteFields.some(field => !Number.isFinite(totals[field] + counters[field]))) {
+    throw new RangeError("Usage total overflow would exceed the finite number limit.");
+  }
+}
+
 function usageCountersFromRow(value: SqlRow): UsageCounterVector {
   return {
     inputTokens: safeIntegerColumn(value.input_tokens, "input_tokens"),
@@ -892,6 +934,28 @@ function boundedIdentifier(value: unknown, label: string, maxBytes: number): str
 
 function boundedOptionalIdentifier(value: unknown, label: string, maxBytes: number): string | null {
   return value === undefined ? null : boundedIdentifier(value, label, maxBytes);
+}
+
+function boundedIdentifierList(value: unknown, label: string, maxEntries: number): readonly string[] {
+  if (!Array.isArray(value)) throw new TypeError(`${label} must be an array.`);
+  if (value.length > maxEntries) throw new RangeError(`${label} cannot contain more than ${String(maxEntries)} entries.`);
+  const normalized = value.map((entry, index) => boundedIdentifier(entry, `${label}[${String(index)}]`, 512));
+  if (new Set(normalized).size !== normalized.length) throw new TypeError(`${label} must not contain duplicates.`);
+  return normalized;
+}
+
+function usageRowsForIds(
+  db: DatabaseSync,
+  table: "usage_main_totals" | "usage_agent_totals",
+  column: "main_id" | "agent_id",
+  sessionId: string,
+  ids: readonly string[],
+): SqlRow[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => "?").join(", ");
+  return db
+    .prepare(`SELECT * FROM ${table} WHERE session_id = ? AND ${column} IN (${placeholders}) ORDER BY ${column}`)
+    .all(sessionId, ...ids) as SqlRow[];
 }
 
 function positiveSafeInteger(value: number, label: string): number {

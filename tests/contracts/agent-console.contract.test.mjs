@@ -597,7 +597,46 @@ test("agent-console resume parser tolerates accumulated money rounding", () => {
   );
 });
 
-test("agent-console snapshot factory copies and bounds lifecycle projections", () => {
+test("agent-console round-trips owner materialized session totals without replay ids", () => {
+  const parsed = parseAgentConsoleSnapshot({
+    profileId: "build",
+    activity: [],
+    agents: [],
+    jobs: [],
+    totalUsage: {
+      inputTokens: 10_000,
+      outputTokens: 2_500,
+      costUsd: 1.25,
+      routes: [
+        {
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          inputTokens: 10_000,
+          outputTokens: 2_500,
+          costUsd: 1.25,
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(parsed?.totalUsage, {
+    inputTokens: 10_000,
+    outputTokens: 2_500,
+    costUsd: 1.25,
+    routes: [
+      {
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        inputTokens: 10_000,
+        outputTokens: 2_500,
+        costUsd: 1.25,
+      },
+    ],
+  });
+  assert.doesNotMatch(JSON.stringify(parsed?.totalUsage), /eventIds/);
+});
+
+test("agent-console snapshot factory copies bounded totals without replay identities", () => {
   const agents = Array.from({ length: 200 }, (_, index) => ({
     id: `run-${index}`,
     displayName: `Agent ${index}`,
@@ -627,8 +666,8 @@ test("agent-console snapshot factory copies and bounds lifecycle projections", (
   assert.equal(snapshot.agents[0]?.id, "run-72");
   assert.equal(snapshot.jobs.length, 128);
   assert.equal(snapshot.jobs[0]?.id, "job-72");
-  assert.equal(snapshot.mainUsage?.eventIds.length, 300);
-  assert.equal(snapshot.mainUsage?.eventIds[0], "usage-0");
+  assert.doesNotMatch(JSON.stringify(snapshot.mainUsage), /eventIds/);
+  assert.equal(snapshot.mainUsage?.inputTokens, 12);
 
   agents.push({
     id: "run-late",
@@ -640,7 +679,7 @@ test("agent-console snapshot factory copies and bounds lifecycle projections", (
   eventIds.push("usage-late");
   assert.equal(snapshot.agents.length, 128);
   assert.equal(snapshot.agents.at(-1)?.id, "run-199");
-  assert.equal(snapshot.mainUsage?.eventIds.at(-1), "usage-299");
+  assert.doesNotMatch(JSON.stringify(snapshot.mainUsage), /usage-late/);
 });
 
 test("agent-console snapshot factory retains active work and trims settled history first", () => {
@@ -1266,42 +1305,52 @@ test("agent-console parser rejects a malformed record inside the discarded prefi
   );
 });
 
-test("agent-console deduplicates usage event ids without evicting replay identities", () => {
-  const snapshot = createAgentConsoleSnapshot({
-    profileId: "build",
-    activity: [],
-    agents: [],
-    jobs: [],
-    mainUsage: {
-      eventIds: [
-        ...Array.from({ length: 300 }, () => "usage-repeat"),
-        "usage-distinct-a",
-        "usage-distinct-b",
-      ],
-    },
-  });
-
-  assert.deepEqual(snapshot.mainUsage?.eventIds, [
-    "usage-repeat",
-    "usage-distinct-a",
-    "usage-distinct-b",
-  ]);
-
-  const preserved = createAgentConsoleSnapshot({
+test("agent-console idempotently migrates 10k legacy identities to totals-only projection", () => {
+  const legacy = {
     profileId: "build",
     activity: [],
     agents: [],
     jobs: [],
     mainUsage: {
       eventIds: Array.from(
-        { length: 300 },
-        (_, index) => `usage-${index % 260}`,
+        { length: 10_000 },
+        (_, index) => `usage-${String(index)}`,
       ),
+      inputTokens: 30_000,
+      costUsd: 10_000,
+      routes: [
+        {
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          eventIds: Array.from(
+            { length: 10_000 },
+            (_, index) => `usage-${String(index)}`,
+          ),
+          inputTokens: 30_000,
+          costUsd: 10_000,
+        },
+      ],
     },
-  });
+  };
+  const migrated = parseAgentConsoleSnapshot(legacy);
+  const migratedAgain = parseAgentConsoleSnapshot(
+    JSON.parse(JSON.stringify(migrated)),
+  );
 
-  assert.equal(preserved.mainUsage?.eventIds.length, 260);
-  assert.equal(new Set(preserved.mainUsage?.eventIds).size, 260);
+  assert.deepEqual(migrated?.mainUsage, {
+    inputTokens: 30_000,
+    costUsd: 10_000,
+    routes: [
+      {
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        inputTokens: 30_000,
+        costUsd: 10_000,
+      },
+    ],
+  });
+  assert.deepEqual(migratedAgain, migrated);
+  assert.doesNotMatch(JSON.stringify(migrated), /eventIds/);
 });
 
 test("agent-console snapshot factory copies nested manifest, decision, and graph arrays", () => {

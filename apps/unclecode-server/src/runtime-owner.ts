@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { unlink } from "node:fs/promises";
 import { watchSessionPersistenceNotices } from "@unclecode/session-store";
+import { bindRuntimeUsageRecorder } from "@unclecode/orchestrator";
 
 import { BoundedEventJournal, LedgerBackedEventJournal } from "./event-journal.js";
 import { makeControlRoomHandlers, startServer, ensureServerToken } from "./index.js";
@@ -97,8 +98,13 @@ export async function startPersistentRuntimeOwner(input: {
         );
         const revisionEngine = created.engine as typeof created.engine & {
           bindRuntimeRevisionClock?: ((clock: { readonly value: number }) => void) | undefined;
+          bindRuntimeUsageRecorder?: ((recorder: ReturnType<typeof bindRuntimeUsageRecorder>) => void) | undefined;
         };
         revisionEngine.bindRuntimeRevisionClock?.(revisionClock);
+        revisionEngine.bindRuntimeUsageRecorder?.(bindRuntimeUsageRecorder({
+          sessionId: request.sessionId,
+          ledger,
+        }));
         const mutationArbiter = new RuntimeSessionMutationArbiter(revisionClock, {
           ledger,
           sessionId: request.sessionId,

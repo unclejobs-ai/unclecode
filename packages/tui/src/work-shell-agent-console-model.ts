@@ -225,6 +225,8 @@ export function selectAgentConsoleRows(
  * or zero pricing yields `undefined` rather than a manufactured `$0.00`.
  */
 export function formatAgentConsoleTotalCost(snapshot: AgentConsoleSnapshot): string | undefined {
+  const ownerTotal = positiveFinite(snapshot.totalUsage?.costUsd);
+  if (ownerTotal > 0) return formatUsd(ownerTotal);
   let total = 0;
   const seenEventIds = new Set<string>();
   const usageAggregates = [snapshot.mainUsage, ...snapshot.agents.map((run) => run.usage)];
@@ -233,7 +235,7 @@ export function formatAgentConsoleTotalCost(snapshot: AgentConsoleSnapshot): str
     const cost = positiveFinite(usage.costUsd);
     if (cost === 0) continue;
 
-    const eventIds = [...new Set(usage.eventIds)];
+    const eventIds = [...new Set(usage.eventIds ?? [])];
     if (eventIds.length === 0) {
       total += cost;
       continue;

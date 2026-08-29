@@ -363,6 +363,70 @@ test("usage recording is exact-once and atomically materializes every scope tota
       },
     ],
   });
+  const filtered = ledger.snapshotUsageTotals("session-usage", {
+    mainIds: ["main-a"],
+    agentIds: ["agent-b"],
+    includeRoutes: false,
+  });
+  assert.deepEqual(filtered.session, {
+    inputTokens: 150,
+    outputTokens: 30,
+    cacheReadTokens: 60,
+    cacheWriteTokens: 9,
+    cacheSavingsUsd: 0.03,
+    costUsd: 0.2,
+  });
+  assert.deepEqual(filtered.byMain.map(item => item.mainId), ["main-a"]);
+  assert.deepEqual(filtered.byAgent.map(item => item.agentId), ["agent-b"]);
+  assert.deepEqual(filtered.byRoute, []);
+  assert.deepEqual(
+    ledger.snapshotUsageTotals("session-usage", {}),
+    { session: filtered.session, byMain: [], byAgent: [], byRoute: [] },
+  );
+  assert.throws(
+    () => ledger.snapshotUsageTotals("session-usage", { mainIds: Array.from({ length: 9 }, (_, index) => `main-${String(index)}`) }),
+    /mainIds cannot contain more than 8/i,
+  );
+  assert.throws(
+    () => ledger.snapshotUsageTotals("session-usage", { agentIds: ["agent-a", "agent-a"] }),
+    /agentIds must not contain duplicates/i,
+  );
+  ledger.close();
+});
+
+test("usage total overflow rejects and rolls back the event and every materialized scope", () => {
+  const ledger = openRuntimeLedger({ dbPath: makeLedgerPath() });
+  const counters = (inputTokens, costUsd) => ({
+    inputTokens,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cacheSavingsUsd: 0,
+    costUsd,
+  });
+  const base = {
+    sessionId: "usage-overflow",
+    mainId: "main",
+    agentId: "agent",
+    route: { provider: "test", model: "overflow" },
+  };
+  ledger.recordUsage({ ...base, eventId: "near-token-max", counters: counters(Number.MAX_SAFE_INTEGER - 1, 0) });
+  assert.throws(
+    () => ledger.recordUsage({ ...base, eventId: "token-overflow", counters: counters(2, 0) }),
+    /usage total overflow/i,
+  );
+  assert.equal(
+    ledger.recordUsage({ ...base, eventId: "token-overflow", counters: counters(1, 0) }).kind,
+    "recorded",
+    "the rejected event insert must roll back with its totals",
+  );
+
+  ledger.recordUsage({ ...base, sessionId: "money-overflow", eventId: "large-money", counters: counters(0, 1e308) });
+  assert.throws(
+    () => ledger.recordUsage({ ...base, sessionId: "money-overflow", eventId: "money-overflow", counters: counters(0, 1e308) }),
+    /usage total overflow/i,
+  );
+  assert.equal(ledger.snapshotUsageTotals("money-overflow").session.costUsd, 1e308);
   ledger.close();
 });
 

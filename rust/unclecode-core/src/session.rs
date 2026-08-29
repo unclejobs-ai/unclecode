@@ -822,6 +822,24 @@ fn sanitize_agent_console_snapshot(value: &Value) -> Option<Value> {
             sanitize_agent_run_usage(main_usage)?,
         );
     }
+    if let Some(total_usage) = source.get("totalUsage") {
+        snapshot.insert(
+            "totalUsage".to_string(),
+            sanitize_agent_run_usage(total_usage)?,
+        );
+    }
+
+    // Replay identity belongs to the persistent runtime owner's indexed
+    // ledger. Checkpoints retain projection totals/routes only; accepting and
+    // then removing legacy arrays keeps old checkpoints resumable without
+    // turning the 32 KiB console projection back into an identity store.
+    strip_run_usage_replay_identities(&mut snapshot);
+    if let Some(main_usage) = snapshot.get_mut("mainUsage") {
+        strip_usage_replay_identity(main_usage);
+    }
+    if let Some(total_usage) = snapshot.get_mut("totalUsage") {
+        strip_usage_replay_identity(total_usage);
+    }
 
     // Allowlisting and redaction both run before fitting, so the size ladder
     // below can only ever remove safe data — it can never keep an unknown field
@@ -1155,16 +1173,21 @@ fn strip_run_usage_replay_identities(snapshot: &mut Map<String, Value>) {
     }
 }
 
-/// Replay identities are dedupe bookkeeping, not operator evidence. Dropping
-/// them under size pressure keeps the counters an operator actually reads; the
-/// cost is that a resumed trace may re-count a duplicate event, which is a far
-/// smaller loss than resuming with no console at all.
+/// Replay identities are owner-ledger truth, not Agent Console projection.
+/// Legacy checkpoints may still carry them; routes and all totals remain while
+/// only the obsolete identity arrays are removed.
 fn strip_usage_replay_identity(usage: &mut Value) {
     let Some(usage) = usage.as_object_mut() else {
         return;
     };
-    usage.remove("routes");
-    usage.insert("eventIds".to_string(), Value::Array(Vec::new()));
+    usage.remove("eventIds");
+    if let Some(routes) = usage.get_mut("routes").and_then(Value::as_array_mut) {
+        for route in routes {
+            if let Some(route) = route.as_object_mut() {
+                route.remove("eventIds");
+            }
+        }
+    }
 }
 
 fn drop_lifecycle_field(snapshot: &mut Map<String, Value>, field: &str) {
@@ -1280,10 +1303,9 @@ fn sanitize_async_job(value: &Value) -> Option<Value> {
 fn sanitize_agent_run_usage(value: &Value) -> Option<Value> {
     let source = value.as_object()?;
     let mut usage = copy_known_fields(value, USAGE_COUNTER_FIELDS)?;
-    usage.insert(
-        "eventIds".to_string(),
-        sanitize_usage_event_ids(source.get("eventIds")?)?,
-    );
+    if let Some(event_ids) = source.get("eventIds") {
+        usage.insert("eventIds".to_string(), sanitize_usage_event_ids(event_ids)?);
+    }
     if let Some(routes) = source.get("routes") {
         let routes = routes
             .as_array()?
@@ -1306,10 +1328,9 @@ fn sanitize_agent_run_usage_route(value: &Value) -> Option<Value> {
         "model".to_string(),
         Value::String(source.get("model")?.as_str()?.to_string()),
     );
-    route.insert(
-        "eventIds".to_string(),
-        sanitize_usage_event_ids(source.get("eventIds")?)?,
-    );
+    if let Some(event_ids) = source.get("eventIds") {
+        route.insert("eventIds".to_string(), sanitize_usage_event_ids(event_ids)?);
+    }
     Some(Value::Object(route))
 }
 
@@ -2205,7 +2226,10 @@ mod tests {
         );
         assert_eq!(console["agents"][0]["summary"], "Refactoring the auth guard.");
         assert_eq!(console["agents"][0]["usage"]["inputTokens"], 120);
-        assert_eq!(console["agents"][0]["usage"]["eventIds"][0], "usage-1");
+        assert!(console["agents"][0]["usage"].get("eventIds").is_none());
+        assert!(console["agents"][0]["usage"]["routes"][0]
+            .get("eventIds")
+            .is_none());
         assert_eq!(
             console["agents"][0]["usage"]["routes"][0]["model"],
             "gpt-5.6-sol"
@@ -2386,6 +2410,57 @@ mod tests {
         assert!(!serialized.contains("ghp_"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn work_shell_agent_console_migrates_10k_legacy_ids_to_owner_totals_projection() {
+        let ids = (0..10_000)
+            .map(|index| format!("usage:restart:{index}"))
+            .collect::<Vec<_>>();
+        let console = json!({
+            "profileId": "build",
+            "activity": (0..80).map(|index| json!({
+                "id": format!("activity-{index}"),
+                "toolCallId": format!("call-{index}"),
+                "toolName": "read_file",
+                "kind": "read",
+                "intent": "x".repeat(400),
+                "status": "completed",
+                "startedAt": index,
+            })).collect::<Vec<_>>(),
+            "agents": [],
+            "jobs": [],
+            "mainUsage": {
+                "eventIds": ids,
+                "inputTokens": 10_000,
+                "routes": [{
+                    "provider": "openai",
+                    "model": "gpt-5.6-sol",
+                    "eventIds": ["usage:restart:0"],
+                    "inputTokens": 10_000
+                }]
+            },
+            "totalUsage": {
+                "inputTokens": 25_000,
+                "costUsd": 1.25,
+                "routes": [{
+                    "provider": "openai",
+                    "model": "gpt-5.6-sol",
+                    "inputTokens": 25_000,
+                    "costUsd": 1.25
+                }]
+            },
+        });
+
+        let fitted = persist_and_resume_console("work-session-usage-ledger", console);
+        assert!(fitted["mainUsage"].get("eventIds").is_none());
+        assert!(fitted["mainUsage"]["routes"][0].get("eventIds").is_none());
+        assert_eq!(fitted["mainUsage"]["inputTokens"], 10_000);
+        assert_eq!(fitted["mainUsage"]["routes"][0]["inputTokens"], 10_000);
+        assert_eq!(fitted["totalUsage"]["inputTokens"], 25_000);
+        assert_eq!(fitted["totalUsage"]["routes"][0]["costUsd"], 1.25);
+        assert!(fitted["totalUsage"].get("eventIds").is_none());
+        assert!(fitted["activity"].as_array().expect("activity").len() < 80);
     }
 
     fn active_lifecycle_console_fields() -> Map<String, Value> {

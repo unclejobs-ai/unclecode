@@ -199,6 +199,21 @@ test("total console cost counts main usage and each agent's usage exactly once",
   assert.equal(total, "$1.00");
 });
 
+test("total console cost uses owner lifetime total after settled agents leave projection", () => {
+  const total = formatAgentConsoleTotalCost(snapshot({
+    totalUsage: { costUsd: 12.5 },
+    mainUsage: { eventIds: ["recent-main"], costUsd: 0.25 },
+    agents: [agent({
+      id: "recent-agent",
+      displayName: "RecentAgent",
+      status: "completed",
+      usage: { eventIds: ["recent-agent-usage"], costUsd: 0.5 },
+    })],
+  }));
+
+  assert.equal(total, "$12.50");
+});
+
 test("total console cost deduplicates overlapping usage event ids", () => {
   const total = formatAgentConsoleTotalCost(snapshot({
     mainUsage: { eventIds: ["u1", "u2"], costUsd: 2 },

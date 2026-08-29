@@ -316,14 +316,15 @@ export type TerminalAsyncJobStatus = Extract<
 >;
 
 /**
- * Deduplicated usage ledger. `eventIds` is the identity set that makes usage
- * replay idempotent — a provider turn contributes to either `mainUsage` or one
- * `AgentRun.usage`, never both.
+ * Materialized usage totals. Legacy checkpoints may still carry `eventIds`;
+ * parsers validate those arrays for migration and always remove them from the
+ * returned projection. Exact replay identity belongs to the runtime ledger.
  */
 export type AgentRunUsageRoute = {
   readonly provider: string;
   readonly model: string;
-  readonly eventIds: readonly string[];
+  /** @deprecated Accepted as legacy input only; never emitted in a snapshot. */
+  readonly eventIds?: readonly string[];
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly cacheReadTokens?: number;
@@ -333,7 +334,8 @@ export type AgentRunUsageRoute = {
 };
 
 export type AgentRunUsage = {
-  readonly eventIds: readonly string[];
+  /** @deprecated Accepted as legacy input only; never emitted in a snapshot. */
+  readonly eventIds?: readonly string[];
   /** Uncached input; cache reads and writes are tracked in their own buckets. */
   readonly inputTokens?: number;
   readonly outputTokens?: number;
@@ -342,6 +344,11 @@ export type AgentRunUsage = {
   readonly cacheSavingsUsd?: number;
   readonly costUsd?: number;
   readonly routes?: readonly AgentRunUsageRoute[];
+};
+
+export type AgentUsageRouteTotals = Omit<AgentRunUsageRoute, "eventIds">;
+export type AgentUsageTotals = Omit<AgentRunUsage, "eventIds" | "routes"> & {
+  readonly routes?: readonly AgentUsageRouteTotals[];
 };
 
 /**
@@ -420,6 +427,8 @@ export type AgentConsoleSnapshot = {
   readonly agents: readonly AgentRun[];
   readonly jobs: readonly AsyncJob[];
   readonly mainUsage?: AgentRunUsage;
+  /** Owner-materialized lifetime session total; contains no replay identity. */
+  readonly totalUsage?: AgentUsageTotals;
 };
 
 export type AgentConsoleJournalEvent =
@@ -486,6 +495,7 @@ export function createAgentConsoleSnapshot(
     jobs: boundLifecycleRecords(input.jobs ?? [], MAX_PERSISTED_ASYNC_JOBS, isActiveAsyncJob)
       .map(copyAsyncJob),
     ...(input.mainUsage ? { mainUsage: copyAgentRunUsage(input.mainUsage) } : {}),
+    ...(input.totalUsage ? { totalUsage: copyAgentUsageTotals(input.totalUsage) } : {}),
   };
 }
 
@@ -771,15 +781,10 @@ function copyAsyncJob(job: AsyncJob): AsyncJob {
       : { errorSummary: boundLifecycleSummary(job.errorSummary) }),
   };
 }
-/**
- * Keep every per-route replay identity for the same reason as the aggregate
- * ledger; route eviction would make provider/model attribution diverge.
- */
 function copyAgentRunUsageRoute(route: AgentRunUsageRoute): AgentRunUsageRoute {
   return {
     provider: route.provider,
     model: route.model,
-    eventIds: [...new Set(route.eventIds)],
     ...(route.inputTokens === undefined ? {} : { inputTokens: route.inputTokens }),
     ...(route.outputTokens === undefined ? {} : { outputTokens: route.outputTokens }),
     ...(route.cacheReadTokens === undefined ? {} : { cacheReadTokens: route.cacheReadTokens }),
@@ -790,13 +795,8 @@ function copyAgentRunUsageRoute(route: AgentRunUsageRoute): AgentRunUsageRoute {
 }
 
 
-/**
- * Replay identities intentionally live for the full session. Evicting an older
- * id would let a resumed trace charge lifetime totals a second time.
- */
 function copyAgentRunUsage(usage: AgentRunUsage): AgentRunUsage {
   return {
-    eventIds: [...new Set(usage.eventIds)],
     ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
     ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
     ...(usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
@@ -804,6 +804,37 @@ function copyAgentRunUsage(usage: AgentRunUsage): AgentRunUsage {
     ...(usage.cacheSavingsUsd === undefined ? {} : { cacheSavingsUsd: usage.cacheSavingsUsd }),
     ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
     ...(usage.routes === undefined ? {} : { routes: usage.routes.map(copyAgentRunUsageRoute) }),
+  };
+}
+
+function copyAgentUsageTotals(usage: AgentUsageTotals): AgentUsageTotals {
+  return {
+    ...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+    ...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+    ...(usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
+    ...(usage.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: usage.cacheWriteTokens }),
+    ...(usage.cacheSavingsUsd === undefined ? {} : { cacheSavingsUsd: usage.cacheSavingsUsd }),
+    ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
+    ...(usage.routes === undefined
+      ? {}
+      : {
+          routes: usage.routes.map((route) => ({
+            provider: route.provider,
+            model: route.model,
+            ...(route.inputTokens === undefined ? {} : { inputTokens: route.inputTokens }),
+            ...(route.outputTokens === undefined ? {} : { outputTokens: route.outputTokens }),
+            ...(route.cacheReadTokens === undefined
+              ? {}
+              : { cacheReadTokens: route.cacheReadTokens }),
+            ...(route.cacheWriteTokens === undefined
+              ? {}
+              : { cacheWriteTokens: route.cacheWriteTokens }),
+            ...(route.cacheSavingsUsd === undefined
+              ? {}
+              : { cacheSavingsUsd: route.cacheSavingsUsd }),
+            ...(route.costUsd === undefined ? {} : { costUsd: route.costUsd }),
+          })),
+        }),
   };
 }
 
@@ -845,6 +876,9 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     ? parseEvolutionProposals(record.evolutionProposals)
     : undefined;
   const mainUsage = hasOwn(record, "mainUsage") ? parseAgentRunUsage(record.mainUsage) : undefined;
+  const totalUsage = hasOwn(record, "totalUsage")
+    ? parseAgentUsageTotals(record.totalUsage)
+    : undefined;
   const activityValue = record.activity;
 
   if (
@@ -853,6 +887,7 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     || (hasOwn(record, "workGraph") && !workGraph)
     || (hasOwn(record, "evolutionProposals") && !evolutionProposals)
     || (hasOwn(record, "mainUsage") && !mainUsage)
+    || (hasOwn(record, "totalUsage") && !totalUsage)
     || !Array.isArray(activityValue)
   ) {
     return undefined;
@@ -895,6 +930,7 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     agents,
     jobs,
     ...(mainUsage ? { mainUsage } : {}),
+    ...(totalUsage ? { totalUsage } : {}),
   });
 }
 
@@ -1574,14 +1610,16 @@ function parseAsyncJob(value: unknown): AsyncJob | undefined {
 
 function parseAgentRunUsageRoute(value: unknown): AgentRunUsageRoute | undefined {
   const record = asRecord(value);
-  const eventIds = parseStringList(record?.eventIds);
+  const eventIds = record && hasOwn(record, "eventIds")
+    ? parseStringList(record.eventIds)
+    : undefined;
   if (
     !record
     || typeof record.provider !== "string"
     || record.provider.trim().length === 0
     || typeof record.model !== "string"
     || record.model.trim().length === 0
-    || !eventIds
+    || (hasOwn(record, "eventIds") && !eventIds)
     || (hasOwn(record, "inputTokens") && !isNonNegativeInteger(record.inputTokens))
     || (hasOwn(record, "outputTokens") && !isNonNegativeInteger(record.outputTokens))
     || (hasOwn(record, "cacheReadTokens") && !isNonNegativeInteger(record.cacheReadTokens))
@@ -1591,10 +1629,10 @@ function parseAgentRunUsageRoute(value: unknown): AgentRunUsageRoute | undefined
   ) {
     return undefined;
   }
-  return copyAgentRunUsageRoute({
+  return {
     provider: record.provider.trim(),
     model: record.model.trim(),
-    eventIds,
+    ...(eventIds === undefined ? {} : { eventIds }),
     ...(typeof record.inputTokens === "number" ? { inputTokens: record.inputTokens } : {}),
     ...(typeof record.outputTokens === "number" ? { outputTokens: record.outputTokens } : {}),
     ...(typeof record.cacheReadTokens === "number"
@@ -1607,7 +1645,7 @@ function parseAgentRunUsageRoute(value: unknown): AgentRunUsageRoute | undefined
       ? { cacheSavingsUsd: record.cacheSavingsUsd }
       : {}),
     ...(typeof record.costUsd === "number" ? { costUsd: record.costUsd } : {}),
-  });
+  };
 }
 
 function parseAgentRunUsageRoutes(value: unknown): readonly AgentRunUsageRoute[] | undefined {
@@ -1641,7 +1679,7 @@ function usageRoutesMatchAggregate(
     const routeKey = `${route.provider}\0${route.model}`;
     if (routeKeys.has(routeKey)) return false;
     routeKeys.add(routeKey);
-    for (const eventId of route.eventIds) {
+    for (const eventId of route.eventIds ?? []) {
       if (!aggregateIds.has(eventId) || routedIds.has(eventId)) return false;
       routedIds.add(eventId);
     }
@@ -1681,13 +1719,15 @@ function usageRoutesMatchAggregate(
 
 function parseAgentRunUsage(value: unknown): AgentRunUsage | undefined {
   const record = asRecord(value);
-  const eventIds = parseStringList(record?.eventIds);
+  const eventIds = record && hasOwn(record, "eventIds")
+    ? parseStringList(record.eventIds)
+    : undefined;
   const routes = record && hasOwn(record, "routes")
     ? parseAgentRunUsageRoutes(record.routes)
     : undefined;
   if (
     !record
-    || !eventIds
+    || (hasOwn(record, "eventIds") && !eventIds)
     || (hasOwn(record, "inputTokens") && !isNonNegativeInteger(record.inputTokens))
     || (hasOwn(record, "outputTokens") && !isNonNegativeInteger(record.outputTokens))
     || (hasOwn(record, "cacheReadTokens") && !isNonNegativeInteger(record.cacheReadTokens))
@@ -1698,13 +1738,18 @@ function parseAgentRunUsage(value: unknown): AgentRunUsage | undefined {
   ) {
     return undefined;
   }
-  if (routes && !usageRoutesMatchAggregate(record, eventIds, routes)) {
+  if (
+    eventIds
+    && routes
+    && routes.every((route) => (route.eventIds?.length ?? 0) > 0)
+    && !usageRoutesMatchAggregate(record, eventIds, routes)
+  ) {
     return undefined;
   }
 
 
   return copyAgentRunUsage({
-    eventIds,
+    eventIds: eventIds ?? [],
     ...(typeof record.inputTokens === "number" ? { inputTokens: record.inputTokens } : {}),
     ...(typeof record.outputTokens === "number" ? { outputTokens: record.outputTokens } : {}),
     ...(typeof record.cacheReadTokens === "number"
@@ -1719,4 +1764,66 @@ function parseAgentRunUsage(value: unknown): AgentRunUsage | undefined {
     ...(typeof record.costUsd === "number" ? { costUsd: record.costUsd } : {}),
     ...(routes === undefined ? {} : { routes }),
   });
+}
+
+function parseAgentUsageTotals(value: unknown): AgentUsageTotals | undefined {
+  const record = asRecord(value);
+  if (!record || !usageCounterRecordIsValid(record)) return undefined;
+  let routes: AgentUsageRouteTotals[] | undefined;
+  if (hasOwn(record, "routes")) {
+    if (!Array.isArray(record.routes)) return undefined;
+    routes = [];
+    const routeKeys = new Set<string>();
+    for (const value of record.routes) {
+      const route = asRecord(value);
+      if (
+        !route
+        || !isNonEmptyString(route.provider)
+        || !isNonEmptyString(route.model)
+        || !usageCounterRecordIsValid(route)
+      ) {
+        return undefined;
+      }
+      const key = `${route.provider.trim()}\0${route.model.trim()}`;
+      if (routeKeys.has(key)) return undefined;
+      routeKeys.add(key);
+      routes.push({
+        provider: route.provider.trim(),
+        model: route.model.trim(),
+        ...copyUsageCounterFields(route),
+      });
+    }
+  }
+  return copyAgentUsageTotals({
+    ...copyUsageCounterFields(record),
+    ...(routes === undefined ? {} : { routes }),
+  });
+}
+
+function usageCounterRecordIsValid(record: Record<string, unknown>): boolean {
+  return !(
+    (hasOwn(record, "inputTokens") && !isNonNegativeInteger(record.inputTokens))
+    || (hasOwn(record, "outputTokens") && !isNonNegativeInteger(record.outputTokens))
+    || (hasOwn(record, "cacheReadTokens") && !isNonNegativeInteger(record.cacheReadTokens))
+    || (hasOwn(record, "cacheWriteTokens") && !isNonNegativeInteger(record.cacheWriteTokens))
+    || (hasOwn(record, "cacheSavingsUsd") && !isNonNegativeFinite(record.cacheSavingsUsd))
+    || (hasOwn(record, "costUsd") && !isNonNegativeFinite(record.costUsd))
+  );
+}
+
+function copyUsageCounterFields(record: Record<string, unknown>): Omit<AgentUsageTotals, "routes"> {
+  return {
+    ...(typeof record.inputTokens === "number" ? { inputTokens: record.inputTokens } : {}),
+    ...(typeof record.outputTokens === "number" ? { outputTokens: record.outputTokens } : {}),
+    ...(typeof record.cacheReadTokens === "number"
+      ? { cacheReadTokens: record.cacheReadTokens }
+      : {}),
+    ...(typeof record.cacheWriteTokens === "number"
+      ? { cacheWriteTokens: record.cacheWriteTokens }
+      : {}),
+    ...(typeof record.cacheSavingsUsd === "number"
+      ? { cacheSavingsUsd: record.cacheSavingsUsd }
+      : {}),
+    ...(typeof record.costUsd === "number" ? { costUsd: record.costUsd } : {}),
+  };
 }

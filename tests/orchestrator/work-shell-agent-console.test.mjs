@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { applyTraceEventToAgentConsole } from "@unclecode/orchestrator";
 import { parseAgentConsoleSnapshot } from "@unclecode/contracts";
+import { createUsageRecorder } from "./usage-recorder-fixture.mjs";
 
 const initialConsole = Object.freeze({ profileId: "build", activity: [], agents: [], jobs: [] });
 const TEST_USAGE_ROUTE = { provider: "openai", model: "gpt-5.6-sol" };
@@ -193,6 +194,7 @@ test("agent lifecycle reducer correlates queued jobs, runs, and terminal status"
 });
 
 test("usage reducer attributes cache telemetry once per provider event", () => {
+  const recorder = createUsageRecorder();
   const queued = applyTraceEventToAgentConsole(initialConsole, {
     type: "job.queued",
     jobId: "job-1",
@@ -221,55 +223,31 @@ test("usage reducer attributes cache telemetry once per provider event", () => {
     cacheSavingsUsd: 0.004,
     costUsd: 0.01,
   };
-  const recorded = applyTraceEventToAgentConsole(running, usageEvent);
-  const replayed = applyTraceEventToAgentConsole(recorded, usageEvent);
+  const recorded = applyTraceEventToAgentConsole(running, usageEvent, recorder);
+  const replayed = applyTraceEventToAgentConsole(recorded, usageEvent, recorder);
   const { agentRunId, ...unscopedUsageEvent } = usageEvent;
   const mainRecorded = applyTraceEventToAgentConsole(replayed, {
     ...unscopedUsageEvent,
     eventId: "usage-main",
     cacheReadTokens: 500,
-  });
+  }, recorder);
 
   assert.deepEqual(recorded.agents[0]?.usage, {
-    eventIds: ["usage-1"],
     inputTokens: 1_000,
     outputTokens: 200,
     cacheReadTokens: 750,
     cacheWriteTokens: 50,
     cacheSavingsUsd: 0.004,
     costUsd: 0.01,
-    routes: [{
-      provider: "openai",
-      model: "gpt-5.6-sol",
-      eventIds: ["usage-1"],
-      inputTokens: 1_000,
-      outputTokens: 200,
-      cacheReadTokens: 750,
-      cacheWriteTokens: 50,
-      cacheSavingsUsd: 0.004,
-      costUsd: 0.01,
-    }],
   });
   assert.deepEqual(replayed.agents[0]?.usage, recorded.agents[0]?.usage);
   assert.deepEqual(mainRecorded.mainUsage, {
-    eventIds: ["usage-main"],
     inputTokens: 1_000,
     outputTokens: 200,
     cacheReadTokens: 500,
     cacheWriteTokens: 50,
     cacheSavingsUsd: 0.004,
     costUsd: 0.01,
-    routes: [{
-      provider: "openai",
-      model: "gpt-5.6-sol",
-      eventIds: ["usage-main"],
-      inputTokens: 1_000,
-      outputTokens: 200,
-      cacheReadTokens: 500,
-      cacheWriteTokens: 50,
-      cacheSavingsUsd: 0.004,
-      costUsd: 0.01,
-    }],
   });
   const switchedModel = applyTraceEventToAgentConsole(mainRecorded, {
     type: "usage.recorded",
@@ -279,16 +257,16 @@ test("usage reducer attributes cache telemetry once per provider event", () => {
     inputTokens: 300,
     cacheReadTokens: 200,
     costUsd: 0.005,
-  });
+  }, recorder);
   assert.deepEqual(
-    switchedModel.mainUsage?.routes?.map((route) => [
+    switchedModel.totalUsage?.routes?.map((route) => [
       route.provider,
       route.model,
       route.inputTokens,
       route.cacheReadTokens,
     ]),
     [
-      ["openai", "gpt-5.6-sol", 1_000, 500],
+      ["openai", "gpt-5.6-sol", 2_000, 1_250],
       ["anthropic", "claude-sonnet-4-6", 300, 200],
     ],
   );
@@ -307,7 +285,8 @@ test("usage reducer rejects live measurements without provider and model", () =>
   assert.strictEqual(missingRoute, initialConsole);
 });
 
-test("usage reducer retains every replay identity behind lifetime totals", () => {
+test("usage reducer keeps replay identity in the owner ledger, not the projection", () => {
+  const recorder = createUsageRecorder();
   let snapshot = initialConsole;
   for (let index = 0; index < 300; index += 1) {
     snapshot = applyTraceEventToAgentConsole(snapshot, {
@@ -315,16 +294,16 @@ test("usage reducer retains every replay identity behind lifetime totals", () =>
       ...TEST_USAGE_ROUTE,
       eventId: `usage-long-${index}`,
       inputTokens: 1,
-    });
+    }, recorder);
   }
   const replayed = applyTraceEventToAgentConsole(snapshot, {
     type: "usage.recorded",
     ...TEST_USAGE_ROUTE,
     eventId: "usage-long-0",
     inputTokens: 1,
-  });
-  assert.strictEqual(replayed, snapshot);
-  assert.equal(snapshot.mainUsage?.eventIds.length, 300);
+  }, recorder);
+  assert.deepEqual(replayed, snapshot);
+  assert.doesNotMatch(JSON.stringify(snapshot), /eventIds/);
   assert.equal(snapshot.mainUsage?.inputTokens, 300);
 });
 
@@ -637,6 +616,7 @@ test("tool reducer scopes activity and current intent to the owning agent run", 
 });
 
 test("usage reducer ignores zero, negative, and non-finite counters", () => {
+  const recorder = createUsageRecorder();
   const running = applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun);
   const noisy = applyTraceEventToAgentConsole(running, {
     type: "usage.recorded",
@@ -649,10 +629,14 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
     cacheWriteTokens: 1.5,
     cacheSavingsUsd: Number.POSITIVE_INFINITY,
     costUsd: 0,
-  });
+  }, recorder);
   assert.deepEqual(noisy.agents[0]?.usage, {
-    eventIds: ["usage-noisy"],
-    routes: [{ ...TEST_USAGE_ROUTE, eventIds: ["usage-noisy"] }],
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cacheSavingsUsd: 0,
+    costUsd: 0,
   });
 
   const real = applyTraceEventToAgentConsole(noisy, {
@@ -662,17 +646,14 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
     agentRunId: "run-1",
     inputTokens: 12,
     costUsd: 0.5,
-  });
+  }, recorder);
   assert.deepEqual(real.agents[0]?.usage, {
-    eventIds: ["usage-noisy", "usage-real"],
     inputTokens: 12,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cacheSavingsUsd: 0,
     costUsd: 0.5,
-    routes: [{
-      ...TEST_USAGE_ROUTE,
-      eventIds: ["usage-noisy", "usage-real"],
-      inputTokens: 12,
-      costUsd: 0.5,
-    }],
   });
 
   const zeroed = applyTraceEventToAgentConsole(real, {
@@ -682,17 +663,14 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
     agentRunId: "run-1",
     inputTokens: 0,
     costUsd: 0,
-  });
+  }, recorder);
   assert.deepEqual(zeroed.agents[0]?.usage, {
-    eventIds: ["usage-noisy", "usage-real", "usage-zero"],
     inputTokens: 12,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cacheSavingsUsd: 0,
     costUsd: 0.5,
-    routes: [{
-      ...TEST_USAGE_ROUTE,
-      eventIds: ["usage-noisy", "usage-real", "usage-zero"],
-      inputTokens: 12,
-      costUsd: 0.5,
-    }],
   });
 
   assert.strictEqual(
@@ -702,7 +680,7 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
       eventId: "usage-orphan",
       agentRunId: "run-absent",
       inputTokens: 5,
-    }),
+    }, recorder),
     real,
     "usage for an unknown run is dropped",
   );
@@ -712,7 +690,7 @@ test("usage reducer ignores zero, negative, and non-finite counters", () => {
       ...TEST_USAGE_ROUTE,
       agentRunId: "run-1",
       inputTokens: 5,
-    }),
+    }, recorder),
     real,
     "usage without a dedupe identity is dropped",
   );
@@ -1072,6 +1050,7 @@ test("tool reducer keeps a call's established agent owner", () => {
 });
 
 test("usage reducer routes one provider event id to exactly one ledger", () => {
+  const recorder = createUsageRecorder();
   let console = applyTraceEventToAgentConsole(initialConsole, queuedRuntimeJob);
   console = applyTraceEventToAgentConsole(console, {
     ...queuedRuntimeJob,
@@ -1079,7 +1058,7 @@ test("usage reducer routes one provider event id to exactly one ledger", () => {
     jobId: "job-2",
     label: "Sweep cache",
     queuedAt: 11,
-  });
+  }, recorder);
   console = applyTraceEventToAgentConsole(console, startedRuntimeRun);
   const ready = applyTraceEventToAgentConsole(console, {
     ...startedRuntimeRun,
@@ -1096,14 +1075,14 @@ test("usage reducer routes one provider event id to exactly one ledger", () => {
     eventId: "usage-1",
     agentRunId: "run-1",
     inputTokens: 10,
-  });
+  }, recorder);
   assert.strictEqual(
     applyTraceEventToAgentConsole(scoped, {
       type: "usage.recorded",
       ...TEST_USAGE_ROUTE,
       eventId: "usage-1",
       inputTokens: 10,
-    }),
+    }, recorder),
     scoped,
     "a run-scoped event id cannot be re-charged to main usage",
   );
@@ -1114,7 +1093,7 @@ test("usage reducer routes one provider event id to exactly one ledger", () => {
       eventId: "usage-1",
       agentRunId: "run-2",
       inputTokens: 10,
-    }),
+    }, recorder),
     scoped,
     "a run-scoped event id cannot be re-charged to another run",
   );
@@ -1124,7 +1103,7 @@ test("usage reducer routes one provider event id to exactly one ledger", () => {
     ...TEST_USAGE_ROUTE,
     eventId: "usage-2",
     inputTokens: 7,
-  });
+  }, recorder);
   assert.strictEqual(
     applyTraceEventToAgentConsole(main, {
       type: "usage.recorded",
@@ -1132,13 +1111,14 @@ test("usage reducer routes one provider event id to exactly one ledger", () => {
       eventId: "usage-2",
       agentRunId: "run-1",
       inputTokens: 7,
-    }),
+    }, recorder),
     main,
     "a main-charged event id cannot be re-charged to a run",
   );
 });
 
 test("usage reducer rejects a present but malformed scope instead of charging main usage", () => {
+  const recorder = createUsageRecorder();
   const running = applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun);
 
   const malformedScopes = ["   ", "", 42, null, {}, undefined];
@@ -1150,7 +1130,7 @@ test("usage reducer rejects a present but malformed scope instead of charging ma
         eventId: `usage-bad-${index}`,
         agentRunId,
         inputTokens: 5,
-      }),
+      }, recorder),
       running,
       `a present but invalid scope (${JSON.stringify(agentRunId)}) must not charge main usage`,
     );
@@ -1161,11 +1141,14 @@ test("usage reducer rejects a present but malformed scope instead of charging ma
     ...TEST_USAGE_ROUTE,
     eventId: "usage-absent",
     inputTokens: 5,
-  });
+  }, recorder);
   assert.deepEqual(absent.mainUsage, {
-    eventIds: ["usage-absent"],
     inputTokens: 5,
-    routes: [{ ...TEST_USAGE_ROUTE, eventIds: ["usage-absent"], inputTokens: 5 }],
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cacheSavingsUsd: 0,
+    costUsd: 0,
   });
 
   const explicitlyUndefined = applyTraceEventToAgentConsole(running, {
@@ -1174,7 +1157,7 @@ test("usage reducer rejects a present but malformed scope instead of charging ma
     eventId: "usage-undefined",
     agentRunId: undefined,
     inputTokens: 5,
-  });
+  }, recorder);
   assert.strictEqual(
     explicitlyUndefined,
     running,
@@ -1185,6 +1168,7 @@ test("usage reducer rejects a present but malformed scope instead of charging ma
 });
 
 test("usage reducer still books a settled run's closing measurement", () => {
+  const recorder = createUsageRecorder();
   const running = applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun);
   const settled = applyTraceEventToAgentConsole(running, {
     type: "agent.run.settled",
@@ -1205,23 +1189,21 @@ test("usage reducer still books a settled run's closing measurement", () => {
     agentRunId: "run-1",
     inputTokens: 42,
     costUsd: 0.02,
-  });
+  }, recorder);
   assert.deepEqual(closing.agents[0]?.usage, {
-    eventIds: ["usage-closing"],
     inputTokens: 42,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    cacheSavingsUsd: 0,
     costUsd: 0.02,
-    routes: [{
-      ...TEST_USAGE_ROUTE,
-      eventIds: ["usage-closing"],
-      inputTokens: 42,
-      costUsd: 0.02,
-    }],
   });
   assert.equal(closing.agents[0]?.status, "completed");
   assert.equal(closing.mainUsage, undefined, "a settled run's usage never falls through to main");
 });
 
 test("usage reducer refuses measurements it could not persist", () => {
+  const recorder = createUsageRecorder();
   const running = applyTraceEventToAgentConsole(queuedRuntimeConsole, startedRuntimeRun);
 
   assert.strictEqual(
@@ -1231,7 +1213,7 @@ test("usage reducer refuses measurements it could not persist", () => {
       eventId: "usage-huge",
       agentRunId: "run-1",
       inputTokens: Number.MAX_SAFE_INTEGER + 2,
-    }),
+    }, recorder),
     running,
     "a token count past the safe-integer range is rejected outright",
   );
@@ -1242,7 +1224,7 @@ test("usage reducer refuses measurements it could not persist", () => {
     eventId: "usage-near",
     agentRunId: "run-1",
     inputTokens: Number.MAX_SAFE_INTEGER - 1,
-  });
+  }, recorder);
   assert.equal(near.agents[0]?.usage?.inputTokens, Number.MAX_SAFE_INTEGER - 1);
   assert.ok(Number.isSafeInteger(near.agents[0]?.usage?.inputTokens));
   assert.strictEqual(
@@ -1252,7 +1234,7 @@ test("usage reducer refuses measurements it could not persist", () => {
       eventId: "usage-tip",
       agentRunId: "run-1",
       inputTokens: 10,
-    }),
+    }, recorder),
     near,
     "a token total that would leave the safe-integer range is rejected",
   );
@@ -1263,7 +1245,7 @@ test("usage reducer refuses measurements it could not persist", () => {
     eventId: "usage-heavy",
     agentRunId: "run-1",
     costUsd: 1e308,
-  });
+  }, recorder);
   assert.equal(heavy.agents[0]?.usage?.costUsd, 1e308);
   assert.ok(Number.isFinite(heavy.agents[0]?.usage?.costUsd));
   assert.strictEqual(
@@ -1273,7 +1255,7 @@ test("usage reducer refuses measurements it could not persist", () => {
       eventId: "usage-heavier",
       agentRunId: "run-1",
       costUsd: 1e308,
-    }),
+    }, recorder),
     heavy,
     "a monetary total that would stop being finite is rejected",
   );

@@ -4,6 +4,7 @@ import test from "node:test";
 import { applyTraceEventToAgentConsole } from "@unclecode/orchestrator";
 import { RuntimeCodingAgent } from "../../packages/orchestrator/src/runtime-coding-agent.ts";
 import { attributeTraceToAgentRun } from "../../packages/orchestrator/src/work-agent-lifecycle.ts";
+import { createUsageRecorder } from "./usage-recorder-fixture.mjs";
 
 const OMP_PROVIDER = "omp";
 const OMP_DEFAULT_SELECTOR = "kimi-code/k3";
@@ -114,6 +115,7 @@ test("one OMP worker turn emits exactly one usage.recorded carrying cache read, 
 });
 
 test("OMP usage lands on exactly one agent-run ledger and replay never double counts", async () => {
+  const recorder = createUsageRecorder();
   const runId = "run-omp-worker";
   const jobId = "job-omp-worker";
   const { agent, events } = createOmpAgent([ompTurnResult()]);
@@ -125,36 +127,27 @@ test("OMP usage lands on exactly one agent-run ledger and replay never double co
   assert.equal(scoped.agentRunId, runId);
 
   const started = createRunningConsole(runId, jobId);
-  const recorded = applyTraceEventToAgentConsole(started, scoped);
+  const recorded = applyTraceEventToAgentConsole(started, scoped, recorder);
 
   assert.equal(recorded.mainUsage, undefined, "a scoped worker turn must not charge the session ledger");
   assert.deepEqual(recorded.agents[0]?.usage, {
-    eventIds: [raw.eventId],
     inputTokens: 1_200,
     outputTokens: 340,
     cacheReadTokens: 900,
     cacheWriteTokens: 120,
     costUsd: 0.0042,
-    routes: [{
-      provider: OMP_PROVIDER,
-      model: OMP_DEFAULT_SELECTOR,
-      eventIds: [raw.eventId],
-      inputTokens: 1_200,
-      outputTokens: 340,
-      cacheReadTokens: 900,
-      cacheWriteTokens: 120,
-      costUsd: 0.0042,
-    }],
+    cacheSavingsUsd: 0,
   });
 
   // Replaying the persisted event, and replaying it with a rewritten scope, both
   // have to be inert: the identity already belongs to one ledger.
-  assert.strictEqual(applyTraceEventToAgentConsole(recorded, scoped), recorded);
+  assert.strictEqual(applyTraceEventToAgentConsole(recorded, scoped, recorder), recorded);
   const { agentRunId: _dropped, ...unscoped } = scoped;
-  assert.strictEqual(applyTraceEventToAgentConsole(recorded, unscoped), recorded);
+  assert.strictEqual(applyTraceEventToAgentConsole(recorded, unscoped, recorder), recorded);
 });
 
 test("repeated OMP worker turns keep one route with exact totals and distinct identities", async () => {
+  const recorder = createUsageRecorder();
   const runId = "run-omp-retry";
   const jobId = "job-omp-retry";
   const { agent, events } = createOmpAgent([
@@ -178,27 +171,27 @@ test("repeated OMP worker turns keep one route with exact totals and distinct id
 
   let snapshot = createRunningConsole(runId, jobId);
   for (const event of recorded) {
-    snapshot = applyTraceEventToAgentConsole(snapshot, attributeTraceToAgentRun(event, runId));
+    snapshot = applyTraceEventToAgentConsole(snapshot, attributeTraceToAgentRun(event, runId), recorder);
   }
 
   const usage = snapshot.agents[0]?.usage;
-  assert.equal(usage?.eventIds.length, 2);
+  assert.doesNotMatch(JSON.stringify(usage), /eventIds/);
   assert.equal(usage?.inputTokens, 1_500);
   assert.equal(usage?.outputTokens, 400);
   assert.equal(usage?.cacheReadTokens, 2_000);
   assert.equal(usage?.cacheWriteTokens, 120);
   assert.equal(usage?.costUsd, 0.005);
-  assert.equal(usage?.routes?.length, 1, "one selector must not fan out into several routes");
-  assert.equal(usage.routes[0].provider, OMP_PROVIDER);
-  assert.equal(usage.routes[0].model, OMP_DEFAULT_SELECTOR);
-  assert.equal(usage.routes[0].cacheReadTokens, 2_000);
-  assert.equal(usage.routes[0].cacheWriteTokens, 120);
+  assert.equal(snapshot.totalUsage?.routes?.length, 1, "one selector must not fan out into several routes");
+  assert.equal(snapshot.totalUsage.routes[0].provider, OMP_PROVIDER);
+  assert.equal(snapshot.totalUsage.routes[0].model, OMP_DEFAULT_SELECTOR);
+  assert.equal(snapshot.totalUsage.routes[0].cacheReadTokens, 2_000);
+  assert.equal(snapshot.totalUsage.routes[0].cacheWriteTokens, 120);
 
   // Replaying the whole run in order is idempotent, so a resumed session shows
   // the same totals it persisted.
   let replayed = snapshot;
   for (const event of recorded) {
-    replayed = applyTraceEventToAgentConsole(replayed, attributeTraceToAgentRun(event, runId));
+    replayed = applyTraceEventToAgentConsole(replayed, attributeTraceToAgentRun(event, runId), recorder);
   }
   assert.strictEqual(replayed, snapshot);
 });

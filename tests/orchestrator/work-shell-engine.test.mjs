@@ -10,6 +10,7 @@ import { renderDebugFrame, waitForSettledFrame } from "../tui/work-shell-render-
 import { CONTEXT_DESK_GROUPS } from "@unclecode/contracts";
 import { createOmpWorkerProvider, createOmpWorkerRunner } from "@unclecode/providers";
 import { LiveRuntimeEngineRegistry } from "../../apps/unclecode-server/src/runtime-engine-rpc.ts";
+import { createUsageRecorder } from "./usage-recorder-fixture.mjs";
 
 import {
   WorkShellEngine,
@@ -3305,6 +3306,7 @@ test("WorkShellEngine opens the agent console tab an idle slash command names", 
 
 test("WorkShellEngine projects provider cache usage into the session ledger", async () => {
   const { engine, emitTrace } = createEngine();
+  engine.bindRuntimeUsageRecorder(createUsageRecorder());
 
   await engine.initialize();
   emitTrace({
@@ -3322,25 +3324,23 @@ test("WorkShellEngine projects provider cache usage into the session ledger", as
   });
 
   assert.deepEqual(engine.getState().agentConsole.mainUsage, {
-    eventIds: ["usage-1"],
     inputTokens: 1_000,
     outputTokens: 200,
     cacheReadTokens: 750,
     cacheWriteTokens: 50,
     cacheSavingsUsd: 0.004,
     costUsd: 0.01,
-    routes: [{
+  });
+  assert.deepEqual(engine.getState().agentConsole.totalUsage?.routes, [{
       provider: "openai",
       model: "gpt-5.6-sol",
-      eventIds: ["usage-1"],
       inputTokens: 1_000,
       outputTokens: 200,
       cacheReadTokens: 750,
       cacheWriteTokens: 50,
       cacheSavingsUsd: 0.004,
       costUsd: 0.01,
-    }],
-  });
+    }]);
 });
 
 test("WorkShellEngine preserves GPT-5.6 reasoning overrides across model switches", async () => {

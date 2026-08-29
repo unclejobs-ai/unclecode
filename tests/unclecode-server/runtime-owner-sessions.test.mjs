@@ -196,6 +196,54 @@ test("owner startup recovers admitted receipts as in-doubt before serving mutati
   }
 });
 
+test("owner binds created engines to the same ledger-backed usage recorder", async () => {
+  const rootDir = await mkdtemp(join(tmpdir(), "unclecode-owner-usage-binding-"));
+  const projectPath = join(rootDir, "workspace");
+  let recorder;
+  let owner;
+  try {
+    await mkdir(projectPath);
+    owner = await startPersistentRuntimeOwner({
+      rootDir,
+      leasePath: join(rootDir, "owner.json"),
+      tokenPath: join(rootDir, "server.token"),
+      async createSession(request) {
+        return {
+          engine: {
+            ...fakeEngine(request.sessionId),
+            bindRuntimeUsageRecorder(value) { recorder = value; },
+          },
+          projectPath: request.projectPath,
+        };
+      },
+    });
+    await owner.engines.create({ sessionId: "usage-bound", projectPath, idempotencyKey: "create-usage" });
+    assert.ok(recorder);
+    const recorded = recorder.recordUsage({
+      eventId: "owner-event-1",
+      route: { provider: "openai", model: "gpt-5.6-sol" },
+      counters: {
+        inputTokens: 20,
+        outputTokens: 5,
+        cacheReadTokens: 10,
+        cacheWriteTokens: 0,
+        cacheSavingsUsd: 0.01,
+        costUsd: 0.02,
+      },
+    });
+    assert.equal(recorded.kind, "recorded");
+    await owner.stop();
+    owner = undefined;
+
+    const ledger = openRuntimeLedger({ dbPath: join(rootDir, "runtime-owner-v1", "owner.db") });
+    assert.equal(ledger.snapshotUsageTotals("usage-bound").session.inputTokens, 20);
+    ledger.close();
+  } finally {
+    await owner?.stop();
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
 test("one owner creates and independently revisions multiple workspace sessions", async () => {
   const created = [];
   const disposed = [];

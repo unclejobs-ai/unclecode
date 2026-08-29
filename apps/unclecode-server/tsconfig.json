@@ -9,5 +9,8 @@
     "composite": true
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../../packages/session-store" }]
+  "references": [
+    { "path": "../../packages/orchestrator" },
+    { "path": "../../packages/session-store" }
+  ]
 }

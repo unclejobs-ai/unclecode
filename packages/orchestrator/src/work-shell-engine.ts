@@ -69,7 +69,10 @@ import {
   type WorkShellUiLocale,
 } from "./work-shell-locale.js";
 import { applyWorkShellTraceEvent } from "./work-shell-engine-trace.js";
-import { applyTraceEventToAgentConsole } from "./work-shell-agent-console.js";
+import {
+  applyTraceEventToAgentConsole,
+  type AgentConsoleUsageRecorder,
+} from "./work-shell-agent-console.js";
 import { isExecutorScopedTraceEvent } from "./work-agent-lifecycle.js";
 import {
   clampAgentConsoleView,
@@ -900,6 +903,7 @@ export class WorkShellEngine<
   private admittedRuntimeTurns = 0;
   private cancelledAdmittedRuntimeTurns = 0;
   private runtimeRevisionClock: { readonly value: number } | undefined;
+  private usageRecorder: AgentConsoleUsageRecorder | undefined;
   private readonly activeTurnSettlements = new Set<Promise<void>>();
   private disposed = false;
   private queueAutoDrainPaused = false;
@@ -1009,6 +1013,11 @@ export class WorkShellEngine<
 
   bindRuntimeRevisionClock(clock: { readonly value: number }): void {
     this.runtimeRevisionClock = clock;
+  }
+
+  /** Runtime-owner-only usage identity port; remote clients never receive it. */
+  bindRuntimeUsageRecorder(recorder: AgentConsoleUsageRecorder): void {
+    this.usageRecorder = recorder;
   }
 
   persistRuntimeRevision(revision: number): Promise<void> {
@@ -1417,7 +1426,7 @@ export class WorkShellEngine<
     const base = pending === undefined
       ? this.state.agentConsole
       : mergeAgentConsoleLifecycle(pending, this.state.agentConsole);
-    const next = applyTraceEventToAgentConsole(base, event);
+    const next = applyTraceEventToAgentConsole(base, event, this.usageRecorder);
     if (next === base) {
       return;
     }

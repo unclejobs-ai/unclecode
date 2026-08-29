@@ -379,7 +379,7 @@ function normalizeUsage(usage: AgentRunUsage | AgentRunUsageRoute | undefined): 
     cacheSavingsUsd: usage?.cacheSavingsUsd ?? 0,
     cacheSavingsUnknown: hasUnpricedCacheReads(usage),
     costUsd: usage?.costUsd ?? 0,
-    eventCount: usage?.eventIds.length ?? 0,
+    eventCount: usage?.eventIds?.length ?? 0,
   };
 }
 

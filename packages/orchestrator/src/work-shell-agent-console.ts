@@ -25,12 +25,13 @@ type TraceRecord = Record<string, unknown>;
 export function applyTraceEventToAgentConsole(
   snapshot: AgentConsoleSnapshot,
   event: { readonly type: string },
+  usageRecorder?: AgentConsoleUsageRecorder,
 ): AgentConsoleSnapshot {
   const evolutionSnapshot = applyEvolutionProposalEvent(snapshot, event);
   if (evolutionSnapshot !== snapshot) {
     return evolutionSnapshot;
   }
-  const lifecycleSnapshot = applyAgentLifecycleEvent(snapshot, event);
+  const lifecycleSnapshot = applyAgentLifecycleEvent(snapshot, event, usageRecorder);
   if (lifecycleSnapshot !== snapshot) {
     return lifecycleSnapshot;
   }
@@ -175,6 +176,7 @@ function withCurrentActivity(
 function applyAgentLifecycleEvent(
   snapshot: AgentConsoleSnapshot,
   event: { readonly type: string },
+  usageRecorder: AgentConsoleUsageRecorder | undefined,
 ): AgentConsoleSnapshot {
   const trace = asRecord(event);
   if (!trace) {
@@ -182,7 +184,7 @@ function applyAgentLifecycleEvent(
   }
 
   if (event.type === "usage.recorded") {
-    return applyUsageEvent(snapshot, trace);
+    return applyUsageEvent(snapshot, trace, usageRecorder);
   }
 
   if (event.type === "job.queued") {
@@ -402,6 +404,103 @@ function settleLinkedJob(
 const USAGE_TOKEN_KEYS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"] as const;
 const USAGE_MONEY_KEYS = ["cacheSavingsUsd", "costUsd"] as const;
 
+export type AgentConsoleUsageCounterVector = {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
+  readonly cacheSavingsUsd: number;
+  readonly costUsd: number;
+};
+
+export type AgentConsoleUsageTotalsSnapshot = {
+  readonly session: AgentConsoleUsageCounterVector;
+  readonly byMain: readonly {
+    readonly mainId: string;
+    readonly totals: AgentConsoleUsageCounterVector;
+  }[];
+  readonly byAgent: readonly {
+    readonly agentId: string;
+    readonly totals: AgentConsoleUsageCounterVector;
+  }[];
+  readonly byRoute: readonly {
+    readonly provider: string;
+    readonly model: string;
+    readonly totals: AgentConsoleUsageCounterVector;
+  }[];
+};
+
+export type AgentConsoleUsageRecordInput = {
+  readonly eventId: string;
+  readonly agentId?: string;
+  readonly route: { readonly provider: string; readonly model: string };
+  readonly counters: AgentConsoleUsageCounterVector;
+};
+
+export type AgentConsoleUsageRecordResult =
+  | {
+      readonly kind: "recorded" | "duplicate";
+      readonly mainId: string;
+      readonly totals: AgentConsoleUsageTotalsSnapshot;
+    }
+  | { readonly kind: "scope_mismatch" };
+
+/** Narrow synchronous port owned by the persistent runtime process. */
+export interface AgentConsoleUsageRecorder {
+  recordUsage(input: AgentConsoleUsageRecordInput): AgentConsoleUsageRecordResult;
+}
+
+export type RuntimeUsageLedgerPort = {
+  recordUsage(input: AgentConsoleUsageRecordInput & {
+    readonly sessionId: string;
+    readonly mainId?: string;
+  }): { readonly kind: "recorded" | "duplicate" | "scope_mismatch" };
+  snapshotUsageTotals(
+    sessionId: string,
+    options?: {
+      readonly mainIds?: readonly string[];
+      readonly agentIds?: readonly string[];
+      readonly includeRoutes?: boolean;
+    },
+  ): AgentConsoleUsageTotalsSnapshot;
+};
+
+/**
+ * Bind one owner-opened ledger to one session. The adapter requests only the
+ * main projection and the at-most-128 agent rows the console can retain; exact
+ * event membership and lifetime session totals remain SQLite-owned.
+ */
+export function bindRuntimeUsageRecorder(input: {
+  readonly sessionId: string;
+  readonly ledger: RuntimeUsageLedgerPort;
+  readonly mainId?: string;
+  readonly projectedAgentIds?: (() => readonly string[]) | undefined;
+}): AgentConsoleUsageRecorder {
+  const mainId = input.mainId ?? "main";
+  return {
+    recordUsage(usage) {
+      const result = input.ledger.recordUsage({
+        ...usage,
+        sessionId: input.sessionId,
+        ...(usage.agentId ? {} : { mainId }),
+      });
+      if (result.kind === "scope_mismatch") return { kind: "scope_mismatch" };
+      const projectedAgentIds = [...new Set(input.projectedAgentIds?.() ?? (
+        usage.agentId ? [usage.agentId] : []
+      ))].slice(-128);
+      return {
+        kind: result.kind,
+        mainId,
+        totals: input.ledger.snapshotUsageTotals(input.sessionId, {
+          mainIds: [mainId],
+          agentIds: projectedAgentIds,
+          includeRoutes: true,
+        }),
+      };
+    },
+  };
+}
+
 /**
  * Gate a usage measurement before it reaches a ledger.
  *
@@ -413,12 +512,15 @@ const USAGE_MONEY_KEYS = ["cacheSavingsUsd", "costUsd"] as const;
 function applyUsageEvent(
   snapshot: AgentConsoleSnapshot,
   trace: TraceRecord,
+  recorder: AgentConsoleUsageRecorder | undefined,
 ): AgentConsoleSnapshot {
   const eventId = readNonEmptyString(trace, "eventId");
-  if (!eventId) {
+  if (!eventId || !recorder) {
     return snapshot;
   }
-  if (!readNonEmptyString(trace, "provider") || !readNonEmptyString(trace, "model")) {
+  const provider = readNonEmptyString(trace, "provider");
+  const model = readNonEmptyString(trace, "model");
+  if (!provider || !model) {
     return snapshot;
   }
 
@@ -433,150 +535,136 @@ function applyUsageEvent(
     return snapshot;
   }
 
-  // One provider event contributes to exactly one ledger. Every ledger is
-  // checked, not just the one this event points at, so a replay that arrives
-  // with a changed scope cannot double-count.
-  if (
-    snapshot.mainUsage?.eventIds.includes(eventId)
-    || snapshot.agents.some((agent) => agent.usage?.eventIds.includes(eventId))
-  ) {
-    return snapshot;
-  }
-
   const scopedRun = agentRunId
     ? snapshot.agents.find((agent) => agent.id === agentRunId)
     : undefined;
   if (agentRunId && !scopedRun) {
     return snapshot;
   }
-  const base = agentRunId ? scopedRun?.usage : snapshot.mainUsage;
-  if (!isStorableUsage(appendUsage(base, trace, eventId))) {
+  if (!usageTraceIsStorable(trace)) return snapshot;
+
+  const counters = readUsageCounterVector(trace);
+  try {
+    const result = recorder.recordUsage({
+      eventId,
+      ...(agentRunId ? { agentId: agentRunId } : {}),
+      route: { provider, model },
+      counters,
+    });
+    if (result.kind === "scope_mismatch") return snapshot;
+    if (
+      result.kind === "duplicate"
+      && usageTotalsAlreadyMaterialized(snapshot, result.mainId, result.totals)
+    ) return snapshot;
+    return materializeUsageTotals(snapshot, result.mainId, result.totals);
+  } catch {
+    // The projection never guesses after an owner-ledger failure. A write that
+    // committed before a read failure is recovered by the next exact replay.
     return snapshot;
   }
-  return applyUsageRecordedEvent(snapshot, trace);
 }
 
-/**
- * Every persisted total has to survive `parseAgentConsoleSnapshot`: token
- * counts as safe integers, money as finite numbers. A total that has left
- * either range cannot be written — clamping would invent spend and truncating
- * would hide it — so the event that produced it is refused instead.
- */
-function isStorableUsage(usage: AgentRunUsage): boolean {
-  for (const key of USAGE_TOKEN_KEYS) {
-    const total = usage[key];
-    if (total !== undefined && !Number.isSafeInteger(total)) {
-      return false;
-    }
-  }
-  for (const key of USAGE_MONEY_KEYS) {
-    const total = usage[key];
-    if (total !== undefined && !Number.isFinite(total)) {
-      return false;
-    }
+function usageTotalsAlreadyMaterialized(
+  snapshot: AgentConsoleSnapshot,
+  mainId: string,
+  totals: AgentConsoleUsageTotalsSnapshot,
+): boolean {
+  if (!sameUsageVector(snapshot.totalUsage, totals.session)) return false;
+  const routes = snapshot.totalUsage?.routes ?? [];
+  if (
+    routes.length !== totals.byRoute.length
+    || totals.byRoute.some((entry, index) => {
+      const route = routes[index];
+      return route?.provider !== entry.provider
+        || route.model !== entry.model
+        || !sameUsageVector(route, entry.totals);
+    })
+  ) return false;
+  const mainUsage = totals.byMain.find((entry) => entry.mainId === mainId)?.totals;
+  if (mainUsage && !sameUsageVector(snapshot.mainUsage, mainUsage)) return false;
+  for (const entry of totals.byAgent) {
+    const usage = snapshot.agents.find((agent) => agent.id === entry.agentId)?.usage;
+    if (!sameUsageVector(usage, entry.totals)) return false;
   }
   return true;
 }
 
-function applyUsageRecordedEvent(
+function sameUsageVector(
+  usage: AgentRunUsage | AgentRunUsageRoute | undefined,
+  vector: AgentConsoleUsageCounterVector,
+): boolean {
+  return usage !== undefined
+    && USAGE_TOKEN_KEYS.every((key) => (usage[key] ?? 0) === vector[key])
+    && USAGE_MONEY_KEYS.every((key) => (usage[key] ?? 0) === vector[key]);
+}
+
+function materializeUsageTotals(
   snapshot: AgentConsoleSnapshot,
-  trace: TraceRecord,
+  mainId: string,
+  totals: AgentConsoleUsageTotalsSnapshot,
 ): AgentConsoleSnapshot {
-  const eventId = readNonEmptyString(trace, "eventId");
-  if (!eventId) {
+  if (
+    !usageVectorIsStorable(totals.session)
+    || totals.byMain.some((entry) => !usageVectorIsStorable(entry.totals))
+    || totals.byAgent.some((entry) => !usageVectorIsStorable(entry.totals))
+    || totals.byRoute.some((entry) => !usageVectorIsStorable(entry.totals))
+  ) {
     return snapshot;
   }
-  const agentRunId = readNonEmptyString(trace, "agentRunId");
-  if (agentRunId) {
-    const current = snapshot.agents.find((agent) => agent.id === agentRunId);
-    if (!current || current.usage?.eventIds.includes(eventId)) {
-      return snapshot;
-    }
-    const usage = appendUsage(current.usage, trace, eventId);
-    return createAgentConsoleSnapshot({
-      ...snapshot,
-      agents: snapshot.agents.map((agent) => agent.id === agentRunId ? { ...agent, usage } : agent),
-    });
-  }
-  if (snapshot.mainUsage?.eventIds.includes(eventId)) {
-    return snapshot;
-  }
+  const mainUsage = totals.byMain.find((entry) => entry.mainId === mainId)?.totals;
+  const byAgent = new Map(totals.byAgent.map((entry) => [entry.agentId, entry.totals]));
+  const totalUsage: AgentRunUsage = {
+    ...totals.session,
+    routes: totals.byRoute.map((entry): AgentRunUsageRoute => ({
+      provider: entry.provider,
+      model: entry.model,
+      ...entry.totals,
+    })),
+  };
   return createAgentConsoleSnapshot({
     ...snapshot,
-    mainUsage: appendUsage(snapshot.mainUsage, trace, eventId),
+    ...(mainUsage ? { mainUsage } : {}),
+    totalUsage,
+    agents: snapshot.agents.map((agent) => {
+      const usage = byAgent.get(agent.id);
+      return usage ? { ...agent, usage } : agent;
+    }),
   });
 }
 
-function appendUsage(
-  current: AgentRunUsage | undefined,
-  trace: TraceRecord,
-  eventId: string,
-): AgentRunUsage {
-  const routes = appendUsageRoute(current?.routes ?? [], trace, eventId);
-  return {
-    eventIds: [...(current?.eventIds ?? []), eventId],
-    ...sumUsageCounter(current, trace, "inputTokens"),
-    ...sumUsageCounter(current, trace, "outputTokens"),
-    ...sumUsageCounter(current, trace, "cacheReadTokens"),
-    ...sumUsageCounter(current, trace, "cacheWriteTokens"),
-    ...sumUsageMoney(current, trace, "cacheSavingsUsd"),
-    ...sumUsageMoney(current, trace, "costUsd"),
-    ...(routes.length === 0 ? {} : { routes }),
-  };
+function usageTraceIsStorable(trace: TraceRecord): boolean {
+  for (const key of USAGE_TOKEN_KEYS) {
+    const value = trace[key];
+    if (
+      typeof value === "number"
+      && value > 0
+      && Number.isInteger(value)
+      && !Number.isSafeInteger(value)
+    ) return false;
+  }
+  return true;
 }
 
-function appendUsageRoute(
-  currentRoutes: readonly AgentRunUsageRoute[],
-  trace: TraceRecord,
-  eventId: string,
-): readonly AgentRunUsageRoute[] {
-  const provider = readNonEmptyString(trace, "provider");
-  const model = readNonEmptyString(trace, "model");
-  if (!provider || !model) return currentRoutes;
-
-  const routeIndex = currentRoutes.findIndex(
-    (route) => route.provider === provider && route.model === model,
-  );
-  const current = routeIndex === -1 ? undefined : currentRoutes[routeIndex];
-  const route: AgentRunUsageRoute = {
-    provider,
-    model,
-    eventIds: [...(current?.eventIds ?? []), eventId],
-    ...sumUsageCounter(current, trace, "inputTokens"),
-    ...sumUsageCounter(current, trace, "outputTokens"),
-    ...sumUsageCounter(current, trace, "cacheReadTokens"),
-    ...sumUsageCounter(current, trace, "cacheWriteTokens"),
-    ...sumUsageMoney(current, trace, "cacheSavingsUsd"),
-    ...sumUsageMoney(current, trace, "costUsd"),
-  };
-  if (routeIndex === -1) return [...currentRoutes, route];
-  return currentRoutes.map((candidate, index) => index === routeIndex ? route : candidate);
+function usageVectorIsStorable(vector: AgentConsoleUsageCounterVector): boolean {
+  return USAGE_TOKEN_KEYS.every((key) => Number.isSafeInteger(vector[key]) && vector[key] >= 0)
+    && USAGE_MONEY_KEYS.every((key) => Number.isFinite(vector[key]) && vector[key] >= 0);
 }
 
-function sumUsageCounter(
-  current: AgentRunUsage | AgentRunUsageRoute | undefined,
-  trace: TraceRecord,
-  key: "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens",
-): Partial<AgentRunUsageRoute> {
-  const value = trace[key];
-  return typeof value === "number" && Number.isInteger(value) && value > 0
-    ? { [key]: (current?.[key] ?? 0) + value }
-    : current?.[key] === undefined
-      ? {}
-      : { [key]: current[key] };
-}
-
-function sumUsageMoney(
-  current: AgentRunUsage | AgentRunUsageRoute | undefined,
-  trace: TraceRecord,
-  key: "cacheSavingsUsd" | "costUsd",
-): Partial<AgentRunUsageRoute> {
-  const value = trace[key];
-  return typeof value === "number" && Number.isFinite(value) && value > 0
-    ? { [key]: (current?.[key] ?? 0) + value }
-    : current?.[key] === undefined
-      ? {}
-      : { [key]: current[key] };
+function readUsageCounterVector(trace: TraceRecord): AgentConsoleUsageCounterVector {
+  const vector = {} as Record<keyof AgentConsoleUsageCounterVector, number>;
+  for (const key of USAGE_TOKEN_KEYS) {
+    const value = trace[key];
+    vector[key] = typeof value === "number" && Number.isSafeInteger(value) && value > 0
+      ? value
+      : 0;
+  }
+  for (const key of USAGE_MONEY_KEYS) {
+    const value = trace[key];
+    vector[key] = typeof value === "number" && Number.isFinite(value) && value > 0
+      ? value
+      : 0;
+  }
+  return vector;
 }
 
 function upsertById<T extends { readonly id: string }>(items: readonly T[], item: T): readonly T[] {
