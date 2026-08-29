@@ -459,6 +459,72 @@ export async function loadWorkCliBootstrap(
     ...input.argv,
   ]);
   const activeEngine = engine ?? resolveDefaultWorkEngine(env);
+  if (runtimeRole === "client") {
+    const config = await loadConfig({
+      cwd,
+      env,
+      ...(provider !== undefined ? { provider } : {}),
+      ...(model !== undefined ? { model } : {}),
+      ...(reasoning !== undefined ? { reasoning } : {}),
+      allowProblematicOpenAIAuth: true,
+    });
+    const pluginOverlays = loadExtensionConfigOverlays({
+      workspaceRoot: cwd,
+      env,
+      ...(userHomeDir ? { userHomeDir } : {}),
+    });
+    const configExplanation = explainUncleCodeConfig({
+      workspaceRoot: cwd,
+      env,
+      pluginOverlays,
+    });
+    const contextProfile = resolveContextProfile(
+      configExplanation.settings.contextProfile.value,
+    );
+    const crpConfig = resolveWorkShellCrpConfig(configExplanation);
+    const runtimeProvider = resolveRuntimeProvider(config.provider);
+    const codexOAuthAvailable = Boolean(resolveCodexOAuthBridgeArgs({
+      provider: runtimeProvider,
+      apiKey: config.apiKey,
+      openAIRuntime: config.openAIRuntime,
+    }));
+    const authLabel = resolveWorkShellAuthLabel({
+      engine: activeEngine,
+      configuredLabel: config.authLabel,
+      codexOAuthAvailable,
+    });
+    const modeLabel = (await runRustCommand(
+      ["rust", "ux", "text", "mode-label"],
+      cwd,
+      config.mode,
+      env,
+    )).trim();
+
+    return {
+      agent: createRuntimeClientAgent(),
+      prompt: prompt ?? "",
+      options: {
+        provider: runtimeProvider,
+        model: config.model,
+        mode: config.mode,
+        authLabel,
+        reasoning: config.reasoning,
+        modelWindow: crpConfig.modelWindow,
+        contextProfile: contextProfile.id,
+        motion: configExplanation.settings.motion.value,
+        cwd,
+        contextSummaryLines: deriveAuthIssueLines({
+          ...(config.authIssueMessage
+            ? { authIssueMessage: config.authIssueMessage }
+            : {}),
+        }),
+        homeState: createInitialHomeState({ modeLabel, authLabel }),
+        ...(sessionId ? { sessionId } : {}),
+        browserOAuthAvailable: config.provider === "openai"
+          && Boolean(env.OPENAI_OAUTH_CLIENT_ID?.trim()),
+      },
+    };
+  }
   const resumedSession = sessionId
     ? await loadResumedWorkSession({ cwd, sessionId, env })
     : undefined;
