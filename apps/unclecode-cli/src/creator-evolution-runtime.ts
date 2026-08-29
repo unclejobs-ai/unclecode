@@ -9,11 +9,16 @@ import {
   type AppReasoningConfig,
   type EvolutionBenchmarkResult,
   type EvolutionEvaluatorResult,
-  runContainedEvolutionCommand,
   type WorkTurnAgent,
 } from "@unclecode/orchestrator";
+// @ts-expect-error The trusted harness is authored as an executable ESM module.
+import * as heldOutBenchmark from "../../../scripts/held-out-benchmark.mjs";
 
-import { runWorkspaceGuardianChecks } from "./guardian-checks.js";
+const {
+  HELD_OUT_V1_EVALUATOR_ASSETS,
+  HELD_OUT_V1_SUITE_ASSETS,
+  runHeldOutComparison,
+} = heldOutBenchmark;
 
 const CREATOR_TIMEOUT_MS = 10 * 60_000;
 const CREATOR_POST_ABORT_SETTLEMENT_GRACE_MS = 1_000;
@@ -32,29 +37,30 @@ export function createWorkCreatorEvolutionService(input: {
   readonly creatorAbortSettlementGraceMs?: number;
 }): CreatorEvolutionService {
   const policyAssets = ["AGENTS.md"].filter((asset) => existsSync(join(input.cwd, asset)));
-  const benchmarkAssets = ["package.json"].filter((asset) => existsSync(join(input.cwd, asset)));
   const immutableEvaluatorEnvironment = Object.freeze(evaluatorEnvironment(input.env));
   const evaluator = {
-    id: "unclecode-guardian-evaluator-v1",
-    definition: "UncleCode host guardian checks; creator has no evaluator capability",
+    id: "unclecode-held-out-evaluator-v1",
+    definition: "Trusted UncleCode held-out v1 evaluator; creator has no evaluator capability",
     version: "1.0.0",
-    assets: [] as readonly string[],
+    assets: HELD_OUT_V1_EVALUATOR_ASSETS,
   } as const;
   const suite = {
-    id: "unclecode-held-out-guardian-v1",
+    id: "unclecode-held-out-v1",
     version: "1.0.0",
-    assets: benchmarkAssets,
-    checks: [{ id: "guardian", weight: 1 }],
+    assets: HELD_OUT_V1_SUITE_ASSETS,
+    checks: [{ id: "held-out-v1", weight: 1 }],
     thresholds: {
-      minimumCandidateScore: 1,
-      minimumDelta: 0,
-      maximumRegression: 0,
+      // The trusted harness enforces its full aggregate/domain/frontier/critic
+      // gate set. These generic bounds only preserve the normalized result.
+      minimumCandidateScore: 0,
+      minimumDelta: -1,
+      maximumRegression: 1,
     },
     environment: {
       locale: "C",
       timezone: "UTC",
       network: "host-enforced-disabled",
-      scripts: "check,test",
+      scripts: "held-out-benchmark-v1",
     },
   } as const;
   const evaluatorEnvironmentHash = sha256(canonicalJson({
@@ -118,71 +124,63 @@ export function createWorkCreatorEvolutionService(input: {
       }
     },
     async runEvaluator(request): Promise<EvolutionEvaluatorResult> {
-      const evaluate = async (cwd: string, signal: AbortSignal): Promise<EvolutionBenchmarkResult> => {
-        const outcome = await runWorkspaceGuardianChecks({
-          cwd,
-          env: { ...immutableEvaluatorEnvironment },
-          scripts: ["check", "test"],
-          timeoutMs: Math.max(1_000, Math.floor(request.timeoutMs / 2)),
-          signal,
-        }, {
-          async execFile(command, args, options) {
-            const contained = await runContainedEvolutionCommand({
-              cwd: options.cwd,
-              workspaceRoot: input.cwd,
-              command,
-              args,
-              environment: options.env ?? immutableEvaluatorEnvironment,
-              timeoutMs: options.timeout ?? Math.max(1_000, Math.floor(request.timeoutMs / 2)),
-              maxOutputBytes: request.maxOutputBytes,
-              readablePaths: existsSync(join(input.cwd, "node_modules"))
-                ? [join(input.cwd, "node_modules")]
-                : [],
-              ...(options.signal ? { signal: options.signal } : {}),
-            });
-            if (contained.status !== "completed") {
-              const error = new Error(`Contained evaluator ${contained.status}: ${contained.stderr}`.trim()) as Error & {
-                stdout?: string;
-                stderr?: string;
-              };
-              error.stdout = contained.stdout;
-              error.stderr = contained.stderr;
-              throw error;
-            }
-            return { stdout: contained.stdout, stderr: contained.stderr };
-          },
-        });
-        const proven = outcome.checks.length > 0;
-        const passed = proven && outcome.checks.every((check) => check.status === "passed");
-        return {
-          score: passed ? 1 : 0,
-          summary: boundUtf8(
-            proven ? outcome.summary : "No executable held-out guardian checks were available.",
-            request.maxOutputBytes,
-          ),
-          checks: [{
-            id: "guardian",
-            status: passed ? "passed" : "failed",
-            score: passed ? 1 : 0,
-            durationMs: 0,
-          }],
-        };
-      };
       try {
         const outcome = await runBounded(
           request.signal,
           request.timeoutMs,
-          async (signal) => ({
-            baseline: await evaluate(request.baselineWorktree, signal),
-            candidate: await evaluate(request.candidateWorktree, signal),
-          }),
+          async (signal) => {
+            signal.throwIfAborted();
+            const report = runHeldOutComparison({
+              suiteRoot: join(input.cwd, "benchmarks", "held-out", "v1"),
+              candidatePath: join(
+                input.cwd,
+                "benchmarks",
+                "held-out",
+                "v1",
+                "candidate.fixture.json",
+              ),
+            });
+            signal.throwIfAborted();
+            return report;
+          },
         );
         if (outcome.status !== "completed") return outcome;
+        const report = outcome.value;
+        const baseline: EvolutionBenchmarkResult = {
+          score: report.baseline.qualityPercent / 100,
+          summary: boundUtf8(
+            `Held-out baseline quality ${report.baseline.qualityPercent}%.`,
+            request.maxOutputBytes,
+          ),
+          checks: [{
+            id: "held-out-v1",
+            status: "passed",
+            score: report.baseline.qualityPercent / 100,
+            durationMs: 0,
+          }],
+        };
+        const candidate: EvolutionBenchmarkResult = {
+          score: report.candidate.qualityPercent / 100,
+          summary: boundUtf8(
+            `Held-out candidate quality ${report.candidate.qualityPercent}%; comparison gates ${report.comparison.passed ? "passed" : "failed"}.`,
+            request.maxOutputBytes,
+          ),
+          checks: [{
+            id: "held-out-v1",
+            status: report.comparison.passed ? "passed" : "failed",
+            score: report.candidate.qualityPercent / 100,
+            durationMs: 0,
+          }],
+        };
         return {
           status: "completed",
           environmentHash: request.expectedEnvironmentHash,
-          baseline: outcome.value.baseline,
-          candidate: outcome.value.candidate,
+          integratedProof: {
+            status: report.integratedProof.status,
+            reasons: [...report.integratedProof.reasons],
+          },
+          baseline,
+          candidate,
         };
       } catch (error) {
         return {

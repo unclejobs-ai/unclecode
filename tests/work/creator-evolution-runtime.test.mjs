@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -9,6 +9,11 @@ import {
   createWorkCreatorEvolutionService,
   runBoundedCreatorOperation,
 } from "../../apps/unclecode-cli/src/creator-evolution-runtime.ts";
+import {
+  HELD_OUT_V1_PROTECTED_ASSETS,
+} from "../../scripts/held-out-benchmark.mjs";
+
+const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -24,6 +29,14 @@ function createRepository() {
   writeFileSync(path.join(root, "AGENTS.md"), "policy\n");
   writeFileSync(path.join(root, "package.json"), '{"scripts":{}}\n');
   writeFileSync(path.join(root, "skills", "creator.md"), "creator v1\n");
+  for (const asset of [
+    ...HELD_OUT_V1_PROTECTED_ASSETS,
+    "benchmarks/held-out/v1/candidate.fixture.json",
+  ]) {
+    const target = path.join(root, asset);
+    mkdirSync(path.dirname(target), { recursive: true });
+    cpSync(path.join(REPO_ROOT, asset), target);
+  }
   git(root, ["add", "."]);
   git(root, ["commit", "-m", "base"]);
   return root;
@@ -250,6 +263,52 @@ test("a creator envelope resolved after detachment cannot mutate or record", asy
   } finally {
     controller.abort();
     resolveCreator({ text: '{"files":[]}' });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("production creator uses the trusted held-out closure and rejects offline self-attestation", async () => {
+  const root = createRepository();
+  const records = [];
+  try {
+    const candidateFixture = "benchmarks/held-out/v1/candidate.fixture.json";
+    const candidateTarget = path.join(root, candidateFixture);
+    const candidate = JSON.parse(readFileSync(candidateTarget, "utf8"));
+    candidate.liveProof = {
+      providerRunId: "candidate-self-attested",
+      fullVerificationMatrix: { status: "passed", artifactHash: `sha256:${"a".repeat(64)}` },
+      independentFinalReview: {
+        status: "passed",
+        reviewerId: "candidate-reviewer",
+        artifactHash: `sha256:${"b".repeat(64)}`,
+      },
+    };
+    writeFileSync(candidateTarget, `${JSON.stringify(candidate, null, 2)}\n`);
+    git(root, ["add", "."]);
+    git(root, ["commit", "-m", "trusted held-out assets"]);
+
+    const service = createWorkCreatorEvolutionService({
+      cwd: root,
+      env: { ...process.env },
+      reasoning: {},
+      recorder: fakeRecorder(records),
+      createCreatorAgent: () => fakeAgent(async () => ({
+        text: '{"files":[{"path":"skills/creator.md","content":"creator v2\\n"}]}',
+      })),
+    });
+    const result = await service.run(evolutionInput(
+      root,
+      "creator-trusted-held-out",
+      new AbortController().signal,
+    ));
+
+    assert.equal(result.projection.evaluatorId, "unclecode-held-out-evaluator-v1");
+    assert.equal(result.projection.heldOutBenchmarkId, "unclecode-held-out-v1");
+    assert.equal(result.projection.comparison?.passed, true);
+    assert.equal(result.status, "rejected");
+    assert.ok(result.projection.failures.includes("EVOLUTION_INTEGRATED_PROOF_UNPROVEN"));
+    assert.equal(records.length, 1);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

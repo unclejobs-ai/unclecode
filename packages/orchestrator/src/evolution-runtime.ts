@@ -51,6 +51,10 @@ export type EvolutionEvaluatorResult =
   | {
       readonly status: "completed";
       readonly environmentHash: string;
+      readonly integratedProof: {
+        readonly status: "proven" | "unproven";
+        readonly reasons: readonly string[];
+      };
       readonly baseline: EvolutionBenchmarkResult;
       readonly candidate: EvolutionBenchmarkResult;
     }
@@ -758,6 +762,13 @@ export class CreatorEvolutionService {
         summary: `Held-out comparison rejected candidate ${execution.evaluation.candidate.score} against baseline ${execution.evaluation.baseline.score}.`,
       });
     }
+    if (execution.evaluation.integratedProof.status !== "proven") {
+      return this.finish(execution, {
+        status: "rejected",
+        failures: ["EVOLUTION_INTEGRATED_PROOF_UNPROVEN"],
+        summary: "Held-out comparison passed, but trusted integrated proof remains unproven.",
+      });
+    }
 
     try {
       execution.isolation = await this.host.resolveIsolation({
@@ -1182,11 +1193,35 @@ function validateMutableTargets(targets: readonly string[], protectedPaths: read
     const pathFailure = validateRelativeAssetPath(target);
     if (pathFailure) failures.add(pathFailure);
     if (hasRepositoryControlSegment(target)) failures.add("EVOLUTION_REPOSITORY_CONTROL_MODIFIED");
-    if (protectedPaths.some((asset) => pathMatchesTarget(asset, target) || pathMatchesTarget(target, asset))) {
+    if (
+      isProtectedCandidateTarget(target)
+      || protectedPaths.some((asset) => pathMatchesTarget(asset, target) || pathMatchesTarget(target, asset))
+    ) {
       failures.add("EVOLUTION_PROTECTED_TARGET_DECLARED");
     }
   }
   return [...failures];
+}
+
+function isProtectedCandidateTarget(value: string): boolean {
+  const segments = value.toLowerCase().split("/");
+  const basename = segments.at(-1) ?? "";
+  return segments.some((segment) =>
+    segment === "test"
+    || segment === "tests"
+    || segment === "__tests__"
+    || segment === "config"
+    || segment === "scripts"
+    || segment === "fixture"
+    || segment === "fixtures")
+    || /(?:^|\.)(?:test|spec|fixture)\.[^.]+$/.test(basename)
+    || basename === "package.json"
+    || basename === "package-lock.json"
+    || basename === "npm-shrinkwrap.json"
+    || basename === "pnpm-lock.yaml"
+    || basename === "yarn.lock"
+    || basename.startsWith("tsconfig")
+    || basename.includes(".config.");
 }
 
 function validatePreparedCandidate(
@@ -1255,6 +1290,7 @@ function validateCandidateSnapshot(
     const pathFailure = validateRelativeAssetPath(entry.path);
     if (pathFailure) failures.add(pathFailure);
     if (hasRepositoryControlSegment(entry.path)) failures.add("EVOLUTION_REPOSITORY_CONTROL_MODIFIED");
+    if (isProtectedCandidateTarget(entry.path)) failures.add("EVOLUTION_PROTECTED_TARGET_DECLARED");
     if (entry.kind !== "file" || !SHA256.test(entry.sha256) || entry.size < 0) {
       failures.add("EVOLUTION_UNSUPPORTED_ASSET");
     }
@@ -1305,6 +1341,13 @@ function validateEvaluation(
   if (evaluation.environmentHash !== expectedEnvironmentHash) {
     failures.add("EVOLUTION_EVALUATION_ENVIRONMENT_MISMATCH");
   }
+  if (
+    (evaluation.integratedProof.status !== "proven" && evaluation.integratedProof.status !== "unproven")
+    || !Array.isArray(evaluation.integratedProof.reasons)
+    || evaluation.integratedProof.reasons.some((reason) => typeof reason !== "string" || reason.length === 0)
+  ) {
+    failures.add("EVOLUTION_INTEGRATED_PROOF_INVALID");
+  }
   const expectedChecks = suite.checks.map((entry) => entry.id);
   for (const result of [evaluation.baseline, evaluation.candidate]) {
     if (!finiteScore(result.score)) failures.add("EVOLUTION_EVALUATION_SCORE_INVALID");
@@ -1326,9 +1369,17 @@ function validateEvaluation(
 function sanitizeEvaluation(
   evaluation: Extract<EvolutionEvaluatorResult, { readonly status: "completed" }>,
 ): Extract<EvolutionEvaluatorResult, { readonly status: "completed" }> {
+  const integratedProof = evaluation.integratedProof ?? {
+    status: "unproven" as const,
+    reasons: ["HOST_INTEGRATED_PROOF_MISSING"],
+  };
   return {
     status: "completed",
     environmentHash: evaluation.environmentHash,
+    integratedProof: {
+      status: integratedProof.status,
+      reasons: integratedProof.reasons.map((reason) => boundedSummary(reason)),
+    },
     baseline: {
       score: evaluation.baseline.score,
       summary: boundedSummary(evaluation.baseline.summary),

@@ -83,6 +83,7 @@ function evaluation(overrides = {}) {
   return {
     status: "completed",
     environmentHash: sha("locale=C;timezone=UTC;network=disabled"),
+    integratedProof: { status: "proven", reasons: [] },
     baseline: {
       score: 0.72,
       summary: "baseline completed",
@@ -160,7 +161,7 @@ function makeHost(overrides = {}) {
     async runCreator(input) {
       calls.push("creator");
       state.creatorCount += 1;
-      assert.deepEqual(input.mutableTargets, ["skills/creator.md"]);
+      assert.deepEqual(input.mutableTargets, overrides.expectedMutableTargets ?? ["skills/creator.md"]);
       return overrides.creatorResult ?? { status: "completed", summary: "creator completed" };
     },
     async inspectCandidate() {
@@ -568,6 +569,74 @@ test("the evaluator receives one immutable same-suite comparison and failures ne
       assert.equal(result.projection.cleanup.status, "completed");
     });
   }
+});
+
+test("passing comparison gates cannot promote without host-supplied integrated proof", async () => {
+  const host = makeHost({
+    evaluationResult: evaluation({
+      integratedProof: {
+        status: "unproven",
+        reasons: ["LIVE_PROVIDER_RUN_NOT_RECORDED"],
+      },
+    }),
+  });
+  const lifecycleDispatch = makeDispatch();
+  const result = await new CreatorEvolutionService({
+    config: config(),
+    host,
+    now: () => new Date(NOW),
+  }).run(runInput(lifecycleDispatch.dispatch));
+
+  assert.equal(result.projection.comparison?.passed, true);
+  assert.equal(result.status, "rejected");
+  assert.ok(result.projection.failures.includes("EVOLUTION_INTEGRATED_PROOF_UNPROVEN"));
+  assert.equal(lifecycleDispatch.count, 0);
+});
+
+test("candidate targets cannot overlap test, config, script, fixture, or protected assets", async (t) => {
+  for (const mutableTarget of [
+    "tests/work/evolution-runtime.test.mjs",
+    "config/runtime.json",
+    "scripts/held-out-benchmark.mjs",
+    "benchmarks/held-out/v1/candidate.fixture.json",
+    "host/evaluator.json",
+  ]) {
+    await t.test(mutableTarget, async () => {
+      const host = makeHost();
+      const result = await new CreatorEvolutionService({
+        config: config(),
+        host,
+        now: () => new Date(NOW),
+      }).run(runInput(makeDispatch().dispatch, { mutableTargets: [mutableTarget] }));
+
+      assert.equal(result.status, "failed");
+      assert.ok(result.projection.failures.includes("EVOLUTION_PROTECTED_TARGET_DECLARED"));
+      assert.equal(host.state.prepareCount, 0);
+      assert.equal(host.state.evaluatorCount, 0);
+    });
+  }
+});
+
+test("a broad mutable target cannot hide a protected nested candidate path", async () => {
+  const hiddenTestAsset = {
+    path: "skills/tests/creator.test.mjs",
+    sha256: sha("candidate-owned test"),
+    kind: "file",
+    size: 20,
+  };
+  const host = makeHost({
+    expectedMutableTargets: ["skills"],
+    candidateSnapshots: [candidateSnapshot({ changedAssets: [hiddenTestAsset] })],
+  });
+  const result = await new CreatorEvolutionService({
+    config: config(),
+    host,
+    now: () => new Date(NOW),
+  }).run(runInput(makeDispatch().dispatch, { mutableTargets: ["skills"] }));
+
+  assert.equal(result.status, "failed");
+  assert.ok(result.projection.failures.includes("EVOLUTION_PROTECTED_TARGET_DECLARED"));
+  assert.equal(host.state.evaluatorCount, 0);
 });
 
 test("a syntactically valid but unexpected evaluator environment hash fails closed", async () => {
