@@ -497,6 +497,7 @@ pub fn work_shell_agent_console_tab(line: &str) -> Option<&'static str> {
         "/agents" => Some("agents"),
         "/jobs" => Some("jobs"),
         "/todo" => Some("plan"),
+        "/review" => Some("plan"),
         _ => None,
     }
 }
@@ -1309,13 +1310,22 @@ mod tests {
             work_shell_builtin_submit_command("/todo"),
             Some(json!({ "kind": "agent-console", "tab": "plan" })),
         );
+        assert_eq!(
+            work_shell_builtin_submit_command("/review"),
+            Some(json!({ "kind": "agent-console", "tab": "plan" })),
+        );
         assert_eq!(work_shell_agent_console_tab("/queue"), None);
         assert_eq!(work_shell_agent_console_tab("/agents extra"), None);
     }
 
     #[test]
     fn routes_agent_console_submits_as_builtins() {
-        for (line, tab) in [("/agents", "agents"), ("/jobs", "jobs"), ("/todo", "plan")] {
+        for (line, tab) in [
+            ("/agents", "agents"),
+            ("/jobs", "jobs"),
+            ("/todo", "plan"),
+            ("/review", "plan"),
+        ] {
             let route = serde_json::from_str::<Value>(
                 &route_work_shell_submit_json(line, false, "default", true).unwrap(),
             )

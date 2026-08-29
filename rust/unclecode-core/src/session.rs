@@ -2260,6 +2260,15 @@ mod tests {
         assert_eq!(resumed.summary, "Chat: inspect repo");
         assert_eq!(resumed.owner_mutation_revision, Some(7));
         assert_eq!(resumed.entries.len(), 2);
+        let notice_path = root.join("notifications").join(format!(
+            "{}.notice.json",
+            to_opaque_id("work-session-1", "session")
+        ));
+        let notice: Value = serde_json::from_str(
+            &fs::read_to_string(notice_path).expect("read persistence notice"),
+        )
+        .expect("parse persistence notice");
+        assert_eq!(notice.get("revision").and_then(Value::as_u64), Some(7));
         assert_eq!(resumed.entries[0].id.as_deref(), Some("entry-user"));
         assert_eq!(resumed.entries[1].id.as_deref(), Some("entry-assistant"));
         assert_eq!(resumed.entries[0].text, "inspect repo");

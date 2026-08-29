@@ -293,6 +293,11 @@ test("the compiled SCC quality engine registers without workspace trust and dele
   assert.deepEqual(host.list().map(({ name, source }) => ({ name, source })), [
     { name: "scc-quality-engine", source: "builtin" },
   ]);
+  assert.equal(
+    Object.hasOwn(host.list()[0].hooks, "stopHook"),
+    false,
+    "the in-process Quality Engine must not claim a Claude Stop hook",
+  );
 
   const invalid = qualityGraph();
   invalid.nodes[0].acceptanceCriteria = [];

@@ -5843,9 +5843,9 @@ test("WorkShellEngine shows the copyable auth URL while inline oauth is pending"
       return input === "/auth login" ? ["auth", "login"] : undefined;
     },
     async resolveWorkShellInlineCommand(_args, _runInlineCommand, onProgress) {
-      onProgress?.("Opening browser…");
-      onProgress?.("Enter code: ABCD-1234");
-      onProgress?.("Waiting for device approval…");
+      onProgress?.("Open this URL in your browser:");
+      onProgress?.("https://auth.openai.com/oauth/authorize?client_id=test");
+      onProgress?.("Waiting for callback…");
       return inlinePromise;
     },
   });
@@ -5856,9 +5856,9 @@ test("WorkShellEngine shows the copyable auth URL while inline oauth is pending"
 
   assert.equal(engine.getState().panel.title, "Auth");
   assert.deepEqual(engine.getState().panel.lines, [
-    "Enter code: ABCD-1234",
-    "Waiting for device approval…",
-    "Opening browser…",
+    "Waiting for callback…",
+    "Open this URL in your browser:",
+    "https://auth.openai.com/oauth/authorize?client_id=test",
   ]);
 
   resolveInline({ lines: ["OAuth login complete.", "Auth: oauth-file", "Route: device-oauth"], failed: false });

@@ -889,6 +889,31 @@ test("runtime RPC factory and method failures use the same bounded secret redact
   await methodRegistry.disposeAll();
 });
 
+test("runtime RPC failure serialization survives hostile string coercion without leaking its payload", async () => {
+  const maliciousFailure = {
+    toString() {
+      throw new Error("token=sk-should-never-reach-the-client");
+    },
+  };
+  const registry = new LiveRuntimeEngineRegistry({
+    async createSession() {
+      throw maliciousFailure;
+    },
+  });
+
+  const result = await registry.create({
+    sessionId: "hostile-error-coercion",
+    projectPath: "/workspace/redacted",
+    idempotencyKey: "hostile-error-coercion",
+  });
+
+  assert.deepEqual(result, {
+    ok: false,
+    code: "invalid_action",
+    message: "Runtime operation failed.",
+  });
+});
+
 test("a later mutation cannot reserve or depend on an unpublished revision", async () => {
   let markFirstPersistenceStarted;
   const firstPersistenceStarted = new Promise(resolve => { markFirstPersistenceStarted = resolve; });

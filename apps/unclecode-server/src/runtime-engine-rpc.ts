@@ -407,7 +407,7 @@ export class LiveRuntimeEngineRegistry {
       try {
         await this.settleTeardowns();
       } catch (error) {
-        failures.push(boundedRuntimeFailure(error));
+        failures.push(boundedRuntimeRpcError(error));
       }
     };
     try {
@@ -420,7 +420,7 @@ export class LiveRuntimeEngineRegistry {
             "Runtime session creation shutdown timed out.",
           );
         } catch (error) {
-          failures.push(boundedRuntimeFailure(error));
+          failures.push(boundedRuntimeRpcError(error));
         }
         await settle();
       }
@@ -491,7 +491,7 @@ export class LiveRuntimeEngineRegistry {
   }
 
   #recordTeardownFailure(error: unknown): void {
-    this.#teardownFailures.push(boundedRuntimeFailure(error));
+    this.#teardownFailures.push(boundedRuntimeRpcError(error));
     if (this.#teardownFailures.length > SYSTEM_OBSERVABILITY_BOUNDS.cleanup) {
       this.#teardownFailures.splice(0, this.#teardownFailures.length - SYSTEM_OBSERVABILITY_BOUNDS.cleanup);
     }
@@ -633,12 +633,4 @@ function withTimeout<Result>(promise: Promise<Result>, timeoutMs: number, messag
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) clearTimeout(timer);
   });
-}
-
-function boundedRuntimeFailure(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  const redacted = message
-    .replace(/\b(?:api[_-]?key|token|secret|password)\s*[=:]\s*[^\s,;]+/gi, match => `${match.split(/[=:]/, 1)[0]}=[REDACTED]`)
-    .replace(/\b(?:sk|ghp|xoxb)-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]");
-  return redacted.length > 512 ? `${redacted.slice(0, 511)}…` : redacted;
 }

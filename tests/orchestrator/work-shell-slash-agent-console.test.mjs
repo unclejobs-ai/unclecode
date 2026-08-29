@@ -15,12 +15,13 @@ const AGENT_CONSOLE_COMMANDS = [
   ["/agents", "agents"],
   ["/jobs", "jobs"],
   ["/todo", "plan"],
+  ["/review", "plan"],
 ];
 
 const AGENT_CONSOLE_DESCRIPTIONS = {
-  "/agents": "에이전트 실행 상태와 transcript를 엽니다",
-  "/jobs": "백그라운드 job 상태를 엽니다",
-  "/todo": "현재 WorkGraph 진행 상태를 엽니다",
+  "/agents": "Open agent run status and transcripts.",
+  "/jobs": "Open background job status.",
+  "/todo": "Open current WorkGraph progress.",
 };
 
 test("Rust resolves every agent console command to the single builtin shape", () => {
@@ -42,6 +43,27 @@ test("agent console commands submit as builtins instead of chat or inline comman
       { kind: "builtin", line, command: { kind: "agent-console", tab } },
     );
   }
+});
+
+test("only exact /review opens plan and quality while an argument remains a review prompt", () => {
+  const line = "/review auth flow";
+
+  assert.equal(resolveWorkShellBuiltinCommand(line), undefined);
+  assert.deepEqual(resolveWorkShellSlashCommand(line), ["prompt", "review", "auth", "flow"]);
+  assert.deepEqual(
+    resolveWorkShellSubmitRoute({
+      value: line,
+      isBusy: false,
+      composerMode: "default",
+      resolveWorkShellSlashCommand,
+      hasInlineCommandRunner: true,
+    }),
+    {
+      kind: "prompt-command",
+      line,
+      promptCommand: { kind: "review", focus: "auth flow" },
+    },
+  );
 });
 
 test("agent console tab validation fails closed on missing and unknown tabs", () => {
