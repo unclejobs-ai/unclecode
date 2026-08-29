@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "suiteId": "unclecode-held-out-v1",
+  "version": "1.0.0",
+  "baselineCommit": "d8027bb0d17327528a7b95ed84f50a9eb89ce5f2",
+  "assets": [
+    { "path": "baseline.json", "sha256": "sha256:1e1fce45e951157e9c645e2be825baea9e89bea46d5d002f96ea9e7980d63f06" },
+    { "path": "cases.json", "sha256": "sha256:6483ece50a9b4c42d5de4acc256eb0c7270a942cd212ce3c3a091a67688c2588" },
+    { "path": "evaluator.json", "sha256": "sha256:d7ee4e8dcc21e8fa3dd06252ef7937b9c04943b2c040c5406d33f9aba1fe21af" },
+    { "path": "thresholds.json", "sha256": "sha256:e41d42eeb1de7b1617f0e642bdbe25588c735a6dfc721db85d73641b4b2fbe1e" }
+  ]
+}

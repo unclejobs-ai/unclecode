@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "unclecode-held-out-trace-evaluator",
+  "version": "1.0.0",
+  "qualityAggregation": "equal-case-mean",
+  "domainAggregation": "equal-case-mean",
+  "frontierUseMeasure": "frontierTokens",
+  "cacheHitRateMeasure": "sum(cacheHits)/(sum(cacheHits)+sum(cacheMisses))",
+  "latencyMeasure": "mean-and-nearest-rank-p95-ms",
+  "retainedMemoryMeasure": "maximum-retainedMemoryBytes",
+  "criticProof": {
+    "requiredForEveryCandidateCase": true,
+    "requireIndependentReviewer": true,
+    "requireCurrentArtifactBinding": true,
+    "requiredVerdict": "pass"
+  }
+}
