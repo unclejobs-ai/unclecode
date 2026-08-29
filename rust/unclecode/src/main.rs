@@ -11,7 +11,8 @@ use unclecode_core::aci::{
 use unclecode_core::aci_edit::{line_edit_json, lint_failure_message, restore_file};
 use unclecode_core::aci_patch::{apply_unified_patch_json, parse_unified_diff_json};
 use unclecode_core::aci_safe::{
-    delete_text_file_no_symlinks, read_text_file_no_symlinks,
+    delete_text_file_no_symlinks, delete_text_file_no_symlinks_if_exists,
+    read_text_file_bounded_no_symlinks, read_text_file_no_symlinks,
     write_text_file_atomically_no_symlinks,
 };
 use unclecode_core::aci_search::{find_files_json, glob_files, search_text, search_text_json};
@@ -145,9 +146,10 @@ use unclecode_core::provider_transport::{
     post_openai_codex_json, provider_request_spec_json,
 };
 use unclecode_core::queue::{
-    queue_item_json, queue_items_json, queue_length_json, queue_limit_acceptance_json,
-    queue_limit_rejection_json, PersistentWorkQueue, QueueAttachmentArtifact, QueueMoveDirection,
-    QueuePushError, WorkQueue,
+    queue_cleanup_artifacts_json, queue_cleanup_completion_json, queue_item_json, queue_items_json,
+    queue_length_json, queue_limit_acceptance_json, queue_limit_rejection_json,
+    PersistentWorkQueue, QueueAttachmentArtifact, QueueMoveDirection, QueuePushError, WorkQueue,
+    QUEUE_CLEANUP_SWEEP_LIMIT, QUEUE_MAX_ITEM_BYTES,
 };
 use unclecode_core::queue_command::resolve_queue_command_json;
 use unclecode_core::reasoning_builtin_command::resolve_reasoning_builtin_command_json;
@@ -4745,6 +4747,44 @@ fn run_native_queue_command(args: &[OsString]) -> Result<u8, String> {
             println!("{}", queue_items_json(&items));
             Ok(0)
         }
+        Some("cleanup-list-json") => {
+            let requested = args
+                .get(2)
+                .and_then(|arg| arg.to_str())
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(QUEUE_CLEANUP_SWEEP_LIMIT)
+                .min(QUEUE_CLEANUP_SWEEP_LIMIT);
+            let artifacts = queue
+                .cleanup_snapshot(requested)
+                .map_err(|error| format!("Failed to list queue attachment cleanup: {error}"))?;
+            println!("{}", queue_cleanup_artifacts_json(&artifacts));
+            Ok(0)
+        }
+        Some("cleanup-complete-json") => {
+            let mut input = String::new();
+            io::stdin()
+                .take(QUEUE_MAX_ITEM_BYTES.saturating_add(1) as u64)
+                .read_to_string(&mut input)
+                .map_err(|error| format!("Failed to read queue cleanup completion: {error}"))?;
+            if input.len() > QUEUE_MAX_ITEM_BYTES {
+                return Err("Queue cleanup completion exceeds its bounded input size.".to_string());
+            }
+            let references = serde_json::from_str::<Vec<String>>(&input)
+                .map_err(|_| "Queue cleanup completion must be a JSON string array.".to_string())?;
+            if references.len() > QUEUE_CLEANUP_SWEEP_LIMIT
+                || references.iter().any(|reference| reference.trim().is_empty())
+            {
+                return Err("Queue cleanup completion contains invalid references.".to_string());
+            }
+            let completed = queue
+                .complete_cleanup(&references)
+                .map_err(|error| format!("Failed to complete queue attachment cleanup: {error}"))?;
+            let remaining = queue
+                .cleanup_len()
+                .map_err(|error| format!("Failed to count queue attachment cleanup: {error}"))?;
+            println!("{}", queue_cleanup_completion_json(completed, remaining));
+            Ok(0)
+        }
         Some("retry-json") | Some("discard-json") => {
             let id = args
                 .get(2)
@@ -4804,7 +4844,7 @@ fn run_native_queue_command(args: &[OsString]) -> Result<u8, String> {
             Ok(0)
         }
         _ => Err(
-            "Usage: unclecode rust queue <validate-envelope-json|push|push-json|push-envelope-json|pop|pop-json|claim-json|ack-json|nack-json|quarantine-json|recover-json|retry-json|discard-json|remove-json|move-json|list|len|len-json|clear> <session-id> [args]".to_string(),
+            "Usage: unclecode rust queue <validate-envelope-json|push|push-json|push-envelope-json|pop|pop-json|claim-json|ack-json|nack-json|quarantine-json|recover-json|cleanup-list-json|cleanup-complete-json|retry-json|discard-json|remove-json|move-json|list|len|len-json|clear> <session-id> [args]".to_string(),
         ),
     }
 }
@@ -4838,6 +4878,31 @@ fn run_native_aci_command(args: &[OsString]) -> Result<u8, String> {
                 .ok_or("Usage: unclecode rust aci read-no-symlinks <path>")?;
             let content = read_text_file_no_symlinks(&cwd, PathBuf::from(path))
                 .map_err(|error| error.to_string())?;
+            print!("{content}");
+            Ok(0)
+        }
+        Some("read-bounded-no-symlinks") => {
+            let path = args
+                .get(1)
+                .ok_or("Usage: unclecode rust aci read-bounded-no-symlinks <path> <expected-bytes> <max-bytes>")?;
+            let expected_bytes = args
+                .get(2)
+                .and_then(|arg| arg.to_str())
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or("Expected bytes must be a non-negative integer.")?;
+            let max_bytes = args
+                .get(3)
+                .and_then(|arg| arg.to_str())
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value <= QUEUE_MAX_ITEM_BYTES)
+                .ok_or("Bounded read limit must not exceed the queue item hard cap.")?;
+            let content = read_text_file_bounded_no_symlinks(
+                &cwd,
+                PathBuf::from(path),
+                expected_bytes,
+                max_bytes,
+            )
+            .map_err(|error| error.to_string())?;
             print!("{content}");
             Ok(0)
         }
@@ -4908,6 +4973,15 @@ fn run_native_aci_command(args: &[OsString]) -> Result<u8, String> {
                 .get(1)
                 .ok_or("Usage: unclecode rust aci delete-no-symlinks <path>")?;
             delete_text_file_no_symlinks(&cwd, PathBuf::from(path))
+                .map_err(|error| error.to_string())?;
+            println!("Deleted {}", path.to_string_lossy());
+            Ok(0)
+        }
+        Some("delete-no-symlinks-if-exists") => {
+            let path = args
+                .get(1)
+                .ok_or("Usage: unclecode rust aci delete-no-symlinks-if-exists <path>")?;
+            delete_text_file_no_symlinks_if_exists(&cwd, PathBuf::from(path))
                 .map_err(|error| error.to_string())?;
             println!("Deleted {}", path.to_string_lossy());
             Ok(0)
@@ -5098,7 +5172,7 @@ fn run_native_aci_command(args: &[OsString]) -> Result<u8, String> {
             Ok(0)
         }
         _ => Err(
-            "Usage: unclecode rust aci <list [path]|read <path>|read-no-symlinks <path>|view <path> [window]|view-json <path> [window] [start]|write <path>|write-atomic-no-symlinks <path>|edit-json <path> <start-line> <end-line>|restore <path>|lint-failure-message <start-line> <snippet-context>|search <query> [path]|search-json <query> [path] [cap] [max-count-per-file] [glob...]|find-json <pattern> [cap] [glob...]|glob <pattern>|apply-patch|parse-patch>".to_string(),
+            "Usage: unclecode rust aci <list [path]|read <path>|read-no-symlinks <path>|read-bounded-no-symlinks <path> <expected-bytes> <max-bytes>|view <path> [window]|view-json <path> [window] [start]|write <path>|write-atomic-no-symlinks <path>|delete-no-symlinks-if-exists <path>|edit-json <path> <start-line> <end-line>|restore <path>|lint-failure-message <start-line> <snippet-context>|search <query> [path]|search-json <query> [path] [cap] [max-count-per-file] [glob...]|find-json <pattern> [cap] [glob...]|glob <pattern>|apply-patch|parse-patch>".to_string(),
         ),
     }
 }

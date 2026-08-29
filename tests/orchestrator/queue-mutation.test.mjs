@@ -59,6 +59,45 @@ test("Rust queue backend atomically removes and reorders stable ids", () => {
   }
 });
 
+test("Rust queue acknowledgement durably tracks bounded attachment cleanup", () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-queue-cleanup-"));
+  const session = "task4-cleanup";
+  const attachment = {
+    ref: ".unclecode/artifacts/session/queue-attachments/cleanup.json",
+    schema: "unclecode.queue-attachment.v1",
+    sha256: "c".repeat(64),
+    size: 17,
+  };
+  try {
+    const pushed = JSON.parse(runRustCommandSync(
+      ["rust", "queue", "push-envelope-json", session],
+      cwd,
+      JSON.stringify({ line: "cleanup", createdAt: 123, attachments: [attachment] }),
+    ));
+    runRustCommandSync(["rust", "queue", "claim-json", session], cwd);
+    assert.equal(JSON.parse(runRustCommandSync(
+      ["rust", "queue", "ack-json", session, String(pushed.id)], cwd,
+    )).id, pushed.id);
+    assert.equal(JSON.parse(runRustCommandSync(
+      ["rust", "queue", "nack-json", session, String(pushed.id)], cwd,
+    )), null, "a post-ack cleanup failure must never requeue completed work");
+    assert.deepEqual(JSON.parse(runRustCommandSync(
+      ["rust", "queue", "cleanup-list-json", session, "64"], cwd,
+    )), [{ ref: attachment.ref, size: 17 }]);
+
+    assert.deepEqual(JSON.parse(runRustCommandSync(
+      ["rust", "queue", "cleanup-complete-json", session],
+      cwd,
+      JSON.stringify([attachment.ref]),
+    )), { completed: 1, remaining: 0 });
+    assert.deepEqual(JSON.parse(runRustCommandSync(
+      ["rust", "queue", "cleanup-list-json", session, "64"], cwd,
+    )), []);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("Rust queue backend quarantines crash-stale claims until explicit retry or discard", () => {
   const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-queue-recovery-"));
   const session = "task4-recovery";

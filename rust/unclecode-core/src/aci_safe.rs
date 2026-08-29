@@ -1,7 +1,6 @@
 use crate::aci::AciError;
 use std::fs::File;
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 
 pub struct SafeLockFile {
@@ -37,6 +36,93 @@ pub fn read_text_file_no_symlinks(
             "symbolic-link-safe reads are unsupported on this platform",
         )))
     }
+}
+
+pub fn read_text_file_bounded_no_symlinks(
+    workspace_root: impl AsRef<Path>,
+    path: impl AsRef<Path>,
+    expected_bytes: usize,
+    max_bytes: usize,
+) -> Result<String, AciError> {
+    if expected_bytes > max_bytes {
+        return Err(AciError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "bounded read expected {expected_bytes} bytes, exceeding hard limit {max_bytes}"
+            ),
+        )));
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        return no_symlink_io::read_bounded(
+            workspace_root.as_ref(),
+            path.as_ref(),
+            expected_bytes,
+            max_bytes,
+        )
+        .map_err(AciError::Io);
+    }
+    #[cfg(windows)]
+    {
+        return windows_no_reparse_io::read_bounded(
+            workspace_root.as_ref(),
+            path.as_ref(),
+            expected_bytes,
+            max_bytes,
+        )
+        .map_err(AciError::Io);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = (workspace_root, path, expected_bytes, max_bytes);
+        Err(AciError::Io(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "symbolic-link-safe reads are unsupported on this platform",
+        )))
+    }
+}
+
+fn read_exact_bounded_utf8(
+    file: File,
+    expected_bytes: usize,
+    max_bytes: usize,
+) -> io::Result<String> {
+    if expected_bytes > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "bounded read expected {expected_bytes} bytes, exceeding hard limit {max_bytes}"
+            ),
+        ));
+    }
+    let actual_bytes = usize::try_from(file.metadata()?.len()).unwrap_or(usize::MAX);
+    if actual_bytes != expected_bytes || actual_bytes > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "bounded read size mismatch: expected {expected_bytes} bytes, actual {actual_bytes}, hard limit {max_bytes}"
+            ),
+        ));
+    }
+
+    let read_limit = expected_bytes.saturating_add(1) as u64;
+    let mut bytes = Vec::with_capacity(expected_bytes);
+    file.take(read_limit).read_to_end(&mut bytes)?;
+    if bytes.len() != expected_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "bounded read size changed: expected {expected_bytes} bytes, actual {}",
+                bytes.len()
+            ),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bounded read is not valid UTF-8",
+        )
+    })
 }
 
 pub fn write_text_file_atomically_no_symlinks(
@@ -88,6 +174,17 @@ pub fn delete_text_file_no_symlinks(
             io::ErrorKind::Unsupported,
             "symbolic-link-safe deletes are unsupported on this platform",
         )))
+    }
+}
+
+pub fn delete_text_file_no_symlinks_if_exists(
+    workspace_root: impl AsRef<Path>,
+    path: impl AsRef<Path>,
+) -> Result<(), AciError> {
+    match delete_text_file_no_symlinks(workspace_root, path) {
+        Ok(()) => Ok(()),
+        Err(AciError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -216,6 +313,23 @@ mod no_symlink_io {
         let mut contents = String::new();
         File::from(file).read_to_string(&mut contents)?;
         Ok(contents)
+    }
+
+    pub(super) fn read_bounded(
+        workspace_root: &Path,
+        relative_path: &Path,
+        expected_bytes: usize,
+        max_bytes: usize,
+    ) -> io::Result<String> {
+        let (directory, file_name) = open_parent(workspace_root, relative_path, false, false)?;
+        let file = open_file_at(
+            directory.as_raw_fd(),
+            &file_name,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW,
+            0,
+        )
+        .map_err(|error| path_entry_error(error, relative_path))?;
+        super::read_exact_bounded_utf8(File::from(file), expected_bytes, max_bytes)
     }
 
     pub(super) fn write_atomic(
@@ -554,6 +668,19 @@ mod windows_no_reparse_io {
         Ok(contents)
     }
 
+    pub(super) fn read_bounded(
+        workspace_root: &Path,
+        relative_path: &Path,
+        expected_bytes: usize,
+        max_bytes: usize,
+    ) -> io::Result<String> {
+        let parent = open_parent(workspace_root, relative_path, false)?;
+        let target = parent.target_path();
+        let file = open_file(&target, GENERIC_READ, OPEN_EXISTING)?;
+        validate_handle(&file, false)?;
+        super::read_exact_bounded_utf8(file, expected_bytes, max_bytes)
+    }
+
     pub(super) fn write_atomic(
         workspace_root: &Path,
         relative_path: &Path,
@@ -802,6 +929,41 @@ mod windows_no_reparse_io {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_no_symlink_read_rejects_size_changes_before_buffering() {
+        use std::fs;
+
+        let root = std::env::temp_dir().join(format!(
+            "unclecode-aci-safe-bounded-read-{}",
+            std::process::id()
+        ));
+        let relative = Path::new(".unclecode/artifacts/session/attachment.json");
+        let target = root.join(relative);
+        fs::create_dir_all(target.parent().expect("attachment parent"))
+            .expect("create attachment parent");
+        fs::write(&target, b"{}\n").expect("write original attachment");
+
+        assert_eq!(
+            read_text_file_bounded_no_symlinks(&root, relative, 3, 1024).expect("exact-size read"),
+            "{}\n"
+        );
+
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .expect("open enlarged attachment")
+            .set_len(16 * 1024 * 1024)
+            .expect("enlarge attachment without buffering it in the test");
+        let error = read_text_file_bounded_no_symlinks(&root, relative, 3, 1024)
+            .expect_err("an enlarged attachment must be rejected");
+        assert_eq!(error.to_string().contains("16777216"), true);
+
+        let oversized_descriptor = read_text_file_bounded_no_symlinks(&root, relative, 1025, 1024)
+            .expect_err("the descriptor cannot raise the hard read cap");
+        assert_eq!(oversized_descriptor.to_string().contains("1024"), true);
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[cfg(unix)]
     #[test]

@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -6760,6 +6769,88 @@ test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
 
   assert.deepEqual(prompts, ["first", "second"]);
   assert.ok(engine.getState().entries.some((entry) => /Running queued follow-up #1: second/.test(entry.text)));
+});
+
+test("WorkShellEngine never nacks completed work when post-ack attachment cleanup must retry", {
+  skip: process.platform === "win32",
+}, async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-work-shell-cleanup-retry-"));
+  const sessionId = "queue-cleanup-retry";
+  const outside = path.join(cwd, "outside.json");
+  let releaseFirst;
+  let artifactPath;
+  const prompts = [];
+  writeFileSync(outside, "{}\n", "utf8");
+  try {
+    const options = {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd,
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    };
+    const { engine } = createEngine({
+      sessionId,
+      options,
+      agent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn(prompt) {
+          const userPrompt = stripWorkShellLanguageInstruction(prompt);
+          prompts.push(userPrompt);
+          if (userPrompt === "first") {
+            await new Promise((resolve) => { releaseFirst = resolve; });
+          } else if (userPrompt === "second") {
+            const directory = path.join(
+              cwd,
+              ".unclecode",
+              "artifacts",
+              sessionId,
+              "queue-attachments",
+            );
+            artifactPath = path.join(directory, readdirSync(directory)[0]);
+            unlinkSync(artifactPath);
+            symlinkSync(outside, artifactPath);
+          }
+          return { text: `reply:${userPrompt}` };
+        },
+      },
+    });
+
+    await engine.initialize();
+    const firstTurn = engine.handleSubmit("first");
+    while (typeof releaseFirst !== "function") {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await engine.handleSubmit("second", [{ id: "queued-attachment" }]);
+    releaseFirst();
+    await firstTurn;
+
+    assert.deepEqual(prompts, ["first", "second"]);
+    assert.deepEqual(JSON.parse(runRustCommandSync(
+      ["rust", "queue", "list", sessionId], cwd,
+    )), [], "the acknowledged ID stays removed when deletion fails");
+    assert.equal(JSON.parse(runRustCommandSync(
+      ["rust", "queue", "cleanup-list-json", sessionId, "64"], cwd,
+    )).length, 1, "the orphan remains durably tracked for retry");
+    assert.equal(
+      engine.getState().entries.some((entry) => /symbolic-link|symlink/i.test(entry.text)),
+      false,
+      "post-ack cleanup does not turn a completed provider turn into a queue failure",
+    );
+
+    unlinkSync(artifactPath);
+    const { engine: restarted } = createEngine({ sessionId, options });
+    await restarted.initialize();
+    assert.deepEqual(JSON.parse(runRustCommandSync(
+      ["rust", "queue", "cleanup-list-json", sessionId, "64"], cwd,
+    )), [], "startup retries and completes the bounded cleanup batch");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("WorkShellEngine keeps a queued follow-up stable while paused and drains it once after resume", async () => {

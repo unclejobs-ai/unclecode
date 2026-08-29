@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, open, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -142,6 +142,52 @@ test("queued attachment reads reject a symlink leaf without exposing its target"
         size: 30,
       }]),
       /symbolic-link|symlink|Permission denied/i,
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("queued attachment restoration rejects an enlarged file before Rust buffers or prints it", async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), "unclecode-queue-enlarged-read-"));
+  const reference = ".unclecode/artifacts/session/queue-attachments/enlarged.json";
+  try {
+    const target = path.join(workspace, reference);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, "{}\n", { encoding: "utf8", mode: 0o600 });
+    const file = await open(target, "r+");
+    await file.truncate(16 * 1024 * 1024);
+    await file.close();
+
+    await assert.rejects(
+      restoreQueuedAttachments(workspace, [{
+        ref: reference,
+        schema: "unclecode.queue-attachment.v1",
+        sha256: "0".repeat(64),
+        size: 3,
+      }]),
+      (error) => {
+        assert.match(error.message, /size|bounded|expected/i);
+        assert.doesNotMatch(error.message, /maxBuffer/i);
+        return true;
+      },
+    );
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("queued attachment restoration enforces the hard per-item cap before opening a file", async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), "unclecode-queue-hard-read-cap-"));
+  try {
+    await assert.rejects(
+      restoreQueuedAttachments(workspace, [{
+        ref: ".unclecode/artifacts/session/queue-attachments/missing.json",
+        schema: "unclecode.queue-attachment.v1",
+        sha256: "0".repeat(64),
+        size: 1024 * 1024 + 1,
+      }]),
+      /attachment.*bytes|size.*limit|hard.*cap/i,
     );
   } finally {
     await rm(workspace, { recursive: true, force: true });

@@ -110,6 +110,7 @@ import {
   deleteQueuedAttachmentArtifacts,
   persistQueuedAttachments,
   restoreQueuedAttachments,
+  sweepQueuedAttachmentArtifacts,
 } from "./work-shell-queue-attachments.js";
 import {
   CONTEXT_DESK_COLLECTIONS,
@@ -1055,6 +1056,7 @@ export class WorkShellEngine<
 
     try {
       const recovered = await this.recoverStaleQueuedSubmits();
+      await this.sweepQueuedAttachmentCleanup();
       await this.refreshQueuedSubmitSnapshot();
       if (recovered.length > 0) {
         this.queueAutoDrainPaused = true;
@@ -2979,19 +2981,23 @@ export class WorkShellEngine<
             this.setQueuedCount(await this.loadQueuedSubmitCount());
             break;
           }
-          const acknowledged = await this.ackQueuedSubmit(step.item.id);
-          if (!acknowledged) {
-            throw new Error("Rust queue lost its in-flight claim before acknowledgement.");
-          }
-          await deleteQueuedAttachmentArtifacts(
-            this.queueCommandCwd(),
-            acknowledged.attachmentRefs,
-          );
         } catch (error) {
           await this.nackQueuedSubmit(step.item.id);
           this.setQueuedCount(await this.loadQueuedSubmitCount());
           throw error;
         }
+        let acknowledged: QueuedSubmit | undefined;
+        try {
+          acknowledged = await this.ackQueuedSubmit(step.item.id);
+        } catch (error) {
+          await this.nackQueuedSubmit(step.item.id);
+          this.setQueuedCount(await this.loadQueuedSubmitCount());
+          throw error;
+        }
+        if (!acknowledged) {
+          throw new Error("Rust queue lost its in-flight claim before acknowledgement.");
+        }
+        await this.sweepQueuedAttachmentCleanup();
       }
     } finally {
       this.drainingQueue = false;
@@ -3518,18 +3524,14 @@ export class WorkShellEngine<
       this.queueCommandCwd(),
     ));
     if (!item) return false;
-    await deleteQueuedAttachmentArtifacts(this.queueCommandCwd(), item.attachmentRefs);
+    await this.sweepQueuedAttachmentCleanup();
     await this.refreshQueuedSubmitSnapshot();
     return true;
   }
 
   private async clearQueuedSubmits(): Promise<void> {
-    const pending = (await this.listQueuedSubmits()).filter((item) => item.status === "pending");
     await runRustCommand(["rust", "queue", "clear", this.sessionId], this.queueCommandCwd());
-    await deleteQueuedAttachmentArtifacts(
-      this.queueCommandCwd(),
-      pending.flatMap((item) => item.attachmentRefs),
-    );
+    await this.sweepQueuedAttachmentCleanup();
     const queueSnapshot = await this.refreshQueuedSubmitSnapshot();
     this.queueAutoDrainPaused = queueSnapshot.some((item) => item.status === "requires-action");
     this.queueDrainSkipTurnEpochs.clear();
@@ -3542,7 +3544,7 @@ export class WorkShellEngine<
       this.queueCommandCwd(),
     ));
     if (!item) return false;
-    await deleteQueuedAttachmentArtifacts(this.queueCommandCwd(), item.attachmentRefs);
+    await this.sweepQueuedAttachmentCleanup();
     await this.refreshQueuedSubmitSnapshot();
     return true;
   }
@@ -3573,6 +3575,10 @@ export class WorkShellEngine<
       ["rust", "queue", "recover-json", this.sessionId],
       this.queueCommandCwd(),
     ));
+  }
+
+  private async sweepQueuedAttachmentCleanup(): Promise<void> {
+    await sweepQueuedAttachmentArtifacts(this.queueCommandCwd(), this.sessionId).catch(() => undefined);
   }
 
   private async refreshQueuedSubmitSnapshot(): Promise<readonly QueuedSubmit[]> {

@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::io;
 #[cfg(unix)]
@@ -22,6 +22,7 @@ pub const QUEUE_MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const QUEUE_MAX_ATTACHMENTS_PER_ITEM: usize = 32;
 pub const QUEUE_MAX_ITEM_BYTES: usize = 1024 * 1024;
 pub const QUEUE_MAX_BYTES: usize = 16 * 1024 * 1024;
+pub const QUEUE_CLEANUP_SWEEP_LIMIT: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueLimitCode {
@@ -120,6 +121,12 @@ pub struct QueueAttachmentArtifact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueCleanupArtifact {
+    pub reference: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueItem {
     pub id: u64,
     pub line: String,
@@ -161,6 +168,7 @@ impl QueueItemStatus {
 pub struct WorkQueue {
     next_id: u64,
     items: VecDeque<QueueItem>,
+    cleanup_artifacts: VecDeque<QueueCleanupArtifact>,
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +183,7 @@ impl WorkQueue {
         Self {
             next_id: 1,
             items: VecDeque::new(),
+            cleanup_artifacts: VecDeque::new(),
         }
     }
 
@@ -240,7 +249,7 @@ impl WorkQueue {
             .items
             .iter()
             .position(|item| item.status == QueueItemStatus::Pending)?;
-        self.items.remove(index)
+        self.remove_and_track_cleanup(index)
     }
 
     pub fn claim(&mut self) -> Option<QueueItem> {
@@ -257,7 +266,7 @@ impl WorkQueue {
             .items
             .iter()
             .position(|item| item.id == id && item.status == QueueItemStatus::InFlight)?;
-        self.items.remove(index)
+        self.remove_and_track_cleanup(index)
     }
 
     pub fn nack(&mut self, id: u64) -> Option<QueueItem> {
@@ -318,7 +327,7 @@ impl WorkQueue {
                     QueueItemStatus::InFlight | QueueItemStatus::RequiresAction
                 )
         })?;
-        self.items.remove(index)
+        self.remove_and_track_cleanup(index)
     }
 
     pub fn remove(&mut self, id: u64) -> Option<QueueItem> {
@@ -326,7 +335,7 @@ impl WorkQueue {
             .items
             .iter()
             .position(|item| item.id == id && item.status == QueueItemStatus::Pending)?;
-        self.items.remove(index)
+        self.remove_and_track_cleanup(index)
     }
 
     pub fn move_item(&mut self, id: u64, direction: QueueMoveDirection) -> Option<QueueItem> {
@@ -384,7 +393,59 @@ impl WorkQueue {
                 true
             }
         });
+        self.track_cleanup_items(&removed);
         removed
+    }
+
+    pub fn cleanup_snapshot(&self, limit: usize) -> Vec<QueueCleanupArtifact> {
+        self.cleanup_artifacts.iter().take(limit).cloned().collect()
+    }
+
+    pub fn cleanup_len(&self) -> usize {
+        self.cleanup_artifacts.len()
+    }
+
+    pub fn complete_cleanup(&mut self, references: &[String]) -> usize {
+        let references = references.iter().collect::<HashSet<_>>();
+        let before = self.cleanup_artifacts.len();
+        self.cleanup_artifacts
+            .retain(|artifact| !references.contains(&artifact.reference));
+        before.saturating_sub(self.cleanup_artifacts.len())
+    }
+
+    fn remove_and_track_cleanup(&mut self, index: usize) -> Option<QueueItem> {
+        let item = self.items.remove(index)?;
+        self.track_cleanup(&item);
+        Some(item)
+    }
+
+    fn track_cleanup(&mut self, item: &QueueItem) {
+        self.track_cleanup_items(std::slice::from_ref(item));
+    }
+
+    fn track_cleanup_items(&mut self, items: &[QueueItem]) {
+        let mut tracked = self
+            .cleanup_artifacts
+            .iter()
+            .map(|artifact| artifact.reference.clone())
+            .collect::<HashSet<_>>();
+        for item in items {
+            for reference in &item.attachment_refs {
+                if !tracked.insert(reference.clone()) {
+                    continue;
+                }
+                let size = item
+                    .attachments
+                    .iter()
+                    .find(|artifact| artifact.reference == *reference)
+                    .map(|artifact| artifact.size)
+                    .unwrap_or(0);
+                self.cleanup_artifacts.push_back(QueueCleanupArtifact {
+                    reference: reference.clone(),
+                    size,
+                });
+            }
+        }
     }
 }
 
@@ -505,6 +566,18 @@ impl PersistentWorkQueue {
         Ok(self.load()?.snapshot())
     }
 
+    pub fn cleanup_snapshot(&self, limit: usize) -> io::Result<Vec<QueueCleanupArtifact>> {
+        Ok(self.load()?.cleanup_snapshot(limit))
+    }
+
+    pub fn cleanup_len(&self) -> io::Result<usize> {
+        Ok(self.load()?.cleanup_len())
+    }
+
+    pub fn complete_cleanup(&self, references: &[String]) -> io::Result<usize> {
+        self.mutate(|queue| queue.complete_cleanup(references))
+    }
+
     pub fn clear(&self) -> io::Result<Vec<QueueItem>> {
         self.mutate(WorkQueue::clear_pending)
     }
@@ -558,8 +631,15 @@ impl PersistentWorkQueue {
         }
         let mut queue = WorkQueue::new();
         let mut max_id = 0;
+        let mut cleanup_references = HashSet::new();
         for line in content.lines() {
             if line.trim_start().starts_with('{') {
+                if let Some(artifact) = parse_queue_cleanup_value(line) {
+                    if cleanup_references.insert(artifact.reference.clone()) {
+                        queue.cleanup_artifacts.push_back(artifact);
+                    }
+                    continue;
+                }
                 if let Some(item) = parse_queue_item_value(line) {
                     max_id = max_id.max(item.id);
                     queue.items.push_back(item);
@@ -599,6 +679,11 @@ impl PersistentWorkQueue {
         for item in &queue.items {
             serde_json::to_writer(&mut content, &queue_item_value(item))
                 .expect("queue item serialization should not fail");
+            content.push(b'\n');
+        }
+        for artifact in &queue.cleanup_artifacts {
+            serde_json::to_writer(&mut content, &queue_cleanup_value(artifact))
+                .expect("queue cleanup serialization should not fail");
             content.push(b'\n');
         }
         let content = String::from_utf8(content).expect("queue JSON must be valid UTF-8");
@@ -746,16 +831,40 @@ fn queue_item_bytes(item: &QueueItem) -> usize {
     queue_item_accounted_envelope_bytes(item).saturating_add(attachment_payload_bytes(item))
 }
 
+fn queue_cleanup_envelope_bytes(artifact: &QueueCleanupArtifact) -> usize {
+    serde_json::to_vec(&queue_cleanup_value(artifact))
+        .expect("queue cleanup serialization should not fail")
+        .len()
+        .saturating_add(1)
+}
+
+fn queue_cleanup_bytes(artifact: &QueueCleanupArtifact) -> usize {
+    queue_cleanup_envelope_bytes(artifact)
+        .saturating_add(usize::try_from(artifact.size).unwrap_or(usize::MAX))
+}
+
 fn queue_envelope_bytes(queue: &WorkQueue) -> usize {
-    queue.items.iter().fold(0usize, |total, item| {
+    let item_bytes = queue.items.iter().fold(0usize, |total, item| {
         total.saturating_add(queue_item_envelope_bytes(item))
-    })
+    });
+    queue
+        .cleanup_artifacts
+        .iter()
+        .fold(item_bytes, |total, artifact| {
+            total.saturating_add(queue_cleanup_envelope_bytes(artifact))
+        })
 }
 
 fn queue_bytes(queue: &WorkQueue) -> usize {
-    queue.items.iter().fold(0usize, |total, item| {
+    let item_bytes = queue.items.iter().fold(0usize, |total, item| {
         total.saturating_add(queue_item_bytes(item))
-    })
+    });
+    queue
+        .cleanup_artifacts
+        .iter()
+        .fold(item_bytes, |total, artifact| {
+            total.saturating_add(queue_cleanup_bytes(artifact))
+        })
 }
 
 fn validate_queue_limits(queue: &WorkQueue) -> Result<(), QueueLimitError> {
@@ -819,6 +928,20 @@ pub fn queue_items_json(items: &[QueueItem]) -> String {
         .expect("queue items json serialization should not fail")
 }
 
+pub fn queue_cleanup_artifacts_json(artifacts: &[QueueCleanupArtifact]) -> String {
+    serde_json::to_string(
+        &artifacts
+            .iter()
+            .map(|artifact| json!({ "ref": artifact.reference, "size": artifact.size }))
+            .collect::<Vec<_>>(),
+    )
+    .expect("queue cleanup json serialization should not fail")
+}
+
+pub fn queue_cleanup_completion_json(completed: usize, remaining: usize) -> String {
+    json!({ "completed": completed, "remaining": remaining }).to_string()
+}
+
 pub fn queue_length_json(length: usize) -> String {
     json!({ "length": length }).to_string()
 }
@@ -854,6 +977,28 @@ fn queue_item_value(item: &QueueItem) -> Value {
             "size": artifact.size,
         })).collect::<Vec<_>>(),
         "recoveryReason": item.recovery_reason,
+    })
+}
+
+fn queue_cleanup_value(artifact: &QueueCleanupArtifact) -> Value {
+    json!({
+        "queueCleanup": {
+            "ref": artifact.reference,
+            "size": artifact.size,
+        }
+    })
+}
+
+fn parse_queue_cleanup_value(input: &str) -> Option<QueueCleanupArtifact> {
+    let value: Value = serde_json::from_str(input).ok()?;
+    let cleanup = value.get("queueCleanup")?;
+    let reference = cleanup.get("ref")?.as_str()?.to_string();
+    if reference.trim().is_empty() {
+        return None;
+    }
+    Some(QueueCleanupArtifact {
+        reference,
+        size: cleanup.get("size")?.as_u64()?,
     })
 }
 
@@ -1122,6 +1267,79 @@ mod tests {
         assert_eq!(queue.pending_len(), 1);
         assert_eq!(queue.claim().map(|claimed| claimed.id), Some(item.id));
         assert_eq!(queue.snapshot().len(), 1);
+    }
+
+    #[test]
+    fn persistent_ack_tracks_attachment_cleanup_until_explicit_completion() {
+        let roots = QueueTestRoots::new("ack-cleanup");
+        let queue = PersistentWorkQueue::new(roots.queue_path());
+        let attachment = attachment_with_size(17);
+        let item = queue
+            .push_with_artifacts(
+                "cleanup after acknowledgement",
+                123,
+                vec![attachment.clone()],
+            )
+            .expect("push")
+            .expect("item");
+        let claimed = queue.claim().expect("claim").expect("claimed item");
+        assert_eq!(claimed.id, item.id);
+
+        assert_eq!(queue.ack(item.id).expect("ack"), Some(claimed));
+        assert_eq!(queue.nack(1).expect("nack removed id"), None);
+        assert_eq!(
+            queue
+                .cleanup_snapshot(64)
+                .expect("durable cleanup snapshot"),
+            vec![QueueCleanupArtifact {
+                reference: attachment.reference.clone(),
+                size: attachment.size,
+            }],
+        );
+        assert!(
+            queue_bytes(&queue.load().expect("load tracked cleanup")) >= attachment.size as usize,
+            "the tracked payload remains in the durable footprint until deletion completes",
+        );
+
+        assert_eq!(
+            queue
+                .complete_cleanup(&[attachment.reference.clone()])
+                .expect("complete cleanup"),
+            1,
+        );
+        assert!(queue
+            .cleanup_snapshot(64)
+            .expect("empty cleanup")
+            .is_empty());
+        assert!(queue.snapshot().expect("empty item queue").is_empty());
+
+        for index in 0..QUEUE_CLEANUP_SWEEP_LIMIT + 1 {
+            let mut artifact = attachment_with_size(0);
+            artifact.reference =
+                format!(".unclecode/artifacts/session/queue-attachments/cleanup-{index}.json");
+            let item = queue
+                .push_with_artifacts(
+                    format!("cleanup batch {index}"),
+                    index as u64,
+                    vec![artifact],
+                )
+                .expect("bounded cleanup push")
+                .expect("bounded cleanup item");
+            queue.claim().expect("bounded cleanup claim");
+            queue.ack(item.id).expect("bounded cleanup ack");
+        }
+        assert_eq!(
+            queue
+                .cleanup_snapshot(QUEUE_CLEANUP_SWEEP_LIMIT)
+                .expect("bounded cleanup batch")
+                .len(),
+            QUEUE_CLEANUP_SWEEP_LIMIT,
+        );
+        assert_eq!(
+            queue.cleanup_len().expect("retained cleanup count"),
+            QUEUE_CLEANUP_SWEEP_LIMIT + 1,
+            "one sweep can never expand past its explicit batch bound",
+        );
     }
 
     #[test]
