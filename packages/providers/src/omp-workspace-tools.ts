@@ -1,4 +1,12 @@
-import { constants } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
+  ftruncateSync,
+  writeSync,
+} from "node:fs";
 import {
   lstat,
   open,
@@ -31,6 +39,18 @@ type OmpWorkspaceTool = {
   ): Promise<{ readonly content: readonly [{ readonly type: "text"; readonly text: string }] }>;
 };
 
+type OmpWorkspaceToolOptions = {
+  /** Test seam that can widen the validation/open race without weakening the secure open itself. */
+  readonly beforeAnchoredWriteOpen?: () => void | Promise<void>;
+};
+
+type AnchoredOpenBackend = {
+  openAt(directoryFd: number, name: string, flags: number, mode: number): number;
+};
+
+const BUN_FFI_SPECIFIER = "bun:ffi";
+let anchoredOpenBackendPromise: Promise<AnchoredOpenBackend> | undefined;
+
 export class OmpWorkspacePathError extends Error {
   constructor(message: string) {
     super(message);
@@ -54,6 +74,7 @@ export async function canonicalizeOmpWorkspaceRoot(cwd: string): Promise<string>
 export function createOmpWorkspaceTools(
   workspaceRoot: string,
   schema: OmpSchemaFactory,
+  options: OmpWorkspaceToolOptions = {},
 ): readonly OmpWorkspaceTool[] {
   const result = (text: string) => ({ content: [{ type: "text" as const, text }] as const });
   const tools: OmpWorkspaceTool[] = [
@@ -93,7 +114,8 @@ export function createOmpWorkspaceTools(
         throwIfAborted(signal);
         const content = requireString(params.content, "content");
         const target = await resolveContainedWritablePath(workspaceRoot, requireString(params.path, "path"));
-        await writeNoFollow(target, content, signal);
+        await options.beforeAnchoredWriteOpen?.();
+        await writeNoFollow(workspaceRoot, target, content, signal);
         await assertExistingPathContained(workspaceRoot, target);
         return result(`Wrote ${Buffer.byteLength(content, "utf8")} bytes to ${displayPath(workspaceRoot, target)}.`);
       },
@@ -118,7 +140,13 @@ export function createOmpWorkspaceTools(
         if (original.indexOf(oldString, first + oldString.length) >= 0) {
           throw new Error("old_string is not unique in the target file.");
         }
-        await writeNoFollow(target, `${original.slice(0, first)}${newString}${original.slice(first + oldString.length)}`, signal);
+        await options.beforeAnchoredWriteOpen?.();
+        await writeNoFollow(
+          workspaceRoot,
+          target,
+          `${original.slice(0, first)}${newString}${original.slice(first + oldString.length)}`,
+          signal,
+        );
         await assertExistingPathContained(workspaceRoot, target);
         return result(`Edited ${displayPath(workspaceRoot, target)}.`);
       },
@@ -295,28 +323,194 @@ async function readBoundedUtf8File(target: string, signal?: AbortSignal): Promis
   }
 }
 
-async function writeNoFollow(target: string, content: string, signal?: AbortSignal): Promise<void> {
+async function writeNoFollow(
+  workspaceRoot: string,
+  target: string,
+  content: string,
+  signal?: AbortSignal,
+): Promise<void> {
   throwIfAborted(signal);
   if (Buffer.byteLength(content, "utf8") > MAX_TEXT_BYTES) {
     throw new Error(`Content exceeds the ${MAX_TEXT_BYTES}-byte OMP boundary.`);
   }
-  const handle = await open(
+  const descriptor = await openAnchoredWorkspaceFile(
+    workspaceRoot,
     target,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | noFollowFlag(),
+    constants.O_WRONLY | constants.O_CREAT | nonBlockingFlag(),
     0o644,
   );
   try {
-    const metadata = await handle.stat();
+    const metadata = fstatSync(descriptor);
     if (!metadata.isFile()) throw new OmpWorkspacePathError("Write target must be a regular file.");
-    await handle.writeFile(content, "utf8");
-    await handle.sync();
+    ftruncateSync(descriptor, 0);
+    const bytes = Buffer.from(content, "utf8");
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      throwIfAborted(signal);
+      const written = writeSync(descriptor, bytes, offset, bytes.byteLength - offset, offset);
+      if (written <= 0) throw new Error("OMP workspace write made no progress.");
+      offset += written;
+    }
+    fsyncSync(descriptor);
   } finally {
-    await handle.close();
+    closeSync(descriptor);
   }
+}
+
+/**
+ * Open a workspace file relative to directory descriptors, never by reopening
+ * a pathname that was validated earlier. OMP's worker is Bun, whose FFI gives
+ * us POSIX openat(2); Node and platforms without O_NOFOLLOW fail closed for
+ * writes because their pathname-only APIs cannot close the parent-symlink
+ * validation/open race.
+ */
+async function openAnchoredWorkspaceFile(
+  workspaceRoot: string,
+  target: string,
+  flags: number,
+  mode: number,
+): Promise<number> {
+  const noFollow = noFollowFlag();
+  const directory = directoryFlag();
+  if (noFollow === 0 || directory === 0) {
+    throw new OmpWorkspacePathError("Secure anchored workspace writes are unavailable on this platform.");
+  }
+
+  const relative = path.relative(workspaceRoot, target);
+  if (!relative || relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
+    throw new OmpWorkspacePathError("Write target must remain below the workspace root.");
+  }
+  const segments = relative.split(path.sep);
+  const fileName = segments.pop();
+  if (!fileName || fileName === "." || fileName === "..") {
+    throw new OmpWorkspacePathError("Write target must name a workspace file.");
+  }
+
+  const backend = await loadAnchoredOpenBackend();
+  const rootHandle = await open(workspaceRoot, constants.O_RDONLY | directory | noFollow);
+  let ownedDirectoryFd: number | undefined;
+  try {
+    let directoryFd = rootHandle.fd;
+    for (const segment of segments) {
+      const nextFd = backend.openAt(
+        directoryFd,
+        segment,
+        constants.O_RDONLY | directory | noFollow | closeOnExecFlag(),
+        0,
+      );
+      if (nextFd < 0) {
+        throw new OmpWorkspacePathError("Workspace write parent changed or contains a symbolic link.");
+      }
+      if (ownedDirectoryFd !== undefined) closeSync(ownedDirectoryFd);
+      ownedDirectoryFd = nextFd;
+      directoryFd = nextFd;
+    }
+
+    const existingFlags = flags & ~constants.O_CREAT;
+    let descriptor = backend.openAt(
+      directoryFd,
+      fileName,
+      existingFlags | noFollow | closeOnExecFlag(),
+      0,
+    );
+    if (descriptor < 0 && (flags & constants.O_CREAT) !== 0) {
+      // Bun FFI cannot express openat's variadic mode argument. A restrictive
+      // umask makes the just-created inode inaccessible until fchmod below,
+      // regardless of the ABI's unused register contents.
+      const previousUmask = process.umask(0o777);
+      try {
+        descriptor = backend.openAt(
+          directoryFd,
+          fileName,
+          existingFlags | constants.O_CREAT | constants.O_EXCL | noFollow | closeOnExecFlag(),
+          mode,
+        );
+      } finally {
+        process.umask(previousUmask);
+      }
+      if (descriptor >= 0) {
+        // openat is variadic when O_CREAT is present, which Bun FFI cannot
+        // describe portably. O_EXCL proves this call created the file, so it is
+        // safe to set the intended mode on the returned descriptor immediately.
+        fchmodSync(descriptor, mode);
+      } else {
+        // A contained peer may have won the create race. Reopen only through
+        // the same pinned parent descriptor; symlinks still fail O_NOFOLLOW.
+        descriptor = backend.openAt(
+          directoryFd,
+          fileName,
+          existingFlags | noFollow | closeOnExecFlag(),
+          0,
+        );
+      }
+    }
+    if (descriptor < 0) {
+      throw new OmpWorkspacePathError("Workspace write target changed or is a symbolic link.");
+    }
+    return descriptor;
+  } finally {
+    if (ownedDirectoryFd !== undefined) closeSync(ownedDirectoryFd);
+    await rootHandle.close();
+  }
+}
+
+async function loadAnchoredOpenBackend(): Promise<AnchoredOpenBackend> {
+  if (anchoredOpenBackendPromise) return anchoredOpenBackendPromise;
+  anchoredOpenBackendPromise = (async () => {
+    if (!process.versions.bun) {
+      throw new OmpWorkspacePathError("Secure anchored workspace writes require the isolated Bun worker.");
+    }
+    const libraryPath = process.platform === "darwin"
+      ? "/usr/lib/libSystem.B.dylib"
+      : process.platform === "linux"
+        ? "libc.so.6"
+        : process.platform === "freebsd"
+          ? "libc.so.7"
+          : undefined;
+    if (!libraryPath) {
+      throw new OmpWorkspacePathError("Secure anchored workspace writes are unavailable on this platform.");
+    }
+    try {
+      const ffi = await import(BUN_FFI_SPECIFIER) as unknown as {
+        dlopen(
+          library: string,
+          symbols: Readonly<Record<string, Readonly<Record<string, unknown>>>>,
+        ): { readonly symbols: { readonly openat: (...args: unknown[]) => number } };
+        ptr(buffer: Uint8Array): number | bigint;
+      };
+      const library = ffi.dlopen(libraryPath, {
+        openat: { args: ["i32", "ptr", "i32", "u32"], returns: "i32" },
+      });
+      return {
+        openAt(directoryFd, name, openFlags, mode) {
+          const nulTerminatedName = Buffer.from(`${name}\0`, "utf8");
+          return Number(library.symbols.openat(directoryFd, ffi.ptr(nulTerminatedName), openFlags, mode));
+        },
+      };
+    } catch (error) {
+      throw new OmpWorkspacePathError(
+        `Secure anchored workspace writes could not initialize: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  })();
+  return anchoredOpenBackendPromise;
 }
 
 function noFollowFlag(): number {
   return typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+}
+
+function directoryFlag(): number {
+  return typeof constants.O_DIRECTORY === "number" ? constants.O_DIRECTORY : 0;
+}
+
+function closeOnExecFlag(): number {
+  const value = (constants as unknown as Readonly<Record<string, unknown>>).O_CLOEXEC;
+  return typeof value === "number" ? value : 0;
+}
+
+function nonBlockingFlag(): number {
+  return typeof constants.O_NONBLOCK === "number" ? constants.O_NONBLOCK : 0;
 }
 
 async function collectWorkspaceFiles(target: string, signal?: AbortSignal): Promise<string[]> {
