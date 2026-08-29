@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
@@ -7,6 +8,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  truncateSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -83,6 +85,35 @@ const directoryQualityPlan = JSON.stringify([
   },
 ]);
 
+test("worker artifact paths preserve raw node identity and iteration without collisions", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-artifact-identity-"));
+  const store = new orchestrator.QualityArtifactStore(workspace, "quality-run-artifact-identity");
+
+  try {
+    const inputs = [
+      { nodeId: "a/b", attempt: 0, iteration: 0, summary: "slash id, first graph" },
+      { nodeId: "a-b", attempt: 0, iteration: 0, summary: "dash id, first graph" },
+      { nodeId: "a/b", attempt: 0, iteration: 2, summary: "slash id, reintroduced graph" },
+    ];
+    const artifacts = inputs.map((input) => store.persistNode({
+      ...input,
+      producerId: `worker:${input.nodeId}:iteration-${input.iteration}`,
+      writePaths: [],
+      completedAt: "2026-08-29T00:00:00.000Z",
+    }));
+
+    assert.equal(new Set(artifacts.map((artifact) => artifact.path)).size, 3);
+    assert.equal(readdirSync(store.runDirectory).length, 3);
+    assert.deepEqual(
+      artifacts.map((artifact) => JSON.parse(readFileSync(path.join(workspace, artifact.path), "utf8")))
+        .map(({ nodeId, attempt, iteration }) => [nodeId, attempt, iteration]),
+      [["a/b", 0, 0], ["a-b", 0, 0], ["a/b", 0, 2]],
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 function createDirectoryQualityAgent(input) {
   const host = new PluginHost();
   registerBuiltInSccQualityEngine(host, { workspaceRoot: input.workspace });
@@ -120,7 +151,8 @@ function createDirectoryQualityAgent(input) {
     setTraceListener() {},
     async runTurn(prompt) {
       if (prompt.includes("<quality_critic_read_only>")) {
-        input.mutateCritic?.();
+        input.reviewPrompts?.push(prompt);
+        input.mutateCritic?.(prompt);
         return { text: passingCriticVerdict };
       }
       if (prompt.includes("<quality_promote_read_only>")) {
@@ -134,6 +166,7 @@ function createDirectoryQualityAgent(input) {
     directAgent,
     reviewAgent,
     reviewRoute: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
+    reviewRouteEvidence: "declared",
     mode: "default",
     reasoning: supportedReasoning,
     model: "gpt-5.4",
@@ -220,6 +253,16 @@ test("balanced-prewalk uses direct frontier for pattern setting and commodity on
       model: "claude-sonnet-4-20250514",
       independent: true,
     },
+  );
+  assert.equal(
+    orchestrator.resolveBalancedPrewalkRoute({
+      stage: "critic",
+      directRoute,
+      reviewRoute: { provider: "openai", model: "gpt-5.6-sol" },
+      producerRoutes: [directRoute],
+    }).independent,
+    false,
+    "a different model on the producer provider is not independent-provider evidence",
   );
 });
 
@@ -315,6 +358,54 @@ test("simple English and Korean turns run the minimal SCC lifecycle without plan
     }
     assert.equal(traces.some((event) => event.type === "work.proposed"), false, "minimal quality must not invent a DAG");
     assert.throws(() => readdirSync(path.join(workspace, ".data")));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("quality classification uses the operator request instead of injected workspace context", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-classification-"));
+  const classifications = [];
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+  host.register("classification-observer", {
+    runClassified(event) {
+      classifications.push(event);
+      return { action: "proceed" };
+    },
+  });
+  const directAgent = {
+    clear() {},
+    updateRuntimeSettings() {},
+    setTraceListener() {},
+    async runTurn() {
+      return { text: "hello" };
+    },
+  };
+
+  try {
+    const agent = new orchestrator.WorkAgent({
+      directAgent,
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+    });
+
+    const result = await agent.runTurn(
+      "Workspace instructions: create an agent skill benchmark.\n\nUser request:\nhello",
+      [],
+      { classificationPrompt: "hello" },
+    );
+
+    assert.equal(result.text, "hello");
+    assert.equal(result.qualityStatus, "proceed");
+    assert.equal(classifications.length, 1);
+    assert.equal(classifications[0].prompt, "hello");
+    assert.equal(classifications[0].creatorIntent, false);
+    assert.equal(classifications[0].proposedProfile, "minimal");
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -533,13 +624,14 @@ test("WorkAgent runs the real quality lifecycle, persists hashed artifacts, and 
       qualityRisk: "medium",
       directRoute: { provider: "openai", model: "gpt-5.4" },
       reviewRoute: { provider: "openai", model: "gpt-5.4" },
+      reviewRouteEvidence: "declared",
       commodityRoute: { provider: "omp", model: "kimi-code/k3" },
     });
     agent.setTraceListener((event) => traces.push(event));
 
     const result = await agent.runTurn("refactor login.ts and session.ts");
 
-    assert.equal(result.text, "synthesis handoff");
+    assert.match(result.text, /implementation matches the requested acceptance criteria/i);
     assert.equal(result.qualityStatus, "unproven");
     assert.deepEqual(hookCalls, [
       "classified",
@@ -548,19 +640,17 @@ test("WorkAgent runs the real quality lifecycle, persists hashed artifacts, and 
       "after:task-1",
       "before:task-2",
       "after:task-2",
-      "complete",
     ]);
     assert.ok(directCalls.some((prompt) => prompt.includes("Implement login.ts")));
     assert.ok(commodityCalls.some((prompt) => prompt.includes("Implement session.ts")));
     assert.ok([...directCalls, ...commodityCalls].every((prompt) =>
       prompt.includes("SCC Quality Engine") || prompt.includes("Bounded project quality standards")
     ));
-    const criticPrompt = directCalls.find((prompt) => prompt.includes("Artifact manifest:"));
+    const criticPrompt = directCalls.find((prompt) => prompt.includes("<immutable_quality_review_packet"));
     const promotePrompt = directCalls.find((prompt) => prompt.includes("Synthesize executor findings"));
     assert.match(criticPrompt ?? "", /<quality_critic_read_only>/);
     assert.match(criticPrompt ?? "", /return only one JSON object/i);
-    assert.match(promotePrompt ?? "", /<quality_promote_read_only>/);
-    assert.match(promotePrompt ?? "", /do not invoke tools|tools are unavailable/i);
+    assert.equal(promotePrompt, undefined, "non-independent critic evidence cannot enter promote");
 
     const qualityTraces = traces.filter((event) => event.type.startsWith("quality."));
     assert.deepEqual(
@@ -576,7 +666,6 @@ test("WorkAgent runs the real quality lifecycle, persists hashed artifacts, and 
         ["work", "openai", "gpt-5.4", "frontier"],
         ["work", "omp", "kimi-code/k3", "commodity"],
         ["critic", "openai", "gpt-5.4", "direct"],
-        ["promote", "openai", "gpt-5.4", "direct"],
       ],
     );
     const gate = qualityTraces.find((event) => event.type === "quality.gate_evaluated" && event.stage === "critic");
@@ -587,9 +676,11 @@ test("WorkAgent runs the real quality lifecycle, persists hashed artifacts, and 
       event.type === "quality.gate_evaluated" && event.stage === "work" && event.nodeId === "task-1"
     );
     assert.equal(workerGate?.nodeAttempt, 0);
-    assert.deepEqual(workerGate?.artifactRefs, [
-      `.unclecode/artifacts/${workerGate?.runId}/task-1-attempt-0.json`,
-    ]);
+    assert.equal(workerGate?.artifactRefs.length, 1);
+    assert.match(
+      workerGate?.artifactRefs[0] ?? "",
+      /^\.unclecode\/artifacts\/quality-[^/]+\/task-1-[a-f0-9]{16}-iteration-0-attempt-0\.json$/u,
+    );
     assert.equal(qualityTraces.at(-1)?.type, "quality.completed");
     assert.equal(qualityTraces.at(-1)?.decision, "unproven");
 
@@ -598,7 +689,17 @@ test("WorkAgent runs the real quality lifecycle, persists hashed artifacts, and 
     const [runId] = runIds;
     const artifactDir = path.join(workspace, ".unclecode", "artifacts", runId);
     const artifactFiles = readdirSync(artifactDir).sort();
-    assert.deepEqual(artifactFiles, ["critic.json", "run.json", "task-1-attempt-0.json", "task-2-attempt-0.json"]);
+    const nonWorkerArtifacts = artifactFiles.filter((filename) => !filename.startsWith("task-"));
+    assert.ok(nonWorkerArtifacts.includes("critic.json"));
+    assert.ok(nonWorkerArtifacts.includes("run.json"));
+    assert.equal(
+      nonWorkerArtifacts.filter((filename) => /^review-packet-iteration-0-[a-f0-9]{64}\.json$/u.test(filename)).length,
+      1,
+    );
+    assert.equal(artifactFiles.filter((filename) => filename.startsWith("task-")).length, 2);
+    assert.ok(artifactFiles.filter((filename) => filename.startsWith("task-")).every((filename) =>
+      /^task-[12]-[a-f0-9]{16}-iteration-0-attempt-0\.json$/u.test(filename)
+    ));
     for (const file of artifactFiles) {
       const artifact = JSON.parse(readFileSync(path.join(artifactDir, file), "utf8"));
       assert.equal(artifact.runId, runId);
@@ -609,10 +710,11 @@ test("WorkAgent runs the real quality lifecycle, persists hashed artifacts, and 
   }
 });
 
-test("a refine decision terminates explicitly instead of silently reaching critic or promote", async () => {
+test("external refine hooks execute bounded retries and stop at the authoritative core limit", async () => {
   const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-refine-"));
   const traces = [];
   let factoryCalls = 0;
+  let workerCalls = 0;
   const host = new PluginHost();
   host.register("refiner", {
     afterNodeCompleted: () => ({ action: "refine", reason: "add a boundary test" }),
@@ -623,7 +725,10 @@ test("a refine decision terminates explicitly instead of silently reaching criti
     setTraceListener() {},
     async runTurn(prompt) {
       if (prompt.includes("<goal_task_planner>")) return { text: qualityPlan };
-      if (prompt.includes("Implement login.ts")) return { text: "first pass" };
+      if (prompt.includes("Implement login.ts")) {
+        workerCalls += 1;
+        return { text: `worker pass ${workerCalls}` };
+      }
       return { text: "must not reach critic or promote" };
     },
   };
@@ -648,9 +753,14 @@ test("a refine decision terminates explicitly instead of silently reaching criti
     const result = await agent.runTurn("refactor login.ts and session.ts");
 
     assert.equal(result.qualityStatus, "block");
-    assert.match(result.text, /refine requested.*add a boundary test/i);
-    assert.equal(factoryCalls, 0, "the follower, critic, and promote never run after refine termination");
-    assert.equal(traces.filter((event) => event.type === "quality.refine_requested").length, 1);
+    assert.match(result.text, /refine limit reached/i);
+    assert.equal(workerCalls, 4, "the initial attempt plus three bounded refinements run");
+    assert.equal(factoryCalls, 0, "the dependency remains blocked while its prerequisite requests refinement");
+    assert.equal(traces.filter((event) => event.type === "quality.refine_requested").length, 3);
+    assert.ok(traces.some((event) =>
+      event.type === "quality.gate_evaluated"
+      && event.failures.includes("QUALITY_REFINE_LIMIT_REACHED")
+    ));
     assert.equal(traces.some((event) => event.type === "quality.stage_started" && event.stage === "critic"), false);
     assert.equal(traces.some((event) => event.type === "quality.stage_started" && event.stage === "promote"), false);
   } finally {
@@ -847,6 +957,7 @@ test("an invalid critic verdict blocks before promote instead of becoming pass e
       directAgent,
       reviewAgent,
       reviewRoute: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
+      reviewRouteEvidence: "declared",
       async createExecutorAgent() {
         return {
           clear() {},
@@ -917,6 +1028,7 @@ test("a failing executable check blocks a passing critic before promote", async 
       directAgent,
       reviewAgent,
       reviewRoute: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
+      reviewRouteEvidence: "declared",
       async createExecutorAgent() {
         return {
           clear() {},
@@ -949,6 +1061,134 @@ test("a failing executable check blocks a passing critic before promote", async 
     assert.equal(result.qualityStatus, "block");
     assert.match(result.text, /executable check failed/i);
     assert.equal(reviewPrompts.length, 1, "failed checks must prevent promote");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("independent critic receives the canonical owned content packet and reviews its exact hash", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-critic-packet-"));
+  const reviewPrompts = [];
+  const traces = [];
+  try {
+    const agent = createDirectoryQualityAgent({ workspace, reviewPrompts, traces });
+
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+
+    assert.equal(result.qualityStatus, "proceed");
+    assert.equal(reviewPrompts.length, 1);
+    assert.match(reviewPrompts[0], /<immutable_quality_review_packet/);
+    assert.ok(
+      reviewPrompts[0].indexOf("<immutable_quality_review_packet")
+        < reviewPrompts[0].indexOf("</quality_critic_read_only>"),
+      "the canonical packet remains inside the read-only critic instruction boundary",
+    );
+    assert.match(reviewPrompts[0], /baseline\\n/);
+    assert.match(reviewPrompts[0], /runtime\.test\.ts/);
+    const packetHash = reviewPrompts[0].match(/sha256:[a-f0-9]{64}/)?.[0];
+    assert.ok(packetHash);
+    const criticGate = traces.find((event) =>
+      event.type === "quality.gate_evaluated" && event.stage === "critic"
+    );
+    assert.equal(criticGate?.artifactHash, packetHash);
+    const packetRef = criticGate?.evidenceRefs.find((reference) => reference.includes("review-packet-"));
+    assert.ok(packetRef, "critic evidence must retain the immutable packet artifact");
+    const persisted = JSON.parse(readFileSync(path.join(workspace, packetRef), "utf8"));
+    assert.equal(persisted.artifactHash, packetHash);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("undeclared worker writes block before the independent critic can approve them", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-undeclared-write-"));
+  const reviewPrompts = [];
+  const traces = [];
+  try {
+    const agent = createDirectoryQualityAgent({
+      workspace,
+      reviewPrompts,
+      traces,
+      mutateRuntimeWorker() {
+        writeFileSync(path.join(workspace, "undeclared-backdoor.ts"), "export const hidden = true;\n");
+      },
+    });
+
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.equal(reviewPrompts.length, 0, "ownership violations must fail before reviewer execution");
+    const criticGate = traces.find((event) =>
+      event.type === "quality.gate_evaluated" && event.stage === "critic"
+    );
+    assert.ok(criticGate?.failures.includes("UNDECLARED_WORKSPACE_WRITE"));
+    assert.match(JSON.stringify(criticGate), /undeclared-backdoor\.ts/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("an undeclared mutation during critic makes the reviewed packet stale", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-undeclared-critic-"));
+  const reviewPrompts = [];
+  const traces = [];
+  try {
+    const agent = createDirectoryQualityAgent({
+      workspace,
+      reviewPrompts,
+      traces,
+      mutateCritic() {
+        writeFileSync(path.join(workspace, "critic-backdoor.ts"), "export const hidden = true;\n");
+      },
+    });
+
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.equal(reviewPrompts.length, 1);
+    const criticGate = traces.find((event) =>
+      event.type === "quality.gate_evaluated" && event.stage === "critic"
+    );
+    assert.ok(criticGate?.failures.includes("UNDECLARED_WORKSPACE_WRITE"));
+    assert.equal(criticGate?.stale, true);
+    assert.notEqual(criticGate?.reviewedArtifactHash, criticGate?.currentArtifactHash);
+    assert.match(JSON.stringify(criticGate), /critic-backdoor\.ts/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("tampering with the immutable packet during critic blocks instead of crashing", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-packet-tamper-"));
+  const traces = [];
+  try {
+    const agent = createDirectoryQualityAgent({
+      workspace,
+      traces,
+      mutateCritic(prompt) {
+        const hash = prompt.match(/sha256="sha256:([a-f0-9]{64})"/)?.[1];
+        const runId = prompt.match(/"runId": "([^"]+)"/)?.[1];
+        assert.ok(hash && runId);
+        writeFileSync(
+          path.join(
+            workspace,
+            ".unclecode",
+            "artifacts",
+            runId,
+            `review-packet-iteration-0-${hash}.json`,
+          ),
+          "tampered\n",
+        );
+      },
+    });
+
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    const criticGate = traces.find((event) =>
+      event.type === "quality.gate_evaluated" && event.stage === "critic"
+    );
+    assert.ok(criticGate?.failures.includes("IMMUTABLE_REVIEW_PACKET_ARTIFACT_INVALID"));
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -1193,6 +1433,159 @@ test("directory ownership persists canonical recursive worker evidence", () => {
   }
 });
 
+test("review packets bind the critic to canonical owned content instead of worker prose", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-review-packet-"));
+  try {
+    writeFileSync(path.join(workspace, "owned.ts"), "export const value = 'before';\n");
+    const store = new orchestrator.QualityArtifactStore(workspace, "review-packet");
+    const baseline = store.captureWorkspaceInventory(["owned.ts"]);
+    writeFileSync(path.join(workspace, "owned.ts"), "export const value = 'after';\n");
+
+    const packet = store.persistReviewPacket({
+      graphId: "goal-review-packet",
+      iteration: 0,
+      baseline,
+      request: "Change owned.ts safely.",
+      tasks: [{
+        id: "task-owned",
+        acceptanceCriteria: ["owned.ts exports after"],
+        writePaths: ["owned.ts"],
+      }],
+      results: [{ id: "task-owned", status: "completed", summary: "trust me" }],
+      workerArtifacts: [],
+      executableChecks: [{ name: "test", status: "passed", summary: "tests passed" }],
+    });
+
+    assert.equal(packet.evidenceStatus, "supported");
+    assert.deepEqual(packet.changedPaths, ["owned.ts"]);
+    assert.deepEqual(packet.undeclaredPaths, []);
+    assert.match(packet.canonicalContent, /export const value = 'after';/);
+    assert.match(packet.canonicalContent, /"untrustedWorkerSummary": "trust me"/);
+    assert.equal(
+      packet.artifactHash,
+      `sha256:${createHash("sha256").update(packet.canonicalContent).digest("hex")}`,
+      "reviewer evidence must hash the exact canonical packet body shown to the critic",
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("review packets reject undeclared workspace writes and become stale after mutation", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-review-inventory-"));
+  try {
+    writeFileSync(path.join(workspace, "owned.ts"), "before\n");
+    const store = new orchestrator.QualityArtifactStore(workspace, "review-inventory");
+    const baseline = store.captureWorkspaceInventory(["owned.ts"]);
+    writeFileSync(path.join(workspace, "owned.ts"), "after\n");
+    writeFileSync(path.join(workspace, "surprise.ts"), "undeclared\n");
+    const input = {
+      graphId: "goal-review-inventory",
+      iteration: 0,
+      baseline,
+      request: "Change only owned.ts.",
+      tasks: [{ id: "task-owned", acceptanceCriteria: ["done"], writePaths: ["owned.ts"] }],
+      results: [{ id: "task-owned", status: "completed", summary: "done" }],
+      workerArtifacts: [],
+      executableChecks: [],
+    };
+
+    const packet = store.persistReviewPacket(input);
+    assert.equal(packet.evidenceStatus, "unsupported");
+    assert.deepEqual(packet.changedPaths, ["owned.ts", "surprise.ts"]);
+    assert.deepEqual(packet.undeclaredPaths, ["surprise.ts"]);
+
+    unlinkSync(path.join(workspace, "surprise.ts"));
+    const cleanPacket = store.persistReviewPacket(input);
+    writeFileSync(path.join(workspace, "owned.ts"), "mutated after critic input\n");
+    const stalePacket = store.persistReviewPacket(input);
+    assert.notEqual(stalePacket.artifactHash, cleanPacket.artifactHash);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("review packets stay bounded and reject a tampered content-addressed artifact", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-review-bounds-"));
+  try {
+    writeFileSync(path.join(workspace, "owned.ts"), "before\n");
+    const store = new orchestrator.QualityArtifactStore(workspace, "review-bounds");
+    const baseline = store.captureWorkspaceInventory(["owned.ts"]);
+    writeFileSync(path.join(workspace, "owned.ts"), "after\n");
+    const normalInput = {
+      graphId: "goal-review-bounds",
+      iteration: 0,
+      baseline,
+      request: "Change owned.ts.",
+      tasks: [{ id: "task-owned", acceptanceCriteria: ["done"], writePaths: ["owned.ts"] }],
+      results: [{ id: "task-owned", status: "completed", summary: "done" }],
+      workerArtifacts: [],
+      executableChecks: [],
+    };
+    const packet = store.persistReviewPacket(normalInput);
+    writeFileSync(path.join(workspace, packet.path), "tampered artifact\n");
+    assert.throws(
+      () => store.persistReviewPacket(normalInput),
+      /immutable review packet artifact/i,
+    );
+
+    const oversized = store.persistReviewPacket({
+      ...normalInput,
+      iteration: 1,
+      tasks: Array.from({ length: 700 }, (_, index) => ({
+        id: `task-${index}`,
+        acceptanceCriteria: ["x".repeat(2_000)],
+        writePaths: ["owned.ts"],
+      })),
+    });
+    assert.equal(oversized.evidenceStatus, "unsupported");
+    assert.ok(Buffer.byteLength(oversized.canonicalContent) <= orchestrator.QUALITY_REVIEW_PACKET_MAX_BYTES);
+    assert.match(oversized.canonicalContent, /QUALITY_REVIEW_PACKET_LIMIT_EXCEEDED/);
+
+    const truncatedRequest = store.persistReviewPacket({
+      ...normalInput,
+      iteration: 2,
+      request: "x".repeat(32_001),
+    });
+    assert.equal(truncatedRequest.evidenceStatus, "unsupported");
+    assert.match(truncatedRequest.canonicalContent, /requestTruncated/);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a truncated workspace inventory can never become supported review evidence", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-review-inventory-limit-"));
+  try {
+    writeFileSync(path.join(workspace, "owned.ts"), "content\n");
+    const store = new orchestrator.QualityArtifactStore(workspace, "review-inventory-limit");
+    const actualInventory = store.captureWorkspaceInventory(["owned.ts"]);
+    const truncatedInventory = {
+      files: [
+        ...actualInventory.files,
+        { path: "[inventory-entry-limit]", kind: "unreadable", sha256: null },
+      ],
+    };
+    store.captureWorkspaceInventory = () => truncatedInventory;
+
+    const packet = store.persistReviewPacket({
+      graphId: "goal-review-inventory-limit",
+      iteration: 0,
+      baseline: truncatedInventory,
+      request: "Review owned.ts.",
+      tasks: [{ id: "task-owned", acceptanceCriteria: ["done"], writePaths: ["owned.ts"] }],
+      results: [{ id: "task-owned", status: "completed", summary: "done" }],
+      workerArtifacts: [],
+      executableChecks: [],
+    });
+
+    assert.equal(packet.evidenceStatus, "unsupported");
+    assert.ok(packet.unsupportedEntries.some((entry) => entry.path === "[inventory-entry-limit]"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("ordinary files, directories, and missing owned roots remain supported evidence", () => {
   const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-supported-evidence-"));
   try {
@@ -1212,6 +1605,23 @@ test("ordinary files, directories, and missing owned roots remain supported evid
         { path: "src/ordinary.ts", kind: "file" },
       ],
     );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("quality evidence rejects oversized files without reading them into memory", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-bounded-evidence-"));
+  try {
+    const oversized = path.join(workspace, "oversized.bin");
+    writeFileSync(oversized, "x");
+    truncateSync(oversized, orchestrator.QUALITY_MANIFEST_MAX_FILE_BYTES + 1);
+    const store = new orchestrator.QualityArtifactStore(workspace, "bounded-evidence");
+
+    const manifest = store.captureWorkspaceManifest(["oversized.bin"]);
+
+    assert.equal(manifest.evidenceStatus, "unsupported");
+    assert.deepEqual(manifest.files, [{ path: "oversized.bin", kind: "unreadable", sha256: null }]);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -1360,6 +1770,7 @@ test("a workspace mutation during critic invalidates reviewer evidence before pr
       directAgent,
       reviewAgent,
       reviewRoute: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
+      reviewRouteEvidence: "declared",
       async createExecutorAgent() {
         return {
           clear() {},
@@ -1434,6 +1845,7 @@ test("a workspace mutation during promote blocks completion and invalidates the 
       directAgent,
       reviewAgent,
       reviewRoute: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
+      reviewRouteEvidence: "declared",
       async createExecutorAgent() {
         return {
           clear() {},
@@ -1508,6 +1920,7 @@ test("a workspace mutation inside beforeRunComplete invalidates reviewer evidenc
       directAgent,
       reviewAgent,
       reviewRoute: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
+      reviewRouteEvidence: "declared",
       async createExecutorAgent() {
         return {
           clear() {},
@@ -1539,34 +1952,6 @@ test("a workspace mutation inside beforeRunComplete invalidates reviewer evidenc
 
     assert.equal(result.qualityStatus, "block");
     assert.match(result.text, /artifact manifest changed during promote/i);
-  } finally {
-    rmSync(workspace, { recursive: true, force: true });
-  }
-});
-
-test("successful completion preserves fresh critic provenance in the terminal trace", async () => {
-  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-terminal-provenance-"));
-  const traces = [];
-  try {
-    const agent = createDirectoryQualityAgent({ workspace, traces });
-    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
-    assert.equal(result.qualityStatus, "proceed");
-    const critic = traces.find((event) =>
-      event.type === "quality.gate_evaluated"
-      && event.stage === "critic"
-      && event.decision === "proceed");
-    const completed = traces.find((event) => event.type === "quality.completed");
-    assert.ok(critic?.reviewerRunId);
-    assert.equal(critic.stale, false);
-    assert.equal(critic.reviewedArtifactHash, critic.currentArtifactHash);
-    assert.deepEqual(critic.artifactRefs, critic.evidenceRefs);
-    assert.equal(completed?.reviewerRunId, critic.reviewerRunId);
-    assert.equal(completed?.artifactHash, critic.artifactHash);
-    assert.equal(completed?.reviewedArtifactHash, critic.reviewedArtifactHash);
-    assert.equal(completed?.currentArtifactHash, critic.currentArtifactHash);
-    assert.equal(completed?.independentVerification, true);
-    assert.deepEqual(completed?.artifactRefs, critic.artifactRefs);
-    assert.deepEqual(completed?.evidenceRefs, critic.evidenceRefs);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

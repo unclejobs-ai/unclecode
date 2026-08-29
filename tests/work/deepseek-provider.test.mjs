@@ -223,6 +223,20 @@ test("quality review bootstrap prefers a genuinely distinct configured provider"
     model: "deepseek-chat",
     distinct: false,
   });
+
+  assert.deepEqual(resolveQualityReviewSelection({
+    directProvider: "openai",
+    directModel: "gpt-5.4",
+    env: {
+      OPENAI_API_KEY: "openai-key",
+      UNCLECODE_REVIEW_PROVIDER: "openai",
+      UNCLECODE_REVIEW_MODEL: "gpt-5.6-sol",
+    },
+  }), {
+    provider: "openai",
+    model: "gpt-5.6-sol",
+    distinct: false,
+  });
 });
 
 test("the real bootstrap uses injected env for distinct direct and review routes", async () => {

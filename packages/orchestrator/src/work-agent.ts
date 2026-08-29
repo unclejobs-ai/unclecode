@@ -5,6 +5,7 @@ import {
   DEFAULT_ITERATION_LIMITS,
   evaluateGate,
   type GateEvidence,
+  type GateFinding,
   type QualityRunProjection,
   type RiskLevel,
 } from "@second-claude/core";
@@ -54,11 +55,17 @@ import {
 import {
   QualityArtifactStore,
   parseCriticVerdict,
+  readQualityRouteObservation,
   resolveBalancedPrewalkRoute,
+  resolveQualityReviewRouteEvidence,
   type BalancedPrewalkRoute,
   type PersistedQualityArtifact,
   type QualityProviderRoute,
+  type QualityReviewPacket,
+  type QualityReviewPacketInput,
+  type QualityRouteObservation,
   type QualityWorkspaceEntry,
+  type QualityWorkspaceInventory,
 } from "./quality-runtime.js";
 import type { CreatorEvolutionService } from "./evolution-runtime.js";
 import {
@@ -143,7 +150,15 @@ export interface OrchestratedWorkTurnAgent<
   setTraceListener(listener?: ((event: TraceEvent) => void) | undefined): void;
   updateRuntimeSettings(settings: { reasoning?: Reasoning | undefined; model?: string | undefined }): void;
   updateMode?(mode: string): void;
-  runTurn(prompt: string, attachments?: readonly Attachment[], options?: { readonly signal?: AbortSignal | undefined }): Promise<{ text: string }>;
+  runTurn(
+    prompt: string,
+    attachments?: readonly Attachment[],
+    options?: {
+      readonly signal?: AbortSignal | undefined;
+      /** Operator-authored prompt before workspace/context decoration. */
+      readonly classificationPrompt?: string | undefined;
+    },
+  ): Promise<{ text: string }>;
 }
 
 export function parseAgentPlanResponse(text: string): readonly PlannedWorkTask[] {
@@ -267,6 +282,16 @@ type QualityTerminal = {
   readonly nodeId?: string;
 };
 
+type QualityIterationRequest = Omit<QualityTerminal, "requested" | "nodeId"> & {
+  readonly requested: Extract<QualityGateStatus, "refine" | "pivot">;
+  readonly sourceIteration: number;
+  readonly affectedNodeIds: ReadonlySet<string>;
+  readonly rerunAll: boolean;
+  readonly evidenceRefs: ReadonlySet<string>;
+  readonly nodeAttempt?: number | undefined;
+  readonly artifactRefs: ReadonlySet<string>;
+};
+
 type QualityTerminalProvenance = {
   readonly evidenceRefs: readonly string[];
   readonly artifactRefs: readonly string[];
@@ -286,14 +311,17 @@ type QualityRuntimeState = {
   readonly creatorIntent: boolean;
   readonly artifacts: QualityArtifactStore;
   readonly completedStages: Set<QualityHarnessStage>;
-  readonly workerArtifacts: PersistedQualityArtifact[];
-  readonly producerRoutes: QualityProviderRoute[];
+  readonly workerArtifactsByNode: Map<string, PersistedQualityArtifact>;
+  readonly producerRoutesByNode: Map<string, QualityProviderRoute>;
+  readonly producerAgentRunIdsByNode: Map<string, string>;
   readonly failures: string[];
   readonly terminalHookNodeIds: Set<string>;
   graph?: WorkGraph;
   refineCount: number;
   pivotCount: number;
   iteration: number;
+  pendingIteration?: QualityIterationRequest;
+  reviewBaseline?: QualityWorkspaceInventory;
   terminalProvenance?: QualityTerminalProvenance;
   terminal?: QualityTerminal;
   completed: boolean;
@@ -346,12 +374,104 @@ function appendQualityContext(
 }
 
 function routesDiffer(left: QualityProviderRoute, right: QualityProviderRoute): boolean {
-  return left.provider !== right.provider || left.model !== right.model;
+  return left.provider !== right.provider;
 }
 
 function qualityWritePaths(state: QualityRuntimeState): readonly string[] {
   return [...new Set(state.graph?.nodes.flatMap((node) => node.fileOwnership) ?? [])]
     .sort((left, right) => left.localeCompare(right));
+}
+
+function qualityNodeAttemptKey(
+  state: Pick<QualityRuntimeState, "iteration">,
+  node: Pick<WorkNode, "id" | "attempt">,
+): string {
+  return `${node.id}:attempt-${node.attempt}:iteration-${state.iteration}`;
+}
+
+function qualityJobKey(state: QualityRuntimeState, node: Pick<WorkNode, "id" | "attempt">): string {
+  return state.iteration === 0 && node.attempt === 0
+    ? node.id
+    : `${node.id}:attempt-${node.attempt}:iteration-${state.iteration}`;
+}
+
+function currentWorkerArtifacts(state: QualityRuntimeState): readonly PersistedQualityArtifact[] {
+  return state.graph?.nodes.flatMap((node) => {
+    const artifact = state.workerArtifactsByNode.get(node.id);
+    return artifact ? [artifact] : [];
+  }) ?? [];
+}
+
+function currentProducerRoutes(state: QualityRuntimeState): readonly QualityProviderRoute[] {
+  return state.graph?.nodes.flatMap((node) => {
+    const route = state.producerRoutesByNode.get(node.id);
+    return route ? [route] : [];
+  }) ?? [];
+}
+
+function currentProducerAgentRunIds(state: QualityRuntimeState): readonly string[] {
+  return state.graph?.nodes.flatMap((node) => {
+    const agentRunId = state.producerAgentRunIdsByNode.get(node.id);
+    return agentRunId ? [agentRunId] : [];
+  }) ?? [];
+}
+
+function requestedIterationForFindings(
+  findings: readonly GateFinding[],
+): Extract<QualityGateStatus, "refine" | "pivot"> | undefined {
+  if (findings.some((finding) => finding.kind === "plan" || finding.kind === "acceptance")) {
+    return "pivot";
+  }
+  if (findings.length === 0 || !findings.every((finding) => finding.correctable)) {
+    return undefined;
+  }
+  return new Set(findings.map((finding) => finding.direction ?? "default")).size === 1
+    ? "refine"
+    : "pivot";
+}
+
+function iterationLimitFailure(action: Extract<QualityGateStatus, "refine" | "pivot">): string {
+  return action === "refine" ? "QUALITY_REFINE_LIMIT_REACHED" : "QUALITY_PIVOT_LIMIT_REACHED";
+}
+
+function iterationLimitDecision(
+  action: Extract<QualityGateStatus, "refine" | "pivot">,
+): PluginDecisionAggregate {
+  const limit = DEFAULT_ITERATION_LIMITS[action];
+  const failure = iterationLimitFailure(action);
+  const reason = `Quality ${action} limit reached (${limit}); the bounded quality loop cannot continue.`;
+  return {
+    action: "block",
+    decisions: [{
+      pluginName: "unclecode-runtime",
+      action: "block",
+      reason,
+      failures: [failure],
+    }],
+    failures: [failure],
+  };
+}
+
+function selectRefineTasks(
+  tasks: readonly PlannedWorkTask[],
+  graph: WorkGraph,
+  affectedNodeIds: ReadonlySet<string> | undefined,
+): readonly PlannedWorkTask[] {
+  if (!affectedNodeIds || affectedNodeIds.size === 0) return tasks;
+  const selected = new Set<string>();
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const includeWithDependencies = (nodeId: string): void => {
+    if (selected.has(nodeId)) return;
+    const task = taskById.get(nodeId);
+    if (!task) return;
+    for (const dependencyId of task.dependsOn) includeWithDependencies(dependencyId);
+    selected.add(nodeId);
+  };
+  for (const affectedNodeId of affectedNodeIds) includeWithDependencies(affectedNodeId);
+  for (const node of graph.nodes) {
+    if (node.status !== "completed") includeWithDependencies(node.id);
+  }
+  return tasks.filter((task) => selected.has(task.id));
 }
 
 function staleArtifactDecision(stage: "critic" | "promote"): PluginDecisionAggregate {
@@ -424,6 +544,7 @@ export class WorkAgent<
   private directRoute: QualityProviderRoute;
   private readonly commodityRoute: QualityProviderRoute | undefined;
   private readonly reviewRoute: QualityProviderRoute | undefined;
+  private readonly allowDeclaredReviewRouteEvidence: boolean;
   private traceListener: ((event: OrchestratedWorkAgentTraceEvent<TraceEvent>) => void) | undefined;
   private readonly runController: WorkAgentRunController<Attachment, TraceEvent, Reasoning>;
 
@@ -442,6 +563,8 @@ export class WorkAgent<
     directRoute?: QualityProviderRoute | undefined;
     commodityRoute?: QualityProviderRoute | undefined;
     reviewRoute?: QualityProviderRoute | undefined;
+    /** Explicit escape hatch for deterministic agents that cannot emit provider telemetry. */
+    reviewRouteEvidence?: "declared" | undefined;
   }) {
     this.directAgent = input.directAgent;
     this.reviewAgent = input.reviewAgent;
@@ -457,6 +580,7 @@ export class WorkAgent<
     this.directRoute = input.directRoute ?? { provider: "unknown", model: input.model };
     this.commodityRoute = input.commodityRoute;
     this.reviewRoute = input.reviewRoute;
+    this.allowDeclaredReviewRouteEvidence = input.reviewRouteEvidence === "declared";
     this.runController = new WorkAgentRunController({
       directAgent: input.directAgent,
       ...(input.createExecutorAgent ? { createExecutorAgent: input.createExecutorAgent } : {}),
@@ -534,20 +658,20 @@ export class WorkAgent<
   private async runReadOnlyQualityTurn(
     prompt: string,
     signal: AbortSignal,
-  ): Promise<{ readonly text: string }> {
+  ): Promise<{ readonly text: string; readonly routeObservations: readonly QualityRouteObservation[] }> {
     if (!this.reviewAgent || this.reviewAgent === this.directAgent) {
       throw new Error("A dedicated read-only quality review agent is unavailable.");
     }
     const outerListener = this.traceListener;
-    this.reviewAgent.setTraceListener(
-      outerListener
-        ? (event) => {
-            if (event.type === "usage.recorded") this.emitTrace(event);
-          }
-        : undefined,
-    );
+    const routeObservations: QualityRouteObservation[] = [];
+    this.reviewAgent.setTraceListener((event) => {
+      const observation = readQualityRouteObservation(event);
+      if (observation) routeObservations.push(observation);
+      if (outerListener && event.type === "usage.recorded") this.emitTrace(event);
+    });
     try {
-      return await this.reviewAgent.runTurn(prompt, [], { signal });
+      const result = await this.reviewAgent.runTurn(prompt, [], { signal });
+      return { ...result, routeObservations };
     } finally {
       this.reviewAgent.setTraceListener(undefined);
     }
@@ -640,8 +764,9 @@ export class WorkAgent<
       creatorIntent,
       artifacts: new QualityArtifactStore(this.workspaceRoot, runId),
       completedStages: new Set(),
-      workerArtifacts: [],
-      producerRoutes: [],
+      workerArtifactsByNode: new Map(),
+      producerRoutesByNode: new Map(),
+      producerAgentRunIdsByNode: new Map(),
       failures: [],
       terminalHookNodeIds: new Set(),
       refineCount: 0,
@@ -703,8 +828,19 @@ export class WorkAgent<
     decision: PluginDecisionAggregate,
     detail: QualityDecisionDetail = {},
   ): void {
-    const failures = [...new Set(decision.failures)];
-    const reason = decisionReason(decision);
+    const requestedIteration = decision.action === "refine" || decision.action === "pivot"
+      ? decision.action
+      : undefined;
+    const coalescedRequest = requestedIteration && state.pendingIteration?.requested === "pivot"
+      ? "pivot"
+      : requestedIteration;
+    const effectiveDecision = coalescedRequest
+      && (coalescedRequest === "refine" ? state.refineCount : state.pivotCount)
+        >= DEFAULT_ITERATION_LIMITS[coalescedRequest]
+      ? iterationLimitDecision(coalescedRequest)
+      : decision;
+    const failures = [...new Set(effectiveDecision.failures)];
+    const reason = decisionReason(effectiveDecision);
     const reviewedArtifactHash = detail.reviewedArtifactHash ?? detail.artifactHash;
     const currentArtifactHash = detail.currentArtifactHash ?? reviewedArtifactHash;
     const stale = detail.stale
@@ -720,8 +856,8 @@ export class WorkAgent<
       detail.artifactRefs
         ?? ((stage === "critic" || stage === "promote") ? evidenceRefs : []),
     )];
-    for (const failure of failures) {
-      if (!state.failures.includes(failure)) state.failures.push(failure);
+    if (!state.terminal || effectiveDecision.action === "block") {
+      state.failures.splice(0, state.failures.length, ...failures);
     }
     this.emitTrace({
       type: "quality.gate_evaluated",
@@ -741,7 +877,7 @@ export class WorkAgent<
             route: detail.route.route,
           }
         : {}),
-      decision: decision.action,
+      decision: effectiveDecision.action,
       refineCount: state.refineCount,
       pivotCount: state.pivotCount,
       evidenceRefs,
@@ -769,58 +905,45 @@ export class WorkAgent<
       };
     }
 
-    if (decision.action !== "refine" && decision.action !== "pivot" && decision.action !== "block") {
+    if (
+      effectiveDecision.action !== "refine"
+      && effectiveDecision.action !== "pivot"
+      && effectiveDecision.action !== "block"
+    ) {
       return;
     }
-    if (decision.action === "refine") {
-      delete state.terminalProvenance;
-      state.refineCount += 1;
-      state.iteration += 1;
-      this.emitTrace({
-        type: "quality.refine_requested",
-        level: "high-signal",
-        runId: state.runId,
-        graphId: state.graphId,
-        profile: state.profile,
-        stage,
-        iteration: state.iteration,
-        decision: "refine",
-        count: state.refineCount,
-        limit: DEFAULT_ITERATION_LIMITS.refine,
-        reason,
-        evidenceRefs: detail.evidenceRefs ?? [],
-        failures,
-        ...(detail.nodeId ? { nodeId: detail.nodeId } : {}),
-        ...(detail.nodeAttempt === undefined ? {} : { nodeAttempt: detail.nodeAttempt }),
-        ...(detail.artifactRefs ? { artifactRefs: [...detail.artifactRefs] } : {}),
-        startedAt: Date.now(),
-      });
-    } else if (decision.action === "pivot") {
-      delete state.terminalProvenance;
-      state.pivotCount += 1;
-      state.iteration += 1;
-      this.emitTrace({
-        type: "quality.pivot_requested",
-        level: "high-signal",
-        runId: state.runId,
-        graphId: state.graphId,
-        profile: state.profile,
-        stage,
-        iteration: state.iteration,
-        decision: "pivot",
-        count: state.pivotCount,
-        limit: DEFAULT_ITERATION_LIMITS.pivot,
-        reason,
-        evidenceRefs: detail.evidenceRefs ?? [],
-        failures,
-        ...(detail.nodeId ? { nodeId: detail.nodeId } : {}),
-        ...(detail.nodeAttempt === undefined ? {} : { nodeAttempt: detail.nodeAttempt }),
-        ...(detail.artifactRefs ? { artifactRefs: [...detail.artifactRefs] } : {}),
-        startedAt: Date.now(),
-      });
+    if (effectiveDecision.action === "refine" || effectiveDecision.action === "pivot") {
+      if (state.terminal) return;
+      const existing = state.pendingIteration;
+      const requested = existing?.requested === "pivot" || effectiveDecision.action === "pivot"
+        ? "pivot"
+        : "refine";
+      const affectedNodeIds = new Set(existing?.affectedNodeIds ?? []);
+      if (detail.nodeId) affectedNodeIds.add(detail.nodeId);
+      const evidenceRefs = new Set(existing?.evidenceRefs ?? []);
+      for (const reference of detail.evidenceRefs ?? []) evidenceRefs.add(reference);
+      const artifactRefs = new Set(existing?.artifactRefs ?? []);
+      for (const reference of detail.artifactRefs ?? []) artifactRefs.add(reference);
+      state.pendingIteration = {
+        requested,
+        sourceIteration: state.iteration,
+        stage: requested === effectiveDecision.action ? stage : existing?.stage ?? stage,
+        reason: [...new Set([...(existing ? [existing.reason] : []), reason])].join("; "),
+        failures: [...new Set([...(existing?.failures ?? []), ...failures])],
+        affectedNodeIds,
+        rerunAll: (existing?.rerunAll ?? false) || detail.nodeId === undefined,
+        evidenceRefs,
+        ...(detail.nodeAttempt === undefined
+          ? existing?.nodeAttempt === undefined ? {} : { nodeAttempt: existing.nodeAttempt }
+          : { nodeAttempt: detail.nodeAttempt }),
+        artifactRefs,
+      };
+      state.failures.length = 0;
+      return;
     }
+    delete state.pendingIteration;
     state.terminal = {
-      requested: decision.action,
+      requested: "block",
       stage,
       reason,
       failures,
@@ -849,14 +972,16 @@ export class WorkAgent<
     summary: string,
     route?: BalancedPrewalkRoute | undefined,
   ): Promise<void> {
-    if (!this.pluginHost || state.terminalHookNodeIds.has(node.id)) return;
+    const terminalHookKey = qualityNodeAttemptKey(state, node);
+    if (!this.pluginHost || state.terminalHookNodeIds.has(terminalHookKey)) return;
     const completedAt = new Date().toISOString();
     const producerId = route
-      ? `worker:${route.provider}:${route.model}:${node.id}`
-      : `worker:undispatched:${node.id}`;
+      ? `worker:${route.provider}:${route.model}:${node.id}:attempt-${node.attempt}:iteration-${state.iteration}`
+      : `worker:undispatched:${node.id}:attempt-${node.attempt}:iteration-${state.iteration}`;
     const artifact = state.artifacts.persistNode({
       nodeId: node.id,
       attempt: node.attempt,
+      iteration: state.iteration,
       producerId,
       summary,
       writePaths: status === "blocked" ? [] : node.fileOwnership,
@@ -911,7 +1036,7 @@ export class WorkAgent<
       refineCount: state.refineCount,
       pivotCount: state.pivotCount,
     });
-    state.terminalHookNodeIds.add(node.id);
+    state.terminalHookNodeIds.add(terminalHookKey);
     state.completedStages.add("work");
     const decision: PluginDecisionAggregate = observed.action === "block"
       ? observed
@@ -945,10 +1070,18 @@ export class WorkAgent<
     state: QualityRuntimeState,
     results: readonly PlannedWorkResult[],
   ): Promise<void> {
-    for (const result of results) {
-      if (result.status === "completed" || state.terminalHookNodeIds.has(result.id)) continue;
+    // Observe real failures/cancellations before scheduler-blocked siblings.
+    // A blocked dependency is provisional while the same wave has requested
+    // refinement, but becomes terminal if another result proves the wave failed.
+    const orderedResults = [
+      ...results.filter((result) => result.status !== "blocked"),
+      ...results.filter((result) => result.status === "blocked"),
+    ];
+    for (const result of orderedResults) {
       const node = state.graph?.nodes.find((candidate) => candidate.id === result.id);
       if (!node) throw new Error(`Quality graph is missing terminal node ${result.id}.`);
+      if (result.status === "completed" || state.terminalHookNodeIds.has(qualityNodeAttemptKey(state, node))) continue;
+      if (result.status === "blocked" && state.pendingIteration && !state.terminal) continue;
       await this.finishTerminalQualityNode(state, node, result.status, result.summary);
     }
   }
@@ -1053,14 +1186,15 @@ export class WorkAgent<
     if (!this.pluginHost) {
       throw new Error("Direct quality lifecycle requires a plugin host.");
     }
+    state.graph = this.directQualityGraph(state);
     const route = resolveBalancedPrewalkRoute({
       stage: "work",
       directRoute: this.directRoute,
     });
     const context = await this.qualityContext(state, "work");
     const qualityPrompt = appendQualityContext(prompt, context);
-    const producerId = `direct:${route.provider}:${route.model}`;
-    this.emitQualityStage(state, "work", route, `${state.runId}:direct`);
+    const producerId = `direct:${route.provider}:${route.model}:iteration-${state.iteration}`;
+    this.emitQualityStage(state, "work", route, `${state.runId}:direct:${state.iteration}`);
 
     let directResult: { readonly text: string };
     try {
@@ -1075,6 +1209,7 @@ export class WorkAgent<
         : `Direct provider turn failed: ${error instanceof Error ? error.message : String(error)}`;
       const artifact = state.artifacts.persistDirectTurn({
         intent,
+        iteration: state.iteration,
         producerId,
         summary,
         completedAt: new Date().toISOString(),
@@ -1106,6 +1241,7 @@ export class WorkAgent<
 
     const artifact = state.artifacts.persistDirectTurn({
       intent,
+      iteration: state.iteration,
       producerId,
       summary: directResult.text,
       completedAt: new Date().toISOString(),
@@ -1119,7 +1255,6 @@ export class WorkAgent<
       timestamp: new Date().toISOString(),
     }];
     state.completedStages.add("work");
-    state.graph = this.directQualityGraph(state);
     const projection: QualityRunProjection = {
       runId: state.runId,
       profile: state.profile,
@@ -1153,7 +1288,7 @@ export class WorkAgent<
     if (state.terminal) return this.terminateQuality(state);
     const qualityStatus = decision.action;
     if (qualityStatus === "refine" || qualityStatus === "pivot") {
-      throw new Error("Direct quality iteration escaped terminal handling.");
+      return { text: directResult.text, qualityStatus };
     }
     state.graph = { ...state.graph, gateStatus: qualityStatus };
     this.completeQuality(state, qualityStatus, "work", {
@@ -1186,6 +1321,7 @@ export class WorkAgent<
           prompt,
           attachments,
           epoch,
+          options.classificationPrompt ?? prompt,
         ));
       return epoch.isCleared() ? CLEARED_TURN_RESULT : result;
     } catch (error) {
@@ -1198,20 +1334,26 @@ export class WorkAgent<
     }
   }
 
-  private async runTurnInEpoch(prompt: string, attachments: readonly Attachment[], epoch: WorkAgentTurnEpoch): Promise<WorkAgentTurnResult> {
+  private async runTurnInEpoch(
+    prompt: string,
+    attachments: readonly Attachment[],
+    epoch: WorkAgentTurnEpoch,
+    classificationPrompt: string,
+  ): Promise<WorkAgentTurnResult> {
     const turnSignal = epoch.signal;
     const turnOptions = { signal: turnSignal };
     if (!this.pluginHost && attachments.length > 0) {
       return await this.runMainTurn(prompt, attachments, turnOptions);
     }
 
-    const classifiedIntent = this.pluginHost ? classifyWorkIntent(prompt, this.mode) : undefined;
-    const quality = classifiedIntent ? this.createQualityState(prompt, classifiedIntent) : undefined;
+    const classifiedIntent = this.pluginHost ? classifyWorkIntent(classificationPrompt, this.mode) : undefined;
+    let effectiveIntent = classifiedIntent;
+    const quality = classifiedIntent ? this.createQualityState(classificationPrompt, classifiedIntent) : undefined;
     if (quality && this.pluginHost && classifiedIntent) {
       this.emitQualityStage(quality, "explore");
       const classified = await this.pluginHost.dispatchRunClassified({
         runId: quality.runId,
-        prompt,
+        prompt: classificationPrompt,
         complexity: classifiedIntent,
         risk: quality.risk,
         creatorIntent: quality.creatorIntent,
@@ -1228,12 +1370,22 @@ export class WorkAgent<
     // naming a job the plan never queued, so no second guard is needed here.
     let activeGraphId = "";
     let completionArtifact: PersistedQualityArtifact | undefined;
+    let completionReviewPacket: QualityReviewPacket | undefined;
+    let completionReviewPacketInput: QualityReviewPacketInput | undefined;
     let completionManifestHash = "";
     let completionProducerId = "";
     let completionEvidence: GateEvidence[] = [];
     let criticIndependent = false;
+    let criticIndependentProvider = false;
+    let criticIndependentReviewer = false;
+    let criticReviewerRunId = "";
     let criticGateStatus: QualityGateStatus = "proceed";
     let directQualityResult: WorkAgentTurnResult | undefined;
+    let iterationKind: "initial" | "refine" | "pivot" = "initial";
+    let iterationReason = "";
+    let executionPlan: readonly PlannedWorkTask[] | undefined;
+    let currentPlan: readonly PlannedWorkTask[] = [];
+    const latestResultsByNode = new Map<string, PlannedWorkResult>();
     const orchestrator = createTurnOrchestrator<PlannedWorkTask, PlannedWorkResult>({
       runSimpleTurn: async (simplePrompt) => {
         if (!quality) return await this.runMainTurn(simplePrompt, attachments, turnOptions);
@@ -1258,6 +1410,12 @@ export class WorkAgent<
         return { text: directQualityResult.text };
       },
       planComplexTurn: async (complexPrompt, planOptions) => {
+        if (quality && iterationKind === "refine") {
+          if (!executionPlan || executionPlan.length === 0) {
+            throw new Error("Quality refine requested without an executable affected subgraph.");
+          }
+          return { tasks: executionPlan, usedLlm: false };
+        }
         const context = quality ? await this.qualityContext(quality, "plan") : undefined;
         if (quality) {
           this.emitQualityStage(quality, "plan", resolveBalancedPrewalkRoute({
@@ -1266,8 +1424,11 @@ export class WorkAgent<
             ...(this.commodityRoute ? { commodityRoute: this.commodityRoute } : {}),
           }));
         }
+        const plannerPrompt = quality && iterationKind === "pivot"
+          ? `${complexPrompt}\n\n<quality_pivot_request>\n${iterationReason}\nProduce a replacement explicit DAG that resolves this defect.\n</quality_pivot_request>`
+          : complexPrompt;
         const { tasks, usedLlm } = await this.planTasks(
-          complexPrompt,
+          plannerPrompt,
           planOptions?.onTrace,
           turnSignal,
           context,
@@ -1289,7 +1450,7 @@ export class WorkAgent<
           if (beforeDispatch.action !== "proceed") {
             this.recordQualityDecision(quality, "work", beforeDispatch, { nodeId: task.id });
           }
-          if (beforeDispatch.node.id !== task.id && !quality.terminal) {
+          if (beforeDispatch.node.id !== task.id && !quality.terminal && !quality.pendingIteration) {
             this.recordQualityDecision(quality, "work", {
               action: "block",
               decisions: [{
@@ -1302,7 +1463,11 @@ export class WorkAgent<
             }, { nodeId: task.id });
           }
           if (quality.terminal) {
-            this.runController.settleBlockedJob(activeGraphId, task.id);
+            this.runController.settleBlockedJob(
+              activeGraphId,
+              task.id,
+              qualityJobKey(quality, plannedNode),
+            );
             await this.finishTerminalQualityNode(
               quality,
               plannedNode,
@@ -1312,6 +1477,18 @@ export class WorkAgent<
             return {
               id: task.id,
               summary: quality.terminal.reason,
+              status: "blocked",
+            };
+          }
+          if (quality.pendingIteration) {
+            this.runController.settleBlockedJob(
+              activeGraphId,
+              task.id,
+              qualityJobKey(quality, plannedNode),
+            );
+            return {
+              id: task.id,
+              summary: quality.pendingIteration.reason,
               status: "blocked",
             };
           }
@@ -1333,10 +1510,11 @@ export class WorkAgent<
           });
           const context = await this.qualityContext(quality, "work");
           let outcome: Awaited<ReturnType<WorkAgentRunController<Attachment, TraceEvent, Reasoning>["runTask"]>>;
+          let producerAgentRunId: string | undefined;
           try {
-            await checkpointExecutionPause("between_nodes");
             outcome = await this.runController.runTask({
               graphId: activeGraphId,
+              jobKey: qualityJobKey(quality, node),
               task: {
                 id: node.id,
                 summary: node.title,
@@ -1344,13 +1522,10 @@ export class WorkAgent<
               },
               signal: turnSignal,
               preferDirect: route.executor !== "commodity",
-              onDispatchStarting: (agentRunId) => this.emitQualityStage(
-                quality,
-                "work",
-                route,
-                agentRunId,
-                node,
-              ),
+              onDispatchStarting: (agentRunId) => {
+                producerAgentRunId = agentRunId;
+                this.emitQualityStage(quality, "work", route, agentRunId, node);
+              },
             });
           } catch (error) {
             const summary = `Executor failed: ${error instanceof Error ? error.message : String(error)}`;
@@ -1363,17 +1538,19 @@ export class WorkAgent<
           }
 
           const completedAt = new Date().toISOString();
-          const producerId = `worker:${route.provider}:${route.model}:${node.id}`;
+          const producerId = `worker:${route.provider}:${route.model}:${node.id}:attempt-${node.attempt}:iteration-${quality.iteration}`;
           const artifact = quality.artifacts.persistNode({
             nodeId: node.id,
             attempt: node.attempt,
+            iteration: quality.iteration,
             producerId,
             summary: outcome.text,
             writePaths: node.fileOwnership,
             completedAt,
           });
-          quality.workerArtifacts.push(artifact);
-          quality.producerRoutes.push({ provider: route.provider, model: route.model });
+          quality.workerArtifactsByNode.set(node.id, artifact);
+          quality.producerRoutesByNode.set(node.id, { provider: route.provider, model: route.model });
+          if (producerAgentRunId) quality.producerAgentRunIdsByNode.set(node.id, producerAgentRunId);
           const unsupportedEntries = artifact.unsupportedEntries ?? [];
           const evidenceUnsupported = artifact.evidenceStatus === "unsupported";
           const evidence: GateEvidence[] = [{
@@ -1418,7 +1595,7 @@ export class WorkAgent<
                 }]
               : [],
             independentProviderAvailable: independentAvailable,
-            independentReviewerAvailable: independentAvailable,
+            independentReviewerAvailable: false,
             refineCount: quality.refineCount,
             pivotCount: quality.pivotCount,
           });
@@ -1431,23 +1608,25 @@ export class WorkAgent<
             artifactRefs: [artifact.path],
             artifactHash: artifact.artifactHash,
             evidenceRefs: [artifact.path],
-            independentVerification: independentAvailable,
+            // Route availability is only a capability signal. No independent
+            // reviewer has examined this artifact until the critic stage runs.
+            independentVerification: false,
             route,
           });
-          quality.terminalHookNodeIds.add(node.id);
+          quality.terminalHookNodeIds.add(qualityNodeAttemptKey(quality, node));
           quality.completedStages.add("work");
           const terminalAfterNode = quality.terminal as QualityTerminal | undefined;
-          if (terminalAfterNode) {
+          const iterationAfterNode = quality.pendingIteration as QualityIterationRequest | undefined;
+          if (terminalAfterNode || iterationAfterNode) {
             return {
               id: task.id,
-              summary: terminalAfterNode.reason,
+              summary: (terminalAfterNode ?? iterationAfterNode)?.reason ?? "Quality iteration requested.",
               status: "blocked",
             };
           }
           return { id: task.id, summary: outcome.text, status: "completed" };
         }
 
-        await checkpointExecutionPause("between_nodes");
         const outcome = await this.runController.runTask({
           graphId: activeGraphId,
           task,
@@ -1464,7 +1643,12 @@ export class WorkAgent<
         status: "failed",
       }),
       createBlockedComplexTaskResult: (task) => {
-        this.runController.settleBlockedJob(activeGraphId, task.id);
+        const node = quality?.graph?.nodes.find((candidate) => candidate.id === task.id);
+        this.runController.settleBlockedJob(
+          activeGraphId,
+          task.id,
+          quality && node ? qualityJobKey(quality, node) : undefined,
+        );
         return { id: task.id, summary: BLOCKED_BY_DEPENDENCY_SUMMARY, status: "blocked" };
       },
       runGuardianReview: async ({ prompt: originalPrompt, tasks, results }) => {
@@ -1491,21 +1675,79 @@ export class WorkAgent<
         });
         let criticRoute: BalancedPrewalkRoute | undefined;
         if (quality) {
-          completionProducerId = `graph:${quality.graphId}`;
+          completionProducerId = `graph:${quality.graphId}:iteration-${quality.iteration}`;
           const workspaceManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
           completionManifestHash = workspaceManifest.artifactHash;
           completionArtifact = quality.artifacts.persistRun({
             graphId: quality.graphId,
+            iteration: quality.iteration,
             producerId: completionProducerId,
-            artifacts: quality.workerArtifacts,
+            artifacts: currentWorkerArtifacts(quality),
             completedAt: new Date().toISOString(),
             workspaceManifest,
           });
+          if (!quality.reviewBaseline) {
+            criticGateStatus = "block";
+            this.recordQualityDecision(quality, "critic", {
+              action: "block",
+              decisions: [{
+                pluginName: "unclecode-runtime",
+                action: "block",
+                reason: "The approved-plan workspace baseline is unavailable; changed-path ownership cannot be proven.",
+                failures: ["QUALITY_REVIEW_BASELINE_MISSING"],
+              }],
+              failures: ["QUALITY_REVIEW_BASELINE_MISSING"],
+            }, {
+              artifactHash: completionArtifact.artifactHash,
+              evidenceRefs: [completionArtifact.path],
+              independentVerification: false,
+            });
+            return { summary: "Quality review blocked: workspace baseline unavailable." };
+          }
+          completionReviewPacketInput = {
+            graphId: quality.graphId,
+            iteration: quality.iteration,
+            baseline: quality.reviewBaseline,
+            request: originalPrompt,
+            tasks: tasks.map((task) => ({
+              id: task.id,
+              acceptanceCriteria: task.acceptanceCriteria,
+              writePaths: task.writePaths,
+            })),
+            results: results.map((result) => ({
+              id: result.id,
+              status: result.status,
+              summary: result.summary,
+            })),
+            workerArtifacts: currentWorkerArtifacts(quality),
+            executableChecks: executableChecks.checks,
+          };
+          try {
+            completionReviewPacket = quality.artifacts.persistReviewPacket(completionReviewPacketInput);
+          } catch {
+            criticGateStatus = "block";
+            this.recordQualityDecision(quality, "critic", {
+              action: "block",
+              decisions: [{
+                pluginName: "unclecode-runtime",
+                action: "block",
+                reason: "The immutable review packet artifact could not be created or verified.",
+                failures: ["IMMUTABLE_REVIEW_PACKET_ARTIFACT_INVALID"],
+              }],
+              failures: ["IMMUTABLE_REVIEW_PACKET_ARTIFACT_INVALID"],
+            }, {
+              artifactHash: completionArtifact.artifactHash,
+              evidenceRefs: [completionArtifact.path],
+              independentVerification: false,
+            });
+            return { summary: "Quality review blocked: immutable review packet artifact is invalid." };
+          }
           completionEvidence = [{
             kind: "artifact",
-            artifactHash: completionArtifact.artifactHash,
+            artifactHash: completionReviewPacket.artifactHash,
             producerId: completionProducerId,
-            result: workspaceManifest.evidenceStatus === "unsupported" ? "fail" : "pass",
+            result: workspaceManifest.evidenceStatus === "unsupported"
+              || completionReviewPacket.evidenceStatus === "unsupported" ? "fail" : "pass",
             timestamp: new Date().toISOString(),
           }];
           if (workspaceManifest.evidenceStatus === "unsupported") {
@@ -1515,8 +1757,8 @@ export class WorkAgent<
               "critic",
               workspaceManifest.unsupportedEntries,
               {
-                artifactHash: completionArtifact.artifactHash,
-                evidenceRefs: [completionArtifact.path],
+                artifactHash: completionReviewPacket.artifactHash,
+                evidenceRefs: [completionArtifact.path, completionReviewPacket.path],
                 independentVerification: false,
               },
             );
@@ -1525,15 +1767,58 @@ export class WorkAgent<
             }
             return { summary: "Quality review blocked: unsupported owned workspace evidence." };
           }
+          if (completionReviewPacket.evidenceStatus === "unsupported") {
+            criticGateStatus = "block";
+            if (completionReviewPacket.undeclaredPaths.length > 0) {
+              const paths = completionReviewPacket.undeclaredPaths.slice(0, 8).join(", ");
+              const remainder = completionReviewPacket.undeclaredPaths.length > 8
+                ? `, and ${completionReviewPacket.undeclaredPaths.length - 8} more`
+                : "";
+              this.recordQualityDecision(quality, "critic", {
+                action: "block",
+                decisions: [{
+                  pluginName: "unclecode-runtime",
+                  action: "block",
+                  reason: `Worker execution changed undeclared workspace paths: ${paths}${remainder}.`,
+                  failures: ["UNDECLARED_WORKSPACE_WRITE"],
+                }],
+                failures: ["UNDECLARED_WORKSPACE_WRITE"],
+              }, {
+                artifactHash: completionReviewPacket.artifactHash,
+                evidenceRefs: [completionArtifact.path, completionReviewPacket.path],
+                independentVerification: false,
+              });
+            } else {
+              this.recordUnsupportedOwnershipDecision(
+                quality,
+                "critic",
+                completionReviewPacket.unsupportedEntries ?? [],
+                {
+                  artifactHash: completionReviewPacket.artifactHash,
+                  evidenceRefs: [completionArtifact.path, completionReviewPacket.path],
+                  independentVerification: false,
+                },
+              );
+            }
+            if (quality.graph) {
+              quality.graph = { ...quality.graph, currentStage: "critic", gateStatus: "block" };
+            }
+            return { summary: "Quality review blocked: changed-path ownership evidence is unsupported." };
+          }
           criticRoute = resolveBalancedPrewalkRoute({
             stage: "critic",
             directRoute: this.directRoute,
             ...(this.commodityRoute ? { commodityRoute: this.commodityRoute } : {}),
             ...(this.reviewAgent && this.reviewRoute ? { reviewRoute: this.reviewRoute } : {}),
-            producerRoutes: quality.producerRoutes,
+            producerRoutes: currentProducerRoutes(quality),
           });
-          criticIndependent = criticRoute.independent;
-          reviewPrompt = `${reviewPrompt}\n\nArtifact manifest: ${completionArtifact.path}\nArtifact SHA-256: ${completionArtifact.artifactHash}`;
+          criticIndependentProvider = criticRoute.independent;
+          const packetPrompt = `<immutable_quality_review_packet sha256="${completionReviewPacket.artifactHash}">\n${completionReviewPacket.canonicalContent}</immutable_quality_review_packet>`;
+          const criticBoundary = "</quality_critic_read_only>";
+          const criticBoundaryIndex = reviewPrompt.lastIndexOf(criticBoundary);
+          reviewPrompt = criticBoundaryIndex >= 0
+            ? `${reviewPrompt.slice(0, criticBoundaryIndex)}${packetPrompt}\n\n${reviewPrompt.slice(criticBoundaryIndex)}`
+            : `${reviewPrompt}\n\n${packetPrompt}`;
           reviewPrompt = appendQualityContext(reviewPrompt, await this.qualityContext(quality, "critic"));
           if (!this.reviewAgent || this.reviewAgent === this.directAgent || !this.reviewRoute) {
             this.recordQualityDecision(quality, "critic", {
@@ -1546,25 +1831,157 @@ export class WorkAgent<
               }],
               failures: ["READ_ONLY_REVIEWER_UNAVAILABLE"],
             }, {
-              artifactHash: completionArtifact.artifactHash,
-              evidenceRefs: [completionArtifact.path],
+              artifactHash: completionReviewPacket.artifactHash,
+              evidenceRefs: [completionArtifact.path, completionReviewPacket.path],
             });
             return { summary: "Quality review blocked: read-only reviewer unavailable." };
           }
-          this.emitQualityStage(quality, "critic", criticRoute);
+          criticReviewerRunId = `${quality.runId}:critic:${quality.iteration}:reviewer`;
+          criticIndependentReviewer = !currentProducerAgentRunIds(quality).includes(criticReviewerRunId);
+          this.emitQualityStage(quality, "critic", criticRoute, criticReviewerRunId);
         }
-        const review = quality
+        const qualityReview = quality
           ? await this.runReadOnlyQualityTurn(reviewPrompt, turnSignal)
-          : await this.runInternalTurn(reviewPrompt, [], turnOptions);
+          : undefined;
+        const review = qualityReview ?? await this.runInternalTurn(reviewPrompt, [], turnOptions);
         const summary = `${review.text}\n\nExecutable checks:\n${executableChecks.summary}`;
-        if (quality && criticRoute && completionArtifact) {
-          const reviewerId = `critic:${criticRoute.provider}:${criticRoute.model}`;
+        if (
+          quality
+          && criticRoute
+          && completionArtifact
+          && completionReviewPacket
+          && completionReviewPacketInput
+        ) {
+          const reviewedPacketHash = completionReviewPacket.artifactHash;
+          const routeEvidence = resolveQualityReviewRouteEvidence({
+            declaredRoute: criticRoute,
+            observations: qualityReview?.routeObservations ?? [],
+            allowDeclaredEvidence: this.allowDeclaredReviewRouteEvidence,
+          });
+          criticIndependentProvider = criticIndependentProvider && routeEvidence.status === "matched";
+          criticIndependent = criticIndependentProvider && criticIndependentReviewer;
+          const reviewerId = criticReviewerRunId;
           const completedAt = new Date().toISOString();
+          let postCriticPacket: QualityReviewPacket;
+          try {
+            postCriticPacket = quality.artifacts.persistReviewPacket(completionReviewPacketInput);
+          } catch {
+            completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
+            criticGateStatus = "block";
+            this.recordQualityDecision(quality, "critic", {
+              action: "block",
+              decisions: [{
+                pluginName: "unclecode-runtime",
+                action: "block",
+                reason: "The immutable review packet artifact changed during critic review.",
+                failures: ["IMMUTABLE_REVIEW_PACKET_ARTIFACT_INVALID"],
+              }],
+              failures: ["IMMUTABLE_REVIEW_PACKET_ARTIFACT_INVALID"],
+            }, {
+              artifactHash: completionReviewPacket.artifactHash,
+              reviewedArtifactHash: completionReviewPacket.artifactHash,
+              currentArtifactHash: completionReviewPacket.artifactHash,
+              stale: true,
+              evidenceRefs: [completionArtifact.path, completionReviewPacket.path],
+              independentVerification: false,
+              route: criticRoute,
+            });
+            quality.completedStages.add("critic");
+            if (quality.graph) {
+              quality.graph = { ...quality.graph, currentStage: "critic", gateStatus: "block" };
+            }
+            return { summary: "Immutable review packet artifact changed during critic; review invalidated." };
+          }
+          if (
+            postCriticPacket.evidenceStatus === "unsupported"
+            || postCriticPacket.artifactHash !== completionReviewPacket.artifactHash
+          ) {
+            const criticArtifact = quality.artifacts.persistCritic({
+              reviewerId,
+              iteration: quality.iteration,
+              reviewedArtifactHash: completionReviewPacket.artifactHash,
+              summary,
+              independent: criticIndependent,
+              completedAt,
+            });
+            completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
+            criticGateStatus = "block";
+            if (
+              postCriticPacket.evidenceStatus === "unsupported"
+              && (postCriticPacket.unsupportedEntries?.length ?? 0) > 0
+            ) {
+              this.recordUnsupportedOwnershipDecision(
+                quality,
+                "critic",
+                postCriticPacket.unsupportedEntries ?? [],
+                {
+                  artifactHash: completionReviewPacket.artifactHash,
+                  reviewedArtifactHash: completionReviewPacket.artifactHash,
+                  currentArtifactHash: postCriticPacket.artifactHash,
+                  stale: true,
+                  evidenceRefs: [
+                    completionArtifact.path,
+                    completionReviewPacket.path,
+                    postCriticPacket.path,
+                    criticArtifact.path,
+                  ],
+                  independentVerification: false,
+                  route: criticRoute,
+                },
+              );
+            } else if (postCriticPacket.undeclaredPaths.length > 0) {
+              const paths = postCriticPacket.undeclaredPaths.slice(0, 8).join(", ");
+              this.recordQualityDecision(quality, "critic", {
+                action: "block",
+                decisions: [{
+                  pluginName: "unclecode-runtime",
+                  action: "block",
+                  reason: `The workspace changed on undeclared paths during critic review: ${paths}.`,
+                  failures: ["UNDECLARED_WORKSPACE_WRITE"],
+                }],
+                failures: ["UNDECLARED_WORKSPACE_WRITE"],
+              }, {
+                artifactHash: completionReviewPacket.artifactHash,
+                reviewedArtifactHash: completionReviewPacket.artifactHash,
+                currentArtifactHash: postCriticPacket.artifactHash,
+                stale: true,
+                evidenceRefs: [
+                  completionArtifact.path,
+                  completionReviewPacket.path,
+                  postCriticPacket.path,
+                  criticArtifact.path,
+                ],
+                independentVerification: false,
+                route: criticRoute,
+              });
+            } else {
+              this.recordQualityDecision(quality, "critic", staleArtifactDecision("critic"), {
+                artifactHash: completionReviewPacket.artifactHash,
+                reviewedArtifactHash: completionReviewPacket.artifactHash,
+                currentArtifactHash: postCriticPacket.artifactHash,
+                stale: true,
+                evidenceRefs: [
+                  completionArtifact.path,
+                  completionReviewPacket.path,
+                  postCriticPacket.path,
+                  criticArtifact.path,
+                ],
+                independentVerification: false,
+                route: criticRoute,
+              });
+            }
+            quality.completedStages.add("critic");
+            if (quality.graph) {
+              quality.graph = { ...quality.graph, currentStage: "critic", gateStatus: "block" };
+            }
+            return { summary: "Review packet changed during critic; review evidence invalidated." };
+          }
           const postCriticManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
           if (postCriticManifest.evidenceStatus === "unsupported") {
             const criticArtifact = quality.artifacts.persistCritic({
               reviewerId,
-              reviewedArtifactHash: completionArtifact.artifactHash,
+              iteration: quality.iteration,
+              reviewedArtifactHash: completionReviewPacket.artifactHash,
               summary,
               independent: criticIndependent,
               completedAt,
@@ -1576,8 +1993,8 @@ export class WorkAgent<
               "critic",
               postCriticManifest.unsupportedEntries,
               {
-                artifactHash: completionArtifact.artifactHash,
-                evidenceRefs: [completionArtifact.path, criticArtifact.path],
+                artifactHash: completionReviewPacket.artifactHash,
+                evidenceRefs: [completionArtifact.path, completionReviewPacket.path, criticArtifact.path],
                 independentVerification: false,
                 route: criticRoute,
               },
@@ -1591,7 +2008,8 @@ export class WorkAgent<
           if (postCriticManifest.artifactHash !== completionManifestHash) {
             const criticArtifact = quality.artifacts.persistCritic({
               reviewerId,
-              reviewedArtifactHash: completionArtifact.artifactHash,
+              iteration: quality.iteration,
+              reviewedArtifactHash: completionReviewPacket.artifactHash,
               summary,
               independent: criticIndependent,
               completedAt,
@@ -1599,11 +2017,11 @@ export class WorkAgent<
             completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
             criticGateStatus = "block";
             this.recordQualityDecision(quality, "critic", staleArtifactDecision("critic"), {
-              artifactHash: completionArtifact.artifactHash,
-              reviewedArtifactHash: completionManifestHash,
-              currentArtifactHash: postCriticManifest.artifactHash,
+              artifactHash: completionReviewPacket.artifactHash,
+              reviewedArtifactHash: completionReviewPacket.artifactHash,
+              currentArtifactHash: postCriticPacket.artifactHash,
               stale: true,
-              evidenceRefs: [completionArtifact.path, criticArtifact.path],
+              evidenceRefs: [completionArtifact.path, completionReviewPacket.path, criticArtifact.path],
               independentVerification: false,
               route: criticRoute,
             });
@@ -1616,14 +2034,15 @@ export class WorkAgent<
           const parsedVerdict = parseCriticVerdict(review.text);
           const criticArtifact = quality.artifacts.persistCritic({
             reviewerId,
-            reviewedArtifactHash: completionArtifact.artifactHash,
+            iteration: quality.iteration,
+            reviewedArtifactHash: completionReviewPacket.artifactHash,
             summary,
             independent: criticIndependent,
             completedAt,
           });
           completionEvidence.push(...executableChecks.checks.map((check) => ({
             kind: "test" as const,
-            artifactHash: completionArtifact?.artifactHash ?? "",
+            artifactHash: reviewedPacketHash,
             producerId: completionProducerId,
             result: check.status === "passed" ? "pass" as const : "fail" as const,
             timestamp: completedAt,
@@ -1631,7 +2050,7 @@ export class WorkAgent<
           if (parsedVerdict) {
             completionEvidence.push({
               kind: "reviewer",
-              artifactHash: completionArtifact.artifactHash,
+              artifactHash: completionReviewPacket.artifactHash,
               producerId: completionProducerId,
               reviewerId,
               result: parsedVerdict.verdict === "pass"
@@ -1642,40 +2061,61 @@ export class WorkAgent<
               timestamp: completedAt,
             });
           }
+          const boundedRequest = parsedVerdict
+            && !parsedVerdict.findings.some((finding) =>
+              finding.severity === "critical" && (finding.kind === "policy" || finding.kind === "plan"))
+            ? requestedIterationForFindings(parsedVerdict.findings)
+            : undefined;
+          const exhaustedIteration = boundedRequest
+            && (boundedRequest === "refine" ? quality.refineCount : quality.pivotCount)
+              >= DEFAULT_ITERATION_LIMITS[boundedRequest]
+            ? boundedRequest
+            : undefined;
           const failures = [
             ...executableChecks.failures,
             ...(!parsedVerdict ? ["INVALID_CRITIC_VERDICT"] : []),
             ...(parsedVerdict?.verdict === "fail" ? ["CRITIC_REJECTED"] : []),
+            ...(routeEvidence.status === "missing" ? ["REVIEW_ROUTE_EVIDENCE_MISSING"] : []),
+            ...(routeEvidence.status === "mismatched" ? ["REVIEW_ROUTE_EVIDENCE_MISMATCH"] : []),
+            ...(!criticIndependentProvider ? ["INDEPENDENT_PROVIDER_UNAVAILABLE"] : []),
+            ...(!criticIndependentReviewer ? ["INDEPENDENT_REVIEWER_UNAVAILABLE"] : []),
             ...(!criticIndependent ? ["INDEPENDENT_REVIEW_UNAVAILABLE"] : []),
+            ...(exhaustedIteration ? [iterationLimitFailure(exhaustedIteration)] : []),
           ];
           const evaluated = parsedVerdict
             ? evaluateGate({
                 findings: parsedVerdict.findings,
                 evidence: completionEvidence,
-                currentArtifactHash: completionArtifact.artifactHash,
+                currentArtifactHash: completionReviewPacket.artifactHash,
                 producerId: completionProducerId,
                 reviewRequired: quality.profile !== "minimal",
-                independentProviderAvailable: criticIndependent,
-                independentReviewerAvailable: criticIndependent,
+                independentProviderAvailable: criticIndependentProvider,
+                independentReviewerAvailable: criticIndependentReviewer,
                 refineCount: quality.refineCount,
                 pivotCount: quality.pivotCount,
               })
             : "block";
-          criticGateStatus = !parsedVerdict
-            || parsedVerdict.verdict === "fail"
-            || executableChecks.status === "failed"
+          criticGateStatus = !parsedVerdict || executableChecks.status === "failed"
             ? "block"
             : parsedVerdict.verdict === "unproven"
                 || executableChecks.status === "unproven"
                 || !criticIndependent
               ? "unproven"
-              : evaluated;
+              : exhaustedIteration
+                ? "block"
+                : boundedRequest
+                  ? boundedRequest
+                  : parsedVerdict.verdict === "fail"
+                    ? "block"
+                    : evaluated;
           this.recordQualityDecision(quality, "critic", {
             action: criticGateStatus,
             decisions: [{
               pluginName: "unclecode-critic",
               action: criticGateStatus,
-              reason: !parsedVerdict
+              reason: exhaustedIteration
+                ? `Quality ${exhaustedIteration} limit reached (${DEFAULT_ITERATION_LIMITS[exhaustedIteration]}); the bounded quality loop cannot continue.`
+                : !parsedVerdict
                 ? "Invalid critic verdict; expected the structured critic JSON contract."
                 : executableChecks.status === "failed"
                   ? "Executable check failed."
@@ -1686,11 +2126,12 @@ export class WorkAgent<
             }],
             failures,
           }, {
-            artifactHash: completionArtifact.artifactHash,
-            reviewedArtifactHash: completionManifestHash,
-            currentArtifactHash: completionManifestHash,
+            artifactHash: completionReviewPacket.artifactHash,
+            reviewedArtifactHash: completionReviewPacket.artifactHash,
+            currentArtifactHash: completionReviewPacket.artifactHash,
             stale: false,
-            evidenceRefs: [completionArtifact.path, criticArtifact.path],
+            evidenceRefs: [completionArtifact.path, completionReviewPacket.path, criticArtifact.path],
+            reviewerRunId: criticReviewerRunId,
             independentVerification: criticIndependent,
             route: criticRoute,
           });
@@ -1706,86 +2147,254 @@ export class WorkAgent<
         return { summary };
       },
       shouldRunGuardianReview: ({ results }) =>
-        !quality?.terminal && results.every((entry) => entry.status === "completed"),
+        !quality?.terminal
+        && !quality?.pendingIteration
+        && results.every((entry) => entry.status === "completed"),
     });
 
-    let result: Awaited<ReturnType<typeof orchestrator.run>>;
-    try {
-      result = await orchestrator.run({
-        prompt,
-        mode: this.mode,
-        maxWorkers: this.createExecutorAgent ? resolveWorkerBudget(this.mode) : 1,
-        ...(classifiedIntent ? { intent: classifiedIntent } : {}),
-        ...(this.traceListener ? { onTrace: (event) => this.emitTrace(event) } : {}),
-        onPlan: async (tasks) => {
-          const startedAt = Date.now();
-          const graph = createWorkGraph(
-            tasks,
-            startedAt,
-            quality ? { graphId: quality.graphId, profile: quality.profile } : undefined,
-          );
-          activeGraphId = graph.id;
-          if (quality) quality.graph = graph;
-          this.emitTrace({
-            type: "work.proposed",
-            level: "high-signal",
-            graphId: graph.id,
-            nodeCount: graph.nodes.length,
-            startedAt,
-            graph,
+    const prepareNextQualityIteration = (): void => {
+      if (!quality?.pendingIteration || !quality.graph) {
+        throw new Error("Quality iteration preparation requires a pending request and active graph.");
+      }
+      if (quality.terminal) {
+        throw new Error("A terminal quality decision must be handled before another iteration.");
+      }
+      const request = quality.pendingIteration;
+      delete quality.pendingIteration;
+      if (request.sourceIteration !== quality.iteration) {
+        throw new Error("Quality iteration request does not belong to the active executor wave.");
+      }
+      if (request.requested === "refine") quality.refineCount += 1;
+      else quality.pivotCount += 1;
+      quality.iteration += 1;
+      const count = request.requested === "refine" ? quality.refineCount : quality.pivotCount;
+      const onlyAffectedNodeId = !request.rerunAll && request.affectedNodeIds.size === 1
+        ? [...request.affectedNodeIds][0]
+        : undefined;
+      const iterationTrace = {
+        level: "high-signal",
+        runId: quality.runId,
+        graphId: quality.graphId,
+        profile: quality.profile,
+        stage: request.stage,
+        iteration: quality.iteration,
+        count,
+        reason: request.reason,
+        evidenceRefs: [...request.evidenceRefs],
+        failures: request.failures,
+        ...(onlyAffectedNodeId ? { nodeId: onlyAffectedNodeId } : {}),
+        ...(onlyAffectedNodeId && request.nodeAttempt !== undefined
+          ? { nodeAttempt: request.nodeAttempt }
+          : {}),
+        ...(request.artifactRefs.size > 0 ? { artifactRefs: [...request.artifactRefs] } : {}),
+        startedAt: Date.now(),
+      } as const;
+      this.emitTrace(request.requested === "refine"
+        ? {
+            ...iterationTrace,
+            type: "quality.refine_requested",
+            decision: "refine",
+            limit: DEFAULT_ITERATION_LIMITS.refine,
+          }
+        : {
+            ...iterationTrace,
+            type: "quality.pivot_requested",
+            decision: "pivot",
+            limit: DEFAULT_ITERATION_LIMITS.pivot,
           });
-          if (quality && this.pluginHost) {
-            const planned = await this.pluginHost.dispatchPlanCreated({
-              runId: quality.runId,
+      quality.failures.length = 0;
+      iterationKind = request.requested;
+      iterationReason = request.reason;
+      completionArtifact = undefined;
+      completionReviewPacket = undefined;
+      completionReviewPacketInput = undefined;
+      completionManifestHash = "";
+      completionProducerId = "";
+      completionEvidence = [];
+      criticIndependent = false;
+      criticIndependentProvider = false;
+      criticIndependentReviewer = false;
+      criticReviewerRunId = "";
+      criticGateStatus = "unproven";
+      delete quality.reviewBaseline;
+      delete quality.terminalProvenance;
+
+      if (request.requested === "pivot") {
+        effectiveIntent = "complex";
+        executionPlan = undefined;
+        quality.workerArtifactsByNode.clear();
+        quality.producerRoutesByNode.clear();
+        latestResultsByNode.clear();
+        return;
+      }
+
+      executionPlan = selectRefineTasks(
+        currentPlan,
+        quality.graph,
+        request.rerunAll ? undefined : request.affectedNodeIds,
+      );
+      for (const task of executionPlan) {
+        quality.workerArtifactsByNode.delete(task.id);
+        quality.producerRoutesByNode.delete(task.id);
+        latestResultsByNode.delete(task.id);
+      }
+    };
+
+    qualityIterationLoop:
+    while (true) {
+      let result: Awaited<ReturnType<typeof orchestrator.run>> | undefined;
+      while (!result) {
+      try {
+        result = await orchestrator.run({
+          prompt,
+          mode: this.mode,
+          maxWorkers: this.createExecutorAgent ? resolveWorkerBudget(this.mode) : 1,
+          ...(effectiveIntent ? { intent: effectiveIntent } : {}),
+          ...(this.traceListener ? { onTrace: (event) => this.emitTrace(event) } : {}),
+          onPlan: async (tasks) => {
+            const startedAt = Date.now();
+            let graph: WorkGraph;
+            if (quality && iterationKind === "refine") {
+              const previousGraph = quality.graph;
+              if (!previousGraph) {
+                throw new Error("Quality refine requested without an active WorkGraph.");
+              }
+              const affectedNodeIds = new Set(tasks.map((task) => task.id));
+              graph = {
+                ...previousGraph,
+                currentStage: "work",
+                gateStatus: "unproven",
+                iteration: quality.iteration,
+                approval: "pending",
+                nodes: previousGraph.nodes.map((node) => affectedNodeIds.has(node.id)
+                  ? {
+                      ...node,
+                      status: "proposed",
+                      stage: "work",
+                      attempt: node.attempt + 1,
+                    }
+                  : node),
+              };
+            } else {
+              const previousGraph = quality?.graph;
+              const created = createWorkGraph(
+                tasks,
+                startedAt,
+                quality ? { graphId: quality.graphId, profile: quality.profile } : undefined,
+              );
+              graph = quality
+                ? {
+                    ...created,
+                    iteration: quality.iteration,
+                    gateStatus: "unproven",
+                    nodes: created.nodes.map((node) => {
+                      const previous = previousGraph?.nodes.find((candidate) => candidate.id === node.id);
+                      return iterationKind === "pivot" && previous
+                        ? {
+                            ...node,
+                            attempt: previous.attempt + 1,
+                            artifactRefs: previous.artifactRefs,
+                          }
+                        : node;
+                    }),
+                  }
+                : created;
+              currentPlan = tasks;
+            }
+            activeGraphId = graph.id;
+            if (quality) quality.graph = graph;
+            this.emitTrace({
+              type: "work.proposed",
+              level: "high-signal",
+              graphId: graph.id,
+              nodeCount: graph.nodes.length,
+              startedAt,
               graph,
             });
-            quality.completedStages.add("plan");
-            if (planned.action !== "proceed") {
-              this.recordQualityDecision(quality, "plan", planned);
+            if (quality && this.pluginHost && iterationKind !== "refine") {
+              const planned = await this.pluginHost.dispatchPlanCreated({
+                runId: quality.runId,
+                graph,
+              });
+              quality.completedStages.add("plan");
+              if (planned.action !== "proceed") {
+                this.recordQualityDecision(quality, "plan", planned);
+              }
+              if (quality.terminal || quality.pendingIteration) throw new QualityLifecycleStop();
+              quality.graph = { ...graph, approval: "approved", currentStage: "work" };
+            } else if (quality) {
+              quality.graph = { ...graph, approval: "approved", currentStage: "work" };
             }
-            if (quality.terminal) throw new QualityLifecycleStop();
-            quality.graph = { ...graph, approval: "approved", currentStage: "work" };
-          }
-          this.emitTrace({
-            type: "work.approved",
-            level: "high-signal",
-            graphId: graph.id,
-            startedAt: Date.now(),
-          });
-          this.runController.queuePlannedJobs(graph.id, tasks, startedAt);
-        },
-        onTaskStatus: (task, status) => {
-          if (!activeGraphId) {
-            return;
-          }
-          this.emitTrace({
-            type: "work.status",
-            level: "high-signal",
-            graphId: activeGraphId,
-            nodeId: task.id,
-            status,
-            summary: task.summary,
-            startedAt: Date.now(),
-          });
-          if (quality?.graph) {
-            quality.graph = {
-              ...quality.graph,
-              nodes: quality.graph.nodes.map((node) => node.id === task.id
-                ? { ...node, status }
-                : node),
-            };
-          }
-        },
-      });
-    } catch (error) {
-      if (error instanceof QualityLifecycleStop && quality?.terminal) {
+            if (quality) {
+              quality.reviewBaseline = quality.artifacts.captureWorkspaceInventory(
+                tasks.flatMap((task) => task.writePaths),
+              );
+            }
+            this.emitTrace({
+              type: "work.approved",
+              level: "high-signal",
+              graphId: graph.id,
+              startedAt: Date.now(),
+            });
+            this.runController.queuePlannedJobs(graph.id, tasks, startedAt, {
+              resolveJobKey: (task) => {
+                const node = quality?.graph?.nodes.find((candidate) => candidate.id === task.id);
+                return quality && node ? qualityJobKey(quality, node) : task.id;
+              },
+            });
+          },
+          onTaskStatus: (task, status) => {
+            if (!activeGraphId) {
+              return;
+            }
+            this.emitTrace({
+              type: "work.status",
+              level: "high-signal",
+              graphId: activeGraphId,
+              nodeId: task.id,
+              status,
+              summary: task.summary,
+              startedAt: Date.now(),
+            });
+            if (quality?.graph) {
+              quality.graph = {
+                ...quality.graph,
+                nodes: quality.graph.nodes.map((node) => node.id === task.id
+                  ? { ...node, status }
+                  : node),
+              };
+            }
+          },
+        });
+      } catch (error) {
+        if (error instanceof QualityLifecycleStop && quality?.terminal) {
+          return this.terminateQuality(quality);
+        }
+        if (error instanceof QualityLifecycleStop && quality?.pendingIteration) {
+          prepareNextQualityIteration();
+          result = undefined;
+          continue;
+        }
+        throw error;
+      }
+
+      if (result.kind === "complex") {
+        for (const taskResult of result.results) latestResultsByNode.set(taskResult.id, taskResult);
+        if (quality) await this.reconcileTerminalQualityResults(quality, result.results);
+      }
+      if (epoch.isCleared()) {
+        return CLEARED_TURN_RESULT;
+      }
+      // Every member of the executor wave has settled now. Cancellation and
+      // terminal worker outcomes win over any sibling's proposed iteration.
+      turnSignal.throwIfAborted();
+      if (quality?.terminal) {
         return this.terminateQuality(quality);
       }
-      throw error;
-    }
-
-    if (result.kind === "complex") {
-      await checkpointExecutionPause("between_nodes");
+      if (quality?.pendingIteration) {
+        prepareNextQualityIteration();
+        result = undefined;
+      }
     }
 
     if (result.kind !== "complex") {
@@ -1804,10 +2413,109 @@ export class WorkAgent<
       return this.terminateQuality(quality);
     }
 
+    const synthesisResults = quality
+      ? currentPlan.flatMap((task) => {
+          const taskResult = latestResultsByNode.get(task.id);
+          return taskResult ? [taskResult] : [];
+        })
+      : result.results;
+    if (quality && criticGateStatus !== "proceed") {
+      if (quality.graph) {
+        quality.graph = {
+          ...quality.graph,
+          currentStage: "critic",
+          gateStatus: criticGateStatus,
+        };
+      }
+      this.completeQuality(quality, criticGateStatus, "critic", {
+        evidenceRefs: completionArtifact ? [completionArtifact.path] : [],
+        failures: quality.failures,
+        independentVerification: criticIndependent,
+      });
+      return {
+        text: result.guardian?.summary ?? `Quality critic ended ${criticGateStatus}.`,
+        qualityStatus: criticGateStatus,
+      };
+    }
+
+    const reviewPacketIsFresh = (
+      stage: Extract<QualityHarnessStage, "critic" | "promote">,
+      route?: BalancedPrewalkRoute | undefined,
+    ): boolean => {
+      if (!quality || !completionArtifact || !completionReviewPacket || !completionReviewPacketInput) {
+        return false;
+      }
+      let currentPacket: QualityReviewPacket;
+      try {
+        currentPacket = quality.artifacts.persistReviewPacket(completionReviewPacketInput);
+      } catch {
+        completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
+        this.recordQualityDecision(quality, stage, {
+          action: "block",
+          decisions: [{
+            pluginName: "unclecode-runtime",
+            action: "block",
+            reason: "The immutable review packet artifact could not be revalidated.",
+            failures: ["IMMUTABLE_REVIEW_PACKET_ARTIFACT_INVALID"],
+          }],
+          failures: ["IMMUTABLE_REVIEW_PACKET_ARTIFACT_INVALID"],
+        }, {
+          artifactHash: completionReviewPacket.artifactHash,
+          reviewedArtifactHash: completionReviewPacket.artifactHash,
+          currentArtifactHash: completionReviewPacket.artifactHash,
+          stale: true,
+          evidenceRefs: [completionArtifact.path, completionReviewPacket.path],
+          independentVerification: false,
+          ...(route ? { route } : {}),
+        });
+        return false;
+      }
+      if (
+        currentPacket.evidenceStatus === "supported"
+        && currentPacket.artifactHash === completionReviewPacket.artifactHash
+      ) return true;
+      completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
+      const detail = {
+        artifactHash: completionReviewPacket.artifactHash,
+        reviewedArtifactHash: completionReviewPacket.artifactHash,
+        currentArtifactHash: currentPacket.artifactHash,
+        stale: true,
+        evidenceRefs: [completionArtifact.path, completionReviewPacket.path, currentPacket.path],
+        independentVerification: false,
+        ...(route ? { route } : {}),
+      };
+      if (
+        currentPacket.evidenceStatus === "unsupported"
+        && (currentPacket.unsupportedEntries?.length ?? 0) > 0
+      ) {
+        this.recordUnsupportedOwnershipDecision(
+          quality,
+          stage,
+          currentPacket.unsupportedEntries ?? [],
+          detail,
+        );
+      } else if (currentPacket.undeclaredPaths.length > 0) {
+        const paths = currentPacket.undeclaredPaths.slice(0, 8).join(", ");
+        this.recordQualityDecision(quality, stage, {
+          action: "block",
+          decisions: [{
+            pluginName: "unclecode-runtime",
+            action: "block",
+            reason: `The workspace changed on undeclared paths after critic review: ${paths}.`,
+            failures: ["UNDECLARED_WORKSPACE_WRITE"],
+          }],
+          failures: ["UNDECLARED_WORKSPACE_WRITE"],
+        }, detail);
+      } else {
+        this.recordQualityDecision(quality, stage, staleArtifactDecision(stage), detail);
+      }
+      return false;
+    };
+
     const reviewerStartedAt = Date.now();
     this.emitTrace(resolveAgentTraceEvent({
       kind: "synthesis-running",
-      resultCount: result.results.length,
+      resultCount: synthesisResults.length,
       startedAt: reviewerStartedAt,
     }));
 
@@ -1815,12 +2523,13 @@ export class WorkAgent<
       prompt,
       model: this.model,
       reasoning: this.reasoning.effort,
-      results: result.results,
+      results: synthesisResults,
       ...(result.guardian ? { guardianSummary: result.guardian.summary } : {}),
       ...(quality ? { qualityReadOnly: true } : {}),
     });
 
     if (quality && completionArtifact && completionManifestHash) {
+      if (!reviewPacketIsFresh("promote")) return this.terminateQuality(quality);
       const prePromoteManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
       if (prePromoteManifest.evidenceStatus === "unsupported") {
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
@@ -1829,8 +2538,11 @@ export class WorkAgent<
           "promote",
           prePromoteManifest.unsupportedEntries,
           {
-            artifactHash: completionArtifact.artifactHash,
-            evidenceRefs: [completionArtifact.path],
+            artifactHash: completionReviewPacket?.artifactHash ?? completionArtifact.artifactHash,
+            evidenceRefs: [
+              completionArtifact.path,
+              ...(completionReviewPacket ? [completionReviewPacket.path] : []),
+            ],
             independentVerification: false,
           },
         );
@@ -1839,11 +2551,14 @@ export class WorkAgent<
       if (prePromoteManifest.artifactHash !== completionManifestHash) {
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
         this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
-          artifactHash: completionArtifact.artifactHash,
-          reviewedArtifactHash: completionManifestHash,
+          artifactHash: completionReviewPacket?.artifactHash ?? completionArtifact.artifactHash,
+          reviewedArtifactHash: completionReviewPacket?.artifactHash ?? completionManifestHash,
           currentArtifactHash: prePromoteManifest.artifactHash,
           stale: true,
-          evidenceRefs: [completionArtifact.path],
+          evidenceRefs: [
+            completionArtifact.path,
+            ...(completionReviewPacket ? [completionReviewPacket.path] : []),
+          ],
           independentVerification: false,
         });
         return this.terminateQuality(quality);
@@ -1857,13 +2572,18 @@ export class WorkAgent<
         directRoute: this.directRoute,
         ...(this.commodityRoute ? { commodityRoute: this.commodityRoute } : {}),
         ...(this.reviewAgent && this.reviewRoute ? { reviewRoute: this.reviewRoute } : {}),
-        producerRoutes: quality.producerRoutes,
+        producerRoutes: currentProducerRoutes(quality),
       });
       synthesisPrompt = appendQualityContext(
         synthesisPrompt,
         await this.qualityContext(quality, "promote"),
       );
-      this.emitQualityStage(quality, "promote", promoteRoute);
+      this.emitQualityStage(
+        quality,
+        "promote",
+        promoteRoute,
+        `${quality.runId}:promote:${quality.iteration}`,
+      );
     }
 
     const synthesis = quality
@@ -1872,12 +2592,13 @@ export class WorkAgent<
     const reviewerCompletedAt = Date.now();
     this.emitTrace(resolveAgentTraceEvent({
       kind: "synthesis-completed",
-      resultCount: result.results.length,
+      resultCount: synthesisResults.length,
       startedAt: reviewerStartedAt,
       completedAt: reviewerCompletedAt,
     }));
 
     if (quality && completionArtifact && completionManifestHash) {
+      if (!reviewPacketIsFresh("promote", promoteRoute)) return this.terminateQuality(quality);
       const postPromoteManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
       if (postPromoteManifest.evidenceStatus === "unsupported") {
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
@@ -1886,8 +2607,11 @@ export class WorkAgent<
           "promote",
           postPromoteManifest.unsupportedEntries,
           {
-            artifactHash: completionArtifact.artifactHash,
-            evidenceRefs: [completionArtifact.path],
+            artifactHash: completionReviewPacket?.artifactHash ?? completionArtifact.artifactHash,
+            evidenceRefs: [
+              completionArtifact.path,
+              ...(completionReviewPacket ? [completionReviewPacket.path] : []),
+            ],
             independentVerification: false,
             ...(promoteRoute ? { route: promoteRoute } : {}),
           },
@@ -1897,11 +2621,14 @@ export class WorkAgent<
       if (postPromoteManifest.artifactHash !== completionManifestHash) {
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
         this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
-          artifactHash: completionArtifact.artifactHash,
-          reviewedArtifactHash: completionManifestHash,
+          artifactHash: completionReviewPacket?.artifactHash ?? completionArtifact.artifactHash,
+          reviewedArtifactHash: completionReviewPacket?.artifactHash ?? completionManifestHash,
           currentArtifactHash: postPromoteManifest.artifactHash,
           stale: true,
-          evidenceRefs: [completionArtifact.path],
+          evidenceRefs: [
+            completionArtifact.path,
+            ...(completionReviewPacket ? [completionReviewPacket.path] : []),
+          ],
           independentVerification: false,
           ...(promoteRoute ? { route: promoteRoute } : {}),
         });
@@ -1918,6 +2645,7 @@ export class WorkAgent<
           gateStatus: criticGateStatus,
         };
       }
+      if (!reviewPacketIsFresh("promote", promoteRoute)) return this.terminateQuality(quality);
       const completionManifest = quality.artifacts.captureWorkspaceManifest(qualityWritePaths(quality));
       if (completionManifest.evidenceStatus === "unsupported") {
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
@@ -1926,8 +2654,11 @@ export class WorkAgent<
           "promote",
           completionManifest.unsupportedEntries,
           {
-            artifactHash: completionArtifact.artifactHash,
-            evidenceRefs: [completionArtifact.path],
+            artifactHash: completionReviewPacket?.artifactHash ?? completionArtifact.artifactHash,
+            evidenceRefs: [
+              completionArtifact.path,
+              ...(completionReviewPacket ? [completionReviewPacket.path] : []),
+            ],
             independentVerification: false,
             ...(promoteRoute ? { route: promoteRoute } : {}),
           },
@@ -1937,11 +2668,14 @@ export class WorkAgent<
       if (completionManifest.artifactHash !== completionManifestHash) {
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
         this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
-          artifactHash: completionArtifact.artifactHash,
-          reviewedArtifactHash: completionManifestHash,
+          artifactHash: completionReviewPacket?.artifactHash ?? completionArtifact.artifactHash,
+          reviewedArtifactHash: completionReviewPacket?.artifactHash ?? completionManifestHash,
           currentArtifactHash: completionManifest.artifactHash,
           stale: true,
-          evidenceRefs: [completionArtifact.path],
+          evidenceRefs: [
+            completionArtifact.path,
+            ...(completionReviewPacket ? [completionReviewPacket.path] : []),
+          ],
           independentVerification: false,
           ...(promoteRoute ? { route: promoteRoute } : {}),
         });
@@ -1997,7 +2731,7 @@ export class WorkAgent<
         }),
         projection,
         evidence: completionEvidence,
-        currentArtifactHash: completionArtifact.artifactHash,
+        currentArtifactHash: completionReviewPacket?.artifactHash ?? completionArtifact.artifactHash,
         producerId: completionProducerId,
         independentReviewerAvailable: criticIndependent,
         reviewRequired: quality.profile !== "minimal",
@@ -2057,6 +2791,7 @@ export class WorkAgent<
           };
         }
       }
+      if (!reviewPacketIsFresh("promote", promoteRoute)) return this.terminateQuality(quality);
       const postCompletionManifest = quality.artifacts.captureWorkspaceManifest(
         qualityWritePaths(quality),
       );
@@ -2067,8 +2802,11 @@ export class WorkAgent<
           "promote",
           postCompletionManifest.unsupportedEntries,
           {
-            artifactHash: completionArtifact.artifactHash,
-            evidenceRefs: [completionArtifact.path],
+            artifactHash: completionReviewPacket?.artifactHash ?? completionArtifact.artifactHash,
+            evidenceRefs: [
+              completionArtifact.path,
+              ...(completionReviewPacket ? [completionReviewPacket.path] : []),
+            ],
             independentVerification: false,
             ...(promoteRoute ? { route: promoteRoute } : {}),
           },
@@ -2078,11 +2816,14 @@ export class WorkAgent<
       if (postCompletionManifest.artifactHash !== completionManifestHash) {
         completionEvidence = completionEvidence.filter((evidence) => evidence.kind !== "reviewer");
         this.recordQualityDecision(quality, "promote", staleArtifactDecision("promote"), {
-          artifactHash: completionArtifact.artifactHash,
-          reviewedArtifactHash: completionManifestHash,
+          artifactHash: completionReviewPacket?.artifactHash ?? completionArtifact.artifactHash,
+          reviewedArtifactHash: completionReviewPacket?.artifactHash ?? completionManifestHash,
           currentArtifactHash: postCompletionManifest.artifactHash,
           stale: true,
-          evidenceRefs: [completionArtifact.path],
+          evidenceRefs: [
+            completionArtifact.path,
+            ...(completionReviewPacket ? [completionReviewPacket.path] : []),
+          ],
           independentVerification: false,
           ...(promoteRoute ? { route: promoteRoute } : {}),
         });
@@ -2090,18 +2831,29 @@ export class WorkAgent<
       }
       if (completion.action !== "proceed") {
         this.recordQualityDecision(quality, "promote", completion, {
-          artifactHash: completionArtifact.artifactHash,
-          evidenceRefs: [completionArtifact.path],
+          artifactHash: completionReviewPacket?.artifactHash ?? completionArtifact.artifactHash,
+          evidenceRefs: [
+            completionArtifact.path,
+            ...(completionReviewPacket ? [completionReviewPacket.path] : []),
+          ],
           independentVerification: criticIndependent,
           ...(promoteRoute ? { route: promoteRoute } : {}),
         });
       }
       if (quality.terminal) return this.terminateQuality(quality);
+      if (quality.pendingIteration) {
+        turnSignal.throwIfAborted();
+        prepareNextQualityIteration();
+        continue qualityIterationLoop;
+      }
       const qualityStatus = completion.action === "proceed"
         ? criticGateStatus
         : completion.action;
       this.completeQuality(quality, qualityStatus, "promote", {
-        evidenceRefs: [completionArtifact.path],
+        evidenceRefs: [
+          completionArtifact.path,
+          ...(completionReviewPacket ? [completionReviewPacket.path] : []),
+        ],
         failures: completion.failures,
         independentVerification: criticIndependent,
       });
@@ -2109,6 +2861,7 @@ export class WorkAgent<
     }
 
     return { text: synthesis.text };
+    }
   }
 
   private async loadExecutableGuardianChecks(

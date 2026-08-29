@@ -151,7 +151,7 @@ export function resolveQualityReviewSelection(input: {
     return {
       provider,
       model,
-      distinct: provider !== input.directProvider || model !== input.directModel,
+      distinct: provider !== input.directProvider,
     };
   }
   return {
