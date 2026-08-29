@@ -33,11 +33,13 @@ test("aborting a Rust tool command waits for TERM to bounded KILL process-group 
   const root = mkdtempSync(path.join(tmpdir(), "unclecode-rust-abort-settlement-"));
   const command = path.join(root, "stubborn-rust-command");
   const pidPath = path.join(root, "child.pid");
+  const readyPath = path.join(root, "child.ready");
   const termPath = path.join(root, "child.term");
   writeFileSync(command, [
     "#!/bin/sh",
     'trap \'printf TERM > "$TERM_PATH"\' TERM',
     'printf "%s" "$$" > "$PID_PATH"',
+    'printf READY > "$READY_PATH"',
     "while :; do sleep 1; done",
     "",
   ].join("\n"), "utf8");
@@ -53,14 +55,15 @@ test("aborting a Rust tool command waits for TERM to bounded KILL process-group 
       ["ignored"],
       root,
       "",
-      { ...process.env, PID_PATH: pidPath, TERM_PATH: termPath },
+      { ...process.env, PID_PATH: pidPath, READY_PATH: readyPath, TERM_PATH: termPath },
       { signal: controller.signal, forceKillDelayMs: 50 },
     );
     const deadline = Date.now() + 5_000;
-    while (!existsSync(pidPath) && Date.now() < deadline) {
+    while ((!existsSync(pidPath) || !existsSync(readyPath)) && Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     assert.equal(existsSync(pidPath), true);
+    assert.equal(existsSync(readyPath), true);
     pid = Number(readFileSync(pidPath, "utf8"));
 
     controller.abort();
