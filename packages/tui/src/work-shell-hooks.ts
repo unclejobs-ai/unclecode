@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import {
+  getWorkShellMessages,
   runRustCommandSync,
   type AgentConsoleViewState,
   type WorkShellComposerMode,
@@ -58,9 +59,12 @@ import {
   type AgentConsoleKeyState,
 } from "./work-shell-agent-console-input.js";
 import {
-  getWorkShellTranscriptEntryCapacity,
+  createWorkShellTranscriptAnchor,
+  getWorkShellTranscriptAvailableRows,
+  measureWorkShellEntryRows,
+  projectWorkShellTranscript,
+  resolveWorkShellTranscriptOffsetFromAnchor,
   shouldShowWorkShellConversationEntry,
-  WORK_SHELL_STARTER_PROMPTS,
   type WorkShellEntry,
   type WorkShellPanel,
 } from "./work-shell-view.js";
@@ -152,8 +156,14 @@ export interface WorkShellStateSource<State> {
   dispose(): void;
 }
 
-export function useWorkShellEngineState<State>(engine: WorkShellStateSource<State>): State {
+export type WorkShellEngineOwnership = "owned" | "shared";
+
+export function useWorkShellEngineState<State>(
+  engine: WorkShellStateSource<State>,
+  lifecycle: { readonly ownership?: WorkShellEngineOwnership } = {},
+): State {
   const [state, setState] = useState(() => engine.getState());
+  const ownership = lifecycle.ownership ?? "owned";
 
   useEffect(() => {
     setState(engine.getState());
@@ -161,9 +171,11 @@ export function useWorkShellEngineState<State>(engine: WorkShellStateSource<Stat
     void engine.initialize();
     return () => {
       unsubscribe();
-      engine.dispose();
+      if (ownership === "owned") {
+        engine.dispose();
+      }
     };
-  }, [engine]);
+  }, [engine, ownership]);
 
   return state;
 }
@@ -293,6 +305,9 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
   // tool feed in the composer dock). Optional so hosts and test fakes
   // without engine trace state render no feed.
   readonly traceLines?: readonly string[];
+  /** Shared `/minimal`/`/verbose` tool-history presentation preference. */
+  readonly traceMode?: "minimal" | "verbose" | undefined;
+  readonly uiLocale?: "en" | "ko" | undefined;
   // Always-filled live trace tail (engine-owned, capped at 8). The pane's
   // dock feed reads THIS buffer — not the verbose-only `traceLines` above —
   // so the busy feed stays alive in default (minimal) trace mode.
@@ -333,6 +348,7 @@ export type WorkShellPaneRuntimeState<Reasoning = unknown> = {
 export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   extends WorkShellStateSource<State> {
   handleSubmit(line: string, attachments?: readonly unknown[]): Promise<void>;
+  toggleToolHistoryDisplay?(): Promise<void>;
   setMode(mode: string): void | Promise<void>;
   openSessionsPanel(): Promise<void>;
   interruptTurn?(): void;
@@ -371,6 +387,12 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   // plumbing keep digits and Esc on their existing meanings.
   answerPendingDecisionByIndex?(index: number): boolean;
   cancelPendingDecision?(): boolean;
+  removeQueueItem?(id: number): Promise<boolean>;
+  moveQueueItem?(id: number, direction: "up" | "down"): Promise<boolean>;
+  clearQueueItems?(): Promise<void>;
+  resumeQueueItems?(): Promise<void>;
+  retryQueueItem?(id: number): Promise<boolean>;
+  discardQueueItem?(id: number): Promise<boolean>;
   // Optional because not every pane host wires trace plumbing — when
   // absent, the hook silently drops the event. In practice WorkShellEngine
   // always implements this since commit b891c19's follow-up.
@@ -567,11 +589,15 @@ export type ShellActionKeyOwnershipState = {
 };
 
 /** Hotkey → starter prompt; only exact single digits `1`-`3` match. */
-function getWorkShellStarterPromptForKey(key: string): string | undefined {
-  const index = WORK_SHELL_STARTER_PROMPTS.findIndex((_, promptIndex) =>
+function getWorkShellStarterPromptForKey(
+  key: string,
+  uiLocale: "en" | "ko" = "en",
+): string | undefined {
+  const prompts = getWorkShellMessages(uiLocale).starterPrompts;
+  const index = prompts.findIndex((_, promptIndex) =>
     key === String(promptIndex + 1)
   );
-  return index >= 0 ? WORK_SHELL_STARTER_PROMPTS[index] : undefined;
+  return index >= 0 ? prompts[index] : undefined;
 }
 
 /**
@@ -661,8 +687,52 @@ export function isShellActionKeyOverlayOpen(input: {
   );
 }
 
+export type QueueOverlayKeyAction =
+  | { readonly action: "pass" | "consume" | "remove" | "clear" | "resume" | "retry" | "discard" | "close" }
+  | { readonly action: "select"; readonly delta: -1 | 1 }
+  | { readonly action: "move"; readonly direction: "up" | "down" };
+
+export function resolveQueueOverlayKeyAction(
+  value: string,
+  key: {
+    readonly upArrow?: boolean;
+    readonly downArrow?: boolean;
+    readonly shift?: boolean;
+    readonly escape?: boolean;
+    readonly delete?: boolean;
+    readonly backspace?: boolean;
+    readonly ctrl?: boolean;
+  },
+  queueOpen: boolean,
+): QueueOverlayKeyAction {
+  if (!queueOpen) return { action: "pass" };
+  if (key.escape) return { action: "close" };
+  if (key.upArrow || key.downArrow) {
+    const direction = key.upArrow ? "up" : "down";
+    return key.shift
+      ? { action: "move", direction }
+      : { action: "select", delta: direction === "up" ? -1 : 1 };
+  }
+  if (key.delete || key.backspace || value.toLowerCase() === "d") return { action: "remove" };
+  if (!key.ctrl && value.toLowerCase() === "c") return { action: "clear" };
+  if (!key.ctrl && value.toLowerCase() === "r") return { action: "resume" };
+  if (!key.ctrl && value.toLowerCase() === "t") return { action: "retry" };
+  if (!key.ctrl && value.toLowerCase() === "x") return { action: "discard" };
+  return { action: "consume" };
+}
+
+export function parseQueuePanelItemIds(lines: readonly string[]): readonly number[] {
+  return lines.flatMap((line) => {
+    const match = line.match(/^(?:Next|#\d+) · id (\d+) ·/u);
+    if (!match?.[1]) return [];
+    const id = Number(match[1]);
+    return Number.isSafeInteger(id) && id >= 0 ? [id] : [];
+  });
+}
+
 export function useWorkShellInputController(input: {
   readonly value: string;
+  readonly uiLocale?: "en" | "ko" | undefined;
   readonly replaceValue: (value: string) => void;
   readonly slashSuggestionCount: number;
   readonly selectedSlashCommand?: string;
@@ -672,6 +742,7 @@ export function useWorkShellInputController(input: {
   readonly currentMode: string;
   readonly onExit: () => void;
   readonly onRequestSessionsView?: (() => void) | undefined;
+  readonly toggleToolHistoryDisplay?: (() => void | Promise<void>) | undefined;
   readonly openEngineSessions: () => void;
   readonly cycleMode: (nextMode: string) => void | Promise<void>;
   readonly shouldBlockSlashSubmit: (line: string) => boolean;
@@ -699,6 +770,15 @@ export function useWorkShellInputController(input: {
   /** Decision bar capability probes — wired by engines that own decisions. */
   readonly answerPendingDecisionByIndex?: ((index: number) => boolean) | undefined;
   readonly cancelPendingDecision?: (() => boolean) | undefined;
+  readonly queueOverlayOpen?: boolean | undefined;
+  readonly queueSelectedId?: number | undefined;
+  readonly moveQueueSelection?: ((delta: -1 | 1) => void) | undefined;
+  readonly removeSelectedQueueItem?: (() => Promise<void>) | undefined;
+  readonly moveSelectedQueueItem?: ((direction: "up" | "down") => Promise<void>) | undefined;
+  readonly clearQueueItems?: (() => Promise<void>) | undefined;
+  readonly resumeQueueItems?: (() => Promise<void>) | undefined;
+  readonly retrySelectedQueueItem?: (() => Promise<void>) | undefined;
+  readonly discardSelectedQueueItem?: (() => Promise<void>) | undefined;
   readonly activePanelTitle?: string;
   readonly closeSlashPicker?: ((panelTitle?: string) => void) | undefined;
   readonly interruptTurn?: (() => void) | undefined;
@@ -841,15 +921,27 @@ export function useWorkShellInputController(input: {
 
   useInput((value, key) => {
     const ctrlOCount = value.split("\u000f").length - 1;
-    if (
-      input.onRequestSessionsView &&
-      (ctrlOCount > 0 || (key.ctrl && value.toLowerCase() === "o"))
-    ) {
+    if (input.toggleToolHistoryDisplay && (ctrlOCount > 0 || (key.ctrl && value.toLowerCase() === "o"))) {
       escapeResetArmedAtRef.current = undefined;
-      input.replaceValue("");
       const requestCount = Math.max(1, ctrlOCount);
       for (let index = 0; index < requestCount; index += 1) {
-        input.onRequestSessionsView();
+        void Promise.resolve(input.toggleToolHistoryDisplay()).catch(() => undefined);
+      }
+      return;
+    }
+    const queueAction = resolveQueueOverlayKeyAction(value, key, input.queueOverlayOpen === true);
+    if (queueAction.action !== "pass") {
+      escapeResetArmedAtRef.current = undefined;
+      switch (queueAction.action) {
+        case "close": input.closeOverlay?.(); break;
+        case "select": input.moveQueueSelection?.(queueAction.delta); break;
+        case "remove": void input.removeSelectedQueueItem?.().catch(() => undefined); break;
+        case "move": void input.moveSelectedQueueItem?.(queueAction.direction).catch(() => undefined); break;
+        case "clear": void input.clearQueueItems?.().catch(() => undefined); break;
+        case "resume": void input.resumeQueueItems?.().catch(() => undefined); break;
+        case "retry": void input.retrySelectedQueueItem?.().catch(() => undefined); break;
+        case "discard": void input.discardSelectedQueueItem?.().catch(() => undefined); break;
+        case "consume": break;
       }
       return;
     }
@@ -1001,7 +1093,7 @@ export function useWorkShellInputController(input: {
       }),
     });
     if (shellActionOwnership === "starter") {
-      const starterPrompt = getWorkShellStarterPromptForKey(value);
+      const starterPrompt = getWorkShellStarterPromptForKey(value, input.uiLocale ?? "en");
       if (starterPrompt !== undefined) {
         escapeResetArmedAtRef.current = undefined;
         input.replaceValue(starterPrompt);
@@ -1154,9 +1246,6 @@ export function useWorkShellInputController(input: {
       case "close-overlay":
         input.closeOverlay?.();
         return;
-      case "open-sessions-view":
-        input.onRequestSessionsView?.();
-        return;
       case "open-engine-sessions":
         input.openEngineSessions();
         return;
@@ -1220,12 +1309,16 @@ export function useWorkShellPaneState<
   readonly onSyncHomeState?: ((homeState: Partial<TuiShellHomeState>) => void) | undefined;
   readonly refreshHomeState?: (() => Promise<TuiShellHomeState>) | undefined;
   readonly shouldBlockSlashSubmit: (line: string) => boolean;
+  /** The pane disposes only engines it created; shared runtime owners outlive a view detach. */
+  readonly engineOwnership?: WorkShellEngineOwnership | undefined;
   /**
    * Task 11 scrollback: the pane's measured terminal rows, threaded so the
    * PageUp/PageDown step and the rendered window derive from one capacity
    * calculation. Left undefined, a legacy host keeps a default-rows step.
    */
   readonly terminalRows?: number | undefined;
+  /** Physical columns used for wrapped rendered-row scroll anchoring. */
+  readonly terminalColumns?: number | undefined;
 }) {
   const [inputValue, setInputValueState] = useState("");
   const [composerResetEpoch, setComposerResetEpoch] = useState(0);
@@ -1310,54 +1403,69 @@ export function useWorkShellPaneState<
       return remaining.length === current.length ? current : remaining;
     });
   }, []);
-  const engineState = useWorkShellEngineState(input.engine);
-  // Task 11 transcript scrollback: the offset counts transcript entries
+  const engineState = useWorkShellEngineState(input.engine, {
+    ownership: input.engineOwnership ?? "owned",
+  });
+  // Task 11 transcript scrollback: the offset counts rendered terminal rows
   // hidden below the visible window; 0 is bottom-follow. New entries arrive
   // from the engine outside React events, so the arrival reset is a
-  // subscription-shaped effect keyed on the transcript anchor (visible entry
-  // count + last entry), not a prop mirror: an engine emit that rebuilds the
-  // entries array without changing the anchor must not yank the view down.
-  const [transcriptScrollOffset, setTranscriptScrollOffset] = useState(0);
-  const transcriptArrivalAnchorRef = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    const visibleEntries = engineState.entries.filter(shouldShowWorkShellConversationEntry);
-    const lastVisibleEntry = visibleEntries.at(-1);
-    const lastEntry = lastVisibleEntry !== undefined
-      ? `${lastVisibleEntry.role}:${lastVisibleEntry.text}`
-      : "";
-    const anchor = `${visibleEntries.length}:${lastEntry}`;
-    const previousAnchor = transcriptArrivalAnchorRef.current;
-    transcriptArrivalAnchorRef.current = anchor;
-    if (previousAnchor !== undefined && previousAnchor !== anchor) {
-      setTranscriptScrollOffset(0);
-    }
-  }, [engineState.entries]);
-  // One page is exactly the rendered window's capacity, so PageUp/PageDown
-  // never move by a different amount than the view shows. The capacity comes
-  // from the same entry-weight function the view's window slices with
-  // (measureWorkShellEntryRows via getWorkShellTranscriptEntryCapacity) — a
-  // multi-row tool entry shrinks both the step and the window by the same
-  // amount, so the clamp (`visible − capacity`) always matches what rendering
-  // can actually anchor.
+  // subscription-shaped effect keyed on rendered row count, not a prop mirror:
+  // an engine emit that rebuilds the array without new rows does not move it.
+  const [transcriptAnchor, setTranscriptAnchor] = useState<
+    ReturnType<typeof createWorkShellTranscriptAnchor>
+  >(undefined);
+  const transcriptEntries = projectWorkShellTranscript(
+    engineState.entries,
+    engineState.streamingAssistantText,
+  );
+  const transcriptRowWidth = Math.max(8, (input.terminalColumns ?? 80) - 4);
+  // The scroll position is content-addressed, not a mutable row delta. New
+  // entries, streaming updates, and terminal resize all recompute from the
+  // same entry id + intra-entry row and therefore cannot reinterpret wrapping
+  // growth as an append.
+  const transcriptScrollOffset = resolveWorkShellTranscriptOffsetFromAnchor(
+    transcriptEntries,
+    transcriptRowWidth,
+    transcriptAnchor,
+    engineState.traceMode ?? "verbose",
+  );
+  // One page is exactly the rendered row budget used by the view. Wrapped CJK
+  // and multi-row tool output therefore move and clamp in the same units.
   const moveTranscriptPage = useCallback(
     (direction: -1 | 1) => {
-      setTranscriptScrollOffset((current) => {
-        const visibleEntries = engineState.entries.filter(shouldShowWorkShellConversationEntry);
-        const transcriptPageCapacity = getWorkShellTranscriptEntryCapacity(
-          visibleEntries,
-          input.terminalRows,
+      setTranscriptAnchor((currentAnchor) => {
+        const visibleEntries = projectWorkShellTranscript(
+          engineState.entries,
+          engineState.streamingAssistantText,
         );
-        const maxOffset = Math.max(0, visibleEntries.length - transcriptPageCapacity);
+        const rowWidth = Math.max(8, (input.terminalColumns ?? 80) - 4);
+        const current = resolveWorkShellTranscriptOffsetFromAnchor(
+          visibleEntries,
+          rowWidth,
+          currentAnchor,
+          engineState.traceMode ?? "verbose",
+        );
+        const transcriptPageRows = getWorkShellTranscriptAvailableRows(input.terminalRows);
+        const totalRows = visibleEntries.reduce(
+          (sum, entry) => sum + measureWorkShellEntryRows(entry, rowWidth, engineState.traceMode ?? "verbose"),
+          0,
+        );
+        const maxOffset = Math.max(0, totalRows - transcriptPageRows);
         // PageUp (direction -1) moves toward older entries, which hides more
         // of them below the window — the offset grows, not shrinks.
-        const next = current - direction * transcriptPageCapacity;
-        return Math.max(0, Math.min(maxOffset, next));
+        const next = current - direction * transcriptPageRows;
+        return createWorkShellTranscriptAnchor(
+          visibleEntries,
+          rowWidth,
+          Math.max(0, Math.min(maxOffset, next)),
+          engineState.traceMode ?? "verbose",
+        );
       });
     },
-    [engineState.entries, input.terminalRows],
+    [engineState.entries, engineState.streamingAssistantText, engineState.traceMode, input.terminalColumns, input.terminalRows],
   );
   const returnTranscriptToNewest = useCallback(() => {
-    setTranscriptScrollOffset(0);
+    setTranscriptAnchor(undefined);
   }, []);
   const contextExpandActionsEnabled = resolveContextInspectorExpandOwnership({
     hostExpandAvailable: typeof input.engine.toggleContextInspectorExpanded === "function",
@@ -1417,6 +1525,33 @@ export function useWorkShellPaneState<
   });
   const isStickySlashPicker =
     activeSlashInput !== undefined && !inputValue.trim().startsWith("/");
+  const queueOverlayOpen = activePanel.title === "Queue · follow-ups";
+  const queueItemIds = useMemo(
+    () => queueOverlayOpen ? parseQueuePanelItemIds(activePanel.lines) : [],
+    [activePanel.lines, queueOverlayOpen],
+  );
+  const [storedQueueSelectedId, setQueueSelectedId] = useState<number | undefined>(undefined);
+  const [queueActionError, setQueueActionError] = useState<string | undefined>(undefined);
+  const queueSelectedId = storedQueueSelectedId !== undefined && queueItemIds.includes(storedQueueSelectedId)
+    ? storedQueueSelectedId
+    : queueItemIds[0];
+  // Ink rebinds useInput in a passive effect. Keep the visible selection in a
+  // synchronous ref so a mutation key arriving in the same terminal burst as
+  // ↑/↓ can never act on the previously rendered row.
+  const queueSelectedIdRef = useRef<number | undefined>(queueSelectedId);
+  queueSelectedIdRef.current = queueSelectedId;
+  const moveQueueSelection = useCallback((delta: -1 | 1) => {
+    if (queueItemIds.length === 0) return;
+    const selectedId = queueSelectedIdRef.current;
+    const currentIndex = selectedId === undefined ? 0 : queueItemIds.indexOf(selectedId);
+    const nextIndex = Math.max(0, Math.min(queueItemIds.length - 1, currentIndex + delta));
+    const nextId = queueItemIds[nextIndex];
+    queueSelectedIdRef.current = nextId;
+    setQueueSelectedId(nextId);
+  }, [queueItemIds]);
+  const presentedActivePanel = queueOverlayOpen && queueActionError
+    ? { ...activePanel, lines: [...activePanel.lines, "", `Queue action failed · ${queueActionError}`] }
+    : activePanel;
   useEffect(() => {
     if (inputValue.trim().startsWith("/")) {
       if (ignoreNextSlashDismissResetRef.current) {
@@ -1441,7 +1576,7 @@ export function useWorkShellPaneState<
     (line: string) => {
       // A submission always returns the transcript to the newest entry:
       // the operator has moved on from reading history.
-      setTranscriptScrollOffset(0);
+      setTranscriptAnchor(undefined);
       return input.engine.handleSubmit(line, pendingClipboardAttachments);
     },
     [input.engine, pendingClipboardAttachments],
@@ -1704,6 +1839,7 @@ export function useWorkShellPaneState<
 
   const { submit } = useWorkShellInputController({
     value: inputValue,
+    uiLocale: engineState.uiLocale ?? "en",
     replaceValue: setInputValue,
     slashSuggestionCount: slashSuggestions.length,
     ...(selectedSuggestion?.command
@@ -1715,6 +1851,9 @@ export function useWorkShellPaneState<
     currentMode: engineState.mode,
     onExit: input.onExit,
     onRequestSessionsView: input.onRequestSessionsView,
+    ...(input.engine.toggleToolHistoryDisplay
+      ? { toggleToolHistoryDisplay: () => input.engine.toggleToolHistoryDisplay!() }
+      : {}),
     openEngineSessions,
     cycleMode,
     shouldBlockSlashSubmit: input.shouldBlockSlashSubmit,
@@ -1749,6 +1888,92 @@ export function useWorkShellPaneState<
       : {}),
     ...(input.engine.cancelPendingDecision
       ? { cancelPendingDecision: () => input.engine.cancelPendingDecision?.() ?? false }
+      : {}),
+    queueOverlayOpen,
+    ...(queueSelectedId !== undefined ? { queueSelectedId } : {}),
+    moveQueueSelection,
+    ...(queueSelectedId !== undefined && input.engine.removeQueueItem
+      ? {
+          removeSelectedQueueItem: async () => {
+            const selectedId = queueSelectedIdRef.current;
+            if (selectedId === undefined) return;
+            const index = queueItemIds.indexOf(selectedId);
+            const fallback = queueItemIds[index + 1] ?? queueItemIds[index - 1];
+            try {
+              const removed = await input.engine.removeQueueItem?.(selectedId);
+              if (!removed) throw new Error(`item ${selectedId} is not pending`);
+              setQueueActionError(undefined);
+              queueSelectedIdRef.current = fallback;
+              setQueueSelectedId(fallback);
+            } catch (error) {
+              setQueueActionError(error instanceof Error ? error.message : String(error));
+            }
+          },
+        }
+      : {}),
+    ...(queueSelectedId !== undefined && input.engine.moveQueueItem
+      ? { moveSelectedQueueItem: async (direction: "up" | "down") => {
+          const selectedId = queueSelectedIdRef.current;
+          if (selectedId === undefined) return;
+          try {
+            const moved = await input.engine.moveQueueItem?.(selectedId, direction);
+            if (!moved) throw new Error(`item ${selectedId} cannot move ${direction}`);
+            setQueueActionError(undefined);
+          } catch (error) {
+            setQueueActionError(error instanceof Error ? error.message : String(error));
+          }
+        } }
+      : {}),
+    ...(input.engine.clearQueueItems
+      ? { clearQueueItems: async () => {
+          try {
+            await input.engine.clearQueueItems?.();
+            setQueueActionError(undefined);
+            queueSelectedIdRef.current = undefined;
+            setQueueSelectedId(undefined);
+          } catch (error) {
+            setQueueActionError(error instanceof Error ? error.message : String(error));
+          }
+        } }
+      : {}),
+    ...(input.engine.resumeQueueItems
+      ? { resumeQueueItems: async () => {
+          try {
+            await input.engine.resumeQueueItems?.();
+            setQueueActionError(undefined);
+          } catch (error) {
+            setQueueActionError(error instanceof Error ? error.message : String(error));
+          }
+        } }
+      : {}),
+    ...(queueSelectedId !== undefined && input.engine.retryQueueItem
+      ? { retrySelectedQueueItem: async () => {
+          const selectedId = queueSelectedIdRef.current;
+          if (selectedId === undefined) return;
+          try {
+            const retried = await input.engine.retryQueueItem?.(selectedId);
+            if (!retried) throw new Error(`item ${selectedId} cannot be retried`);
+            setQueueActionError(undefined);
+          } catch (error) {
+            setQueueActionError(error instanceof Error ? error.message : String(error));
+          }
+        } }
+      : {}),
+    ...(queueSelectedId !== undefined && input.engine.discardQueueItem
+      ? { discardSelectedQueueItem: async () => {
+          const selectedId = queueSelectedIdRef.current;
+          if (selectedId === undefined) return;
+          try {
+            const discarded = await input.engine.discardQueueItem?.(selectedId);
+            if (!discarded) throw new Error(`item ${selectedId} cannot be discarded`);
+            setQueueActionError(undefined);
+            const fallback = queueItemIds.find((id) => id !== selectedId);
+            queueSelectedIdRef.current = fallback;
+            setQueueSelectedId(fallback);
+          } catch (error) {
+            setQueueActionError(error instanceof Error ? error.message : String(error));
+          }
+        } }
       : {}),
     activePanelTitle: activePanel.title,
     closeSlashPicker: (panelTitle) => {
@@ -1867,7 +2092,8 @@ export function useWorkShellPaneState<
     /** Task 11 scrollback: entries hidden below the transcript window. */
     transcriptScrollOffset,
     composerPreview,
-    activePanel,
+    activePanel: presentedActivePanel,
+    queueSelectedId,
     slashSuggestionCount: slashSuggestions.length,
     selectedSlashCommand: selectedSuggestion?.command,
     contextAdviceKeyActionsEnabled: contextAdviceActionsAvailable,

@@ -15,7 +15,6 @@ export type WorkShellInputAction =
   | { readonly type: "interrupt-turn" }
   | { readonly type: "clear-input" }
   | { readonly type: "close-overlay" }
-  | { readonly type: "open-sessions-view" }
   | { readonly type: "open-engine-sessions" };
 
 export type WorkShellSubmitAction =

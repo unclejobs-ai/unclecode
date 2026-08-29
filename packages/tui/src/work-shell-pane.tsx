@@ -3,6 +3,7 @@ import React from "react";
 
 import {
   captureClipboardImage as defaultCaptureClipboardImage,
+  getWorkShellMessages,
   type ClipboardImageResult,
 } from "@unclecode/orchestrator";
 
@@ -21,6 +22,7 @@ import {
 import {
   useWorkShellPaneState,
   type WorkShellComposerPreview,
+  type WorkShellEngineOwnership,
   type WorkShellPaneEngine,
   type WorkShellPaneRuntimeState,
   type WorkShellSlashSuggestion,
@@ -31,7 +33,6 @@ import { formatAuthLabelForDisplay } from "./work-shell-panels.js";
 import {
   getWorkShellComposerTextColor,
   resolveWorkShellComposerAdditionalRows,
-  WORK_SHELL_COMPOSER_PLACEHOLDER,
   WorkShellView,
 } from "./work-shell-view.js";
 import { useOmpAuthProviderPicker } from "./work-shell-auth-provider-picker-state.js";
@@ -48,6 +49,8 @@ export type WorkShellPaneProps<
   readonly model: string;
   readonly mode: string;
   readonly engine: WorkShellPaneEngine<State>;
+  /** Explicit lifecycle ownership: shared runtime engines survive pane detach. */
+  readonly engineOwnership?: WorkShellEngineOwnership | undefined;
   readonly cwd: string;
   readonly resolveComposerInput: (
     value: string,
@@ -206,6 +209,7 @@ export function WorkShellPane<
     pendingClipboardAttachmentCount,
   } = useWorkShellPaneState<Attachment, State>({
     engine: props.engine,
+    engineOwnership: props.engineOwnership ?? "owned",
     cwd: props.cwd,
     resolveComposerInput: props.resolveComposerInput,
     getSuggestions: props.getSuggestions,
@@ -281,6 +285,8 @@ export function WorkShellPane<
     queuePaused,
     agentConsole,
     agentConsoleView,
+    traceMode,
+    uiLocale,
   } = engineState;
   // `git status` forks a child process, so it is synced outside render and
   // refreshed only while the main turn or a delegated run could still be
@@ -457,6 +463,8 @@ export function WorkShellPane<
       authLabel={authDisplayLabel}
       {...(contextIndicator ? { contextIndicator } : {})}
       entries={entries}
+      {...(traceMode ? { traceMode } : {})}
+      uiLocale={uiLocale ?? "en"}
       {...(streamingAssistantText ? { streamingAssistantText } : {})}
       isBusy={isBusy}
       {...(busyStatus ? { busyStatus } : {})}
@@ -570,7 +578,7 @@ export function WorkShellPane<
           }}
           terminalColumns={terminalColumns}
           textColor={getWorkShellComposerTextColor()}
-          placeholder={WORK_SHELL_COMPOSER_PLACEHOLDER}
+          placeholder={getWorkShellMessages(uiLocale ?? "en").composerPlaceholder}
           {...(isSecureApiKeyEntry ? { mask: "•" } : {})}
           cursorVisible={
             !shouldSuppressComposerKeysForInspector

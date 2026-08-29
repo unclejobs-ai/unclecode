@@ -157,6 +157,7 @@ export function createManagedWorkShellDashboardProps<
         model: input.paneRuntime.options.model,
         mode: input.paneRuntime.options.mode,
         engine,
+        engineOwnership: localRuntime ? "owned" : "shared",
         cwd: input.paneRuntime.options.cwd,
         resolveComposerInput: input.paneRuntime.resolveComposerInput,
         getSuggestions: localRuntime?.getSuggestions

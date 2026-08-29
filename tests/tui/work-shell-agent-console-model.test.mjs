@@ -42,7 +42,7 @@ function agent(overrides) {
   };
 }
 
-test("the WorkGraph HUD lifts active, blocked, requires-action and failed work above pending and completed rows", () => {
+test("the WorkGraph HUD shows current work, the next stage, and one blocker without overflow noise", () => {
   const rows = selectWorkGraphHudRows(
     snapshot({
       workGraph: {
@@ -62,13 +62,13 @@ test("the WorkGraph HUD lifts active, blocked, requires-action and failed work a
     120,
   );
 
-  // Snapshot order would put "Draft schema" first; priority order must not.
+  // Snapshot order would put "Draft schema" first; the quiet hierarchy must
+  // instead show current → remaining → blocker and stop at three nearby rows.
   assert.deepEqual(rows, [
     "Ship authentication · 1/6",
     "  ◐ Land refresh flow · running",
+    "  ○ Wire session store · ready",
     "  ▲ Await review · requires action",
-    "  ✕ Rotate secrets · failed",
-    "  … +3 more",
   ]);
 });
 

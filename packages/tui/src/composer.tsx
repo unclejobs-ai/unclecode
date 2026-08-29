@@ -477,6 +477,15 @@ export function Composer(props: {
   // the pre-attachment render. Always read the latest props through a ref.
   const propsRef = useRef(props);
   propsRef.current = props;
+  // An explicit owner reset is stronger than a delayed controlled-value ack.
+  // Clear the pending draft during render so the very next input handler
+  // cannot submit an Esc-cancelled IME/steer draft before effects run.
+  const resetEpochChanged = resetEpochRef.current !== props.resetEpoch;
+  if (resetEpochChanged) {
+    resetEpochRef.current = props.resetEpoch;
+    pendingLocalValueRef.current = undefined;
+    cursorOffsetRef.current = props.value.length;
+  }
 
   useEffect(() => {
     propsRef.current.onIsPastingChange?.(isPasting);
@@ -496,14 +505,8 @@ export function Composer(props: {
   }, [props.value]);
 
   useEffect(() => {
-    if (resetEpochRef.current === props.resetEpoch) {
-      return;
-    }
-    resetEpochRef.current = props.resetEpoch;
-    pendingLocalValueRef.current = undefined;
-    cursorOffsetRef.current = props.value.length;
-    setCursorOffset(props.value.length);
-  }, [props.resetEpoch, props.value]);
+    if (resetEpochChanged) setCursorOffset(props.value.length);
+  }, [resetEpochChanged, props.value]);
 
   useEffect(
     () => () => {
@@ -548,6 +551,13 @@ export function Composer(props: {
       isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current),
     );
     if (agentConsoleKeyOwnership === true) {
+      // Esc and Alt+A can tear down an agent-steer composer before React has
+      // painted the parent's cleared value. Discard the child-owned draft in
+      // the same terminal input event so a following Enter can never submit
+      // the abandoned agent message as an ordinary provider prompt.
+      if (key.escape || (key.meta && input.toLowerCase() === "a")) {
+        resetLocalValueAfterSubmit();
+      }
       return;
     }
     const agentConsoleOwnsComposer = agentConsoleKeyOwnership === "compose";
@@ -708,10 +718,16 @@ export function Composer(props: {
     }
   }, { isActive: true });
 
-  const visibleValue = maskComposerValue(props.value, props.mask);
-  const normalizedCursorOffset = normalizeComposerCursorOffset(props.value, cursorOffset);
+  // Local input owns the prompt until the controlled parent acknowledges the
+  // exact value. Rendering `props.value` during that window makes IME preedit
+  // text blink out whenever an unrelated async engine update rerenders the
+  // pane. The pending value is already the edit/submit authority above; use
+  // that same owner for paint and cursor math.
+  const renderValue = pendingLocalValueRef.current ?? props.value;
+  const visibleValue = maskComposerValue(renderValue, props.mask);
+  const normalizedCursorOffset = normalizeComposerCursorOffset(renderValue, cursorOffset);
   const visibleCursorOffset = props.mask
-    ? maskComposerValue(props.value.slice(0, normalizedCursorOffset), props.mask).length
+    ? maskComposerValue(renderValue.slice(0, normalizedCursorOffset), props.mask).length
     : normalizedCursorOffset;
   const visibleWidth = resolveComposerVisibleWidth(props.terminalColumns);
   const viewport = layoutComposerViewport({
@@ -730,7 +746,7 @@ export function Composer(props: {
   // The placeholder replaces the padded blank row of an empty draft (mask and
   // paste windows keep their own presentation), never the typed text.
   const placeholderLine = props.placeholder !== undefined
-    && props.value.length === 0
+    && renderValue.length === 0
     && props.mask === undefined
     && !isPasting
     ? props.placeholder

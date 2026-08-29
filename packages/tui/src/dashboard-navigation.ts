@@ -422,7 +422,7 @@ export function getSessionCenterEscapeHint(input: {
   readonly detailOpen: boolean;
   readonly hasSelectedApproval: boolean;
   readonly hasEmbeddedWorkPane: boolean;
-}): "Esc cancel" | "Esc close" | "Ctrl+O context" | "Esc work" {
+}): "Esc cancel" | "Esc close" | "? sessions" | "Esc work" {
   if (input.hasSelectedApproval) {
     return "Esc cancel";
   }
@@ -430,7 +430,7 @@ export function getSessionCenterEscapeHint(input: {
     return "Esc close";
   }
   if (input.view === "work" && input.hasEmbeddedWorkPane) {
-    return "Ctrl+O context";
+    return "? sessions";
   }
   return "Esc work";
 }

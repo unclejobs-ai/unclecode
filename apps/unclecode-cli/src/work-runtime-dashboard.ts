@@ -75,6 +75,8 @@ export type StartReplOptions = {
   homeState: TuiShellHomeState;
   sessionId?: string | undefined;
   initialTraceMode?: "minimal" | "verbose" | undefined;
+  initialUiLocale?: "en" | "ko" | undefined;
+  initialUiLocaleLocked?: boolean | undefined;
   initialEntries?: readonly WorkShellChatEntry[] | undefined;
   initialSessionSummary?: string | undefined;
   initialAgentConsole?: AgentConsoleSnapshot | undefined;
@@ -217,7 +219,8 @@ export function createManagedDashboardInput(
       formatInlineCommandResultSummary,
       formatAgentTraceLine: (
         event: ExecutionTraceEvent | { readonly type: "bridge.published" | "memory.written"; readonly [key: string]: unknown },
-      ) => formatAgentTraceLine(event as ExecutionTraceEvent),
+        uiLocale?: "en" | "ko",
+      ) => formatAgentTraceLine(event as ExecutionTraceEvent, uiLocale),
       formatWorkShellError,
       listProjectBridgeLines,
       listScopedMemoryLines,

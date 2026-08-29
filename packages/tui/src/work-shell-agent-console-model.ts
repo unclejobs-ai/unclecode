@@ -97,14 +97,18 @@ export function selectWorkGraphHudRows(
 
   const bound = boundWidth(width);
   const completed = graph.nodes.filter((node) => node.status === "completed").length;
-  // Work that needs a human or is in flight leads; everything settled or not
-  // yet started follows in graph order.
-  const ordered = [
-    ...graph.nodes.filter((node) => isActiveWorkNodeStatus(node.status)),
-    ...graph.nodes.filter((node) => !isActiveWorkNodeStatus(node.status)),
-  ];
-  const visible = ordered.slice(0, WORK_GRAPH_HUD_ROWS);
-  const hidden = graph.nodes.length - visible.length;
+  // Quiet hierarchy: current task → remaining stage → blocker → optional
+  // completed detail. Explicit Plan expansion remains the only full roster.
+  const nearby = ([
+    graph.nodes.find((node) => node.status === "running"),
+    graph.nodes.find((node) => node.status === "ready" || node.status === "approved" || node.status === "proposed"),
+    graph.nodes.find((node) => node.status === "requires_action" || node.status === "blocked" || node.status === "failed"),
+    [...graph.nodes].reverse().find((node) => node.status === "completed"),
+    ...graph.nodes,
+  ] satisfies readonly (WorkNode | undefined)[])
+    .filter((node): node is WorkNode => node !== undefined)
+    .filter((node, index, nodes) => nodes.indexOf(node) === index);
+  const visible = nearby.slice(0, WORK_GRAPH_HUD_ROWS);
   const titleBudget = Math.max(8, Math.min(40, bound - 24));
 
   return [
@@ -115,7 +119,6 @@ export function selectWorkGraphHudRows(
       + ` · ${workNodeStatusLabel(node.status)}`,
       bound,
     )),
-    ...(hidden > 0 ? [`${HUD_INDENT}… +${hidden} more`] : []),
   ];
 }
 

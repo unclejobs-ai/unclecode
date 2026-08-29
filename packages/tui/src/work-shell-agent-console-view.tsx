@@ -16,7 +16,6 @@ import {
 } from "./work-shell-agent-console-format.js";
 import {
   formatAgentConsoleTotalCost,
-  selectActiveAgentHudRows,
   selectAgentConsoleInspector,
   selectAgentConsoleRows,
   selectWorkGraphHudRows,
@@ -49,11 +48,7 @@ export function WorkShellAgentConsoleHud(props: {
   readonly palette: ContextInspectorPalette;
   readonly now?: number;
 }): React.ReactNode {
-  const now = props.now ?? Date.now();
-  const rows = [
-    ...selectWorkGraphHudRows(props.snapshot, props.width),
-    ...selectActiveAgentHudRows(props.snapshot, now, props.width),
-  ];
+  const rows = selectWorkGraphHudRows(props.snapshot, props.width);
   if (rows.length === 0) {
     return null;
   }

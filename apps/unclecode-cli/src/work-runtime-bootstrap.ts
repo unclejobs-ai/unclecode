@@ -30,6 +30,9 @@ import {
   loadExtensionConfigOverlays,
   loadExtensionManifestSummaries,
   WorkAgent,
+  detectWorkShellUserLocale,
+  resolveWorkShellTerminalUiLocale,
+  workShellLanguageInstruction,
   type AppReasoningConfig,
   type WorkTurnAgent,
 } from "@unclecode/orchestrator";
@@ -555,7 +558,23 @@ export async function loadWorkCliBootstrap(
     pluginOverlays,
   });
   const contextProfile = resolveContextProfile(configExplanation.settings.contextProfile.value);
+  const terminalUiLocale = resolveWorkShellTerminalUiLocale(env, "en");
+  const resumedUserText = [...(resumedSession?.initialEntries ?? [])]
+    .reverse()
+    .find((entry) => entry.role === "user")?.text ?? "";
+  const resumedUserLocale = detectWorkShellUserLocale(resumedUserText);
+  const submittedUserLocale = detectWorkShellUserLocale(prompt ?? resumedUserText);
+  const durableResumedLocale = resumedUserLocale === undefined
+    ? undefined
+    : resumedSession?.initialUiLocale;
+  const initialUiLocale = durableResumedLocale
+    ?? submittedUserLocale
+    ?? resumedSession?.initialUiLocale
+    ?? terminalUiLocale;
+  const initialUiLocaleLocked = durableResumedLocale !== undefined
+    || submittedUserLocale !== undefined;
   const systemPromptAppendix = [
+    initialUiLocaleLocked ? workShellLanguageInstruction(initialUiLocale) : "",
     configExplanation.prompt.rendered
       ? `Configured prompt:\n\n${configExplanation.prompt.rendered}`
       : "",
@@ -676,13 +695,16 @@ export async function loadWorkCliBootstrap(
       })
     : undefined;
 
-  const pluginHost = new PluginHost();
   const recorder = createAgentOpsRecorder({
     workspaceRoot: cwd,
     command: "unclecode work",
     ...(resumedSession?.sessionId ? { sessionId: resumedSession.sessionId } : {}),
   });
 
+  let recordPluginDiagnostic: ((diagnostic: import("@unclecode/plugin-host").PluginInvocationDiagnostic) => void) | undefined;
+  const pluginHost = new PluginHost({
+    onDiagnostic: (diagnostic) => recordPluginDiagnostic?.(diagnostic),
+  });
   registerBuiltInSccQualityEngine(pluginHost, { workspaceRoot: cwd, env });
   await pluginHost.loadFromDisk(cwd, {
     env,
@@ -751,6 +773,7 @@ export async function loadWorkCliBootstrap(
       });
     },
   }) : undefined;
+  recordPluginDiagnostic = (diagnostic) => ownerAgent?.recordPluginDiagnostic(diagnostic);
   const agent: StartReplAgent = ownerAgent ?? createRuntimeClientAgent();
 
   const refreshAuthState = async (): Promise<{
@@ -900,6 +923,8 @@ export async function loadWorkCliBootstrap(
       ...(resumedSession?.initialTraceMode
         ? { initialTraceMode: resumedSession.initialTraceMode }
         : {}),
+      initialUiLocale,
+      initialUiLocaleLocked,
       ...(resumedSession?.initialEntries
         ? { initialEntries: resumedSession.initialEntries }
         : {}),

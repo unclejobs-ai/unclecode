@@ -59,9 +59,15 @@ import {
   createInitialWorkShellEngineState,
   createWorkShellBusyStatePatch,
   createWorkShellTraceLinePatch,
+  createWorkShellTraceModePatch,
   resolveModeDefaultReasoning,
 } from "./work-shell-engine-state.js";
 import { runWorkShellContextAdviceEffects } from "./work-shell-engine-post-turns.js";
+import {
+  detectWorkShellUserLocale,
+  workShellLanguageInstruction,
+  type WorkShellUiLocale,
+} from "./work-shell-locale.js";
 import { applyWorkShellTraceEvent } from "./work-shell-engine-trace.js";
 import { applyTraceEventToAgentConsole } from "./work-shell-agent-console.js";
 import { isExecutorScopedTraceEvent } from "./work-agent-lifecycle.js";
@@ -391,6 +397,9 @@ export type WorkShellEngineOptions<Reasoning extends WorkShellReasoningConfig> =
   readonly cwd: string;
   readonly contextSummaryLines: readonly string[];
   readonly initialTraceMode?: WorkShellTraceMode | undefined;
+  readonly initialUiLocale?: WorkShellUiLocale | undefined;
+  /** False means terminal chrome is provisional until the first prose submit. */
+  readonly initialUiLocaleLocked?: boolean | undefined;
   readonly initialEntries?: readonly WorkShellChatEntry[] | undefined;
   readonly initialSessionSummary?: string | undefined;
   readonly initialLastSubmittedContextReceiptId?: string | undefined;
@@ -440,7 +449,14 @@ export type WorkShellEngineState<Reasoning extends WorkShellReasoningConfig> = {
    */
   readonly liveTraceLines: readonly string[];
   readonly traceMode: WorkShellTraceMode;
+  readonly uiLocale: WorkShellUiLocale;
+  readonly uiLocaleLocked: boolean;
   readonly composerMode: WorkShellComposerMode;
+  /** Immutable run identity captured when an agent-steer draft begins. */
+  readonly agentSteerTarget?: {
+    readonly kind: "agent-steer";
+    readonly agentRunId: string;
+  } | undefined;
   readonly isBusy: boolean;
   readonly busyStatus?: string | undefined;
   readonly currentTurnStartedAt?: number | undefined;
@@ -527,7 +543,10 @@ export type WorkShellEngineInput<
   ) => WorkShellPanel;
   buildInlineCommandPanel: (args: readonly string[], lines: readonly string[]) => WorkShellPanel;
   formatInlineCommandResultSummary: (args: readonly string[], lines: readonly string[]) => string;
-  formatAgentTraceLine: (event: TraceEvent | { readonly type: "bridge.published" | "memory.written"; readonly [key: string]: unknown }) => string;
+  formatAgentTraceLine: (
+    event: TraceEvent | { readonly type: "bridge.published" | "memory.written"; readonly [key: string]: unknown },
+    uiLocale?: WorkShellUiLocale,
+  ) => string;
   formatWorkShellError: (message: string) => string;
   listProjectBridgeLines: (cwd: string) => Promise<readonly string[]>;
   listScopedMemoryLines: (input: {
@@ -736,7 +755,10 @@ export class WorkShellEngine<
   ) => WorkShellPanel;
   private readonly buildInlineCommandPanel: (args: readonly string[], lines: readonly string[]) => WorkShellPanel;
   private readonly formatInlineCommandResultSummary: (args: readonly string[], lines: readonly string[]) => string;
-  private readonly formatAgentTraceLine: (event: TraceEvent | { readonly type: "bridge.published" | "memory.written"; readonly [key: string]: unknown }) => string;
+  private readonly formatAgentTraceLine: (
+    event: TraceEvent | { readonly type: "bridge.published" | "memory.written"; readonly [key: string]: unknown },
+    uiLocale?: WorkShellUiLocale,
+  ) => string;
   private readonly formatWorkShellError: (message: string) => string;
   private readonly listProjectBridgeLines: (cwd: string) => Promise<readonly string[]>;
   private readonly listScopedMemoryLines: (input: {
@@ -1205,7 +1227,12 @@ export class WorkShellEngine<
   }
 
   closeAgentConsole(): void {
-    this.setState({ agentConsoleView: closeAgentConsoleView(this.state.agentConsoleView) });
+    this.setState({
+      agentConsoleView: closeAgentConsoleView(this.state.agentConsoleView),
+      ...(this.state.composerMode === "agent-steer"
+        ? { composerMode: "default", agentSteerTarget: undefined }
+        : {}),
+    });
   }
 
   selectAgentConsoleTab(tab: AgentConsoleTab): void {
@@ -1297,6 +1324,7 @@ export class WorkShellEngine<
     const selection = resolveAgentConsoleSelection(view, this.state.agentConsole);
     if (!view.open || selection?.tab !== "agents" || isSettledAgentRun(selection.run)) {
       this.setState({
+        agentSteerTarget: undefined,
         agentConsoleView: settleAgentConsoleControl(view, {
           status: "rejected",
           message: "Select a running agent to steer.",
@@ -1306,6 +1334,7 @@ export class WorkShellEngine<
     }
     this.setState({
       composerMode: "agent-steer",
+      agentSteerTarget: { kind: "agent-steer", agentRunId: selection.run.id },
       agentConsoleView: settleAgentConsoleControl(view),
     });
   }
@@ -1364,15 +1393,14 @@ export class WorkShellEngine<
    * whose target has gone away.
    */
   private async submitAgentSteer(value: string): Promise<void> {
-    const selection = resolveAgentConsoleSelection(
-      this.state.agentConsoleView,
-      this.state.agentConsole,
-    );
-    const receipt: AgentControlReceipt = selection?.tab === "agents"
-      ? await this.getAgentControlPort().steer(selection.run.id, value)
+    const target = this.state.agentSteerTarget;
+    // Consume the binding before awaiting so repeated Enter cannot deliver the
+    // same draft twice or observe a cursor that moved during remote queuing.
+    this.setState({ composerMode: "default", agentSteerTarget: undefined });
+    const receipt: AgentControlReceipt = target?.kind === "agent-steer"
+      ? await this.getAgentControlPort().steer(target.agentRunId, value)
       : { status: "rejected", message: "Select an agent run to steer." };
     this.setState({
-      composerMode: "default",
       agentConsoleView: settleAgentConsoleControl(this.state.agentConsoleView, receipt),
     });
   }
@@ -1506,6 +1534,7 @@ export class WorkShellEngine<
     if (this.state.composerMode === "agent-steer") {
       this.setState({
         composerMode: "default",
+        agentSteerTarget: undefined,
         agentConsoleView: settleAgentConsoleControl(this.state.agentConsoleView),
       });
       return;
@@ -2358,6 +2387,24 @@ export class WorkShellEngine<
     await this.persistSessionSnapshot("idle", this.lastSessionSummary).catch(() => undefined);
   }
 
+  /**
+   * Ctrl+O changes only the presentation of retained tool history. It shares
+   * `/minimal` and `/verbose`'s one durable traceMode field, but deliberately
+   * emits no synthetic transcript entries and opens no panel.
+   */
+  async toggleToolHistoryDisplay(): Promise<void> {
+    const traceMode: WorkShellTraceMode = this.state.traceMode === "verbose"
+      ? "minimal"
+      : "verbose";
+    this.setState(createWorkShellTraceModePatch({
+      state: this.state,
+      traceMode,
+      contextSummaryLines: this.currentContextSummaryLines,
+      buildContextPanel: this.buildContextPanel,
+    }));
+    await this.persistSessionSnapshot("idle", this.lastSessionSummary, traceMode).catch(() => undefined);
+  }
+
   private applyMode(mode: string): void {
     this.options = { ...this.options, mode };
     this.agent.updateMode?.(mode);
@@ -2566,6 +2613,12 @@ export class WorkShellEngine<
       return;
     }
 
+    if (route.kind === "chat" && !route.line.startsWith("!")) {
+      this.lockUiLocaleFromFirstUserProse(route.line);
+    } else if (route.kind === "prompt-command") {
+      this.lockUiLocaleFromFirstUserProse(route.promptCommand.focus ?? "");
+    }
+
     // Submitting a turn retires the Context Desk right away: the review is
     // over, so the desk yields the conversation space through the same close
     // path Esc uses. Scoped to operator-initiated turn starts — builtin
@@ -2655,7 +2708,9 @@ export class WorkShellEngine<
             autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
             runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.runAgentTurnAtPauseBoundary({
               turnEpoch,
-              prompt: contextPacket ? this.composeProviderPrompt(contextPacket, prompt) : prompt,
+              prompt: contextPacket
+                ? this.composeProviderPrompt(contextPacket, prompt)
+                : this.decorateProviderPrompt(prompt),
               classificationPrompt: prompt,
               attachments,
               signal: abortController.signal,
@@ -2784,7 +2839,9 @@ export class WorkShellEngine<
             autoContinueOnPermissionStall: this.options.autoContinueOnPermissionStall,
             runAgentTurn: (prompt: string, attachments?: readonly Attachment[]) => this.runAgentTurnAtPauseBoundary({
               turnEpoch,
-              prompt: contextPacket ? this.composeProviderPrompt(contextPacket, prompt) : prompt,
+              prompt: contextPacket
+                ? this.composeProviderPrompt(contextPacket, prompt)
+                : this.decorateProviderPrompt(prompt),
               classificationPrompt: prompt,
               attachments,
               signal: abortController.signal,
@@ -3098,6 +3155,7 @@ export class WorkShellEngine<
       state: input.state,
       summary: input.summary,
       traceMode: input.traceMode,
+      uiLocale: this.state.uiLocale,
       reasoningEffort: overrideReasoningEffort,
       lastSubmittedContextReceiptId: this.lastSubmittedContextReceiptId,
       ownerMutationRevision: input.ownerMutationRevision ?? this.runtimeRevisionClock?.value,
@@ -3606,11 +3664,21 @@ export class WorkShellEngine<
   }
 
   private composeProviderPrompt(packet: ContextPacketView, userPrompt: string): string {
+    const providerPrompt = this.resolvePromptManifest
+      ? this.resolvePromptManifest({ packet, userPrompt }).providerPrompt
+      : composeWorkShellTurnPromptFromPacket({ packet, userPrompt });
+    return this.decorateProviderPrompt(providerPrompt);
+  }
 
-    if (this.resolvePromptManifest) {
-      return this.resolvePromptManifest({ packet, userPrompt }).providerPrompt;
-    }
-    return composeWorkShellTurnPromptFromPacket({ packet, userPrompt });
+  private decorateProviderPrompt(providerPrompt: string): string {
+    return `${workShellLanguageInstruction(this.state.uiLocale)}\n\n${providerPrompt}`;
+  }
+
+  private lockUiLocaleFromFirstUserProse(value: string): void {
+    if (this.state.uiLocaleLocked) return;
+    const uiLocale = detectWorkShellUserLocale(value);
+    if (uiLocale === undefined) return;
+    this.setState({ uiLocale, uiLocaleLocked: true });
   }
 
   private async refreshContextPacket(

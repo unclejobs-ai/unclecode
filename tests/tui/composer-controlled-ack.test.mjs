@@ -68,6 +68,72 @@ test("Composer preserves newer local input across a delayed controlled-parent ac
   }
 });
 
+test("Composer keeps one visible IME draft through preedit replacement and async parent renders", async () => {
+  const changedValues = [];
+  const submittedValues = [];
+  let forceParentRender;
+  let output = "";
+
+  function ImeHarness() {
+    const [, setEpoch] = React.useState(0);
+    forceParentRender = () => setEpoch((current) => current + 1);
+    return React.createElement(Composer, {
+      value: "",
+      onChange: (nextValue) => changedValues.push(nextValue),
+      onSubmit: (value) => submittedValues.push(value),
+    });
+  }
+
+  const stdin = createInkInput();
+  const stdout = createWritableOutput();
+  stdout.on("data", (chunk) => {
+    output += chunk.toString();
+  });
+  const instance = render(React.createElement(ImeHarness), {
+    stdin,
+    stdout,
+    stderr: createWritableError(),
+    debug: true,
+    patchConsole: false,
+    exitOnCtrlC: false,
+  });
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // A real preedit replacement sequence: the input method retracts the
+    // previous grapheme before publishing the longer decomposed Hangul
+    // cluster. Split the final UTF-8 bytes across writes as a PTY can.
+    stdin.write("ᄒ");
+    await waitForCondition(() => changedValues.at(-1) === "ᄒ");
+    stdin.write("\u007f");
+    await waitForCondition(() => changedValues.at(-1) === "");
+    stdin.write("하");
+    await waitForCondition(() => changedValues.at(-1) === "하");
+    forceParentRender();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    stdin.write("\u007f");
+    await waitForCondition(() => changedValues.at(-1) === "");
+    const committed = Buffer.from("한");
+    stdin.write(committed.subarray(0, 2));
+    stdin.write(committed.subarray(2, 5));
+    stdin.write(committed.subarray(5));
+    await waitForCondition(() => changedValues.at(-1) === "한");
+    output = "";
+    forceParentRender();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.match(output, /한/u, "the current preedit cluster remains visible before parent acknowledgement");
+    assert.doesNotMatch(output, /ᄒ하/u, "retracted preedit text is never duplicated");
+
+    stdin.write("\r");
+    await waitForCondition(() => submittedValues.length === 1);
+    assert.deepEqual(submittedValues, ["한"]);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
 function createInkInput() {
   const input = new PassThrough();
   input.isTTY = true;

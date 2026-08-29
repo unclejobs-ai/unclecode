@@ -171,12 +171,13 @@ test("the Agent Console falls back to the roster pane at 80 columns with the ins
   assert.match(frame, /Esc close/);
 });
 
-test("the default shell shows a bounded goal and agent HUD instead of the detailed tool ledger", async () => {
+test("the default shell keeps Plan separate from Agents and Jobs", async () => {
   const frame = await renderFrame({}, 100);
 
   assert.match(frame, /Ship authentication · 1\/6/, "goal progress stays in the default HUD");
-  assert.match(frame, /RuntimeMap · running/, "active agent rows stay in the default HUD");
-  assert.match(frame, /… \+3 more/, "the WorkGraph HUD is bounded to three rows");
+  assert.doesNotMatch(frame, /RuntimeMap · running/, "agent rows belong to the explicit Agents surface");
+  assert.doesNotMatch(frame, /Agents · \d+ active/, "the Plan HUD must not grow an Agents section");
+  assert.doesNotMatch(frame, /… \+3 more/, "the quiet HUD is exactly three nearby progress rows plus its status line");
 
   // The removed detailed ledger: per-call kind column, its metric tail, and
   // the diff preview it hung under each write.
@@ -298,12 +299,13 @@ function delay(ms) {
   return new Promise((resolve) => { setTimeout(resolve, ms); });
 }
 
-test("an idle main turn still advances elapsed labels while an agent is running", async () => {
+test("the explicit agent inspector advances elapsed labels while the main turn is idle", async () => {
   const base = runningSnapshot();
   const startedAt = Date.now() - 2_000;
   const { instance, getOutput } = renderDebugFrame(
     React.createElement(WorkShellView, {
       ...baseProps({
+        agentConsoleView: consoleView(),
         agentConsole: {
           ...base,
           agents: [{ ...base.agents[0], startedAt }],
@@ -316,10 +318,10 @@ test("an idle main turn still advances elapsed labels while an agent is running"
   );
   try {
     await waitForSettledFrame(getOutput);
-    assert.match(stripVTControlCharacters(getOutput()), /RuntimeMap · running 2s/);
+    assert.match(stripVTControlCharacters(getOutput()), /Elapsed\s+2s/);
     // No keypress, no engine event — only the shell's own clock.
     await delay(1_400);
-    const elapsed = [...stripVTControlCharacters(getOutput()).matchAll(/RuntimeMap · running (\d+)s/g)]
+    const elapsed = [...stripVTControlCharacters(getOutput()).matchAll(/Elapsed\s+(\d+)s/g)]
       .map((match) => Number(match[1]));
     assert.ok(Math.max(...elapsed) > 2, `elapsed label did not advance: ${elapsed.join(", ")}`);
   } finally {

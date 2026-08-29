@@ -5,6 +5,7 @@ import test from "node:test";
 import { render } from "ink";
 import React from "react";
 import CursorContext from "../../node_modules/ink/build/components/CursorContext.js";
+import { resolveQueueOverlayKeyAction } from "../../packages/tui/src/work-shell-hooks.ts";
 
 import {
   Composer,
@@ -15,6 +16,85 @@ import {
   getWorkShellSlashSuggestions,
   shouldBlockSlashSubmit,
 } from "../../packages/orchestrator/src/index.ts";
+
+test("Queue overlay owns selection and mutation keys without leaking composer input", () => {
+  assert.deepEqual(resolveQueueOverlayKeyAction("", { downArrow: true }, true), { action: "select", delta: 1 });
+  assert.deepEqual(resolveQueueOverlayKeyAction("", { upArrow: true, shift: true }, true), { action: "move", direction: "up" });
+  assert.deepEqual(resolveQueueOverlayKeyAction("d", {}, true), { action: "remove" });
+  assert.deepEqual(resolveQueueOverlayKeyAction("c", {}, true), { action: "clear" });
+  assert.deepEqual(resolveQueueOverlayKeyAction("r", {}, true), { action: "resume" });
+  assert.deepEqual(resolveQueueOverlayKeyAction("t", {}, true), { action: "retry" });
+  assert.deepEqual(resolveQueueOverlayKeyAction("x", {}, true), { action: "discard" });
+  assert.deepEqual(resolveQueueOverlayKeyAction("한", {}, true), { action: "consume" });
+  assert.deepEqual(resolveQueueOverlayKeyAction("한", {}, false), { action: "pass" });
+});
+
+test("Queue overlay dispatches stable selected-id actions and consumes Korean input", async () => {
+  const calls = [];
+  const { engine, submittedLines } = createWorkShellPaneEngine({
+    panel: {
+      title: "Queue · follow-ups",
+      lines: [
+        "Running · 2 follow-ups",
+        "",
+        "Next · id 41 · 첫 번째 긴 후속 요청",
+        "#2 · id 77 · 두 번째 긴 후속 요청",
+        "",
+        "↑/↓ select · Shift+↑/↓ reorder · d remove",
+      ],
+    },
+  });
+  engine.removeQueueItem = async (id) => { calls.push(["remove", id]); return true; };
+  engine.moveQueueItem = async (id, direction) => { calls.push(["move", id, direction]); return true; };
+  engine.clearQueueItems = async () => { calls.push(["clear"]); };
+  engine.resumeQueueItems = async () => { calls.push(["resume"]); };
+  engine.retryQueueItem = async (id) => { calls.push(["retry", id]); return true; };
+  engine.discardQueueItem = async (id) => { calls.push(["discard", id]); return true; };
+  engine.closeOverlay = () => { calls.push(["close"]); };
+  const { stdin, instance, getOutput } = renderKeyboardWorkPane(engine);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.match(getLastWorkFrame(getOutput()), /› Next · id 41/);
+    stdin.write("\u001b[B");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stdin.write("d");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stdin.write("한");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stdin.write("r");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stdin.write("t");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stdin.write("x");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.deepEqual(calls, [["remove", 77], ["resume"], ["retry", 41], ["discard", 41]]);
+    assert.deepEqual(submittedLines, []);
+    assert.doesNotMatch(getLastWorkFrame(getOutput()), /› 한/);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("Queue overlay renders mutation failures instead of swallowing them", async () => {
+  const { engine } = createWorkShellPaneEngine({
+    panel: {
+      title: "Queue · follow-ups",
+      lines: ["Paused · 1 follow-up", "", "Next · id 9 · 복구가 필요한 요청"],
+    },
+  });
+  engine.removeQueueItem = async () => { throw new Error("backend denied mutation"); };
+  const { stdin, instance, getOutput } = renderKeyboardWorkPane(engine);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stdin.write("d");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.match(getLastWorkFrame(getOutput()), /Queue action failed · backend denied mutation/);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
 
 function createInkInput() {
   const input = new PassThrough();
@@ -106,6 +186,12 @@ function createWorkShellPaneEngine(overrides = {}) {
 
   return {
     submittedLines,
+    updateState: (patch) => {
+      state = { ...state, ...patch };
+      for (const listener of listeners) {
+        listener(state);
+      }
+    },
     engine: {
       getState: () => state,
       subscribe: (listener) => {
@@ -174,7 +260,7 @@ function renderKeyboardWorkPane(engine) {
 
 function WorkShellInputControllerHarness(props) {
   const { submit } = useWorkShellInputController({
-    value: "",
+    value: props.value ?? "",
     replaceValue: props.replaceValue,
     slashSuggestionCount: 1,
     selectedSlashCommand: "/model gpt-5.5",
@@ -185,6 +271,10 @@ function WorkShellInputControllerHarness(props) {
     onExit: () => {},
     ...(props.onRequestSessionsView
       ? { onRequestSessionsView: props.onRequestSessionsView }
+      : {}),
+    ...(props.toggleQualityPlan ? { toggleQualityPlan: props.toggleQualityPlan } : {}),
+    ...(props.toggleToolHistoryDisplay
+      ? { toggleToolHistoryDisplay: props.toggleToolHistoryDisplay }
       : {}),
     openEngineSessions: () => {},
     cycleMode: () => {},
@@ -228,6 +318,32 @@ test("Work model picker closes after Enter submits the selected model option", a
 
   assert.deepEqual(submittedLines, ["/model gpt-5.5"]);
   assert.equal(closeCount, 1);
+});
+
+test("Ctrl+T toggles quality plan while Ctrl+O only toggles tool history", async () => {
+  const actions = [];
+  const replaced = [];
+  const { stdin, instance } = renderWithInput(
+    React.createElement(WorkShellInputControllerHarness, {
+      value: "keep this draft",
+      replaceValue: (value) => replaced.push(value),
+      handleSubmit: async () => {},
+      closeSlashPicker: () => {},
+      toggleQualityPlan: () => actions.push("plan"),
+      toggleToolHistoryDisplay: () => actions.push("tools"),
+      onRequestSessionsView: () => actions.push("sessions"),
+      onSubmitReady: () => {},
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  stdin.write("\u0014");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  stdin.write("\u000f");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  instance.unmount();
+  instance.cleanup();
+  assert.deepEqual(actions, ["plan", "tools"]);
+  assert.deepEqual(replaced, []);
 });
 
 test("Work model picker submits the visibly selected model instead of hidden controls", async () => {
@@ -279,15 +395,19 @@ test("Work model picker submits the visibly selected model instead of hidden con
   }
 });
 
-test("Work Ctrl+O opens the work context", async () => {
-  let openCount = 0;
+test("Work Ctrl+O toggles tool history without opening sessions", async () => {
+  let toggleCount = 0;
+  let sessionCount = 0;
   const { stdin, instance } = renderWithInput(
     React.createElement(WorkShellInputControllerHarness, {
       replaceValue: () => {},
       handleSubmit: async () => {},
       closeSlashPicker: () => {},
+      toggleToolHistoryDisplay: () => {
+        toggleCount += 1;
+      },
       onRequestSessionsView: () => {
-        openCount += 1;
+        sessionCount += 1;
       },
       onSubmitReady: () => {},
     }),
@@ -299,7 +419,8 @@ test("Work Ctrl+O opens the work context", async () => {
   instance.unmount();
   instance.cleanup();
 
-  assert.equal(openCount, 1);
+  assert.equal(toggleCount, 1);
+  assert.equal(sessionCount, 0);
 });
 
 test("Composer leaves Ctrl+O for Work shell shortcuts instead of inserting it", async () => {
@@ -386,9 +507,12 @@ test("Composer does not append new typing to a just-submitted stale parent value
   assert.equal(changedValues.includes("firstsecond"), false);
 });
 
-test("Work pane routes repeated Ctrl+O to work context without submitting text", async () => {
+test("Work pane routes repeated Ctrl+O to persisted tool-history mode without submitting text", async () => {
   const { engine, submittedLines } = createWorkShellPaneEngine();
-  let openCount = 0;
+  let toggleCount = 0;
+  engine.toggleToolHistoryDisplay = async () => {
+    toggleCount += 1;
+  };
   const { stdin, instance } = renderWithInput(
     React.createElement(WorkShellPane, {
       provider: "OpenAI",
@@ -407,9 +531,7 @@ test("Work pane routes repeated Ctrl+O to work context without submitting text",
           currentModel: "gpt-5.4",
         }),
       onExit: () => {},
-      onRequestSessionsView: () => {
-        openCount += 1;
-      },
+      onRequestSessionsView: () => assert.fail("Ctrl+O must not open sessions"),
       shouldBlockSlashSubmit: (line) =>
         shouldBlockSlashSubmit(line, {
           provider: "openai",
@@ -427,8 +549,67 @@ test("Work pane routes repeated Ctrl+O to work context without submitting text",
   instance.unmount();
   instance.cleanup();
 
-  assert.equal(openCount, 2);
+  assert.equal(toggleCount, 2);
   assert.deepEqual(submittedLines, []);
+});
+
+test("Work pane has one prompt owner across Korean edits, Ctrl+O, overlays, and busy follow-up submit", async () => {
+  const harness = createWorkShellPaneEngine();
+  let toggleCount = 0;
+  harness.engine.toggleToolHistoryDisplay = async () => {
+    toggleCount += 1;
+  };
+  const { stdin, instance, getOutput } = renderKeyboardWorkPane(harness.engine);
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stdin.write("ASCII 한글XYZ");
+    await waitForCondition(() => /› ASCII 한글XYZ(?:▏)?/.test(getLastWorkFrame(getOutput())));
+
+    // Cursor before X: Backspace removes the committed Hangul grapheme to the
+    // left, while forward Delete removes X to the right.
+    stdin.write("\u001b[D");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    stdin.write("\u001b[D");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    stdin.write("\u001b[D");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    stdin.write("\u007f");
+    await waitForCondition(() => /› ASCII 한XYZ(?:▏)?/.test(getLastWorkFrame(getOutput())));
+    stdin.write("\u001b[3~");
+    await waitForCondition(() => /› ASCII 한YZ(?:▏)?/.test(getLastWorkFrame(getOutput())));
+
+    stdin.write("\u000f");
+    await waitForCondition(() => toggleCount === 1);
+    assert.match(
+      getLastWorkFrame(getOutput()),
+      /› ASCII 한YZ(?:▏)?/,
+      "Ctrl+O must reproject tool history without taking or clearing the draft",
+    );
+
+    harness.updateState({
+      panel: { title: "Session status", lines: ["Non-owning status refresh."] },
+    });
+    await waitForCondition(() => getLastWorkFrame(getOutput()).includes("Non-owning status refresh."));
+    assert.match(
+      getLastWorkFrame(getOutput()),
+      /› ASCII 한YZ(?:▏)?/,
+      "a non-owning panel refresh must not write a stale parent draft",
+    );
+
+    harness.updateState({ isBusy: true, composerMode: "queue" });
+    stdin.write("\u001b[C");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    stdin.write("\u001b[C");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    stdin.write(" 후속");
+    stdin.write("\r");
+    await waitForCondition(() => harness.submittedLines.length === 1);
+    assert.deepEqual(harness.submittedLines, ["ASCII 한YZ 후속"]);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
 });
 
 test("Work pane keeps plain c and a keystrokes in the composer", async () => {

@@ -10,6 +10,10 @@ import { WorkShellPane } from "../../packages/tui/src/index.tsx";
 import {
   getWorkShellTranscriptEntryCapacity,
   measureWorkShellEntryRows,
+  createWorkShellTranscriptAnchor,
+  formatWorkShellTranscriptScrollIndicator,
+  projectWorkShellTranscript,
+  resolveWorkShellTranscriptOffsetFromAnchor,
   resolveWorkShellTranscriptWindow,
 } from "../../packages/tui/src/work-shell-view.tsx";
 import {
@@ -239,6 +243,62 @@ test("measureWorkShellEntryRows counts text rows plus the one-row margin", () =>
   assert.equal(measureWorkShellEntryRows(eightRowToolEntry), 9);
 });
 
+test("role-aware projection exactly budgets Korean user, assistant, system, and capped tool rows", () => {
+  const korean = "가나다라마바사아자차카타파하";
+  assert.equal(measureWorkShellEntryRows({ role: "user", text: korean }, 30), 3);
+  assert.equal(measureWorkShellEntryRows({ role: "assistant", text: korean }, 30), 4);
+  assert.equal(measureWorkShellEntryRows({ role: "system", text: korean }, 30), 3);
+  assert.equal(measureWorkShellEntryRows({
+    role: "tool",
+    text: ["검사 실행", ...Array.from({ length: 10 }, (_, index) => `결과 ${index}`)].join("\n"),
+  }, 30), 11);
+});
+
+test("entry-id and intra-entry anchor survives append, update, and resize", () => {
+  const before = [
+    { id: "old", role: "assistant", text: "오래된 답변" },
+    { id: "anchor", role: "assistant", text: "가나다라마바사아자차카타파하" },
+    { id: "new", role: "user", text: "최신" },
+  ];
+  const anchor = createWorkShellTranscriptAnchor(before, 30, 4);
+  assert.deepEqual(anchor, { entryId: "anchor", intraEntryRow: 2 });
+  const after = [
+    before[0],
+    { ...before[1], text: `${before[1].text} 업데이트` },
+    before[2],
+    { id: "fresh", role: "tool", text: "검사\n통과" },
+  ];
+  assert.equal(resolveWorkShellTranscriptOffsetFromAnchor(after, 30, anchor), 7);
+  assert.equal(resolveWorkShellTranscriptOffsetFromAnchor(after, 20, anchor), 7);
+});
+
+test("streaming assistant anchor follows the committed assistant entry", () => {
+  const durable = [
+    { id: "entry-user", role: "user", text: "질문" },
+    { id: "entry-old", role: "assistant", text: "이전 답변" },
+  ];
+  const streaming = projectWorkShellTranscript(durable, "새 답변을 스트리밍 중입니다 👨‍👩‍👧‍👦");
+  const anchor = createWorkShellTranscriptAnchor(streaming, 20, 2);
+  assert.deepEqual(anchor, { entryId: "streaming-assistant", intraEntryRow: 2 });
+
+  const committed = projectWorkShellTranscript([
+    ...durable,
+    { id: "entry-committed", role: "assistant", text: "새 답변을 스트리밍 중입니다 👨‍👩‍👧‍👦" },
+  ]);
+  assert.equal(resolveWorkShellTranscriptOffsetFromAnchor(committed, 20, anchor), 2);
+});
+
+test("scroll indicator localizes owned chrome while preserving key names", () => {
+  assert.equal(
+    formatWorkShellTranscriptScrollIndicator({ earlierRows: 12, newerRows: 4, uiLocale: "ko" }),
+    "↑ 12 이전 행 · Fn+Up/PageUp · ↓ 4 새 행 · Fn+Down/PageDown · Esc 최신",
+  );
+  assert.equal(
+    formatWorkShellTranscriptScrollIndicator({ earlierRows: 12, newerRows: 4, uiLocale: "en" }),
+    "↑ 12 earlier rows · Fn+Up/PageUp · ↓ 4 newer rows · Fn+Down/PageDown · Esc latest",
+  );
+});
+
 test("multi-row tool entries shrink the window capacity the view and controller share", () => {
   // 20 available rows at rows=30: single-line entries weigh 2 → 10 fit.
   const singleLine = Array.from({ length: 20 }, (_, index) => ({
@@ -322,7 +382,7 @@ test("PageUp scrolls older entries into view with the indicator row", async () =
     stdin.write(KEY_PAGE_UP);
     assert.ok(
       await waitForCondition(() =>
-        getLastWorkFrame(getOutput()).includes("entries above")
+        getLastWorkFrame(getOutput()).includes("earlier rows")
       ),
     );
     const scrolled = getLastWorkFrame(getOutput());
@@ -335,7 +395,7 @@ test("PageUp scrolls older entries into view with the indicator row", async () =
     assert.ok(!scrolled.includes("sb-0010"));
     assert.match(
       scrolled,
-      new RegExp(`↑ ${TRANSCRIPT_ENTRY_COUNT - 2 * TRANSCRIPT_CAPACITY} entries above · PageUp/PageDown scroll · Esc newest`),
+      /↑ \d+ earlier rows · Fn\+Up\/PageUp · ↓ \d+ newer rows · Fn\+Down\/PageDown · Esc latest/,
     );
   } finally {
     instance.unmount();
@@ -357,7 +417,7 @@ test("PageUp shows older entries when multi-row tool entries fill the transcript
     );
     stdin.write(KEY_PAGE_UP);
     assert.ok(
-      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("entries above")),
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")),
     );
     const scrolled = getLastWorkFrame(getOutput());
     // The page is the weighted capacity: the first window entry, the gone
@@ -370,7 +430,7 @@ test("PageUp shows older entries when multi-row tool entries fill the transcript
     assert.ok(!scrolled.includes(`sb-${padScrollbackIndex(TRANSCRIPT_ENTRY_COUNT - 1)}`));
     assert.match(
       scrolled,
-      new RegExp(`↑ ${TRANSCRIPT_ENTRY_COUNT - 2 * capacity} entries above · PageUp/PageDown scroll · Esc newest`),
+      /↑ \d+ earlier rows · Fn\+Up\/PageUp · ↓ \d+ newer rows · Fn\+Down\/PageDown · Esc latest/,
     );
   } finally {
     instance.unmount();
@@ -388,7 +448,7 @@ test("a scrolled window separates entries with exactly one blank row and closes 
     assert.ok(await waitForNewestEntry(getOutput));
     stdin.write(KEY_PAGE_UP);
     assert.ok(
-      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("entries above")),
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")),
     );
     const frame = stripVTControlCharacters(getLastWorkFrame(getOutput()));
     const frameRows = frame.split("\n");
@@ -421,7 +481,7 @@ test("a scrolled window separates entries with exactly one blank row and closes 
     // The last window entry adds no trailing blank: the scroll indicator sits
     // directly beneath it, inside the conversation block.
     const lastEntryRow = entryRowIndexes[entryRowIndexes.length - 1];
-    const indicatorRow = frameRows.findIndex((row) => row.includes("entries above"));
+    const indicatorRow = frameRows.findIndex((row) => row.includes("earlier rows"));
     assert.equal(indicatorRow, lastEntryRow + 1);
 
     // Weight consistency, direct assertion: the frame span from the window's
@@ -448,13 +508,13 @@ test("PageDown returns the transcript to the newest entries", async () => {
     assert.ok(await waitForNewestEntry(getOutput));
     stdin.write(KEY_PAGE_UP);
     assert.ok(
-      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("entries above")),
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")),
     );
 
     stdin.write(KEY_PAGE_DOWN);
     assert.ok(await waitForNewestEntry(getOutput));
     const backToNewest = getLastWorkFrame(getOutput());
-    assert.ok(!backToNewest.includes("entries above"));
+    assert.ok(!backToNewest.includes("earlier rows"));
     assert.ok(backToNewest.includes("sb-0010"));
   } finally {
     instance.unmount();
@@ -473,14 +533,14 @@ test("Esc returns the transcript to the newest entries", async () => {
     assert.ok(
       await waitForCondition(() =>
         getLastWorkFrame(getOutput()).includes(
-          `↑ ${TRANSCRIPT_ENTRY_COUNT - 3 * TRANSCRIPT_CAPACITY} entries above`,
+          "earlier rows",
         )
       ),
     );
 
     stdin.write(KEY_ESCAPE);
     assert.ok(await waitForNewestEntry(getOutput));
-    assert.ok(!getLastWorkFrame(getOutput()).includes("entries above"));
+    assert.ok(!getLastWorkFrame(getOutput()).includes("earlier rows"));
   } finally {
     instance.unmount();
     instance.cleanup();
@@ -495,12 +555,12 @@ test("submitting input returns the transcript to the newest entries", async () =
     assert.ok(await waitForNewestEntry(getOutput));
     stdin.write(KEY_PAGE_UP);
     assert.ok(
-      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("entries above")),
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")),
     );
 
     stdin.write("hello\r");
     assert.ok(
-      await waitForCondition(() => !getLastWorkFrame(getOutput()).includes("entries above")),
+      await waitForCondition(() => !getLastWorkFrame(getOutput()).includes("earlier rows")),
     );
     assert.deepEqual(submittedLines, ["hello"]);
     assert.ok(await waitForNewestEntry(getOutput));
@@ -510,7 +570,7 @@ test("submitting input returns the transcript to the newest entries", async () =
   }
 });
 
-test("a newly arrived entry returns the transcript to bottom-follow", async () => {
+test("a newly arrived entry preserves the user\'s transcript position", async () => {
   const { engine, emitEntries } = createWorkShellPaneEngine();
   const { stdin, instance, getOutput } = renderScrollbackPane(engine);
 
@@ -518,14 +578,29 @@ test("a newly arrived entry returns the transcript to bottom-follow", async () =
     assert.ok(await waitForNewestEntry(getOutput));
     stdin.write(KEY_PAGE_UP);
     assert.ok(
-      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("entries above")),
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")),
     );
 
+    const outputLengthBeforeArrival = getOutput().length;
     emitEntries([...createScrollbackEntries(), { role: "user", text: "sb-fresh" }]);
     assert.ok(
-      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("sb-fresh")),
+      await waitForCondition(() => getOutput().length > outputLengthBeforeArrival),
     );
-    assert.ok(!getLastWorkFrame(getOutput()).includes("entries above"));
+    const afterArrival = getLastWorkFrame(getOutput());
+    assert.ok(afterArrival.includes("earlier rows"));
+    assert.ok(!afterArrival.includes("sb-fresh"));
+
+    stdin.write(KEY_PAGE_UP);
+    assert.ok(
+      await waitForCondition(() =>
+        getLastWorkFrame(getOutput()).includes(
+          "earlier rows",
+        )
+      ),
+    );
+
+    stdin.write(KEY_ESCAPE);
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("sb-fresh")));
   } finally {
     instance.unmount();
     instance.cleanup();
@@ -545,10 +620,10 @@ test("PageUp works with text in the composer and keeps the draft", async () => {
 
     stdin.write(KEY_PAGE_UP);
     assert.ok(
-      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("entries above")),
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")),
     );
     const scrolled = getLastWorkFrame(getOutput());
-    assert.match(scrolled, /↑ \d+ entries above · PageUp\/PageDown scroll · Esc newest/);
+    assert.match(scrolled, /↑ \d+ earlier rows · Fn\+Up\/PageUp · ↓ \d+ newer rows · Fn\+Down\/PageDown · Esc latest/);
     // Scrolling is not a print key: the draft survives it.
     assert.match(scrolled, /› hello/);
   } finally {
@@ -570,7 +645,7 @@ test("PageUp is a no-op on a conversation shorter than the window", async () => 
     stdin.write(KEY_PAGE_UP);
     await new Promise((resolve) => setTimeout(resolve, 150));
     const frame = getLastWorkFrame(getOutput());
-    assert.ok(!frame.includes("entries above"));
+    assert.ok(!frame.includes("earlier rows"));
     assert.ok(frame.includes("sb-0000"));
     assert.ok(frame.includes("sb-0002"));
   } finally {

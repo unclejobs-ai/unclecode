@@ -13,6 +13,7 @@ import type {
   ContextPolicySuggestion,
 } from "@unclecode/contracts";
 import {
+  getWorkShellMessages,
   resolveWorkShellSlashArgHint,
   runRustCommandSync,
   sanitizeWorkShellAssistantText,
@@ -73,6 +74,7 @@ export type { WorkShellPanelDisplayMode } from "./work-shell-view-fast-paths.js"
 export type WorkShellEntryRole = "user" | "assistant" | "tool" | "system";
 
 export type WorkShellEntry = {
+  readonly id?: string;
   readonly role: WorkShellEntryRole;
   readonly text: string;
 };
@@ -349,7 +351,8 @@ export function getWorkShellEntryBorderStyle(role: WorkShellEntryRole): "round" 
   return resolveWorkShellEntryPresentation(role).borderStyle;
 }
 
-export function getWorkShellEmptyConversationHint(): string {
+export function getWorkShellEmptyConversationHint(uiLocale: "en" | "ko" = "en"): string {
+  if (uiLocale === "ko") return getWorkShellMessages(uiLocale).emptyHint;
   return runRustCommandSync(["rust", "ux", "text", "empty-conversation-hint"], process.cwd()).trimEnd();
 }
 
@@ -478,29 +481,31 @@ export function getWorkShellComposerHint(
   inputValue: string,
   slashSuggestionCount: number,
   selectedSlashCommand?: string,
+  uiLocale: "en" | "ko" = "en",
 ): string | undefined {
+  const messages = getWorkShellMessages(uiLocale);
   const trimmed = inputValue.trim();
   if (trimmed.startsWith("/")) {
     const argHint = selectedSlashCommand
       ? resolveWorkShellSlashArgHint(selectedSlashCommand)
       : undefined;
-    const argSuffix = argHint ? ` · args: ${argHint}` : "";
+    const argSuffix = argHint ? ` · ${uiLocale === "ko" ? "인자" : "args"}: ${argHint}` : "";
     if (trimmed.startsWith("/model")) {
       return slashSuggestionCount > 0
-        ? `↑↓ choose · Enter switch · type to filter · Esc cancel${argSuffix}`
-        : "No exact model match · type to filter";
+        ? `${messages.modelSelectHint}${argSuffix}`
+        : messages.modelNoMatch;
     }
     return slashSuggestionCount > 0
-      ? `↑↓ select · Enter run · Esc cancel${argSuffix}`
-      : "No matches · try /model, /auth, /context, /queue";
+      ? `${messages.slashSelectHint}${argSuffix}`
+      : messages.slashNoMatch;
   }
   // The empty composer is the only surface that advertises slash discovery.
   // Once a draft exists the operator has already found the composer, so the
   // shorter help keeps the hint row narrow.
   if (trimmed.length === 0) {
-    return "Enter send · Shift+Enter newline · / commands · Ctrl+V image";
+    return messages.composerEmptyHint;
   }
-  return "Enter send · Shift+Enter newline · Ctrl+V image";
+  return messages.composerDraftHint;
 }
 
 export function resolveWorkShellComposerHint(input: {
@@ -520,27 +525,30 @@ export function resolveWorkShellComposerHint(input: {
   readonly inputValue: string;
   readonly slashSuggestionCount: number;
   readonly selectedSlashCommand?: string;
+  readonly uiLocale?: "en" | "ko";
 }): string | undefined {
+  const messages = getWorkShellMessages(input.uiLocale ?? "en");
   if (input.composerHintOverride) {
     return input.composerHintOverride;
   }
   if (input.decisionPending) {
     if (typeof input.decisionPending === "number") {
       const range = input.decisionPending > 1 ? `1-${input.decisionPending}` : "1";
-      return `${range} answer · Esc cancels decision · or type`;
+      return `${range} ${messages.decisionCancelHint}`;
     }
-    return "type answers · Esc cancels decision · /cancel";
+    return messages.decisionTypeHint;
   }
   if (input.isBusy) {
-    return "Enter queues follow-up · Ctrl+C/Esc interrupt · /queue";
+    return messages.composerBusyHint;
   }
   if (input.queuePaused && (input.queuedCount ?? 0) > 0) {
-    return "Queue paused after interrupt · check /queue · /queue clear drops";
+    return messages.composerPausedHint;
   }
   return getWorkShellComposerHint(
     input.inputValue,
     input.slashSuggestionCount,
     input.selectedSlashCommand,
+    input.uiLocale,
   );
 }
 
@@ -624,15 +632,15 @@ function runRustUxText(operation: "busy-status" | "normalize-markdown", value: s
   return runRustCommandSync(["rust", "ux", "text", operation], process.cwd(), value).trimEnd();
 }
 
-export function formatWorkShellBusyStatusLine(status?: string, frame = 0): string {
+export function formatWorkShellBusyStatusLine(status?: string, frame = 0, uiLocale: "en" | "ko" = "en"): string {
   const spinner = pickBusySpinnerFrame(frame);
   const key = status ?? "";
   const cached = rustBusyStatusCache.get(key);
   const normalizedStatus = cached ?? runRustUxText("busy-status", key);
-  if (!cached) {
-    rustBusyStatusCache.set(key, normalizedStatus);
+  if (cached === undefined) {
+    setBoundedCacheValue(rustBusyStatusCache, key, normalizedStatus, shouldSkipRustTextCacheStore(key));
   }
-  return `${spinner} ${normalizedStatus || "Thinking..."}`;
+  return `${spinner} ${normalizedStatus || (uiLocale === "ko" ? "생각 중..." : "Thinking...")}`;
 }
 
 export function formatWorkShellThinkingLine(reasoningLabel: string): string {
@@ -641,7 +649,7 @@ export function formatWorkShellThinkingLine(reasoningLabel: string): string {
     return cached;
   }
   const line = runRustCommandSync(["rust", "ux", "text", "thinking-line"], process.cwd(), reasoningLabel).trimEnd();
-  rustThinkingLineCache.set(reasoningLabel, line);
+  setBoundedCacheValue(rustThinkingLineCache, reasoningLabel, line, shouldSkipRustTextCacheStore(reasoningLabel));
   return line;
 }
 
@@ -664,6 +672,7 @@ export function formatWorkShellStatusLine(input: {
   readonly reasoningLabel: string;
   readonly mode: string;
   readonly authLabel: string;
+  readonly uiLocale?: "en" | "ko";
 }): string {
   const key = JSON.stringify(input);
   const cached = rustStatusLineCache.get(key);
@@ -671,7 +680,7 @@ export function formatWorkShellStatusLine(input: {
     return cached;
   }
   const line = runRustCommandSync(["rust", "ux", "text", "status-line"], process.cwd(), key).trimEnd();
-  rustStatusLineCache.set(key, line);
+  setBoundedCacheValue(rustStatusLineCache, key, line, shouldSkipRustTextCacheStore(key));
   return line;
 }
 
@@ -682,23 +691,27 @@ export function formatWorkShellUsageLine(input: {
   readonly lastTurnDurationMs?: number;
   readonly nowMs?: number;
   readonly spinnerFrame?: number;
+  readonly uiLocale?: "en" | "ko";
 }): string {
+  const messages = getWorkShellMessages(input.uiLocale ?? "en");
   const spinner = pickBusySpinnerFrame(input.spinnerFrame ?? 0);
   if (input.isBusy) {
     const elapsed = input.currentTurnStartedAt === undefined
-      ? "starting"
+      ? messages.starting
       : formatCompactDuration(Math.max(0, (input.nowMs ?? input.currentTurnStartedAt) - input.currentTurnStartedAt));
-    const detail = normalizeBusyDetail(input.busyStatus ?? "");
+    const detail = normalizeBusyDetail(input.busyStatus ?? "", input.uiLocale ?? "en");
     return [
       `${spinner} ${elapsed}`,
       detail.length > 0 ? detail : undefined,
-      "Ctrl+C/Esc · Enter queues",
+      input.uiLocale === "ko" ? "Ctrl+C/Esc 중단 · Enter 대기열 추가" : "Ctrl+C/Esc · Enter queues",
     ].filter((part) => part !== undefined && part.length > 0).join(" · ");
   }
   const replyTiming = input.lastTurnDurationMs === undefined
-    ? "no reply yet"
-    : `last reply ${formatCompactDuration(input.lastTurnDurationMs)}`;
-  return ["Ready", replyTiming].join(" · ");
+    ? (input.uiLocale === "ko" ? "아직 응답 없음" : "no reply yet")
+    : (input.uiLocale === "ko"
+      ? `최근 응답 ${formatCompactDuration(input.lastTurnDurationMs)}`
+      : `last reply ${formatCompactDuration(input.lastTurnDurationMs)}`);
+  return [messages.ready, replyTiming].join(" · ");
 }
 
 function formatCompactDuration(durationMs: number): string {
@@ -712,29 +725,34 @@ function formatCompactDuration(durationMs: number): string {
   return `${Math.trunc(duration / 1000)}s`;
 }
 
-function normalizeBusyDetail(value: string): string {
+function normalizeBusyDetail(value: string, uiLocale: "en" | "ko" = "en"): string {
+  const messages = getWorkShellMessages(uiLocale);
   const stripped = value.replace(/^[·→★✓✖↔✦\s]+/u, "").trim();
   if (!stripped) {
     return "";
   }
   const lower = stripped.toLowerCase();
+  if (lower.startsWith("preparing context")) {
+    return uiLocale === "ko" ? "컨텍스트 준비 중" : "Preparing context";
+  }
   if (lower.includes("planner") || lower.includes("routing complex") || lower.includes("prepared ")) {
-    return "Planning parallel work";
+    return messages.planning;
   }
   if (lower.includes("synthesis") || lower.includes("synthesiz")) {
-    return "Synthesizing answer";
+    return messages.synthesizing;
   }
   if (lower.includes("reviewer") || lower.includes("guardian")) {
-    return "Reviewing results";
+    return messages.reviewing;
   }
   if (lower.startsWith("read ") || lower.startsWith("write ") || lower.startsWith("search ")) {
-    return "Reading files";
+    return messages.readingFiles;
   }
   if (lower.startsWith("calling ")) {
-    return stripped.replace(/^calling /i, "Model ");
+    const target = stripped.replace(/^calling /i, "").trim();
+    return uiLocale === "ko" ? `모델 ${target} 호출 중` : `Model ${target}`;
   }
   if (lower.startsWith("model ")) {
-    return `Model ${stripped.slice(6).trim()}`;
+    return `${uiLocale === "ko" ? "모델" : "Model"} ${stripped.slice(6).trim()}`;
   }
   if (
     lower === "thinking"
@@ -742,19 +760,28 @@ function normalizeBusyDetail(value: string): string {
     || lower === "thinking…"
     || lower === "reasoning"
   ) {
-    return "Thinking";
+    return uiLocale === "ko" ? "생각 중" : "Thinking";
   }
   if (lower.startsWith("executor") || lower.includes(" parallel ") || lower.includes("task")) {
-    return "Parallel workers";
+    return uiLocale === "ko" ? "병렬 작업 중" : "Parallel workers";
   }
   if (stripped.includes("/") && stripped.includes(".") && !stripped.includes(" ")) {
-    return "Reading files";
+    return messages.readingFiles;
   }
   return stripped;
 }
 
-function resolveWorkShellBusyActivityPhrase(detail: string): string {
-  const normalized = normalizeBusyDetail(detail);
+function resolveWorkShellBusyActivityPhrase(detail: string, uiLocale: "en" | "ko" = "en"): string {
+  const messages = getWorkShellMessages(uiLocale);
+  const normalized = normalizeBusyDetail(detail, uiLocale);
+  if (uiLocale === "ko") {
+    if (normalized.length === 0 || normalized === "Thinking" || normalized === "생각 중") return "다음 단계 검토 중";
+    if (normalized === messages.planning) return "작업 계획 중";
+    if (normalized === messages.synthesizing) return "응답 작성 중";
+    if (normalized === messages.reviewing) return messages.reviewing;
+    if (normalized === messages.readingFiles || normalized.toLowerCase().startsWith("reading ")) return "컨텍스트 읽는 중";
+    return normalized;
+  }
   if (normalized.length === 0 || normalized === "Thinking") {
     return "Thinking through the next step";
   }
@@ -812,7 +839,7 @@ function resolveWorkShellEntryPresentation(role: WorkShellEntryRole): WorkShellE
   }
   const raw = runRustCommandSync(["rust", "ux", "text", "entry-presentation"], process.cwd(), role);
   const parsed = JSON.parse(raw) as WorkShellEntryRolePresentationContract;
-  rustEntryPresentationCache.set(role, parsed);
+  setBoundedCacheValue(rustEntryPresentationCache, role, parsed, false);
   return parsed;
 }
 
@@ -827,7 +854,7 @@ function resolveWorkShellAttachmentLayout(lineIndex = 0): WorkShellAttachmentLay
     JSON.stringify({ lineIndex }),
   );
   const parsed = JSON.parse(raw) as WorkShellAttachmentLayout;
-  rustAttachmentLayoutCache.set(lineIndex, parsed);
+  setBoundedCacheValue(rustAttachmentLayoutCache, lineIndex, parsed, false);
   return parsed;
 }
 
@@ -845,7 +872,7 @@ function resolveWorkShellViewportLayout(input: {
   }
   const raw = runRustCommandSync(["rust", "ux", "text", "viewport-layout"], process.cwd(), key);
   const parsed = JSON.parse(raw) as WorkShellViewportLayout;
-  rustViewportLayoutCache.set(key, parsed);
+  setBoundedCacheValue(rustViewportLayoutCache, key, parsed, false);
   return parsed;
 }
 
@@ -921,6 +948,28 @@ function renderWorkShellPanelLine(line: string, index: number): React.ReactNode 
     return <Text key={`${index}-${line}`} {...readableTextColorProps(W.text)}>{classified.line}</Text>;
   }
   return <Text key={`${index}-${line}`} {...readableTextColorProps(W.text)}>{line}</Text>;
+}
+
+export function resolveQueuePanelVisibleLines(
+  lines: readonly string[],
+  selectedId: number | undefined,
+  maxVisibleItems = 5,
+): readonly string[] {
+  if (selectedId === undefined || maxVisibleItems < 1) return lines;
+  const itemPattern = /^(?:Next|#\d+) · id (\d+) ·/u;
+  const itemRows = lines.flatMap((line, lineIndex) => {
+    const match = line.match(itemPattern);
+    return match?.[1] ? [{ lineIndex, id: Number(match[1]) }] : [];
+  });
+  if (itemRows.length <= maxVisibleItems) return lines;
+  const selectedIndex = itemRows.findIndex((row) => row.id === selectedId);
+  if (selectedIndex < 0) return lines;
+  const start = Math.max(
+    0,
+    Math.min(itemRows.length - maxVisibleItems, selectedIndex - Math.floor(maxVisibleItems / 2)),
+  );
+  const visible = new Set(itemRows.slice(start, start + maxVisibleItems).map((row) => row.lineIndex));
+  return lines.filter((line, lineIndex) => !itemPattern.test(line) || visible.has(lineIndex));
 }
 
 // Context Runbook line renderer — gives each source category a distinct icon
@@ -1423,6 +1472,7 @@ function renderWorkShellEntryBlock(input: {
   readonly entry: WorkShellEntry;
   readonly index: number;
   readonly width: number;
+  readonly toolHistoryMode?: "minimal" | "verbose";
   /**
    * Task 9 block separation: every entry except the last one in the rendered
    * window closes with a one-row margin, so consecutive transcript blocks are
@@ -1567,7 +1617,7 @@ function renderWorkShellEntryBlock(input: {
           <Text color={callColor} bold>{"● "}</Text>
           <Text color={W.text} bold>{call}</Text>
         </Text>
-        {resultLines.map((line, lineIndex) => (
+        {(input.toolHistoryMode === "minimal" ? [] : resultLines).map((line, lineIndex) => (
           <Text key={`tool-${String(input.index)}-${String(lineIndex)}`}>
             <Text color={W.textDim}>{lineIndex === 0 ? "  ⎿ " : "    "}</Text>
             <Text color={W.textMuted}>{line}</Text>
@@ -1670,7 +1720,8 @@ const WORK_SHELL_WORDMARK_WIDTH = WORK_SHELL_WORDMARK[0]?.length ?? 0;
  */
 export const WORK_SHELL_COMPOSER_PLACEHOLDER = "Describe a task · / for commands";
 
-function renderWorkShellEmptyConversation(conversationWidth: number): React.ReactNode {
+function renderWorkShellEmptyConversation(conversationWidth: number, uiLocale: "en" | "ko" = "en"): React.ReactNode {
+  const messages = getWorkShellMessages(uiLocale);
   // Width gate: the art needs its 47 columns plus 2 columns of breathing room
   // on each side. Narrower containers skip it entirely (no wrapping, no
   // shredding) and keep the pre-Task-13 text-only empty state.
@@ -1682,19 +1733,19 @@ function renderWorkShellEmptyConversation(conversationWidth: number): React.Reac
       )) : null}
       <Text>
         <Text color={W.assistant} bold>{"● "}</Text>
-        <Text color={W.text} bold>{"Ready for the next move"}</Text>
+        <Text color={W.text} bold>{messages.nextMove}</Text>
       </Text>
       <Box paddingLeft={2} flexDirection="column">
-        <Text color={W.textMuted}>{getWorkShellEmptyConversationHint()}</Text>
+        <Text color={W.textMuted}>{getWorkShellEmptyConversationHint(uiLocale)}</Text>
         <Box marginTop={1} flexDirection="column">
-          {WORK_SHELL_STARTER_PROMPTS.map((prompt, index) => (
+          {messages.starterPrompts.map((prompt, index) => (
             <Text key={prompt}>
               <Text color={W.assistant} bold>{`${index + 1}  `}</Text>
               <Text color={W.textDim}>{prompt}</Text>
             </Text>
           ))}
         </Box>
-        <Text color={W.textDim}>{WORK_SHELL_OPENERS}</Text>
+        <Text color={W.textDim}>{messages.openers}</Text>
       </Box>
     </Box>
   );
@@ -1726,8 +1777,113 @@ export function getWorkShellThinkingDetailLines(input: {
  * amount than the view shows. It deliberately ignores wrap growth: the weight
  * only has to be consistent everywhere, not pixel-exact.
  */
-export function measureWorkShellEntryRows(entry: WorkShellEntry): number {
-  return entry.text.split("\n").length + 1;
+export function projectWorkShellEntryRows(
+  entry: WorkShellEntry,
+  width?: number,
+  toolHistoryMode: "minimal" | "verbose" = "verbose",
+): readonly string[] {
+  const bodyText = entry.role === "assistant"
+    ? formatWorkShellAssistantDisplayText(entry.text)
+    : entry.text;
+  if (width === undefined) {
+    if (entry.role === "assistant") {
+      return ["● UncleCode", ...bodyText.replace(STREAMING_CURSOR, "").split("\n")];
+    }
+    return bodyText.split("\n");
+  }
+  if (entry.role === "user") {
+    return wrapDisplayTextFast(bodyText, Math.max(20, width - 6));
+  }
+  if (entry.role === "assistant" && entry.text.startsWith(WORK_SHELL_REASONING_ENTRY_PREFIX)) {
+    return wrapDisplayTextFast(entry.text.trimEnd(), Math.max(20, width - 4));
+  }
+  if (entry.role === "assistant") {
+    const streaming = entry.text.endsWith(STREAMING_CURSOR);
+    const bodyRows = wrapDisplayTextFast(
+      bodyText.replace(STREAMING_CURSOR, ""),
+      Math.max(20, width - 4),
+    );
+    return ["● UncleCode", ...bodyRows, ...(streaming ? [STREAMING_CURSOR] : [])];
+  }
+  if (entry.role === "tool") {
+    const tool = splitWorkShellToolEntry(bodyText, width);
+    if (toolHistoryMode === "minimal") return [`● ${tool.call}`];
+    return [`● ${tool.call}`, ...tool.resultLines.map((line, index) => `${index === 0 ? "  ⎿ " : "    "}${line}`)];
+  }
+  if (entry.role === "system") {
+    return wrapDisplayTextFast(`· ${bodyText}`, Math.max(20, width - 2));
+  }
+  return wrapDisplayTextFast(bodyText, Math.max(20, width - 3));
+}
+
+export function measureWorkShellEntryRows(
+  entry: WorkShellEntry,
+  width?: number,
+  toolHistoryMode: "minimal" | "verbose" = "verbose",
+): number {
+  return projectWorkShellEntryRows(entry, width, toolHistoryMode).length + 1;
+}
+
+export type WorkShellTranscriptAnchor = {
+  readonly entryId: string;
+  readonly intraEntryRow: number;
+};
+
+export const WORK_SHELL_STREAMING_ENTRY_ID = "streaming-assistant";
+
+function transcriptEntryId(entry: WorkShellEntry, index: number): string {
+  return entry.id ?? `legacy-entry-${index}`;
+}
+
+/** Convert the row offset into a stable content anchor before entries mutate. */
+export function createWorkShellTranscriptAnchor(
+  entries: readonly WorkShellEntry[],
+  width: number,
+  scrollOffset: number,
+  toolHistoryMode: "minimal" | "verbose" = "verbose",
+): WorkShellTranscriptAnchor | undefined {
+  if (scrollOffset <= 0) return undefined;
+  let remaining = scrollOffset;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (!entry) continue;
+    const rows = measureWorkShellEntryRows(entry, width, toolHistoryMode);
+    if (remaining <= rows) {
+      return { entryId: transcriptEntryId(entry, index), intraEntryRow: Math.max(1, remaining) };
+    }
+    remaining -= rows;
+  }
+  const first = entries[0];
+  return first
+    ? { entryId: transcriptEntryId(first, 0), intraEntryRow: measureWorkShellEntryRows(first, width, toolHistoryMode) }
+    : undefined;
+}
+
+/** Recompute row offset from an entry-id/row anchor after append, update, or resize. */
+export function resolveWorkShellTranscriptOffsetFromAnchor(
+  entries: readonly WorkShellEntry[],
+  width: number,
+  anchor: WorkShellTranscriptAnchor | undefined,
+  toolHistoryMode: "minimal" | "verbose" = "verbose",
+): number {
+  if (!anchor) return 0;
+  let index = entries.findIndex((entry, entryIndex) => transcriptEntryId(entry, entryIndex) === anchor.entryId);
+  if (index < 0 && anchor.entryId === WORK_SHELL_STREAMING_ENTRY_ID) {
+    for (let entryIndex = entries.length - 1; entryIndex >= 0; entryIndex -= 1) {
+      if (entries[entryIndex]?.role === "assistant") {
+        index = entryIndex;
+        break;
+      }
+    }
+  }
+  if (index < 0) return 0;
+  const anchored = entries[index];
+  if (!anchored) return 0;
+  return Math.min(anchor.intraEntryRow, measureWorkShellEntryRows(anchored, width, toolHistoryMode))
+    + entries.slice(index + 1).reduce(
+      (sum, entry) => sum + measureWorkShellEntryRows(entry, width, toolHistoryMode),
+      0,
+    );
 }
 
 const WORK_SHELL_TRANSCRIPT_RESERVED_ROWS = 10;
@@ -1753,6 +1909,8 @@ export function getWorkShellTranscriptAvailableRows(terminalRows?: number): numb
 export function getWorkShellTranscriptEntryCapacity(
   entries: readonly WorkShellEntry[],
   terminalRows?: number,
+  width?: number,
+  toolHistoryMode: "minimal" | "verbose" = "verbose",
 ): number {
   const availableRows = getWorkShellTranscriptAvailableRows(terminalRows);
   let usedRows = 0;
@@ -1762,7 +1920,7 @@ export function getWorkShellTranscriptEntryCapacity(
     if (entry === undefined) {
       break;
     }
-    const weight = measureWorkShellEntryRows(entry);
+    const weight = measureWorkShellEntryRows(entry, width, toolHistoryMode);
     if (count > 0 && usedRows + weight > availableRows) {
       break;
     }
@@ -1784,20 +1942,63 @@ export function getWorkShellTranscriptEntryCapacity(
 export function resolveWorkShellTranscriptWindow(input: {
   readonly entries: readonly WorkShellEntry[];
   readonly terminalRows?: number | undefined;
+  readonly terminalColumns?: number | undefined;
   readonly scrollOffset: number;
+  readonly toolHistoryMode?: "minimal" | "verbose";
 }): {
   readonly window: readonly WorkShellEntry[];
   readonly entriesAbove: number;
+  readonly earlierRows: number;
+  readonly newerRows: number;
   readonly scrolled: boolean;
 } {
   if (input.scrollOffset <= 0 || input.entries.length === 0) {
     return {
       window: input.entries.slice(-50),
       entriesAbove: Math.max(0, input.entries.length - 50),
+      earlierRows: input.entries.slice(0, -50).reduce(
+        (sum, entry) => sum + measureWorkShellEntryRows(entry, undefined, input.toolHistoryMode),
+        0,
+      ),
+      newerRows: 0,
       scrolled: false,
     };
   }
-  const capacity = getWorkShellTranscriptEntryCapacity(input.entries, input.terminalRows);
+  const rowWidth = input.terminalColumns === undefined
+    ? undefined
+    : Math.max(8, input.terminalColumns - 4);
+  if (rowWidth !== undefined) {
+    const weights = input.entries.map((entry) => measureWorkShellEntryRows(entry, rowWidth, input.toolHistoryMode));
+    const availableRows = getWorkShellTranscriptAvailableRows(input.terminalRows);
+    let end = input.entries.length;
+    let newerRows = 0;
+    while (end > 0 && newerRows < input.scrollOffset) {
+      end -= 1;
+      newerRows += weights[end] ?? 0;
+    }
+    let start = end;
+    let usedRows = 0;
+    while (start > 0) {
+      const weight = weights[start - 1] ?? 0;
+      if (usedRows > 0 && usedRows + weight > availableRows) break;
+      start -= 1;
+      usedRows += weight;
+    }
+    const earlierRows = weights.slice(0, start).reduce((sum, weight) => sum + weight, 0);
+    return {
+      window: input.entries.slice(start, end),
+      entriesAbove: start,
+      earlierRows,
+      newerRows,
+      scrolled: true,
+    };
+  }
+  const capacity = getWorkShellTranscriptEntryCapacity(
+    input.entries,
+    input.terminalRows,
+    undefined,
+    input.toolHistoryMode,
+  );
   const end = Math.min(
     input.entries.length,
     Math.max(capacity, input.entries.length - input.scrollOffset),
@@ -1806,8 +2007,44 @@ export function resolveWorkShellTranscriptWindow(input: {
   return {
     window: input.entries.slice(start, end),
     entriesAbove: start,
+    earlierRows: input.entries.slice(0, start).reduce(
+      (sum, entry) => sum + measureWorkShellEntryRows(entry, undefined, input.toolHistoryMode),
+      0,
+    ),
+    newerRows: input.entries.slice(end).reduce(
+      (sum, entry) => sum + measureWorkShellEntryRows(entry, undefined, input.toolHistoryMode),
+      0,
+    ),
     scrolled: true,
   };
+}
+
+/** One role-filtered projection shared by scroll math and the Ink renderer. */
+export function projectWorkShellTranscript(
+  entries: readonly WorkShellEntry[],
+  streamingAssistantText?: string | undefined,
+): readonly WorkShellEntry[] {
+  const visible = entries.filter(shouldShowWorkShellConversationEntry);
+  return streamingAssistantText
+    ? [
+        ...visible,
+        {
+          id: WORK_SHELL_STREAMING_ENTRY_ID,
+          role: "assistant",
+          text: `${streamingAssistantText}${STREAMING_CURSOR}`,
+        },
+      ]
+    : visible;
+}
+
+export function formatWorkShellTranscriptScrollIndicator(input: {
+  readonly earlierRows: number;
+  readonly newerRows: number;
+  readonly uiLocale: "en" | "ko";
+}): string {
+  return input.uiLocale === "ko"
+    ? `↑ ${input.earlierRows} 이전 행 · Fn+Up/PageUp · ↓ ${input.newerRows} 새 행 · Fn+Down/PageDown · Esc 최신`
+    : `↑ ${input.earlierRows} earlier rows · Fn+Up/PageUp · ↓ ${input.newerRows} newer rows · Fn+Down/PageDown · Esc latest`;
 }
 
 const WorkShellConversationBlock = React.memo(function WorkShellConversationBlock(props: {
@@ -1819,36 +2056,40 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
   readonly terminalRows?: number;
   /** Task 11 scrollback: entries hidden below the window; 0 = bottom-follow. */
   readonly scrollOffset?: number;
+  readonly toolHistoryMode?: "minimal" | "verbose";
+  readonly uiLocale?: "en" | "ko";
 }) {
   const conversationWidth = getWorkShellConversationWidth({
     panelPlacement: props.panelPlacement,
     ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
   });
-  const entries = props.streamingAssistantText
-    ? [
-        ...props.entries.filter(shouldShowWorkShellConversationEntry),
-        { role: "assistant", text: `${props.streamingAssistantText}${STREAMING_CURSOR}` } as const,
-      ]
-    : props.entries.filter(shouldShowWorkShellConversationEntry);
+  const entries = projectWorkShellTranscript(props.entries, props.streamingAssistantText);
   const transcriptWindow = resolveWorkShellTranscriptWindow({
     entries,
     ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
+    ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
     scrollOffset: props.scrollOffset ?? 0,
+    ...(props.toolHistoryMode ? { toolHistoryMode: props.toolHistoryMode } : {}),
   });
 
   return (
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "68%" : undefined} paddingRight={props.panelPlacement === "side" ? 1 : 0}>
       <Box flexDirection="column">
         {entries.length === 0 ? (
-          props.isBusy ? null : renderWorkShellEmptyConversation(conversationWidth)
+          props.isBusy ? null : renderWorkShellEmptyConversation(conversationWidth, props.uiLocale ?? "en")
         ) : transcriptWindow.window.map((entry, index) => renderWorkShellEntryBlock({
           entry,
           index,
           width: conversationWidth,
+          ...(props.toolHistoryMode ? { toolHistoryMode: props.toolHistoryMode } : {}),
           isLastWindowEntry: index === transcriptWindow.window.length - 1,
         }))}
         {transcriptWindow.scrolled ? (
-          <Text color={W.textDim}>{`↑ ${transcriptWindow.entriesAbove} entries above · PageUp/PageDown scroll · Esc newest`}</Text>
+          <Text color={W.textDim}>{formatWorkShellTranscriptScrollIndicator({
+            earlierRows: transcriptWindow.earlierRows,
+            newerRows: transcriptWindow.newerRows,
+            uiLocale: props.uiLocale ?? "en",
+          })}</Text>
         ) : null}
       </Box>
     </Box>
@@ -1860,11 +2101,12 @@ export function formatWorkShellLiveActivityLine(input: {
   readonly isBusy: boolean;
   readonly busyStatus?: string;
   readonly spinnerFrame?: number;
+  readonly uiLocale?: "en" | "ko";
 }): string | null {
   if (!input.isBusy) {
     return null;
   }
-  return `${pickBusySpinnerFrame(input.spinnerFrame ?? 0)} ${resolveWorkShellBusyActivityPhrase(input.busyStatus ?? "")}`;
+  return `${pickBusySpinnerFrame(input.spinnerFrame ?? 0)} ${resolveWorkShellBusyActivityPhrase(input.busyStatus ?? "", input.uiLocale ?? "en")}`;
 }
 
 const WorkShellPanelBlock = React.memo(function WorkShellPanelBlock(props: {
@@ -1875,7 +2117,13 @@ const WorkShellPanelBlock = React.memo(function WorkShellPanelBlock(props: {
   readonly panelDisplayMode: WorkShellPanelDisplayMode;
   readonly inputValue: string;
   readonly terminalColumns?: number;
+  readonly queueSelectedId?: number;
+  readonly uiLocale?: "en" | "ko";
 }) {
+  const localizedPanel = localizeWorkShellPanelChrome(
+    { title: props.title, lines: props.lines },
+    props.uiLocale ?? "en",
+  );
   const dividerWidth = props.panelPlacement === "side"
     ? getWorkShellDividerWidth({
         ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
@@ -1888,23 +2136,83 @@ const WorkShellPanelBlock = React.memo(function WorkShellPanelBlock(props: {
 
   return (
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "32%" : undefined} paddingLeft={props.panelPlacement === "side" ? 1 : 0} marginTop={props.panelPlacement === "bottom" ? 1 : 0}>
-      <WorkShellSectionDivider label={props.title} accentColor={props.panelBorderColor} width={dividerWidth} />
+      <WorkShellSectionDivider label={localizedPanel.title} accentColor={props.panelBorderColor} width={dividerWidth} />
       <Box
         marginTop={1}
         flexDirection="column"
         paddingLeft={1}
         minHeight={getWorkShellBottomDrawerMinHeight(props.panelDisplayMode, props.title, props.inputValue)}
       >
-        {(props.lines.length > 0 ? props.lines : formatWorkShellPanelEmptyLines(props.title))
-          .map((line, index) => renderWorkShellPanelLine(line, index))}
+        {resolveQueuePanelVisibleLines(
+          localizedPanel.lines.length > 0 ? localizedPanel.lines : formatWorkShellPanelEmptyLines(localizedPanel.title),
+          props.title === "Queue · follow-ups" ? props.queueSelectedId : undefined,
+        )
+          .map((line, index) => {
+            const selectedQueueLine = props.title === "Queue · follow-ups"
+              && props.queueSelectedId !== undefined
+              && new RegExp(`^(?:Next|다음|#\\d+) · id ${props.queueSelectedId} ·`, "u").test(line);
+            return selectedQueueLine
+              ? <Text key={`queue-${props.queueSelectedId}`} color={W.assistant} bold>{`› ${line}`}</Text>
+              : renderWorkShellPanelLine(line, index);
+          })}
       </Box>
     </Box>
   );
 });
 
+const PANEL_TITLES_KO: Readonly<Record<string, string>> = {
+  "Queue · follow-ups": "대기열 · 후속 요청",
+  "Session status": "세션 상태",
+  "Quality review": "품질 검토",
+  Review: "검토",
+  Decision: "사용자 결정",
+  Help: "도움말",
+  Attachments: "첨부 파일",
+};
+
+/** Translate only renderer-owned chrome. Queue previews and arbitrary panel
+ * payloads pass through untouched, byte for byte. */
+export function localizeWorkShellPanelChrome(
+  panel: WorkShellPanel,
+  uiLocale: "en" | "ko",
+): WorkShellPanel {
+  if (uiLocale === "en") return panel;
+  const exact: Readonly<Record<string, string>> = {
+    "Queue empty · new messages run immediately": "대기열 비어 있음 · 새 메시지는 즉시 실행됩니다",
+    "↑/↓ select · Shift+↑/↓ reorder · d remove": "↑/↓ 선택 · Shift+↑/↓ 순서 변경 · d 삭제",
+    "c clear pending · r resume · t retry · x discard · Esc close": "c 대기 항목 비우기 · r 재개 · t 재시도 · x 폐기 · Esc 닫기",
+    "/queue remove <id> · /queue move <id> up|down": "/queue remove <id> 삭제 · /queue move <id> up|down 순서 변경",
+    "/queue clear · /queue resume": "/queue clear 비우기 · /queue resume 재개",
+    "Queue = user follow-ups · /todo = Plan/PDCA · /agents or /jobs = parallel work": "대기열 = 사용자 후속 요청 · /todo = 계획/PDCA · /agents 또는 /jobs = 병렬 작업",
+    "Enter queues one follow-up exactly once; Esc interrupts and pauses this list.": "Enter는 후속 요청을 한 번만 추가합니다. Esc는 중단하고 이 목록을 일시정지합니다.",
+  };
+  return {
+    title: PANEL_TITLES_KO[panel.title] ?? panel.title,
+    lines: panel.lines.map((line) => {
+      if (exact[line]) return exact[line];
+      const header = /^(Paused|Running|Idle) · (\d+) total · (\d+) pending · (\d+) in flight · (\d+) requires action$/u.exec(line);
+      if (header) {
+        const state = header[1] === "Paused" ? "일시정지" : header[1] === "Running" ? "실행 중" : "대기";
+        return `${state} · 전체 ${header[2]} · 대기 ${header[3]} · 실행 중 ${header[4]} · 조치 필요 ${header[5]}`;
+      }
+      const item = /^(Next|#\d+) · id (\d+) · (pending|in flight|requires action)( · wait \d+s)? · ([\s\S]*)$/u.exec(line);
+      if (item) {
+        const position = item[1] === "Next" ? "다음" : item[1];
+        const status = item[3] === "pending" ? "대기" : item[3] === "in flight" ? "실행 중" : "조치 필요";
+        const wait = item[4]?.replace(" · wait ", " · 대기 ") ?? "";
+        return `${position} · id ${item[2]} · ${status}${wait} · ${item[5]}`;
+      }
+      if (line.startsWith("Current turn · ")) return `현재 작업 · ${line.slice(15)}`;
+      if (line.startsWith("Pause reason · ")) return `일시정지 이유 · ${line.slice(15)}`;
+      return line;
+    }),
+  };
+}
+
 const WorkShellAttachmentBlock = React.memo(function WorkShellAttachmentBlock(props: {
   readonly attachmentLines: readonly string[];
   readonly terminalColumns?: number;
+  readonly uiLocale?: "en" | "ko";
 }) {
   if (props.attachmentLines.length === 0 || getWorkShellAttachmentPlacement() !== "after-composer") {
     return null;
@@ -1913,7 +2221,7 @@ const WorkShellAttachmentBlock = React.memo(function WorkShellAttachmentBlock(pr
   return (
     <Box marginTop={1} flexDirection="column">
       <WorkShellSectionDivider
-        label="attachments"
+        label={getWorkShellMessages(props.uiLocale ?? "en").attachments}
         accentColor={W.textMuted}
         width={getWorkShellDividerWidth({
           ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
@@ -1944,6 +2252,7 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
   readonly authLabel: string;
   readonly headerHint?: string;
   readonly terminalColumns?: number;
+  readonly uiLocale?: "en" | "ko";
 }) {
   const providerTitle = formatWorkShellProviderTitle(props.provider);
   const width = resolveWorkShellChromeWidth(props.terminalColumns);
@@ -1974,6 +2283,7 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
     const sessionFacts = formatWorkShellSessionFactsGroup({
       model: props.model,
       mode: props.mode,
+      uiLocale: props.uiLocale ?? "en",
     });
     const chip = isWorkShellAuthWarning(props.authLabel)
       ? formatWorkShellAuthFactsGroup(props.authLabel)
@@ -2048,10 +2358,21 @@ const WorkShellHeaderBlock = React.memo(function WorkShellHeaderBlock(props: {
   );
 });
 
-function resolveWorkShellCompactBusyActivityPhrase(status: string): string {
+function resolveWorkShellCompactBusyActivityPhrase(status: string, uiLocale: "en" | "ko" = "en"): string {
+  const messages = getWorkShellMessages(uiLocale);
   const normalized = status.trim().replace(/\s+/g, " ");
   const lower = normalized.toLowerCase();
-  if (!normalized) return "Working";
+  if (!normalized) return messages.working;
+  if (uiLocale === "ko") {
+    if (lower.includes("thinking") || lower.includes("reasoning")) return "생각 중";
+    if (lower.includes("context")) return "컨텍스트 준비 중";
+    if (lower.includes("queue")) return "대기 중";
+    if (lower.includes("stream")) return "응답 수신 중";
+    if (lower.includes("read") || lower.includes("search")) return "컨텍스트 읽는 중";
+    if (lower.includes("tool") || lower.includes("call")) return "도구 실행 중";
+    if (lower.includes("verify") || lower.includes("test")) return "결과 확인 중";
+    if (lower.includes("write") || lower.includes("edit")) return "변경 적용 중";
+  }
   if (lower.includes("thinking") || lower.includes("reasoning")) return "Thinking";
   if (lower.includes("context")) return "Preparing context";
   if (lower.includes("queue")) return "Queued";
@@ -2132,12 +2453,14 @@ export function formatWorkShellStatusActivityFacts(input: {
   readonly activeJobs?: number;
   readonly activity: string;
   readonly elapsed?: string;
+  readonly uiLocale?: "en" | "ko";
 }): string {
+  const messages = getWorkShellMessages(input.uiLocale ?? "en");
   const agents = input.activeAgents ?? 0;
   const jobs = input.activeJobs ?? 0;
   return [
-    agents > 0 ? formatCount(agents, "agent", "agents") : undefined,
-    jobs > 0 ? formatCount(jobs, "job", "jobs") : undefined,
+    agents > 0 ? `${agents} ${agents === 1 ? messages.agent : messages.agents}` : undefined,
+    jobs > 0 ? `${jobs} ${jobs === 1 ? messages.job : messages.jobs}` : undefined,
     input.activity,
     input.elapsed,
   ]
@@ -2161,7 +2484,10 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
    * turn is idle, because something the operator started is still running.
    */
   readonly activeCounts?: AgentConsoleActiveCounts;
+  readonly uiLocale?: "en" | "ko";
 }) {
+  const uiLocale = props.uiLocale ?? "en";
+  const messages = getWorkShellMessages(uiLocale);
   const { activityFrame, activityNow } = props.clock;
   const activeAgents = props.activeCounts?.agents ?? 0;
   const activeJobs = props.activeCounts?.jobs ?? 0;
@@ -2186,24 +2512,25 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
   // timing is simply omitted.
   const lastReplyTiming = props.lastTurnDurationMs === undefined
     ? undefined
-    : `last ${formatCompactDuration(props.lastTurnDurationMs)}`;
+    : `${messages.last} ${formatCompactDuration(props.lastTurnDurationMs)}`;
   // Only a main turn has an elapsed anchor. Delegated runs carry their own
   // per-agent labels in the HUD below, so this slot stays empty for them
   // rather than reporting the previous turn's clock as if it were still live.
   const busyElapsed = props.currentTurnStartedAt === undefined
-    ? "starting"
+    ? messages.starting
     : formatCompactDuration(Math.max(0, activityNow - props.currentTurnStartedAt));
   const activity = props.isBusy
-    ? resolveWorkShellBusyActivityPhrase(props.busyStatus ?? "")
+    ? resolveWorkShellBusyActivityPhrase(props.busyStatus ?? "", uiLocale)
     : backgroundBusy
-      ? "Working"
-      : "Ready";
+      ? messages.working
+      : messages.ready;
   const elapsed = props.isBusy ? busyElapsed : backgroundBusy ? undefined : lastReplyTiming;
   const statusDisplay = formatWorkShellStatusActivityFacts({
     activeAgents,
     activeJobs,
     activity,
     ...(elapsed === undefined ? {} : { elapsed }),
+    uiLocale,
   });
   const isNarrow = props.terminalColumns !== undefined && props.terminalColumns < 72;
   if (isNarrow) {
@@ -2213,9 +2540,10 @@ const WorkShellStatusBlock = React.memo(function WorkShellStatusBlock(props: {
         activeAgents,
         activeJobs,
         activity: props.isBusy
-          ? resolveWorkShellCompactBusyActivityPhrase(props.busyStatus ?? "")
+          ? resolveWorkShellCompactBusyActivityPhrase(props.busyStatus ?? "", uiLocale)
           : activity,
         ...(elapsed === undefined ? {} : { elapsed }),
+        uiLocale,
       })}`;
     const availableStatusWidth = Math.max(1, (props.terminalColumns ?? 72) - 6);
     return (
@@ -2315,6 +2643,14 @@ function renderWorkShellAgentConsoleControl(input: {
  * `question-id: n` answers. The engine clears `pendingDecision` on settle,
  * so the bar disappears the frame the decision is answered or cancelled.
  */
+export function formatWorkShellDecisionKindLabel(
+  kind: AskUserQuestionRequest["kind"],
+  uiLocale: "en" | "ko" = "en",
+): string {
+  if (uiLocale === "ko") return kind === "security-approval" ? "보안 승인" : "사용자 결정";
+  return kind === "security-approval" ? "Security approval" : "User decision";
+}
+
 const WorkShellDecisionBar = React.memo(function WorkShellDecisionBar(props: {
   readonly request: AskUserQuestionRequest;
   /**
@@ -2324,8 +2660,15 @@ const WorkShellDecisionBar = React.memo(function WorkShellDecisionBar(props: {
    */
   readonly inputNeededLine?: string | undefined;
   readonly terminalColumns?: number | undefined;
+  readonly uiLocale?: "en" | "ko";
 }) {
-  const title = props.request.title?.trim() || "Decision required";
+  const uiLocale = props.uiLocale ?? "en";
+  const messages = getWorkShellMessages(uiLocale);
+  const kindLabel = formatWorkShellDecisionKindLabel(props.request.kind ?? "user-decision", uiLocale);
+  const requestTitle = props.request.title?.trim();
+  const title = requestTitle && requestTitle.toLocaleLowerCase() !== kindLabel.toLocaleLowerCase()
+    ? `${kindLabel} · ${requestTitle}`
+    : requestTitle || kindLabel;
   const singleQuestion = props.request.questions.length === 1
     ? props.request.questions[0]
     : undefined;
@@ -2342,7 +2685,9 @@ const WorkShellDecisionBar = React.memo(function WorkShellDecisionBar(props: {
           <Text color={W.assistant} bold>{"◆ "}</Text>
           <Text color={W.text} bold>{title}</Text>
           <Text color={W.textDim}>
-            {` · ${props.request.questions.length} questions · type answers · /cancel`}
+            {uiLocale === "ko"
+              ? ` · 질문 ${props.request.questions.length}개 · 답변 입력 · /cancel`
+              : ` · ${props.request.questions.length} questions · type answers · /cancel`}
           </Text>
         </Text>
         {feedbackLine ? (
@@ -2367,12 +2712,12 @@ const WorkShellDecisionBar = React.memo(function WorkShellDecisionBar(props: {
             <Text color={W.assistant} bold>{`${index + 1}. `}</Text>
             <Text color={W.textDim}>
               {singleQuestion.recommended === index
-                ? `${option.label} (recommended)`
+                ? `${option.label} (${uiLocale === "ko" ? "권장" : "recommended"})`
                 : option.label}
             </Text>
           </Text>
         ))}
-        <Text color={W.textDim}>{`${keyRange} answer · Esc cancel · or type`}</Text>
+        <Text color={W.textDim}>{`${keyRange} ${messages.decisionBarHint}`}</Text>
         {feedbackLine ? (
           <Text color={W.warning}>{feedbackLine}</Text>
         ) : null}
@@ -2403,6 +2748,7 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   readonly busyStatus?: string;
   readonly currentTurnStartedAt?: number;
   readonly clock: WorkShellActivityClock;
+  readonly uiLocale?: "en" | "ko";
   /**
    * Live delegated work — the same counts the status row gates on, so the
    * dock's activity row and the (idle-only) top row can never disagree about
@@ -2416,6 +2762,8 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
    */
   readonly liveToolTraceLines?: readonly string[];
 }) {
+  const uiLocale = props.uiLocale ?? "en";
+  const messages = getWorkShellMessages(uiLocale);
   const dockWidth = getWorkShellDockWidth(props.terminalColumns);
   const footerLine = formatWorkShellFooterLine({
     ...(props.cwd ? { cwd: props.cwd } : {}),
@@ -2472,15 +2820,16 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
           activeAgents,
           activeJobs,
           activity: props.isBusy
-            ? resolveWorkShellBusyActivityPhrase(props.busyStatus ?? "")
-            : "Working",
+            ? resolveWorkShellBusyActivityPhrase(props.busyStatus ?? "", uiLocale)
+            : messages.working,
           ...(props.isBusy
             ? {
                 elapsed: props.currentTurnStartedAt === undefined
-                  ? "starting"
+                  ? messages.starting
                   : formatCompactDuration(Math.max(0, activityNow - props.currentTurnStartedAt)),
               }
             : {}),
+          uiLocale,
         }),
         Math.max(12, dockWidth - 2),
       )
@@ -2520,14 +2869,20 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   );
 });
 
-export function formatWorkShellQueueIndicator(queuedCount: number, queuePaused = false): string | null {
+export function formatWorkShellQueueIndicator(
+  queuedCount: number,
+  queuePaused = false,
+  uiLocale: "en" | "ko" = "en",
+): string | null {
   if (queuedCount <= 0) {
     return null;
   }
+  const messages = getWorkShellMessages(uiLocale);
+  const label = queuedCount === 1 ? messages.queueFollowUp : messages.queueFollowUps;
   if (queuePaused) {
-    return `⋯ ${queuedCount} queued · paused · /queue clear`;
+    return `⋯ ${queuedCount} ${label} · ${messages.paused} · /queue ${messages.resume}`;
   }
-  return `⋯ ${queuedCount} queued · /queue`;
+  return `⋯ ${queuedCount} ${label} · /queue`;
 }
 
 
@@ -2540,6 +2895,8 @@ export function WorkShellView(props: {
   readonly authLabel: string;
   readonly contextIndicator?: string;
   readonly entries: readonly WorkShellEntry[];
+  readonly traceMode?: "minimal" | "verbose";
+  readonly uiLocale?: "en" | "ko";
   readonly streamingAssistantText?: string;
   readonly isBusy: boolean;
   readonly busyStatus?: string;
@@ -2593,6 +2950,7 @@ export function WorkShellView(props: {
   readonly cwd?: string;
   readonly queuedCount?: number;
   readonly queuePaused?: boolean;
+  readonly queueSelectedId?: number;
   readonly agentConsole?: AgentConsoleSnapshot;
   /**
    * Engine-owned Agent Console navigation. Absent (or closed) keeps the shell
@@ -2647,6 +3005,7 @@ export function WorkShellView(props: {
     inputValue: props.inputValue,
     slashSuggestionCount: props.slashSuggestionCount,
     ...(props.selectedSlashCommand ? { selectedSlashCommand: props.selectedSlashCommand } : {}),
+    uiLocale: props.uiLocale ?? "en",
   });
   const panelBorderColor = getWorkShellPanelBorderColor(props.inputValue, props.activePanel.title);
   const panelDisplayMode = getWorkShellPanelDisplayMode({
@@ -2671,7 +3030,11 @@ export function WorkShellView(props: {
     latestSystemText: getLatestWorkShellSystemText(props.entries),
     decisionBarActive,
   });
-  const queueIndicator = formatWorkShellQueueIndicator(props.queuedCount ?? 0, props.queuePaused ?? false);
+  const queueIndicator = formatWorkShellQueueIndicator(
+    props.queuedCount ?? 0,
+    props.queuePaused ?? false,
+    props.uiLocale ?? "en",
+  );
   const agentConsoleOpen = props.agentConsole !== undefined && props.agentConsoleView?.open === true;
   const shouldRenderContextInspectorOverlay =
     props.activePanel.title === "Context expanded" && props.contextPacket !== undefined;
@@ -2687,10 +3050,12 @@ export function WorkShellView(props: {
     && shouldShowOmpAuthPicker(props.inputValue);
 
   const conversation = (
-    <WorkShellConversationBlock
+      <WorkShellConversationBlock
       entries={props.entries}
+      {...(props.traceMode ? { toolHistoryMode: props.traceMode } : {})}
       {...(props.streamingAssistantText ? { streamingAssistantText: props.streamingAssistantText } : {})}
       isBusy={props.isBusy}
+      uiLocale={props.uiLocale ?? "en"}
       panelPlacement={panelPlacement}
       {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
       {...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {})}
@@ -2708,6 +3073,7 @@ export function WorkShellView(props: {
       width: Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4),
       borderColor: panelBorderColor,
       palette: W,
+      uiLocale: props.uiLocale ?? "en",
       ...(props.ompAuthSignInReceipt ? { signInReceipt: props.ompAuthSignInReceipt } : {}),
     })
   ) : (
@@ -2719,6 +3085,8 @@ export function WorkShellView(props: {
       panelDisplayMode={panelDisplayMode}
       inputValue={props.inputValue}
       {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+      {...(props.queueSelectedId !== undefined ? { queueSelectedId: props.queueSelectedId } : {})}
+      uiLocale={props.uiLocale ?? "en"}
     />
   );
 
@@ -2740,6 +3108,7 @@ export function WorkShellView(props: {
       {...(props.modelWindow !== undefined ? { modelWindow: props.modelWindow } : {})}
       {...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {})}
       isBusy={props.isBusy}
+      uiLocale={props.uiLocale ?? "en"}
       {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
       {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
       {...(props.liveToolTraceLines && props.liveToolTraceLines.length > 0
@@ -2762,6 +3131,7 @@ export function WorkShellView(props: {
           model={props.model}
           mode={props.mode}
           authLabel={props.authLabel}
+          uiLocale={props.uiLocale ?? "en"}
           {...(props.headerHint ? { headerHint: props.headerHint } : {})}
           {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
         />
@@ -2771,6 +3141,7 @@ export function WorkShellView(props: {
           mode={props.mode}
           authLabel={props.authLabel}
           isBusy={props.isBusy}
+          uiLocale={props.uiLocale ?? "en"}
           {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
           {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
           {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
@@ -2787,6 +3158,7 @@ export function WorkShellView(props: {
           borderColor={panelBorderColor}
           palette={W}
           now={clock.activityNow}
+          uiLocale={props.uiLocale ?? "en"}
         />
         {renderWorkShellAgentConsoleControl({
           snapshot: props.agentConsole,
@@ -2826,6 +3198,7 @@ export function WorkShellView(props: {
           model={props.model}
           mode={props.mode}
           authLabel={props.authLabel}
+          uiLocale={props.uiLocale ?? "en"}
           {...(props.headerHint ? { headerHint: props.headerHint } : {})}
           {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
         />
@@ -2835,6 +3208,7 @@ export function WorkShellView(props: {
           mode={props.mode}
           authLabel={props.authLabel}
           isBusy={props.isBusy}
+          uiLocale={props.uiLocale ?? "en"}
           {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
           {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
           {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
@@ -2873,6 +3247,7 @@ export function WorkShellView(props: {
             ? { contextAdviceUnavailable: props.contextAdviceUnavailable }
             : {}),
           contextAdviceActionsEnabled: props.contextAdviceActionsEnabled ?? false,
+          uiLocale: props.uiLocale ?? "en",
           ...(contextDeskTerminalRows !== undefined
             ? { terminalRows: contextDeskTerminalRows }
             : {}),
@@ -2894,6 +3269,7 @@ export function WorkShellView(props: {
           model={props.model}
           mode={props.mode}
           authLabel={props.authLabel}
+          uiLocale={props.uiLocale ?? "en"}
           {...(props.headerHint ? { headerHint: props.headerHint } : {})}
           {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
         />
@@ -2903,6 +3279,7 @@ export function WorkShellView(props: {
           mode={props.mode}
           authLabel={props.authLabel}
           isBusy={props.isBusy}
+          uiLocale={props.uiLocale ?? "en"}
           {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
           {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
           {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
@@ -2917,12 +3294,14 @@ export function WorkShellView(props: {
               width: overlayWidth,
               borderColor: panelBorderColor,
               palette: W,
+              uiLocale: props.uiLocale ?? "en",
             })
           : renderAgentHistoryOverlay({
               snapshot: props.agentConsole,
               width: overlayWidth,
               borderColor: panelBorderColor,
               palette: W,
+              uiLocale: props.uiLocale ?? "en",
             })}
       </Box>
     );
@@ -2935,6 +3314,7 @@ export function WorkShellView(props: {
         model={props.model}
         mode={props.mode}
         authLabel={props.authLabel}
+        uiLocale={props.uiLocale ?? "en"}
         {...(props.headerHint ? { headerHint: props.headerHint } : {})}
         {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
       />
@@ -2944,6 +3324,7 @@ export function WorkShellView(props: {
         mode={props.mode}
         authLabel={props.authLabel}
         isBusy={props.isBusy}
+        uiLocale={props.uiLocale ?? "en"}
         {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
         {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
         {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
@@ -2957,6 +3338,7 @@ export function WorkShellView(props: {
           width={resolveWorkShellChromeWidth(props.terminalColumns)}
           palette={W}
           now={clock.activityNow}
+          uiLocale={props.uiLocale ?? "en"}
         />
       ) : null}
       {getWorkShellPanelAnchor(panelDisplayMode) === "with-conversation" ? (
@@ -2995,12 +3377,14 @@ export function WorkShellView(props: {
           {...(props.terminalColumns !== undefined
             ? { terminalColumns: props.terminalColumns }
             : {})}
+          uiLocale={props.uiLocale ?? "en"}
         />
       ) : null}
       {composerDock}
       {props.attachmentLines
         ? <WorkShellAttachmentBlock
             attachmentLines={props.attachmentLines}
+            uiLocale={props.uiLocale ?? "en"}
             {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
           />
         : null}
@@ -3035,6 +3419,7 @@ export function WorkShellView(props: {
             ? { contextAdviceUnavailable: props.contextAdviceUnavailable }
             : {}),
           contextAdviceActionsEnabled: props.contextAdviceActionsEnabled ?? false,
+          uiLocale: props.uiLocale ?? "en",
           ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
         })
       ) : panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput ? (

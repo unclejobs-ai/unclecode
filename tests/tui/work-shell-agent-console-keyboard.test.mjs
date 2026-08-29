@@ -827,6 +827,7 @@ test("Tab switches console tabs and Esc closes the console", async () => {
 
     stdin.write("\t");
     await waitForCondition(() => getState().agentConsoleView.tab === "jobs");
+    await waitForCondition(() => /\[Jobs\]/.test(lastFrame(getOutput())));
     assert.equal(getState().agentConsoleView.tab, "jobs");
     assert.match(lastFrame(getOutput()), /\[Jobs\]/);
 
@@ -836,6 +837,7 @@ test("Tab switches console tabs and Esc closes the console", async () => {
 
     stdin.write("\u001b");
     await waitForCondition(() => !getState().agentConsoleView.open);
+    await waitForCondition(() => !/▤ Agent Console/.test(lastFrame(getOutput())));
     assert.equal(getState().agentConsoleView.open, false, "Esc closes the console");
     assert.doesNotMatch(lastFrame(getOutput()), /▤ Agent Console/);
   } finally {

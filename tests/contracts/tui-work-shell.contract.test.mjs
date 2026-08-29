@@ -241,18 +241,18 @@ test("formatWorkShellProviderTitle humanizes known providers for the unified wor
 test("formatWorkShellHeaderLine renders one width-bounded row", () => {
   const wide = formatWorkShellHeaderLine({
     providerTitle: "UncleCode · OpenAI",
-    headerHint: "work context · Ctrl+O context · / commands",
+    headerHint: "work context · Ctrl+O tools · / commands",
     terminalColumns: 120,
   });
   assert.equal(getDisplayWidth(wide), 116);
   assert.match(wide, /^UncleCode · OpenAI/);
   assert.match(wide, /work context/);
-  assert.match(wide, /Ctrl\+O context/);
+  assert.match(wide, /Ctrl\+O tools/);
   assert.doesNotMatch(wide, /\n/);
 
   const narrow = formatWorkShellHeaderLine({
     providerTitle: "UncleCode · OpenAI",
-    headerHint: "work context · Ctrl+O context · / commands",
+    headerHint: "work context · Ctrl+O tools · / commands",
     terminalColumns: 36,
   });
   assert.equal(getDisplayWidth(narrow), 32);
@@ -262,7 +262,7 @@ test("formatWorkShellHeaderLine renders one width-bounded row", () => {
 test("formatWorkShellHeaderLine keeps header hints within the row width", () => {
   const line = formatWorkShellHeaderLine({
     providerTitle: "UncleCode · Gemini",
-    headerHint: "work context · Ctrl+O sessions · / commands",
+    headerHint: "work context · Ctrl+O tools · / commands",
     terminalColumns: 72,
   });
   assert.equal(getDisplayWidth(line), 68);
@@ -558,7 +558,7 @@ test("getWorkShellComposerHint keeps slash discovery guidance inside the shared 
   assert.equal(getWorkShellComposerHintMinHeight(), 1);
 });
 
-test("resolveWorkShellComposerHint and spinner interval stay aligned with DESIGN.md workflow states", () => {
+test("resolveWorkShellComposerHint and spinner interval stay aligned with the quiet-workspace workflow states", () => {
   assert.equal(WORK_SHELL_SPINNER_INTERVAL_MS, 100);
   assert.equal(
     resolveWorkShellComposerHint({
@@ -566,7 +566,7 @@ test("resolveWorkShellComposerHint and spinner interval stay aligned with DESIGN
       inputValue: "plain text",
       slashSuggestionCount: 0,
     }),
-    "Enter queues follow-up · Ctrl+C/Esc interrupt · /queue",
+    "Queue a follow-up... · Enter queue · Esc interrupt · /queue",
   );
   assert.equal(
     resolveWorkShellComposerHint({
@@ -1205,7 +1205,18 @@ test("work-shell input decision helpers are exported from the shared tui package
       isBusy: false,
       hasRequestSessionsView: true,
     }),
-    { type: "open-sessions-view" },
+    { type: "none" },
+  );
+  assert.deepEqual(
+    resolveWorkShellInputAction({
+      value: "\u000f",
+      key: { ctrl: true },
+      input: "IME 초안",
+      slashSuggestionCount: 0,
+      isBusy: false,
+      hasRequestSessionsView: true,
+    }),
+    { type: "none" },
   );
   assert.deepEqual(
     resolveWorkShellInputAction({
@@ -1620,7 +1631,7 @@ test("work-shell panel helpers are exported from the shared tui package seam", (
       mode: "default",
       authLabel: "Browser OAuth · file",
     }),
-    "gpt-5.4 · 작업 모드 · Saved OAuth · work context",
+    "gpt-5.4 · Work mode · Saved OAuth · work context",
   );
   assert.equal(
     formatWorkShellFooterLine({

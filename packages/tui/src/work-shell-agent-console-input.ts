@@ -26,7 +26,7 @@ import type { AgentConsoleControlState, WorkShellComposerMode } from "@unclecode
  *
  * 1. secure API-key entry owns every keystroke — nothing leaks to the console;
  * 2. the slash command picker owns its keys next;
- * 3. ctrl chords stay global (Ctrl+C, Ctrl+O, Ctrl+V);
+ * 3. ctrl chords stay global (Ctrl+C, Ctrl+O tool history, Ctrl+V);
  * 4. `Alt+A` toggles the console from any other composer state, draft or not;
  * 5. a closed console has no further claim;
  * 6. `agent-steer` gives every non-`Esc` key to the Composer and nothing to
@@ -105,7 +105,7 @@ export function resolveAgentConsoleInputDecision(
     return PASS;
   }
   // Ctrl chords are the shell's global escape hatches (Ctrl+C exit, Ctrl+O
-  // sessions, Ctrl+V paste) and stay reachable from every console state.
+  // tool history, Ctrl+V paste) and stay reachable from every console state.
   if (input.key.ctrl === true) {
     return PASS;
   }
