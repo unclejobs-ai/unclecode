@@ -2,6 +2,8 @@ import { useState, useSyncExternalStore } from 'react'
 import './App.css'
 import { evolutionEvidenceLabel } from './evolution-labels.js'
 import { canApproveOnce, normalizePendingDecision } from './pending-decision.js'
+import { SystemView } from './SystemView.jsx'
+import { normalizeSystemProjection, resolveControlRoomView } from './system-view.js'
 import { deriveWorkFocus } from './work-focus.js'
 
 const COPY = {
@@ -25,7 +27,13 @@ const COPY = {
     pending: 'Pending', success: 'Applied', conflict: 'State changed; refresh and try again.', denied: 'Denied by policy.',
     loading: 'Loading runtime state', retry: 'Retry', noData: 'Nothing recorded for this view.',
     runtime: 'Runtime', quality: 'Quality', elapsed: 'Updated', state: 'State', attention: 'Needs attention',
-    source: 'Source', hook: 'Hook', error: 'Error', cleanup: 'Cleanup', providerHealth: 'Provider health', pluginHealth: 'Plugin health',
+    source: 'Source', hook: 'Hook', error: 'Error', cleanup: 'Cleanup', providerHealth: 'Providers', pluginHealth: 'Plugin health', diagnosticRecorded: 'Bounded diagnostic recorded',
+    systemOwner: 'Runtime owner', systemNominal: 'All reported evidence sources are available.', ownerEvidence: 'Owner evidence', cacheEvidence: 'Cache evidence',
+    mcpHealth: 'MCP servers', pluginHosts: 'Plugin hosts', pluginRegistrations: 'Registrations', providers: 'Provider evidence', mcpServers: 'MCP evidence', pluginLifecycle: 'Plugin lifecycle', pluginHost: 'Host', pendingCleanup: 'Pending cleanup', truncated: 'bounded',
+    memoryResources: 'Memory and resources', heapUsed: 'Heap used', heapTotal: 'Heap total', externalMemory: 'External memory', activeResources: 'Active resources', cpuTime: 'CPU time', maxRss: 'Peak RSS', caches: 'Caches', hits: 'hits', misses: 'misses', hitRate: 'hit rate', entries: 'entries', bytes: 'bytes',
+    engineCounters: 'Engine counters', journalCounters: 'Journal counters', attachedSessions: 'Attached sessions', observedSessions: 'Observed sessions', activeMutations: 'Active mutations', clientLeases: 'Client leases', pendingCreations: 'Pending creations', pendingTeardowns: 'Pending teardowns', teardownFailures: 'Retained teardown failures', cleanupDropped: 'Cleanup rows dropped', unlistedTeardowns: 'Unlisted teardowns', callbackFailures: 'Evidence callback failures', mcpUnavailable: 'MCP config unavailable', retainedEvents: 'Retained events', activeSubscriptions: 'Active subscriptions', subscriberSessions: 'Subscriber sessions', replayWatermarks: 'Replay watermarks', configuredEmpty: 'Available; nothing configured or recorded.', sourceUnavailable: 'Evidence source unavailable.',
+    systemStatuses: { available: 'available', unavailable: 'unavailable', degraded: 'degraded', configured: 'configured', notConfigured: 'not configured', authenticated: 'authenticated', missing: 'missing auth', unverified: 'unverified', passed: 'probe passed', failed: 'failed', 'not-run': 'not probed', active: 'active', disposing: 'disposing', disposed: 'disposed', pending: 'pending', completed: 'completed' },
+    systemReasons: { owner: 'owner evidence unavailable', cacheTelemetry: 'cache evidence unavailable', callbacks: 'session evidence callback failed', mcpConfiguration: 'MCP configuration unavailable', providers: 'provider evidence needs attention', mcpServers: 'MCP evidence needs attention', pluginHosts: 'plugin lifecycle needs attention', cleanup: 'cleanup failure retained' },
     mergeGuard: 'Main merge and release require human approval.', external: 'External plugin', notReviewed: 'No independent reviewer evidence.',
     fullProjection: 'Full projection', humanGate: 'Human gate', heldOut: 'Held-out benchmark', manual: 'manual', stale: 'stale',
     isolation: 'Isolation', comparison: 'Comparison', candidateHash: 'Candidate hash', attestation: 'Attestation', approval: 'Approval',
@@ -57,7 +65,13 @@ const COPY = {
     pending: '처리 중', success: '적용됨', conflict: '상태가 변경되었습니다. 새로고침 후 다시 시도하세요.', denied: '정책에 의해 거부되었습니다.',
     loading: '런타임 상태를 불러오는 중', retry: '다시 시도', noData: '이 화면에 기록된 항목이 없습니다.',
     runtime: '런타임', quality: '품질', elapsed: '갱신', state: '상태', attention: '확인 필요',
-    source: '출처', hook: '훅', error: '오류', cleanup: '정리', providerHealth: '공급자 상태', pluginHealth: '플러그인 상태',
+    source: '출처', hook: '훅', error: '오류', cleanup: '정리', providerHealth: '공급자', pluginHealth: '플러그인 상태', diagnosticRecorded: '범위 제한 진단 기록됨',
+    systemOwner: '런타임 소유자', systemNominal: '보고된 모든 증거 출처를 사용할 수 있습니다.', ownerEvidence: '소유자 증거', cacheEvidence: '캐시 증거',
+    mcpHealth: 'MCP 서버', pluginHosts: '플러그인 호스트', pluginRegistrations: '등록', providers: '공급자 증거', mcpServers: 'MCP 증거', pluginLifecycle: '플러그인 수명주기', pluginHost: '호스트', pendingCleanup: '정리 대기', truncated: '범위 제한',
+    memoryResources: '메모리와 리소스', heapUsed: '힙 사용량', heapTotal: '전체 힙', externalMemory: '외부 메모리', activeResources: '활성 리소스', cpuTime: 'CPU 시간', maxRss: '최대 RSS', caches: '캐시', hits: '적중', misses: '미적중', hitRate: '적중률', entries: '항목', bytes: '바이트',
+    engineCounters: '엔진 카운터', journalCounters: '저널 카운터', attachedSessions: '연결된 세션', observedSessions: '관찰된 세션', activeMutations: '활성 변경', clientLeases: '클라이언트 임대', pendingCreations: '생성 대기', pendingTeardowns: '종료 대기', teardownFailures: '보존된 종료 실패', cleanupDropped: '제외된 정리 행', unlistedTeardowns: '미표시 종료', callbackFailures: '증거 콜백 실패', mcpUnavailable: 'MCP 구성 사용 불가', retainedEvents: '보존 이벤트', activeSubscriptions: '활성 구독', subscriberSessions: '구독 세션', replayWatermarks: '재생 워터마크', configuredEmpty: '사용 가능하며 구성되거나 기록된 항목이 없습니다.', sourceUnavailable: '증거 출처를 사용할 수 없습니다.',
+    systemStatuses: { available: '사용 가능', unavailable: '사용 불가', degraded: '성능 저하', configured: '구성됨', notConfigured: '미구성', authenticated: '인증됨', missing: '인증 없음', unverified: '미검증', passed: '검사 통과', failed: '실패', 'not-run': '검사 안 함', active: '활성', disposing: '정리 중', disposed: '정리됨', pending: '대기', completed: '완료' },
+    systemReasons: { owner: '소유자 증거 사용 불가', cacheTelemetry: '캐시 증거 사용 불가', callbacks: '세션 증거 콜백 실패', mcpConfiguration: 'MCP 구성 사용 불가', providers: '공급자 증거 확인 필요', mcpServers: 'MCP 증거 확인 필요', pluginHosts: '플러그인 수명주기 확인 필요', cleanup: '정리 실패 보존됨' },
     mergeGuard: '기본 브랜치 병합과 릴리스는 사람 승인이 필요합니다.', external: '외부 플러그인', notReviewed: '독립 검토자 증거가 없습니다.',
     fullProjection: '전체 투영', humanGate: '사람 승인', heldOut: '미공개 벤치마크', manual: '수동', stale: '만료됨',
     isolation: '격리', comparison: '비교', candidateHash: '후보 해시', attestation: '검증', approval: '승인',
@@ -319,11 +333,6 @@ function EvolveView({ run, copy }) {
   </div>
 }
 
-function SystemView({ run, projection, copy }) {
-  const diagnostics = run.system.diagnostics
-  return <div className="view-stack"><div className="metrics"><Metric label={copy.providerHealth} value={projection.system?.providers?.length ?? 0} mono /><Metric label={copy.pluginHealth} value={projection.system?.plugins?.length ?? 0} mono /><Metric label={copy.cleanup} value={projection.system?.cleanup?.length ?? 0} mono /></div><section className="plane"><div className="section-title"><h2>{copy.diagnostics}</h2><span className="mono subtle">{diagnostics.length}</span></div>{diagnostics.length ? <div className="diagnostics">{diagnostics.map(item => <div key={item.dedupeKey}><span className="external-label">{copy.external}</span><div><strong>{item.pluginId}</strong><span>{copy.source} · {item.source} / {item.trust}</span><span>{copy.hook} · {item.hook}</span><span className="diagnostic-error">{copy.error} · {item.error}</span></div><span className="mono">{item.dedupeKey}</span></div>)}</div> : <p className="muted">{copy.noData}</p>}</section></div>
-}
-
 function MainView({ view, run, projection, copy, pending, onSteer }) {
   if (view === 'Quality') return <QualityView run={run} copy={copy} />
   if (view === 'Context') return <ContextView run={run} copy={copy} />
@@ -341,6 +350,7 @@ export default function App({ store }) {
   const [followUp, setFollowUp] = useState('')
   const runs = snapshot.data?.runs ?? []
   const run = runs.find(item => item.id === selectedId) ?? runs[0]
+  const activeView = resolveControlRoomView(view, Boolean(run))
   const browserLocale = globalThis.navigator?.language?.toLowerCase().startsWith('ko') ? 'ko' : 'en'
   const locale = run?.locale === 'ko' ? 'ko' : run?.locale === 'en' ? 'en' : browserLocale
   const copy = COPY[locale]
@@ -348,7 +358,18 @@ export default function App({ store }) {
   if (snapshot.status === 'auth_required') return <AuthGate store={store} snapshot={snapshot} copy={copy} />
   if (snapshot.status === 'idle' || snapshot.status === 'loading') return <Skeleton copy={copy} />
   if (snapshot.status === 'error' && !snapshot.data) return <div className="fatal"><span className="brand-mark">UC</span><h1>{copy.controlRoom}</h1><p>{snapshot.error}</p><button onClick={() => store.refresh()}>{copy.retry}</button></div>
-  if (!run) return <div className="empty-shell"><header><span className="brand-mark">UC</span><span>UncleCode / {copy.controlRoom}</span></header><Empty title={copy.noRuns} detail={copy.noRunsHint} /></div>
+  if (!run) {
+    const system = normalizeSystemProjection(snapshot.data?.system)
+    return <main className="shell shell--system-only">
+      <nav className="rail" aria-label={copy.controlRoom}>
+        <div className="brand-mark" aria-label="UncleCode">UC</div>
+        <div className="rail__nav">{VIEW_IDS.map((id, index) => <button key={id} className={activeView === id ? 'active' : ''} onClick={() => setView(id)} title={copy.nav[index]} disabled={id !== 'System'}><span>{String(index + 1).padStart(2, '0')}</span><strong>{copy.nav[index]}</strong></button>)}</div>
+        <div className="rail__footer"><div className={`connection connection--${snapshot.connection}`}><span />{snapshot.connection === 'live' ? copy.live : snapshot.connection === 'connecting' ? copy.connecting : copy.offline}</div><button className="lock-control" onClick={() => store.clearCredentials()}>{copy.lock}</button></div>
+      </nav>
+      <RunList runs={runs} selectedId={null} onSelect={() => {}} copy={copy} />
+      <section className="workspace workspace--system"><header className="workspace__header"><div><span className="eyebrow">UncleCode / {copy.controlRoom}</span><h1>{copy.nav[6]}</h1><div className="run-meta"><span>{copy.systemStatuses[system.evidenceSources.owner]}</span><span>{copy.noRuns}</span></div></div></header><div className="workspace__body workspace__body--system"><div className="workspace__main"><SystemView projection={snapshot.data} copy={copy} /></div></div></section>
+    </main>
+  }
 
   const action = snapshot.actions[run.id]
   const pending = action?.status === 'pending'
@@ -363,7 +384,7 @@ export default function App({ store }) {
   return <main className="shell">
     <nav className="rail" aria-label={copy.controlRoom}>
       <div className="brand-mark" aria-label="UncleCode">UC</div>
-      <div className="rail__nav">{VIEW_IDS.map((id, index) => <button key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)} title={copy.nav[index]}><span>{String(index + 1).padStart(2, '0')}</span><strong>{copy.nav[index]}</strong></button>)}</div>
+      <div className="rail__nav">{VIEW_IDS.map((id, index) => <button key={id} className={activeView === id ? 'active' : ''} onClick={() => setView(id)} title={copy.nav[index]}><span>{String(index + 1).padStart(2, '0')}</span><strong>{copy.nav[index]}</strong></button>)}</div>
       <div className="rail__footer"><div className={`connection connection--${snapshot.connection}`}><span />{snapshot.connection === 'live' ? copy.live : snapshot.connection === 'connecting' ? copy.connecting : copy.offline}</div><button className="lock-control" onClick={() => store.clearCredentials()}>{copy.lock}</button></div>
     </nav>
     <RunList runs={runs} selectedId={run.id} onSelect={id => { setSelectedId(id); store.selectSession?.(id) }} copy={copy} />
@@ -371,9 +392,9 @@ export default function App({ store }) {
       <header className="workspace__header"><div><span className="eyebrow">{copy.runDetail} / <span className="mono">{run.id}</span></span><h1>{run.project}</h1><div className="run-meta"><Status value={run.state} copy={copy} /><span>{run.model}</span><span>{run.quality.profile}</span><span className={`gate gate--${run.quality.gate}`}>{copy.gates[run.quality.gate] ?? run.quality.gate}</span></div></div><div className="controls"><button disabled={pending || run.state !== 'running'} onClick={() => void doAction('pause')}>{copy.pause}</button><button disabled={pending || run.state !== 'paused'} onClick={() => void doAction('resume')}>{copy.resume}</button><button className="control--danger" disabled={pending || ['completed', 'failed', 'cancelled'].includes(run.state)} onClick={() => void doAction('cancel')}>{copy.cancel}</button></div></header>
       <ActionFeedback action={action} copy={copy} />
       {snapshot.error && <p className="inline-error" role="alert">{snapshot.error}</p>}
-      <WorkFocus run={run} view={view} copy={copy} />
+      <WorkFocus run={run} view={activeView} copy={copy} />
       <PendingDecision run={run} copy={copy} pending={pending} onApprove={() => doAction('approve', { decision: 'approve_once' })} onDecision={payload => doAction('decision', payload)} />
-      <div className="workspace__body"><div className="workspace__main"><MainView view={view} run={run} projection={snapshot.data} copy={copy} pending={pending} onSteer={payload => doAction('steer', payload)} /></div><aside className="evidence-rail"><span className="eyebrow">{run.quality.recorded ? copy.qualityEngine : copy.noData}</span><div className="evidence-rail__gate"><strong>{copy.gates[run.quality.gate] ?? run.quality.gate}</strong><span>{run.quality.profile} · {copy.stages[run.quality.stage] ?? run.quality.stage}</span></div><Metric label="PDCA" value={copy.phases[run.quality.phase] ?? run.quality.phase} /><Metric label={copy.iteration} value={run.quality.iteration} mono /><Metric label={copy.independent} value={run.quality.independentVerification ? copy.verified : copy.unproven} /><div className="evidence-list"><span>{copy.evidence}</span>{run.artifacts.slice(0, 4).map(item => <code key={item.ref}>{item.hash ?? item.ref}</code>)}</div>{run.attentionReason && <p className="attention"><strong>{copy.attention}</strong>{run.attentionReason}</p>}</aside></div>
+      <div className="workspace__body"><div className="workspace__main"><MainView view={activeView} run={run} projection={snapshot.data} copy={copy} pending={pending} onSteer={payload => doAction('steer', payload)} /></div><aside className="evidence-rail"><span className="eyebrow">{run.quality.recorded ? copy.qualityEngine : copy.noData}</span><div className="evidence-rail__gate"><strong>{copy.gates[run.quality.gate] ?? run.quality.gate}</strong><span>{run.quality.profile} · {copy.stages[run.quality.stage] ?? run.quality.stage}</span></div><Metric label="PDCA" value={copy.phases[run.quality.phase] ?? run.quality.phase} /><Metric label={copy.iteration} value={run.quality.iteration} mono /><Metric label={copy.independent} value={run.quality.independentVerification ? copy.verified : copy.unproven} /><div className="evidence-list"><span>{copy.evidence}</span>{run.artifacts.slice(0, 4).map(item => <code key={item.ref}>{item.hash ?? item.ref}</code>)}</div>{run.attentionReason && <p className="attention"><strong>{copy.attention}</strong>{run.attentionReason}</p>}</aside></div>
       <form className="follow-up" onSubmit={submitFollowUp}><label htmlFor="follow-up">{copy.followUp}</label><div><input id="follow-up" value={followUp} onChange={event => setFollowUp(event.target.value)} placeholder={copy.followUpPlaceholder} disabled={pending} /><button className="control--accent" disabled={pending || !followUp.trim()}>{copy.send}</button></div></form>
     </section>
   </main>

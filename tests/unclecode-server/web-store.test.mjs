@@ -59,6 +59,34 @@ test("locking the web store cannot be undone by a stale authenticated response",
   assert.equal(store.getSnapshot().data, null);
 });
 
+test("web store retains global System evidence when there are zero runs", async () => {
+  const projection = {
+    version: 1,
+    generatedAt: 1,
+    runs: [],
+    system: {
+      evidenceSources: { owner: "available", cacheTelemetry: "available" },
+      pluginHosts: [{ sessionId: "session-1", status: "active", registrationCount: 1, pendingCleanupCount: 0, registrations: [], truncated: false }],
+      providers: [],
+      mcpServers: [],
+      cleanup: [],
+      caches: [],
+    },
+  };
+  const store = createControlRoomStore({
+    baseUrl: "http://127.0.0.1:17677",
+    token: "secret",
+    fetchImpl: async () => new Response(JSON.stringify(projection), { status: 200 }),
+    connectEvents: false,
+  });
+  await store.start();
+
+  assert.equal(store.getSnapshot().status, "ready");
+  assert.deepEqual(store.getSnapshot().data.runs, []);
+  assert.equal(store.getSnapshot().data.system.pluginHosts[0].registrationCount, 1);
+  assert.equal("plugins" in store.getSnapshot().data.system, false);
+});
+
 test("web work focus preserves task, remaining-stage, blocker, then detail inputs", () => {
   const focus = deriveWorkFocus({
     project: "unclecode",

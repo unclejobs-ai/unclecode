@@ -184,6 +184,41 @@ button:disabled { opacity: .38; cursor: not-allowed; }
 .guard-label, .external-label { border: 1px solid var(--warning); color: var(--warning); padding: 6px 9px; width: max-content; font: 650 9px "Geist Mono", monospace; text-transform: uppercase; letter-spacing: .08em; }
 .diagnostic-error { color: var(--danger) !important; }
 
+.workspace__body--system { grid-template-columns: minmax(0, 1fr); }
+.system-view { max-width: 1180px; }
+.system-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 32px; align-items: end; padding: 22px 0; border-top: 3px solid var(--success); border-bottom: 1px solid var(--line); }
+.system-summary--degraded { border-top-color: var(--warning); }
+.system-summary--unavailable { border-top-color: var(--danger); }
+.system-summary h2 { margin: 8px 0 5px; font-size: clamp(24px, 3vw, 34px); letter-spacing: -.04em; }
+.system-summary p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.system-summary__sources { min-width: 220px; display: grid; gap: 10px; }
+.system-summary__sources > span { display: flex; justify-content: space-between; gap: 20px; color: var(--muted); font-size: 10px; }
+.system-status { display: inline-flex; align-items: center; width: max-content; color: var(--muted); font: 650 9px "Geist Mono", monospace; text-transform: uppercase; letter-spacing: .04em; }
+.system-status::before { content: ''; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: currentColor; }
+.system-status--available, .system-status--configured, .system-status--authenticated, .system-status--passed, .system-status--active, .system-status--completed { color: var(--success); }
+.system-status--unavailable, .system-status--failed, .system-status--missing { color: var(--danger); }
+.system-status--degraded, .system-status--notConfigured, .system-status--unverified, .system-status--not-run, .system-status--disposing, .system-status--pending { color: var(--warning); }
+.system-status--disposed { color: var(--muted); }
+.system-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 34px; }
+.system-section { min-width: 0; }
+.system-evidence > div { display: grid; grid-template-columns: minmax(140px, 1fr) auto auto auto; gap: 12px; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); }
+.system-evidence > div > div { min-width: 0; display: grid; gap: 4px; }
+.system-evidence strong { font-size: 11px; overflow-wrap: anywhere; }
+.system-evidence .mono { color: var(--muted); font-size: 9px; overflow-wrap: anywhere; }
+.plugin-hosts > div { display: grid; grid-template-columns: minmax(130px, .7fr) auto auto minmax(220px, 1.3fr); gap: 16px; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); font-size: 10px; }
+.plugin-hosts__owner { display: flex; align-items: center; gap: 10px; }
+.plugin-hosts span { color: var(--muted); line-height: 1.45; overflow-wrap: anywhere; }
+.resource-types { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.resource-types span { display: inline-flex; gap: 10px; padding: 7px 9px; border: 1px solid var(--line); color: var(--muted); font-size: 9px; }
+.resource-types strong { color: var(--text); }
+.cache-rows > div { display: grid; grid-template-columns: minmax(130px, 1.2fr) repeat(4, minmax(100px, auto)); gap: 16px; align-items: baseline; padding: 12px 0; border-top: 1px solid var(--line); font-size: 10px; }
+.cache-rows strong { overflow-wrap: anywhere; }
+.cache-rows span { color: var(--muted); }
+.cache-rows b { color: var(--text); font-family: "Geist Mono", monospace; font-weight: 600; }
+.counter-list .metric:first-child { border-top: 1px solid var(--line); }
+.cleanup-rows > div { display: grid; grid-template-columns: 130px minmax(150px, 1fr) auto 120px; gap: 16px; align-items: center; padding: 11px 0; border-top: 1px solid var(--line); font-size: 10px; }
+.cleanup-rows .mono { color: var(--muted); overflow-wrap: anywhere; }
+
 .steer-composer { border-top: 2px solid var(--accent); padding-top: 16px; }
 .steer-composer__fields { display: grid; grid-template-columns: auto minmax(130px, .45fr) minmax(220px, 1fr) auto; gap: 8px; align-items: center; }
 .steer-composer__fields > label { color: var(--muted); font-size: 10px; }
@@ -278,6 +313,12 @@ button:disabled { opacity: .38; cursor: not-allowed; }
   .steer-composer__fields select { grid-column: 1 / -1; }
   .artifact-list > div, .diagnostics > div { grid-template-columns: 8px minmax(0, 1fr); }
   .artifact-list > div > .mono, .diagnostics > div > .mono { grid-column: 2; }
+  .system-summary, .system-columns { grid-template-columns: 1fr; }
+  .system-summary__sources { min-width: 0; }
+  .system-evidence > div { grid-template-columns: 1fr 1fr; }
+  .system-evidence > div > div { grid-column: 1 / -1; }
+  .plugin-hosts > div, .cache-rows > div, .cleanup-rows > div { grid-template-columns: 1fr 1fr; }
+  .plugin-hosts > div > span:last-child, .cache-rows > div > strong, .cleanup-rows > div > strong { grid-column: 1 / -1; }
 }
 
 @media (max-width: 520px) {
