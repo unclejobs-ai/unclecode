@@ -144,7 +144,8 @@ use unclecode_core::provider_transport::{
     post_openai_codex_json, provider_request_spec_json,
 };
 use unclecode_core::queue::{
-    queue_item_json, queue_items_json, queue_length_json, PersistentWorkQueue, WorkQueue,
+    queue_item_json, queue_items_json, queue_length_json, PersistentWorkQueue,
+    QueueAttachmentArtifact, QueueMoveDirection, WorkQueue,
 };
 use unclecode_core::queue_command::resolve_queue_command_json;
 use unclecode_core::reasoning_builtin_command::resolve_reasoning_builtin_command_json;
@@ -4586,6 +4587,60 @@ fn run_native_queue_command(args: &[OsString]) -> Result<u8, String> {
         .ok_or("Usage: unclecode rust queue <push|pop|list|len|clear> <session-id> [line]")?;
     let queue = PersistentWorkQueue::new(queue_path(&cwd, session_id));
     match args.first().and_then(|arg| arg.to_str()) {
+        Some("push-envelope-json") => {
+            let mut input = String::new();
+            io::stdin()
+                .read_to_string(&mut input)
+                .map_err(|error| format!("Failed to read queue envelope: {error}"))?;
+            let value: serde_json::Value = serde_json::from_str(&input)
+                .map_err(|error| format!("Invalid queue envelope: {error}"))?;
+            let line = value
+                .get("line")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("Queue envelope line must be a string.")?;
+            let created_at = value
+                .get("createdAt")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("Queue envelope createdAt must be an unsigned integer.")?;
+            let attachments = value
+                .get("attachments")
+                .and_then(serde_json::Value::as_array)
+                .ok_or("Queue envelope attachments must be an array.")?
+                .iter()
+                .map(|artifact| {
+                    let reference = artifact
+                        .get("ref")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|candidate| !candidate.trim().is_empty())
+                        .ok_or("Queue attachment ref must be a non-empty string.")?;
+                    let schema = artifact
+                        .get("schema")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|candidate| !candidate.trim().is_empty())
+                        .ok_or("Queue attachment schema must be a non-empty string.")?;
+                    let sha256 = artifact
+                        .get("sha256")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|candidate| candidate.len() == 64)
+                        .ok_or("Queue attachment sha256 must be a 64-character string.")?;
+                    let size = artifact
+                        .get("size")
+                        .and_then(serde_json::Value::as_u64)
+                        .ok_or("Queue attachment size must be an unsigned integer.")?;
+                    Ok::<QueueAttachmentArtifact, &'static str>(QueueAttachmentArtifact {
+                        reference: reference.to_string(),
+                        schema: schema.to_string(),
+                        sha256: sha256.to_string(),
+                        size,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let item = queue
+                .push_with_artifacts(line, created_at, attachments)
+                .map_err(|error| format!("Failed to push queue item: {error}"))?;
+            println!("{}", queue_item_json(item.as_ref()));
+            Ok(0)
+        }
         Some("push") | Some("push-json") => {
             let line = args[2..]
                 .iter()
@@ -4616,6 +4671,85 @@ fn run_native_queue_command(args: &[OsString]) -> Result<u8, String> {
             }
             Ok(0)
         }
+        Some("claim-json") => {
+            let item = queue
+                .claim()
+                .map_err(|error| format!("Failed to claim queue item: {error}"))?;
+            println!("{}", queue_item_json(item.as_ref()));
+            Ok(0)
+        }
+        Some("ack-json") | Some("nack-json") => {
+            let id = args
+                .get(2)
+                .and_then(|arg| arg.to_str())
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or("Usage: unclecode rust queue <ack-json|nack-json> <session-id> <id>")?;
+            let item = if args.first().and_then(|arg| arg.to_str()) == Some("ack-json") {
+                queue.ack(id)
+            } else {
+                queue.nack(id)
+            }
+            .map_err(|error| format!("Failed to settle queue item: {error}"))?;
+            println!("{}", queue_item_json(item.as_ref()));
+            Ok(0)
+        }
+        Some("quarantine-json") => {
+            let id = args
+                .get(2)
+                .and_then(|arg| arg.to_str())
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or("Usage: unclecode rust queue quarantine-json <session-id> <id>")?;
+            let mut reason = String::new();
+            io::stdin()
+                .read_to_string(&mut reason)
+                .map_err(|error| format!("Failed to read quarantine reason: {error}"))?;
+            let item = queue
+                .quarantine(id, reason)
+                .map_err(|error| format!("Failed to quarantine queue item: {error}"))?;
+            println!("{}", queue_item_json(item.as_ref()));
+            Ok(0)
+        }
+        Some("recover-json") => {
+            let items = queue
+                .recover_stale_in_flight()
+                .map_err(|error| format!("Failed to recover stale queue claims: {error}"))?;
+            println!("{}", queue_items_json(&items));
+            Ok(0)
+        }
+        Some("retry-json") | Some("discard-json") => {
+            let id = args
+                .get(2)
+                .and_then(|arg| arg.to_str())
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or("Usage: unclecode rust queue <retry-json|discard-json> <session-id> <id>")?;
+            let item = if args.first().and_then(|arg| arg.to_str()) == Some("retry-json") {
+                queue.retry(id)
+            } else {
+                queue.discard(id)
+            }
+            .map_err(|error| format!("Failed to recover queue item: {error}"))?;
+            println!("{}", queue_item_json(item.as_ref()));
+            Ok(0)
+        }
+        Some("remove-json") => {
+            let id = args.get(2).and_then(|arg| arg.to_str()).and_then(|value| value.parse::<u64>().ok())
+                .ok_or("Usage: unclecode rust queue remove-json <session-id> <id>")?;
+            let item = queue.remove(id).map_err(|error| format!("Failed to remove queue item: {error}"))?;
+            println!("{}", queue_item_json(item.as_ref()));
+            Ok(0)
+        }
+        Some("move-json") => {
+            let id = args.get(2).and_then(|arg| arg.to_str()).and_then(|value| value.parse::<u64>().ok())
+                .ok_or("Usage: unclecode rust queue move-json <session-id> <id> <up|down>")?;
+            let direction = match args.get(3).and_then(|arg| arg.to_str()) {
+                Some("up") => QueueMoveDirection::Up,
+                Some("down") => QueueMoveDirection::Down,
+                _ => return Err("Usage: unclecode rust queue move-json <session-id> <id> <up|down>".to_string()),
+            };
+            let item = queue.move_item(id, direction).map_err(|error| format!("Failed to move queue item: {error}"))?;
+            println!("{}", queue_item_json(item.as_ref()));
+            Ok(0)
+        }
         Some("list") => {
             let items = queue
                 .snapshot()
@@ -4641,7 +4775,7 @@ fn run_native_queue_command(args: &[OsString]) -> Result<u8, String> {
             Ok(0)
         }
         _ => Err(
-            "Usage: unclecode rust queue <push|push-json|pop|pop-json|list|len|len-json|clear> <session-id> [line]".to_string(),
+            "Usage: unclecode rust queue <push|push-json|push-envelope-json|pop|pop-json|claim-json|ack-json|nack-json|quarantine-json|recover-json|retry-json|discard-json|remove-json|move-json|list|len|len-json|clear> <session-id> [args]".to_string(),
         ),
     }
 }
@@ -5047,6 +5181,57 @@ fn is_repo_root(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
+
+    static QUEUE_TEST_WORK_CWD_LOCK: Mutex<()> = Mutex::new(());
+
+    struct QueueTestWorkCwd {
+        root: PathBuf,
+        previous: Option<OsString>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl QueueTestWorkCwd {
+        fn new(session_id: &str) -> Self {
+            let lock = QUEUE_TEST_WORK_CWD_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let root = env::temp_dir().join(format!(
+                "unclecode-queue-cli-test-{}-{session_id}",
+                std::process::id()
+            ));
+            assert!(!root.exists(), "queue test root must be unique");
+            std::fs::create_dir(&root).expect("create queue test work cwd");
+            let previous = env::var_os("UNCLECODE_WORK_CWD");
+            // SAFETY: queue CLI tests serialize mutations of this process-global
+            // variable with QUEUE_TEST_WORK_CWD_LOCK and restore it in Drop.
+            unsafe { env::set_var("UNCLECODE_WORK_CWD", &root) };
+            Self {
+                root,
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for QueueTestWorkCwd {
+        fn drop(&mut self) {
+            // SAFETY: the matching process-global mutation is serialized by the
+            // guard held until this Drop implementation completes.
+            unsafe {
+                match self.previous.take() {
+                    Some(previous) => env::set_var("UNCLECODE_WORK_CWD", previous),
+                    None => env::remove_var("UNCLECODE_WORK_CWD"),
+                }
+            }
+            if let Err(error) = std::fs::remove_dir_all(&self.root) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    panic!("failed to clean queue test work cwd: {error}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn detects_workspace_root_shape() {
@@ -6860,6 +7045,8 @@ mod tests {
     #[test]
     fn native_queue_commands_do_not_need_node_bridge() {
         let session_id = format!("test-queue-{}", std::process::id());
+        let work_cwd = QueueTestWorkCwd::new(&session_id);
+        let test_root = work_cwd.root.clone();
         assert_eq!(
             run(vec![
                 OsString::from("rust"),
@@ -6933,8 +7120,11 @@ mod tests {
             ]),
             Ok(0)
         );
-        let root = find_repo_root().expect("repo root");
-        let _ = std::fs::remove_file(queue_path(&root, &session_id));
+        drop(work_cwd);
+        assert!(
+            !test_root.exists(),
+            "queue CLI test must remove its temp work cwd"
+        );
     }
 
     #[test]

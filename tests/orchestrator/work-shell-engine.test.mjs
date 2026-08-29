@@ -17,6 +17,7 @@ import {
   createWorkShellEngine,
   createWorkShellInteractionBridge,
   createWorkShellPaneRuntime,
+  runRustCommandSync,
 } from "@unclecode/orchestrator";
 import {
   createAuthKeyBuiltinResult,
@@ -7111,7 +7112,119 @@ test("WorkShellEngine clears queued follow-ups while busy", async () => {
   assert.deepEqual(prompts, ["first"]);
 });
 
-test("WorkShellEngine queue panel respects terminal width for board layout", async () => {
+test("WorkShellEngine clear during a claimed follow-up cannot replace or duplicate the executing id", async () => {
+  let releaseFirst;
+  let releaseSecond;
+  const prompts = [];
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
+          await new Promise((resolve) => { releaseFirst = resolve; });
+        }
+        if (userPrompt === "second") {
+          await new Promise((resolve) => { releaseSecond = resolve; });
+        }
+        return { text: `reply:${userPrompt}` };
+      },
+    },
+  });
+
+  await engine.initialize();
+  const drain = engine.handleSubmit("first");
+  while (typeof releaseFirst !== "function") {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  await engine.handleSubmit("second");
+  await engine.handleSubmit("third");
+  releaseFirst();
+  while (typeof releaseSecond !== "function") {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  await engine.handleSubmit("/queue clear");
+  assert.equal(engine.getState().queuedCount, 0, "the count remains pending-only");
+  assert.ok(
+    engine.getState().panel?.lines.some((line) =>
+      /Running · 1 total · 0 pending · 1 in flight · 0 requires action/.test(line),
+    ),
+    "clear must render the surviving claimed item from the full snapshot",
+  );
+  assert.ok(engine.getState().panel?.lines.some((line) => /id 1 · in flight/.test(line)));
+  releaseSecond();
+  await drain;
+
+  assert.deepEqual(prompts, ["first", "second"]);
+  assert.equal(engine.getState().queuedCount, 0);
+  assert.equal(
+    engine.getState().entries.filter((entry) => /Running queued follow-up.*second/.test(entry.text)).length,
+    1,
+  );
+});
+
+test("WorkShellEngine startup quarantines a persisted claim until explicit retry", async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-work-shell-queue-restart-"));
+  const sessionId = "queue-restart-session";
+  const turns = [];
+  try {
+    const pushed = JSON.parse(runRustCommandSync(
+      ["rust", "queue", "push-json", sessionId, "stale claimed follow-up"], cwd,
+    ));
+    assert.equal(JSON.parse(runRustCommandSync(
+      ["rust", "queue", "claim-json", sessionId], cwd,
+    )).id, pushed.id);
+
+    const { engine } = createEngine({
+      sessionId,
+      options: {
+        provider: "openai",
+        model: "gpt-5.4",
+        mode: "default",
+        authLabel: "api-key-env",
+        reasoning: supportedReasoning,
+        cwd,
+        contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      },
+      agent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn(prompt) {
+          turns.push(stripWorkShellLanguageInstruction(prompt));
+          return { text: "done" };
+        },
+      },
+    });
+
+    await engine.initialize();
+    assert.deepEqual(turns, [], "startup recovery must never execute a stale claim");
+    assert.equal(engine.getState().queuedCount, 0, "requires-action is not a pending count");
+    assert.equal(engine.getState().queuePaused, true);
+    assert.ok(engine.getState().entries.some((entry) => /requires action.*retry or discard/i.test(entry.text)));
+
+    await engine.handleSubmit("/queue");
+    const panelText = engine.getState().panel.lines.join("\n");
+    assert.match(panelText, /1 total · 0 pending · 0 in flight · 1 requires action/);
+    assert.match(panelText, new RegExp(`id ${pushed.id} · requires action`));
+    assert.match(panelText, /UncleCode restarted before this…/);
+
+    assert.equal(await engine.retryQueueItem(pushed.id), true);
+    assert.equal(engine.getState().queuedCount, 1);
+    assert.deepEqual(turns, [], "retry only makes the stable id pending");
+    await engine.resumeQueueItems();
+    assert.deepEqual(turns, ["stale claimed follow-up"]);
+    assert.equal(engine.getState().queuedCount, 0);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("WorkShellEngine queue panel keeps follow-up separation across terminal widths", async () => {
   const { engine } = createEngine();
 
   await engine.initialize();

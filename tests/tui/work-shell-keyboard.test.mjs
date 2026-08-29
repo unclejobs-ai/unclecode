@@ -96,6 +96,49 @@ test("Queue overlay renders mutation failures instead of swallowing them", async
   }
 });
 
+test("Queue clear preserves a selected requires-action id that survives pending cleanup", async () => {
+  const harness = createWorkShellPaneEngine({
+    panel: {
+      title: "Queue · follow-ups",
+      lines: [
+        "Paused · 3 total · 1 pending · 0 in flight · 2 requires action",
+        "",
+        "Next · id 41 · pending · pending follow-up",
+        "#2 · id 88 · requires action · first recovery",
+        "#3 · id 77 · requires action · selected recovery",
+      ],
+    },
+  });
+  harness.engine.clearQueueItems = async () => {
+    harness.updateState({
+      panel: {
+        title: "Queue · follow-ups",
+        lines: [
+          "Paused · 2 total · 0 pending · 0 in flight · 2 requires action",
+          "",
+          "Next · id 88 · requires action · first recovery",
+          "#2 · id 77 · requires action · selected recovery",
+        ],
+      },
+    });
+  };
+  const { stdin, instance, getOutput } = renderKeyboardWorkPane(harness.engine);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    stdin.write("\u001b[B");
+    stdin.write("\u001b[B");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.match(getLastWorkFrame(getOutput()), /› #3 · id 77/);
+
+    stdin.write("c");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.match(getLastWorkFrame(getOutput()), /› #2 · id 77/);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
 function createInkInput() {
   const input = new PassThrough();
   input.isTTY = true;

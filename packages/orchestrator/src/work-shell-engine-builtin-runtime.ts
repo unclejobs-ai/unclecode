@@ -127,8 +127,15 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
   reloadContextState: () => Promise<void>;
   refreshContextPacket?: (() => Promise<ContextPacketView | undefined>) | undefined;
   queuedCount?: (() => number) | undefined;
-  queuedItems?: (() => Promise<readonly { readonly id: number; readonly line: string }[]>) | undefined;
+  queuedItems?: (() => Promise<readonly {
+    readonly id: number;
+    readonly line: string;
+    readonly attachmentCount?: number;
+  }[]>) | undefined;
   clearQueuedItems?: (() => Promise<void>) | undefined;
+  removeQueuedItem?: ((id: number) => Promise<boolean>) | undefined;
+  moveQueuedItem?: ((id: number, direction: "up" | "down") => Promise<boolean>) | undefined;
+  resumeQueuedItems?: (() => Promise<void>) | undefined;
   appendEntries: (...entries: readonly WorkShellChatEntry[]) => void;
   setState: (patch: Partial<WorkShellEngineState<Reasoning>>) => void;
   persistSessionSnapshot: (
@@ -336,13 +343,56 @@ export async function executeWorkShellBuiltinSubmit<Reasoning extends WorkShellR
     }
     case "queue-clear": {
       await input.clearQueuedItems?.();
+      const queuedItems = input.queuedItems ? await input.queuedItems() : undefined;
       applyQueueBuiltinResult(input, buildWorkShellQueueBuiltinInput({
         ...buildQueueBuiltinBase(input),
-        queuedCount: 0,
-        queuedItems: [],
+        ...(input.queuedCount ? { queuedCount: input.queuedCount() } : {}),
+        ...(queuedItems ? { queuedItems } : {}),
         transcriptText: input.state.isBusy
           ? "Queue cleared. Active turn is still running."
           : "Queue cleared.",
+      }));
+      return;
+    }
+    case "queue-remove": {
+      const removed = await input.removeQueuedItem?.(input.builtinCommand.id) ?? false;
+      const queuedItems = input.queuedItems ? await input.queuedItems() : undefined;
+      applyQueueBuiltinResult(input, buildWorkShellQueueBuiltinInput({
+        ...buildQueueBuiltinBase(input),
+        ...(input.queuedCount ? { queuedCount: input.queuedCount() } : {}),
+        ...(queuedItems ? { queuedItems } : {}),
+        transcriptText: removed
+          ? `Removed queued follow-up id ${input.builtinCommand.id}.`
+          : `Queued follow-up id ${input.builtinCommand.id} was not found.`,
+      }));
+      return;
+    }
+    case "queue-move": {
+      const moved = await input.moveQueuedItem?.(
+        input.builtinCommand.id,
+        input.builtinCommand.direction,
+      ) ?? false;
+      const queuedItems = input.queuedItems ? await input.queuedItems() : undefined;
+      applyQueueBuiltinResult(input, buildWorkShellQueueBuiltinInput({
+        ...buildQueueBuiltinBase(input),
+        ...(input.queuedCount ? { queuedCount: input.queuedCount() } : {}),
+        ...(queuedItems ? { queuedItems } : {}),
+        transcriptText: moved
+          ? `Moved queued follow-up id ${input.builtinCommand.id} ${input.builtinCommand.direction}.`
+          : `Queued follow-up id ${input.builtinCommand.id} cannot move ${input.builtinCommand.direction}.`,
+      }));
+      return;
+    }
+    case "queue-resume": {
+      await input.resumeQueuedItems?.();
+      const queuedItems = input.queuedItems ? await input.queuedItems() : undefined;
+      const base = buildQueueBuiltinBase(input);
+      applyQueueBuiltinResult(input, buildWorkShellQueueBuiltinInput({
+        ...base,
+        state: { ...base.state, queuePaused: false },
+        ...(input.queuedCount ? { queuedCount: input.queuedCount() } : {}),
+        ...(queuedItems ? { queuedItems } : {}),
+        transcriptText: "Queue resumed. Follow-ups will run in order.",
       }));
       return;
     }

@@ -456,13 +456,15 @@ test("loadResumedWorkSession round-trips safe lifecycle records and settles unre
   assert.equal(resumedConsole.agents[2]?.summary, "Refactored the auth guard.");
   assert.equal(resumedConsole.agents[2]?.parentRunId, "run-running");
   assert.equal(resumedConsole.agents[2]?.transcriptRef, "transcripts/run-done.jsonl");
-  assert.deepEqual(resumedConsole.agents[2]?.usage?.eventIds, ["usage-run-done"]);
+  assert.equal(resumedConsole.agents[2]?.usage?.eventIds, undefined);
   assert.equal(resumedConsole.agents[2]?.usage?.routes?.[0]?.model, "gpt-5.6-sol");
+  assert.equal(resumedConsole.agents[2]?.usage?.routes?.[0]?.eventIds, undefined);
   assert.equal(resumedConsole.jobs[1]?.summary, "Plan step two finished.");
   assert.equal(resumedConsole.jobs[1]?.agentRunId, "run-done");
   assert.equal(resumedConsole.mainUsage?.inputTokens, 900);
   assert.equal(resumedConsole.mainUsage?.cacheReadTokens, 400);
-  assert.deepEqual(resumedConsole.mainUsage?.eventIds, ["usage-main"]);
+  assert.equal(resumedConsole.mainUsage?.eventIds, undefined);
+  assert.equal(resumedConsole.mainUsage?.routes?.[0]?.eventIds, undefined);
 
   // Unrecoverable work settles exactly once: interrupted records gain one
   // completion stamped at the resume, settled records keep their own.

@@ -1929,8 +1929,6 @@ export function useWorkShellPaneState<
           try {
             await input.engine.clearQueueItems?.();
             setQueueActionError(undefined);
-            queueSelectedIdRef.current = undefined;
-            setQueueSelectedId(undefined);
           } catch (error) {
             setQueueActionError(error instanceof Error ? error.message : String(error));
           }

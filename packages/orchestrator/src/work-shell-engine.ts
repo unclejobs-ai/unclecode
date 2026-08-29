@@ -8,7 +8,6 @@ import {
   createQueueBuiltinResult,
   resolveLastCompletedTurn,
 } from "./work-shell-engine-builtins.js";
-import { isAgentConsoleTab } from "./work-shell-engine-commands.js";
 import { resolveWorkerBudget } from "./work-agent.js";
 import {
   executeInlineCommandSubmit,
@@ -33,10 +32,24 @@ import {
   resolveSensitiveInputCancelState,
 } from "./work-shell-engine-lifecycle.js";
 import {
+  type BusySubmitDecision,
+  type QueueDrainStartDecision,
+  type QueueDrainStepDecision,
+  type QueuedSubmit,
+  isQueueItem,
+  parseBusySubmitDecision,
+  parseQueueDrainStartDecision,
+  parseQueueDrainStepDecision,
+  parseQueueLength,
+  parseQueuedSubmit,
+  parseQueuedSubmitList,
+} from "./work-shell-engine-queue-parse.js";
+import {
   resolveWorkShellSubmitRoute,
   type WorkShellSubmitRoute,
 } from "./work-shell-engine-submit.js";
 import {
+import { resolveWorkShellBuiltinCommand } from "./work-shell-engine-commands.js";
   createWorkShellSessionSnapshotInput,
   parseWorkShellReplaySafePauseCheckpoint,
   type WorkShellSessionState,
@@ -114,6 +127,11 @@ import type {
   AgentControlPort,
   AgentControlReceipt,
   AgentRun,
+import {
+  deleteQueuedAttachmentArtifacts,
+  persistQueuedAttachments,
+  restoreQueuedAttachments,
+} from "./work-shell-queue-attachments.js";
   ContextDeskCollection,
   ContextDeskGroupId,
   ContextDeskPane,
@@ -177,174 +195,12 @@ export function formatAttachmentTraceLine(event: {
   ).trimEnd();
 }
 
-function parseQueuedSubmit(stdout: string): { readonly id: number; readonly line: string } | undefined {
-  const trimmed = stdout.trim();
-  if (!trimmed || trimmed === "null") {
-    return undefined;
-  }
-  const parsed: unknown = JSON.parse(trimmed);
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error(`Invalid Rust queue response: ${trimmed}`);
-  }
-  const candidate = parsed as { id?: unknown; line?: unknown };
-  if (
-    typeof candidate.id !== "number" ||
-    !Number.isSafeInteger(candidate.id) ||
-    candidate.id <= 0 ||
-    typeof candidate.line !== "string"
-  ) {
-    throw new Error(`Invalid Rust queue response: ${trimmed}`);
-  }
-  return { id: candidate.id, line: candidate.line };
-}
-
-function parseQueueLength(stdout: string): number {
-  const trimmed = stdout.trim();
-  if (!trimmed) {
-    return 0;
-  }
-  const parsed: unknown = JSON.parse(trimmed);
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error("Invalid Rust queue length response.");
-  }
-  const length = (parsed as { length?: unknown }).length;
-  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
-    throw new Error("Invalid Rust queue length response.");
-  }
-  return length;
-}
-
-function parseQueuedSubmitList(stdout: string): readonly { readonly id: number; readonly line: string }[] {
-  const trimmed = stdout.trim();
-  if (!trimmed) {
-    return [];
-  }
-  const parsed: unknown = JSON.parse(trimmed);
-  if (!Array.isArray(parsed)) {
-    throw new Error("Invalid Rust queue list response.");
-  }
-  return parsed.map((item) => {
-    if (typeof item !== "object" || item === null) {
-      throw new Error("Invalid Rust queue list response.");
-    }
-    const candidate = item as { id?: unknown; line?: unknown };
-    if (
-      typeof candidate.id !== "number" ||
-      !Number.isSafeInteger(candidate.id) ||
-      candidate.id <= 0 ||
-      typeof candidate.line !== "string"
-    ) {
-      throw new Error("Invalid Rust queue list response.");
-    }
-    return { id: candidate.id, line: candidate.line };
-  });
-}
-
-type BusySubmitDecision =
-  | { readonly action: "ignore" }
-  | { readonly action: "show_queue"; readonly line: string }
-  | { readonly action: "clear_queue"; readonly line: string; readonly message: string }
-  | { readonly action: "cancel_turn"; readonly line: string; readonly message: string }
-  | { readonly action: "reject_slash"; readonly line: string; readonly message: string }
-  | { readonly action: "open_agent_console"; readonly line: string; readonly tab: AgentConsoleTab }
-  | { readonly action: "queue"; readonly line: string; readonly displayIndex: number; readonly message: string };
-
-function parseBusySubmitDecision(stdout: string): BusySubmitDecision {
-  const parsed = JSON.parse(stdout.trim()) as Partial<BusySubmitDecision>;
-  if (parsed.action === "ignore") {
-    return { action: "ignore" };
-  }
-  if (parsed.action === "show_queue" && typeof parsed.line === "string") {
-    return { action: "show_queue", line: parsed.line };
-  }
-  if (parsed.action === "clear_queue" && typeof parsed.line === "string" && typeof parsed.message === "string") {
-    return { action: "clear_queue", line: parsed.line, message: parsed.message };
-  }
-  if (parsed.action === "cancel_turn" && typeof parsed.line === "string" && typeof parsed.message === "string") {
-    return { action: "cancel_turn", line: parsed.line, message: parsed.message };
-  }
-  if (parsed.action === "reject_slash" && typeof parsed.line === "string" && typeof parsed.message === "string") {
-    return { action: "reject_slash", line: parsed.line, message: parsed.message };
-  }
-  if (parsed.action === "open_agent_console" && typeof parsed.line === "string" && isAgentConsoleTab(parsed.tab)) {
-    return { action: "open_agent_console", line: parsed.line, tab: parsed.tab };
-  }
-  if (
-    parsed.action === "queue"
-    && typeof parsed.line === "string"
-    && typeof parsed.message === "string"
-    && typeof parsed.displayIndex === "number"
-    && Number.isSafeInteger(parsed.displayIndex)
-    && parsed.displayIndex > 0
-  ) {
-    return {
-      action: "queue",
-      line: parsed.line,
-      displayIndex: parsed.displayIndex,
-      message: parsed.message,
-    };
-  }
-  throw new Error("Invalid Rust busy submit response.");
-}
-
-type QueueDrainStartDecision = { readonly action: "skip" | "drain" };
-
-function parseQueueDrainStartDecision(stdout: string): QueueDrainStartDecision {
-  const parsed = JSON.parse(stdout.trim()) as Partial<QueueDrainStartDecision>;
-  if (parsed.action === "skip" || parsed.action === "drain") {
-    return { action: parsed.action };
-  }
-  throw new Error("Invalid Rust queue drain start response.");
-}
-
-type QueueDrainStepDecision =
-  | { readonly action: "empty"; readonly queuedCount: number }
-  | {
-      readonly action: "run";
-      readonly queuedCount: number;
-      readonly message: string;
-      readonly item: { readonly id: number; readonly line: string };
-    };
-
-function isQueueItem(value: unknown): value is { readonly id: number; readonly line: string } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as { id?: unknown; line?: unknown };
-  return typeof candidate.id === "number"
-    && Number.isSafeInteger(candidate.id)
-    && candidate.id > 0
-    && typeof candidate.line === "string"
-    && candidate.line.length > 0;
-}
-
-function parseQueueDrainStepDecision(stdout: string): QueueDrainStepDecision {
-  const parsed = JSON.parse(stdout.trim()) as Partial<QueueDrainStepDecision>;
-  if (
-    parsed.action === "empty"
-    && typeof parsed.queuedCount === "number"
-    && Number.isSafeInteger(parsed.queuedCount)
-    && parsed.queuedCount === 0
-  ) {
-    return { action: "empty", queuedCount: 0 };
-  }
-  if (
-    parsed.action === "run"
-    && typeof parsed.queuedCount === "number"
-    && Number.isSafeInteger(parsed.queuedCount)
-    && parsed.queuedCount >= 0
-    && typeof parsed.message === "string"
-    && isQueueItem(parsed.item)
-  ) {
-    return {
-      action: "run",
-      queuedCount: parsed.queuedCount,
-      message: parsed.message,
-      item: parsed.item,
-    };
-  }
-  throw new Error("Invalid Rust queue drain step response.");
-}
+// Queue Rust stdout parsing moved to ./work-shell-engine-queue-parse.ts
+// (split 2026-08-18 — pure parsers, no engine-state dependency). The new
+// module owns: parseQueuedSubmit, parseQueueLength, parseQueuedSubmitList,
+// parseBusySubmitDecision, parseQueueDrainStartDecision,
+// parseQueueDrainStepDecision, isQueueItem, BusySubmitDecision,
+// QueueDrainStartDecision, QueueDrainStepDecision.
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 
 export type WorkShellChatEntry = {
@@ -890,7 +746,6 @@ export class WorkShellEngine<
   private readonly refreshCondensedHistory?: (() => Promise<void>) | undefined;
   private readonly interactionBridge?: WorkShellInteractionBridge | undefined;
   private readonly subscribers = new Set<(state: WorkShellEngineState<Reasoning>) => void>();
-  private readonly queuedAttachments = new Map<number, readonly Attachment[]>();
   private readonly queueDrainSkipTurnEpochs = new Set<number>();
   private readonly pendingContextSuggestionInvalidations = new Set<string>();
   private contextSuggestionAcceptanceInFlight = false;
@@ -913,7 +768,11 @@ export class WorkShellEngine<
   private disposed = false;
   private queueAutoDrainPaused = false;
   private workBoardRebuildGeneration = 0;
-  private workBoardQueuedItemsSnapshot: readonly { readonly id: number; readonly line: string }[] = [];
+  private workBoardQueuedItemsSnapshot: readonly {
+    readonly id: number;
+    readonly line: string;
+    readonly attachmentCount?: number;
+  }[] = [];
   private lastCompletedTurnSnapshot:
     | { readonly user: string; readonly assistant: string }
     | undefined;
@@ -1094,7 +953,14 @@ export class WorkShellEngine<
   }
 
   private createWorkBoardPanel(
-    queuedItems: readonly { readonly id: number; readonly line: string }[],
+    queuedItems: readonly {
+      readonly id: number;
+      readonly line: string;
+      readonly attachmentCount?: number;
+      readonly createdAt?: number;
+      readonly status?: "pending" | "in-flight" | "requires-action";
+      readonly recoveryReason?: string | undefined;
+    }[],
   ): WorkShellPanel {
     return createQueueBuiltinResult(buildWorkShellQueueBuiltinInput({
       line: "/queue",
@@ -1109,7 +975,14 @@ export class WorkShellEngine<
 
   private async rebuildWorkBoardPanel(): Promise<void> {
     const generation = ++this.workBoardRebuildGeneration;
-    let queuedItems: readonly { readonly id: number; readonly line: string }[] = [];
+    let queuedItems: readonly {
+      readonly id: number;
+      readonly line: string;
+      readonly attachmentCount?: number;
+      readonly createdAt?: number;
+      readonly status?: "pending" | "in-flight" | "requires-action";
+      readonly recoveryReason?: string | undefined;
+    }[] = [];
     try {
       queuedItems = await this.listQueuedSubmits();
     } catch {
@@ -1169,7 +1042,12 @@ export class WorkShellEngine<
     });
 
     try {
-      this.setQueuedCount(await this.loadQueuedSubmitCount());
+      const recovered = await this.recoverStaleQueuedSubmits();
+      await this.refreshQueuedSubmitSnapshot();
+      if (recovered.length > 0) {
+        this.queueAutoDrainPaused = true;
+        this.setState({ queuePaused: true });
+      }
       if (this.durablePauseCheckpoint) {
         await this.enqueueSessionSnapshotWrite(this.buildSessionSnapshotInput({
           state: "paused",
@@ -1216,6 +1094,13 @@ export class WorkShellEngine<
    * Owner-only async shutdown. Abort is only the request; returning requires
    * the provider/tool continuation itself to have settled. A signal-deaf
    * implementation is surfaced as an owner shutdown failure instead of being
+      if (recovered.length > 0) {
+        const noun = recovered.length === 1 ? "follow-up" : "follow-ups";
+        this.appendEntries({
+          role: "system",
+          text: `Recovered ${recovered.length} interrupted queued ${noun} as requires action. Use /queue to retry or discard.`,
+        });
+      }
    * detached and leaked.
    */
   async shutdown(input: { readonly timeoutMs?: number | undefined } = {}): Promise<boolean> {
@@ -1655,6 +1540,41 @@ export class WorkShellEngine<
   /**
    * Context Desk — the vertical key for whichever pane holds focus.
    * `direction` is -1 (up) or +1 (down): groups walks the collection menu and
+  /** Keyboard-owned Queue overlay mutations. IDs stay stable while rows move. */
+  async removeQueueItem(id: number): Promise<boolean> {
+    const removed = await this.removeQueuedSubmit(id);
+    await this.rebuildWorkBoardPanel();
+    return removed;
+  }
+
+  async moveQueueItem(id: number, direction: "up" | "down"): Promise<boolean> {
+    const moved = await this.moveQueuedSubmit(id, direction);
+    await this.rebuildWorkBoardPanel();
+    return moved;
+  }
+
+  async clearQueueItems(): Promise<void> {
+    await this.clearQueuedSubmits();
+    await this.rebuildWorkBoardPanel();
+  }
+
+  async resumeQueueItems(): Promise<void> {
+    await this.resumeQueuedSubmits();
+    await this.rebuildWorkBoardPanel();
+  }
+
+  async retryQueueItem(id: number): Promise<boolean> {
+    const retried = await this.retryQueuedSubmit(id);
+    await this.rebuildWorkBoardPanel();
+    return retried;
+  }
+
+  async discardQueueItem(id: number): Promise<boolean> {
+    const discarded = await this.discardQueuedSubmit(id);
+    await this.rebuildWorkBoardPanel();
+    return discarded;
+  }
+
    * reanchors the selection, sources walks the active collection, and preview
    * scrolls the selected row's body — expanded or not — without disturbing the
    * selection behind it.
@@ -2984,11 +2904,8 @@ export class WorkShellEngine<
         this.appendEntries({ role: "system", text: decision.message });
         return;
       case "queue": {
-        const item = await this.pushQueuedSubmit(decision.line);
+        const item = await this.pushQueuedSubmit(decision.line, pendingAttachments ?? []);
         this.setQueuedCount(decision.displayIndex);
-        if (pendingAttachments && pendingAttachments.length > 0) {
-          this.queuedAttachments.set(item.id, pendingAttachments);
-        }
         this.appendEntries({ role: "system", text: decision.message });
         return;
       }
@@ -2996,6 +2913,11 @@ export class WorkShellEngine<
   }
 
   private async drainQueuedSubmits(): Promise<void> {
+      case "queue_command": {
+        const command = resolveWorkShellBuiltinCommand(decision.line);
+        if (command) await this.handleBuiltinSubmit(decision.line, command);
+        return;
+      }
     const start = await this.resolveQueueDrainStartDecision();
     if (start.action === "skip") {
       return;
@@ -3003,25 +2925,49 @@ export class WorkShellEngine<
     this.drainingQueue = true;
     try {
       while ((await this.resolveQueueDrainContinueDecision()).action === "drain") {
-        const next = (await this.listQueuedSubmits())[0];
+        const next = await this.claimQueuedSubmit();
         const step = await this.resolveQueueDrainStepDecision(next);
         if (step.action === "empty") {
-          this.setQueuedCount(step.queuedCount);
-          break;
-        }
-        this.setQueuedCount(step.queuedCount);
-        const pendingAttachments = this.queuedAttachments.get(step.item.id);
-        this.appendEntries({ role: "system", text: step.message });
-        await this.handleSubmit(step.item.line, pendingAttachments);
-        if (this.queueAutoDrainPaused) {
           this.setQueuedCount(await this.loadQueuedSubmitCount());
           break;
         }
-        const popped = await this.popQueuedSubmit();
-        if (!popped || popped.id !== step.item.id) {
-          throw new Error("Rust queue changed while a queued turn was running.");
+        this.setQueuedCount(await this.loadQueuedSubmitCount());
+        let pendingAttachments: readonly Attachment[];
+        try {
+          pendingAttachments = await restoreQueuedAttachments<Attachment>(
+            this.queueCommandCwd(),
+            step.item.attachments,
+          );
+        } catch (error) {
+          const reason = this.formatWorkShellError(
+            error instanceof Error ? error.message : String(error),
+          );
+          await this.quarantineQueuedSubmit(step.item.id, reason);
+          this.workBoardQueuedItemsSnapshot = await this.listQueuedSubmits();
+          this.setQueuedCount(await this.loadQueuedSubmitCount());
+          break;
         }
-        this.queuedAttachments.delete(step.item.id);
+        this.appendEntries({ role: "system", text: step.message });
+        try {
+          await this.handleSubmit(step.item.line, pendingAttachments);
+          if (this.queueAutoDrainPaused) {
+            await this.nackQueuedSubmit(step.item.id);
+            this.setQueuedCount(await this.loadQueuedSubmitCount());
+            break;
+          }
+          const acknowledged = await this.ackQueuedSubmit(step.item.id);
+          if (!acknowledged) {
+            throw new Error("Rust queue lost its in-flight claim before acknowledgement.");
+          }
+          await deleteQueuedAttachmentArtifacts(
+            this.queueCommandCwd(),
+            acknowledged.attachmentRefs,
+          );
+        } catch (error) {
+          await this.nackQueuedSubmit(step.item.id);
+          this.setQueuedCount(await this.loadQueuedSubmitCount());
+          throw error;
+        }
       }
     } finally {
       this.drainingQueue = false;
@@ -3039,6 +2985,12 @@ export class WorkShellEngine<
   private shouldSkipQueueDrainAfterTurn(
     turnEpoch: number,
     routeKind: WorkShellSubmitRoute["kind"],
+          this.queueAutoDrainPaused = true;
+          this.setState({ queuePaused: true });
+          this.appendEntries({
+            role: "system",
+            text: `Queued follow-up #${step.item.id} requires action: ${reason}`,
+          });
   ): boolean {
     const wasInterruptedTurn = this.queueDrainSkipTurnEpochs.delete(turnEpoch);
     if (wasInterruptedTurn) {
@@ -3137,6 +3089,9 @@ export class WorkShellEngine<
   }
 
   private async handleInlineCommandSubmit(line: string, slashCommand: readonly string[]): Promise<void> {
+      removeQueuedItem: (id) => this.removeQueuedSubmit(id),
+      moveQueuedItem: (id, direction) => this.moveQueuedSubmit(id, direction),
+      resumeQueuedItems: () => this.resumeQueuedSubmits(),
     await executeInlineCommandSubmit<Reasoning>({
       line,
       slashCommand,
@@ -3368,13 +3323,30 @@ export class WorkShellEngine<
     this.pauseController.complete();
   }
 
-  private async pushQueuedSubmit(line: string): Promise<{ readonly id: number; readonly line: string }> {
-    const stdout = await runRustCommand(["rust", "queue", "push-json", this.sessionId, line], this.queueCommandCwd());
-    const item = parseQueuedSubmit(stdout);
-    if (!item) {
-      throw new Error("Rust queue push did not return an item.");
+  private async pushQueuedSubmit(
+    line: string,
+    attachments: readonly Attachment[],
+  ): Promise<QueuedSubmit> {
+    const cwd = this.queueCommandCwd();
+    const attachmentArtifacts = await persistQueuedAttachments(cwd, this.sessionId, attachments);
+    try {
+      const stdout = await runRustCommand(
+        ["rust", "queue", "push-envelope-json", this.sessionId],
+        cwd,
+        JSON.stringify({ line, createdAt: Date.now(), attachments: attachmentArtifacts }),
+      );
+      const item = parseQueuedSubmit(stdout);
+      if (!item) {
+        throw new Error("Rust queue push did not return an item.");
+      }
+      return item;
+    } catch (error) {
+      await deleteQueuedAttachmentArtifacts(
+        cwd,
+        attachmentArtifacts.map((artifact) => artifact.ref),
+      );
+      throw error;
     }
-    return item;
   }
 
   private async resolveBusySubmitDecision(line: string): Promise<BusySubmitDecision> {
@@ -3427,16 +3399,45 @@ export class WorkShellEngine<
     return parseQueueDrainStepDecision(stdout);
   }
 
-  private async popQueuedSubmit(): Promise<{ readonly id: number; readonly line: string } | undefined> {
-    const stdout = await runRustCommand(["rust", "queue", "pop-json", this.sessionId], this.queueCommandCwd());
+  private async claimQueuedSubmit(): Promise<QueuedSubmit | undefined> {
+    const stdout = await runRustCommand(["rust", "queue", "claim-json", this.sessionId], this.queueCommandCwd());
     return parseQueuedSubmit(stdout);
   }
 
   private async clearQueuedSubmits(): Promise<void> {
     await runRustCommand(["rust", "queue", "clear", this.sessionId], this.queueCommandCwd());
-    this.setQueuedCount(0);
-    this.workBoardQueuedItemsSnapshot = [];
-    this.queuedAttachments.clear();
+    await deleteQueuedAttachmentArtifacts(
+      this.queueCommandCwd(),
+      pending.flatMap((item) => item.attachmentRefs),
+    );
+    const queueSnapshot = await this.refreshQueuedSubmitSnapshot();
+    this.queueAutoDrainPaused = queueSnapshot.some((item) => item.status === "requires-action");
+    this.queueDrainSkipTurnEpochs.clear();
+    this.setState({ queuePaused: this.queueAutoDrainPaused });
+  }
+
+  private async removeQueuedSubmit(id: number): Promise<boolean> {
+    const item = parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "remove-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+    ));
+    if (!item) return false;
+    await deleteQueuedAttachmentArtifacts(this.queueCommandCwd(), item.attachmentRefs);
+    await this.refreshQueuedSubmitSnapshot();
+    return true;
+  }
+
+  private async moveQueuedSubmit(id: number, direction: "up" | "down"): Promise<boolean> {
+    const item = parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "move-json", this.sessionId, String(id), direction],
+      this.queueCommandCwd(),
+    ));
+    if (!item) return false;
+    this.workBoardQueuedItemsSnapshot = await this.listQueuedSubmits();
+    return true;
+  }
+
+  private async resumeQueuedSubmits(): Promise<void> {
     this.queueAutoDrainPaused = false;
     this.queueDrainSkipTurnEpochs.clear();
     this.setState({ queuePaused: false });
@@ -3446,8 +3447,25 @@ export class WorkShellEngine<
     return parseQueueLength(await runRustCommand(["rust", "queue", "len-json", this.sessionId], this.queueCommandCwd()));
   }
 
-  private async listQueuedSubmits(): Promise<readonly { readonly id: number; readonly line: string }[]> {
-    return parseQueuedSubmitList(await runRustCommand(["rust", "queue", "list", this.sessionId], this.queueCommandCwd()));
+  private async recoverStaleQueuedSubmits(): Promise<readonly QueuedSubmit[]> {
+    return parseQueuedSubmitList(await runRustCommand(
+      ["rust", "queue", "recover-json", this.sessionId],
+      this.queueCommandCwd(),
+    ));
+  }
+
+  private async refreshQueuedSubmitSnapshot(): Promise<readonly QueuedSubmit[]> {
+    const snapshot = await this.listQueuedSubmits();
+    this.workBoardQueuedItemsSnapshot = snapshot;
+    this.setQueuedCount(snapshot.filter((item) => item.status === "pending").length);
+    return snapshot;
+  }
+
+  private async listQueuedSubmits(): Promise<readonly QueuedSubmit[]> {
+    return parseQueuedSubmitList(await runRustCommand(
+      ["rust", "queue", "list", this.sessionId],
+      this.queueCommandCwd(),
+    ));
   }
 
   private queueCommandCwd(): string {
@@ -3467,7 +3485,50 @@ export class WorkShellEngine<
       buildContextPanel: this.buildContextPanel,
       expanded: this.state.panel.title === "Context expanded",
     });
+  private async ackQueuedSubmit(id: number): Promise<QueuedSubmit | undefined> {
+    return parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "ack-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+    ));
+  }
+
+  private async nackQueuedSubmit(id: number): Promise<QueuedSubmit | undefined> {
+    return parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "nack-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+    ));
+  }
+
+  private async quarantineQueuedSubmit(id: number, reason: string): Promise<QueuedSubmit | undefined> {
+    return parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "quarantine-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+      reason,
+    ));
+  }
+
+  private async retryQueuedSubmit(id: number): Promise<boolean> {
+    const item = parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "retry-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+    ));
+    await this.refreshQueuedSubmitSnapshot();
+    return item !== undefined;
+  }
+
+  private async discardQueuedSubmit(id: number): Promise<boolean> {
+    const item = parseQueuedSubmit(await runRustCommand(
+      ["rust", "queue", "discard-json", this.sessionId, String(id)],
+      this.queueCommandCwd(),
+    ));
+    if (!item) return false;
+    await deleteQueuedAttachmentArtifacts(this.queueCommandCwd(), item.attachmentRefs);
+    await this.refreshQueuedSubmitSnapshot();
+    return true;
+  }
+
     this.currentContextSummaryLines = contextState.contextSummaryLines;
+    const pending = (await this.listQueuedSubmits()).filter((item) => item.status === "pending");
     this.setState({
       bridgeLines: contextState.bridgeLines,
       memoryLines: contextState.memoryLines,
@@ -3475,6 +3536,7 @@ export class WorkShellEngine<
     });
     await this.refreshContextPacket(true);
   }
+    if (!this.state.isBusy) await this.drainQueuedSubmits();
 
   private resolveContextLifecycleProfile(): string {
     return this.options.contextProfile
