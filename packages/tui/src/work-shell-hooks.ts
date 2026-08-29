@@ -1228,6 +1228,7 @@ export function useWorkShellPaneState<
   readonly terminalRows?: number | undefined;
 }) {
   const [inputValue, setInputValueState] = useState("");
+  const [composerResetEpoch, setComposerResetEpoch] = useState(0);
   const pendingInputValueRef = useRef("");
   const setInputValue = useCallback((value: SetStateAction<string>): void => {
     const nextValue = typeof value === "function"
@@ -1534,8 +1535,9 @@ export function useWorkShellPaneState<
   // take the draft with it: a half-typed message addressed to an agent must
   // never be left behind as a chat prompt one Enter away from the provider.
   const leaveAgentSteerComposer = () => {
-    input.engine.cancelSensitiveInput?.();
     setInputValue("");
+    setComposerResetEpoch((current) => current + 1);
+    input.engine.cancelSensitiveInput?.();
   };
   const buildAgentConsoleContextForScope = (
     scope: AgentConsoleDecisionScope,
@@ -1646,6 +1648,9 @@ export function useWorkShellPaneState<
   const suppressAgentConsoleKey = agentConsoleKeyboard
     ? (value: string, key: AgentConsoleKeyState, composerEmpty: boolean) => {
       const kind = agentConsoleKeyboard.decide(value, key, composerEmpty, "suppress").kind;
+      if (kind === "compose") {
+        return "compose" as const;
+      }
       return kind === "dispatch" || kind === "consume";
     }
     : undefined;
@@ -1857,6 +1862,7 @@ export function useWorkShellPaneState<
   return {
     inputValue,
     setInputValue,
+    composerResetEpoch,
     engineState,
     /** Task 11 scrollback: entries hidden below the transcript window. */
     transcriptScrollOffset,

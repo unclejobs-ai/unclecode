@@ -184,8 +184,11 @@ export function resolveComposerCursorOffsetAfterValueChange(input: {
   readonly currentCursorOffset: number;
   readonly pendingLocalValue?: string | undefined;
 }): number {
-  if (input.pendingLocalValue === input.nextValue) {
-    return normalizeComposerCursorOffset(input.nextValue, input.currentCursorOffset);
+  if (input.pendingLocalValue !== undefined) {
+    // A controlled parent can acknowledge an earlier edit after a newer local
+    // edit is already pending. Preserve both the newer draft and its cursor;
+    // explicit owner resets use resetEpoch instead of masquerading as an ack.
+    return normalizeComposerCursorOffset(input.pendingLocalValue, input.currentCursorOffset);
   }
 
   return input.nextValue.length;
@@ -427,14 +430,16 @@ export function Composer(props: {
    * Agent Console (Sprint 3): the console's key ownership is state-dependent
    * (toggle chord, browse keys, cancel confirmation, steer mode), so the
    * Composer asks the console's own resolver instead of carrying a second
-   * copy of the key map. Returning true keeps the keystroke out of the draft.
+   * copy of the key map. Returning true keeps the keystroke out of the draft;
+   * `compose` reserves the keystroke for this composer ahead of stale panel
+   * suppression flags without swallowing the text.
    */
   readonly suppressAgentConsoleKey?:
     | ((
       input: string,
       key: AgentConsoleKeyState,
       composerEmpty: boolean,
-    ) => boolean)
+    ) => boolean | "compose")
     | undefined;
   /**
    * Work shell action keys (empty-screen starter prompts, decision replies,
@@ -454,6 +459,8 @@ export function Composer(props: {
    */
   readonly placeholder?: string | undefined;
   readonly cursorVisible?: boolean | undefined;
+  /** Explicit owner reset; unlike controlled value acknowledgements, this discards pending local input. */
+  readonly resetEpoch?: number | undefined;
 }) {
   const { setCursorPosition } = useCursor();
   const composerRef = useRef<DOMElement>(null);
@@ -462,6 +469,7 @@ export function Composer(props: {
   const [cursorOffset, setCursorOffset] = useState(props.value.length);
   const cursorOffsetRef = useRef(props.value.length);
   const pendingLocalValueRef = useRef<string | undefined>(undefined);
+  const resetEpochRef = useRef(props.resetEpoch);
   const pasteTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const suppressNextSubmitRef = useRef(false);
   // Ink's useInput rebinds when the handler identity changes, but Enter after
@@ -486,6 +494,16 @@ export function Composer(props: {
       pendingLocalValueRef.current = undefined;
     }
   }, [props.value]);
+
+  useEffect(() => {
+    if (resetEpochRef.current === props.resetEpoch) {
+      return;
+    }
+    resetEpochRef.current = props.resetEpoch;
+    pendingLocalValueRef.current = undefined;
+    cursorOffsetRef.current = props.value.length;
+    setCursorOffset(props.value.length);
+  }, [props.resetEpoch, props.value]);
 
   useEffect(
     () => () => {
@@ -524,20 +542,21 @@ export function Composer(props: {
     const latestProps = propsRef.current;
     // The Agent Console takes the frame ahead of every panel overlay, so its
     // ownership question is asked first.
-    if (
-      latestProps.suppressAgentConsoleKey?.(
-        input,
-        key,
-        isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current),
-      )
-    ) {
+    const agentConsoleKeyOwnership = latestProps.suppressAgentConsoleKey?.(
+      input,
+      key,
+      isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current),
+    );
+    if (agentConsoleKeyOwnership === true) {
       return;
     }
+    const agentConsoleOwnsComposer = agentConsoleKeyOwnership === "compose";
     // Shell action keys (starter prefill, decision one-key replies, `?`
     // keymap) resolve through the same shared predicate the input controller
     // dispatches on, so an owned character is never also draft text.
     if (
-      latestProps.suppressShellActionKeys?.(
+      !agentConsoleOwnsComposer
+      && latestProps.suppressShellActionKeys?.(
         input,
         isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current),
       )
@@ -572,7 +591,8 @@ export function Composer(props: {
 
 
     if (
-      latestProps.suppressTelemetryHotkeys
+      !agentConsoleOwnsComposer
+      && latestProps.suppressTelemetryHotkeys
       && isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current)
       && (input.toLowerCase() === "a" || input.toLowerCase() === "c")
     ) {
@@ -583,7 +603,8 @@ export function Composer(props: {
     // enabled action keys out of the draft. Read-only panes leave unavailable
     // action letters available as ordinary text.
     if (
-      latestProps.suppressInspectorKeys
+      !agentConsoleOwnsComposer
+      && latestProps.suppressInspectorKeys
       && isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current)
     ) {
       const suppressMutationKeys =

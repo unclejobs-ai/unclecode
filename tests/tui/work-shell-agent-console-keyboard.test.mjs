@@ -860,9 +860,12 @@ test("agent-steer keeps hidden telemetry panels from stealing the steer message"
 
       // Typed one keystroke at a time, so the panel's own single-character
       // hotkey (`a` / `c`) really is the first key of the steer message.
+      let typedPrefix = "";
       for (const character of word) {
+        typedPrefix += character;
         stdin.write(character);
-        await new Promise((resolve) => setTimeout(resolve, 40));
+        const visiblePrefix = typedPrefix.trimEnd();
+        await waitForCondition(() => new RegExp(`› ${visiblePrefix}`).test(lastFrame(getOutput())));
       }
       await waitForCondition(() => new RegExp(`› ${word}`).test(lastFrame(getOutput())));
       assert.match(

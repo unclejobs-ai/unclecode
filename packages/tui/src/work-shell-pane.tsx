@@ -183,6 +183,7 @@ export function WorkShellPane<
   const {
     inputValue,
     setInputValue,
+    composerResetEpoch,
     engineState,
     transcriptScrollOffset,
     composerPreview,
@@ -491,6 +492,7 @@ export function WorkShellPane<
       composer={
         <Composer
           value={inputValue}
+          resetEpoch={composerResetEpoch}
           onChange={handleComposerChange}
           onSubmit={async (line) => {
             // The steer composer routes to an agent's control mailbox, which
