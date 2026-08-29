@@ -20,6 +20,7 @@ import {
   readdirSync,
   writeFileSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -221,14 +222,31 @@ export type PluginHostOptions = {
   readonly onDiagnostic?: (diagnostic: PluginInvocationDiagnostic) => void;
 };
 
+export type PluginLifecycleRegistrationSnapshot = {
+  readonly name: string;
+  readonly source: PluginSource;
+  readonly trustLane: PluginTrustLane;
+  readonly hookCount: number;
+};
+
+export type PluginLifecycleSnapshot = {
+  readonly status: "active" | "disposing" | "disposed";
+  readonly registrationCount: number;
+  readonly pendingCleanupCount: number;
+  readonly registrations: readonly PluginLifecycleRegistrationSnapshot[];
+  readonly truncated: boolean;
+};
+
 export type PluginEntry = (ctx: PluginContext) => PluginHooks | Promise<PluginHooks>;
 
 export class PluginHost {
   private readonly registrations: PluginRegistration[] = [];
+  private readonly registrationHookCounts = new WeakMap<PluginRegistration, number>();
   private readonly diagnosticKeysByRun = new Map<string, Set<string>>();
   private readonly pendingCleanupByName = new Map<string, Promise<void>>();
   private readonly onDiagnostic: ((diagnostic: PluginInvocationDiagnostic) => void) | undefined;
   private disposed = false;
+  private disposeSettled = false;
   private disposePromise: Promise<void> | undefined;
 
   constructor(options: PluginHostOptions = {}) {
@@ -242,6 +260,9 @@ export class PluginHost {
   ): Promise<void> {
     this.assertActive();
     HookKeysSchema.parse(hooks);
+    const hookCount = Object.keys(hooks).filter((key) => key !== "dispose").length;
+    const nextRegistration: PluginRegistration = { name, hooks, source };
+    this.registrationHookCounts.set(nextRegistration, hookCount);
     const pendingCleanup = this.pendingCleanupByName.get(name);
     if (pendingCleanup) {
       await pendingCleanup;
@@ -259,7 +280,7 @@ export class PluginHost {
       (registration) => registration.name === name && registration.source === source,
     );
     if (existingIndex === -1) {
-      this.registrations.push({ name, hooks, source });
+      this.registrations.push(nextRegistration);
       return;
     }
 
@@ -272,7 +293,7 @@ export class PluginHost {
       this.registrations.splice(
         Math.min(existingIndex, this.registrations.length),
         0,
-        { name, hooks, source },
+        nextRegistration,
       );
       return;
     }
@@ -289,7 +310,7 @@ export class PluginHost {
     this.registrations.splice(
       Math.min(existingIndex, this.registrations.length),
       0,
-      { name, hooks, source },
+      nextRegistration,
     );
   }
 
@@ -298,13 +319,23 @@ export class PluginHost {
   }
 
   async loadEntries(workspaceRoot: string, entries: ReadonlyArray<{ name: string; entry: PluginEntry }>, env: NodeJS.ProcessEnv = process.env): Promise<void> {
-    for (const { name, entry } of entries) {
-      const log = (message: string) => process.stderr.write(`[plugin:${name}] ${message}\n`);
-      const hooks = await entry({ workspaceRoot, env, log });
+    const prepared: Array<{ readonly name: string; readonly hooks: PluginHooks }> = [];
+    try {
+      for (const { name, entry } of entries) {
+        const log = (message: string) => process.stderr.write(`[plugin:${name}] ${message}\n`);
+        prepared.push({ name, hooks: await entry({ workspaceRoot, env, log }) });
+      }
+    } catch (error) {
+      await disposePreparedAfterFailure(prepared, error);
+    }
+    const registered: string[] = [];
+    for (const { name, hooks } of prepared) {
       try {
         await this.register(name, hooks, "memory");
+        registered.push(name);
       } catch (error) {
         await hooks.dispose?.();
+        await this.rollbackBatch(registered, "memory", error);
         throw error;
       }
     }
@@ -333,22 +364,30 @@ export class PluginHost {
       throw new PluginTrustError(resolve(workspaceRoot));
     }
     const env = options.env ?? process.env;
+    const prepared: Array<{ readonly name: string; readonly hooks: PluginHooks }> = [];
+    try {
+      for (const file of files) {
+        const name = file.replace(/\.(ts|mjs|js)$/, "");
+        const moduleUrl = new URL(`file://${join(dir, file)}`);
+        const imported = (await import(moduleUrl.href)) as {
+          default?: PluginEntry;
+          register?: PluginEntry;
+        };
+        const entry = imported.default ?? imported.register;
+        if (typeof entry !== "function") continue;
+        const log = (message: string) => process.stderr.write(`[plugin:${name}] ${message}\n`);
+        prepared.push({ name, hooks: await entry({ workspaceRoot, env, log }) });
+      }
+    } catch (error) {
+      await disposePreparedAfterFailure(prepared, error);
+    }
     const loaded: string[] = [];
-    for (const file of files) {
-      const name = file.replace(/\.(ts|mjs|js)$/, "");
-      const moduleUrl = new URL(`file://${join(dir, file)}`);
-      const imported = (await import(moduleUrl.href)) as {
-        default?: PluginEntry;
-        register?: PluginEntry;
-      };
-      const entry = imported.default ?? imported.register;
-      if (typeof entry !== "function") continue;
-      const log = (message: string) => process.stderr.write(`[plugin:${name}] ${message}\n`);
-      const hooks = await entry({ workspaceRoot, env, log });
+    for (const { name, hooks } of prepared) {
       try {
         await this.register(name, hooks, "workspace");
       } catch (error) {
         await hooks.dispose?.();
+        await this.rollbackBatch(loaded, "workspace", error);
         throw error;
       }
       loaded.push(name);
@@ -359,6 +398,23 @@ export class PluginHost {
 
   list(): ReadonlyArray<PluginRegistration> {
     return this.registrations.slice();
+  }
+
+  getLifecycleSnapshot(): PluginLifecycleSnapshot {
+    const registrationCount = this.registrations.length;
+    const registrations = this.registrations.slice(0, 64).map((registration) => ({
+      name: registration.name,
+      source: registration.source,
+      trustLane: pluginTrustLane(registration.source),
+      hookCount: this.registrationHookCounts.get(registration) ?? 0,
+    }));
+    return Object.freeze({
+      status: !this.disposed ? "active" : this.disposeSettled ? "disposed" : "disposing",
+      registrationCount,
+      pendingCleanupCount: this.pendingCleanupByName.size,
+      registrations: Object.freeze(registrations),
+      truncated: registrationCount > registrations.length,
+    });
   }
 
   async unload(name: string, source?: PluginSource): Promise<boolean> {
@@ -393,7 +449,9 @@ export class PluginHost {
         registrations.map((registration) => this.disposeRegistration(registration)),
       );
       throwCleanupFailures([...pendingResults, ...cleanupResults]);
-    })();
+    })().finally(() => {
+      this.disposeSettled = true;
+    });
     return this.disposePromise;
   }
 
@@ -561,7 +619,9 @@ export class PluginHost {
     const runId = pluginInvocationRunId(event);
     const errorName = cause instanceof Error && cause.name ? cause.name : "Error";
     const errorMessage = cause instanceof Error ? cause.message : String(cause);
-    const dedupeKey = `${registration.source}:${registration.name}:${hookName}:${errorName}:${errorMessage}`;
+    const dedupeKey = `sha256:${createHash("sha256")
+      .update(`${registration.source}:${registration.name}:${hookName}:${errorName}:${errorMessage}`)
+      .digest("hex")}`;
     let keys = this.diagnosticKeysByRun.get(runId);
     if (!keys) {
       if (this.diagnosticKeysByRun.size >= 256) {
@@ -572,6 +632,10 @@ export class PluginHost {
       this.diagnosticKeysByRun.set(runId, keys);
     }
     if (keys.has(dedupeKey)) return;
+    if (keys.size >= 64) {
+      const oldest = keys.values().next().value as string | undefined;
+      if (oldest !== undefined) keys.delete(oldest);
+    }
     keys.add(dedupeKey);
     const exitStatus = pluginErrorExitStatus(cause);
     try {
@@ -607,6 +671,19 @@ export class PluginHost {
     for (const name of staleNames) await this.unload(name, source);
   }
 
+  private async rollbackBatch(names: readonly string[], source: PluginSource, cause: unknown): Promise<never> {
+    const failures: unknown[] = [cause];
+    for (const name of [...names].reverse()) {
+      try {
+        await this.unload(name, source);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length === 1) throw cause;
+    throw new AggregateError(failures, "Plugin batch registration and rollback failed.");
+  }
+
   private assertActive(): void {
     if (this.disposed) throw new Error("PluginHost has been disposed.");
   }
@@ -626,6 +703,20 @@ export class PluginRegistrationConflictError extends Error {
     this.existingSource = existingSource;
     this.incomingSource = incomingSource;
   }
+}
+
+async function disposePreparedAfterFailure(
+  prepared: readonly { readonly hooks: PluginHooks }[],
+  cause: unknown,
+): Promise<never> {
+  const results = await Promise.allSettled(
+    prepared.map(async ({ hooks }) => hooks.dispose?.()),
+  );
+  const cleanupFailures = results
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => result.reason);
+  if (cleanupFailures.length === 0) throw cause;
+  throw new AggregateError([cause, ...cleanupFailures], "Plugin batch initialization and cleanup failed.");
 }
 
 async function disposeRegistrations(registrations: readonly PluginRegistration[]): Promise<void> {

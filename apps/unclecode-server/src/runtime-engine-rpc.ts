@@ -2,6 +2,15 @@ import {
   RuntimeSessionMutationArbiter,
   type RuntimeSessionRevisionClock,
 } from "./runtime-mutation-arbiter.js";
+import {
+  SYSTEM_OBSERVABILITY_BOUNDS,
+  type RuntimeCleanupEvidence,
+  type RuntimeMcpServerEvidence,
+  type RuntimePluginHostEvidence,
+  type RuntimeProviderEvidence,
+  type RuntimeSessionObservabilitySource,
+  type RuntimeSystemObservabilitySource,
+} from "./system-observability.js";
 
 export type { RuntimeSessionRevisionClock } from "./runtime-mutation-arbiter.js";
 
@@ -54,6 +63,7 @@ export type RuntimeSessionFactory = (input: Omit<RuntimeSessionCreateInput, "ide
   readonly revisionClock?: RuntimeSessionRevisionClock | undefined;
   readonly mutationArbiter?: RuntimeSessionMutationArbiter | undefined;
   readonly dispose?: (() => void | Promise<void>) | undefined;
+  readonly readObservability?: (() => RuntimeSessionObservabilitySource) | undefined;
 }>;
 
 export type RuntimeSessionCreateResponse =
@@ -73,6 +83,7 @@ type Attached = {
   readonly model?: string | undefined;
   readonly reasoning?: string | undefined;
   readonly dispose?: (() => void | Promise<void>) | undefined;
+  readonly readObservability?: (() => RuntimeSessionObservabilitySource) | undefined;
   readonly unsubscribe: () => void;
   lastAccessAt: number;
   clientLeaseUntil: number;
@@ -102,15 +113,25 @@ export class LiveRuntimeEngineRegistry {
   readonly #factory: RuntimeSessionFactory | undefined;
   readonly #maxIdleSessions: number;
   readonly #idleSessionTtlMs: number;
+  readonly #teardownTimeoutMs: number;
   readonly #teardowns = new Set<Promise<void>>();
   readonly #teardownFailures: string[] = [];
+  readonly #cleanupInventory: Array<{
+    readonly kind: "runtime-session";
+    readonly identity: string;
+    status: RuntimeCleanupEvidence["status"];
+    recordedAt: number;
+  }> = [];
+  #cleanupEntriesDropped = 0;
   readonly #retired = new WeakSet<Attached>();
   #sweepTimer: NodeJS.Timeout | undefined;
+  #disposed = false;
 
   constructor(input: {
     readonly createSession?: RuntimeSessionFactory | undefined;
     readonly maxIdleSessions?: number | undefined;
     readonly idleSessionTtlMs?: number | undefined;
+    readonly teardownTimeoutMs?: number | undefined;
   } = {}) {
     this.#factory = input.createSession;
     this.#maxIdleSessions = Number.isSafeInteger(input.maxIdleSessions)
@@ -119,15 +140,20 @@ export class LiveRuntimeEngineRegistry {
     this.#idleSessionTtlMs = Number.isFinite(input.idleSessionTtlMs)
       ? Math.max(1_000, Math.floor(input.idleSessionTtlMs!))
       : 5 * 60_000;
+    this.#teardownTimeoutMs = Number.isFinite(input.teardownTimeoutMs)
+      ? Math.max(10, Math.floor(input.teardownTimeoutMs!))
+      : 10_000;
   }
 
   attach(sessionId: string, engine: RuntimeEngineSource, metadata: {
     readonly projectPath?: string | undefined;
     readonly provider?: string | undefined;
     readonly dispose?: (() => void | Promise<void>) | undefined;
+    readonly readObservability?: (() => RuntimeSessionObservabilitySource) | undefined;
     readonly revisionClock?: RuntimeSessionRevisionClock | undefined;
     readonly mutationArbiter?: RuntimeSessionMutationArbiter | undefined;
   } = {}): () => void {
+    if (this.#disposed) throw new Error("Runtime engine registry has been disposed.");
     const previous = this.#engines.get(sessionId);
     if (previous) this.#scheduleTeardown(sessionId, previous, true);
     let unsubscribe = () => {};
@@ -165,11 +191,92 @@ export class LiveRuntimeEngineRegistry {
       .sort((a, b) => a.sessionId.localeCompare(b.sessionId));
   }
 
+  systemSnapshot(): Pick<
+    RuntimeSystemObservabilitySource,
+    "engines" | "providers" | "mcpServers" | "pluginHosts" | "cleanup"
+  > {
+    const now = Date.now();
+    const providers = new Map<string, RuntimeProviderEvidence>();
+    const mcpServers = new Map<string, RuntimeMcpServerEvidence>();
+    const pluginHosts: RuntimePluginHostEvidence[] = [];
+    let activeMutations = 0;
+    let clientLeaseProtectedSessions = 0;
+    let observedSessions = 0;
+    let observabilityCallbackFailures = 0;
+    let mcpConfigurationUnavailableObserved = 0;
+    for (const [sessionId, attached] of this.#engines) {
+      if (observedSessions >= SYSTEM_OBSERVABILITY_BOUNDS.engineSessions) break;
+      observedSessions += 1;
+      if (attached.arbiter.isMutationActive()) activeMutations += 1;
+      if (attached.clientLeaseUntil > now) clientLeaseProtectedSessions += 1;
+      let observed: RuntimeSessionObservabilitySource | undefined;
+      try {
+        observed = attached.readObservability?.();
+      } catch {
+        observabilityCallbackFailures += 1;
+        continue;
+      }
+      if (observed?.mcpConfigurationStatus === "unavailable") {
+        mcpConfigurationUnavailableObserved += 1;
+      }
+      if (observed?.provider && providers.size < SYSTEM_OBSERVABILITY_BOUNDS.providers) {
+        const key = `${observed.provider.provider}\u0000${observed.provider.model}`;
+        if (!providers.has(key)) providers.set(key, observed.provider);
+      }
+      for (const server of observed?.mcpServers ?? []) {
+        if (mcpServers.size >= SYSTEM_OBSERVABILITY_BOUNDS.mcpServers) break;
+        const key = `${server.name}\u0000${server.transport}`;
+        if (!mcpServers.has(key)) mcpServers.set(key, server);
+      }
+      if (observed?.plugins && pluginHosts.length < SYSTEM_OBSERVABILITY_BOUNDS.pluginHosts) {
+        pluginHosts.push({
+          sessionId,
+          status: observed.plugins.status,
+          registrationCount: observed.plugins.registrationCount,
+          pendingCleanupCount: observed.plugins.pendingCleanupCount,
+          registrations: observed.plugins.registrations.slice(0, SYSTEM_OBSERVABILITY_BOUNDS.pluginsPerHost),
+          truncated: observed.plugins.truncated
+            || observed.plugins.registrations.length > SYSTEM_OBSERVABILITY_BOUNDS.pluginsPerHost,
+        });
+      }
+    }
+    return {
+      engines: {
+        attachedSessions: this.#engines.size,
+        activeMutationsObserved: activeMutations,
+        pendingCreations: this.#sessionCreations.size,
+        pendingTeardowns: this.#teardowns.size,
+        clientLeaseProtectedSessionsObserved: clientLeaseProtectedSessions,
+        teardownFailuresRetained: this.#teardownFailures.length,
+        observedSessions,
+        scanTruncated: this.#engines.size > observedSessions,
+        cleanupEntriesDropped: this.#cleanupEntriesDropped,
+        unlistedPendingTeardowns: Math.max(
+          0,
+          this.#teardowns.size - this.#cleanupInventory.filter(item => item.status === "pending").length,
+        ),
+        observabilityCallbackFailures,
+        mcpConfigurationUnavailableObserved,
+      },
+      providers: [...providers.values()],
+      mcpServers: [...mcpServers.values()],
+      pluginHosts,
+      cleanup: this.#cleanupInventory.slice(-SYSTEM_OBSERVABILITY_BOUNDS.cleanup).map(item => ({ ...item })),
+    };
+  }
+
   publishDurableRevision(sessionId: string, revision: number): number | undefined {
     return this.#engines.get(sessionId)?.arbiter.publishDurable(revision);
   }
 
   create(input: RuntimeSessionCreateInput): Promise<RuntimeSessionCreateResponse> {
+    if (this.#disposed) {
+      return Promise.resolve({
+        ok: false,
+        code: "invalid_action",
+        message: "Runtime engine registry has been disposed.",
+      });
+    }
     const fingerprint = JSON.stringify({ sessionId: input.sessionId, projectPath: input.projectPath, provider: input.provider, model: input.model, reasoning: input.reasoning, resume: input.resume });
     const prior = this.#createReceipts.get(input.idempotencyKey);
     if (prior) return prior.fingerprint === fingerprint
@@ -215,6 +322,14 @@ export class LiveRuntimeEngineRegistry {
         ...(input.reasoning ? { reasoning: input.reasoning } : {}),
         ...(input.resume !== undefined ? { resume: input.resume } : {}),
       });
+      if (this.#disposed) {
+        await withTimeout(
+          Promise.resolve(created.dispose?.()),
+          this.#teardownTimeoutMs,
+          "Late runtime session cleanup timed out.",
+        );
+        return { ok: false, code: "invalid_action", message: "Runtime engine registry has been disposed." };
+      }
       const raced = this.#engines.get(input.sessionId);
       if (raced) {
         await created.dispose?.();
@@ -231,6 +346,7 @@ export class LiveRuntimeEngineRegistry {
         ...(created.revisionClock ? { revisionClock: created.revisionClock } : {}),
         ...(created.mutationArbiter ? { mutationArbiter: created.mutationArbiter } : {}),
         ...(created.dispose ? { dispose: created.dispose } : {}),
+        ...(created.readObservability ? { readObservability: created.readObservability } : {}),
       });
       return { ok: true, session: this.#descriptor(input.sessionId, this.#engines.get(input.sessionId)!) };
     } catch (error) {
@@ -264,10 +380,19 @@ export class LiveRuntimeEngineRegistry {
   }
 
   async disposeAll(): Promise<void> {
+    this.#disposed = true;
     if (this.#sweepTimer) clearTimeout(this.#sweepTimer);
     this.#sweepTimer = undefined;
     for (const [sessionId, item] of [...this.#engines]) this.#scheduleTeardown(sessionId, item, true);
     await this.settleTeardowns();
+    if (this.#sessionCreations.size > 0) {
+      await withTimeout(
+        Promise.allSettled([...this.#sessionCreations.values()].map(item => item.promise)),
+        this.#teardownTimeoutMs,
+        "Runtime session creation shutdown timed out.",
+      );
+      await this.settleTeardowns();
+    }
     this.#createReceipts.clear();
     this.#sessionCreations.clear();
   }
@@ -305,12 +430,43 @@ export class LiveRuntimeEngineRegistry {
     if (!force && attached.arbiter.isMutationActive()) return;
     this.#retired.add(attached);
     if (this.#engines.get(sessionId) === attached) this.#engines.delete(sessionId);
-    const teardown = this.#disposeAttached(attached).catch((error: unknown) => {
-      this.#teardownFailures.push(error instanceof Error ? error.message : String(error));
+    const cleanup = {
+      kind: "runtime-session" as const,
+      identity: sessionId,
+      status: "pending" as RuntimeCleanupEvidence["status"],
+      recordedAt: Date.now(),
+    };
+    this.#cleanupInventory.push(cleanup);
+    this.#boundCleanupInventory();
+    const teardown = withTimeout(
+      this.#disposeAttached(attached),
+      this.#teardownTimeoutMs,
+      `Runtime session ${sessionId} teardown timed out.`,
+    ).catch((error: unknown) => {
+      cleanup.status = "failed";
+      cleanup.recordedAt = Date.now();
+      this.#teardownFailures.push(boundedRuntimeFailure(error));
+      if (this.#teardownFailures.length > SYSTEM_OBSERVABILITY_BOUNDS.cleanup) {
+        this.#teardownFailures.splice(0, this.#teardownFailures.length - SYSTEM_OBSERVABILITY_BOUNDS.cleanup);
+      }
     }).finally(() => {
+      if (cleanup.status === "pending") cleanup.status = "completed";
+      cleanup.recordedAt = Date.now();
       this.#teardowns.delete(teardown);
     });
     this.#teardowns.add(teardown);
+  }
+
+  #boundCleanupInventory(): void {
+    while (this.#cleanupInventory.length > SYSTEM_OBSERVABILITY_BOUNDS.cleanup) {
+      const completed = this.#cleanupInventory.findIndex(item => item.status === "completed");
+      const failed = completed < 0
+        ? this.#cleanupInventory.findIndex(item => item.status === "failed")
+        : -1;
+      const removeAt = completed >= 0 ? completed : failed >= 0 ? failed : 0;
+      this.#cleanupInventory.splice(removeAt, 1);
+      this.#cleanupEntriesDropped += 1;
+    }
   }
 
   #touch(sessionId: string, attached: Attached, protectClient: boolean): void {
@@ -427,4 +583,22 @@ export class LiveRuntimeEngineRegistry {
       }),
     });
   }
+}
+
+function withTimeout<Result>(promise: Promise<Result>, timeoutMs: number, message: string): Promise<Result> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function boundedRuntimeFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const redacted = message
+    .replace(/\b(?:api[_-]?key|token|secret|password)\s*[=:]\s*[^\s,;]+/gi, match => `${match.split(/[=:]/, 1)[0]}=[REDACTED]`)
+    .replace(/\b(?:sk|ghp|xoxb)-[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]");
+  return redacted.length > 512 ? `${redacted.slice(0, 511)}…` : redacted;
 }

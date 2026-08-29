@@ -26,6 +26,7 @@ async function runProductionDiagnosticFixture({ sessionId, prompts, uiLocale }) 
   const originalEnv = { ...process.env };
   const workspaceRoot = mkdtempSync(path.join(tmpdir(), "unclecode-plugin-diag-bootstrap-"));
   const fakeHome = path.join(workspaceRoot, "home");
+  let bootstrap;
   try {
     mkdirSync(path.join(workspaceRoot, ".unclecode", "plugins"), { recursive: true });
     mkdirSync(fakeHome, { recursive: true });
@@ -56,7 +57,7 @@ async function runProductionDiagnosticFixture({ sessionId, prompts, uiLocale }) 
     };
     process.env = env;
 
-    const bootstrap = await loadWorkCliBootstrap({
+    bootstrap = await loadWorkCliBootstrap({
       argv: ["--cwd", workspaceRoot],
       env,
       userHomeDir: fakeHome,
@@ -87,7 +88,13 @@ async function runProductionDiagnosticFixture({ sessionId, prompts, uiLocale }) 
     return { diagnosticEntries, liveDiagnostics, resumedDiagnostics };
   } finally {
     process.env = originalEnv;
-    rmSync(workspaceRoot, { recursive: true, force: true });
+    await bootstrap?.dispose?.();
+    rmSync(workspaceRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 20,
+    });
   }
 }
 

@@ -402,7 +402,14 @@ test("projection preserves failed, cancelled, recorded creator, stale-artifact, 
       { sessionId: "cancelled", projectPath: "/tmp/b", locale: "ko", state: "cancelled", revision: 3, agentConsole: { qualityReview: { profile: "minimal", currentStage: "work", latestDecision: "unproven", history: [] } } },
       { sessionId: "creator", projectPath: "/tmp/c", locale: "en", state: "completed", revision: 4, agentConsole: { evolutionProposals: [evolutionProposal], qualityReview: { profile: "creator", currentStage: "promote", latestDecision: "proceed", history: [{ stage: "promote", decision: "proceed", artifactRefs: ["candidate.patch"], artifactHash: "sha256:old", stale: true, independentVerification: true }] } } },
     ],
-    system: { cleanup: [{ kind: "worktree", status: "pending" }] },
+    system: {
+      cleanup: [{
+        kind: "runtime-session",
+        identity: "creator-session",
+        status: "pending",
+        recordedAt: 200,
+      }],
+    },
   });
 
   assert.deepEqual(projection.runs.map(run => run.state), ["failed", "cancelled", "completed"]);

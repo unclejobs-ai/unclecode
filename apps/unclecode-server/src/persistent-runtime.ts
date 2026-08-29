@@ -10,6 +10,7 @@ import type {
   RuntimeReadSource,
   RuntimeSessionSource,
 } from "./control-room.js";
+import type { RuntimeSystemObservabilitySource } from "./system-observability.js";
 import type { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
 
 const MAX_CHECKPOINTS = 128;
@@ -195,6 +196,7 @@ export async function readPersistentRuntime(
   rootDir: string,
   controls: LiveRuntimeControlRegistry,
   readCacheTelemetry?: () => readonly RuntimeCacheTelemetrySnapshot[],
+  readSystemObservability?: () => RuntimeSystemObservabilitySource,
 ): Promise<RuntimeReadSource> {
   const paths = await checkpointPaths(rootDir);
   const settled = await Promise.all(paths.map(path => readCheckpoint(path, controls)));
@@ -205,25 +207,41 @@ export async function readPersistentRuntime(
   for (const live of controls.snapshots()) bySessionId.set(live.sessionId, live);
   const sessions = [...bySessionId.values()]
     .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+  const systemEvidence = readSystemObservabilitySafely(readSystemObservability);
+  const cacheEvidence = readCacheTelemetrySafely(readCacheTelemetry);
   return {
     generatedAt: Date.now(),
     sessions,
     system: {
-      providers: [],
-      plugins: [],
-      cleanup: [],
-      caches: readCacheTelemetrySafely(readCacheTelemetry),
+      ...systemEvidence.value,
+      evidenceSources: {
+        owner: systemEvidence.status,
+        cacheTelemetry: cacheEvidence.status,
+      },
+      caches: cacheEvidence.value,
     },
   };
 }
 
+function readSystemObservabilitySafely(
+  readSystemObservability: (() => RuntimeSystemObservabilitySource) | undefined,
+): { readonly status: "available" | "unavailable"; readonly value: RuntimeSystemObservabilitySource } {
+  if (!readSystemObservability) return { status: "unavailable", value: {} };
+  try {
+    return { status: "available", value: readSystemObservability() };
+  } catch {
+    return { status: "unavailable", value: {} };
+  }
+}
+
 function readCacheTelemetrySafely(
   readCacheTelemetry: (() => readonly RuntimeCacheTelemetrySnapshot[]) | undefined,
-): readonly RuntimeCacheTelemetrySnapshot[] {
+): { readonly status: "available" | "unavailable"; readonly value: readonly RuntimeCacheTelemetrySnapshot[] } {
+  if (!readCacheTelemetry) return { status: "unavailable", value: [] };
   try {
-    return readCacheTelemetry?.() ?? [];
+    return { status: "available", value: readCacheTelemetry() };
   } catch {
-    return [];
+    return { status: "unavailable", value: [] };
   }
 }
 
@@ -233,6 +251,7 @@ export function createPersistentRuntimeAdapter(input: {
   readonly journal?: EventJournal;
   readonly journalCapacity?: number;
   readonly readCacheTelemetry?: () => readonly RuntimeCacheTelemetrySnapshot[];
+  readonly readSystemObservability?: () => RuntimeSystemObservabilitySource;
 }): {
   readonly adapter: RuntimeAdapter;
   readonly controls: LiveRuntimeControlRegistry;
@@ -246,7 +265,12 @@ export function createPersistentRuntimeAdapter(input: {
     controls,
     journal,
     adapter: createRuntimeAdapter({
-      read: () => readPersistentRuntime(input.rootDir, controls, input.readCacheTelemetry),
+      read: () => readPersistentRuntime(
+        input.rootDir,
+        controls,
+        input.readCacheTelemetry,
+        input.readSystemObservability,
+      ),
       controls,
     }),
   };

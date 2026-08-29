@@ -82,6 +82,7 @@ const createSession: RuntimeSessionFactory = async (request) => {
       provider: session.options.provider,
       revisionClock,
       dispose: disposeSession,
+      ...(loaded.readObservability ? { readObservability: loaded.readObservability } : {}),
     };
   } catch (error) {
     if (disposeSession) await disposeSession();

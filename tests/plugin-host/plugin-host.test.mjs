@@ -462,7 +462,7 @@ test("external hook failures emit one source-labelled diagnostic per run and pre
     errorName: "Error",
     errorMessage: "Stop hook failed: zod/v3",
     exitStatus: undefined,
-    dedupeKey: "cached:claude-mem:runClassified:Error:Stop hook failed: zod/v3",
+    dedupeKey: "sha256:595a95dc6b3af6680b1b5543236da928b1c812121623201e34013a6443c51a22",
   }]);
   assert.equal(
     diagnostics.some((diagnostic) => diagnostic.pluginName === "scc-quality-engine"),

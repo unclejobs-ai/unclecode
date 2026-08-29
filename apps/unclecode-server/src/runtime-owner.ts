@@ -14,6 +14,7 @@ import { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
 import { openRuntimeLedger } from "./runtime-ledger.js";
 import { attachWorkShellRuntime, type WorkShellControlEngine } from "./work-shell-control.js";
 import type { RuntimeCacheTelemetrySnapshot } from "./control-room.js";
+import { readRuntimeProcessObservability } from "./system-observability.js";
 import {
   RUNTIME_OWNER_PROTOCOL,
   currentBootIdentity,
@@ -79,13 +80,19 @@ export async function startPersistentRuntimeOwner(input: {
     throw error;
   }
   const journal = new LedgerBackedEventJournal({ ledger, hot: hotJournal });
+  let engines: LiveRuntimeEngineRegistry;
   const { adapter, controls } = createPersistentRuntimeAdapter({
     rootDir: input.rootDir,
     ...(input.controls ? { controls: input.controls } : {}),
     journal,
     ...(input.readCacheTelemetry ? { readCacheTelemetry: input.readCacheTelemetry } : {}),
+    readSystemObservability: () => ({
+      ...readRuntimeProcessObservability(),
+      journal: journal.stats,
+      ...engines.systemSnapshot(),
+    }),
   });
-  const engines = input.engines ?? new LiveRuntimeEngineRegistry({
+  engines = input.engines ?? new LiveRuntimeEngineRegistry({
     ...(input.createSession ? {
       createSession: async (request) => {
         const created = await input.createSession!(request);

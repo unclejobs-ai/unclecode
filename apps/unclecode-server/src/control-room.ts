@@ -1,5 +1,13 @@
 import { basename } from "node:path";
 import type { ControlRoomPendingDecision } from "@unclecode/contracts";
+import {
+  SYSTEM_OBSERVABILITY_BOUNDS,
+  projectSystemObservability,
+  type ControlRoomSystemProjection,
+  type RuntimeSystemObservabilitySource,
+} from "./system-observability.js";
+
+export type { RuntimeCacheTelemetrySnapshot } from "./system-observability.js";
 
 const MAX_RUNS = 128;
 const MAX_CONTEXT_SOURCES = 64;
@@ -7,7 +15,6 @@ const MAX_HISTORY = 64;
 const MAX_DIAGNOSTICS = 32;
 const MAX_ARTIFACTS = 64;
 const MAX_EVOLUTION_PROPOSALS = 32;
-const MAX_CACHE_TELEMETRY = 32;
 const MAX_DECISION_QUESTIONS = 8;
 const MAX_DECISION_OPTIONS = 16;
 const MAX_TEXT = 800;
@@ -44,29 +51,10 @@ export type RuntimeSessionSource = {
   };
 };
 
-export type RuntimeCacheTelemetrySnapshot = {
-  readonly name: string;
-  readonly hits: number;
-  readonly misses: number;
-  readonly hitRate?: number;
-  readonly evictions: number;
-  readonly byteEvictions: number;
-  readonly invalidations: number;
-  readonly currentSize: number;
-  readonly maxEntries: number;
-  readonly maxRetainedBytes: number;
-  readonly retainedBytesEstimate: number;
-};
-
 export type RuntimeReadSource = {
   readonly generatedAt: number;
   readonly sessions: readonly RuntimeSessionSource[];
-  readonly system?: {
-    readonly providers?: readonly Readonly<Record<string, unknown>>[];
-    readonly plugins?: readonly Readonly<Record<string, unknown>>[];
-    readonly cleanup?: readonly Readonly<Record<string, unknown>>[];
-    readonly caches?: readonly RuntimeCacheTelemetrySnapshot[];
-  };
+  readonly system?: RuntimeSystemObservabilitySource;
 };
 
 export type ControlRoomDiagnostic = {
@@ -136,9 +124,10 @@ export type ControlRoomProjection = {
     readonly runs: number;
     readonly contextSources: number;
     readonly history: number;
+    readonly system: typeof SYSTEM_OBSERVABILITY_BOUNDS;
   };
   readonly runs: readonly ControlRoomRun[];
-  readonly system: RuntimeReadSource["system"];
+  readonly system: ControlRoomSystemProjection;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -254,36 +243,6 @@ function pendingDecisionFrom(
       : {}),
     questions,
   };
-}
-
-function cacheTelemetry(
-  value: readonly RuntimeCacheTelemetrySnapshot[] | undefined,
-): readonly RuntimeCacheTelemetrySnapshot[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter(isRecord).slice(0, MAX_CACHE_TELEMETRY).map((entry) => {
-    const nonnegative = (key: string) => {
-      const candidate = entry[key];
-      return typeof candidate === "number" && Number.isFinite(candidate)
-        ? Math.max(0, candidate)
-        : 0;
-    };
-    const hits = nonnegative("hits");
-    const misses = nonnegative("misses");
-    const lookups = hits + misses;
-    return {
-      name: redactText(entry.name, 120),
-      hits,
-      misses,
-      hitRate: lookups > 0 ? hits / lookups : 0,
-      evictions: nonnegative("evictions"),
-      byteEvictions: nonnegative("byteEvictions"),
-      invalidations: nonnegative("invalidations"),
-      currentSize: nonnegative("currentSize"),
-      maxEntries: nonnegative("maxEntries"),
-      maxRetainedBytes: nonnegative("maxRetainedBytes"),
-      retainedBytesEstimate: nonnegative("retainedBytesEstimate"),
-    };
-  });
 }
 
 function projectedRecord(
@@ -604,13 +563,13 @@ export function createControlRoomProjection(source: RuntimeReadSource): ControlR
   return {
     version: 1,
     generatedAt: source.generatedAt,
-    bounds: { runs: MAX_RUNS, contextSources: MAX_CONTEXT_SOURCES, history: MAX_HISTORY },
+    bounds: {
+      runs: MAX_RUNS,
+      contextSources: MAX_CONTEXT_SOURCES,
+      history: MAX_HISTORY,
+      system: SYSTEM_OBSERVABILITY_BOUNDS,
+    },
     runs: source.sessions.slice(0, MAX_RUNS).map(projectRun),
-    system: source.system
-      ? {
-          ...source.system,
-          ...(source.system.caches ? { caches: cacheTelemetry(source.system.caches) } : {}),
-        }
-      : undefined,
+    system: projectSystemObservability(source.system),
   };
 }

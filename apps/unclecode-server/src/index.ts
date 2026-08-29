@@ -43,6 +43,7 @@ export * from "./runtime-engine-rpc.js";
 export * from "./runtime-mutation-arbiter.js";
 export * from "./runtime-admission-ledger.js";
 export * from "./runtime-ledger.js";
+export * from "./system-observability.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
 

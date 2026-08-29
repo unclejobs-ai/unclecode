@@ -40,6 +40,7 @@ export class BoundedEventJournal {
   readonly #eventsBySession = new Map<string, Map<number, JournalEvent>>();
   readonly #subscribers = new Map<string, Set<(event: JournalEvent) => void>>();
   readonly #replayWatermarks = new Map<string, number>();
+  #activeSubscriptions = 0;
   #head = 0;
   #size = 0;
   #nextId = 1;
@@ -106,11 +107,9 @@ export class BoundedEventJournal {
   }
 
   get stats(): EventJournalStats {
-    let activeSubscriptions = 0;
-    for (const subscribers of this.#subscribers.values()) activeSubscriptions += subscribers.size;
     return Object.freeze({
       retainedEvents: this.#size,
-      activeSubscriptions,
+      activeSubscriptions: this.#activeSubscriptions,
       subscriberSessions: this.#subscribers.size,
       replayWatermarks: this.#replayWatermarks.size,
     });
@@ -132,9 +131,12 @@ export class BoundedEventJournal {
       set = new Set();
       this.#subscribers.set(sessionId, set);
     }
-    set.add(listener);
+    if (!set.has(listener)) {
+      set.add(listener);
+      this.#activeSubscriptions += 1;
+    }
     return () => {
-      set?.delete(listener);
+      if (set?.delete(listener)) this.#activeSubscriptions -= 1;
       if (set?.size === 0) this.#subscribers.delete(sessionId);
     };
   }

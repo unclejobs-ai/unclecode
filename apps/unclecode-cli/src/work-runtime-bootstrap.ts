@@ -79,6 +79,10 @@ import {
   PluginHost,
   registerBuiltInSccQualityEngine,
 } from "@unclecode/plugin-host";
+import { loadMcpHostRegistry } from "@unclecode/mcp-host";
+import type { RuntimeSessionObservabilitySource } from "@unclecode/server";
+
+const MAX_SESSION_MCP_OBSERVABILITY = 64;
 import {
   buildContextLineItems,
   buildContextSummaryItems,
@@ -222,6 +226,7 @@ export type WorkCliBootstrapResult = {
   prompt: string;
   options: StartReplOptions;
   dispose?: (() => void | Promise<void>) | undefined;
+  readObservability?: (() => RuntimeSessionObservabilitySource) | undefined;
 };
 
 async function runInlineCommand(input: {
@@ -816,6 +821,25 @@ export async function loadWorkCliBootstrap(
   const authStatus = config.provider === "openai"
     ? await resolveRustOpenAIAuthStatus({ cwd, env })
     : undefined;
+  const observabilityObservedAt = Date.now();
+  const mcpEvidence = (() => {
+    try {
+      const mcpServers = loadMcpHostRegistry({
+        workspaceRoot: cwd,
+        ...(userHomeDir ? { userHomeDir } : {}),
+      }).entries.slice(0, MAX_SESSION_MCP_OBSERVABILITY).map((entry) => ({
+        name: entry.name,
+        transport: entry.transport,
+        configured: true,
+        authentication: "unverified" as const,
+        liveProbe: "not-run" as const,
+        observedAt: observabilityObservedAt,
+      }));
+      return { status: "available" as const, mcpServers };
+    } catch {
+      return { status: "unavailable" as const, mcpServers: [] };
+    }
+  })();
   const browserOAuthAvailable = config.provider === "openai"
     ? Boolean(env.OPENAI_OAUTH_CLIENT_ID?.trim())
     : false;
@@ -899,6 +923,21 @@ export async function loadWorkCliBootstrap(
     agent,
     prompt: prompt ?? "",
     dispose: () => pluginHost.dispose(),
+    readObservability: () => ({
+      provider: {
+        provider: directRuntimeProvider,
+        model: config.model,
+        configured: true,
+        authentication: config.provider === "openai"
+          ? authStatus?.activeSource === "none" ? "missing" : "unverified"
+          : config.apiKey.trim().length > 0 ? "unverified" : "missing",
+        liveProbe: "not-run",
+        observedAt: observabilityObservedAt,
+      },
+      mcpServers: mcpEvidence.mcpServers,
+      mcpConfigurationStatus: mcpEvidence.status,
+      plugins: pluginHost.getLifecycleSnapshot(),
+    }),
     options: {
       provider: resolveRuntimeProvider(config.provider),
       model: config.model,
