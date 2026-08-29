@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { resolveWorkEntrypointArgs } from "../../apps/unclecode-cli/src/work-entry.ts";
 import { runWorkCli } from "../../apps/unclecode-cli/src/work-runtime.ts";
 
 const idleState = {
@@ -82,6 +83,69 @@ test("one-shot Work prompt runs through the owner and prints its terminal transc
   assert.ok(invokes[0].idempotencyKey.length > 0);
   assert.notEqual(invokes[0].idempotencyKey, creates[0].idempotencyKey);
   assert.deepEqual(output, ["OWNER_TRANSCRIPT_RESULT\n"]);
+});
+
+test("piped Work input becomes one owner prompt without constructing a local runtime", async () => {
+  const invokes = [];
+  const output = [];
+  const argv = await resolveWorkEntrypointArgs([], {
+    stdinIsTTY: false,
+    readStdin: async () => "summarize from stdin\nwith exact payload",
+  });
+  const terminalState = {
+    ...idleState,
+    entries: [
+      { role: "user", text: "summarize from stdin\nwith exact payload" },
+      { role: "assistant", text: "PIPE_OWNER_RESULT" },
+    ],
+    turnLifecycle: { state: "completed", turnId: "turn-pipe-1" },
+  };
+  const client = {
+    async createRuntimeSession(input) {
+      return { ok: true, session: successfulSession(input.sessionId) };
+    },
+    async attachRuntimeSession(sessionId) {
+      return {
+        ok: true,
+        session: successfulSession(sessionId),
+        engine: { ok: true, revision: 1, state: idleState, result: null },
+      };
+    },
+    async readEngineState() {
+      return { ok: true, revision: 1, state: idleState, result: null };
+    },
+    async invokeEngineMethod(input) {
+      invokes.push(input);
+      return { ok: true, revision: 2, state: terminalState, result: undefined };
+    },
+  };
+
+  assert.deepEqual(argv, ["summarize from stdin\nwith exact payload"]);
+  await runWorkCli(argv, {
+    connectOwner: async () => client,
+    loadInteractiveSession: async () => {
+      throw new Error("piped prompt constructed a local runtime");
+    },
+    writeOutput: (text) => { output.push(text); },
+  });
+
+  assert.equal(invokes.length, 1);
+  assert.deepEqual(invokes[0].args, ["summarize from stdin\nwith exact payload"]);
+  assert.deepEqual(output, ["PIPE_OWNER_RESULT\n"]);
+});
+
+test("empty piped Work input exits without opening an interactive runtime", async () => {
+  let reads = 0;
+  const argv = await resolveWorkEntrypointArgs([], {
+    stdinIsTTY: false,
+    readStdin: async () => {
+      reads += 1;
+      return " \n\t";
+    },
+  });
+
+  assert.equal(reads, 1);
+  assert.equal(argv, undefined);
 });
 
 test("one-shot Work prompt returns at an owner decision and settles its client request", async () => {

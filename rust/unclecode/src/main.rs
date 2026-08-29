@@ -244,6 +244,7 @@ mod cli_team_background;
 mod cli_work;
 
 const TS_ENTRYPOINT: &str = "apps/unclecode-cli/dist/index.js";
+const TS_WORK_ENTRYPOINT: &str = "apps/unclecode-cli/dist/work-entry.js";
 const NODE_NO_EXPERIMENTAL_WARNING: &str = "--no-warnings=ExperimentalWarning";
 
 fn main() -> ExitCode {
@@ -362,17 +363,15 @@ fn run_with_start(args: Vec<OsString>, started_at: Instant) -> Result<u8, String
         return cli_team::run_top_level_team_command(&team_args);
     }
     if let Some(work_args) = cli_work::top_level_work_args(&args) {
-        // Interactive `unclecode work` launches the TS TUI runtime so CRP
-        // (Context Runbook Protocol) is active. Non-interactive (piped stdin,
-        // one-shot prompt) falls through to the Rust-native mini-loop.
-        if should_launch_work_tui(
+        return match select_public_work_route(
             &work_args,
             io::stdin().is_terminal(),
             io::stdout().is_terminal(),
         ) {
-            return launch_typescript_tui_bridge(&work_args);
-        }
-        return cli_work::run_top_level_work_command(&work_args);
+            PublicWorkRoute::TypescriptTui => launch_typescript_tui_bridge(&work_args),
+            PublicWorkRoute::TypescriptOwner => launch_typescript_work_owner_bridge(&work_args),
+            PublicWorkRoute::RustNative => cli_work::run_top_level_work_command(&work_args),
+        };
     }
 
     let command = args
@@ -497,6 +496,29 @@ fn should_launch_work_tui(work_args: &[OsString], stdin_is_tty: bool, stdout_is_
     stdin_is_tty && stdout_is_tty && cli_work::work_args_are_interactive_promptless(work_args)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublicWorkRoute {
+    TypescriptTui,
+    TypescriptOwner,
+    RustNative,
+}
+
+fn select_public_work_route(
+    work_args: &[OsString],
+    stdin_is_tty: bool,
+    stdout_is_tty: bool,
+) -> PublicWorkRoute {
+    if cli_work::work_args_request_metadata(work_args) {
+        PublicWorkRoute::RustNative
+    } else if cli_work::work_args_have_prompt(work_args) || !stdin_is_tty {
+        PublicWorkRoute::TypescriptOwner
+    } else if should_launch_work_tui(work_args, stdin_is_tty, stdout_is_tty) {
+        PublicWorkRoute::TypescriptTui
+    } else {
+        PublicWorkRoute::RustNative
+    }
+}
+
 fn should_launch_full_center(args: &[OsString], stdin_is_tty: bool, stdout_is_tty: bool) -> bool {
     if !stdin_is_tty || !stdout_is_tty {
         return false;
@@ -513,21 +535,36 @@ fn launch_typescript_tui_bridge(tui_args: &[OsString]) -> Result<u8, String> {
     launch_typescript_command_bridge("tui", tui_args)
 }
 
+fn launch_typescript_work_owner_bridge(work_args: &[OsString]) -> Result<u8, String> {
+    launch_typescript_entrypoint_bridge(TS_WORK_ENTRYPOINT, None, work_args)
+}
+
 fn launch_typescript_command_bridge(
     command: &str,
     command_args: &[OsString],
 ) -> Result<u8, String> {
+    launch_typescript_entrypoint_bridge(TS_ENTRYPOINT, Some(command), command_args)
+}
+
+fn launch_typescript_entrypoint_bridge(
+    entrypoint_path: &str,
+    command: Option<&str>,
+    command_args: &[OsString],
+) -> Result<u8, String> {
     let repo_root = find_repo_root()?;
-    let entrypoint = repo_root.join(TS_ENTRYPOINT);
+    let entrypoint = repo_root.join(entrypoint_path);
     if !entrypoint.exists() {
-        return Err("Full-screen TUI bridge is not built yet. Run `npm run build`.".to_string());
+        return Err("TypeScript runtime bridge is not built yet. Run `npm run build`.".to_string());
     }
 
     repair_typescript_native_modules_if_needed(&repo_root)?;
 
-    let status = Command::new(node_binary())
-        .arg(entrypoint)
-        .arg(command)
+    let mut child = Command::new(node_binary());
+    child.arg(entrypoint);
+    if let Some(command) = command {
+        child.arg(command);
+    }
+    let status = child
         .args(command_args)
         .current_dir(work_cwd()?)
         .envs(env::vars_os())
@@ -537,7 +574,7 @@ fn launch_typescript_command_bridge(
         )
         .env("UNCLECODE_FORCE_TS_TUI", "1")
         .status()
-        .map_err(|error| format!("Failed to launch UncleCode full-screen TUI: {error}"))?;
+        .map_err(|error| format!("Failed to launch UncleCode TypeScript runtime: {error}"))?;
 
     Ok(status.code().unwrap_or(1).clamp(0, 255) as u8)
 }
@@ -5064,35 +5101,52 @@ mod tests {
     }
 
     #[test]
-    fn interactive_work_routes_full_screen_tui_only_without_a_one_shot_prompt() {
-        // `unclecode work` with no prompt on a real terminal stays a TUI session.
-        assert!(should_launch_work_tui(&[], true, true));
-        assert!(should_launch_work_tui(
-            &[OsString::from("--engine"), OsString::from("pi")],
-            true,
-            true
-        ));
+    fn public_work_routes_prompts_to_the_typescript_owner_and_keeps_tty_ink() {
+        assert_eq!(
+            select_public_work_route(&[], true, true),
+            PublicWorkRoute::TypescriptTui
+        );
+        assert_eq!(
+            select_public_work_route(
+                &[OsString::from("--engine"), OsString::from("pi")],
+                true,
+                true
+            ),
+            PublicWorkRoute::TypescriptTui
+        );
 
-        // A typed one-shot prompt must fall through to the Rust-native turn even
-        // on a TTY, otherwise the prompt is silently dropped by the TS bridge.
-        assert!(!should_launch_work_tui(
-            &[OsString::from("summarize the repo")],
-            true,
-            true
-        ));
-        assert!(!should_launch_work_tui(
-            &[
-                OsString::from("--engine"),
-                OsString::from("pi"),
-                OsString::from("summarize the repo"),
-            ],
-            true,
-            true
-        ));
+        for (stdin_is_tty, stdout_is_tty) in
+            [(true, true), (false, true), (true, false), (false, false)]
+        {
+            assert_eq!(
+                select_public_work_route(
+                    &[OsString::from("summarize the repo")],
+                    stdin_is_tty,
+                    stdout_is_tty,
+                ),
+                PublicWorkRoute::TypescriptOwner,
+                "positional prompts must never enter the Rust mini-loop"
+            );
+        }
 
-        // Non-interactive stdio never opens the full-screen TUI.
-        assert!(!should_launch_work_tui(&[], false, true));
-        assert!(!should_launch_work_tui(&[], true, false));
+        assert_eq!(
+            select_public_work_route(&[], false, true),
+            PublicWorkRoute::TypescriptOwner,
+            "piped stdin is a non-interactive owner prompt"
+        );
+        assert_eq!(
+            select_public_work_route(&[], true, false),
+            PublicWorkRoute::RustNative,
+            "a promptless TTY with redirected output preserves the native fallback"
+        );
+        assert_eq!(
+            select_public_work_route(&[OsString::from("--help")], false, false),
+            PublicWorkRoute::RustNative
+        );
+        assert_eq!(
+            select_public_work_route(&[OsString::from("--tools")], true, true),
+            PublicWorkRoute::RustNative
+        );
     }
 
     #[test]

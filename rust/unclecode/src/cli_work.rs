@@ -78,6 +78,17 @@ pub fn work_args_are_interactive_promptless(args: &[OsString]) -> bool {
             .is_none_or(|value| value.trim().is_empty())
 }
 
+pub fn work_args_have_prompt(args: &[OsString]) -> bool {
+    parse_work_args(args, PathBuf::from("."))
+        .prompt
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+pub fn work_args_request_metadata(args: &[OsString]) -> bool {
+    let parsed = parse_work_args(args, PathBuf::from("."));
+    parsed.show_help || parsed.show_tools
+}
+
 pub fn run_top_level_work_command(args: &[OsString]) -> Result<u8, String> {
     let parsed = parse_work_args(
         args,

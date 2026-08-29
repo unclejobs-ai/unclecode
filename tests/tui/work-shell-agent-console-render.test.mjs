@@ -188,6 +188,53 @@ test("the default shell keeps Plan separate from Agents and Jobs", async () => {
   assert.doesNotMatch(frame, new RegExp(RAW_OUTPUT_SENTINEL));
 });
 
+test("the Korean quiet HUD keeps agent payloads in the explicit roster", async () => {
+  const base = runningSnapshot();
+  const manyAgents = Array.from({ length: 12 }, (_, index) => ({
+    ...base.agents[0],
+    id: `ko-run-${index}`,
+    displayName: index === 0 ? "RuntimeMap" : `PayloadAgent${index}`,
+  }));
+  const snapshot = { ...base, agents: manyAgents };
+
+  const hud = await renderFrame({ uiLocale: "ko", agentConsole: snapshot }, 100);
+  assert.doesNotMatch(hud, /에이전트 · 12개 활성/);
+  assert.doesNotMatch(hud, /RuntimeMap · 실행 중/);
+  assert.doesNotMatch(hud, /… \+3개 더 있음/);
+  assert.doesNotMatch(hud, /Agents ·| active| · running| more/);
+
+  const roster = await renderFrame({
+    uiLocale: "ko",
+    agentConsole: snapshot,
+    agentConsoleView: consoleView({ inspectorVisible: false }),
+  }, 80);
+  assert.match(roster, /RuntimeMap · 실행 중/);
+  assert.match(roster, /화면 밖 2개 더 있음/);
+  assert.doesNotMatch(roster, /running|more off screen/);
+  assert.match(roster, /PayloadAgent1/, "agent names are operator payload and remain byte-for-byte");
+});
+
+test("the Korean visible inspector localizes agent and job enum chrome while preserving payload fields", async () => {
+  const agentFrame = await renderFrame({
+    uiLocale: "ko",
+    agentConsoleView: consoleView({ inspectorVisible: true }),
+  }, 100);
+  assert.match(agentFrame, /RuntimeMap/);
+  assert.match(agentFrame, /탐색 · 실행 중/);
+  assert.match(agentFrame, /경과/);
+  assert.match(agentFrame, /계보\s+상위 실행 r0/);
+  assert.match(agentFrame, /활동\s+Reading runtime/, "activity payload is not translated");
+  assert.doesNotMatch(agentFrame, /scout · running|child of|Elapsed|Lineage/);
+
+  const jobFrame = await renderFrame({
+    uiLocale: "ko",
+    agentConsoleView: consoleView({ tab: "jobs", inspectorVisible: true }),
+  }, 100);
+  assert.match(jobFrame, /작업 노드 · 실행 중/);
+  assert.match(jobFrame, /소유자\s+RuntimeMap/);
+  assert.doesNotMatch(jobFrame, /work-node · running|Owner/);
+});
+
 /**
  * Ink writes one whole frame per render in debug mode and the harness
  * accumulates them, so physical-height assertions must read the newest frame.

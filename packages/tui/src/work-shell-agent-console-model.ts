@@ -2,7 +2,9 @@ import type {
   AgentConsoleSnapshot,
   AgentConsoleTab,
   AgentRun,
+  AgentRunStatus,
   AsyncJob,
+  AsyncJobStatus,
   ToolActivity,
   WorkNode,
   WorkNodeStatus,
@@ -89,6 +91,7 @@ export type AgentConsoleInspector = {
 export function selectWorkGraphHudRows(
   snapshot: AgentConsoleSnapshot,
   width: number,
+  uiLocale: "en" | "ko" = "en",
 ): readonly string[] {
   const graph = snapshot.workGraph;
   if (!graph || graph.nodes.length === 0) {
@@ -116,7 +119,7 @@ export function selectWorkGraphHudRows(
     ...visible.map((node) => truncateForDisplayWidth(
       `${HUD_INDENT}${agentConsoleStatusGlyph(STATUS_TONES[node.status])} `
       + `${boundRow(node.title || node.id, titleBudget)}`
-      + ` · ${workNodeStatusLabel(node.status)}`,
+      + ` · ${localizedWorkNodeStatus(node.status, uiLocale)}`,
       bound,
     )),
   ];
@@ -163,6 +166,7 @@ export function selectActiveAgentHudRows(
   snapshot: AgentConsoleSnapshot,
   now: number,
   width: number,
+  uiLocale: "en" | "ko" = "en",
 ): readonly string[] {
   const active = snapshot.agents.filter(isActiveAgentRun);
   if (active.length === 0) {
@@ -175,9 +179,9 @@ export function selectActiveAgentHudRows(
   const nameBudget = Math.max(8, Math.min(28, Math.trunc(bound * 0.3)));
 
   return [
-    boundRow(`Agents · ${active.length} active`, bound),
-    ...visible.map((run) => formatActiveAgentRow(run, now, bound, nameBudget)),
-    ...(hidden > 0 ? [`${HUD_INDENT}… +${hidden} more`] : []),
+    boundRow(uiLocale === "ko" ? `에이전트 · ${active.length}개 활성` : `Agents · ${active.length} active`, bound),
+    ...visible.map((run) => formatActiveAgentRow(run, now, bound, nameBudget, uiLocale)),
+    ...(hidden > 0 ? [`${HUD_INDENT}… +${hidden}${uiLocale === "ko" ? "개 더 있음" : " more"}`] : []),
   ];
 }
 
@@ -190,6 +194,7 @@ export function selectActiveAgentHudRows(
 export function selectAgentConsoleRows(
   snapshot: AgentConsoleSnapshot,
   tab: AgentConsoleTab,
+  uiLocale: "en" | "ko" = "en",
 ): readonly AgentConsoleRow[] {
   switch (tab) {
     case "agents":
@@ -197,7 +202,7 @@ export function selectAgentConsoleRows(
         id: run.id,
         glyph: agentConsoleStatusGlyph(STATUS_TONES[run.status]),
         label: flattenRowText(run.displayName),
-        statusLabel: run.status,
+        statusLabel: localizedAgentRunStatus(run.status, uiLocale),
         tone: STATUS_TONES[run.status],
       }));
     case "jobs":
@@ -205,7 +210,7 @@ export function selectAgentConsoleRows(
         id: job.id,
         glyph: agentConsoleStatusGlyph(STATUS_TONES[job.status]),
         label: flattenRowText(job.label),
-        statusLabel: job.status,
+        statusLabel: localizedAsyncJobStatus(job.status, uiLocale),
         tone: STATUS_TONES[job.status],
       }));
     case "plan":
@@ -213,7 +218,7 @@ export function selectAgentConsoleRows(
         id: node.id,
         glyph: agentConsoleStatusGlyph(STATUS_TONES[node.status]),
         label: flattenRowText(node.title || node.id),
-        statusLabel: workNodeStatusLabel(node.status),
+        statusLabel: localizedWorkNodeStatus(node.status, uiLocale),
         tone: STATUS_TONES[node.status],
       }));
   }
@@ -256,17 +261,18 @@ export function selectAgentConsoleInspector(
   selection: AgentConsoleSelection | undefined,
   now: number,
   width: number,
+  uiLocale: "en" | "ko" = "en",
 ): AgentConsoleInspector | undefined {
   if (!selection) {
     return undefined;
   }
   switch (selection.tab) {
     case "agents":
-      return inspectAgentRun(snapshot, selection.run, now, width);
+      return inspectAgentRun(snapshot, selection.run, now, width, uiLocale);
     case "jobs":
-      return inspectAsyncJob(snapshot, selection.job, now, width);
+      return inspectAsyncJob(snapshot, selection.job, now, width, uiLocale);
     case "plan":
-      return inspectWorkNode(selection.node, width);
+      return inspectWorkNode(selection.node, width, uiLocale);
   }
 }
 
@@ -306,6 +312,7 @@ function inspectAgentRun(
   run: AgentRun,
   now: number,
   width: number,
+  uiLocale: "en" | "ko",
 ): AgentConsoleInspector {
   const bound = boundWidth(width);
   const facts: AgentConsoleInspectorFact[] = [];
@@ -315,7 +322,7 @@ function inspectAgentRun(
   } else if (run.completedAt !== undefined) {
     facts.push({ label: "Duration", value: formatElapsedLabel(run.completedAt - run.startedAt) });
   }
-  const lineage = formatLineage(run);
+  const lineage = formatLineage(run, uiLocale);
   if (lineage) {
     facts.push({ label: "Lineage", value: lineage });
   }
@@ -333,7 +340,7 @@ function inspectAgentRun(
 
   return composeInspector({
     title: run.displayName,
-    subtitle: `${run.agentType} · ${run.status}`,
+    subtitle: `${localizedAgentType(run.agentType, uiLocale)} · ${localizedAgentRunStatus(run.status, uiLocale)}`,
     tone: STATUS_TONES[run.status],
     facts,
     ...scopedTimeline(snapshot, run.id, bound),
@@ -384,6 +391,7 @@ function inspectAsyncJob(
   job: AsyncJob,
   now: number,
   width: number,
+  uiLocale: "en" | "ko",
 ): AgentConsoleInspector {
   const bound = boundWidth(width);
   const facts: AgentConsoleInspectorFact[] = [];
@@ -407,7 +415,7 @@ function inspectAsyncJob(
 
   return composeInspector({
     title: job.label,
-    subtitle: `${job.type} · ${job.status}`,
+    subtitle: `${localizedJobType(job.type, uiLocale)} · ${localizedAsyncJobStatus(job.status, uiLocale)}`,
     tone: STATUS_TONES[job.status],
     facts,
     ...scopedTimeline(snapshot, job.agentRunId, bound),
@@ -422,7 +430,11 @@ function inspectAsyncJob(
  * A plan node carries the executor's raw assignment in `prompt`. The inspector
  * projects only the operator-facing fields, so that text has no path here.
  */
-function inspectWorkNode(node: WorkNode, width: number): AgentConsoleInspector {
+function inspectWorkNode(
+  node: WorkNode,
+  width: number,
+  uiLocale: "en" | "ko" = "en",
+): AgentConsoleInspector {
   const bound = boundWidth(width);
   const facts: AgentConsoleInspectorFact[] = [];
   if (node.dependsOn.length > 0) {
@@ -434,16 +446,23 @@ function inspectWorkNode(node: WorkNode, width: number): AgentConsoleInspector {
   if (node.acceptanceCriteria && node.acceptanceCriteria.length > 0) {
     facts.push({
       label: "Acceptance",
-      value: formatCount(node.acceptanceCriteria.length, "criterion", "criteria"),
+      value: uiLocale === "ko"
+        ? `기준 ${node.acceptanceCriteria.length}개`
+        : formatCount(node.acceptanceCriteria.length, "criterion", "criteria"),
     });
   }
   if (node.evidenceRefs.length > 0) {
-    facts.push({ label: "Evidence", value: formatCount(node.evidenceRefs.length, "ref", "refs") });
+    facts.push({
+      label: "Evidence",
+      value: uiLocale === "ko"
+        ? `참조 ${node.evidenceRefs.length}개`
+        : formatCount(node.evidenceRefs.length, "ref", "refs"),
+    });
   }
 
   return composeInspector({
     title: node.title || node.id,
-    subtitle: `task · ${workNodeStatusLabel(node.status)}`,
+    subtitle: `${uiLocale === "ko" ? "작업" : "task"} · ${localizedWorkNodeStatus(node.status, uiLocale)}`,
     tone: STATUS_TONES[node.status],
     facts,
     timeline: [],
@@ -484,10 +503,11 @@ function formatActiveAgentRow(
   now: number,
   bound: number,
   nameBudget: number,
+  uiLocale: "en" | "ko",
 ): string {
   const head = `${HUD_INDENT}${agentConsoleStatusGlyph(STATUS_TONES[run.status])} `
     + `${boundRow(run.displayName, nameBudget)}`
-    + ` · ${run.status} ${formatElapsedLabel(now - run.startedAt)}`;
+    + ` · ${localizedAgentRunStatus(run.status, uiLocale)} ${formatElapsedLabel(now - run.startedAt)}`;
   if (!run.currentActivity) {
     return truncateForDisplayWidth(head, bound);
   }
@@ -498,10 +518,65 @@ function formatActiveAgentRow(
   return truncateForDisplayWidth(`${head} · ${boundRow(run.currentActivity, remaining)}`, bound);
 }
 
-function formatLineage(run: AgentRun): string | undefined {
-  if (run.continuationOf) return `continues ${run.continuationOf}`;
-  if (run.parentRunId) return `child of ${run.parentRunId}`;
+function formatLineage(run: AgentRun, uiLocale: "en" | "ko"): string | undefined {
+  if (run.continuationOf) return `${uiLocale === "ko" ? "이어받은 실행" : "continues"} ${run.continuationOf}`;
+  if (run.parentRunId) return `${uiLocale === "ko" ? "상위 실행" : "child of"} ${run.parentRunId}`;
   return undefined;
 }
 
+function localizedAgentRunStatus(status: AgentRunStatus, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return status;
+  return ({
+    queued: "대기",
+    running: "실행 중",
+    waiting: "응답 대기",
+    completed: "완료",
+    failed: "실패",
+    cancelled: "취소",
+    interrupted: "중단",
+  } as const)[status];
+}
+
+function localizedAsyncJobStatus(status: AsyncJobStatus, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return status;
+  return ({
+    queued: "대기",
+    running: "실행 중",
+    completed: "완료",
+    failed: "실패",
+    cancelled: "취소",
+    interrupted: "중단",
+  } as const)[status];
+}
+
+function localizedWorkNodeStatus(status: WorkNodeStatus, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return workNodeStatusLabel(status);
+  const labels: Record<WorkNodeStatus, string> = {
+    proposed: "제안", approved: "승인", ready: "준비", running: "실행 중", completed: "완료",
+    failed: "실패", blocked: "차단", cancelled: "취소", requires_action: "조치 필요",
+  };
+  return labels[status];
+}
+
+function localizedAgentType(agentType: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return agentType;
+  return ({
+    scout: "탐색",
+    planner: "계획",
+    worker: "작업",
+    executor: "실행",
+    critic: "비평",
+    reviewer: "검토",
+    guardian: "검증",
+  } as Readonly<Record<string, string>>)[agentType] ?? agentType;
+}
+
+function localizedJobType(jobType: string, uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return jobType;
+  return ({
+    "work-node": "작업 노드",
+    agent: "에이전트",
+    review: "검토",
+  } as Readonly<Record<string, string>>)[jobType] ?? jobType;
+}
 
