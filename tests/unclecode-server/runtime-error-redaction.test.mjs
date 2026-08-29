@@ -51,6 +51,57 @@ test("runtime diagnostics recognize encoded credential query names without redac
   );
 });
 
+test("runtime diagnostics close cookie, JWT, signing, quoted auth, and escaped-key gaps", () => {
+  const cases = [
+    {
+      input: "Cookie: session_id=cookie-secret; theme=dark",
+      expected: "Cookie: [REDACTED]",
+      forbidden: ["cookie-secret"],
+    },
+    {
+      input: "Set-Cookie: sid=set-cookie-secret; HttpOnly; SameSite=Strict",
+      expected: "Set-Cookie: [REDACTED]",
+      forbidden: ["set-cookie-secret"],
+    },
+    {
+      input: "SESSION_COOKIE=session=cookie-env-secret;theme=dark",
+      expected: "SESSION_COOKIE=[REDACTED]",
+      forbidden: ["cookie-env-secret", "theme=dark"],
+    },
+    {
+      input: 'Authorization: Bearer "quoted-bearer-secret"',
+      expected: "Authorization: Bearer [REDACTED]",
+      forbidden: ["quoted-bearer-secret"],
+    },
+    {
+      input: "Proxy-Authorization=Basic 'quoted-basic-secret'",
+      expected: "Proxy-Authorization=Basic [REDACTED]",
+      forbidden: ["quoted-basic-secret"],
+    },
+    {
+      input: "JWT=jwt-named-secret SESSION_TOKEN=session-token-secret SIGNING_KEY=signing-key-secret",
+      expected: "JWT=[REDACTED] SESSION_TOKEN=[REDACTED] SIGNING_KEY=[REDACTED]",
+      forbidden: ["jwt-named-secret", "session-token-secret", "signing-key-secret"],
+    },
+    {
+      input: '{"\\u0074oken":"escaped-json-secret","message":"safe"}',
+      expected: '{"\\u0074oken":"[REDACTED]","message":"safe"}',
+      forbidden: ["escaped-json-secret"],
+    },
+    {
+      input: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZWNyZXQifQ.signature123456",
+      expected: "[REDACTED]",
+      forbidden: ["eyJhbGci", "zZWNyZXQ"],
+    },
+  ];
+
+  for (const fixture of cases) {
+    const result = redactRuntimeDiagnostic(fixture.input);
+    assert.equal(result, fixture.expected, fixture.input);
+    for (const secret of fixture.forbidden) assert.doesNotMatch(result, new RegExp(secret));
+  }
+});
+
 test("runtime error conversion is bounded and survives hostile coercion", () => {
   const tail = "z".repeat(2_000);
   const result = boundedRuntimeRpcError(new Error(`DATABASE_CREDENTIAL=database-secret ${tail}`));

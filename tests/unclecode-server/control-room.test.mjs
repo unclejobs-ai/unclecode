@@ -61,7 +61,7 @@ test("control-room projection is bounded, redacted, and honest about unproven qu
           hookName: "runClassified",
           status: "error",
           errorName: "PluginHookError",
-          errorMessage: "Authorization: Basic plugin-basic-secret https://user:pass@example.test/?access_token=query-secret Stop hook failed at /Users/alice/private/plugin.mjs: zod/v3",
+          errorMessage: '{"\\u0074oken":"plugin-json-secret"} Stop hook failed at /Users/alice/private/plugin.mjs: zod/v3',
           exitStatus: "2",
           dedupeKey: `sha256:${"c".repeat(64)}`,
           startedAt: 50,
@@ -79,7 +79,7 @@ test("control-room projection is bounded, redacted, and honest about unproven qu
   assert.equal(projection.runs[0].quality.independentVerification, false);
   assert.equal(projection.runs[0].quality.provenance, "Quality Engine (SCC)");
   assert.equal(projection.runs[0].context.included.length, 64);
-  assert.doesNotMatch(JSON.stringify(projection), /super-secret|plugin-basic-secret|query-secret|user:pass|\/workspace\/private/);
+  assert.doesNotMatch(JSON.stringify(projection), /super-secret|plugin-json-secret|\/workspace\/private/);
   assert.deepEqual(projection.runs[0].system.diagnostics[0], {
     runId: "run-1",
     source: "workspace",
@@ -88,7 +88,7 @@ test("control-room projection is bounded, redacted, and honest about unproven qu
     hook: "runClassified",
     status: "error",
     exitStatus: "2",
-    error: "Authorization: Basic [REDACTED] https://[REDACTED]@example.test/?access_token=[REDACTED] Stop hook failed at [PATH] zod/v3",
+    error: '{"\\u0074oken":"[REDACTED]"} Stop hook failed at [PATH] zod/v3',
     dedupeKey: `sha256:${"c".repeat(64)}`,
   });
   assert.doesNotMatch(JSON.stringify(projection.runs[0].system.diagnostics), /alice|super-secret/);

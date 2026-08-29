@@ -132,12 +132,12 @@ test("WorkShell live adapter fails closed for ambiguous approvals and steer targ
 test("WorkShell rejected steer receipts expose only bounded redacted diagnostics", async () => {
   const controls = new LiveRuntimeControlRegistry();
   const engine = fakeEngine();
-  const secret = "steer-client-secret";
+  const secret = "steer-cookie-secret";
   engine.getAgentControlPort = () => ({
     async steer() {
       return {
         status: "not_delivered",
-        message: `Authorization: Basic ${secret} ${"x".repeat(2_000)}`,
+        message: `Set-Cookie: session=${secret}; HttpOnly ${"x".repeat(2_000)}`,
       };
     },
   });
@@ -159,7 +159,7 @@ test("WorkShell rejected steer receipts expose only bounded redacted diagnostics
   assert.equal(result.ok, false);
   assert.equal(result.code, "denied");
   assert.doesNotMatch(result.message, new RegExp(secret));
-  assert.match(result.message, /Authorization: Basic \[REDACTED\]/);
+  assert.equal(result.message, "Set-Cookie: [REDACTED]");
   assert.ok(result.message.length <= 512);
 });
 
