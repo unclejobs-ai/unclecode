@@ -97,8 +97,10 @@ export class RuntimeOwnerClient {
     return await response.json() as RuntimeControlResult;
   }
 
-  async readEngineState(sessionId: string): Promise<RuntimeEngineRpcResponse> {
-    const response = await this.#fetch(`/runtime/sessions/${encodeURIComponent(sessionId)}/state`);
+  async readEngineState(sessionId: string, options: { readonly signal?: AbortSignal | undefined } = {}): Promise<RuntimeEngineRpcResponse> {
+    const response = await this.#fetch(`/runtime/sessions/${encodeURIComponent(sessionId)}/state`, {
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
     return await response.json() as RuntimeEngineRpcResponse;
   }
 
@@ -150,8 +152,10 @@ export class RuntimeOwnerClient {
   }
 
   #fetch(path: string, init: RequestInit = {}): Promise<Response> {
+    const timeout = AbortSignal.timeout(5_000);
     return fetch(`${this.#lease.endpoint}${path}`, {
       ...init,
+      signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
       headers: {
         ...Object.fromEntries(new Headers(init.headers).entries()),
         authorization: `Bearer ${this.#token}`,

@@ -67,6 +67,42 @@ test("remote adapter refreshes and retries one stale revision with the same idem
   engine.dispose();
 });
 
+test("remote adapter rejects a late stale poll instead of regressing owner state", async () => {
+  let reads = 0;
+  const client = {
+    async readEngineState() {
+      reads += 1;
+      return reads === 1
+        ? { ok: true, revision: 5, state: { mode: "deep" }, result: null }
+        : { ok: true, revision: 4, state: { mode: "standard" }, result: null };
+    },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "late-poll");
+  await engine.initialize();
+  assert.equal(engine.getState().mode, "deep");
+  engine.dispose();
+});
+
+test("remote adapter surfaces a decision conflict without retrying against a changed decision", async () => {
+  let revision = 1;
+  let state = { agentConsole: { pendingDecision: { id: "decision-a" } } };
+  let attempts = 0;
+  const client = {
+    async readEngineState() { return { ok: true, revision, state, result: null }; },
+    async invokeEngineMethod() {
+      attempts += 1;
+      revision = 2;
+      state = { agentConsole: { pendingDecision: { id: "decision-b" } } };
+      return { ok: false, code: "revision_conflict", message: "Engine revision changed.", revision };
+    },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "decision-conflict");
+  await assert.rejects(engine.answerPendingDecisionByIndex(1), /Engine revision changed/);
+  assert.equal(attempts, 1, "an index cannot be replayed against a different pending decision identity");
+  assert.equal(engine.getState().agentConsole.pendingDecision.id, "decision-a");
+  engine.dispose();
+});
+
 test("TUI boot attaches through discovery without a fixed port or split local registry", async () => {
   const source = await readFile(new URL("../../apps/unclecode-cli/src/work-runtime.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /17677|EADDRINUSE|startServer\s*\(/);

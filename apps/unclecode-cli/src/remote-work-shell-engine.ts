@@ -3,6 +3,13 @@ import { randomUUID } from "node:crypto";
 
 type State = Readonly<Record<string, unknown>>;
 
+const STABLE_CONFLICT_RETRY_METHODS = new Set([
+  "setMode",
+  "updateTerminalColumns",
+  "updateTerminalRows",
+  "closeOverlay",
+]);
+
 /**
  * Thin TUI projection over the owner process. Dispose detaches only this
  * polling subscriber; it never disposes the owner-held engine or active turn.
@@ -18,22 +25,35 @@ export async function createRemoteWorkShellEngine(
   const listeners = new Set<(state: State) => void>();
   let timer: NodeJS.Timeout | undefined;
   let polling = false;
+  let disposed = false;
+  let pollAbort: AbortController | undefined;
   let invocationTail: Promise<void> = Promise.resolve();
 
-  const publish = (next: unknown, nextRevision: number) => {
+  const publish = (next: unknown, nextRevision: number): boolean => {
+    if (nextRevision <= revision) return false;
     revision = nextRevision;
     state = next as State;
     for (const listener of listeners) listener(state);
+    return true;
   };
-  const readLatest = async () => {
-    const response = await client.readEngineState(sessionId);
-    if (response.ok && response.revision !== revision) publish(response.state, response.revision);
+  const readLatest = async (signal?: AbortSignal) => {
+    const response = await client.readEngineState(sessionId, signal ? { signal } : undefined);
+    if (response.ok) publish(response.state, response.revision);
     return response;
   };
   const refresh = async () => {
-    if (polling) return;
+    if (polling || disposed) return;
     polling = true;
-    try { await readLatest(); } finally { polling = false; }
+    const controller = new AbortController();
+    pollAbort = controller;
+    try {
+      await readLatest(controller.signal);
+    } catch (error) {
+      if (!controller.signal.aborted) throw error;
+    } finally {
+      if (pollAbort === controller) pollAbort = undefined;
+      polling = false;
+    }
   };
   const invoke = async (method: string, args: readonly unknown[]) => {
     const idempotencyKey = randomUUID();
@@ -45,7 +65,11 @@ export async function createRemoteWorkShellEngine(
         publish(response.state, response.revision);
         return response.result;
       }
-      if (response.code !== "revision_conflict" || attempt > 0) throw new Error(response.message);
+      if (
+        response.code !== "revision_conflict"
+        || attempt > 0
+        || !STABLE_CONFLICT_RETRY_METHODS.has(method)
+      ) throw new Error(response.message);
       await readLatest();
     }
     throw new Error("Engine revision remained unstable after refresh.");
@@ -72,6 +96,9 @@ export async function createRemoteWorkShellEngine(
     },
     async initialize() { await refresh(); },
     dispose() {
+      disposed = true;
+      pollAbort?.abort();
+      pollAbort = undefined;
       listeners.clear();
       if (timer) clearInterval(timer);
       timer = undefined;
