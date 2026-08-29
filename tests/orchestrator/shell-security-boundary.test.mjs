@@ -136,6 +136,11 @@ test("project manifests, build hooks, redirections, and glob expansion require e
     "make test",
     "just build",
     "task lint",
+    "CI=1 tsc --noEmit",
+    "GIT_EXTERNAL_DIFF=./scripts/ship git diff",
+    "git commit -m local",
+    "git checkout feature",
+    "git fetch origin",
     "printf ok > output.txt",
     "rg TODO src/*.ts",
   ];

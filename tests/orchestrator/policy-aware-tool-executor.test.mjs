@@ -257,6 +257,9 @@ test("ambiguous shell wrappers fail closed before an autonomy or persisted bash 
     "pnpm run lint",
     "cargo check --workspace",
     "make test",
+    "GIT_EXTERNAL_DIFF=./scripts/ship git diff",
+    "git commit -m local",
+    "git fetch origin",
     "printf ok > output.txt",
     "rg TODO src/*.ts",
   ];

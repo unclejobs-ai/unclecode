@@ -159,6 +159,10 @@ const LOCAL_GIT_SUBCOMMANDS = new Set([
   "reflog", "remote", "reset", "restore", "revert", "rev-parse", "rm", "show",
   "sparse-checkout", "stash", "status", "switch", "tag", "worktree",
 ]);
+const GIT_NETWORK_SUBCOMMANDS = new Set(["clone", "fetch", "pull"]);
+const GIT_HOOK_SUBCOMMANDS = new Set([
+  "am", "checkout", "cherry-pick", "commit", "rebase", "switch", "worktree",
+]);
 const DYNAMIC_SHELL_PATTERN = /(?:`|\$\(|\$\{|\$[A-Za-z_])/;
 const ASSIGNMENT_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const RELEASE_TASK_PATTERN = /^(?:deploy|publish|release)(?::|$)/;
@@ -375,6 +379,12 @@ function directShellApproval(
 ): OneShotShellApprovalKind | undefined {
   let commandIndex = firstCommandIndex(tokens);
   if (commandIndex >= tokens.length) return undefined;
+  if (commandIndex > 0) {
+    // Prefix assignments can replace PATH or activate executable callbacks
+    // (for example GIT_EXTERNAL_DIFF), changing the effect of an otherwise
+    // recognizable command. The assignment and command are approved together.
+    return "project-code";
+  }
   let executable = executableName(tokens[commandIndex] ?? "");
 
   let wrapperDepth = 0;
@@ -442,6 +452,11 @@ function directShellApproval(
     // The current branch is runtime state unavailable to this layer, so every
     // merge is guarded rather than guessing whether it updates main.
     if (subcommand === "merge") return "git-merge";
+    if (subcommand && GIT_NETWORK_SUBCOMMANDS.has(subcommand)) return "external-client";
+    if (subcommand && GIT_HOOK_SUBCOMMANDS.has(subcommand)) return "project-code";
+    if (subcommand === "archive" && globalArguments.some((token) => token.startsWith("--remote"))) {
+      return "external-client";
+    }
     return subcommand && LOCAL_GIT_SUBCOMMANDS.has(subcommand) ? undefined : "ambiguous-wrapper";
   }
 
