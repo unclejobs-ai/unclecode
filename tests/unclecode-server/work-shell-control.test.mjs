@@ -57,6 +57,11 @@ function fakeEngine() {
       publish({ agentConsole: { ...state.agentConsole, pendingDecision: undefined } });
       return true;
     },
+    answerPendingUserDecision(decisionId, answers) {
+      calls.push(["decision", decisionId, answers]);
+      publish({ agentConsole: { ...state.agentConsole, pendingDecision: undefined } });
+      return true;
+    },
     getAgentControlPort() {
       return {
         async steer(agentRunId, message) { calls.push(["steer", agentRunId, message]); return { status: "delivered" }; },
@@ -116,6 +121,109 @@ test("WorkShell live adapter fails closed for ambiguous approvals and steer targ
   assert.equal(staleSteer.code, "denied");
   assert.equal(controls.snapshot("live-2").revision, 1, "rejected controls cannot consume owner revisions");
   assert.deepEqual(engine.calls, []);
+});
+
+test("WorkShell live adapter settles one exact typed user decision", async () => {
+  const controls = new LiveRuntimeControlRegistry();
+  const engine = fakeEngine();
+  engine.getState().agentConsole.pendingDecision = {
+    kind: "user-decision",
+    id: "release-choice",
+    questions: [{
+      id: "lane",
+      question: "Which lane?",
+      options: [{ label: "Canary" }, { label: "Stable" }],
+    }, {
+      id: "checks",
+      question: "Which checks?",
+      options: [{ label: "Unit" }, { label: "Integration" }],
+      multi: true,
+    }],
+  };
+  attachWorkShellRuntime(controls, { sessionId: "live-decision", projectPath: "/tmp/p", engine, initialRevision: 3 });
+  const request = {
+    sessionId: "live-decision",
+    action: "decision",
+    expectedRevision: 3,
+    idempotencyKey: "decision-key",
+    payload: {
+      decisionId: "release-choice",
+      answers: [
+        { id: "lane", selectedOptions: ["Canary"] },
+        { id: "checks", selectedOptions: ["Unit", "Integration"] },
+      ],
+    },
+  };
+
+  const first = await controls.control(request);
+  const replay = await controls.control(request);
+  assert.equal(first.ok, true);
+  assert.deepEqual(replay, first);
+  assert.equal(first.revision, 4);
+  assert.deepEqual(engine.calls, [["decision", "release-choice", request.payload.answers]]);
+});
+
+test("WorkShell decision control rejects stale identity, wrong kind, invalid options, and invalid multiplicity", async () => {
+  const attempts = [
+    {
+      name: "stale identity",
+      mutate(engine) { engine.getState().agentConsole.pendingDecision.id = "new-decision"; },
+      payload: { decisionId: "old-decision", answers: [{ id: "lane", selectedOptions: ["Canary"] }] },
+    },
+    {
+      name: "wrong kind",
+      mutate(engine) { engine.getState().agentConsole.pendingDecision.kind = "security-approval"; },
+      payload: { decisionId: "release-choice", answers: [{ id: "lane", selectedOptions: ["Canary"] }] },
+    },
+    {
+      name: "invalid option",
+      payload: { decisionId: "release-choice", answers: [{ id: "lane", selectedOptions: ["Unknown"] }] },
+    },
+    {
+      name: "invalid single-select multiplicity",
+      payload: { decisionId: "release-choice", answers: [{ id: "lane", selectedOptions: ["Canary", "Stable"] }] },
+    },
+  ];
+
+  for (const [index, attempt] of attempts.entries()) {
+    const controls = new LiveRuntimeControlRegistry();
+    const engine = fakeEngine();
+    engine.getState().agentConsole.pendingDecision = {
+      kind: "user-decision",
+      id: "release-choice",
+      questions: [{ id: "lane", question: "Which lane?", options: [{ label: "Canary" }, { label: "Stable" }] }],
+    };
+    attempt.mutate?.(engine);
+    attachWorkShellRuntime(controls, { sessionId: `invalid-${index}`, projectPath: "/tmp/p", engine, initialRevision: 7 });
+    const result = await controls.control({
+      sessionId: `invalid-${index}`,
+      action: "decision",
+      expectedRevision: 7,
+      idempotencyKey: attempt.name,
+      payload: attempt.payload,
+    });
+    assert.equal(result.code, "denied", attempt.name);
+    assert.equal(controls.snapshot(`invalid-${index}`).revision, 7, `${attempt.name} must not consume a revision`);
+    assert.deepEqual(engine.calls, [], attempt.name);
+  }
+
+  const staleControls = new LiveRuntimeControlRegistry();
+  const staleEngine = fakeEngine();
+  staleEngine.getState().agentConsole.pendingDecision = {
+    kind: "user-decision",
+    id: "release-choice",
+    questions: [{ id: "lane", question: "Which lane?", options: [{ label: "Canary" }] }],
+  };
+  attachWorkShellRuntime(staleControls, { sessionId: "stale-revision", projectPath: "/tmp/p", engine: staleEngine, initialRevision: 9 });
+  const stale = await staleControls.control({
+    sessionId: "stale-revision",
+    action: "decision",
+    expectedRevision: 8,
+    idempotencyKey: "stale-revision",
+    payload: { decisionId: "release-choice", answers: [{ id: "lane", selectedOptions: ["Canary"] }] },
+  });
+  assert.equal(stale.code, "revision_conflict");
+  assert.deepEqual(staleEngine.calls, []);
 });
 
 test("persistent read model includes an attached live WorkShell before its first checkpoint", async () => {

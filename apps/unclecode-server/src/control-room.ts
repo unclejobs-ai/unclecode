@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import type { ControlRoomPendingDecision } from "@unclecode/contracts";
 
 const MAX_RUNS = 128;
 const MAX_CONTEXT_SOURCES = 64;
@@ -7,7 +8,14 @@ const MAX_DIAGNOSTICS = 32;
 const MAX_ARTIFACTS = 64;
 const MAX_EVOLUTION_PROPOSALS = 32;
 const MAX_CACHE_TELEMETRY = 32;
+const MAX_DECISION_QUESTIONS = 8;
+const MAX_DECISION_OPTIONS = 16;
 const MAX_TEXT = 800;
+const MAX_DECISION_TITLE = 240;
+const MAX_DECISION_QUESTION = 400;
+const MAX_DECISION_DESCRIPTION = 320;
+const MAX_DECISION_LABEL = 240;
+const SAFE_DECISION_ID = /^[A-Za-z0-9._:-]{1,160}$/;
 
 export type ControlRoomLocale = "en" | "ko";
 export type RuntimeSessionState = "idle" | "running" | "pause_pending" | "paused" | "requires_action" | "completed" | "failed" | "cancelled";
@@ -83,6 +91,7 @@ export type ControlRoomRun = {
   readonly model: string;
   readonly provider: string;
   readonly attentionReason?: string;
+  readonly pendingDecision?: ControlRoomPendingDecision;
   readonly quality: {
     readonly recorded: boolean;
     readonly provenance: "Quality Engine (SCC)" | "not-recorded";
@@ -158,6 +167,93 @@ function sanitizeRecord(input: Readonly<Record<string, unknown>>): Readonly<Reco
     else if (isRecord(value)) output[key] = sanitizeRecord(value);
   }
   return output;
+}
+
+/**
+ * Project decisions only when their answer identities can round-trip exactly.
+ * Display-only prose is bounded and redacted, while IDs and option labels are
+ * either safe as-is or the whole decision is omitted.
+ */
+function pendingDecisionFrom(
+  consoleRecord: Readonly<Record<string, unknown>>,
+): ControlRoomPendingDecision | undefined {
+  const decision = isRecord(consoleRecord.pendingDecision) ? consoleRecord.pendingDecision : undefined;
+  if (
+    !decision
+    || (decision.kind !== "security-approval" && decision.kind !== "user-decision")
+    || typeof decision.id !== "string"
+    || !SAFE_DECISION_ID.test(decision.id)
+    || !Array.isArray(decision.questions)
+    || decision.questions.length === 0
+    || decision.questions.length > MAX_DECISION_QUESTIONS
+  ) {
+    return undefined;
+  }
+
+  const questionIds = new Set<string>();
+  const questions: ControlRoomPendingDecision["questions"][number][] = [];
+  for (const candidate of decision.questions) {
+    if (
+      !isRecord(candidate)
+      || typeof candidate.id !== "string"
+      || !SAFE_DECISION_ID.test(candidate.id)
+      || questionIds.has(candidate.id)
+      || typeof candidate.question !== "string"
+      || candidate.question.trim().length === 0
+      || !Array.isArray(candidate.options)
+      || candidate.options.length === 0
+      || candidate.options.length > MAX_DECISION_OPTIONS
+      || (candidate.multi !== undefined && typeof candidate.multi !== "boolean")
+    ) {
+      return undefined;
+    }
+    questionIds.add(candidate.id);
+
+    const labels = new Set<string>();
+    const options: ControlRoomPendingDecision["questions"][number]["options"][number][] = [];
+    for (const optionCandidate of candidate.options) {
+      if (!isRecord(optionCandidate) || typeof optionCandidate.label !== "string") return undefined;
+      const label = optionCandidate.label;
+      if (
+        label.length === 0
+        || label.length > MAX_DECISION_LABEL
+        || label.trim() !== label
+        || redactText(label, MAX_DECISION_LABEL) !== label
+        || labels.has(label)
+        || (optionCandidate.description !== undefined && typeof optionCandidate.description !== "string")
+      ) {
+        return undefined;
+      }
+      labels.add(label);
+      options.push({
+        label,
+        ...(typeof optionCandidate.description === "string"
+          ? { description: redactText(optionCandidate.description, MAX_DECISION_DESCRIPTION) }
+          : {}),
+      });
+    }
+
+    const recommended = candidate.recommended;
+    if (recommended !== undefined && (!Number.isSafeInteger(recommended) || Number(recommended) < 0 || Number(recommended) >= options.length)) {
+      return undefined;
+    }
+    questions.push({
+      id: candidate.id,
+      question: redactText(candidate.question, MAX_DECISION_QUESTION),
+      options,
+      ...(candidate.multi === true ? { multi: true } : {}),
+      ...(typeof recommended === "number" ? { recommended } : {}),
+    });
+  }
+
+  return {
+    kind: decision.kind,
+    id: decision.id,
+    ...(typeof decision.title === "string" && decision.title.trim().length > 0
+      ? { title: redactText(decision.title, MAX_DECISION_TITLE) }
+      : {}),
+    questions,
+  };
 }
 
 function cacheTelemetry(
@@ -436,6 +532,7 @@ function projectRun(session: RuntimeSessionSource): ControlRoomRun {
   const aggregate = terminalQualityAggregate(history);
   const stage = stringField(aggregate, "stage", stringField(qualityRecord, "currentStage", stringField(graphRecord, "currentStage", "unknown")));
   const gate = stringField(aggregate, "decision", stringField(qualityRecord, "latestDecision", stringField(graphRecord, "gateStatus", "unproven")));
+  const pendingDecision = pendingDecisionFrom(consoleRecord);
   const latest = aggregate ?? history.at(-1);
   const failures = Array.isArray(latest?.failures)
     ? latest.failures.filter((value): value is string => typeof value === "string").slice(0, 32).map(value => redactText(value, 320))
@@ -446,7 +543,11 @@ function projectRun(session: RuntimeSessionSource): ControlRoomRun {
   const profile = stringField(qualityRecord, "profile", stringField(graphRecord, "qualityProfile", "unknown"));
   const metadata = isRecord(session.metadata) ? session.metadata : {};
   const attentionReason = session.state === "requires_action"
-    ? session.locale === "ko" ? "보안 승인 또는 사용자 결정이 필요합니다." : "Security approval or user decision required"
+    ? pendingDecision?.kind === "security-approval"
+      ? session.locale === "ko" ? "보안 승인이 필요합니다." : "Security approval required"
+      : pendingDecision?.kind === "user-decision"
+        ? session.locale === "ko" ? "사용자 결정이 필요합니다." : "User decision required"
+        : session.locale === "ko" ? "운영자 작업이 필요합니다." : "Operator action required"
     : gate === "block" || gate === "pivot" || gate === "refine"
       ? failures[0] ?? (session.locale === "ko" ? `품질 게이트: ${gate}` : `Quality gate: ${gate}`)
       : undefined;
@@ -456,6 +557,7 @@ function projectRun(session: RuntimeSessionSource): ControlRoomRun {
   const evolve = evolutionFrom(consoleRecord);
 
   return {
+    ...(pendingDecision ? { pendingDecision } : {}),
     id: redactText(session.sessionId, 180),
     project: projectName(session.projectPath),
     locale: session.locale,

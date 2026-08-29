@@ -10,6 +10,55 @@ export type WorkShellDecisionReply =
   | { readonly kind: "cancelled" }
   | { readonly kind: "invalid"; readonly message: string };
 
+const MAX_CUSTOM_INPUT = 800;
+
+/**
+ * Validate a structured answer against one exact pending request. Answers are
+ * returned in question order so every settlement path has one canonical form.
+ */
+export function resolveWorkShellDecisionAnswers(input: {
+  readonly request: AskUserQuestionRequest;
+  readonly decisionId: string;
+  readonly answers: readonly AskUserQuestionAnswer[];
+}): AskUserQuestionResult | undefined {
+  if (input.request.id !== input.decisionId || !Array.isArray(input.answers)) return undefined;
+  if (input.answers.length !== input.request.questions.length) return undefined;
+
+  const answersById = new Map<string, AskUserQuestionAnswer>();
+  for (const answer of input.answers) {
+    if (!answer || typeof answer !== "object" || typeof answer.id !== "string" || answersById.has(answer.id)) {
+      return undefined;
+    }
+    answersById.set(answer.id, answer);
+  }
+
+  const normalized: AskUserQuestionAnswer[] = [];
+  for (const question of input.request.questions) {
+    const answer = answersById.get(question.id);
+    if (!answer || !Array.isArray(answer.selectedOptions)) return undefined;
+    const selectedOptions = [...answer.selectedOptions];
+    if (selectedOptions.length === 0 || (question.multi !== true && selectedOptions.length !== 1)) return undefined;
+    if (selectedOptions.some(option => typeof option !== "string" || !question.options.some(candidate => candidate.label === option))) {
+      return undefined;
+    }
+    if (new Set(selectedOptions).size !== selectedOptions.length) return undefined;
+    if (answer.customInput !== undefined && (
+      typeof answer.customInput !== "string"
+      || answer.customInput.trim().length === 0
+      || answer.customInput.length > MAX_CUSTOM_INPUT
+    )) {
+      return undefined;
+    }
+    normalized.push({
+      id: question.id,
+      selectedOptions,
+      ...(answer.customInput === undefined ? {} : { customInput: answer.customInput }),
+    });
+  }
+
+  return { status: "answered", answers: normalized };
+}
+
 /**
  * Resolves a compact composer reply without giving free-form input a second
  * route into the tool protocol. One question accepts `1` or an option label.

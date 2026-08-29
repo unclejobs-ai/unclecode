@@ -157,6 +157,7 @@ async function isConfirmed(
   if (bridge === undefined) {
     return false;
   }
+    kind: "security-approval",
   const request: AskUserQuestionRequest = {
     id: `${CONFIRMATION_QUESTION_ID}:${toolName}`,
     title: "Execution policy confirmation",

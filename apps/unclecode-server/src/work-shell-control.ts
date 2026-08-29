@@ -3,12 +3,12 @@ import { LiveRuntimeControlRegistry } from "./persistent-runtime.js";
 import type { RuntimeControlRequest, RuntimeControlResult } from "./runtime-adapter.js";
 import type { RuntimeSessionRevisionClock } from "./runtime-engine-rpc.js";
 import { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
+import type {
+  AskUserQuestionAnswer,
+  AskUserQuestionRequest,
+  ControlRoomDecisionPayload,
+} from "@unclecode/contracts";
 
-type DecisionOption = { readonly label: string };
-type PendingDecision = {
-  readonly kind: "security-approval" | "user-decision";
-  readonly questions: readonly { readonly options: readonly DecisionOption[] }[];
-};
 type AgentRun = { readonly id: string; readonly status?: string | undefined };
 
 export type WorkShellControlEngine = {
@@ -19,7 +19,7 @@ export type WorkShellControlEngine = {
     readonly mode: string;
     readonly uiLocale: "en" | "ko";
     readonly agentConsole: Readonly<Record<string, unknown>> & {
-      readonly pendingDecision?: PendingDecision | undefined;
+      readonly pendingDecision?: AskUserQuestionRequest | undefined;
       readonly agents?: readonly AgentRun[] | undefined;
     };
   };
@@ -36,6 +36,7 @@ export type WorkShellControlEngine = {
   resumeQueueItems(): Promise<void>;
   handleSubmit(message: string): Promise<void>;
   answerPendingDecisionByIndex(index: number): boolean;
+  answerPendingUserDecision(decisionId: string, answers: readonly AskUserQuestionAnswer[]): boolean;
   getAgentControlPort(): {
     steer(agentRunId: string, message: string): Promise<{ readonly status: string; readonly message?: string }>;
   };
@@ -48,8 +49,31 @@ export type WorkShellRuntimeChange = {
 };
 
 function messageFrom(request: RuntimeControlRequest): string | undefined {
+  if (request.action === "decision") return undefined;
   const value = request.payload?.message;
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function validDecisionAnswers(
+  pending: AskUserQuestionRequest | undefined,
+  payload: ControlRoomDecisionPayload,
+): boolean {
+  if (pending?.kind !== "user-decision" || pending.id !== payload.decisionId) return false;
+  if (!Array.isArray(payload.answers) || payload.answers.length !== pending.questions.length) return false;
+  const byId = new Map<string, AskUserQuestionAnswer>();
+  for (const answer of payload.answers) {
+    if (!answer || typeof answer !== "object" || typeof answer.id !== "string" || byId.has(answer.id)) return false;
+    byId.set(answer.id, answer);
+  }
+  return pending.questions.every(question => {
+    const answer = byId.get(question.id);
+    if (!answer || !Array.isArray(answer.selectedOptions)) return false;
+    if (answer.selectedOptions.length === 0 || (question.multi !== true && answer.selectedOptions.length !== 1)) return false;
+    if (new Set(answer.selectedOptions).size !== answer.selectedOptions.length) return false;
+    if (answer.selectedOptions.some(label => typeof label !== "string" || !question.options.some(option => option.label === label))) return false;
+    return answer.customInput === undefined
+      || (typeof answer.customInput === "string" && answer.customInput.trim().length > 0 && answer.customInput.length <= 800);
+  });
 }
 
 function stateOf(engine: WorkShellControlEngine): RuntimeSessionSource["state"] {
@@ -168,6 +192,12 @@ export function attachWorkShellRuntime(
           return deny("denied", "The security approval is no longer pending.");
         }
       }
+      if (request.action === "decision" && !validDecisionAnswers(
+        input.engine.getState().agentConsole.pendingDecision,
+        request.payload,
+      )) {
+        return deny("denied", "The user decision changed or the submitted answers are invalid.");
+      }
       return undefined;
     },
     async control(request) {
@@ -202,6 +232,13 @@ export function attachWorkShellRuntime(
           const index = pending.questions[0]?.options.findIndex(option => option.label === "Approve") ?? -1;
           if (index < 0 || !input.engine.answerPendingDecisionByIndex(index + 1)) {
             return deny("denied", "The security approval is no longer pending.");
+          }
+        } else if (request.action === "decision") {
+          if (!validDecisionAnswers(input.engine.getState().agentConsole.pendingDecision, request.payload)) {
+            return deny("denied", "The user decision changed or the submitted answers are invalid.");
+          }
+          if (!input.engine.answerPendingUserDecision(request.payload.decisionId, request.payload.answers)) {
+            return deny("denied", "The user decision is no longer pending.");
           }
         } else {
           return deny("invalid_action", "Unknown runtime action.");

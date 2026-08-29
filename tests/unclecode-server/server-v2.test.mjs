@@ -79,6 +79,40 @@ test("typed controls validate body, revision, and idempotency", async () => {
   }
 });
 
+test("typed decision endpoint rejects malformed answers before runtime admission", async () => {
+  const { handlers, calls } = fixture();
+  const server = await startServer({ port: 0, handlers, authToken: TOKEN });
+  try {
+    const malformed = await fetch(`${server.url}/sessions/s1/actions/decision`, {
+      method: "POST",
+      headers: headers({ "content-type": "application/json", "idempotency-key": "decision-bad" }),
+      body: JSON.stringify({
+        expectedRevision: 2,
+        payload: { decisionId: "decision-1", answers: [{ id: "lane", selectedOptions: [] }] },
+      }),
+    });
+    assert.equal(malformed.status, 400);
+    assert.equal((await malformed.json()).error.code, "invalid_payload");
+    assert.equal(calls.length, 0);
+
+    const payload = {
+      decisionId: "decision-1",
+      answers: [{ id: "lane", selectedOptions: ["Canary"] }],
+    };
+    const accepted = await fetch(`${server.url}/sessions/s1/actions/decision`, {
+      method: "POST",
+      headers: headers({ "content-type": "application/json", "idempotency-key": "decision-good" }),
+      body: JSON.stringify({ expectedRevision: 2, payload }),
+    });
+    assert.equal(accepted.status, 200);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].action, "decision");
+    assert.deepEqual(calls[0].payload, payload);
+  } finally {
+    await server.stop();
+  }
+});
+
 test("SSE uses ids and Last-Event-ID replay", async () => {
   const { handlers, journal } = fixture();
   const first = journal.publish("s1", "run.updated", { revision: 1 });

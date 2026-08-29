@@ -1,7 +1,134 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createControlRoomStore, parseSseFrames } from "../../apps/godness-web/src/control-room-store.js";
+import { readFile } from "node:fs/promises";
+
+import { createControlRoomStore, normalizeLoopbackServerUrl, parseSseFrames } from "../../apps/godness-web/src/control-room-store.js";
+import { canApproveOnce, normalizePendingDecision } from "../../apps/godness-web/src/pending-decision.js";
+import { readRuntimeBootstrap } from "../../apps/godness-web/src/runtime-bootstrap.js";
+import { deriveWorkFocus } from "../../apps/godness-web/src/work-focus.js";
+
+test("web runtime bootstrap never needs a build-time token", async () => {
+  assert.deepEqual(
+    readRuntimeBootstrap({ baseUrl: "http://localhost:19000", token: " runtime-secret " }, "http://127.0.0.1:17677"),
+    { baseUrl: "http://localhost:19000", token: "runtime-secret" },
+  );
+  assert.deepEqual(
+    readRuntimeBootstrap(undefined, "http://127.0.0.1:18000"),
+    { baseUrl: "http://127.0.0.1:18000", token: "" },
+  );
+  const mainSource = await readFile(new URL("../../apps/godness-web/src/main.jsx", import.meta.url), "utf8");
+  assert.doesNotMatch(mainSource, /VITE_UNCLECODE_SERVER_TOKEN|localStorage|sessionStorage|location\.(?:hash|search)/);
+});
+
+test("web store accepts only loopback credential targets", async () => {
+  assert.equal(normalizeLoopbackServerUrl("http://localhost:17677/"), "http://localhost:17677");
+  assert.equal(normalizeLoopbackServerUrl("https://[::1]:17677"), "https://[::1]:17677");
+  assert.throws(() => normalizeLoopbackServerUrl("https://control.example.com"), /loopback/i);
+  assert.throws(() => normalizeLoopbackServerUrl("http://127.0.0.1:17677/control-room?token=secret"), /loopback/i);
+
+  let fetches = 0;
+  const store = createControlRoomStore({
+    baseUrl: "http://127.0.0.1:17677",
+    fetchImpl: async () => { fetches += 1; return new Response("{}", { status: 200 }); },
+    connectEvents: false,
+  });
+  assert.equal(store.getSnapshot().status, "auth_required");
+  await store.start();
+  assert.equal(fetches, 0);
+  await store.authenticate({ baseUrl: "https://control.example.com", token: "do-not-send" });
+  assert.equal(fetches, 0);
+  assert.equal(store.getSnapshot().status, "auth_required");
+});
+
+test("locking the web store cannot be undone by a stale authenticated response", async () => {
+  let release;
+  const pendingResponse = new Promise(resolve => { release = resolve; });
+  const store = createControlRoomStore({
+    baseUrl: "http://127.0.0.1:17677",
+    token: "secret",
+    fetchImpl: async () => pendingResponse,
+    connectEvents: false,
+  });
+  const starting = store.start();
+  store.clearCredentials();
+  release(new Response(JSON.stringify({ version: 1, runs: [{ id: "s1" }] }), { status: 200 }));
+  await starting;
+
+  assert.equal(store.getSnapshot().status, "auth_required");
+  assert.equal(store.getSnapshot().data, null);
+});
+
+test("web work focus preserves task, remaining-stage, blocker, then detail inputs", () => {
+  const focus = deriveWorkFocus({
+    project: "unclecode",
+    state: "running",
+    attentionReason: "Waiting for tests",
+    graph: { nodes: [
+      { id: "plan", title: "Plan the work", status: "completed" },
+      { id: "implement", title: "Implement Control Room", status: "running" },
+    ] },
+    quality: { stage: "work", gate: "refine", findings: ["A lower-priority finding"] },
+  });
+  assert.equal(focus.currentTask, "Implement Control Room");
+  assert.deepEqual(focus.remainingStages, ["critic", "promote"]);
+  assert.equal(focus.blocker, "Waiting for tests");
+  assert.equal(focus.blockerKind, "attention");
+});
+
+test("web decisions keep security approval separate from typed user questions", async () => {
+  const userDecision = normalizePendingDecision({
+    kind: "user-decision",
+    id: "release-choice",
+    title: "Choose a release lane",
+    questions: [{
+      id: "lane",
+      question: "Which lane should continue?",
+      options: [{ label: "Canary", description: "Small cohort" }, { label: "Stable" }],
+      recommended: 0,
+    }],
+  });
+  assert.equal(userDecision.kind, "user-decision");
+  assert.equal(userDecision.questions[0].options[0].description, "Small cohort");
+  assert.equal(canApproveOnce(userDecision), false);
+  assert.equal(canApproveOnce(normalizePendingDecision({
+    kind: "security-approval",
+    id: "tool-policy",
+    questions: [{ id: "allow", question: "Allow this tool?", options: [{ label: "Approve" }, { label: "Reject" }] }],
+  })), true);
+  assert.equal(normalizePendingDecision({
+    kind: "user-decision",
+    id: "oversized",
+    questions: Array.from({ length: 9 }, (_, index) => ({ id: `q-${index}`, question: "Choose", options: [{ label: "One" }] })),
+  }), null);
+
+  const appSource = await readFile(new URL("../../apps/godness-web/src/App.jsx", import.meta.url), "utf8");
+  assert.doesNotMatch(appSource, /run\.state\s*===\s*['"]requires_action['"][^\n]*doAction\(['"]approve['"]/);
+});
+
+test("work focus names an explicit user decision before a generic attention reason", () => {
+  const focus = deriveWorkFocus({
+    project: "unclecode",
+    state: "requires_action",
+    attentionReason: "Security approval or user decision required",
+    pendingDecision: { kind: "user-decision" },
+    graph: { nodes: [] },
+    quality: { stage: "plan", gate: "unproven", findings: [] },
+  });
+  assert.equal(focus.blocker, "user_decision");
+  assert.equal(focus.blockerKind, "decision");
+});
+
+test("work focus does not infer security approval from an untyped action state", () => {
+  const focus = deriveWorkFocus({
+    project: "unclecode",
+    state: "requires_action",
+    graph: { nodes: [] },
+    quality: { stage: "plan", gate: "unproven", findings: [] },
+  });
+  assert.equal(focus.blocker, "action_required");
+  assert.equal(focus.blockerKind, "attention");
+});
 
 test("web store loads one bounded snapshot and applies SSE refresh without duplicate connections", async () => {
   let fetches = 0;
@@ -49,6 +176,45 @@ test("SSE parser preserves event ids and ignores incomplete frames", () => {
   const parsed = parseSseFrames("id: 7\nevent: quality.updated\ndata: {\"gate\":\"refine\"}\n\nid: 8\nevent: run.updated\n");
   assert.deepEqual(parsed.events, [{ id: 7, event: "quality.updated", data: { gate: "refine" } }]);
   assert.match(parsed.rest, /id: 8/);
+});
+
+test("SSE parser accepts CRLF frames and rejects partial numeric event ids", () => {
+  const parsed = parseSseFrames("id: 9\r\nevent: run.updated\r\ndata: {}\r\n\r\nid: 10x\ndata: {}\n\n");
+  assert.deepEqual(parsed.events, [{ id: 9, event: "run.updated", data: {} }]);
+});
+
+test("web store sends steer, follow-up, and typed decisions through authenticated action routes", async () => {
+  let revision = 7;
+  const actions = [];
+  const fetchImpl = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname === "/control-room") {
+      return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs: [{ id: "s1", revision }] }), { status: 200 });
+    }
+    actions.push({ pathname, init, body: JSON.parse(init.body) });
+    revision += 1;
+    return new Response(JSON.stringify({ ok: true, revision, state: "running" }), { status: 200 });
+  };
+  const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl, connectEvents: false });
+  await store.start();
+  await store.action("s1", "steer", 7, { agentRunId: "agent-1", message: "Check the failing test" });
+  await store.action("s1", "follow-up", 8, { message: "Run the focused verification" });
+  await store.action("s1", "decision", 9, {
+    decisionId: "release-choice",
+    answers: [{ id: "lane", selectedOptions: ["Canary"] }],
+  });
+
+  assert.deepEqual(actions.map(item => item.pathname), [
+    "/sessions/s1/actions/steer",
+    "/sessions/s1/actions/follow-up",
+    "/sessions/s1/actions/decision",
+  ]);
+  assert.deepEqual(actions[0].body.payload, { agentRunId: "agent-1", message: "Check the failing test" });
+  assert.deepEqual(actions[2].body.payload, {
+    decisionId: "release-choice",
+    answers: [{ id: "lane", selectedOptions: ["Canary"] }],
+  });
+  assert.equal(actions.every(item => item.init.headers.authorization === "Bearer secret"), true);
 });
 
 test("web store reuses the idempotency key after an ambiguous network failure", async () => {

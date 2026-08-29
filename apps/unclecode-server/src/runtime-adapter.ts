@@ -1,16 +1,25 @@
 import { createControlRoomProjection, type ControlRoomProjection, type RuntimeReadSource } from "./control-room.js";
 import { canonicalMutationFingerprint } from "./runtime-ledger.js";
+import type { ControlRoomDecisionPayload } from "@unclecode/contracts";
 
-export const CONTROL_ACTIONS = ["pause", "resume", "cancel", "approve", "steer", "follow-up"] as const;
+export const CONTROL_ACTIONS = ["pause", "resume", "cancel", "approve", "decision", "steer", "follow-up"] as const;
 export type ControlAction = (typeof CONTROL_ACTIONS)[number];
 
-export type RuntimeControlRequest = {
+type RuntimeControlRequestBase = {
   readonly sessionId: string;
-  readonly action: ControlAction;
   readonly expectedRevision: number;
   readonly idempotencyKey: string;
-  readonly payload?: Readonly<Record<string, unknown>>;
 };
+
+export type RuntimeControlRequest =
+  | RuntimeControlRequestBase & {
+      readonly action: "decision";
+      readonly payload: ControlRoomDecisionPayload;
+    }
+  | RuntimeControlRequestBase & {
+      readonly action: Exclude<ControlAction, "decision">;
+      readonly payload?: Readonly<Record<string, unknown>>;
+    };
 
 export type RuntimeControlResult =
   | { readonly ok: true; readonly revision: number; readonly state: string; readonly receiptId?: string }

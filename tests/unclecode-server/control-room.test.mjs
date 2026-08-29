@@ -79,6 +79,82 @@ test("control-room projection is bounded, redacted, and honest about unproven qu
   assert.match(projection.runs[0].system.diagnostics[0].error, /\[REDACTED\]/);
 });
 
+test("control-room projects bounded user decisions without changing answer identities", () => {
+  const decision = {
+    kind: "user-decision",
+    id: "release-choice",
+    title: "Choose token=private lane",
+    questions: [{
+      id: "lane",
+      question: "Which lane uses token=private?",
+      options: [
+        { label: "Canary", description: "Use api_key=private for a small cohort" },
+        { label: "Stable", description: "Use the established path" },
+      ],
+      recommended: 0,
+    }, {
+      id: "checks",
+      question: "Which checks?",
+      options: [{ label: "Unit" }, { label: "Integration" }],
+      multi: true,
+    }],
+  };
+  const projection = createControlRoomProjection({
+    generatedAt: 103,
+    sessions: [{
+      sessionId: "decision-session",
+      projectPath: "/workspace/project",
+      locale: "en",
+      state: "requires_action",
+      revision: 5,
+      agentConsole: { pendingDecision: decision },
+    }],
+  });
+
+  assert.equal(projection.runs[0].pendingDecision.id, "release-choice");
+  assert.equal(projection.runs[0].pendingDecision.kind, "user-decision");
+  assert.deepEqual(projection.runs[0].pendingDecision.questions[0].options.map(option => option.label), ["Canary", "Stable"]);
+  assert.equal(projection.runs[0].pendingDecision.questions[1].multi, true);
+  assert.equal(projection.runs[0].attentionReason, "User decision required");
+  assert.doesNotMatch(JSON.stringify(projection.runs[0].pendingDecision), /private/);
+
+  const unsafe = createControlRoomProjection({
+    generatedAt: 104,
+    sessions: [{
+      sessionId: "unsafe-decision",
+      projectPath: "/workspace/project",
+      locale: "en",
+      state: "requires_action",
+      revision: 1,
+      agentConsole: {
+        pendingDecision: {
+          ...decision,
+          questions: [{ id: "lane", question: "Which lane?", options: [{ label: "token=private" }] }],
+        },
+      },
+    }, {
+      sessionId: "oversized-decision",
+      projectPath: "/workspace/project",
+      locale: "en",
+      state: "requires_action",
+      revision: 1,
+      agentConsole: {
+        pendingDecision: {
+          ...decision,
+          questions: Array.from({ length: 9 }, (_, index) => ({
+            id: `question-${index}`,
+            question: "Choose",
+            options: [{ label: "Continue" }],
+          })),
+        },
+      },
+    }],
+  });
+  assert.equal(unsafe.runs[0].pendingDecision, undefined, "answer labels that require redaction must fail closed");
+  assert.equal(unsafe.runs[1].pendingDecision, undefined, "oversized decisions must not be truncated into an unanswerable mutation");
+  assert.equal(unsafe.runs[0].attentionReason, "Operator action required");
+});
+
 test("control-room preserves authoritative critic provenance through terminal promotion", () => {
   const projection = createControlRoomProjection({
     generatedAt: 101,

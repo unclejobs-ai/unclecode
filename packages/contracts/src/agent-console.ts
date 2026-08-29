@@ -65,6 +65,7 @@ export type AskUserQuestionAnswer = {
 };
 
 export type AskUserQuestionRequest = {
+  readonly kind: "security-approval" | "user-decision";
   readonly id: string;
   readonly title?: string;
   readonly questions: readonly AskUserQuestion[];
@@ -81,6 +82,29 @@ export const WORK_NODE_STATUSES = [
   "approved",
   "ready",
   "running",
+/** Bounded, display-safe pending decision exposed by the Control Room API. */
+export type ControlRoomPendingDecision = {
+  readonly kind: "security-approval" | "user-decision";
+  readonly id: string;
+  readonly title?: string;
+  readonly questions: readonly {
+    readonly id: string;
+    readonly question: string;
+    readonly options: readonly {
+      readonly label: string;
+      readonly description?: string;
+    }[];
+    readonly multi?: boolean;
+    readonly recommended?: number;
+  }[];
+};
+
+/** Typed answer mutation for one exact Control Room user decision. */
+export type ControlRoomDecisionPayload = {
+  readonly decisionId: string;
+  readonly answers: readonly AskUserQuestionAnswer[];
+};
+
   "blocked",
   "requires_action",
   "completed",
@@ -605,6 +629,7 @@ function copyPersistedPromptManifest(manifest: PersistedPromptManifest): Persist
 }
 
 function copyAskUserQuestionRequest(request: AskUserQuestionRequest): AskUserQuestionRequest {
+    kind: request.kind ?? "user-decision",
   return {
     id: request.id,
     ...(request.title === undefined ? {} : { title: request.title }),
@@ -1404,6 +1429,13 @@ function parseAskUserQuestionRequest(value: unknown): AskUserQuestionRequest | u
     return undefined;
   }
 
+  if (
+    hasOwn(record, "kind")
+    && record.kind !== "security-approval"
+    && record.kind !== "user-decision"
+  ) {
+    return undefined;
+  }
   const questions = record.questions.map(parseAskUserQuestion);
   if (questions.some((question) => question === undefined)) {
     return undefined;
@@ -1412,6 +1444,7 @@ function parseAskUserQuestionRequest(value: unknown): AskUserQuestionRequest | u
     (question): question is AskUserQuestion => question !== undefined,
   );
 
+    kind: record.kind === "security-approval" ? "security-approval" : "user-decision",
   return {
     id: record.id,
     ...(typeof record.title === "string" ? { title: record.title } : {}),

@@ -388,6 +388,7 @@ export function parseAskUserQuestionRequest(input: Record<string, unknown>): Ask
   }
 
   const questionIds = new Set<string>();
+    kind: "user-decision",
   return {
     id: input.id.trim(),
     ...(typeof input.title === "string" && input.title.trim().length > 0 ? { title: input.title.trim() } : {}),

@@ -106,6 +106,7 @@ test("agent-console journal snapshot restores one pending decision and running w
   const snapshot = createAgentConsoleSnapshot({
     profileId: "review",
     pendingDecision: {
+      kind: "user-decision",
       id: "decision-1",
       questions: [
         {
@@ -134,6 +135,7 @@ test("agent-console journal snapshot restores one pending decision and running w
     },
     activity: [],
   });
+  assert.equal(snapshot.pendingDecision.kind, "user-decision");
 
   assert.equal(snapshot.pendingDecision?.id, "decision-1");
   assert.equal(snapshot.workGraph?.nodes[0]?.status, "running");

@@ -98,10 +98,12 @@ import {
   createAgentConsoleSnapshot,
   resolveContextDeskGroup,
   type AskUserQuestionRequest,
+  type AskUserQuestionAnswer,
   type AskUserQuestionResult,
 } from "@unclecode/contracts";
 import {
   formatWorkShellDecisionLines,
+  resolveWorkShellDecisionAnswers,
   resolveWorkShellDecisionReply,
 } from "./work-shell-decision.js";
 import type { WorkShellInteractionBridge } from "./work-shell-interaction-bridge.js";
@@ -2448,10 +2450,15 @@ export class WorkShellEngine<
       });
     }
 
+    const normalizedRequest: AskUserQuestionRequest = {
+      ...request,
+      kind: request.kind === "security-approval" ? "security-approval" : "user-decision",
+    };
+
     const { promise, resolve } = createPromiseResolvers<AskUserQuestionResult>();
     let onAbort: () => void = () => {};
     const pending: PendingDecision = {
-      request,
+      request: normalizedRequest,
       settle: (result) => {
         if (this.pendingDecision !== pending) {
           return;
@@ -2481,16 +2488,16 @@ export class WorkShellEngine<
     this.setState({
       agentConsole: createAgentConsoleSnapshot({
         ...this.state.agentConsole,
-        pendingDecision: request,
+        pendingDecision: normalizedRequest,
       }),
       panel: {
         title: "Decision",
-        lines: formatWorkShellDecisionLines(request),
+        lines: formatWorkShellDecisionLines(normalizedRequest),
       },
     });
     void this.persistSessionSnapshot(
       "requires_action",
-      `Decision required: ${request.title?.trim() || request.id}`,
+      `Decision required: ${normalizedRequest.title?.trim() || normalizedRequest.id}`,
     ).catch(() => undefined);
     return promise;
   }
@@ -2543,6 +2550,19 @@ export class WorkShellEngine<
   }
 
   /** Esc on the decision bar: `/cancel` through the same settle guard. */
+  /** Settle one exact user decision without routing structured answers through chat input. */
+  answerPendingUserDecision(
+    decisionId: string,
+    answers: readonly AskUserQuestionAnswer[],
+  ): boolean {
+    const pending = this.pendingDecision;
+    if (!pending || pending.request.kind !== "user-decision") return false;
+    const result = resolveWorkShellDecisionAnswers({ request: pending.request, decisionId, answers });
+    if (!result) return false;
+    pending.settle(result);
+    return true;
+  }
+
   cancelPendingDecision(): boolean {
     if (!this.pendingDecision) {
       return false;

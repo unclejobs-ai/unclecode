@@ -4770,6 +4770,42 @@ test("WorkShellEngine answers and cancels a pending decision by one-key methods"
 });
 
 test("WorkShellEngine one-key decision methods refuse multi-question and absent decisions", async () => {
+test("WorkShellEngine settles only the exact pending typed user decision", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  const { engine } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+    },
+  });
+  await engine.initialize();
+
+  const result = interactionBridge.ask({
+    id: "typed-decision",
+    title: "Release choice",
+    questions: [{
+      id: "lane",
+      question: "Which lane?",
+      options: [{ label: "Canary" }, { label: "Stable" }],
+    }],
+  });
+  assert.equal(engine.answerPendingUserDecision("stale-decision", [{ id: "lane", selectedOptions: ["Canary"] }]), false);
+  assert.equal(engine.answerPendingUserDecision("typed-decision", [{ id: "lane", selectedOptions: ["Unknown"] }]), false);
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "typed-decision");
+  assert.equal(engine.answerPendingUserDecision("typed-decision", [{ id: "lane", selectedOptions: ["Stable"] }]), true);
+  assert.deepEqual(await result, {
+    status: "answered",
+    answers: [{ id: "lane", selectedOptions: ["Stable"] }],
+  });
+  assert.equal(engine.answerPendingUserDecision("typed-decision", [{ id: "lane", selectedOptions: ["Canary"] }]), false);
+});
+
   const interactionBridge = createWorkShellInteractionBridge();
   const { engine } = createEngine({
     options: {

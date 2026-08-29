@@ -19,6 +19,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { BoundedEventJournal, type EventJournal, type JournalEvent, type JournalReplay } from "./event-journal.js";
 import { CONTROL_ACTIONS, type ControlAction, type RuntimeAdapter, type RuntimeControlRequest, type RuntimeControlResult } from "./runtime-adapter.js";
 import type { ControlRoomProjection } from "./control-room.js";
+import type { ControlRoomDecisionPayload } from "@unclecode/contracts";
 
 export { BoundedEventJournal } from "./event-journal.js";
 export { createControlRoomProjection } from "./control-room.js";
@@ -419,13 +420,18 @@ async function routeRequest(input: { readonly req: IncomingMessage; readonly res
     if ((action === "steer" || action === "follow-up") && (typeof payload?.message !== "string" || payload.message.trim().length === 0)) {
       return writeError(res, 400, "invalid_payload", `${action} requires payload.message.`);
     }
-    const result = await options.handlers.control({
+    if (action === "decision" && !isDecisionPayload(payload)) {
+      return writeError(res, 400, "invalid_payload", "decision requires one exact decisionId and bounded typed answers.");
+    }
+    const common = {
       sessionId: actionMatch[1] ?? "",
-      action,
       expectedRevision: Number(body.expectedRevision),
       idempotencyKey,
-      ...(payload ? { payload } : {}),
-    });
+    };
+    const request: RuntimeControlRequest = action === "decision"
+      ? { ...common, action, payload: payload as ControlRoomDecisionPayload }
+      : { ...common, action, ...(payload ? { payload } : {}) };
+    const result = await options.handlers.control(request);
     if (result.ok) return writeJson(res, 200, result);
     const status = result.code === "not_found" ? 404 : result.code === "revision_conflict" ? 409 : result.code === "denied" ? 403 : 409;
     return writeJson(res, status, result);
@@ -511,6 +517,20 @@ function writeSse(res: ServerResponse, id: number, event: string, data: unknown)
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isDecisionPayload(value: unknown): value is ControlRoomDecisionPayload {
+  if (!isRecord(value) || Object.keys(value).some(key => key !== "decisionId" && key !== "answers")) return false;
+  if (typeof value.decisionId !== "string" || !/^[A-Za-z0-9._:-]{1,160}$/.test(value.decisionId)) return false;
+  if (!Array.isArray(value.answers) || value.answers.length === 0 || value.answers.length > 8) return false;
+  return value.answers.every(answer => {
+    if (!isRecord(answer) || Object.keys(answer).some(key => key !== "id" && key !== "selectedOptions" && key !== "customInput")) return false;
+    if (typeof answer.id !== "string" || !/^[A-Za-z0-9._:-]{1,160}$/.test(answer.id)) return false;
+    if (!Array.isArray(answer.selectedOptions) || answer.selectedOptions.length === 0 || answer.selectedOptions.length > 16) return false;
+    if (answer.selectedOptions.some(option => typeof option !== "string" || option.length === 0 || option.length > 240 || option.trim() !== option)) return false;
+    return answer.customInput === undefined
+      || (typeof answer.customInput === "string" && answer.customInput.trim().length > 0 && answer.customInput.length <= 800);
+  });
 }
 
 function writeJson(res: ServerResponse, status: number, body: unknown): void {

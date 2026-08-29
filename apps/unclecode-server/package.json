@@ -15,6 +15,7 @@
     }
   },
   "dependencies": {
+    "@unclecode/contracts": "0.1.0",
     "@unclecode/orchestrator": "0.1.0",
     "@unclecode/session-store": "0.1.0"
   }
