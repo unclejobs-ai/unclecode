@@ -172,6 +172,9 @@ function suggestKnownSlashCommand(line: string): string | undefined {
   if (!best) {
     return undefined;
   }
+  if (best.command === token) {
+    return undefined;
+  }
   const threshold = token.length <= 5 ? 2 : 3;
   return best.distance <= threshold ? best.command : undefined;
 }
