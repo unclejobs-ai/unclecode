@@ -234,6 +234,31 @@ test("findOmpInstall resolves the package root through the executable symlink", 
   }
 });
 
+test("findOmpInstall resolves a Bun standalone binary beside its global package tree", () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "unclecode-omp-standalone-")));
+  try {
+    const binPath = path.join(root, "bin", "omp");
+    const packageRoot = path.join(root, "install", "global", "node_modules", "@oh-my-pi", "pi-coding-agent");
+    mkdirSync(path.dirname(binPath), { recursive: true });
+    mkdirSync(packageRoot, { recursive: true });
+    writeFileSync(binPath, "standalone binary", "utf8");
+    chmodSync(binPath, 0o755);
+    writeFileSync(
+      path.join(packageRoot, "package.json"),
+      JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version: "17.4.0" }),
+      "utf8",
+    );
+
+    assert.deepEqual(findOmpInstall({ UNCLECODE_OMP_BIN: binPath }), {
+      binPath,
+      packageRoot,
+      scopeRoot: path.dirname(packageRoot),
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("findOmpInstall returns undefined instead of throwing when omp is absent", () => {
   const empty = mkdtempSync(path.join(os.tmpdir(), "unclecode-omp-empty-"));
   try {

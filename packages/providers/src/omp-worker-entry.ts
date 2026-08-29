@@ -17,6 +17,10 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { findOmpInstall } from "./omp-install.js";
+import {
+  canonicalizeOmpWorkspaceRoot,
+  createOmpWorkspaceTools,
+} from "./omp-workspace-tools.js";
 
 /** The single selector every work/executor turn runs on. Not overridable. */
 export const OMP_WORKER_DEFAULT_MODEL = "kimi-code/k3";
@@ -27,7 +31,7 @@ export const OMP_WORKER_DEFAULT_MODEL = "kimi-code/k3";
  * tools; shell, task, browser, MCP, and other externally acting tools must run
  * through an UncleCode-owned runtime instead.
  */
-export const OMP_WORKER_ALLOWED_TOOLS = ["read", "write", "edit", "grep", "find"] as const;
+export const OMP_WORKER_ALLOWED_TOOLS = ["read", "write", "edit", "grep", "glob"] as const;
 
 /**
  * Prefix for the worker's single result line: OMP writes its own diagnostics to
@@ -117,6 +121,7 @@ export type OmpWorkerRuntime = {
   createModelRegistry(authStorage: OmpAuthStorageHandle): OmpModelRegistryHandle;
   createSessionManager(cwd: string): unknown;
   createSettings(cwd: string): Promise<unknown>;
+  createWorkspaceTools(cwd: string): Promise<readonly unknown[]>;
   createAgentSession(options: Record<string, unknown>): Promise<{ session: OmpWorkerSession }>;
 };
 
@@ -154,6 +159,10 @@ type OmpSettingsModule = {
       readonly overrides: Readonly<Record<string, unknown>>;
     }): Promise<unknown>;
   };
+};
+
+type OmpSchemaModule = {
+  type(definition: Readonly<Record<string, unknown>>): unknown;
 };
 
 const OMP_THINKING_LEVELS: Readonly<Record<string, string>> = {
@@ -347,6 +356,10 @@ export async function loadOmpWorkerRuntime(env: NodeJS.ProcessEnv = process.env)
     install.packageRoot,
     "src/config/settings.ts",
   );
+  const schemas = await importOmpAbsoluteModule<OmpSchemaModule>(
+    path.join(install.scopeRoot, "omptype", "src", "index.ts"),
+    "@oh-my-pi/omptype",
+  );
   return {
     createAuthStorage: () => sdk.discoverAuthStorage(),
     createModelRegistry: (authStorage) => new registry.ModelRegistry(authStorage),
@@ -363,6 +376,7 @@ export async function loadOmpWorkerRuntime(env: NodeJS.ProcessEnv = process.env)
         "tools.approvalMode": "write",
       },
     }),
+    createWorkspaceTools: async (cwd) => createOmpWorkspaceTools(cwd, schemas.type),
     createAgentSession: (options) => sdk.createAgentSession(options),
   };
 }
@@ -375,6 +389,7 @@ export async function runOmpWorkerTurn(
   request: OmpWorkerRequest,
   runtime: OmpWorkerRuntime,
 ): Promise<OmpWorkerSuccess> {
+  const workspaceRoot = await canonicalizeOmpWorkspaceRoot(request.cwd);
   const selector = parseOmpModelSelector(request.model);
   const thinkingLevel = toOmpThinkingLevel(request.reasoning);
   const authStorage = await runtime.createAuthStorage();
@@ -395,18 +410,20 @@ export async function runOmpWorkerTurn(
       );
     }
     const created = await runtime.createAgentSession({
-      cwd: request.cwd,
+      cwd: workspaceRoot,
       model,
       authStorage,
       modelRegistry,
-      sessionManager: runtime.createSessionManager(request.cwd),
-      settings: await runtime.createSettings(request.cwd),
+      sessionManager: runtime.createSessionManager(workspaceRoot),
+      settings: await runtime.createSettings(workspaceRoot),
       thinkingLevel,
       enableMCP: false,
       disableExtensionDiscovery: true,
       skills: [],
       toolNames: [...OMP_WORKER_ALLOWED_TOOLS],
       restrictToolNames: true,
+      allowRestrictedCustomTools: true,
+      customTools: await runtime.createWorkspaceTools(workspaceRoot),
       autoApprove: false,
     });
     session = created.session;
@@ -486,6 +503,17 @@ async function importOmpModule<T>(packageRoot: string, relativePath: string): Pr
     throw new OmpWorkerError(
       "OMP_UNAVAILABLE",
       `Failed to load OMP module "${relativePath}": ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+async function importOmpAbsoluteModule<T>(absolutePath: string, label: string): Promise<T> {
+  try {
+    return (await import(pathToFileURL(absolutePath).href)) as T;
+  } catch (error) {
+    throw new OmpWorkerError(
+      "OMP_UNAVAILABLE",
+      `Failed to load OMP module "${label}": ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 }
