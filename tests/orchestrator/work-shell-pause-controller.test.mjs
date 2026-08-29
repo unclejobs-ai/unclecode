@@ -119,3 +119,34 @@ test("an irreversible tool stays pause_pending until the handler settles, then p
   assert.equal(controller.resume(), true);
   assert.equal(await tool, "written-once");
 });
+
+test("overlapping approval checkpoints share one durable transition and one resume gate", async () => {
+  const controller = new CooperativePauseController();
+  controller.beginTurn("turn-approval-overlap");
+  const pause = controller.requestPause();
+  let persists = 0;
+  let releasePersist;
+  const persist = async () => {
+    persists += 1;
+    await new Promise(resolve => { releasePersist = resolve; });
+  };
+
+  let firstReleased = false;
+  let secondReleased = false;
+  const beforeApproval = controller.checkpoint("before_approval", persist)
+    .then(() => { firstReleased = true; });
+  const afterApproval = controller.checkpoint("after_approval", persist)
+    .then(() => { secondReleased = true; });
+  await tick();
+  assert.equal(persists, 1, "only the checkpoint that atomically claims the transition may persist");
+  releasePersist();
+  const receipt = await pause;
+  assert.equal(receipt.boundary, "before_approval");
+  assert.equal(controller.snapshot().state, "paused");
+  assert.equal(controller.resume(), true);
+  assert.equal(controller.resume(), false);
+  await Promise.all([beforeApproval, afterApproval]);
+  assert.equal(firstReleased, true);
+  assert.equal(secondReleased, true);
+  assert.equal(controller.snapshot().state, "running");
+});

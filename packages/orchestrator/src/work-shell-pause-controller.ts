@@ -36,6 +36,13 @@ type Deferred<Value> = {
   readonly reject: (reason?: unknown) => void;
 };
 
+type PauseTransition = {
+  readonly turnId: string;
+  readonly boundary: WorkShellPauseBoundary;
+  readonly resumeGate: Deferred<void>;
+  readonly suspension: Promise<void>;
+};
+
 function deferred<Value>(): Deferred<Value> {
   let resolve!: (value: Value | PromiseLike<Value>) => void;
   let reject!: (reason?: unknown) => void;
@@ -73,7 +80,7 @@ export class CooperativePauseController {
   readonly #listeners = new Set<(snapshot: WorkShellPauseSnapshot) => void>();
   #snapshot: WorkShellPauseSnapshot = { state: "idle" };
   #pauseAcknowledgement: Deferred<WorkShellPauseReceipt> | undefined;
-  #resumeGate: Deferred<void> | undefined;
+  #pauseTransition: PauseTransition | undefined;
 
   constructor(input: {
     readonly onStateChanged?: ((snapshot: WorkShellPauseSnapshot) => void) | undefined;
@@ -96,7 +103,7 @@ export class CooperativePauseController {
       throw new Error("A cooperative turn is already active.");
     }
     this.#pauseAcknowledgement = undefined;
-    this.#resumeGate = undefined;
+    this.#pauseTransition = undefined;
     this.#publish({ state: "running", turnId });
   }
 
@@ -118,18 +125,35 @@ export class CooperativePauseController {
     persist: (snapshot: WorkShellPauseSnapshot) => Promise<void>,
   ): Promise<void> {
     if (this.#snapshot.state === "cancelled") throw abortError("Turn cancelled while suspended.");
+    if (this.#pauseTransition) return this.#pauseTransition.suspension;
     if (this.#snapshot.state !== "pause_pending") return;
     const turnId = this.#snapshot.turnId;
     if (!turnId) throw new Error("Pause checkpoint lost the active turn identity.");
 
     const paused = { state: "paused", turnId, boundary } as const;
-    await persist(paused);
-    if (this.#isCancelled()) throw abortError("Turn cancelled while persisting its pause checkpoint.");
-    this.#resumeGate = deferred<void>();
-    this.#publish(paused);
-    this.#pauseAcknowledgement?.resolve({ turnId, boundary });
-    await this.#resumeGate.promise;
-    if (this.#isCancelled()) throw abortError("Turn cancelled while suspended.");
+    const resumeGate = deferred<void>();
+    let transition!: PauseTransition;
+    const suspension = (async () => {
+      try {
+        await persist(paused);
+        if (this.#isCancelled()) throw abortError("Turn cancelled while persisting its pause checkpoint.");
+        this.#publish(paused);
+        this.#pauseAcknowledgement?.resolve({ turnId, boundary });
+        await resumeGate.promise;
+        if (this.#isCancelled()) throw abortError("Turn cancelled while suspended.");
+      } catch (error) {
+        if (this.#pauseTransition === transition) this.#pauseTransition = undefined;
+        if (!this.#isCancelled()) {
+          this.#pauseAcknowledgement?.reject(error);
+          this.#pauseAcknowledgement = undefined;
+          this.#publish({ state: "running", turnId });
+        }
+        throw error;
+      }
+    })();
+    transition = { turnId, boundary, resumeGate, suspension };
+    this.#pauseTransition = transition;
+    return suspension;
   }
 
   async runNonInterruptible<Value>(
@@ -153,13 +177,13 @@ export class CooperativePauseController {
   }
 
   resume(): boolean {
-    if (this.#snapshot.state !== "paused" || !this.#resumeGate) return false;
+    if (this.#snapshot.state !== "paused" || !this.#pauseTransition) return false;
     const turnId = this.#snapshot.turnId;
-    const gate = this.#resumeGate;
-    this.#resumeGate = undefined;
+    const transition = this.#pauseTransition;
+    this.#pauseTransition = undefined;
     this.#pauseAcknowledgement = undefined;
     this.#publish({ state: "running", ...(turnId ? { turnId } : {}) });
-    gate.resolve();
+    transition.resumeGate.resolve();
     return true;
   }
 
@@ -169,10 +193,10 @@ export class CooperativePauseController {
     const error = abortError("Turn cancelled.");
     this.#pauseAcknowledgement?.reject(error);
     this.#pauseAcknowledgement = undefined;
-    const gate = this.#resumeGate;
-    this.#resumeGate = undefined;
+    const transition = this.#pauseTransition;
+    this.#pauseTransition = undefined;
     this.#publish({ state: "cancelled", ...(turnId ? { turnId } : {}) });
-    gate?.resolve();
+    transition?.resumeGate.resolve();
     return true;
   }
 
