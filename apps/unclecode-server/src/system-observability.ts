@@ -349,13 +349,21 @@ export function projectSystemObservability(source: RuntimeSystemObservabilitySou
   const projectedCaches = projectCaches(source?.caches);
   const projectedCacheSources = projectCacheSources(rawCacheTelemetry.sources);
   const inheritedProjectionFailures = count(rawCacheTelemetry.projectionFailures);
+  const hasAggregateSourceFailures = rawCacheTelemetry.sourceFailures !== undefined;
+  const aggregateSourceFailures = hasAggregateSourceFailures
+    ? telemetryCount(rawCacheTelemetry.sourceFailures)
+    : undefined;
   const projectionFailures = inheritedProjectionFailures
     + projectedCaches.failures
-    + projectedCacheSources.failures;
-  const sourceFailures = projectedCacheSources.values.reduce(
+    + projectedCacheSources.failures
+    + (hasAggregateSourceFailures && aggregateSourceFailures === undefined ? 1 : 0);
+  const projectedSourceFailures = projectedCacheSources.values.reduce(
     (total, cacheSource) => total + cacheSource.failureCount,
     0,
   );
+  const sourceFailures = aggregateSourceFailures === undefined
+    ? projectedSourceFailures
+    : Math.max(aggregateSourceFailures, projectedSourceFailures);
   const hasExplicitCacheSources = Array.isArray(rawCacheTelemetry.sources);
   const cacheSourcesHealthy = !hasExplicitCacheSources || (
     projectedCacheSources.values.length > 0
@@ -372,6 +380,7 @@ export function projectSystemObservability(source: RuntimeSystemObservabilitySou
       owner: source?.evidenceSources?.owner === "available" ? "available" : "unavailable",
       cacheTelemetry: source?.evidenceSources?.cacheTelemetry === "available"
         && cacheSourcesHealthy
+        && sourceFailures === 0
         && projectionFailures === 0
         && rawCacheTelemetry.truncated !== true
         && !projectedCaches.truncated

@@ -499,6 +499,49 @@ test("partial cache evidence stays unavailable and retains bounded per-source fa
   }
 });
 
+test("aggregate cache source failures cannot be hidden by healthy source rows", () => {
+  const projection = createControlRoomProjection({
+    generatedAt: 1,
+    sessions: [],
+    system: {
+      evidenceSources: { owner: "available", cacheTelemetry: "available" },
+      cacheTelemetry: {
+        sources: [{ name: "probe", status: "available", failureCount: 0 }],
+        sourceFailures: 7,
+        projectionFailures: 0,
+        truncated: false,
+      },
+      caches: [],
+    },
+  });
+
+  assert.equal(projection.system.cacheTelemetry.sourceFailures, 7);
+  assert.equal(projection.system.evidenceSources.cacheTelemetry, "unavailable");
+});
+
+test("malformed aggregate cache source failures fail closed", () => {
+  for (const sourceFailures of [-1, "7", Number.POSITIVE_INFINITY, Number.NaN]) {
+    const projection = createControlRoomProjection({
+      generatedAt: 1,
+      sessions: [],
+      system: {
+        evidenceSources: { owner: "available", cacheTelemetry: "available" },
+        cacheTelemetry: {
+          sources: [{ name: "probe", status: "available", failureCount: 0 }],
+          sourceFailures,
+          projectionFailures: 0,
+          truncated: false,
+        },
+        caches: [],
+      },
+    });
+
+    assert.equal(projection.system.evidenceSources.cacheTelemetry, "unavailable");
+    assert.equal(projection.system.cacheTelemetry.sourceFailures, 0);
+    assert.equal(projection.system.cacheTelemetry.projectionFailures, 1);
+  }
+});
+
 test("malformed cache snapshots are rejected instead of projected as healthy zeroes", () => {
   const projection = createControlRoomProjection({
     generatedAt: 1,
