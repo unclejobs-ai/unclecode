@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -131,6 +131,78 @@ test("a live reused PID cannot preserve a lock from another process start", asyn
     startOwner: async () => replacement,
   });
   assert.equal(result.ownerId, replacement.ownerId);
+});
+
+test("an old claim from the same live process start is never stolen by age", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-live-slow-"));
+  const leasePath = join(root, "runtime-owner.json");
+  const lockPath = join(root, "runtime-owner.lock");
+  await writeFile(lockPath, JSON.stringify({
+    pid: process.pid,
+    bootId: "boot-test",
+    claimId: "slow-live-claim",
+    processStartId: "same-live-start",
+    claimedAt: Date.now() - 120_000,
+  }), { mode: 0o600 });
+  let starts = 0;
+  const published = lease({ ownerId: "slow-live-owner" });
+  const publish = setTimeout(() => {
+    void writeFile(leasePath, `${JSON.stringify(published)}\n`, { mode: 0o600 });
+  }, 40);
+  try {
+    const result = await ensureRuntimeOwner({
+      leasePath, lockPath, bootId: "boot-test", timeoutMs: 1_000,
+      resolveProcessStartIdentity: async () => "same-live-start",
+      health: async candidate => candidate.ownerId === published.ownerId,
+      startOwner: async () => { starts += 1; return lease({ ownerId: "duplicate" }); },
+    });
+    assert.equal(result.ownerId, published.ownerId);
+    assert.equal(starts, 0);
+    assert.equal(JSON.parse(await readFile(lockPath, "utf8")).claimId, "slow-live-claim");
+  } finally {
+    clearTimeout(publish);
+  }
+});
+
+test("stale-lock cleanup revalidates identity before unlinking a replacement claim", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-lock-revalidate-"));
+  const leasePath = join(root, "runtime-owner.json");
+  const lockPath = join(root, "runtime-owner.lock");
+  await writeFile(lockPath, JSON.stringify({
+    pid: process.pid,
+    bootId: "boot-test",
+    claimId: "stale-claim",
+    processStartId: "stale-start",
+    claimedAt: Date.now(),
+  }), { mode: 0o600 });
+  const replacementLock = {
+    pid: process.pid,
+    bootId: "boot-test",
+    claimId: "replacement-live-claim",
+    processStartId: "replacement-start",
+    claimedAt: Date.now(),
+  };
+  const published = lease({ ownerId: "replacement-live-owner" });
+  let identityCalls = 0;
+  let starts = 0;
+  const result = await ensureRuntimeOwner({
+    leasePath, lockPath, bootId: "boot-test", timeoutMs: 1_000,
+    resolveProcessStartIdentity: async () => {
+      identityCalls += 1;
+      if (identityCalls === 1) return "claimant-start";
+      if (identityCalls === 2) {
+        await writeFile(lockPath, JSON.stringify(replacementLock), { mode: 0o600 });
+        await writeFile(leasePath, `${JSON.stringify(published)}\n`, { mode: 0o600 });
+        return "different-from-stale";
+      }
+      return "replacement-start";
+    },
+    health: async candidate => candidate.ownerId === published.ownerId,
+    startOwner: async () => { starts += 1; return lease({ ownerId: "duplicate" }); },
+  });
+  assert.equal(result.ownerId, published.ownerId);
+  assert.equal(starts, 0);
+  assert.equal(JSON.parse(await readFile(lockPath, "utf8")).claimId, replacementLock.claimId);
 });
 
 test("server token creation rejects symlinks and insecure legacy permissions", async () => {

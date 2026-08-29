@@ -39,7 +39,6 @@ type OwnerLock = {
 
 const execFileAsync = promisify(execFile);
 const LOCK_WRITE_GRACE_MS = 250;
-const LOCK_MAX_AGE_MS = 30_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -185,15 +184,21 @@ async function removeDeadLock(
     const stat = await lstat(lockPath);
     if (!stat.isFile() || stat.isSymbolicLink()) return;
     const ageMs = Math.max(0, now - stat.mtimeMs);
+    let raw: string;
+    try {
+      raw = await readFile(lockPath, "utf8");
+    } catch {
+      return;
+    }
     let value: unknown;
     try {
-      value = JSON.parse(await readFile(lockPath, "utf8"));
+      value = JSON.parse(raw);
     } catch {
-      if (ageMs >= LOCK_WRITE_GRACE_MS) await unlink(lockPath).catch(() => undefined);
+      if (ageMs >= LOCK_WRITE_GRACE_MS) await unlinkLockIfUnchanged(lockPath, stat, raw);
       return;
     }
     if (!isRecord(value)) {
-      if (ageMs >= LOCK_WRITE_GRACE_MS) await unlink(lockPath).catch(() => undefined);
+      if (ageMs >= LOCK_WRITE_GRACE_MS) await unlinkLockIfUnchanged(lockPath, stat, raw);
       return;
     }
     const lock = value as Partial<OwnerLock>;
@@ -211,12 +216,31 @@ async function removeDeadLock(
       || lock.bootId !== bootId
       || actualStartId === null
       || actualStartId !== lock.processStartId
-      || now - Number(lock.claimedAt) > LOCK_MAX_AGE_MS
     ) {
-      await unlink(lockPath).catch(() => undefined);
+      await unlinkLockIfUnchanged(lockPath, stat, raw);
     }
   } catch {
     // The next bounded retry revalidates the lock identity.
+  }
+}
+
+async function unlinkLockIfUnchanged(
+  lockPath: string,
+  observedStat: Awaited<ReturnType<typeof lstat>>,
+  observedRaw: string,
+): Promise<void> {
+  try {
+    const currentStat = await lstat(lockPath);
+    if (
+      !currentStat.isFile()
+      || currentStat.isSymbolicLink()
+      || currentStat.dev !== observedStat.dev
+      || currentStat.ino !== observedStat.ino
+      || await readFile(lockPath, "utf8") !== observedRaw
+    ) return;
+    await unlink(lockPath);
+  } catch {
+    // Another claimant changed or removed the path. Its claim wins.
   }
 }
 
