@@ -20,6 +20,7 @@ import {
   parseArgs,
   printHelp,
   printTools,
+  type ParsedArgs,
 } from "./work-runtime-args.js";
 import {
   loadWorkCliBootstrap,
@@ -120,6 +121,162 @@ async function connectPersistentRuntimeOwner(): Promise<RuntimeOwnerClient> {
     }),
   });
   return RuntimeOwnerClient.connect(lease);
+}
+
+type RemotePromptEngine = {
+  readonly getState: () => Readonly<Record<string, unknown>>;
+  readonly initialize: () => Promise<void>;
+  readonly handleSubmit: (prompt: string) => Promise<unknown>;
+  readonly dispose: () => void;
+};
+
+type WorkCliDependencies = {
+  readonly connectOwner?: (() => Promise<RuntimeOwnerClient>) | undefined;
+  readonly loadInteractiveSession?: typeof loadWorkCliBootstrap | undefined;
+  readonly writeOutput?: ((text: string) => void) | undefined;
+};
+
+function workShellEntries(state: Readonly<Record<string, unknown>>): readonly {
+  readonly role: string;
+  readonly text: string;
+}[] {
+  if (!Array.isArray(state.entries)) return [];
+  return state.entries.filter((entry): entry is { readonly role: string; readonly text: string } => (
+    typeof entry === "object"
+    && entry !== null
+    && typeof (entry as { readonly role?: unknown }).role === "string"
+    && typeof (entry as { readonly text?: unknown }).text === "string"
+  ));
+}
+
+function hasPendingOwnerDecision(state: Readonly<Record<string, unknown>>): boolean {
+  const agentConsole = state.agentConsole;
+  return typeof agentConsole === "object"
+    && agentConsole !== null
+    && (agentConsole as { readonly pendingDecision?: unknown }).pendingDecision !== undefined;
+}
+
+function workShellPanelLines(state: Readonly<Record<string, unknown>>): readonly string[] {
+  const panel = state.panel;
+  if (typeof panel !== "object" || panel === null) return [];
+  const lines = (panel as { readonly lines?: unknown }).lines;
+  return Array.isArray(lines) ? lines.filter((line): line is string => typeof line === "string") : [];
+}
+
+function hasNewTerminalOwnerTurn(
+  state: Readonly<Record<string, unknown>>,
+  baseline: { readonly entryCount: number; readonly turnId?: string | undefined },
+): boolean {
+  const turnLifecycle = state.turnLifecycle;
+  if (typeof turnLifecycle !== "object" || turnLifecycle === null) return false;
+  const lifecycle = turnLifecycle as { readonly state?: unknown; readonly turnId?: unknown };
+  if (lifecycle.state !== "completed" && lifecycle.state !== "cancelled") return false;
+  return workShellEntries(state).length > baseline.entryCount
+    || (typeof lifecycle.turnId === "string" && lifecycle.turnId !== baseline.turnId);
+}
+
+async function waitForOwnerPromptState(
+  engine: RemotePromptEngine,
+  prompt: string,
+): Promise<Readonly<Record<string, unknown>>> {
+  const initialState = engine.getState();
+  const initialLifecycle = initialState.turnLifecycle;
+  const baseline = {
+    entryCount: workShellEntries(initialState).length,
+    ...(typeof initialLifecycle === "object"
+      && initialLifecycle !== null
+      && typeof (initialLifecycle as { readonly turnId?: unknown }).turnId === "string"
+      ? { turnId: (initialLifecycle as { readonly turnId: string }).turnId }
+      : {}),
+  };
+  let submissionSettled = false;
+  const submission = engine.handleSubmit(prompt).then(
+    () => ({ kind: "submitted" as const }),
+    (error: unknown) => ({ kind: "failed" as const, error }),
+  ).finally(() => {
+    submissionSettled = true;
+  });
+  let detachedAtOwnerState = false;
+  try {
+    while (true) {
+      let pollTimer: NodeJS.Timeout | undefined;
+      const outcome = await Promise.race([
+        submission,
+        new Promise<{ readonly kind: "poll" }>((resolve) => {
+          pollTimer = setTimeout(() => resolve({ kind: "poll" }), 100);
+          pollTimer.unref?.();
+        }),
+      ]);
+      if (pollTimer) clearTimeout(pollTimer);
+      if (outcome.kind === "failed") {
+        try {
+          await engine.initialize();
+          const state = engine.getState();
+          if (hasPendingOwnerDecision(state) || hasNewTerminalOwnerTurn(state, baseline)) {
+            detachedAtOwnerState = true;
+            return state;
+          }
+        } catch {
+          // Preserve the submission failure when authoritative recovery is
+          // unavailable; it is the operation the caller asked to perform.
+        }
+        throw outcome.error;
+      }
+      if (outcome.kind === "submitted") return engine.getState();
+
+      await engine.initialize();
+      const state = engine.getState();
+      if (hasPendingOwnerDecision(state) || hasNewTerminalOwnerTurn(state, baseline)) {
+        detachedAtOwnerState = true;
+        return state;
+      }
+    }
+  } finally {
+    engine.dispose();
+    if (!submissionSettled) {
+      const outcome = await submission;
+      if (!detachedAtOwnerState && outcome.kind === "failed") throw outcome.error;
+    }
+  }
+}
+
+async function runPromptThroughPersistentOwner(
+  parsed: ParsedArgs & { readonly prompt: string },
+  dependencies: WorkCliDependencies,
+): Promise<void> {
+  const client = await (dependencies.connectOwner ?? connectPersistentRuntimeOwner)();
+  const sessionId = parsed.sessionId ?? `work-${randomUUID()}`;
+  const created = await client.createRuntimeSession({
+    sessionId,
+    projectPath: parsed.cwd,
+    ...(parsed.provider ? { provider: parsed.provider } : {}),
+    ...(parsed.model ? { model: parsed.model } : {}),
+    ...(parsed.reasoning ? { reasoning: parsed.reasoning } : {}),
+    resume: parsed.sessionId !== undefined,
+    idempotencyKey: `prompt-${randomUUID()}`,
+  });
+  if (!created.ok) throw new Error(created.message);
+  const attached = await client.attachRuntimeSession(created.session.sessionId);
+  if (!attached.ok) throw new Error(attached.message);
+
+  const engine = await createRemoteWorkShellEngine(
+    client,
+    attached.session.sessionId,
+  ) as RemotePromptEngine;
+  const baselineEntryCount = workShellEntries(engine.getState()).length;
+  const state = await waitForOwnerPromptState(engine, parsed.prompt);
+  const transcriptLines = workShellEntries(state)
+    .slice(baselineEntryCount)
+    .filter((entry) => entry.role !== "user")
+    .map((entry) => entry.text);
+  const lines = transcriptLines.length > 0
+    ? transcriptLines
+    : hasPendingOwnerDecision(state)
+      ? workShellPanelLines(state)
+      : [];
+  if (lines.length > 0) {
+    (dependencies.writeOutput ?? ((text: string) => { process.stdout.write(text); }))(`${lines.join("\n")}\n`);
+  }
 }
 
 function resolveSwitchedSession(
@@ -361,6 +518,7 @@ export async function smokeWorkShellRuntime(
 
 export async function runWorkCli(
   argv: readonly string[] = process.argv.slice(2),
+  dependencies: WorkCliDependencies = {},
 ): Promise<void> {
   const { showHelp, showTools } = parseArgs([...argv]);
   if (showHelp) {
@@ -373,12 +531,14 @@ export async function runWorkCli(
   }
 
   const parsed = parseArgs([...argv]);
-  const session = await loadWorkCliBootstrap({ argv, role: parsed.prompt ? "owner" : "client" });
-  if (session.prompt) {
-    const result = await session.agent.runTurn(session.prompt);
-    process.stdout.write(`${result.text}\n`);
+  if (parsed.prompt) {
+    await runPromptThroughPersistentOwner(
+      { ...parsed, prompt: parsed.prompt },
+      dependencies,
+    );
     return;
   }
 
+  const session = await (dependencies.loadInteractiveSession ?? loadWorkCliBootstrap)({ argv, role: "client" });
   await startRepl(session.agent, session.options);
 }
