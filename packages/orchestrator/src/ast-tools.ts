@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 
 import type { ToolDefinition, ToolHandler } from "./tools.js";
 import type { ToolRegistry } from "./tool-executor.js";
-import { waitForOwnedProcessGroupExit } from "./process-group-settlement.js";
+import { createOwnedProcessGroupController } from "./process-group-settlement.js";
 
 const DEFAULT_MATCH_LIMIT = 50;
 const MAX_MATCH_LIMIT = 200;
@@ -29,17 +29,6 @@ function abortError(): Error {
   const error = new Error("The AST tool request was aborted.");
   error.name = "AbortError";
   return error;
-}
-
-function signalChildProcess(pid: number | undefined, signal: NodeJS.Signals): boolean {
-  if (!pid) return false;
-  try {
-    process.kill(process.platform === "win32" ? pid : -pid, signal);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
-    throw error;
-  }
 }
 
 function resolveWorkspaceTarget(cwd: string, requestedPath: string): string {
@@ -135,6 +124,11 @@ function runAstGrep(
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32",
   });
+  const processGroup = createOwnedProcessGroupController({
+    child,
+    label: "ast-grep",
+    forceKillDelayMs,
+  });
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   let outputBytes = 0;
@@ -143,11 +137,9 @@ function runAstGrep(
   let settled = false;
   let requestedFailure: Error | undefined;
   let timeoutTimer: NodeJS.Timeout | undefined;
-  let forceTimer: NodeJS.Timeout | undefined;
 
   const cleanup = () => {
     if (timeoutTimer) clearTimeout(timeoutTimer);
-    if (forceTimer) clearTimeout(forceTimer);
     if (signal) signal.removeEventListener("abort", onAbort);
   };
 
@@ -160,11 +152,7 @@ function runAstGrep(
 
   const requestTermination = (error: Error) => {
     requestedFailure ??= error;
-    if (!signalChildProcess(child.pid, "SIGTERM")) return;
-    forceTimer ??= setTimeout(() => {
-      signalChildProcess(child.pid, "SIGKILL");
-    }, Math.max(0, forceKillDelayMs));
-    forceTimer.unref();
+    void processGroup.terminate().catch(() => undefined);
   };
   const onAbort = () => requestTermination(abortError());
   if (signal) signal.addEventListener("abort", onAbort, { once: true });
@@ -201,11 +189,7 @@ function runAstGrep(
     settled = true;
     void (async () => {
       try {
-        await waitForOwnedProcessGroupExit({
-          processGroupId: child.pid,
-          timeoutMs: Math.max(1_000, forceKillDelayMs + 2_000),
-          label: "ast-grep",
-        });
+        await (requestedFailure ? processGroup.terminate() : processGroup.settle());
         if (requestedFailure) {
           reject(requestedFailure);
           return;

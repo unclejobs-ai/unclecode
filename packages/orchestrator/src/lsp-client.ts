@@ -1,7 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { waitForOwnedProcessGroupExit } from "./process-group-settlement.js";
+import {
+  createOwnedProcessGroupController,
+  type OwnedProcessGroupController,
+} from "./process-group-settlement.js";
 
 export type LspServerConfig = {
   readonly id: string;
@@ -99,7 +102,7 @@ export class LspJsonRpcClient {
   private stderr = "";
   private closed = false;
   private abortListener: (() => void) | undefined;
-  private childClosePromise: Promise<void> | undefined;
+  private processGroup: OwnedProcessGroupController | undefined;
   private terminationPromise: Promise<void> | undefined;
   private closePromise: Promise<void> | undefined;
   capabilities: Record<string, unknown> = {};
@@ -119,7 +122,11 @@ export class LspJsonRpcClient {
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
-    this.childClosePromise = new Promise((resolve) => this.child?.once("close", () => resolve()));
+    this.processGroup = createOwnedProcessGroupController({
+      child: this.child,
+      label: this.config.id,
+      forceKillDelayMs: this.forceKillDelayMs,
+    });
     this.child.stdout.on("data", (chunk: Buffer) => this.consume(chunk));
     this.child.stderr.on("data", (chunk: Buffer) => {
       this.stderr = `${this.stderr}${chunk.toString("utf8")}`.slice(-8192);
@@ -339,52 +346,8 @@ export class LspJsonRpcClient {
 
   private terminateChild(): Promise<void> {
     if (this.terminationPromise) return this.terminationPromise;
-    const child = this.child;
-    if (!child) return Promise.resolve();
-    const closePromise = this.childClosePromise ?? Promise.resolve();
-    this.terminationPromise = (async () => {
-      if (child.exitCode === null && child.signalCode === null) {
-        this.signalChild(child.pid, "SIGTERM");
-      }
-      const forceTimer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) {
-          this.signalChild(child.pid, "SIGKILL");
-        }
-      }, Math.max(0, this.forceKillDelayMs));
-      forceTimer.unref();
-      const groupSettlement = closePromise.then(() => waitForOwnedProcessGroupExit({
-        processGroupId: child.pid,
-        timeoutMs: Math.max(1_000, this.forceKillDelayMs + 2_000),
-        label: this.config.id,
-      }));
-      try {
-        await Promise.race([
-          groupSettlement,
-          new Promise<never>((_resolve, reject) => {
-            const timer = setTimeout(
-              () => reject(new Error(`${this.config.id} did not exit after SIGKILL`)),
-              Math.max(1_000, this.forceKillDelayMs + 2_000),
-            );
-            timer.unref();
-            groupSettlement.finally(() => clearTimeout(timer)).catch(() => undefined);
-          }),
-        ]);
-      } finally {
-        clearTimeout(forceTimer);
-      }
-    })();
+    this.terminationPromise = this.processGroup?.terminate() ?? Promise.resolve();
     return this.terminationPromise;
-  }
-
-  private signalChild(pid: number | undefined, signal: NodeJS.Signals): boolean {
-    if (!pid) return false;
-    try {
-      process.kill(process.platform === "win32" ? pid : -pid, signal);
-      return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
-      throw error;
-    }
   }
 
   private rejectPending(error: Error): void {
