@@ -805,6 +805,7 @@ export class WorkShellEngine<
   } | undefined;
   private sessionSnapshotWriteDrain: Promise<void> | undefined;
   private sessionSnapshotWriteQueue: Promise<void> = Promise.resolve();
+  private readonly sessionSnapshotWritesInFlight = new Set<Promise<void>>();
   private disposal: Promise<void> | undefined;
 
   constructor(input: WorkShellEngineInput<Attachment, Reasoning, TraceEvent>) {
@@ -1108,7 +1109,10 @@ export class WorkShellEngine<
     this.agent.getAgentControlRuntime?.()?.clear("Work Shell closed.");
     this.settlePendingDecision({ status: "unavailable", reason: "Work Shell closed." });
     this.interactionBridge?.unbind("Work Shell closed.");
-    this.disposal = finalCheckpoint.then(() => this.sessionSnapshotWriteQueue);
+    this.disposal = Promise.all([
+      finalCheckpoint,
+      ...this.sessionSnapshotWritesInFlight,
+    ]).then(() => undefined);
     return this.disposal;
   }
 
@@ -3241,6 +3245,11 @@ export class WorkShellEngine<
       resolveWrite = resolve;
       rejectWrite = reject;
     });
+    this.sessionSnapshotWritesInFlight.add(write);
+    void write.then(
+      () => this.sessionSnapshotWritesInFlight.delete(write),
+      () => this.sessionSnapshotWritesInFlight.delete(write),
+    );
     this.pendingSessionSnapshotWrite = {
       input,
       promise: write,

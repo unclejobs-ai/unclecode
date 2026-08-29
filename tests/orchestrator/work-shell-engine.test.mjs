@@ -8529,6 +8529,30 @@ test("WorkShellEngine dispose rejects when its final console checkpoint cannot b
   await assert.rejects(disposal, /ENOSPC: no space left on device/u);
 });
 
+test("WorkShellEngine dispose observes a background console checkpoint already in flight", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-background-final-write");
+  await waitFor(() => writes.length === 2, "the timer-fired background checkpoint");
+  const disposal = engine.dispose();
+  assert.equal(engine.dispose(), disposal, "dispose remains idempotent after the timer fires");
+  writes[1].reject(new Error("ENOSPC: background checkpoint failed"));
+
+  await assert.rejects(disposal, /ENOSPC: background checkpoint failed/u);
+});
+
 test("WorkShellEngine shutdown flushes pending console timers before awaiting durable writes", async () => {
   const writes = [];
   const { engine, emitTrace } = createAgentConsoleEngine({
