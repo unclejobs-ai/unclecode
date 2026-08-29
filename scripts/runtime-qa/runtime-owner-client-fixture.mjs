@@ -27,13 +27,22 @@ const created = await client.createRuntimeSession({
   idempotencyKey: `create-${sessionId}`,
 });
 if (!created.ok) throw new Error(created.message);
-const changed = await client.invokeEngineMethod({
-  sessionId,
-  method: "setMode",
-  args: ["deep"],
-  expectedRevision: created.session.revision,
-  idempotencyKey: "first-client-mode",
-});
+const idempotencyKey = "first-client-mode";
+let expectedRevision = created.session.revision;
+let changed;
+for (let attempt = 0; attempt < 3; attempt += 1) {
+  changed = await client.invokeEngineMethod({
+    sessionId,
+    method: "setMode",
+    args: ["deep"],
+    expectedRevision,
+    idempotencyKey,
+  });
+  if (changed.ok || changed.code !== "revision_conflict") break;
+  const latest = await client.readEngineState(sessionId);
+  if (!latest.ok) throw new Error(latest.message);
+  expectedRevision = latest.revision;
+}
 if (!changed.ok) throw new Error(changed.message);
 process.stdout.write(`${JSON.stringify({ lease, sessionId, revision: changed.revision })}\n`);
 setInterval(() => {}, 60_000);

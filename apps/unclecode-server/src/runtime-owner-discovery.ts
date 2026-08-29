@@ -230,7 +230,10 @@ export async function ensureRuntimeOwner(input: {
   readonly resolveProcessStartIdentity?: ((pid: number) => Promise<string | null>) | undefined;
 }): Promise<RuntimeOwnerLease> {
   const bootId = input.bootId ?? currentBootIdentity();
-  const deadline = Date.now() + (input.timeoutMs ?? 10_000);
+  // A first caller can cold-start the full owner graph while every concurrent
+  // caller waits on its atomic claim. Bound that wait above the launcher's
+  // own startup window so a follower cannot time out before the claimant.
+  const deadline = Date.now() + (input.timeoutMs ?? 75_000);
   await mkdir(dirname(input.lockPath), { recursive: true, mode: 0o700 });
   const resolveIdentity = input.resolveProcessStartIdentity ?? processStartIdentity;
   const claimantStartId = await resolveIdentity(process.pid);

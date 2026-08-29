@@ -44,7 +44,9 @@ function waitForChildExit(child: ReturnType<typeof spawn>, timeoutMs: number): P
     };
     const onExit = () => finish(true);
     const timer = setTimeout(() => finish(false), timeoutMs);
-    timer.unref();
+    // This timer is the only remaining handle after the detached child is
+    // unref'ed. Keep it referenced so startup failure settlement cannot leave
+    // a top-level await pending and make Node exit with code 13.
     child.once("exit", onExit);
   });
 }
@@ -81,18 +83,14 @@ export async function spawnDetachedRuntimeOwner(input: {
     cwd: process.cwd(),
     detached: true,
     env: runtimeOwnerServiceEnvironment(),
-    // The startup-only pipe is bounded and destroyed after the healthy lease;
-    // the long-lived owner has no terminal handle after handoff.
-    stdio: ["ignore", "ignore", "pipe"],
-  });
-  let startupError = "";
-  child.stderr?.setEncoding("utf8");
-  child.stderr?.on("data", (chunk: string) => {
-    if (startupError.length < 2_048) startupError += chunk.slice(0, 2_048 - startupError.length);
+    // The owner must not retain a terminal pipe after handoff. In particular,
+    // closing a startup stderr pipe would make later Node warnings hit EPIPE
+    // and kill the otherwise healthy detached owner.
+    stdio: ["ignore", "ignore", "ignore"],
   });
   child.unref();
 
-  const deadline = Date.now() + (input.timeoutMs ?? 15_000);
+  const deadline = Date.now() + (input.timeoutMs ?? 60_000);
   let exited: { code: number | null; signal: NodeJS.Signals | null } | undefined;
   let spawnFailure: Error | undefined;
   child.once("error", (error) => { spawnFailure = error; });
@@ -100,13 +98,10 @@ export async function spawnDetachedRuntimeOwner(input: {
   while (Date.now() <= deadline) {
     const lease = await readRuntimeOwnerLease(input.leasePath);
     if (lease && lease.pid === child.pid && await probeRuntimeOwner(lease)) {
-      child.stderr?.destroy();
       return lease;
     }
     if (exited) {
-      child.stderr?.destroy();
-      const detail = startupError.trim().replace(/[\r\n]+/g, " ").slice(0, 512);
-      throw new Error(`Detached runtime owner exited before publishing a healthy lease (${exited.code ?? exited.signal ?? "unknown"})${detail ? `: ${detail}` : "."}`);
+      throw new Error(`Detached runtime owner exited before publishing a healthy lease (${exited.code ?? exited.signal ?? "unknown"}).`);
     }
     if (spawnFailure) {
       await reapFailedOwnerStartup(child);

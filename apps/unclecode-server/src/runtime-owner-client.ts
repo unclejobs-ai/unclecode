@@ -139,11 +139,13 @@ export class RuntimeOwnerClient {
     readonly args?: readonly unknown[] | undefined;
     readonly expectedRevision: number;
     readonly idempotencyKey?: string | undefined;
+    readonly signal?: AbortSignal | undefined;
   }): Promise<RuntimeEngineRpcResponse> {
     const response = await this.#fetch(
       `/runtime/sessions/${encodeURIComponent(input.sessionId)}/methods/${encodeURIComponent(input.method)}`,
       {
         method: "POST",
+        ...(input.signal ? { signal: input.signal } : {}),
         headers: { "content-type": "application/json", "idempotency-key": input.idempotencyKey ?? randomUUID() },
         body: JSON.stringify({ expectedRevision: input.expectedRevision, args: input.args ?? [] }),
       },
@@ -152,7 +154,10 @@ export class RuntimeOwnerClient {
   }
 
   #fetch(path: string, init: RequestInit = {}): Promise<Response> {
-    const timeout = AbortSignal.timeout(5_000);
+    // Engine RPCs can include provider/tool work. Keep every transport
+    // bounded, while leaving enough time for a real turn to settle. Callers
+    // that represent a detachable view pass their own shorter-lived signal.
+    const timeout = AbortSignal.timeout(10 * 60_000);
     return fetch(`${this.#lease.endpoint}${path}`, {
       ...init,
       signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout,

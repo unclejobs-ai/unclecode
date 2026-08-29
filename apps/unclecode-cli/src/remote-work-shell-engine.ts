@@ -27,6 +27,7 @@ export async function createRemoteWorkShellEngine(
   let polling = false;
   let disposed = false;
   let pollAbort: AbortController | undefined;
+  let invocationAbort: AbortController | undefined;
   let invocationTail: Promise<void> = Promise.resolve();
 
   const publish = (next: unknown, nextRevision: number): boolean => {
@@ -56,23 +57,31 @@ export async function createRemoteWorkShellEngine(
     }
   };
   const invoke = async (method: string, args: readonly unknown[]) => {
+    if (disposed) throw new Error("Remote runtime attachment is closed.");
     const idempotencyKey = randomUUID();
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const response = await client.invokeEngineMethod({
-        sessionId, method, args, expectedRevision: revision, idempotencyKey,
-      });
-      if (response.ok) {
-        publish(response.state, response.revision);
-        return response.result;
+    const controller = new AbortController();
+    invocationAbort = controller;
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await client.invokeEngineMethod({
+          sessionId, method, args, expectedRevision: revision, idempotencyKey,
+          signal: controller.signal,
+        });
+        if (response.ok) {
+          publish(response.state, response.revision);
+          return response.result;
+        }
+        if (
+          response.code !== "revision_conflict"
+          || attempt > 0
+          || !STABLE_CONFLICT_RETRY_METHODS.has(method)
+        ) throw new Error(response.message);
+        await readLatest(controller.signal);
       }
-      if (
-        response.code !== "revision_conflict"
-        || attempt > 0
-        || !STABLE_CONFLICT_RETRY_METHODS.has(method)
-      ) throw new Error(response.message);
-      await readLatest();
+      throw new Error("Engine revision remained unstable after refresh.");
+    } finally {
+      if (invocationAbort === controller) invocationAbort = undefined;
     }
-    throw new Error("Engine revision remained unstable after refresh.");
   };
   const scheduleInvoke = (method: string, args: readonly unknown[]) => {
     const scheduled = invocationTail.then(() => invoke(method, args));
@@ -99,6 +108,8 @@ export async function createRemoteWorkShellEngine(
       disposed = true;
       pollAbort?.abort();
       pollAbort = undefined;
+      invocationAbort?.abort(new Error("Remote runtime attachment closed."));
+      invocationAbort = undefined;
       listeners.clear();
       if (timer) clearInterval(timer);
       timer = undefined;

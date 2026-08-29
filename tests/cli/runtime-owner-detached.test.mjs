@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import test from "node:test";
 
-import { RuntimeOwnerClient, probeRuntimeOwner } from "../../apps/unclecode-server/src/index.ts";
+import { RuntimeOwnerClient, probeRuntimeOwner, readRuntimeOwnerLease } from "../../apps/unclecode-server/src/index.ts";
 import {
   runtimeOwnerServiceEnvironment,
   spawnDetachedRuntimeOwner,
@@ -50,6 +50,32 @@ function waitForExit(pid, timeoutMs = 5_000) {
   });
 }
 
+async function stopFixtureProcess(fixture) {
+  fixture.lines.close();
+  if (fixture.child.exitCode !== null || fixture.child.signalCode !== null) return;
+  const exited = new Promise(resolve => fixture.child.once("exit", resolve));
+  fixture.child.kill("SIGKILL");
+  await Promise.race([
+    exited,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`fixture ${fixture.child.pid} did not exit`)), 2_000)),
+  ]);
+}
+
+async function stopOwnersForHome(home) {
+  const leasePath = join(home, ".unclecode", "runtime-owner-v1.json");
+  const lease = await readRuntimeOwnerLease(leasePath);
+  const pids = lease ? [lease.pid] : await processesForLease(leasePath);
+  for (const pid of pids) {
+    try { process.kill(pid, "SIGTERM"); } catch { continue; }
+    try {
+      await waitForExit(pid, 2_000);
+    } catch {
+      try { process.kill(pid, "SIGKILL"); } catch {}
+      await waitForExit(pid, 2_000);
+    }
+  }
+}
+
 async function startClientFixture(home) {
   const fixture = new URL("../../scripts/runtime-qa/runtime-owner-client-fixture.mjs", import.meta.url);
   const child = spawn(process.execPath, ["--import", "tsx", fixture.pathname, process.cwd()], {
@@ -61,76 +87,95 @@ async function startClientFixture(home) {
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", chunk => errors.push(chunk));
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-  const ready = await new Promise((resolve, reject) => {
-    const onExit = (code, signal) => {
-      clearTimeout(timer);
-      reject(new Error(`fixture exited before ready (${code ?? signal}): ${errors.join("")}`));
-    };
-    const timer = setTimeout(() => {
-      child.off("exit", onExit);
-      reject(new Error(`fixture timeout: ${errors.join("")}`));
-    }, 20_000);
-    timer.unref();
-    child.once("exit", onExit);
-    lines.once("line", line => {
-      clearTimeout(timer);
-      child.off("exit", onExit);
-      resolve(JSON.parse(line));
+  try {
+    const ready = await new Promise((resolve, reject) => {
+      const onExit = (code, signal) => {
+        clearTimeout(timer);
+        reject(new Error(`fixture exited before ready (${code ?? signal}): ${errors.join("")}`));
+      };
+      const timer = setTimeout(() => {
+        child.off("exit", onExit);
+        reject(new Error(`fixture timeout: ${errors.join("")}`));
+      // Source-mode cold starts compile the complete owner graph. Production
+      // uses built JS, but this process contract must remain deterministic on a
+      // cold CI worker as well.
+      }, 90_000);
+      timer.unref();
+      child.once("exit", onExit);
+      lines.once("line", line => {
+        clearTimeout(timer);
+        child.off("exit", onExit);
+        resolve(JSON.parse(line));
+      });
     });
-  });
-  return { child, lines, ready };
+    return { child, lines, ready };
+  } catch (error) {
+    await stopFixtureProcess({ child, lines }).catch(() => undefined);
+    await stopOwnersForHome(home).catch(() => undefined);
+    throw error;
+  }
 }
 
 test("detached owner survives first TUI death and preserves endpoint, session, and revision", async () => {
   const home = await mkdtemp(join(tmpdir(), "unclecode-owner-detach-"));
-  const { child, lines, ready } = await startClientFixture(home);
-  const { lease, sessionId, revision } = ready;
-  assert.notEqual(lease.pid, child.pid, "client and owner must be different OS processes");
-  assert.equal(await probeRuntimeOwner(lease), true);
+  let fixture;
+  try {
+    fixture = await startClientFixture(home);
+    const { child, lines, ready } = fixture;
+    const { lease, sessionId, revision } = ready;
+    assert.notEqual(lease.pid, child.pid, "client and owner must be different OS processes");
+    assert.equal(await probeRuntimeOwner(lease), true);
 
-  child.kill("SIGKILL");
-  await new Promise(resolve => child.once("exit", resolve));
-  lines.close();
-  assert.equal(await probeRuntimeOwner(lease), true, "owner must survive terminal/SSH-like client death");
-  const reattached = await RuntimeOwnerClient.connect(lease);
-  const state = await reattached.readEngineState(sessionId);
-  assert.equal(state.ok, true);
-  assert.equal(state.revision, revision);
-  assert.equal(state.state.mode, "deep");
+    child.kill("SIGKILL");
+    await new Promise(resolve => child.once("exit", resolve));
+    lines.close();
+    assert.equal(await probeRuntimeOwner(lease), true, "owner must survive terminal/SSH-like client death");
+    const reattached = await RuntimeOwnerClient.connect(lease);
+    const state = await reattached.readEngineState(sessionId);
+    assert.equal(state.ok, true);
+    assert.equal(state.revision, revision);
+    assert.equal(state.state.mode, "deep");
 
-  const next = await reattached.invokeEngineMethod({
-    sessionId, method: "setMode", args: ["standard"], expectedRevision: revision,
-    idempotencyKey: "reattached-mode",
-  });
-  assert.equal(next.ok, true);
-  assert.equal(next.revision > revision, true);
-  assert.equal(reattached.lease.pid, lease.pid);
-  assert.equal(reattached.lease.endpoint, lease.endpoint);
+    const next = await reattached.invokeEngineMethod({
+      sessionId, method: "setMode", args: ["standard"], expectedRevision: revision,
+      idempotencyKey: "reattached-mode",
+    });
+    assert.equal(next.ok, true);
+    assert.equal(next.revision > revision, true);
+    assert.equal(reattached.lease.pid, lease.pid);
+    assert.equal(reattached.lease.endpoint, lease.endpoint);
 
-  process.kill(lease.pid, "SIGTERM");
-  await waitForExit(lease.pid);
-  await assert.rejects(readFile(join(home, ".unclecode", "runtime-owner-v1.json"), "utf8"));
+    process.kill(lease.pid, "SIGTERM");
+    await waitForExit(lease.pid);
+    await assert.rejects(readFile(join(home, ".unclecode", "runtime-owner-v1.json"), "utf8"));
+  } finally {
+    if (fixture) await stopFixtureProcess(fixture).catch(() => undefined);
+    await stopOwnersForHome(home);
+  }
 });
 
 test("simultaneous first clients converge on one detached owner", async () => {
   const home = await mkdtemp(join(tmpdir(), "unclecode-owner-race-"));
-  const [first, second] = await Promise.all([startClientFixture(home), startClientFixture(home)]);
-  assert.equal(first.ready.lease.pid, second.ready.lease.pid);
-  assert.equal(first.ready.lease.ownerId, second.ready.lease.ownerId);
-  assert.equal(first.ready.lease.endpoint, second.ready.lease.endpoint);
-  assert.notEqual(first.ready.sessionId, second.ready.sessionId);
-  first.child.kill("SIGKILL");
-  second.child.kill("SIGKILL");
-  await Promise.all([
-    new Promise(resolve => first.child.once("exit", resolve)),
-    new Promise(resolve => second.child.once("exit", resolve)),
-  ]);
-  first.lines.close();
-  second.lines.close();
-  assert.equal(await probeRuntimeOwner(first.ready.lease), true);
-  process.kill(first.ready.lease.pid, "SIGTERM");
-  await waitForExit(first.ready.lease.pid);
-  await assert.rejects(readFile(join(home, ".unclecode", "runtime-owner-v1.json"), "utf8"));
+  const settled = await Promise.allSettled([startClientFixture(home), startClientFixture(home)]);
+  const fixtures = settled.filter(result => result.status === "fulfilled").map(result => result.value);
+  try {
+    const failure = settled.find(result => result.status === "rejected");
+    if (failure) throw failure.reason;
+    const [first, second] = fixtures;
+    assert.ok(first && second);
+    assert.equal(first.ready.lease.pid, second.ready.lease.pid);
+    assert.equal(first.ready.lease.ownerId, second.ready.lease.ownerId);
+    assert.equal(first.ready.lease.endpoint, second.ready.lease.endpoint);
+    assert.notEqual(first.ready.sessionId, second.ready.sessionId);
+    await Promise.all([stopFixtureProcess(first), stopFixtureProcess(second)]);
+    assert.equal(await probeRuntimeOwner(first.ready.lease), true);
+    process.kill(first.ready.lease.pid, "SIGTERM");
+    await waitForExit(first.ready.lease.pid);
+    await assert.rejects(readFile(join(home, ".unclecode", "runtime-owner-v1.json"), "utf8"));
+  } finally {
+    await Promise.all(fixtures.map(fixture => stopFixtureProcess(fixture).catch(() => undefined)));
+    await stopOwnersForHome(home);
+  }
 });
 
 test("owner service environment forwards runtime config but drops unrelated secrets", () => {

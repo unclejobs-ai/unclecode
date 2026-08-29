@@ -113,6 +113,30 @@ test("remote adapter dispose aborts an in-flight owner poll and settles initiali
   assert.equal(pollAborted, true);
 });
 
+test("remote adapter dispose aborts its in-flight RPC without cancelling the owner turn", async () => {
+  let invokeStarted;
+  let receivedSignal;
+  const started = new Promise((resolve) => { invokeStarted = resolve; });
+  const client = {
+    async readEngineState() {
+      return { ok: true, revision: 1, state: { mode: "standard" }, result: null };
+    },
+    async invokeEngineMethod(input) {
+      receivedSignal = input.signal;
+      invokeStarted();
+      return await new Promise((resolve, reject) => {
+        input.signal.addEventListener("abort", () => reject(input.signal.reason), { once: true });
+      });
+    },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "detach-rpc");
+  const pending = engine.submit("keep running in the owner");
+  await started;
+  engine.dispose();
+  await assert.rejects(pending, /attachment closed/);
+  assert.equal(receivedSignal.aborted, true);
+});
+
 test("remote adapter surfaces a decision conflict without retrying against a changed decision", async () => {
   let revision = 1;
   let state = { agentConsole: { pendingDecision: { id: "decision-a" } } };
