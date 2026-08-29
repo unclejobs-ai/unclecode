@@ -166,9 +166,12 @@ export function resolveQualityReviewSelection(input: {
  *
  * Executor turns run entirely inside OMP: it routes the request, executes its
  * own tool loop, and resolves its own credentials from its own profile — so the
- * executor needs neither UncleCode's tool runtime nor a bearer token. The
- * surrounding `CodingAgent` still brackets the turn with the standard
- * trace/usage events, under the `omp` provider identity and the OMP selector.
+ * executor needs neither UncleCode's tool runtime nor a bearer token. Because
+ * that process boundary has no approval bridge, the worker exposes only its
+ * fixed workspace-file tool allowlist; shell and externally acting tools stay
+ * on UncleCode-owned runtimes. The surrounding `CodingAgent` still brackets
+ * the turn with the standard trace/usage events, under the `omp` provider
+ * identity and the OMP selector.
  *
  * The selector is fixed to `OMP_WORKER_DEFAULT_MODEL`: work turns always run on
  * Kimi K3. There is deliberately no caller input and no environment override —

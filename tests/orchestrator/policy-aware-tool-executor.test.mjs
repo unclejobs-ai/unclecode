@@ -169,8 +169,19 @@ test("release-sensitive shell actions require fresh one-shot approval despite au
     "pnpm --filter web publish",
     "pnpm run deploy",
     "gh release create v1.2.3",
+    "gh --repo owner/project pr merge 42 --merge",
+    "glab mr merge 42",
+    "hub merge feature/release-safety",
+    "git send-pack origin HEAD:refs/heads/main",
     "vercel deploy --prod",
     "bash -c 'git push origin main'",
+    "sh -c 'gh pr merge 42 --merge'",
+    "sh -c -- 'git push origin main'",
+    "command exec gh pr merge 42 --merge",
+    "command env git push origin main",
+    "env command env git push origin main",
+    "git pu\\\nsh origin main",
+    "gh p\\\nr merge 42 --merge",
     "git push origin main",
   ];
   const invoked = [];
@@ -228,6 +239,15 @@ test("ambiguous shell wrappers fail closed before autonomy", async () => {
     "make ship",
     "yarn deploy",
     "vercel --prod",
+    `node -e "require('node:child_process').execSync('git push origin main')"`,
+    `node --eval="require('node:child_process').execSync('git push origin main')"`,
+    `python -c "import os; os.system('gh pr merge 42 --merge')"`,
+    `python3.12 -c "import os; os.system('git push origin main')"`,
+    "node scripts/release.js",
+    "python scripts/deploy.py",
+    "git ship",
+    "gh api --method PUT repos/o/r/pulls/42/merge",
+    "glab api projects/1/releases --method POST",
   ];
   const invoked = [];
   const executor = createPolicyAwareToolExecutor({

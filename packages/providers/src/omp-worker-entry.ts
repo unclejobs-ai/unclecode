@@ -22,6 +22,14 @@ import { findOmpInstall } from "./omp-install.js";
 export const OMP_WORKER_DEFAULT_MODEL = "kimi-code/k3";
 
 /**
+ * The delegated worker has no interactive path back to UncleCode's approval
+ * bridge. Keep its ambient OMP registry closed and expose only workspace file
+ * tools; shell, task, browser, MCP, and other externally acting tools must run
+ * through an UncleCode-owned runtime instead.
+ */
+export const OMP_WORKER_ALLOWED_TOOLS = ["read", "write", "edit", "grep", "find"] as const;
+
+/**
  * Prefix for the worker's single result line: OMP writes its own diagnostics to
  * the same stdout, so the reader locates the result by sentinel.
  */
@@ -349,6 +357,10 @@ export async function loadOmpWorkerRuntime(env: NodeJS.ProcessEnv = process.env)
         "retry.modelFallback": false,
         "retry.usageAwareFallback": false,
         "retry.fallbackChains": {},
+        // Reads and workspace file edits remain useful to executor agents. No
+        // exec-tier tool is registered below, so a future approval-mode default
+        // cannot silently restore shell or external-write authority.
+        "tools.approvalMode": "write",
       },
     }),
     createAgentSession: (options) => sdk.createAgentSession(options),
@@ -356,8 +368,8 @@ export async function loadOmpWorkerRuntime(env: NodeJS.ProcessEnv = process.env)
 }
 
 /**
- * Run one OMP turn. OMP owns tool execution, credentials, and prompt caching;
- * this function owns only translation and honest failure codes.
+ * Run one OMP turn. OMP owns the restricted workspace-file loop, credentials,
+ * and prompt caching; external execution remains outside this worker boundary.
  */
 export async function runOmpWorkerTurn(
   request: OmpWorkerRequest,
@@ -393,7 +405,9 @@ export async function runOmpWorkerTurn(
       enableMCP: false,
       disableExtensionDiscovery: true,
       skills: [],
-      autoApprove: true,
+      toolNames: [...OMP_WORKER_ALLOWED_TOOLS],
+      restrictToolNames: true,
+      autoApprove: false,
     });
     session = created.session;
 

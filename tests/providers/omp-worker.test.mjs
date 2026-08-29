@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   mapOmpUsage,
+  OMP_WORKER_ALLOWED_TOOLS,
   OMP_WORKER_DEFAULT_MODEL,
   OMP_WORKER_RESULT_SENTINEL,
   parseOmpModelSelector,
@@ -83,6 +84,7 @@ function fakeOmpRuntime(input = {}) {
         "retry.modelFallback": false,
         "retry.usageAwareFallback": false,
         "retry.fallbackChains": {},
+        "tools.approvalMode": "write",
       };
       return {
         cwd,
@@ -323,7 +325,7 @@ test("runOmpWorkerMain returns the final assistant text with summed cache usage"
   assert.equal(runtime.calls.authClosed, 1);
 });
 
-test("runOmpWorkerMain drives OMP's own tool loop with an isolated in-memory session", async () => {
+test("runOmpWorkerMain restricts the isolated OMP loop to workspace file tools", async () => {
   const runtime = fakeOmpRuntime();
   await runOmpWorkerMain({
     stdin: JSON.stringify(workerRequest({ cwd: "/tmp/repo", reasoning: "max" })),
@@ -334,7 +336,12 @@ test("runOmpWorkerMain drives OMP's own tool loop with an isolated in-memory ses
   assert.equal(options.cwd, "/tmp/repo");
   assert.equal(options.enableMCP, false);
   assert.equal(options.disableExtensionDiscovery, true);
-  assert.equal(options.autoApprove, true);
+  assert.equal(options.autoApprove, false);
+  assert.equal(options.restrictToolNames, true);
+  assert.deepEqual(options.toolNames, [...OMP_WORKER_ALLOWED_TOOLS]);
+  assert.equal(options.toolNames.includes("bash"), false);
+  assert.equal(options.toolNames.includes("task"), false);
+  assert.equal(options.toolNames.includes("web_search"), false);
   assert.deepEqual(options.skills, []);
   assert.equal(options.thinkingLevel, "max");
   assert.deepEqual(options.sessionManager, { cwd: "/tmp/repo" });
@@ -343,6 +350,7 @@ test("runOmpWorkerMain drives OMP's own tool loop with an isolated in-memory ses
   assert.equal(options.settings.get("retry.modelFallback"), false);
   assert.equal(options.settings.get("retry.usageAwareFallback"), false);
   assert.deepEqual(options.settings.get("retry.fallbackChains"), {});
+  assert.equal(options.settings.get("tools.approvalMode"), "write");
 });
 
 test("runOmpWorkerMain reports a missing OMP install as OMP_UNAVAILABLE", async () => {

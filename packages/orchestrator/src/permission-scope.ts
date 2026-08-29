@@ -40,14 +40,30 @@ const SHELL_GRAMMAR_WORDS = new Set([
 
 const SIMPLE_COMMAND_WRAPPERS = new Set(["command", "exec", "nohup"]);
 const SHELL_COMMAND_WRAPPERS = new Set(["bash", "dash", "fish", "ksh", "sh", "zsh"]);
+const INLINE_CODE_INTERPRETERS: Readonly<Record<string, ReadonlySet<string>>> = {
+  bun: new Set(["-e", "--eval", "-p", "--print"]),
+  deno: new Set(["eval"]),
+  node: new Set(["-e", "--eval", "-p", "--print"]),
+  nodejs: new Set(["-e", "--eval", "-p", "--print"]),
+  python: new Set(["-c"]),
+  python3: new Set(["-c"]),
+};
 const AMBIGUOUS_COMMAND_WRAPPERS = new Set([".", "doas", "eval", "parallel", "source", "sudo", "xargs"]);
 const DEPLOY_CLIENTS = new Set(["firebase", "fly", "netlify", "render", "vercel", "wrangler"]);
 const TASK_RUNNERS = new Set(["just", "make", "task"]);
 const PACKAGE_MANAGERS = new Set(["bun", "npm", "pnpm", "yarn"]);
+const LOCAL_GIT_SUBCOMMANDS = new Set([
+  "add", "am", "apply", "archive", "bisect", "blame", "branch", "checkout",
+  "cherry-pick", "clean", "clone", "commit", "config", "describe", "diff",
+  "fetch", "grep", "init", "log", "ls-files", "mv", "pull", "rebase",
+  "reflog", "remote", "reset", "restore", "revert", "rev-parse", "rm", "show",
+  "sparse-checkout", "stash", "status", "switch", "tag", "worktree",
+]);
 const DYNAMIC_SHELL_PATTERN = /(?:`|\$\(|\$\{|\$[A-Za-z_])/;
 const ASSIGNMENT_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const SAFE_LOCAL_TASK_PATTERN = /^(?:build|check|format|lint|test|typecheck|verify)(?::|$)/;
 const RELEASE_TASK_PATTERN = /^(?:deploy|publish|release)(?::|$)/;
+const MAX_NESTED_COMMAND_DEPTH = 8;
 
 type TokenizedShellCommand = {
   readonly clauses: readonly (readonly string[])[];
@@ -80,8 +96,11 @@ function tokenizeShellCommand(command: string): TokenizedShellCommand {
   for (let index = 0; index < command.length; index += 1) {
     const char = command[index] ?? "";
     if (escaped) {
-      token += char;
       escaped = false;
+      // POSIX shells remove a backslash-newline pair before tokenization. Keep
+      // the classifier's token identical so a split release verb cannot evade
+      // recognition (for example `git pu\\\nsh`).
+      if (char !== "\n") token += char;
       continue;
     }
     if (char === "\\" && quote !== "single") {
@@ -201,19 +220,49 @@ function gitSubcommand(tokens: readonly string[], start: number): string | undef
   return undefined;
 }
 
-function directShellApproval(tokens: readonly string[]): OneShotShellApprovalKind | undefined {
+function nestedCommandPayload(
+  tokens: readonly string[],
+  flagIndex: number,
+): string | undefined {
+  const payloadIndex = tokens[flagIndex + 1] === "--" ? flagIndex + 2 : flagIndex + 1;
+  return tokens[payloadIndex];
+}
+
+function inlineCodePayload(
+  tokens: readonly string[],
+  start: number,
+  flags: ReadonlySet<string>,
+): string | undefined {
+  for (let index = start; index < tokens.length; index += 1) {
+    const token = tokens[index] ?? "";
+    const normalized = token.toLowerCase();
+    if (flags.has(normalized)) return nestedCommandPayload(tokens, index);
+    for (const flag of flags) {
+      if (normalized.startsWith(`${flag}=`)) return token.slice(flag.length + 1);
+      if (flag.length === 2 && normalized.startsWith(flag) && token.length > flag.length) {
+        return token.slice(flag.length);
+      }
+    }
+  }
+  return undefined;
+}
+
+function directShellApproval(
+  tokens: readonly string[],
+  nestedDepth: number,
+): OneShotShellApprovalKind | undefined {
   let commandIndex = firstCommandIndex(tokens);
   if (commandIndex >= tokens.length) return undefined;
   let executable = executableName(tokens[commandIndex] ?? "");
 
-  if (executable === "env") {
+  let wrapperDepth = 0;
+  while (executable === "env" || SIMPLE_COMMAND_WRAPPERS.has(executable)) {
+    wrapperDepth += 1;
+    if (wrapperDepth > MAX_NESTED_COMMAND_DEPTH) return "ambiguous-wrapper";
     commandIndex += 1;
-    while (commandIndex < tokens.length && ASSIGNMENT_PATTERN.test(tokens[commandIndex] ?? "")) commandIndex += 1;
-    if (tokens[commandIndex]?.startsWith("-")) return "ambiguous-wrapper";
-    executable = executableName(tokens[commandIndex] ?? "");
-  }
-  if (SIMPLE_COMMAND_WRAPPERS.has(executable)) {
-    commandIndex += 1;
+    if (executable === "env") {
+      while (commandIndex < tokens.length && ASSIGNMENT_PATTERN.test(tokens[commandIndex] ?? "")) commandIndex += 1;
+    }
     if (tokens[commandIndex]?.startsWith("-")) return "ambiguous-wrapper";
     executable = executableName(tokens[commandIndex] ?? "");
   }
@@ -227,9 +276,29 @@ function directShellApproval(tokens: readonly string[]): OneShotShellApprovalKin
   if (SHELL_COMMAND_WRAPPERS.has(executable)) {
     const commandFlag = tokens.findIndex((token, index) => index > commandIndex && (token === "-c" || token === "--command"));
     if (commandFlag < 0) return "ambiguous-wrapper";
-    const nested = tokens[commandFlag + 1];
+    const nested = nestedCommandPayload(tokens, commandFlag);
     if (!nested || DYNAMIC_SHELL_PATTERN.test(nested)) return "ambiguous-wrapper";
-    return classifyShellCommand(nested) ?? undefined;
+    return classifyShellCommand(nested, nestedDepth + 1) ?? undefined;
+  }
+  const inlineCodeFlags = INLINE_CODE_INTERPRETERS[executable]
+    ?? (/^python3(?:\.\d+)*$/.test(executable) ? INLINE_CODE_INTERPRETERS.python3 : undefined);
+  if (inlineCodeFlags) {
+    const inlineCode = inlineCodePayload(tokens, commandIndex + 1, inlineCodeFlags);
+    if (inlineCode !== undefined) {
+      if (!inlineCode || DYNAMIC_SHELL_PATTERN.test(inlineCode)) return "ambiguous-wrapper";
+      // Inline interpreter code is not shell grammar, but recursively checking
+      // it still identifies a plain wrapped release command. Anything else is
+      // executable code whose effects cannot be proven local at this layer.
+      return classifyShellCommand(inlineCode, nestedDepth + 1) ?? "ambiguous-wrapper";
+    }
+    const interpreterArguments = tokens.slice(commandIndex + 1).map((token) => token.toLowerCase());
+    if (interpreterArguments.length === 1 && ["-h", "--help", "-v", "--version"].includes(interpreterArguments[0] ?? "")) {
+      return undefined;
+    }
+    // A script, module, REPL, stdin program, or unrecognized interpreter mode
+    // is another executable-code boundary. Its effects cannot be inferred from
+    // the outer shell tokens, so autonomy and stored bash grants cannot apply.
+    return "ambiguous-wrapper";
   }
   if (/^(?:deploy|publish|release)(?:\.[A-Za-z0-9]+)?$/.test(executable)) {
     return executable.startsWith("deploy") ? "deploy" : executable.startsWith("release") ? "release" : "package-publish";
@@ -243,10 +312,11 @@ function directShellApproval(tokens: readonly string[]): OneShotShellApprovalKin
     }
     const subcommand = gitSubcommand(tokens, commandIndex + 1);
     if (subcommand === "push") return "git-push";
+    if (subcommand === "send-pack") return "git-push";
     // The current branch is runtime state unavailable to this layer, so every
     // merge is guarded rather than guessing whether it updates main.
     if (subcommand === "merge") return "git-merge";
-    return undefined;
+    return subcommand && LOCAL_GIT_SUBCOMMANDS.has(subcommand) ? undefined : "ambiguous-wrapper";
   }
 
   const subcommand = firstSubcommand(tokens, commandIndex + 1);
@@ -310,16 +380,37 @@ function directShellApproval(tokens: readonly string[]): OneShotShellApprovalKin
     }
     if (!SAFE_LOCAL_TASK_PATTERN.test(subcommand ?? "")) return "ambiguous-wrapper";
   }
-  if (executable === "gh" && subcommand === "release") return "release";
+  if (executable === "gh") {
+    const tail = tokens.slice(commandIndex + 1).map((token) => token.toLowerCase());
+    if (tail.includes("api") || tail.includes("alias")) return "ambiguous-wrapper";
+    const releaseIndex = tail.indexOf("release");
+    if (releaseIndex >= 0) return "release";
+    const pullRequestIndex = tail.findIndex((token) => token === "pr" || token === "pull-request");
+    if (pullRequestIndex >= 0 && tail.slice(pullRequestIndex + 1).includes("merge")) return "git-merge";
+  }
+  if (executable === "glab") {
+    const tail = tokens.slice(commandIndex + 1).map((token) => token.toLowerCase());
+    if (tail.includes("api") || tail.includes("alias")) return "ambiguous-wrapper";
+    if (tail.includes("release")) return "release";
+    const mergeRequestIndex = tail.findIndex((token) => token === "mr" || token === "merge-request");
+    if (mergeRequestIndex >= 0 && tail.slice(mergeRequestIndex + 1).includes("merge")) return "git-merge";
+  }
+  if (executable === "hub" && (subcommand === "merge" || subcommand === "release")) {
+    return subcommand === "merge" ? "git-merge" : "release";
+  }
   if (executable === "semantic-release") return "release";
   if (executable === "changeset" && subcommand === "publish") return "package-publish";
   return undefined;
 }
 
-function classifyShellCommand(command: string): OneShotShellApprovalKind | undefined {
+function classifyShellCommand(
+  command: string,
+  nestedDepth = 0,
+): OneShotShellApprovalKind | undefined {
+  if (nestedDepth > MAX_NESTED_COMMAND_DEPTH) return "ambiguous-wrapper";
   const tokenized = tokenizeShellCommand(command);
   for (const clause of tokenized.clauses) {
-    const classified = directShellApproval(clause);
+    const classified = directShellApproval(clause, nestedDepth);
     if (classified) return classified;
   }
   return tokenized.ambiguous ? "ambiguous-wrapper" : undefined;
