@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  parseQueueWriteResult,
   parseQueuedSubmit,
   parseQueuedSubmitList,
 } from "../../packages/orchestrator/src/work-shell-engine-queue-parse.ts";
@@ -42,6 +43,23 @@ test("queue parser restores the durable envelope and accepts legacy id/line JSON
   }]);
 });
 
+test("queue write parser preserves typed Rust limit rejections", () => {
+  assert.deepEqual(parseQueueWriteResult(JSON.stringify({
+    accepted: false,
+    error: { code: "queue_bytes", actual: 16_777_217, limit: 16_777_216 },
+  })), {
+    accepted: false,
+    error: { code: "queue_bytes", actual: 16_777_217, limit: 16_777_216 },
+  });
+  assert.throws(
+    () => parseQueueWriteResult(JSON.stringify({
+      accepted: false,
+      error: { code: "raw_path", actual: 2, limit: 1 },
+    })),
+    /Invalid Rust queue write response/,
+  );
+});
+
 test("queued attachment payloads survive a fresh loader under UncleCode artifact ownership", async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), "unclecode-queue-artifacts-"));
   const attachment = {
@@ -64,6 +82,28 @@ test("queued attachment payloads survive a fresh loader under UncleCode artifact
     assert.deepEqual(await restoreQueuedAttachments(workspace, artifacts), [attachment]);
     await deleteQueuedAttachmentArtifacts(workspace, artifacts.map((artifact) => artifact.ref));
     await assert.rejects(readFile(path.join(workspace, artifacts[0].ref), "utf8"));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("queued attachment preflight runs against exact descriptors before any artifact write", async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), "unclecode-queue-preflight-"));
+  const attachment = { type: "image", dataUrl: "data:image/png;base64,QUJD" };
+  let inspected = false;
+  try {
+    await assert.rejects(
+      persistQueuedAttachments(workspace, "session", [attachment], async (artifacts) => {
+        inspected = true;
+        assert.equal(artifacts.length, 1);
+        assert.equal(artifacts[0].size, Buffer.byteLength(`${JSON.stringify(attachment)}\n`));
+        assert.match(artifacts[0].sha256, /^[a-f0-9]{64}$/);
+        throw new Error("preflight rejected");
+      }),
+      /preflight rejected/,
+    );
+    assert.equal(inspected, true);
+    await assert.rejects(readFile(path.join(workspace, ".unclecode", "artifacts"), "utf8"));
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }

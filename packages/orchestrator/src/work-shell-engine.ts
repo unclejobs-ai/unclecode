@@ -19,6 +19,7 @@ import {
   parseQueueDrainStartDecision,
   parseQueueDrainStepDecision,
   parseQueueLength,
+  parseQueueWriteResult,
   parseQueuedSubmit,
   parseQueuedSubmitList,
 } from "./work-shell-engine-queue-parse.js";
@@ -3341,14 +3342,34 @@ export class WorkShellEngine<
     attachments: readonly Attachment[],
   ): Promise<QueuedSubmit> {
     const cwd = this.queueCommandCwd();
-    const attachmentArtifacts = await persistQueuedAttachments(cwd, this.sessionId, attachments);
+    const createdAt = Date.now();
+    const requireAccepted = (stdout: string) => {
+      const result = parseQueueWriteResult(stdout);
+      if (!result.accepted) {
+        const { code, actual, limit } = result.error;
+        throw new Error(`Queue rejected ${code}: actual ${actual}, limit ${limit}.`);
+      }
+      return result;
+    };
+    const attachmentArtifacts = await persistQueuedAttachments(
+      cwd,
+      this.sessionId,
+      attachments,
+      async (artifacts) => {
+        requireAccepted(await runRustCommand(
+          ["rust", "queue", "validate-envelope-json", this.sessionId],
+          cwd,
+          JSON.stringify({ line, createdAt, attachments: artifacts }),
+        ));
+      },
+    );
     try {
       const stdout = await runRustCommand(
         ["rust", "queue", "push-envelope-json", this.sessionId],
         cwd,
-        JSON.stringify({ line, createdAt: Date.now(), attachments: attachmentArtifacts }),
+        JSON.stringify({ line, createdAt, attachments: attachmentArtifacts }),
       );
-      const item = parseQueuedSubmit(stdout);
+      const item = requireAccepted(stdout).item;
       if (!item) {
         throw new Error("Rust queue push did not return an item.");
       }

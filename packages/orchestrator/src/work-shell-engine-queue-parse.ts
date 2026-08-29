@@ -47,6 +47,32 @@ export type QueuedSubmit = {
   readonly recoveryReason?: string | undefined;
 };
 
+export type QueueLimitCode =
+  | "item_count"
+  | "message_bytes"
+  | "attachment_count"
+  | "item_bytes"
+  | "queue_bytes";
+
+export type QueueWriteResult =
+  | { readonly accepted: true; readonly item?: QueuedSubmit | undefined }
+  | {
+      readonly accepted: false;
+      readonly error: {
+        readonly code: QueueLimitCode;
+        readonly actual: number;
+        readonly limit: number;
+      };
+    };
+
+const QUEUE_LIMIT_CODES = new Set<QueueLimitCode>([
+  "item_count",
+  "message_bytes",
+  "attachment_count",
+  "item_bytes",
+  "queue_bytes",
+]);
+
 function normalizeQueueItem(value: unknown): QueuedSubmit | undefined {
   if (!value || typeof value !== "object") return undefined;
   const candidate = value as {
@@ -136,6 +162,45 @@ export function parseQueuedSubmit(stdout: string): QueuedSubmit | undefined {
     throw new Error(`Invalid Rust queue response: ${trimmed}`);
   }
   return candidate;
+}
+
+export function parseQueueWriteResult(stdout: string): QueueWriteResult {
+  const trimmed = stdout.trim();
+  const parsed: unknown = JSON.parse(trimmed);
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error("Invalid Rust queue write response.");
+  }
+  const candidate = parsed as {
+    accepted?: unknown;
+    error?: { code?: unknown; actual?: unknown; limit?: unknown };
+  };
+  if (candidate.accepted === true) {
+    return { accepted: true };
+  }
+  if (candidate.accepted === false) {
+    const code = candidate.error?.code;
+    const actual = candidate.error?.actual;
+    const limit = candidate.error?.limit;
+    if (
+      typeof code === "string"
+      && QUEUE_LIMIT_CODES.has(code as QueueLimitCode)
+      && typeof actual === "number"
+      && Number.isSafeInteger(actual)
+      && actual >= 0
+      && typeof limit === "number"
+      && Number.isSafeInteger(limit)
+      && limit >= 0
+    ) {
+      return {
+        accepted: false,
+        error: { code: code as QueueLimitCode, actual, limit },
+      };
+    }
+    throw new Error("Invalid Rust queue write response.");
+  }
+  const item = normalizeQueueItem(parsed);
+  if (item) return { accepted: true, item };
+  throw new Error("Invalid Rust queue write response.");
 }
 
 export function parseQueueLength(stdout: string): number {

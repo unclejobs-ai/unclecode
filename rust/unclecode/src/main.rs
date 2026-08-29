@@ -145,8 +145,9 @@ use unclecode_core::provider_transport::{
     post_openai_codex_json, provider_request_spec_json,
 };
 use unclecode_core::queue::{
-    queue_item_json, queue_items_json, queue_length_json, PersistentWorkQueue,
-    QueueAttachmentArtifact, QueueMoveDirection, WorkQueue,
+    queue_item_json, queue_items_json, queue_length_json, queue_limit_acceptance_json,
+    queue_limit_rejection_json, PersistentWorkQueue, QueueAttachmentArtifact, QueueMoveDirection,
+    QueuePushError, WorkQueue,
 };
 use unclecode_core::queue_command::resolve_queue_command_json;
 use unclecode_core::reasoning_builtin_command::resolve_reasoning_builtin_command_json;
@@ -4580,6 +4581,55 @@ fn run_native_session_command(args: &[OsString]) -> Result<u8, String> {
     }
 }
 
+fn parse_native_queue_envelope(
+    input: &str,
+) -> Result<(String, u64, Vec<QueueAttachmentArtifact>), String> {
+    let value: serde_json::Value =
+        serde_json::from_str(input).map_err(|error| format!("Invalid queue envelope: {error}"))?;
+    let line = value
+        .get("line")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("Queue envelope line must be a string.")?;
+    let created_at = value
+        .get("createdAt")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or("Queue envelope createdAt must be an unsigned integer.")?;
+    let attachments = value
+        .get("attachments")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("Queue envelope attachments must be an array.")?
+        .iter()
+        .map(|artifact| {
+            let reference = artifact
+                .get("ref")
+                .and_then(serde_json::Value::as_str)
+                .filter(|candidate| !candidate.trim().is_empty())
+                .ok_or("Queue attachment ref must be a non-empty string.")?;
+            let schema = artifact
+                .get("schema")
+                .and_then(serde_json::Value::as_str)
+                .filter(|candidate| !candidate.trim().is_empty())
+                .ok_or("Queue attachment schema must be a non-empty string.")?;
+            let sha256 = artifact
+                .get("sha256")
+                .and_then(serde_json::Value::as_str)
+                .filter(|candidate| candidate.len() == 64)
+                .ok_or("Queue attachment sha256 must be a 64-character string.")?;
+            let size = artifact
+                .get("size")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or("Queue attachment size must be an unsigned integer.")?;
+            Ok::<QueueAttachmentArtifact, &'static str>(QueueAttachmentArtifact {
+                reference: reference.to_string(),
+                schema: schema.to_string(),
+                sha256: sha256.to_string(),
+                size,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((line.to_string(), created_at, attachments))
+}
+
 fn run_native_queue_command(args: &[OsString]) -> Result<u8, String> {
     let cwd = work_cwd()?;
     let session_id = args
@@ -4588,58 +4638,31 @@ fn run_native_queue_command(args: &[OsString]) -> Result<u8, String> {
         .ok_or("Usage: unclecode rust queue <push|pop|list|len|clear> <session-id> [line]")?;
     let queue = PersistentWorkQueue::new(queue_path(&cwd, session_id));
     match args.first().and_then(|arg| arg.to_str()) {
-        Some("push-envelope-json") => {
+        Some("validate-envelope-json") | Some("push-envelope-json") => {
             let mut input = String::new();
             io::stdin()
                 .read_to_string(&mut input)
                 .map_err(|error| format!("Failed to read queue envelope: {error}"))?;
-            let value: serde_json::Value = serde_json::from_str(&input)
-                .map_err(|error| format!("Invalid queue envelope: {error}"))?;
-            let line = value
-                .get("line")
-                .and_then(serde_json::Value::as_str)
-                .ok_or("Queue envelope line must be a string.")?;
-            let created_at = value
-                .get("createdAt")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or("Queue envelope createdAt must be an unsigned integer.")?;
-            let attachments = value
-                .get("attachments")
-                .and_then(serde_json::Value::as_array)
-                .ok_or("Queue envelope attachments must be an array.")?
-                .iter()
-                .map(|artifact| {
-                    let reference = artifact
-                        .get("ref")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|candidate| !candidate.trim().is_empty())
-                        .ok_or("Queue attachment ref must be a non-empty string.")?;
-                    let schema = artifact
-                        .get("schema")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|candidate| !candidate.trim().is_empty())
-                        .ok_or("Queue attachment schema must be a non-empty string.")?;
-                    let sha256 = artifact
-                        .get("sha256")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|candidate| candidate.len() == 64)
-                        .ok_or("Queue attachment sha256 must be a 64-character string.")?;
-                    let size = artifact
-                        .get("size")
-                        .and_then(serde_json::Value::as_u64)
-                        .ok_or("Queue attachment size must be an unsigned integer.")?;
-                    Ok::<QueueAttachmentArtifact, &'static str>(QueueAttachmentArtifact {
-                        reference: reference.to_string(),
-                        schema: schema.to_string(),
-                        sha256: sha256.to_string(),
-                        size,
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let item = queue
-                .push_with_artifacts(line, created_at, attachments)
-                .map_err(|error| format!("Failed to push queue item: {error}"))?;
-            println!("{}", queue_item_json(item.as_ref()));
+            let (line, created_at, attachments) = parse_native_queue_envelope(&input)?;
+            let result = if args.first().and_then(|arg| arg.to_str())
+                == Some("validate-envelope-json")
+            {
+                queue
+                    .preflight_push_with_artifacts(line, created_at, attachments)
+                    .map(|()| None)
+            } else {
+                queue.push_with_artifacts(line, created_at, attachments)
+            };
+            match result {
+                Ok(Some(item)) => println!("{}", queue_item_json(Some(&item))),
+                Ok(None) => println!("{}", queue_limit_acceptance_json()),
+                Err(QueuePushError::Rejected(error)) => {
+                    println!("{}", queue_limit_rejection_json(&error));
+                }
+                Err(QueuePushError::Io(error)) => {
+                    return Err(format!("Failed to access queue: {error}"));
+                }
+            }
             Ok(0)
         }
         Some("push") | Some("push-json") => {
@@ -4648,16 +4671,21 @@ fn run_native_queue_command(args: &[OsString]) -> Result<u8, String> {
                 .map(|arg| arg.to_string_lossy())
                 .collect::<Vec<_>>()
                 .join(" ");
-            let Some(item) = queue
-                .push(line)
-                .map_err(|error| format!("Failed to push queue item: {error}"))?
-            else {
-                return Err("Queue line must not be empty.".to_string());
-            };
-            if args.first().and_then(|arg| arg.to_str()) == Some("push-json") {
-                println!("{}", queue_item_json(Some(&item)));
-            } else {
-                println!("{} {}", item.id, item.line);
+            match queue.push(line) {
+                Ok(Some(item)) => {
+                    if args.first().and_then(|arg| arg.to_str()) == Some("push-json") {
+                        println!("{}", queue_item_json(Some(&item)));
+                    } else {
+                        println!("{} {}", item.id, item.line);
+                    }
+                }
+                Ok(None) => return Err("Queue line must not be empty.".to_string()),
+                Err(QueuePushError::Rejected(error))
+                    if args.first().and_then(|arg| arg.to_str()) == Some("push-json") =>
+                {
+                    println!("{}", queue_limit_rejection_json(&error));
+                }
+                Err(error) => return Err(format!("Failed to push queue item: {error}")),
             }
             Ok(0)
         }
@@ -4776,7 +4804,7 @@ fn run_native_queue_command(args: &[OsString]) -> Result<u8, String> {
             Ok(0)
         }
         _ => Err(
-            "Usage: unclecode rust queue <push|push-json|push-envelope-json|pop|pop-json|claim-json|ack-json|nack-json|quarantine-json|recover-json|retry-json|discard-json|remove-json|move-json|list|len|len-json|clear> <session-id> [args]".to_string(),
+            "Usage: unclecode rust queue <validate-envelope-json|push|push-json|push-envelope-json|pop|pop-json|claim-json|ack-json|nack-json|quarantine-json|recover-json|retry-json|discard-json|remove-json|move-json|list|len|len-json|clear> <session-id> [args]".to_string(),
         ),
     }
 }

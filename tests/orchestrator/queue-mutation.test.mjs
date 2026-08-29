@@ -6,6 +6,37 @@ import test from "node:test";
 
 import { runRustCommandSync } from "@unclecode/orchestrator";
 
+test("Rust queue preflight returns typed payload-free limit rejections", () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-queue-limits-"));
+  const session = "task4-limits";
+  try {
+    const accepted = JSON.parse(runRustCommandSync(
+      ["rust", "queue", "validate-envelope-json", session],
+      cwd,
+      JSON.stringify({ line: "가".repeat(21_845) + "a", createdAt: 123, attachments: [] }),
+    ));
+    assert.deepEqual(accepted, { accepted: true });
+
+    const rejected = JSON.parse(runRustCommandSync(
+      ["rust", "queue", "validate-envelope-json", session],
+      cwd,
+      JSON.stringify({ line: "가".repeat(21_846), createdAt: 124, attachments: [] }),
+    ));
+    assert.deepEqual(rejected, {
+      accepted: false,
+      error: { actual: 65_538, code: "message_bytes", limit: 65_536 },
+    });
+    assert.equal(JSON.stringify(rejected).includes("가"), false, "rejections never echo raw input");
+    assert.deepEqual(
+      JSON.parse(runRustCommandSync(["rust", "queue", "list", session], cwd)),
+      [],
+      "preflight never mutates the durable queue",
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("Rust queue backend atomically removes and reorders stable ids", () => {
   const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-queue-mutation-"));
   const session = "task4-queue";

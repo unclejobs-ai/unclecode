@@ -51,35 +51,44 @@ export async function persistQueuedAttachments<Attachment>(
   workspaceRoot: string,
   sessionId: string,
   attachments: readonly Attachment[],
+  preflight?: (artifacts: readonly QueueAttachmentArtifact[]) => Promise<void>,
 ): Promise<readonly QueueAttachmentArtifact[]> {
-  if (attachments.length === 0) return [];
   const relativeDirectory = path.join(
     ".unclecode",
     "artifacts",
     safeFilePart(sessionId),
     "queue-attachments",
   );
-  const artifacts: QueueAttachmentArtifact[] = [];
-  try {
-    for (let index = 0; index < attachments.length; index += 1) {
-      const filename = `${randomUUID()}-${index}.json`;
-      const relative = path.join(relativeDirectory, filename).split(path.sep).join("/");
-      const content = `${JSON.stringify(attachments[index])}\n`;
-      await runRustCommand(
-        ["rust", "aci", "write-atomic-no-symlinks", workspaceRelativeOwnedArtifact(workspaceRoot, relative)],
-        workspaceRoot,
-        content,
-      );
-      artifacts.push({
+  const prepared = attachments.map((attachment, index) => {
+    const filename = `${randomUUID()}-${index}.json`;
+    const relative = path.join(relativeDirectory, filename).split(path.sep).join("/");
+    const content = `${JSON.stringify(attachment)}\n`;
+    return {
+      content,
+      artifact: {
         ref: relative,
         schema: QUEUE_ATTACHMENT_SCHEMA,
         sha256: digest(content),
         size: Buffer.byteLength(content, "utf8"),
-      });
+      } satisfies QueueAttachmentArtifact,
+    };
+  });
+  await preflight?.(prepared.map(({ artifact }) => artifact));
+  if (prepared.length === 0) return [];
+
+  const persisted: QueueAttachmentArtifact[] = [];
+  try {
+    for (const { artifact, content } of prepared) {
+      await runRustCommand(
+        ["rust", "aci", "write-atomic-no-symlinks", workspaceRelativeOwnedArtifact(workspaceRoot, artifact.ref)],
+        workspaceRoot,
+        content,
+      );
+      persisted.push(artifact);
     }
-    return artifacts;
+    return persisted;
   } catch (error) {
-    await deleteQueuedAttachmentArtifacts(workspaceRoot, artifacts.map((artifact) => artifact.ref));
+    await deleteQueuedAttachmentArtifacts(workspaceRoot, persisted.map((artifact) => artifact.ref));
     throw error;
   }
 }

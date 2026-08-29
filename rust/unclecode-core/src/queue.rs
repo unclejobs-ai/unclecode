@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::fmt;
 use std::io;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -16,6 +17,99 @@ use serde_json::{json, Value};
 
 pub const STALE_IN_FLIGHT_RECOVERY_REASON: &str =
     "UncleCode restarted before this queued follow-up completed. Retry or discard it explicitly.";
+pub const QUEUE_MAX_ITEMS: usize = 256;
+pub const QUEUE_MAX_MESSAGE_BYTES: usize = 64 * 1024;
+pub const QUEUE_MAX_ATTACHMENTS_PER_ITEM: usize = 32;
+pub const QUEUE_MAX_ITEM_BYTES: usize = 1024 * 1024;
+pub const QUEUE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueLimitCode {
+    ItemCount,
+    MessageBytes,
+    AttachmentCount,
+    ItemBytes,
+    QueueBytes,
+}
+
+impl QueueLimitCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ItemCount => "item_count",
+            Self::MessageBytes => "message_bytes",
+            Self::AttachmentCount => "attachment_count",
+            Self::ItemBytes => "item_bytes",
+            Self::QueueBytes => "queue_bytes",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueLimitError {
+    pub code: QueueLimitCode,
+    pub actual: usize,
+    pub limit: usize,
+}
+
+impl fmt::Display for QueueLimitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "queue limit exceeded: {} actual={} limit={}",
+            self.code.as_str(),
+            self.actual,
+            self.limit,
+        )
+    }
+}
+
+impl std::error::Error for QueueLimitError {}
+
+#[derive(Debug)]
+pub enum QueuePushError {
+    Io(io::Error),
+    Rejected(QueueLimitError),
+}
+
+impl QueuePushError {
+    pub fn rejection(&self) -> Option<&QueueLimitError> {
+        match self {
+            Self::Io(_) => None,
+            Self::Rejected(error) => Some(error),
+        }
+    }
+
+    pub fn kind(&self) -> io::ErrorKind {
+        match self {
+            Self::Io(error) => error.kind(),
+            Self::Rejected(_) => io::ErrorKind::InvalidInput,
+        }
+    }
+}
+
+impl fmt::Display for QueuePushError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => error.fmt(formatter),
+            Self::Rejected(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for QueuePushError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Rejected(error) => Some(error),
+        }
+    }
+}
+
+impl From<io::Error> for QueuePushError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueAttachmentArtifact {
@@ -315,9 +409,9 @@ impl PersistentWorkQueue {
         &self.path
     }
 
-    pub fn push(&self, line: impl Into<String>) -> io::Result<Option<QueueItem>> {
+    pub fn push(&self, line: impl Into<String>) -> Result<Option<QueueItem>, QueuePushError> {
         let line = line.into();
-        self.mutate(move |queue| queue.push(line))
+        self.mutate_push(move |queue| queue.push(line))
     }
 
     pub fn push_with_metadata(
@@ -325,9 +419,9 @@ impl PersistentWorkQueue {
         line: impl Into<String>,
         created_at: u64,
         attachment_refs: Vec<String>,
-    ) -> io::Result<Option<QueueItem>> {
+    ) -> Result<Option<QueueItem>, QueuePushError> {
         let line = line.into();
-        self.mutate(move |queue| queue.push_with_metadata(line, created_at, attachment_refs))
+        self.mutate_push(move |queue| queue.push_with_metadata(line, created_at, attachment_refs))
     }
 
     pub fn push_with_artifacts(
@@ -335,9 +429,27 @@ impl PersistentWorkQueue {
         line: impl Into<String>,
         created_at: u64,
         attachments: Vec<QueueAttachmentArtifact>,
-    ) -> io::Result<Option<QueueItem>> {
+    ) -> Result<Option<QueueItem>, QueuePushError> {
         let line = line.into();
-        self.mutate(move |queue| queue.push_with_artifacts(line, created_at, attachments))
+        self.mutate_push(move |queue| queue.push_with_artifacts(line, created_at, attachments))
+    }
+
+    pub fn preflight_push_with_artifacts(
+        &self,
+        line: impl Into<String>,
+        created_at: u64,
+        attachments: Vec<QueueAttachmentArtifact>,
+    ) -> Result<(), QueuePushError> {
+        let _lock =
+            QueueFileLock::acquire_in_workspace(&self.workspace_root, &self.lock_relative_path())?;
+        let mut queue = self.load()?;
+        if queue
+            .push_with_artifacts(line, created_at, attachments)
+            .is_some()
+        {
+            validate_queue_limits(&queue).map_err(QueuePushError::Rejected)?;
+        }
+        Ok(())
     }
 
     pub fn pop(&self) -> io::Result<Option<QueueItem>> {
@@ -402,6 +514,20 @@ impl PersistentWorkQueue {
             QueueFileLock::acquire_in_workspace(&self.workspace_root, &self.lock_relative_path())?;
         let mut queue = self.load()?;
         let result = update(&mut queue);
+        validate_queue_limits(&queue).map_err(queue_limit_io_error)?;
+        self.store(&queue)?;
+        Ok(result)
+    }
+
+    fn mutate_push(
+        &self,
+        update: impl FnOnce(&mut WorkQueue) -> Option<QueueItem>,
+    ) -> Result<Option<QueueItem>, QueuePushError> {
+        let _lock =
+            QueueFileLock::acquire_in_workspace(&self.workspace_root, &self.lock_relative_path())?;
+        let mut queue = self.load()?;
+        let result = update(&mut queue);
+        validate_queue_limits(&queue).map_err(QueuePushError::Rejected)?;
         self.store(&queue)?;
         Ok(result)
     }
@@ -423,6 +549,13 @@ impl PersistentWorkQueue {
             }
             Err(error) => return Err(aci_error_to_io(error)),
         };
+        if content.len() > QUEUE_MAX_BYTES {
+            return Err(queue_limit_io_error(QueueLimitError {
+                code: QueueLimitCode::QueueBytes,
+                actual: content.len(),
+                limit: QUEUE_MAX_BYTES,
+            }));
+        }
         let mut queue = WorkQueue::new();
         let mut max_id = 0;
         for line in content.lines() {
@@ -456,18 +589,19 @@ impl PersistentWorkQueue {
             });
         }
         queue.next_id = max_id.saturating_add(1).max(1);
+        validate_queue_limits(&queue).map_err(queue_limit_io_error)?;
         Ok(queue)
     }
 
     fn store(&self, queue: &WorkQueue) -> io::Result<()> {
-        let mut content = String::new();
-        for item in queue.snapshot() {
-            content.push_str(
-                &serde_json::to_string(&queue_item_value(&item))
-                    .expect("queue item serialization should not fail"),
-            );
-            content.push('\n');
+        let envelope_bytes = queue_envelope_bytes(queue);
+        let mut content = Vec::with_capacity(envelope_bytes);
+        for item in &queue.items {
+            serde_json::to_writer(&mut content, &queue_item_value(item))
+                .expect("queue item serialization should not fail");
+            content.push(b'\n');
         }
+        let content = String::from_utf8(content).expect("queue JSON must be valid UTF-8");
         write_text_file_atomically_no_symlinks(&self.workspace_root, &self.relative_path, &content)
             .map_err(aci_error_to_io)
     }
@@ -583,6 +717,95 @@ fn aci_error_to_io(error: AciError) -> io::Error {
     }
 }
 
+fn queue_limit_io_error(error: QueueLimitError) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+fn attachment_payload_bytes(item: &QueueItem) -> usize {
+    item.attachments.iter().fold(0usize, |total, attachment| {
+        total.saturating_add(usize::try_from(attachment.size).unwrap_or(usize::MAX))
+    })
+}
+
+fn queue_item_envelope_bytes(item: &QueueItem) -> usize {
+    serde_json::to_vec(&queue_item_value(item))
+        .expect("queue item serialization should not fail")
+        .len()
+        .saturating_add(1)
+}
+
+fn queue_item_accounted_envelope_bytes(item: &QueueItem) -> usize {
+    let actual = queue_item_envelope_bytes(item);
+    let mut recovery_projection = item.clone();
+    recovery_projection.status = QueueItemStatus::RequiresAction;
+    recovery_projection.recovery_reason = Some(STALE_IN_FLIGHT_RECOVERY_REASON.to_string());
+    actual.max(queue_item_envelope_bytes(&recovery_projection))
+}
+
+fn queue_item_bytes(item: &QueueItem) -> usize {
+    queue_item_accounted_envelope_bytes(item).saturating_add(attachment_payload_bytes(item))
+}
+
+fn queue_envelope_bytes(queue: &WorkQueue) -> usize {
+    queue.items.iter().fold(0usize, |total, item| {
+        total.saturating_add(queue_item_envelope_bytes(item))
+    })
+}
+
+fn queue_bytes(queue: &WorkQueue) -> usize {
+    queue.items.iter().fold(0usize, |total, item| {
+        total.saturating_add(queue_item_bytes(item))
+    })
+}
+
+fn validate_queue_limits(queue: &WorkQueue) -> Result<(), QueueLimitError> {
+    if queue.items.len() > QUEUE_MAX_ITEMS {
+        return Err(QueueLimitError {
+            code: QueueLimitCode::ItemCount,
+            actual: queue.items.len(),
+            limit: QUEUE_MAX_ITEMS,
+        });
+    }
+    for item in &queue.items {
+        let message_bytes = item.line.len();
+        if message_bytes > QUEUE_MAX_MESSAGE_BYTES {
+            return Err(QueueLimitError {
+                code: QueueLimitCode::MessageBytes,
+                actual: message_bytes,
+                limit: QUEUE_MAX_MESSAGE_BYTES,
+            });
+        }
+        let attachment_count = item
+            .attachment_count
+            .max(item.attachment_refs.len())
+            .max(item.attachments.len());
+        if attachment_count > QUEUE_MAX_ATTACHMENTS_PER_ITEM {
+            return Err(QueueLimitError {
+                code: QueueLimitCode::AttachmentCount,
+                actual: attachment_count,
+                limit: QUEUE_MAX_ATTACHMENTS_PER_ITEM,
+            });
+        }
+        let item_bytes = queue_item_bytes(item);
+        if item_bytes > QUEUE_MAX_ITEM_BYTES {
+            return Err(QueueLimitError {
+                code: QueueLimitCode::ItemBytes,
+                actual: item_bytes,
+                limit: QUEUE_MAX_ITEM_BYTES,
+            });
+        }
+    }
+    let queue_bytes = queue_bytes(queue);
+    if queue_bytes > QUEUE_MAX_BYTES {
+        return Err(QueueLimitError {
+            code: QueueLimitCode::QueueBytes,
+            actual: queue_bytes,
+            limit: QUEUE_MAX_BYTES,
+        });
+    }
+    Ok(())
+}
+
 pub fn queue_item_json(item: Option<&QueueItem>) -> String {
     match item {
         Some(item) => serde_json::to_string(&queue_item_value(item))
@@ -598,6 +821,22 @@ pub fn queue_items_json(items: &[QueueItem]) -> String {
 
 pub fn queue_length_json(length: usize) -> String {
     json!({ "length": length }).to_string()
+}
+
+pub fn queue_limit_acceptance_json() -> String {
+    json!({ "accepted": true }).to_string()
+}
+
+pub fn queue_limit_rejection_json(error: &QueueLimitError) -> String {
+    json!({
+        "accepted": false,
+        "error": {
+            "code": error.code.as_str(),
+            "actual": error.actual,
+            "limit": error.limit,
+        }
+    })
+    .to_string()
 }
 
 fn queue_item_value(item: &QueueItem) -> Value {
@@ -739,9 +978,11 @@ mod tests {
     impl QueueTestRoots {
         fn new(label: &str) -> Self {
             let suffix = format!("{}-{}", std::process::id(), epoch_millis());
+            let workspace =
+                std::env::temp_dir().join(format!("unclecode-queue-{label}-workspace-{suffix}"));
+            fs::create_dir_all(&workspace).expect("queue test workspace");
             Self {
-                workspace: std::env::temp_dir()
-                    .join(format!("unclecode-queue-{label}-workspace-{suffix}")),
+                workspace,
                 outside: std::env::temp_dir()
                     .join(format!("unclecode-queue-{label}-outside-{suffix}")),
             }
@@ -1086,6 +1327,264 @@ mod tests {
         let serialized = queue_item_json(Some(&item));
         let restored = parse_queue_item_value(&serialized).expect("parse serialized item");
         assert_eq!(restored, item);
+    }
+
+    fn attachment_with_size(size: u64) -> QueueAttachmentArtifact {
+        QueueAttachmentArtifact {
+            reference: ".unclecode/artifacts/session/queue-attachments/a.json".to_string(),
+            schema: "unclecode.queue-attachment.v1".to_string(),
+            sha256: "a".repeat(64),
+            size,
+        }
+    }
+
+    fn payload_size_for_exact_item_bytes(
+        id: u64,
+        line: &str,
+        created_at: u64,
+        target: usize,
+    ) -> u64 {
+        let mut payload_size = target as u64;
+        loop {
+            let item = QueueItem {
+                id,
+                line: line.to_string(),
+                created_at,
+                status: QueueItemStatus::Pending,
+                attachment_refs: vec![attachment_with_size(payload_size).reference],
+                attachment_count: 1,
+                attachments: vec![attachment_with_size(payload_size)],
+                recovery_reason: None,
+            };
+            let next = target
+                .checked_sub(queue_item_accounted_envelope_bytes(&item))
+                .expect("target fits queue envelope") as u64;
+            if next == payload_size {
+                assert_eq!(queue_item_bytes(&item), target);
+                return payload_size;
+            }
+            payload_size = next;
+        }
+    }
+
+    #[test]
+    fn persistent_queue_enforces_utf8_message_bytes_at_the_exact_boundary() {
+        let roots = QueueTestRoots::new("message-byte-limit");
+        let queue = PersistentWorkQueue::new(roots.queue_path());
+        let accepted = format!("{}a", "가".repeat((QUEUE_MAX_MESSAGE_BYTES - 1) / 3));
+        assert_eq!(accepted.len(), QUEUE_MAX_MESSAGE_BYTES);
+        assert!(queue.push(&accepted).expect("boundary push").is_some());
+
+        let oversized = format!("{accepted}나");
+        let error = queue
+            .push(oversized)
+            .expect_err("UTF-8 bytes above the boundary must be rejected");
+        assert_eq!(
+            error.rejection(),
+            Some(&QueueLimitError {
+                code: QueueLimitCode::MessageBytes,
+                actual: QUEUE_MAX_MESSAGE_BYTES + 3,
+                limit: QUEUE_MAX_MESSAGE_BYTES,
+            })
+        );
+        assert_eq!(queue.snapshot().expect("unchanged snapshot").len(), 1);
+    }
+
+    #[test]
+    fn persistent_queue_accepts_attachment_count_boundary_and_rejects_one_more() {
+        let roots = QueueTestRoots::new("attachment-count-limit");
+        let queue = PersistentWorkQueue::new(roots.queue_path());
+        let boundary = vec![attachment_with_size(0); QUEUE_MAX_ATTACHMENTS_PER_ITEM];
+        assert!(queue
+            .push_with_artifacts("boundary", 123, boundary)
+            .expect("boundary push")
+            .is_some());
+
+        let oversized = vec![attachment_with_size(0); QUEUE_MAX_ATTACHMENTS_PER_ITEM + 1];
+        let error = queue
+            .push_with_artifacts("oversized", 124, oversized)
+            .expect_err("attachment count above the boundary must be rejected");
+        assert_eq!(
+            error.rejection().map(|error| error.code),
+            Some(QueueLimitCode::AttachmentCount)
+        );
+        assert_eq!(
+            error.rejection().map(|error| error.actual),
+            Some(QUEUE_MAX_ATTACHMENTS_PER_ITEM + 1)
+        );
+        assert_eq!(queue.snapshot().expect("unchanged snapshot").len(), 1);
+    }
+
+    #[test]
+    fn persistent_queue_rejects_item_and_aggregate_serialized_bytes_without_mutation() {
+        let roots = QueueTestRoots::new("item-byte-limit");
+        let queue = PersistentWorkQueue::new(roots.queue_path());
+        let boundary_size =
+            payload_size_for_exact_item_bytes(1, "item boundary", 123, QUEUE_MAX_ITEM_BYTES);
+        assert!(queue
+            .push_with_artifacts(
+                "item boundary",
+                123,
+                vec![attachment_with_size(boundary_size)],
+            )
+            .expect("exact item boundary")
+            .is_some());
+        queue
+            .claim()
+            .expect("boundary claim")
+            .expect("claimed item");
+        let recovered = queue
+            .recover_stale_in_flight()
+            .expect("boundary crash recovery");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status, QueueItemStatus::RequiresAction);
+        let before_item_rejection = queue.snapshot().expect("boundary snapshot");
+        let item_error = queue
+            .push_with_artifacts(
+                "item boundary",
+                124,
+                vec![attachment_with_size(boundary_size + 1)],
+            )
+            .expect_err("envelope plus payload must exceed the item boundary");
+        assert_eq!(
+            item_error.rejection().map(|error| error.code),
+            Some(QueueLimitCode::ItemBytes)
+        );
+        assert!(item_error.rejection().unwrap().actual > QUEUE_MAX_ITEM_BYTES);
+        assert_eq!(
+            queue.snapshot().expect("unchanged item snapshot"),
+            before_item_rejection
+        );
+
+        let aggregate_roots = QueueTestRoots::new("aggregate-byte-limit");
+        let aggregate_queue = PersistentWorkQueue::new(aggregate_roots.queue_path());
+        for index in 0..16 {
+            let line = format!("aggregate {index}");
+            let created_at = index as u64;
+            let payload_size = payload_size_for_exact_item_bytes(
+                created_at + 1,
+                &line,
+                created_at,
+                QUEUE_MAX_ITEM_BYTES,
+            );
+            aggregate_queue
+                .push_with_artifacts(line, created_at, vec![attachment_with_size(payload_size)])
+                .expect("within aggregate limit")
+                .expect("queued item");
+        }
+        assert_eq!(
+            queue_bytes(&aggregate_queue.load().expect("load exact aggregate")),
+            QUEUE_MAX_BYTES,
+        );
+        let before = aggregate_queue
+            .snapshot()
+            .expect("snapshot before rejection");
+        let aggregate_error = aggregate_queue
+            .push("aggregate overflow")
+            .expect_err("aggregate durable footprint must be bounded");
+        assert_eq!(
+            aggregate_error.rejection().map(|error| error.code),
+            Some(QueueLimitCode::QueueBytes)
+        );
+        assert!(aggregate_error.rejection().unwrap().actual > QUEUE_MAX_BYTES);
+        assert_eq!(
+            aggregate_queue.snapshot().expect("unchanged snapshot"),
+            before
+        );
+    }
+
+    #[test]
+    fn persistent_queue_caps_all_retained_states_and_does_not_grow_after_rejection() {
+        let roots = QueueTestRoots::new("retained-item-limit");
+        let queue = PersistentWorkQueue::new(roots.queue_path());
+        for index in 0..QUEUE_MAX_ITEMS - 1 {
+            queue
+                .push(format!("bounded {index}"))
+                .expect("push within item limit")
+                .expect("queued item");
+        }
+        queue
+            .preflight_push_with_artifacts("race candidate", 123, Vec::new())
+            .expect("preflight with one retained slot");
+        queue
+            .push("concurrent winner")
+            .expect("definitive winner push")
+            .expect("queued winner");
+        let claimed = queue
+            .claim()
+            .expect("claim mutation")
+            .expect("claimed item");
+        assert_eq!(claimed.status, QueueItemStatus::InFlight);
+        let recovered = queue.recover_stale_in_flight().expect("crash recovery");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status, QueueItemStatus::RequiresAction);
+        assert!(queue
+            .recover_stale_in_flight()
+            .expect("idempotent crash recovery")
+            .is_empty());
+        let before = fs::metadata(roots.queue_path())
+            .expect("queue metadata")
+            .len();
+        let error = queue
+            .push("one too many")
+            .expect_err("the retained item cap must include every durable state");
+        assert_eq!(
+            error.rejection(),
+            Some(&QueueLimitError {
+                code: QueueLimitCode::ItemCount,
+                actual: QUEUE_MAX_ITEMS + 1,
+                limit: QUEUE_MAX_ITEMS,
+            })
+        );
+        assert_eq!(
+            queue.snapshot().expect("bounded snapshot").len(),
+            QUEUE_MAX_ITEMS
+        );
+        assert_eq!(
+            fs::metadata(roots.queue_path())
+                .expect("queue metadata")
+                .len(),
+            before
+        );
+    }
+
+    #[test]
+    fn persistent_queue_rejects_an_oversized_raw_queue_file_before_rewriting_it() {
+        let roots = QueueTestRoots::new("raw-file-limit");
+        let path = roots.queue_path();
+        fs::create_dir_all(path.parent().expect("queue parent")).expect("queue directory");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&path)
+            .expect("oversized queue fixture");
+        file.set_len((QUEUE_MAX_BYTES + 1) as u64)
+            .expect("oversized queue length");
+        let before = fs::metadata(&path).expect("queue metadata").len();
+
+        let error = PersistentWorkQueue::new(&path)
+            .clear()
+            .expect_err("oversized raw storage must not be parsed and rewritten");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::metadata(path).expect("queue metadata").len(), before);
+    }
+
+    #[test]
+    fn queue_limit_rejection_json_is_structured_and_payload_free() {
+        let error = QueueLimitError {
+            code: QueueLimitCode::QueueBytes,
+            actual: QUEUE_MAX_BYTES + 1,
+            limit: QUEUE_MAX_BYTES,
+        };
+        assert_eq!(
+            queue_limit_rejection_json(&error),
+            format!(
+                r#"{{"accepted":false,"error":{{"actual":{},"code":"queue_bytes","limit":{}}}}}"#,
+                QUEUE_MAX_BYTES + 1,
+                QUEUE_MAX_BYTES,
+            )
+        );
     }
 
     #[cfg(any(unix, windows))]
