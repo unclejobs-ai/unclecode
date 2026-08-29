@@ -127,6 +127,8 @@ function isMissingEntrypoint(error: unknown): boolean {
 export type RunRustCommandOptions = {
   readonly signal?: AbortSignal | undefined;
   readonly forceKillDelayMs?: number | undefined;
+  /** Use only the supplied environment instead of inheriting the owner process. */
+  readonly replaceEnv?: boolean | undefined;
 };
 
 function createAbortError(): Error {
@@ -234,7 +236,11 @@ export async function runRustCommand(
 ): Promise<string> {
   const rust = findRustEntrypoint();
   const finalArgs = [...rust.argsPrefix, ...args];
-  const childEnv = { ...process.env, ...env, UNCLECODE_WORK_CWD: cwd };
+  const childEnv = {
+    ...(options.replaceEnv ? {} : process.env),
+    ...env,
+    UNCLECODE_WORK_CWD: cwd,
+  };
   const runCwd = rust.runCwd ?? cwd;
   if (stdin === undefined) {
     try {

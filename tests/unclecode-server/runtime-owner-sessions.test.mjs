@@ -853,6 +853,42 @@ test("timed-out admission persistence leaves the revision unpublished and releas
   assert.equal(engineCalls, 1);
 });
 
+test("runtime RPC factory and method failures use the same bounded secret redaction", async () => {
+  const secret = "sk-runtime-" + "A".repeat(80);
+  const longTail = "z".repeat(2_000);
+  const factoryRegistry = new LiveRuntimeEngineRegistry({
+    async createSession() {
+      throw new Error(`token=${secret} ${longTail}`);
+    },
+  });
+  const factoryResult = await factoryRegistry.create({
+    sessionId: "redacted-factory",
+    projectPath: "/workspace/redacted",
+    idempotencyKey: "redacted-factory",
+  });
+  assert.equal(factoryResult.ok, false);
+  assert.doesNotMatch(factoryResult.message, /sk-runtime|AAAA/);
+  assert.match(factoryResult.message, /\[REDACTED\]/);
+  assert.ok(factoryResult.message.length <= 512);
+
+  const methodRegistry = new LiveRuntimeEngineRegistry();
+  const engine = fakeEngine("redacted-method");
+  engine.setMode = () => { throw new Error(`api_key:${secret} ${longTail}`); };
+  methodRegistry.attach("redacted-method", engine, { projectPath: "/workspace/redacted" });
+  const methodResult = await methodRegistry.invoke({
+    sessionId: "redacted-method",
+    method: "setMode",
+    args: ["deep"],
+    expectedRevision: 0,
+    idempotencyKey: "redacted-method",
+  });
+  assert.equal(methodResult.ok, false);
+  assert.doesNotMatch(methodResult.message, /sk-runtime|AAAA/);
+  assert.match(methodResult.message, /\[REDACTED\]/);
+  assert.ok(methodResult.message.length <= 512);
+  await methodRegistry.disposeAll();
+});
+
 test("a later mutation cannot reserve or depend on an unpublished revision", async () => {
   let markFirstPersistenceStarted;
   const firstPersistenceStarted = new Promise(resolve => { markFirstPersistenceStarted = resolve; });

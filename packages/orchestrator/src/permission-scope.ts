@@ -11,6 +11,8 @@ export type OneShotShellApprovalKind =
   | "package-publish"
   | "deploy"
   | "release"
+  | "external-client"
+  | "unknown-executable"
   | "ambiguous-wrapper";
 
 export type OneShotShellApproval = {
@@ -134,8 +136,18 @@ const INLINE_CODE_INTERPRETERS: Readonly<Record<string, ReadonlySet<string>>> = 
   nodejs: new Set(["-e", "--eval", "-p", "--print"]),
   python: new Set(["-c"]),
   python3: new Set(["-c"]),
+  perl: new Set(["-e"]),
+  php: new Set(["-r"]),
+  ruby: new Set(["-e"]),
 };
 const AMBIGUOUS_COMMAND_WRAPPERS = new Set([".", "doas", "eval", "parallel", "source", "sudo", "xargs"]);
+const EXECUTION_COMMAND_WRAPPERS = new Set([
+  "busybox", "chroot", "gtimeout", "ionice", "nice", "setsid", "stdbuf", "timeout", "watch",
+]);
+const EXTERNAL_CLIENTS = new Set([
+  "az", "aws", "curl", "ftp", "gcloud", "http", "httpie", "nc", "ncat", "netcat",
+  "rsync", "scp", "sftp", "socat", "ssh", "telnet", "wget",
+]);
 const DEPLOY_CLIENTS = new Set(["firebase", "fly", "netlify", "render", "vercel", "wrangler"]);
 const TASK_RUNNERS = new Set(["just", "make", "task"]);
 const PACKAGE_MANAGERS = new Set(["bun", "npm", "pnpm", "yarn"]);
@@ -151,6 +163,18 @@ const ASSIGNMENT_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const SAFE_LOCAL_TASK_PATTERN = /^(?:build|check|format|lint|test|typecheck|verify)(?::|$)/;
 const RELEASE_TASK_PATTERN = /^(?:deploy|publish|release)(?::|$)/;
 const MAX_NESTED_COMMAND_DEPTH = 8;
+const SAFE_LOCAL_EXECUTABLES = new Set([
+  "[", "basename", "cargo", "cat", "chmod", "cksum", "cmp", "comm", "cp", "cut", "date",
+  "diff", "dirname", "du", "echo", "false", "fd", "find", "fmt", "git", "grep", "head",
+  "install", "jq", "ln", "ls", "md5sum", "mkdir", "mv", "patch", "printf", "pwd", "readlink",
+  "realpath", "rg", "rm", "rmdir", "sed", "sha256sum", "sort", "stat", "tail", "tar", "tee",
+  "test", "touch", "tr", "true", "tsc", "uname", "uniq", "wc", "which",
+]);
+
+export type RuntimeControlPlaneShellDenial = {
+  readonly code: "runtime-control-plane";
+  readonly reason: string;
+};
 
 type TokenizedShellCommand = {
   readonly clauses: readonly (readonly string[])[];
@@ -357,6 +381,9 @@ function directShellApproval(
   if (SHELL_GRAMMAR_WORDS.has(executable) || AMBIGUOUS_COMMAND_WRAPPERS.has(executable)) {
     return "ambiguous-wrapper";
   }
+  if (EXECUTION_COMMAND_WRAPPERS.has(executable)) return "ambiguous-wrapper";
+  if (EXTERNAL_CLIENTS.has(executable)) return "external-client";
+  if (["awk", "gawk", "mawk", "nawk"].includes(executable)) return "ambiguous-wrapper";
   if (executable === "find" && tokens.slice(commandIndex + 1).some((token) => token === "-exec" || token === "-execdir")) {
     return "ambiguous-wrapper";
   }
@@ -391,6 +418,7 @@ function directShellApproval(
     return executable.startsWith("deploy") ? "deploy" : executable.startsWith("release") ? "release" : "package-publish";
   }
   if (/\.(?:bash|fish|ksh|sh|zsh)$/.test(executable)) return "ambiguous-wrapper";
+  if (/[\\/]/.test(tokens[commandIndex] ?? "")) return "unknown-executable";
 
   if (executable === "git") {
     const globalArguments = tokens.slice(commandIndex + 1);
@@ -487,7 +515,15 @@ function directShellApproval(
   }
   if (executable === "semantic-release") return "release";
   if (executable === "changeset" && subcommand === "publish") return "package-publish";
-  return undefined;
+  const knownExecutable = SAFE_LOCAL_EXECUTABLES.has(executable)
+    || PACKAGE_MANAGERS.has(executable)
+    || TASK_RUNNERS.has(executable)
+    || DEPLOY_CLIENTS.has(executable)
+    || [
+      "changeset", "docker", "dotnet", "firebase", "fly", "gem", "gh", "glab", "helm", "hub",
+      "kubectl", "podman", "railway", "semantic-release", "twine", "vercel", "wrangler",
+    ].includes(executable);
+  return knownExecutable ? undefined : "unknown-executable";
 }
 
 function classifyShellCommand(
@@ -521,6 +557,8 @@ export function resolveOneShotShellApproval(input: {
     "package-publish": "package publish",
     deploy: "deployment",
     release: "release",
+    "external-client": "external shell client",
+    "unknown-executable": "unknown shell executable",
     "ambiguous-wrapper": "ambiguous shell wrapper",
   };
   const label = labels[kind];
@@ -528,13 +566,51 @@ export function resolveOneShotShellApproval(input: {
     kind,
     scope: {
       kind: "tool",
-      key: `shell-once:${kind}`,
+      key: `bash:once:${command}`,
       label,
-      detail: kind === "ambiguous-wrapper"
+      detail: kind === "ambiguous-wrapper" || kind === "unknown-executable"
         ? `The command structure cannot be proven free of external or irreversible actions. Exact command: ${JSON.stringify(command)}.`
         : `This ${label} action can change external or release state. Exact command: ${JSON.stringify(command)}.`,
     },
   };
+}
+
+/**
+ * The runtime owner is the authority that settles approvals. Shell execution
+ * must never be able to recover its token/lease or call that authority through
+ * loopback, even when the operator previously granted the generic bash scope.
+ */
+export function resolveRuntimeControlPlaneShellDenial(input: {
+  readonly toolName: string;
+  readonly input: Readonly<Record<string, unknown>>;
+}): RuntimeControlPlaneShellDenial | undefined {
+  if (input.toolName !== "run_shell" || typeof input.input.command !== "string") return undefined;
+  const command = input.input.command;
+  // Removing quoting and escaping catches simple shell concatenation such as
+  // `.uncl"ecode"/server.token`; the whole `.unclecode` owner directory is
+  // reserved because wildcard reads would otherwise recover the same secrets.
+  const compact = command.toLowerCase().replace(/[\\'"\s]/g, "");
+  if (
+    compact.includes(".unclecode")
+    || compact.includes("runtime-owner-v1.json")
+    || compact.includes("runtime-owner-v1.lock")
+    || compact.includes("server.token")
+  ) {
+    return {
+      code: "runtime-control-plane",
+      reason: "run_shell cannot access the runtime owner's token, lease, or private state directory.",
+    };
+  }
+
+  const clientPattern = /(?:^|[;&|\s'"`()])\/?(?:[^\s/;&|'"`()]+\/)*(?:curl|wget|http|httpie|nc|ncat|netcat|socat|telnet)\b/i;
+  const loopbackPattern = /(?:https?:\/\/)?(?:localhost\.?|0\.0\.0\.0|127(?:\.\d{1,3}){3}|\[?(?:::1|::ffff:127\.0\.0\.1|0:0:0:0:0:0:0:1)\]?)(?::\d+)?(?:[\s/'";]|$)/i;
+  if (clientPattern.test(command) && loopbackPattern.test(command)) {
+    return {
+      code: "runtime-control-plane",
+      reason: "run_shell cannot use a loopback client to reach the runtime control plane.",
+    };
+  }
+  return undefined;
 }
 
 export function createCanonicalPermissionRule(

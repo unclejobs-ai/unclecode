@@ -29,6 +29,7 @@ import {
   matchesCanonicalPermissionRule,
   resolveCanonicalPermissionScope,
   resolveOneShotShellApproval,
+  resolveRuntimeControlPlaneShellDenial,
   type CanonicalPermissionRule,
   type CanonicalPermissionScope,
   type CanonicalPermissionRuleStore,
@@ -273,6 +274,11 @@ export function createPolicyAwareToolExecutor(
         return refuse(
           `${request.toolName} declares no usable resource metadata, so execution policy cannot authorize it.`,
         );
+      }
+
+      const controlPlaneDenial = resolveRuntimeControlPlaneShellDenial(request);
+      if (controlPlaneDenial !== undefined) {
+        return refuse(`${request.toolName} blocked by runtime isolation: ${controlPlaneDenial.reason}`);
       }
 
       await checkpointExecutionPause("before_policy");

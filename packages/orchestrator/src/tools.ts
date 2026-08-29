@@ -46,12 +46,49 @@ async function runRustAci(args: readonly string[], cwd: string, stdin?: string, 
   return await runRustCommand(["rust", "aci", ...args], cwd, stdin ?? (options.signal ? "" : undefined), process.env, options);
 }
 
+const MODEL_SHELL_PRIVATE_ENV_PATTERN = /(?:^|_)(?:API_?KEY|ACCESS_?KEY|AUTH(?:ORIZATION)?|AUTH_?TOKEN|CLIENT_?SECRET|COOKIE|CREDENTIALS?|JWT|PASSWORD|PASSWD|PRIVATE_?KEY|SECRET|SESSION|SIGNING_?KEY|TOKEN)(?:_|$)/i;
+const MODEL_SHELL_PRIVATE_ENV_VALUE_PATTERN = /(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@|\b(?:sk|ghp|github_pat|xox[baprs])-[A-Za-z0-9_-]{8,}\b)/i;
+const MODEL_SHELL_CONTROL_ENV = new Set([
+  "CODEX_HOME",
+  "UNCLECODE_DATA_ROOT",
+  "UNCLECODE_OWNER_ATTACH_TIMEOUT_MS",
+  "UNCLECODE_RPC_PROTOCOL",
+  "UNCLECODE_RPC_TRANSPORT",
+  "UNCLECODE_SERVER_URL",
+  "UNCLECODE_SESSION_STORE_ROOT",
+]);
+
+/**
+ * Shell children inherit ordinary build configuration but never the runtime
+ * owner's credentials, discovery endpoints, or ambient authentication agents.
+ */
+export function createModelShellEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    const normalizedName = name.toUpperCase();
+    if (MODEL_SHELL_PRIVATE_ENV_PATTERN.test(name)) continue;
+    if (MODEL_SHELL_PRIVATE_ENV_VALUE_PATTERN.test(value)) continue;
+    if (MODEL_SHELL_CONTROL_ENV.has(normalizedName)) continue;
+    if (normalizedName.startsWith("UNCLECODE_CONFIG__") || normalizedName.startsWith("UNCLECODE_SUBMIT__")) continue;
+    environment[name] = value;
+  }
+  environment.UNCLECODE_ALLOW_RUN_SHELL = "1";
+  return environment;
+}
+
 async function runRustShell(command: string, cwd: string, options: ToolHandlerOptions = {}): Promise<string> {
   // Reaching this handler means the executor already authorized shell.run, so
-  // the Rust child gets a request-scoped grant. The parent process env is
-  // never mutated.
-  const env = { ...process.env, UNCLECODE_ALLOW_RUN_SHELL: "1" };
-  return await runRustCommand(["rust", "shell", "--", command], cwd, options.signal ? "" : undefined, env, options);
+  // the Rust child gets a request-scoped grant. Owner/control credentials are
+  // removed and replaceEnv prevents runRustCommand from adding them back.
+  const env = createModelShellEnvironment(process.env);
+  return await runRustCommand(
+    ["rust", "shell", "--", command],
+    cwd,
+    options.signal ? "" : undefined,
+    env,
+    { ...options, replaceEnv: true },
+  );
 }
 
 function normalizeRustPathError(error: unknown, requestedPath: string): never {

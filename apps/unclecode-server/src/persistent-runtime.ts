@@ -12,6 +12,7 @@ import type {
 } from "./control-room.js";
 import type { RuntimeSystemObservabilitySource } from "./system-observability.js";
 import type { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
+import { boundedRuntimeRpcError } from "./runtime-error-redaction.js";
 
 const MAX_CHECKPOINTS = 128;
 const MAX_DIRECTORIES = 2_048;
@@ -86,7 +87,7 @@ export class LiveRuntimeControlRegistry implements RuntimeControlPort {
       fail: (error, current) => ({
         ok: false,
         code: "invalid_action",
-        message: error instanceof Error ? error.message : String(error),
+        message: boundedRuntimeRpcError(error),
         revision: current,
       }),
     });

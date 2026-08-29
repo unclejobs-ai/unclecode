@@ -11,6 +11,7 @@ import {
   type RuntimeSessionObservabilitySource,
   type RuntimeSystemObservabilitySource,
 } from "./system-observability.js";
+import { boundedRuntimeRpcError } from "./runtime-error-redaction.js";
 
 export type { RuntimeSessionRevisionClock } from "./runtime-mutation-arbiter.js";
 
@@ -350,7 +351,7 @@ export class LiveRuntimeEngineRegistry {
       });
       return { ok: true, session: this.#descriptor(input.sessionId, this.#engines.get(input.sessionId)!) };
     } catch (error) {
-      return { ok: false, code: "invalid_action", message: error instanceof Error ? error.message : String(error) };
+      return { ok: false, code: "invalid_action", message: boundedRuntimeRpcError(error) };
     }
   }
 
@@ -412,7 +413,7 @@ export class LiveRuntimeEngineRegistry {
         Reflect.apply(lifecycle.interruptTurn, item.engine, []);
       }
     } catch (error) {
-      failures.push(error instanceof Error ? error.message : String(error));
+      failures.push(boundedRuntimeRpcError(error));
     }
     if (!await item.arbiter.settle()) {
       failures.push("Runtime mutation arbiter did not settle active provider/tool work.");
@@ -420,7 +421,7 @@ export class LiveRuntimeEngineRegistry {
     try {
       await item.dispose?.();
     } catch (error) {
-      failures.push(error instanceof Error ? error.message : String(error));
+      failures.push(boundedRuntimeRpcError(error));
     }
     if (failures.length > 0) throw new Error(`Runtime owner shutdown did not settle cleanly: ${failures.join("; ")}`);
   }
@@ -578,7 +579,7 @@ export class LiveRuntimeEngineRegistry {
       fail: (error, revision) => ({
         ok: false,
         code: "invalid_action",
-        message: error instanceof Error ? error.message : String(error),
+        message: boundedRuntimeRpcError(error),
         revision,
       }),
     });

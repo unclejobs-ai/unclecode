@@ -2,6 +2,7 @@ import type { RuntimeSessionSource } from "./control-room.js";
 import { LiveRuntimeControlRegistry } from "./persistent-runtime.js";
 import type { RuntimeControlRequest, RuntimeControlResult } from "./runtime-adapter.js";
 import type { RuntimeSessionRevisionClock } from "./runtime-engine-rpc.js";
+import { boundedRuntimeRpcError } from "./runtime-error-redaction.js";
 import { RuntimeSessionMutationArbiter } from "./runtime-mutation-arbiter.js";
 import type {
   AskUserQuestionAnswer,
@@ -255,7 +256,7 @@ export function attachWorkShellRuntime(
         }
         result = { ok: true, revision: revisionClock.value, state: stateOf(input.engine) };
       } catch (error) {
-        return deny("invalid_action", error instanceof Error ? error.message : String(error));
+        return deny("invalid_action", boundedRuntimeRpcError(error));
       }
       return result ?? deny("invalid_action", "The runtime action did not complete.");
     },
