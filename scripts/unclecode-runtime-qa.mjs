@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-
-import { currentBootIdentity, processStartIdentity } from "@unclecode/server";
 
 import { binEntrypoint, repoRoot, reportPath, tmpPrefix } from "./runtime-qa/constants.mjs";
 import { persistReport } from "./runtime-qa/cli-helpers.mjs";
@@ -21,6 +19,7 @@ import {
   buildRuntimeEvidence,
   formatRuntimeQaCompactReport,
 } from "./runtime-qa/report-evidence.mjs";
+import { stopRuntimeOwnersUnder } from "./runtime-qa/runtime-owner-cleanup.mjs";
 import { runAgentConsoleTuiSmoke } from "./runtime-qa/tui-basic-smokes.mjs";
 import { killRuntimeTmuxServer, startRuntimeTmuxKeeper } from "./runtime-qa/tmux-helpers.mjs";
 import { runTtySmoke } from "./runtime-qa/tty-smoke.mjs";
@@ -130,45 +129,6 @@ try {
   await killRuntimeTmuxServer();
   await stopRuntimeOwnersUnder(tmp);
   rmSync(tmp, { recursive: true, force: true });
-}
-
-async function stopRuntimeOwnersUnder(root) {
-  const leasePaths = findRuntimeOwnerLeases(root);
-  for (const leasePath of leasePaths) {
-    let lease;
-    try {
-      lease = JSON.parse(readFileSync(leasePath, "utf8"));
-    } catch {
-      continue;
-    }
-    if (
-      !Number.isSafeInteger(lease.pid)
-      || typeof lease.processStartId !== "string"
-      || lease.bootId !== currentBootIdentity()
-      || await processStartIdentity(lease.pid) !== lease.processStartId
-    ) {
-      continue;
-    }
-    process.kill(lease.pid, "SIGTERM");
-    const deadline = Date.now() + 2_000;
-    while (Date.now() < deadline && await processStartIdentity(lease.pid) === lease.processStartId) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    if (await processStartIdentity(lease.pid) === lease.processStartId) {
-      process.kill(lease.pid, "SIGKILL");
-    }
-  }
-}
-
-function findRuntimeOwnerLeases(root) {
-  if (!existsSync(root)) return [];
-  const leases = [];
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    const resolved = path.join(root, entry.name);
-    if (entry.isDirectory()) leases.push(...findRuntimeOwnerLeases(resolved));
-    else if (entry.isFile() && entry.name === "runtime-owner-v1.json") leases.push(resolved);
-  }
-  return leases;
 }
 
 function parseArgs(argv) {
