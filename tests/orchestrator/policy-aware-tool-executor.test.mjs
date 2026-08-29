@@ -252,6 +252,13 @@ test("ambiguous shell wrappers fail closed before an autonomy or persisted bash 
     "git ship",
     "gh api --method PUT repos/o/r/pulls/42/merge",
     "glab api projects/1/releases --method POST",
+    "npm test",
+    "npm run build",
+    "pnpm run lint",
+    "cargo check --workspace",
+    "make test",
+    "printf ok > output.txt",
+    "rg TODO src/*.ts",
   ];
   const invoked = [];
   const executor = createPolicyAwareToolExecutor({
@@ -275,14 +282,11 @@ test("ambiguous shell wrappers fail closed before an autonomy or persisted bash 
   assert.deepEqual(invoked, []);
 });
 
-test("autonomy keeps ordinary local build and test shell commands prompt-free", async () => {
+test("autonomy keeps only statically inspectable local shell commands prompt-free", async () => {
   const commands = [
-    "npm test",
-    "npm run build",
-    "pnpm run lint",
-    "cargo test --workspace",
-    "make test",
     "git status --short",
+    "tsc --noEmit",
+    "rg -n TODO src",
     'printf "%s\\n" "release notes"',
   ];
   const invoked = [];

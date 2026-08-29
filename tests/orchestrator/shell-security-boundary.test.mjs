@@ -54,7 +54,7 @@ test("external clients, execution wrappers, inline interpreters, and unknown exe
   }
 });
 
-test("one-shot shell classes re-prompt through yolo and a persisted bash grant", async () => {
+test("one-shot shell classes and project code re-prompt through yolo and a persisted bash grant", async () => {
   const commands = [
     "curl https://example.com/hook",
     "aws s3 ls",
@@ -66,6 +66,11 @@ test("one-shot shell classes re-prompt through yolo and a persisted bash grant",
     "awk 'BEGIN { print 1 }'",
     "busybox echo ok",
     "./unknown-client ship",
+    "npm run build",
+    "cargo check --workspace",
+    "make test",
+    "printf ok > output.txt",
+    "rg TODO src/*.ts",
   ];
   const invoked = [];
   const prompts = [];
@@ -107,12 +112,10 @@ test("one-shot shell classes re-prompt through yolo and a persisted bash grant",
   ));
 });
 
-test("known local inspection and build commands remain eligible for autonomous execution", () => {
+test("statically inspectable local commands remain eligible for autonomous execution", () => {
   for (const command of [
     "git status --short",
-    "npm test",
-    "pnpm run lint",
-    "cargo check --workspace",
+    "tsc --noEmit",
     "rg -n TODO src",
     "sed -n '1,20p' README.md",
     "printf '%s\\n' ok",
@@ -121,9 +124,34 @@ test("known local inspection and build commands remain eligible for autonomous e
   }
 });
 
+test("project manifests, build hooks, redirections, and glob expansion require exact one-shot approval", () => {
+  const commands = [
+    "npm test",
+    "npm run build",
+    "pnpm run lint",
+    "yarn test",
+    "bun run check",
+    "npm install",
+    "cargo check --workspace",
+    "make test",
+    "just build",
+    "task lint",
+    "printf ok > output.txt",
+    "rg TODO src/*.ts",
+  ];
+
+  for (const command of commands) {
+    const approval = resolveOneShotShellApproval({ toolName: "run_shell", input: { command } });
+    assert.ok(approval, command);
+    assert.equal(approval.scope.key, `bash:once:${command}`);
+  }
+});
+
 test("runtime owner files and loopback control clients are hard-denied before any approval", async () => {
   const commands = [
     "cat ~/.unclecode/server.token",
+    "cat ~/.uncl*/server.tok*",
+    "cat $HOME/.uncl?code/server.tok?n",
     "cat \"$HOME/.uncl\"ecode/runtime-owner-v1.json",
     "cp $HOME/.unclecode/runtime-owner-v1.lock ./lease",
     "curl http://127.0.0.1:4321/control-room",
@@ -132,6 +160,8 @@ test("runtime owner files and loopback control clients are hard-denied before an
     "'/usr/bin/curl' http://0.0.0.0:4321/health",
     "wget http://[::1]:4321/control-room",
     "nc ::1 4321",
+    "printf x >/dev/tcp/127.0.0.1/4321",
+    "exec 3<>/dev/udp/127.0.0.1/4321",
   ];
   const invoked = [];
   const prompts = [];

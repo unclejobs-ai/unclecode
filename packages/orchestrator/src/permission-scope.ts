@@ -11,6 +11,7 @@ export type OneShotShellApprovalKind =
   | "package-publish"
   | "deploy"
   | "release"
+  | "project-code"
   | "external-client"
   | "unknown-executable"
   | "ambiguous-wrapper";
@@ -160,7 +161,6 @@ const LOCAL_GIT_SUBCOMMANDS = new Set([
 ]);
 const DYNAMIC_SHELL_PATTERN = /(?:`|\$\(|\$\{|\$[A-Za-z_])/;
 const ASSIGNMENT_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*=/;
-const SAFE_LOCAL_TASK_PATTERN = /^(?:build|check|format|lint|test|typecheck|verify)(?::|$)/;
 const RELEASE_TASK_PATTERN = /^(?:deploy|publish|release)(?::|$)/;
 const MAX_NESTED_COMMAND_DEPTH = 8;
 const SAFE_LOCAL_EXECUTABLES = new Set([
@@ -262,8 +262,19 @@ function tokenizeShellCommand(command: string): TokenizedShellCommand {
       continue;
     }
     if (char === ">" || char === "<") {
+      // Redirections have filesystem and, in bash, network semantics that are
+      // not represented by the argv-like clause tokens below. Keep the
+      // command visible for exact one-shot approval instead of silently
+      // discarding the operator.
+      ambiguous = true;
       finishToken();
       continue;
+    }
+    if (char === "*" || char === "?" || char === "[") {
+      // Unquoted pathname expansion can select private runtime state or files
+      // whose names were never shown to policy. A partial lexer cannot prove
+      // that expansion local, so it must fail closed.
+      ambiguous = true;
     }
     token += char;
   }
@@ -448,7 +459,9 @@ function directShellApproval(
       if (script && RELEASE_TASK_PATTERN.test(script)) {
         return script.startsWith("deploy") ? "deploy" : script.startsWith("release") ? "release" : "package-publish";
       }
-      if (!script || !SAFE_LOCAL_TASK_PATTERN.test(script)) return "ambiguous-wrapper";
+      // Script names are labels, not capabilities. `build`, `test`, and
+      // `lint` can all contain publish/deploy/push commands or lifecycle hooks.
+      return "project-code";
     }
     if (executable === "yarn" && RELEASE_TASK_PATTERN.test(packageSubcommand ?? "")) {
       return packageSubcommand?.startsWith("deploy")
@@ -460,6 +473,13 @@ function directShellApproval(
     if (executable === "yarn" && packageSubcommand === "npm" && tokens.slice((packageCommandIndex ?? commandIndex) + 1).includes("publish")) {
       return "package-publish";
     }
+    // Package-manager verbs such as install/add/test/start may execute package
+    // lifecycle hooks or project-defined aliases. Only non-executing help and
+    // version inspection can inherit a persistent bash grant.
+    const packageTail = tokens.slice(commandIndex + 1).map((token) => token.toLowerCase());
+    const inspectionOnly = packageTail.length > 0
+      && packageTail.every((token) => ["-h", "--help", "-v", "--version", "help"].includes(token));
+    if (!inspectionOnly) return "project-code";
   }
   if (
     (executable === "cargo" && subcommand === "publish")
@@ -469,6 +489,12 @@ function directShellApproval(
     || (executable === "dotnet" && tokens.slice(commandIndex + 1, commandIndex + 4).map((token) => token.toLowerCase()).join(" ").startsWith("nuget push"))
   ) {
     return "package-publish";
+  }
+  if (executable === "cargo") {
+    const cargoTail = tokens.slice(commandIndex + 1).map((token) => token.toLowerCase());
+    const inspectionOnly = cargoTail.length > 0
+      && cargoTail.every((token) => ["-h", "--help", "-v", "-vv", "--version", "version"].includes(token));
+    if (!inspectionOnly) return "project-code";
   }
   if (executable === "python" || executable === "python3") {
     const tail = tokens.slice(commandIndex + 1).map((token) => token.toLowerCase());
@@ -493,7 +519,9 @@ function directShellApproval(
     if (RELEASE_TASK_PATTERN.test(subcommand ?? "")) {
       return subcommand?.startsWith("deploy") ? "deploy" : subcommand?.startsWith("release") ? "release" : "package-publish";
     }
-    if (!SAFE_LOCAL_TASK_PATTERN.test(subcommand ?? "")) return "ambiguous-wrapper";
+    // Makefiles and task manifests are executable project input. Target names
+    // such as `test` or `build` cannot prove the recipe has no release action.
+    return "project-code";
   }
   if (executable === "gh") {
     const tail = tokens.slice(commandIndex + 1).map((token) => token.toLowerCase());
@@ -557,6 +585,7 @@ export function resolveOneShotShellApproval(input: {
     "package-publish": "package publish",
     deploy: "deployment",
     release: "release",
+    "project-code": "project-defined code",
     "external-client": "external shell client",
     "unknown-executable": "unknown shell executable",
     "ambiguous-wrapper": "ambiguous shell wrapper",
@@ -570,6 +599,8 @@ export function resolveOneShotShellApproval(input: {
       label,
       detail: kind === "ambiguous-wrapper" || kind === "unknown-executable"
         ? `The command structure cannot be proven free of external or irreversible actions. Exact command: ${JSON.stringify(command)}.`
+        : kind === "project-code"
+          ? `Project scripts, task recipes, and build hooks can contain external or irreversible actions. Exact command: ${JSON.stringify(command)}.`
         : `This ${label} action can change external or release state. Exact command: ${JSON.stringify(command)}.`,
     },
   };
@@ -592,13 +623,22 @@ export function resolveRuntimeControlPlaneShellDenial(input: {
   const compact = command.toLowerCase().replace(/[\\'"\s]/g, "");
   if (
     compact.includes(".unclecode")
+    || /(?:^|[~/])\.uncl/.test(compact)
     || compact.includes("runtime-owner-v1.json")
     || compact.includes("runtime-owner-v1.lock")
     || compact.includes("server.token")
+    || compact.includes("server.tok")
   ) {
     return {
       code: "runtime-control-plane",
       reason: "run_shell cannot access the runtime owner's token, lease, or private state directory.",
+    };
+  }
+
+  if (compact.includes("/dev/tcp/") || compact.includes("/dev/udp/")) {
+    return {
+      code: "runtime-control-plane",
+      reason: "run_shell cannot open raw network pseudo-devices outside the governed network tool boundary.",
     };
   }
 
