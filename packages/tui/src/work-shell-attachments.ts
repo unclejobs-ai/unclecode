@@ -12,6 +12,14 @@ export type WorkShellImageAttachment = ClipboardImageAttachment;
 
 const attachmentPreviewCache = new Map<string, readonly string[]>();
 const inlineSupportCache = new Map<string, string>();
+const ATTACHMENT_PREVIEW_CACHE_MAX_ENTRIES = 32;
+const INLINE_SUPPORT_CACHE_MAX_ENTRIES = 16;
+
+function cacheSet<K, V>(cache: Map<K, V>, key: K, value: V, maxEntries: number): void {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > maxEntries) cache.delete(cache.keys().next().value as K);
+}
 
 function runRustUxText(operation: string, stdin?: string, env: NodeJS.ProcessEnv = process.env): string {
   return runRustCommandSync(["rust", "ux", "text", operation], process.cwd(), stdin, env).trimEnd();
@@ -38,13 +46,15 @@ export function formatAttachmentBadgeLine(attachments: readonly WorkShellImageAt
 }
 
 export function buildAttachmentPreviewLines(attachments: readonly WorkShellImageAttachment[]): readonly string[] {
-  const key = JSON.stringify(attachments);
+  // Preview rendering uses labels only. Never duplicate multi-megabyte data URLs
+  // in a process-wide cache key or send them through the Rust display helper.
+  const key = JSON.stringify(attachments.map(({ displayName, mimeType }) => ({ displayName, mimeType })));
   const cached = attachmentPreviewCache.get(key);
   if (cached) {
     return cached;
   }
   const lines = JSON.parse(runRustUxText("attachment-preview", key)) as readonly string[];
-  attachmentPreviewCache.set(key, lines);
+  cacheSet(attachmentPreviewCache, key, lines, ATTACHMENT_PREVIEW_CACHE_MAX_ENTRIES);
   return lines;
 }
 
@@ -55,7 +65,7 @@ export function formatInlineImageSupportLine(env: NodeJS.ProcessEnv = process.en
     return cached;
   }
   const line = runRustUxText("inline-image-support", undefined, terminalEnv(env));
-  inlineSupportCache.set(key, line);
+  cacheSet(inlineSupportCache, key, line, INLINE_SUPPORT_CACHE_MAX_ENTRIES);
   return line;
 }
 

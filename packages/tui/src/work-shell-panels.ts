@@ -11,6 +11,15 @@ export { formatAuthLabelForDisplay } from "./work-shell-auth-panels.js";
 
 const inlineCommandPanelCache = new Map<string, WorkShellPanel>();
 const inlineCommandSummaryCache = new Map<string, string>();
+const INLINE_COMMAND_CACHE_MAX_ENTRIES = 64;
+
+function cacheInlineCommand<T>(cache: Map<string, T>, key: string, value: T): void {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > INLINE_COMMAND_CACHE_MAX_ENTRIES) {
+    cache.delete(cache.keys().next().value as string);
+  }
+}
 
 function parseRustPanel(raw: string, expectedTitle?: string): WorkShellPanel {
   const parsed = JSON.parse(raw) as unknown;
@@ -61,7 +70,7 @@ export function buildInlineCommandPanel(args: readonly string[], lines: readonly
       key,
     ),
   );
-  inlineCommandPanelCache.set(key, panel);
+  cacheInlineCommand(inlineCommandPanelCache, key, panel);
   return panel;
 }
 
@@ -76,7 +85,7 @@ export function formatInlineCommandResultSummary(args: readonly string[], lines:
     process.cwd(),
     key,
   ).trimEnd();
-  inlineCommandSummaryCache.set(key, summary);
+  cacheInlineCommand(inlineCommandSummaryCache, key, summary);
   return summary;
 }
 

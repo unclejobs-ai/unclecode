@@ -7,6 +7,14 @@ import {
 
 const rustTraceLineCache = new Map<string, string>();
 const rustErrorMessageCache = new Map<string, string>();
+const TRACE_LINE_CACHE_MAX_ENTRIES = 512;
+const ERROR_MESSAGE_CACHE_MAX_ENTRIES = 64;
+
+function cacheFormatted<T>(cache: Map<string, T>, key: string, value: T, maxEntries: number): void {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > maxEntries) cache.delete(cache.keys().next().value as string);
+}
 
 export function formatWorkShellError(message: string): string {
   const cached = rustErrorMessageCache.get(message);
@@ -14,7 +22,7 @@ export function formatWorkShellError(message: string): string {
     return cached;
   }
   const formatted = runRustCommandSync(["rust", "ux", "text", "error-message"], process.cwd(), message).trimEnd();
-  rustErrorMessageCache.set(message, formatted);
+  cacheFormatted(rustErrorMessageCache, message, formatted, ERROR_MESSAGE_CACHE_MAX_ENTRIES);
   return formatted;
 }
 
@@ -42,7 +50,7 @@ export function formatAgentTraceLine(
     return cached;
   }
   const line = runRustCommandSync(["rust", "ux", "text", "trace-line"], process.cwd(), key).trimEnd();
-  rustTraceLineCache.set(key, line);
+  cacheFormatted(rustTraceLineCache, key, line, TRACE_LINE_CACHE_MAX_ENTRIES);
   return line;
 }
 
