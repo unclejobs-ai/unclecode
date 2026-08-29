@@ -8353,6 +8353,97 @@ test("WorkShellEngine serializes checkpoint writes so an older snapshot cannot o
   writes[5].resolve();
 });
 
+test("WorkShellEngine coalesces queued checkpoints to the latest pending snapshot", async () => {
+  const writes = [];
+  const { engine } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  const first = engine.setMode("analyze");
+  await waitFor(() => writes.length === 2, "the first mode checkpoint");
+  const pending = Array.from({ length: 256 }, (_, index) => engine.enqueueSessionSnapshotWrite({
+    ...writes[1].snapshot,
+    mode: index === 255 ? "default" : index % 2 === 0 ? "search" : "analyze",
+  }));
+  await delay(20);
+  assert.equal(writes.length, 2, "256 pending snapshots stay coalesced behind the active write");
+
+  writes[1].resolve();
+  await waitFor(() => writes.length === 3, "the latest coalesced checkpoint");
+  assert.equal(writes[2].snapshot.mode, "default");
+  writes[2].resolve();
+  await Promise.all([first, ...pending]);
+  assert.equal(writes.length, 3);
+  await engine.dispose();
+});
+
+test("WorkShellEngine dispose is awaitable through its final console checkpoint", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-final-write");
+  let disposed = false;
+  const disposal = engine.dispose().then(() => { disposed = true; });
+  await waitFor(() => writes.length === 2, "the dispose checkpoint");
+  await delay(10);
+  assert.equal(disposed, false);
+  assert.equal(writes[1].snapshot.agentConsole?.agents[0]?.id, "run-final-write");
+
+  writes[1].resolve();
+  await disposal;
+  assert.equal(disposed, true);
+});
+
+test("WorkShellEngine shutdown flushes pending console timers before awaiting durable writes", async () => {
+  const writes = [];
+  const { engine, emitTrace } = createAgentConsoleEngine({
+    persistWorkShellSessionSnapshot(snapshot) {
+      return new Promise((resolve, reject) => {
+        writes.push({ snapshot, resolve, reject });
+      });
+    },
+  });
+
+  const initializing = engine.initialize();
+  await waitFor(() => writes.length === 1, "the initialize checkpoint");
+  writes[0].resolve();
+  await initializing;
+
+  emitRunStarted(emitTrace, "run-shutdown-write");
+  let shutdownSettled = false;
+  const shutdown = engine.shutdown({ timeoutMs: 1_000 }).then((result) => {
+    shutdownSettled = true;
+    return result;
+  });
+  await waitFor(() => writes.length === 2, "the shutdown checkpoint");
+  await delay(10);
+  assert.equal(shutdownSettled, false);
+  assert.equal(writes[1].snapshot.agentConsole?.agents[0]?.id, "run-shutdown-write");
+
+  writes[1].resolve();
+  assert.equal(await shutdown, true);
+});
+
 // ---------------------------------------------------------------------------
 // Context Desk — "Pure Yazi" three-pane redesign (Groups → Sources → Preview).
 // ---------------------------------------------------------------------------

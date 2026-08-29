@@ -24,7 +24,9 @@ const MAX_AGENT_CONSOLE_EVOLUTION_PROPOSALS: usize = 32;
 const MAX_RESUME_ENTRY_CHARS: usize = 600;
 const SESSION_NOTICE_VERSION: u8 = 1;
 const MAX_SESSION_NOTICE_BYTES: usize = 4 * 1024;
-const MAX_SESSION_NOTICE_FILES: usize = 128;
+const MAX_SESSION_NOTICE_FILES: usize = 256;
+const MAX_SESSION_CHECKPOINT_READ_BYTES: usize = 512 * 1024;
+const MAX_WORK_SHELL_EVENT_LOG_BYTES: usize = 256 * 1024;
 const MAX_PAUSE_CHECKPOINT_REFS: usize = 64;
 const MAX_PAUSE_CHECKPOINT_STRING_CHARS: usize = 256;
 
@@ -156,28 +158,35 @@ impl WorkShellSessionStore {
         root.create_dir_all(self.relative_path(&paths.project_memory_dir)?)?;
         root.create_dir_all(self.relative_path(&paths.research_artifacts_dir)?)?;
 
+        let checkpoint_path = self.relative_path(&paths.checkpoint_path)?;
+        let previous_event_count = read_checkpoint_event_count(&root, checkpoint_path)?;
         let records = build_work_shell_records(snapshot);
         let event_log_path = self.relative_path(&paths.event_log_path)?;
-        let mut existing_count = count_anchored_lines(&root, event_log_path)?;
+        let mut event_count = previous_event_count.unwrap_or(0);
         let mut updated_at = String::new();
         let mut event_lines = String::new();
         for record in &records {
             updated_at = record.timestamp.clone();
-            existing_count += 1;
+            event_count = event_count.saturating_add(1);
             event_lines.push_str(&record.to_json(&snapshot.session_id));
             event_lines.push('\n');
         }
-        root.append_all(event_log_path, event_lines.as_bytes())?;
+        let existing_log_bytes = root.regular_file_len(event_log_path)?.unwrap_or(0);
+        let rotate_log = previous_event_count.is_none()
+            || existing_log_bytes.saturating_add(event_lines.len() as u64)
+                > MAX_WORK_SHELL_EVENT_LOG_BYTES as u64;
+        if rotate_log {
+            root.write_atomic_durable(event_log_path, event_lines.as_bytes())?;
+        } else {
+            root.append_all(event_log_path, event_lines.as_bytes())?;
+        }
 
-        let checkpoint = build_checkpoint_json(snapshot, existing_count, &updated_at);
-        root.write_atomic_durable(
-            self.relative_path(&paths.checkpoint_path)?,
-            checkpoint.as_bytes(),
-        )?;
+        let checkpoint = build_checkpoint_json(snapshot, event_count, &updated_at);
+        root.write_atomic_durable(checkpoint_path, checkpoint.as_bytes())?;
         // Owner mutations and append-only session events have distinct clocks.
         // New snapshots carry the accepted owner revision explicitly; legacy
         // writers fall back to the event count only when that field is absent.
-        let notice_revision = snapshot.owner_mutation_revision.unwrap_or(existing_count);
+        let notice_revision = snapshot.owner_mutation_revision.unwrap_or(event_count);
         self.persist_checkpoint_notice(&root, &snapshot.session_id, notice_revision)
     }
 
@@ -197,7 +206,19 @@ impl WorkShellSessionStore {
             "revision": revision,
         }))
         .map_err(io::Error::other)?;
-        root.write_atomic_durable(&notice_path, &notice)
+        root.write_atomic_durable(&notice_path, &notice)?;
+        root.prune_regular_files_matching(
+            Path::new("notifications"),
+            MAX_SESSION_NOTICE_FILES,
+            notice_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "invalid notice name")
+                })?,
+            is_session_notice_file_name_bytes,
+        )?;
+        Ok(())
     }
 
     fn relative_path<'a>(&self, path: &'a Path) -> io::Result<&'a Path> {
@@ -566,6 +587,13 @@ fn minimize_resume_entry_text(text: &str) -> String {
     truncate_chars(&without_reference_bodies, MAX_RESUME_ENTRY_CHARS)
 }
 
+fn bounded_session_summary(summary: &str) -> String {
+    truncate_chars(
+        &redact_resume_secrets(&redact_secrets(summary).replace('\0', "\u{FFFD}")),
+        MAX_RESUME_ENTRY_CHARS,
+    )
+}
+
 fn truncate_chars(value: &str, max_chars: usize) -> String {
     let mut iter = value.chars();
     let truncated = iter.by_ref().take(max_chars).collect::<String>();
@@ -705,49 +733,64 @@ pub fn session_paths(root_dir: &Path, project_path: &Path, session_id: &str) -> 
 pub fn scan_session_persistence_notices_json(root_dir: &Path) -> Result<String, String> {
     let root = match AnchoredSessionRoot::open_existing(root_dir) {
         Ok(root) => root,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok("[]".to_string()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok("{\"notices\":[],\"truncatedCount\":0}".to_string())
+        }
         Err(error) => {
             return Err(format!(
                 "Failed to anchor session persistence root: {error}"
             ))
         }
     };
-    let files = match root.read_bounded_regular_files(
+    let scan = match root.read_bounded_regular_files_matching(
         Path::new("notifications"),
         MAX_SESSION_NOTICE_FILES,
         MAX_SESSION_NOTICE_BYTES,
+        is_session_notice_file_name_bytes,
     ) {
-        Ok(files) => files,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Ok(scan) => scan,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok("{\"notices\":[],\"truncatedCount\":0}".to_string())
+        }
         Err(error) => {
             return Err(format!(
                 "Failed to scan session persistence notices: {error}"
             ))
         }
     };
-    let notices = files
+    let truncated_count = scan.truncated_count;
+    let notices = scan
+        .files
         .into_iter()
-        .filter(|(name, _)| is_session_notice_file_name(name))
         .filter_map(|(name, bytes)| {
             String::from_utf8(bytes)
                 .ok()
                 .map(|contents| json!({ "name": name, "contents": contents }))
         })
         .collect::<Vec<_>>();
-    serde_json::to_string(&notices)
-        .map_err(|error| format!("Failed to serialize session persistence notices: {error}"))
+    serde_json::to_string(&json!({
+        "notices": notices,
+        "truncatedCount": truncated_count,
+    }))
+    .map_err(|error| format!("Failed to serialize session persistence notices: {error}"))
 }
 
+#[cfg(test)]
 fn is_session_notice_file_name(name: &str) -> bool {
+    is_session_notice_file_name_bytes(name.as_bytes())
+}
+
+fn is_session_notice_file_name_bytes(name: &[u8]) -> bool {
     let Some(digest) = name
-        .strip_prefix("session-")
-        .and_then(|value| value.strip_suffix(".notice.json"))
+        .strip_prefix(b"session-")
+        .and_then(|value| value.strip_suffix(b".notice.json"))
     else {
         return false;
     };
     digest.len() == 20
         && digest
-            .bytes()
+            .iter()
+            .copied()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
@@ -767,12 +810,24 @@ fn to_opaque_id(value: &str, prefix: &str) -> String {
     format!("{}-{}", prefix, &sha256_hex(value)[..20])
 }
 
-fn count_anchored_lines(root: &AnchoredSessionRoot, path: &Path) -> io::Result<usize> {
-    match root.read_to_string(path) {
-        Ok(raw) => Ok(raw.lines().filter(|line| !line.trim().is_empty()).count()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
-        Err(error) => Err(error),
-    }
+fn read_checkpoint_event_count(
+    root: &AnchoredSessionRoot,
+    path: &Path,
+) -> io::Result<Option<usize>> {
+    let raw = match root.read_to_string_bounded(path, MAX_SESSION_CHECKPOINT_READ_BYTES) {
+        Ok(raw) => raw,
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.kind() == io::ErrorKind::InvalidData =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(serde_json::from_str::<Value>(&raw)
+        .ok()
+        .and_then(|value| value.get("eventCount").and_then(Value::as_u64))
+        .and_then(|count| usize::try_from(count).ok()))
 }
 
 fn sanitize_agent_console_snapshot(value: &Value) -> Option<Value> {
@@ -1821,6 +1876,7 @@ fn redact_json_strings(value: Value) -> Value {
 
 fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShellRecord> {
     let summary_timestamp = now_timestamp();
+    let summary = bounded_session_summary(&snapshot.summary);
     let metadata_trace = snapshot
         .trace_mode
         .as_ref()
@@ -1861,7 +1917,7 @@ fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShel
             checkpoint_json: format!(
                 "{{\"type\":\"metadata\",\"metadata\":{{\"model\":\"{}\",\"taskSummary\":\"{}\",\"isUltraworkMode\":{}{}{}{}{}}}}}",
                 escape_json(&snapshot.model),
-                escape_json(&snapshot.summary),
+                escape_json(&summary),
                 if snapshot.mode == "ultrawork" { "true" } else { "false" },
                 metadata_trace,
                 metadata_locale,
@@ -1873,7 +1929,7 @@ fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShel
             timestamp: summary_timestamp.clone(),
             checkpoint_json: format!(
                 "{{\"type\":\"task_summary\",\"summary\":\"{}\",\"timestamp\":\"{}\"}}",
-                escape_json(&snapshot.summary),
+                escape_json(&summary),
                 summary_timestamp
             ),
         },
@@ -1882,7 +1938,11 @@ fn build_work_shell_records(snapshot: &WorkShellSessionSnapshot) -> Vec<WorkShel
             checkpoint_json: "{\"type\":\"mode\",\"mode\":\"normal\"}".to_string(),
         },
     ];
-    if let Some(agent_console) = &snapshot.agent_console {
+    if let Some(agent_console) = snapshot
+        .agent_console
+        .as_ref()
+        .and_then(sanitize_agent_console_snapshot)
+    {
         records.push(WorkShellRecord {
             timestamp: now_timestamp(),
             checkpoint_json: format!(
@@ -1898,9 +1958,10 @@ fn build_checkpoint_json(
     event_count: usize,
     updated_at: &str,
 ) -> String {
+    let summary = bounded_session_summary(&snapshot.summary);
     let mut metadata = serde_json::Map::new();
     metadata.insert("model".to_string(), json!(snapshot.model));
-    metadata.insert("taskSummary".to_string(), json!(snapshot.summary));
+    metadata.insert("taskSummary".to_string(), json!(summary));
     metadata.insert(
         "isUltraworkMode".to_string(),
         json!(snapshot.mode == "ultrawork"),
@@ -1934,7 +1995,7 @@ fn build_checkpoint_json(
         "state": snapshot.state,
         "metadata": metadata,
         "taskSummary": {
-            "summary": snapshot.summary,
+            "summary": summary,
             "timestamp": updated_at,
         },
         "mode": "normal",
@@ -1942,8 +2003,14 @@ fn build_checkpoint_json(
             .into_iter()
             .map(|entry| json!({ "id": entry.id, "role": entry.role, "text": entry.text }))
             .collect::<Vec<_>>(),
-        "agentConsole": snapshot.agent_console.clone(),
-        "pauseCheckpoint": snapshot.pause_checkpoint.clone(),
+        "agentConsole": snapshot
+            .agent_console
+            .as_ref()
+            .and_then(sanitize_agent_console_snapshot),
+        "pauseCheckpoint": snapshot
+            .pause_checkpoint
+            .as_ref()
+            .and_then(sanitize_pause_checkpoint),
     }))
     .unwrap_or_else(|_| "{}".to_string())
 }
@@ -2033,6 +2100,109 @@ mod tests {
     }
 
     #[test]
+    fn notice_scan_returns_all_129_and_256_valid_files_without_truncation() {
+        for notice_count in [129_usize, 256] {
+            let root = env::temp_dir().join(format!(
+                "unclecode-session-notice-truncation-{notice_count}-{}-{}",
+                std::process::id(),
+                now_ms()
+            ));
+            let notice_dir = root.join("notifications");
+            fs::create_dir_all(&notice_dir).expect("create notice directory");
+            for index in 0..notice_count {
+                let session_id = format!("bounded-session-{index}");
+                fs::write(
+                    notice_dir.join(format!(
+                        "{}.notice.json",
+                        to_opaque_id(&session_id, "session")
+                    )),
+                    serde_json::to_vec(&json!({
+                        "version": SESSION_NOTICE_VERSION,
+                        "sessionId": session_id,
+                        "revision": index + 1,
+                    }))
+                    .expect("serialize notice"),
+                )
+                .expect("write notice");
+            }
+
+            let raw = scan_session_persistence_notices_json(&root).expect("scan notices");
+            let scan: Value = serde_json::from_str(&raw).expect("parse scan");
+            assert_eq!(scan["notices"].as_array().map(Vec::len), Some(notice_count));
+            assert_eq!(scan["truncatedCount"].as_u64(), Some(0));
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn notice_scan_reports_the_exact_count_beyond_the_256_file_bound() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-notice-truncation-count-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let notice_dir = root.join("notifications");
+        fs::create_dir_all(&notice_dir).expect("create notice directory");
+        for index in 0..300 {
+            let session_id = format!("overflow-session-{index}");
+            fs::write(
+                notice_dir.join(format!(
+                    "{}.notice.json",
+                    to_opaque_id(&session_id, "session")
+                )),
+                serde_json::to_vec(&json!({
+                    "version": SESSION_NOTICE_VERSION,
+                    "sessionId": session_id,
+                    "revision": index + 1,
+                }))
+                .expect("serialize notice"),
+            )
+            .expect("write notice");
+        }
+
+        let raw = scan_session_persistence_notices_json(&root).expect("scan notices");
+        let scan: Value = serde_json::from_str(&raw).expect("parse scan");
+        assert_eq!(scan["notices"].as_array().map(Vec::len), Some(256));
+        assert_eq!(scan["truncatedCount"].as_u64(), Some(44));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn notice_scan_ignores_malformed_names_before_applying_the_bound() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-notice-starvation-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let notice_dir = root.join("notifications");
+        fs::create_dir_all(&notice_dir).expect("create notice directory");
+        for index in 0..256 {
+            fs::write(notice_dir.join(format!("{index:03}-malformed")), b"ignored")
+                .expect("write malformed entry");
+        }
+        let session_id = "valid-starvation-session";
+        let valid_name = format!("{}.notice.json", to_opaque_id(session_id, "session"));
+        fs::write(
+            notice_dir.join(&valid_name),
+            serde_json::to_vec(&json!({
+                "version": SESSION_NOTICE_VERSION,
+                "sessionId": session_id,
+                "revision": 7,
+            }))
+            .expect("serialize notice"),
+        )
+        .expect("write valid notice");
+
+        let raw = scan_session_persistence_notices_json(&root).expect("scan notices");
+        let scan: Value = serde_json::from_str(&raw).expect("parse scan");
+        let notices = scan["notices"].as_array().expect("notice array");
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0]["name"], valid_name.as_str());
+        assert_eq!(scan["truncatedCount"], 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn work_shell_snapshot_matches_session_store_shape() {
         let root = env::temp_dir().join(format!(
             "unclecode-session-store-test-{}-{}",
@@ -2095,6 +2265,151 @@ mod tests {
         assert_eq!(resumed.entries[0].text, "inspect repo");
         assert_eq!(resumed.entries[1].text, "repo inspected");
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn checkpoint_notice_rotation_keeps_the_current_session_and_bounds_the_directory() {
+        let root_dir = env::temp_dir().join(format!(
+            "unclecode-session-notice-rotation-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let store = WorkShellSessionStore::new(&root_dir);
+        let root = AnchoredSessionRoot::open(&root_dir).expect("anchor root");
+        for index in 0..384 {
+            store
+                .persist_checkpoint_notice(&root, &format!("rotated-session-{index}"), index + 1)
+                .expect("persist bounded notice");
+        }
+
+        let current = format!(
+            "{}.notice.json",
+            to_opaque_id("rotated-session-383", "session")
+        );
+        let notice_dir = root_dir.join("notifications");
+        let retained = fs::read_dir(&notice_dir)
+            .expect("read notice directory")
+            .filter_map(Result::ok)
+            .filter(|entry| is_session_notice_file_name(&entry.file_name().to_string_lossy()))
+            .count();
+        assert_eq!(retained, MAX_SESSION_NOTICE_FILES);
+        assert!(notice_dir.join(current).is_file());
+        let _ = fs::remove_dir_all(root_dir);
+    }
+
+    #[test]
+    fn repeated_snapshots_use_checkpoint_count_and_keep_the_append_log_bounded() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-bounded-log-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let project = env::current_dir().expect("cwd");
+        let store = WorkShellSessionStore::new(&root);
+        let mut snapshot = WorkShellSessionSnapshot {
+            session_id: "work-session-bounded-log".to_string(),
+            project_path: project.to_string_lossy().to_string(),
+            model: "gpt-5.4".to_string(),
+            mode: "normal".to_string(),
+            state: "running".to_string(),
+            summary: "initial".to_string(),
+            trace_mode: Some("minimal".to_string()),
+            ui_locale: None,
+            reasoning_effort: None,
+            last_submitted_context_receipt_id: None,
+            owner_mutation_revision: None,
+            entries: Vec::new(),
+            agent_console: None,
+            pause_checkpoint: None,
+        };
+        let records_per_snapshot = build_work_shell_records(&snapshot).len();
+        for index in 0..256 {
+            snapshot.summary = format!("checkpoint-{index}-{}", "x".repeat(400));
+            store
+                .persist_work_shell_snapshot(&snapshot)
+                .expect("persist repeated snapshot");
+        }
+
+        let paths = session_paths(&root, &project, &snapshot.session_id);
+        let checkpoint: Value = serde_json::from_str(
+            &fs::read_to_string(&paths.checkpoint_path).expect("read checkpoint"),
+        )
+        .expect("parse checkpoint");
+        assert_eq!(
+            checkpoint["eventCount"].as_u64(),
+            Some((256 * records_per_snapshot) as u64)
+        );
+        assert!(
+            fs::metadata(&paths.event_log_path)
+                .expect("event log metadata")
+                .len()
+                <= MAX_WORK_SHELL_EVENT_LOG_BYTES as u64
+        );
+        let resumed = store
+            .resume_work_shell_session(&project, &snapshot.session_id)
+            .expect("resume")
+            .expect("resumed");
+        assert_eq!(resumed.summary, snapshot.summary);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn oversized_legacy_log_is_compacted_without_recounting_its_contents() {
+        let root = env::temp_dir().join(format!(
+            "unclecode-session-log-metadata-count-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let project = env::current_dir().expect("cwd");
+        let store = WorkShellSessionStore::new(&root);
+        let snapshot = WorkShellSessionSnapshot {
+            session_id: "work-session-log-metadata-count".to_string(),
+            project_path: project.to_string_lossy().to_string(),
+            model: "gpt-5.4".to_string(),
+            mode: "normal".to_string(),
+            state: "idle".to_string(),
+            summary: "latest durable state".to_string(),
+            trace_mode: None,
+            ui_locale: None,
+            reasoning_effort: None,
+            last_submitted_context_receipt_id: None,
+            owner_mutation_revision: None,
+            entries: Vec::new(),
+            agent_console: None,
+            pause_checkpoint: None,
+        };
+        let paths = session_paths(&root, &project, &snapshot.session_id);
+        fs::create_dir_all(&paths.session_dir).expect("create session directory");
+        fs::write(
+            &paths.checkpoint_path,
+            serde_json::to_vec(&json!({ "eventCount": 77 })).expect("checkpoint json"),
+        )
+        .expect("write checkpoint metadata");
+        fs::write(
+            &paths.event_log_path,
+            vec![b'x'; MAX_WORK_SHELL_EVENT_LOG_BYTES + 1],
+        )
+        .expect("write oversized event log");
+
+        store
+            .persist_work_shell_snapshot(&snapshot)
+            .expect("persist over oversized log");
+
+        let checkpoint: Value = serde_json::from_str(
+            &fs::read_to_string(&paths.checkpoint_path).expect("read checkpoint"),
+        )
+        .expect("parse checkpoint");
+        assert_eq!(
+            checkpoint["eventCount"].as_u64(),
+            Some((77 + build_work_shell_records(&snapshot).len()) as u64)
+        );
+        assert!(
+            fs::metadata(&paths.event_log_path)
+                .expect("event log metadata")
+                .len()
+                <= MAX_WORK_SHELL_EVENT_LOG_BYTES as u64
+        );
         let _ = fs::remove_dir_all(root);
     }
 

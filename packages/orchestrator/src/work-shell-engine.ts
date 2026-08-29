@@ -792,10 +792,19 @@ export class WorkShellEngine<
   private agentConsolePublishTimer: NodeJS.Timeout | undefined;
   private agentConsolePersistTimer: NodeJS.Timeout | undefined;
   /**
-   * Tail of the ordered durable-write chain. Never rejects: a failed write is
-   * absorbed here so the next checkpoint still runs.
+   * One write may be active and one latest snapshot may be pending behind it.
+   * Every superseded caller settles with the latest pending write, so lifecycle
+   * bursts stay bounded without letting an older checkpoint win durable order.
    */
+  private pendingSessionSnapshotWrite: {
+    input: WorkShellSessionSnapshotInput;
+    promise: Promise<void>;
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  } | undefined;
+  private sessionSnapshotWriteDrain: Promise<void> | undefined;
   private sessionSnapshotWriteQueue: Promise<void> = Promise.resolve();
+  private disposal: Promise<void> | undefined;
 
   constructor(input: WorkShellEngineInput<Attachment, Reasoning, TraceEvent>) {
     this.agent = input.agent;
@@ -1088,16 +1097,17 @@ export class WorkShellEngine<
     }
   }
 
-  dispose(): void {
-    if (this.disposed) return;
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
     this.disposed = true;
     this.pauseController.cancel();
     this.agent.setTraceListener(undefined);
-    this.flushAgentConsole();
-    this.clearAgentConsoleTimers();
+    const finalCheckpoint = this.flushAgentConsole();
     this.agent.getAgentControlRuntime?.()?.clear("Work Shell closed.");
     this.settlePendingDecision({ status: "unavailable", reason: "Work Shell closed." });
     this.interactionBridge?.unbind("Work Shell closed.");
+    this.disposal = finalCheckpoint.then(() => this.sessionSnapshotWriteQueue);
+    return this.disposal;
   }
 
   /**
@@ -1125,16 +1135,16 @@ export class WorkShellEngine<
         throw new Error("Work Shell shutdown did not settle the active provider/tool turn.");
       }
     }
+    const disposal = this.dispose();
     const remaining = Math.max(0, deadline - Date.now());
     const writesSettled = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => resolve(false), remaining);
-      this.sessionSnapshotWriteQueue.then(() => {
+      disposal.then(() => {
         clearTimeout(timer);
         resolve(true);
       });
     });
     if (!writesSettled) throw new Error("Work Shell shutdown did not settle durable session writes.");
-    this.dispose();
     return true;
   }
 
@@ -1398,14 +1408,17 @@ export class WorkShellEngine<
   }
 
   /** Publish and durably record whatever the coalescing windows still hold. */
-  private flushAgentConsole(): void {
+  private flushAgentConsole(): Promise<void> {
+    const hadPendingPublish = this.agentConsolePublishTimer !== undefined;
     const hadPendingWrite = this.agentConsolePersistTimer !== undefined;
-    if (this.agentConsolePublishTimer !== undefined || this.pendingAgentConsole !== undefined) {
+    this.clearAgentConsoleTimers();
+    if (hadPendingPublish || this.pendingAgentConsole !== undefined) {
       this.publishStagedTraceState();
     }
     if (hadPendingWrite) {
-      void this.persistAgentConsoleSnapshot();
+      return this.persistAgentConsoleSnapshot();
     }
+    return this.sessionSnapshotWriteQueue;
   }
 
   private clearAgentConsoleTimers(): void {
@@ -3210,14 +3223,42 @@ export class WorkShellEngine<
    * queue itself absorbs it and stays usable for the next write.
    */
   private enqueueSessionSnapshotWrite(input: WorkShellSessionSnapshotInput): Promise<void> {
-    const write = this.sessionSnapshotWriteQueue.then(
-      () => this.persistWorkShellSessionSnapshot(input),
-    );
-    this.sessionSnapshotWriteQueue = write.then(
-      () => undefined,
-      () => undefined,
-    );
+    if (this.pendingSessionSnapshotWrite) {
+      this.pendingSessionSnapshotWrite.input = input;
+      return this.pendingSessionSnapshotWrite.promise;
+    }
+    let resolveWrite!: () => void;
+    let rejectWrite!: (error: unknown) => void;
+    const write = new Promise<void>((resolve, reject) => {
+      resolveWrite = resolve;
+      rejectWrite = reject;
+    });
+    this.pendingSessionSnapshotWrite = {
+      input,
+      promise: write,
+      resolve: resolveWrite,
+      reject: rejectWrite,
+    };
+    if (!this.sessionSnapshotWriteDrain) {
+      const drain = this.drainSessionSnapshotWrites();
+      this.sessionSnapshotWriteDrain = drain;
+      this.sessionSnapshotWriteQueue = drain;
+    }
     return write;
+  }
+
+  private async drainSessionSnapshotWrites(): Promise<void> {
+    while (this.pendingSessionSnapshotWrite) {
+      const pending = this.pendingSessionSnapshotWrite;
+      this.pendingSessionSnapshotWrite = undefined;
+      try {
+        await this.persistWorkShellSessionSnapshot(pending.input);
+        pending.resolve();
+      } catch (error: unknown) {
+        pending.reject(error);
+      }
+    }
+    this.sessionSnapshotWriteDrain = undefined;
   }
 
   private async persistSessionSnapshotForEpoch(

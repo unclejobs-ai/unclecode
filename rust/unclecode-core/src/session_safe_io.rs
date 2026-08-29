@@ -1,6 +1,11 @@
 use std::io;
 use std::path::Path;
 
+pub(crate) struct BoundedRegularFiles {
+    pub(crate) files: Vec<(String, Vec<u8>)>,
+    pub(crate) truncated_count: usize,
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod platform {
     use super::*;
@@ -161,7 +166,11 @@ mod platform {
             Ok(())
         }
 
-        pub(crate) fn read_to_string(&self, relative_path: &Path) -> io::Result<String> {
+        pub(crate) fn read_to_string_bounded(
+            &self,
+            relative_path: &Path,
+            max_bytes: usize,
+        ) -> io::Result<String> {
             let (directory, file_name) = self.open_parent(relative_path, false)?;
             let file = open_file_at(
                 directory.as_raw_fd(),
@@ -170,9 +179,50 @@ mod platform {
                 0,
             )
             .map_err(|error| path_entry_error(error, relative_path))?;
-            let mut contents = String::new();
-            File::from(file).read_to_string(&mut contents)?;
+            let mut file = File::from(file);
+            let metadata = file.metadata()?;
+            if !metadata.is_file() || metadata.len() > max_bytes as u64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("session file exceeds the {max_bytes}-byte read bound"),
+                ));
+            }
+            let mut contents = String::with_capacity(metadata.len() as usize);
+            Read::by_ref(&mut file)
+                .take(max_bytes.saturating_add(1) as u64)
+                .read_to_string(&mut contents)?;
+            if contents.len() > max_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("session file exceeds the {max_bytes}-byte read bound"),
+                ));
+            }
             Ok(contents)
+        }
+
+        pub(crate) fn regular_file_len(&self, relative_path: &Path) -> io::Result<Option<u64>> {
+            let (directory, file_name) = self.open_parent(relative_path, false)?;
+            let file = match open_file_at(
+                directory.as_raw_fd(),
+                &file_name,
+                O_RDONLY | O_CLOEXEC | O_NOFOLLOW,
+                0,
+            ) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(path_entry_error(error, relative_path)),
+            };
+            let metadata = File::from(file).metadata()?;
+            if !metadata.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "refusing non-file session target {}",
+                        relative_path.display()
+                    ),
+                ));
+            }
+            Ok(Some(metadata.len()))
         }
 
         pub(crate) fn append_all(&self, relative_path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -236,21 +286,35 @@ mod platform {
             sync_fd(directory.as_raw_fd())
         }
 
-        pub(crate) fn read_bounded_regular_files(
+        pub(crate) fn read_bounded_regular_files_matching<Matches>(
             &self,
             relative_directory: &Path,
             max_entries: usize,
             max_bytes: usize,
-        ) -> io::Result<Vec<(String, Vec<u8>)>> {
-            self.read_bounded_regular_files_with_hooks(
-                relative_directory,
-                max_entries,
-                max_bytes,
-                || {},
-                || {},
-            )
+            matches: Matches,
+        ) -> io::Result<BoundedRegularFiles>
+        where
+            Matches: Fn(&[u8]) -> bool,
+        {
+            let directory = self.open_directory(relative_directory, false)?;
+            read_bounded_regular_files_at(&directory, max_entries, max_bytes, matches)
         }
 
+        pub(crate) fn prune_regular_files_matching<Matches>(
+            &self,
+            relative_directory: &Path,
+            max_entries: usize,
+            protected_name: &str,
+            matches: Matches,
+        ) -> io::Result<usize>
+        where
+            Matches: Fn(&[u8]) -> bool,
+        {
+            let directory = self.open_directory(relative_directory, false)?;
+            prune_regular_files_at(&directory, max_entries, protected_name.as_bytes(), matches)
+        }
+
+        #[cfg(test)]
         fn read_bounded_regular_files_with_hooks<Before, After>(
             &self,
             relative_directory: &Path,
@@ -265,7 +329,9 @@ mod platform {
         {
             let directory = self.open_directory(relative_directory, false)?;
             before_enumeration();
-            let result = read_bounded_regular_files_at(&directory, max_entries, max_bytes);
+            let result =
+                read_bounded_regular_files_at(&directory, max_entries, max_bytes, |_| true)
+                    .map(|scan| scan.files);
             after_enumeration();
             result
         }
@@ -297,11 +363,15 @@ mod platform {
         }
     }
 
-    fn read_bounded_regular_files_at(
+    fn read_bounded_regular_files_at<Matches>(
         directory: &OwnedFd,
         max_entries: usize,
         max_bytes: usize,
-    ) -> io::Result<Vec<(String, Vec<u8>)>> {
+        matches: Matches,
+    ) -> io::Result<BoundedRegularFiles>
+    where
+        Matches: Fn(&[u8]) -> bool,
+    {
         let duplicate = duplicate_directory(directory)?;
         let raw_fd = duplicate.into_raw_fd();
         let raw_stream = unsafe { fdopendir(raw_fd) };
@@ -311,7 +381,8 @@ mod platform {
             return Err(error);
         }
         let stream = OwnedDirectoryStream(raw_stream);
-        let mut names = Vec::new();
+        let mut files = Vec::new();
+        let mut truncated_count = 0_usize;
         loop {
             unsafe { *errno_location() = 0 };
             let entry = unsafe { readdir(stream.0) };
@@ -326,18 +397,12 @@ mod platform {
             if name.to_bytes() == b"." || name.to_bytes() == b".." {
                 continue;
             }
-            if names.len() >= max_entries {
-                break;
+            if !matches(name.to_bytes()) {
+                continue;
             }
-            names.push(name.to_owned());
-        }
-        names.sort_by(|left, right| left.to_bytes().cmp(right.to_bytes()));
-
-        let mut files = Vec::new();
-        for name in names {
             let Ok(file) = open_file_at(
                 directory.as_raw_fd(),
-                &name,
+                name,
                 O_RDONLY | O_CLOEXEC | O_NOFOLLOW,
                 0,
             ) else {
@@ -348,6 +413,10 @@ mod platform {
             if !metadata.is_file() || metadata.len() > max_bytes as u64 {
                 continue;
             }
+            if files.len() >= max_entries {
+                truncated_count = truncated_count.saturating_add(1);
+                continue;
+            }
             let mut bytes = Vec::with_capacity(metadata.len() as usize);
             Read::by_ref(&mut file)
                 .take(max_bytes.saturating_add(1) as u64)
@@ -355,12 +424,78 @@ mod platform {
             if bytes.len() > max_bytes {
                 continue;
             }
-            let Ok(name) = name.into_string() else {
+            let Ok(name) = name.to_owned().into_string() else {
                 continue;
             };
             files.push((name, bytes));
         }
-        Ok(files)
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(BoundedRegularFiles {
+            files,
+            truncated_count,
+        })
+    }
+
+    fn prune_regular_files_at<Matches>(
+        directory: &OwnedFd,
+        max_entries: usize,
+        protected_name: &[u8],
+        matches: Matches,
+    ) -> io::Result<usize>
+    where
+        Matches: Fn(&[u8]) -> bool,
+    {
+        let duplicate = duplicate_directory(directory)?;
+        let raw_fd = duplicate.into_raw_fd();
+        let raw_stream = unsafe { fdopendir(raw_fd) };
+        if raw_stream.is_null() {
+            let error = io::Error::last_os_error();
+            drop(unsafe { OwnedFd::from_raw_fd(raw_fd) });
+            return Err(error);
+        }
+        let stream = OwnedDirectoryStream(raw_stream);
+        let mut retained_others = 0_usize;
+        let max_others = max_entries.saturating_sub(1);
+        let mut removed = 0_usize;
+        loop {
+            unsafe { *errno_location() = 0 };
+            let entry = unsafe { readdir(stream.0) };
+            if entry.is_null() {
+                let errno = unsafe { *errno_location() };
+                if errno != 0 {
+                    return Err(io::Error::from_raw_os_error(errno));
+                }
+                break;
+            }
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+            let bytes = name.to_bytes();
+            if bytes == b"." || bytes == b".." || !matches(bytes) || bytes == protected_name {
+                continue;
+            }
+            let Ok(file) = open_file_at(
+                directory.as_raw_fd(),
+                name,
+                O_RDONLY | O_CLOEXEC | O_NOFOLLOW,
+                0,
+            ) else {
+                continue;
+            };
+            if !File::from(file).metadata()?.is_file() {
+                continue;
+            }
+            if retained_others < max_others {
+                retained_others += 1;
+                continue;
+            }
+            if unsafe { unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            removed += 1;
+        }
+        if removed > 0 {
+            sync_fd(directory.as_raw_fd())?;
+        }
+        Ok(removed)
     }
 
     unsafe fn errno_location() -> *mut c_int {
@@ -559,6 +694,34 @@ mod platform {
                 b"{\"revision\":99}"
             );
         }
+
+        #[test]
+        fn bounded_scan_applies_the_name_filter_before_the_entry_limit() {
+            let temp = TestDirectory::new("notice-name-filter");
+            let root = temp.0.join("root");
+            let notices = root.join("notifications");
+            fs::create_dir_all(&notices).expect("create notices");
+            for index in 0..256 {
+                fs::write(notices.join(format!("{index:03}-malformed")), b"ignored")
+                    .expect("write malformed entry");
+            }
+            let notice_name = "session-00000000000000000000.notice.json";
+            fs::write(notices.join(notice_name), b"{\"revision\":1}").expect("write valid notice");
+
+            let anchored = AnchoredSessionRoot::open_existing(&root).expect("anchor root");
+            let scan = anchored
+                .read_bounded_regular_files_matching(
+                    Path::new("notifications"),
+                    128,
+                    4 * 1024,
+                    |name| name == notice_name.as_bytes(),
+                )
+                .expect("scan matching notices");
+
+            assert_eq!(scan.files.len(), 1);
+            assert_eq!(scan.files[0].0, notice_name);
+            assert_eq!(scan.truncated_count, 0);
+        }
     }
 }
 
@@ -587,7 +750,15 @@ mod platform {
             unreachable!("unsupported session root cannot be constructed")
         }
 
-        pub(crate) fn read_to_string(&self, _path: &Path) -> io::Result<String> {
+        pub(crate) fn read_to_string_bounded(
+            &self,
+            _path: &Path,
+            _max_bytes: usize,
+        ) -> io::Result<String> {
+            unreachable!("unsupported session root cannot be constructed")
+        }
+
+        pub(crate) fn regular_file_len(&self, _path: &Path) -> io::Result<Option<u64>> {
             unreachable!("unsupported session root cannot be constructed")
         }
 
@@ -599,12 +770,29 @@ mod platform {
             unreachable!("unsupported session root cannot be constructed")
         }
 
-        pub(crate) fn read_bounded_regular_files(
+        pub(crate) fn read_bounded_regular_files_matching<Matches>(
             &self,
             _relative_directory: &Path,
             _max_entries: usize,
             _max_bytes: usize,
-        ) -> io::Result<Vec<(String, Vec<u8>)>> {
+            _matches: Matches,
+        ) -> io::Result<BoundedRegularFiles>
+        where
+            Matches: Fn(&[u8]) -> bool,
+        {
+            unreachable!("unsupported session root cannot be constructed")
+        }
+
+        pub(crate) fn prune_regular_files_matching<Matches>(
+            &self,
+            _relative_directory: &Path,
+            _max_entries: usize,
+            _protected_name: &str,
+            _matches: Matches,
+        ) -> io::Result<usize>
+        where
+            Matches: Fn(&[u8]) -> bool,
+        {
             unreachable!("unsupported session root cannot be constructed")
         }
     }

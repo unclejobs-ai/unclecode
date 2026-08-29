@@ -72,6 +72,29 @@ test("notification watcher rescans durable latest revisions and recovers after r
   }
 });
 
+test("notification watcher observes all 129 and 256 valid idle-session receipts", async () => {
+  for (const noticeCount of [129, 256]) {
+    const parent = await mkdtemp(path.join(tmpdir(), `unclecode-notice-cap-${noticeCount}-`));
+    const rootDir = path.join(parent, "sessions");
+    for (let index = 0; index < noticeCount; index += 1) {
+      await writeNotice(rootDir, `idle-session-${noticeCount}-${index}`, index + 1);
+    }
+
+    const received = [];
+    const watcher = await watchSessionPersistenceNotices({
+      rootDir,
+      onNotice(notice) { received.push(notice); },
+    });
+    try {
+      assert.equal(received.length, noticeCount);
+      assert.equal(new Set(received.map((notice) => notice.sessionId)).size, noticeCount);
+    } finally {
+      watcher.stop();
+      await rm(parent, { recursive: true, force: true });
+    }
+  }
+});
+
 test("notification watcher ignores malformed, oversized, misnamed, and symlink receipts", async () => {
   const parent = await mkdtemp(path.join(tmpdir(), "unclecode-notice-bounds-"));
   const rootDir = path.join(parent, "sessions");

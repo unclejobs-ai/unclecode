@@ -9,7 +9,7 @@ const NOTICE_DIRECTORY = "notifications";
 const NOTICE_FILE = /^session-[a-f0-9]{20}\.notice\.json$/u;
 const SESSION_ID = /^[A-Za-z0-9._-]{1,256}$/u;
 const MAX_NOTICE_BYTES = 4 * 1024;
-const MAX_NOTICE_FILES = 128;
+const MAX_NOTICE_FILES = 256;
 
 export type SessionPersistenceNotice = {
   readonly version: 1;
@@ -73,9 +73,14 @@ function scanNotices(rootDir: string): SessionPersistenceNotice[] {
   } catch {
     return [];
   }
-  if (!Array.isArray(parsed) || parsed.length > MAX_NOTICE_FILES) return [];
+  const items = Array.isArray(parsed)
+    ? parsed
+    : isRecord(parsed) && Array.isArray(parsed.notices)
+      ? parsed.notices
+      : undefined;
+  if (!items || items.length > MAX_NOTICE_FILES) return [];
   const notices: SessionPersistenceNotice[] = [];
-  for (const item of parsed) {
+  for (const item of items) {
     if (
       !isRecord(item)
       || typeof item.name !== "string"
