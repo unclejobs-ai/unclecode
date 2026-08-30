@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { binEntrypoint, repoRoot, reportPath, tmpPrefix } from "./runtime-qa/constants.mjs";
+import { buildRuntimeForQa } from "./runtime-qa/build-runtime.mjs";
 import { persistReport } from "./runtime-qa/cli-helpers.mjs";
 import { startAnthropicMessagesServer } from "./runtime-qa/fake-anthropic-server.mjs";
 import { startGeminiServer } from "./runtime-qa/fake-gemini-server.mjs";
@@ -25,11 +26,11 @@ import { killRuntimeTmuxServer, startRuntimeTmuxKeeper } from "./runtime-qa/tmux
 import { runTtySmoke } from "./runtime-qa/tty-smoke.mjs";
 import { runTuiSmokeSuite, runWithRuntimeHome } from "./runtime-qa/tui-suite-smokes.mjs";
 
-if (!existsSync(binEntrypoint)) {
-  throw new Error(`Missing UncleCode bin entrypoint: ${binEntrypoint}`);
-}
-
 const args = parseArgs(process.argv.slice(2));
+await buildRuntimeForQa();
+if (!existsSync(binEntrypoint)) {
+  throw new Error(`Missing UncleCode bin entrypoint after build: ${binEntrypoint}`);
+}
 const tmp = mkdtempSync(path.join(tmpdir(), tmpPrefix));
 const qaHome = path.join(tmp, "home");
 mkdirSync(qaHome, { recursive: true });

@@ -14,7 +14,7 @@
     "check": "tsc -p tsconfig.check.json --noEmit",
     "provenance:check": "node scripts/provenance-check.mjs",
     "node:check": "node scripts/node-version-check.mjs",
-    "qa:runtime": "npm run build --silent && cargo build --quiet -p unclecode && node scripts/unclecode-runtime-qa.mjs",
+    "qa:runtime": "node scripts/unclecode-runtime-qa.mjs",
     "qa:live": "npm run build --silent && cargo build --quiet -p unclecode && node scripts/unclecode-live-provider-qa.mjs",
     "qa:providers": "npm run build --silent && cargo build --quiet -p unclecode && node scripts/provider-conformance.mjs",
     "benchmark:competitive": "npm run build --silent && cargo build --quiet -p unclecode && node scripts/competitive-benchmark.mjs",

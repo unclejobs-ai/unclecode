@@ -26,10 +26,35 @@ test("package exposes one command for operational health and stabilization check
 test("QA scripts keep build noise low while preserving native build checks", () => {
   const pkg = JSON.parse(readFileSync(path.join(workspaceRoot, "package.json"), "utf8"));
 
-  for (const scriptName of ["qa:runtime", "qa:live", "qa:live:record"]) {
+  for (const scriptName of ["qa:live", "qa:live:record"]) {
     const command = pkg.scripts?.[scriptName] ?? "";
     assert.match(command, /cargo build --quiet -p unclecode/);
   }
+
+  assert.equal(pkg.scripts?.["qa:runtime"], "node scripts/unclecode-runtime-qa.mjs");
+});
+
+test("direct runtime QA rebuilds the Node and Rust boot chain before its real-bin smokes", async () => {
+  const moduleUrl = pathToFileURL(
+    path.join(workspaceRoot, "scripts", "runtime-qa", "build-runtime.mjs"),
+  ).href;
+  const { buildRuntimeForQa } = await import(moduleUrl);
+  const calls = [];
+
+  await buildRuntimeForQa(async (command, args, env) => {
+    calls.push({ command, args, env });
+    return { code: 0 };
+  });
+
+  assert.deepEqual(calls.map(({ command, args }) => ({ command, args })), [
+    {
+      command: process.platform === "win32" ? "npm.cmd" : "npm",
+      args: ["run", "build", "--silent"],
+    },
+    { command: "cargo", args: ["build", "--quiet", "-p", "unclecode"] },
+  ]);
+  assert.equal(calls[0]?.env, process.env);
+  assert.equal(calls[1]?.env, process.env);
 });
 
 test("node test scripts suppress expected sqlite experimental warning noise", () => {
@@ -119,6 +144,7 @@ test("runtime QA stays split into inspectable modules", () => {
   assert.deepEqual(moduleFiles, [
     "agent-console-smoke-fixture.mjs",
     "agent-console-smoke-server.mjs",
+    "build-runtime.mjs",
     "cli-helpers.mjs",
     "constants.mjs",
     "control-room-fixture.mjs",
