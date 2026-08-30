@@ -1,4 +1,4 @@
-import { useState, useSyncExternalStore } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import './App.css'
 import { evolutionEvidenceLabel } from './evolution-labels.js'
 import { approvalPayloadFor, canApproveOnce, normalizePendingDecision } from './pending-decision.js'
@@ -83,6 +83,33 @@ const COPY = {
     roles: { planner: '계획자', worker: '작업자', critic: '검토자', promoter: '정리 담당' },
     proposalStates: { evaluating: '평가 중', 'pr-ready': 'PR 준비됨' },
   },
+}
+
+const DOCUMENT_METADATA = {
+  en: { lang: 'en', title: 'UncleCode Control Room' },
+  ko: { lang: 'ko', title: 'UncleCode 관제실' },
+}
+const documentMetadataOwners = new WeakMap()
+
+// Exported for a browserless ownership/race test; App remains the only production consumer.
+// eslint-disable-next-line react-refresh/only-export-components
+export function synchronizeDocumentLocale(documentRef, locale) {
+  const documentElement = documentRef?.documentElement
+  if (!documentElement) return () => {}
+
+  const metadata = DOCUMENT_METADATA[locale] ?? DOCUMENT_METADATA.en
+  const previous = { lang: documentElement.lang, title: documentRef.title }
+  const owner = Symbol('document-metadata-owner')
+  documentMetadataOwners.set(documentRef, owner)
+  documentElement.lang = metadata.lang
+  documentRef.title = metadata.title
+
+  return () => {
+    if (documentMetadataOwners.get(documentRef) !== owner) return
+    documentMetadataOwners.delete(documentRef)
+    if (documentElement.lang === metadata.lang) documentElement.lang = previous.lang
+    if (documentRef.title === metadata.title) documentRef.title = previous.title
+  }
 }
 
 const VIEW_IDS = ['Runs', 'Quality', 'Context', 'Agents & Jobs', 'Artifacts', 'Evolve', 'System']
@@ -354,6 +381,8 @@ export default function App({ store }) {
   const browserLocale = globalThis.navigator?.language?.toLowerCase().startsWith('ko') ? 'ko' : 'en'
   const locale = run?.locale === 'ko' ? 'ko' : run?.locale === 'en' ? 'en' : browserLocale
   const copy = COPY[locale]
+
+  useEffect(() => synchronizeDocumentLocale(globalThis.document, locale), [locale])
 
   if (snapshot.status === 'auth_required') return <AuthGate store={store} snapshot={snapshot} copy={copy} />
   if (snapshot.status === 'idle' || snapshot.status === 'loading') return <Skeleton copy={copy} />
