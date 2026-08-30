@@ -15,6 +15,7 @@ test("an explicit env preserves launcher variables needed for Cargo fallback", {
   t.after(() => rmSync(workspace, { recursive: true, force: true }));
   mkdirSync(path.join(workspace, "rust"));
   writeFileSync(path.join(workspace, "Cargo.toml"), "[workspace]\n", "utf8");
+  writeFileSync(path.join(workspace, "package.json"), '{"type":"module"}\n', "utf8");
   const copiedRustCommand = path.join(workspace, "rust-command.ts");
   copyFileSync(
     path.join(repoRoot, "packages", "providers", "src", "rust-command.ts"),
