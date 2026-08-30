@@ -30,6 +30,7 @@ if (rustEntrypoint) {
     env: {
       ...process.env,
       UNCLECODE_NODE: process.env.UNCLECODE_NODE || process.execPath,
+      UNCLECODE_REPO_ROOT: repoRoot,
     },
   });
   process.exit(result.status ?? 0);

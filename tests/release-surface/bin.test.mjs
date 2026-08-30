@@ -19,7 +19,11 @@ const testDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(testDirectory, "../..");
 const binEntrypoint = path.join(workspaceRoot, "bin/unclecode.cjs");
 
-function createLinkedLauncherFixture({ cargoWorkspace = false, rustBinary = false } = {}) {
+function createLinkedLauncherFixture({
+  callerWorkspace = false,
+  cargoWorkspace = false,
+  rustBinary = false,
+} = {}) {
   const fixtureRoot = realpathSync(mkdtempSync(path.join(tmpdir(), "unclecode-linked-bin-")));
   const packageRoot = path.join(fixtureRoot, "package");
   const packageBinDirectory = path.join(packageRoot, "bin");
@@ -34,6 +38,12 @@ function createLinkedLauncherFixture({ cargoWorkspace = false, rustBinary = fals
   copyFileSync(binEntrypoint, packageLauncher);
   symlinkSync(packageLauncher, linkedLauncher);
 
+  if (callerWorkspace) {
+    mkdirSync(path.join(unrelatedCwd, "apps", "unclecode-cli"), { recursive: true });
+    mkdirSync(path.join(unrelatedCwd, "packages", "orchestrator"), { recursive: true });
+    writeFileSync(path.join(unrelatedCwd, "package.json"), "{}\n", "utf8");
+  }
+
   if (cargoWorkspace) {
     writeFileSync(path.join(packageRoot, "Cargo.toml"), "[workspace]\n", "utf8");
   }
@@ -45,7 +55,11 @@ function createLinkedLauncherFixture({ cargoWorkspace = false, rustBinary = fals
       binaryPath,
       [
         "#!/usr/bin/env node",
-        "process.stdout.write(JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2) }));",
+        "process.stdout.write(JSON.stringify({",
+        "  cwd: process.cwd(),",
+        "  args: process.argv.slice(2),",
+        "  repoRoot: process.env.UNCLECODE_REPO_ROOT,",
+        "}));",
         "",
       ].join("\n"),
       "utf8",
@@ -56,14 +70,14 @@ function createLinkedLauncherFixture({ cargoWorkspace = false, rustBinary = fals
   return { fixtureRoot, linkedLauncher, packageRoot, unrelatedCwd };
 }
 
-function runLinkedLauncher(fixture, args = []) {
+function runLinkedLauncher(fixture, args = [], env = {}) {
   return spawnSync(
     process.execPath,
     ["--preserve-symlinks-main", fixture.linkedLauncher, ...args],
     {
       cwd: fixture.unrelatedCwd,
       encoding: "utf8",
-      env: { ...process.env, UNCLECODE_DISABLE_RUST_BRIDGE: "" },
+      env: { ...process.env, UNCLECODE_DISABLE_RUST_BRIDGE: "", ...env },
     },
   );
 }
@@ -85,16 +99,19 @@ test("release surface exposes UncleCode help and version from the root bin", () 
   assert.doesNotMatch(helpResult.stdout, /claw-dev/i);
 });
 
-test("linked launcher resolves the Rust binary from its real package root", () => {
-  const fixture = createLinkedLauncherFixture({ rustBinary: true });
+test("linked launcher pins its real package root from another UncleCode checkout", () => {
+  const fixture = createLinkedLauncherFixture({ callerWorkspace: true, rustBinary: true });
 
   try {
-    const result = runLinkedLauncher(fixture, ["doctor", "--json"]);
+    const result = runLinkedLauncher(fixture, ["doctor", "--json"], {
+      UNCLECODE_REPO_ROOT: fixture.unrelatedCwd,
+    });
 
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout), {
       cwd: fixture.unrelatedCwd,
       args: ["doctor", "--json"],
+      repoRoot: fixture.packageRoot,
     });
   } finally {
     rmSync(fixture.fixtureRoot, { recursive: true, force: true });

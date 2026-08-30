@@ -77,6 +77,9 @@ surfaces run from the package bin without a Node fallback to
 The wrapper resolves the launcher's real path before deriving the package root,
 so a global symlink such as `~/.local/bin/unclecode` still searches the source
 package's `target` directory instead of `~/.local/target`.
+It also pins `UNCLECODE_REPO_ROOT` to that resolved package root when spawning
+Rust, preventing a different UncleCode-shaped caller directory from supplying
+the TypeScript bridge at runtime.
 When both debug and release Rust binaries exist, the wrapper picks the newest
 binary so a stale release build does not shadow a newly built debug CLI during
 local development.
