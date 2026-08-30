@@ -74,6 +74,46 @@ test("offline fixture compares trace-derived quality and resource measurements d
   assert.equal(first.comparison.passed, true);
 });
 
+test("suite-allocated live telemetry preserves exact totals without inventing case latency or cache claims", () => {
+  const suite = loadHeldOutSuite();
+  const baseline = asSuiteAllocatedLiveResult(suite.baseline);
+  const candidate = asSuiteAllocatedLiveResult(
+    JSON.parse(readFileSync(DEFAULT_HELD_OUT_CANDIDATE, "utf8")),
+  );
+
+  const report = runHeldOutComparison({ baselineResult: baseline, candidateResult: candidate });
+
+  for (const summary of [report.baseline, report.candidate]) {
+    assert.equal(summary.measurementScope, "suite");
+    assert.equal(summary.allocated, true);
+    assert.equal(Object.hasOwn(summary, "cacheHitRatePercent"), false);
+    assert.equal(Object.hasOwn(summary, "latencyMs"), false);
+    assert.equal(summary.frontierTokens, summary.suiteMetrics.frontierTokens);
+    assert.equal(summary.totalTokens, summary.suiteMetrics.totalTokens);
+    assert.equal(summary.suiteMetrics.measurementScope, "suite");
+  }
+  assert.equal(report.baseline.suiteMetrics.latencyMs, 48_795);
+  assert.equal(report.candidate.suiteMetrics.latencyMs, 36_590);
+  assert.equal(report.comparison.frontierTokenReductionPercent, 60.00244);
+});
+
+test("live suite telemetry schema rejects missing labels and non-reconstructable allocations", () => {
+  const suite = loadHeldOutSuite();
+  const unlabeled = JSON.parse(JSON.stringify(suite.baseline));
+  unlabeled.evidenceMode = "live-provider";
+  assert.throws(
+    () => runHeldOutComparison({ baselineResult: unlabeled }),
+    /must declare its measurement scope and allocation semantics/,
+  );
+
+  const mismatched = asSuiteAllocatedLiveResult(suite.baseline);
+  mismatched.aggregateMetrics.latencyMs += 1;
+  assert.throws(
+    () => runHeldOutComparison({ baselineResult: mismatched }),
+    /allocated latencyMs does not reconstruct its exact suite total/,
+  );
+});
+
 test("offline fixture gates never claim live integrated proof", () => {
   const report = runHeldOutComparison();
 
@@ -233,4 +273,28 @@ function copyCandidate(mutate) {
   mutate(candidate);
   writeFileSync(candidatePath, `${JSON.stringify(candidate, null, 2)}\n`, "utf8");
   return candidatePath;
+}
+
+function asSuiteAllocatedLiveResult(source) {
+  const result = JSON.parse(JSON.stringify(source));
+  result.evidenceMode = "live-provider";
+  result.measurementScope = "suite";
+  result.allocated = true;
+  const retainedMemoryBytes = Math.max(
+    ...result.cases.map((entry) => entry.metrics.retainedMemoryBytes),
+  );
+  for (const entry of result.cases) entry.metrics.retainedMemoryBytes = retainedMemoryBytes;
+  result.aggregateMetrics = {
+    frontierTokens: sumCaseMetric(result, "frontierTokens"),
+    totalTokens: sumCaseMetric(result, "totalTokens"),
+    cacheHits: sumCaseMetric(result, "cacheHits"),
+    cacheMisses: sumCaseMetric(result, "cacheMisses"),
+    latencyMs: sumCaseMetric(result, "latencyMs"),
+    retainedMemoryBytes,
+  };
+  return result;
+}
+
+function sumCaseMetric(result, metric) {
+  return result.cases.reduce((total, entry) => total + entry.metrics[metric], 0);
 }

@@ -245,6 +245,19 @@ function validateResult(result, caseDefinitions, label) {
   ) {
     throw new Error(`Invalid ${label} result envelope`);
   }
+  if (result.evidenceMode === "live-provider") {
+    if (!["case", "suite"].includes(result.measurementScope) || typeof result.allocated !== "boolean") {
+      throw new Error(`${label} live result must declare its measurement scope and allocation semantics`);
+    }
+    if (result.measurementScope === "case" && result.allocated) {
+      throw new Error(`${label} case measurements cannot be marked allocated`);
+    }
+  }
+  const suiteAllocated = result.measurementScope === "suite" && result.allocated === true;
+  if (result.measurementScope === "suite" && !suiteAllocated) {
+    throw new Error(`${label} suite measurements must be marked allocated`);
+  }
+  if (suiteAllocated) validateAggregateMetrics(result.aggregateMetrics, label);
   const expectedIds = new Set(caseDefinitions.map((entry) => entry.id));
   const seen = new Set();
   for (const entry of result.cases) {
@@ -265,17 +278,38 @@ function validateResult(result, caseDefinitions, label) {
     }
   }
   if (seen.size !== expectedIds.size) throw new Error(`${label} result must cover every held-out case exactly once`);
+  if (suiteAllocated) {
+    for (const metric of ["frontierTokens", "totalTokens", "cacheHits", "cacheMisses", "latencyMs"]) {
+      const allocatedTotal = sum(result.cases.map((entry) => entry.metrics[metric]));
+      if (allocatedTotal !== result.aggregateMetrics[metric]) {
+        throw new Error(`${label} allocated ${metric} does not reconstruct its exact suite total`);
+      }
+    }
+    if (result.cases.some(
+      (entry) => entry.metrics.retainedMemoryBytes !== result.aggregateMetrics.retainedMemoryBytes,
+    )) {
+      throw new Error(`${label} allocated retainedMemoryBytes does not match its exact suite measurement`);
+    }
+  }
 }
 
 function summarizeResult(result, caseDefinitions) {
   const byId = new Map(result.cases.map((entry) => [entry.id, entry]));
   const scores = result.cases.map((entry) => entry.score);
-  const cacheHits = sum(result.cases.map((entry) => entry.metrics.cacheHits));
-  const cacheMisses = sum(result.cases.map((entry) => entry.metrics.cacheMisses));
-  const latencies = result.cases.map((entry) => entry.metrics.latencyMs).sort((left, right) => left - right);
+  const suiteAllocated = result.measurementScope === "suite" && result.allocated === true;
+  const aggregate = suiteAllocated ? result.aggregateMetrics : undefined;
+  const cacheHits = aggregate?.cacheHits
+    ?? sum(result.cases.map((entry) => entry.metrics.cacheHits));
+  const cacheMisses = aggregate?.cacheMisses
+    ?? sum(result.cases.map((entry) => entry.metrics.cacheMisses));
+  const latencies = suiteAllocated
+    ? []
+    : result.cases.map((entry) => entry.metrics.latencyMs).sort((left, right) => left - right);
   return {
     system: result.system,
     commit: result.commit,
+    measurementScope: suiteAllocated ? "suite" : "case",
+    allocated: suiteAllocated,
     qualityPercent: round(mean(scores) * 100),
     domains: Object.fromEntries(HELD_OUT_DOMAINS.map((domain) => {
       const domainScores = caseDefinitions
@@ -283,15 +317,48 @@ function summarizeResult(result, caseDefinitions) {
         .map((entry) => byId.get(entry.id).score);
       return [domain, round(mean(domainScores) * 100)];
     })),
-    frontierTokens: sum(result.cases.map((entry) => entry.metrics.frontierTokens)),
-    totalTokens: sum(result.cases.map((entry) => entry.metrics.totalTokens)),
-    cacheHitRatePercent: cacheHits + cacheMisses === 0 ? 0 : round(cacheHits / (cacheHits + cacheMisses) * 100),
-    latencyMs: {
-      mean: round(mean(latencies)),
-      p95: latencies[Math.max(0, Math.ceil(latencies.length * 0.95) - 1)],
-    },
-    retainedMemoryBytes: Math.max(...result.cases.map((entry) => entry.metrics.retainedMemoryBytes)),
+    frontierTokens: aggregate?.frontierTokens
+      ?? sum(result.cases.map((entry) => entry.metrics.frontierTokens)),
+    totalTokens: aggregate?.totalTokens
+      ?? sum(result.cases.map((entry) => entry.metrics.totalTokens)),
+    ...(suiteAllocated
+      ? {
+          suiteMetrics: {
+            measurementScope: "suite",
+            frontierTokens: aggregate.frontierTokens,
+            totalTokens: aggregate.totalTokens,
+            cacheHits: aggregate.cacheHits,
+            cacheMisses: aggregate.cacheMisses,
+            latencyMs: aggregate.latencyMs,
+            retainedMemoryBytes: aggregate.retainedMemoryBytes,
+          },
+        }
+      : {
+          cacheHitRatePercent: cacheHits + cacheMisses === 0
+            ? 0
+            : round(cacheHits / (cacheHits + cacheMisses) * 100),
+          latencyMs: {
+            mean: round(mean(latencies)),
+            p95: latencies[Math.max(0, Math.ceil(latencies.length * 0.95) - 1)],
+          },
+        }),
+    retainedMemoryBytes: aggregate?.retainedMemoryBytes
+      ?? Math.max(...result.cases.map((entry) => entry.metrics.retainedMemoryBytes)),
   };
+}
+
+function validateAggregateMetrics(metrics, label) {
+  if (!metrics || typeof metrics !== "object") {
+    throw new Error(`${label} suite measurement requires exact aggregate metrics`);
+  }
+  for (const metric of ["frontierTokens", "totalTokens", "cacheHits", "cacheMisses", "latencyMs", "retainedMemoryBytes"]) {
+    if (!Number.isSafeInteger(metrics[metric]) || metrics[metric] < 0) {
+      throw new Error(`${label} result has invalid aggregate ${metric}`);
+    }
+  }
+  if (metrics.frontierTokens > metrics.totalTokens) {
+    throw new Error(`${label} aggregate frontier tokens exceed total tokens`);
+  }
 }
 
 function validateCriticProof(candidate, caseDefinitions) {

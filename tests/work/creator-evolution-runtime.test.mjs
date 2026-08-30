@@ -374,8 +374,12 @@ test("host evaluation reads each isolated candidate and produces candidate-bound
       "utf8",
     ));
     baseline.evidenceMode = "live-provider";
+    baseline.measurementScope = "case";
+    baseline.allocated = false;
     baseline.commit = git(baselineWorktree, ["rev-parse", "HEAD"]);
     candidate.evidenceMode = "live-provider";
+    candidate.measurementScope = "case";
+    candidate.allocated = false;
     candidate.commit = git(candidateWorktree, ["rev-parse", "HEAD"]);
     for (const entry of candidate.cases) entry.score = candidateScore;
     return {
@@ -736,6 +740,15 @@ test("the host evaluator reads sealed Git blobs and rejects synthetic provider i
     });
 
     assert.equal(result.candidateResult.commit, candidateCommit);
+    assert.equal(result.candidateResult.measurementScope, "suite");
+    assert.equal(result.candidateResult.allocated, true);
+    assert.equal(
+      result.candidateResult.aggregateMetrics.frontierTokens,
+      result.candidateResult.cases.reduce(
+        (total, entry) => total + entry.metrics.frontierTokens,
+        0,
+      ),
+    );
     assert.match(candidatePrompt, /sealed candidate guidance/);
     assert.doesNotMatch(candidatePrompt, /DIRTY PROMPT INJECTION/);
     assert.equal(readFileSync(path.join(candidateWorktree, "skills", "creator.md"), "utf8"), "DIRTY PROMPT INJECTION\n");
@@ -756,6 +769,14 @@ test("the host evaluator reads sealed Git blobs and rejects synthetic provider i
       trustedProof: failedReview.verification,
     });
     assert.equal(failedReview.verification.independentFinalReview.status, "failed");
+    assert.equal(failedReport.candidate.measurementScope, "suite");
+    assert.equal(failedReport.candidate.allocated, true);
+    assert.equal(Object.hasOwn(failedReport.candidate, "latencyMs"), false);
+    assert.equal(Object.hasOwn(failedReport.candidate, "cacheHitRatePercent"), false);
+    assert.equal(
+      failedReport.candidate.suiteMetrics.latencyMs,
+      failedReview.candidateResult.aggregateMetrics.latencyMs,
+    );
     assert.equal(failedReport.integratedProof.status, "unproven");
     assert.ok(failedReport.integratedProof.reasons.includes("COMPARISON_GATES_FAILED"));
     assert.ok(failedReport.integratedProof.reasons.includes("INDEPENDENT_FINAL_REVIEW_NOT_PROVEN"));

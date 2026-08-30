@@ -565,6 +565,16 @@ function buildLiveHeldOutResult(input: {
     commit: input.commit,
     evidenceMode: "live-provider",
     traceDerived: true,
+    measurementScope: "suite",
+    allocated: true,
+    aggregateMetrics: {
+      frontierTokens: input.accounting.outputTokens,
+      totalTokens: input.accounting.inputTokens + input.accounting.outputTokens,
+      cacheHits: input.accounting.cacheReadTokens,
+      cacheMisses: Math.max(0, input.accounting.inputTokens - input.accounting.cacheReadTokens),
+      latencyMs: input.accounting.latencyMs,
+      retainedMemoryBytes,
+    },
     recordedAt: input.recordedAt,
     cases: input.scores.map((entry, index) => ({
       id: entry.id,
