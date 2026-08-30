@@ -504,7 +504,7 @@ export type AgentControlPort = {
   continue(agentRunId: string, message?: string): Promise<AgentControlReceipt>;
 };
 
-export const AGENT_CONSOLE_TABS = ["agents", "jobs", "plan"] as const;
+export const AGENT_CONSOLE_TABS = ["agents", "jobs", "plan", "quality"] as const;
 export type AgentConsoleTab = (typeof AGENT_CONSOLE_TABS)[number];
 
 /** Bounded, redacted diagnostic safe for traces, checkpoints, and operator projections. */

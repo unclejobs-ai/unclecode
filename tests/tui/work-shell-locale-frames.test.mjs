@@ -87,7 +87,7 @@ test("review frame exposes Korean Quality Engine chrome without changing evidenc
   };
   const ko = await frame({
     uiLocale: "ko", agentConsole: snapshot,
-    agentConsoleView: { open: true, tab: "plan", cursor: 0, activePane: "roster", inspectorVisible: false, control: { kind: "browse" } },
+    agentConsoleView: { open: true, tab: "quality", cursor: 0, activePane: "roster", inspectorVisible: false, control: { kind: "browse" } },
   });
   assert.match(ko, /품질 엔진 \(SCC\) · 심층 · 비평 · PDCA 점검 · 반복 2/u);
   assert.match(ko, /게이트 · 미입증/u);

@@ -255,8 +255,19 @@ export function createWorkShellCommandRegistry(extraEntries: readonly Registered
     },
     {
       command: "/review",
+      routeTo: ["review"],
+      metadata: builtinLocal("Inspect SCC Quality Engine gates, critic findings, and evidence without starting a model turn."),
+      exactOnly: true,
+    },
+    {
+      command: "/review run",
       routeTo: ["prompt", "review"],
-      metadata: builtinPrompt("Review the current changes, risks, and missing verification."),
+      metadata: builtinPrompt("Run a model-backed code review. Optional focus text may follow."),
+    },
+    {
+      command: "/code-review",
+      routeTo: ["prompt", "review"],
+      metadata: builtinPrompt("Run a model-backed code review. Optional focus text may follow."),
     },
     {
       command: "/commit",

@@ -144,7 +144,7 @@ export function WorkShellAgentConsoleOverlay(props: {
   );
 
   const totalCost = formatAgentConsoleTotalCost(props.snapshot);
-  const qualityReview = props.view.tab === "plan"
+  const qualityReview = props.view.tab === "quality"
     ? selectQualityReviewLines(props.snapshot, body, uiLocale)
     : [];
   const recordedEvolution = qualityReview.length === 0
@@ -169,7 +169,7 @@ export function WorkShellAgentConsoleOverlay(props: {
         </Text>
       </Text>
       <Text>
-        {(["agents", "jobs", "plan"] as const).map((tab, index) => (
+        {(["agents", "jobs", "plan", "quality"] as const).map((tab, index) => (
           <Text key={tab}>
             {index === 0 ? "" : "  "}
             <Text
@@ -212,17 +212,24 @@ export function WorkShellAgentConsoleOverlay(props: {
       </Box>
 
       <Box marginTop={1}>
-        <Text color={props.palette.textDim}>{truncateForDisplayWidth(uiLocale === "ko" ? "j/k 이동 · Tab 창 · s 조정 · x 취소 · r 계속 · Esc 닫기" : CONSOLE_KEY_HINTS, body)}</Text>
+        <Text color={props.palette.textDim}>{truncateForDisplayWidth(
+          props.view.tab === "quality"
+            ? (uiLocale === "ko"
+              ? "j/k 이동 · Tab 창 · Enter 상세 · Esc 닫기 · 읽기 전용"
+              : "j/k move · Tab pane · Enter detail · Esc close · read-only")
+            : (uiLocale === "ko" ? "j/k 이동 · Tab 창 · s 조정 · x 취소 · r 계속 · Esc 닫기" : CONSOLE_KEY_HINTS),
+          body,
+        )}</Text>
       </Box>
     </Box>
   );
 }
 
-const TAB_LABELS = { agents: "Agents", jobs: "Jobs", plan: "Plan" } as const;
+const TAB_LABELS = { agents: "Agents", jobs: "Jobs", plan: "Plan", quality: "Quality" } as const;
 
 function tabLabel(tab: keyof typeof TAB_LABELS, uiLocale: "en" | "ko"): string {
   if (uiLocale === "en") return TAB_LABELS[tab];
-  return ({ agents: "에이전트", jobs: "작업", plan: "계획" } as const)[tab];
+  return ({ agents: "에이전트", jobs: "작업", plan: "계획", quality: "품질" } as const)[tab];
 }
 
 function renderInspector(
@@ -308,6 +315,8 @@ function localizeInspectorLabel(label: string, uiLocale: "en" | "ko"): string {
     "Reviewed hash": "검토 해시",
     "Current hash": "현재 해시",
     "Artifact hash": "산출물 해시",
+    Iteration: "반복",
+    Verification: "검증",
     Tokens: "토큰",
     Cost: "비용",
     Model: "모델",
@@ -392,6 +401,7 @@ function emptyRosterLabel(tab: AgentConsoleViewState["tab"], uiLocale: "en" | "k
   if (uiLocale === "ko") {
     if (tab === "agents") return "이 세션에 위임된 에이전트 실행이 없습니다.";
     if (tab === "jobs") return "이 세션에 백그라운드 작업이 없습니다.";
+    if (tab === "quality") return "아직 품질 엔진 검토 기록이 없습니다.";
     return "아직 승인된 작업 그래프가 없습니다.";
   }
   switch (tab) {
@@ -401,6 +411,8 @@ function emptyRosterLabel(tab: AgentConsoleViewState["tab"], uiLocale: "en" | "k
       return "No background jobs in this session.";
     case "plan":
       return "No approved work graph yet.";
+    case "quality":
+      return "No Quality Engine review history yet.";
   }
 }
 

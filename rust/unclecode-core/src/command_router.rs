@@ -223,8 +223,20 @@ const WORK_SHELL_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     },
     BuiltinSlashCommand {
         command: "/review",
+        route: &["review"],
+        description: "Inspect SCC Quality Engine gates, critic findings, and evidence without starting a model turn.",
+        aliases: &[],
+    },
+    BuiltinSlashCommand {
+        command: "/review run",
         route: &["prompt", "review"],
-        description: "Review the current changes, risks, and missing verification.",
+        description: "Run a model-backed code review. Optional focus text may follow.",
+        aliases: &[],
+    },
+    BuiltinSlashCommand {
+        command: "/code-review",
+        route: &["prompt", "review"],
+        description: "Run a model-backed code review. Optional focus text may follow.",
         aliases: &[],
     },
     BuiltinSlashCommand {
@@ -309,7 +321,14 @@ pub fn route_work_shell_slash_command(input: &str) -> SlashRoute {
         };
     }
 
-    for (command, kind) in [("/review", "review"), ("/commit", "commit")] {
+    for (command, kind) in [
+        ("/review run", "review"),
+        ("/code-review", "review"),
+        // Compatibility: an argument-bearing legacy `/review <focus>` remains
+        // executable, while the exact bare command is intercepted locally.
+        ("/review", "review"),
+        ("/commit", "commit"),
+    ] {
         if let Some(route) = route_prompt_style(&normalized, command, kind) {
             return SlashRoute {
                 kind: SlashRouteKind::Dynamic,
@@ -497,7 +516,7 @@ pub fn work_shell_agent_console_tab(line: &str) -> Option<&'static str> {
         "/agents" => Some("agents"),
         "/jobs" => Some("jobs"),
         "/todo" => Some("plan"),
-        "/review" => Some("plan"),
+        "/review" => Some("quality"),
         _ => None,
     }
 }
@@ -1312,7 +1331,7 @@ mod tests {
         );
         assert_eq!(
             work_shell_builtin_submit_command("/review"),
-            Some(json!({ "kind": "agent-console", "tab": "plan" })),
+            Some(json!({ "kind": "agent-console", "tab": "quality" })),
         );
         assert_eq!(work_shell_agent_console_tab("/queue"), None);
         assert_eq!(work_shell_agent_console_tab("/agents extra"), None);
@@ -1324,7 +1343,7 @@ mod tests {
             ("/agents", "agents"),
             ("/jobs", "jobs"),
             ("/todo", "plan"),
-            ("/review", "plan"),
+            ("/review", "quality"),
         ] {
             let route = serde_json::from_str::<Value>(
                 &route_work_shell_submit_json(line, false, "default", true).unwrap(),

@@ -412,6 +412,16 @@ export function selectAgentConsoleRows(
         statusLabel: localizedWorkNodeStatus(node.status, uiLocale),
         tone: STATUS_TONES[node.status],
       }));
+    case "quality":
+      return (snapshot.qualityReview?.history ?? []).map((entry, index) => ({
+        id: `${entry.startedAt}:${entry.iteration}:${entry.event}:${index}`,
+        glyph: agentConsoleStatusGlyph(qualityDecisionTone(entry.decision)),
+        label: flattenRowText(
+          `${uiLocale === "ko" ? "반복" : "iteration"} ${entry.iteration} · ${localizedQualityStage(entry.stage, uiLocale)} · ${localizedQualityEvent(entry.event, uiLocale)}`,
+        ),
+        statusLabel: localizedGateDecision(entry.decision, uiLocale),
+        tone: qualityDecisionTone(entry.decision),
+      }));
   }
 }
 
@@ -464,7 +474,16 @@ export function selectAgentConsoleInspector(
       return inspectAsyncJob(snapshot, selection.job, now, width, uiLocale);
     case "plan":
       return inspectWorkNode(selection.node, width, snapshot.workGraph, snapshot.qualityReview, uiLocale);
+    case "quality":
+      return inspectQualityReview(selection.review, width, uiLocale);
   }
+}
+
+function qualityDecisionTone(decision: QualityReviewHistoryEntry["decision"]): AgentConsoleRowTone {
+  if (decision === "proceed") return "success";
+  if (decision === "block") return "danger";
+  if (decision === "refine" || decision === "pivot") return "warning";
+  return "pending";
 }
 
 export function isActiveAgentRun(run: AgentRun): boolean {
@@ -733,6 +752,61 @@ function inspectWorkNode(
   });
 }
 
+function inspectQualityReview(
+  review: QualityReviewHistoryEntry,
+  width: number,
+  uiLocale: "en" | "ko",
+): AgentConsoleInspector {
+  const facts: AgentConsoleInspectorFact[] = [
+    { label: "Gate", value: localizedGateDecision(review.decision, uiLocale) },
+    { label: "Stage", value: localizedQualityStage(review.stage, uiLocale) },
+    { label: "Iteration", value: String(review.iteration) },
+    {
+      label: "Verification",
+      value: review.independentVerification
+        ? (uiLocale === "ko" ? "독립" : "independent")
+        : (uiLocale === "ko" ? "독립 아님" : "not independent"),
+    },
+  ];
+  if (review.reviewerId) facts.push({ label: "Reviewer", value: review.reviewerId });
+  if (review.reviewerRunId) facts.push({ label: "Reviewer run", value: review.reviewerRunId });
+  if (review.route || review.provider || review.model) {
+    facts.push({
+      label: "Route",
+      value: [review.route, review.provider, review.model].filter(Boolean).join(" · "),
+    });
+  }
+  if (review.reviewedArtifactHash) facts.push({ label: "Reviewed hash", value: review.reviewedArtifactHash });
+  if (review.currentArtifactHash) {
+    facts.push({
+      label: "Current hash",
+      value: `${review.currentArtifactHash}${review.stale
+        ? (uiLocale === "ko" ? " · 만료" : " · stale")
+        : (uiLocale === "ko" ? " · 현재" : " · current")}`,
+    });
+  } else if (review.artifactHash) {
+    facts.push({ label: "Artifact hash", value: review.artifactHash });
+  }
+  if (review.count !== undefined && review.limit !== undefined) {
+    facts.push({ label: "Attempt", value: `${review.count}/${review.limit}` });
+  }
+
+  return composeInspector({
+    title: `${uiLocale === "ko" ? "반복" : "Iteration"} ${review.iteration} · ${localizedQualityEvent(review.event, uiLocale)}`,
+    subtitle: `${localizedQualityStage(review.stage, uiLocale)} · ${localizedGateDecision(review.decision, uiLocale)}`,
+    tone: qualityDecisionTone(review.decision),
+    facts,
+    timeline: [
+      ...(review.reason ? [`${uiLocale === "ko" ? "이유" : "Reason"} · ${review.reason}`] : []),
+      ...review.failures.map((failure) => `${uiLocale === "ko" ? "비평 발견" : "Critic finding"} · ${failure}`),
+      ...review.evidenceRefs.map((evidence) => `${uiLocale === "ko" ? "증거" : "Evidence"} · ${evidence}`),
+      ...review.artifactRefs.map((artifact) => `${uiLocale === "ko" ? "산출물" : "Artifact"} · ${artifact}`),
+    ],
+    hiddenTimelineCount: 0,
+    bound: boundWidth(width),
+  });
+}
+
 function buildTimeline(
   activity: readonly ToolActivity[],
   bound: number,
@@ -836,6 +910,11 @@ function localizedJobType(jobType: string, uiLocale: "en" | "ko"): string {
 function localizedQualityStage(stage: string, uiLocale: "en" | "ko"): string {
   if (uiLocale === "en") return stage;
   return ({ explore: "탐색", plan: "계획", work: "작업", critic: "비평", promote: "정리" } as Readonly<Record<string, string>>)[stage] ?? stage;
+}
+
+function localizedQualityEvent(event: QualityReviewHistoryEntry["event"], uiLocale: "en" | "ko"): string {
+  if (uiLocale === "en") return event;
+  return ({ gate: "게이트", refine: "개선", pivot: "전환", completed: "완료" } as const)[event];
 }
 
 function localizedQualityProfile(profile: string, uiLocale: "en" | "ko"): string {

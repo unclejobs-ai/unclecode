@@ -4,6 +4,7 @@ import type {
   AgentControlReceipt,
   AgentRun,
   AsyncJob,
+  QualityReviewHistoryEntry,
   WorkNode,
 } from "@unclecode/contracts";
 
@@ -35,7 +36,8 @@ export type AgentConsoleViewState = {
 export type AgentConsoleSelection =
   | { readonly tab: "agents"; readonly run: AgentRun }
   | { readonly tab: "jobs"; readonly job: AsyncJob }
-  | { readonly tab: "plan"; readonly node: WorkNode };
+  | { readonly tab: "plan"; readonly node: WorkNode }
+  | { readonly tab: "quality"; readonly review: QualityReviewHistoryEntry };
 
 const BROWSE: AgentConsoleControlState = { kind: "browse" };
 
@@ -68,6 +70,8 @@ export function countAgentConsoleRows(
       return snapshot.jobs.length;
     case "plan":
       return snapshot.workGraph?.nodes.length ?? 0;
+    case "quality":
+      return snapshot.qualityReview?.history.length ?? 0;
   }
 }
 
@@ -275,6 +279,10 @@ export function resolveAgentConsoleSelection(
     case "plan": {
       const node = snapshot.workGraph?.nodes[view.cursor];
       return node ? { tab: "plan", node } : undefined;
+    }
+    case "quality": {
+      const review = snapshot.qualityReview?.history[view.cursor];
+      return review ? { tab: "quality", review } : undefined;
     }
   }
 }

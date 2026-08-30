@@ -170,20 +170,28 @@ test("an open console with an empty composer owns navigation and control keys", 
 });
 
 test("Tab walks the console tabs forward and Shift+Tab walks them back", () => {
-  const forward = [["agents", "jobs"], ["jobs", "plan"], ["plan", "agents"]];
+  const forward = [["agents", "jobs"], ["jobs", "plan"], ["plan", "quality"], ["quality", "agents"]];
   for (const [from, to] of forward) {
     assert.deepEqual(
       decide({ key: { tab: true }, tab: from }),
       dispatch({ kind: "tab", tab: to }),
     );
   }
-  const backward = [["agents", "plan"], ["jobs", "agents"], ["plan", "jobs"]];
+  const backward = [["agents", "quality"], ["jobs", "agents"], ["plan", "jobs"], ["quality", "plan"]];
   for (const [from, to] of backward) {
     assert.deepEqual(
       decide({ key: { tab: true, shift: true }, tab: from }),
       dispatch({ kind: "tab", tab: to }),
     );
   }
+});
+
+test("the Quality tab is read-only while navigation and global Ctrl+O remain available", () => {
+  for (const value of ["s", "x", "r"]) {
+    assert.deepEqual(decide({ tab: "quality", value }), CONSUME);
+  }
+  assert.deepEqual(decide({ tab: "quality", value: "j" }), dispatch({ kind: "move", delta: 1 }));
+  assert.deepEqual(decide({ tab: "quality", value: "o", key: { ctrl: true } }), PASS);
 });
 
 test("a composer with a draft keeps every console key as ordinary editing", () => {
@@ -1114,15 +1122,15 @@ test("two Shift+Tab chords in one terminal chunk walk two tabs, not the same one
     // the first event's decision is cached and never read — and the second
     // event must still decide against the tab the first one selected.
     stdin.write("\u001b[Z\u001b[Z");
-    await waitForCondition(() => getState().agentConsoleView.tab === "jobs", 1500);
+    await waitForCondition(() => getState().agentConsoleView.tab === "plan", 1500);
 
     assert.equal(
       getState().agentConsoleView.tab,
-      "jobs",
-      "agents → plan → jobs: the second chord must not replay the first decision",
+      "plan",
+      "agents → quality → plan: the second chord must not replay the first decision",
     );
     assert.equal(getState().agentConsoleView.open, true, "neither chord may close the console");
-    assert.match(lastFrame(getOutput()), /\[Jobs\]/, "the rendered console agrees with the state");
+    assert.match(lastFrame(getOutput()), /\[Plan\]/, "the rendered console agrees with the state");
   } finally {
     instance.unmount();
     instance.cleanup();

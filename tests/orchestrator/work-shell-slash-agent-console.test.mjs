@@ -15,7 +15,7 @@ const AGENT_CONSOLE_COMMANDS = [
   ["/agents", "agents"],
   ["/jobs", "jobs"],
   ["/todo", "plan"],
-  ["/review", "plan"],
+  ["/review", "quality"],
 ];
 
 const AGENT_CONSOLE_DESCRIPTIONS = {
@@ -45,7 +45,7 @@ test("agent console commands submit as builtins instead of chat or inline comman
   }
 });
 
-test("only exact /review opens plan and quality while an argument remains a review prompt", () => {
+test("only exact /review opens quality while explicit and legacy focused forms remain review prompts", () => {
   const line = "/review auth flow";
 
   assert.equal(resolveWorkShellBuiltinCommand(line), undefined);
@@ -64,12 +64,16 @@ test("only exact /review opens plan and quality while an argument remains a revi
       promptCommand: { kind: "review", focus: "auth flow" },
     },
   );
+
+  assert.deepEqual(resolveWorkShellSlashCommand("/review run auth flow"), ["prompt", "review", "auth", "flow"]);
+  assert.deepEqual(resolveWorkShellSlashCommand("/code-review auth flow"), ["prompt", "review", "auth", "flow"]);
 });
 
 test("agent console tab validation fails closed on missing and unknown tabs", () => {
   assert.equal(isAgentConsoleTab("agents"), true);
   assert.equal(isAgentConsoleTab("jobs"), true);
   assert.equal(isAgentConsoleTab("plan"), true);
+  assert.equal(isAgentConsoleTab("quality"), true);
 
   assert.equal(isAgentConsoleTab("todo"), false);
   assert.equal(isAgentConsoleTab(""), false);

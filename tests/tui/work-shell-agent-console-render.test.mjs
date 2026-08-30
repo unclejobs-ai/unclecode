@@ -140,6 +140,7 @@ test("the Agent Console shows roster and inspector side by side at 100 columns",
   assert.match(frame, /\[Agents\]/, "the active tab must be marked with text, not colour alone");
   assert.match(frame, /Jobs/);
   assert.match(frame, /Plan/);
+  assert.match(frame, /Quality/);
   // `DocsMap` is a roster-only row (the cursor selects `RuntimeMap`), and
   // `Elapsed` is an inspector-only fact label. Both present means two panes.
   assert.match(frame, /DocsMap/, "the roster pane must stay visible beside the inspector");
@@ -309,6 +310,103 @@ test("the Korean plan inspector localizes counts, review state, hashes and evide
   ]) {
     assert.match(frame, new RegExp(payload.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
+});
+
+test("the Quality tab presents the projected SCC gate, critic evidence, and iteration history", async () => {
+  const base = runningSnapshot();
+  const snapshot = {
+    ...base,
+    workGraph: {
+      ...base.workGraph,
+      qualityProfile: "deep",
+      currentStage: "critic",
+      gateStatus: "unproven",
+      iteration: 4,
+      nodes: base.workGraph.nodes.map((node, index) => ({
+        ...node,
+        stage: index === 0 ? "critic" : "work",
+        role: index === 0 ? "critic" : "worker",
+        status: index === 0 ? "failed" : node.status,
+        attempt: 1,
+        artifactRefs: index === 0 ? ["artifacts/auth.patch"] : [],
+        reviewRequired: true,
+      })),
+    },
+    qualityReview: {
+      runId: "quality-run-1",
+      graphId: "goal-1",
+      profile: "deep",
+      currentStage: "critic",
+      iteration: 4,
+      refineCount: 1,
+      pivotCount: 1,
+      latestDecision: "unproven",
+      history: [
+        {
+          event: "gate",
+          stage: "critic",
+          decision: "unproven",
+          iteration: 1,
+          reason: "Independent proof expired",
+          failures: ["Session expiry remains untested"],
+          evidenceRefs: ["evidence/auth-review.json"],
+          artifactRefs: ["artifacts/auth.patch"],
+          reviewedArtifactHash: "sha256:reviewed-auth",
+          currentArtifactHash: "sha256:current-auth",
+          reviewerId: "critic-auth",
+          independentVerification: true,
+          stale: true,
+          startedAt: 10,
+        },
+        {
+          event: "refine", stage: "work", decision: "refine", iteration: 2,
+          failures: [], evidenceRefs: [], artifactRefs: [], independentVerification: false, stale: false, startedAt: 20,
+        },
+        {
+          event: "pivot", stage: "plan", decision: "pivot", iteration: 3,
+          failures: [], evidenceRefs: [], artifactRefs: [], independentVerification: false, stale: false, startedAt: 30,
+        },
+        {
+          event: "completed", stage: "promote", decision: "proceed", iteration: 4,
+          failures: [], evidenceRefs: [], artifactRefs: [], independentVerification: true, stale: false, startedAt: 40,
+        },
+      ],
+    },
+  };
+
+  const frame = await renderFrame({
+    agentConsole: snapshot,
+    agentConsoleView: consoleView({ tab: "quality", cursor: 0 }),
+  }, 120);
+
+  assert.match(frame, /\[Quality\]/);
+  assert.match(frame, /Quality Engine \(SCC\)/);
+  assert.match(frame, /Gate · unproven/);
+  assert.match(frame, /Unproven · independent review evidence is missing or stale/);
+  assert.match(frame, /Finding · Task 1 · failed/);
+  assert.match(frame, /Critic finding · Session expiry remains untested/);
+  assert.match(frame, /Evidence · evidence\/auth-review\.json/);
+  assert.match(frame, /Reviewed hash\s+sha256:reviewed-auth/);
+  assert.match(frame, /Current hash\s+sha256:current-auth · stale/);
+  assert.match(frame, /iteration 2 · work · refine/);
+  assert.match(frame, /iteration 3 · plan · pivot/);
+  assert.match(frame, /iteration 4 · promote · completed/);
+  assert.match(frame, /History · 1 refine · 1 pivot/);
+  assert.match(frame, /Promote · handoff\/synthesis only/);
+  assert.match(frame, /Enter detail · Esc close · read-only/);
+  assert.doesNotMatch(frame, /s steer · x cancel · r continue/);
+
+  const korean = await renderFrame({
+    uiLocale: "ko",
+    agentConsole: snapshot,
+    agentConsoleView: consoleView({ tab: "quality", cursor: 0 }),
+  }, 120);
+  assert.match(korean, /반복 1 · 비평 · 게이트/);
+  assert.match(korean, /반복 2 · 작업 · 개선/);
+  assert.match(korean, /반복 3 · 계획 · 전환/);
+  assert.match(korean, /반복 4 · 정리 · 완료/);
+  assert.doesNotMatch(korean, /· (gate|refine|pivot|completed)/);
+  assert.match(korean, /읽기 전용/);
 });
 
 /**

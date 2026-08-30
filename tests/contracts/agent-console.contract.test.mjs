@@ -1197,7 +1197,7 @@ test("agent-console exposes lifecycle, control, and tab unions", () => {
     "not_delivered",
     "rejected",
   ]);
-  assert.deepEqual(AGENT_CONSOLE_TABS, ["agents", "jobs", "plan"]);
+  assert.deepEqual(AGENT_CONSOLE_TABS, ["agents", "jobs", "plan", "quality"]);
 });
 
 test("agent-console parser bounds oversized lifecycle lists to the newest tail", () => {

@@ -3371,11 +3371,12 @@ test("WorkShellEngine opens cache telemetry locally", async () => {
 });
 
 test("WorkShellEngine opens the agent console tab an idle slash command names", async () => {
-  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"]]) {
+  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"], ["/review", "quality"]]) {
     const { engine, calls } = createEngine();
 
     await engine.initialize();
     const entriesBefore = engine.getState().entries.length;
+    const runtimeProjectionBefore = engine.getState().agentConsole;
     await engine.handleSubmit(line);
 
     assert.equal(engine.getState().agentConsoleView.open, true, `${line} must open the console`);
@@ -3386,6 +3387,12 @@ test("WorkShellEngine opens the agent console tab an idle slash command names", 
       `${line} must not write a conversation entry`,
     );
     assert.equal(calls.turns.length, 0);
+    assert.equal(engine.getState().queuedCount, 0, `${line} must not enqueue work`);
+    assert.strictEqual(
+      engine.getState().agentConsole,
+      runtimeProjectionBefore,
+      `${line} must not revise the authoritative runtime projection`,
+    );
   }
 });
 
@@ -6072,7 +6079,7 @@ test("WorkShellEngine keeps skill summaries visible in the skills panel", async 
   assert.deepEqual(engine.getState().panel.lines, ["autopilot · project", "  Keep moving."]);
 });
 
-test("WorkShellEngine turns /review into a focused review prompt", async () => {
+test("WorkShellEngine turns /review run into a focused review prompt", async () => {
   const prompts = [];
   const { engine } = createEngine({
     agent: {
@@ -6085,12 +6092,12 @@ test("WorkShellEngine turns /review into a focused review prompt", async () => {
       },
     },
     resolveWorkShellSlashCommand(input) {
-      return input === "/review auth flow" ? ["prompt", "review", "auth", "flow"] : undefined;
+      return input === "/review run auth flow" ? ["prompt", "review", "auth", "flow"] : undefined;
     },
   });
 
   await engine.initialize();
-  await engine.handleSubmit("/review auth flow");
+  await engine.handleSubmit("/review run auth flow");
 
   assert.equal(prompts.length, 1);
   assert.match(prompts[0] ?? "", /Review the current repository changes and implementation/);
@@ -7300,7 +7307,7 @@ function createBusyEngine() {
 }
 
 test("WorkShellEngine opens the agent console during a busy turn without queueing it", async () => {
-  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"]]) {
+  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"], ["/review", "quality"]]) {
     const { engine, prompts, release } = createBusyEngine();
 
     await engine.initialize();
@@ -7356,7 +7363,7 @@ test("WorkShellEngine still refuses unrelated slash commands during a busy turn"
 });
 
 test("WorkShellEngine opens the agent console while a busy turn waits on a decision", async () => {
-  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"]]) {
+  for (const [line, tab] of [["/agents", "agents"], ["/jobs", "jobs"], ["/todo", "plan"], ["/review", "quality"]]) {
     const interactionBridge = createWorkShellInteractionBridge();
     const prompts = [];
     let releaseTurn;

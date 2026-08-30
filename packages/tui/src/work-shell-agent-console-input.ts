@@ -169,10 +169,13 @@ export function resolveAgentConsoleInputDecision(
     case "k":
       return act({ kind: "move", delta: -1 });
     case "s":
+      if (input.tab === "quality") return CONSUME;
       return act({ kind: "begin-steer" });
     case "x":
+      if (input.tab === "quality") return CONSUME;
       return act({ kind: "request-cancel" });
     case "r":
+      if (input.tab === "quality") return CONSUME;
       return act({ kind: "continue" });
     default:
       return PASS;
