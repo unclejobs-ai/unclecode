@@ -90,10 +90,7 @@ pub fn work_args_request_metadata(args: &[OsString]) -> bool {
 }
 
 pub fn work_args_request_native_engine(args: &[OsString]) -> bool {
-    parse_work_args(args, PathBuf::from("."))
-        .engine
-        .as_deref()
-        == Some("native")
+    parse_work_args(args, PathBuf::from(".")).engine.as_deref() == Some("native")
 }
 
 pub fn run_top_level_work_command(args: &[OsString]) -> Result<u8, String> {
