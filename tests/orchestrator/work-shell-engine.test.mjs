@@ -6461,6 +6461,290 @@ test("WorkShellEngine shutdown aborts the active turn and fails visibly when its
   }
 });
 
+test("WorkShellEngine shutdown waits for a queue drain and fences the next post-ack follow-up", {
+  skip: process.platform === "win32",
+}, async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-shutdown-drain-fence-"));
+  const sessionId = "shutdown-drain-fence";
+  let releaseFirst;
+  let releaseCleanup;
+  let markCleanupReached;
+  const cleanupReached = new Promise((resolve) => { markCleanupReached = resolve; });
+  const cleanupRelease = new Promise((resolve) => { releaseCleanup = resolve; });
+  const prompts = [];
+  const options = {
+    provider: "openai",
+    model: "gpt-5.4",
+    mode: "default",
+    authLabel: "api-key-env",
+    reasoning: supportedReasoning,
+    cwd,
+    contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+  };
+  const { engine } = createEngine({
+    sessionId,
+    options,
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
+          await new Promise((resolve) => { releaseFirst = resolve; });
+        }
+        return { text: `reply:${userPrompt}` };
+      },
+    },
+  });
+  let restarted;
+  try {
+    await engine.initialize();
+    let cleanupCalls = 0;
+    engine.sweepQueuedAttachmentCleanup = async () => {
+      cleanupCalls += 1;
+      if (cleanupCalls === 1) {
+        markCleanupReached();
+        await cleanupRelease;
+      }
+    };
+
+    const firstTurn = engine.handleSubmit("first");
+    while (typeof releaseFirst !== "function") {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await engine.handleSubmit("second");
+    await engine.handleSubmit("third");
+    releaseFirst();
+    await cleanupReached;
+
+    let shutdownSettled = false;
+    const shutdown = engine.shutdown({ timeoutMs: 20_000 }).then((result) => {
+      shutdownSettled = true;
+      return result;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(shutdownSettled, false, "shutdown must own the in-progress queue drain");
+    assert.deepEqual(prompts, ["first", "second"]);
+
+    releaseCleanup();
+    assert.equal(await shutdown, true);
+    await firstTurn;
+    assert.deepEqual(prompts, ["first", "second"], "third must not dispatch after the shutdown fence");
+    await engine.handleSubmit("after-shutdown");
+    assert.deepEqual(prompts, ["first", "second"], "disposed engines must reject new provider turns");
+    assert.deepEqual(
+      JSON.parse(runRustCommandSync(["rust", "queue", "list", sessionId], cwd))
+        .map((item) => [item.line, item.status]),
+      [["third", "pending"]],
+      "the undispatched follow-up remains recoverable exactly once",
+    );
+
+    const resumedPrompts = [];
+    ({ engine: restarted } = createEngine({
+      sessionId,
+      options,
+      agent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn(prompt) {
+          const userPrompt = stripWorkShellLanguageInstruction(prompt);
+          resumedPrompts.push(userPrompt);
+          return { text: `reply:${userPrompt}` };
+        },
+      },
+    }));
+    await restarted.initialize();
+    await restarted.handleSubmit("resume");
+    assert.deepEqual(resumedPrompts, ["resume", "third"]);
+    assert.deepEqual(JSON.parse(runRustCommandSync(["rust", "queue", "list", sessionId], cwd)), []);
+    await restarted.shutdown();
+  } finally {
+    releaseFirst?.();
+    releaseCleanup?.();
+    await engine.dispose().catch(() => undefined);
+    await restarted?.dispose().catch(() => undefined);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("WorkShellEngine shutdown returns a claimed follow-up before provider dispatch", {
+  skip: process.platform === "win32",
+}, async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-shutdown-claim-fence-"));
+  const sessionId = "shutdown-claim-fence";
+  let releaseFirst;
+  let releaseClaim;
+  let markClaimReached;
+  const claimReached = new Promise((resolve) => { markClaimReached = resolve; });
+  const claimRelease = new Promise((resolve) => { releaseClaim = resolve; });
+  const prompts = [];
+  const options = {
+    provider: "openai",
+    model: "gpt-5.4",
+    mode: "default",
+    authLabel: "api-key-env",
+    reasoning: supportedReasoning,
+    cwd,
+    contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+  };
+  const { engine } = createEngine({
+    sessionId,
+    options,
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        const userPrompt = stripWorkShellLanguageInstruction(prompt);
+        prompts.push(userPrompt);
+        if (userPrompt === "first") {
+          await new Promise((resolve) => { releaseFirst = resolve; });
+        }
+        return { text: `reply:${userPrompt}` };
+      },
+    },
+  });
+  let restarted;
+  try {
+    await engine.initialize();
+    const claimQueuedSubmit = engine.claimQueuedSubmit.bind(engine);
+    engine.claimQueuedSubmit = async () => {
+      const item = await claimQueuedSubmit();
+      markClaimReached();
+      await claimRelease;
+      return item;
+    };
+
+    const firstTurn = engine.handleSubmit("first");
+    while (typeof releaseFirst !== "function") {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await engine.handleSubmit("second");
+    releaseFirst();
+    await claimReached;
+
+    let shutdownSettled = false;
+    const shutdown = engine.shutdown({ timeoutMs: 20_000 }).then((result) => {
+      shutdownSettled = true;
+      return result;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(shutdownSettled, false);
+    releaseClaim();
+    assert.equal(await shutdown, true);
+    await firstTurn;
+    assert.deepEqual(prompts, ["first"], "a claimed item must not reach the provider after shutdown");
+    assert.deepEqual(
+      JSON.parse(runRustCommandSync(["rust", "queue", "list", sessionId], cwd))
+        .map((item) => [item.line, item.status]),
+      [["second", "pending"]],
+      "the claim is nacked to one retryable pending item",
+    );
+
+    const resumedPrompts = [];
+    ({ engine: restarted } = createEngine({
+      sessionId,
+      options,
+      agent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn(prompt) {
+          const userPrompt = stripWorkShellLanguageInstruction(prompt);
+          resumedPrompts.push(userPrompt);
+          return { text: `reply:${userPrompt}` };
+        },
+      },
+    }));
+    await restarted.initialize();
+    await restarted.handleSubmit("resume");
+    assert.deepEqual(resumedPrompts, ["resume", "second"]);
+    assert.deepEqual(JSON.parse(runRustCommandSync(["rust", "queue", "list", sessionId], cwd)), []);
+    await restarted.shutdown();
+  } finally {
+    releaseFirst?.();
+    releaseClaim?.();
+    await engine.dispose().catch(() => undefined);
+    await restarted?.dispose().catch(() => undefined);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("WorkShellEngine shutdown reports a failed claimed-follow-up recovery", {
+  skip: process.platform === "win32",
+}, async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), "unclecode-shutdown-claim-recovery-failure-"));
+  const sessionId = "shutdown-claim-recovery-failure";
+  let releaseFirst;
+  let releaseClaim;
+  let markClaimReached;
+  const claimReached = new Promise((resolve) => { markClaimReached = resolve; });
+  const claimRelease = new Promise((resolve) => { releaseClaim = resolve; });
+  const { engine } = createEngine({
+    sessionId,
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd,
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+    },
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        if (stripWorkShellLanguageInstruction(prompt) === "first") {
+          await new Promise((resolve) => { releaseFirst = resolve; });
+        }
+        return { text: "reply" };
+      },
+    },
+  });
+  const originalNackQueuedSubmit = engine.nackQueuedSubmit.bind(engine);
+  try {
+    await engine.initialize();
+    const claimQueuedSubmit = engine.claimQueuedSubmit.bind(engine);
+    engine.claimQueuedSubmit = async () => {
+      const item = await claimQueuedSubmit();
+      markClaimReached();
+      await claimRelease;
+      return item;
+    };
+    engine.nackQueuedSubmit = async () => undefined;
+
+    const firstTurn = engine.handleSubmit("first");
+    const observedFirstTurn = firstTurn.catch((error) => error);
+    while (typeof releaseFirst !== "function") {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    await engine.handleSubmit("second");
+    releaseFirst();
+    await claimReached;
+
+    const shutdown = engine.shutdown({ timeoutMs: 20_000 });
+    releaseClaim();
+    await assert.rejects(
+      shutdown,
+      /lost in-flight follow-up.*shutdown recovery/iu,
+      "shutdown must surface a durable claim-recovery failure",
+    );
+    assert.match(String(await observedFirstTurn), /lost in-flight follow-up.*shutdown recovery/iu);
+  } finally {
+    releaseFirst?.();
+    releaseClaim?.();
+    engine.nackQueuedSubmit = originalNackQueuedSubmit;
+    await originalNackQueuedSubmit(1).catch(() => undefined);
+    await engine.dispose().catch(() => undefined);
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("an admitted remote turn cancelled before busy state never reaches the provider", async () => {
   let providerCalls = 0;
   const { engine } = createEngine({

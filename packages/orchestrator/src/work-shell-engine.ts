@@ -769,6 +769,7 @@ export class WorkShellEngine<
   private runtimeRevisionClock: { readonly value: number } | undefined;
   private usageRecorder: AgentConsoleUsageRecorder | undefined;
   private readonly activeTurnSettlements = new Set<Promise<void>>();
+  private lifecycleClosing = false;
   private disposed = false;
   private queueAutoDrainPaused = false;
   private workBoardRebuildGeneration = 0;
@@ -1106,6 +1107,7 @@ export class WorkShellEngine<
   }
 
   dispose(): Promise<void> {
+    this.lifecycleClosing = true;
     if (this.disposal) return this.disposal;
     this.disposed = true;
     this.pauseController.cancel();
@@ -1132,40 +1134,69 @@ export class WorkShellEngine<
    * detached and leaked.
    */
   async shutdown(input: { readonly timeoutMs?: number | undefined } = {}): Promise<boolean> {
+    // Fence new work synchronously. The active settlement set includes the
+    // entire queue drain, so shutdown cannot dispose the engine in the idle
+    // gap between one acknowledged follow-up and the next claim.
+    this.lifecycleClosing = true;
     const timeoutMs = Math.max(0, input.timeoutMs ?? 5_000);
     if (this.state.isBusy) this.interruptTurn();
     else this.activeTurnAbortController?.abort();
     const deadline = Date.now() + timeoutMs;
+    let activeTurnFailure: unknown;
+    let hasActiveTurnFailure = false;
     while (this.activeTurnSettlements.size > 0) {
       const active = [...this.activeTurnSettlements];
       const remaining = Math.max(0, deadline - Date.now());
-      const settled = await new Promise<boolean>((resolve) => {
-        const timer = setTimeout(() => resolve(false), remaining);
-        Promise.allSettled(active).then(() => {
+      const settled = await new Promise<readonly PromiseSettledResult<void>[] | undefined>((resolve) => {
+        const timer = setTimeout(() => resolve(undefined), remaining);
+        Promise.allSettled(active).then((results) => {
           clearTimeout(timer);
-          resolve(true);
+          resolve(results);
         });
       });
       if (!settled) {
         throw new Error("Work Shell shutdown did not settle the active provider/tool turn.");
       }
+      if (!hasActiveTurnFailure) {
+        const rejected = settled.find(
+          (result): result is PromiseRejectedResult => result.status === "rejected",
+        );
+        if (rejected) {
+          activeTurnFailure = rejected.reason;
+          hasActiveTurnFailure = true;
+        }
+      }
     }
     const disposal = this.dispose();
     const remaining = Math.max(0, deadline - Date.now());
-    const writesSettled = await new Promise<boolean>((resolve, reject) => {
-      const timer = setTimeout(() => resolve(false), remaining);
+    const disposalOutcome = await new Promise<
+      | { readonly status: "settled" }
+      | { readonly status: "timed-out" }
+      | { readonly status: "rejected"; readonly reason: unknown }
+    >((resolve) => {
+      const timer = setTimeout(() => resolve({ status: "timed-out" }), remaining);
       disposal.then(
         () => {
           clearTimeout(timer);
-          resolve(true);
+          resolve({ status: "settled" });
         },
         (error: unknown) => {
           clearTimeout(timer);
-          reject(error);
+          resolve({ status: "rejected", reason: error });
         },
       );
     });
-    if (!writesSettled) throw new Error("Work Shell shutdown did not settle durable session writes.");
+    if (disposalOutcome.status === "timed-out") {
+      throw new Error("Work Shell shutdown did not settle durable session writes.");
+    }
+    if (hasActiveTurnFailure && disposalOutcome.status === "rejected") {
+      throw new AggregateError(
+        [activeTurnFailure, disposalOutcome.reason],
+        "Work Shell shutdown failed to settle active work and durable session writes.",
+      );
+    }
+    if (hasActiveTurnFailure) throw activeTurnFailure;
+    if (disposalOutcome.status === "rejected") throw disposalOutcome.reason;
     return true;
   }
 
@@ -2568,6 +2599,7 @@ export class WorkShellEngine<
     value: string,
     pendingAttachments?: readonly Attachment[],
   ): Promise<void> {
+    if (this.lifecycleClosing || this.disposed) return;
     if (!this.consumeRuntimeTurnAdmission()) return;
     // The steer composer owns the whole submit: an empty line still leaves the
     // mode rather than falling through into the chat router.
@@ -2661,7 +2693,14 @@ export class WorkShellEngine<
     if (this.shouldSkipQueueDrainAfterTurn(turnEpoch, route.kind)) {
       return;
     }
-    await this.drainQueuedSubmits();
+    if (this.lifecycleClosing || this.disposed) return;
+    const drain = this.drainQueuedSubmits();
+    this.activeTurnSettlements.add(drain);
+    try {
+      await drain;
+    } finally {
+      this.activeTurnSettlements.delete(drain);
+    }
   }
 
   private async executeSubmitRoute(
@@ -2951,17 +2990,28 @@ export class WorkShellEngine<
   }
 
   private async drainQueuedSubmits(): Promise<void> {
+    if (this.lifecycleClosing || this.disposed) return;
     const start = await this.resolveQueueDrainStartDecision();
-    if (start.action === "skip") {
+    if (this.lifecycleClosing || this.disposed || start.action === "skip") {
       return;
     }
     this.drainingQueue = true;
     try {
-      while ((await this.resolveQueueDrainContinueDecision()).action === "drain") {
+      while (!this.lifecycleClosing && !this.disposed) {
+        const continuation = await this.resolveQueueDrainContinueDecision();
+        if (this.lifecycleClosing || this.disposed || continuation.action !== "drain") break;
         const next = await this.claimQueuedSubmit();
+        if (this.lifecycleClosing || this.disposed) {
+          if (next) await this.returnQueuedSubmitClaim(next.id);
+          break;
+        }
         const step = await this.resolveQueueDrainStepDecision(next);
         if (step.action === "empty") {
           this.setQueuedCount(await this.loadQueuedSubmitCount());
+          break;
+        }
+        if (this.lifecycleClosing || this.disposed) {
+          await this.returnQueuedSubmitClaim(step.item.id);
           break;
         }
         this.setQueuedCount(await this.loadQueuedSubmitCount());
@@ -2986,9 +3036,17 @@ export class WorkShellEngine<
           });
           break;
         }
+        if (this.lifecycleClosing || this.disposed) {
+          await this.returnQueuedSubmitClaim(step.item.id);
+          break;
+        }
         this.appendEntries({ role: "system", text: step.message });
         try {
           await this.handleSubmit(step.item.line, pendingAttachments);
+          if (this.lifecycleClosing || this.disposed) {
+            await this.returnQueuedSubmitClaim(step.item.id);
+            break;
+          }
           if (this.queueAutoDrainPaused) {
             await this.nackQueuedSubmit(step.item.id);
             this.setQueuedCount(await this.loadQueuedSubmitCount());
@@ -3015,6 +3073,14 @@ export class WorkShellEngine<
     } finally {
       this.drainingQueue = false;
     }
+  }
+
+  private async returnQueuedSubmitClaim(id: number): Promise<void> {
+    const returned = await this.nackQueuedSubmit(id);
+    if (!returned) {
+      throw new Error(`Rust queue lost in-flight follow-up #${id} during shutdown recovery.`);
+    }
+    this.setQueuedCount(await this.loadQueuedSubmitCount());
   }
 
   private pauseQueueAfterProofBlock(turnEpoch: number): void {
