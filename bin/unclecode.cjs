@@ -4,7 +4,8 @@ const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 const fs = require("node:fs");
 
-const repoRoot = path.resolve(__dirname, "..");
+const launcherPath = fs.realpathSync(__filename);
+const repoRoot = path.resolve(path.dirname(launcherPath), "..");
 const rustEntrypoints = [
   path.join(repoRoot, "target", "release", "unclecode"),
   path.join(repoRoot, "target", "debug", "unclecode"),
@@ -34,7 +35,16 @@ if (rustEntrypoint) {
   process.exit(result.status ?? 0);
 }
 
-process.stderr.write(
-  "UncleCode Rust CLI is not built yet. Run `cargo build -p unclecode`.\n",
-);
+const cargoManifest = path.join(repoRoot, "Cargo.toml");
+if (fs.existsSync(cargoManifest)) {
+  process.stderr.write(
+    `UncleCode Rust CLI binary was not found under "${repoRoot}".\n`
+      + `Build it with \`cargo build --manifest-path "${cargoManifest}" -p unclecode\`.\n`,
+  );
+} else {
+  process.stderr.write(
+    `This UncleCode installation is missing its Rust CLI binary under "${repoRoot}". `
+      + "Reinstall UncleCode.\n",
+  );
+}
 process.exit(1);

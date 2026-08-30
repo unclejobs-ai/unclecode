@@ -74,11 +74,17 @@ The root `bin/unclecode.cjs` wrapper now runs an available Rust binary before
 checking any temporary TypeScript build artifact. This means native Rust
 surfaces run from the package bin without a Node fallback to
 `apps/unclecode-cli/dist/index.js`.
+The wrapper resolves the launcher's real path before deriving the package root,
+so a global symlink such as `~/.local/bin/unclecode` still searches the source
+package's `target` directory instead of `~/.local/target`.
 When both debug and release Rust binaries exist, the wrapper picks the newest
 binary so a stale release build does not shadow a newly built debug CLI during
 local development.
-If no Rust binary exists, the wrapper gives a single recovery path:
-`cargo build -p unclecode`.
+If no Rust binary exists in a source checkout, the wrapper reports the resolved
+package root and gives a cwd-independent `cargo build --manifest-path
+"<package-root>/Cargo.toml" -p unclecode` recovery command. An installed package
+without its Rust binary instead asks for reinstall rather than suggesting a
+source build from the caller's current directory.
 
 This keeps the CLI usable while making Rust the new executable surface.
 The package CLI now also routes normal built `unclecode work`, `unclecode tui`,
