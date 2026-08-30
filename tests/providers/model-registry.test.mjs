@@ -176,6 +176,23 @@ test("deepseek is a first-class runtime route with a pinned compat catalog", () 
   assert.equal(policy.requiresReasoningContentForToolCalls, true);
 });
 
+test("deepseek registry keeps an explicit empty env isolated from the host model", (t) => {
+  const previousModel = process.env.DEEPSEEK_MODEL;
+  process.env.DEEPSEEK_MODEL = "host-only-model";
+  t.after(() => {
+    if (previousModel === undefined) {
+      delete process.env.DEEPSEEK_MODEL;
+    } else {
+      process.env.DEEPSEEK_MODEL = previousModel;
+    }
+  });
+
+  const registry = getProviderAdapter("deepseek").getModelRegistry({});
+
+  assert.equal(registry.defaultModel, "deepseek-chat");
+  assert.deepEqual(registry.models, ["deepseek-chat", "deepseek-reasoner"]);
+});
+
 test("omp resolves as an executor-only native route instead of being rejected", () => {
   const ompRoute = resolveProviderRoute("omp");
   assert.deepEqual(

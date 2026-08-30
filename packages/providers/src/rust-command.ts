@@ -105,6 +105,37 @@ function findRustEntrypoint(): { command: string; argsPrefix: string[]; runCwd?:
   return cachedRustEntrypoint;
 }
 
+function resolveLauncherEnvironment(): NodeJS.ProcessEnv {
+  const keys = process.platform === "win32"
+    ? ["PATH", "PATHEXT", "SystemRoot", "ComSpec"]
+    : ["PATH"];
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value !== undefined) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
+function resolveChildEnvironment(env: NodeJS.ProcessEnv, cwd: string): NodeJS.ProcessEnv {
+  const childEnv: NodeJS.ProcessEnv = {};
+  for (const source of [resolveLauncherEnvironment(), env, { UNCLECODE_WORK_CWD: cwd }]) {
+    for (const [key, value] of Object.entries(source)) {
+      if (process.platform === "win32") {
+        for (const existingKey of Object.keys(childEnv)) {
+          if (existingKey.toLowerCase() === key.toLowerCase()) {
+            delete childEnv[existingKey];
+          }
+        }
+      }
+      childEnv[key] = value;
+    }
+  }
+  return childEnv;
+}
+
 export async function runRustCommand(
   args: readonly string[],
   cwd: string,
@@ -113,7 +144,7 @@ export async function runRustCommand(
   options: RunRustCommandOptions = {},
 ): Promise<string> {
   const rust = findRustEntrypoint();
-  const childEnv = { ...process.env, ...env, UNCLECODE_WORK_CWD: cwd };
+  const childEnv = resolveChildEnvironment(env, cwd);
   if (stdin !== undefined) {
     return await new Promise((resolvePromise, reject) => {
       if (options.signal?.aborted) {
@@ -211,7 +242,7 @@ export function runRustCommandSync(
   stdin?: string,
 ): string {
   const rust = findRustEntrypoint();
-  const childEnv = { ...process.env, ...env, UNCLECODE_WORK_CWD: cwd };
+  const childEnv = resolveChildEnvironment(env, cwd);
   try {
     return execFileSync(rust.command, [...rust.argsPrefix, ...args], {
       cwd: rust.runCwd ?? cwd,
