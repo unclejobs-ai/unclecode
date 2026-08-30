@@ -4541,10 +4541,9 @@ fn run_native_auth_command(args: &[OsString]) -> Result<u8, String> {
 fn run_native_session_command(args: &[OsString]) -> Result<u8, String> {
     match args.first().and_then(|arg| arg.to_str()) {
         Some("scan-notices") => {
-            let root_dir = args
-                .get(1)
-                .map(PathBuf::from)
-                .ok_or("Usage: unclecode rust session scan-notices <root-dir>")?;
+            let root_dir = args.get(1).map(PathBuf::from).ok_or(
+                "Usage: unclecode rust session scan-notices <root-dir>",
+            )?;
             println!("{}", scan_session_persistence_notices_json(&root_dir)?);
             Ok(0)
         }

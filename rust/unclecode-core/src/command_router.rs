@@ -557,10 +557,7 @@ pub fn is_work_shell_console_invalid_form(line: &str) -> bool {
         .filter(|entry| work_shell_agent_console_tab(entry.command).is_none())
         .any(|entry| {
             entry.command.starts_with(token)
-                || entry
-                    .aliases
-                    .iter()
-                    .any(|alias| alias.starts_with(token))
+                || entry.aliases.iter().any(|alias| alias.starts_with(token))
         })
 }
 

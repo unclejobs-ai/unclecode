@@ -432,7 +432,10 @@ pub fn provider_model_catalog(
         return CompatProviderCatalog {
             provider_id: provider_id.to_string(),
             label: provider_label(provider_id),
-            models: OMP_MODELS.iter().map(|model| (*model).to_string()).collect(),
+            models: OMP_MODELS
+                .iter()
+                .map(|model| (*model).to_string())
+                .collect(),
         };
     }
     let mut models = Vec::new();
@@ -595,7 +598,10 @@ mod tests {
         assert!(route.env_keys.is_empty());
         assert_eq!(route.endpoint_url, "");
 
-        assert_eq!(resolve_provider_route("OMP", None).unwrap().provider_id, "omp");
+        assert_eq!(
+            resolve_provider_route("OMP", None).unwrap().provider_id,
+            "omp"
+        );
     }
 
     #[test]
@@ -771,7 +777,8 @@ mod tests {
         assert_eq!(pinned.models, ["kimi-code/k3"]);
 
         // `OMP_MODEL` / `OMP_MODELS` must not widen or reorder a delegated route.
-        let forced = provider_model_catalog("omp", Some("zai/glm-5"), Some("groq/openai/gpt-oss-20b"));
+        let forced =
+            provider_model_catalog("omp", Some("zai/glm-5"), Some("groq/openai/gpt-oss-20b"));
         assert_eq!(forced.models, ["kimi-code/k3"]);
 
         // Every other provider still honours the operator's active/custom models.

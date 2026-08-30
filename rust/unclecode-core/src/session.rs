@@ -1360,8 +1360,7 @@ fn compact_lifecycle_text(snapshot: &mut Map<String, Value>, limit: Option<usize
                 let Some(text) = record.get(*field).and_then(Value::as_str) else {
                     continue;
                 };
-                let compacted =
-                    limit.map(|limit| text.chars().take(limit).collect::<String>());
+                let compacted = limit.map(|limit| text.chars().take(limit).collect::<String>());
                 match compacted {
                     Some(compacted) if !compacted.trim().is_empty() => {
                         record.insert((*field).to_string(), Value::String(compacted));
@@ -1515,7 +1514,10 @@ fn bounded_pause_string(value: &Value) -> Option<Value> {
         return None;
     }
     Some(Value::String(
-        input.chars().take(MAX_PAUSE_CHECKPOINT_STRING_CHARS).collect(),
+        input
+            .chars()
+            .take(MAX_PAUSE_CHECKPOINT_STRING_CHARS)
+            .collect(),
     ))
 }
 
@@ -1533,34 +1535,57 @@ fn sanitize_pause_refs(value: &Value) -> Option<Value> {
 fn sanitize_pause_checkpoint(value: &Value) -> Option<Value> {
     let source = value.as_object()?;
     let mut checkpoint = Map::new();
-    checkpoint.insert("turnId".to_string(), bounded_pause_string(source.get("turnId")?)?);
-    checkpoint.insert("boundary".to_string(), bounded_pause_string(source.get("boundary")?)?);
-    for field in ["currentStage", "gateStatus", "decisionId", "contextReceiptId"] {
+    checkpoint.insert(
+        "turnId".to_string(),
+        bounded_pause_string(source.get("turnId")?)?,
+    );
+    checkpoint.insert(
+        "boundary".to_string(),
+        bounded_pause_string(source.get("boundary")?)?,
+    );
+    for field in [
+        "currentStage",
+        "gateStatus",
+        "decisionId",
+        "contextReceiptId",
+    ] {
         if let Some(value) = source.get(field).and_then(bounded_pause_string) {
             checkpoint.insert(field.to_string(), value);
         }
     }
     if let Some(iteration) = source.get("iteration").and_then(Value::as_u64) {
-        checkpoint.insert("iteration".to_string(), json!(iteration.min(u32::MAX as u64)));
+        checkpoint.insert(
+            "iteration".to_string(),
+            json!(iteration.min(u32::MAX as u64)),
+        );
     }
     if let Some(active) = source.get("activeNode").and_then(Value::as_object) {
         if let (Some(id), Some(attempt)) = (
             active.get("id").and_then(bounded_pause_string),
             active.get("attempt").and_then(Value::as_u64),
         ) {
-            checkpoint.insert("activeNode".to_string(), json!({
-                "id": id,
-                "attempt": attempt.min(u32::MAX as u64),
-            }));
+            checkpoint.insert(
+                "activeNode".to_string(),
+                json!({
+                    "id": id,
+                    "attempt": attempt.min(u32::MAX as u64),
+                }),
+            );
         }
     }
     checkpoint.insert(
         "attachmentRefs".to_string(),
-        source.get("attachmentRefs").and_then(sanitize_pause_refs).unwrap_or_else(|| json!([])),
+        source
+            .get("attachmentRefs")
+            .and_then(sanitize_pause_refs)
+            .unwrap_or_else(|| json!([])),
     );
     checkpoint.insert(
         "artifactRefs".to_string(),
-        source.get("artifactRefs").and_then(sanitize_pause_refs).unwrap_or_else(|| json!([])),
+        source
+            .get("artifactRefs")
+            .and_then(sanitize_pause_refs)
+            .unwrap_or_else(|| json!([])),
     );
     Some(Value::Object(checkpoint))
 }
@@ -2451,7 +2476,8 @@ mod tests {
                 "artifactRefs": ["artifact:sha256:abc"],
                 "providerHeaders": { "authorization": "Bearer secret" }
             }
-        }).to_string();
+        })
+        .to_string();
 
         persist_work_shell_session_snapshot_json(&store, &project, &payload)
             .expect("persist pause checkpoint");
@@ -2733,7 +2759,10 @@ mod tests {
             console["agents"][0]["transcriptRef"],
             "transcripts/run-1.jsonl"
         );
-        assert_eq!(console["agents"][0]["summary"], "Refactoring the auth guard.");
+        assert_eq!(
+            console["agents"][0]["summary"],
+            "Refactoring the auth guard."
+        );
         assert_eq!(console["agents"][0]["usage"]["inputTokens"], 120);
         assert!(console["agents"][0]["usage"].get("eventIds").is_none());
         assert!(console["agents"][0]["usage"]["routes"][0]
@@ -2868,7 +2897,9 @@ mod tests {
             .resume_work_shell_session(&project, "work-session-oversized")
             .expect("resume")
             .expect("resumed");
-        let fitted = resumed.agent_console.expect("agent console survives fitting");
+        let fitted = resumed
+            .agent_console
+            .expect("agent console survives fitting");
 
         // Fits the durable budget instead of collapsing to nothing.
         let bytes = serde_json::to_vec(&fitted).expect("serialize fitted");
@@ -2899,9 +2930,7 @@ mod tests {
         // Oldest terminal history is what paid for the budget.
         assert!(agents.len() < 128);
         assert!(jobs.len() < 128);
-        assert!(!agents
-            .iter()
-            .any(|agent| agent["id"] == json!("run-0")));
+        assert!(!agents.iter().any(|agent| agent["id"] == json!("run-0")));
         assert!(!jobs.iter().any(|job| job["id"] == json!("job-0")));
 
         // Aggregate main usage counters survive.
@@ -3083,7 +3112,9 @@ mod tests {
             .resume_work_shell_session(&project, session_id)
             .expect("resume")
             .expect("resumed");
-        let fitted = resumed.agent_console.expect("agent console survives fitting");
+        let fitted = resumed
+            .agent_console
+            .expect("agent console survives fitting");
         let _ = fs::remove_dir_all(root);
         fitted
     }
@@ -3128,14 +3159,20 @@ mod tests {
         let policy = fitted["manifest"]["policy"].as_array().expect("policy");
         assert!(!policy.is_empty());
         assert!(policy.len() < 400);
-        assert_eq!(policy[0]["id"], json!(format!("policy-{}", 400 - policy.len())));
+        assert_eq!(
+            policy[0]["id"],
+            json!(format!("policy-{}", 400 - policy.len()))
+        );
         assert_eq!(policy[policy.len() - 1]["id"], "policy-399");
     }
 
     #[test]
     fn work_shell_agent_console_compacts_oversized_pending_decision_before_active_work() {
         let mut console = active_lifecycle_console_fields();
-        console.insert("pendingDecision".to_string(), oversized_pending_decision(60));
+        console.insert(
+            "pendingDecision".to_string(),
+            oversized_pending_decision(60),
+        );
 
         let fitted = persist_and_resume_console("work-session-decision", Value::Object(console));
 
@@ -3165,7 +3202,10 @@ mod tests {
     fn work_shell_agent_console_drops_shell_metadata_before_active_identities() {
         let mut console = active_lifecycle_console_fields();
         console.insert("manifest".to_string(), oversized_manifest(400));
-        console.insert("pendingDecision".to_string(), oversized_pending_decision(400));
+        console.insert(
+            "pendingDecision".to_string(),
+            oversized_pending_decision(400),
+        );
         console.insert(
             "workGraph".to_string(),
             json!({
@@ -3238,14 +3278,20 @@ mod tests {
         let policy = fitted["manifest"]["policy"]
             .as_array()
             .expect("policy survives as an array");
-        assert!(!policy.is_empty(), "trimming must not empty a policy that fits");
+        assert!(
+            !policy.is_empty(),
+            "trimming must not empty a policy that fits"
+        );
         assert!(policy.len() < sources);
 
         // Oldest-first retention: the survivors are the newest contiguous
         // suffix, still in order.
         let first_kept = sources - policy.len();
         for (offset, source) in policy.iter().enumerate() {
-            assert_eq!(source["id"], json!(format!("policy-{}", first_kept + offset)));
+            assert_eq!(
+                source["id"],
+                json!(format!("policy-{}", first_kept + offset))
+            );
         }
 
         // Minimality: putting the newest dropped source back must overflow.
