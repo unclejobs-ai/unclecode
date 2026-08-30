@@ -173,9 +173,9 @@ export function runHeldOutComparison({
       ),
     },
     evidence: {
-      baselineMode: suite.baseline.evidenceMode,
+      baselineMode: baseline.evidenceMode,
       candidateMode: candidate.evidenceMode,
-      traceDerived: suite.baseline.traceDerived === true && candidate.traceDerived === true,
+      traceDerived: baseline.traceDerived === true && candidate.traceDerived === true,
     },
     baseline: baselineSummary,
     candidate: candidateSummary,

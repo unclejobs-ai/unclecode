@@ -97,6 +97,34 @@ test("suite-allocated live telemetry preserves exact totals without inventing ca
   assert.equal(report.comparison.frontierTokenReductionPercent, 60.00244);
 });
 
+test("supplied live baseline provenance is reported without changing comparison gates", () => {
+  const suite = loadHeldOutSuite();
+  const baseline = asSuiteAllocatedLiveResult(suite.baseline);
+  const candidate = asSuiteAllocatedLiveResult(
+    JSON.parse(readFileSync(DEFAULT_HELD_OUT_CANDIDATE, "utf8")),
+  );
+
+  const report = runHeldOutComparison({ baselineResult: baseline, candidateResult: candidate });
+
+  assert.deepEqual(report.evidence, {
+    baselineMode: "live-provider",
+    candidateMode: "live-provider",
+    traceDerived: true,
+  });
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(report.comparison.gates).map(([name, gate]) => [name, gate.passed]),
+    ),
+    {
+      aggregateQuality: true,
+      domainRegression: true,
+      frontierTokenReduction: true,
+      criticProof: true,
+    },
+  );
+  assert.equal(report.comparison.passed, true);
+});
+
 test("live suite telemetry schema rejects missing labels and non-reconstructable allocations", () => {
   const suite = loadHeldOutSuite();
   const unlabeled = JSON.parse(JSON.stringify(suite.baseline));
