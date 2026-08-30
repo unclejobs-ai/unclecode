@@ -415,6 +415,199 @@ test("web store retries a failed event invalidation without waiting for another 
   store.stop();
 });
 
+test("web store times out a hung discovery read and discovers the first run on the next poll", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let controlRoomRequests = 0;
+  let activeRequests = 0;
+  const fetchImpl = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname !== "/control-room") {
+      return new Response(new ReadableStream({ start() {} }), { status: 200 });
+    }
+    controlRoomRequests += 1;
+    if (controlRoomRequests === 1) {
+      return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs: [] }), { status: 200 });
+    }
+    if (controlRoomRequests === 2) {
+      activeRequests += 1;
+      return new Promise((resolve, reject) => {
+        init.signal?.addEventListener("abort", () => {
+          activeRequests -= 1;
+          reject(init.signal.reason);
+        }, { once: true });
+      });
+    }
+    return new Response(JSON.stringify({ version: 1, generatedAt: 2, runs: [{ id: "s1", revision: 1 }] }), { status: 200 });
+  };
+  const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl });
+  context.after(() => store.stop());
+  await store.start();
+
+  context.mock.timers.tick(1_000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(activeRequests, 1);
+
+  context.mock.timers.tick(30_000);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(activeRequests, 0);
+  context.mock.timers.tick(1_000);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(controlRoomRequests, 3);
+  assert.equal(store.getSnapshot().data.runs[0]?.id, "s1");
+  store.stop();
+});
+
+test("web store aborts a discovery read and ignores its late response after stop", async context => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let controlRoomRequests = 0;
+  let activeRequests = 0;
+  let releaseLateResponse;
+  const fetchImpl = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname !== "/control-room") {
+      return new Response(new ReadableStream({ start() {} }), { status: 200 });
+    }
+    controlRoomRequests += 1;
+    if (controlRoomRequests === 1) {
+      return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs: [] }), { status: 200 });
+    }
+    activeRequests += 1;
+    init.signal?.addEventListener("abort", () => { activeRequests -= 1; }, { once: true });
+    return new Promise(resolve => { releaseLateResponse = resolve; });
+  };
+  const store = createControlRoomStore({ baseUrl: "http://127.0.0.1:17677", token: "secret", fetchImpl });
+  const emissions = [];
+  const unsubscribe = store.subscribe(() => emissions.push(store.getSnapshot()));
+  context.after(() => { unsubscribe(); store.stop(); });
+  await store.start();
+  context.mock.timers.tick(1_000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(activeRequests, 1);
+
+  store.stop();
+  await new Promise(resolve => setImmediate(resolve));
+  const stoppedSnapshot = store.getSnapshot();
+  const emissionsAfterStop = emissions.length;
+  assert.equal(activeRequests, 0);
+  releaseLateResponse(new Response(JSON.stringify({ version: 1, generatedAt: 2, runs: [{ id: "late" }] }), { status: 200 }));
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(store.getSnapshot(), stoppedSnapshot);
+  assert.equal(emissions.length, emissionsAfterStop);
+  context.mock.timers.tick(30_000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(controlRoomRequests, 2);
+});
+
+test("web store aborts an in-flight action and never emits its late result after stop", async context => {
+  let actionRequests = 0;
+  let actionAborts = 0;
+  let releaseLateResponse;
+  const fetchImpl = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname === "/control-room") {
+      return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs: [{ id: "s1", revision: 1 }] }), { status: 200 });
+    }
+    actionRequests += 1;
+    init.signal?.addEventListener("abort", () => { actionAborts += 1; }, { once: true });
+    return new Promise(resolve => { releaseLateResponse = resolve; });
+  };
+  const store = createControlRoomStore({
+    baseUrl: "http://127.0.0.1:17677",
+    token: "secret",
+    fetchImpl,
+    connectEvents: false,
+  });
+  const emissions = [];
+  const unsubscribe = store.subscribe(() => emissions.push(store.getSnapshot()));
+  context.after(() => { unsubscribe(); store.stop(); });
+  await store.start();
+
+  const action = store.action("s1", "pause", 1);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(actionRequests, 1);
+  store.stop();
+  const stoppedSnapshot = store.getSnapshot();
+  const emissionsAfterStop = emissions.length;
+  assert.equal(actionAborts, 1);
+  assert.equal((await action).code, "store_stopped");
+
+  releaseLateResponse(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(store.getSnapshot(), stoppedSnapshot);
+  assert.equal(emissions.length, emissionsAfterStop);
+});
+
+test("web store aborts the old authenticated read and never regresses the newer projection", async context => {
+  let activeOldRequests = 0;
+  let releaseOldResponse;
+  const fetchImpl = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    assert.equal(pathname, "/control-room");
+    if (init.headers.authorization === "Bearer old-secret") {
+      activeOldRequests += 1;
+      init.signal?.addEventListener("abort", () => { activeOldRequests -= 1; }, { once: true });
+      return new Promise(resolve => { releaseOldResponse = resolve; });
+    }
+    return new Response(JSON.stringify({ version: 1, generatedAt: 2, runs: [{ id: "s2", revision: 2 }] }), { status: 200 });
+  };
+  const store = createControlRoomStore({
+    baseUrl: "http://127.0.0.1:17677",
+    token: "old-secret",
+    fetchImpl,
+    connectEvents: false,
+  });
+  context.after(() => store.stop());
+  const oldStart = store.start();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(activeOldRequests, 1);
+
+  await store.authenticate({ baseUrl: "http://127.0.0.1:17677", token: "new-secret" });
+  assert.equal(activeOldRequests, 0);
+  assert.equal(store.getSnapshot().data.runs[0].revision, 2);
+  releaseOldResponse(new Response(JSON.stringify({ version: 1, generatedAt: 1, runs: [{ id: "s1", revision: 1 }] }), { status: 200 }));
+  await oldStart;
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(store.getSnapshot().data.runs[0].id, "s2");
+  assert.equal(store.getSnapshot().data.runs[0].revision, 2);
+});
+
+test("web store coalesces concurrent projection reads within one lifecycle", async context => {
+  let controlRoomRequests = 0;
+  const pendingReads = [];
+  const fetchImpl = async url => {
+    assert.equal(new URL(String(url)).pathname, "/control-room");
+    controlRoomRequests += 1;
+    if (controlRoomRequests === 1) {
+      return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs: [] }), { status: 200 });
+    }
+    return new Promise(resolve => pendingReads.push(resolve));
+  };
+  const store = createControlRoomStore({
+    baseUrl: "http://127.0.0.1:17677",
+    token: "secret",
+    fetchImpl,
+    connectEvents: false,
+  });
+  context.after(() => store.stop());
+  await store.start();
+
+  const first = store.refresh();
+  const second = store.refresh();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(controlRoomRequests, 2);
+  for (const resolve of pendingReads) {
+    resolve(new Response(JSON.stringify({ version: 1, generatedAt: 2, runs: [{ id: "s1", revision: 2 }] }), { status: 200 }));
+  }
+  await Promise.all([first, second]);
+  assert.equal(store.getSnapshot().data.runs[0].revision, 2);
+});
+
 test("web store keeps discovery and reconnect subscriptions singular and cleans them up", async context => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
   let controlRoomRequests = 0;

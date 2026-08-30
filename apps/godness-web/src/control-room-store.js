@@ -21,6 +21,7 @@ function idempotencyKey() {
 
 const MAX_SSE_BUFFER_CHARS = 1024 * 1024;
 const CONTROL_ROOM_DISCOVERY_INTERVAL_MS = 1_000;
+const CONTROL_ROOM_READ_TIMEOUT_MS = 5_000;
 
 export function normalizeLoopbackServerUrl(value) {
   let url
@@ -105,6 +106,9 @@ export function createControlRoomStore(options = {}) {
   let refreshQueued = false;
   let activeSessionId = null;
   let credentialGeneration = 0;
+  let lifecycleGeneration = 0;
+  let projectionRequest = null;
+  const actionControllers = new Set();
   const lastEventIds = new Map();
   const retryKeys = new Map();
 
@@ -126,9 +130,30 @@ export function createControlRoomStore(options = {}) {
     }
   }
 
+  const abortProjectionRead = () => {
+    const request = projectionRequest;
+    projectionRequest = null;
+    if (request?.timeout) clearTimeout(request.timeout);
+    request?.controller.abort(new Error("Control room projection read cancelled."));
+  };
+
+  const abortActionRequests = () => {
+    for (const controller of actionControllers) {
+      controller.abort(new Error("Control room action cancelled."));
+    }
+    actionControllers.clear();
+  };
+
+  const advanceLifecycle = () => {
+    lifecycleGeneration += 1;
+    abortProjectionRead();
+    abortActionRequests();
+  };
+
   const requireAuthentication = message => {
     credentialGeneration += 1
     token = ""
+    advanceLifecycle()
     disconnectEventStream()
     clearConnectionTimers()
     emit({
@@ -143,53 +168,102 @@ export function createControlRoomStore(options = {}) {
   }
 
   const load = async () => {
+    if (stopped) return snapshot;
     if (!token) {
       emit({ ...snapshot, status: "auth_required", auth: "required", connection: "offline", error: snapshot.error });
       return snapshot;
     }
-    const generation = credentialGeneration
-    emit({ ...snapshot, status: snapshot.data ? "ready" : "loading", auth: "ready", error: null });
-    try {
-      const response = await fetchImpl(`${baseUrl}/control-room`, {
-        headers: authHeaders({ accept: "application/json" }),
-        redirect: "error",
-      });
-      const body = await readBody(response);
-      if (generation !== credentialGeneration) return snapshot
-      if (response.status === 401) {
-        requireAuthentication(body?.error?.message ?? "The server token was rejected.")
-        return snapshot
-      }
-      if (!response.ok) throw new Error(body?.error?.message ?? `Control room returned ${response.status}.`);
-      const activeRunIds = new Set((body?.runs ?? []).map(run => run.id));
-      const actions = Object.fromEntries(Object.entries(snapshot.actions).filter(([sessionId]) => activeRunIds.has(sessionId)));
-      for (const sessionId of retryKeys.keys()) if (!activeRunIds.has(sessionId)) retryKeys.delete(sessionId);
-      for (const sessionId of lastEventIds.keys()) if (!activeRunIds.has(sessionId)) lastEventIds.delete(sessionId);
-      if (blockedEventSessionId && !activeRunIds.has(blockedEventSessionId)) {
-        blockedEventSessionId = null;
-        blockedEventError = null;
-      }
-      emit({
-        ...snapshot,
-        status: "ready",
-        auth: "ready",
-        connection: connectEvents
-          ? eventStreamLive
-            ? "live"
-            : blockedEventSessionId
-              ? "offline"
-              : "connecting"
-          : "offline",
-        data: body,
-        actions,
-        error: blockedEventSessionId ? blockedEventError : null,
-      });
-      return snapshot;
-    } catch (error) {
-      if (generation !== credentialGeneration) return snapshot
-      emit({ ...snapshot, status: snapshot.data ? "ready" : "error", connection: eventStreamLive ? "live" : "offline", error: error instanceof Error ? error.message : String(error) });
-      return snapshot;
+    const activeRequest = projectionRequest;
+    if (activeRequest
+      && activeRequest.lifecycleGeneration === lifecycleGeneration
+      && activeRequest.credentialGeneration === credentialGeneration) {
+      return activeRequest.promise;
     }
+
+    const controller = new AbortController();
+    const request = {
+      lifecycleGeneration,
+      credentialGeneration,
+      controller,
+      timedOut: false,
+      timeout: null,
+      promise: null,
+    };
+    const isCurrent = () => projectionRequest === request
+      && request.lifecycleGeneration === lifecycleGeneration
+      && request.credentialGeneration === credentialGeneration;
+    let rejectAbort;
+    request.promise = (async () => {
+      await Promise.resolve();
+      try {
+        if (!isCurrent() || stopped) return snapshot;
+        const abortPromise = new Promise((_, reject) => {
+          rejectAbort = () => reject(controller.signal.reason);
+          if (controller.signal.aborted) rejectAbort();
+          else controller.signal.addEventListener("abort", rejectAbort, { once: true });
+        });
+        request.timeout = setTimeout(() => {
+          request.timedOut = true;
+          controller.abort(new Error("Control room projection read timed out."));
+        }, CONTROL_ROOM_READ_TIMEOUT_MS);
+        const operation = Promise.resolve().then(async () => {
+          if (controller.signal.aborted) throw controller.signal.reason;
+          const response = await fetchImpl(`${baseUrl}/control-room`, {
+            headers: authHeaders({ accept: "application/json" }),
+            signal: controller.signal,
+            redirect: "error",
+          });
+          return { response, body: await readBody(response) };
+        });
+        const responsePromise = Promise.race([operation, abortPromise]);
+        emit({ ...snapshot, status: snapshot.data ? "ready" : "loading", auth: "ready", error: null });
+        const { response, body } = await responsePromise;
+        if (!isCurrent() || stopped) return snapshot;
+        if (response.status === 401) {
+          requireAuthentication(body?.error?.message ?? "The server token was rejected.")
+          return snapshot
+        }
+        if (!response.ok) throw new Error(body?.error?.message ?? `Control room returned ${response.status}.`);
+        const activeRunIds = new Set((body?.runs ?? []).map(run => run.id));
+        const actions = Object.fromEntries(Object.entries(snapshot.actions).filter(([sessionId]) => activeRunIds.has(sessionId)));
+        for (const sessionId of retryKeys.keys()) if (!activeRunIds.has(sessionId)) retryKeys.delete(sessionId);
+        for (const sessionId of lastEventIds.keys()) if (!activeRunIds.has(sessionId)) lastEventIds.delete(sessionId);
+        if (blockedEventSessionId && !activeRunIds.has(blockedEventSessionId)) {
+          blockedEventSessionId = null;
+          blockedEventError = null;
+        }
+        emit({
+          ...snapshot,
+          status: "ready",
+          auth: "ready",
+          connection: connectEvents
+            ? eventStreamLive
+              ? "live"
+              : blockedEventSessionId
+                ? "offline"
+                : "connecting"
+            : "offline",
+          data: body,
+          actions,
+          error: blockedEventSessionId ? blockedEventError : null,
+        });
+        return snapshot;
+      } catch (error) {
+        if (!isCurrent() || stopped) return snapshot;
+        const message = request.timedOut
+          ? "Control room projection read timed out."
+          : error instanceof Error ? error.message : String(error);
+        emit({ ...snapshot, status: snapshot.data ? "ready" : "error", connection: eventStreamLive ? "live" : "offline", error: message });
+        return snapshot;
+      } finally {
+        if (rejectAbort) controller.signal.removeEventListener("abort", rejectAbort);
+        if (request.timeout) clearTimeout(request.timeout);
+        request.timeout = null;
+        if (projectionRequest === request) projectionRequest = null;
+      }
+    })();
+    projectionRequest = request;
+    return request.promise;
   };
 
   const queueRefresh = () => {
@@ -328,10 +402,13 @@ export function createControlRoomStore(options = {}) {
     discoveryTimer = setTimeout(() => {
       discoveryTimer = null;
       void (async () => {
-        if (stopped || !token) return;
-        const result = await load();
-        if (!stopped && result.status === "ready") void connect();
-        scheduleDiscovery();
+        try {
+          if (stopped || !token) return;
+          const result = await load();
+          if (!stopped && result.status === "ready") void connect();
+        } finally {
+          scheduleDiscovery();
+        }
       })();
     }, CONTROL_ROOM_DISCOVERY_INTERVAL_MS);
   };
@@ -339,8 +416,10 @@ export function createControlRoomStore(options = {}) {
   const start = async () => {
     if (startPromise) return startPromise;
     stopped = false;
+    const generation = lifecycleGeneration;
     startPromise = (async () => {
       await load();
+      if (stopped || generation !== lifecycleGeneration) return snapshot;
       if (snapshot.status === "ready") void connect();
       scheduleDiscovery();
       return snapshot;
@@ -359,6 +438,7 @@ export function createControlRoomStore(options = {}) {
     start,
     stop() {
       stopped = true;
+      advanceLifecycle();
       disconnectEventStream();
       clearConnectionTimers();
       blockedEventSessionId = null;
@@ -386,6 +466,7 @@ export function createControlRoomStore(options = {}) {
         return snapshot
       }
       stopped = true
+      advanceLifecycle()
       disconnectEventStream()
       clearConnectionTimers()
       blockedEventSessionId = null
@@ -410,6 +491,7 @@ export function createControlRoomStore(options = {}) {
       credentialGeneration += 1
       token = ""
       stopped = true
+      advanceLifecycle()
       disconnectEventStream()
       clearConnectionTimers()
       blockedEventSessionId = null
@@ -439,23 +521,43 @@ export function createControlRoomStore(options = {}) {
     async action(sessionId, action, expectedRevision, payload) {
       if (!CONTROL_ACTIONS.has(action)) return { ok: false, code: "invalid_action", message: "Unknown control action." };
       if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return { ok: false, code: "invalid_revision", message: "A valid session revision is required." };
+      if (stopped) return { ok: false, code: "store_stopped", message: "The control room store is stopped." };
       const current = snapshot.actions[sessionId];
       if (current?.status === "pending") return { ok: false, code: "pending", message: "An action is already pending." };
+      const lifecycle = lifecycleGeneration;
+      const generation = credentialGeneration;
+      const controller = new AbortController();
+      actionControllers.add(controller);
       const actions = { ...snapshot.actions, [sessionId]: { status: "pending", action } };
       emit({ ...snapshot, actions });
+      if (stopped || lifecycle !== lifecycleGeneration) {
+        actionControllers.delete(controller);
+        return { ok: false, code: "store_stopped", message: "The control room store is stopped." };
+      }
       const fingerprint = JSON.stringify({ action, expectedRevision, payload: payload ?? null });
       const retry = retryKeys.get(sessionId);
       const requestKey = retry?.fingerprint === fingerprint ? retry.key : idempotencyKey();
-      const generation = credentialGeneration
+      let rejectAbort;
+      const abortPromise = new Promise((_, reject) => {
+        rejectAbort = () => reject(controller.signal.reason);
+        if (controller.signal.aborted) rejectAbort();
+        else controller.signal.addEventListener("abort", rejectAbort, { once: true });
+      });
       try {
-        const response = await fetchImpl(`${baseUrl}/sessions/${encodeURIComponent(sessionId)}/actions/${action}`, {
-          method: "POST",
-          headers: authHeaders({ "content-type": "application/json", "idempotency-key": requestKey }),
-          body: JSON.stringify({ expectedRevision, ...(payload ? { payload } : {}) }),
-          redirect: "error",
-        });
-        const result = await readBody(response) ?? { ok: false, code: "invalid_response", message: `Control action returned ${response.status}.` };
+        const operation = (async () => {
+          const response = await fetchImpl(`${baseUrl}/sessions/${encodeURIComponent(sessionId)}/actions/${action}`, {
+            method: "POST",
+            headers: authHeaders({ "content-type": "application/json", "idempotency-key": requestKey }),
+            body: JSON.stringify({ expectedRevision, ...(payload ? { payload } : {}) }),
+            signal: controller.signal,
+            redirect: "error",
+          });
+          return { response, result: await readBody(response) };
+        })();
+        const { response, result: responseResult } = await Promise.race([operation, abortPromise]);
+        const result = responseResult ?? { ok: false, code: "invalid_response", message: `Control action returned ${response.status}.` };
         if (generation !== credentialGeneration) return { ok: false, code: "credentials_changed", message: "Credentials changed while the action was pending." };
+        if (stopped || lifecycle !== lifecycleGeneration) return { ok: false, code: "store_stopped", message: "The control room store is stopped." };
         if (response.status === 401) {
           retryKeys.delete(sessionId)
           requireAuthentication(result.error?.message ?? "The server token expired or was rotated.")
@@ -468,12 +570,18 @@ export function createControlRoomStore(options = {}) {
         return result;
       } catch (error) {
         if (generation !== credentialGeneration) return { ok: false, code: "credentials_changed", message: "Credentials changed while the action was pending." };
+        if (stopped || lifecycle !== lifecycleGeneration || controller.signal.aborted) {
+          return { ok: false, code: "store_stopped", message: "The control room store is stopped." };
+        }
         const message = error instanceof Error ? error.message : String(error);
         // The server may have applied a request whose response was lost. An
         // exact retry must reuse the same key instead of executing it twice.
         retryKeys.set(sessionId, { fingerprint, key: requestKey });
         emit({ ...snapshot, actions: { ...snapshot.actions, [sessionId]: { status: "error", action, message } } });
         return { ok: false, code: "network_error", message };
+      } finally {
+        if (rejectAbort) controller.signal.removeEventListener("abort", rejectAbort);
+        actionControllers.delete(controller);
       }
     },
   };
