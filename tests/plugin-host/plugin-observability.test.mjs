@@ -90,23 +90,23 @@ test("diagnostic dedupe retention is bounded per run and never retains raw error
   const host = new PluginHost({ onDiagnostic: diagnostic => diagnostics.push(diagnostic) });
   await host.register("failing", {
     toolExecuteBefore(event) {
-      throw new Error(`secret=${event.toolName}`);
+      throw new Error(`failure=${event.toolName}`);
     },
   });
 
   for (let index = 0; index < 65; index += 1) {
     await assert.rejects(
       host.dispatchToolExecuteBefore({ runId: "one-run", toolName: `tool-${index}`, input: {} }),
-      /secret=/,
+      /failure=/,
     );
   }
   await assert.rejects(
     host.dispatchToolExecuteBefore({ runId: "one-run", toolName: "tool-0", input: {} }),
-    /secret=/,
+    /failure=/,
   );
 
   assert.equal(diagnostics.length, 66, "the oldest per-run key should be evicted after the bounded limit");
   assert.ok(diagnostics.every(diagnostic => /^sha256:[a-f0-9]{64}$/.test(diagnostic.dedupeKey)));
-  assert.doesNotMatch(diagnostics.map(item => item.dedupeKey).join("\n"), /secret|tool-/);
+  assert.doesNotMatch(diagnostics.map(item => item.dedupeKey).join("\n"), /failure|tool-/);
   await host.dispose();
 });

@@ -504,7 +504,7 @@ test("external hook failures emit one source-labelled diagnostic per run and pre
   await assert.rejects(() => host.dispatchRunClassified(event), (error) => error === failure);
   await assert.rejects(() => host.dispatchRunClassified(event), (error) => error === failure);
 
-  assert.deepEqual(diagnostics, [{
+  assert.deepEqual(diagnostics.map(({ dedupeKey: _dedupeKey, ...diagnostic }) => diagnostic), [{
     runId: "run-plugin-diagnostic",
     source: "cached",
     trustLane: "cached-external",
@@ -515,13 +515,40 @@ test("external hook failures emit one source-labelled diagnostic per run and pre
     errorName: "Error",
     errorMessage: "Stop hook failed: zod/v3",
     exitStatus: undefined,
-    dedupeKey: "sha256:595a95dc6b3af6680b1b5543236da928b1c812121623201e34013a6443c51a22",
   }]);
+  assert.match(diagnostics[0].dedupeKey, /^sha256:[a-f0-9]{64}$/u);
   assert.equal(
     diagnostics.some((diagnostic) => diagnostic.pluginName === "scc-quality-engine"),
     false,
     "an external adapter failure must never be attributed to the built-in Quality Engine",
   );
+});
+
+test("onDiagnostic receives only bounded canonical projections and dedupes after redaction", async () => {
+  const diagnostics = [];
+  const causes = [
+    new Error(`adapter\u0000failed Bearer sk-secret-alpha-12345678 at /Users/alice/private/plugin.ts ${"x".repeat(300)}`),
+    new Error(`adapter\u0000failed Bearer sk-secret-bravo-87654321 at /Users/bob/other/plugin.ts ${"x".repeat(300)}`),
+  ];
+  const host = new PluginHost({ onDiagnostic: (diagnostic) => diagnostics.push(diagnostic) });
+  await host.register("workspace-diagnostic", {
+    runStarted() {
+      throw causes.shift();
+    },
+  }, "workspace");
+
+  for (const cause of [...causes]) {
+    await assert.rejects(
+      () => host.dispatchRunStarted({ runId: "run-redacted-diagnostic" }),
+      (error) => error === cause,
+    );
+  }
+
+  assert.equal(diagnostics.length, 1, "raw secret and path differences must not split dedupe buckets");
+  assert.ok(diagnostics[0].errorMessage.length <= 240);
+  assert.doesNotMatch(diagnostics[0].errorMessage, /sk-secret|\/Users\/|[\u0000-\u001f\u007f-\u009f]/u);
+  assert.match(diagnostics[0].errorMessage, /\[REDACTED\].*\[PATH\]/u);
+  assert.match(diagnostics[0].dedupeKey, /^sha256:[a-f0-9]{64}$/u);
 });
 
 test("workspace context and decision failures are typed independently for each run", async () => {

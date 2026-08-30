@@ -38,6 +38,7 @@ import {
   type UncleCodeComplexity,
 } from "@second-claude/core";
 import {
+  createPluginDiagnosticProjection,
   QUALITY_HARNESS_STAGES,
   WORK_NODE_ROLES,
   WORK_NODE_STATUSES,
@@ -542,7 +543,28 @@ export class PluginHost {
   }
 
   async dispatchBeforeRunComplete(event: PluginBeforeRunCompleteEvent): Promise<PluginDecisionAggregate> {
-    return this.dispatchDecision("beforeRunComplete", event, (hooks, value) => hooks.beforeRunComplete?.(value));
+    const hostEvent = immutablePluginSnapshot(event);
+    const decisions: AttributedPluginDecision[] = [];
+    let action: PluginDecisionAction = "proceed";
+    for (const reg of this.registrations) {
+      const hookEvent = immutablePluginSnapshot(hostEvent);
+      const raw = await this.invokeExternalHook(
+        reg,
+        "beforeRunComplete",
+        hookEvent,
+        () => reg.hooks.beforeRunComplete?.(hookEvent),
+      );
+      if (raw === undefined) continue;
+      const decision = parseDecision(raw, reg.name);
+      decisions.push(attributeDecision(reg.name, decision));
+      action = strongerDecision(action, decision.action);
+    }
+    const finalValidation = validateRunCompletionDecision(hostEvent);
+    if (finalValidation.action !== "proceed") {
+      decisions.push(attributeDecision("unclecode-plugin-host", finalValidation));
+      action = strongerDecision(action, finalValidation.action);
+    }
+    return aggregateDecision(action, decisions);
   }
 
   async dispatchEvolutionProposed(event: PluginEvolutionProposedEvent): Promise<PluginDecisionAggregate> {
@@ -624,11 +646,39 @@ export class PluginHost {
     event: unknown,
     cause: unknown,
   ): void {
+    if (registration.source === "builtin") return;
     const runId = pluginInvocationRunId(event);
+    const trustLane = registration.source === "workspace"
+      ? "workspace-trusted"
+      : registration.source === "cached"
+        ? "cached-external"
+        : "host-provided";
     const errorName = cause instanceof Error && cause.name ? cause.name : "Error";
     const errorMessage = cause instanceof Error ? cause.message : String(cause);
+    const exitStatus = pluginErrorExitStatus(cause);
+    const safeFields = createPluginDiagnosticProjection({
+      runId,
+      source: registration.source,
+      trustLane,
+      pluginId: registration.name,
+      pluginName: registration.name,
+      hookName,
+      status: "error",
+      errorName,
+      errorMessage,
+      ...(exitStatus === undefined ? {} : { exitStatus }),
+      dedupeKey: `sha256:${"0".repeat(64)}`,
+      startedAt: 0,
+    });
     const dedupeKey = `sha256:${createHash("sha256")
-      .update(`${registration.source}:${registration.name}:${hookName}:${errorName}:${errorMessage}`)
+      .update([
+        safeFields.source,
+        safeFields.pluginId,
+        safeFields.hookName,
+        safeFields.errorName,
+        safeFields.errorMessage,
+        safeFields.exitStatus ?? "",
+      ].join(":"))
       .digest("hex")}`;
     let keys = this.diagnosticKeysByRun.get(runId);
     if (!keys) {
@@ -645,19 +695,18 @@ export class PluginHost {
       if (oldest !== undefined) keys.delete(oldest);
     }
     keys.add(dedupeKey);
-    const exitStatus = pluginErrorExitStatus(cause);
     try {
       this.onDiagnostic?.({
-        runId,
-        source: registration.source,
-        trustLane: pluginTrustLane(registration.source),
-        pluginId: registration.name,
-        pluginName: registration.name,
-        hookName,
+        runId: safeFields.runId,
+        source: safeFields.source,
+        trustLane: safeFields.trustLane,
+        pluginId: safeFields.pluginId,
+        pluginName: safeFields.pluginName,
+        hookName: safeFields.hookName as PluginHookName,
         status: "error",
-        errorName,
-        errorMessage,
-        exitStatus,
+        errorName: safeFields.errorName,
+        errorMessage: safeFields.errorMessage,
+        exitStatus: safeFields.exitStatus,
         dedupeKey,
       });
     } catch {
@@ -779,6 +828,17 @@ function pluginErrorExitStatus(cause: unknown): string | undefined {
   const value = (cause as { exitStatus?: unknown; status?: unknown }).exitStatus
     ?? (cause as { status?: unknown }).status;
   return typeof value === "string" || typeof value === "number" ? String(value) : undefined;
+}
+
+function immutablePluginSnapshot<Value>(value: Value): Value {
+  return deepFreeze(structuredClone(value));
+}
+
+function deepFreeze<Value>(value: Value): Value {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const nested of Object.values(value)) deepFreeze(nested);
+  return value;
 }
 
 const DECISION_PRECEDENCE: Readonly<Record<PluginDecisionAction, number>> = {
@@ -980,29 +1040,7 @@ export function registerBuiltInSccQualityEngine(
         pivotCount: event.pivotCount,
       }),
     }),
-    beforeRunComplete: (event) => {
-      if (event.projection.profile === "creator") {
-        const evolutionDecision = validateCreatorEvolutionCompletion(event.evolution);
-        if (evolutionDecision !== undefined) return evolutionDecision;
-      }
-      const result = validateRunCompletion(
-        event.projection,
-        event.evidence,
-        {
-          currentArtifactHash: event.currentArtifactHash,
-          producerId: event.producerId,
-          independentReviewerAvailable: event.independentReviewerAvailable,
-          ...(event.reviewRequired === undefined ? {} : { reviewRequired: event.reviewRequired }),
-        },
-      );
-      if (result.valid) return { action: "proceed" };
-      const failures = result.issues.map((issue) => issue.code);
-      return {
-        action: failures.includes("INDEPENDENT_REVIEW_UNAVAILABLE") ? "unproven" : "block",
-        reason: "SCC run-completion validation failed.",
-        failures,
-      };
-    },
+    beforeRunComplete: validateRunCompletionDecision,
     contextContribute: (event) => ({
       content: qualityStandards(event.profile, event.stage),
     }),
@@ -1010,6 +1048,32 @@ export function registerBuiltInSccQualityEngine(
       validateEvolutionProposal(event.proposal, event.context),
     ),
   });
+}
+
+function validateRunCompletionDecision(
+  event: PluginBeforeRunCompleteEvent,
+): PluginLifecycleDecision {
+  if (event.projection.profile === "creator") {
+    const evolutionDecision = validateCreatorEvolutionCompletion(event.evolution);
+    if (evolutionDecision !== undefined) return evolutionDecision;
+  }
+  const result = validateRunCompletion(
+    event.projection,
+    event.evidence,
+    {
+      currentArtifactHash: event.currentArtifactHash,
+      producerId: event.producerId,
+      independentReviewerAvailable: event.independentReviewerAvailable,
+      ...(event.reviewRequired === undefined ? {} : { reviewRequired: event.reviewRequired }),
+    },
+  );
+  if (result.valid) return { action: "proceed" };
+  const failures = result.issues.map((issue) => issue.code);
+  return {
+    action: failures.includes("INDEPENDENT_REVIEW_UNAVAILABLE") ? "unproven" : "block",
+    reason: "SCC run-completion validation failed.",
+    failures,
+  };
 }
 
 function validateCreatorEvolutionCompletion(

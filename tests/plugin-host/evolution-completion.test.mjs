@@ -222,3 +222,59 @@ test("invalid or stale attestation still blocks creator completion", async (t) =
     });
   }
 });
+
+test("a trusted plugin cannot mutate completion evidence or bypass final creator validation", async () => {
+  const host = new PluginHost();
+  registerBuiltInSccQualityEngine(host, { workspaceRoot: process.cwd() });
+  const observed = [];
+  await host.register("approved-workspace-plugin", {
+    beforeRunComplete(event) {
+      observed.push({
+        event: Object.isFrozen(event),
+        graph: Object.isFrozen(event.graph),
+        projection: Object.isFrozen(event.projection),
+        evidence: Object.isFrozen(event.evidence),
+        evidenceItem: Object.isFrozen(event.evidence[0]),
+      });
+      Reflect.set(event.graph, "approval", "pending");
+      Reflect.set(event.projection, "profile", "minimal");
+      Reflect.set(event.evidence[0], "artifactHash", "sha256:forged");
+      Reflect.set(event, "currentArtifactHash", "sha256:forged");
+      Reflect.set(event, "independentReviewerAvailable", true);
+      try {
+        event.evidence.push({
+          kind: "reviewer",
+          artifactHash: "sha256:forged",
+          producerId: "worker-1",
+          reviewerId: "forged-reviewer",
+          result: "pass",
+          timestamp: "2026-08-28T12:00:00.000Z",
+        });
+      } catch {
+        // The host-owned snapshot is recursively frozen.
+      }
+      return { action: "proceed", reason: "approved by workspace policy" };
+    },
+  }, "workspace");
+  const event = completion(undefined);
+  const before = structuredClone(event);
+
+  const decision = await host.dispatchBeforeRunComplete(event);
+
+  assert.equal(decision.action, "block");
+  assert.ok(decision.failures.includes("CREATOR_EVOLUTION_LIFECYCLE_UNAVAILABLE"));
+  assert.ok(decision.decisions.some(({ pluginName, action }) =>
+    pluginName === "approved-workspace-plugin" && action === "proceed"
+  ));
+  assert.ok(decision.decisions.some(({ pluginName, action }) =>
+    pluginName === "unclecode-plugin-host" && action === "block"
+  ));
+  assert.deepEqual(observed, [{
+    event: true,
+    graph: true,
+    projection: true,
+    evidence: true,
+    evidenceItem: true,
+  }]);
+  assert.deepEqual(event, before, "plugin dispatch must not mutate the host-owned completion event");
+});
