@@ -7,14 +7,21 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  createHostHeldOutWorktreeEvaluator,
   createWorkCreatorEvolutionService,
   runBoundedCreatorOperation,
 } from "../../apps/unclecode-cli/src/creator-evolution-runtime.ts";
+import { loadWorkCliBootstrap } from "../../apps/unclecode-cli/src/work-runtime-bootstrap.ts";
 import {
   HELD_OUT_V1_PROTECTED_ASSETS,
+  runHeldOutComparison,
 } from "../../scripts/held-out-benchmark.mjs";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
+const HELD_OUT_CASE_IDS = JSON.parse(readFileSync(
+  path.join(REPO_ROOT, "benchmarks", "held-out", "v1", "cases.json"),
+  "utf8",
+)).cases.map((entry) => entry.id);
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -64,6 +71,32 @@ function fakeAgent(runTurn, clear = () => {}) {
     updateRuntimeSettings() {},
     runTurn,
   };
+}
+
+function tracedFakeAgent(provider, model, runTurn, clear = () => {}) {
+  let listener;
+  return {
+    clear,
+    setTraceListener(next) { listener = next; },
+    updateRuntimeSettings() {},
+    async runTurn(prompt, attachments, options) {
+      listener?.({ type: "provider.route", provider, model });
+      return await runTurn(prompt, attachments, options);
+    },
+  };
+}
+
+function workloadResponse(prefix) {
+  return JSON.stringify({
+    cases: HELD_OUT_CASE_IDS.map((id) => ({ id, response: `${prefix}:${id}` })),
+  });
+}
+
+function comparisonScores(baselineScore = 0.7, candidateScore = 0.8) {
+  return JSON.stringify({
+    baselineCases: HELD_OUT_CASE_IDS.map((id) => ({ id, score: baselineScore })),
+    candidateCases: HELD_OUT_CASE_IDS.map((id) => ({ id, score: candidateScore })),
+  });
 }
 
 function evolutionInput(root, runId, signal) {
@@ -440,6 +473,304 @@ test("the offline plus-8.8 fixture cannot authorize an unrelated isolated candid
     assert.ok(result.projection.failures.includes("EVOLUTION_EVALUATOR_FAILED"));
     assert.equal(result.projection.comparison, undefined);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the production runtime owner reaches PR-ready only from sealed workload traces and three distinct providers", async () => {
+  const root = createRepository();
+  const home = path.join(root, ".unclecode", "test-home");
+  mkdirSync(home, { recursive: true });
+  const beforeHead = git(root, ["rev-parse", "HEAD"]);
+  const beforeCreator = readFileSync(path.join(root, "skills", "creator.md"), "utf8");
+  const workloadKinds = [];
+  const cleared = [];
+  let loaded;
+  const env = {
+    PATH: process.env.PATH,
+    HOME: home,
+    LLM_PROVIDER: "deepseek",
+    DEEPSEEK_API_KEY: "creator-key",
+    DEEPSEEK_MODEL: "deepseek-creator",
+    ANTHROPIC_API_KEY: "evaluator-key",
+    ANTHROPIC_MODEL: "claude-evaluator",
+    GEMINI_API_KEY: "reviewer-key",
+    GEMINI_MODEL: "gemini-reviewer",
+    UNCLECODE_REVIEW_PROVIDER: "anthropic",
+    UNCLECODE_CREATOR_REVIEW_PROVIDER: "gemini",
+    UNCLECODE_SESSION_STORE_ROOT: path.join(root, ".unclecode", "state"),
+    UNCLECODE_OMP_BIN: path.join(root, "missing-omp"),
+    UNCLECODE_OMP_BUN_BIN: path.join(root, "missing-bun"),
+  };
+  try {
+    loaded = await loadWorkCliBootstrap({
+      argv: ["--cwd", root, "--provider", "deepseek", "--engine", "native"],
+      env,
+      userHomeDir: home,
+      creatorEvolutionRuntime: {
+        createCreatorAgent: () => fakeAgent(async () => ({
+          text: JSON.stringify({
+            files: [{ path: "skills/creator.md", content: "creator v2 deterministic\n" }],
+          }),
+        })),
+        createHeldOutWorkloadAgent({ kind, creatorSystemPrompt }) {
+          workloadKinds.push({ kind, creatorSystemPrompt });
+          return tracedFakeAgent("deepseek", "deepseek-creator", async () => ({
+            text: workloadResponse(kind),
+            usage: kind === "baseline"
+              ? { inputTokens: 8_000, outputTokens: 4_000, cacheReadTokens: 100, cacheWriteTokens: 0 }
+              : { inputTokens: 3_000, outputTokens: 1_000, cacheReadTokens: 600, cacheWriteTokens: 0 },
+          }), () => cleared.push(`workload:${kind}`));
+        },
+        createHeldOutEvaluatorAgent: () => tracedFakeAgent(
+          "anthropic",
+          "claude-evaluator",
+          async () => ({
+            text: comparisonScores(),
+            usage: { inputTokens: 2_000, outputTokens: 500, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          }),
+          () => cleared.push("evaluator"),
+        ),
+        createHeldOutReviewerAgent: () => tracedFakeAgent(
+          "gemini",
+          "gemini-reviewer",
+          async (prompt) => ({
+            text: JSON.stringify({ caseId: JSON.parse(prompt).case.id, verdict: "pass" }),
+            usage: { inputTokens: 2_000, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          }),
+          () => cleared.push("reviewer"),
+        ),
+      },
+    });
+    const service = loaded.agent.creatorEvolutionService;
+    assert.ok(service, "the production owner must construct its creator evolution service");
+    const result = await service.run(evolutionInput(
+      root,
+      "production-bootstrap-three-provider",
+      new AbortController().signal,
+    ));
+    const proposal = result.projection;
+
+    assert.equal(result.status, "pr-ready", JSON.stringify({ proposal, result }));
+    assert.equal(proposal.state, "pr-ready");
+    assert.equal(proposal.humanApproval, "pending");
+    assert.equal(proposal.mergeRequiresHumanApproval, true);
+    assert.equal(proposal.comparison.passed, true);
+    assert.equal(proposal.comparison.baselineScore, 0.7);
+    assert.equal(proposal.comparison.candidateScore, 0.8);
+    assert.deepEqual(workloadKinds.map((entry) => entry.kind), ["baseline", "candidate"]);
+    assert.match(workloadKinds[0].creatorSystemPrompt, /creator v1/);
+    assert.match(workloadKinds[1].creatorSystemPrompt, /creator v2 deterministic/);
+    assert.equal(cleared.filter((entry) => entry === "reviewer").length, 40);
+    assert.deepEqual(
+      cleared.filter((entry) => entry !== "reviewer").sort(),
+      ["evaluator", "workload:baseline", "workload:candidate"],
+    );
+    assert.equal(git(root, ["rev-parse", "HEAD"]), beforeHead);
+    assert.equal(git(root, ["branch", "--show-current"]), "main");
+    assert.equal(readFileSync(path.join(root, "skills", "creator.md"), "utf8"), beforeCreator);
+    assert.equal(git(root, ["status", "--short"]), "", "the primary worktree must remain untouched");
+    assert.match(proposal.summary, /Human approval remains pending/);
+  } finally {
+    await loaded?.dispose?.();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the production runtime owner keeps creator evolution unproven without provider-independent evaluator and reviewer", async () => {
+  const root = createRepository();
+  const home = path.join(root, ".unclecode", "test-home");
+  mkdirSync(home, { recursive: true });
+  let workloadCalls = 0;
+  let loaded;
+  const env = {
+    PATH: process.env.PATH,
+    HOME: home,
+    LLM_PROVIDER: "deepseek",
+    DEEPSEEK_API_KEY: "only-provider-key",
+    DEEPSEEK_MODEL: "deepseek-creator",
+    UNCLECODE_REVIEW_PROVIDER: "deepseek",
+    UNCLECODE_REVIEW_MODEL: "deepseek-review-model",
+    UNCLECODE_SESSION_STORE_ROOT: path.join(root, ".unclecode", "state"),
+    UNCLECODE_OMP_BIN: path.join(root, "missing-omp"),
+    UNCLECODE_OMP_BUN_BIN: path.join(root, "missing-bun"),
+  };
+  try {
+    loaded = await loadWorkCliBootstrap({
+      argv: ["--cwd", root, "--provider", "deepseek", "--engine", "native"],
+      env,
+      userHomeDir: home,
+      creatorEvolutionRuntime: {
+        createCreatorAgent: () => fakeAgent(async () => ({
+          text: '{"files":[{"path":"skills/creator.md","content":"creator v2\\n"}]}',
+        })),
+        createHeldOutWorkloadAgent() {
+          workloadCalls += 1;
+          throw new Error("same-provider fallback must not execute a fake live workload");
+        },
+      },
+    });
+    const service = loaded.agent.creatorEvolutionService;
+    assert.ok(service, "the production owner must construct its fail-closed creator service");
+    const result = await service.run(evolutionInput(
+      root,
+      "production-bootstrap-same-provider",
+      new AbortController().signal,
+    ));
+    const proposal = result.projection;
+
+    assert.equal(result.status, "rejected");
+    assert.equal(proposal.state, "rejected");
+    assert.ok(proposal.failures.includes("EVOLUTION_INTEGRATED_PROOF_UNPROVEN"));
+    assert.equal(workloadCalls, 0);
+    assert.equal(readFileSync(path.join(root, "skills", "creator.md"), "utf8"), "creator v1\n");
+  } finally {
+    await loaded?.dispose?.();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a timed-out host workload detaches its provider and cleans isolated resources", async () => {
+  const root = createRepository();
+  const records = [];
+  let workloadClears = 0;
+  const evaluator = createHostHeldOutWorktreeEvaluator({
+    cwd: root,
+    creator: { provider: "deepseek", model: "creator" },
+    evaluator: { provider: "anthropic", model: "evaluator" },
+    reviewer: { provider: "gemini", model: "reviewer" },
+    evaluatorTurnTimeoutMs: 5,
+    evaluatorAbortSettlementGraceMs: 10,
+    createWorkloadAgent: () => tracedFakeAgent(
+      "deepseek",
+      "creator",
+      () => new Promise(() => {}),
+      () => { workloadClears += 1; },
+    ),
+    createEvaluatorAgent: () => {
+      throw new Error("must not reach evaluator");
+    },
+    createReviewerAgent: () => {
+      throw new Error("must not reach reviewer");
+    },
+  });
+  const service = createWorkCreatorEvolutionService({
+    cwd: root,
+    env: { ...process.env },
+    reasoning: {},
+    recorder: fakeRecorder(records),
+    evaluateHeldOutWorktrees: evaluator,
+    createCreatorAgent: () => fakeAgent(async () => ({
+      text: '{"files":[{"path":"skills/creator.md","content":"creator v2\\n"}]}',
+    })),
+  });
+  try {
+    const result = await Promise.race([
+      service.run(evolutionInput(root, "creator-workload-timeout", new AbortController().signal)),
+      // The provider boundary itself is 15ms; allow the surrounding Git
+      // isolation cleanup enough time on a loaded CI host.
+      new Promise((resolve) => setTimeout(() => resolve("still-pending"), 5_000)),
+    ]);
+    assert.notEqual(result, "still-pending");
+    assert.equal(result.status, "failed");
+    assert.ok(result.projection.failures.includes("EVOLUTION_EVALUATOR_FAILED"));
+    assert.equal(workloadClears, 1);
+    assert.equal(git(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads/unclecode/evolve/"]), "");
+    assert.equal(readFileSync(path.join(root, "skills", "creator.md"), "utf8"), "creator v1\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the host evaluator reads sealed Git blobs and rejects synthetic provider independence", async () => {
+  const root = createRepository();
+  const candidateWorktree = path.join(root, ".unclecode", "sealed-candidate");
+  let candidatePrompt = "";
+  try {
+    assert.equal(createHostHeldOutWorktreeEvaluator({
+      cwd: root,
+      creator: { provider: "deepseek", model: "creator" },
+      evaluator: { provider: "anthropic", model: "judge" },
+      reviewer: { provider: "anthropic", model: "different-review-model" },
+      createWorkloadAgent: () => fakeAgent(async () => ({ text: "unused" })),
+      createEvaluatorAgent: () => fakeAgent(async () => ({ text: "unused" })),
+      createReviewerAgent: () => fakeAgent(async () => ({ text: "unused" })),
+    }), undefined, "same-provider/different-model identities must remain unproven");
+
+    git(root, ["worktree", "add", "-b", "sealed-candidate", candidateWorktree]);
+    writeFileSync(path.join(candidateWorktree, "skills", "creator.md"), "sealed candidate guidance\n");
+    git(candidateWorktree, ["add", "skills/creator.md"]);
+    git(candidateWorktree, ["commit", "-m", "sealed candidate"]);
+    const candidateCommit = git(candidateWorktree, ["rev-parse", "HEAD"]);
+    writeFileSync(path.join(candidateWorktree, "skills", "creator.md"), "DIRTY PROMPT INJECTION\n");
+
+    const makeEvaluator = (reviewCase) => createHostHeldOutWorktreeEvaluator({
+      cwd: root,
+      creator: { provider: "deepseek", model: "creator" },
+      evaluator: { provider: "anthropic", model: "judge" },
+      reviewer: { provider: "gemini", model: "reviewer" },
+      createWorkloadAgent({ kind, creatorSystemPrompt }) {
+        if (kind === "candidate") candidatePrompt = creatorSystemPrompt;
+        return tracedFakeAgent("deepseek", "creator", async () => ({
+          text: workloadResponse(kind),
+          usage: kind === "baseline"
+            ? { inputTokens: 8_000, outputTokens: 4_000 }
+            : { inputTokens: 3_000, outputTokens: 1_000 },
+        }));
+      },
+      createEvaluatorAgent: () => tracedFakeAgent("anthropic", "judge", async () => ({
+        text: comparisonScores(),
+        usage: { inputTokens: 2_000, outputTokens: 500 },
+      })),
+      createReviewerAgent: () => tracedFakeAgent("gemini", "reviewer", async (prompt) => ({
+        text: JSON.stringify(reviewCase(JSON.parse(prompt).case.id)),
+        usage: { inputTokens: 2_000, outputTokens: 20 },
+      })),
+    });
+    const evaluator = makeEvaluator((caseId) => ({ caseId, verdict: "pass" }));
+    const result = await evaluator({
+      runId: "sealed-git-blob",
+      baselineWorktree: root,
+      candidateWorktree,
+      signal: new AbortController().signal,
+    });
+
+    assert.equal(result.candidateResult.commit, candidateCommit);
+    assert.match(candidatePrompt, /sealed candidate guidance/);
+    assert.doesNotMatch(candidatePrompt, /DIRTY PROMPT INJECTION/);
+    assert.equal(readFileSync(path.join(candidateWorktree, "skills", "creator.md"), "utf8"), "DIRTY PROMPT INJECTION\n");
+
+    const failedReview = await makeEvaluator((caseId) => ({
+      caseId,
+      verdict: caseId === "code-01" ? "fail" : "pass",
+    }))({
+      runId: "one-case-review-failed",
+      baselineWorktree: root,
+      candidateWorktree,
+      signal: new AbortController().signal,
+    });
+    const failedReport = runHeldOutComparison({
+      suiteRoot: path.join(root, "benchmarks", "held-out", "v1"),
+      baselineResult: failedReview.baselineResult,
+      candidateResult: failedReview.candidateResult,
+      trustedProof: failedReview.verification,
+    });
+    assert.equal(failedReview.verification.independentFinalReview.status, "failed");
+    assert.equal(failedReport.integratedProof.status, "unproven");
+    assert.ok(failedReport.integratedProof.reasons.includes("COMPARISON_GATES_FAILED"));
+    assert.ok(failedReport.integratedProof.reasons.includes("INDEPENDENT_FINAL_REVIEW_NOT_PROVEN"));
+
+    await assert.rejects(() => makeEvaluator((caseId) => ({
+      caseId: caseId === "code-02" ? "wrong-case" : caseId,
+      verdict: "pass",
+    }))({
+      runId: "malformed-case-review",
+      baselineWorktree: root,
+      candidateWorktree,
+      signal: new AbortController().signal,
+    }), /case-bound pass or fail verdict/);
+  } finally {
+    try { git(root, ["worktree", "remove", "--force", candidateWorktree]); } catch {}
     rmSync(root, { recursive: true, force: true });
   }
 });

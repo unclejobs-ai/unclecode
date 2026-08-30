@@ -96,7 +96,10 @@ import {
   resolveWorkShellCrpConfig,
   type WorkShellContextPacketResolver,
 } from "./work-runtime-crp.js";
-import { createWorkCreatorEvolutionService } from "./creator-evolution-runtime.js";
+import {
+  createHostHeldOutWorktreeEvaluator,
+  createWorkCreatorEvolutionService,
+} from "./creator-evolution-runtime.js";
 
 const WORK_PI_TURN_STEP_LIMIT = 16;
 const WORK_PI_TURN_COST_LIMIT_USD = 2;
@@ -164,6 +167,33 @@ export function resolveQualityReviewSelection(input: {
   };
 }
 
+export function resolveCreatorHeldOutReviewerSelection(input: {
+  readonly creatorProvider: QualityReviewProvider;
+  readonly evaluatorProvider: QualityReviewProvider;
+  readonly env: NodeJS.ProcessEnv;
+}): QualityReviewSelection | undefined {
+  const explicitProvider = input.env.UNCLECODE_CREATOR_REVIEW_PROVIDER?.trim().toLowerCase();
+  if (explicitProvider && !isQualityReviewProvider(explicitProvider)) {
+    throw new Error(`Unsupported UNCLECODE_CREATOR_REVIEW_PROVIDER: ${explicitProvider}`);
+  }
+  const candidates: readonly QualityReviewProvider[] = isQualityReviewProvider(explicitProvider)
+    ? [explicitProvider]
+    : QUALITY_REVIEW_PROVIDER_ORDER;
+  for (const provider of candidates) {
+    if (provider === input.creatorProvider || provider === input.evaluatorProvider) continue;
+    const fields = QUALITY_REVIEW_PROVIDER_ENV[provider];
+    if (!input.env[fields.key]?.trim()) continue;
+    return {
+      provider,
+      model: input.env.UNCLECODE_CREATOR_REVIEW_MODEL?.trim()
+        ?? input.env[fields.model]?.trim()
+        ?? fields.fallback,
+      distinct: true,
+    };
+  }
+  return undefined;
+}
+
 /**
  * Build one work/executor agent backed by OMP.
  *
@@ -207,6 +237,18 @@ export type WorkCliBootstrapInput = {
   env?: NodeJS.ProcessEnv | undefined;
   userHomeDir?: string | undefined;
   lspBridge?: GuardianLspBridge | undefined;
+  /** Runtime-owner embedding seam; route identity remains derived from host configuration. */
+  creatorEvolutionRuntime?: {
+    readonly createCreatorAgent?: (() => WorkTurnAgent | Promise<WorkTurnAgent>) | undefined;
+    readonly createHeldOutWorkloadAgent?: ((input: {
+      readonly kind: "baseline" | "candidate";
+      readonly creatorSystemPrompt: string;
+    }) => WorkTurnAgent | Promise<WorkTurnAgent>) | undefined;
+    readonly createHeldOutEvaluatorAgent?: (() => WorkTurnAgent | Promise<WorkTurnAgent>) | undefined;
+    readonly createHeldOutReviewerAgent?: (() => WorkTurnAgent | Promise<WorkTurnAgent>) | undefined;
+    readonly evaluatorTurnTimeoutMs?: number | undefined;
+    readonly evaluatorAbortSettlementGraceMs?: number | undefined;
+  } | undefined;
 };
 
 export function createRuntimeClientAgent(): StartReplAgent {
@@ -701,6 +743,22 @@ export async function loadWorkCliBootstrap(
           : {}),
       })
     : undefined;
+  const heldOutReviewerSelection = reviewSelection.distinct
+    ? resolveCreatorHeldOutReviewerSelection({
+        creatorProvider: directRuntimeProvider,
+        evaluatorProvider: reviewSelection.provider,
+        env,
+      })
+    : undefined;
+  const heldOutReviewerConfig = heldOutReviewerSelection
+    ? await loadConfig({
+        cwd,
+        env,
+        provider: heldOutReviewerSelection.provider,
+        model: heldOutReviewerSelection.model,
+        allowProblematicOpenAIAuth: true,
+      })
+    : undefined;
 
   const recorder = createAgentOpsRecorder({
     workspaceRoot: cwd,
@@ -723,12 +781,23 @@ export async function loadWorkCliBootstrap(
       env,
       ...(input.userHomeDir ? { homeDir: input.userHomeDir } : {}),
     });
-  const creatorEvolutionService = createWorkCreatorEvolutionService({
-    cwd,
-    env,
-    reasoning: config.reasoning,
-    recorder,
-    createCreatorAgent: () => createRuntimeCodingAgent({
+  const createHeldOutEvaluatorAgent = input.creatorEvolutionRuntime?.createHeldOutEvaluatorAgent
+    ?? (() => createRuntimeCodingAgent({
+        provider: resolveRuntimeProvider(reviewConfig.provider),
+        apiKey: reviewConfig.apiKey,
+        model: reviewConfig.model,
+        cwd,
+        reasoning: reviewConfig.reasoning,
+        mode: reviewConfig.mode,
+        toolAccess: "none",
+        ...(reviewConfig.baseUrl ? { baseUrl: reviewConfig.baseUrl } : {}),
+        ...(reviewConfig.openAIRuntime ? { openAIRuntime: reviewConfig.openAIRuntime } : {}),
+        ...(reviewConfig.openAIAccountId !== undefined
+          ? { openAIAccountId: reviewConfig.openAIAccountId }
+          : {}),
+      }));
+  const createHeldOutWorkloadAgent = input.creatorEvolutionRuntime?.createHeldOutWorkloadAgent
+    ?? ((workload: { readonly creatorSystemPrompt: string }) => createRuntimeCodingAgent({
       provider: directRuntimeProvider,
       apiKey: config.apiKey,
       model: config.model,
@@ -736,13 +805,97 @@ export async function loadWorkCliBootstrap(
       reasoning: config.reasoning,
       mode: config.mode,
       toolAccess: "none",
+      systemPrompt: workload.creatorSystemPrompt,
       ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
-      ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
       ...(config.openAIRuntime ? { openAIRuntime: config.openAIRuntime } : {}),
       ...(config.openAIAccountId !== undefined
         ? { openAIAccountId: config.openAIAccountId }
         : {}),
-    }),
+    }));
+  const createHeldOutReviewerAgent = input.creatorEvolutionRuntime?.createHeldOutReviewerAgent
+    ?? (heldOutReviewerConfig
+      ? () => createRuntimeCodingAgent({
+          provider: resolveRuntimeProvider(heldOutReviewerConfig.provider),
+          apiKey: heldOutReviewerConfig.apiKey,
+          model: heldOutReviewerConfig.model,
+          cwd,
+          reasoning: heldOutReviewerConfig.reasoning,
+          mode: heldOutReviewerConfig.mode,
+          toolAccess: "none",
+          ...(heldOutReviewerConfig.baseUrl ? { baseUrl: heldOutReviewerConfig.baseUrl } : {}),
+          ...(heldOutReviewerConfig.openAIRuntime
+            ? { openAIRuntime: heldOutReviewerConfig.openAIRuntime }
+            : {}),
+          ...(heldOutReviewerConfig.openAIAccountId !== undefined
+            ? { openAIAccountId: heldOutReviewerConfig.openAIAccountId }
+            : {}),
+        })
+      : undefined);
+  const evaluateHeldOutWorktrees = reviewSelection.distinct
+    && heldOutReviewerSelection
+    && createHeldOutReviewerAgent
+      ? createHostHeldOutWorktreeEvaluator({
+          cwd,
+          creator: {
+            provider: directRuntimeProvider,
+            model: config.model,
+          },
+          evaluator: {
+            provider: reviewSelection.provider,
+            model: reviewSelection.model,
+          },
+          reviewer: {
+            provider: heldOutReviewerSelection.provider,
+            model: heldOutReviewerSelection.model,
+          },
+          createWorkloadAgent: createHeldOutWorkloadAgent,
+          createEvaluatorAgent: createHeldOutEvaluatorAgent,
+          createReviewerAgent: createHeldOutReviewerAgent,
+          ...(input.creatorEvolutionRuntime?.evaluatorTurnTimeoutMs === undefined
+            ? {}
+            : { evaluatorTurnTimeoutMs: input.creatorEvolutionRuntime.evaluatorTurnTimeoutMs }),
+          ...(input.creatorEvolutionRuntime?.evaluatorAbortSettlementGraceMs === undefined
+            ? {}
+            : {
+                evaluatorAbortSettlementGraceMs:
+                  input.creatorEvolutionRuntime.evaluatorAbortSettlementGraceMs,
+              }),
+        })
+      : undefined;
+  const creatorEvolutionService = createWorkCreatorEvolutionService({
+    cwd,
+    env,
+    reasoning: config.reasoning,
+    recorder,
+    ...(evaluateHeldOutWorktrees ? { evaluateHeldOutWorktrees } : {}),
+    ...(evaluateHeldOutWorktrees && heldOutReviewerSelection
+      ? {
+          heldOutProviderIdentities: {
+            creator: { provider: directRuntimeProvider, model: config.model },
+            evaluator: { provider: reviewSelection.provider, model: reviewSelection.model },
+            reviewer: {
+              provider: heldOutReviewerSelection.provider,
+              model: heldOutReviewerSelection.model,
+            },
+          },
+        }
+      : {}),
+    createCreatorAgent: input.creatorEvolutionRuntime?.createCreatorAgent
+      ?? (() => createRuntimeCodingAgent({
+        provider: directRuntimeProvider,
+        apiKey: config.apiKey,
+        model: config.model,
+        cwd,
+        reasoning: config.reasoning,
+        mode: config.mode,
+        toolAccess: "none",
+        ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+        ...(systemPromptAppendix ? { systemPrompt: systemPromptAppendix } : {}),
+        ...(config.openAIRuntime ? { openAIRuntime: config.openAIRuntime } : {}),
+        ...(config.openAIAccountId !== undefined
+          ? { openAIAccountId: config.openAIAccountId }
+          : {}),
+      })),
   });
 
   const ownerAgent = directAgent && reviewAgent ? new WorkAgent({
