@@ -82,7 +82,7 @@ async function runProductionDiagnosticFixture({ sessionId, prompts, uiLocale }) 
       && entry.text.includes("runClassified"));
     const liveDiagnostics = runtime.engine.getState().agentConsole.pluginDiagnostics ?? [];
 
-    runtime.engine.dispose();
+    await runtime.engine.dispose();
     const resumed = await loadResumedWorkSession({ cwd: workspaceRoot, sessionId, env });
     const resumedDiagnostics = resumed.initialAgentConsole?.pluginDiagnostics ?? [];
     return { diagnosticEntries, liveDiagnostics, resumedDiagnostics };
@@ -121,7 +121,10 @@ test("production bootstrap keeps English external plugin diagnostic labels in an
   const fixture = await runProductionDiagnosticFixture({
     sessionId: "plugin-diagnostic-en-session",
     uiLocale: "en",
-    prompts: ["Fix one typo", "Fix another typo"],
+    prompts: [
+      "Refactor login.ts and session.ts without changing public behavior",
+      "Refactor auth.ts and tokens.ts while preserving existing tests",
+    ],
   });
   assertDurableDiagnosticPayload(fixture);
   assert.ok(fixture.diagnosticEntries.every((entry) =>
@@ -132,7 +135,10 @@ test("production bootstrap localizes only system-owned external plugin labels fo
   const fixture = await runProductionDiagnosticFixture({
     sessionId: "plugin-diagnostic-ko-session",
     uiLocale: "ko",
-    prompts: ["첫 번째 오타를 수정해 주세요", "두 번째 오타를 수정해 주세요"],
+    prompts: [
+      "전체 인증 흐름을 점검하고 login.ts와 session.ts를 리팩터해 주세요",
+      "모든 파일의 토큰 처리를 점검하고 auth.ts와 tokens.ts를 리팩터해 주세요",
+    ],
   });
   assertDurableDiagnosticPayload(fixture);
   assert.ok(fixture.diagnosticEntries.every((entry) =>

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -259,7 +260,7 @@ function createLoopHarness(input) {
   const completionEvents = [];
   const host = new PluginHost();
   registerBuiltInSccQualityEngine(host, { workspaceRoot: input.workspace });
-  host.register("quality-loop-observer", {
+  host.registerBuiltIn("quality-loop-observer", {
     planCreated(event) {
       planEvents.push(event);
       return { action: "proceed" };
@@ -401,7 +402,10 @@ function createDirectLoopHarness(input) {
   const planEvents = [];
   const host = new PluginHost();
   registerBuiltInSccQualityEngine(host, { workspaceRoot: input.workspace });
-  host.register("direct-quality-loop-observer", {
+  const registerObserver = input.externalObserver
+    ? host.register.bind(host)
+    : host.registerBuiltIn.bind(host);
+  registerObserver("direct-quality-loop-observer", {
     planCreated(event) {
       planEvents.push(event);
       return { action: "proceed" };
@@ -951,12 +955,15 @@ test("direct completion evidence binds the actual post-tool workspace manifest",
   }
 });
 
-test("direct completion fails closed when the post-tool manifest changes during completion hooks", async () => {
+test("uncontracted external completion hooks block before callback or workspace mutation", async () => {
   const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-direct-stale-manifest-"));
+  let callbackCalls = 0;
   const harness = createDirectLoopHarness({
     workspace,
     directTexts: ["stable answer"],
+    externalObserver: true,
     onBeforeRunComplete() {
+      callbackCalls += 1;
       writeFileSync(path.join(workspace, "concurrent-change.txt"), "stale\n");
       return { action: "proceed" };
     },
@@ -965,12 +972,11 @@ test("direct completion fails closed when the post-tool manifest changes during 
   try {
     const result = await harness.agent.runTurn("hello");
     assert.equal(result.qualityStatus, "block");
-    assert.match(result.text, /workspace manifest changed/i);
-    const staleGate = harness.traces.find((event) =>
-      event.type === "quality.gate_evaluated" && event.stale === true
-    );
-    assert.equal(staleGate?.decision, "block");
-    assert.notEqual(staleGate?.reviewedArtifactHash, staleGate?.currentArtifactHash);
+    assert.equal(callbackCalls, 0);
+    assert.equal(existsSync(path.join(workspace, "concurrent-change.txt")), false);
+    assert.ok(harness.traces.some((event) =>
+      event.failures?.includes("DIRECT_EXTERNAL_LIFECYCLE_CONTRACT_UNPROVEN")
+    ));
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
