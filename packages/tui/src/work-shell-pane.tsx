@@ -568,6 +568,7 @@ export function WorkShellPane<
             if (accepted) {
               clearClipboardAttachments(submittedClipboardAttachments);
             }
+            return accepted;
           }}
           captureClipboardImage={captureClipboardImage}
           onClipboardImage={(attachment) => {

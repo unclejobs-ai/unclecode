@@ -26,7 +26,7 @@ export const RUNTIME_ENGINE_METHODS = [
   "includeContextSourceAtCursor", "toggleContextInspectorExpanded", "undoLastContextSourceAction",
   "acceptContextSuggestion", "rejectContextSuggestion", "openAgentConsole", "closeAgentConsole",
   "selectAgentConsoleTab", "moveAgentConsoleCursor", "toggleAgentConsoleInspector", "beginAgentSteer",
-  "submitAgentSteer", "requestAgentCancel", "confirmAgentCancel", "continueSelectedAgent", "answerPendingDecisionByIndex",
+  "submitAgentSteer", "requestAgentCancel", "confirmAgentCancel", "continueSelectedAgent", "submitPendingDecisionText", "answerPendingDecisionByIndex",
   "cancelPendingDecision", "removeQueueItem", "moveQueueItem", "clearQueueItems", "resumeQueueItems",
   "retryQueueItem", "discardQueueItem", "recordTraceEvent", "requestTurnPause", "resumeTurn",
 ] as const;
@@ -34,7 +34,7 @@ export const RUNTIME_ENGINE_METHODS = [
 export type RuntimeEngineMethod = (typeof RUNTIME_ENGINE_METHODS)[number];
 
 const CONTROL_ENGINE_METHODS = new Set<RuntimeEngineMethod>([
-  "requestTurnPause", "resumeTurn", "answerPendingDecisionByIndex", "cancelPendingDecision",
+  "requestTurnPause", "resumeTurn", "submitPendingDecisionText", "answerPendingDecisionByIndex", "cancelPendingDecision",
   "beginAgentSteer", "requestAgentCancel", "confirmAgentCancel", "continueSelectedAgent",
   "submitAgentSteer",
   "openAgentConsole", "closeAgentConsole", "selectAgentConsoleTab", "moveAgentConsoleCursor",
@@ -111,6 +111,11 @@ function hasInterruptibleTurn(attached: Attached): boolean {
 
 type ExactDecisionInvocation =
   | {
+      readonly method: "submitPendingDecisionText";
+      readonly args: readonly [value: string, decisionId: string];
+      readonly decisionId: string;
+    }
+  | {
       readonly method: "answerPendingDecisionByIndex";
       readonly args: readonly [index: number, decisionId: string];
       readonly decisionId: string;
@@ -136,6 +141,28 @@ function validateDecisionInvocation(
   method: string,
   args: readonly unknown[],
 ): DecisionInvocationValidation {
+  if (method === "submitPendingDecisionText") {
+    const [value, decisionId] = args;
+    if (
+      args.length !== 2
+      || typeof value !== "string"
+      || value.trim().length === 0
+      || !validRuntimeDecisionId(decisionId)
+    ) {
+      return {
+        kind: "invalid",
+        message: "submitPendingDecisionText requires [nonEmptyText, decisionId].",
+      };
+    }
+    return {
+      kind: "valid",
+      invocation: {
+        method,
+        args: [value, decisionId],
+        decisionId,
+      },
+    };
+  }
   if (method === "answerPendingDecisionByIndex") {
     const [index, decisionId] = args;
     if (
@@ -192,10 +219,17 @@ function canSettleExactPendingDecision(
   } | null;
   const pending = state?.agentConsole?.pendingDecision;
   if (pending?.id !== invocation.decisionId) return false;
-  if (invocation.method === "cancelPendingDecision") return true;
+  if (invocation.method === "cancelPendingDecision" || invocation.method === "submitPendingDecisionText") return true;
   if (!Array.isArray(pending.questions) || pending.questions.length !== 1) return false;
   const question = pending.questions[0] as { readonly options?: unknown } | undefined;
   return Array.isArray(question?.options) && invocation.args[0] <= question.options.length;
+}
+
+function hasPendingDecision(attached: Attached): boolean {
+  const state = attached.engine.getState() as {
+    readonly agentConsole?: { readonly pendingDecision?: unknown } | undefined;
+  } | null;
+  return state?.agentConsole?.pendingDecision !== undefined;
 }
 
 export type RuntimeEngineRpcResponse =
@@ -704,7 +738,12 @@ export class LiveRuntimeEngineRegistry {
       ...(input.method === "handleSubmit" && typeof (attached.engine as { admitRuntimeTurn?: unknown }).admitRuntimeTurn === "function"
         ? { onAdmitted: () => Reflect.apply((attached.engine as unknown as { admitRuntimeTurn: () => void }).admitRuntimeTurn, attached.engine, []) }
         : {}),
-      ...(input.method === "interruptTurn"
+      ...(input.method === "handleSubmit"
+        ? {
+            precondition: () => hasPendingDecision(attached) ? false : undefined,
+            didMutate: (result: unknown) => result !== false,
+          }
+        : input.method === "interruptTurn"
         ? {
             precondition: () => hasInterruptibleTurn(attached) ? undefined : false,
             didMutate: (result: unknown) => result !== false,
@@ -718,6 +757,8 @@ export class LiveRuntimeEngineRegistry {
       execute: () => Reflect.apply(method, attached.engine, invocationArgs),
       complete: (result, revision) => input.method === "interruptTurn" && result === false
         ? { ok: false, code: "invalid_action", message: "No admitted or active turn could be cancelled.", revision }
+        : input.method === "handleSubmit" && result === false
+          ? { ok: false, code: "invalid_action", message: "Pending decision text requires an exact decision identity.", revision }
         : exactDecision && result === false
           ? { ok: false, code: "invalid_action", message: "The pending decision changed or is no longer actionable.", revision }
         : {

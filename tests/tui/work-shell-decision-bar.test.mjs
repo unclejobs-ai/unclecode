@@ -124,9 +124,10 @@ const DECISION_PANEL_LINES = [
   "Reply with an option number or label · /cancel cancels",
 ];
 
-function createDecisionPaneEngine(decision, overrides = {}) {
+function createDecisionPaneEngine(decision, overrides = {}, controls = {}) {
   const answeredIndexes = [];
   const answeredDecisionIds = [];
+  const typedReplies = [];
   const cancelCalls = [];
   const cancelledDecisionIds = [];
   let state = {
@@ -158,8 +159,17 @@ function createDecisionPaneEngine(decision, overrides = {}) {
   return {
     answeredIndexes,
     answeredDecisionIds,
+    typedReplies,
     cancelCalls,
     cancelledDecisionIds,
+    replacePendingDecision(nextDecision) {
+      state = {
+        ...state,
+        panel: { title: "Decision", lines: [] },
+        agentConsole: { ...state.agentConsole, pendingDecision: nextDecision },
+      };
+      for (const listener of listeners) listener(state);
+    },
     engine: {
       getState: () => state,
       subscribe: (listener) => {
@@ -173,6 +183,10 @@ function createDecisionPaneEngine(decision, overrides = {}) {
       handleSubmit: async () => {},
       setMode: async () => {},
       openSessionsPanel: async () => {},
+      submitPendingDecisionText: async (value, decisionId) => {
+        typedReplies.push([value, decisionId]);
+        return true;
+      },
       answerPendingDecisionByIndex: (index, decisionId) => {
         answeredIndexes.push(index);
         answeredDecisionIds.push(decisionId);
@@ -183,6 +197,7 @@ function createDecisionPaneEngine(decision, overrides = {}) {
         cancelledDecisionIds.push(decisionId);
         return true;
       },
+      ...controls,
     },
   };
 }
@@ -413,3 +428,87 @@ test("a digit beyond the rendered options stays ordinary draft input", async () 
     instance.cleanup();
   }
 });
+
+test("typed Enter keeps A identity and restores its draft when B replaces it before rejection", async () => {
+  const deferred = Promise.withResolvers();
+  const typedCalls = [];
+  const unhandled = [];
+  const onUnhandled = (error) => { unhandled.push(error); };
+  process.on("unhandledRejection", onUnhandled);
+  const fixture = createDecisionPaneEngine(
+    MULTI_QUESTION_DECISION,
+    {},
+    {
+      async submitPendingDecisionText(value, decisionId) {
+        typedCalls.push([value, decisionId]);
+        return deferred.promise;
+      },
+      async handleSubmit() {
+        throw new Error("typed decision text must not use generic handleSubmit");
+      },
+    },
+  );
+  const { stdin, instance, getOutput } = renderWorkShellPane(fixture.engine);
+
+  try {
+    await waitForCondition(() => getLastWorkFrame(getOutput()).includes("User decision · Scope"));
+    stdin.write("depth: 2; breadth: 1\r");
+    await waitForCondition(() => typedCalls.length === 1);
+    assert.deepEqual(typedCalls, [["depth: 2; breadth: 1", "decision-bar-2"]]);
+
+    fixture.replacePendingDecision({
+      ...SINGLE_QUESTION_DECISION,
+      id: "decision-b",
+      title: "Replacement B",
+    });
+    deferred.reject(new Error("owner rejected stale decision A"));
+    await waitForCondition(() => getLastWorkFrame(getOutput()).includes("Replacement B"));
+    await waitForCondition(() => getLastWorkFrame(getOutput()).includes("› depth: 2; breadth: 1"));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const frame = getLastWorkFrame(getOutput());
+    assert.match(frame, /Replacement B/);
+    assert.match(frame, /› depth: 2; breadth: 1/);
+    assert.equal(unhandled.length, 0);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+for (const [label, input, method] of [
+  ["one-key", "1", "answerPendingDecisionByIndex"],
+  ["Esc", "\u001b", "cancelPendingDecision"],
+]) {
+  test(`${label} remote rejection is handled without changing the current decision`, async () => {
+    const unhandled = [];
+    const onUnhandled = (error) => { unhandled.push(error); };
+    process.on("unhandledRejection", onUnhandled);
+    const calls = [];
+    const fixture = createDecisionPaneEngine(
+      SINGLE_QUESTION_DECISION,
+      {},
+      {
+        [method]: async (...args) => {
+          calls.push(args);
+          throw new Error(`remote ${label} rejected`);
+        },
+      },
+    );
+    const { stdin, instance, getOutput } = renderWorkShellPane(fixture.engine);
+    try {
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("User decision · Execution choice"));
+      stdin.write(input);
+      await waitForCondition(() => calls.length === 1);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.match(getLastWorkFrame(getOutput()), /◆ User decision · Execution choice/);
+      assert.equal(fixture.engine.getState().agentConsole.pendingDecision.id, "decision-bar-1");
+      assert.equal(unhandled.length, 0);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      instance.unmount();
+      instance.cleanup();
+    }
+  });
+}

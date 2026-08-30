@@ -41,6 +41,7 @@ const PREEMPTIVE_CONTROL_METHODS = new Set([
   "interruptTurn",
   "requestTurnPause",
   "resumeTurn",
+  "submitPendingDecisionText",
   "answerPendingDecisionByIndex",
   "cancelPendingDecision",
   "beginAgentSteer",

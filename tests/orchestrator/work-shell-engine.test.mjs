@@ -4795,7 +4795,7 @@ test("WorkShellEngine binds ask_user to a durable composer decision", async () =
   assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-1");
   assert.equal(engine.getState().panel.title, "Decision");
 
-  await engine.handleSubmit("2");
+  assert.equal(await engine.submitPendingDecisionText("2", "decision-1"), true);
 
   assert.deepEqual(await result, {
     status: "answered",
@@ -4943,6 +4943,59 @@ test("WorkShellEngine settles only the exact pending typed user decision", async
   assert.equal(engine.answerPendingUserDecision("typed-decision", [{ id: "lane", selectedOptions: ["Canary"] }]), false);
 });
 
+test("WorkShellEngine never settles replacement B when typed text for A is delayed in routing", async () => {
+  const interactionBridge = createWorkShellInteractionBridge();
+  const { engine } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      interactionBridge,
+    },
+  });
+  await engine.initialize();
+
+  const resultA = interactionBridge.ask({
+    id: "typed-a",
+    title: "First choice",
+    questions: [{
+      id: "lane",
+      question: "Choose first lane.",
+      options: [{ label: "Canary" }, { label: "Stable" }],
+    }],
+  });
+  const classifier = Promise.withResolvers();
+  engine.resolveBusySubmitDecision = async () => classifier.promise;
+  const delayedA = engine.submitPendingDecisionText("2", "typed-a");
+  await Promise.resolve();
+
+  assert.equal(engine.cancelPendingDecision("typed-a"), true);
+  assert.deepEqual(await resultA, { status: "cancelled" });
+  const resultB = interactionBridge.ask({
+    id: "typed-b",
+    title: "Replacement choice",
+    questions: [{
+      id: "lane",
+      question: "Choose replacement lane.",
+      options: [{ label: "Blue" }, { label: "Green" }],
+    }],
+  });
+  classifier.resolve({ action: "queue" });
+
+  assert.equal(await delayedA, false);
+  assert.equal(engine.getState().agentConsole.pendingDecision?.id, "typed-b");
+  assert.equal(await Promise.race([resultB, Promise.resolve("pending")]), "pending");
+  assert.equal(await engine.submitPendingDecisionText("2", "typed-b"), true);
+  assert.deepEqual(await resultB, {
+    status: "answered",
+    answers: [{ id: "lane", selectedOptions: ["Green"] }],
+  });
+});
+
 test("WorkShellEngine one-key decision methods refuse multi-question and absent decisions", async () => {
   const interactionBridge = createWorkShellInteractionBridge();
   const { engine } = createEngine({
@@ -5028,16 +5081,16 @@ test("WorkShellEngine still settles a pending decision when console routing thro
   };
   const replies = [];
   const handleReply = engine.handlePendingDecisionReply.bind(engine);
-  engine.handlePendingDecisionReply = (value) => {
-    replies.push(value);
-    handleReply(value);
+  engine.handlePendingDecisionReply = (value, decisionId) => {
+    replies.push([value, decisionId]);
+    return handleReply(value, decisionId);
   };
   const entriesBefore = engine.getState().entries.length;
 
-  await engine.handleSubmit("2");
+  assert.equal(await engine.submitPendingDecisionText("2", "decision-1"), true);
 
   assert.equal(routeCalls, 1, "the classifier is consulted exactly once");
-  assert.deepEqual(replies, ["2"], "the original line settles the decision exactly once");
+  assert.deepEqual(replies, [["2", "decision-1"]], "the original line settles the exact decision once");
   assert.deepEqual(await result, {
     status: "answered",
     answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
@@ -7369,7 +7422,7 @@ test("WorkShellEngine opens the agent console while a busy turn waits on a decis
     };
     const entriesBefore = engine.getState().entries.map((entry) => entry.text);
 
-    await engine.handleSubmit(line);
+    assert.equal(await engine.submitPendingDecisionText(line, "decision-1"), true);
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     assert.deepEqual(classified, [line], `${line} must consult the Rust classifier once`);
@@ -7385,7 +7438,7 @@ test("WorkShellEngine opens the agent console while a busy turn waits on a decis
     assert.equal(engine.getState().queuedCount, 0, `${line} must not queue`);
     assert.deepEqual(engine.getState().entries.map((entry) => entry.text), entriesBefore);
 
-    await engine.handleSubmit("2");
+    assert.equal(await engine.submitPendingDecisionText("2", "decision-1"), true);
     assert.deepEqual(await decision, {
       status: "answered",
       answers: [{ id: "strategy", selectedOptions: ["Fast"] }],
@@ -8704,7 +8757,7 @@ test("WorkShellEngine reduces lifecycle events from the newest decision and mani
   assert.equal(engine.getState().agentConsole.pendingDecision?.id, "decision-1");
   assert.equal(engine.getState().agentConsole.activity[0]?.status, "completed");
 
-  await engine.handleSubmit("2");
+  assert.equal(await engine.submitPendingDecisionText("2", "decision-1"), true);
   assert.deepEqual(await answer, {
     status: "answered",
     answers: [{ id: "strategy", selectedOptions: ["Fast"] }],

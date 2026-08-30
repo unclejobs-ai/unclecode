@@ -379,7 +379,8 @@ function getComposerAbsolutePosition(
 export function Composer(props: {
   readonly value: string;
   readonly onChange: (value: string) => void;
-  readonly onSubmit: (value: string) => void | Promise<void>;
+  /** Return false (or reject) when the owner did not accept the line; the draft is restored. */
+  readonly onSubmit: (value: string) => void | boolean | Promise<void | boolean>;
   readonly onPaste?: ((text: string) => void) | undefined;
   readonly onIsPastingChange?: ((isPasting: boolean) => void) | undefined;
   readonly onClipboardImage?:
@@ -489,6 +490,7 @@ export function Composer(props: {
   const resetEpochRef = useRef(props.resetEpoch);
   const pasteTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const suppressNextSubmitRef = useRef(false);
+  const inputEpochRef = useRef(0);
   // Ink's useInput rebinds when the handler identity changes, but Enter after
   // Ctrl+V can still observe a stale onSubmit/onClipboardImage closure from
   // the pre-attachment render. Always read the latest props through a ref.
@@ -499,6 +501,7 @@ export function Composer(props: {
   // cannot submit an Esc-cancelled IME/steer draft before effects run.
   const resetEpochChanged = resetEpochRef.current !== props.resetEpoch;
   if (resetEpochChanged) {
+    inputEpochRef.current += 1;
     resetEpochRef.current = props.resetEpoch;
     pendingLocalValueRef.current = undefined;
     cursorOffsetRef.current = props.value.length;
@@ -558,7 +561,36 @@ export function Composer(props: {
     setCursorOffset(0);
   };
 
+  const submitAndRestoreIfRejected = (submittedValue: string): void => {
+    const normalizedSubmittedValue = sanitizeComposerInput(submittedValue);
+    const submittedAtEpoch = inputEpochRef.current;
+    resetLocalValueAfterSubmit();
+    let result: void | boolean | Promise<void | boolean>;
+    try {
+      result = propsRef.current.onSubmit(normalizedSubmittedValue);
+    } catch {
+      result = false;
+    }
+    void Promise.resolve(result).then(
+      (accepted) => {
+        if (accepted !== false || inputEpochRef.current !== submittedAtEpoch) return;
+        pendingLocalValueRef.current = normalizedSubmittedValue;
+        cursorOffsetRef.current = normalizedSubmittedValue.length;
+        setCursorOffset(normalizedSubmittedValue.length);
+        propsRef.current.onChange(normalizedSubmittedValue);
+      },
+      () => {
+        if (inputEpochRef.current !== submittedAtEpoch) return;
+        pendingLocalValueRef.current = normalizedSubmittedValue;
+        cursorOffsetRef.current = normalizedSubmittedValue.length;
+        setCursorOffset(normalizedSubmittedValue.length);
+        propsRef.current.onChange(normalizedSubmittedValue);
+      },
+    );
+  };
+
   useInput((input, key) => {
+    inputEpochRef.current += 1;
     const latestProps = propsRef.current;
     // The Agent Console takes the frame ahead of every panel overlay, so its
     // ownership question is asked first.
@@ -701,8 +733,7 @@ export function Composer(props: {
         }
         return;
       }
-      resetLocalValueAfterSubmit();
-      void Promise.resolve(latestProps.onSubmit(sanitizeComposerInput(submittedValue))).catch(() => undefined);
+      submitAndRestoreIfRejected(submittedValue);
       return;
     }
 
@@ -721,8 +752,7 @@ export function Composer(props: {
       if (suppressNextSubmitRef.current || isPasting) {
         return;
       }
-      resetLocalValueAfterSubmit();
-      void Promise.resolve(latestProps.onSubmit(sanitizeComposerInput(result.nextValue))).catch(() => undefined);
+      submitAndRestoreIfRejected(result.nextValue);
       return;
     }
 

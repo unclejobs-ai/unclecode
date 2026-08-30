@@ -2515,10 +2515,10 @@ export class WorkShellEngine<
     return promise;
   }
 
-  private handlePendingDecisionReply(value: string): void {
+  private handlePendingDecisionReply(value: string, decisionId: string): boolean {
     const pending = this.pendingDecision;
-    if (!pending) {
-      return;
+    if (!pending || pending.request.id !== decisionId) {
+      return false;
     }
     const reply = resolveWorkShellDecisionReply({
       request: pending.request,
@@ -2526,11 +2526,11 @@ export class WorkShellEngine<
     });
     if (reply.kind === "cancelled") {
       pending.settle({ status: "cancelled" });
-      return;
+      return true;
     }
     if (reply.kind === "answered") {
       pending.settle(reply.result);
-      return;
+      return true;
     }
     this.setState({
       panel: {
@@ -2538,14 +2538,46 @@ export class WorkShellEngine<
         lines: [...formatWorkShellDecisionLines(pending.request), `Input needed · ${reply.message}`],
       },
     });
+    return true;
   }
 
   /**
-   * One-key reply for the decision bar. `handlePendingDecisionReply` is void,
-   * so the range is validated up front: a pending decision with exactly one
-   * question and an in-range option index settles through the same reply
-   * path as a typed line, everything else is a no-op that keeps the decision
-   * pending (multi-question requests need typed `id: n` answers).
+   * Submit composer text to one exact pending decision. Routing may call Rust,
+   * so the identity is checked both before and after that await: text entered
+   * for A can never settle a replacement B that appears while classification
+   * is in flight.
+   */
+  async submitPendingDecisionText(value: string, decisionId: string): Promise<boolean> {
+    if (this.lifecycleClosing || this.disposed) return false;
+    const line = value.trim();
+    if (!line || this.pendingDecision?.request.id !== decisionId) return false;
+
+    let decision: BusySubmitDecision | undefined;
+    try {
+      decision = await this.resolveBusySubmitDecision(line);
+    } catch {
+      if (this.pendingDecision?.request.id !== decisionId) return false;
+      this.appendEntries({
+        role: "system",
+        text: this.formatWorkShellError(
+          "Console commands are unavailable. This line was read as an answer to the pending decision.",
+        ),
+      });
+    }
+    if (this.pendingDecision?.request.id !== decisionId) return false;
+    if (decision?.action === "open_agent_console") {
+      this.openAgentConsole(decision.tab);
+      return true;
+    }
+    return this.handlePendingDecisionReply(line, decisionId);
+  }
+
+  /**
+   * One-key reply for the decision bar. The range and decision identity are
+   * validated up front: a pending decision with exactly one question and an
+   * in-range option index settles through the same reply path as a typed line;
+   * everything else is a no-op that keeps the decision pending
+   * (multi-question requests need typed `id: n` answers).
    */
   answerPendingDecisionByIndex(index: number, decisionId: string): boolean {
     const pending = this.pendingDecision;
@@ -2558,8 +2590,7 @@ export class WorkShellEngine<
     if (!Number.isSafeInteger(index) || index < 1 || index > question.options.length) {
       return false;
     }
-    this.handlePendingDecisionReply(String(index));
-    return true;
+    return this.handlePendingDecisionReply(String(index), decisionId);
   }
 
   /** Settle one exact user decision without routing structured answers through chat input. */
@@ -2580,8 +2611,7 @@ export class WorkShellEngine<
     if (!this.pendingDecision || this.pendingDecision.request.id !== decisionId) {
       return false;
     }
-    this.handlePendingDecisionReply("/cancel");
-    return true;
+    return this.handlePendingDecisionReply("/cancel", decisionId);
   }
 
   private settlePendingDecision(result: AskUserQuestionResult): void {
@@ -2612,32 +2642,10 @@ export class WorkShellEngine<
       return;
     }
     if (this.pendingDecision) {
-      // A pending decision must not lock the operator out of the console. Rust
-      // stays the authority on what a slash line means mid-turn, so the line is
-      // classified once here; only `open_agent_console` is handled early, and
-      // every other action — including ordinary answers — falls through to the
-      // decision untouched.
-      //
-      // Classification is a console convenience, never a gate on answering. If
-      // it fails, the operator still gets their answer through: dropping the
-      // line here would strand the run behind a question nothing can settle,
-      // and the console command that failed was never the point of the line.
-      let decision: BusySubmitDecision | undefined;
-      try {
-        decision = await this.resolveBusySubmitDecision(line);
-      } catch {
-        this.appendEntries({
-          role: "system",
-          text: this.formatWorkShellError(
-            "Console commands are unavailable. This line was read as an answer to the pending decision.",
-          ),
-        });
-      }
-      if (decision?.action === "open_agent_console") {
-        this.openAgentConsole(decision.tab);
-        return;
-      }
-      this.handlePendingDecisionReply(line);
+      // Decision text must carry an explicit identity through
+      // `submitPendingDecisionText`; generic prompt submission intentionally
+      // remains an ordinary prompt path and cannot target whichever decision
+      // happens to be current when a delayed call arrives.
       return;
     }
     if (this.state.isBusy) {

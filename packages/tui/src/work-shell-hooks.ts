@@ -386,8 +386,9 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   // Decision bar (main-screen UX overhaul) — one-key replies and Esc cancel
   // for a pending AskUserQuestion. Both optional so hosts without decision
   // plumbing keep digits and Esc on their existing meanings.
-  answerPendingDecisionByIndex?(index: number, decisionId: string): boolean;
-  cancelPendingDecision?(decisionId: string): boolean;
+  submitPendingDecisionText?(value: string, decisionId: string): boolean | Promise<boolean>;
+  answerPendingDecisionByIndex?(index: number, decisionId: string): boolean | Promise<boolean>;
+  cancelPendingDecision?(decisionId: string): boolean | Promise<boolean>;
   removeQueueItem?(id: number): Promise<boolean>;
   moveQueueItem?(id: number, direction: "up" | "down"): Promise<boolean>;
   clearQueueItems?(): Promise<void>;
@@ -771,8 +772,9 @@ export function useWorkShellInputController(input: {
   readonly pendingDecisionId?: string | undefined;
   readonly decisionOptionCount?: number | undefined;
   /** Decision bar capability probes — wired by engines that own decisions. */
-  readonly answerPendingDecisionByIndex?: ((index: number, decisionId: string) => boolean) | undefined;
-  readonly cancelPendingDecision?: ((decisionId: string) => boolean) | undefined;
+  readonly submitPendingDecisionText?: ((value: string, decisionId: string) => boolean | Promise<boolean>) | undefined;
+  readonly answerPendingDecisionByIndex?: ((index: number, decisionId: string) => boolean | Promise<boolean>) | undefined;
+  readonly cancelPendingDecision?: ((decisionId: string) => boolean | Promise<boolean>) | undefined;
   readonly queueOverlayOpen?: boolean | undefined;
   readonly queueSelectedId?: number | undefined;
   readonly moveQueueSelection?: ((delta: -1 | 1) => void) | undefined;
@@ -872,6 +874,21 @@ export function useWorkShellInputController(input: {
         // pane must keep its pending clipboard badge intact.
         return false;
       }
+      // A typed answer is a control for the exact decision rendered when
+      // Enter was pressed, never a generic prompt. Keeping the identity in
+      // this call prevents a delayed remote A submission from being replayed
+      // against replacement decision B at the same owner revision.
+      if (input.pendingDecisionId && input.submitPendingDecisionText) {
+        if (value.trim().length === 0) return false;
+        try {
+          return await input.submitPendingDecisionText(value, input.pendingDecisionId);
+        } catch {
+          // The Composer interprets false as "not accepted" and restores the
+          // submitted draft. The owner remains the authority on the current
+          // decision, so a transport/revision rejection changes no UI state.
+          return false;
+        }
+      }
       const typedLine = value.trim();
       const submitValue =
         input.activeSlashInput && (typedLine.length === 0 || !typedLine.startsWith("/"))
@@ -919,6 +936,8 @@ export function useWorkShellInputController(input: {
       input.selectedSlashCommand,
       input.shouldBlockSlashSubmit,
       input.agentConsole?.buildContext,
+      input.pendingDecisionId,
+      input.submitPendingDecisionText,
     ],
   );
 
@@ -1121,7 +1140,10 @@ export function useWorkShellInputController(input: {
     if (shellActionOwnership === "decision") {
       if (key.escape && input.cancelPendingDecision && input.pendingDecisionId) {
         escapeResetArmedAtRef.current = undefined;
-        input.cancelPendingDecision(input.pendingDecisionId);
+        const decisionId = input.pendingDecisionId;
+        void Promise.resolve()
+          .then(() => input.cancelPendingDecision?.(decisionId))
+          .catch(() => undefined);
         return;
       }
       const oneKeyIndex = Number(value);
@@ -1133,7 +1155,10 @@ export function useWorkShellInputController(input: {
         && oneKeyIndex >= 1
       ) {
         escapeResetArmedAtRef.current = undefined;
-        input.answerPendingDecisionByIndex(oneKeyIndex, input.pendingDecisionId);
+        const decisionId = input.pendingDecisionId;
+        void Promise.resolve()
+          .then(() => input.answerPendingDecisionByIndex?.(oneKeyIndex, decisionId))
+          .catch(() => undefined);
         return;
       }
     }
@@ -1908,6 +1933,12 @@ export function useWorkShellPaneState<
     decisionPending,
     ...(pendingDecisionRequest?.id ? { pendingDecisionId: pendingDecisionRequest.id } : {}),
     ...(decisionOptionCount !== undefined ? { decisionOptionCount } : {}),
+    ...(input.engine.submitPendingDecisionText
+      ? {
+          submitPendingDecisionText: (value: string, decisionId: string) =>
+            input.engine.submitPendingDecisionText?.(value, decisionId) ?? false,
+        }
+      : {}),
     ...(input.engine.answerPendingDecisionByIndex
       ? {
           answerPendingDecisionByIndex: (index: number, decisionId: string) =>

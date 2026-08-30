@@ -50,6 +50,8 @@ function fakeDecisionEngine(label) {
   let pendingDecision;
   let answerCalls = 0;
   let cancelCalls = 0;
+  let textCalls = 0;
+  let submitCalls = 0;
   const decision = (id) => ({
     kind: "user-decision",
     id,
@@ -63,6 +65,8 @@ function fakeDecisionEngine(label) {
   return {
     get answerCalls() { return answerCalls; },
     get cancelCalls() { return cancelCalls; },
+    get textCalls() { return textCalls; },
+    get submitCalls() { return submitCalls; },
     get pendingDecisionId() { return pendingDecision?.id; },
     replacePendingDecision(id) { pendingDecision = decision(id); },
     getState: () => ({
@@ -71,6 +75,15 @@ function fakeDecisionEngine(label) {
       agentConsole: pendingDecision ? { pendingDecision } : {},
     }),
     subscribe: () => () => {},
+    async handleSubmit() {
+      submitCalls += 1;
+    },
+    submitPendingDecisionText(value, decisionId) {
+      textCalls += 1;
+      if (pendingDecision?.id !== decisionId || typeof value !== "string" || value.trim() === "") return false;
+      pendingDecision = undefined;
+      return true;
+    },
     answerPendingDecisionByIndex(index, decisionId) {
       answerCalls += 1;
       if (pendingDecision?.id !== decisionId || index < 1 || index > 2) return false;
@@ -976,6 +989,73 @@ test("owner HTTP RPC keeps replacement decision B pending for delayed A answer a
   assert.equal(accepted.revision, 1);
   assert.equal(engine.pendingDecisionId, undefined);
   assert.equal(engine.cancelCalls, 1);
+});
+
+test("owner HTTP RPC keeps replacement decision B pending for delayed typed text from A", async (t) => {
+  const rootDir = await mkdtemp(join(tmpdir(), "unclecode-owner-decision-text-race-"));
+  const projectPath = join(rootDir, "workspace");
+  const engine = fakeDecisionEngine("http-decision-text-race");
+  await mkdir(projectPath);
+  const owner = await startPersistentRuntimeOwner({
+    rootDir,
+    leasePath: join(rootDir, "owner.json"),
+    tokenPath: join(rootDir, "server.token"),
+    async createSession() {
+      return { engine, projectPath };
+    },
+  });
+  t.after(async () => {
+    await owner.stop();
+    await rm(rootDir, { recursive: true, force: true });
+  });
+  const client = await RuntimeOwnerClient.connect(owner.lease);
+  const created = await client.createRuntimeSession({
+    sessionId: "http-decision-text-race",
+    projectPath,
+    idempotencyKey: "create-http-decision-text-race",
+  });
+  assert.equal(created.ok, true);
+  engine.replacePendingDecision("decision-a");
+  engine.replacePendingDecision("decision-b");
+
+  const stale = await client.invokeEngineMethod({
+    sessionId: "http-decision-text-race",
+    method: "submitPendingDecisionText",
+    args: ["choice: 1", "decision-a"],
+    expectedRevision: 0,
+    idempotencyKey: "http-delayed-text-a",
+  });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.code, "invalid_action");
+  assert.equal(stale.revision, 0);
+  assert.equal(engine.pendingDecisionId, "decision-b");
+  assert.equal(engine.textCalls, 0, "a stale identity must fail before engine dispatch");
+
+  const generic = await client.invokeEngineMethod({
+    sessionId: "http-decision-text-race",
+    method: "handleSubmit",
+    args: ["choice: 1"],
+    expectedRevision: 0,
+    idempotencyKey: "http-generic-text-without-id",
+  });
+  assert.equal(generic.ok, false);
+  assert.equal(generic.code, "invalid_action");
+  assert.equal(generic.revision, 0);
+  assert.equal(engine.pendingDecisionId, "decision-b");
+  assert.equal(engine.submitCalls, 0, "generic prompt RPC must not target a pending decision");
+
+  const accepted = await client.invokeEngineMethod({
+    sessionId: "http-decision-text-race",
+    method: "submitPendingDecisionText",
+    args: ["choice: 2", "decision-b"],
+    expectedRevision: 0,
+    idempotencyKey: "http-text-b",
+  });
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.result, true);
+  assert.equal(accepted.revision, 1);
+  assert.equal(engine.pendingDecisionId, undefined);
+  assert.equal(engine.textCalls, 1);
 });
 
 test("timed-out admission persistence leaves the revision unpublished and releases the admission tail", async () => {

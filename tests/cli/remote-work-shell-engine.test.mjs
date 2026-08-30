@@ -485,6 +485,32 @@ test("remote adapter surfaces a decision conflict without retrying against a cha
   engine.dispose();
 });
 
+test("remote typed decision text carries A identity once and never retries it against B", async () => {
+  let revision = 4;
+  let state = { agentConsole: { pendingDecision: { id: "decision-a" } } };
+  const attempts = [];
+  const client = {
+    async readEngineState() { return { ok: true, revision, state, result: null }; },
+    async invokeEngineMethod(input) {
+      attempts.push(input);
+      revision = 5;
+      state = { agentConsole: { pendingDecision: { id: "decision-b" } } };
+      return { ok: false, code: "revision_conflict", message: "Engine revision changed.", revision };
+    },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "typed-decision-conflict");
+
+  await assert.rejects(
+    engine.submitPendingDecisionText("scope: 1", "decision-a"),
+    /Engine revision changed/,
+  );
+  assert.equal(attempts.length, 1);
+  assert.equal(attempts[0].method, "submitPendingDecisionText");
+  assert.deepEqual(attempts[0].args, ["scope: 1", "decision-a"]);
+  assert.equal(engine.getState().agentConsole.pendingDecision.id, "decision-a");
+  engine.dispose();
+});
+
 test("TUI boot attaches through discovery without a fixed port or split local registry", async () => {
   const source = await readFile(new URL("../../apps/unclecode-cli/src/work-runtime.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /17677|EADDRINUSE|startServer\s*\(/);
