@@ -700,7 +700,7 @@ test("getWorkShellPanelPlacement keeps long-session panels near the composer by 
     getWorkShellBottomDrawerMinHeight("bottom", "Doctor", "plain text"),
     6,
   );
-  assert.equal(getWorkShellAttachmentPlacement(), "after-composer");
+  assert.equal(getWorkShellAttachmentPlacement(), "above-composer");
   assert.equal(getWorkShellAttachmentMinHeight(), 4);
 });
 
@@ -920,8 +920,8 @@ test("work-shell composer row budget wraps without a sync Rust spawn on keystrok
 
   assert.match(
     functionBody,
-    /wrapDisplayTextFast\(/,
-    "the composer row budget must wrap with the pure-TS fast wrap",
+    /resolveComposerRenderedRowCount\(/,
+    "the composer row budget must share the live Composer layout",
   );
   assert.doesNotMatch(
     functionBody,

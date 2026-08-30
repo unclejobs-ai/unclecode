@@ -1781,9 +1781,15 @@ export function useWorkShellPaneState<
     if (phase === "suppress") {
       agentConsoleDecisionCacheRef.current = undefined;
     }
-    const decision = resolveAgentConsoleInputDecision(
+    const resolvedDecision = resolveAgentConsoleInputDecision(
       buildAgentConsoleContextForScope(scope, value, key, composerEmpty),
     );
+    const decision: AgentConsoleInputDecision =
+      scope.composerMode === "agent-steer"
+      && resolvedDecision.kind === "dispatch"
+      && (resolvedDecision.action.kind === "close" || resolvedDecision.action.kind === "cancel-steer")
+        ? { ...resolvedDecision, discardComposer: true }
+        : resolvedDecision;
     if (phase === "dispatch") {
       const next = { value, keyMask, composerEmpty, decision };
       agentConsoleDecisionCacheRef.current = next;
@@ -1841,11 +1847,14 @@ export function useWorkShellPaneState<
       : undefined;
   const suppressAgentConsoleKey = agentConsoleKeyboard
     ? (value: string, key: AgentConsoleKeyState, composerEmpty: boolean) => {
-      const kind = agentConsoleKeyboard.decide(value, key, composerEmpty, "suppress").kind;
-      if (kind === "compose") {
+      const decision = agentConsoleKeyboard.decide(value, key, composerEmpty, "suppress");
+      if (decision.kind === "compose") {
         return "compose" as const;
       }
-      return kind === "dispatch" || kind === "consume";
+      if (decision.kind === "dispatch" && decision.discardComposer === true) {
+        return "consume-reset" as const;
+      }
+      return decision.kind === "dispatch" || decision.kind === "consume";
     }
     : undefined;
   const agentConsoleOwnsKeyboard = agentConsoleWired

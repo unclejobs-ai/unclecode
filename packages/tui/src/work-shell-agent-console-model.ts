@@ -101,6 +101,14 @@ export function selectWorkGraphHudRows(
   const review = snapshot.qualityReview;
   if (!graph || graph.nodes.length === 0) {
     if (!review?.profile || !review.currentStage || review.iteration === undefined) return [];
+    if (review.profile === "minimal") {
+      return [boundRow(
+        `${uiLocale === "ko" ? "품질 엔진" : messages.qualityEngine} · ${localizedQualityProfile(review.profile, uiLocale)}`
+        + ` · ${messages.gate} ${localizedGateDecision(review.latestDecision, uiLocale)}`
+        + (uiLocale === "ko" ? " · /scc 상세" : " · /scc details"),
+        boundWidth(width),
+      )];
+    }
     return [boundRow(
       `${uiLocale === "ko" ? "품질 엔진" : messages.qualityEngine} · ${localizedQualityProfile(review.profile, uiLocale)} · ${localizedQualityStage(review.currentStage, uiLocale)}`
       + ` · PDCA ${localizedPdcaPhase(review.currentStage, uiLocale)}`

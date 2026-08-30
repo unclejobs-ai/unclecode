@@ -268,7 +268,7 @@ test("turn receipt derives every source count from its auditable source refs", (
   assert.equal(output, "▤ 3 sent · ~18.1k tok");
 });
 
-test("WorkShellView renders categorized context proof outside the conversation transcript", async () => {
+test("WorkShellView keeps context proof to one quiet row outside the transcript", async () => {
   const output = await renderView({
     activePanel: { title: "Status", lines: ["Ready"] },
     contextPacket: packet({ id: "crp-b203" }),
@@ -280,7 +280,7 @@ test("WorkShellView renders categorized context proof outside the conversation t
   });
 
   assert.match(output, /▤ 3 sent · ~18\.1k tok/);
-  assert.match(output, /Guidance 1 · Memory 2/);
+  assert.doesNotMatch(output, /Guidance 1 · Memory 2/);
   assert.equal(output.match(/▤/g)?.length, 1);
   assert.doesNotMatch(output, /SUBMITTED crp-b203|turn-session-1-7/);
 });
@@ -1989,7 +1989,7 @@ test("narrow Groups delivery lanes keep Sent and Held glyphs without a DELIVERY 
   assert.ok(lines.some((line) => /^○ Held\b/.test(line)), "Held lane must keep its open glyph");
 });
 
-test("compact Groups stays inside its tiny pane allocation with a wrapped composer", async () => {
+test("compact Groups stays inside its bounded pane allocation with a wrapped composer", async () => {
   const terminalColumns = 52;
   const terminalRows = 40;
   const draft = Array.from(
@@ -2008,7 +2008,11 @@ test("compact Groups stays inside its tiny pane allocation with a wrapped compos
   const workbenchRows = Math.max(1, overlayViewportRows - 1);
   const contentRows = Math.max(1, workbenchRows - 1);
   const groupsPaneAllocation = Math.max(2, contentRows - 1 - 2 - 1);
-  assert.equal(groupsPaneAllocation, 2, "the fixture must exercise the minimum Groups pane allocation");
+  assert.equal(
+    groupsPaneAllocation,
+    4,
+    "the fixture must share the Composer's four-row viewport plus both possible overflow markers",
+  );
 
   const output = await renderView(
     {

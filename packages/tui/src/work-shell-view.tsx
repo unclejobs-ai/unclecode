@@ -59,6 +59,7 @@ import {
   WorkShellAgentConsoleOverlay,
 } from "./work-shell-agent-console-view.js";
 import { renderOmpAuthProviderPicker } from "./work-shell-auth-provider-picker.js";
+import { resolveComposerRenderedRowCount } from "./composer.js";
 import {
   resolveOmpAuthPickerQuery,
   shouldShowOmpAuthPicker,
@@ -469,7 +470,7 @@ export function getWorkShellComposerHintMinHeight(): 1 {
   return resolveWorkShellAttachmentLayout().composerHintMinHeight;
 }
 
-export function getWorkShellAttachmentPlacement(): "after-composer" {
+export function getWorkShellAttachmentPlacement(): "above-composer" {
   return resolveWorkShellAttachmentLayout().attachmentPlacement;
 }
 
@@ -635,7 +636,7 @@ type WorkShellEntryRolePresentationContract = {
 
 type WorkShellAttachmentLayout = {
   readonly composerHintMinHeight: 1;
-  readonly attachmentPlacement: "after-composer";
+  readonly attachmentPlacement: "above-composer";
   readonly attachmentMinHeight: 4;
   readonly attachmentLineColorRole: "user" | "text" | "textMuted";
 };
@@ -1497,20 +1498,14 @@ export function resolveWorkShellComposerAdditionalRows(input: {
   readonly terminalColumns?: number | undefined;
   readonly attachmentCount?: number | undefined;
 }): number {
-  const dockWidth = getWorkShellDockWidth(input.terminalColumns);
-  const contentWidth = Math.max(20, dockWidth - 3);
-  const attachmentBadge = input.attachmentCount === undefined
-    ? ""
-    : ` [${input.attachmentCount}/5]`;
-  // Keystroke path: this runs on every input change to size the transcript
-  // window, so it must not spawn the sync Rust wrap (wrapDisplayText). The
-  // pure-TS wrap keeps composer typing free of process spawns; the row count
-  // it returns only gates layout height, where the fast wrap's greedy
-  // behavior matches the Rust wrap for counting purposes.
-  const composerRows = wrapDisplayTextFast(
-    `${input.inputValue || " "}${attachmentBadge}`,
-    contentWidth,
-  ).length;
+  // Use the same grapheme width, cursor-boundary continuation row, and visible
+  // row cap as Composer itself. The attachment badge is a sibling deliberately
+  // covered by Composer's ten-column reservation; it does not change the
+  // Composer viewport height.
+  const composerRows = resolveComposerRenderedRowCount(
+    input.inputValue,
+    input.terminalColumns,
+  );
   return Math.max(0, composerRows - 1);
 }
 
@@ -2373,17 +2368,20 @@ export function localizeWorkShellPanelChrome(
 
 const WorkShellAttachmentBlock = React.memo(function WorkShellAttachmentBlock(props: {
   readonly attachmentLines: readonly string[];
+  readonly attachmentCount?: number;
   readonly terminalColumns?: number;
   readonly uiLocale?: "en" | "ko";
 }) {
-  if (props.attachmentLines.length === 0 || getWorkShellAttachmentPlacement() !== "after-composer") {
+  if (props.attachmentLines.length === 0 || getWorkShellAttachmentPlacement() !== "above-composer") {
     return null;
   }
 
   return (
     <Box marginTop={1} flexDirection="column">
       <WorkShellSectionDivider
-        label={getWorkShellMessages(props.uiLocale ?? "en").attachments}
+        label={props.attachmentCount === undefined
+          ? getWorkShellMessages(props.uiLocale ?? "en").attachments
+          : `${getWorkShellMessages(props.uiLocale ?? "en").attachments} · ${props.attachmentCount}/5`}
         accentColor={W.textMuted}
         width={getWorkShellDividerWidth({
           ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
@@ -2901,6 +2899,7 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   readonly authLabel: string;
   readonly contextIndicator?: string;
   readonly terminalColumns?: number;
+  readonly terminalRows?: number;
   readonly attachmentCount?: number;
   readonly isBusy?: boolean;
   readonly queuePaused?: boolean;
@@ -2959,7 +2958,6 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
       : dockLayout.accentColorRole === "warning"
         ? W.warning
         : W.borderStrong;
-  const badgeColorProps = dockLayout.attachmentBadgeColorRole === "warning" ? { color: W.warning } : readableTextColorProps(W.textDim);
   const hintColorProps = dockLayout.accentColorRole === "warning"
     ? { color: W.warning }
     : dockLayout.accentColorRole === "user"
@@ -2971,6 +2969,8 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   const activeAgents = props.activeCounts?.agents ?? 0;
   const activeJobs = props.activeCounts?.jobs ?? 0;
   const backgroundBusy = activeAgents > 0 || activeJobs > 0;
+  const minimalHeightDock = props.terminalRows !== undefined && props.terminalRows <= 8;
+  const compactHeightDock = props.terminalRows !== undefined && props.terminalRows <= 14;
   // Same liveness rule the status block owns — a main turn OR live delegated
   // work — reusing its counts so the dock never invents a second definition.
   const busy = props.isBusy === true || backgroundBusy;
@@ -2978,7 +2978,7 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   // hint row: spinner + activity phrase + elapsed, with agent/job counts
   // first when delegated work is live. Idle frames render nothing here, which
   // keeps the braille spinner off the idle screen the tmux smoke pins.
-  const activityLine = busy
+  const activityLine = busy && !minimalHeightDock
     ? truncateForDisplayWidth(
         formatWorkShellStatusActivityFacts({
           activeAgents,
@@ -3000,7 +3000,10 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
     : undefined;
 
   return (
-    <Box marginTop={1} flexDirection="column">
+    <Box
+      marginTop={minimalHeightDock ? 0 : 1}
+      flexDirection="column"
+    >
       {activityLine !== undefined ? (
         <Text>
           <Text color={W.spinner} bold>{`${pickBusySpinnerFrame(activityFrame)} `}</Text>
@@ -3010,23 +3013,20 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
       {/* The turn's trace tail, dim and one truncated row per line, directly
           under the activity row: which tools are running, where the user is
           looking. Idle frames render no feed rows (same gate as the spinner). */}
-      {busy && props.liveToolTraceLines !== undefined
+      {busy && !compactHeightDock && props.liveToolTraceLines !== undefined
         ? props.liveToolTraceLines.map((line, index) => (
           <Text key={`${index}-${line}`} {...readableTextColorProps(W.textDim)}>
             {truncateForDisplayWidth(line, Math.max(12, dockWidth - 2))}
           </Text>
         ))
         : null}
-      {props.composerHint ? (
+      {props.composerHint && !minimalHeightDock ? (
         <Text {...hintColorProps}>{truncateForDisplayWidth(props.composerHint, dockWidth)}</Text>
       ) : null}
       <Text {...readableTextColorProps(W.borderSoft)}>{formatWorkShellComposerDockDivider(dockWidth)}</Text>
       <Box minHeight={1} paddingLeft={1}>
         <Text color={accent} bold>{"› "}</Text>
         {props.composer}
-        {props.attachmentCount !== undefined ? (
-          <Text {...badgeColorProps}> [{props.attachmentCount}/5]</Text>
-        ) : null}
       </Box>
       <Text {...readableTextColorProps(W.borderSoft)}>{dockLayout.footerLine}</Text>
     </Box>
@@ -3266,6 +3266,7 @@ export function WorkShellView(props: {
       authLabel={props.authLabel}
       {...(props.contextIndicator ? { contextIndicator: props.contextIndicator } : {})}
       {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+      {...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {})}
       {...(props.branch ? { branch: props.branch } : {})}
       {...(props.gitFacts ? { gitFacts: props.gitFacts } : {})}
       {...(sessionCost ? { cost: sessionCost } : {})}
@@ -3284,36 +3285,73 @@ export function WorkShellView(props: {
       {...(props.queuedCount !== undefined ? { queuedCount: props.queuedCount } : {})}
     />
   );
+  const attachmentBlock = props.attachmentLines ? (
+    <WorkShellAttachmentBlock
+      attachmentLines={props.attachmentLines}
+      {...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {})}
+      uiLocale={props.uiLocale ?? "en"}
+      {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+    />
+  ) : null;
+
+  const headerBlock = (
+    <WorkShellHeaderBlock
+      provider={props.provider}
+      model={props.model}
+      mode={props.mode}
+      authLabel={props.authLabel}
+      uiLocale={props.uiLocale ?? "en"}
+      {...(props.headerHint ? { headerHint: props.headerHint } : {})}
+      {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+    />
+  );
+  const statusBlock = (
+    <WorkShellStatusBlock
+      model={props.model}
+      reasoningLabel={props.reasoningLabel}
+      mode={props.mode}
+      authLabel={props.authLabel}
+      isBusy={props.isBusy}
+      uiLocale={props.uiLocale ?? "en"}
+      {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
+      {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
+      {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
+      {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+      clock={clock}
+      {...(activeCounts ? { activeCounts } : {})}
+    />
+  );
+  const renderPinnedFrame = (
+    body: React.ReactNode,
+    options: { readonly showHeaderStatus?: boolean } = {},
+  ): React.ReactNode => (
+    <Box
+      flexDirection="column"
+      paddingX={2}
+      {...(props.terminalRows !== undefined ? { height: props.terminalRows } : {})}
+    >
+      <Box
+        flexDirection="column"
+        flexGrow={1}
+        flexShrink={1}
+        minHeight={0}
+        overflow="hidden"
+      >
+        {options.showHeaderStatus === false ? null : headerBlock}
+        {options.showHeaderStatus === false ? null : statusBlock}
+        {body}
+      </Box>
+      <Box flexDirection="column" flexShrink={0}>
+        {composerDock}
+      </Box>
+    </Box>
+  );
 
   // The Agent Console is keyboard-owned rather than panel-title driven, so it
   // takes the frame ahead of every `/`-command overlay once it is open.
   if (agentConsoleOpen && props.agentConsole && props.agentConsoleView) {
-    return (
-      <Box flexDirection="column" paddingX={2}>
-        <WorkShellHeaderBlock
-          provider={props.provider}
-          model={props.model}
-          mode={props.mode}
-          authLabel={props.authLabel}
-          uiLocale={props.uiLocale ?? "en"}
-          {...(props.headerHint ? { headerHint: props.headerHint } : {})}
-          {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
-        />
-        <WorkShellStatusBlock
-          model={props.model}
-          reasoningLabel={props.reasoningLabel}
-          mode={props.mode}
-          authLabel={props.authLabel}
-          isBusy={props.isBusy}
-          uiLocale={props.uiLocale ?? "en"}
-          {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
-          {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
-          {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
-          {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
-          clock={clock}
-          {...(activeCounts ? { activeCounts } : {})}
-        />
-        {composerDock}
+    return renderPinnedFrame(
+      <>
         <WorkShellAgentConsoleOverlay
           snapshot={props.agentConsole}
           view={props.agentConsoleView}
@@ -3330,7 +3368,9 @@ export function WorkShellView(props: {
           width: resolveWorkShellChromeWidth(props.terminalColumns),
           uiLocale: props.uiLocale ?? "en",
         })}
-      </Box>
+        {attachmentBlock}
+      </>,
+      { showHeaderStatus: false },
     );
   }
 
@@ -3356,32 +3396,8 @@ export function WorkShellView(props: {
               : {}),
           }),
         );
-    return (
-      <Box flexDirection="column" paddingX={2}>
-        <WorkShellHeaderBlock
-          provider={props.provider}
-          model={props.model}
-          mode={props.mode}
-          authLabel={props.authLabel}
-          uiLocale={props.uiLocale ?? "en"}
-          {...(props.headerHint ? { headerHint: props.headerHint } : {})}
-          {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
-        />
-        <WorkShellStatusBlock
-          model={props.model}
-          reasoningLabel={props.reasoningLabel}
-          mode={props.mode}
-          authLabel={props.authLabel}
-          isBusy={props.isBusy}
-          uiLocale={props.uiLocale ?? "en"}
-          {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
-          {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
-          {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
-          {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
-          clock={clock}
-          {...(activeCounts ? { activeCounts } : {})}
-        />
-        {composerDock}
+    return renderPinnedFrame(
+      <>
         {renderContextInspectorOverlay({
           packet: props.contextPacket,
           cursorIndex: props.contextInspectorCursor ?? -1,
@@ -3417,7 +3433,8 @@ export function WorkShellView(props: {
             ? { terminalRows: contextDeskTerminalRows }
             : {}),
         })}
-      </Box>
+        {attachmentBlock}
+      </>,
     );
   }
   if (
@@ -3427,32 +3444,8 @@ export function WorkShellView(props: {
     && (shouldRenderCacheTelemetryOverlay || shouldRenderAgentHistoryOverlay)
   ) {
     const overlayWidth = Math.max(32, (props.terminalColumns ?? process.stdout.columns ?? 96) - 4);
-    return (
-      <Box flexDirection="column" paddingX={2}>
-        <WorkShellHeaderBlock
-          provider={props.provider}
-          model={props.model}
-          mode={props.mode}
-          authLabel={props.authLabel}
-          uiLocale={props.uiLocale ?? "en"}
-          {...(props.headerHint ? { headerHint: props.headerHint } : {})}
-          {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
-        />
-        <WorkShellStatusBlock
-          model={props.model}
-          reasoningLabel={props.reasoningLabel}
-          mode={props.mode}
-          authLabel={props.authLabel}
-          isBusy={props.isBusy}
-          uiLocale={props.uiLocale ?? "en"}
-          {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
-          {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
-          {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
-          {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
-          clock={clock}
-          {...(activeCounts ? { activeCounts } : {})}
-        />
-        {composerDock}
+    return renderPinnedFrame(
+      <>
         {shouldRenderCacheTelemetryOverlay
           ? renderCacheTelemetryOverlay({
               snapshot: props.agentConsole,
@@ -3468,35 +3461,13 @@ export function WorkShellView(props: {
               palette: W,
               uiLocale: props.uiLocale ?? "en",
             })}
-      </Box>
+        {attachmentBlock}
+      </>,
     );
   }
 
-  return (
-    <Box flexDirection="column" paddingX={2}>
-      <WorkShellHeaderBlock
-        provider={props.provider}
-        model={props.model}
-        mode={props.mode}
-        authLabel={props.authLabel}
-        uiLocale={props.uiLocale ?? "en"}
-        {...(props.headerHint ? { headerHint: props.headerHint } : {})}
-        {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
-      />
-      <WorkShellStatusBlock
-        model={props.model}
-        reasoningLabel={props.reasoningLabel}
-        mode={props.mode}
-        authLabel={props.authLabel}
-        isBusy={props.isBusy}
-        uiLocale={props.uiLocale ?? "en"}
-        {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
-        {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
-        {...(props.lastTurnDurationMs !== undefined ? { lastTurnDurationMs: props.lastTurnDurationMs } : {})}
-        {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
-        clock={clock}
-        {...(activeCounts ? { activeCounts } : {})}
-      />
+  return renderPinnedFrame(
+    <>
       {props.agentConsole ? (
         <WorkShellAgentConsoleHud
           snapshot={props.agentConsole}
@@ -3523,7 +3494,7 @@ export function WorkShellView(props: {
             ...(props.contextPacketChange ? { change: props.contextPacketChange } : {}),
             width: resolveWorkShellChromeWidth(props.terminalColumns),
             expanded: false,
-            showPrimary: true,
+            showPrimary: false,
             palette: W,
           })}
         </Box>
@@ -3545,14 +3516,7 @@ export function WorkShellView(props: {
           uiLocale={props.uiLocale ?? "en"}
         />
       ) : null}
-      {composerDock}
-      {props.attachmentLines
-        ? <WorkShellAttachmentBlock
-            attachmentLines={props.attachmentLines}
-            uiLocale={props.uiLocale ?? "en"}
-            {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
-          />
-        : null}
+      {attachmentBlock}
       {panelDisplayMode === "overlay" && !shouldSuppressOverlayForInput && shouldRenderContextInspectorOverlay ? (
         renderContextInspectorOverlay({
           packet: props.contextPacket,
@@ -3609,6 +3573,6 @@ export function WorkShellView(props: {
       ) : panelDisplayMode === "bottom" && !shouldSuppressPassivePanel ? (
         panel
       ) : null}
-    </Box>
+    </>,
   );
 }

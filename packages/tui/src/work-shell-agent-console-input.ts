@@ -38,7 +38,12 @@ import type { AgentConsoleControlState, WorkShellComposerMode } from "@unclecode
  * 9. browsing owns `j`/`k`, the arrows, `Tab`, `Enter`, `s`, `x`, `r`, `Esc`.
  */
 export type AgentConsoleInputDecision =
-  | { readonly kind: "dispatch"; readonly action: AgentConsoleInputAction }
+  | {
+      readonly kind: "dispatch";
+      readonly action: AgentConsoleInputAction;
+      /** The dispatched action abandons an agent-addressed child draft. */
+      readonly discardComposer?: true;
+    }
   | { readonly kind: "consume" }
   | { readonly kind: "compose" }
   | { readonly kind: "pass" };

@@ -467,7 +467,8 @@ test("Context Desk yields rows to a wrapped multiline composer", async () => {
       inputValue: nearlyFullLine,
       terminalColumns: 52,
     }),
-    0,
+    1,
+    "the parent row budget must match the live Composer's 42-cell viewport",
   );
   assert.equal(
     resolveWorkShellComposerAdditionalRows({
@@ -476,7 +477,15 @@ test("Context Desk yields rows to a wrapped multiline composer", async () => {
       attachmentCount: 5,
     }),
     1,
-    "an attachment badge that wraps must yield another row to the composer",
+    "the attachment badge uses Composer's reserved columns without changing its height",
+  );
+  assert.equal(
+    resolveWorkShellComposerAdditionalRows({
+      inputValue: "한".repeat(21),
+      terminalColumns: 52,
+    }),
+    1,
+    "an exact CJK cell boundary must reserve the cursor continuation row rendered by Composer",
   );
   const { instance, getFrame } = renderFrames(
     React.createElement(
@@ -509,7 +518,7 @@ test("Context Desk yields rows to a wrapped multiline composer", async () => {
  * keeps the full desk bounded. This preserves the active draft without relying
  * on clipping the desk's proof or controls.
  */
-test("the composer dock is drawn above the Context Desk on a crowded 52x40 frame", async () => {
+test("the composer dock stays in the bottom slot below a crowded Context Desk", async () => {
   const suggestions = Array.from({ length: 6 }, (_, index) => ({
     ...ADVICE,
     id: `advice-${index}`,
@@ -536,9 +545,11 @@ test("the composer dock is drawn above the Context Desk on a crowded 52x40 frame
     const dockAt = dockDividerIndex(rows);
     const deskAt = rows.findIndex((row) => row.includes("Context Desk ·"));
     assert.ok(dockAt >= 0, "the composer dock must survive an advice-heavy desk");
-    assert.ok(
-      dockAt < deskAt,
-      "the composer dock must render before the desk so desk overflow never hides the draft",
+    assert.ok(deskAt < dockAt, "the bounded desk must remain above the stable composer dock");
+    assert.equal(
+      rows.findIndex((row) => row.includes(`${PROMPT_GLYPH} budget check`)),
+      38,
+      "opening Context Desk must not move the prompt from its terminal-bottom slot",
     );
   } finally {
     instance.unmount();

@@ -207,7 +207,7 @@ test("mounted Ctrl+V with injected synthetic PNG captures once and forwards badg
     await waitForCondition(() => getOutput().includes("UncleCode · OpenAI"));
     stdin.write("\u0016");
     await waitForCondition(() => captureCalls === 1, 20_000);
-    await waitForCondition(() => getOutput().includes("[1/5]"));
+    await waitForCondition(() => getOutput().includes("attachments · 1/5"));
 
     stdin.write("\r");
     await waitForCondition(() => submitted.length === 1);
@@ -272,7 +272,7 @@ test("exact /attach clipboard uses injectable capture and does not submit the sl
     stdin.write("/attach clipboard");
     stdin.write("\r");
     await waitForCondition(() => captureCalls === 1);
-    await waitForCondition(() => getOutput().includes("[1/5]"));
+    await waitForCondition(() => getOutput().includes("attachments · 1/5"));
     await new Promise((resolve) => setTimeout(resolve, 100));
 
   } finally {
@@ -334,9 +334,9 @@ test("many clipboard attachments submit once with plural inspection prompt", asy
   try {
     await new Promise((resolve) => setTimeout(resolve, 100));
     stdin.write("\u0016");
-    await waitForCondition(() => getOutput().includes("[1/5]"));
+    await waitForCondition(() => getOutput().includes("attachments · 1/5"));
     stdin.write("\u0016");
-    await waitForCondition(() => getOutput().includes("[2/5]"));
+    await waitForCondition(() => getOutput().includes("attachments · 2/5"));
     stdin.write("\r");
     await waitForCondition(() => submitted.length === 1);
 
@@ -394,13 +394,13 @@ test("busy queue accepts an attachment-only follow-up and clears its badge", asy
     await new Promise((resolve) => setTimeout(resolve, 100));
     stdin.write("\u0016");
     await waitForCondition(() => captureCalls === 1);
-    await waitForCondition(() => getOutput().includes("[1/5]"));
+    await waitForCondition(() => getOutput().includes("attachments · 1/5"));
     clearOutput();
     const renderCountBeforeSubmit = getRenderCount();
     stdin.write("\r");
     await waitForCondition(() => submitted.length === 1);
     await waitForCondition(() => getRenderCount() > renderCountBeforeSubmit);
-    await waitForCondition(() => !getOutput().includes("[1/5]"));
+    await waitForCondition(() => !getOutput().includes("attachments · 1/5"));
     assert.deepEqual(submitted, [{
       line: "Please inspect the attached image.",
       attachments: [attachmentWirePayload(PNG_A)],
@@ -446,20 +446,20 @@ test("attachment pasted during an in-flight submit remains queued for the next t
   try {
     await new Promise((resolve) => setTimeout(resolve, 100));
     stdin.write("\u0016");
-    await waitForCondition(() => getOutput().includes("[1/5]"));
+    await waitForCondition(() => getOutput().includes("attachments · 1/5"));
     stdin.write("\r");
     await waitForCondition(() => submitted.length === 1);
 
     stdin.write("\u0016");
-    await waitForCondition(() => getOutput().includes("[2/5]"));
+    await waitForCondition(() => getOutput().includes("attachments · 2/5"));
     clearOutput();
     releaseFirstSubmit();
-    await waitForCondition(() => getOutput().includes("[1/5]"));
+    await waitForCondition(() => getOutput().includes("attachments · 1/5"));
 
     clearOutput();
     stdin.write("\r");
     await waitForCondition(() => submitted.length === 2);
-    await waitForCondition(() => getOutput().includes("UncleCode · OpenAI") && !getOutput().includes("[1/5]"));
+    await waitForCondition(() => getOutput().includes("UncleCode · OpenAI") && !getOutput().includes("attachments · 1/5"));
     assert.deepEqual(submitted, [
       {
         line: "Please inspect the attached image.",

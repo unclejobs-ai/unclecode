@@ -352,7 +352,7 @@ test("graph-less minimal quality traces remain visible and truthful through resu
   assert.equal(resumed.workGraph, undefined, "minimal turns do not invent a planner DAG");
 
   const hud = selectWorkGraphHudRows(resumed, 100).join("\n");
-  assert.match(hud, /Quality Engine · minimal · promote · PDCA act · Gate proceed/);
+  assert.equal(hud, "Quality Engine · minimal · Gate proceed · /scc details");
   const review = selectQualityReviewLines(resumed, 100).join("\n");
   assert.match(review, /Quality Engine \(SCC\) · minimal · promote/);
   assert.match(review, /Artifact hash · sha256:turn-output/);

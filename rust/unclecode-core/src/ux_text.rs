@@ -70,7 +70,7 @@ pub fn resolve_work_shell_attachment_layout_json(input_json: &str) -> Result<Str
     let line_index = number_field(&input, "lineIndex").unwrap_or(0);
     serde_json::to_string(&json!({
         "composerHintMinHeight": 1,
-        "attachmentPlacement": "after-composer",
+        "attachmentPlacement": "above-composer",
         "attachmentMinHeight": 4,
         "attachmentLineColorRole": resolve_attachment_line_color_role(line_index),
     }))
@@ -1806,19 +1806,19 @@ mod tests {
     fn resolves_work_shell_attachment_layout() {
         assert_eq!(
             resolve_work_shell_attachment_layout_json(r#"{"lineIndex":0}"#).unwrap(),
-            r#"{"attachmentLineColorRole":"user","attachmentMinHeight":4,"attachmentPlacement":"after-composer","composerHintMinHeight":1}"#
+            r#"{"attachmentLineColorRole":"user","attachmentMinHeight":4,"attachmentPlacement":"above-composer","composerHintMinHeight":1}"#
         );
         assert_eq!(
             resolve_work_shell_attachment_layout_json(r#"{"lineIndex":1}"#).unwrap(),
-            r#"{"attachmentLineColorRole":"text","attachmentMinHeight":4,"attachmentPlacement":"after-composer","composerHintMinHeight":1}"#
+            r#"{"attachmentLineColorRole":"text","attachmentMinHeight":4,"attachmentPlacement":"above-composer","composerHintMinHeight":1}"#
         );
         assert_eq!(
             resolve_work_shell_attachment_layout_json(r#"{"lineIndex":2}"#).unwrap(),
-            r#"{"attachmentLineColorRole":"textMuted","attachmentMinHeight":4,"attachmentPlacement":"after-composer","composerHintMinHeight":1}"#
+            r#"{"attachmentLineColorRole":"textMuted","attachmentMinHeight":4,"attachmentPlacement":"above-composer","composerHintMinHeight":1}"#
         );
         assert_eq!(
             resolve_work_shell_attachment_layout_json("").unwrap(),
-            r#"{"attachmentLineColorRole":"user","attachmentMinHeight":4,"attachmentPlacement":"after-composer","composerHintMinHeight":1}"#
+            r#"{"attachmentLineColorRole":"user","attachmentMinHeight":4,"attachmentPlacement":"above-composer","composerHintMinHeight":1}"#
         );
     }
 

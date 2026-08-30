@@ -581,6 +581,10 @@ export function WorkShellPane<
             setLastClipboardError(formatClipboardCaptureFriendlyError(status, reason));
           }}
           terminalColumns={terminalColumns}
+          cursorAnchor={{
+            x: 5,
+            bottom: Math.max(0, terminalRows - 2),
+          }}
           textColor={getWorkShellComposerTextColor()}
           placeholder={getWorkShellMessages(uiLocale ?? "en").composerPlaceholder}
           {...(isSecureApiKeyEntry ? { mask: "•" } : {})}

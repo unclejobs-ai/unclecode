@@ -931,7 +931,7 @@ async function mountDeskWithParkedAttachment(rendered) {
     30_000,
   );
   await waitForComposerCondition(
-    () => rendered.getFrame().includes("[1/5]"),
+    () => rendered.getFrame().includes("attachments · 1/5"),
     "the parked clipboard attachment badge",
     30_000,
   );

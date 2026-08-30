@@ -391,7 +391,8 @@ function renderWithInput(element) {
   const stdout = createWritableOutput();
   let output = "";
   stdout.on("data", (chunk) => {
-    output += chunk.toString();
+    const rendered = chunk.toString();
+    if (rendered.includes("\n")) output = rendered;
   });
   const instance = render(element, {
     stdin,
@@ -1053,6 +1054,32 @@ test("Alt+A out of the steer composer tears the steer draft down with the mode",
   }
 });
 
+test("Alt+A and Enter in one terminal chunk cannot submit an abandoned steer draft", async () => {
+  const { engine, calls, getState } = createAgentConsoleEngine();
+  const { stdin, instance, getOutput } = renderConsolePane(engine);
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    stdin.write("\u001ba");
+    await waitForCondition(() => getState().agentConsoleView.open);
+    stdin.write("s");
+    await waitForCondition(() => getState().composerMode === "agent-steer");
+    stdin.write("must stay with the agent");
+    await waitForCondition(() => /› must stay with the agent/.test(lastFrame(getOutput())));
+
+    stdin.write("\u001ba\r");
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    assert.equal(getState().composerMode, "default");
+    assert.equal(getState().agentConsoleView.open, false);
+    assert.deepEqual(calls.submitted, [], "the same-chunk Enter must not reach the provider");
+    assert.deepEqual(calls.steer, [], "the abandoned draft must not reach the agent either");
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
 test("an empty steer with a pending attachment stays empty and keeps the attachment queued", async () => {
   const { engine, calls, getState } = createAgentConsoleEngine();
   let captureCalls = 0;
@@ -1066,7 +1093,7 @@ test("an empty steer with a pending attachment stays empty and keeps the attachm
   try {
     await new Promise((resolve) => setTimeout(resolve, 150));
     stdin.write("\u0016");
-    await waitForCondition(() => captureCalls === 1 && getOutput().includes("[1/5]"));
+    await waitForCondition(() => captureCalls === 1 && /attachments · 1\/5/i.test(getOutput()));
 
     stdin.write("\u001ba");
     await waitForCondition(() => getState().agentConsoleView.open);
@@ -1093,7 +1120,11 @@ test("an empty steer with a pending attachment stays empty and keeps the attachm
     await waitForCondition(
       () => !getState().agentConsoleView.open && !/▤ Agent Console/.test(lastFrame(getOutput())),
     );
-    assert.match(lastFrame(getOutput()), /\[1\/5\]/, "the attachment badge survives the steer");
+    assert.match(
+      lastFrame(getOutput()),
+      /attachments · 1\/5/i,
+      "the attachment count survives the steer outside the input row",
+    );
     assert.equal(getState().composerMode, "default", "normal turn starts outside steer mode");
 
     stdin.write("\r");

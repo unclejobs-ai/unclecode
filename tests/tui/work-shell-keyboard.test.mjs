@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 
-import { render } from "ink";
+import { Box, render, Text } from "ink";
 import React from "react";
 import CursorContext from "../../node_modules/ink/build/components/CursorContext.js";
 import { resolveQueueOverlayKeyAction } from "../../packages/tui/src/work-shell-hooks.ts";
@@ -187,6 +187,7 @@ function renderWithInput(element) {
   });
   return {
     stdin,
+    stdout,
     instance,
     getOutput: () => output,
     clearOutput: () => {
@@ -272,8 +273,11 @@ function createWorkShellPaneEngine(overrides = {}) {
 }
 
 function renderKeyboardWorkPane(engine) {
-  return renderWithInput(
-    React.createElement(WorkShellPane, {
+  return renderWithInput(createKeyboardWorkPaneElement(engine));
+}
+
+function createKeyboardWorkPaneElement(engine) {
+  return React.createElement(WorkShellPane, {
       provider: "OpenAI",
       model: "gpt-5.4",
       mode: "yolo",
@@ -297,8 +301,7 @@ function renderKeyboardWorkPane(engine) {
         }),
       getReasoningLabel: () => "default medium",
       isReasoningSupported: () => true,
-    }),
-  );
+    });
 }
 
 function WorkShellInputControllerHarness(props) {
@@ -1022,5 +1025,77 @@ test("Composer publishes the current Hangul cursor position in the same render",
     finalPosition,
     { x: 2, y: 0 },
     "one double-width Hangul grapheme should publish the terminal cursor in column 2",
+  );
+});
+
+test("anchored Composer never publishes the previous prompt row after surrounding layout moves", async () => {
+  const positions = [];
+  const cursorContext = {
+    setCursorPosition(position) {
+      positions.push(position);
+    },
+  };
+  const composerProps = {
+    value: "한",
+    onChange: () => {},
+    onSubmit: () => {},
+    terminalColumns: 20,
+    cursorAnchor: { x: 0, bottom: 3 },
+  };
+  const renderComposer = (prefix) => React.createElement(
+    CursorContext.Provider,
+    { value: cursorContext },
+    React.createElement(
+      Box,
+      { flexDirection: "column" },
+      React.createElement(Text, null, prefix),
+      React.createElement(Composer, composerProps),
+    ),
+  );
+  const { instance } = renderWithInput(renderComposer("above"));
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  positions.length = 0;
+  instance.rerender(renderComposer("above\nnew transcript row\nanother row"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  instance.unmount();
+  instance.cleanup();
+
+  const visiblePositions = positions.filter((position) => position !== undefined);
+  assert.deepEqual(
+    visiblePositions,
+    [{ x: 2, y: 3 }],
+    "an IME candidate must never be anchored to the composer's stale pre-layout row",
+  );
+});
+
+test("Work pane publishes only the resized bottom-dock cursor row", async () => {
+  const positions = [];
+  const cursorContext = {
+    setCursorPosition(position) {
+      positions.push(position);
+    },
+  };
+  const { engine } = createWorkShellPaneEngine();
+  const { instance, stdout } = renderWithInput(React.createElement(
+    CursorContext.Provider,
+    { value: cursorContext },
+    createKeyboardWorkPaneElement(engine),
+  ));
+
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  positions.length = 0;
+  stdout.rows = 30;
+  stdout.emit("resize");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  instance.unmount();
+  instance.cleanup();
+
+  const visiblePositions = positions.filter((position) => position !== undefined);
+  assert.equal(visiblePositions.at(-1)?.y, 28, "the prompt remains directly above its footer");
+  assert.equal(
+    visiblePositions.some((position) => position.y === 38),
+    false,
+    "a vertical split resize must not publish the pre-resize IME row",
   );
 });

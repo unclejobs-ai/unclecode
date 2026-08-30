@@ -310,6 +310,19 @@ export function resolveComposerTerminalCursor(input: {
   };
 }
 
+function resolveAnchoredComposerOrigin(
+  anchor: { readonly x: number; readonly bottom: number },
+  viewport: ComposerViewportLayout,
+): { readonly x: number; readonly y: number } {
+  const renderedRows = viewport.lines.length
+    + (viewport.hiddenAbove > 0 ? 1 : 0)
+    + (viewport.hiddenBelow > 0 ? 1 : 0);
+  return {
+    x: anchor.x,
+    y: Math.max(0, anchor.bottom - renderedRows + 1),
+  };
+}
+
 function padComposerLine(value: string, width: number): string {
   const padding = Math.max(0, width - getDisplayWidth(value));
   return `${value}${" ".repeat(padding)}`;
@@ -330,6 +343,30 @@ export function formatComposerOverflowLine(
 export function resolveComposerVisibleWidth(terminalColumns?: number): number {
   const columns = terminalColumns ?? process.stdout.columns ?? COMPOSER_DEFAULT_VISIBLE_WIDTH + 10;
   return Math.max(12, columns - 10);
+}
+
+/**
+ * Measure the physical rows the Composer can paint for a draft. This shares
+ * the exact grapheme/cursor-boundary algorithm used by the live component, so
+ * a parent never budgets one row while CJK input paints two. The live viewport
+ * can show four value rows plus an overflow marker on either side.
+ */
+export function resolveComposerRenderedRowCount(
+  value: string,
+  terminalColumns?: number,
+): number {
+  const viewport = layoutComposerViewport({
+    value: value || " ",
+    cursorOffset: value.length,
+    width: resolveComposerVisibleWidth(terminalColumns),
+    maxRows: COMPOSER_MAX_VISIBLE_ROWS,
+  });
+  const overflows = viewport.hiddenAbove > 0 || viewport.hiddenBelow > 0;
+  // The parent does not own Composer's movable cursor. Once the complete
+  // draft is taller than the four-row value viewport, reserve both possible
+  // overflow markers: a cursor in the middle can paint one above and one
+  // below even though measuring at the end only observes the upper marker.
+  return viewport.lines.length + (overflows ? 2 : 0);
 }
 
 /**
@@ -398,6 +435,15 @@ export function Composer(props: {
   readonly mask?: string | undefined;
   readonly terminalColumns?: number | undefined;
   /**
+   * Stable screen-space anchor for the last rendered composer row. The work
+   * shell pins its dock to the terminal bottom and supplies this so transcript
+   * growth and split-pane reflow cannot publish a one-frame-old IME cursor.
+   */
+  readonly cursorAnchor?: {
+    readonly x: number;
+    readonly bottom: number;
+  } | undefined;
+  /**
    * Explicit text color for typed input. Critical for dark terminals: without
    * it the Composer inherits terminal default fg and typed text vanishes on
    * black/dark backgrounds. Pass a high-contrast palette color (e.g. W.text).
@@ -450,14 +496,15 @@ export function Composer(props: {
    * Composer asks the console's own resolver instead of carrying a second
    * copy of the key map. Returning true keeps the keystroke out of the draft;
    * `compose` reserves the keystroke for this composer ahead of stale panel
-   * suppression flags without swallowing the text.
+   * suppression flags without swallowing the text. `consume-reset` also
+   * discards a child-owned steer draft in the same terminal event.
    */
   readonly suppressAgentConsoleKey?:
     | ((
       input: string,
       key: AgentConsoleKeyState,
       composerEmpty: boolean,
-    ) => boolean | "compose")
+    ) => boolean | "compose" | "consume-reset")
     | undefined;
   /**
    * Work shell action keys (empty-screen starter prompts, decision replies,
@@ -536,6 +583,7 @@ export function Composer(props: {
     [],
   );
   useEffect(() => {
+    if (props.cursorAnchor) return;
     const nextOrigin = getComposerAbsolutePosition(composerRef.current);
     setTerminalOrigin((current) => (
       current?.x === nextOrigin?.x && current?.y === nextOrigin?.y ? current : nextOrigin
@@ -596,12 +644,12 @@ export function Composer(props: {
       key,
       isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current),
     );
-    if (agentConsoleKeyOwnership === true) {
+    if (agentConsoleKeyOwnership === true || agentConsoleKeyOwnership === "consume-reset") {
       // Esc and Alt+A can tear down an agent-steer composer before React has
       // painted the parent's cleared value. Discard the child-owned draft in
       // the same terminal input event so a following Enter can never submit
       // the abandoned agent message as an ordinary provider prompt.
-      if (key.escape || (key.meta && input.toLowerCase() === "a")) {
+      if (key.escape || agentConsoleKeyOwnership === "consume-reset") {
         resetLocalValueAfterSubmit();
       }
       return;
@@ -768,8 +816,11 @@ export function Composer(props: {
     width: visibleWidth,
     maxRows: COMPOSER_MAX_VISIBLE_ROWS,
   });
+  const cursorOrigin = props.cursorAnchor
+    ? resolveAnchoredComposerOrigin(props.cursorAnchor, viewport)
+    : terminalOrigin;
   const terminalCursor = resolveComposerTerminalCursor({
-    origin: terminalOrigin,
+    origin: cursorOrigin,
     viewport,
     visible: props.cursorVisible ?? true,
   });
