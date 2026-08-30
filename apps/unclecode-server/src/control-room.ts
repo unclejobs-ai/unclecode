@@ -420,16 +420,26 @@ function isFreshHashBoundAttestation(entry: Readonly<Record<string, unknown>> | 
 }
 
 function isFreshIndependentCritic(entry: Readonly<Record<string, unknown>> | undefined): boolean {
-  return entry?.event === "gate" && entry.stage === "critic" && isFreshHashBoundAttestation(entry);
+  return entry?.event === "gate"
+    && entry.stage === "critic"
+    && isFreshHashBoundAttestation(entry);
 }
 
+/**
+ * Terminal completion is authoritative for the outcome, while its attached
+ * fresh critic attestation is authoritative for verification provenance. The
+ * fallback preserves older persisted sessions whose completion entry predated
+ * terminal provenance fields.
+ */
 function terminalQualityAggregate(
   history: readonly Readonly<Record<string, unknown>>[],
 ): Readonly<Record<string, unknown>> | undefined {
   const terminalIndex = history.findLastIndex((entry) => entry.event === "completed");
   if (terminalIndex < 0) {
     const latest = history.at(-1);
-    return latest ? { ...latest, authoritativeCriticVerification: isFreshIndependentCritic(latest) } : undefined;
+    return latest
+      ? { ...latest, authoritativeCriticVerification: isFreshIndependentCritic(latest) }
+      : undefined;
   }
   const terminal = history[terminalIndex];
   if (!terminal) return undefined;
@@ -438,7 +448,10 @@ function terminalQualityAggregate(
     for (let index = terminalIndex - 1; index >= 0; index -= 1) {
       const candidate = history[index];
       if (candidate?.event === "refine" || candidate?.event === "pivot") break;
-      if (candidate?.iteration === terminal.iteration && isFreshIndependentCritic(candidate)) {
+      if (
+        candidate?.iteration === terminal.iteration
+        && isFreshIndependentCritic(candidate)
+      ) {
         review = candidate;
         break;
       }
@@ -446,24 +459,33 @@ function terminalQualityAggregate(
   }
   const terminalArtifactRefs = stringList(terminal, "artifactRefs");
   const reviewArtifactRefs = review ? stringList(review, "artifactRefs") : [];
-  const artifactRefs = terminalArtifactRefs.length > 0
-    ? terminalArtifactRefs
-    : reviewArtifactRefs.length > 0 ? reviewArtifactRefs : review ? stringList(review, "evidenceRefs") : [];
+  const artifactRefs = reviewArtifactRefs.length > 0
+    ? reviewArtifactRefs
+    : review
+      ? stringList(review, "evidenceRefs")
+      : terminalArtifactRefs;
+  const provenance = review ?? terminal;
   return {
     ...terminal,
     artifactRefs,
-    ...(typeof terminal.artifactHash === "string" ? { artifactHash: terminal.artifactHash }
-      : typeof review?.artifactHash === "string" ? { artifactHash: review.artifactHash } : {}),
-    ...(typeof terminal.reviewedArtifactHash === "string" ? { reviewedArtifactHash: terminal.reviewedArtifactHash }
-      : typeof review?.reviewedArtifactHash === "string" ? { reviewedArtifactHash: review.reviewedArtifactHash } : {}),
-    ...(typeof terminal.currentArtifactHash === "string" ? { currentArtifactHash: terminal.currentArtifactHash }
-      : typeof review?.currentArtifactHash === "string" ? { currentArtifactHash: review.currentArtifactHash } : {}),
-    ...(typeof terminal.reviewerRunId === "string" ? { reviewerRunId: terminal.reviewerRunId }
-      : typeof review?.reviewerRunId === "string" ? { reviewerRunId: review.reviewerRunId } : {}),
+    ...(typeof provenance.artifactHash === "string"
+      ? { artifactHash: provenance.artifactHash }
+      : {}),
+    ...(typeof provenance.reviewedArtifactHash === "string"
+      ? { reviewedArtifactHash: provenance.reviewedArtifactHash }
+      : {}),
+    ...(typeof provenance.currentArtifactHash === "string"
+      ? { currentArtifactHash: provenance.currentArtifactHash }
+      : {}),
+    ...(typeof provenance.reviewerRunId === "string"
+      ? { reviewerRunId: provenance.reviewerRunId }
+      : {}),
     authoritativeCriticVerification: terminal.decision === "proceed"
-      && terminal.stale !== true && isFreshHashBoundAttestation(review),
+      && terminal.stale !== true
+      && isFreshHashBoundAttestation(review),
     independentVerification: terminal.decision === "proceed"
-      && terminal.stale !== true && isFreshHashBoundAttestation(review),
+      && terminal.stale !== true
+      && isFreshHashBoundAttestation(review),
   };
 }
 
@@ -496,7 +518,6 @@ function projectRun(session: RuntimeSessionSource): ControlRoomRun {
   const aggregate = terminalQualityAggregate(history);
   const stage = stringField(aggregate, "stage", stringField(qualityRecord, "currentStage", stringField(graphRecord, "currentStage", "unknown")));
   const gate = stringField(aggregate, "decision", stringField(qualityRecord, "latestDecision", stringField(graphRecord, "gateStatus", "unproven")));
-  const pendingDecision = pendingDecisionFrom(consoleRecord);
   const latest = aggregate ?? history.at(-1);
   const failures = Array.isArray(latest?.failures)
     ? latest.failures.filter((value): value is string => typeof value === "string").slice(0, 32).map(value => redactText(value, 320))
@@ -506,6 +527,7 @@ function projectRun(session: RuntimeSessionSource): ControlRoomRun {
     && booleanField(currentReview, "authoritativeCriticVerification");
   const profile = stringField(qualityRecord, "profile", stringField(graphRecord, "qualityProfile", "unknown"));
   const metadata = isRecord(session.metadata) ? session.metadata : {};
+  const pendingDecision = pendingDecisionFrom(consoleRecord);
   const attentionReason = session.state === "requires_action"
     ? pendingDecision?.kind === "security-approval"
       ? session.locale === "ko" ? "보안 승인이 필요합니다." : "Security approval required"
@@ -521,7 +543,6 @@ function projectRun(session: RuntimeSessionSource): ControlRoomRun {
   const evolve = evolutionFrom(consoleRecord);
 
   return {
-    ...(pendingDecision ? { pendingDecision } : {}),
     id: redactText(session.sessionId, 180),
     project: projectName(session.projectPath),
     locale: session.locale,
@@ -531,6 +552,7 @@ function projectRun(session: RuntimeSessionSource): ControlRoomRun {
     model: stringField(metadata, "model", "unknown"),
     provider: stringField(metadata, "provider", "unknown"),
     ...(attentionReason ? { attentionReason } : {}),
+    ...(pendingDecision ? { pendingDecision } : {}),
     quality: {
       recorded: qualityRecorded,
       provenance: qualityRecorded ? "Quality Engine (SCC)" : "not-recorded",

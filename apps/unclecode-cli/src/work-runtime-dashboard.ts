@@ -41,6 +41,7 @@ import {
   type WorkShellPromptManifestResolver,
 } from "@unclecode/orchestrator";
 import type { WorkShellInteractionBridge } from "@unclecode/orchestrator";
+import type { WorkShellControlEngine } from "@unclecode/server";
 import type {
   OmpAuthCatalogClient,
   ProviderInputAttachment,
@@ -140,6 +141,8 @@ export type StartReplOptions = {
   refreshCondensedHistory?: (() => Promise<void>) | undefined;
   memoryLineage?: MemoryLineageAdapter | undefined;
   promoteScopedMemory?: ((input: PromoteScopedMemoryInput) => Promise<{ memoryId: string }>) | undefined;
+  /** Same-process attachment for the loopback web control room. */
+  onWorkShellEngineReady?: ((engine: WorkShellControlEngine & { getSessionId(): string }) => void) | undefined;
 };
 
 type StartReplTraceEvent =
@@ -182,8 +185,12 @@ export function createManagedDashboardInput(
     userHomeDir?: string;
   },
 ) {
+  const onEngineReady = session.options.onWorkShellEngineReady
+    ? oncePerEngine(session.options.onWorkShellEngineReady)
+    : undefined;
   return {
     homeState: session.options.homeState,
+    ...(onEngineReady ? { onEngineReady } : {}),
     ...(session.options.refreshHomeState
       ? { refreshHomeState: session.options.refreshHomeState }
       : {}),
@@ -353,5 +360,14 @@ export function createManagedDashboardInput(
     getReasoningLabel: describeReasoning,
     isReasoningSupported: (reasoning: WorkShellReasoningConfig) =>
       reasoning.support.status === "supported",
+  };
+}
+
+function oncePerEngine<T extends object>(callback: (engine: T) => void): (engine: T) => void {
+  const attached = new WeakSet<T>();
+  return (engine) => {
+    if (attached.has(engine)) return;
+    callback(engine);
+    attached.add(engine);
   };
 }

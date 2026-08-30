@@ -1193,3 +1193,94 @@ test("managed dashboard preserves the resumed submitted receipt identity", () =>
   const pane = embeddedPane.props.buildPane({ onExit() {} });
   assert.equal(pane.ompAuthCatalog, ompAuthCatalog);
 });
+
+test("managed dashboard publishes one attachment callback per runtime engine", () => {
+  const attached = [];
+  const managed = createManagedDashboardInput({
+    agent: {},
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "build",
+      authLabel: "api-key-env",
+      reasoning: {
+        effort: "high",
+        source: "mode-default",
+        support: {
+          status: "supported",
+          defaultEffort: "medium",
+          supportedEfforts: ["low", "medium", "high"],
+        },
+      },
+      cwd: "/repo",
+      modelWindow: 128_000,
+      contextSummaryLines: [],
+      homeState: {},
+      onWorkShellEngineReady(engine) {
+        attached.push(engine);
+      },
+    },
+  }, {
+    resolveWorkShellInlineCommand: async () => ({ lines: [], failed: false }),
+  });
+  const sharedEngine = {
+    getState() { return { model: "gpt-5.4" }; },
+  };
+  const dashboard = createManagedWorkShellDashboardProps({
+    ...managed,
+    paneEngine: sharedEngine,
+  });
+
+  dashboard.renderWorkPane({ openSessions() {}, syncHomeState() {} })
+    .props.buildPane({ onExit() {} });
+  dashboard.renderWorkPane({ openSessions() {}, syncHomeState() {} })
+    .props.buildPane({ onExit() {} });
+
+  assert.deepEqual(attached, [sharedEngine]);
+});
+
+test("managed dashboard retries an engine attachment callback that throws", () => {
+  let attempts = 0;
+  const managed = createManagedDashboardInput({
+    agent: {},
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "build",
+      authLabel: "api-key-env",
+      reasoning: {
+        effort: "high",
+        source: "mode-default",
+        support: {
+          status: "supported",
+          defaultEffort: "medium",
+          supportedEfforts: ["low", "medium", "high"],
+        },
+      },
+      cwd: "/repo",
+      modelWindow: 128_000,
+      contextSummaryLines: [],
+      homeState: {},
+      onWorkShellEngineReady() {
+        attempts += 1;
+        if (attempts === 1) throw new Error("attach failed");
+      },
+    },
+  }, {
+    resolveWorkShellInlineCommand: async () => ({ lines: [], failed: false }),
+  });
+  const sharedEngine = {
+    getState() { return { model: "gpt-5.4" }; },
+  };
+  const dashboard = createManagedWorkShellDashboardProps({
+    ...managed,
+    paneEngine: sharedEngine,
+  });
+  const build = () => dashboard.renderWorkPane({ openSessions() {}, syncHomeState() {} })
+    .props.buildPane({ onExit() {} });
+
+  assert.throws(build, /attach failed/);
+  assert.doesNotThrow(build);
+  assert.doesNotThrow(build);
+  assert.equal(attempts, 2);
+});

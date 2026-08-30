@@ -311,6 +311,63 @@ test("control-room never reuses critic provenance from an earlier quality iterat
   }]);
 });
 
+test("terminal projection never labels conflicting completion artifacts as critic-verified", () => {
+  const source = {
+    generatedAt: 105,
+    sessions: [{
+      sessionId: "session-conflicting-completion",
+      projectPath: "/workspace/project",
+      locale: "en",
+      state: "completed",
+      revision: 10,
+      agentConsole: {
+        qualityReview: {
+          profile: "deep",
+          currentStage: "promote",
+          iteration: 1,
+          latestDecision: "proceed",
+          history: [{
+            event: "gate",
+            stage: "critic",
+            decision: "proceed",
+            iteration: 1,
+            evidenceRefs: ["critic-bound.json"],
+            artifactRefs: [],
+            artifactHash: "sha256:critic-run",
+            reviewedArtifactHash: "sha256:reviewed-workspace",
+            currentArtifactHash: "sha256:reviewed-workspace",
+            reviewerRunId: "independent-critic",
+            independentVerification: true,
+            stale: false,
+          }, {
+            event: "completed",
+            stage: "promote",
+            decision: "proceed",
+            iteration: 1,
+            artifactRefs: ["unreviewed-promote-output.json"],
+            artifactHash: "sha256:conflicting-completion",
+            reviewedArtifactHash: "sha256:conflicting-review",
+            currentArtifactHash: "sha256:conflicting-current",
+            reviewerRunId: "worker-self-review",
+            independentVerification: false,
+            stale: false,
+          }],
+        },
+      },
+    }],
+  };
+
+  const first = createControlRoomProjection(source);
+  const replay = createControlRoomProjection(source);
+  assert.deepEqual(replay, first, "projection replay must be idempotent");
+  assert.equal(first.runs[0].quality.independentVerification, true);
+  assert.deepEqual(first.runs[0].artifacts, [{
+    ref: "critic-bound.json",
+    stale: false,
+    verified: true,
+  }]);
+});
+
 test("bounded event journal replays strictly after cursor and detects expiry", () => {
   const journal = new BoundedEventJournal({ capacity: 3 });
   const one = journal.publish("session-1", "run.updated", { revision: 1 });
