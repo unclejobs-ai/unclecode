@@ -203,6 +203,26 @@ function unsupportedOwnershipFailures(traces) {
     .filter((failure) => failure === "UNSUPPORTED_OWNERSHIP_EVIDENCE");
 }
 
+function commitQualityWorkspaceBaseline(workspace) {
+  execFileSync("git", ["init", "--initial-branch=main", workspace], { stdio: "ignore" });
+  execFileSync("git", ["-C", workspace, "add", "."], { stdio: "ignore" });
+  execFileSync(
+    "git",
+    [
+      "-C",
+      workspace,
+      "-c",
+      "user.name=Quality Test",
+      "-c",
+      "user.email=quality@example.test",
+      "commit",
+      "-m",
+      "baseline",
+    ],
+    { stdio: "ignore" },
+  );
+}
+
 test("balanced-prewalk uses direct frontier for pattern setting and commodity only for followers", () => {
   const directRoute = { provider: "openai", model: "gpt-5.4" };
   const commodityRoute = { provider: "omp", model: "kimi-code/k3" };
@@ -359,6 +379,190 @@ test("simple English and Korean turns run the minimal SCC lifecycle without plan
     }
     assert.equal(traces.some((event) => event.type === "work.proposed"), false, "minimal quality must not invent a DAG");
     assert.throws(() => readdirSync(path.join(workspace, ".data")));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("an unchanged tracked baseline symlink does not block an ordinary minimal turn", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-minimal-baseline-link-"));
+  const traces = [];
+  try {
+    mkdirSync(path.join(workspace, "skills"), { recursive: true });
+    mkdirSync(path.join(workspace, "shared-skill"), { recursive: true });
+    writeFileSync(path.join(workspace, ".gitignore"), ".unclecode/\n");
+    writeFileSync(path.join(workspace, "shared-skill", "SKILL.md"), "baseline skill\n");
+    symlinkSync("../shared-skill", path.join(workspace, "skills", "shared"), "dir");
+    commitQualityWorkspaceBaseline(workspace);
+
+    const host = new PluginHost();
+    registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+    const agent = new orchestrator.WorkAgent({
+      directAgent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn() {
+          return { text: "ordinary answer" };
+        },
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    const result = await agent.runTurn("hello");
+
+    assert.equal(result.text, "ordinary answer");
+    assert.equal(result.qualityStatus, "proceed");
+    assert.deepEqual(unsupportedOwnershipFailures(traces), []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a new symlink created by an ordinary minimal turn remains unsupported", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-minimal-new-link-"));
+  const traces = [];
+  try {
+    const host = new PluginHost();
+    registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+    const agent = new orchestrator.WorkAgent({
+      directAgent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn() {
+          writeFileSync(path.join(workspace, "target.txt"), "target\n");
+          symlinkSync("target.txt", path.join(workspace, "created-link"));
+          return { text: "unsafe answer" };
+        },
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    const result = await agent.runTurn("hello");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /unsupported owned workspace evidence/i);
+    assert.deepEqual(unsupportedOwnershipFailures(traces), ["UNSUPPORTED_OWNERSHIP_EVIDENCE"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("an unchanged untracked baseline symlink remains unsupported", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-minimal-untracked-link-"));
+  const traces = [];
+  try {
+    writeFileSync(path.join(workspace, "target.txt"), "target\n");
+    symlinkSync("target.txt", path.join(workspace, "untracked-link"));
+    const host = new PluginHost();
+    registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+    const agent = new orchestrator.WorkAgent({
+      directAgent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn() {
+          return { text: "unsafe answer" };
+        },
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    const result = await agent.runTurn("hello");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /unsupported owned workspace evidence/i);
+    assert.deepEqual(unsupportedOwnershipFailures(traces), ["UNSUPPORTED_OWNERSHIP_EVIDENCE"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a tracked baseline symlink changed by an ordinary minimal turn remains unsupported", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-minimal-changed-link-"));
+  const traces = [];
+  try {
+    mkdirSync(path.join(workspace, "skills"), { recursive: true });
+    mkdirSync(path.join(workspace, "target-a"), { recursive: true });
+    mkdirSync(path.join(workspace, "target-b"), { recursive: true });
+    writeFileSync(path.join(workspace, ".gitignore"), ".unclecode/\n");
+    writeFileSync(path.join(workspace, "target-a", "SKILL.md"), "target a\n");
+    writeFileSync(path.join(workspace, "target-b", "SKILL.md"), "target b\n");
+    symlinkSync("../target-a", path.join(workspace, "skills", "shared"), "dir");
+    commitQualityWorkspaceBaseline(workspace);
+
+    const host = new PluginHost();
+    registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+    const agent = new orchestrator.WorkAgent({
+      directAgent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn() {
+          unlinkSync(path.join(workspace, "skills", "shared"));
+          symlinkSync("../target-b", path.join(workspace, "skills", "shared"), "dir");
+          return { text: "unsafe answer" };
+        },
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+      directRoute: { provider: "openai", model: "gpt-5.4" },
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    const result = await agent.runTurn("hello");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /unsupported owned workspace evidence/i);
+    assert.deepEqual(unsupportedOwnershipFailures(traces), ["UNSUPPORTED_OWNERSHIP_EVIDENCE"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("an unchanged tracked symlink beneath declared ownership remains unsupported", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-owned-baseline-link-"));
+  const traces = [];
+  try {
+    mkdirSync(path.join(workspace, "src", "runtime"), { recursive: true });
+    mkdirSync(path.join(workspace, "internal-target"), { recursive: true });
+    writeFileSync(path.join(workspace, ".gitignore"), ".unclecode/\n");
+    writeFileSync(path.join(workspace, "internal-target", "baseline.ts"), "baseline\n");
+    symlinkSync(
+      "../../internal-target",
+      path.join(workspace, "src", "runtime", "nested"),
+      "dir",
+    );
+    commitQualityWorkspaceBaseline(workspace);
+    const agent = createDirectoryQualityAgent({ workspace, traces });
+
+    const result = await agent.runTurn("refactor src/runtime.ts and src/nested/tests.ts");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.match(result.text, /unsupported owned workspace evidence/i);
+    assert.deepEqual(unsupportedOwnershipFailures(traces), ["UNSUPPORTED_OWNERSHIP_EVIDENCE"]);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

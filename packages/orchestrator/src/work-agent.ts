@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 
 import {
@@ -67,6 +68,7 @@ import {
   type QualityRouteObservation,
   type QualityWorkspaceEntry,
   type QualityWorkspaceInventory,
+  type QualityWorkspaceInventoryManifest,
 } from "./quality-runtime.js";
 import type { CreatorEvolutionService } from "./evolution-runtime.js";
 import {
@@ -636,6 +638,78 @@ function staleDirectWorkspaceDecision(): PluginDecisionAggregate {
       failures: ["DIRECT_WORKSPACE_MANIFEST_CHANGED_DURING_COMPLETION"],
     }],
     failures: ["DIRECT_WORKSPACE_MANIFEST_CHANGED_DURING_COMPLETION"],
+  };
+}
+
+function trackedWorkspaceSymlinks(
+  workspaceRoot: string,
+  manifest: QualityWorkspaceInventoryManifest,
+): ReadonlySet<string> {
+  const baselineSymlinks = new Set(
+    manifest.files.filter((entry) => entry.kind === "symlink").map((entry) => entry.path),
+  );
+  if (baselineSymlinks.size === 0 || baselineSymlinks.size > 256) return new Set();
+  try {
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      GIT_LITERAL_PATHSPECS: "1",
+      GIT_OPTIONAL_LOCKS: "0",
+    };
+    for (const key of ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"]) delete environment[key];
+    const output = execFileSync(
+      "git",
+      [
+        "-C",
+        workspaceRoot,
+        "-c",
+        "core.fsmonitor=false",
+        "ls-files",
+        "--stage",
+        "-z",
+        "--",
+        ...baselineSymlinks,
+      ],
+      {
+        encoding: "buffer",
+        env: environment,
+        maxBuffer: 8 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    );
+    const tracked = new Set<string>();
+    for (const record of output.toString("utf8").split("\0")) {
+      const separator = record.indexOf("\t");
+      if (separator < 0 || !record.startsWith("120000 ")) continue;
+      const relativePath = record.slice(separator + 1);
+      if (baselineSymlinks.has(relativePath)) tracked.add(relativePath);
+    }
+    return tracked;
+  } catch {
+    return new Set();
+  }
+}
+
+function directWorkspaceManifestAgainstBaseline(input: {
+  readonly baseline: QualityWorkspaceInventoryManifest;
+  readonly baselineTrackedSymlinks: ReadonlySet<string>;
+  readonly current: QualityWorkspaceInventoryManifest;
+  readonly currentTrackedSymlinks: ReadonlySet<string>;
+}): QualityWorkspaceInventoryManifest {
+  const baselineByPath = new Map(input.baseline.files.map((entry) => [entry.path, entry] as const));
+  const unsupportedEntries = input.current.unsupportedEntries.filter((entry) => {
+    if (
+      entry.kind !== "symlink"
+      || entry.sha256 === null
+      || !input.baselineTrackedSymlinks.has(entry.path)
+      || !input.currentTrackedSymlinks.has(entry.path)
+    ) return true;
+    const baselineEntry = baselineByPath.get(entry.path);
+    return baselineEntry?.kind !== "symlink" || baselineEntry.sha256 !== entry.sha256;
+  });
+  return {
+    ...input.current,
+    evidenceStatus: unsupportedEntries.length === 0 ? "supported" : "unsupported",
+    unsupportedEntries,
   };
 }
 
@@ -1528,6 +1602,8 @@ export class WorkAgent<
     if (!this.pluginHost) {
       throw new Error("Direct quality lifecycle requires a plugin host.");
     }
+    const workspaceBaseline = state.artifacts.captureWorkspaceInventoryManifest();
+    const baselineTrackedSymlinks = trackedWorkspaceSymlinks(this.workspaceRoot, workspaceBaseline);
     state.graph = this.directQualityGraph(state);
     const route = resolveBalancedPrewalkRoute({
       stage: "work",
@@ -1583,7 +1659,13 @@ export class WorkAgent<
       throw error;
     }
 
-    const workspaceManifest = state.artifacts.captureWorkspaceInventoryManifest();
+    const rawWorkspaceManifest = state.artifacts.captureWorkspaceInventoryManifest();
+    const workspaceManifest = directWorkspaceManifestAgainstBaseline({
+      baseline: workspaceBaseline,
+      baselineTrackedSymlinks,
+      current: rawWorkspaceManifest,
+      currentTrackedSymlinks: trackedWorkspaceSymlinks(this.workspaceRoot, rawWorkspaceManifest),
+    });
     const artifact = state.artifacts.persistDirectTurn({
       intent,
       iteration: state.iteration,
@@ -1624,7 +1706,13 @@ export class WorkAgent<
       independentReviewerAvailable: false,
       reviewRequired: state.profile !== "minimal",
     });
-    const currentManifest = state.artifacts.captureWorkspaceInventoryManifest();
+    const rawCurrentManifest = state.artifacts.captureWorkspaceInventoryManifest();
+    const currentManifest = directWorkspaceManifestAgainstBaseline({
+      baseline: workspaceBaseline,
+      baselineTrackedSymlinks,
+      current: rawCurrentManifest,
+      currentTrackedSymlinks: trackedWorkspaceSymlinks(this.workspaceRoot, rawCurrentManifest),
+    });
     if (workspaceManifest.evidenceStatus === "unsupported") {
       this.recordUnsupportedOwnershipDecision(state, "work", workspaceManifest.unsupportedEntries, {
         artifactHash: artifact.artifactHash,
