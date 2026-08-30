@@ -1360,9 +1360,41 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         let stub = dir.join("descendant.mjs");
+        let descendant = dir.join("descendant-child.mjs");
+        let outcome = dir.join("descendant-outcome.txt");
+        fs::write(
+            &descendant,
+            r#"import {writeFileSync} from "node:fs";
+const outcome = process.argv[2];
+process.on("SIGTERM", () => {
+  writeFileSync(outcome, "sigterm");
+  process.exit(0);
+});
+process.send?.("ready");
+setTimeout(() => {
+  writeFileSync(outcome, "fallback");
+  process.exit(0);
+}, 10000);"#,
+        )
+        .unwrap();
         fs::write(
             &stub,
-            "import {spawn} from \"node:child_process\";let input=\"\";process.stdin.on(\"data\",(d)=>input+=d).on(\"end\",()=>{JSON.parse(input);const child=spawn(process.execPath,[\"-e\",\"setTimeout(()=>{},2000)\"],{stdio:[\"ignore\",\"inherit\",\"inherit\"]});child.unref();process.stdout.write(JSON.stringify({status:\"ok\",text:\"done\",steps:1,costUsd:0}))});",
+            r#"import {spawn} from "node:child_process";
+import {fileURLToPath} from "node:url";
+let input = "";
+process.stdin.on("data", (data) => input += data).on("end", () => {
+  JSON.parse(input);
+  const child = spawn(process.execPath, [
+    fileURLToPath(new URL("./descendant-child.mjs", import.meta.url)),
+    fileURLToPath(new URL("./descendant-outcome.txt", import.meta.url)),
+  ], {stdio: ["ignore", "inherit", "inherit", "ipc"]});
+  child.once("message", (message) => {
+    if (message !== "ready") process.exit(2);
+    child.disconnect();
+    child.unref();
+    process.stdout.write(JSON.stringify({status: "ok", text: "done", steps: 1, costUsd: 0}));
+  });
+});"#,
         )
         .unwrap();
         let config = WorkRuntimeConfig {
@@ -1376,17 +1408,21 @@ mod tests {
             allow_run_shell: false,
             engine: "pi".to_string(),
         };
-        let started = std::time::Instant::now();
         let result = run_pi_bridge_turn_with_entry_timeout(
             &config,
             "hello",
             &stub,
             std::time::Duration::from_secs(3),
         );
+        let descendant_outcome = fs::read_to_string(&outcome);
         fs::remove_dir_all(&dir).ok();
 
         assert_eq!(result.unwrap().submission, "done");
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(
+            descendant_outcome.unwrap(),
+            "sigterm",
+            "descendant should be terminated with the helper process group before its fallback"
+        );
     }
 
     #[cfg(unix)]
