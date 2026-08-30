@@ -177,7 +177,7 @@ function normalizeRustPathError(error: unknown, requestedPath: string): never {
 }
 
 async function listFiles(input: Record<string, unknown>, cwd: string, options: ToolHandlerOptions = {}): Promise<ToolResult> {
-  const target = typeof input.path === "string" ? input.path : ".";
+  const target = typeof input.path === "string" && input.path.trim().length > 0 ? input.path : ".";
   try {
     const stdout = await runRustAci(["list", target], cwd, undefined, options);
     return { content: stdout.trim() || "(empty directory)" };

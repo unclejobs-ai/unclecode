@@ -12,6 +12,10 @@
         "AGENTS.md": "# Benchmark instruction\n\nFor this benchmark only, create `result.txt` with the exact UTF-8 content `LOCAL_RULE_OK` followed by one newline. Do not modify any existing file.\n",
         "anchor.txt": "UNCHANGED\n"
       },
+      "approvalPolicy": {
+        "tools": ["write_file"],
+        "shellCommands": []
+      },
       "checks": [
         {
           "kind": "fileEquals",
@@ -28,12 +32,28 @@
     {
       "id": "cross-file-clean-rename",
       "description": "Rename a public symbol across files without leaving an alias or stale callsite.",
-      "prompt": "Rename the exported `sum` function to `add`, update every caller, leave no compatibility alias or stale `sum` identifier, and run the provided test.",
+      "prompt": "Rename the exported `sum` function to `add`, update every caller, leave no compatibility alias or stale `sum` identifier, and run the provided test. Use the search_text tool for the stale-identifier search. Shell commands must be standalone and exact: `node test.mjs`, then either `sha256sum app.mjs math.mjs test.mjs` or `shasum -a 256 app.mjs math.mjs test.mjs`. Do not use a multiline shell script, shell wrapper, redirection, or a compound command for the search.",
       "timeoutMs": 240000,
       "files": {
         "math.mjs": "export function sum(left, right) {\n  return left + right;\n}\n",
         "app.mjs": "import { sum } from './math.mjs';\n\nexport const total = sum(20, 22);\n",
         "test.mjs": "import assert from 'node:assert/strict';\nimport { add } from './math.mjs';\nimport { total } from './app.mjs';\n\nassert.equal(add(2, 3), 5);\nassert.equal(total, 42);\n"
+      },
+      "approvalPolicy": {
+        "tools": ["write_file"],
+        "shellCommands": [
+          "node test.mjs",
+          "sha256sum math.mjs app.mjs",
+          "sha256sum math.mjs app.mjs test.mjs",
+          "sha256sum app.mjs math.mjs test.mjs",
+          "shasum -a 256 math.mjs app.mjs",
+          "shasum -a 256 math.mjs app.mjs test.mjs",
+          "shasum -a 256 app.mjs math.mjs test.mjs",
+          "node test.mjs && sha256sum math.mjs app.mjs",
+          "node test.mjs && sha256sum math.mjs app.mjs test.mjs",
+          "node test.mjs && shasum -a 256 math.mjs app.mjs",
+          "node test.mjs && shasum -a 256 math.mjs app.mjs test.mjs"
+        ]
       },
       "checks": [
         {
@@ -61,11 +81,25 @@
     {
       "id": "unicode-bug-fix",
       "description": "Fix a Unicode correctness bug while preserving the existing ASCII contract.",
-      "prompt": "Fix the slug implementation so the provided regression test passes. Preserve letters and decimal digits from every Unicode script, keep the ASCII behavior, add no dependency, and run the test.",
+      "prompt": "Fix the slug implementation so the provided regression test passes. Preserve letters and decimal digits from every Unicode script, keep the ASCII behavior, add no dependency, and run the test. Shell commands must be fixture-scoped: use `node test.mjs` for verification and `sha256sum slug.mjs` or `sha256sum slug.mjs test.mjs` only for evidence. Do not use multiline shell, redirection, subshells, or other executables.",
       "timeoutMs": 240000,
       "files": {
         "slug.mjs": "export function slug(value) {\n  return value\n    .trim()\n    .toLowerCase()\n    .replace(/[^a-z0-9]+/g, '-')\n    .replace(/^-|-$/g, '');\n}\n",
         "test.mjs": "import assert from 'node:assert/strict';\nimport { slug } from './slug.mjs';\n\nassert.equal(slug('Hello, World!'), 'hello-world');\nassert.equal(slug('한글 입력'), '한글-입력');\nassert.equal(slug('Version ２０２６'), 'version-２０２６');\n"
+      },
+      "approvalPolicy": {
+        "tools": ["write_file"],
+        "shellCommands": [
+          "node test.mjs",
+          "sha256sum slug.mjs",
+          "sha256sum slug.mjs test.mjs",
+          "shasum -a 256 slug.mjs",
+          "shasum -a 256 slug.mjs test.mjs",
+          "node test.mjs && sha256sum slug.mjs",
+          "node test.mjs && sha256sum slug.mjs test.mjs",
+          "node test.mjs && shasum -a 256 slug.mjs",
+          "node test.mjs && shasum -a 256 slug.mjs test.mjs"
+        ]
       },
       "checks": [
         {
