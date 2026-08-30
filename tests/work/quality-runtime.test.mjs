@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -115,6 +116,67 @@ test("worker artifact paths preserve raw node identity and iteration without col
   }
 });
 
+test("quality artifact persistence rejects oversized writes and reports bounded telemetry", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-artifact-budget-"));
+  const store = new orchestrator.QualityArtifactStore(workspace, "quality-run-artifact-budget");
+  try {
+    assert.throws(() => store.persistRun({
+      graphId: "oversized-graph",
+      producerId: "planner:test",
+      artifacts: Array.from({ length: 12_000 }, (_, index) => ({
+        path: `${String(index).padStart(5, "0")}-${"x".repeat(220)}.json`,
+        artifactHash: `sha256:${"a".repeat(64)}`,
+      })),
+      completedAt: "2026-08-29T00:00:00.000Z",
+    }), /artifact exceeds .* persistence limit/i);
+
+    const critic = {
+      reviewerId: "critic:test",
+      reviewedArtifactHash: `sha256:${"b".repeat(64)}`,
+      summary: "verified",
+      independent: true,
+      completedAt: "2026-08-29T00:00:01.000Z",
+    };
+    const first = store.persistCritic(critic);
+    assert.deepEqual(store.getArtifactPersistenceTelemetry(), {
+      artifactsWritten: 1,
+      bytesWritten: Buffer.byteLength(readFileSync(path.join(workspace, first.path), "utf8"), "utf8"),
+      deduplicatedArtifacts: 0,
+      oversizedArtifactsRejected: 1,
+    });
+    assert.deepEqual(readdirSync(store.runDirectory), ["critic.json"]);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("ownership-scoped review inventory avoids generated trees without weakening declared evidence", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-inventory-worker-"));
+  try {
+    writeFileSync(path.join(workspace, "tracked.ts"), "export const tracked = true;\n");
+    mkdirSync(path.join(workspace, "node_modules", "fixture"), { recursive: true });
+    for (let index = 0; index < 64; index += 1) {
+      writeFileSync(path.join(workspace, "node_modules", "fixture", `${index}.js`), `export default ${index};\n`);
+    }
+    execFileSync("git", ["init", "-q"], { cwd: workspace });
+    execFileSync("git", ["config", "user.email", "qa@example.com"], { cwd: workspace });
+    execFileSync("git", ["config", "user.name", "QA"], { cwd: workspace });
+    execFileSync("git", ["add", "tracked.ts"], { cwd: workspace });
+    execFileSync("git", ["commit", "-qm", "fixture"], { cwd: workspace });
+
+    const store = new orchestrator.QualityArtifactStore(workspace, "async-inventory");
+    const inventory = store.captureWorkspaceInventory(["tracked.ts"], { scope: "review" });
+    assert.equal(inventory.files.some((entry) => entry.path.startsWith("node_modules/")), false);
+    assert.equal(inventory.materialInputs.some((entry) => entry.path === "node_modules"), false);
+    const declared = inventory.files.find((entry) => entry.path === "tracked.ts");
+    assert.equal(declared?.sha256, `sha256:${createHash("sha256").update("export const tracked = true;\n").digest("hex")}`,
+      "declared review evidence must hash worktree bytes instead of borrowing the index object id");
+    assert.equal(store.getWorkspaceInventoryTelemetry().scanCount, 1);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 function createDirectoryQualityAgent(input) {
   const host = new PluginHost();
   registerBuiltInSccQualityEngine(host, { workspaceRoot: input.workspace });
@@ -223,6 +285,200 @@ function commitQualityWorkspaceBaseline(workspace) {
   );
 }
 
+test("direct inventory reuses clean git identities and hashes only dirty workspace bytes", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-direct-fast-inventory-"));
+  try {
+    execFileSync("git", ["init", "--initial-branch=main", workspace], { stdio: "ignore" });
+    writeFileSync(path.join(workspace, ".gitignore"), ".unclecode/\nnode_modules/\ntarget/\n");
+    mkdirSync(path.join(workspace, "src"), { recursive: true });
+    for (let index = 0; index < 256; index += 1) {
+      writeFileSync(path.join(workspace, "src", `file-${index}.txt`), `tracked ${index}\n`);
+    }
+    execFileSync("git", ["-C", workspace, "add", "."], { stdio: "ignore" });
+    execFileSync(
+      "git",
+      ["-C", workspace, "-c", "user.name=Quality Test", "-c", "user.email=quality@example.test", "commit", "-m", "baseline"],
+      { stdio: "ignore" },
+    );
+    const store = new orchestrator.QualityArtifactStore(workspace, "direct-fast-inventory");
+    const originalSnapshot = store.snapshotInventoryEntry.bind(store);
+    let actualContentSnapshots = 0;
+    store.snapshotInventoryEntry = (relativePath) => {
+      actualContentSnapshots += 1;
+      return originalSnapshot(relativePath);
+    };
+
+    const baseline = store.captureWorkspaceInventoryManifest({ scope: "direct" });
+    const baselineTelemetry = store.getWorkspaceInventoryTelemetry();
+    assert.equal(actualContentSnapshots, 0, "clean tracked files must not be reopened and hashed");
+    assert.ok(baselineTelemetry.indexEntryHits >= 257);
+    assert.equal(baselineTelemetry.contentHashMisses, 0);
+    assert.equal(baselineTelemetry.fallbackScans, 0);
+    assert.ok(baselineTelemetry.lastScanMs >= 0);
+    assert.ok(baseline.files.some((entry) => entry.path === "[git-index-worktree]"));
+    assert.equal(baseline.files.some((entry) => entry.path === "src/file-1.txt"), false);
+
+    writeFileSync(path.join(workspace, "src", "file-1.txt"), "unstaged worktree bytes\n");
+    const dirty = store.captureWorkspaceInventoryManifest({ scope: "direct" });
+    const dirtyEntry = dirty.files.find((entry) => entry.path === "src/file-1.txt");
+    assert.equal(dirtyEntry?.kind, "file");
+    assert.match(dirtyEntry?.sha256 ?? "", /^sha256:[a-f0-9]{64}$/u);
+    assert.notEqual(dirty.artifactHash, baseline.artifactHash);
+    assert.equal(actualContentSnapshots, 1, "only the dirty file needs an actual content hash");
+
+    execFileSync("git", ["-C", workspace, "add", "src/file-1.txt"], { stdio: "ignore" });
+    const staged = store.captureWorkspaceInventoryManifest({ scope: "direct" });
+    assert.notEqual(staged.artifactHash, baseline.artifactHash, "staged index identity must bind the new bytes");
+    assert.equal(staged.files.some((entry) => entry.path === "src/file-1.txt"), false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("direct inventory distrusts assume-unchanged, sparse paths, and gitlinks", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-direct-index-flags-"));
+  try {
+    writeFileSync(path.join(workspace, ".gitignore"), ".unclecode/\n");
+    writeFileSync(path.join(workspace, "assumed.txt"), "baseline assumed\n");
+    writeFileSync(path.join(workspace, "sparse.txt"), "baseline sparse\n");
+    commitQualityWorkspaceBaseline(workspace);
+    const baselineCommit = execFileSync("git", ["-C", workspace, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", workspace, "update-index", "--assume-unchanged", "assumed.txt"]);
+    execFileSync("git", ["-C", workspace, "update-index", "--skip-worktree", "sparse.txt"]);
+    execFileSync("git", ["-C", workspace, "update-index", "--add", "--cacheinfo", `160000,${baselineCommit},dependency`]);
+    writeFileSync(path.join(workspace, "assumed.txt"), "changed despite assume-unchanged\n");
+    unlinkSync(path.join(workspace, "sparse.txt"));
+
+    const manifest = new orchestrator.QualityArtifactStore(workspace, "direct-index-flags")
+      .captureWorkspaceInventoryManifest({ scope: "direct" });
+
+    assert.equal(manifest.files.find((entry) => entry.path === "assumed.txt")?.kind, "file");
+    assert.equal(manifest.files.find((entry) => entry.path === "sparse.txt")?.kind, "missing");
+    assert.equal(manifest.files.find((entry) => entry.path === "dependency")?.kind, "special");
+    assert.equal(manifest.evidenceStatus, "unsupported", "gitlinks remain explicit fail-closed evidence");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("direct inventory records deletion and type-changing symlinks as fail-closed evidence", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-direct-typechange-"));
+  try {
+    writeFileSync(path.join(workspace, ".gitignore"), ".unclecode/\n");
+    writeFileSync(path.join(workspace, "owned.txt"), "tracked\n");
+    writeFileSync(path.join(workspace, "target.txt"), "target\n");
+    commitQualityWorkspaceBaseline(workspace);
+    const store = new orchestrator.QualityArtifactStore(workspace, "direct-typechange");
+    const baseline = store.captureWorkspaceInventoryManifest({ scope: "direct" });
+
+    unlinkSync(path.join(workspace, "owned.txt"));
+    const deleted = store.captureWorkspaceInventoryManifest({ scope: "direct" });
+    assert.equal(deleted.files.find((entry) => entry.path === "owned.txt")?.kind, "missing");
+    assert.notEqual(deleted.artifactHash, baseline.artifactHash);
+
+    symlinkSync("target.txt", path.join(workspace, "owned.txt"));
+    const linked = store.captureWorkspaceInventoryManifest({ scope: "direct" });
+    assert.equal(linked.files.find((entry) => entry.path === "owned.txt")?.kind, "symlink");
+    assert.equal(linked.evidenceStatus, "unsupported");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("direct inventory fails closed when an actual content path mutates between read and restat", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-direct-toctou-"));
+  try {
+    writeFileSync(path.join(workspace, "volatile.txt"), "before\n");
+    const store = new orchestrator.QualityArtifactStore(workspace, "direct-toctou");
+    const originalSnapshot = store.snapshotInventoryEntry.bind(store);
+    store.snapshotInventoryEntry = (relativePath) => {
+      const entry = originalSnapshot(relativePath);
+      if (relativePath === "volatile.txt") {
+        writeFileSync(path.join(workspace, relativePath), "after with a different size\n");
+      }
+      return entry;
+    };
+
+    const manifest = store.captureWorkspaceInventoryManifest({ scope: "direct" });
+    assert.deepEqual(
+      manifest.files.find((entry) => entry.path === "volatile.txt"),
+      { path: "volatile.txt", kind: "unreadable", sha256: null },
+    );
+    const telemetry = store.getWorkspaceInventoryTelemetry();
+    assert.equal(telemetry.fallbackScans, 1, "non-git workspaces retain the bounded filesystem fallback");
+    assert.equal(telemetry.concurrentMutationFailures, 1);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("direct inventory excludes generated dependency trees while retaining runtime configuration inputs", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-direct-generated-scope-"));
+  try {
+    writeFileSync(path.join(workspace, ".gitignore"), ".unclecode/\nnode_modules/\ntarget/\n");
+    writeFileSync(path.join(workspace, "source.txt"), "source\n");
+    commitQualityWorkspaceBaseline(workspace);
+    mkdirSync(path.join(workspace, "node_modules", "pkg", "nested"), { recursive: true });
+    mkdirSync(path.join(workspace, "target", "debug", "nested"), { recursive: true });
+    writeFileSync(path.join(workspace, "node_modules", "pkg", "nested", "index.js"), "generated\n");
+    writeFileSync(path.join(workspace, "target", "debug", "nested", "app"), "generated\n");
+    const store = new orchestrator.QualityArtifactStore(workspace, "direct-generated-scope");
+
+    const manifest = store.captureWorkspaceInventoryManifest({ scope: "direct" });
+    assert.equal(manifest.files.some((entry) => /^(?:node_modules|target)\//u.test(entry.path)), false);
+    assert.equal(manifest.materialInputs.some((entry) => entry.path === "node_modules"), false);
+    assert.equal(manifest.materialInputs.some((entry) => entry.path === "target"), false);
+    assert.ok(manifest.files.some((entry) => entry.path === "[git-index-worktree]"));
+    assert.ok(manifest.materialInputs.some((entry) => entry.path === ".unclecode/plugins"));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("direct inventory enforces one aggregate content budget across dirty files", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-direct-total-budget-"));
+  try {
+    execFileSync("git", ["init", "--initial-branch=main", workspace], { stdio: "ignore" });
+    for (let index = 0; index < 5; index += 1) {
+      const dirtyPath = path.join(workspace, `dirty-${index}.bin`);
+      writeFileSync(dirtyPath, "");
+      truncateSync(dirtyPath, 60 * 1024 * 1024);
+    }
+
+    const manifest = new orchestrator.QualityArtifactStore(workspace, "direct-total-budget")
+      .captureWorkspaceInventoryManifest({ scope: "direct" });
+
+    const dirtyEntries = manifest.files.filter((entry) => entry.path.startsWith("dirty-"));
+    assert.equal(dirtyEntries.filter((entry) => entry.kind === "file").length, 4);
+    assert.equal(dirtyEntries.filter((entry) => entry.kind === "unreadable").length, 1);
+    assert.equal(manifest.evidenceStatus, "unsupported");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("direct inventory disables repository fsmonitor before checking worktree bytes", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-direct-fsmonitor-"));
+  try {
+    writeFileSync(path.join(workspace, "source.txt"), "before\n");
+    commitQualityWorkspaceBaseline(workspace);
+    const invoked = path.join(workspace, "fsmonitor-invoked");
+    const hook = path.join(workspace, "fsmonitor-hook.sh");
+    writeFileSync(hook, `#!/bin/sh\nprintf invoked > ${JSON.stringify(invoked)}\nexit 0\n`);
+    chmodSync(hook, 0o755);
+    execFileSync("git", ["-C", workspace, "config", "core.fsmonitor", hook]);
+    writeFileSync(path.join(workspace, "source.txt"), "after\n");
+
+    const manifest = new orchestrator.QualityArtifactStore(workspace, "direct-fsmonitor")
+      .captureWorkspaceInventoryManifest({ scope: "direct" });
+
+    assert.equal(manifest.files.find((entry) => entry.path === "source.txt")?.kind, "file");
+    assert.throws(() => readFileSync(invoked), "inventory must not invoke an untrusted repository fsmonitor hook");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("balanced-prewalk uses direct frontier for pattern setting and commodity only for followers", () => {
   const directRoute = { provider: "openai", model: "gpt-5.4" };
   const commodityRoute = { provider: "omp", model: "kimi-code/k3" };
@@ -295,7 +551,7 @@ test("simple English and Korean turns run the minimal SCC lifecycle without plan
   const traces = [];
   const host = new PluginHost();
   registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
-  host.register("minimal-observer", {
+  host.registerBuiltIn("minimal-observer", {
     runClassified(event) {
       classifications.push(event);
       return { action: "proceed" };
@@ -379,6 +635,213 @@ test("simple English and Korean turns run the minimal SCC lifecycle without plan
     }
     assert.equal(traces.some((event) => event.type === "work.proposed"), false, "minimal quality must not invent a DAG");
     assert.throws(() => readdirSync(path.join(workspace, ".data")));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("minimal proven-read-only shell tools retain the bounded direct evidence path", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-minimal-readonly-tool-"));
+  const traces = [];
+  let listener;
+  try {
+    writeFileSync(path.join(workspace, ".gitignore"), ".unclecode/\nnode_modules/\ntarget/\n");
+    writeFileSync(path.join(workspace, "source.txt"), "source\n");
+    commitQualityWorkspaceBaseline(workspace);
+    mkdirSync(path.join(workspace, "node_modules", "generated"), { recursive: true });
+    writeFileSync(path.join(workspace, "node_modules", "generated", "large.js"), "generated\n");
+    const host = new PluginHost();
+    await registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+    const agent = new orchestrator.WorkAgent({
+      directAgent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener(next) { listener = next; },
+        async runTurn() {
+          listener?.({ type: "tool.started", toolName: "run_shell", input: { command: "printf TOOL_CALL_SMOKE_OK" } });
+          listener?.({ type: "tool.completed", toolName: "run_shell", input: { command: "printf TOOL_CALL_SMOKE_OK" } });
+          return { text: "read-only answer" };
+        },
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    const result = await agent.runTurn("hello");
+
+    assert.equal(result.qualityStatus, "proceed");
+    assert.equal(traces.some((event) => event.failures?.includes("DIRECT_MUTATING_TOOL_BASELINE_UNPROVEN")), false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("minimal shell redirection is blocked without a full pre-tool baseline", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-minimal-mutating-tool-"));
+  const traces = [];
+  let listener;
+  try {
+    writeFileSync(path.join(workspace, ".gitignore"), ".unclecode/\n.cache/\n");
+    writeFileSync(path.join(workspace, "source.txt"), "source\n");
+    commitQualityWorkspaceBaseline(workspace);
+    const host = new PluginHost();
+    await registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+    const agent = new orchestrator.WorkAgent({
+      directAgent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener(next) { listener = next; },
+        async runTurn() {
+          listener?.({ type: "tool.started", toolName: "run_shell", input: { command: "printf unsafe > source.txt" } });
+          writeFileSync(path.join(workspace, "source.txt"), "mutated\n");
+          listener?.({ type: "tool.completed", toolName: "run_shell", input: { command: "printf unsafe > source.txt" } });
+          return { text: "unsafe answer" };
+        },
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    const result = await agent.runTurn("hello");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.ok(traces.some((event) => event.failures?.includes("DIRECT_MUTATING_TOOL_BASELINE_UNPROVEN")));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("external completion hooks without an evidence contract block before ignored material can mutate", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-minimal-external-hook-"));
+  const traces = [];
+  try {
+    writeFileSync(path.join(workspace, ".gitignore"), ".unclecode/\n.cache/\n");
+    writeFileSync(path.join(workspace, "source.txt"), "source\n");
+    commitQualityWorkspaceBaseline(workspace);
+    mkdirSync(path.join(workspace, ".cache", "custom"), { recursive: true });
+    const generated = path.join(workspace, ".cache", "custom", "result.bin");
+    writeFileSync(generated, "before\n");
+    const host = new PluginHost();
+    await registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+    await host.register("external-completion-mutator", {
+      beforeRunComplete() {
+        writeFileSync(generated, "after with different bytes\n");
+        return { action: "proceed" };
+      },
+    });
+    const agent = new orchestrator.WorkAgent({
+      directAgent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn() { return { text: "answer" }; },
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    const result = await agent.runTurn("hello");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.equal(readFileSync(generated, "utf8"), "before\n");
+    assert.ok(traces.some((event) =>
+      event.failures?.includes("DIRECT_EXTERNAL_LIFECYCLE_CONTRACT_UNPROVEN")
+    ));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("external context hooks without an evidence contract block before source mutation", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-minimal-context-mutator-"));
+  const traces = [];
+  try {
+    writeFileSync(path.join(workspace, ".gitignore"), ".unclecode/\nnode_modules/\n");
+    writeFileSync(path.join(workspace, "source.txt"), "before\n");
+    commitQualityWorkspaceBaseline(workspace);
+    const host = new PluginHost();
+    await registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+    await host.register("external-context-mutator", {
+      contextContribute() {
+        writeFileSync(path.join(workspace, "source.txt"), "changed by context hook\n");
+        return { content: "context" };
+      },
+    });
+    const agent = new orchestrator.WorkAgent({
+      directAgent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn() { return { text: "answer" }; },
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    const result = await agent.runTurn("hello");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.equal(readFileSync(path.join(workspace, "source.txt"), "utf8"), "before\n");
+    assert.ok(traces.some((event) =>
+      event.failures?.includes("DIRECT_EXTERNAL_LIFECYCLE_CONTRACT_UNPROVEN")
+    ));
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("direct quality fails closed when plugin registrations change during provider work", async () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-minimal-dynamic-plugin-"));
+  const traces = [];
+  try {
+    writeFileSync(path.join(workspace, "source.txt"), "before\n");
+    commitQualityWorkspaceBaseline(workspace);
+    const host = new PluginHost();
+    await registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
+    const agent = new orchestrator.WorkAgent({
+      directAgent: {
+        clear() {},
+        updateRuntimeSettings() {},
+        setTraceListener() {},
+        async runTurn() {
+          await host.register("late-completion-mutator", {
+            beforeRunComplete() {
+              writeFileSync(path.join(workspace, "source.txt"), "late mutation\n");
+              return { action: "proceed" };
+            },
+          });
+          return { text: "answer" };
+        },
+      },
+      mode: "default",
+      reasoning: supportedReasoning,
+      model: "gpt-5.4",
+      workspaceRoot: workspace,
+      pluginHost: host,
+    });
+    agent.setTraceListener((event) => traces.push(event));
+
+    const result = await agent.runTurn("hello");
+
+    assert.equal(result.qualityStatus, "block");
+    assert.equal(readFileSync(path.join(workspace, "source.txt"), "utf8"), "before\n");
+    assert.ok(traces.some((event) => event.failures?.includes("DIRECT_PLUGIN_LIFECYCLE_CHANGED")));
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -573,7 +1036,7 @@ test("quality classification uses the operator request instead of injected works
   const classifications = [];
   const host = new PluginHost();
   registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
-  host.register("classification-observer", {
+  host.registerBuiltIn("classification-observer", {
     runClassified(event) {
       classifications.push(event);
       return { action: "proceed" };
@@ -624,7 +1087,7 @@ test("deep research runs an explicit DAG with an independent critic and promote 
   const reviewCalls = [];
   const host = new PluginHost();
   registerBuiltInSccQualityEngine(host, { workspaceRoot: workspace });
-  host.register("research-observer", {
+  host.registerBuiltIn("research-observer", {
     runClassified(event) {
       classifications.push(event);
       return { action: "proceed" };
@@ -1976,6 +2439,8 @@ test("review packets ignore volatile git housekeeping when relevant repository s
 
     assert.equal(afterHousekeeping.evidenceStatus, "supported");
     assert.equal(afterHousekeeping.artifactHash, beforeHousekeeping.artifactHash);
+    assert.equal(store.getArtifactPersistenceTelemetry().artifactsWritten, 1);
+    assert.equal(store.getArtifactPersistenceTelemetry().deduplicatedArtifacts, 1);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   lowerBusyActivityRowPattern,
+  resolvePaneWaitDeadline,
   runTmux,
   runtimeTmuxArgs,
   runtimeTmuxEnvironment,
@@ -33,6 +34,10 @@ test("typed composer pattern waits for the actual input line instead of static c
   assert.doesNotMatch("\n  › /context  Inspect the context packet.", pattern);
   assert.match("\n  › /context▏", pattern);
   assert.match("\n  › /context\n", pattern);
+
+  const wrapped = typedComposerLinePattern("긴 프롬프트 immediate Enter");
+  assert.match("\n  › 긴 프롬프트 immediate\n     Enter▏\n", wrapped);
+  assert.doesNotMatch("\n  › 긴 프롬프트 immediate\n     Exit▏\n", wrapped);
 });
 
 test("runtime QA tmux children stay interactive under CI runners", () => {
@@ -70,6 +75,21 @@ test("runtime QA tmux commands use an isolated socket", () => {
     `unclecode-runtime-qa-${process.pid}`,
   ]);
   assert.deepEqual(args.slice(4), ["new-session", "-d", "-s", "qa"]);
+});
+
+test("a visible runtime connection phase uses the bounded owner lifecycle deadline", () => {
+  const startedAt = 1_000;
+  const genericDeadline = 31_000;
+  assert.equal(resolvePaneWaitDeadline({
+    startedAt,
+    deadline: genericDeadline,
+    pane: "UncleCode\n\n● Connecting to UncleCode runtime…",
+  }), 91_000);
+  assert.equal(resolvePaneWaitDeadline({
+    startedAt,
+    deadline: genericDeadline,
+    pane: "",
+  }), genericDeadline, "a truly blank pane must still fail on the short diagnostic deadline");
 });
 
 test("runtime QA tmux helper starts the requested pane command", async (context) => {

@@ -18,6 +18,31 @@ let rendererFallbackWarned = false;
 // drift under Ink 6. Column-shrink residue remains handled by the terminal
 // resize clear, while ordinary streaming now updates only changed rows.
 const DASHBOARD_RENDER_OPTIONS = { incrementalRendering: true } as const;
+const ESC = String.fromCharCode(27);
+
+export const RUNTIME_CONNECTION_STATUS = {
+  en: "Connecting to UncleCode runtime…",
+  ko: "UncleCode 런타임에 연결 중…",
+} as const;
+
+/**
+ * Paint a useful first frame before the persistent runtime owner is ready.
+ * Owner discovery and session attachment intentionally happen before Ink owns
+ * stdin, so this tiny synchronous frame prevents a slow cold start from
+ * looking like a dead terminal. The returned handle is idempotent and must be
+ * restored before mounting the real dashboard.
+ */
+export function showRuntimeConnectionStatus(input: {
+  readonly locale?: "en" | "ko" | undefined;
+  readonly stdout?: NodeJS.WriteStream | undefined;
+} = {}): { readonly restore: () => void; readonly active: boolean } {
+  const stdout = input.stdout ?? process.stdout;
+  const altScreen = enterAlternateScreen(stdout);
+  if (!altScreen.active) return altScreen;
+  const message = RUNTIME_CONNECTION_STATUS[input.locale ?? "en"];
+  stdout.write(`${ESC}[2J${ESC}[HUncleCode\n\n● ${message}\n`);
+  return altScreen;
+}
 
 function warnIfRequestedRendererFallsBack(): void {
   const plan = resolveTuiRendererPlan();

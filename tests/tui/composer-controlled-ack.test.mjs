@@ -68,6 +68,46 @@ test("Composer preserves newer local input across a delayed controlled-parent ac
   }
 });
 
+test("Composer submits a long single-chunk prompt on the first following Enter", async () => {
+  const submittedValues = [];
+  const longPrompt = "x".repeat(64);
+  let markChanged;
+  const changed = new Promise(resolve => { markChanged = resolve; });
+
+  function LongPromptHarness() {
+    const [value, setValue] = React.useState("");
+    return React.createElement(Composer, {
+      value,
+      onChange: nextValue => {
+        setValue(nextValue);
+        markChanged();
+      },
+      onSubmit: value => submittedValues.push(value),
+    });
+  }
+
+  const stdin = createInkInput();
+  const instance = render(React.createElement(LongPromptHarness), {
+    stdin,
+    stdout: createWritableOutput(),
+    stderr: createWritableError(),
+    debug: true,
+    patchConsole: false,
+    exitOnCtrlC: false,
+  });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    stdin.write(longPrompt);
+    await changed;
+    stdin.write("\r");
+    await waitForCondition(() => submittedValues.length > 0);
+    assert.deepEqual(submittedValues, [longPrompt]);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
 test("Composer keeps one visible IME draft through preedit replacement and async parent renders", async () => {
   const changedValues = [];
   const submittedValues = [];

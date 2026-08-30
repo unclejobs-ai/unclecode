@@ -11,6 +11,7 @@ import {
   createManagedWorkShellDashboardProps,
   formatWorkShellError,
   renderEmbeddedWorkShellPaneDashboard,
+  showRuntimeConnectionStatus,
   type EmbeddedWorkDashboardSnapshot,
   type TuiRenderOptions,
   type TuiShellHomeState,
@@ -458,6 +459,12 @@ export async function createPersistentOwnerWorkShellController(input: {
 export async function startRepl(
   agent: StartReplAgent,
   options: StartReplOptions,
+  dependencies: {
+    readonly connectOwner?: typeof connectPersistentRuntimeOwner | undefined;
+    readonly createController?: typeof createPersistentOwnerWorkShellController | undefined;
+    readonly renderDashboard?: typeof renderEmbeddedWorkShellPaneDashboard | undefined;
+    readonly showConnectionStatus?: typeof showRuntimeConnectionStatus | undefined;
+  } = {},
 ): Promise<void> {
   const requestedSessionId = options.sessionId ?? `work-${randomUUID()}`;
   const session = withDefaultWorkSessionLaunch({
@@ -467,15 +474,24 @@ export async function startRepl(
       sessionId: requestedSessionId,
     },
   });
-  const client = await connectPersistentRuntimeOwner();
-  const controller = await createPersistentOwnerWorkShellController({
-    client,
-    session,
-    resume: options.sessionId !== undefined,
-    reconnectOwner: connectPersistentRuntimeOwner,
+  const connectOwner = dependencies.connectOwner ?? connectPersistentRuntimeOwner;
+  const startupFrame = (dependencies.showConnectionStatus ?? showRuntimeConnectionStatus)({
+    locale: options.initialUiLocale ?? "en",
   });
+  let controller: PersistentOwnerWorkShellController;
   try {
-    await renderEmbeddedWorkShellPaneDashboard({
+    const client = await connectOwner();
+    controller = await (dependencies.createController ?? createPersistentOwnerWorkShellController)({
+      client,
+      session,
+      resume: options.sessionId !== undefined,
+      reconnectOwner: connectOwner,
+    });
+  } finally {
+    startupFrame.restore();
+  }
+  try {
+    await (dependencies.renderDashboard ?? renderEmbeddedWorkShellPaneDashboard)({
       ...controller.initialProps,
       ...controller.embeddedWorkPane,
     });

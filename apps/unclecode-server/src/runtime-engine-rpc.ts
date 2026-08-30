@@ -40,6 +40,10 @@ const CONTROL_ENGINE_METHODS = new Set<RuntimeEngineMethod>([
   "openAgentConsole", "closeAgentConsole", "selectAgentConsoleTab", "moveAgentConsoleCursor",
   "toggleAgentConsoleInspector",
 ]);
+const REBASEABLE_AGENT_CONSOLE_VIEW_METHODS = new Set<RuntimeEngineMethod>([
+  "openAgentConsole", "closeAgentConsole", "selectAgentConsoleTab",
+  "moveAgentConsoleCursor", "toggleAgentConsoleInspector",
+]);
 export type RuntimeEngineSource = {
   getState(): unknown;
   subscribe(listener: () => void): () => void;
@@ -94,6 +98,7 @@ type Attached = {
   readonly unsubscribe: () => void;
   lastAccessAt: number;
   clientLeaseUntil: number;
+  activeSubmitInvocations: number;
 };
 
 function hasInterruptibleTurn(attached: Attached): boolean {
@@ -105,6 +110,11 @@ function hasInterruptibleTurn(attached: Attached): boolean {
     ? Reflect.apply(engine.getTurnLifecycle, attached.engine, [])
     : undefined;
   if (lifecycle?.state && !["idle", "completed", "cancelled"].includes(lifecycle.state)) return true;
+  const state = attached.engine.getState() as { readonly isBusy?: unknown } | null;
+  return state?.isBusy === true;
+}
+
+function isBusyEngine(attached: Attached): boolean {
   const state = attached.engine.getState() as { readonly isBusy?: unknown } | null;
   return state?.isBusy === true;
 }
@@ -232,6 +242,33 @@ function hasPendingDecision(attached: Attached): boolean {
   return state?.agentConsole?.pendingDecision !== undefined;
 }
 
+function exactAgentSteerTarget(args: readonly unknown[]): string | undefined {
+  const [agentRunId] = args;
+  return args.length === 1 && validRuntimeDecisionId(agentRunId)
+    ? agentRunId
+    : undefined;
+}
+
+function canBeginExactAgentSteer(attached: Attached, agentRunId: string): boolean {
+  const state = attached.engine.getState() as {
+    readonly agentConsoleView?: {
+      readonly open?: unknown;
+      readonly tab?: unknown;
+      readonly cursor?: unknown;
+    } | undefined;
+    readonly agentConsole?: {
+      readonly agents?: readonly { readonly id?: unknown }[] | undefined;
+    } | undefined;
+  } | null;
+  const view = state?.agentConsoleView;
+  if (
+    view?.open !== true
+    || view.tab !== "agents"
+    || !Number.isSafeInteger(view.cursor)
+  ) return false;
+  return state?.agentConsole?.agents?.[view.cursor as number]?.id === agentRunId;
+}
+
 export type RuntimeEngineRpcResponse =
   | { readonly ok: true; readonly revision: number; readonly state?: unknown; readonly result?: unknown }
   | { readonly ok: false; readonly code: "not_attached" | "revision_conflict" | "invalid_method" | "invalid_action"; readonly message: string; readonly revision?: number };
@@ -297,6 +334,7 @@ export class LiveRuntimeEngineRegistry {
       unsubscribe: () => unsubscribe(),
       lastAccessAt: Date.now(),
       clientLeaseUntil: 0,
+      activeSubmitInvocations: 0,
     } satisfies Attached;
     unsubscribe = engine.subscribe(() => {
       attached.arbiter.publishAutonomous();
@@ -722,13 +760,43 @@ export class LiveRuntimeEngineRegistry {
     const exactDecision = decisionValidation.kind === "valid"
       ? decisionValidation.invocation
       : undefined;
+    const agentSteerTarget = input.method === "beginAgentSteer"
+      ? exactAgentSteerTarget(input.args)
+      : undefined;
+    if (input.method === "beginAgentSteer" && input.args.length > 0 && !agentSteerTarget) {
+      return {
+        ok: false,
+        code: "invalid_action",
+        message: "beginAgentSteer requires one bounded agentRunId.",
+        revision: attached.clock.value,
+      };
+    }
     const invocationArgs = exactDecision?.args ?? input.args;
-    return attached.arbiter.mutate<unknown, RuntimeEngineRpcResponse>({
+    // A follow-up submitted while provider/post-turn work is active must reach
+    // WorkShellEngine immediately so it can enter the durable queue. The first
+    // submit remains on the normal lane and retains cancel-generation fencing.
+    const busySubmit = input.method === "handleSubmit"
+      && (attached.activeSubmitInvocations > 0 || isBusyEngine(attached));
+    if (input.method === "handleSubmit") attached.activeSubmitInvocations += 1;
+    const mutation = attached.arbiter.mutate<unknown, RuntimeEngineRpcResponse>({
       idempotencyKey: input.idempotencyKey,
       fingerprint,
       expectedRevision: input.expectedRevision,
+      // A busy prose submit is queue admission, not execution of the new
+      // prompt. Autonomous provider/progress revisions must not make that
+      // durable follow-up disappear. The idempotency ledger is consulted
+      // before this pre-admission rebase, while the first idle submit and all
+      // decisions/policy mutations retain exact-revision semantics.
+      ...(busySubmit || REBASEABLE_AGENT_CONSOLE_VIEW_METHODS.has(input.method as RuntimeEngineMethod)
+        ? { acceptLatestRevision: true }
+        : {}),
+      ...(agentSteerTarget
+        ? { acceptLatestRevisionWhen: () => canBeginExactAgentSteer(attached, agentSteerTarget) }
+        : {}),
       ...(input.method === "interruptTurn"
         ? { lane: "cancel" as const }
+        : busySubmit
+          ? { lane: "control" as const }
         : CONTROL_ENGINE_METHODS.has(input.method as RuntimeEngineMethod)
           ? { lane: "control" as const }
           : {}),
@@ -753,6 +821,11 @@ export class LiveRuntimeEngineRegistry {
               precondition: () => canSettleExactPendingDecision(attached, exactDecision) ? undefined : false,
               didMutate: (result: unknown) => result !== false,
             }
+        : agentSteerTarget
+          ? {
+              precondition: () => canBeginExactAgentSteer(attached, agentSteerTarget) ? undefined : false,
+              didMutate: (result: unknown) => result !== false,
+            }
         : {}),
       execute: () => Reflect.apply(method, attached.engine, invocationArgs),
       complete: (result, revision) => input.method === "interruptTurn" && result === false
@@ -761,6 +834,8 @@ export class LiveRuntimeEngineRegistry {
           ? { ok: false, code: "invalid_action", message: "Pending decision text requires an exact decision identity.", revision }
         : exactDecision && result === false
           ? { ok: false, code: "invalid_action", message: "The pending decision changed or is no longer actionable.", revision }
+        : agentSteerTarget && result === false
+          ? { ok: false, code: "invalid_action", message: "The selected agent changed or is no longer actionable.", revision }
         : {
             ok: true,
             revision,
@@ -773,6 +848,9 @@ export class LiveRuntimeEngineRegistry {
         revision,
       }),
     });
+    return input.method === "handleSubmit"
+      ? mutation.finally(() => { attached.activeSubmitInvocations -= 1; })
+      : mutation;
   }
 }
 

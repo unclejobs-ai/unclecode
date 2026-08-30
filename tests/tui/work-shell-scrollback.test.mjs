@@ -207,12 +207,12 @@ async function waitForNewestEntry(getOutput) {
   );
 }
 
-test("resolveWorkShellTranscriptWindow keeps the historical window at rest and pages by capacity", () => {
+test("resolveWorkShellTranscriptWindow keeps the newest row-budgeted window at rest and pages by capacity", () => {
   const entries = createScrollbackEntries();
-  // Bottom-follow (offset 0) reproduces the pre-scrollback frame exactly.
   const atRest = resolveWorkShellTranscriptWindow({ entries, terminalRows: TERMINAL_ROWS, scrollOffset: 0 });
   assert.equal(atRest.scrolled, false);
-  assert.equal(atRest.window.length, 50);
+  assert.equal(atRest.window.length, TRANSCRIPT_CAPACITY);
+  assert.equal(atRest.entriesAbove, TRANSCRIPT_ENTRY_COUNT - TRANSCRIPT_CAPACITY);
   assert.equal(atRest.window[atRest.window.length - 1].text, `sb-${String(TRANSCRIPT_ENTRY_COUNT - 1).padStart(4, "0")}`);
 
   // One PageUp: the window is the rows-derived capacity anchored one page
@@ -356,16 +356,39 @@ test("the weighted window pages and clamps on the same capacity the controller s
   assert.equal(atTop.entriesAbove, 0);
 });
 
-test("offset 0 keeps the exact last-50 slice even for mixed-height entries", () => {
+test("offset 0 keeps the newest mixed-height entries within the row budget", () => {
   const entries = createMixedScrollbackEntries();
+  const capacity = getWorkShellTranscriptEntryCapacity(entries, TERMINAL_ROWS);
   const atRest = resolveWorkShellTranscriptWindow({
     entries,
     terminalRows: TERMINAL_ROWS,
     scrollOffset: 0,
   });
   assert.equal(atRest.scrolled, false);
-  assert.deepEqual(atRest.window, entries.slice(-50));
-  assert.equal(atRest.entriesAbove, 10);
+  assert.deepEqual(atRest.window, entries.slice(-capacity));
+  assert.equal(atRest.entriesAbove, entries.length - capacity);
+});
+
+test("an oversized newest reply is tail-clipped so the composer row budget remains visible", () => {
+  const original = {
+    role: "assistant",
+    text: Array.from({ length: 100 }, (_, index) =>
+      `reply-${String(index).padStart(3, "0")} 👨‍👩‍👧‍👦 한글 응답`
+    ).join("\n"),
+  };
+  const atRest = resolveWorkShellTranscriptWindow({
+    entries: [original],
+    terminalRows: TERMINAL_ROWS,
+    terminalColumns: 40,
+    scrollOffset: 0,
+  });
+
+  assert.equal(atRest.window.length, 1);
+  assert.ok(atRest.window[0].text.startsWith("…\n"));
+  assert.ok(atRest.window[0].text.includes("reply-099"));
+  assert.ok(!atRest.window[0].text.includes("reply-000"));
+  assert.ok(measureWorkShellEntryRows(atRest.window[0], 36) <= 20);
+  assert.equal(atRest.entriesAbove, 0);
 });
 
 test("PageUp scrolls older entries into view with the indicator row", async () => {
@@ -375,8 +398,8 @@ test("PageUp scrolls older entries into view with the indicator row", async () =
   try {
     assert.ok(await waitForNewestEntry(getOutput));
     const atRest = getLastWorkFrame(getOutput());
-    // The bottom-follow window renders the historical last-50 slice.
-    assert.ok(atRest.includes("sb-0010"));
+    assert.ok(atRest.includes(`sb-${padScrollbackIndex(TRANSCRIPT_ENTRY_COUNT - TRANSCRIPT_CAPACITY)}`));
+    assert.ok(!atRest.includes("sb-0010"));
     assert.ok(!atRest.includes("entries above"));
 
     stdin.write(KEY_PAGE_UP);
@@ -515,7 +538,9 @@ test("PageDown returns the transcript to the newest entries", async () => {
     assert.ok(await waitForNewestEntry(getOutput));
     const backToNewest = getLastWorkFrame(getOutput());
     assert.ok(!backToNewest.includes("earlier rows"));
-    assert.ok(backToNewest.includes("sb-0010"));
+    assert.ok(backToNewest.includes(
+      `sb-${padScrollbackIndex(TRANSCRIPT_ENTRY_COUNT - TRANSCRIPT_CAPACITY)}`,
+    ));
   } finally {
     instance.unmount();
     instance.cleanup();

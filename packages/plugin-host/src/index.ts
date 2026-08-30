@@ -245,6 +245,7 @@ export type PluginEntry = (ctx: PluginContext) => PluginHooks | Promise<PluginHo
 
 export class PluginHost {
   private readonly registrations: PluginRegistration[] = [];
+  private registrationGeneration = 0;
   private readonly registrationHookCounts = new WeakMap<PluginRegistration, number>();
   private readonly diagnosticKeysByRun = new Map<string, Set<string>>();
   private readonly pendingCleanupByName = new Map<string, Promise<void>>();
@@ -285,12 +286,14 @@ export class PluginHost {
     );
     if (existingIndex === -1) {
       this.registrations.push(nextRegistration);
+      this.registrationGeneration += 1;
       return;
     }
 
     const existing = this.registrations[existingIndex];
     if (!existing) return;
     this.registrations.splice(existingIndex, 1);
+    this.registrationGeneration += 1;
     this.diagnosticKeysByRun.clear();
     const cleanupResult = existing.hooks.dispose?.();
     if (!isPromiseLike(cleanupResult)) {
@@ -299,6 +302,7 @@ export class PluginHost {
         0,
         nextRegistration,
       );
+      this.registrationGeneration += 1;
       return;
     }
     const cleanup = Promise.resolve(cleanupResult);
@@ -316,6 +320,7 @@ export class PluginHost {
       0,
       nextRegistration,
     );
+    this.registrationGeneration += 1;
   }
 
   registerBuiltIn(name: string, hooks: PluginHooks): Promise<void> {
@@ -404,6 +409,11 @@ export class PluginHost {
     return this.registrations.slice();
   }
 
+  /** Monotonic identity used by callers to fail closed across hot reloads. */
+  getRegistrationGeneration(): number {
+    return this.registrationGeneration;
+  }
+
   getLifecycleSnapshot(): PluginLifecycleSnapshot {
     const registrationCount = this.registrations.length;
     const registrations = this.registrations.slice(0, 64).map((registration) => ({
@@ -436,6 +446,7 @@ export class PluginHost {
       const registration = this.registrations[index];
       if (registration && removedSet.has(registration)) this.registrations.splice(index, 1);
     }
+    this.registrationGeneration += 1;
     this.diagnosticKeysByRun.clear();
     await disposeRegistrations(removed);
     return true;
@@ -445,6 +456,7 @@ export class PluginHost {
     if (this.disposePromise) return this.disposePromise;
     this.disposed = true;
     const registrations = this.registrations.splice(0);
+    if (registrations.length > 0) this.registrationGeneration += 1;
     const pendingCleanups = [...this.pendingCleanupByName.values()];
     this.diagnosticKeysByRun.clear();
     this.disposePromise = (async () => {

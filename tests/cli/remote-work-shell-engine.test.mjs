@@ -73,6 +73,146 @@ test("remote adapter refreshes and retries one stale revision with the same idem
   engine.dispose();
 });
 
+test("remote submit reaches a busy owner without waiting for the active submit receipt", async () => {
+  let revision = 1;
+  let releaseFirst;
+  let markFirstStarted;
+  const firstStarted = new Promise(resolve => { markFirstStarted = resolve; });
+  const methods = [];
+  const client = {
+    async readEngineState() {
+      return { ok: true, revision, state: { isBusy: methods.includes("handleSubmit:first") }, result: null };
+    },
+    async invokeEngineMethod(input) {
+      revision += 1;
+      const label = `${input.method}:${input.args[0]}`;
+      methods.push(label);
+      if (label === "handleSubmit:first") {
+        markFirstStarted();
+        await new Promise(resolve => { releaseFirst = resolve; });
+      }
+      return { ok: true, revision, result: undefined };
+    },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "busy-submit");
+
+  const first = engine.handleSubmit("first");
+  await firstStarted;
+  const followUp = engine.handleSubmit("follow-up");
+  const admittedWhileFirstActive = await Promise.race([
+    followUp.then(() => true),
+    new Promise(resolve => setTimeout(() => resolve(false), 100)),
+  ]);
+
+  assert.equal(admittedWhileFirstActive, true, "the follow-up must reach the owner while its busy state is authoritative");
+  assert.deepEqual(methods, ["handleSubmit:first", "handleSubmit:follow-up"]);
+  releaseFirst();
+  await first;
+  engine.dispose();
+});
+
+test("an accepted submit remains accepted when its projection refresh fails", async () => {
+  let reads = 0;
+  let invokes = 0;
+  const engine = await createRemoteWorkShellEngine({
+    async readEngineState() {
+      reads += 1;
+      if (reads > 1) throw new Error("projection socket closed");
+      return { ok: true, revision: 1, state: { isBusy: false }, result: null };
+    },
+    async invokeEngineMethod() {
+      invokes += 1;
+      return { ok: true, revision: 2, result: undefined };
+    },
+  }, "accepted-submit-refresh");
+
+  await assert.doesNotReject(engine.handleSubmit("accepted exactly once"));
+  assert.equal(invokes, 1, "post-receipt refresh failure must never replay an accepted submit");
+  engine.dispose();
+});
+
+test("initial submit waits for setup mutations instead of exhausting its conflict retry", async () => {
+  let revision = 0;
+  let releaseColumns;
+  let markColumnsStarted;
+  const columnsStarted = new Promise(resolve => { markColumnsStarted = resolve; });
+  const methods = [];
+  const client = {
+    async readEngineState() {
+      return { ok: true, revision, state: { isBusy: false }, result: null };
+    },
+    async invokeEngineMethod(input) {
+      methods.push(input.method);
+      if (input.method === "updateTerminalColumns") {
+        markColumnsStarted();
+        await new Promise(resolve => { releaseColumns = resolve; });
+      }
+      revision += 1;
+      return { ok: true, revision, result: undefined };
+    },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "initial-submit");
+
+  const columns = engine.updateTerminalColumns(100);
+  await columnsStarted;
+  const submit = engine.handleSubmit("first prompt");
+  await new Promise(resolve => setTimeout(resolve, 20));
+
+  assert.deepEqual(
+    methods,
+    ["updateTerminalColumns"],
+    "an idle first submit must remain behind setup mutations on the normal lane",
+  );
+  releaseColumns();
+  await Promise.all([columns, submit]);
+  assert.deepEqual(methods, ["updateTerminalColumns", "handleSubmit"]);
+  engine.dispose();
+});
+
+test("remote submit retries one pre-admission revision conflict but never a transport failure", async () => {
+  let revision = 3;
+  let reads = 0;
+  const attempts = [];
+  const client = {
+    async readEngineState() {
+      reads += 1;
+      return { ok: true, revision, state: { isBusy: true }, result: null };
+    },
+    async invokeEngineMethod(input) {
+      attempts.push(input);
+      if (attempts.length === 1) {
+        revision = 4;
+        return { ok: false, code: "revision_conflict", message: "Engine revision changed.", revision };
+      }
+      return { ok: true, revision: 5, result: undefined };
+    },
+  };
+  const engine = await createRemoteWorkShellEngine(client, "submit-conflict");
+
+  await engine.handleSubmit("queue me");
+
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].idempotencyKey, attempts[1].idempotencyKey);
+  assert.equal(attempts[0].expectedRevision, 3);
+  assert.equal(attempts[1].expectedRevision, 4);
+  assert.equal(reads, 3, "initial state, conflict refresh, and successful receipt refresh must be read");
+  engine.dispose();
+
+  let transportAttempts = 0;
+  const transportEngine = await createRemoteWorkShellEngine({
+    async readEngineState() {
+      return { ok: true, revision: 1, state: { isBusy: false }, result: null };
+    },
+    async invokeEngineMethod() {
+      transportAttempts += 1;
+      throw new Error("socket closed after admission");
+    },
+  }, "submit-transport");
+  await assert.rejects(transportEngine.handleSubmit("exactly once"), /socket closed after admission/);
+  assert.equal(transportAttempts, 1, "an in-doubt submitted turn must never be replayed");
+  transportEngine.dispose();
+});
+
 test("remote tool-history toggle retries one non-receipted revision conflict exactly once", async () => {
   let revision = 3;
   let state = { traceMode: "minimal" };
@@ -586,5 +726,30 @@ test("remote agent console opens while a long submitted turn is still running", 
   assert.equal(opens, 1);
   releaseSubmit?.();
   await turn;
+  engine.dispose();
+});
+
+test("remote Agent Console surfaces a bounded exact-target rejection", async () => {
+  const state = {
+    isBusy: true,
+    composerMode: "default",
+    agentConsoleView: { open: true, tab: "agents", cursor: 1, control: { kind: "browse" } },
+    agentConsole: { agents: [{ id: "run-alpha" }, { id: "run-beta" }] },
+  };
+  const engine = await createRemoteWorkShellEngine({
+    async readEngineState() {
+      return { ok: true, revision: 2, state, result: null };
+    },
+    async invokeEngineMethod() {
+      return { ok: false, code: "revision_conflict", message: "RAW_OWNER_DETAIL", revision: 3 };
+    },
+  }, "rejected-agent-control");
+
+  await assert.rejects(engine.beginAgentSteer("run-alpha"), /RAW_OWNER_DETAIL/);
+  const projected = engine.getState();
+  assert.equal(projected.composerMode, "default");
+  assert.equal(projected.agentConsoleView.receipt.status, "rejected");
+  assert.equal(projected.agentConsoleView.receipt.message, "Agent control state changed. Try again.");
+  assert.doesNotMatch(projected.agentConsoleView.receipt.message, /RAW_OWNER_DETAIL/);
   engine.dispose();
 });

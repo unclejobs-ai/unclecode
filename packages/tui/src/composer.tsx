@@ -489,7 +489,6 @@ export function Composer(props: {
   const pendingLocalValueRef = useRef<string | undefined>(undefined);
   const resetEpochRef = useRef(props.resetEpoch);
   const pasteTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const suppressNextSubmitRef = useRef(false);
   const inputEpochRef = useRef(0);
   // Ink's useInput rebinds when the handler identity changes, but Enter after
   // Ctrl+V can still observe a stale onSubmit/onClipboardImage closure from
@@ -544,14 +543,12 @@ export function Composer(props: {
   });
 
   const armPasteWindow = (text: string): void => {
-    suppressNextSubmitRef.current = true;
     setIsPasting(true);
     propsRef.current.onPaste?.(text);
     if (pasteTimeoutRef.current) {
       clearTimeout(pasteTimeoutRef.current);
     }
     pasteTimeoutRef.current = setTimeout(() => {
-      suppressNextSubmitRef.current = false;
       setIsPasting(false);
     }, PASTE_SETTLE_MS);
   };
@@ -724,15 +721,6 @@ export function Composer(props: {
       const submittedValue = textBeforeReturn.length > 0
         ? `${currentValue.slice(0, currentCursorOffset)}${sanitizeComposerInput(textBeforeReturn)}${currentValue.slice(currentCursorOffset)}`
         : currentValue;
-      if (suppressNextSubmitRef.current || isPasting) {
-        cursorOffsetRef.current = submittedValue.length;
-        setCursorOffset(submittedValue.length);
-        pendingLocalValueRef.current = submittedValue;
-        if (submittedValue !== currentValue) {
-          latestProps.onChange(submittedValue);
-        }
-        return;
-      }
       submitAndRestoreIfRejected(submittedValue);
       return;
     }
@@ -749,9 +737,6 @@ export function Composer(props: {
     setCursorOffset(result.nextCursorOffset);
 
     if (result.submitted) {
-      if (suppressNextSubmitRef.current || isPasting) {
-        return;
-      }
       submitAndRestoreIfRejected(result.nextValue);
       return;
     }

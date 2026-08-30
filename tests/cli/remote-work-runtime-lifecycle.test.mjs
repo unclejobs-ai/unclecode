@@ -209,3 +209,48 @@ test("persistent owner controller reattaches an existing session after owner rep
   assert.equal(pane.engine.getState().remoteConnection, undefined);
   controller.dispose();
 });
+
+test("interactive startup paints a connection frame before waiting for a cold owner", async () => {
+  const fixture = sessionFixture(process.cwd());
+  const events = [];
+  let resolveOwner;
+  const owner = new Promise((resolve) => { resolveOwner = resolve; });
+  const controller = {
+    initialProps: { workspaceRoot: process.cwd() },
+    embeddedWorkPane: { renderWorkPane() {} },
+    async dispose() { events.push("dispose"); },
+  };
+
+  const started = workRuntime.startRepl(fixture.agent, {
+    ...fixture.options,
+    initialUiLocale: "ko",
+  }, {
+    showConnectionStatus(input) {
+      events.push(`frame:${input.locale}`);
+      return { active: true, restore() { events.push("restore"); } };
+    },
+    connectOwner: async () => {
+      events.push("connect");
+      return owner;
+    },
+    createController: async ({ client }) => {
+      events.push(`controller:${client.id}`);
+      return controller;
+    },
+    renderDashboard: async () => { events.push("render"); },
+  });
+
+  await Promise.resolve();
+  assert.deepEqual(events, ["frame:ko", "connect"],
+    "a slow owner must never leave the terminal blank before its promise settles");
+  resolveOwner({ id: "owner-1" });
+  await started;
+  assert.deepEqual(events, [
+    "frame:ko",
+    "connect",
+    "controller:owner-1",
+    "restore",
+    "render",
+    "dispose",
+  ]);
+});

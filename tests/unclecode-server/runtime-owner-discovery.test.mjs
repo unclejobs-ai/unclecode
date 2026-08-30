@@ -39,8 +39,14 @@ test("simultaneous clients start exactly one runtime owner and attach to the sam
   };
 
   const [first, second] = await Promise.all([
-    ensureRuntimeOwner({ leasePath, lockPath, bootId: "boot-test", health, startOwner }),
-    ensureRuntimeOwner({ leasePath, lockPath, bootId: "boot-test", health, startOwner }),
+    ensureRuntimeOwner({
+      leasePath, lockPath, bootId: "boot-test", health, startOwner,
+      resolveProcessStartIdentity: async () => "fixture-process-start",
+    }),
+    ensureRuntimeOwner({
+      leasePath, lockPath, bootId: "boot-test", health, startOwner,
+      resolveProcessStartIdentity: async () => "fixture-process-start",
+    }),
   ]);
 
   assert.equal(starts, 1);
@@ -92,6 +98,132 @@ test("a live compatible lease with failed identity health is replaced, never tru
 
   assert.equal(starts, 1);
   assert.equal(result.ownerId, "owner-2");
+});
+
+test("a live identity-matched owner survives a transient health timeout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-transient-health-"));
+  const leasePath = join(root, "runtime-owner.json");
+  const lockPath = join(root, "runtime-owner.lock");
+  await writeFile(leasePath, `${JSON.stringify(lease())}\n`);
+  let healthChecks = 0;
+  let starts = 0;
+
+  const result = await ensureRuntimeOwner({
+    leasePath,
+    lockPath,
+    bootId: "boot-test",
+    timeoutMs: 1_000,
+    resolveProcessStartIdentity: async () => "fixture-process-start",
+    health: async () => {
+      healthChecks += 1;
+      return healthChecks >= 3;
+    },
+    startOwner: async () => {
+      starts += 1;
+      return lease({ ownerId: "replacement-must-not-start" });
+    },
+  });
+
+  assert.equal(result.ownerId, "owner-1");
+  assert.equal(starts, 0, "a timeout cannot replace the exact live owner process");
+  assert.equal(healthChecks, 3);
+});
+
+test("a live owner survives an indeterminate process identity lookup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-indeterminate-identity-"));
+  const leasePath = join(root, "runtime-owner.json");
+  const lockPath = join(root, "runtime-owner.lock");
+  await writeFile(leasePath, `${JSON.stringify(lease())}\n`);
+  let identityCalls = 0;
+  let starts = 0;
+
+  const result = await ensureRuntimeOwner({
+    leasePath, lockPath, bootId: "boot-test", timeoutMs: 1_000,
+    resolveProcessStartIdentity: async () => {
+      identityCalls += 1;
+      if (identityCalls === 1) return "claimant-start";
+      if (identityCalls === 2) return null;
+      return "fixture-process-start";
+    },
+    health: async candidate => candidate.ownerId === "owner-1",
+    startOwner: async () => { starts += 1; return lease({ ownerId: "duplicate" }); },
+  });
+
+  assert.equal(result.ownerId, "owner-1");
+  assert.equal(starts, 0);
+});
+
+test("persistent indeterminate identity fails closed without starting a second owner", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-indeterminate-timeout-"));
+  const leasePath = join(root, "runtime-owner.json");
+  const lockPath = join(root, "runtime-owner.lock");
+  await writeFile(leasePath, `${JSON.stringify(lease())}\n`);
+  let identityCalls = 0;
+  let starts = 0;
+
+  await assert.rejects(ensureRuntimeOwner({
+    leasePath, lockPath, bootId: "boot-test", timeoutMs: 30,
+    resolveProcessStartIdentity: async () => {
+      identityCalls += 1;
+      return identityCalls === 1 ? "claimant-start" : null;
+    },
+    health: async () => false,
+    startOwner: async () => { starts += 1; return lease({ ownerId: "duplicate" }); },
+  }), /Timed out attaching/);
+  assert.equal(starts, 0);
+});
+
+test("identity-matched owner with foreign health times out without replacement", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-foreign-health-"));
+  const leasePath = join(root, "runtime-owner.json");
+  const lockPath = join(root, "runtime-owner.lock");
+  await writeFile(leasePath, `${JSON.stringify(lease())}\n`);
+  let starts = 0;
+
+  await assert.rejects(ensureRuntimeOwner({
+    leasePath, lockPath, bootId: "boot-test", timeoutMs: 30,
+    resolveProcessStartIdentity: async () => "fixture-process-start",
+    health: async () => false,
+    startOwner: async () => { starts += 1; return lease({ ownerId: "duplicate" }); },
+  }), /Timed out attaching/);
+  assert.equal(starts, 0, "a live exact process cannot be replaced by a foreign endpoint response");
+});
+
+test("an indeterminate live lock identity is preserved until its owner publishes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unclecode-owner-lock-indeterminate-"));
+  const leasePath = join(root, "runtime-owner.json");
+  const lockPath = join(root, "runtime-owner.lock");
+  await writeFile(lockPath, JSON.stringify({
+    pid: process.pid,
+    bootId: "boot-test",
+    claimId: "live-indeterminate-claim",
+    processStartId: "fixture-process-start",
+    claimedAt: Date.now(),
+  }), { mode: 0o600 });
+  const published = lease({ ownerId: "published-after-indeterminate" });
+  let identityCalls = 0;
+  let starts = 0;
+  const publish = setTimeout(() => {
+    void writeFile(leasePath, `${JSON.stringify(published)}\n`, { mode: 0o600 });
+  }, 40);
+  try {
+    const result = await ensureRuntimeOwner({
+      leasePath, lockPath, bootId: "boot-test", timeoutMs: 1_000,
+      resolveProcessStartIdentity: async () => {
+        identityCalls += 1;
+        if (identityCalls === 1) return "claimant-start";
+        if (identityCalls === 2) return null;
+        return "fixture-process-start";
+      },
+      health: async candidate => candidate.ownerId === published.ownerId,
+      startOwner: async () => { starts += 1; return lease({ ownerId: "duplicate" }); },
+    });
+    assert.equal(result.ownerId, published.ownerId);
+    assert.equal(starts, 0);
+    assert.equal(JSON.parse(await readFile(lockPath, "utf8")).claimId, "live-indeterminate-claim");
+  } finally {
+    clearTimeout(publish);
+  }
 });
 
 test("stale empty and truncated discovery locks are recovered", async () => {
@@ -146,7 +278,7 @@ test("an old claim from the same live process start is never stolen by age", asy
     claimedAt: Date.now() - 120_000,
   }), { mode: 0o600 });
   let starts = 0;
-  const published = lease({ ownerId: "slow-live-owner" });
+  const published = lease({ ownerId: "slow-live-owner", processStartId: "same-live-start" });
   const publish = setTimeout(() => {
     void writeFile(leasePath, `${JSON.stringify(published)}\n`, { mode: 0o600 });
   }, 40);
@@ -183,7 +315,10 @@ test("stale-lock cleanup revalidates identity before unlinking a replacement cla
     processStartId: "replacement-start",
     claimedAt: Date.now(),
   };
-  const published = lease({ ownerId: "replacement-live-owner" });
+  const published = lease({
+    ownerId: "replacement-live-owner",
+    processStartId: "replacement-start",
+  });
   let identityCalls = 0;
   let starts = 0;
   const result = await ensureRuntimeOwner({

@@ -101,6 +101,31 @@ export type WorkAgentTurnResult = {
 
 const CLEARED_TURN_RESULT: WorkAgentTurnResult = { text: WORK_TURN_CANCELLED_SUMMARY, cancelled: true };
 
+// These tools cannot mutate workspace bytes. Everything else is deliberately
+// treated as mutation-capable so a newly added tool cannot silently inherit
+// the lightweight direct-turn evidence path.
+const DIRECT_READ_ONLY_TOOLS = new Set([
+  "ask_user",
+  "list_files",
+  "read_file",
+  "search_text",
+  "web_search",
+]);
+
+function isDirectReadOnlyToolEvent(event: { readonly toolName?: unknown; readonly input?: unknown }): boolean {
+  if (typeof event.toolName !== "string") return false;
+  if (DIRECT_READ_ONLY_TOOLS.has(event.toolName)) return true;
+  if (event.toolName !== "run_shell" || !event.input || typeof event.input !== "object") return false;
+  const command = (event.input as { readonly command?: unknown }).command;
+  if (typeof command !== "string") return false;
+  // A deliberately tiny shell subset used for display/probe commands. Shell
+  // composition, substitution, redirection, and multiline input all fall back
+  // to mutation-capable. This is an evidence optimization, not an authority
+  // grant; policy still governs execution independently.
+  return /^(?:printf|echo|pwd)(?:\s|$)/u.test(command)
+    && !/[\n\r;&|<>`$(){}]/u.test(command);
+}
+
 /** What an executable guardian check is told about a finished plan. */
 type GuardianCheckRequest = {
   readonly prompt: string;
@@ -329,6 +354,7 @@ type QualityRuntimeState = {
   readonly producerAgentRunIdsByNode: Map<string, string>;
   readonly failures: string[];
   readonly terminalHookNodeIds: Set<string>;
+  directLifecyclePluginGeneration?: number;
   graph?: WorkGraph;
   refineCount: number;
   pivotCount: number;
@@ -641,6 +667,32 @@ function staleDirectWorkspaceDecision(): PluginDecisionAggregate {
   };
 }
 
+function directMutationWithoutBaselineDecision(): PluginDecisionAggregate {
+  return {
+    action: "block",
+    decisions: [{
+      pluginName: "unclecode-runtime",
+      action: "block",
+      reason: "A mutation-capable tool ran in a direct turn without a full pre-tool workspace baseline.",
+      failures: ["DIRECT_MUTATING_TOOL_BASELINE_UNPROVEN"],
+    }],
+    failures: ["DIRECT_MUTATING_TOOL_BASELINE_UNPROVEN"],
+  };
+}
+
+function directLifecycleIntegrityDecision(failure: string, reason: string): PluginDecisionAggregate {
+  return {
+    action: "block",
+    decisions: [{
+      pluginName: "unclecode-runtime",
+      action: "block",
+      reason,
+      failures: [failure],
+    }],
+    failures: [failure],
+  };
+}
+
 function trackedWorkspaceSymlinks(
   workspaceRoot: string,
   manifest: QualityWorkspaceInventoryManifest,
@@ -841,10 +893,25 @@ export class WorkAgent<
     prompt: string,
     attachments: readonly Attachment[],
     options: { readonly signal?: AbortSignal | undefined },
+    observeTrace?: ((event: TraceEvent) => void) | undefined,
   ): Promise<{ text: string }> {
     return runExecutionNonInterruptible("provider.request", () =>
-      this.runController.withDirectAgent(() =>
-        this.directAgent.runTurn(prompt, attachments, options)));
+      this.runController.withDirectAgent(async () => {
+        const outerListener = this.traceListener;
+        this.directAgent.setTraceListener(
+          observeTrace || outerListener
+            ? (event) => {
+                observeTrace?.(event);
+                if (outerListener) this.emitTrace(event);
+              }
+            : undefined,
+        );
+        try {
+          return await this.directAgent.runTurn(prompt, attachments, options);
+        } finally {
+          this.directAgent.setTraceListener(outerListener ? (event) => this.emitTrace(event) : undefined);
+        }
+      }));
   }
 
   private runInternalTurn(
@@ -913,16 +980,21 @@ export class WorkAgent<
     onTrace?: TurnOrchestratorTraceListener,
     signal?: AbortSignal | undefined,
     qualityContext?: readonly { readonly pluginName: string; readonly content: string }[] | undefined,
-  ): Promise<{ readonly tasks: readonly PlannedWorkTask[]; readonly usedLlm: boolean }> {
+  ): Promise<{
+    readonly tasks: readonly PlannedWorkTask[];
+    readonly usedLlm: boolean;
+    readonly plannerStartedAt?: number | undefined;
+  }> {
     const staticTasks = buildComplexTasks(prompt);
     let plannerInvoked = false;
+    let plannerStartedAt: number | undefined;
 
     try {
       const planPrompt = appendQualityContext(
         buildRustPrompt("planner-prompt", { prompt }),
         qualityContext ?? [],
       );
-      const plannerStartedAt = Date.now();
+      plannerStartedAt = Date.now();
       onTrace?.(resolveAgentTraceEvent({
         kind: "planner-running",
         prompt,
@@ -932,7 +1004,7 @@ export class WorkAgent<
       const result = await this.runInternalTurn(planPrompt, [], { signal });
       const parsed = parseAgentPlanResponse(result.text);
       if (parsed.length >= 2) {
-        return { tasks: parsed, usedLlm: true };
+        return { tasks: parsed, usedLlm: true, plannerStartedAt };
       }
     } catch (error) {
       // A cancelled turn must not fall back to a static plan and keep working;
@@ -943,7 +1015,11 @@ export class WorkAgent<
       // A deterministic end-to-end task keeps the turn actionable when planning fails.
     }
 
-    return { tasks: staticTasks, usedLlm: plannerInvoked };
+    return {
+      tasks: staticTasks,
+      usedLlm: plannerInvoked,
+      ...(plannerStartedAt === undefined ? {} : { plannerStartedAt }),
+    };
   }
 
   setTraceListener(listener?: ((event: OrchestratedWorkAgentTraceEvent<TraceEvent>) => void) | undefined): void {
@@ -1602,7 +1678,7 @@ export class WorkAgent<
     if (!this.pluginHost) {
       throw new Error("Direct quality lifecycle requires a plugin host.");
     }
-    const workspaceBaseline = state.artifacts.captureWorkspaceInventoryManifest();
+    const workspaceBaseline = state.artifacts.captureWorkspaceInventoryManifest({ scope: "direct" });
     const baselineTrackedSymlinks = trackedWorkspaceSymlinks(this.workspaceRoot, workspaceBaseline);
     state.graph = this.directQualityGraph(state);
     const route = resolveBalancedPrewalkRoute({
@@ -1612,11 +1688,20 @@ export class WorkAgent<
     const context = await this.qualityContext(state, "work");
     const qualityPrompt = appendQualityContext(prompt, context);
     const producerId = `direct:${route.provider}:${route.model}:iteration-${state.iteration}`;
+    let mutationCapableToolStarted = false;
     this.emitQualityStage(state, "work", route, `${state.runId}:direct:${state.iteration}`);
 
     let directResult: { readonly text: string };
     try {
-      directResult = await this.runMainTurn(qualityPrompt, attachments, { signal });
+      directResult = await this.runMainTurn(qualityPrompt, attachments, { signal }, (event) => {
+        if (event.type !== "tool.started") return;
+        if (!isDirectReadOnlyToolEvent(event as TraceEvent & {
+          readonly toolName?: unknown;
+          readonly input?: unknown;
+        })) {
+          mutationCapableToolStarted = true;
+        }
+      });
     } catch (error) {
       const status = error instanceof Error && error.name === "AbortError"
         ? "cancelled"
@@ -1625,7 +1710,9 @@ export class WorkAgent<
       const summary = status === "cancelled"
         ? "Direct provider turn cancelled."
         : `Direct provider turn failed: ${error instanceof Error ? error.message : String(error)}`;
-      const workspaceManifest = state.artifacts.captureWorkspaceInventoryManifest();
+      const workspaceManifest = state.artifacts.captureWorkspaceInventoryManifest({
+        scope: mutationCapableToolStarted ? "review" : "direct",
+      });
       const artifact = state.artifacts.persistDirectTurn({
         intent,
         iteration: state.iteration,
@@ -1659,7 +1746,9 @@ export class WorkAgent<
       throw error;
     }
 
-    const rawWorkspaceManifest = state.artifacts.captureWorkspaceInventoryManifest();
+    const rawWorkspaceManifest = state.artifacts.captureWorkspaceInventoryManifest({
+      scope: mutationCapableToolStarted ? "review" : "direct",
+    });
     const workspaceManifest = directWorkspaceManifestAgainstBaseline({
       baseline: workspaceBaseline,
       baselineTrackedSymlinks,
@@ -1683,6 +1772,25 @@ export class WorkAgent<
       timestamp: new Date().toISOString(),
     }];
     state.completedStages.add("work");
+    if (
+      state.directLifecyclePluginGeneration !== undefined
+      && this.pluginHost.getRegistrationGeneration() !== state.directLifecyclePluginGeneration
+    ) {
+      const decision = directLifecycleIntegrityDecision(
+        "DIRECT_PLUGIN_LIFECYCLE_CHANGED",
+        "Plugin registrations changed during the direct quality lifecycle; completion cannot be proven.",
+      );
+      this.recordQualityDecision(state, "work", decision, {
+        artifactHash: artifact.artifactHash,
+        reviewedArtifactHash: workspaceBaseline.artifactHash,
+        currentArtifactHash: workspaceManifest.artifactHash,
+        stale: true,
+        evidenceRefs: [artifact.path],
+        independentVerification: false,
+        route,
+      });
+      return this.terminateQuality(state);
+    }
     const projection: QualityRunProjection = {
       runId: state.runId,
       profile: state.profile,
@@ -1706,13 +1814,40 @@ export class WorkAgent<
       independentReviewerAvailable: false,
       reviewRequired: state.profile !== "minimal",
     });
-    const rawCurrentManifest = state.artifacts.captureWorkspaceInventoryManifest();
-    const currentManifest = directWorkspaceManifestAgainstBaseline({
-      baseline: workspaceBaseline,
-      baselineTrackedSymlinks,
-      current: rawCurrentManifest,
-      currentTrackedSymlinks: trackedWorkspaceSymlinks(this.workspaceRoot, rawCurrentManifest),
-    });
+    // Signed built-in completion gates are synchronous and trusted not to
+    // mutate workspace bytes, so their already-bound manifest can be reused.
+    const currentManifest = workspaceManifest;
+    if (
+      state.directLifecyclePluginGeneration !== undefined
+      && this.pluginHost.getRegistrationGeneration() !== state.directLifecyclePluginGeneration
+    ) {
+      const decision = directLifecycleIntegrityDecision(
+        "DIRECT_PLUGIN_LIFECYCLE_CHANGED",
+        "Plugin registrations changed while direct completion hooks were running.",
+      );
+      this.recordQualityDecision(state, "work", decision, {
+        artifactHash: artifact.artifactHash,
+        reviewedArtifactHash: workspaceManifest.artifactHash,
+        currentArtifactHash: currentManifest.artifactHash,
+        stale: true,
+        evidenceRefs: [artifact.path],
+        independentVerification: false,
+        route,
+      });
+      return this.terminateQuality(state);
+    }
+    if (mutationCapableToolStarted) {
+      this.recordQualityDecision(state, "work", directMutationWithoutBaselineDecision(), {
+        artifactHash: artifact.artifactHash,
+        reviewedArtifactHash: workspaceManifest.artifactHash,
+        currentArtifactHash: currentManifest.artifactHash,
+        stale: true,
+        evidenceRefs: [artifact.path],
+        independentVerification: false,
+        route,
+      });
+      return this.terminateQuality(state);
+    }
     if (workspaceManifest.evidenceStatus === "unsupported") {
       this.recordUnsupportedOwnershipDecision(state, "work", workspaceManifest.unsupportedEntries, {
         artifactHash: artifact.artifactHash,
@@ -1824,6 +1959,29 @@ export class WorkAgent<
       : classifiedIntent;
     const quality = effectiveIntent ? this.createQualityState(effectiveIntent, safety) : undefined;
     if (quality && this.pluginHost && effectiveIntent) {
+      const directLifecycle = quality.profile === "minimal";
+      if (directLifecycle) {
+        quality.directLifecyclePluginGeneration = this.pluginHost.getRegistrationGeneration();
+        if (this.pluginHost.list().some((registration) =>
+          registration.source !== "builtin"
+          && (
+            typeof registration.hooks.runClassified === "function"
+            || typeof registration.hooks.contextContribute === "function"
+            || typeof registration.hooks.beforeRunComplete === "function"
+          )
+        )) {
+          // Workspace-plugin trust answers whether code may execute; it does
+          // not prove which ignored/generated paths that code can mutate.
+          // Without a host-declared ownership/side-effect contract, external
+          // direct lifecycle participation cannot produce proven SCC evidence.
+          this.emitQualityStage(quality, "explore");
+          this.recordQualityDecision(quality, "explore", directLifecycleIntegrityDecision(
+            "DIRECT_EXTERNAL_LIFECYCLE_CONTRACT_UNPROVEN",
+            "External direct-lifecycle plugins require a host-declared ownership and side-effect evidence contract.",
+          ));
+          return this.terminateQuality(quality);
+        }
+      }
       this.emitQualityStage(quality, "explore");
       const classified = await this.pluginHost.dispatchRunClassified({
         runId: quality.runId,
@@ -1836,6 +1994,16 @@ export class WorkAgent<
       quality.completedStages.add("explore");
       if (classified.action !== "proceed") {
         this.recordQualityDecision(quality, "explore", classified);
+      }
+      if (
+        directLifecycle
+        && quality.directLifecyclePluginGeneration !== undefined
+        && this.pluginHost.getRegistrationGeneration() !== quality.directLifecyclePluginGeneration
+      ) {
+        this.recordQualityDecision(quality, "explore", directLifecycleIntegrityDecision(
+          "DIRECT_PLUGIN_LIFECYCLE_CHANGED",
+          "Plugin registrations changed during direct classification; execution was blocked fail-closed.",
+        ));
       }
       if (quality.terminal) return this.terminateQuality(quality);
     }
@@ -1904,13 +2072,13 @@ export class WorkAgent<
         const plannerPrompt = quality && iterationKind === "pivot"
           ? `${complexPrompt}\n\n<quality_pivot_request>\n${iterationReason}\nProduce a replacement explicit DAG that resolves this defect.\n</quality_pivot_request>`
           : complexPrompt;
-        const { tasks, usedLlm } = await this.planTasks(
+        const plan = await this.planTasks(
           plannerPrompt,
           planOptions?.onTrace,
           turnSignal,
           context,
         );
-        return { tasks, usedLlm };
+        return plan;
       },
       executeComplexTask: async (task) => {
         if (quality && this.pluginHost) {
@@ -2820,6 +2988,7 @@ export class WorkAgent<
             if (quality) {
               quality.reviewBaseline = quality.artifacts.captureWorkspaceInventory(
                 tasks.flatMap((task) => task.writePaths),
+                { scope: "review" },
               );
             }
             this.emitTrace({

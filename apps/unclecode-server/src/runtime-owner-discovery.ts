@@ -164,17 +164,20 @@ export async function publishRuntimeOwnerLease(path: string, lease: RuntimeOwner
   }
 }
 
-async function isAttachable(
+async function classifyPublishedOwner(
   lease: RuntimeOwnerLease | null,
   bootId: string,
+  identity: (pid: number) => Promise<string | null>,
   health: (lease: RuntimeOwnerLease) => Promise<boolean>,
-): Promise<boolean> {
-  return Boolean(
-    lease
-    && lease.bootId === bootId
-    && isPidAlive(lease.pid)
-    && await health(lease).catch(() => false),
-  );
+): Promise<"attachable" | "live-unhealthy" | "stale"> {
+  if (!lease || lease.bootId !== bootId || !isPidAlive(lease.pid)) return "stale";
+  const actualStartId = await identity(lease.pid);
+  // Identity lookup can fail transiently even after process liveness was
+  // proven. Treat indeterminate identity like an unhealthy live owner and
+  // retry; only a non-null mismatch proves PID reuse and permits replacement.
+  if (actualStartId === null) return "live-unhealthy";
+  if (actualStartId !== lease.processStartId) return "stale";
+  return await health(lease).catch(() => false) ? "attachable" : "live-unhealthy";
 }
 
 async function removeDeadLock(
@@ -213,12 +216,14 @@ async function removeDeadLock(
       && lock.processStartId.length > 0
       && typeof lock.claimedAt === "number"
       && Number.isFinite(lock.claimedAt);
-    const actualStartId = validShape ? await identity(Number(lock.pid)) : null;
+    const lockPid = Number(lock.pid);
+    const lockPidAlive = validShape && isPidAlive(lockPid);
+    const actualStartId = lockPidAlive ? await identity(lockPid) : null;
     if (
       !validShape
       || lock.bootId !== bootId
-      || actualStartId === null
-      || actualStartId !== lock.processStartId
+      || !lockPidAlive
+      || (actualStartId !== null && actualStartId !== lock.processStartId)
     ) {
       await unlinkLockIfUnchanged(lockPath, stat, raw);
     }
@@ -268,7 +273,16 @@ export async function ensureRuntimeOwner(input: {
 
   while (Date.now() <= deadline) {
     const existing = await readRuntimeOwnerLease(input.leasePath);
-    if (existing && await isAttachable(existing, bootId, input.health)) return existing;
+    const existingState = await classifyPublishedOwner(existing, bootId, resolveIdentity, input.health);
+    if (existing && existingState === "attachable") return existing;
+    if (existingState === "live-unhealthy") {
+      // A bounded health RPC can time out while the one true owner is busy.
+      // Replacing its lease would create a split brain, interrupt queue claims,
+      // and strand accepted follow-ups. Only a dead/reused process identity is
+      // stale enough to replace; a live exact owner gets another bounded poll.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      continue;
+    }
 
     let lock: Awaited<ReturnType<typeof open>> | undefined;
     try {
@@ -283,7 +297,12 @@ export async function ensureRuntimeOwner(input: {
       await lock.sync();
 
       const raced = await readRuntimeOwnerLease(input.leasePath);
-      if (raced && await isAttachable(raced, bootId, input.health)) return raced;
+      const racedState = await classifyPublishedOwner(raced, bootId, resolveIdentity, input.health);
+      if (raced && racedState === "attachable") return raced;
+      if (racedState === "live-unhealthy") {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        continue;
+      }
 
       const started = parseLease(await input.startOwner());
       if (!started) throw new Error("Runtime owner returned an incompatible discovery lease.");

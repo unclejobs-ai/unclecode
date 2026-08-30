@@ -1568,6 +1568,82 @@ test("an active submitted turn does not retain the owner lane needed to pause it
   await turn;
 });
 
+test("a busy follow-up reaches the engine before the active submit settles", async () => {
+  const listeners = new Set();
+  let releaseTurn;
+  let markTurnStarted;
+  const turnStarted = new Promise(resolve => { markTurnStarted = resolve; });
+  const submissions = [];
+  const engine = {
+    // Deliberately keep the projection idle. Admission itself is the
+    // authoritative signal that a second submit is a follow-up; waiting for
+    // a later busy render strands it behind the first long receipt.
+    getState: () => ({ isBusy: false, queuePaused: false, model: "test", mode: "standard", uiLocale: "en", agentConsole: {} }),
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    admitRuntimeTurn() {},
+    async handleSubmit(value) {
+      submissions.push(value);
+      if (value === "first") {
+        markTurnStarted();
+        await new Promise(resolve => { releaseTurn = resolve; });
+      }
+    },
+  };
+  const registry = new LiveRuntimeEngineRegistry();
+  registry.attach("busy-follow-up", engine, { projectPath: "/work/busy-follow-up" });
+
+  const first = registry.invoke({
+    sessionId: "busy-follow-up", method: "handleSubmit", args: ["first"],
+    expectedRevision: 0, idempotencyKey: "busy-first",
+  });
+  await turnStarted;
+  const followUp = registry.invoke({
+    sessionId: "busy-follow-up", method: "handleSubmit", args: ["follow-up"],
+    expectedRevision: 1, idempotencyKey: "busy-follow-up",
+  });
+  const admittedWhileBusy = await Promise.race([
+    followUp.then(result => result.ok),
+    new Promise(resolve => setTimeout(() => resolve(false), 100)),
+  ]);
+
+  assert.equal(admittedWhileBusy, true, "busy follow-up admission must not wait for provider/post-turn settlement");
+  assert.deepEqual(submissions, ["first", "follow-up"]);
+  releaseTurn();
+  assert.equal((await first).ok, true);
+  await registry.disposeAll();
+});
+
+test("a busy follow-up rebases across repeated autonomous revisions without duplicate execution", async () => {
+  const listeners = new Set();
+  const submissions = [];
+  const engine = {
+    getState: () => ({ isBusy: true, queuePaused: false, model: "test", mode: "standard", uiLocale: "en", agentConsole: {} }),
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    admitRuntimeTurn() {},
+    async handleSubmit(value) { submissions.push(value); },
+  };
+  const registry = new LiveRuntimeEngineRegistry();
+  registry.attach("busy-autonomous-follow-up", engine, { projectPath: "/work/busy-autonomous-follow-up" });
+
+  for (const listener of listeners) listener();
+  for (const listener of listeners) listener();
+  assert.equal(registry.read("busy-autonomous-follow-up").revision, 2);
+  const input = {
+    sessionId: "busy-autonomous-follow-up",
+    method: "handleSubmit",
+    args: ["follow-up"],
+    expectedRevision: 0,
+    idempotencyKey: "busy-autonomous-follow-up",
+  };
+  const accepted = await registry.invoke(input);
+  const replay = await registry.invoke(input);
+
+  assert.equal(accepted.ok, true);
+  assert.equal(replay.ok, true);
+  assert.deepEqual(submissions, ["follow-up"], "same-key replay must not execute twice");
+  await registry.disposeAll();
+});
+
 test("Agent Console view controls preempt an active submitted turn", async () => {
   const listeners = new Set();
   let releaseTurn;
@@ -1595,7 +1671,13 @@ test("Agent Console view controls preempt an active submitted turn", async () =>
     sessionId: "live-console-control", method, args,
     expectedRevision: registry.read("live-console-control").revision, idempotencyKey,
   });
-  const open = invokeControl("openAgentConsole", [], "console-open");
+  // The active turn may publish autonomous agent/job revisions after this
+  // view was rendered. View-only console controls rebase onto the latest
+  // projection instead of crashing the TUI with a second revision conflict.
+  const open = registry.invoke({
+    sessionId: "live-console-control", method: "openAgentConsole", args: [],
+    expectedRevision: 0, idempotencyKey: "console-open",
+  });
   const result = await Promise.race([
     open,
     new Promise(resolve => setTimeout(() => resolve({ outcome: "blocked" }), 100)),
@@ -1605,7 +1687,7 @@ test("Agent Console view controls preempt an active submitted turn", async () =>
   assert.equal(result.ok, true);
   const replay = await registry.invoke({
     sessionId: "live-console-control", method: "openAgentConsole", args: [],
-    expectedRevision: 1, idempotencyKey: "console-open",
+    expectedRevision: 0, idempotencyKey: "console-open",
   });
   assert.deepEqual(replay, result, "a reconnect may replay the exact receipt without opening twice");
   for (const [method, args, key] of [
@@ -1624,6 +1706,45 @@ test("Agent Console view controls preempt an active submitted turn", async () =>
   ]);
   releaseTurn();
   await turn;
+});
+
+test("an exact Agent Console steer target survives autonomous revisions without retargeting", async () => {
+  const listeners = new Set();
+  const begins = [];
+  const state = {
+    isBusy: true,
+    agentConsoleView: { open: true, tab: "agents", cursor: 0 },
+    agentConsole: { agents: [{ id: "run-alpha", status: "running" }, { id: "run-beta", status: "running" }] },
+  };
+  const engine = {
+    getState: () => state,
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    beginAgentSteer(agentRunId) {
+      if (state.agentConsole.agents[state.agentConsoleView.cursor]?.id !== agentRunId) return false;
+      begins.push(agentRunId);
+      return true;
+    },
+  };
+  const registry = new LiveRuntimeEngineRegistry();
+  registry.attach("exact-agent-steer", engine, { projectPath: "/work/exact-agent-steer" });
+
+  for (const listener of listeners) listener();
+  for (const listener of listeners) listener();
+  const accepted = await registry.invoke({
+    sessionId: "exact-agent-steer", method: "beginAgentSteer", args: ["run-alpha"],
+    expectedRevision: 0, idempotencyKey: "begin-alpha",
+  });
+  assert.equal(accepted.ok, true);
+  assert.deepEqual(begins, ["run-alpha"]);
+
+  state.agentConsoleView.cursor = 1;
+  const staleTarget = await registry.invoke({
+    sessionId: "exact-agent-steer", method: "beginAgentSteer", args: ["run-alpha"],
+    expectedRevision: 0, idempotencyKey: "stale-alpha",
+  });
+  assert.equal(staleTarget.ok, false);
+  assert.deepEqual(begins, ["run-alpha"], "a stale selection must never retarget another run");
+  await registry.disposeAll();
 });
 
 test("owner disposal reports a non-settling engine instead of silently dropping it", async () => {

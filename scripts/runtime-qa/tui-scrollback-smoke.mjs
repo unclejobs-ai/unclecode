@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { repoRoot, responseText } from "./constants.mjs";
+import { repoRoot, responseText, scrollbackResponseText } from "./constants.mjs";
 import { escapeRegExp, run, shellQuote, sleep } from "./cli-helpers.mjs";
+import { extractRuntimeQaUserRequest } from "./fake-gemini-server.mjs";
 import {
   capturePane,
   IDLE_COMPOSER_PATTERN,
@@ -35,12 +36,13 @@ const PANE_POLL_INTERVAL_MS = 100;
  */
 const COMPOSER_PLACEHOLDER_TEXT = "Describe a task · / for commands";
 
-function turnCompletionPattern(prompt) {
+function turnCompletionPattern(prompt, reply) {
   // Every branch needs its own `.*` prefix: a bare lookahead would pin the
   // match anchor to that one string's position, breaking the "all of these
   // somewhere in the pane" semantics (same composition the context smoke uses).
   return new RegExp(
     `(?=.*\\b${escapeRegExp(prompt)}\\b)` +
+      `(?=.*${escapeRegExp(reply)})` +
       `(?=.*${escapeRegExp(COMPOSER_PLACEHOLDER_TEXT)})` +
       `(?=.*${IDLE_COMPOSER_PATTERN.source})`,
     "is",
@@ -77,20 +79,28 @@ export async function runScrollbackTuiSmoke({ port, tmp, observations }) {
 
     for (let turn = 1; turn <= SCROLLBACK_TURN_COUNT; turn += 1) {
       const prompt = `scroll turn ${String(turn).padStart(2, "0")}`;
+      const observationIndex = observations.length;
       await submitLine(session, prompt, paneFile);
-      // Waiting on the fake provider's observation log (not pane text) makes
-      // the per-turn arrival signal deterministic: the canned reply text is
-      // identical every turn, so pane matching could not tell turns apart.
-      // "At least" semantics on purpose — a turn that fans out to more than
-      // one provider call still satisfies the wait.
-      await waitForRequestCount(observations, beforeRequests + turn);
+      // SCC may issue additional reviewer/quality requests. A global request
+      // count can therefore be satisfied before this exact user turn reaches
+      // the provider, and the smoke would kill the TUI while owner work is
+      // still starting. Bind the barrier to this turn's extracted user input.
+      await waitForProviderRequest({
+        observations,
+        afterIndex: observationIndex,
+        prompt,
+      });
       // Wait out the full turn before the next submit: submitting during the
       // busy window arms the composer queue instead of starting a turn, and
       // the queue drain can race the idle transition (a queued follow-up can
       // then strand the engine idle with a backlog). The completion pattern
       // below only matches once this turn's reply landed and the composer is
       // back to idle, so the next Enter always starts a fresh turn.
-      await waitForPane(session, turnCompletionPattern(prompt), paneFile);
+      await waitForPane(
+        session,
+        turnCompletionPattern(prompt, scrollbackResponseText(prompt)),
+        paneFile,
+      );
     }
     await sleep(400);
     const idlePane = await capturePane(session, paneFile);
@@ -143,19 +153,35 @@ export async function runScrollbackTuiSmoke({ port, tmp, observations }) {
 }
 
 /**
- * Bounded wait for the fake provider to have served at least `target`
- * requests. Throws on timeout — no swallowing, per the runner contract above.
+ * Bounded wait for this exact user turn's fake-provider response to finish.
+ * Extra SCC reviewer calls and merely accepted-but-unsettled requests cannot
+ * satisfy the barrier. Throws on timeout — no swallowing, per the runner.
  */
-async function waitForRequestCount(observations, target, timeoutMs = REQUEST_WAIT_TIMEOUT_MS) {
+export async function waitForProviderRequest({
+  observations,
+  afterIndex,
+  prompt,
+  timeoutMs = REQUEST_WAIT_TIMEOUT_MS,
+}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (observations.length >= target) {
-      return observations.length;
+    for (let index = afterIndex; index < observations.length; index += 1) {
+      const observation = observations[index];
+      if (
+        observation?.responseFinished === true
+        && extractRuntimeQaUserRequest(observation.text ?? "") === prompt
+      ) {
+        return observation;
+      }
     }
     await sleep(PANE_POLL_INTERVAL_MS);
   }
+  const observedRequests = observations
+    .slice(afterIndex)
+    .map((observation) => extractRuntimeQaUserRequest(observation?.text ?? ""));
   throw new Error(
-    `Timed out waiting for ${target} provider requests (got ${observations.length}) in the scrollback smoke`,
+    `Timed out waiting for provider request ${JSON.stringify(prompt)}; `
+      + `observed ${JSON.stringify(observedRequests)} in the scrollback smoke`,
   );
 }
 

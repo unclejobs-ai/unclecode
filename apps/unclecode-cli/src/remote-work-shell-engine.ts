@@ -24,7 +24,7 @@ const MAX_RECONNECT_DELAY_MS = 2_000;
 // These methods may be replayed only with the same owner receipt identity.
 // A pre-admission conflict can then refresh once, while a lost response
 // resolves from the authoritative receipt without executing the method twice.
-const SAFE_RECEIPT_RETRY_METHODS = new Set([
+const SAFE_TRANSPORT_RETRY_METHODS = new Set([
   "setMode",
   "updateTerminalColumns",
   "updateTerminalRows",
@@ -35,6 +35,15 @@ const SAFE_RECEIPT_RETRY_METHODS = new Set([
   "selectAgentConsoleTab",
   "moveAgentConsoleCursor",
   "toggleAgentConsoleInspector",
+]);
+
+// A revision conflict is returned before admission, so handleSubmit may
+// refresh and retry once with the same receipt identity. It must not be
+// replayed after a transport failure because the owner may already have
+// admitted the turn.
+const SAFE_CONFLICT_RETRY_METHODS = new Set([
+  ...SAFE_TRANSPORT_RETRY_METHODS,
+  "handleSubmit",
 ]);
 
 const PREEMPTIVE_CONTROL_METHODS = new Set([
@@ -82,6 +91,26 @@ export async function createRemoteWorkShellEngine(
   let pollAbort: AbortController | undefined;
   const invocationAborts = new Set<AbortController>();
   let invocationTail: Promise<void> = Promise.resolve();
+  let activeSubmitInvocations = 0;
+  let agentControlFailure = false;
+
+  const projectOwnerState = (next: State): State => {
+    if (!agentControlFailure) return next;
+    const view = next.agentConsoleView;
+    if (!view || typeof view !== "object") return next;
+    return {
+      ...next,
+      composerMode: "default",
+      agentConsoleView: {
+        ...(view as Readonly<Record<string, unknown>>),
+        control: { kind: "browse" },
+        receipt: {
+          status: "rejected",
+          message: "Agent control state changed. Try again.",
+        },
+      },
+    };
+  };
 
   const notify = (next: State) => {
     state = next;
@@ -114,11 +143,11 @@ export async function createRemoteWorkShellEngine(
     }
     acceptedStateRequestSequence = Math.max(acceptedStateRequestSequence, requestSequence);
     ownerState = next as State;
-    notify(ownerState);
+    notify(projectOwnerState(ownerState));
     return true;
   };
   const projectConnection = (connection: RemoteConnectionProjection) => {
-    notify({ ...ownerState, remoteConnection: connection });
+    notify({ ...projectOwnerState(ownerState), remoteConnection: connection });
   };
   const readLatest = async (signal?: AbortSignal) => {
     const requestSequence = ++stateRequestSequence;
@@ -147,7 +176,7 @@ export async function createRemoteWorkShellEngine(
       const response = await readLatest(controller.signal);
       if (!response.ok) throw new Error(response.message);
       reconnectAttempt = 0;
-      if (state.remoteConnection !== undefined) notify(ownerState);
+      if (state.remoteConnection !== undefined) notify(projectOwnerState(ownerState));
       return POLL_INTERVAL_MS;
     } catch (error) {
       if (controller.signal.aborted || disposed) return POLL_INTERVAL_MS;
@@ -191,28 +220,29 @@ export async function createRemoteWorkShellEngine(
           const requestSequence = ++stateRequestSequence;
           try {
             response = await ownerClient.invokeEngineMethod(request);
-            if (response.ok) {
-              if ("state" in response) {
-                publish(response.state, response.revision, requestSequence, "mutation");
-              } else {
-                // Mutation receipts intentionally exclude the potentially
-                // multi-megabyte live projection. Publish the durable revision
-                // fence first, then obtain authoritative state through the
-                // dedicated read endpoint.
-                if (response.revision > revision) revision = response.revision;
-                readableRequestSequenceFloor = stateRequestSequence + 1;
-                acceptedStateRequestSequence = Math.max(acceptedStateRequestSequence, requestSequence);
-                await readLatest(controller.signal);
-              }
-            }
-            break;
           } catch (error) {
             if (
               controller.signal.aborted
               || replayAttempt > 0
-              || !SAFE_RECEIPT_RETRY_METHODS.has(method)
+              || !SAFE_TRANSPORT_RETRY_METHODS.has(method)
             ) throw error;
+            continue;
           }
+          if (response.ok) {
+            if ("state" in response) {
+              publish(response.state, response.revision, requestSequence, "mutation");
+            } else {
+              // The receipt is already authoritative and durable. Fence its
+              // revision before refreshing the potentially large projection;
+              // a failed refresh must never turn an accepted submit into an
+              // apparent rejection that invites the user to send it twice.
+              if (response.revision > revision) revision = response.revision;
+              readableRequestSequenceFloor = stateRequestSequence + 1;
+              acceptedStateRequestSequence = Math.max(acceptedStateRequestSequence, requestSequence);
+              await readLatest(controller.signal).catch(() => undefined);
+            }
+          }
+          break;
         }
         if (response.ok) {
           return response.result;
@@ -220,7 +250,7 @@ export async function createRemoteWorkShellEngine(
         if (
           response.code !== "revision_conflict"
           || attempt > 0
-          || !SAFE_RECEIPT_RETRY_METHODS.has(method)
+          || !SAFE_CONFLICT_RETRY_METHODS.has(method)
         ) throw new Error(response.message);
         await readLatest(controller.signal);
       }
@@ -229,11 +259,42 @@ export async function createRemoteWorkShellEngine(
       invocationAborts.delete(controller);
     }
   };
+  const invokeWithSubmitLifecycle = async (method: string, args: readonly unknown[]) => {
+    if (method === "handleSubmit") activeSubmitInvocations += 1;
+    try {
+      return await invoke(method, args);
+    } finally {
+      if (method === "handleSubmit") activeSubmitInvocations -= 1;
+    }
+  };
   const scheduleInvoke = (method: string, args: readonly unknown[]) => {
-    if (PREEMPTIVE_CONTROL_METHODS.has(method)) return invoke(method, args);
-    const scheduled = invocationTail.then(() => invoke(method, args));
-    invocationTail = scheduled.then(() => undefined, () => undefined);
-    return scheduled;
+    if (method === "beginAgentSteer" && agentControlFailure) {
+      agentControlFailure = false;
+      notify(ownerState);
+    }
+    // Only a follow-up for an authoritatively busy owner may bypass the
+    // client mutation tail. Making every submit preemptive lets the initial
+    // prompt race startup column/row mutations and exhaust its single safe
+    // pre-admission conflict retry, which looks like an ignored Enter when
+    // the Composer restores the rejected draft.
+    const busySubmit = method === "handleSubmit"
+      && (activeSubmitInvocations > 0 || ownerState.isBusy === true);
+    const scheduled = busySubmit || PREEMPTIVE_CONTROL_METHODS.has(method)
+      ? invokeWithSubmitLifecycle(method, args)
+      : invocationTail.then(() => invokeWithSubmitLifecycle(method, args));
+    if (!busySubmit && !PREEMPTIVE_CONTROL_METHODS.has(method)) {
+      invocationTail = scheduled.then(() => undefined, () => undefined);
+    }
+    if (method !== "beginAgentSteer") return scheduled;
+    return scheduled.catch((error) => {
+      // A semantic console action can legitimately lose its exact target to
+      // an autonomous lifecycle update. Keep that rejection client-local,
+      // bounded, and visible; never leak the owner error or let a discarded
+      // Promise become an unhandled rejection in Ink's key handler.
+      agentControlFailure = true;
+      notify(projectOwnerState(ownerState));
+      throw error;
+    });
   };
   const target = {
     getSessionId: () => sessionId,

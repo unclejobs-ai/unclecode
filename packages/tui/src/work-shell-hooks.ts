@@ -9,6 +9,7 @@ import {
 } from "react";
 import {
   getWorkShellMessages,
+  resolveAgentConsoleSelection,
   runRustCommandSync,
   type AgentConsoleViewState,
   type WorkShellComposerMode,
@@ -378,7 +379,7 @@ export interface WorkShellPaneEngine<State extends WorkShellPaneRuntimeState>
   selectAgentConsoleTab?(tab: AgentConsoleTab): void;
   moveAgentConsoleCursor?(delta: number): void;
   toggleAgentConsoleInspector?(): void;
-  beginAgentSteer?(): void;
+  beginAgentSteer?(agentRunId?: string): unknown;
   submitAgentSteer?(value: string): Promise<void>;
   requestAgentCancel?(): void;
   confirmAgentCancel?(confirm: boolean): Promise<void>;
@@ -1811,7 +1812,22 @@ export function useWorkShellPaneState<
             selectTab: (tab) => input.engine.selectAgentConsoleTab?.(tab),
             moveCursor: (delta) => input.engine.moveAgentConsoleCursor?.(delta),
             toggleInspector: () => input.engine.toggleAgentConsoleInspector?.(),
-            beginSteer: () => input.engine.beginAgentSteer?.(),
+            beginSteer: () => {
+              const liveState = input.engine.getState();
+              const liveView = liveState.agentConsoleView;
+              const liveSnapshot = liveState.agentConsole;
+              const selection = liveView && liveSnapshot
+                ? resolveAgentConsoleSelection(liveView, liveSnapshot)
+                : undefined;
+              const started = input.engine.beginAgentSteer?.(
+                selection?.tab === "agents" ? selection.run.id : undefined,
+              );
+              if (started && typeof (started as PromiseLike<unknown>).then === "function") {
+                void Promise.resolve(started).catch(() => {
+                  leaveAgentSteerComposer();
+                });
+              }
+            },
             cancelSteer: leaveAgentSteerComposer,
             requestCancel: () => input.engine.requestAgentCancel?.(),
             confirmCancel: (confirmed) => {

@@ -211,6 +211,39 @@ export type QualityReviewPacketInput = {
 
 type QualityWorkspaceSnapshot = Omit<QualityWorkspaceManifest, "artifactHash">;
 
+type GitWorkspaceEntry = {
+  readonly kind: QualityWorkspaceEntry["kind"];
+  readonly sha256: QualityWorkspaceEntry["sha256"];
+};
+
+type GitWorkspaceSnapshot = {
+  readonly entries: ReadonlyMap<string, GitWorkspaceEntry>;
+  readonly dirtyPaths: ReadonlySet<string>;
+  readonly untrackedPaths: ReadonlySet<string>;
+  readonly fingerprint: string;
+};
+
+type QualityWorkspaceInventoryOptions = {
+  readonly scope?: "review" | "direct" | undefined;
+};
+
+export type QualityWorkspaceInventoryTelemetry = {
+  readonly scanCount: number;
+  readonly indexEntryHits: number;
+  readonly contentHashMisses: number;
+  readonly fallbackScans: number;
+  readonly concurrentMutationFailures: number;
+  readonly lastScanMs: number;
+  readonly maxScanMs: number;
+};
+
+export type QualityArtifactPersistenceTelemetry = {
+  readonly artifactsWritten: number;
+  readonly bytesWritten: number;
+  readonly deduplicatedArtifacts: number;
+  readonly oversizedArtifactsRejected: number;
+};
+
 export type ParsedCriticVerdict = {
   readonly verdict: "pass" | "fail" | "unproven";
   readonly summary: string;
@@ -227,8 +260,15 @@ export const QUALITY_REVIEW_PACKET_MAX_BYTES = 1024 * 1024;
 export const QUALITY_REVIEW_PACKET_MAX_FILE_BYTES = 256 * 1024;
 export const QUALITY_MATERIAL_INPUT_MAX_ENTRIES = 100_000;
 const QUALITY_REVIEW_PACKET_CONTENT_BUDGET = 768 * 1024;
+export const QUALITY_ARTIFACT_MAX_BYTES = 2 * 1024 * 1024;
+const QUALITY_REVIEW_SCOPE_SENTINEL = "[inventory-scope-review]";
 const QUALITY_HASH_BUFFER_BYTES = 64 * 1024;
 const QUALITY_INVENTORY_IGNORED_ROOTS = new Set([".git", ".unclecode", "node_modules", "target"]);
+const isGeneratedInventoryPath = (relativePath: string): boolean =>
+  relativePath === "node_modules"
+  || relativePath.startsWith("node_modules/")
+  || relativePath === "target"
+  || relativePath.startsWith("target/");
 const QUALITY_MATERIAL_INPUT_ROOTS = [
   ".git",
   ".unclecode/config.json",
@@ -356,6 +396,22 @@ export class QualityArtifactStore {
   readonly runId: string;
   readonly runDirectory: string;
   private readonly workspaceRealRoot: string;
+  private inventoryConcurrentMutationDetections = 0;
+  private inventoryTelemetry: QualityWorkspaceInventoryTelemetry = {
+    scanCount: 0,
+    indexEntryHits: 0,
+    contentHashMisses: 0,
+    fallbackScans: 0,
+    concurrentMutationFailures: 0,
+    lastScanMs: 0,
+    maxScanMs: 0,
+  };
+  private artifactPersistenceTelemetry: QualityArtifactPersistenceTelemetry = {
+    artifactsWritten: 0,
+    bytesWritten: 0,
+    deduplicatedArtifacts: 0,
+    oversizedArtifactsRejected: 0,
+  };
 
   constructor(workspaceRoot: string, runId: string) {
     this.workspaceRoot = path.resolve(workspaceRoot);
@@ -390,28 +446,128 @@ export class QualityArtifactStore {
    * the bounded source-file inventory when available; small non-git workspaces
    * use the same no-symlink filesystem walker as artifact manifests.
    */
-  captureWorkspaceInventory(declaredPaths: readonly string[] = []): QualityWorkspaceInventory {
-    const candidatePaths = this.workspaceInventoryPaths();
-    for (const entry of this.snapshotOwnedPaths(declaredPaths).files) {
+  captureWorkspaceInventory(
+    declaredPaths: readonly string[] = [],
+    options: QualityWorkspaceInventoryOptions = {},
+  ): QualityWorkspaceInventory {
+    const scanStartedAt = performance.now();
+    const mutationDetectionsBefore = this.inventoryConcurrentMutationDetections;
+    const gitBefore = this.readGitWorkspaceSnapshot();
+    const ownershipScopedGitInventory = options.scope !== undefined && gitBefore !== undefined;
+    const declaredSnapshot = this.snapshotOwnedPaths(declaredPaths);
+    const declaredEntries = new Map(
+      declaredSnapshot.files
+        .filter((entry) => entry.kind !== "directory")
+        .map((entry) => [entry.path, entry] as const),
+    );
+    const candidatePaths = ownershipScopedGitInventory
+      ? new Set([
+          ...gitBefore.dirtyPaths,
+          ...gitBefore.untrackedPaths,
+          ...[...gitBefore.entries]
+            .filter(([, entry]) => entry.kind !== "file")
+            .map(([relativePath]) => relativePath),
+        ].filter((relativePath) => !isGeneratedInventoryPath(relativePath)))
+      : this.workspaceInventoryPaths(gitBefore);
+    for (const entry of declaredSnapshot.files) {
       if (entry.kind !== "directory") candidatePaths.add(entry.path);
     }
-    const files = [...candidatePaths]
+    let indexEntryHits = 0;
+    let contentHashMisses = 0;
+    const contentBudget = { bytes: 0 };
+    const files: QualityWorkspaceEntry[] = [
+      ...(options.scope === "review"
+        ? [{
+            path: QUALITY_REVIEW_SCOPE_SENTINEL,
+            kind: "file" as const,
+            sha256: sha256("unclecode-quality-review-scope-v1"),
+          }]
+        : []),
+      ...(ownershipScopedGitInventory
+        ? [{ path: "[git-index-worktree]", kind: "file" as const, sha256: gitBefore.fingerprint as `sha256:${string}` }]
+        : []),
+    ];
+    files.push(...[...candidatePaths]
       .sort(compareStablePaths)
       .slice(0, QUALITY_MANIFEST_MAX_ENTRIES)
-      .map((relativePath) => this.snapshotInventoryEntry(relativePath));
+      .map((relativePath) => {
+        const indexed = gitBefore?.entries.get(relativePath);
+        const declared = declaredEntries.get(relativePath);
+        // Review evidence owns exact bytes for every declared path. Index
+        // identities are only the cheap global undeclared-mutation sentinel.
+        if (declared) {
+          contentHashMisses += 1;
+          return this.snapshotInventoryEntryStable(relativePath, contentBudget);
+        }
+        // A gitlink is unsupported ownership evidence by definition. Preserve
+        // that index type even when its worktree flag asks us not to inspect a
+        // nested checkout; representing it as merely missing would fail open.
+        if (indexed?.kind === "special") return { path: relativePath, ...indexed };
+        if (indexed && !gitBefore?.dirtyPaths.has(relativePath)) {
+          if (!ownershipScopedGitInventory) indexEntryHits += 1;
+          return { path: relativePath, ...indexed };
+        }
+        contentHashMisses += 1;
+        return options.scope === "review"
+          ? this.snapshotInventoryMetadataStable(relativePath)
+          : this.snapshotInventoryEntryStable(relativePath, contentBudget);
+      }));
+    if (ownershipScopedGitInventory) {
+      indexEntryHits += [...gitBefore.entries.keys()]
+        .filter((relativePath) => !gitBefore.dirtyPaths.has(relativePath)).length;
+    }
     if (candidatePaths.size > QUALITY_MANIFEST_MAX_ENTRIES) {
       files.push({ path: "[inventory-entry-limit]", kind: "unreadable", sha256: null });
     }
+    let concurrentMutationFailures = 0;
+    if (gitBefore) {
+      const gitAfter = this.readGitWorkspaceSnapshot();
+      if (!gitAfter || gitAfter.fingerprint !== gitBefore.fingerprint) {
+        concurrentMutationFailures += 1;
+        files.push({
+          path: "[git-workspace-changed-during-inventory]",
+          kind: "unreadable",
+          sha256: null,
+        });
+      }
+    }
+    concurrentMutationFailures +=
+      this.inventoryConcurrentMutationDetections - mutationDetectionsBefore;
+    const scanMs = Math.max(0, performance.now() - scanStartedAt);
+    this.inventoryTelemetry = {
+      scanCount: this.inventoryTelemetry.scanCount + 1,
+      indexEntryHits: this.inventoryTelemetry.indexEntryHits + indexEntryHits,
+      contentHashMisses: this.inventoryTelemetry.contentHashMisses + contentHashMisses,
+      fallbackScans: this.inventoryTelemetry.fallbackScans + (gitBefore ? 0 : 1),
+      concurrentMutationFailures:
+        this.inventoryTelemetry.concurrentMutationFailures + concurrentMutationFailures,
+      lastScanMs: scanMs,
+      maxScanMs: Math.max(this.inventoryTelemetry.maxScanMs, scanMs),
+    };
     return {
       files,
-      materialInputs: QUALITY_MATERIAL_INPUT_ROOTS.map((relativePath) =>
+      materialInputs: (options.scope !== undefined
+        ? QUALITY_MATERIAL_INPUT_ROOTS.filter((relativePath) =>
+            relativePath !== ".git" && relativePath !== "node_modules" && relativePath !== "target")
+        : QUALITY_MATERIAL_INPUT_ROOTS).map((relativePath) =>
         this.snapshotMaterialInput(relativePath)),
     };
   }
 
+
+  getWorkspaceInventoryTelemetry(): QualityWorkspaceInventoryTelemetry {
+    return { ...this.inventoryTelemetry };
+  }
+
+  getArtifactPersistenceTelemetry(): QualityArtifactPersistenceTelemetry {
+    return { ...this.artifactPersistenceTelemetry };
+  }
+
   /** A bounded whole-workspace fingerprint suitable for direct tool turns. */
-  captureWorkspaceInventoryManifest(): QualityWorkspaceInventoryManifest {
-    const inventory = this.captureWorkspaceInventory();
+  captureWorkspaceInventoryManifest(
+    options: QualityWorkspaceInventoryOptions = {},
+  ): QualityWorkspaceInventoryManifest {
+    const inventory = this.captureWorkspaceInventory([], options);
     const allEntries: readonly QualityWorkspaceEntry[] = [
       ...inventory.files,
       ...inventory.materialInputs,
@@ -437,7 +593,12 @@ export class QualityArtifactStore {
     const declaredPaths = [...new Set(input.tasks.flatMap((task) => task.writePaths))]
       .map((writePath) => this.resolveOwnedPath(writePath).relativePath)
       .sort(compareStablePaths);
-    const current = this.captureWorkspaceInventory(declaredPaths);
+    const ownershipScopedBaseline = input.baseline.files.some((entry) =>
+      entry.path === QUALITY_REVIEW_SCOPE_SENTINEL || entry.path === "[git-index-worktree]");
+    const current = this.captureWorkspaceInventory(
+      declaredPaths,
+      ownershipScopedBaseline ? { scope: "review" } : {},
+    );
     const beforeByPath = new Map(input.baseline.files.map((entry) => [entry.path, entry] as const));
     const afterByPath = new Map(current.files.map((entry) => [entry.path, entry] as const));
     const baselineMaterialInputs = input.baseline.materialInputs ?? [];
@@ -445,7 +606,11 @@ export class QualityArtifactStore {
     const beforeMaterialByPath = new Map(baselineMaterialInputs.map((entry) => [entry.path, entry] as const));
     const afterMaterialByPath = new Map(currentMaterialInputs.map((entry) => [entry.path, entry] as const));
     const materialInputUnsupportedEntries: QualityWorkspaceEntry[] = [];
-    for (const relativePath of QUALITY_MATERIAL_INPUT_ROOTS) {
+    const reviewedMaterialRoots = new Set([
+      ...baselineMaterialInputs.map((entry) => entry.path),
+      ...currentMaterialInputs.map((entry) => entry.path),
+    ]);
+    for (const relativePath of reviewedMaterialRoots) {
       const before = beforeMaterialByPath.get(relativePath);
       const after = afterMaterialByPath.get(relativePath);
       if (!before || !after) {
@@ -493,9 +658,10 @@ export class QualityArtifactStore {
       ...changedPaths,
     ])].sort(compareStablePaths);
     const contentBudget = { bytes: 0 };
+    const inventoryBudget = { bytes: 0 };
     const packetFiles = packetPaths.map((relativePath) => {
       const before = beforeByPath.get(relativePath);
-      const after = afterByPath.get(relativePath) ?? this.snapshotInventoryEntry(relativePath);
+      const after = afterByPath.get(relativePath) ?? this.snapshotInventoryEntry(relativePath, inventoryBudget);
       const content = after.kind === "file" ? this.readReviewPacketContent(relativePath, contentBudget) : undefined;
       return {
         path: relativePath,
@@ -581,12 +747,25 @@ export class QualityArtifactStore {
     const fileName = `review-packet-iteration-${input.iteration}-${artifactHash.slice("sha256:".length)}.json`;
     const outputPath = path.join(this.runDirectory, fileName);
     const persistedContent = stableJson({ ...packetBody, artifactHash, evidenceStatus });
+    const persistedBytes = Buffer.byteLength(persistedContent, "utf8");
+    if (persistedBytes > QUALITY_ARTIFACT_MAX_BYTES) {
+      this.artifactPersistenceTelemetry = {
+        ...this.artifactPersistenceTelemetry,
+        oversizedArtifactsRejected:
+          this.artifactPersistenceTelemetry.oversizedArtifactsRejected + 1,
+      };
+      throw new Error(
+        `Quality review packet exceeds the ${QUALITY_ARTIFACT_MAX_BYTES}-byte persistence limit.`,
+      );
+    }
+    let createdArtifact = false;
     try {
       writeFileSync(outputPath, persistedContent, {
         encoding: "utf8",
         mode: 0o600,
         flag: "wx",
       });
+      createdArtifact = true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       let existingContent: string;
@@ -599,6 +778,17 @@ export class QualityArtifactStore {
         throw new Error(`Immutable review packet artifact was replaced: ${outputPath}`);
       }
     }
+    this.artifactPersistenceTelemetry = createdArtifact
+      ? {
+          artifactsWritten: this.artifactPersistenceTelemetry.artifactsWritten + 1,
+          bytesWritten: this.artifactPersistenceTelemetry.bytesWritten + persistedBytes,
+          deduplicatedArtifacts: this.artifactPersistenceTelemetry.deduplicatedArtifacts,
+          oversizedArtifactsRejected: this.artifactPersistenceTelemetry.oversizedArtifactsRejected,
+        }
+      : {
+          ...this.artifactPersistenceTelemetry,
+          deduplicatedArtifacts: this.artifactPersistenceTelemetry.deduplicatedArtifacts + 1,
+        };
     return {
       path: path.relative(this.workspaceRoot, outputPath),
       artifactHash,
@@ -633,12 +823,14 @@ export class QualityArtifactStore {
     };
   }
 
-  private workspaceInventoryPaths(): Set<string> {
+  private workspaceInventoryPaths(gitSnapshot?: GitWorkspaceSnapshot | undefined): Set<string> {
     const paths = new Set<string>();
-    try {
+    if (gitSnapshot) {
+      for (const relativePath of gitSnapshot.entries.keys()) paths.add(relativePath);
+    } else try {
       const output = execFileSync(
         "git",
-        ["-C", this.workspaceRoot, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        ["-C", this.workspaceRoot, "-c", "core.fsmonitor=false", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
         { encoding: "buffer", maxBuffer: 8 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] },
       );
       for (const candidate of output.toString("utf8").split("\0").filter(Boolean)) {
@@ -651,6 +843,87 @@ export class QualityArtifactStore {
     // root exclusions bound generated/vendor state and the artifact store itself.
     this.collectWorkspaceInventoryPaths(this.workspaceRoot, "", paths, 0);
     return paths;
+  }
+
+  /**
+   * Git already owns a content-addressed identity for every clean tracked
+   * path. Reusing that identity avoids synchronously opening and hashing every
+   * source file before a minimal chat can reach its provider. Dirty/untracked
+   * paths still go through the bounded filesystem hasher below.
+   */
+  private readGitWorkspaceSnapshot(): GitWorkspaceSnapshot | undefined {
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      GIT_LITERAL_PATHSPECS: "1",
+      GIT_OPTIONAL_LOCKS: "0",
+    };
+    for (const key of ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"]) delete environment[key];
+    try {
+      const stagedAndFlags = execFileSync(
+        "git",
+        ["-C", this.workspaceRoot, "-c", "core.fsmonitor=false", "ls-files", "--stage", "-v", "-z"],
+        { encoding: "buffer", env: environment, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] },
+      );
+      const statusOutput = execFileSync(
+        "git",
+        ["-C", this.workspaceRoot, "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none", "--no-renames"],
+        { encoding: "buffer", env: environment, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] },
+      );
+      const entries = new Map<string, GitWorkspaceEntry>();
+      const dirtyPaths = new Set<string>();
+      const untrackedPaths = new Set<string>();
+      for (const record of statusOutput.toString("utf8").split("\0").filter(Boolean)) {
+        if (record.length < 4 || record[2] !== " ") throw new Error("Malformed git status record.");
+        const status = record.slice(0, 2);
+        const relativePath = record.slice(3);
+        if (!relativePath) throw new Error("Malformed git status path.");
+        if (status === "??") untrackedPaths.add(relativePath);
+        // The index object already binds staged-only bytes. Re-open only when
+        // the worktree column is dirty; this preserves staged/worktree
+        // identity without turning every staged path into a content-hash miss.
+        else if (status[1] !== " ") dirtyPaths.add(relativePath);
+      }
+      // `diff-files` intentionally trusts assume-unchanged/skip-worktree bits.
+      // Fast inventory cannot: such paths must be read from the worktree (or
+      // recorded missing) instead of borrowing the index object's identity.
+      for (const record of stagedAndFlags.toString("utf8").split("\0").filter(Boolean)) {
+        if (record.length < 3 || record[1] !== " ") throw new Error("Malformed git worktree flag record.");
+        const tag = record[0];
+        const stagedRecord = record.slice(2);
+        if (!tag) throw new Error("Malformed git worktree flag identity.");
+        const separator = stagedRecord.indexOf("\t");
+        if (separator < 0) throw new Error("Malformed git index record.");
+        const [mode, objectId, stage] = stagedRecord.slice(0, separator).split(" ");
+        const relativePath = stagedRecord.slice(separator + 1);
+        if (tag !== "H") dirtyPaths.add(relativePath);
+        if (!mode || !objectId || !stage || !relativePath) throw new Error("Malformed git index identity.");
+        if (stage !== "0" || /^0+$/u.test(objectId) || entries.has(relativePath)) {
+          dirtyPaths.add(relativePath);
+          continue;
+        }
+        const kind: QualityWorkspaceEntry["kind"] = mode === "120000"
+          ? "symlink"
+          : mode === "160000"
+            ? "special"
+            : mode.startsWith("100")
+              ? "file"
+              : "unreadable";
+        entries.set(relativePath, {
+          kind,
+          sha256: kind === "unreadable"
+            ? null
+            : sha256(stableJson({ source: "git-index", mode, objectId })),
+        });
+      }
+      const fingerprint = sha256(stableJson({
+        entries: [...entries.entries()].sort(([left], [right]) => compareStablePaths(left, right)),
+        dirtyPaths: [...dirtyPaths].sort(compareStablePaths),
+        untrackedPaths: [...untrackedPaths].sort(compareStablePaths),
+      }));
+      return { entries, dirtyPaths, untrackedPaths, fingerprint };
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -718,7 +991,13 @@ export class QualityArtifactStore {
     ] as const;
     try {
       for (const command of commands) {
-        const output = execFileSync("git", ["-C", this.workspaceRoot, ...command], {
+        const output = execFileSync("git", [
+          "-C",
+          this.workspaceRoot,
+          "-c",
+          "core.fsmonitor=false",
+          ...command,
+        ], {
           encoding: "buffer",
           env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
           maxBuffer: 8 * 1024 * 1024,
@@ -838,14 +1117,92 @@ export class QualityArtifactStore {
     }
   }
 
-  private snapshotInventoryEntry(relativePath: string): QualityWorkspaceEntry {
+  private snapshotInventoryEntry(
+    relativePath: string,
+    budget: { bytes: number } = { bytes: 0 },
+  ): QualityWorkspaceEntry {
     const absolutePath = path.resolve(this.workspaceRoot, relativePath);
     if (!isContainedPath(this.workspaceRoot, absolutePath)) {
       return { path: relativePath, kind: "unreadable", sha256: null };
     }
     const entries = new Map<string, QualityWorkspaceEntry>();
-    this.snapshotOwnedPath(absolutePath, relativePath, entries, { bytes: 0 }, 0);
+    this.snapshotOwnedPath(absolutePath, relativePath, entries, budget, 0);
     return entries.get(relativePath) ?? { path: relativePath, kind: "missing", sha256: null };
+  }
+
+  /** Fail closed if a dirty/untracked path changes while its bytes are read. */
+  private snapshotInventoryEntryStable(
+    relativePath: string,
+    budget: { bytes: number } = { bytes: 0 },
+  ): QualityWorkspaceEntry {
+    const absolutePath = path.resolve(this.workspaceRoot, relativePath);
+    const before = this.inventoryStatIdentity(absolutePath);
+    const entry = this.snapshotInventoryEntry(relativePath, budget);
+    const after = this.inventoryStatIdentity(absolutePath);
+    if (before !== after) {
+      this.inventoryConcurrentMutationDetections += 1;
+      return { path: relativePath, kind: "unreadable", sha256: null };
+    }
+    return entry;
+  }
+
+  /**
+   * Undeclared dirty/untracked paths are mutation sentinels, not review
+   * content. Device/inode/mode/size plus ctime/mtime catches replacement and
+   * byte changes without synchronously reading every pre-existing dirty file;
+   * declared paths still take the content-hash path above.
+   */
+  private snapshotInventoryMetadataStable(relativePath: string): QualityWorkspaceEntry {
+    const absolutePath = path.resolve(this.workspaceRoot, relativePath);
+    if (!isContainedPath(this.workspaceRoot, absolutePath)) {
+      return { path: relativePath, kind: "unreadable", sha256: null };
+    }
+    const before = this.inventoryStatIdentity(absolutePath);
+    let entry: QualityWorkspaceEntry;
+    try {
+      const stats = lstatSync(absolutePath);
+      const kind: QualityWorkspaceEntry["kind"] = stats.isFile()
+        ? "file"
+        : stats.isDirectory()
+          ? "directory"
+          : stats.isSymbolicLink()
+            ? "symlink"
+            : "special";
+      entry = {
+        path: relativePath,
+        kind,
+        sha256: kind === "file" || kind === "directory"
+          ? sha256(stableJson({ source: "worktree-metadata", identity: before }))
+          : null,
+      };
+    } catch (error) {
+      entry = (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? { path: relativePath, kind: "missing", sha256: null }
+        : { path: relativePath, kind: "unreadable", sha256: null };
+    }
+    const after = this.inventoryStatIdentity(absolutePath);
+    if (before !== after) {
+      this.inventoryConcurrentMutationDetections += 1;
+      return { path: relativePath, kind: "unreadable", sha256: null };
+    }
+    return entry;
+  }
+
+  private inventoryStatIdentity(absolutePath: string): string {
+    try {
+      const stats = lstatSync(absolutePath, { bigint: true });
+      return stableJson({
+        device: String(stats.dev),
+        inode: String(stats.ino),
+        mode: String(stats.mode),
+        size: String(stats.size),
+        modifiedNs: String(stats.mtimeNs),
+        changedNs: String(stats.ctimeNs),
+      });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      return code === "ENOENT" ? "missing" : `error:${code ?? "unknown"}`;
+    }
   }
 
   private readReviewPacketContent(
@@ -1163,10 +1520,28 @@ export class QualityArtifactStore {
     mkdirSync(this.runDirectory, { recursive: true });
     const artifactHash = sha256(stableJson(body));
     const outputPath = path.join(this.runDirectory, fileName);
-    writeFileSync(outputPath, stableJson({ ...body, artifactHash }), {
+    const persistedContent = stableJson({ ...body, artifactHash });
+    const persistedBytes = Buffer.byteLength(persistedContent, "utf8");
+    if (persistedBytes > QUALITY_ARTIFACT_MAX_BYTES) {
+      this.artifactPersistenceTelemetry = {
+        ...this.artifactPersistenceTelemetry,
+        oversizedArtifactsRejected:
+          this.artifactPersistenceTelemetry.oversizedArtifactsRejected + 1,
+      };
+      throw new Error(
+        `Quality artifact exceeds the ${QUALITY_ARTIFACT_MAX_BYTES}-byte persistence limit.`,
+      );
+    }
+    writeFileSync(outputPath, persistedContent, {
       encoding: "utf8",
       mode: 0o600,
     });
+    this.artifactPersistenceTelemetry = {
+      artifactsWritten: this.artifactPersistenceTelemetry.artifactsWritten + 1,
+      bytesWritten: this.artifactPersistenceTelemetry.bytesWritten + persistedBytes,
+      deduplicatedArtifacts: this.artifactPersistenceTelemetry.deduplicatedArtifacts,
+      oversizedArtifactsRejected: this.artifactPersistenceTelemetry.oversizedArtifactsRejected,
+    };
     return {
       path: path.relative(this.workspaceRoot, outputPath),
       artifactHash,

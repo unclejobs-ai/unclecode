@@ -482,6 +482,7 @@ function consoleSnapshot() {
  */
 function createAgentConsoleEngine(overrides = {}) {
   const calls = {
+    beginSteer: [],
     steer: [],
     cancel: [],
     continue: [],
@@ -573,10 +574,16 @@ function createAgentConsoleEngine(overrides = {}) {
     toggleAgentConsoleInspector: () => {
       setState({ agentConsoleView: toggleAgentConsoleInspector(state.agentConsoleView) });
     },
-    beginAgentSteer: () => {
+    beginAgentSteer: (agentRunId) => {
       const view = state.agentConsoleView;
       const selection = resolveAgentConsoleSelection(view, state.agentConsole);
-      if (!view.open || selection?.tab !== "agents" || isSettledAgentRun(selection.run)) {
+      calls.beginSteer.push(agentRunId);
+      if (
+        !view.open
+        || selection?.tab !== "agents"
+        || (agentRunId !== undefined && selection.run.id !== agentRunId)
+        || isSettledAgentRun(selection.run)
+      ) {
         setState({
           agentConsoleView: settleAgentConsoleControl(view, {
             status: "rejected",
@@ -746,6 +753,7 @@ test("the console keyboard drives steer, cancel and continue at the selected run
     stdin.write("s");
     await waitForCondition(() => getState().composerMode === "agent-steer");
     assert.equal(getState().composerMode, "agent-steer", "s opens the steer composer");
+    assert.deepEqual(calls.beginSteer, ["r2"], "steer mode binds the exact selected run identity");
     assert.doesNotMatch(lastFrame(getOutput()), /› s/, "s must never reach the composer draft");
 
     stdin.write("focus on tests");

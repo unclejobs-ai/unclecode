@@ -6,12 +6,16 @@ export const reportPath = path.join(repoRoot, ".unclecode", "qa", "runtime-qa-la
 export const tmpPrefix = "unclecode-runtime-qa-";
 
 export const responseText = "UNCLECODE_RUNTIME_QA_OK";
+export const scrollbackResponseText = (prompt) => `${responseText} · ${prompt}`;
 export const ttyResponseText = "UNCLECODE_TTY_QA_OK";
 export const fullTuiResponseText = "UNCLECODE_FULL_TUI_QA_OK";
 export const yoloGreetingResponseText = "UNCLECODE_YOLO_GREETING_QA_OK";
 export const koreanBusyPromptText = "한글 스피너 QA";
 export const koreanBusyResponseText = "하이요! 편하게 말씀 주세요.";
-export const realUseFirstPromptText = "실사용 스트레스 첫 번째";
+// Keep this above Composer's large single-chunk threshold. tmux sends the
+// complete prompt followed immediately by CR, matching terminal paste/input
+// bursts that must submit on the first Enter.
+export const realUseFirstPromptText = `실사용 긴 프롬프트 즉시 제출 검증: ${"가".repeat(48)}`;
 export const realUseFirstResponseText = "REAL_USE_FIRST_OK";
 export const realUseQueuedPromptText = "큐 후속 질문";
 export const realUseQueuedResponseText = "REAL_USE_QUEUE_OK";

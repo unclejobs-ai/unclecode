@@ -51,6 +51,10 @@ try {
     const toolCallSmoke = await runToolCallSmoke(server.port, observations);
     const openAIToolCallSmoke = await runOpenAIToolCallSmoke(openAIServer.port, openAIObservations);
     const anthropicToolCallSmoke = await runAnthropicToolCallSmoke(anthropicServer.port, anthropicObservations);
+    // Non-interactive provider gates use persistent owners too. Reap them
+    // before allocating the TTY/TUI fleet so responsiveness evidence is not
+    // distorted by idle pollers and sockets from already-settled smokes.
+    await stopRuntimeOwnersUnder(tmp);
     await startRuntimeTmuxKeeper();
     const ttySmoke = await runTtySmoke({ port: server.port, tmp, observations });
     const tuiSmokes = await runTuiSmokeSuite({ port: server.port, tmp, observations });
@@ -60,6 +64,7 @@ try {
       tmp,
       "agent-console",
       () => runAgentConsoleTuiSmoke({ tmp }),
+      { extraOwnerRoots: [path.join(tmp, "agent-console-session-store")] },
     );
     const providerSmokes = { toolCallSmoke, openAIToolCallSmoke, anthropicToolCallSmoke };
     const evidence = buildRuntimeEvidence({ ...providerSmokes, ...tuiSmokes });

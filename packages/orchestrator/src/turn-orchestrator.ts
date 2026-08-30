@@ -324,7 +324,11 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
   readonly planComplexTurn: (
     prompt: string,
     options?: { readonly onTrace?: TurnOrchestratorTraceListener | undefined },
-  ) => Promise<{ readonly tasks: readonly Task[]; readonly usedLlm: boolean }>;
+  ) => Promise<{
+    readonly tasks: readonly Task[];
+    readonly usedLlm: boolean;
+    readonly plannerStartedAt?: number | undefined;
+  }>;
   readonly executeComplexTask: (task: Task) => Promise<Result>;
   readonly isComplexTaskSuccessful?: ((result: Result) => boolean) | undefined;
   readonly resolveComplexTaskStatus?:
@@ -414,7 +418,7 @@ export function createTurnOrchestrator<Task extends ComplexPlanTask, Result>(dep
         input.onTrace?.(resolveOrchestratorTraceEvent({
           kind: "planner-completed",
           taskCount: tasks.length,
-          startedAt: plannerStartedAt,
+          startedAt: planOutcome.plannerStartedAt ?? plannerStartedAt,
           completedAt: plannerCompletedAt,
         }));
       }

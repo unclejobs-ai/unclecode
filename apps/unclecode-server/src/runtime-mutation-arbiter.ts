@@ -132,6 +132,18 @@ export class RuntimeSessionMutationArbiter {
     readonly idempotencyKey: string;
     readonly fingerprint: unknown;
     readonly expectedRevision: number;
+    /**
+     * Apply a view-only mutation to the latest projection even if autonomous
+     * state advanced after the client rendered it. Never use for decisions,
+     * execution, queue, policy, or other semantic mutations.
+     */
+    readonly acceptLatestRevision?: boolean | undefined;
+    /**
+     * Permit a stale semantic request only when its caller-owned identity is
+     * still exact in the authoritative projection. Unlike the view-only flag,
+     * this predicate must bind the target independently of the revision.
+     */
+    readonly acceptLatestRevisionWhen?: (() => boolean) | undefined;
     readonly lane?: RuntimeMutationLane | undefined;
     readonly bindsCancelGeneration?: boolean | undefined;
     readonly conflict: (revision: number) => Result;
@@ -208,7 +220,24 @@ export class RuntimeSessionMutationArbiter {
         && input.expectedRevision >= 0
         && input.expectedRevision < this.clock.value
         && input.expectedRevision + 1 >= oldestActiveNormalGeneration;
-      if (this.clock.value !== input.expectedRevision && !stalePreemptiveCancel) {
+      let acceptsLatestIdentity = false;
+      if (
+        this.clock.value !== input.expectedRevision
+        && input.acceptLatestRevision !== true
+        && input.acceptLatestRevisionWhen
+      ) {
+        try {
+          acceptsLatestIdentity = input.acceptLatestRevisionWhen();
+        } catch (error) {
+          return { accepted: false, result: input.fail(error, this.clock.value) };
+        }
+      }
+      if (
+        this.clock.value !== input.expectedRevision
+        && !stalePreemptiveCancel
+        && input.acceptLatestRevision !== true
+        && !acceptsLatestIdentity
+      ) {
         return { accepted: false, result: input.conflict(this.clock.value) };
       }
 

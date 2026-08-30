@@ -1973,13 +1973,45 @@ export function getWorkShellTranscriptEntryCapacity(
 
 /**
  * Task 11 scrollback window. The offset counts entries hidden *below* the
- * window ("entries from the bottom"); 0 is bottom-follow. At 0 the window is
- * the historical last-50 slice, so the unscrolled frame is byte-identical to
- * the pre-scrollback render (the existing render tests guard that). Once
- * scrolled, the window is the weight-derived capacity (entry rows measured by
- * `measureWorkShellEntryRows`) anchored `scrollOffset` entries above the
- * newest entry. `entriesAbove` feeds the indicator row.
+ * window ("entries from the bottom"); 0 is bottom-follow. At 0 the same row
+ * budget keeps the actual newest reply and composer on screen; a fixed
+ * last-50 slice can overflow Ink's alternate-screen viewport and make an idle
+ * frame appear to jump backward. Once scrolled, the window is anchored
+ * `scrollOffset` rows above the newest entry. `entriesAbove` feeds the
+ * indicator row.
  */
+function clipNewestTranscriptEntryToRows(
+  entry: WorkShellEntry,
+  availableRows: number,
+  rowWidth: number | undefined,
+  toolHistoryMode: Parameters<typeof measureWorkShellEntryRows>[2],
+): WorkShellEntry | undefined {
+  if (availableRows <= 0) return undefined;
+  if (measureWorkShellEntryRows(entry, rowWidth, toolHistoryMode) <= availableRows) return entry;
+  if (typeof entry.text !== "string" || entry.text.length === 0) return undefined;
+
+  const graphemes = typeof Intl.Segmenter === "function"
+    ? [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(entry.text)]
+        .map((segment) => segment.segment)
+    : Array.from(entry.text);
+  let low = 0;
+  let high = graphemes.length;
+  let best: WorkShellEntry | undefined;
+  // Keep the longest tail that leaves the composer/status region visible.
+  // Binary search bounds work even for pathological 100k-line provider text.
+  while (low <= high) {
+    const start = Math.floor((low + high) / 2);
+    const candidate = { ...entry, text: `…\n${graphemes.slice(start).join("")}` };
+    if (measureWorkShellEntryRows(candidate, rowWidth, toolHistoryMode) <= availableRows) {
+      best = candidate;
+      high = start - 1;
+    } else {
+      low = start + 1;
+    }
+  }
+  return best;
+}
+
 export function resolveWorkShellTranscriptWindow(input: {
   readonly entries: readonly WorkShellEntry[];
   readonly terminalRows?: number | undefined;
@@ -1993,14 +2025,11 @@ export function resolveWorkShellTranscriptWindow(input: {
   readonly newerRows: number;
   readonly scrolled: boolean;
 } {
-  if (input.scrollOffset <= 0 || input.entries.length === 0) {
+  if (input.entries.length === 0) {
     return {
-      window: input.entries.slice(-50),
-      entriesAbove: Math.max(0, input.entries.length - 50),
-      earlierRows: input.entries.slice(0, -50).reduce(
-        (sum, entry) => sum + measureWorkShellEntryRows(entry, undefined, input.toolHistoryMode),
-        0,
-      ),
+      window: [],
+      entriesAbove: 0,
+      earlierRows: 0,
       newerRows: 0,
       scrolled: false,
     };
@@ -2008,6 +2037,44 @@ export function resolveWorkShellTranscriptWindow(input: {
   const rowWidth = input.terminalColumns === undefined
     ? undefined
     : Math.max(8, input.terminalColumns - 4);
+  if (input.scrollOffset <= 0) {
+    const weights = input.entries.map((entry) =>
+      measureWorkShellEntryRows(entry, rowWidth, input.toolHistoryMode)
+    );
+    const availableRows = getWorkShellTranscriptAvailableRows(input.terminalRows);
+    const newest = input.entries[input.entries.length - 1];
+    if (newest && (weights[weights.length - 1] ?? 0) > availableRows) {
+      const clippedNewest = clipNewestTranscriptEntryToRows(
+        newest,
+        availableRows,
+        rowWidth,
+        input.toolHistoryMode,
+      );
+      return {
+        window: clippedNewest ? [clippedNewest] : [],
+        entriesAbove: input.entries.length - (clippedNewest ? 1 : 0),
+        earlierRows: (clippedNewest ? weights.slice(0, -1) : weights)
+          .reduce((sum, weight) => sum + weight, 0),
+        newerRows: 0,
+        scrolled: false,
+      };
+    }
+    let start = input.entries.length;
+    let usedRows = 0;
+    while (start > 0) {
+      const weight = weights[start - 1] ?? 0;
+      if (usedRows > 0 && usedRows + weight > availableRows) break;
+      start -= 1;
+      usedRows += weight;
+    }
+    return {
+      window: input.entries.slice(start),
+      entriesAbove: start,
+      earlierRows: weights.slice(0, start).reduce((sum, weight) => sum + weight, 0),
+      newerRows: 0,
+      scrolled: false,
+    };
+  }
   if (rowWidth !== undefined) {
     const weights = input.entries.map((entry) => measureWorkShellEntryRows(entry, rowWidth, input.toolHistoryMode));
     const availableRows = getWorkShellTranscriptAvailableRows(input.terminalRows);

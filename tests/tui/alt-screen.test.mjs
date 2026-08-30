@@ -5,6 +5,10 @@ import {
   ALT_SCREEN_SEQUENCES,
   enterAlternateScreen,
 } from "../../packages/tui/src/alt-screen.ts";
+import {
+  RUNTIME_CONNECTION_STATUS,
+  showRuntimeConnectionStatus,
+} from "../../packages/tui/src/tui-entry.tsx";
 
 function fakeStdout({ isTTY = true } = {}) {
   const writes = [];
@@ -91,5 +95,21 @@ test("entering does not leave process listeners behind after restore", () => {
     session.restore();
     const after = process.listenerCount("SIGINT") + process.listenerCount("exit");
     assert.equal(after, before, "restore must unregister its exit and signal hooks");
+  });
+});
+
+test("runtime owner startup paints a localized first frame synchronously", () => {
+  withoutDisableFlag(() => {
+    const english = fakeStdout();
+    const englishFrame = showRuntimeConnectionStatus({ locale: "en", stdout: english });
+    assert.match(english.output, new RegExp(RUNTIME_CONNECTION_STATUS.en));
+    assert.match(english.output, /UncleCode/);
+    englishFrame.restore();
+
+    const korean = fakeStdout();
+    const koreanFrame = showRuntimeConnectionStatus({ locale: "ko", stdout: korean });
+    assert.match(korean.output, new RegExp(RUNTIME_CONNECTION_STATUS.ko));
+    assert.doesNotMatch(korean.output, new RegExp(RUNTIME_CONNECTION_STATUS.en));
+    koreanFrame.restore();
   });
 });

@@ -9,6 +9,7 @@ import {
   realUseQueuedPromptText,
   realUseQueuedResponseText,
   responseText,
+  scrollbackResponseText,
   toolCallFinalResponseText,
   toolCallId,
   toolCallPromptText,
@@ -34,7 +35,7 @@ export function startGeminiServer(onRequest) {
       const functionResponse = latestGeminiFunctionResponse(parsed);
       const functionResponseText = functionResponse ? JSON.stringify(functionResponse) : "";
       const currentUserRequest = extractRuntimeQaUserRequest(requestText);
-      onRequest({
+      const observation = {
         count,
         url: req.url,
         hasApiKey: Boolean(req.headers["x-goog-api-key"]),
@@ -50,7 +51,7 @@ export function startGeminiServer(onRequest) {
         finalAnswerGatedByToolResult: functionResponseText.includes(toolCallShellOutput),
         contentCount: Array.isArray(parsed.contents) ? parsed.contents.length : 0,
         text: requestText,
-      });
+      };
       let text = responseText;
       let responseParts;
       if (functionResponseText.includes(toolCallShellOutput)) {
@@ -85,6 +86,8 @@ export function startGeminiServer(onRequest) {
         text = koreanBusyResponseText;
       } else if (currentUserRequest === parallelModeKoreanPromptText) {
         text = parallelModeKoreanLeakyResponseText;
+      } else if (/^scroll turn \d{2}$/u.test(currentUserRequest)) {
+        text = scrollbackResponseText(currentUserRequest);
       }
       responseParts ??= [{ text }];
       const respond = () => {
@@ -94,9 +97,14 @@ export function startGeminiServer(onRequest) {
         });
         const streaming = req.url?.includes(":streamGenerateContent") ?? false;
         const payload = streaming ? `data: ${response}\n\n` : response;
+        res.once("finish", () => {
+          onRequest({ ...observation, responseFinished: res.writableFinished });
+        });
         res.writeHead(200, {
           "content-type": streaming ? "text/event-stream" : "application/json",
           "content-length": Buffer.byteLength(payload),
+          ...(streaming ? { "cache-control": "no-cache" } : {}),
+          connection: "close",
         });
         res.end(payload);
       };

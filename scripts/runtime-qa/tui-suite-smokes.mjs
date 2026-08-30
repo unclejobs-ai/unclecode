@@ -11,6 +11,7 @@ import { runPromptInputTuiSmoke } from "./tui-prompt-input-smoke.mjs";
 import { runRealUseTuiStress } from "./tui-real-use-smoke.mjs";
 import { runScrollbackTuiSmoke } from "./tui-scrollback-smoke.mjs";
 import { runSlashLatencyTuiSmoke } from "./tui-slash-latency-smoke.mjs";
+import { stopRuntimeOwnersUnder } from "./runtime-owner-cleanup.mjs";
 import { runTmux } from "./tmux-helpers.mjs";
 
 export async function runTuiSmokeSuite({ port, tmp, observations }) {
@@ -44,11 +45,25 @@ export async function runTuiSmokeSuite({ port, tmp, observations }) {
   };
 }
 
-export async function runWithRuntimeHome(tmp, label, run) {
+export async function runWithRuntimeHome(tmp, label, run, dependencies = {}) {
+  const runTmuxCommand = dependencies.runTmuxCommand ?? runTmux;
+  const stopOwners = dependencies.stopOwners ?? stopRuntimeOwnersUnder;
+  const extraOwnerRoots = dependencies.extraOwnerRoots ?? [];
   const home = path.join(tmp, "runtime-homes", label);
-  await runTmux(["set-environment", "-g", "HOME", home]);
-  await runTmux(["set-environment", "-g", "USERPROFILE", home]);
-  await runTmux(["set-environment", "-g", "UNCLECODE_SESSION_STORE_ROOT", path.join(home, ".unclecode", "state")]);
-  return run();
+  try {
+    await runTmuxCommand(["set-environment", "-g", "HOME", home]);
+    await runTmuxCommand(["set-environment", "-g", "USERPROFILE", home]);
+    await runTmuxCommand(["set-environment", "-g", "UNCLECODE_SESSION_STORE_ROOT", path.join(home, ".unclecode", "state")]);
+    return await run();
+  } finally {
+    // Every smoke owns an isolated runtime HOME. Reap its persistent owner as
+    // soon as that smoke settles so later panes do not inherit a fleet of idle
+    // pollers and sockets that distort responsiveness and memory evidence.
+    await stopOwners(home);
+    for (const extraRoot of extraOwnerRoots) {
+      if (path.resolve(extraRoot) === path.resolve(home)) continue;
+      await stopOwners(extraRoot);
+    }
+  }
 }
 import path from "node:path";

@@ -1309,10 +1309,15 @@ export class WorkShellEngine<
   }
 
   /** Enter the steer composer for the selected live run. */
-  beginAgentSteer(): void {
+  beginAgentSteer(agentRunId?: string): boolean {
     const view = this.state.agentConsoleView;
     const selection = resolveAgentConsoleSelection(view, this.state.agentConsole);
-    if (!view.open || selection?.tab !== "agents" || isSettledAgentRun(selection.run)) {
+    if (
+      !view.open
+      || selection?.tab !== "agents"
+      || (agentRunId !== undefined && selection.run.id !== agentRunId)
+      || isSettledAgentRun(selection.run)
+    ) {
       this.setState({
         agentSteerTarget: undefined,
         agentConsoleView: settleAgentConsoleControl(view, {
@@ -1320,13 +1325,14 @@ export class WorkShellEngine<
           message: "Select a running agent to steer.",
         }),
       });
-      return;
+      return false;
     }
     this.setState({
       composerMode: "agent-steer",
       agentSteerTarget: { kind: "agent-steer", agentRunId: selection.run.id },
       agentConsoleView: settleAgentConsoleControl(view),
     });
+    return true;
   }
 
   /** Arm the cancel confirmation for the selected run. */
@@ -2990,9 +2996,11 @@ export class WorkShellEngine<
         return;
       case "queue": {
         this.updateUiLocaleFromUserProse(decision.line);
-        const item = await this.pushQueuedSubmit(decision.line, pendingAttachments ?? []);
+        await this.pushQueuedSubmit(decision.line, pendingAttachments ?? []);
         this.setQueuedCount(decision.displayIndex);
-        this.appendEntries({ role: "system", text: decision.message });
+        // Queue lifecycle belongs to the Queue view/status projection. Adding
+        // enqueue notices to the conversation creates duplicate history and
+        // makes a settled follow-up look like assistant/user transcript data.
         return;
       }
     }
@@ -3049,7 +3057,6 @@ export class WorkShellEngine<
           await this.returnQueuedSubmitClaim(step.item.id);
           break;
         }
-        this.appendEntries({ role: "system", text: step.message });
         try {
           await this.handleSubmit(step.item.line, pendingAttachments);
           if (this.lifecycleClosing || this.disposed) {

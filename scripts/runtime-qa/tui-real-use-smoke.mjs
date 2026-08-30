@@ -46,6 +46,10 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
   await runTmux(["kill-session", "-t", session], { allowFailure: true });
 
   const beforeRequests = observations.length;
+  assert.ok(
+    realUseFirstPromptText.length >= 64,
+    "real-use first prompt must exercise a 64+ character single-chunk submit",
+  );
   const command = [
     `cd ${shellQuote(repoRoot)}`,
     [
@@ -84,7 +88,7 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
     await sleep(200);
 
     const firstSubmitStartedAt = Date.now();
-    await submitLine(session, realUseFirstPromptText, paneFile, new RegExp(escapeRegExp(realUseFirstPromptText)));
+    await submitLine(session, realUseFirstPromptText, paneFile);
     const busyPane = await waitForPane(
       session,
       /preparing context|thinking|Working|Enter queues follow-up/,
@@ -196,6 +200,7 @@ export async function runRealUseTuiStress({ port, tmp, observations }) {
       latencies: { firstReplyMs, queueDrainMs, maxMs: MAX_REAL_USE_LATENCY_MS },
       requestDelta: realUseRequests.length,
       contextPacketTransparency: true,
+      longPromptImmediateEnterVerified: true,
       queueDrainVerified: true,
       resizeVerified: true,
       idleStableVerified: true,

@@ -4650,7 +4650,7 @@ test("WorkShellEngine preserves queued follow-ups when context proof blocks a tu
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   await engine.handleSubmit("queued follow-up");
-  assert.ok(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)));
+  assert.equal(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)), false);
   assert.equal(engine.getState().queuedCount, 1);
 
   releaseResolve();
@@ -7141,9 +7141,7 @@ test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
   }
 
   await engine.handleSubmit("second", [{ id: "queued-attachment" }]);
-  assert.ok(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)));
-  assert.ok(engine.getState().entries.some((entry) => /run automatically/.test(entry.text)));
-  assert.ok(engine.getState().entries.some((entry) => /\/queue shows backlog/.test(entry.text)));
+  assert.equal(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)), false);
   await engine.handleSubmit("/queue");
   assert.equal(engine.getState().panel?.title, "Queue · follow-ups");
   assert.ok(
@@ -7161,7 +7159,7 @@ test("WorkShellEngine queues follow-up chat while a turn is busy", async () => {
   await firstTurn;
 
   assert.deepEqual(prompts, ["first", "second"]);
-  assert.ok(engine.getState().entries.some((entry) => /Running queued follow-up #1: second/.test(entry.text)));
+  assert.equal(engine.getState().entries.some((entry) => /Running queued follow-up/.test(entry.text)), false);
 });
 
 test("WorkShellEngine never nacks completed work when post-ack attachment cleanup must retry", {
@@ -7563,7 +7561,7 @@ test("WorkShellEngine binds queued follow-up chat to a fresh context packet", as
   }
 
   await engine.handleSubmit("second");
-  assert.ok(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)));
+  assert.equal(engine.getState().entries.some((entry) => /Queued follow-up #1/.test(entry.text)), false);
 
   releaseFirst();
   await firstTurn;
@@ -7574,7 +7572,7 @@ test("WorkShellEngine binds queued follow-up chat to a fresh context packet", as
   assert.match(prompts[0] ?? "", /User request:\nfirst$/);
   assert.match(prompts[1] ?? "", /<unclecode_context_packet id="packet-2" version="1">/);
   assert.match(prompts[1] ?? "", /User request:\nsecond$/);
-  assert.ok(engine.getState().entries.some((entry) => /Running queued follow-up #1: second/.test(entry.text)));
+  assert.equal(engine.getState().entries.some((entry) => /Running queued follow-up/.test(entry.text)), false);
 });
 
 test("WorkShellEngine clears queued follow-ups while busy", async () => {
@@ -7679,10 +7677,7 @@ test("WorkShellEngine clear during a claimed follow-up cannot replace or duplica
 
   assert.deepEqual(prompts, ["first", "second"]);
   assert.equal(engine.getState().queuedCount, 0);
-  assert.equal(
-    engine.getState().entries.filter((entry) => /Running queued follow-up.*second/.test(entry.text)).length,
-    1,
-  );
+  assert.equal(engine.getState().entries.some((entry) => /Running queued follow-up/.test(entry.text)), false);
 });
 
 test("WorkShellEngine startup quarantines a persisted claim until explicit retry", async () => {
