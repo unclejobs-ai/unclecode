@@ -21,6 +21,7 @@ case "$*" in
     fi
     ;;
   "rust ux text trace-line") printf '%s\\n' 'formatted-trace' ;;
+  "rust ux text normalize-markdown") printf '%s' "$payload" ;;
   "rust ux panel inline-command")
     if [ "$payload" = '{"args":["large-panel-output"],"lines":[]}' ]; then
       printf '%s' '{"title":"Cached panel","lines":["'
@@ -59,6 +60,9 @@ const {
   buildInlineCommandPanel,
   formatInlineCommandResultSummary,
 } = await import("../../packages/tui/src/work-shell-panels.ts");
+const {
+  normalizeMarkdownDisplayText,
+} = await import("../../packages/tui/src/work-shell-view.tsx");
 
 test.after(() => {
   if (previousRustBin === undefined) delete process.env.UNCLECODE_RUST_BIN;
@@ -217,6 +221,29 @@ test("trace formatting cache bypasses oversized serialized events", () => {
     loggedCalls("rust ux text trace-line").length,
     before + 2,
     "an oversized serialized trace must not become a retained cache key",
+  );
+});
+
+test("markdown normalization cache hits for small text", () => {
+  const before = loggedCalls("rust ux text normalize-markdown").length;
+  assert.equal(normalizeMarkdownDisplayText("small markdown"), "small markdown");
+  assert.equal(normalizeMarkdownDisplayText("small markdown"), "small markdown");
+  assert.equal(
+    loggedCalls("rust ux text normalize-markdown").length,
+    before + 1,
+    "settled small markdown should remain cacheable",
+  );
+});
+
+test("markdown normalization cache bypasses a 1 MiB request key", () => {
+  const oversized = `oversized-markdown:${"M".repeat(1024 * 1024)}`;
+  const before = loggedCalls("rust ux text normalize-markdown").length;
+  assert.equal(normalizeMarkdownDisplayText(oversized), oversized);
+  assert.equal(normalizeMarkdownDisplayText(oversized), oversized);
+  assert.equal(
+    loggedCalls("rust ux text normalize-markdown").length,
+    before + 2,
+    "arbitrary oversized markdown must not remain as a Rust-text cache key or value",
   );
 });
 

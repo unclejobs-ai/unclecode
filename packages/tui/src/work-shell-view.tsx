@@ -1,16 +1,17 @@
 import { Box, Text } from "ink";
 import React from "react";
-import type {
-  AgentConsoleSnapshot,
-  AgentControlReceiptStatus,
-  AskUserQuestionRequest,
-  ContextDeskCollection,
-  ContextDeskPane,
-  ContextPacketChangeClassification,
-  ContextPacketReceipt,
-  ContextPacketView,
-  ContextPacketViewActionReceipt,
-  ContextPolicySuggestion,
+import {
+  createInstrumentedLruCache,
+  type AgentConsoleSnapshot,
+  type AgentControlReceiptStatus,
+  type AskUserQuestionRequest,
+  type ContextDeskCollection,
+  type ContextDeskPane,
+  type ContextPacketChangeClassification,
+  type ContextPacketReceipt,
+  type ContextPacketView,
+  type ContextPacketViewActionReceipt,
+  type ContextPolicySuggestion,
 } from "@unclecode/contracts";
 import {
   getWorkShellMessages,
@@ -572,28 +573,46 @@ const WORK_SHELL_PROMPT_GLYPH = "›";
 const WORK_SHELL_REASONING_ENTRY_PREFIX = "✻ ";
 const BODY_CONTINUATION_INDENT = "   ";
 const RUST_TEXT_CACHE_MAX_ENTRIES = 512;
-const rustBusyStatusCache = new Map<string, string>();
-const rustMarkdownDisplayCache = new Map<string, string>();
-const rustThinkingLineCache = new Map<string, string>();
-const rustStatusLineCache = new Map<string, string>();
-const rustWrapDisplayCache = new Map<string, readonly string[]>();
+const RUST_TEXT_CACHE_MAX_INPUT_BYTES = 256 * 1024;
+const rustTextCacheEncoder = new TextEncoder();
+const rustBusyStatusCache = createInstrumentedLruCache<string, string>({
+  name: "tui-rust-busy-status",
+  maxEntries: RUST_TEXT_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: 256 * 1024,
+});
+const rustMarkdownDisplayCache = createInstrumentedLruCache<string, string>({
+  name: "tui-rust-markdown-display",
+  maxEntries: RUST_TEXT_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: 4 * 1024 * 1024,
+});
+const rustThinkingLineCache = createInstrumentedLruCache<string, string>({
+  name: "tui-rust-thinking-lines",
+  maxEntries: RUST_TEXT_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: 256 * 1024,
+});
+const rustStatusLineCache = createInstrumentedLruCache<string, string>({
+  name: "tui-rust-status-lines",
+  maxEntries: RUST_TEXT_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: 512 * 1024,
+});
+const rustWrapDisplayCache = createInstrumentedLruCache<string, readonly string[]>({
+  name: "tui-rust-wrapped-display",
+  maxEntries: RUST_TEXT_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: 4 * 1024 * 1024,
+});
 const rustEntryPresentationCache = new Map<WorkShellEntryRole, WorkShellEntryRolePresentationContract>();
 const rustAttachmentLayoutCache = new Map<number, WorkShellAttachmentLayout>();
 const rustViewportLayoutCache = new Map<string, WorkShellViewportLayout>();
 
 function shouldSkipRustTextCacheStore(text: string): boolean {
-  return text.endsWith(STREAMING_CURSOR);
+  return text.endsWith(STREAMING_CURSOR)
+    || rustTextCacheEncoder.encode(text).byteLength > RUST_TEXT_CACHE_MAX_INPUT_BYTES;
 }
 
-function setBoundedCacheValue<K, V>(cache: Map<K, V>, key: K, value: V, skipStore: boolean): void {
-  if (skipStore) {
-    return;
-  }
+function setBoundedSmallCacheValue<K, V>(cache: Map<K, V>, key: K, value: V): void {
   if (cache.size >= RUST_TEXT_CACHE_MAX_ENTRIES) {
-    const firstKey = cache.keys().next().value;
-    if (firstKey !== undefined) {
-      cache.delete(firstKey);
-    }
+    const oldest = cache.keys().next();
+    if (!oldest.done) cache.delete(oldest.value);
   }
   cache.set(key, value);
 }
@@ -635,31 +654,38 @@ function runRustUxText(operation: "busy-status" | "normalize-markdown", value: s
 export function formatWorkShellBusyStatusLine(status?: string, frame = 0, uiLocale: "en" | "ko" = "en"): string {
   const spinner = pickBusySpinnerFrame(frame);
   const key = status ?? "";
-  const cached = rustBusyStatusCache.get(key);
-  const normalizedStatus = cached ?? runRustUxText("busy-status", key);
-  if (cached === undefined) {
-    setBoundedCacheValue(rustBusyStatusCache, key, normalizedStatus, shouldSkipRustTextCacheStore(key));
+  const skipCache = shouldSkipRustTextCacheStore(key);
+  const cached = skipCache ? undefined : rustBusyStatusCache.lookup(key);
+  const normalizedStatus = cached?.hit ? cached.value : runRustUxText("busy-status", key);
+  if (!skipCache && !cached?.hit) {
+    rustBusyStatusCache.set(key, normalizedStatus);
   }
   return `${spinner} ${normalizedStatus || (uiLocale === "ko" ? "생각 중..." : "Thinking...")}`;
 }
 
 export function formatWorkShellThinkingLine(reasoningLabel: string): string {
-  const cached = rustThinkingLineCache.get(reasoningLabel);
-  if (cached !== undefined) {
-    return cached;
+  const skipCache = shouldSkipRustTextCacheStore(reasoningLabel);
+  const cached = skipCache ? undefined : rustThinkingLineCache.lookup(reasoningLabel);
+  if (cached?.hit) {
+    return cached.value;
   }
   const line = runRustCommandSync(["rust", "ux", "text", "thinking-line"], process.cwd(), reasoningLabel).trimEnd();
-  setBoundedCacheValue(rustThinkingLineCache, reasoningLabel, line, shouldSkipRustTextCacheStore(reasoningLabel));
+  if (!skipCache) {
+    rustThinkingLineCache.set(reasoningLabel, line);
+  }
   return line;
 }
 
 export function normalizeMarkdownDisplayText(value: string): string {
-  const cached = rustMarkdownDisplayCache.get(value);
-  if (cached !== undefined) {
-    return cached;
+  const skipCache = shouldSkipRustTextCacheStore(value);
+  const cached = skipCache ? undefined : rustMarkdownDisplayCache.lookup(value);
+  if (cached?.hit) {
+    return cached.value;
   }
   const normalized = runRustUxText("normalize-markdown", value);
-  setBoundedCacheValue(rustMarkdownDisplayCache, value, normalized, shouldSkipRustTextCacheStore(value));
+  if (!skipCache) {
+    rustMarkdownDisplayCache.set(value, normalized);
+  }
   return normalized;
 }
 
@@ -675,12 +701,15 @@ export function formatWorkShellStatusLine(input: {
   readonly uiLocale?: "en" | "ko";
 }): string {
   const key = JSON.stringify(input);
-  const cached = rustStatusLineCache.get(key);
-  if (cached !== undefined) {
-    return cached;
+  const skipCache = shouldSkipRustTextCacheStore(key);
+  const cached = skipCache ? undefined : rustStatusLineCache.lookup(key);
+  if (cached?.hit) {
+    return cached.value;
   }
   const line = runRustCommandSync(["rust", "ux", "text", "status-line"], process.cwd(), key).trimEnd();
-  setBoundedCacheValue(rustStatusLineCache, key, line, shouldSkipRustTextCacheStore(key));
+  if (!skipCache) {
+    rustStatusLineCache.set(key, line);
+  }
   return line;
 }
 
@@ -839,7 +868,7 @@ function resolveWorkShellEntryPresentation(role: WorkShellEntryRole): WorkShellE
   }
   const raw = runRustCommandSync(["rust", "ux", "text", "entry-presentation"], process.cwd(), role);
   const parsed = JSON.parse(raw) as WorkShellEntryRolePresentationContract;
-  setBoundedCacheValue(rustEntryPresentationCache, role, parsed, false);
+  setBoundedSmallCacheValue(rustEntryPresentationCache, role, parsed);
   return parsed;
 }
 
@@ -854,7 +883,7 @@ function resolveWorkShellAttachmentLayout(lineIndex = 0): WorkShellAttachmentLay
     JSON.stringify({ lineIndex }),
   );
   const parsed = JSON.parse(raw) as WorkShellAttachmentLayout;
-  setBoundedCacheValue(rustAttachmentLayoutCache, lineIndex, parsed, false);
+  setBoundedSmallCacheValue(rustAttachmentLayoutCache, lineIndex, parsed);
   return parsed;
 }
 
@@ -872,7 +901,7 @@ function resolveWorkShellViewportLayout(input: {
   }
   const raw = runRustCommandSync(["rust", "ux", "text", "viewport-layout"], process.cwd(), key);
   const parsed = JSON.parse(raw) as WorkShellViewportLayout;
-  setBoundedCacheValue(rustViewportLayoutCache, key, parsed, false);
+  setBoundedSmallCacheValue(rustViewportLayoutCache, key, parsed);
   return parsed;
 }
 
@@ -1398,14 +1427,17 @@ export function formatWorkShellFooterLine(input: {
 }
 
 function wrapDisplayText(value: string, width: number): string[] {
+  const skipCache = shouldSkipRustTextCacheStore(value);
   const key = JSON.stringify({ text: value, width });
-  const cached = rustWrapDisplayCache.get(key);
-  if (cached !== undefined) {
-    return [...cached];
+  const cached = skipCache ? undefined : rustWrapDisplayCache.lookup(key);
+  if (cached?.hit) {
+    return [...cached.value];
   }
   const raw = runRustCommandSync(["rust", "ux", "text", "wrap-display"], process.cwd(), key);
   const parsed = JSON.parse(raw) as string[];
-  setBoundedCacheValue(rustWrapDisplayCache, key, parsed, shouldSkipRustTextCacheStore(value));
+  if (!skipCache) {
+    rustWrapDisplayCache.set(key, parsed);
+  }
   return parsed;
 }
 

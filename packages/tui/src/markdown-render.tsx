@@ -1,3 +1,4 @@
+import { createInstrumentedLruCache } from "@unclecode/contracts";
 import { Box, Text } from "ink";
 import React from "react";
 
@@ -368,7 +369,18 @@ function renderDiagramLine(line: string, theme: MarkdownTheme, key: string): Rea
 const STREAMING_CURSOR_GLYPH = "▌";
 
 const MARKDOWN_RENDER_CACHE_MAX_ENTRIES = 64;
-const markdownRenderCache = new Map<string, React.ReactNode>();
+const MARKDOWN_RENDER_CACHE_MAX_RETAINED_BYTES = 8 * 1024 * 1024;
+const MARKDOWN_RENDER_CACHE_MAX_SOURCE_BYTES = 256 * 1024;
+const markdownCacheTextEncoder = new TextEncoder();
+const markdownRenderCache = createInstrumentedLruCache<string, React.ReactNode>({
+  name: "tui-markdown-render",
+  maxEntries: MARKDOWN_RENDER_CACHE_MAX_ENTRIES,
+  maxRetainedBytes: MARKDOWN_RENDER_CACHE_MAX_RETAINED_BYTES,
+  // The key contains the full source and theme. Rendering also retains parsed
+  // line/token strings plus the React tree, so charge a conservative multiple
+  // instead of measuring only JSON-serializable React properties.
+  estimateEntryBytes: (key) => (markdownCacheTextEncoder.encode(key).byteLength * 3) + 4_096,
+});
 let markdownRenderParseCount = 0;
 
 function buildMarkdownRenderCacheKey(
@@ -389,7 +401,9 @@ function shouldSkipMarkdownRenderCache(input: {
   readonly text: string;
   readonly isStreamingText?: boolean;
 }): boolean {
-  return input.isStreamingText === true || input.text.endsWith(STREAMING_CURSOR_GLYPH);
+  return input.isStreamingText === true
+    || input.text.endsWith(STREAMING_CURSOR_GLYPH)
+    || markdownCacheTextEncoder.encode(input.text).byteLength > MARKDOWN_RENDER_CACHE_MAX_SOURCE_BYTES;
 }
 
 /** @internal test seam — parse counter for cache-hit assertions. */
@@ -399,7 +413,7 @@ export function getMarkdownRenderParseCountForTest(): number {
 
 /** @internal test seam — isolates cache state between tests. */
 export function resetMarkdownRenderCacheForTest(): void {
-  markdownRenderCache.clear();
+  markdownRenderCache.invalidateAll();
   markdownRenderParseCount = 0;
 }
 
@@ -418,12 +432,9 @@ export function renderMarkdown(
     ? undefined
     : buildMarkdownRenderCacheKey(text, width, theme);
   if (cacheKey !== undefined) {
-    const cached = markdownRenderCache.get(cacheKey);
-    if (cached !== undefined) {
-      // LRU touch: re-insert so the newest reads survive eviction.
-      markdownRenderCache.delete(cacheKey);
-      markdownRenderCache.set(cacheKey, cached);
-      return cached;
+    const cached = markdownRenderCache.lookup(cacheKey);
+    if (cached.hit) {
+      return cached.value;
     }
   }
   markdownRenderParseCount += 1;
@@ -621,12 +632,6 @@ export function renderMarkdown(
 
   const rendered = <Box flexDirection="column">{nodes}</Box>;
   if (cacheKey !== undefined) {
-    if (markdownRenderCache.size >= MARKDOWN_RENDER_CACHE_MAX_ENTRIES) {
-      const oldestKey = markdownRenderCache.keys().next().value;
-      if (oldestKey !== undefined) {
-        markdownRenderCache.delete(oldestKey);
-      }
-    }
     markdownRenderCache.set(cacheKey, rendered);
   }
   return rendered;
