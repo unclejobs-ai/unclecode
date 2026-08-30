@@ -35,6 +35,8 @@ type DiagnosticWaiter = {
 const FORCE_KILL_DELAY_MS = 2_000;
 const MAX_LSP_FRAME_BYTES = 16 * 1024 * 1024;
 const MAX_LSP_INPUT_BUFFER_BYTES = 32 * 1024 * 1024;
+const MIN_LSP_INPUT_BUFFER_CAPACITY = 64 * 1024;
+const LSP_HEADER_TERMINATOR = Buffer.from("\r\n\r\n");
 const MAX_PUBLISHED_DIAGNOSTIC_URIS = 512;
 const MAX_PUBLISHED_DIAGNOSTIC_BYTES = 8 * 1024 * 1024;
 
@@ -99,6 +101,11 @@ export function resolveDefaultLspServer(
 export class LspJsonRpcClient {
   private child: ChildProcessWithoutNullStreams | undefined;
   private buffer = Buffer.alloc(0);
+  private bufferStart = 0;
+  private bufferEnd = 0;
+  private headerSearchOffset = 0;
+  private pendingBodyStart: number | undefined;
+  private pendingFrameEnd: number | undefined;
   private nextRequestId = 1;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly publishedDiagnostics = createInstrumentedLruCache<string, unknown[]>({
@@ -245,7 +252,7 @@ export class LspJsonRpcClient {
       this.rejectPending(new Error(`${this.config.id} session closed`));
       this.settleDiagnosticWaiters();
       this.publishedDiagnostics.invalidateAll();
-      this.buffer = Buffer.alloc(0);
+      this.releaseInputBuffer();
     }
     await this.terminateChild();
   }
@@ -257,36 +264,102 @@ export class LspJsonRpcClient {
   }
 
   private consume(chunk: Buffer): void {
-    this.buffer = Buffer.concat([this.buffer, chunk]);
-    if (this.buffer.length > MAX_LSP_INPUT_BUFFER_BYTES) {
-      this.fail(new Error(`${this.config.id} exceeded the 32 MiB LSP input buffer limit`));
-      return;
-    }
-    while (true) {
-      const headerEnd = this.buffer.indexOf("\r\n\r\n");
-      if (headerEnd < 0) return;
-      const header = this.buffer.subarray(0, headerEnd).toString("ascii");
-      const lengthMatch = /(?:^|\r\n)Content-Length:\s*(\d+)/i.exec(header);
-      if (!lengthMatch) {
-        this.fail(new Error(`${this.config.id} sent an LSP frame without Content-Length`));
+    if (this.closed) return;
+    if (!this.appendInput(chunk)) return;
+    while (!this.closed) {
+      if (this.pendingFrameEnd === undefined) {
+        const unread = this.buffer.subarray(this.bufferStart, this.bufferEnd);
+        const searchFrom = Math.max(0, this.headerSearchOffset - this.bufferStart);
+        const relativeHeaderEnd = unread.indexOf(LSP_HEADER_TERMINATOR, searchFrom);
+        if (relativeHeaderEnd < 0) {
+          this.headerSearchOffset = Math.max(this.bufferStart, this.bufferEnd - 3);
+          return;
+        }
+        const headerEnd = this.bufferStart + relativeHeaderEnd;
+        const header = this.buffer.subarray(this.bufferStart, headerEnd).toString("ascii");
+        const lengthMatch = /(?:^|\r\n)Content-Length:\s*(\d+)/i.exec(header);
+        if (!lengthMatch) {
+          this.fail(new Error(`${this.config.id} sent an LSP frame without Content-Length`));
+          return;
+        }
+        const bodyLength = Number(lengthMatch[1]);
+        if (!Number.isSafeInteger(bodyLength) || bodyLength < 0 || bodyLength > MAX_LSP_FRAME_BYTES) {
+          this.fail(new Error(`${this.config.id} sent an oversized LSP frame`));
+          return;
+        }
+        this.pendingBodyStart = headerEnd + LSP_HEADER_TERMINATOR.length;
+        this.pendingFrameEnd = this.pendingBodyStart + bodyLength;
+      }
+      if (this.bufferEnd < this.pendingFrameEnd) return;
+
+      const bodyStart = this.pendingBodyStart;
+      const frameEnd = this.pendingFrameEnd;
+      if (bodyStart === undefined) {
+        this.fail(new Error(`${this.config.id} reached an invalid LSP parser state`));
         return;
       }
-      const bodyLength = Number(lengthMatch[1]);
-      if (!Number.isSafeInteger(bodyLength) || bodyLength < 0 || bodyLength > MAX_LSP_FRAME_BYTES) {
-        this.fail(new Error(`${this.config.id} sent an oversized LSP frame`));
-        return;
-      }
-      const bodyStart = headerEnd + 4;
-      if (this.buffer.length < bodyStart + bodyLength) return;
-      const body = this.buffer.subarray(bodyStart, bodyStart + bodyLength).toString("utf8");
-      this.buffer = this.buffer.subarray(bodyStart + bodyLength);
+      const body = this.buffer.subarray(bodyStart, frameEnd).toString("utf8");
+      this.bufferStart = frameEnd;
+      this.headerSearchOffset = frameEnd;
+      this.pendingBodyStart = undefined;
+      this.pendingFrameEnd = undefined;
       try {
         this.handleMessage(JSON.parse(body) as JsonObject);
       } catch (error) {
         this.fail(error instanceof Error ? error : new Error(String(error)));
         return;
       }
+      if (this.bufferStart === this.bufferEnd) this.resetConsumedInput();
     }
+  }
+
+  private appendInput(chunk: Buffer): boolean {
+    const unreadBytes = this.bufferEnd - this.bufferStart;
+    if (chunk.length > MAX_LSP_INPUT_BUFFER_BYTES - unreadBytes) {
+      this.fail(new Error(`${this.config.id} exceeded the 32 MiB LSP input buffer limit`));
+      return false;
+    }
+    if (chunk.length === 0) return true;
+
+    if (this.buffer.length - this.bufferEnd < chunk.length) {
+      const requiredCapacity = unreadBytes + chunk.length;
+      let nextCapacity = Math.max(MIN_LSP_INPUT_BUFFER_CAPACITY, this.buffer.length);
+      while (nextCapacity < requiredCapacity) {
+        nextCapacity = Math.min(MAX_LSP_INPUT_BUFFER_BYTES, nextCapacity * 2);
+      }
+      const next = Buffer.allocUnsafe(nextCapacity);
+      this.buffer.copy(next, 0, this.bufferStart, this.bufferEnd);
+      const consumedBytes = this.bufferStart;
+      this.buffer = next;
+      this.bufferStart = 0;
+      this.bufferEnd = unreadBytes;
+      this.headerSearchOffset = Math.max(0, this.headerSearchOffset - consumedBytes);
+      if (this.pendingBodyStart !== undefined) {
+        this.pendingBodyStart -= consumedBytes;
+      }
+      if (this.pendingFrameEnd !== undefined) {
+        this.pendingFrameEnd -= consumedBytes;
+      }
+    }
+    chunk.copy(this.buffer, this.bufferEnd);
+    this.bufferEnd += chunk.length;
+    return true;
+  }
+
+  private resetConsumedInput(): void {
+    this.bufferStart = 0;
+    this.bufferEnd = 0;
+    this.headerSearchOffset = 0;
+    this.pendingBodyStart = undefined;
+    this.pendingFrameEnd = undefined;
+    if (this.buffer.length > MIN_LSP_INPUT_BUFFER_CAPACITY) {
+      this.buffer = Buffer.alloc(0);
+    }
+  }
+
+  private releaseInputBuffer(): void {
+    this.buffer = Buffer.alloc(0);
+    this.resetConsumedInput();
   }
 
   private handleMessage(message: JsonObject): void {
@@ -347,7 +420,7 @@ export class LspJsonRpcClient {
     this.rejectPending(failure);
     this.settleDiagnosticWaiters();
     this.publishedDiagnostics.invalidateAll();
-    this.buffer = Buffer.alloc(0);
+    this.releaseInputBuffer();
   }
 
   private settleDiagnosticWaiters(): void {

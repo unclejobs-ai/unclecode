@@ -144,6 +144,7 @@ test("unterminated LSP input is capped at 32 MiB and terminates the child", asyn
     pid = Number(await waitForFile(fixture.pidPath));
 
     await rejectedStart;
+    assert.equal(client.buffer.length, 0, "failed input must release its retained buffer");
     await client.close();
     await waitForProcessExit(pid);
   } finally {
@@ -151,6 +152,31 @@ test("unterminated LSP input is capped at 32 MiB and terminates the child", asyn
     if (pid && processExists(pid)) process.kill(-pid, "SIGKILL");
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("unterminated LSP input grows by bounded capacity steps before the hard cap", () => {
+  const client = new LspJsonRpcClient(
+    { id: "buffer-growth", command: process.execPath, args: [], languageId: "typescript" },
+    process.cwd(),
+    1_000,
+  );
+  const chunk = Buffer.alloc(64 * 1024, "x");
+  let priorBuffer = client.buffer;
+  let reallocations = 0;
+
+  for (let index = 0; index < 512; index += 1) {
+    client.consume(chunk);
+    if (client.buffer !== priorBuffer) {
+      priorBuffer = client.buffer;
+      reallocations += 1;
+    }
+  }
+
+  assert.equal(client.bufferEnd - client.bufferStart, 32 * 1024 * 1024);
+  assert.ok(reallocations <= 10, `expected amortized growth, observed ${reallocations} reallocations`);
+  client.consume(Buffer.from("x"));
+  assert.equal(client.closed, true);
+  assert.equal(client.buffer.length, 0, "overflow must release the bounded input allocation");
 });
 
 test("published LSP diagnostics evict the oldest URI after 512 retained documents", async () => {
