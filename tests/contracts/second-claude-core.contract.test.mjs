@@ -15,7 +15,7 @@ const vendorTarball = path.join(
   "vendor/second-claude/second-claude-core-4.0.0.tgz",
 );
 const expectedSha256 =
-  "a541566920e0326d66dd2204cb3331d717e73f64da60608b879bfd5f9c8673d7";
+  "ec2449e6eb87da1b1d286b86b4c686079d616cadfe2e1b4f07365e9b83c97647";
 
 function readTarballEntry(tarball, expectedPath) {
   const archive = gunzipSync(readFileSync(tarball));
