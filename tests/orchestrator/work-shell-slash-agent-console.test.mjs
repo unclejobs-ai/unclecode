@@ -16,6 +16,7 @@ const AGENT_CONSOLE_COMMANDS = [
   ["/jobs", "jobs"],
   ["/todo", "plan"],
   ["/review", "quality"],
+  ["/scc", "quality"],
 ];
 
 const AGENT_CONSOLE_DESCRIPTIONS = {
@@ -66,6 +67,7 @@ test("only exact /review opens quality while explicit and legacy focused forms r
   );
 
   assert.deepEqual(resolveWorkShellSlashCommand("/review run auth flow"), ["prompt", "review", "auth", "flow"]);
+  assert.deepEqual(resolveWorkShellSlashCommand("/scc review auth flow"), ["prompt", "review", "auth", "flow"]);
   assert.deepEqual(resolveWorkShellSlashCommand("/code-review auth flow"), ["prompt", "review", "auth", "flow"]);
 });
 

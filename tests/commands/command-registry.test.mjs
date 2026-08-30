@@ -26,7 +26,9 @@ test("work-shell command registry shares builtin metadata for inline operational
   assert.ok(commands.some((entry) => entry.command === "/auth logout" && entry.metadata.source === "builtin"));
   assert.ok(commands.some((entry) => entry.command === "/reload" && entry.metadata.source === "builtin"));
   assert.ok(commands.some((entry) => entry.command === "/review" && entry.metadata.type === "local"));
+  assert.ok(commands.some((entry) => entry.command === "/scc" && entry.metadata.type === "local"));
   assert.ok(commands.some((entry) => entry.command === "/review run" && entry.metadata.type === "prompt"));
+  assert.ok(commands.some((entry) => entry.command === "/scc review" && entry.metadata.type === "prompt"));
   assert.ok(commands.some((entry) => entry.command === "/code-review" && entry.metadata.type === "prompt"));
   assert.ok(commands.some((entry) => entry.command === "/commit" && entry.metadata.type === "prompt"));
   assert.ok(commands.some((entry) => entry.command === "/research" && entry.metadata.type === "prompt"));
@@ -38,7 +40,9 @@ test("work-shell command registry shares builtin metadata for inline operational
   assert.deepEqual(registry.resolve("/auth logout"), ["auth", "logout"]);
   assert.deepEqual(registry.resolve("/reload"), ["reload"]);
   assert.deepEqual(registry.resolve("/review"), ["review"]);
+  assert.deepEqual(registry.resolve("/scc"), ["review"]);
   assert.deepEqual(registry.resolve("/review run"), ["prompt", "review"]);
+  assert.deepEqual(registry.resolve("/scc review"), ["prompt", "review"]);
   assert.deepEqual(registry.resolve("/code-review"), ["prompt", "review"]);
   assert.deepEqual(registry.resolve("/com"), ["prompt", "commit"]);
   assert.deepEqual(registry.resolve("/research"), ["research", "run"]);

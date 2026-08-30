@@ -7937,7 +7937,7 @@ test("WorkShellEngine honors an explicitly configured locale lock across turns",
   assert.equal(calls.snapshots.at(-1)?.uiLocale, "ko");
 });
 
-test("WorkShellEngine updates inferred locale for every meaningful prose turn", async () => {
+test("WorkShellEngine keeps chrome locale stable while each provider turn follows user prose", async () => {
   const previousLcAll = process.env.LC_ALL;
   try {
     for (const fixture of [
@@ -7979,18 +7979,23 @@ test("WorkShellEngine updates inferred locale for every meaningful prose turn", 
       assert.equal(engine.getState().uiLocaleLocked, false);
 
       await engine.handleSubmit(fixture.first);
-      assert.equal(engine.getState().uiLocale, fixture.firstLocale);
+      assert.equal(engine.getState().uiLocale, fixture.initial);
       assert.equal(engine.getState().uiLocaleLocked, false);
       assert.match(calls.turns[0], fixture.firstInstruction);
 
       await engine.handleSubmit(fixture.later);
-      assert.equal(engine.getState().uiLocale, fixture.laterLocale);
+      assert.equal(engine.getState().uiLocale, fixture.initial);
       assert.equal(engine.getState().uiLocaleLocked, false);
       assert.match(calls.turns[1], fixture.laterInstruction);
 
       await engine.handleSubmit("./fixtures/한국어.json");
-      assert.equal(engine.getState().uiLocale, fixture.laterLocale);
-      assert.match(calls.turns[2], fixture.laterInstruction);
+      assert.equal(engine.getState().uiLocale, fixture.initial);
+      assert.match(
+        calls.turns[2],
+        fixture.initial === "ko"
+          ? /^이번 요청에는 한국어로 답변하세요/u
+          : /^Respond in English for this turn/u,
+      );
       assert.equal(stripWorkShellLanguageInstruction(calls.turns[2]), "./fixtures/한국어.json");
     }
   } finally {
@@ -8038,7 +8043,7 @@ test("WorkShellEngine ignores local command prose until the first provider-bound
   }
 });
 
-test("WorkShellEngine detects locale from prompt-command focus instead of slash syntax", async () => {
+test("WorkShellEngine detects provider-turn locale from prompt-command focus without relocalizing chrome", async () => {
   const previousLcAll = process.env.LC_ALL;
   try {
     process.env.LC_ALL = "ko_KR.UTF-8";
@@ -8050,7 +8055,7 @@ test("WorkShellEngine detects locale from prompt-command focus instead of slash 
     await engine.initialize();
 
     await engine.handleSubmit("/review Handle the authentication flow");
-    assert.equal(engine.getState().uiLocale, "en");
+    assert.equal(engine.getState().uiLocale, "ko");
     assert.equal(engine.getState().uiLocaleLocked, false);
     assert.match(calls.turns[0], /^Respond in English for this turn/u);
   } finally {
@@ -8059,7 +8064,7 @@ test("WorkShellEngine detects locale from prompt-command focus instead of slash 
   }
 });
 
-test("WorkShellEngine restores persisted locale as an unlocked fallback", async () => {
+test("WorkShellEngine keeps persisted chrome locale while an unlocked provider turn follows new prose", async () => {
   const { engine, calls } = createEngine({
     options: {
       provider: "openai",
@@ -8083,12 +8088,12 @@ test("WorkShellEngine restores persisted locale as an unlocked fallback", async 
   assert.equal(engine.getState().uiLocaleLocked, false);
 
   await engine.handleSubmit("Explain the resumed work");
-  assert.equal(engine.getState().uiLocale, "en");
+  assert.equal(engine.getState().uiLocale, "ko");
   assert.match(calls.turns[0], /^Respond in English for this turn/u);
-  assert.equal(calls.snapshots.at(-1)?.uiLocale, "en");
+  assert.equal(calls.snapshots.at(-1)?.uiLocale, "ko");
 });
 
-test("WorkShellEngine applies a busy follow-up locale immediately and again when queued", async () => {
+test("WorkShellEngine keeps chrome stable while queued turns retain their own response locale", async () => {
   let releaseFirst;
   const prompts = [];
   const { engine } = createEngine({
@@ -8113,7 +8118,7 @@ test("WorkShellEngine applies a busy follow-up locale immediately and again when
   while (!engine.getState().isBusy || typeof releaseFirst !== "function") {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
-  assert.equal(engine.getState().uiLocale, "ko");
+  assert.equal(engine.getState().uiLocale, "en");
 
   await engine.handleSubmit("Explain the queued follow-up");
   assert.equal(engine.getState().uiLocale, "en");

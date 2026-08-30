@@ -260,6 +260,12 @@ export function createWorkShellCommandRegistry(extraEntries: readonly Registered
       exactOnly: true,
     },
     {
+      command: "/scc",
+      routeTo: ["review"],
+      metadata: builtinLocal("Open the SCC Quality Engine status already enforcing this run."),
+      exactOnly: true,
+    },
+    {
       command: "/review run",
       routeTo: ["prompt", "review"],
       metadata: builtinPrompt("Run a model-backed code review. Optional focus text may follow."),
@@ -268,6 +274,11 @@ export function createWorkShellCommandRegistry(extraEntries: readonly Registered
       command: "/code-review",
       routeTo: ["prompt", "review"],
       metadata: builtinPrompt("Run a model-backed code review. Optional focus text may follow."),
+    },
+    {
+      command: "/scc review",
+      routeTo: ["prompt", "review"],
+      metadata: builtinPrompt("Run an explicit model-backed review through the SCC Quality Engine."),
     },
     {
       command: "/commit",

@@ -228,6 +228,12 @@ const WORK_SHELL_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
         aliases: &[],
     },
     BuiltinSlashCommand {
+        command: "/scc",
+        route: &["review"],
+        description: "Open the SCC Quality Engine status already enforcing this run.",
+        aliases: &[],
+    },
+    BuiltinSlashCommand {
         command: "/review run",
         route: &["prompt", "review"],
         description: "Run a model-backed code review. Optional focus text may follow.",
@@ -237,6 +243,12 @@ const WORK_SHELL_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
         command: "/code-review",
         route: &["prompt", "review"],
         description: "Run a model-backed code review. Optional focus text may follow.",
+        aliases: &[],
+    },
+    BuiltinSlashCommand {
+        command: "/scc review",
+        route: &["prompt", "review"],
+        description: "Run an explicit model-backed review through the SCC Quality Engine.",
         aliases: &[],
     },
     BuiltinSlashCommand {
@@ -324,6 +336,7 @@ pub fn route_work_shell_slash_command(input: &str) -> SlashRoute {
     for (command, kind) in [
         ("/review run", "review"),
         ("/code-review", "review"),
+        ("/scc review", "review"),
         // Compatibility: an argument-bearing legacy `/review <focus>` remains
         // executable, while the exact bare command is intercepted locally.
         ("/review", "review"),
@@ -517,6 +530,7 @@ pub fn work_shell_agent_console_tab(line: &str) -> Option<&'static str> {
         "/jobs" => Some("jobs"),
         "/todo" => Some("plan"),
         "/review" => Some("quality"),
+        "/scc" => Some("quality"),
         _ => None,
     }
 }

@@ -2670,12 +2670,6 @@ export class WorkShellEngine<
       return;
     }
 
-    if (route.kind === "chat" && !route.line.startsWith("!")) {
-      this.updateUiLocaleFromUserProse(route.line);
-    } else if (route.kind === "prompt-command") {
-      this.updateUiLocaleFromUserProse(route.promptCommand.focus ?? "");
-    }
-
     // Submitting a turn retires the Context Desk right away: the review is
     // over, so the desk yields the conversation space through the same close
     // path Esc uses. Scoped to operator-initiated turn starts — builtin
@@ -2774,7 +2768,7 @@ export class WorkShellEngine<
               turnEpoch,
               prompt: contextPacket
                 ? this.composeProviderPrompt(contextPacket, prompt)
-                : this.decorateProviderPrompt(prompt),
+                : this.decorateProviderPrompt(prompt, prompt),
               classificationPrompt: prompt,
               attachments,
               signal: abortController.signal,
@@ -2905,7 +2899,7 @@ export class WorkShellEngine<
               turnEpoch,
               prompt: contextPacket
                 ? this.composeProviderPrompt(contextPacket, prompt)
-                : this.decorateProviderPrompt(prompt),
+                : this.decorateProviderPrompt(prompt, prompt),
               classificationPrompt: prompt,
               attachments,
               signal: abortController.signal,
@@ -2995,7 +2989,6 @@ export class WorkShellEngine<
         this.appendEntries({ role: "system", text: decision.message });
         return;
       case "queue": {
-        this.updateUiLocaleFromUserProse(decision.line);
         await this.pushQueuedSubmit(decision.line, pendingAttachments ?? []);
         this.setQueuedCount(decision.displayIndex);
         // Queue lifecycle belongs to the Queue view/status projection. Adding
@@ -3992,18 +3985,14 @@ export class WorkShellEngine<
     const providerPrompt = this.resolvePromptManifest
       ? this.resolvePromptManifest({ packet, userPrompt }).providerPrompt
       : composeWorkShellTurnPromptFromPacket({ packet, userPrompt });
-    return this.decorateProviderPrompt(providerPrompt);
+    return this.decorateProviderPrompt(providerPrompt, userPrompt);
   }
 
-  private decorateProviderPrompt(providerPrompt: string): string {
-    return `${workShellLanguageInstruction(this.state.uiLocale)}\n\n${providerPrompt}`;
-  }
-
-  private updateUiLocaleFromUserProse(value: string): void {
-    if (this.state.uiLocaleLocked) return;
-    const uiLocale = detectWorkShellUserLocale(value);
-    if (uiLocale === undefined) return;
-    this.setState({ uiLocale });
+  private decorateProviderPrompt(providerPrompt: string, userPrompt: string): string {
+    const turnLocale = this.state.uiLocaleLocked
+      ? this.state.uiLocale
+      : detectWorkShellUserLocale(userPrompt) ?? this.state.uiLocale;
+    return `${workShellLanguageInstruction(turnLocale)}\n\n${providerPrompt}`;
   }
 
   private async refreshContextPacket(

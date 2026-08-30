@@ -10,10 +10,7 @@ import type {
 import type { WorkShellReasoningConfig } from "./reasoning.js";
 import { createAgentConsoleSnapshot } from "@unclecode/contracts";
 import { createAgentConsoleViewState } from "./work-shell-agent-console-state.js";
-import {
-  detectWorkShellUserLocale,
-  resolveWorkShellTerminalUiLocale,
-} from "./work-shell-locale.js";
+import { resolveWorkShellTerminalUiLocale } from "./work-shell-locale.js";
 import type { WorkShellPauseSnapshot } from "./work-shell-pause-controller.js";
 
 type BuildContextPanel<Reasoning extends WorkShellReasoningConfig> = (
@@ -74,10 +71,6 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
   contextSummaryLines: readonly string[];
   buildContextPanel: BuildContextPanel<Reasoning>;
 }): WorkShellEngineState<Reasoning> {
-  const resumedLocale = [...(input.options.initialEntries ?? [])]
-    .reverse()
-    .find((entry) => entry.role === "user")?.text;
-  const detectedResumedLocale = detectWorkShellUserLocale(resumedLocale ?? "");
   const decision = resolveWorkShellInitialStateDecision<Reasoning>({
     model: input.options.model,
     mode: input.options.mode,
@@ -113,7 +106,6 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
     liveTraceLines: [],
     traceMode: decision.traceMode,
     uiLocale: input.options.initialUiLocale
-      ?? detectedResumedLocale
       ?? resolveWorkShellTerminalUiLocale(process.env, "en"),
     uiLocaleLocked: input.options.initialUiLocaleLocked
       ?? input.options.initialUiLocale !== undefined,

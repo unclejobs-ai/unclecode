@@ -30,7 +30,6 @@ import {
   loadExtensionConfigOverlays,
   loadExtensionManifestSummaries,
   WorkAgent,
-  detectWorkShellUserLocale,
   resolveWorkShellTerminalUiLocale,
   type AppReasoningConfig,
   type WorkTurnAgent,
@@ -609,16 +608,10 @@ export async function loadWorkCliBootstrap(
   });
   const contextProfile = resolveContextProfile(configExplanation.settings.contextProfile.value);
   const terminalUiLocale = resolveWorkShellTerminalUiLocale(env, "en");
-  const resumedUserText = [...(resumedSession?.initialEntries ?? [])]
-    .reverse()
-    .find((entry) => entry.role === "user")?.text ?? "";
-  const submittedUserLocale = detectWorkShellUserLocale(prompt ?? resumedUserText);
-  const initialUiLocale = submittedUserLocale
-    ?? resumedSession?.initialUiLocale
-    ?? terminalUiLocale;
-  // Prompt and resumed-session detection seed the chrome, but only an
-  // explicitly configured engine lock may prevent later prose from switching
-  // the per-turn language.
+  // Shell chrome follows the operator's terminal preference. The current
+  // provider turn detects its response language independently from user prose,
+  // so Korean conversation content can never relocalize or persist the TUI.
+  const initialUiLocale = terminalUiLocale;
   const initialUiLocaleLocked = false;
   const systemPromptAppendix = [
     configExplanation.prompt.rendered
