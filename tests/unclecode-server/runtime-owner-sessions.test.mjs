@@ -1381,6 +1381,233 @@ test("idle owner sessions use one teardown path and remain bounded across 2.5k c
   await registry.disposeAll();
 });
 
+test("hard session capacity rejects before factory allocation while a client lease is protected", { timeout: 30_000 }, async () => {
+  let factoryCalls = 0;
+  const disposed = [];
+  const registry = new LiveRuntimeEngineRegistry({
+    maxIdleSessions: 32,
+    maxTotalSessions: 1,
+    async createSession(input) {
+      factoryCalls += 1;
+      return {
+        engine: fakeEngine(input.sessionId),
+        projectPath: input.projectPath,
+        dispose() { disposed.push(input.sessionId); },
+      };
+    },
+  });
+  const first = await registry.create({
+    sessionId: "protected-a",
+    projectPath: "/work/a",
+    idempotencyKey: "create-a",
+  });
+  assert.equal(first.ok, true);
+  assert.equal(registry.attachSession("protected-a").ok, true);
+
+  const rejectedPromise = registry.create({
+    sessionId: "rejected-b",
+    projectPath: "/work/b",
+    idempotencyKey: "create-b-rejected",
+  });
+  assert.equal(registry.create({
+    sessionId: "rejected-b",
+    projectPath: "/work/b",
+    idempotencyKey: "create-b-rejected",
+  }), rejectedPromise, "a rejected admission remains idempotent");
+  const rejected = await rejectedPromise;
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.code, "invalid_action");
+  assert.match(rejected.message, /capacity/i);
+
+  let lastAttempt;
+  for (let index = 0; index < 100_000; index += 1) {
+    lastAttempt = registry.create({
+      sessionId: `overflow-${index}`,
+      projectPath: `/work/overflow-${index}`,
+      idempotencyKey: `overflow-${index}`,
+    });
+  }
+  assert.equal((await lastAttempt).ok, false);
+  assert.equal(factoryCalls, 1, "known capacity exhaustion must not allocate another engine");
+  assert.deepEqual(registry.list().map(session => session.sessionId), ["protected-a"]);
+  assert.equal(registry.read("protected-a").ok, true, "the leased session must remain usable");
+  assert.deepEqual(disposed, []);
+
+  assert.equal(await registry.releaseSession("protected-a"), true);
+  const admitted = await registry.create({
+    sessionId: "rejected-b",
+    projectPath: "/work/b",
+    idempotencyKey: "create-b-after-release",
+  });
+  assert.equal(admitted.ok, true);
+  assert.equal(factoryCalls, 2);
+  assert.deepEqual(registry.list().map(session => session.sessionId), ["rejected-b"]);
+  assert.deepEqual(disposed, ["protected-a"]);
+  await registry.disposeAll();
+});
+
+test("hard session capacity never evicts active mutation work", async () => {
+  let releaseTurn;
+  const disposed = [];
+  const registry = new LiveRuntimeEngineRegistry({
+    maxTotalSessions: 1,
+    async createSession(input) {
+      const engine = fakeEngine(input.sessionId);
+      if (input.sessionId === "active-a") {
+        engine.setMode = async () => new Promise(resolve => { releaseTurn = resolve; });
+      }
+      return {
+        engine,
+        projectPath: input.projectPath,
+        dispose() { disposed.push(input.sessionId); },
+      };
+    },
+  });
+  assert.equal((await registry.create({
+    sessionId: "active-a",
+    projectPath: "/work/active-a",
+    idempotencyKey: "create-active-a",
+  })).ok, true);
+  const activeTurn = registry.invoke({
+    sessionId: "active-a",
+    method: "setMode",
+    args: ["deep"],
+    expectedRevision: 0,
+    idempotencyKey: "active-a-turn",
+  });
+  while (!releaseTurn) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(await registry.releaseSession("active-a"), false, "release cannot retire active work");
+
+  const rejected = await registry.create({
+    sessionId: "waiting-b",
+    projectPath: "/work/waiting-b",
+    idempotencyKey: "create-b-while-active",
+  });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.message, /capacity/i);
+  assert.equal(registry.read("active-a").ok, true);
+  assert.deepEqual(disposed, []);
+
+  assert.ok(releaseTurn);
+  releaseTurn();
+  await activeTurn;
+  await registry.releaseSession("active-a");
+  assert.equal((await registry.create({
+    sessionId: "waiting-b",
+    projectPath: "/work/waiting-b",
+    idempotencyKey: "create-b-after-active",
+  })).ok, true);
+  assert.deepEqual(registry.list().map(session => session.sessionId), ["waiting-b"]);
+  assert.ok(disposed.includes("active-a"));
+  await registry.disposeAll();
+});
+
+test("hard session capacity reserves pending factory slots and bounds direct attachment", async () => {
+  let resolveFirst;
+  let factoryCalls = 0;
+  const registry = new LiveRuntimeEngineRegistry({
+    maxTotalSessions: 1,
+    createSession(input) {
+      factoryCalls += 1;
+      return new Promise(resolve => {
+        resolveFirst = () => resolve({ engine: fakeEngine(input.sessionId), projectPath: input.projectPath });
+      });
+    },
+  });
+  const pending = registry.create({
+    sessionId: "pending-a",
+    projectPath: "/work/pending-a",
+    idempotencyKey: "create-pending-a",
+  });
+  const rejected = await registry.create({
+    sessionId: "pending-b",
+    projectPath: "/work/pending-b",
+    idempotencyKey: "create-pending-b",
+  });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.message, /capacity/i);
+  assert.equal(factoryCalls, 1);
+  assert.throws(
+    () => registry.attach("direct-b", fakeEngine("direct-b"), { projectPath: "/work/direct-b" }),
+    /capacity/i,
+  );
+
+  resolveFirst();
+  assert.equal((await pending).ok, true);
+  assert.equal(registry.list().length, 1, "session listing cannot exceed the configured hard capacity");
+  await registry.disposeAll();
+});
+
+test("runtime session listing has an absolute 2,048-item response bound", async () => {
+  const registry = new LiveRuntimeEngineRegistry({
+    maxIdleSessions: Number.MAX_SAFE_INTEGER,
+    maxTotalSessions: Number.MAX_SAFE_INTEGER,
+  });
+  for (let index = 0; index < 2_049; index += 1) {
+    registry.attach(`listed-${index}`, fakeEngine(`listed-${index}`), {
+      projectPath: `/work/listed-${index}`,
+    });
+  }
+
+  const listed = registry.list();
+  assert.equal(listed.length, 2_048);
+  assert.equal(listed.some(session => session.sessionId === "listed-0"), false);
+  assert.equal(listed.some(session => session.sessionId === "listed-2048"), true);
+  await registry.disposeAll();
+});
+
+test("factory completion rejected by cleanup quarantine cannot strand creation admission", async () => {
+  let resolveFactory;
+  let releaseAttachedDisposer;
+  let releaseCreatedDisposer;
+  let createdDisposerSignal;
+  const factoryGate = new Promise(resolve => { resolveFactory = resolve; });
+  const registry = new LiveRuntimeEngineRegistry({
+    maxTotalSessions: 2,
+    teardownTimeoutMs: 25,
+    async createSession(input) {
+      await factoryGate;
+      return {
+        engine: fakeEngine(input.sessionId),
+        projectPath: input.projectPath,
+        dispose(signal) {
+          createdDisposerSignal = signal;
+          return new Promise(resolve => { releaseCreatedDisposer = resolve; });
+        },
+      };
+    },
+  });
+  registry.attach("hung-attached", fakeEngine("hung-attached"), {
+    projectPath: "/work/hung-attached",
+    dispose: () => new Promise(resolve => { releaseAttachedDisposer = resolve; }),
+  });
+  const creating = registry.create({
+    sessionId: "late-created",
+    projectPath: "/work/late-created",
+    idempotencyKey: "create-late-created",
+  });
+  await assert.rejects(registry.releaseSession("hung-attached"), /timed out/i);
+  resolveFactory();
+
+  const outcome = await Promise.race([
+    creating,
+    new Promise(resolve => setTimeout(() => resolve("creation-stuck"), 250)),
+  ]);
+  assert.notEqual(outcome, "creation-stuck", "cleanup must not strand the creation receipt or reservation");
+  assert.equal(outcome.ok, false);
+  assert.match(outcome.message, /quarantined/i);
+  assert.equal(createdDisposerSignal?.aborted, true);
+  assert.equal(registry.systemSnapshot().engines.pendingCreations, 0);
+  assert.equal(registry.systemSnapshot().engines.pendingTeardowns, 2);
+
+  releaseAttachedDisposer();
+  releaseCreatedDisposer();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(registry.systemSnapshot().engines.pendingTeardowns, 0);
+  await assert.rejects(registry.settleTeardowns(), /timed out/i);
+  await registry.disposeAll();
+});
+
 test("bounded idle teardown never evicts an active turn or an attached client", async () => {
   let releaseTurn;
   const disposed = [];

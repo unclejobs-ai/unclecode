@@ -17,6 +17,10 @@ export type { RuntimeSessionRevisionClock } from "./runtime-mutation-arbiter.js"
 
 const MAX_PENDING_SESSION_CREATIONS = 256;
 const MAX_RUNTIME_DECISION_ID_LENGTH = 160;
+const DEFAULT_MAX_TOTAL_RUNTIME_SESSIONS = 256;
+export const MAX_TOTAL_RUNTIME_SESSIONS = 2_048;
+const RUNTIME_SESSION_CAPACITY_MESSAGE = "Runtime owner session capacity is exhausted.";
+const RUNTIME_SESSION_QUARANTINED_MESSAGE = "Runtime owner has quarantined session cleanup and cannot admit another session.";
 
 export const RUNTIME_ENGINE_METHODS = [
   "handleSubmit", "toggleToolHistoryDisplay", "setMode", "openSessionsPanel", "interruptTurn",
@@ -73,7 +77,7 @@ export type RuntimeSessionFactory = (input: Omit<RuntimeSessionCreateInput, "ide
   readonly provider?: string | undefined;
   readonly revisionClock?: RuntimeSessionRevisionClock | undefined;
   readonly mutationArbiter?: RuntimeSessionMutationArbiter | undefined;
-  readonly dispose?: (() => void | Promise<void>) | undefined;
+  readonly dispose?: ((signal?: AbortSignal) => void | Promise<void>) | undefined;
   readonly readObservability?: (() => RuntimeSessionObservabilitySource) | undefined;
 }>;
 
@@ -93,7 +97,7 @@ type Attached = {
   readonly provider?: string | undefined;
   readonly model?: string | undefined;
   readonly reasoning?: string | undefined;
-  readonly dispose?: (() => void | Promise<void>) | undefined;
+  readonly dispose?: ((signal?: AbortSignal) => void | Promise<void>) | undefined;
   readonly readObservability?: (() => RuntimeSessionObservabilitySource) | undefined;
   readonly unsubscribe: () => void;
   lastAccessAt: number;
@@ -277,11 +281,14 @@ export class LiveRuntimeEngineRegistry {
   readonly #engines = new Map<string, Attached>();
   readonly #createReceipts = new Map<string, { readonly fingerprint: string; readonly promise: Promise<RuntimeSessionCreateResponse> }>();
   readonly #sessionCreations = new Map<string, { readonly fingerprint: string; readonly promise: Promise<RuntimeSessionCreateResponse> }>();
+  readonly #sessionCapacityReservations = new Set<string>();
   readonly #factory: RuntimeSessionFactory | undefined;
   readonly #maxIdleSessions: number;
+  readonly #maxTotalSessions: number;
   readonly #idleSessionTtlMs: number;
   readonly #teardownTimeoutMs: number;
   readonly #teardowns = new Set<Promise<void>>();
+  readonly #orphanedTeardowns = new Set<Promise<void>>();
   readonly #teardownFailures: string[] = [];
   readonly #cleanupInventory: Array<{
     readonly kind: "runtime-session";
@@ -297,6 +304,7 @@ export class LiveRuntimeEngineRegistry {
   constructor(input: {
     readonly createSession?: RuntimeSessionFactory | undefined;
     readonly maxIdleSessions?: number | undefined;
+    readonly maxTotalSessions?: number | undefined;
     readonly idleSessionTtlMs?: number | undefined;
     readonly teardownTimeoutMs?: number | undefined;
   } = {}) {
@@ -304,6 +312,12 @@ export class LiveRuntimeEngineRegistry {
     this.#maxIdleSessions = Number.isSafeInteger(input.maxIdleSessions)
       ? Math.max(1, input.maxIdleSessions!)
       : 256;
+    this.#maxTotalSessions = Number.isSafeInteger(input.maxTotalSessions)
+      ? Math.max(1, Math.min(MAX_TOTAL_RUNTIME_SESSIONS, input.maxTotalSessions!))
+      : Math.max(
+          DEFAULT_MAX_TOTAL_RUNTIME_SESSIONS,
+          Math.min(MAX_TOTAL_RUNTIME_SESSIONS, this.#maxIdleSessions),
+        );
     this.#idleSessionTtlMs = Number.isFinite(input.idleSessionTtlMs)
       ? Math.max(1_000, Math.floor(input.idleSessionTtlMs!))
       : 5 * 60_000;
@@ -315,13 +329,17 @@ export class LiveRuntimeEngineRegistry {
   attach(sessionId: string, engine: RuntimeEngineSource, metadata: {
     readonly projectPath?: string | undefined;
     readonly provider?: string | undefined;
-    readonly dispose?: (() => void | Promise<void>) | undefined;
+    readonly dispose?: ((signal?: AbortSignal) => void | Promise<void>) | undefined;
     readonly readObservability?: (() => RuntimeSessionObservabilitySource) | undefined;
     readonly revisionClock?: RuntimeSessionRevisionClock | undefined;
     readonly mutationArbiter?: RuntimeSessionMutationArbiter | undefined;
   } = {}): () => void {
     if (this.#disposed) throw new Error("Runtime engine registry has been disposed.");
     const previous = this.#engines.get(sessionId);
+    const admissionError = previous ? undefined : this.#newSessionAdmissionError();
+    if (admissionError) {
+      throw new Error(admissionError);
+    }
     if (previous) this.#scheduleTeardown(sessionId, previous, true);
     let unsubscribe = () => {};
     const clock = metadata.revisionClock ?? metadata.mutationArbiter?.clock ?? { value: 0 };
@@ -347,6 +365,7 @@ export class LiveRuntimeEngineRegistry {
     };
   }
 
+  /** Returns no more than the registry's hard capacity (and never over 2,048 items). */
   list(): readonly RuntimeSessionDescriptor[] {
     return [...this.#engines.entries()]
       .filter((entry): entry is [string, Attached & { projectPath: string }] => typeof entry[1].projectPath === "string")
@@ -413,7 +432,7 @@ export class LiveRuntimeEngineRegistry {
         attachedSessions: this.#engines.size,
         activeMutationsObserved: activeMutations,
         pendingCreations: this.#sessionCreations.size,
-        pendingTeardowns: this.#teardowns.size,
+        pendingTeardowns: this.#teardowns.size + this.#orphanedTeardowns.size,
         clientLeaseProtectedSessionsObserved: clientLeaseProtectedSessions,
         teardownFailuresRetained: this.#teardownFailures.length,
         observedSessions,
@@ -421,7 +440,8 @@ export class LiveRuntimeEngineRegistry {
         cleanupEntriesDropped: this.#cleanupEntriesDropped,
         unlistedPendingTeardowns: Math.max(
           0,
-          this.#teardowns.size - this.#cleanupInventory.filter(item => item.status === "pending").length,
+          this.#teardowns.size + this.#orphanedTeardowns.size
+            - this.#cleanupInventory.filter(item => item.status === "pending").length,
         ),
         observabilityCallbackFailures,
         mcpConfigurationUnavailableObserved,
@@ -470,7 +490,19 @@ export class LiveRuntimeEngineRegistry {
         message: "Runtime owner has too many session creations in progress.",
       });
     }
-    const promise = this.#createOnce(input).finally(() => {
+    const needsCapacityReservation = !this.#engines.has(input.sessionId) && this.#factory !== undefined;
+    const admissionError = needsCapacityReservation
+      ? this.#reserveSessionCapacity(input.sessionId)
+      : undefined;
+    if (admissionError) {
+      return Promise.resolve({
+        ok: false,
+        code: "invalid_action",
+        message: admissionError,
+      });
+    }
+    const promise = this.#createOnce(input, needsCapacityReservation).finally(() => {
+      if (needsCapacityReservation) this.#sessionCapacityReservations.delete(input.sessionId);
       if (this.#sessionCreations.get(input.sessionId)?.promise === promise) {
         this.#sessionCreations.delete(input.sessionId);
       }
@@ -479,7 +511,7 @@ export class LiveRuntimeEngineRegistry {
     return promise;
   }
 
-  async #createOnce(input: RuntimeSessionCreateInput): Promise<RuntimeSessionCreateResponse> {
+  async #createOnce(input: RuntimeSessionCreateInput, hasCapacityReservation: boolean): Promise<RuntimeSessionCreateResponse> {
     const existing = this.#engines.get(input.sessionId);
     if (existing) {
       if (existing.projectPath !== input.projectPath) {
@@ -499,35 +531,50 @@ export class LiveRuntimeEngineRegistry {
       });
       if (this.#disposed) {
         try {
-          await withTimeout(
-            Promise.resolve(created.dispose?.()),
-            this.#teardownTimeoutMs,
+          await this.#disposeUnattached(
+            created.dispose ? signal => created.dispose?.(signal) : undefined,
             "Late runtime session cleanup timed out.",
           );
         } catch (error) {
-          this.#recordTeardownFailure(error);
           throw error;
         }
         return { ok: false, code: "invalid_action", message: "Runtime engine registry has been disposed." };
       }
       const raced = this.#engines.get(input.sessionId);
       if (raced) {
-        await created.dispose?.();
+        await this.#disposeUnattached(
+          created.dispose ? signal => created.dispose?.(signal) : undefined,
+          "Raced runtime session cleanup timed out.",
+        );
         if (raced.projectPath !== input.projectPath) {
           return { ok: false, code: "session_conflict", message: "Session id is already owned by another workspace." };
         }
         return { ok: true, session: this.#descriptor(input.sessionId, raced) };
       }
-      this.attach(input.sessionId, created.engine, {
-        projectPath: created.projectPath,
-        ...(created.provider ? { provider: created.provider } : {}),
-        ...(input.model ? { model: input.model } : {}),
-        ...(input.reasoning ? { reasoning: input.reasoning } : {}),
-        ...(created.revisionClock ? { revisionClock: created.revisionClock } : {}),
-        ...(created.mutationArbiter ? { mutationArbiter: created.mutationArbiter } : {}),
-        ...(created.dispose ? { dispose: created.dispose } : {}),
-        ...(created.readObservability ? { readObservability: created.readObservability } : {}),
-      });
+      if (hasCapacityReservation) this.#sessionCapacityReservations.delete(input.sessionId);
+      try {
+        this.attach(input.sessionId, created.engine, {
+          projectPath: created.projectPath,
+          ...(created.provider ? { provider: created.provider } : {}),
+          ...(input.model ? { model: input.model } : {}),
+          ...(input.reasoning ? { reasoning: input.reasoning } : {}),
+          ...(created.revisionClock ? { revisionClock: created.revisionClock } : {}),
+          ...(created.mutationArbiter ? { mutationArbiter: created.mutationArbiter } : {}),
+          ...(created.dispose ? { dispose: created.dispose } : {}),
+          ...(created.readObservability ? { readObservability: created.readObservability } : {}),
+        });
+      } catch (error) {
+        try {
+          await this.#disposeUnattached(
+            created.dispose ? signal => created.dispose?.(signal) : undefined,
+            "Rejected runtime session cleanup timed out.",
+          );
+        } catch {
+          // The cleanup failure is retained for owner health; keep the
+          // admission response deterministic for this idempotency receipt.
+        }
+        throw error;
+      }
       return { ok: true, session: this.#descriptor(input.sessionId, this.#engines.get(input.sessionId)!) };
     } catch (error) {
       return { ok: false, code: "invalid_action", message: boundedRuntimeRpcError(error) };
@@ -553,10 +600,11 @@ export class LiveRuntimeEngineRegistry {
 
   async settleTeardowns(): Promise<void> {
     while (this.#teardowns.size > 0) await Promise.allSettled([...this.#teardowns]);
-    if (this.#teardownFailures.length > 0) {
-      const failures = this.#teardownFailures.splice(0);
-      throw new Error(`Runtime session teardown did not settle cleanly: ${failures.join("; ")}`);
+    const failures = this.#teardownFailures.splice(0);
+    if (this.#orphanedTeardowns.size > 0) {
+      failures.push(`${String(this.#orphanedTeardowns.size)} runtime session teardown(s) remain quarantined.`);
     }
+    if (failures.length > 0) throw new Error(`Runtime session teardown did not settle cleanly: ${failures.join("; ")}`);
   }
 
   async disposeAll(): Promise<void> {
@@ -589,13 +637,14 @@ export class LiveRuntimeEngineRegistry {
     } finally {
       this.#createReceipts.clear();
       this.#sessionCreations.clear();
+      this.#sessionCapacityReservations.clear();
     }
     if (failures.length > 0) {
       throw new Error(`Runtime owner cleanup did not settle cleanly: ${failures.join("; ")}`);
     }
   }
 
-  async #disposeAttached(item: Attached): Promise<void> {
+  async #disposeAttached(item: Attached, signal?: AbortSignal): Promise<void> {
     const failures: string[] = [];
     item.unsubscribe();
     const lifecycle = item.engine as unknown as {
@@ -616,11 +665,32 @@ export class LiveRuntimeEngineRegistry {
       failures.push("Runtime mutation arbiter did not settle active provider/tool work.");
     }
     try {
-      await item.dispose?.();
+      await item.dispose?.(signal);
     } catch (error) {
       failures.push(boundedRuntimeRpcError(error));
     }
     if (failures.length > 0) throw new Error(`Runtime owner shutdown did not settle cleanly: ${failures.join("; ")}`);
+  }
+
+  async #disposeUnattached(
+    dispose: ((signal: AbortSignal) => void | Promise<void>) | undefined,
+    timeoutMessage: string,
+  ): Promise<void> {
+    if (!dispose) return;
+    const abort = new AbortController();
+    let disposalSettled = false;
+    const disposal = Promise.resolve().then(() => dispose(abort.signal));
+    void disposal.then(
+      () => { disposalSettled = true; },
+      () => { disposalSettled = true; },
+    );
+    try {
+      await withTimeout(disposal, this.#teardownTimeoutMs, timeoutMessage, () => abort.abort());
+    } catch (error) {
+      if (!disposalSettled) this.#quarantineTeardown(disposal);
+      this.#recordTeardownFailure(error);
+      throw error;
+    }
   }
 
   #scheduleTeardown(sessionId: string, attached: Attached, force: boolean): void {
@@ -636,11 +706,20 @@ export class LiveRuntimeEngineRegistry {
     };
     this.#cleanupInventory.push(cleanup);
     this.#boundCleanupInventory();
+    const abort = new AbortController();
+    let disposalSettled = false;
+    const disposal = this.#disposeAttached(attached, abort.signal);
+    void disposal.then(
+      () => { disposalSettled = true; },
+      () => { disposalSettled = true; },
+    );
     const teardown = withTimeout(
-      this.#disposeAttached(attached),
+      disposal,
       this.#teardownTimeoutMs,
       `Runtime session ${sessionId} teardown timed out.`,
+      () => abort.abort(),
     ).catch((error: unknown) => {
+      if (!disposalSettled) this.#quarantineTeardown(disposal);
       cleanup.status = "failed";
       cleanup.recordedAt = Date.now();
       this.#recordTeardownFailure(error);
@@ -650,6 +729,14 @@ export class LiveRuntimeEngineRegistry {
       this.#teardowns.delete(teardown);
     });
     this.#teardowns.add(teardown);
+  }
+
+  #quarantineTeardown(disposal: Promise<void>): void {
+    this.#orphanedTeardowns.add(disposal);
+    void disposal.then(
+      () => { this.#orphanedTeardowns.delete(disposal); },
+      () => { this.#orphanedTeardowns.delete(disposal); },
+    );
   }
 
   #recordTeardownFailure(error: unknown): void {
@@ -688,6 +775,31 @@ export class LiveRuntimeEngineRegistry {
     for (const [sessionId, attached] of this.#engines) {
       if (this.#engines.size <= this.#maxIdleSessions) break;
       if (sessionId === excludeSessionId || attached.clientLeaseUntil > now || attached.arbiter.isMutationActive()) continue;
+      this.#scheduleTeardown(sessionId, attached, false);
+    }
+  }
+
+  #reserveSessionCapacity(sessionId: string): string | undefined {
+    const admissionError = this.#newSessionAdmissionError();
+    if (admissionError) return admissionError;
+    this.#sessionCapacityReservations.add(sessionId);
+    return undefined;
+  }
+
+  #newSessionAdmissionError(): string | undefined {
+    if (this.#orphanedTeardowns.size > 0) return RUNTIME_SESSION_QUARANTINED_MESSAGE;
+    this.#evictIdleForTotalCapacity();
+    return this.#engines.size + this.#sessionCapacityReservations.size < this.#maxTotalSessions
+      ? undefined
+      : RUNTIME_SESSION_CAPACITY_MESSAGE;
+  }
+
+  #evictIdleForTotalCapacity(): void {
+    if (this.#engines.size + this.#sessionCapacityReservations.size < this.#maxTotalSessions) return;
+    const now = Date.now();
+    for (const [sessionId, attached] of this.#engines) {
+      if (this.#engines.size + this.#sessionCapacityReservations.size < this.#maxTotalSessions) break;
+      if (attached.clientLeaseUntil > now || attached.arbiter.isMutationActive()) continue;
       this.#scheduleTeardown(sessionId, attached, false);
     }
   }
@@ -854,10 +966,18 @@ export class LiveRuntimeEngineRegistry {
   }
 }
 
-function withTimeout<Result>(promise: Promise<Result>, timeoutMs: number, message: string): Promise<Result> {
+function withTimeout<Result>(
+  promise: Promise<Result>,
+  timeoutMs: number,
+  message: string,
+  onTimeout?: (() => void) | undefined,
+): Promise<Result> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    timer = setTimeout(() => {
+      onTimeout?.();
+      reject(new Error(message));
+    }, timeoutMs);
   });
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) clearTimeout(timer);

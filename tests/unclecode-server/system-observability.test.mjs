@@ -280,16 +280,50 @@ test("disposeAll drains late factory cleanup and aggregates its failure after an
 });
 
 test("a never-resolving session disposer times out instead of hanging owner teardown", async () => {
-  const registry = new LiveRuntimeEngineRegistry({ teardownTimeoutMs: 25 });
+  let releaseDisposer;
+  let disposerSignal;
+  let factoryCalls = 0;
+  const registry = new LiveRuntimeEngineRegistry({
+    teardownTimeoutMs: 25,
+    async createSession(input) {
+      factoryCalls += 1;
+      return { engine: fakeEngine(input.sessionId), projectPath: input.projectPath };
+    },
+  });
   registry.attach("hung", fakeEngine("hung"), {
     projectPath: "/workspace",
-    dispose: () => new Promise(() => {}),
+    dispose: signal => {
+      disposerSignal = signal;
+      return new Promise(resolve => { releaseDisposer = resolve; });
+    },
   });
   const startedAt = Date.now();
-  await assert.rejects(registry.disposeAll(), /timed out/i);
+  await assert.rejects(registry.releaseSession("hung"), /timed out/i);
   assert.ok(Date.now() - startedAt < 500);
   assert.equal(registry.systemSnapshot().engines.attachedSessions, 0);
+  assert.equal(disposerSignal?.aborted, true, "timeout must request cooperative disposer cancellation");
+  assert.equal(registry.systemSnapshot().engines.pendingTeardowns, 1, "non-cooperative cleanup remains quarantined and observable");
   assert.equal(registry.systemSnapshot().cleanup.at(-1).status, "failed");
+  await assert.rejects(registry.settleTeardowns(), /quarantined/i);
+  const quarantinedAdmission = await registry.create({
+    sessionId: "replacement",
+    projectPath: "/workspace/replacement",
+    idempotencyKey: "replacement-while-quarantined",
+  });
+  assert.equal(quarantinedAdmission.ok, false);
+  assert.match(quarantinedAdmission.message, /quarantined/i);
+  assert.equal(factoryCalls, 0, "a quarantined owner must restart or settle before allocating another engine");
+
+  releaseDisposer();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(registry.systemSnapshot().engines.pendingTeardowns, 0);
+  assert.equal((await registry.create({
+    sessionId: "replacement",
+    projectPath: "/workspace/replacement",
+    idempotencyKey: "replacement-after-settle",
+  })).ok, true);
+  assert.equal(factoryCalls, 1);
+  await registry.disposeAll();
 });
 
 test("System projection whitelists, bounds, and redacts every backend inventory", () => {
