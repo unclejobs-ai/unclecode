@@ -179,6 +179,83 @@ test("work lifecycle reducer projects the proposed graph and correlated task sta
   );
 });
 
+function proposalReplayEvent() {
+  return {
+    type: "work.proposed",
+    graphId: "goal-proposal-replay",
+    graph: {
+      id: "goal-proposal-replay",
+      qualityProfile: "deep",
+      currentStage: "plan",
+      gateStatus: "unproven",
+      iteration: 0,
+      approval: "pending",
+      nodes: [{
+        id: "task-1",
+        title: "Implement auth",
+        prompt: "private executor assignment",
+        status: "proposed",
+        dependsOn: [],
+        fileOwnership: ["src/auth.ts"],
+        acceptanceCriteria: ["tests pass"],
+        evidenceRefs: [],
+        stage: "work",
+        role: "worker",
+        attempt: 0,
+        artifactRefs: [],
+        reviewRequired: true,
+      }],
+    },
+  };
+}
+
+test("an exact work proposal replay preserves snapshot identity", () => {
+  const originalProposal = proposalReplayEvent();
+  const proposed = applyTraceEventToAgentConsole(initialConsole, originalProposal);
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(proposed, structuredClone(originalProposal)),
+    proposed,
+    "an exact serialized replay must not create snapshot churn",
+  );
+});
+
+test("a completed work graph rejects stale proposals but accepts a newer iteration", () => {
+  const originalProposal = proposalReplayEvent();
+  const proposed = applyTraceEventToAgentConsole(initialConsole, originalProposal);
+  const completed = applyTraceEventToAgentConsole(proposed, {
+    type: "quality.completed",
+    runId: "run-proposal-replay",
+    graphId: "goal-proposal-replay",
+    profile: "deep",
+    stage: "promote",
+    iteration: 0,
+    decision: "unproven",
+    startedAt: 20,
+  });
+  assert.equal(completed.workGraph?.currentStage, "promote");
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(completed, structuredClone(originalProposal)),
+    completed,
+    "replaying the original proposal after completion must not regress the graph",
+  );
+
+  const newerProposal = structuredClone(originalProposal);
+  newerProposal.graph.iteration = 1;
+  newerProposal.graph.currentStage = "work";
+  newerProposal.graph.nodes[0].attempt = 1;
+  const refined = applyTraceEventToAgentConsole(completed, newerProposal);
+  assert.notStrictEqual(refined, completed);
+  assert.equal(refined.workGraph?.iteration, 1);
+  assert.equal(refined.workGraph?.currentStage, "work");
+  assert.equal(refined.workGraph?.nodes[0]?.attempt, 1);
+
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(refined, structuredClone(originalProposal)),
+    refined,
+    "an older proposal must not replace the active iteration",
+  );
+});
+
 test("agent lifecycle reducer correlates queued jobs, runs, and terminal status", () => {
   const queued = applyTraceEventToAgentConsole(initialConsole, {
     type: "job.queued",

@@ -14,8 +14,9 @@ import {
   type QualityProfile,
   type TerminalAgentRunStatus,
   type ToolActivity,
-  type WorkNodeStatus,
   type ToolActivityKind,
+  type WorkGraph,
+  type WorkNodeStatus,
 } from "@unclecode/contracts";
 
 const MAX_TOOL_ACTIVITY = 80;
@@ -747,6 +748,36 @@ function applyWorkLifecycleEvent(
     ) {
       return snapshot;
     }
+    const proposedGraph = parsed.workGraph;
+    const currentGraph = snapshot.workGraph;
+    if (currentGraph && workGraphsEqual(currentGraph, proposedGraph)) {
+      return snapshot;
+    }
+    const review = snapshot.qualityReview?.graphId === proposedGraph.id
+      ? snapshot.qualityReview
+      : undefined;
+    const currentIteration = Math.max(
+      currentGraph?.id === proposedGraph.id ? currentGraph.iteration : -1,
+      review?.iteration ?? -1,
+    );
+    const terminalIteration = review?.history.reduce<number | undefined>(
+      (latest, entry) => entry.event === "completed"
+        ? Math.max(latest ?? -1, entry.iteration)
+        : latest,
+      undefined,
+    );
+    // A proposal opens an iteration. Once that same graph has projected any
+    // state for the iteration, replay cannot send it back to the opening plan;
+    // refine and pivot remain valid because they increment the iteration first.
+    if (
+      proposedGraph.iteration <= currentIteration
+      && (
+        currentGraph?.id === proposedGraph.id
+        || (terminalIteration !== undefined && proposedGraph.iteration <= terminalIteration)
+      )
+    ) {
+      return snapshot;
+    }
     return parsed;
   }
 
@@ -882,6 +913,12 @@ function applyWorkLifecycleEvent(
         candidate.id === node.id ? { ...candidate, status } : candidate),
     },
   });
+}
+
+function workGraphsEqual(left: WorkGraph, right: WorkGraph): boolean {
+  // Both graphs crossed the contracts parser, so their bounded canonical
+  // property order makes this a stable exact-payload identity check.
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function projectQualityStage(
