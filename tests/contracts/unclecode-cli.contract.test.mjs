@@ -900,7 +900,15 @@ test("startup router keeps interactive boot behind dynamic imports without nativ
     /apps[\/",\s]+unclecode-cli[\/",\s]+dist[\/",\s]+index\.js/,
   );
   assert.doesNotMatch(binSource, /dist-work[\/",\s]+src[\/",\s]+index\.js/);
-  assert.match(binSource, /cargo build -p unclecode/);
+  assert.match(
+    binSource,
+    /const\s+cargoManifest\s*=\s*path\.join\(repoRoot,\s*"Cargo\.toml"\)/,
+  );
+  assert.match(
+    binSource,
+    /cargo build --manifest-path "\$\{cargoManifest\}" -p unclecode/,
+  );
+  assert.doesNotMatch(binSource, /cargo build -p unclecode/);
   assert.doesNotMatch(binSource, /temporary Node fallback/);
   assert.match(
     workTsconfig,
@@ -1167,7 +1175,11 @@ test("obsolete root cli compatibility surfaces are removed after app/package sea
   assert.doesNotMatch(runtimeSource, /return\s+loadWorkShellDashboardProps\(/);
   assert.match(
     runtimeSource,
-    /try\s*\{[\s\S]*renderEmbeddedWorkShellPaneDashboard\(\{[\s\S]*\.\.\.controller\.initialProps[\s\S]*\.\.\.controller\.embeddedWorkPane[\s\S]*finally\s*\{[\s\S]*controller\.dispose\(\)/,
+    /readonly\s+renderDashboard\?:\s*typeof\s+renderEmbeddedWorkShellPaneDashboard\s*\|\s*undefined/,
+  );
+  assert.match(
+    runtimeSource,
+    /try\s*\{[\s\S]*await\s+\(dependencies\.renderDashboard\s*\?\?\s*renderEmbeddedWorkShellPaneDashboard\)\(\{[\s\S]*\.\.\.controller\.initialProps[\s\S]*\.\.\.controller\.embeddedWorkPane[\s\S]*\}\);\s*\}\s*finally\s*\{\s*await\s+controller\.dispose\(\)/,
   );
   assert.match(
     runtimeSource,
