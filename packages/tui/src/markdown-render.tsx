@@ -441,12 +441,12 @@ function shouldSkipMarkdownRenderCache(input: {
     || markdownCacheTextEncoder.encode(input.text).byteLength > MARKDOWN_RENDER_CACHE_MAX_SOURCE_BYTES;
 }
 
-function shouldRenderCompactPlainMarkdown(text: string): boolean {
+function resolveCompactPlainMarkdownText(text: string, width: number): string | undefined {
   let lineCount = 1;
   for (let index = 0; index < text.length && lineCount < COMPACT_PLAIN_MARKDOWN_MIN_LINES; index += 1) {
     if (text.charCodeAt(index) === 10) lineCount += 1;
   }
-  if (lineCount < COMPACT_PLAIN_MARKDOWN_MIN_LINES) return false;
+  if (lineCount < COMPACT_PLAIN_MARKDOWN_MIN_LINES) return undefined;
 
   // Treat any Markdown punctuation as structural. This deliberately gives up
   // the compact path for ambiguous prose rather than silently flattening a
@@ -457,9 +457,9 @@ function shouldRenderCompactPlainMarkdown(text: string): boolean {
       || (codePoint >= 58 && codePoint <= 64)
       || (codePoint >= 91 && codePoint <= 96)
       || (codePoint >= 123 && codePoint <= 126);
-    if (isAsciiPunctuation) return false;
+    if (isAsciiPunctuation) return undefined;
   }
-  return true;
+  return renderPlainMarkdownVerbatimText(text, width);
 }
 
 function renderPlainMarkdownVerbatimText(text: string, width: number): string | undefined {
@@ -484,27 +484,10 @@ function renderPlainMarkdownVerbatimText(text: string, width: number): string | 
   return text.endsWith("\n") ? `${text} ` : text;
 }
 
-function renderCompactPlainMarkdown(text: string, width: number, theme: MarkdownTheme): React.ReactNode {
-  const verbatimText = renderPlainMarkdownVerbatimText(text, width);
-  if (verbatimText !== undefined) {
-    return (
-      <Box flexDirection="column">
-        <Text color={theme.text}>{verbatimText}</Text>
-      </Box>
-    );
-  }
-  const rows: string[] = [];
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) {
-      rows.push(" ");
-      continue;
-    }
-    rows.push(...wrapDisplayTextFast(trimmed, Math.max(20, width)));
-  }
+function renderCompactPlainMarkdown(text: string, theme: MarkdownTheme): React.ReactNode {
   return (
     <Box flexDirection="column">
-      <Text color={theme.text}>{rows.join("\n")}</Text>
+      <Text color={theme.text}>{text}</Text>
     </Box>
   );
 }
@@ -530,7 +513,8 @@ export function renderMarkdown(
   },
 ): React.ReactNode {
   const { text, width, theme } = input;
-  const useCompactPlainRenderer = shouldRenderCompactPlainMarkdown(text);
+  const compactPlainText = resolveCompactPlainMarkdownText(text, width);
+  const useCompactPlainRenderer = compactPlainText !== undefined;
   const skipCache = useCompactPlainRenderer || shouldSkipMarkdownRenderCache(input);
   const cacheKey = skipCache
     ? undefined
@@ -542,8 +526,8 @@ export function renderMarkdown(
     }
   }
   markdownRenderParseCount += 1;
-  if (useCompactPlainRenderer) {
-    return renderCompactPlainMarkdown(text, width, theme);
+  if (compactPlainText !== undefined) {
+    return renderCompactPlainMarkdown(compactPlainText, theme);
   }
   const lines = text.split("\n");
   const nodes: React.ReactNode[] = [];

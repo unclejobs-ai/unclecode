@@ -252,7 +252,52 @@ test("line-rich Markdown syntax always falls back to the structural renderer", (
   }
 });
 
-test("line-rich compact fallback preserves trimming and display wrapping", async () => {
+test("line-rich whitespace and control inputs fall back to the structural renderer", () => {
+  const cases = [
+    ["tab", "\t"],
+    ["vertical tab", "\u000b"],
+    ["form feed", "\u000c"],
+    ["NBSP", "\u00a0"],
+    ["Ogham space", "\u1680"],
+    ["en quad", "\u2000"],
+    ["em space", "\u2003"],
+    ["line separator", "\u2028"],
+    ["paragraph separator", "\u2029"],
+    ["narrow NBSP", "\u202f"],
+    ["medium mathematical space", "\u205f"],
+    ["ideographic space", "\u3000"],
+  ];
+  for (const [label, prefix] of cases) {
+    const text = [`${prefix}indented`, ...Array.from({ length: 128 }, () => "plain")].join("\n");
+    const rendered = renderMarkdown({ text, width: 80, theme: THEME });
+    assert.ok(
+      countReactElements(rendered) > 128,
+      `${label} must not enter the compact plain-text path`,
+    );
+  }
+
+  const wrapped = ["x".repeat(25), ...Array.from({ length: 128 }, () => "plain")].join("\n");
+  assert.ok(
+    countReactElements(renderMarkdown({ text: wrapped, width: 20, theme: THEME })) > 128,
+    "text requiring display wrapping must use the structural renderer",
+  );
+});
+
+test("line-rich NBSP indentation is preserved byte-for-byte", async () => {
+  const { renderDebugFrame, waitForSettledFrame } = await import("./work-shell-render-harness.mjs");
+  const text = ["\u00a0indented", ...Array.from({ length: 128 }, () => "plain")].join("\n");
+  const { instance, getOutput } = renderDebugFrame(
+    renderMarkdown({ text, width: 80, theme: THEME }),
+    { columns: 80, rows: 140 },
+  );
+  await waitForSettledFrame(getOutput);
+  const frame = stripVTControlCharacters(getOutput()).trimEnd();
+  instance.unmount();
+  instance.cleanup();
+  assert.equal(frame, text);
+});
+
+test("line-rich structural fallback preserves trimming and display wrapping", async () => {
   const { renderDebugFrame, waitForSettledFrame } = await import("./work-shell-render-harness.mjs");
   const text = ["  padded  ", ...Array.from({ length: 159 }, () => "x".repeat(25))].join("\n");
   const expected = [
