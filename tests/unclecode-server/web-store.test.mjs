@@ -577,6 +577,93 @@ test("web store aborts the old authenticated read and never regresses the newer 
   assert.equal(store.getSnapshot().data.runs[0].revision, 2);
 });
 
+test("web store ignores a stale event-stream 401 after reauthentication", async context => {
+  let releaseOldEvents;
+  let releaseNewEvents;
+  const fetchImpl = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    const authorization = init.headers?.authorization;
+    if (pathname === "/control-room") {
+      const id = authorization === "Bearer old-secret" ? "old-run" : "new-run";
+      return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs: [{ id, revision: 1 }] }), { status: 200 });
+    }
+    if (authorization === "Bearer old-secret") {
+      return new Promise(resolve => { releaseOldEvents = resolve; });
+    }
+    return new Promise(resolve => { releaseNewEvents = resolve; });
+  };
+  const store = createControlRoomStore({
+    baseUrl: "http://127.0.0.1:17677",
+    token: "old-secret",
+    fetchImpl,
+  });
+  context.after(() => {
+    store.stop();
+    releaseNewEvents?.(new Response(new ReadableStream({ start() {} }), { status: 200 }));
+  });
+  await store.start();
+  await new Promise(resolve => setImmediate(resolve));
+
+  await store.authenticate({ baseUrl: "http://127.0.0.1:17677", token: "new-secret" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(store.getSnapshot().data.runs[0].id, "new-run");
+
+  releaseOldEvents(new Response(JSON.stringify({ error: { code: "expired" } }), { status: 401 }));
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(store.getSnapshot().auth, "ready");
+  assert.equal(store.getSnapshot().data.runs[0].id, "new-run");
+  assert.equal(store.getSnapshot().error, null);
+});
+
+test("web store ignores a stale expired-cursor body after reauthentication", async context => {
+  let releaseOldCursorBody;
+  let releaseNewEvents;
+  let controlRoomRequests = 0;
+  const fetchImpl = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    const authorization = init.headers?.authorization;
+    if (pathname === "/control-room") {
+      controlRoomRequests += 1;
+      const id = authorization === "Bearer old-secret" ? "old-run" : "new-run";
+      return new Response(JSON.stringify({ version: 1, generatedAt: 1, runs: [{ id, revision: 1 }] }), { status: 200 });
+    }
+    if (authorization === "Bearer old-secret") {
+      return {
+        status: 409,
+        ok: false,
+        body: null,
+        json: () => new Promise(resolve => { releaseOldCursorBody = resolve; }),
+      };
+    }
+    return new Promise(resolve => { releaseNewEvents = resolve; });
+  };
+  const store = createControlRoomStore({
+    baseUrl: "http://127.0.0.1:17677",
+    token: "old-secret",
+    fetchImpl,
+  });
+  context.after(() => {
+    store.stop();
+    releaseNewEvents?.(new Response(new ReadableStream({ start() {} }), { status: 200 }));
+  });
+  await store.start();
+  await new Promise(resolve => setImmediate(resolve));
+
+  await store.authenticate({ baseUrl: "http://127.0.0.1:17677", token: "new-secret" });
+  await new Promise(resolve => setImmediate(resolve));
+  const requestsAfterAuthentication = controlRoomRequests;
+  releaseOldCursorBody({ error: { code: "event_cursor_expired" } });
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(controlRoomRequests, requestsAfterAuthentication);
+  assert.equal(store.getSnapshot().auth, "ready");
+  assert.equal(store.getSnapshot().data.runs[0].id, "new-run");
+  assert.equal(store.getSnapshot().error, null);
+});
+
 test("web store coalesces concurrent projection reads within one lifecycle", async context => {
   let controlRoomRequests = 0;
   const pendingReads = [];

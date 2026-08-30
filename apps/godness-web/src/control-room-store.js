@@ -313,6 +313,13 @@ export function createControlRoomStore(options = {}) {
     const controller = new AbortController();
     eventAbort = controller;
     eventSessionId = sessionId;
+    const lifecycle = lifecycleGeneration;
+    const generation = credentialGeneration;
+    const isCurrent = () => !stopped
+      && lifecycle === lifecycleGeneration
+      && generation === credentialGeneration
+      && !controller.signal.aborted
+      && eventAbort === controller;
     const lastEventId = lastEventIds.get(sessionId) ?? 0;
     emit({ ...snapshot, connection: "connecting" });
     let reader = null;
@@ -323,12 +330,17 @@ export function createControlRoomStore(options = {}) {
         signal: controller.signal,
         redirect: "error",
       });
+      if (!isCurrent()) {
+        if (response.body) await response.body.cancel().catch(() => {});
+        return;
+      }
       if (response.status === 401) {
         requireAuthentication("The server token expired or was rotated.")
         return
       }
       if (response.status === 409) {
         const body = await response.json().catch(() => null);
+        if (!isCurrent()) return;
         if (body?.error?.code !== "event_cursor_expired") {
           retryable = false;
           throw new Error(body?.error?.message ?? "Event stream returned 409.");
@@ -339,15 +351,11 @@ export function createControlRoomStore(options = {}) {
         }
         lastEventIds.delete(sessionId);
         await load();
-        if (stopped || eventAbort !== controller) return;
+        if (!isCurrent()) return;
         disconnectEventStream();
         return connect(false);
       }
       if (!response.ok || !response.body) throw new Error(`Event stream returned ${response.status}.`);
-      if (stopped || controller.signal.aborted || eventAbort !== controller) {
-        await response.body.cancel();
-        return;
-      }
       blockedEventSessionId = null;
       blockedEventError = null;
       eventStreamLive = true;
@@ -356,8 +364,9 @@ export function createControlRoomStore(options = {}) {
       eventReader = reader;
       const decoder = new TextDecoder();
       let buffer = "";
-      while (!stopped && !controller.signal.aborted && eventAbort === controller) {
+      while (isCurrent()) {
         const { done, value } = await reader.read();
+        if (!isCurrent()) return;
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         if (buffer.length > MAX_SSE_BUFFER_CHARS) throw new Error("Event stream frame exceeded the client buffer limit.");
@@ -372,8 +381,9 @@ export function createControlRoomStore(options = {}) {
       }
       if (!stopped) throw new Error("Event stream disconnected.");
     } catch (error) {
-      if (stopped || controller.signal.aborted || eventAbort !== controller) return;
+      if (!isCurrent()) return;
       if (reader) await reader.cancel().catch(() => {});
+      if (!isCurrent()) return;
       eventAbort = null;
       eventSessionId = null;
       eventStreamLive = false;
