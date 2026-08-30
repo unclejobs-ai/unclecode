@@ -264,7 +264,7 @@ export type WorkShellEngineOptions<Reasoning extends WorkShellReasoningConfig> =
   readonly contextSummaryLines: readonly string[];
   readonly initialTraceMode?: WorkShellTraceMode | undefined;
   readonly initialUiLocale?: WorkShellUiLocale | undefined;
-  /** False means terminal chrome is provisional until the first prose submit. */
+  /** True makes the configured locale immutable; false keeps prose-driven per-turn detection active. */
   readonly initialUiLocaleLocked?: boolean | undefined;
   readonly initialEntries?: readonly WorkShellChatEntry[] | undefined;
   readonly initialSessionSummary?: string | undefined;
@@ -2665,9 +2665,9 @@ export class WorkShellEngine<
     }
 
     if (route.kind === "chat" && !route.line.startsWith("!")) {
-      this.lockUiLocaleFromFirstUserProse(route.line);
+      this.updateUiLocaleFromUserProse(route.line);
     } else if (route.kind === "prompt-command") {
-      this.lockUiLocaleFromFirstUserProse(route.promptCommand.focus ?? "");
+      this.updateUiLocaleFromUserProse(route.promptCommand.focus ?? "");
     }
 
     // Submitting a turn retires the Context Desk right away: the review is
@@ -2989,6 +2989,7 @@ export class WorkShellEngine<
         this.appendEntries({ role: "system", text: decision.message });
         return;
       case "queue": {
+        this.updateUiLocaleFromUserProse(decision.line);
         const item = await this.pushQueuedSubmit(decision.line, pendingAttachments ?? []);
         this.setQueuedCount(decision.displayIndex);
         this.appendEntries({ role: "system", text: decision.message });
@@ -3991,11 +3992,11 @@ export class WorkShellEngine<
     return `${workShellLanguageInstruction(this.state.uiLocale)}\n\n${providerPrompt}`;
   }
 
-  private lockUiLocaleFromFirstUserProse(value: string): void {
+  private updateUiLocaleFromUserProse(value: string): void {
     if (this.state.uiLocaleLocked) return;
     const uiLocale = detectWorkShellUserLocale(value);
     if (uiLocale === undefined) return;
-    this.setState({ uiLocale, uiLocaleLocked: true });
+    this.setState({ uiLocale });
   }
 
   private async refreshContextPacket(

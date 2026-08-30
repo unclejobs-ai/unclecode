@@ -15,12 +15,10 @@ test("terminal locale preference is deterministic across standard locale environ
   assert.equal(resolveWorkShellTerminalUiLocale({}, "ko"), "ko");
 });
 
-test("the initial user language may select the session locale without making later sentences a preference", () => {
+test("meaningful user prose resolves locale independently on each turn", () => {
   const terminalPreference = resolveWorkShellTerminalUiLocale({ LANG: "en_US.UTF-8" });
-  const sessionLocale = resolveWorkShellUiLocale("이 세션은 한국어로 진행해 줘", terminalPreference);
-  assert.equal(sessionLocale, "ko");
+  assert.equal(resolveWorkShellUiLocale("이 요청을 처리해 줘", terminalPreference), "ko");
   assert.equal(resolveWorkShellUiLocale("Please inspect this file", terminalPreference), "en");
-  assert.equal(sessionLocale, "ko", "the selected session preference is stored rather than recomputed per sentence");
 });
 
 test("meaningful prose detection distinguishes a preference from neutral input", () => {

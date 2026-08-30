@@ -34,7 +34,7 @@ export function resolveWorkShellUiLocale(
   return detectWorkShellUserLocale(text) ?? fallback;
 }
 
-/** Resolve the operator's stable terminal preference without reading prose. */
+/** Resolve the operator's terminal fallback without reading prose. */
 export function resolveWorkShellTerminalUiLocale(
   env: Readonly<Record<string, string | undefined>>,
   fallback: WorkShellUiLocale = "en",
@@ -223,6 +223,6 @@ export function formatWorkShellModeLabelForLocale(
 
 export function workShellLanguageInstruction(locale: WorkShellUiLocale): string {
   return locale === "ko"
-    ? "현재 세션의 사용자 언어를 따라 한국어로 답변하세요. 코드, 경로, 명령, 고유 명칭은 필요한 경우 원문을 유지하세요."
-    : "Respond in English for this session. Preserve code, paths, commands, and proper names when needed.";
+    ? "이번 요청에는 한국어로 답변하세요. 코드, 경로, 명령, 고유 명칭은 필요한 경우 원문을 유지하세요."
+    : "Respond in English for this turn. Preserve code, paths, commands, and proper names when needed.";
 }

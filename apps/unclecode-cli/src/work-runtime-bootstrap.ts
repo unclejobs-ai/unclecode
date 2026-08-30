@@ -32,7 +32,6 @@ import {
   WorkAgent,
   detectWorkShellUserLocale,
   resolveWorkShellTerminalUiLocale,
-  workShellLanguageInstruction,
   type AppReasoningConfig,
   type WorkTurnAgent,
 } from "@unclecode/orchestrator";
@@ -571,19 +570,15 @@ export async function loadWorkCliBootstrap(
   const resumedUserText = [...(resumedSession?.initialEntries ?? [])]
     .reverse()
     .find((entry) => entry.role === "user")?.text ?? "";
-  const resumedUserLocale = detectWorkShellUserLocale(resumedUserText);
   const submittedUserLocale = detectWorkShellUserLocale(prompt ?? resumedUserText);
-  const durableResumedLocale = resumedUserLocale === undefined
-    ? undefined
-    : resumedSession?.initialUiLocale;
-  const initialUiLocale = durableResumedLocale
-    ?? submittedUserLocale
+  const initialUiLocale = submittedUserLocale
     ?? resumedSession?.initialUiLocale
     ?? terminalUiLocale;
-  const initialUiLocaleLocked = durableResumedLocale !== undefined
-    || submittedUserLocale !== undefined;
+  // Prompt and resumed-session detection seed the chrome, but only an
+  // explicitly configured engine lock may prevent later prose from switching
+  // the per-turn language.
+  const initialUiLocaleLocked = false;
   const systemPromptAppendix = [
-    initialUiLocaleLocked ? workShellLanguageInstruction(initialUiLocale) : "",
     configExplanation.prompt.rendered
       ? `Configured prompt:\n\n${configExplanation.prompt.rendered}`
       : "",

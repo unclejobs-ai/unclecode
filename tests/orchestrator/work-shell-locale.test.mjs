@@ -30,8 +30,9 @@ test("mode chrome comes from one EN/KO message boundary", () => {
   assert.equal(formatWorkShellModeLabelForLocale("ultrawork", "ko"), "집중 작업 모드");
 });
 
-test("provider instruction follows the durable session locale without mixed guidance", () => {
+test("provider instruction follows the current turn locale without mixed guidance", () => {
   assert.match(workShellLanguageInstruction("en"), /Respond in English/);
+  assert.match(workShellLanguageInstruction("en"), /this turn/);
   assert.doesNotMatch(workShellLanguageInstruction("en"), /[가-힣]/u);
   assert.match(workShellLanguageInstruction("ko"), /한국어로 답변/);
   assert.doesNotMatch(workShellLanguageInstruction("ko"), /Respond in English/);

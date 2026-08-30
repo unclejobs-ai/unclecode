@@ -171,7 +171,7 @@ export function extractRuntimeQaUserRequest(requestText) {
     userRequest = userRequest.slice(0, qualityContextOffset).trim();
   }
   userRequest = userRequest.replace(
-    /^(?:Respond in English for this session\. Preserve code, paths, commands, and proper names when needed\.|현재 세션의 사용자 언어를 따라 한국어로 답변하세요\. 코드, 경로, 명령, 고유 명칭은 필요한 경우 원문을 유지하세요\.)\n\n/u,
+    /^(?:Respond in English for this turn\. Preserve code, paths, commands, and proper names when needed\.|이번 요청에는 한국어로 답변하세요\. 코드, 경로, 명령, 고유 명칭은 필요한 경우 원문을 유지하세요\.)\n\n/u,
     "",
   );
   return userRequest.trim();

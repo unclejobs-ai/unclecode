@@ -109,7 +109,7 @@ import {
 } from "../../packages/orchestrator/src/work-shell-engine-operations.ts";
 
 function stripWorkShellLanguageInstruction(prompt) {
-  if (!/^(?:Respond in English for this session\.|현재 세션의 사용자 언어를 따라)/u.test(prompt)) {
+  if (!/^(?:Respond in English for this turn\.|이번 요청에는 한국어로 답변하세요\.)/u.test(prompt)) {
     return prompt;
   }
   const separator = prompt.indexOf("\n\n");
@@ -3684,7 +3684,7 @@ test("WorkShellEngine sends the manifest-owned provider prompt for a resolved pa
 
   assert.deepEqual(manifestInputs, [{ packet, userPrompt: "write focused tests" }]);
   assert.deepEqual(providerPrompts, [
-    "Respond in English for this session. Preserve code, paths, commands, and proper names when needed.\n\nmanifest-owned:packet-manifest-1:write focused tests",
+    "Respond in English for this turn. Preserve code, paths, commands, and proper names when needed.\n\nmanifest-owned:packet-manifest-1:write focused tests",
   ]);
   assert.deepEqual(engine.getState().agentConsole.manifest, packet.manifest);
   assert.deepEqual(calls.snapshots.at(-1)?.agentConsole?.manifest, packet.manifest);
@@ -7907,7 +7907,7 @@ test("WorkShellEngine Ctrl+O path reprojects retained tool history through the o
   assert.equal(calls.snapshots.at(-1)?.traceMode, "minimal");
 });
 
-test("WorkShellEngine keeps the session locale stable when a later sentence uses another language", async () => {
+test("WorkShellEngine honors an explicitly configured locale lock across turns", async () => {
   const { engine, calls } = createEngine({
     options: {
       provider: "openai",
@@ -7924,18 +7924,18 @@ test("WorkShellEngine keeps the session locale stable when a later sentence uses
 
   await engine.handleSubmit("이 파일을 설명해 주세요");
   assert.equal(engine.getState().uiLocale, "ko");
-  assert.match(calls.turns[0], /^현재 세션의 사용자 언어를 따라 한국어로 답변하세요/u);
+  assert.match(calls.turns[0], /^이번 요청에는 한국어로 답변하세요/u);
   assert.doesNotMatch(calls.turns[0], /Respond in English/u);
   assert.equal(calls.snapshots.at(-1)?.uiLocale, "ko");
 
   await engine.handleSubmit("Explain the next file in English");
   assert.equal(engine.getState().uiLocale, "ko");
-  assert.match(calls.turns[1], /^현재 세션의 사용자 언어를 따라 한국어로 답변하세요/u);
+  assert.match(calls.turns[1], /^이번 요청에는 한국어로 답변하세요/u);
   assert.doesNotMatch(calls.turns[1], /Respond in English/u);
   assert.equal(calls.snapshots.at(-1)?.uiLocale, "ko");
 });
 
-test("WorkShellEngine locks the first prose language across opposite terminal locales", async () => {
+test("WorkShellEngine updates inferred locale for every meaningful prose turn", async () => {
   const previousLcAll = process.env.LC_ALL;
   try {
     for (const fixture of [
@@ -7944,16 +7944,20 @@ test("WorkShellEngine locks the first prose language across opposite terminal lo
         initial: "en",
         first: "첫 요청을 처리해 주세요",
         later: "Explain the next file",
-        expected: "ko",
-        instruction: /^현재 세션의 사용자 언어를 따라 한국어로 답변하세요/u,
+        firstLocale: "ko",
+        laterLocale: "en",
+        firstInstruction: /^이번 요청에는 한국어로 답변하세요/u,
+        laterInstruction: /^Respond in English for this turn/u,
       },
       {
         terminal: "ko_KR.UTF-8",
         initial: "ko",
         first: "Handle the first request",
         later: "다음 파일도 설명해 주세요",
-        expected: "en",
-        instruction: /^Respond in English for this session/u,
+        firstLocale: "en",
+        laterLocale: "ko",
+        firstInstruction: /^Respond in English for this turn/u,
+        laterInstruction: /^이번 요청에는 한국어로 답변하세요/u,
       },
     ]) {
       process.env.LC_ALL = fixture.terminal;
@@ -7973,13 +7977,19 @@ test("WorkShellEngine locks the first prose language across opposite terminal lo
       assert.equal(engine.getState().uiLocaleLocked, false);
 
       await engine.handleSubmit(fixture.first);
-      assert.equal(engine.getState().uiLocale, fixture.expected);
-      assert.equal(engine.getState().uiLocaleLocked, true);
-      assert.match(calls.turns[0], fixture.instruction);
+      assert.equal(engine.getState().uiLocale, fixture.firstLocale);
+      assert.equal(engine.getState().uiLocaleLocked, false);
+      assert.match(calls.turns[0], fixture.firstInstruction);
 
       await engine.handleSubmit(fixture.later);
-      assert.equal(engine.getState().uiLocale, fixture.expected);
-      assert.match(calls.turns[1], fixture.instruction);
+      assert.equal(engine.getState().uiLocale, fixture.laterLocale);
+      assert.equal(engine.getState().uiLocaleLocked, false);
+      assert.match(calls.turns[1], fixture.laterInstruction);
+
+      await engine.handleSubmit("./fixtures/한국어.json");
+      assert.equal(engine.getState().uiLocale, fixture.laterLocale);
+      assert.match(calls.turns[2], fixture.laterInstruction);
+      assert.equal(stripWorkShellLanguageInstruction(calls.turns[2]), "./fixtures/한국어.json");
     }
   } finally {
     if (previousLcAll === undefined) delete process.env.LC_ALL;
@@ -8017,7 +8027,7 @@ test("WorkShellEngine ignores local command prose until the first provider-bound
 
       await engine.handleSubmit(fixture.first);
       assert.equal(engine.getState().uiLocale, fixture.expected);
-      assert.equal(engine.getState().uiLocaleLocked, true);
+      assert.equal(engine.getState().uiLocaleLocked, false);
       assert.equal(calls.turns.length, 1);
     }
   } finally {
@@ -8039,12 +8049,84 @@ test("WorkShellEngine detects locale from prompt-command focus instead of slash 
 
     await engine.handleSubmit("/review Handle the authentication flow");
     assert.equal(engine.getState().uiLocale, "en");
-    assert.equal(engine.getState().uiLocaleLocked, true);
-    assert.match(calls.turns[0], /^Respond in English for this session/u);
+    assert.equal(engine.getState().uiLocaleLocked, false);
+    assert.match(calls.turns[0], /^Respond in English for this turn/u);
   } finally {
     if (previousLcAll === undefined) delete process.env.LC_ALL;
     else process.env.LC_ALL = previousLcAll;
   }
+});
+
+test("WorkShellEngine restores persisted locale as an unlocked fallback", async () => {
+  const { engine, calls } = createEngine({
+    options: {
+      provider: "openai",
+      model: "gpt-5.4",
+      mode: "default",
+      authLabel: "api-key-env",
+      reasoning: supportedReasoning,
+      cwd: "/repo",
+      contextSummaryLines: ["Loaded guidance: AGENTS.md"],
+      initialUiLocale: "ko",
+      initialUiLocaleLocked: false,
+      initialEntries: [
+        { role: "user", text: "이전 요청을 처리해 주세요" },
+        { role: "assistant", text: "처리했습니다" },
+      ],
+    },
+  });
+  await engine.initialize();
+
+  assert.equal(engine.getState().uiLocale, "ko");
+  assert.equal(engine.getState().uiLocaleLocked, false);
+
+  await engine.handleSubmit("Explain the resumed work");
+  assert.equal(engine.getState().uiLocale, "en");
+  assert.match(calls.turns[0], /^Respond in English for this turn/u);
+  assert.equal(calls.snapshots.at(-1)?.uiLocale, "en");
+});
+
+test("WorkShellEngine applies a busy follow-up locale immediately and again when queued", async () => {
+  let releaseFirst;
+  const prompts = [];
+  const { engine } = createEngine({
+    agent: {
+      clear() {},
+      updateRuntimeSettings() {},
+      setTraceListener() {},
+      async runTurn(prompt) {
+        prompts.push(prompt);
+        if (stripWorkShellLanguageInstruction(prompt) === "첫 요청을 처리해 주세요") {
+          await new Promise((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        return { text: "done" };
+      },
+    },
+  });
+  await engine.initialize();
+
+  const firstTurn = engine.handleSubmit("첫 요청을 처리해 주세요");
+  while (!engine.getState().isBusy || typeof releaseFirst !== "function") {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.equal(engine.getState().uiLocale, "ko");
+
+  await engine.handleSubmit("Explain the queued follow-up");
+  assert.equal(engine.getState().uiLocale, "en");
+  assert.equal(engine.getState().queuedCount, 1);
+
+  releaseFirst();
+  await firstTurn;
+
+  assert.match(prompts[0], /^이번 요청에는 한국어로 답변하세요/u);
+  assert.match(prompts[1], /^Respond in English for this turn/u);
+  assert.deepEqual(prompts.map(stripWorkShellLanguageInstruction), [
+    "첫 요청을 처리해 주세요",
+    "Explain the queued follow-up",
+  ]);
+  assert.equal(engine.getState().uiLocale, "en");
 });
 
 test("WorkShellEngine keeps bridge bookkeeping and unproven memory out of the transcript", async () => {

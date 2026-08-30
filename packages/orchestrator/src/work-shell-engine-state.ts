@@ -116,7 +116,7 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
       ?? detectedResumedLocale
       ?? resolveWorkShellTerminalUiLocale(process.env, "en"),
     uiLocaleLocked: input.options.initialUiLocaleLocked
-      ?? (input.options.initialUiLocale !== undefined || detectedResumedLocale !== undefined),
+      ?? input.options.initialUiLocale !== undefined,
     composerMode: decision.composerMode,
     isBusy: decision.isBusy,
     turnLifecycle: { state: "idle" } satisfies WorkShellPauseSnapshot,
