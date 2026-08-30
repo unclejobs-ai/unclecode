@@ -3147,6 +3147,22 @@ test("work-shell state helpers append entries and update auth/busy transitions d
   assert.equal(withBusy.currentTurnStartedAt, 123);
 });
 
+test("work-shell transcript projection retains only the newest 256 entries in long live sessions", () => {
+  const state = createState({
+    entries: Array.from({ length: 300 }, (_value, index) => ({
+      id: `entry-${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      text: `message-${index}`,
+    })),
+  });
+
+  const patch = appendWorkShellEntries(state, { role: "assistant", text: "message-300" });
+
+  assert.equal(patch.entries.length, 256);
+  assert.equal(patch.entries[0]?.text, "message-45");
+  assert.equal(patch.entries.at(-1)?.text, "message-300");
+});
+
 test("work-shell state helpers update trace mode and trace lines without mutating pinned panels", () => {
   const state = createState({
     panel: { title: "Status", lines: ["model:gpt-5.4"] },
