@@ -9,6 +9,7 @@ import {
   type AgentRunUsageRoute,
   type AsyncJob,
   MAX_QUALITY_REVIEW_HISTORY,
+  MAX_SUPERSEDED_WORK_PROPOSALS,
   type QualityReviewHistoryEntry,
   type QualityReviewProjection,
   type QualityProfile,
@@ -17,6 +18,8 @@ import {
   type ToolActivityKind,
   type WorkGraph,
   type WorkNodeStatus,
+  type WorkProposalIdentity,
+  type WorkProposalOrderProjection,
 } from "@unclecode/contracts";
 
 const MAX_TOOL_ACTIVITY = 80;
@@ -738,8 +741,9 @@ function applyWorkLifecycleEvent(
   }
 
   if (event.type === "work.proposed") {
+    const { workProposalOrder: _workProposalOrder, ...snapshotWithoutProposalOrder } = snapshot;
     const parsed = parseAgentConsoleSnapshot({
-      ...snapshot,
+      ...snapshotWithoutProposalOrder,
       workGraph: trace.graph,
     });
     if (
@@ -753,32 +757,64 @@ function applyWorkLifecycleEvent(
     if (currentGraph && workGraphsEqual(currentGraph, proposedGraph)) {
       return snapshot;
     }
-    const review = snapshot.qualityReview?.graphId === proposedGraph.id
-      ? snapshot.qualityReview
-      : undefined;
-    const currentIteration = Math.max(
-      currentGraph?.id === proposedGraph.id ? currentGraph.iteration : -1,
-      review?.iteration ?? -1,
-    );
-    const terminalIteration = review?.history.reduce<number | undefined>(
-      (latest, entry) => entry.event === "completed"
-        ? Math.max(latest ?? -1, entry.iteration)
-        : latest,
-      undefined,
-    );
-    // A proposal opens an iteration. Once that same graph has projected any
-    // state for the iteration, replay cannot send it back to the opening plan;
-    // refine and pivot remain valid because they increment the iteration first.
+    const candidateStartedAt = readTimestamp(trace, "startedAt");
+    const candidateSequence = readTimestamp(trace, "sequence");
+    if (Object.hasOwn(trace, "sequence") && candidateSequence === undefined) {
+      return snapshot;
+    }
+    const candidateIdentity = workProposalIdentity(proposedGraph);
+    const currentOrder = snapshot.workProposalOrder;
     if (
-      proposedGraph.iteration <= currentIteration
+      currentOrder
       && (
-        currentGraph?.id === proposedGraph.id
-        || (terminalIteration !== undefined && proposedGraph.iteration <= terminalIteration)
+        sameWorkProposalIdentity(currentOrder, candidateIdentity)
+        || currentOrder.superseded.some((identity) =>
+          sameWorkProposalIdentity(identity, candidateIdentity))
       )
     ) {
       return snapshot;
     }
-    return parsed;
+    // The trace contract owns this timestamp. Without a validated value there
+    // is no safe fallback order for either the first proposal or its replay.
+    if (candidateStartedAt === undefined) {
+      return snapshot;
+    }
+    if (currentOrder) {
+      const currentSequence = currentOrder.sequence;
+      if (currentSequence !== undefined) {
+        // Once the source establishes an authoritative sequence, an omitted
+        // sequence cannot fall back to a timestamp and bypass that watermark.
+        if (candidateSequence === undefined || candidateSequence <= currentSequence) {
+          return snapshot;
+        }
+      } else if (currentOrder.graphId === proposedGraph.id) {
+        if (proposedGraph.iteration < currentOrder.iteration) return snapshot;
+      } else if (candidateStartedAt < currentOrder.startedAt) {
+        return snapshot;
+      } else if (
+        candidateSequence === undefined
+        && candidateStartedAt === currentOrder.startedAt
+        && currentOrder.unsequencedTieSaturated
+      ) {
+        return snapshot;
+      }
+    } else if (
+      currentGraph?.id === proposedGraph.id
+      && proposedGraph.iteration <= currentGraph.iteration
+    ) {
+      return snapshot;
+    }
+
+    const workProposalOrder = projectWorkProposalOrder({
+      currentOrder,
+      currentGraph,
+      candidate: {
+        ...candidateIdentity,
+        startedAt: candidateStartedAt,
+        ...(candidateSequence === undefined ? {} : { sequence: candidateSequence }),
+      },
+    });
+    return createAgentConsoleSnapshot({ ...parsed, workProposalOrder });
   }
 
   if (
@@ -919,6 +955,47 @@ function workGraphsEqual(left: WorkGraph, right: WorkGraph): boolean {
   // Both graphs crossed the contracts parser, so their bounded canonical
   // property order makes this a stable exact-payload identity check.
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function workProposalIdentity(graph: WorkGraph): WorkProposalIdentity {
+  return { graphId: graph.id, iteration: graph.iteration };
+}
+
+function sameWorkProposalIdentity(
+  left: WorkProposalIdentity,
+  right: WorkProposalIdentity,
+): boolean {
+  return left.graphId === right.graphId && left.iteration === right.iteration;
+}
+
+function projectWorkProposalOrder(input: {
+  readonly currentOrder: WorkProposalOrderProjection | undefined;
+  readonly currentGraph: WorkGraph | undefined;
+  readonly candidate: Omit<WorkProposalOrderProjection, "superseded">;
+}): WorkProposalOrderProjection {
+  const previous = input.currentOrder
+    ? [
+        ...input.currentOrder.superseded,
+        { graphId: input.currentOrder.graphId, iteration: input.currentOrder.iteration },
+      ]
+    : input.currentGraph ? [workProposalIdentity(input.currentGraph)] : [];
+  const unique = new Map<string, WorkProposalIdentity>();
+  for (const identity of previous) {
+    if (sameWorkProposalIdentity(identity, input.candidate)) continue;
+    unique.set(JSON.stringify([identity.graphId, identity.iteration]), identity);
+  }
+  const unsequencedTieSaturated = input.candidate.sequence === undefined
+    && input.currentOrder?.sequence === undefined
+    && input.currentOrder?.startedAt === input.candidate.startedAt
+    && (
+      input.currentOrder.unsequencedTieSaturated === true
+      || input.currentOrder.superseded.length >= MAX_SUPERSEDED_WORK_PROPOSALS
+    );
+  return {
+    ...input.candidate,
+    ...(unsequencedTieSaturated ? { unsequencedTieSaturated: true as const } : {}),
+    superseded: [...unique.values()].slice(-MAX_SUPERSEDED_WORK_PROPOSALS),
+  };
 }
 
 function projectQualityStage(

@@ -242,6 +242,15 @@ export function resolveWorkerBudget(mode: string): number {
 }
 
 let workGraphSequence = 0;
+let workProposalSequence = -1;
+
+function nextWorkProposalSequence(startedAt: number): number {
+  // Timestamp-derived space keeps the source-owned watermark monotonic across
+  // ordinary host restarts; the increment keeps same-millisecond proposals
+  // strictly ordered within a process.
+  workProposalSequence = Math.max(workProposalSequence + 1, startedAt * 1_000);
+  return workProposalSequence;
+}
 
 function createWorkGraph(
   tasks: readonly PlannedWorkTask[],
@@ -2702,6 +2711,7 @@ export class WorkAgent<
               level: "high-signal",
               graphId: graph.id,
               nodeCount: graph.nodes.length,
+              sequence: nextWorkProposalSequence(startedAt),
               startedAt,
               graph,
             });

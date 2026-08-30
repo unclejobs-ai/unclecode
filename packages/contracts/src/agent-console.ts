@@ -165,6 +165,22 @@ export type WorkGraph = {
   readonly approval: "pending" | "approved" | "rejected";
 };
 
+export const MAX_SUPERSEDED_WORK_PROPOSALS = 32;
+
+export type WorkProposalIdentity = {
+  readonly graphId: string;
+  readonly iteration: number;
+};
+
+/** Host-owned ordering watermark for replay-safe `work.proposed` projection. */
+export type WorkProposalOrderProjection = WorkProposalIdentity & {
+  readonly startedAt: number;
+  readonly sequence?: number;
+  /** Fail closed after the bounded legacy same-timestamp replay set is exhausted. */
+  readonly unsequencedTieSaturated?: true;
+  readonly superseded: readonly WorkProposalIdentity[];
+};
+
 export const MAX_QUALITY_REVIEW_HISTORY = 32;
 
 export type QualityReviewHistoryEntry = {
@@ -513,6 +529,7 @@ export type AgentConsoleSnapshot = {
   readonly manifest?: PersistedPromptManifest;
   readonly pendingDecision?: AskUserQuestionRequest;
   readonly workGraph?: WorkGraph;
+  readonly workProposalOrder?: WorkProposalOrderProjection;
   readonly qualityReview?: QualityReviewProjection;
   readonly evolutionProposals?: readonly EvolutionProposalProjection[];
   readonly pluginDiagnostics?: readonly PluginDiagnosticProjection[];
@@ -565,6 +582,9 @@ export function createAgentConsoleSnapshot(
       ? { pendingDecision: copyAskUserQuestionRequest(input.pendingDecision) }
       : {}),
     ...(input.workGraph ? { workGraph: copyWorkGraph(input.workGraph) } : {}),
+    ...(input.workProposalOrder
+      ? { workProposalOrder: copyWorkProposalOrder(input.workProposalOrder) }
+      : {}),
     ...(input.qualityReview ? { qualityReview: copyQualityReview(input.qualityReview) } : {}),
     ...(input.evolutionProposals && input.evolutionProposals.length > 0
       ? { evolutionProposals: input.evolutionProposals.slice(-MAX_EVOLUTION_PROPOSALS).map(copyEvolutionProposal) }
@@ -726,6 +746,20 @@ function copyWorkGraph(graph: WorkGraph): WorkGraph {
       attempt: node.attempt ?? 0,
       artifactRefs: [...(node.artifactRefs ?? [])],
       reviewRequired: node.reviewRequired ?? false,
+    })),
+  };
+}
+
+function copyWorkProposalOrder(order: WorkProposalOrderProjection): WorkProposalOrderProjection {
+  return {
+    graphId: order.graphId,
+    iteration: order.iteration,
+    startedAt: order.startedAt,
+    ...(order.sequence === undefined ? {} : { sequence: order.sequence }),
+    ...(order.unsequencedTieSaturated ? { unsequencedTieSaturated: true as const } : {}),
+    superseded: order.superseded.slice(-MAX_SUPERSEDED_WORK_PROPOSALS).map((identity) => ({
+      graphId: identity.graphId,
+      iteration: identity.iteration,
     })),
   };
 }
@@ -1051,6 +1085,9 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     ? parseSecurityApprovalRules(record.securityApprovals)
     : undefined;
   const workGraph = hasOwn(record, "workGraph") ? parseWorkGraph(record.workGraph) : undefined;
+  const workProposalOrder = hasOwn(record, "workProposalOrder")
+    ? parseWorkProposalOrder(record.workProposalOrder)
+    : undefined;
   const qualityReview = hasOwn(record, "qualityReview")
     ? parseQualityReviewProjection(record.qualityReview)
     : undefined;
@@ -1071,6 +1108,11 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     || (hasOwn(record, "pendingDecision") && !pendingDecision)
     || (hasOwn(record, "securityApprovals") && !securityApprovals)
     || (hasOwn(record, "workGraph") && !workGraph)
+    || (hasOwn(record, "workProposalOrder") && !workProposalOrder)
+    || (workProposalOrder
+      && (!workGraph
+        || workProposalOrder.graphId !== workGraph.id
+        || workProposalOrder.iteration > workGraph.iteration))
     || (hasOwn(record, "qualityReview") && !qualityReview)
     || (hasOwn(record, "evolutionProposals") && !evolutionProposals)
     || (hasOwn(record, "pluginDiagnostics") && !pluginDiagnostics)
@@ -1114,6 +1156,7 @@ export function parseAgentConsoleSnapshot(value: unknown): AgentConsoleSnapshot 
     ...(manifest ? { manifest } : {}),
     ...(pendingDecision ? { pendingDecision } : {}),
     ...(workGraph ? { workGraph } : {}),
+    ...(workProposalOrder ? { workProposalOrder } : {}),
     ...(qualityReview ? { qualityReview } : {}),
     ...(evolutionProposals && evolutionProposals.length > 0 ? { evolutionProposals } : {}),
     ...(pluginDiagnostics && pluginDiagnostics.length > 0 ? { pluginDiagnostics } : {}),
@@ -1730,6 +1773,51 @@ function parseWorkGraph(value: unknown): WorkGraph | undefined {
     approval: record.approval,
     nodes: parsedNodes,
   };
+}
+
+function parseWorkProposalIdentity(value: unknown): WorkProposalIdentity | undefined {
+  const record = asRecord(value);
+  return record
+    && isNonEmptyString(record.graphId)
+    && isNonNegativeInteger(record.iteration)
+    ? { graphId: record.graphId, iteration: record.iteration }
+    : undefined;
+}
+
+function parseWorkProposalOrder(value: unknown): WorkProposalOrderProjection | undefined {
+  const record = asRecord(value);
+  if (
+    !record
+    || !isNonEmptyString(record.graphId)
+    || !isNonNegativeInteger(record.iteration)
+    || !isNonNegativeInteger(record.startedAt)
+    || (hasOwn(record, "sequence") && !isNonNegativeInteger(record.sequence))
+    || (hasOwn(record, "unsequencedTieSaturated") && record.unsequencedTieSaturated !== true)
+    || !Array.isArray(record.superseded)
+    || record.superseded.length > MAX_SUPERSEDED_WORK_PROPOSALS
+  ) {
+    return undefined;
+  }
+  const superseded = record.superseded.map(parseWorkProposalIdentity);
+  if (superseded.some((identity) => identity === undefined)) return undefined;
+  const identities = superseded.filter(
+    (identity): identity is WorkProposalIdentity => identity !== undefined,
+  );
+  const keys = identities.map((identity) => JSON.stringify([identity.graphId, identity.iteration]));
+  if (
+    new Set(keys).size !== keys.length
+    || keys.includes(JSON.stringify([record.graphId, record.iteration]))
+  ) {
+    return undefined;
+  }
+  return copyWorkProposalOrder({
+    graphId: record.graphId,
+    iteration: record.iteration,
+    startedAt: record.startedAt,
+    ...(typeof record.sequence === "number" ? { sequence: record.sequence } : {}),
+    ...(record.unsequencedTieSaturated === true ? { unsequencedTieSaturated: true as const } : {}),
+    superseded: identities,
+  });
 }
 
 function parseQualityReviewProjection(value: unknown): QualityReviewProjection | undefined {

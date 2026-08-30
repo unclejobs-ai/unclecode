@@ -126,6 +126,7 @@ test("work lifecycle reducer projects the proposed graph and correlated task sta
     applyTraceEventToAgentConsole(initialConsole, {
       type: "work.proposed",
       graphId: "invalid",
+      startedAt: 1,
       graph: {
         id: "invalid",
         approval: "pending",
@@ -138,6 +139,7 @@ test("work lifecycle reducer projects the proposed graph and correlated task sta
   const proposed = applyTraceEventToAgentConsole(initialConsole, {
     type: "work.proposed",
     graphId: "goal-1",
+    startedAt: 2,
     graph: {
       id: "goal-1",
       goal: "Ship authentication",
@@ -179,12 +181,13 @@ test("work lifecycle reducer projects the proposed graph and correlated task sta
   );
 });
 
-function proposalReplayEvent() {
+function proposalReplayEvent(graphId = "goal-proposal-replay", startedAt = 10) {
   return {
     type: "work.proposed",
-    graphId: "goal-proposal-replay",
+    graphId,
+    startedAt,
     graph: {
-      id: "goal-proposal-replay",
+      id: graphId,
       qualityProfile: "deep",
       currentStage: "plan",
       gateStatus: "unproven",
@@ -253,6 +256,140 @@ test("a completed work graph rejects stale proposals but accepts a newer iterati
     applyTraceEventToAgentConsole(refined, structuredClone(originalProposal)),
     refined,
     "an older proposal must not replace the active iteration",
+  );
+});
+
+test("a newer cross-graph proposal rejects replay of its superseded predecessor", () => {
+  const proposalA = proposalReplayEvent("graph-a", 100);
+  const proposalB = proposalReplayEvent("graph-b", 200);
+  const graphA = applyTraceEventToAgentConsole(initialConsole, proposalA);
+  const graphB = applyTraceEventToAgentConsole(graphA, proposalB);
+
+  assert.equal(graphB.workGraph?.id, "graph-b");
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(graphB, structuredClone(proposalA)),
+    graphB,
+    "A -> B -> replay A must retain B without snapshot churn",
+  );
+});
+
+test("work proposal sequence outranks timestamps and rejects an equal sequence", () => {
+  const proposalA = { ...proposalReplayEvent("graph-sequence-a", 200), sequence: 7 };
+  const proposalB = { ...proposalReplayEvent("graph-sequence-b", 100), sequence: 8 };
+  const graphA = applyTraceEventToAgentConsole(initialConsole, proposalA);
+  const graphB = applyTraceEventToAgentConsole(graphA, proposalB);
+  const restored = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(graphB)));
+
+  assert.equal(graphB.workGraph?.id, "graph-sequence-b", "the owner sequence is authoritative");
+  assert.equal(restored?.workProposalOrder?.sequence, 8);
+  assert.ok(restored);
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(restored, {
+      ...proposalReplayEvent("graph-sequence-c", 300),
+      sequence: 8,
+    }),
+    restored,
+    "a sequence already consumed by another proposal is not later",
+  );
+});
+
+test("an established work proposal sequence rejects an unsequenced timestamp bypass", () => {
+  const sequenced = applyTraceEventToAgentConsole(initialConsole, {
+    ...proposalReplayEvent("graph-sequenced", 100),
+    sequence: 9,
+  });
+
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(
+      sequenced,
+      proposalReplayEvent("graph-unsequenced-newer-time", 1_000),
+    ),
+    sequenced,
+  );
+});
+
+test("a work proposal with malformed ordering metadata is rejected", () => {
+  const current = applyTraceEventToAgentConsole(
+    initialConsole,
+    proposalReplayEvent("graph-order-valid", 100),
+  );
+  for (const startedAt of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.strictEqual(
+      applyTraceEventToAgentConsole(
+        current,
+        proposalReplayEvent(`graph-order-invalid-${startedAt}`, startedAt),
+      ),
+      current,
+    );
+  }
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(current, {
+      ...proposalReplayEvent("graph-sequence-invalid", 200),
+      sequence: -1,
+    }),
+    current,
+  );
+});
+
+test("equal-time proposal ordering survives snapshot serialization", () => {
+  const proposalA = proposalReplayEvent("graph-tie-a", 500);
+  const proposalB = proposalReplayEvent("graph-tie-b", 500);
+  const graphA = applyTraceEventToAgentConsole(initialConsole, proposalA);
+  const graphB = applyTraceEventToAgentConsole(graphA, proposalB);
+  const restored = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(graphB)));
+
+  assert.ok(restored);
+  assert.equal(restored.workGraph?.id, "graph-tie-b");
+  assert.deepEqual(restored.workProposalOrder, {
+    graphId: "graph-tie-b",
+    iteration: 0,
+    startedAt: 500,
+    superseded: [{ graphId: "graph-tie-a", iteration: 0 }],
+  });
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(restored, structuredClone(proposalA)),
+    restored,
+    "the bounded superseded identity survives restart",
+  );
+});
+
+test("work proposal superseded identities stay bounded without reopening an older timestamp", () => {
+  let snapshot = initialConsole;
+  for (let index = 0; index < 40; index += 1) {
+    snapshot = applyTraceEventToAgentConsole(
+      snapshot,
+      { ...proposalReplayEvent(`graph-bounded-${index}`, index), sequence: index },
+    );
+  }
+
+  assert.equal(snapshot.workGraph?.id, "graph-bounded-39");
+  assert.equal(snapshot.workProposalOrder?.superseded.length, 32);
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(snapshot, proposalReplayEvent("graph-bounded-0", 0)),
+    snapshot,
+  );
+});
+
+test("an evicted equal-time proposal cannot reopen a saturated legacy tie", () => {
+  let snapshot = initialConsole;
+  for (let index = 0; index < 34; index += 1) {
+    snapshot = applyTraceEventToAgentConsole(
+      snapshot,
+      proposalReplayEvent(`graph-equal-bounded-${index}`, 700),
+    );
+  }
+
+  assert.equal(snapshot.workGraph?.id, "graph-equal-bounded-33");
+  assert.equal(snapshot.workProposalOrder?.superseded.length, 32);
+  assert.equal(snapshot.workProposalOrder?.unsequencedTieSaturated, true);
+  const restored = parseAgentConsoleSnapshot(JSON.parse(JSON.stringify(snapshot)));
+  assert.ok(restored);
+  assert.strictEqual(
+    applyTraceEventToAgentConsole(
+      restored,
+      proposalReplayEvent("graph-equal-bounded-0", 700),
+    ),
+    restored,
   );
 });
 
@@ -1465,6 +1602,7 @@ test("work lifecycle reducer keeps terminal node statuses monotonic", () => {
   const proposed = applyTraceEventToAgentConsole(initialConsole, {
     type: "work.proposed",
     graphId: "goal-1",
+    startedAt: 3,
     graph: {
       id: "goal-1",
       approval: "pending",
@@ -1534,6 +1672,7 @@ test("quality traces project stage, gate, iteration, node attempt, and artifacts
   const proposed = applyTraceEventToAgentConsole(initialConsole, {
     type: "work.proposed",
     graphId: "goal-quality",
+    startedAt: 4,
     graph: {
       id: "goal-quality",
       qualityProfile: "standard",

@@ -222,7 +222,7 @@ export function clampAgentConsoleView(
 /**
  * The one merge invariant between the two writers of an `AgentConsoleSnapshot`.
  *
- * Lifecycle-owned fields (`workGraph`, `activity`, `agents`, `jobs`,
+ * Lifecycle-owned fields (`workGraph`, `workProposalOrder`, `activity`, `agents`, `jobs`,
  * `mainUsage`) come from the pending reduction, so a burst stays in arrival
  * order. Shell-owned fields (`profileId`, `manifest`, `pendingDecision`) are
  * re-read from the live snapshot, so a decision or manifest that changed inside
@@ -246,6 +246,9 @@ export function mergeAgentConsoleLifecycle(
     ...(current.manifest === undefined ? {} : { manifest: current.manifest }),
     ...(current.pendingDecision === undefined ? {} : { pendingDecision: current.pendingDecision }),
     ...(pending.workGraph === undefined ? {} : { workGraph: pending.workGraph }),
+    ...(pending.workProposalOrder === undefined
+      ? {}
+      : { workProposalOrder: pending.workProposalOrder }),
     ...(pending.qualityReview === undefined ? {} : { qualityReview: pending.qualityReview }),
     ...(pending.evolutionProposals === undefined ? {} : { evolutionProposals: pending.evolutionProposals }),
     ...(pending.pluginDiagnostics === undefined ? {} : { pluginDiagnostics: pending.pluginDiagnostics }),

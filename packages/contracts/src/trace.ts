@@ -159,6 +159,8 @@ export type WorkProposedTraceEvent = {
   readonly level: "high-signal";
   readonly graphId: string;
   readonly nodeCount: number;
+  /** Source-owner ordering key; replay must retain the same value. */
+  readonly sequence: number;
   readonly startedAt: number;
   readonly graph?: WorkGraph;
 };

@@ -1465,6 +1465,7 @@ test("same-wave refinement requests coalesce into one retry iteration", async ()
     assert.deepEqual(requests.map((event) => [event.iteration, event.count]), [[1, 1]]);
     const proposals = harness.traces.filter((event) => event.type === "work.proposed");
     assert.deepEqual(proposals.map((event) => event.graph.iteration), [0, 1]);
+    assert.ok(proposals[1].sequence > proposals[0].sequence);
     assert.deepEqual(
       proposals.map((event) => event.graph.nodes.map((node) => node.attempt)),
       [[0, 0], [1, 1]],

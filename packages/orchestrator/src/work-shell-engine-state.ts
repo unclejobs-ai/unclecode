@@ -165,6 +165,9 @@ export function createInitialWorkShellEngineState<Reasoning extends WorkShellRea
             ...(input.options.initialAgentConsole.workGraph
               ? { workGraph: input.options.initialAgentConsole.workGraph }
               : {}),
+            ...(input.options.initialAgentConsole.workProposalOrder
+              ? { workProposalOrder: input.options.initialAgentConsole.workProposalOrder }
+              : {}),
             ...(input.options.initialAgentConsole.qualityReview
               ? { qualityReview: input.options.initialAgentConsole.qualityReview }
               : {}),
