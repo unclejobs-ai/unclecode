@@ -376,19 +376,60 @@ test("an oversized newest reply is tail-clipped so the composer row budget remai
       `reply-${String(index).padStart(3, "0")} 👨‍👩‍👧‍👦 한글 응답`
     ).join("\n"),
   };
-  const atRest = resolveWorkShellTranscriptWindow({
-    entries: [original],
-    terminalRows: TERMINAL_ROWS,
-    terminalColumns: 40,
-    scrollOffset: 0,
-  });
+  for (const terminalColumns of [60, 80, 100, 140]) {
+    const atRest = resolveWorkShellTranscriptWindow({
+      entries: [original],
+      terminalRows: TERMINAL_ROWS,
+      terminalColumns,
+      scrollOffset: 0,
+    });
 
-  assert.equal(atRest.window.length, 1);
-  assert.ok(atRest.window[0].text.startsWith("…\n"));
-  assert.ok(atRest.window[0].text.includes("reply-099"));
-  assert.ok(!atRest.window[0].text.includes("reply-000"));
-  assert.ok(measureWorkShellEntryRows(atRest.window[0], 36) <= 20);
-  assert.equal(atRest.entriesAbove, 0);
+    assert.equal(atRest.window.length, 1, `width ${terminalColumns}`);
+    assert.ok(atRest.window[0].text.startsWith("…\n"), `width ${terminalColumns}`);
+    assert.ok(atRest.window[0].text.includes("reply-099"), `width ${terminalColumns}`);
+    assert.ok(atRest.window[0].text.includes("👨‍👩‍👧‍👦 한글 응답"), `width ${terminalColumns}`);
+    assert.ok(!atRest.window[0].text.includes("reply-000"), `width ${terminalColumns}`);
+    assert.ok(
+      measureWorkShellEntryRows(atRest.window[0], terminalColumns - 4) <= 20,
+      `width ${terminalColumns}`,
+    );
+    assert.equal(atRest.entriesAbove, 0, `width ${terminalColumns}`);
+  }
+});
+
+test("PageUp traverses one 100-line reply from its newest tail to its first rows", async () => {
+  const entries = [{
+    role: "assistant",
+    text: Array.from({ length: 100 }, (_, index) =>
+      `reply-${String(index).padStart(3, "0")} 👨‍👩‍👧‍👦 한글 응답`
+    ).join("\n"),
+  }];
+  const { engine } = createWorkShellPaneEngine({ entries });
+  const { stdin, instance, getOutput } = renderScrollbackPane(engine);
+
+  try {
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("reply-099")));
+    assert.ok(!getLastWorkFrame(getOutput()).includes("reply-000"));
+
+    stdin.write(KEY_PAGE_UP);
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("reply-080")));
+    const middle = getLastWorkFrame(getOutput());
+    assert.ok(middle.includes("👨‍👩‍👧‍👦 한글 응답"));
+    assert.ok(!middle.includes("reply-099"));
+    assert.match(middle, /↑ \d+ earlier rows .+ ↓ \d+ newer rows/u);
+
+    stdin.write(KEY_PAGE_UP);
+    stdin.write(KEY_PAGE_UP);
+    stdin.write(KEY_PAGE_UP);
+    stdin.write(KEY_PAGE_UP);
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("reply-000")));
+    const oldest = getLastWorkFrame(getOutput());
+    assert.ok(!oldest.includes("reply-099"));
+    assert.match(oldest, /↑ 0 earlier rows .+ ↓ \d+ newer rows/u);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
 });
 
 test("PageUp scrolls older entries into view with the indicator row", async () => {

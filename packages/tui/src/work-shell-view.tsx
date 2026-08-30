@@ -80,6 +80,12 @@ export type WorkShellEntry = {
   readonly text: string;
 };
 
+// Row-window fragments are ephemeral view objects. Keeping their already
+// wrapped rows out of the public transcript type prevents projected display
+// content from leaking back into engine state while letting measurement and
+// rendering consume the exact same grapheme-safe slice.
+const workShellTranscriptFragmentRows = new WeakMap<WorkShellEntry, readonly string[]>();
+
 export type WorkShellPanel = {
   readonly title: string;
   readonly lines: readonly string[];
@@ -1528,6 +1534,25 @@ function renderWorkShellEntryBlock(input: {
 }): React.ReactNode {
   const presentation = getWorkShellEntryPresentation(input.entry.role);
   const bottomMargin = input.isLastWindowEntry === true ? 0 : 1;
+  const fragmentRows = workShellTranscriptFragmentRows.get(input.entry);
+  if (fragmentRows) {
+    return (
+      <Box
+        key={`${input.entry.role}-${input.index}`}
+        marginBottom={bottomMargin}
+        flexDirection="column"
+      >
+        {fragmentRows.map((line, lineIndex) => (
+          <WorkShellReadableText
+            key={`fragment-${String(input.index)}-${String(lineIndex)}`}
+            color={presentation.bodyColor}
+          >
+            {line}
+          </WorkShellReadableText>
+        ))}
+      </Box>
+    );
+  }
   // For assistant replies, skip the Rust markdown *stripper* — we render
   // markdown structure natively now (headings, code, lists, tables). We still
   // sanitize the text (removes leaked plan JSON etc.) but keep all markdown
@@ -1823,6 +1848,8 @@ export function projectWorkShellEntryRows(
   width?: number,
   toolHistoryMode: "minimal" | "verbose" = "verbose",
 ): readonly string[] {
+  const fragmentRows = workShellTranscriptFragmentRows.get(entry);
+  if (fragmentRows) return fragmentRows;
   const bodyText = entry.role === "assistant"
     ? formatWorkShellAssistantDisplayText(entry.text)
     : entry.text;
@@ -1980,36 +2007,91 @@ export function getWorkShellTranscriptEntryCapacity(
  * `scrollOffset` rows above the newest entry. `entriesAbove` feeds the
  * indicator row.
  */
-function clipNewestTranscriptEntryToRows(
+function sliceWorkShellTranscriptEntryRows(
   entry: WorkShellEntry,
-  availableRows: number,
-  rowWidth: number | undefined,
-  toolHistoryMode: Parameters<typeof measureWorkShellEntryRows>[2],
+  projectedRows: readonly string[],
+  startRow: number,
+  endRow: number,
+  rowBudget: number,
+  showOlderEllipsis: boolean,
 ): WorkShellEntry | undefined {
-  if (availableRows <= 0) return undefined;
-  if (measureWorkShellEntryRows(entry, rowWidth, toolHistoryMode) <= availableRows) return entry;
-  if (typeof entry.text !== "string" || entry.text.length === 0) return undefined;
+  if (rowBudget <= 0 || startRow >= endRow) return undefined;
+  const ellipsisRows = showOlderEllipsis && startRow > 0 ? ["…"] : [];
+  const contentCapacity = Math.max(0, rowBudget - 1 - ellipsisRows.length);
+  const sourceRows = projectedRows.slice(startRow, Math.min(endRow, projectedRows.length));
+  const visibleSourceRows = startRow <= 0
+    ? sourceRows.slice(0, contentCapacity)
+    : sourceRows.slice(Math.max(0, sourceRows.length - contentCapacity));
+  const displayRows = [...ellipsisRows, ...visibleSourceRows];
+  if (displayRows.length === 0) return undefined;
 
-  const graphemes = typeof Intl.Segmenter === "function"
-    ? [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(entry.text)]
-        .map((segment) => segment.segment)
-    : Array.from(entry.text);
-  let low = 0;
-  let high = graphemes.length;
-  let best: WorkShellEntry | undefined;
-  // Keep the longest tail that leaves the composer/status region visible.
-  // Binary search bounds work even for pathological 100k-line provider text.
-  while (low <= high) {
-    const start = Math.floor((low + high) / 2);
-    const candidate = { ...entry, text: `…\n${graphemes.slice(start).join("")}` };
-    if (measureWorkShellEntryRows(candidate, rowWidth, toolHistoryMode) <= availableRows) {
-      best = candidate;
-      high = start - 1;
-    } else {
-      low = start + 1;
+  const textRows = entry.role === "assistant"
+    && !entry.text.startsWith(WORK_SHELL_REASONING_ENTRY_PREFIX)
+    && displayRows[0] === "● UncleCode"
+    ? displayRows.slice(1)
+    : displayRows;
+  const candidate: WorkShellEntry = { ...entry, text: textRows.join("\n") };
+  workShellTranscriptFragmentRows.set(candidate, displayRows);
+  return candidate;
+}
+
+function resolveWorkShellTranscriptDisplayRowWindow(input: {
+  readonly entries: readonly WorkShellEntry[];
+  readonly availableRows: number;
+  readonly rowWidth: number;
+  readonly scrollOffset: number;
+  readonly toolHistoryMode?: "minimal" | "verbose";
+}): {
+  readonly window: readonly WorkShellEntry[];
+  readonly entriesAbove: number;
+  readonly earlierRows: number;
+  readonly newerRows: number;
+} {
+  const rowsByEntry = input.entries.map((entry) =>
+    projectWorkShellEntryRows(entry, input.rowWidth, input.toolHistoryMode)
+  );
+  const weights = rowsByEntry.map((rows) => rows.length + 1);
+  const totalRows = weights.reduce((sum, weight) => sum + weight, 0);
+  const maxOffset = Math.max(0, totalRows - input.availableRows);
+  const newerRows = Math.min(Math.max(0, input.scrollOffset), maxOffset);
+  const visibleEnd = totalRows - newerRows;
+  const visibleStart = Math.max(0, visibleEnd - input.availableRows);
+  const window: WorkShellEntry[] = [];
+  let entriesAbove = input.entries.length;
+  let entryStart = 0;
+
+  for (let index = 0; index < input.entries.length; index += 1) {
+    const entry = input.entries[index];
+    const projectedRows = rowsByEntry[index];
+    const weight = weights[index] ?? 0;
+    const entryEnd = entryStart + weight;
+    if (entry && projectedRows && entryEnd > visibleStart && entryStart < visibleEnd) {
+      const localStart = Math.max(0, visibleStart - entryStart);
+      const localEnd = Math.min(weight, visibleEnd - entryStart);
+      const visibleEntry = localStart === 0 && localEnd === weight
+        ? entry
+        : sliceWorkShellTranscriptEntryRows(
+            entry,
+            projectedRows,
+            localStart,
+            localEnd,
+            localEnd - localStart,
+            input.scrollOffset <= 0,
+          );
+      if (visibleEntry) {
+        if (window.length === 0) entriesAbove = index;
+        window.push(visibleEntry);
+      }
     }
+    entryStart = entryEnd;
   }
-  return best;
+
+  return {
+    window,
+    entriesAbove,
+    earlierRows: visibleStart,
+    newerRows,
+  };
 }
 
 export function resolveWorkShellTranscriptWindow(input: {
@@ -2037,28 +2119,24 @@ export function resolveWorkShellTranscriptWindow(input: {
   const rowWidth = input.terminalColumns === undefined
     ? undefined
     : Math.max(8, input.terminalColumns - 4);
+  if (rowWidth !== undefined) {
+    const rowWindow = resolveWorkShellTranscriptDisplayRowWindow({
+      entries: input.entries,
+      availableRows: getWorkShellTranscriptAvailableRows(input.terminalRows),
+      rowWidth,
+      scrollOffset: input.scrollOffset,
+      ...(input.toolHistoryMode ? { toolHistoryMode: input.toolHistoryMode } : {}),
+    });
+    return {
+      ...rowWindow,
+      scrolled: input.scrollOffset > 0 && rowWindow.newerRows > 0,
+    };
+  }
   if (input.scrollOffset <= 0) {
     const weights = input.entries.map((entry) =>
       measureWorkShellEntryRows(entry, rowWidth, input.toolHistoryMode)
     );
     const availableRows = getWorkShellTranscriptAvailableRows(input.terminalRows);
-    const newest = input.entries[input.entries.length - 1];
-    if (newest && (weights[weights.length - 1] ?? 0) > availableRows) {
-      const clippedNewest = clipNewestTranscriptEntryToRows(
-        newest,
-        availableRows,
-        rowWidth,
-        input.toolHistoryMode,
-      );
-      return {
-        window: clippedNewest ? [clippedNewest] : [],
-        entriesAbove: input.entries.length - (clippedNewest ? 1 : 0),
-        earlierRows: (clippedNewest ? weights.slice(0, -1) : weights)
-          .reduce((sum, weight) => sum + weight, 0),
-        newerRows: 0,
-        scrolled: false,
-      };
-    }
     let start = input.entries.length;
     let usedRows = 0;
     while (start > 0) {
@@ -2073,32 +2151,6 @@ export function resolveWorkShellTranscriptWindow(input: {
       earlierRows: weights.slice(0, start).reduce((sum, weight) => sum + weight, 0),
       newerRows: 0,
       scrolled: false,
-    };
-  }
-  if (rowWidth !== undefined) {
-    const weights = input.entries.map((entry) => measureWorkShellEntryRows(entry, rowWidth, input.toolHistoryMode));
-    const availableRows = getWorkShellTranscriptAvailableRows(input.terminalRows);
-    let end = input.entries.length;
-    let newerRows = 0;
-    while (end > 0 && newerRows < input.scrollOffset) {
-      end -= 1;
-      newerRows += weights[end] ?? 0;
-    }
-    let start = end;
-    let usedRows = 0;
-    while (start > 0) {
-      const weight = weights[start - 1] ?? 0;
-      if (usedRows > 0 && usedRows + weight > availableRows) break;
-      start -= 1;
-      usedRows += weight;
-    }
-    const earlierRows = weights.slice(0, start).reduce((sum, weight) => sum + weight, 0);
-    return {
-      window: input.entries.slice(start, end),
-      entriesAbove: start,
-      earlierRows,
-      newerRows,
-      scrolled: true,
     };
   }
   const capacity = getWorkShellTranscriptEntryCapacity(
