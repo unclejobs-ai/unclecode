@@ -12,6 +12,8 @@ export const fullTuiResponseText = "UNCLECODE_FULL_TUI_QA_OK";
 export const yoloGreetingResponseText = "UNCLECODE_YOLO_GREETING_QA_OK";
 export const koreanBusyPromptText = "한글 스피너 QA";
 export const koreanBusyResponseText = "하이요! 편하게 말씀 주세요.";
+export const koreanBusyStatusPattern =
+  /컨텍스트 준비 중|컨텍스트 읽는 중|생각 중|다음 단계 검토 중|작업 계획 중|응답 작성 중|검토 중|병렬 작업 중|작업 중|후속 요청 대기열 추가/;
 // Keep this above Composer's large single-chunk threshold. tmux sends the
 // complete prompt followed immediately by CR, matching terminal paste/input
 // bursts that must submit on the first Enter.

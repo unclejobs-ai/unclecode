@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   koreanBusyPromptText,
   koreanBusyResponseText,
+  koreanBusyStatusPattern,
   realUseQueuedPromptText,
   realUseQueuedResponseText,
   repoRoot,
@@ -85,13 +86,18 @@ export async function runPromptInputTuiSmoke({ port, tmp, observations }) {
     await pressEnter(session);
     const busyPane = await waitForPane(
       session,
-      /preparing context|thinking|Working|Enter queues follow-up/,
+      koreanBusyStatusPattern,
       busyPaneFile,
+    );
+    assert.doesNotMatch(
+      busyPane,
+      /Preparing context|Thinking|Working|Queue a follow-up|Enter queue/,
+      "Korean prompt input must switch busy and composer guidance before the reply",
     );
     await typeKeys(session, realUseQueuedPromptText);
     await waitForPane(session, new RegExp(escapeRegExp(realUseQueuedPromptText)), busyPaneFile);
     await pressEnter(session);
-    await waitForPane(session, /queued|follow-up|\/queue/i, busyPaneFile);
+    await waitForPane(session, /queued|follow-up|대기열|후속 요청|\/queue/i, busyPaneFile);
 
     await waitForPane(session, new RegExp(escapeRegExp(koreanBusyResponseText)), paneFile);
     await waitForPane(session, new RegExp(escapeRegExp(realUseQueuedResponseText)), paneFile);

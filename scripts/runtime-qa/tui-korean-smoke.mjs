@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { koreanBusyPromptText, koreanBusyResponseText, repoRoot } from "./constants.mjs";
+import {
+  koreanBusyPromptText,
+  koreanBusyResponseText,
+  koreanBusyStatusPattern,
+  repoRoot,
+} from "./constants.mjs";
 import { escapeRegExp, run, shellQuote } from "./cli-helpers.mjs";
 import {
   calculatePaneWidth,
@@ -13,9 +18,6 @@ import {
   waitForIdleComposer,
   waitForPane,
 } from "./tmux-helpers.mjs";
-
-const koreanBusyStatusPattern =
-  /컨텍스트 준비 중|컨텍스트 읽는 중|생각 중|다음 단계 검토 중|작업 계획 중|응답 작성 중|검토 중|병렬 작업 중|작업 중|후속 요청 대기열 추가/;
 
 export async function runKoreanBusyTuiSmoke({ port, tmp, observations }) {
   const tmux = await run("sh", ["-lc", "command -v tmux"], process.env);
