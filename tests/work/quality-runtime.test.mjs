@@ -3,6 +3,8 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -11,6 +13,7 @@ import {
   rmSync,
   symlinkSync,
   truncateSync,
+  utimesSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -143,7 +146,18 @@ test("quality artifact persistence rejects oversized writes and reports bounded 
       bytesWritten: Buffer.byteLength(readFileSync(path.join(workspace, first.path), "utf8"), "utf8"),
       deduplicatedArtifacts: 0,
       oversizedArtifactsRejected: 1,
+      runAggregateArtifactsRejected: 0,
+      workspaceRunAdmissionsRejected: 0,
+      workspaceAggregateArtifactsRejected: 0,
+      workspaceUsageReconciliations: 1,
     });
+    const usageIndex = JSON.parse(readFileSync(
+      path.join(workspace, ".unclecode", "artifacts", ".quality-usage.json"),
+      "utf8",
+    ));
+    assert.equal(usageIndex.schemaVersion, 1);
+    assert.equal(usageIndex.totalBytes, usageIndex.runs[store.runId]);
+    assert.equal(usageIndex.totalBytes, store.getArtifactPersistenceTelemetry().bytesWritten);
     assert.deepEqual(readdirSync(store.runDirectory), ["critic.json"]);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
@@ -174,6 +188,233 @@ test("ownership-scoped review inventory avoids generated trees without weakening
     assert.equal(store.getWorkspaceInventoryTelemetry().scanCount, 1);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("git-backed review packets allow declared modified, new, and staged files but block undeclared staged files", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-review-git-ownership-"));
+  try {
+    writeFileSync(path.join(workspace, ".gitignore"), ".unclecode/\n");
+    writeFileSync(path.join(workspace, "modified.ts"), "before modified\n");
+    writeFileSync(path.join(workspace, "staged.ts"), "before staged\n");
+    writeFileSync(path.join(workspace, "undeclared.ts"), "before undeclared\n");
+    commitQualityWorkspaceBaseline(workspace);
+    const store = new orchestrator.QualityArtifactStore(workspace, "review-git-ownership");
+    const writePaths = ["modified.ts", "new.ts", "staged.ts"];
+    const baseline = store.captureWorkspaceInventory(writePaths, { scope: "review" });
+
+    writeFileSync(path.join(workspace, "modified.ts"), "after modified\n");
+    writeFileSync(path.join(workspace, "new.ts"), "after new\n");
+    writeFileSync(path.join(workspace, "staged.ts"), "after staged\n");
+    execFileSync("git", ["-C", workspace, "add", "staged.ts"], { stdio: "ignore" });
+    const input = {
+      graphId: "goal-review-git-ownership",
+      iteration: 0,
+      baseline,
+      request: "Change only the declared files.",
+      tasks: [{ id: "task-owned", acceptanceCriteria: ["done"], writePaths }],
+      results: [{ id: "task-owned", status: "completed", summary: "done" }],
+      workerArtifacts: [],
+      executableChecks: [],
+    };
+
+    const declaredPacket = store.persistReviewPacket(input);
+    assert.equal(declaredPacket.evidenceStatus, "supported");
+    assert.deepEqual(declaredPacket.changedPaths, ["modified.ts", "new.ts", "staged.ts"]);
+    assert.deepEqual(declaredPacket.undeclaredPaths, []);
+    assert.equal(declaredPacket.changedPaths.some((entry) => entry.startsWith("[")), false);
+
+    writeFileSync(path.join(workspace, "undeclared.ts"), "after undeclared\n");
+    execFileSync("git", ["-C", workspace, "add", "undeclared.ts"], { stdio: "ignore" });
+    const undeclaredPacket = store.persistReviewPacket(input);
+    assert.equal(undeclaredPacket.evidenceStatus, "unsupported");
+    assert.deepEqual(undeclaredPacket.undeclaredPaths, ["undeclared.ts"]);
+    assert.equal(undeclaredPacket.changedPaths.some((entry) => entry.startsWith("[")), false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("review packet phases reuse one owned snapshot and report bounded git and hashing telemetry", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-review-phase-telemetry-"));
+  try {
+    writeFileSync(path.join(workspace, ".gitignore"), ".unclecode/\n");
+    writeFileSync(path.join(workspace, "owned-a.ts"), "before a\n");
+    writeFileSync(path.join(workspace, "owned-b.ts"), "before b\n");
+    commitQualityWorkspaceBaseline(workspace);
+    const store = new orchestrator.QualityArtifactStore(workspace, "review-phase-telemetry");
+    const writePaths = ["owned-a.ts", "owned-b.ts"];
+    const baseline = store.captureWorkspaceInventory(writePaths, { scope: "review" });
+    const afterBaseline = store.getWorkspaceInventoryTelemetry();
+    assert.equal(afterBaseline.gitCalls, 4, "a coherent git before/after snapshot uses two commands each");
+    assert.ok(afterBaseline.gitOutputBytes > 0);
+
+    const afterA = "after a with exact bytes\n";
+    const afterB = "after b with exact bytes\n";
+    writeFileSync(path.join(workspace, "owned-a.ts"), afterA);
+    writeFileSync(path.join(workspace, "owned-b.ts"), afterB);
+    const packet = store.persistReviewPacket({
+      graphId: "goal-review-phase-telemetry",
+      iteration: 0,
+      baseline,
+      request: "Change the owned files.",
+      tasks: [{ id: "task-owned", acceptanceCriteria: ["done"], writePaths }],
+      results: [{ id: "task-owned", status: "completed", summary: "done" }],
+      workerArtifacts: [],
+      executableChecks: [],
+    });
+    const afterPacket = store.getWorkspaceInventoryTelemetry();
+
+    assert.equal(packet.evidenceStatus, "supported");
+    assert.equal(afterPacket.gitCalls - afterBaseline.gitCalls, 4);
+    assert.equal(
+      afterPacket.contentBytesHashed - afterBaseline.contentBytesHashed,
+      Buffer.byteLength(afterA) + Buffer.byteLength(afterB),
+      "each current owned byte is hashed once and reused for packet content",
+    );
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("quality artifact admission caps aggregate run bytes without charging idempotent duplicates", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-run-admission-"));
+  try {
+    const store = new orchestrator.QualityArtifactStore(workspace, "run-admission");
+    const critic = {
+      reviewerId: "critic:test",
+      reviewedArtifactHash: `sha256:${"b".repeat(64)}`,
+      summary: "verified",
+      independent: true,
+      completedAt: "2026-08-29T00:00:01.000Z",
+    };
+    const first = store.persistCritic(critic);
+    const duplicate = store.persistCritic(critic);
+    assert.equal(duplicate.artifactHash, first.artifactHash);
+    assert.equal(store.getArtifactPersistenceTelemetry().artifactsWritten, 1);
+    assert.equal(store.getArtifactPersistenceTelemetry().deduplicatedArtifacts, 1);
+
+    const padding = path.join(store.runDirectory, "existing-audit-evidence.bin");
+    writeFileSync(padding, "");
+    truncateSync(padding, orchestrator.QUALITY_ARTIFACT_RUN_MAX_BYTES);
+    const restartedStore = new orchestrator.QualityArtifactStore(workspace, "run-admission");
+    assert.throws(
+      () => restartedStore.persistRun({
+        graphId: "blocked-by-run-cap",
+        producerId: "planner:test",
+        artifacts: [],
+        completedAt: "2026-08-29T00:00:02.000Z",
+      }),
+      /aggregate cap.*archive.*no artifacts were deleted/i,
+    );
+    assert.equal(restartedStore.getArtifactPersistenceTelemetry().runAggregateArtifactsRejected, 1);
+    assert.equal(readFileSync(path.join(workspace, first.path), "utf8").length > 0, true);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("quality artifact admission fails closed at the workspace run cap without evicting audit evidence", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-workspace-admission-"));
+  try {
+    const artifactRoot = path.join(workspace, ".unclecode", "artifacts");
+    mkdirSync(artifactRoot, { recursive: true });
+    for (let index = 0; index < orchestrator.QUALITY_ARTIFACT_WORKSPACE_MAX_RUNS; index += 1) {
+      mkdirSync(path.join(artifactRoot, `retained-${String(index).padStart(4, "0")}`));
+    }
+    const store = new orchestrator.QualityArtifactStore(workspace, "new-run");
+    assert.throws(
+      () => store.persistCritic({
+        reviewerId: "critic:test",
+        reviewedArtifactHash: `sha256:${"c".repeat(64)}`,
+        summary: "verified",
+        independent: true,
+        completedAt: "2026-08-29T00:00:01.000Z",
+      }),
+      /workspace run admission cap.*archive.*no artifacts were deleted/i,
+    );
+    assert.equal(store.getArtifactPersistenceTelemetry().workspaceRunAdmissionsRejected, 1);
+    assert.equal(readdirSync(artifactRoot).length, orchestrator.QUALITY_ARTIFACT_WORKSPACE_MAX_RUNS);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("quality artifact admission caps workspace bytes without evicting retained evidence", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-workspace-byte-admission-"));
+  try {
+    const artifactRoot = path.join(workspace, ".unclecode", "artifacts");
+    const retainedRun = path.join(artifactRoot, "retained-run");
+    mkdirSync(retainedRun, { recursive: true });
+    const retainedEvidence = path.join(retainedRun, "review-verdict.json");
+    writeFileSync(retainedEvidence, "");
+    truncateSync(retainedEvidence, orchestrator.QUALITY_ARTIFACT_WORKSPACE_MAX_BYTES);
+
+    const store = new orchestrator.QualityArtifactStore(workspace, "new-workspace-run");
+    assert.throws(
+      () => store.persistCritic({
+        reviewerId: "critic:test",
+        reviewedArtifactHash: `sha256:${"d".repeat(64)}`,
+        summary: "verified",
+        independent: true,
+        completedAt: "2026-08-29T00:00:01.000Z",
+      }),
+      /workspace aggregate cap.*archive.*no artifacts were deleted/i,
+    );
+    assert.equal(store.getArtifactPersistenceTelemetry().workspaceAggregateArtifactsRejected, 1);
+    assert.equal(lstatSync(retainedEvidence).size, orchestrator.QUALITY_ARTIFACT_WORKSPACE_MAX_BYTES);
+    assert.equal(existsSync(store.runDirectory), false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("quality artifact admission reclaims a dead stale lock without leaving a deadlock", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-stale-admission-lock-"));
+  try {
+    const artifactRoot = path.join(workspace, ".unclecode", "artifacts");
+    mkdirSync(artifactRoot, { recursive: true });
+    const lockPath = path.join(artifactRoot, ".quality-admission.lock");
+    writeFileSync(lockPath, JSON.stringify({ pid: Number.MAX_SAFE_INTEGER, startedAt: "2020-01-01T00:00:00.000Z" }));
+    const staleAt = new Date(Date.now() - 60 * 60 * 1000);
+    utimesSync(lockPath, staleAt, staleAt);
+
+    const store = new orchestrator.QualityArtifactStore(workspace, "stale-lock");
+    const artifact = store.persistCritic({
+      reviewerId: "critic:test",
+      reviewedArtifactHash: `sha256:${"e".repeat(64)}`,
+      summary: "verified",
+      independent: true,
+      completedAt: "2026-08-29T00:00:01.000Z",
+    });
+
+    assert.equal(existsSync(path.join(workspace, artifact.path)), true);
+    assert.equal(existsSync(lockPath), false);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("quality artifact admission rejects a symlinked artifact ancestor before writing outside the workspace", () => {
+  const workspace = mkdtempSync(path.join(tmpdir(), "uc-quality-artifact-ancestor-link-"));
+  const outside = mkdtempSync(path.join(tmpdir(), "uc-quality-artifact-outside-"));
+  try {
+    symlinkSync(outside, path.join(workspace, ".unclecode"), "dir");
+    const store = new orchestrator.QualityArtifactStore(workspace, "unsafe-root");
+    assert.throws(
+      () => store.persistCritic({
+        reviewerId: "critic:test",
+        reviewedArtifactHash: `sha256:${"f".repeat(64)}`,
+        summary: "must not write",
+        independent: true,
+        completedAt: "2026-08-29T00:00:01.000Z",
+      }),
+      /symlink|unsafe artifact/i,
+    );
+    assert.deepEqual(readdirSync(outside), []);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
 

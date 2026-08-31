@@ -10,7 +10,10 @@ import {
   readSync,
   readlinkSync,
   realpathSync,
+  renameSync,
+  unlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import path from "node:path";
 
@@ -184,6 +187,7 @@ export type QualityReviewPacket = PersistedQualityArtifact & {
   readonly evidenceStatus: QualityWorkspaceEvidenceStatus;
   readonly changedPaths: readonly string[];
   readonly undeclaredPaths: readonly string[];
+  readonly workspaceManifest: QualityWorkspaceManifest;
 };
 
 export type QualityReviewPacketInput = {
@@ -220,11 +224,37 @@ type GitWorkspaceSnapshot = {
   readonly entries: ReadonlyMap<string, GitWorkspaceEntry>;
   readonly dirtyPaths: ReadonlySet<string>;
   readonly untrackedPaths: ReadonlySet<string>;
+  readonly statusPaths: ReadonlySet<string>;
   readonly fingerprint: string;
 };
 
 type QualityWorkspaceInventoryOptions = {
   readonly scope?: "review" | "direct" | undefined;
+};
+
+type ReviewPacketFileContent =
+  | { readonly encoding: "utf8" | "base64"; readonly content: string }
+  | { readonly contentOmitted: true };
+
+type ReviewPacketContentCapture = {
+  readonly files: Map<string, ReviewPacketFileContent>;
+  retainedBytes: number;
+};
+
+type QualityArtifactUsageIndex = {
+  readonly schemaVersion: 1;
+  readonly totalBytes: number;
+  readonly runs: Readonly<Record<string, number>>;
+};
+
+type ReconciledArtifactUsage = {
+  readonly totalBytes: number;
+  readonly runs: ReadonlyMap<string, number>;
+};
+
+type AdmissionLockHandle = {
+  readonly fd: number;
+  readonly path: string;
 };
 
 export type QualityWorkspaceInventoryTelemetry = {
@@ -233,6 +263,9 @@ export type QualityWorkspaceInventoryTelemetry = {
   readonly contentHashMisses: number;
   readonly fallbackScans: number;
   readonly concurrentMutationFailures: number;
+  readonly gitCalls: number;
+  readonly gitOutputBytes: number;
+  readonly contentBytesHashed: number;
   readonly lastScanMs: number;
   readonly maxScanMs: number;
 };
@@ -242,6 +275,10 @@ export type QualityArtifactPersistenceTelemetry = {
   readonly bytesWritten: number;
   readonly deduplicatedArtifacts: number;
   readonly oversizedArtifactsRejected: number;
+  readonly runAggregateArtifactsRejected: number;
+  readonly workspaceRunAdmissionsRejected: number;
+  readonly workspaceAggregateArtifactsRejected: number;
+  readonly workspaceUsageReconciliations: number;
 };
 
 export type ParsedCriticVerdict = {
@@ -261,6 +298,12 @@ export const QUALITY_REVIEW_PACKET_MAX_FILE_BYTES = 256 * 1024;
 export const QUALITY_MATERIAL_INPUT_MAX_ENTRIES = 100_000;
 const QUALITY_REVIEW_PACKET_CONTENT_BUDGET = 768 * 1024;
 export const QUALITY_ARTIFACT_MAX_BYTES = 2 * 1024 * 1024;
+export const QUALITY_ARTIFACT_RUN_MAX_BYTES = 64 * 1024 * 1024;
+export const QUALITY_ARTIFACT_WORKSPACE_MAX_BYTES = 512 * 1024 * 1024;
+export const QUALITY_ARTIFACT_WORKSPACE_MAX_RUNS = 4_096;
+const QUALITY_ARTIFACT_USAGE_INDEX = ".quality-usage.json";
+const QUALITY_ARTIFACT_ADMISSION_LOCK = ".quality-admission.lock";
+const QUALITY_ARTIFACT_ADMISSION_LOCK_STALE_MS = 15 * 60 * 1_000;
 const QUALITY_REVIEW_SCOPE_SENTINEL = "[inventory-scope-review]";
 const QUALITY_HASH_BUFFER_BYTES = 64 * 1024;
 const QUALITY_INVENTORY_IGNORED_ROOTS = new Set([".git", ".unclecode", "node_modules", "target"]);
@@ -403,6 +446,9 @@ export class QualityArtifactStore {
     contentHashMisses: 0,
     fallbackScans: 0,
     concurrentMutationFailures: 0,
+    gitCalls: 0,
+    gitOutputBytes: 0,
+    contentBytesHashed: 0,
     lastScanMs: 0,
     maxScanMs: 0,
   };
@@ -411,6 +457,10 @@ export class QualityArtifactStore {
     bytesWritten: 0,
     deduplicatedArtifacts: 0,
     oversizedArtifactsRejected: 0,
+    runAggregateArtifactsRejected: 0,
+    workspaceRunAdmissionsRejected: 0,
+    workspaceAggregateArtifactsRejected: 0,
+    workspaceUsageReconciliations: 0,
   };
 
   constructor(workspaceRoot: string, runId: string) {
@@ -449,32 +499,40 @@ export class QualityArtifactStore {
   captureWorkspaceInventory(
     declaredPaths: readonly string[] = [],
     options: QualityWorkspaceInventoryOptions = {},
+    reviewContentCapture?: ReviewPacketContentCapture | undefined,
   ): QualityWorkspaceInventory {
     const scanStartedAt = performance.now();
     const mutationDetectionsBefore = this.inventoryConcurrentMutationDetections;
-    const gitBefore = this.readGitWorkspaceSnapshot();
+    const contentBudget = { bytes: 0 };
+    const scopedOwnershipRoots = options.scope === "review"
+      ? declaredPaths.map((writePath) => this.resolveOwnedPath(writePath).relativePath)
+      : [];
+    const gitBefore = this.readGitWorkspaceSnapshot(scopedOwnershipRoots);
     const ownershipScopedGitInventory = options.scope !== undefined && gitBefore !== undefined;
-    const declaredSnapshot = this.snapshotOwnedPaths(declaredPaths);
+    const declaredSnapshot = this.snapshotOwnedPaths(
+      declaredPaths,
+      contentBudget,
+      reviewContentCapture,
+    );
     const declaredEntries = new Map(
       declaredSnapshot.files
-        .filter((entry) => entry.kind !== "directory")
         .map((entry) => [entry.path, entry] as const),
     );
     const candidatePaths = ownershipScopedGitInventory
       ? new Set([
           ...gitBefore.dirtyPaths,
           ...gitBefore.untrackedPaths,
+          ...(options.scope === "review" ? gitBefore.statusPaths : []),
           ...[...gitBefore.entries]
             .filter(([, entry]) => entry.kind !== "file")
             .map(([relativePath]) => relativePath),
         ].filter((relativePath) => !isGeneratedInventoryPath(relativePath)))
       : this.workspaceInventoryPaths(gitBefore);
     for (const entry of declaredSnapshot.files) {
-      if (entry.kind !== "directory") candidatePaths.add(entry.path);
+      candidatePaths.add(entry.path);
     }
     let indexEntryHits = 0;
     let contentHashMisses = 0;
-    const contentBudget = { bytes: 0 };
     const files: QualityWorkspaceEntry[] = [
       ...(options.scope === "review"
         ? [{
@@ -497,7 +555,7 @@ export class QualityArtifactStore {
         // identities are only the cheap global undeclared-mutation sentinel.
         if (declared) {
           contentHashMisses += 1;
-          return this.snapshotInventoryEntryStable(relativePath, contentBudget);
+          return declared;
         }
         // A gitlink is unsupported ownership evidence by definition. Preserve
         // that index type even when its worktree flag asks us not to inspect a
@@ -521,7 +579,7 @@ export class QualityArtifactStore {
     }
     let concurrentMutationFailures = 0;
     if (gitBefore) {
-      const gitAfter = this.readGitWorkspaceSnapshot();
+      const gitAfter = this.readGitWorkspaceSnapshot(scopedOwnershipRoots);
       if (!gitAfter || gitAfter.fingerprint !== gitBefore.fingerprint) {
         concurrentMutationFailures += 1;
         files.push({
@@ -541,6 +599,9 @@ export class QualityArtifactStore {
       fallbackScans: this.inventoryTelemetry.fallbackScans + (gitBefore ? 0 : 1),
       concurrentMutationFailures:
         this.inventoryTelemetry.concurrentMutationFailures + concurrentMutationFailures,
+      gitCalls: this.inventoryTelemetry.gitCalls,
+      gitOutputBytes: this.inventoryTelemetry.gitOutputBytes,
+      contentBytesHashed: this.inventoryTelemetry.contentBytesHashed + contentBudget.bytes,
       lastScanMs: scanMs,
       maxScanMs: Math.max(this.inventoryTelemetry.maxScanMs, scanMs),
     };
@@ -594,10 +655,15 @@ export class QualityArtifactStore {
       .map((writePath) => this.resolveOwnedPath(writePath).relativePath)
       .sort(compareStablePaths);
     const ownershipScopedBaseline = input.baseline.files.some((entry) =>
-      entry.path === QUALITY_REVIEW_SCOPE_SENTINEL || entry.path === "[git-index-worktree]");
+      entry.path === QUALITY_REVIEW_SCOPE_SENTINEL);
+    const reviewContentCapture: ReviewPacketContentCapture = {
+      files: new Map(),
+      retainedBytes: 0,
+    };
     const current = this.captureWorkspaceInventory(
       declaredPaths,
       ownershipScopedBaseline ? { scope: "review" } : {},
+      reviewContentCapture,
     );
     const beforeByPath = new Map(input.baseline.files.map((entry) => [entry.path, entry] as const));
     const afterByPath = new Map(current.files.map((entry) => [entry.path, entry] as const));
@@ -648,21 +714,42 @@ export class QualityArtifactStore {
         .filter((entry) => entry.kind === "unreadable")
         .map((entry) => [entry.path, entry] as const),
     ).values()];
+    const syntheticInventoryPaths = new Set([
+      QUALITY_REVIEW_SCOPE_SENTINEL,
+      "[git-index-worktree]",
+    ]);
     const changedPaths = [...new Set([...beforeByPath.keys(), ...afterByPath.keys()])]
+      .filter((candidate) => !syntheticInventoryPaths.has(candidate))
       .filter((candidate) => inventoryEntryChanged(beforeByPath.get(candidate), afterByPath.get(candidate)))
       .sort(compareStablePaths);
     const undeclaredPaths = changedPaths.filter((candidate) => !isOwnedPath(candidate, declaredPaths));
-    const declaredManifest = this.snapshotOwnedPaths(declaredPaths);
+    const declaredFiles = current.files.filter((entry) =>
+      !syntheticInventoryPaths.has(entry.path) && isOwnedPath(entry.path, declaredPaths));
+    const declaredUnsupportedEntries = declaredFiles.filter((entry) =>
+      entry.kind === "symlink" || entry.kind === "special" || entry.kind === "unreadable");
+    const declaredManifest: QualityWorkspaceManifest = {
+      artifactHash: sha256(stableJson({
+        schemaVersion: 1,
+        kind: "workspace-manifest",
+        evidenceStatus: declaredUnsupportedEntries.length === 0 ? "supported" : "unsupported",
+        unsupportedEntries: declaredUnsupportedEntries,
+        files: declaredFiles,
+      })),
+      evidenceStatus: declaredUnsupportedEntries.length === 0 ? "supported" : "unsupported",
+      unsupportedEntries: declaredUnsupportedEntries,
+      files: declaredFiles,
+    };
     const packetPaths = [...new Set([
       ...declaredManifest.files.filter((entry) => entry.kind !== "directory").map((entry) => entry.path),
       ...changedPaths,
     ])].sort(compareStablePaths);
-    const contentBudget = { bytes: 0 };
     const inventoryBudget = { bytes: 0 };
     const packetFiles = packetPaths.map((relativePath) => {
       const before = beforeByPath.get(relativePath);
       const after = afterByPath.get(relativePath) ?? this.snapshotInventoryEntry(relativePath, inventoryBudget);
-      const content = after.kind === "file" ? this.readReviewPacketContent(relativePath, contentBudget) : undefined;
+      const content = after.kind === "file" && isOwnedPath(relativePath, declaredPaths)
+        ? reviewContentCapture.files.get(relativePath) ?? { contentOmitted: true as const }
+        : undefined;
       return {
         path: relativePath,
         declared: isOwnedPath(relativePath, declaredPaths),
@@ -743,9 +830,7 @@ export class QualityArtifactStore {
       ? "supported"
       : "unsupported";
     const artifactHash = sha256(canonicalContent);
-    mkdirSync(this.runDirectory, { recursive: true });
     const fileName = `review-packet-iteration-${input.iteration}-${artifactHash.slice("sha256:".length)}.json`;
-    const outputPath = path.join(this.runDirectory, fileName);
     const persistedContent = stableJson({ ...packetBody, artifactHash, evidenceStatus });
     const persistedBytes = Buffer.byteLength(persistedContent, "utf8");
     if (persistedBytes > QUALITY_ARTIFACT_MAX_BYTES) {
@@ -758,37 +843,12 @@ export class QualityArtifactStore {
         `Quality review packet exceeds the ${QUALITY_ARTIFACT_MAX_BYTES}-byte persistence limit.`,
       );
     }
-    let createdArtifact = false;
-    try {
-      writeFileSync(outputPath, persistedContent, {
-        encoding: "utf8",
-        mode: 0o600,
-        flag: "wx",
-      });
-      createdArtifact = true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      let existingContent: string;
-      try {
-        existingContent = readFileSync(outputPath, "utf8");
-      } catch {
-        throw new Error(`Immutable review packet artifact is unreadable: ${outputPath}`);
-      }
-      if (existingContent !== persistedContent) {
-        throw new Error(`Immutable review packet artifact was replaced: ${outputPath}`);
-      }
-    }
-    this.artifactPersistenceTelemetry = createdArtifact
-      ? {
-          artifactsWritten: this.artifactPersistenceTelemetry.artifactsWritten + 1,
-          bytesWritten: this.artifactPersistenceTelemetry.bytesWritten + persistedBytes,
-          deduplicatedArtifacts: this.artifactPersistenceTelemetry.deduplicatedArtifacts,
-          oversizedArtifactsRejected: this.artifactPersistenceTelemetry.oversizedArtifactsRejected,
-        }
-      : {
-          ...this.artifactPersistenceTelemetry,
-          deduplicatedArtifacts: this.artifactPersistenceTelemetry.deduplicatedArtifacts + 1,
-        };
+    const outputPath = this.persistImmutableArtifact(
+      fileName,
+      persistedContent,
+      persistedBytes,
+      "review packet artifact",
+    );
     return {
       path: path.relative(this.workspaceRoot, outputPath),
       artifactHash,
@@ -796,6 +856,7 @@ export class QualityArtifactStore {
       evidenceStatus,
       changedPaths,
       undeclaredPaths,
+      workspaceManifest: declaredManifest,
       unsupportedEntries: [
         ...inventoryUnsupportedEntries,
         ...materialInputUnsupportedEntries,
@@ -851,7 +912,7 @@ export class QualityArtifactStore {
    * source file before a minimal chat can reach its provider. Dirty/untracked
    * paths still go through the bounded filesystem hasher below.
    */
-  private readGitWorkspaceSnapshot(): GitWorkspaceSnapshot | undefined {
+  private readGitWorkspaceSnapshot(excludedOwnershipRoots: readonly string[] = []): GitWorkspaceSnapshot | undefined {
     const environment: NodeJS.ProcessEnv = {
       ...process.env,
       GIT_LITERAL_PATHSPECS: "1",
@@ -859,24 +920,26 @@ export class QualityArtifactStore {
     };
     for (const key of ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"]) delete environment[key];
     try {
-      const stagedAndFlags = execFileSync(
-        "git",
-        ["-C", this.workspaceRoot, "-c", "core.fsmonitor=false", "ls-files", "--stage", "-v", "-z"],
-        { encoding: "buffer", env: environment, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] },
+      const stagedAndFlags = this.execGitForInventory(
+        ["ls-files", "--stage", "-v", "-z"],
+        environment,
+        16 * 1024 * 1024,
       );
-      const statusOutput = execFileSync(
-        "git",
-        ["-C", this.workspaceRoot, "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none", "--no-renames"],
-        { encoding: "buffer", env: environment, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] },
+      const statusOutput = this.execGitForInventory(
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none", "--no-renames"],
+        environment,
+        16 * 1024 * 1024,
       );
       const entries = new Map<string, GitWorkspaceEntry>();
       const dirtyPaths = new Set<string>();
       const untrackedPaths = new Set<string>();
+      const statusPaths = new Set<string>();
       for (const record of statusOutput.toString("utf8").split("\0").filter(Boolean)) {
         if (record.length < 4 || record[2] !== " ") throw new Error("Malformed git status record.");
         const status = record.slice(0, 2);
         const relativePath = record.slice(3);
         if (!relativePath) throw new Error("Malformed git status path.");
+        statusPaths.add(relativePath);
         if (status === "??") untrackedPaths.add(relativePath);
         // The index object already binds staged-only bytes. Re-open only when
         // the worktree column is dirty; this preserves staged/worktree
@@ -915,15 +978,37 @@ export class QualityArtifactStore {
             : sha256(stableJson({ source: "git-index", mode, objectId })),
         });
       }
+      const outsideOwnership = (relativePath: string): boolean =>
+        !isOwnedPath(relativePath, excludedOwnershipRoots);
       const fingerprint = sha256(stableJson({
-        entries: [...entries.entries()].sort(([left], [right]) => compareStablePaths(left, right)),
-        dirtyPaths: [...dirtyPaths].sort(compareStablePaths),
-        untrackedPaths: [...untrackedPaths].sort(compareStablePaths),
+        entries: [...entries.entries()]
+          .filter(([relativePath]) => outsideOwnership(relativePath))
+          .sort(([left], [right]) => compareStablePaths(left, right)),
+        dirtyPaths: [...dirtyPaths].filter(outsideOwnership).sort(compareStablePaths),
+        untrackedPaths: [...untrackedPaths].filter(outsideOwnership).sort(compareStablePaths),
       }));
-      return { entries, dirtyPaths, untrackedPaths, fingerprint };
+      return { entries, dirtyPaths, untrackedPaths, statusPaths, fingerprint };
     } catch {
       return undefined;
     }
+  }
+
+  private execGitForInventory(
+    command: readonly string[],
+    environment: NodeJS.ProcessEnv,
+    maxBuffer: number,
+  ): Buffer {
+    const output = execFileSync(
+      "git",
+      ["-C", this.workspaceRoot, "-c", "core.fsmonitor=false", ...command],
+      { encoding: "buffer", env: environment, maxBuffer, stdio: ["ignore", "pipe", "ignore"] },
+    );
+    this.inventoryTelemetry = {
+      ...this.inventoryTelemetry,
+      gitCalls: this.inventoryTelemetry.gitCalls + 1,
+      gitOutputBytes: this.inventoryTelemetry.gitOutputBytes + output.byteLength,
+    };
+    return output;
   }
 
   /**
@@ -991,18 +1076,11 @@ export class QualityArtifactStore {
     ] as const;
     try {
       for (const command of commands) {
-        const output = execFileSync("git", [
-          "-C",
-          this.workspaceRoot,
-          "-c",
-          "core.fsmonitor=false",
-          ...command,
-        ], {
-          encoding: "buffer",
-          env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
-          maxBuffer: 8 * 1024 * 1024,
-          stdio: ["ignore", "pipe", "ignore"],
-        });
+        const output = this.execGitForInventory(
+          command,
+          { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+          8 * 1024 * 1024,
+        );
         hash.update(stableJson({ command }));
         hash.update(output);
       }
@@ -1205,30 +1283,6 @@ export class QualityArtifactStore {
     }
   }
 
-  private readReviewPacketContent(
-    relativePath: string,
-    budget: { bytes: number },
-  ): { readonly encoding: "utf8" | "base64"; readonly content: string } | { readonly contentOmitted: true } {
-    const absolutePath = path.resolve(this.workspaceRoot, relativePath);
-    let stats: ReturnType<typeof lstatSync>;
-    try {
-      stats = lstatSync(absolutePath);
-    } catch {
-      return { contentOmitted: true };
-    }
-    if (
-      !stats.isFile()
-      || stats.size > QUALITY_REVIEW_PACKET_MAX_FILE_BYTES
-      || budget.bytes + stats.size > QUALITY_REVIEW_PACKET_CONTENT_BUDGET
-    ) return { contentOmitted: true };
-    const content = readFileSync(absolutePath);
-    budget.bytes += content.byteLength;
-    const utf8 = content.toString("utf8");
-    return !utf8.includes("\0") && Buffer.from(utf8, "utf8").equals(content)
-      ? { encoding: "utf8", content: utf8 }
-      : { encoding: "base64", content: content.toString("base64") };
-  }
-
   persistNode(input: {
     readonly nodeId: string;
     readonly attempt: number;
@@ -1291,14 +1345,24 @@ export class QualityArtifactStore {
     });
   }
 
-  private snapshotOwnedPaths(writePaths: readonly string[]): QualityWorkspaceSnapshot {
+  private snapshotOwnedPaths(
+    writePaths: readonly string[],
+    budget: { bytes: number } = { bytes: 0 },
+    reviewContentCapture?: ReviewPacketContentCapture | undefined,
+  ): QualityWorkspaceSnapshot {
     const entries = new Map<string, QualityWorkspaceEntry>();
-    const budget = { bytes: 0 };
     const roots = [...new Set(writePaths)]
       .map((writePath) => this.resolveOwnedPath(writePath))
       .sort((left, right) => compareStablePaths(left.relativePath, right.relativePath));
     for (const root of roots) {
-      this.snapshotOwnedPath(root.absolutePath, root.relativePath, entries, budget, 0);
+      this.snapshotOwnedPath(
+        root.absolutePath,
+        root.relativePath,
+        entries,
+        budget,
+        0,
+        reviewContentCapture,
+      );
     }
     const files = [...entries.values()].sort((left, right) => compareStablePaths(left.path, right.path));
     const unsupportedEntries = files.filter((entry) =>
@@ -1376,6 +1440,7 @@ export class QualityArtifactStore {
     entries: Map<string, QualityWorkspaceEntry>,
     budget: { bytes: number },
     depth: number,
+    reviewContentCapture?: ReviewPacketContentCapture | undefined,
   ): void {
     if (isContainedPath(this.runDirectory, absolutePath)) return;
     if (entries.size >= QUALITY_MANIFEST_MAX_ENTRIES - 1) {
@@ -1423,12 +1488,38 @@ export class QualityArtifactStore {
         return;
       }
       try {
+        const beforeIdentity = this.inventoryStatIdentity(absolutePath);
+        const retainContent = reviewContentCapture !== undefined
+          && stats.size <= QUALITY_REVIEW_PACKET_MAX_FILE_BYTES
+          && reviewContentCapture.retainedBytes + stats.size <= QUALITY_REVIEW_PACKET_CONTENT_BUDGET;
+        const content = retainContent ? readFileSync(absolutePath) : undefined;
+        const fileHash = content ? sha256(content) : sha256File(absolutePath);
+        const afterIdentity = this.inventoryStatIdentity(absolutePath);
+        if (beforeIdentity !== afterIdentity) {
+          this.inventoryConcurrentMutationDetections += 1;
+          entries.set(relativePath, { path: relativePath, kind: "unreadable", sha256: null });
+          return;
+        }
         entries.set(relativePath, {
           path: relativePath,
           kind: "file",
-          sha256: sha256File(absolutePath),
+          sha256: fileHash,
         });
         budget.bytes += stats.size;
+        if (reviewContentCapture) {
+          if (!content) {
+            reviewContentCapture.files.set(relativePath, { contentOmitted: true });
+          } else {
+            const utf8 = content.toString("utf8");
+            reviewContentCapture.files.set(
+              relativePath,
+              !utf8.includes("\0") && Buffer.from(utf8, "utf8").equals(content)
+                ? { encoding: "utf8", content: utf8 }
+                : { encoding: "base64", content: content.toString("base64") },
+            );
+            reviewContentCapture.retainedBytes += content.byteLength;
+          }
+        }
       } catch {
         entries.set(relativePath, { path: relativePath, kind: "unreadable", sha256: null });
       }
@@ -1468,6 +1559,7 @@ export class QualityArtifactStore {
         entries,
         budget,
         depth + 1,
+        reviewContentCapture,
       );
     }
   }
@@ -1517,9 +1609,7 @@ export class QualityArtifactStore {
   }
 
   private persist(fileName: string, body: Record<string, unknown>): PersistedQualityArtifact {
-    mkdirSync(this.runDirectory, { recursive: true });
     const artifactHash = sha256(stableJson(body));
-    const outputPath = path.join(this.runDirectory, fileName);
     const persistedContent = stableJson({ ...body, artifactHash });
     const persistedBytes = Buffer.byteLength(persistedContent, "utf8");
     if (persistedBytes > QUALITY_ARTIFACT_MAX_BYTES) {
@@ -1532,19 +1622,478 @@ export class QualityArtifactStore {
         `Quality artifact exceeds the ${QUALITY_ARTIFACT_MAX_BYTES}-byte persistence limit.`,
       );
     }
-    writeFileSync(outputPath, persistedContent, {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-    this.artifactPersistenceTelemetry = {
-      artifactsWritten: this.artifactPersistenceTelemetry.artifactsWritten + 1,
-      bytesWritten: this.artifactPersistenceTelemetry.bytesWritten + persistedBytes,
-      deduplicatedArtifacts: this.artifactPersistenceTelemetry.deduplicatedArtifacts,
-      oversizedArtifactsRejected: this.artifactPersistenceTelemetry.oversizedArtifactsRejected,
-    };
+    const outputPath = this.persistImmutableArtifact(fileName, persistedContent, persistedBytes);
     return {
       path: path.relative(this.workspaceRoot, outputPath),
       artifactHash,
     };
+  }
+
+  private artifactRootPath(): string {
+    return path.join(this.workspaceRoot, ".unclecode", "artifacts");
+  }
+
+  /**
+   * Check every existing component without resolving through a symlink. This
+   * is intentionally separate from `realpath` so a missing directory may be
+   * created one component at a time without ever following an attacker-owned
+   * ancestor.
+   */
+  private assertSafeArtifactDirectory(absoluteDirectory: string): void {
+    if (!isContainedPath(this.workspaceRoot, absoluteDirectory)) {
+      throw new Error(`Quality artifact directory is outside the workspace: ${absoluteDirectory}`);
+    }
+    const relative = path.relative(this.workspaceRoot, absoluteDirectory);
+    if (!relative) return;
+    let current = this.workspaceRoot;
+    for (const component of relative.split(path.sep)) {
+      current = path.join(current, component);
+      let stats: ReturnType<typeof lstatSync>;
+      try {
+        stats = lstatSync(current);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return;
+        throw new Error(`Quality artifact directory is unreadable: ${current}`);
+      }
+      if (stats.isSymbolicLink() || !stats.isDirectory()) {
+        throw new Error(`Quality artifact directory contains an unsafe symlink or non-directory: ${current}`);
+      }
+      let realCurrent: string;
+      try {
+        realCurrent = realpathSync.native(current);
+      } catch {
+        throw new Error(`Quality artifact directory cannot be resolved safely: ${current}`);
+      }
+      if (!isContainedPath(this.workspaceRealRoot, realCurrent)) {
+        throw new Error(`Quality artifact directory resolves outside the workspace: ${current}`);
+      }
+    }
+  }
+
+  /** Create missing artifact directories without recursive symlink traversal. */
+  private ensureSafeArtifactDirectory(absoluteDirectory: string): void {
+    if (!isContainedPath(this.workspaceRoot, absoluteDirectory)) {
+      throw new Error(`Quality artifact directory is outside the workspace: ${absoluteDirectory}`);
+    }
+    const relative = path.relative(this.workspaceRoot, absoluteDirectory);
+    if (!relative) return;
+    let current = this.workspaceRoot;
+    for (const component of relative.split(path.sep)) {
+      current = path.join(current, component);
+      try {
+        const stats = lstatSync(current);
+        if (stats.isSymbolicLink() || !stats.isDirectory()) {
+          throw new Error(`Quality artifact directory contains an unsafe symlink or non-directory: ${current}`);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        try {
+          mkdirSync(current, { mode: 0o700 });
+        } catch (mkdirError) {
+          if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirError;
+        }
+      }
+      this.assertSafeArtifactDirectory(current);
+    }
+  }
+
+  private readArtifactUsageIndex(artifactRoot: string): QualityArtifactUsageIndex | undefined {
+    const indexPath = path.join(artifactRoot, QUALITY_ARTIFACT_USAGE_INDEX);
+    let stats: ReturnType<typeof lstatSync>;
+    try {
+      stats = lstatSync(indexPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    if (stats.isSymbolicLink() || !stats.isFile()) {
+      throw new Error(`Quality artifact usage index is not a safe regular file: ${indexPath}`);
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(indexPath, "utf8"));
+    } catch {
+      return undefined;
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+    const record = parsed as Record<string, unknown>;
+    const indexedTotalBytes = record.totalBytes;
+    if (
+      record.schemaVersion !== 1
+      || typeof indexedTotalBytes !== "number"
+      || !Number.isSafeInteger(indexedTotalBytes)
+      || indexedTotalBytes < 0
+    ) {
+      return undefined;
+    }
+    const expectedTotalBytes = indexedTotalBytes;
+    if (typeof record.runs !== "object" || record.runs === null || Array.isArray(record.runs)) {
+      return undefined;
+    }
+    const runs: Record<string, number> = {};
+    let totalBytes = 0;
+    for (const [runId, bytes] of Object.entries(record.runs)) {
+      if (
+        !runId
+        || path.basename(runId) !== runId
+        || !Number.isSafeInteger(bytes)
+        || bytes < 0
+      ) return undefined;
+      totalBytes += bytes;
+      if (!Number.isSafeInteger(totalBytes)) return undefined;
+      runs[runId] = bytes;
+    }
+    if (totalBytes !== expectedTotalBytes) return undefined;
+    return {
+      schemaVersion: 1,
+      totalBytes: expectedTotalBytes,
+      runs,
+    };
+  }
+
+  private reconcileArtifactUsage(artifactRoot: string): ReconciledArtifactUsage {
+    // Reading the durable index validates that a symlink cannot masquerade as
+    // metadata. The directory walk below remains authoritative after a crash
+    // or an external evidence copy.
+    this.readArtifactUsageIndex(artifactRoot);
+    const runs = new Map<string, number>();
+    let totalBytes = 0;
+    const state = { entries: 0 };
+    const directory = opendirSync(artifactRoot);
+    try {
+      while (true) {
+        const child = directory.readSync();
+        if (!child) break;
+        if (child.name === QUALITY_ARTIFACT_USAGE_INDEX || child.name === QUALITY_ARTIFACT_ADMISSION_LOCK) {
+          continue;
+        }
+        if (child.isSymbolicLink() || !child.isDirectory()) {
+          throw new Error(`Quality artifact workspace contains unsafe evidence: ${path.join(artifactRoot, child.name)}`);
+        }
+        const runPath = path.join(artifactRoot, child.name);
+        const bytes = this.artifactDirectoryBytes(runPath, state);
+        runs.set(child.name, bytes);
+        totalBytes += bytes;
+        if (!Number.isSafeInteger(totalBytes)) {
+          throw new Error("Quality artifact workspace aggregate exceeded the safe integer limit.");
+        }
+      }
+    } finally {
+      directory.closeSync();
+    }
+    this.artifactPersistenceTelemetry = {
+      ...this.artifactPersistenceTelemetry,
+      workspaceUsageReconciliations:
+        this.artifactPersistenceTelemetry.workspaceUsageReconciliations + 1,
+    };
+    return { totalBytes, runs };
+  }
+
+  private persistArtifactUsageIndex(
+    artifactRoot: string,
+    usage: ReconciledArtifactUsage,
+  ): void {
+    this.assertSafeArtifactDirectory(artifactRoot);
+    const runs = Object.fromEntries(
+      [...usage.runs.entries()].sort(([left], [right]) => compareStablePaths(left, right)),
+    );
+    const desired: QualityArtifactUsageIndex = {
+      schemaVersion: 1,
+      totalBytes: usage.totalBytes,
+      runs,
+    };
+    const current = this.readArtifactUsageIndex(artifactRoot);
+    if (current && stableJson(current) === stableJson(desired)) return;
+
+    const indexPath = path.join(artifactRoot, QUALITY_ARTIFACT_USAGE_INDEX);
+    const temporaryPath = `${indexPath}.tmp-${process.pid}-${Date.now()}-${process.hrtime.bigint()}`;
+    let temporaryCreated = false;
+    try {
+      writeFileSync(temporaryPath, stableJson(desired), {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx",
+      });
+      temporaryCreated = true;
+      this.assertSafeArtifactDirectory(artifactRoot);
+      let indexStats: ReturnType<typeof lstatSync> | undefined;
+      try {
+        indexStats = lstatSync(indexPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (indexStats && (indexStats.isSymbolicLink() || !indexStats.isFile())) {
+        throw new Error(`Quality artifact usage index is not a safe regular file: ${indexPath}`);
+      }
+      renameSync(temporaryPath, indexPath);
+      temporaryCreated = false;
+    } finally {
+      if (temporaryCreated) {
+        try {
+          unlinkSync(temporaryPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      }
+    }
+  }
+
+  private acquireAdmissionLock(artifactRoot: string): AdmissionLockHandle {
+    const lockPath = path.join(artifactRoot, QUALITY_ARTIFACT_ADMISSION_LOCK);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let fd: number | undefined;
+      try {
+        fd = openSync(lockPath, "wx", 0o600);
+        writeSync(fd, stableJson({
+          pid: process.pid,
+          startedAt: new Date().toISOString(),
+        }));
+        return { fd, path: lockPath };
+      } catch (error) {
+        if (fd !== undefined) {
+          try {
+            closeSync(fd);
+          } finally {
+            try {
+              unlinkSync(lockPath);
+            } catch (cleanupError) {
+              if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") throw cleanupError;
+            }
+          }
+        }
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if (!this.reclaimStaleAdmissionLock(lockPath)) {
+          throw new Error(
+            `Quality artifact admission is already active at ${lockPath}. `
+            + "Retry after it completes; no artifacts were deleted.",
+          );
+        }
+      }
+    }
+    throw new Error(`Quality artifact admission lock could not be acquired: ${lockPath}`);
+  }
+
+  private reclaimStaleAdmissionLock(lockPath: string): boolean {
+    let stats: ReturnType<typeof lstatSync>;
+    try {
+      stats = lstatSync(lockPath);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT";
+    }
+    if (stats.isSymbolicLink() || !stats.isFile()) {
+      throw new Error(`Quality artifact admission lock is unsafe: ${lockPath}`);
+    }
+    let pid: number | undefined;
+    try {
+      const parsed = JSON.parse(readFileSync(lockPath, "utf8")) as Record<string, unknown>;
+      pid = typeof parsed.pid === "number" && Number.isInteger(parsed.pid) ? parsed.pid : undefined;
+    } catch {
+      // An old/truncated lock is reclaimable only after its lease has expired.
+    }
+    const ownerAlive = pid === undefined ? undefined : this.isProcessAlive(pid);
+    const leaseExpired = Date.now() - stats.mtimeMs > QUALITY_ARTIFACT_ADMISSION_LOCK_STALE_MS;
+    if (ownerAlive !== false && !(ownerAlive === undefined && leaseExpired)) return false;
+
+    // Rename first so a waiter cannot unlink a newly-created lock after this
+    // process has observed the old one. The quarantine lives outside artifacts
+    // and is removed immediately; no audit evidence is touched.
+    const quarantinePath = path.join(
+      path.dirname(path.dirname(lockPath)),
+      `.${QUALITY_ARTIFACT_ADMISSION_LOCK}.reclaimed-${process.pid}-${Date.now()}-${process.hrtime.bigint()}`,
+    );
+    try {
+      renameSync(lockPath, quarantinePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+      throw error;
+    }
+    try {
+      unlinkSync(quarantinePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    return true;
+  }
+
+  private isProcessAlive(pid: number): boolean | undefined {
+    if (!Number.isInteger(pid) || pid <= 0) return undefined;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") return false;
+      if (code === "EPERM") return true;
+      return undefined;
+    }
+  }
+
+  private releaseAdmissionLock(lock: AdmissionLockHandle): void {
+    try {
+      closeSync(lock.fd);
+    } finally {
+      try {
+        unlinkSync(lock.path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+  }
+
+  private persistImmutableArtifact(
+    fileName: string,
+    persistedContent: string,
+    persistedBytes: number,
+    artifactLabel = "quality artifact",
+  ): string {
+    const artifactRoot = this.artifactRootPath();
+    const outputPath = path.join(this.runDirectory, fileName);
+    this.assertSafeArtifactDirectory(artifactRoot);
+    this.assertSafeArtifactDirectory(this.runDirectory);
+    const existing = this.readExistingImmutableArtifact(outputPath);
+    if (existing !== undefined) {
+      if (existing !== persistedContent) {
+        throw new Error(`Immutable ${artifactLabel} was replaced: ${outputPath}`);
+      }
+      this.artifactPersistenceTelemetry = {
+        ...this.artifactPersistenceTelemetry,
+        deduplicatedArtifacts: this.artifactPersistenceTelemetry.deduplicatedArtifacts + 1,
+      };
+      return outputPath;
+    }
+
+    this.ensureSafeArtifactDirectory(artifactRoot);
+    const admissionLock = this.acquireAdmissionLock(artifactRoot);
+    try {
+      const admittedExisting = this.readExistingImmutableArtifact(outputPath);
+      if (admittedExisting !== undefined) {
+        if (admittedExisting !== persistedContent) {
+          throw new Error(`Immutable ${artifactLabel} was replaced: ${outputPath}`);
+        }
+        this.artifactPersistenceTelemetry = {
+          ...this.artifactPersistenceTelemetry,
+          deduplicatedArtifacts: this.artifactPersistenceTelemetry.deduplicatedArtifacts + 1,
+        };
+        return outputPath;
+      }
+      const usage = this.reconcileArtifactUsage(artifactRoot);
+      const runExists = usage.runs.has(this.runId);
+      if (!runExists && usage.runs.size >= QUALITY_ARTIFACT_WORKSPACE_MAX_RUNS) {
+        this.artifactPersistenceTelemetry = {
+          ...this.artifactPersistenceTelemetry,
+          workspaceRunAdmissionsRejected:
+            this.artifactPersistenceTelemetry.workspaceRunAdmissionsRejected + 1,
+        };
+        throw new Error(
+          `Quality artifact workspace run admission cap of ${QUALITY_ARTIFACT_WORKSPACE_MAX_RUNS} was reached. `
+          + `Archive completed runs under ${artifactRoot} before retrying; no artifacts were deleted.`,
+        );
+      }
+      const aggregateBytes = usage.runs.get(this.runId) ?? 0;
+      if (aggregateBytes + persistedBytes > QUALITY_ARTIFACT_RUN_MAX_BYTES) {
+        this.artifactPersistenceTelemetry = {
+          ...this.artifactPersistenceTelemetry,
+          runAggregateArtifactsRejected:
+            this.artifactPersistenceTelemetry.runAggregateArtifactsRejected + 1,
+        };
+        throw new Error(
+          `Quality artifact run aggregate cap of ${QUALITY_ARTIFACT_RUN_MAX_BYTES} bytes would be exceeded. `
+          + `Archive completed audit evidence under ${this.runDirectory} before retrying; no artifacts were deleted.`,
+        );
+      }
+      if (usage.totalBytes + persistedBytes > QUALITY_ARTIFACT_WORKSPACE_MAX_BYTES) {
+        this.artifactPersistenceTelemetry = {
+          ...this.artifactPersistenceTelemetry,
+          workspaceAggregateArtifactsRejected:
+            this.artifactPersistenceTelemetry.workspaceAggregateArtifactsRejected + 1,
+        };
+        throw new Error(
+          `Quality artifact workspace aggregate cap of ${QUALITY_ARTIFACT_WORKSPACE_MAX_BYTES} bytes would be exceeded. `
+          + `Archive completed audit evidence under ${artifactRoot} before retrying; no artifacts were deleted.`,
+        );
+      }
+      if (!runExists) this.ensureSafeArtifactDirectory(this.runDirectory);
+
+      let created = false;
+      try {
+        writeFileSync(outputPath, persistedContent, {
+          encoding: "utf8",
+          mode: 0o600,
+          flag: "wx",
+        });
+        created = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const racedExisting = this.readExistingImmutableArtifact(outputPath);
+        if (racedExisting === undefined || racedExisting !== persistedContent) {
+          throw new Error(`Immutable ${artifactLabel} was replaced: ${outputPath}`);
+        }
+      }
+      this.artifactPersistenceTelemetry = created
+        ? {
+            ...this.artifactPersistenceTelemetry,
+            artifactsWritten: this.artifactPersistenceTelemetry.artifactsWritten + 1,
+            bytesWritten: this.artifactPersistenceTelemetry.bytesWritten + persistedBytes,
+          }
+        : {
+            ...this.artifactPersistenceTelemetry,
+            deduplicatedArtifacts: this.artifactPersistenceTelemetry.deduplicatedArtifacts + 1,
+          };
+      if (created) {
+        const nextRuns = new Map(usage.runs);
+        nextRuns.set(this.runId, (nextRuns.get(this.runId) ?? 0) + persistedBytes);
+        this.persistArtifactUsageIndex(artifactRoot, {
+          totalBytes: usage.totalBytes + persistedBytes,
+          runs: nextRuns,
+        });
+      }
+      return outputPath;
+    } finally {
+      this.releaseAdmissionLock(admissionLock);
+    }
+  }
+
+  private readExistingImmutableArtifact(outputPath: string): string | undefined {
+    try {
+      const stats = lstatSync(outputPath);
+      if (!stats.isFile() || stats.isSymbolicLink()) {
+        throw new Error(`Immutable quality artifact is unreadable: ${outputPath}`);
+      }
+      return readFileSync(outputPath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+  }
+
+  private artifactDirectoryBytes(
+    absoluteDirectory: string,
+    state: { entries: number } = { entries: 0 },
+  ): number {
+    if (state.entries > QUALITY_MATERIAL_INPUT_MAX_ENTRIES) {
+      throw new Error(`Quality artifact admission scan exceeded its safety limit: ${absoluteDirectory}`);
+    }
+    let bytes = 0;
+    const directory = opendirSync(absoluteDirectory);
+    try {
+      while (true) {
+        const child = directory.readSync();
+        if (!child) break;
+        state.entries += 1;
+        const childPath = path.join(absoluteDirectory, child.name);
+        if (child.isDirectory()) {
+          bytes += this.artifactDirectoryBytes(childPath, state);
+        } else if (child.isFile()) {
+          bytes += lstatSync(childPath).size;
+        } else {
+          throw new Error(`Quality artifact admission found unsafe evidence: ${childPath}`);
+        }
+        if (bytes > QUALITY_ARTIFACT_RUN_MAX_BYTES) return bytes;
+      }
+    } finally {
+      directory.closeSync();
+    }
+    return bytes;
   }
 }
