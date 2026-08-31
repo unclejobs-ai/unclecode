@@ -26,13 +26,14 @@ jobs:
           rustup default 1.96.1
           rustc --version
 
-      - name: Install tmux
+      - name: Install terminal dependencies
         run: |
-          if ! command -v tmux >/dev/null 2>&1; then
+          if ! command -v tmux >/dev/null 2>&1 || ! command -v rg >/dev/null 2>&1; then
             sudo apt-get update
-            sudo apt-get install -y tmux
+            sudo apt-get install -y tmux ripgrep
           fi
           tmux -V
+          rg --version
 
       - name: Install dependencies
         run: npm ci
