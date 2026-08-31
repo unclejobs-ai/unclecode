@@ -227,7 +227,9 @@ async function waitForOwnerPromptState(
         submission,
         new Promise<{ readonly kind: "poll" }>((resolve) => {
           pollTimer = setTimeout(() => resolve({ kind: "poll" }), 100);
-          pollTimer.unref?.();
+          // This timer owns progress while the long-running submit request is
+          // waiting on an owner-side decision. Keeping it referenced prevents
+          // a one-shot CLI from exiting with an unresolved top-level await.
         }),
       ]);
       if (pollTimer) clearTimeout(pollTimer);
