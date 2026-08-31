@@ -84,9 +84,9 @@ Therefore the current evidence proves the offline differentiation gate but does 
 
 ## Memory/cache evidence carried from Task 10
 
-The forced-GC runtime soak recorded heap delta `+2,536,296` bytes, handles `2 -> 2`, file descriptors `18 -> 18`, at most 256 of 768 sessions retained before owner shutdown, zero afterward, and full endpoint/lease/temp cleanup. Runtime caches expose hit/miss/eviction/invalidation/entry/byte telemetry; TUI text and markdown render caches now enforce retained-byte budgets.
+The final forced-GC scale soak recorded 100,000 exact usage publications, heap delta `+2,511,800` bytes, handles `2 -> 2`, file descriptors `13 -> 13`, at most 256 of 768 sessions retained before owner shutdown, zero afterward, and full endpoint/lease/temp cleanup. It materialized 300,000 input tokens into 64 agent aggregates and one route aggregate in a 12,439,552-byte SQLite database. Runtime caches expose hit/miss/eviction/invalidation/entry/byte telemetry; TUI text and markdown render caches now enforce retained-byte budgets.
 
-This local soak is evidence for bounded behavior, not a substitute for the final cross-suite matrix. The Task 10 report also retains the missing single 100k end-to-end publication run as a limitation.
+This local soak is evidence for bounded behavior, not a substitute for the final cross-suite matrix. The original single-run 100,000-publication target is satisfied; cross-platform performance remains a separate limitation.
 
 ## Final verification matrix
 
