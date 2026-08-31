@@ -5717,6 +5717,7 @@ test("WorkShellEngine reuses the previewed /context packet for the next chat tur
 
 test("WorkShellEngine shows a busy spinner state while resolving composer context", async () => {
   let releaseComposer;
+  let holdComposer = true;
   let agentCalled = false;
   const { engine } = createEngine({
     agent: {
@@ -5728,13 +5729,19 @@ test("WorkShellEngine shows a busy spinner state while resolving composer contex
         return { text: `reply:${prompt}` };
       },
     },
-    resolveComposerInput: async (value) => new Promise((resolve) => {
-      releaseComposer = () => resolve({
+    resolveComposerInput: async (value) => holdComposer
+      ? new Promise((resolve) => {
+        releaseComposer = () => resolve({
+          prompt: value.trim(),
+          attachments: [],
+          transcriptText: value.trim(),
+        });
+      })
+      : ({
         prompt: value.trim(),
         attachments: [],
         transcriptText: value.trim(),
-      });
-    }),
+      }),
   });
 
   await engine.initialize();
@@ -5745,17 +5752,22 @@ test("WorkShellEngine shows a busy spinner state while resolving composer contex
 
   assert.equal(engine.getState().isBusy, true);
   assert.equal(engine.getState().busyStatus, "preparing context");
+  assert.equal(engine.getState().uiLocale, "ko", "Korean turn chrome must switch before the provider reply");
   assert.equal(agentCalled, false);
   for (let attempt = 0; attempt < 100 && typeof releaseComposer !== "function"; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   assert.equal(typeof releaseComposer, "function");
 
+  holdComposer = false;
   releaseComposer();
   await submit;
 
   assert.equal(agentCalled, true);
   assert.equal(engine.getState().isBusy, false);
+
+  await engine.handleSubmit("is the input stable now");
+  assert.equal(engine.getState().uiLocale, "en", "English follow-up chrome must switch with its turn");
 });
 
 test("WorkShellEngine treats /con as the human context shortcut", async () => {

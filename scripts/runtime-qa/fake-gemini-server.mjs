@@ -108,14 +108,11 @@ export function startGeminiServer(onRequest) {
         });
         res.end(payload);
       };
-      if (matchesRuntimeQaUserRequest(currentUserRequest, koreanBusyPromptText)) {
-        // The smoke must observe at least one remote-owner polling frame on a
-        // cold CI worker; 1.2s can complete between two rendered captures.
-        setTimeout(respond, 3_000);
-        return;
-      }
-      if (matchesRuntimeQaUserRequest(currentUserRequest, realUseFirstPromptText)) {
-        setTimeout(respond, 1_200);
+      if (
+        matchesRuntimeQaUserRequest(currentUserRequest, koreanBusyPromptText)
+        || matchesRuntimeQaUserRequest(currentUserRequest, realUseFirstPromptText)
+      ) {
+        setTimeout(respond, 1200);
         return;
       }
       respond();

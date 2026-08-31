@@ -2670,6 +2670,19 @@ export class WorkShellEngine<
       return;
     }
 
+    if (
+      !this.state.uiLocaleLocked
+      && (route.kind === "chat" || route.kind === "prompt-command")
+    ) {
+      const turnLocale = detectWorkShellUserLocale(route.line);
+      if (turnLocale && turnLocale !== this.state.uiLocale) {
+        // Commit the turn language before preparation marks the shell busy so
+        // status text, composer guidance, and the provider instruction change
+        // together instead of switching only after the reply arrives.
+        this.setState({ uiLocale: turnLocale });
+      }
+    }
+
     // Submitting a turn retires the Context Desk right away: the review is
     // over, so the desk yields the conversation space through the same close
     // path Esc uses. Scoped to operator-initiated turn starts — builtin

@@ -14,6 +14,9 @@ import {
   waitForPane,
 } from "./tmux-helpers.mjs";
 
+const koreanBusyStatusPattern =
+  /컨텍스트 준비 중|컨텍스트 읽는 중|생각 중|다음 단계 검토 중|작업 계획 중|응답 작성 중|검토 중|병렬 작업 중|작업 중|후속 요청 대기열 추가/;
+
 export async function runKoreanBusyTuiSmoke({ port, tmp, observations }) {
   const tmux = await run("sh", ["-lc", "command -v tmux"], process.env);
   assert.equal(tmux.code, 0, "tmux is required for the Korean busy TUI QA gate");
@@ -64,7 +67,7 @@ export async function runKoreanBusyTuiSmoke({ port, tmp, observations }) {
     await pressEnter(session);
     const busyPane = await waitForPane(
       session,
-      /컨텍스트 준비 중|생각 중|작업 중|후속 요청 대기열 추가/,
+      koreanBusyStatusPattern,
       busyPaneFile,
     );
     assert.doesNotMatch(
@@ -79,7 +82,7 @@ export async function runKoreanBusyTuiSmoke({ port, tmp, observations }) {
 
     assert.equal(requestDelta, 1, `Korean busy QA should make one provider call, got ${requestDelta}`);
     assert.match(pane, new RegExp(escapeRegExp(koreanBusyResponseText)));
-    assert.match(busyPane, /컨텍스트 준비 중|생각 중|작업 중|후속 요청 대기열 추가/);
+    assert.match(busyPane, koreanBusyStatusPattern);
     assert.doesNotMatch(
       busyPane,
       /Preparing context|Thinking|Working|Enter queues follow-up/,
