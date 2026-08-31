@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -51,7 +52,9 @@ function waitForExit(pid, timeoutMs = 5_000) {
       try { process.kill(pid, 0); }
       catch { resolve(); return; }
       if (Date.now() > deadline) { reject(new Error(`process ${pid} remained alive`)); return; }
-      setTimeout(poll, 20).unref();
+      // Once the detached owner exits this poll can be the only live handle.
+      // Keep it referenced so Node does not abandon the pending assertion.
+      setTimeout(poll, 20);
     };
     poll();
   });
@@ -330,36 +333,31 @@ function spawnLeaseChild(args, options, {
   const tokenPath = flagValue(args, "--token-path");
   const ownerId = flagValue(args, "--owner-id") ?? "fixture-owner";
   const bootId = flagValue(args, "--boot-id") ?? "fixture-boot";
-  const script = `
-const { writeFileSync } = require("node:fs");
-function writeLease(overrides) {
-  writeFileSync(${JSON.stringify(leasePath)}, JSON.stringify({
-    version: 1,
-    protocol: "unclecode-runtime-owner/1",
-    ownerId: ${JSON.stringify(foreignOwner ? "foreign-owner" : ownerId)},
-    pid: process.pid,
-    bootId: ${JSON.stringify(foreignBoot ? "foreign-boot" : bootId)},
-    processStartId: ${JSON.stringify(foreignStart ? "foreign-process-start" : "fixture-process-start")},
-    endpoint: "http://127.0.0.1:49999",
-    tokenPath: ${JSON.stringify(tokenPath)},
-    startedAt: Date.now(),
-    ...overrides,
-  }));
-}
-writeLease({});
-if (${replaceAfterPublish}) {
-  writeLease({
-    ownerId: "replacement-owner",
-    processStartId: "replacement-process-start",
-  });
-}
-if (${hang}) {
-  setInterval(() => {}, 1 << 30);
-} else {
-  setTimeout(() => process.exit(23), 30);
-}
-`;
-  return spawn(process.execPath, ["-e", script], options);
+  const child = spawn(process.execPath, ["-e", hang
+    ? "setInterval(() => {}, 1 << 30)"
+    : "setTimeout(() => process.exit(23), 30)"], options);
+  const writeLease = (overrides = {}) => {
+    writeFileSync(leasePath, JSON.stringify({
+      version: 1,
+      protocol: "unclecode-runtime-owner/1",
+      ownerId: foreignOwner ? "foreign-owner" : ownerId,
+      pid: child.pid,
+      bootId: foreignBoot ? "foreign-boot" : bootId,
+      processStartId: foreignStart ? "foreign-process-start" : "fixture-process-start",
+      endpoint: "http://127.0.0.1:49999",
+      tokenPath,
+      startedAt: Date.now(),
+      ...overrides,
+    }));
+  };
+  writeLease();
+  if (replaceAfterPublish) {
+    writeLease({
+      ownerId: "replacement-owner",
+      processStartId: "replacement-process-start",
+    });
+  }
+  return child;
 }
 
 function spawnLeaseThenExit(args, options, identity = {}) {
