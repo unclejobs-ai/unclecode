@@ -1,0 +1,30 @@
+{
+  "name": "unclecode",
+  "image": "mcr.microsoft.com/devcontainers/base:bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22.22.0"
+    },
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "1.98.0"
+    }
+  },
+  "postCreateCommand": "bash -lc 'set -euo pipefail; npm ci && npm run build && cargo check --workspace'",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "rust-analyzer.cargo.features": "all",
+        "[typescript]": {
+          "editor.defaultFormatter": "biomejs.biome"
+        }
+      },
+      "extensions": [
+        "biomejs.biome",
+        "rust-lang.rust-analyzer",
+        "ms-vscode.vscode-typescript-next"
+      ]
+    }
+  },
+  "forwardPorts": [],
+  "remoteUser": "vscode"
+}
