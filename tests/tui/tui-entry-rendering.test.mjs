@@ -177,6 +177,19 @@ function TestPane() {
     process.stdout.on("resize", onResize);
     return () => process.stdout.off("resize", onResize);
   }, []);
+  React.useEffect(() => {
+    // Measure the scenario from the first mounted frame. On a loaded machine,
+    // scheduling these timers before Ink mounts can let the exit timer win
+    // before the streaming interval or resize listener ever becomes active.
+    const timers = [];
+    for (const step of schedule) {
+      if (step.at > 0 && step.columns > 0) {
+        timers.push(setTimeout(() => resize(step.columns, step.rows), step.at));
+      }
+    }
+    timers.push(setTimeout(() => process.exit(0), runForMs));
+    return () => timers.forEach(clearTimeout);
+  }, []);
 
   const children = [React.createElement(Text, null, "STATIC CONVERSATION")];
   if (scenario === "column-shrink") {
@@ -196,12 +209,6 @@ const schedule = [
   { at: Number(process.env.TEST_RESIZE_AT_MS || 0), columns: Number(process.env.TEST_NEXT_COLUMNS || 0), rows: Number(process.env.TEST_NEXT_ROWS || 0) },
 ];
 const runForMs = Number(process.env.TEST_RUN_FOR_MS);
-for (const step of schedule) {
-  if (step.at > 0 && step.columns > 0) {
-    setTimeout(() => resize(step.columns, step.rows), step.at);
-  }
-}
-setTimeout(() => process.exit(0), runForMs);
 await renderEmbeddedWorkShellPaneDashboard({
   initialView: "work",
   renderWorkPane: () => React.createElement(TestPane),

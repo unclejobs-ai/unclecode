@@ -130,6 +130,7 @@ export function openAgentConsoleView(
     open: true,
     tab: nextTab,
     cursor: clampCursor(cursor, countAgentConsoleRows(snapshot, nextTab)),
+    ...(tab === "quality" ? { inspectorVisible: false } : {}),
     control: BROWSE,
   });
 }
@@ -147,6 +148,7 @@ export function selectAgentConsoleTab(
   return reviseAgentConsoleView(view, {
     tab,
     cursor: clampCursor(cursor, countAgentConsoleRows(snapshot, tab)),
+    ...(tab === "quality" ? { inspectorVisible: false } : {}),
     control: BROWSE,
   });
 }
@@ -227,7 +229,8 @@ export function clampAgentConsoleView(
  * The one merge invariant between the two writers of an `AgentConsoleSnapshot`.
  *
  * Lifecycle-owned fields (`workGraph`, `workProposalOrder`, `activity`, `agents`, `jobs`,
- * `mainUsage`) come from the pending reduction, so a burst stays in arrival
+ * `mainUsage`, `totalUsage`, `lastTurnPerformance`) come from the pending
+ * reduction, so a burst stays in arrival
  * order. Shell-owned fields (`profileId`, `manifest`, `pendingDecision`) are
  * re-read from the live snapshot, so a decision or manifest that changed inside
  * the coalescing window is neither overwritten by the next reduction nor
@@ -260,6 +263,10 @@ export function mergeAgentConsoleLifecycle(
     agents: pending.agents,
     jobs: pending.jobs,
     ...(pending.mainUsage === undefined ? {} : { mainUsage: pending.mainUsage }),
+    ...(pending.totalUsage === undefined ? {} : { totalUsage: pending.totalUsage }),
+    ...(pending.lastTurnPerformance === undefined
+      ? {}
+      : { lastTurnPerformance: pending.lastTurnPerformance }),
   };
 }
 

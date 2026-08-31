@@ -7,6 +7,7 @@ import {
   countAgentConsoleRows,
   createAgentConsoleViewState,
   isSettledAgentRun,
+  mergeAgentConsoleLifecycle,
   moveAgentConsoleCursor,
   openAgentConsoleView,
   requestAgentConsoleCancel,
@@ -167,6 +168,32 @@ test("agent console inspector toggles independently of tab and cursor", () => {
   assert.equal(hidden.cursor, 1);
 
   assert.equal(toggleAgentConsoleInspector(hidden).inspectorVisible, moved.inspectorVisible);
+});
+
+test("quality opens as a quiet summary and lifecycle merge preserves performance evidence", () => {
+  const quality = openAgentConsoleView(createAgentConsoleViewState(), twoAgents, "quality");
+  assert.equal(quality.inspectorVisible, false);
+
+  const performance = {
+    provider: "openai",
+    model: "gpt-5.6-sol",
+    startedAt: 1_000,
+    firstTokenAt: 1_200,
+    completedAt: 2_000,
+    outputTokens: 10,
+    cacheReadTokens: 4,
+  };
+  const pending = consoleSnapshot({
+    lastTurnPerformance: performance,
+    totalUsage: { outputTokens: 10 },
+  });
+  const current = consoleSnapshot({
+    manifest: { id: "new-context", packetId: "packet", profileId: "build", createdAt: "now", includedSourceCount: 0, excludedSourceCount: 0, tokenEstimate: 0, policy: [] },
+  });
+  const merged = mergeAgentConsoleLifecycle(pending, current);
+  assert.strictEqual(merged.lastTurnPerformance, performance);
+  assert.deepEqual(merged.totalUsage, { outputTokens: 10 });
+  assert.equal(merged.manifest?.id, "new-context");
 });
 
 test("agent console cancel confirmation only targets a live selected run", () => {

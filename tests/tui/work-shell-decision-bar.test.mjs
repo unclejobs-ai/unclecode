@@ -244,11 +244,12 @@ test("a pending single-question decision renders the interactive bar above the c
 
     // Header, numbered options with the recommended marker, and the key hint.
     assert.match(frame, /◆ User decision · Execution choice/);
-    assert.match(frame, /1\. Safe \(recommended\)/);
+    assert.match(frame, /› 1\. Safe \(recommended\)/);
     assert.match(frame, /2\. Fast/);
-    assert.match(frame, /1-2 answer · Esc cancel · or type/);
+    assert.match(frame, /↑\/↓ select · Enter answer · 1-2 direct · Esc cancel · type/);
+    assert.match(frame, /Type an answer, or use ↑\/↓ \+ Enter/);
     // The composer hint swaps its busy Esc meaning for the decision's.
-    assert.match(frame, /1-2 answer · Esc cancels decision · or type/);
+    assert.match(frame, /1-2 direct · ↑\/↓ select · Enter answer · Esc cancels decision · type/);
     assert.doesNotMatch(frame, /Enter queues follow-up · Ctrl\+C\/Esc interrupt/);
 
     // The passive "Decision" panel is suppressed for this frame, so every
@@ -305,7 +306,33 @@ test("pressing 1 answers the pending decision without typing into the draft", as
     assert.deepEqual(answeredDecisionIds, ["decision-bar-1"]);
     assert.deepEqual(cancelCalls, []);
     // The digit was consumed as the reply, not typed as draft text.
-    assert.doesNotMatch(getLastWorkFrame(getOutput()), /› 1/);
+    assert.doesNotMatch(getLastWorkFrame(getOutput()), /^\s*› 1\s*$/mu);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("arrow navigation highlights an option and Enter answers the selected decision", async () => {
+  const { engine, answeredIndexes, answeredDecisionIds } = createDecisionPaneEngine(
+    SINGLE_QUESTION_DECISION,
+  );
+  const { stdin, instance, getOutput } = renderWorkShellPane(engine);
+
+  try {
+    await waitForCondition(() =>
+      getLastWorkFrame(getOutput()).includes("› 1. Safe")
+    );
+    stdin.write("\u001b[B");
+    await waitForCondition(() =>
+      getLastWorkFrame(getOutput()).includes("› 2. Fast")
+    );
+    stdin.write("\r");
+    await waitForCondition(() => answeredIndexes.length === 1);
+
+    assert.deepEqual(answeredIndexes, [2]);
+    assert.deepEqual(answeredDecisionIds, ["decision-bar-1"]);
+    assert.doesNotMatch(getLastWorkFrame(getOutput()), /› 1\. Safe/);
   } finally {
     instance.unmount();
     instance.cleanup();
@@ -423,6 +450,37 @@ test("a digit beyond the rendered options stays ordinary draft input", async () 
     // into the draft rather than be swallowed with no action.
     assert.deepEqual(answeredIndexes, []);
     assert.match(getLastWorkFrame(getOutput()), /› 7/);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("a partially wired decision keeps the ordinary composer cursor and input path", async () => {
+  const { engine, answeredIndexes } = createDecisionPaneEngine(
+    SINGLE_QUESTION_DECISION,
+    {},
+    // A legacy host may publish the request before it wires every one-key
+    // control. The decision remains visible, but it must not claim the empty
+    // composer cursor or swallow digits into a dead selection handler.
+    { cancelPendingDecision: undefined },
+  );
+  const { stdin, instance, getOutput } = renderWorkShellPane(engine);
+
+  try {
+    assert.ok(await waitForCondition(() =>
+      getLastWorkFrame(getOutput()).includes("◆ User decision · Execution choice")
+    ));
+    const initialFrame = getLastWorkFrame(getOutput());
+    assert.match(initialFrame, /Describe a task · \/ for commands/);
+    assert.doesNotMatch(initialFrame, /Type an answer, or use ↑\/↓ \+ Enter/);
+
+    stdin.write("1");
+    assert.ok(await waitForCondition(() => {
+      const plain = getLastWorkFrame(getOutput()).replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/gu, "");
+      return plain.split("\n").some((line) => line.trim() === "› 1");
+    }));
+    assert.deepEqual(answeredIndexes, []);
   } finally {
     instance.unmount();
     instance.cleanup();

@@ -532,7 +532,7 @@ export function Composer(props: {
    * as `suppressAgentConsoleKey`.
    */
   readonly suppressShellActionKeys?:
-    | ((input: string, composerEmpty: boolean) => boolean)
+    | ((input: string, composerEmpty: boolean, key: AgentConsoleKeyState) => boolean)
     | undefined;
   /**
    * Ghost hint painted onto the empty input row. Shown only while the draft is
@@ -682,6 +682,7 @@ export function Composer(props: {
       && latestProps.suppressShellActionKeys?.(
         input,
         isRawComposerEmpty(latestProps.value ?? "", pendingLocalValueRef.current),
+        key,
       )
     ) {
       return;

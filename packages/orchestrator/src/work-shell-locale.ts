@@ -61,6 +61,7 @@ export type WorkShellMessageCatalog = Readonly<{
   openers: string;
   starterPrompts: readonly [string, string, string];
   composerPlaceholder: string;
+  decisionComposerPlaceholder: string;
   composerEmptyHint: string;
   composerDraftHint: string;
   composerBusyHint: string;
@@ -125,6 +126,7 @@ const UI_MESSAGES: Readonly<Record<WorkShellUiLocale, WorkShellMessageCatalog>> 
       "Draft a plan for the next change",
     ],
     composerPlaceholder: "Describe a task · / for commands",
+    decisionComposerPlaceholder: "Type an answer, or use ↑/↓ + Enter",
     composerEmptyHint: "Enter send · Shift+Enter newline · / commands · Ctrl+V image",
     composerDraftHint: "Enter send · Shift+Enter newline · Ctrl+V image",
     composerBusyHint: "Queue a follow-up... · Enter queue · Esc interrupt · /queue",
@@ -134,8 +136,8 @@ const UI_MESSAGES: Readonly<Record<WorkShellUiLocale, WorkShellMessageCatalog>> 
     modelSelectHint: "↑↓ choose · Enter switch · type to filter · Esc cancel",
     modelNoMatch: "No exact model match · type to filter",
     decisionTypeHint: "type answers · Esc cancels decision · /cancel",
-    decisionCancelHint: "answer · Esc cancels decision · or type",
-    decisionBarHint: "answer · Esc cancel · or type",
+    decisionCancelHint: "direct · ↑/↓ select · Enter answer · Esc cancels decision · type",
+    decisionBarHint: "direct · Esc cancel · type",
     queueFollowUp: "follow-up", queueFollowUps: "follow-ups", paused: "paused", resume: "resume",
     attachments: "attachments", agent: "agent", agents: "agents", job: "job", jobs: "jobs",
     planning: "Planning parallel work", synthesizing: "Synthesizing answer",
@@ -161,6 +163,7 @@ const UI_MESSAGES: Readonly<Record<WorkShellUiLocale, WorkShellMessageCatalog>> 
       "다음 변경 작업의 계획을 작성해 주세요",
     ],
     composerPlaceholder: "작업을 설명하세요 · / 명령",
+    decisionComposerPlaceholder: "답변을 입력하거나 ↑/↓ + Enter로 선택",
     composerEmptyHint: "Enter 전송 · Shift+Enter 줄바꿈 · / 명령 · Ctrl+V 이미지",
     composerDraftHint: "Enter 전송 · Shift+Enter 줄바꿈 · Ctrl+V 이미지",
     composerBusyHint: "후속 요청 대기열 추가... · Enter 추가 · Esc 중단 · /queue",
@@ -170,8 +173,8 @@ const UI_MESSAGES: Readonly<Record<WorkShellUiLocale, WorkShellMessageCatalog>> 
     modelSelectHint: "↑↓ 선택 · Enter 전환 · 입력하여 필터 · Esc 취소",
     modelNoMatch: "정확한 모델 일치 없음 · 입력하여 필터",
     decisionTypeHint: "답변 입력 · Esc 결정 취소 · /cancel",
-    decisionCancelHint: "답변 · Esc 결정 취소 · 또는 입력",
-    decisionBarHint: "답변 · Esc 취소 · 또는 입력",
+    decisionCancelHint: "바로 선택 · ↑/↓ 이동 · Enter 답변 · Esc 결정 취소 · 입력",
+    decisionBarHint: "바로 선택 · Esc 취소 · 입력",
     queueFollowUp: "후속 요청", queueFollowUps: "후속 요청", paused: "일시정지", resume: "재개",
     attachments: "첨부 파일", agent: "에이전트", agents: "에이전트", job: "작업", jobs: "작업",
     planning: "병렬 작업 계획 중", synthesizing: "응답 정리 중",

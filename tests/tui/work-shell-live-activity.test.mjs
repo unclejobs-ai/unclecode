@@ -714,7 +714,7 @@ test("elapsed labels keep advancing when the wall clock jumps back", async () =>
 // one truncated row per line. The transcript's own trace filtering is
 // unchanged: these raw lines never enter the conversation rail.
 
-test("busy WorkShellView streams the newest trace lines above the prompt row", async () => {
+test("minimal tool history keeps duplicate live traces out of the quiet dock", async () => {
   const traceLines = [
     "→ read packages/tui/src/work-shell-view.tsx",
     "→ search \"traceLines\" in packages/tui/src",
@@ -725,6 +725,7 @@ test("busy WorkShellView streams the newest trace lines above the prompt row", a
     busyStatus: "read src/app.ts",
     currentTurnStartedAt: Date.now() - 1_000,
     liveToolTraceLines: traceLines,
+    traceMode: "minimal",
   });
 
   const rows = frame.split("\n");
@@ -732,23 +733,20 @@ test("busy WorkShellView streams the newest trace lines above the prompt row", a
   assert.ok(activityIndex >= 0, `expected the dock activity row, received:\n${frame}`);
   const promptIndex = rows.findIndex((row) => row.trimStart().startsWith("›"));
   assert.ok(promptIndex > activityIndex, `the prompt row should sit below the activity row, received:\n${frame}`);
-  const feedIndexes = traceLines.map((line) => rows.findIndex((row) => row.includes(line)));
-  for (const [position, feedIndex] of feedIndexes.entries()) {
-    assert.ok(
-      feedIndex > activityIndex,
-      `trace line ${position} should render below the activity row, received:\n${frame}`,
-    );
-    assert.ok(
-      feedIndex < promptIndex,
-      `trace line ${position} should render above the › row, received:\n${frame}`,
-    );
-    if (position > 0) {
-      assert.ok(
-        feedIndex > feedIndexes[position - 1],
-        `trace lines should keep chronological order (newest last), received:\n${frame}`,
-      );
-    }
-  }
+  for (const line of traceLines) assert.ok(!frame.includes(line));
+});
+
+test("verbose tool history shows only the latest live tool state", async () => {
+  const traceLines = ["→ read one.ts", "→ read two.ts", "✓ read two.ts"];
+  const frame = await renderStatusFrame({
+    isBusy: true,
+    busyStatus: "read src/app.ts",
+    currentTurnStartedAt: Date.now() - 1_000,
+    liveToolTraceLines: traceLines,
+    traceMode: "verbose",
+  });
+  assert.match(frame, /✓ read two\.ts/u);
+  assert.doesNotMatch(frame, /→ read one\.ts|→ read two\.ts/u);
 });
 
 test("idle WorkShellView renders no tool trace feed", async () => {
@@ -767,6 +765,7 @@ test("an over-width trace line truncates to a single dock row", async () => {
     busyStatus: "read src/app.ts",
     currentTurnStartedAt: Date.now() - 1_000,
     liveToolTraceLines: [`→ read ${"packages/tui/src/work-shell-".repeat(8)}pane.tsx`],
+    traceMode: "verbose",
   });
 
   const feedRows = frame.split("\n").filter((row) => row.includes("→ read packages/tui/src"));
@@ -877,7 +876,7 @@ function renderLiveFeedPane(engine) {
   return { instance, getOutput: () => output };
 }
 
-test("busy pane streams the liveTraceLines tail in minimal trace mode", async () => {
+test("busy pane keeps liveTraceLines out of the dock in minimal trace mode", async () => {
   const liveTraceLines = Array.from(
     { length: 8 },
     (_, index) => `→ read src/step-0${index + 1}.ts`,
@@ -899,19 +898,7 @@ test("busy pane streams the liveTraceLines tail in minimal trace mode", async ()
   assert.ok(activityIndex >= 0, `expected the dock activity row, received:\n${frame}`);
   const promptIndex = rows.findIndex((row) => row.trimStart().startsWith("›"));
   assert.ok(promptIndex > activityIndex, `the prompt row should sit below the activity row, received:\n${frame}`);
-  for (const line of liveTraceLines.slice(-3)) {
-    const feedIndex = rows.findIndex((row) => row.includes(line));
-    assert.ok(
-      feedIndex > activityIndex && feedIndex < promptIndex,
-      `feed line ${line} should render between the activity row and the › row, received:\n${frame}`,
-    );
-  }
-  for (const line of liveTraceLines.slice(0, liveTraceLines.length - 3)) {
-    assert.ok(
-      !frame.includes(line),
-      `older buffer line ${line} must stay out of the 3-row dock feed, received:\n${frame}`,
-    );
-  }
+  for (const line of liveTraceLines) assert.ok(!frame.includes(line));
 });
 
 test("idle pane renders no liveTraceLines feed even with a filled buffer", async () => {

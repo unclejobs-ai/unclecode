@@ -76,29 +76,29 @@ function createInkInput() {
   return input;
 }
 
-function createWritableOutput() {
+function createWritableOutput({ columns = 100, rows = TERMINAL_ROWS } = {}) {
   const output = new PassThrough();
-  output.columns = 100;
-  output.rows = TERMINAL_ROWS;
+  output.columns = columns;
+  output.rows = rows;
   output.isTTY = true;
   return output;
 }
 
-function createWritableError() {
+function createWritableError({ columns = 100, rows = TERMINAL_ROWS } = {}) {
   const error = new Writable({
     write(_chunk, _encoding, callback) {
       callback();
     },
   });
-  error.columns = 100;
-  error.rows = TERMINAL_ROWS;
+  error.columns = columns;
+  error.rows = rows;
   error.isTTY = true;
   return error;
 }
 
-function renderWithInput(element) {
+function renderWithInput(element, dimensions = {}) {
   const stdin = createInkInput();
-  const stdout = createWritableOutput();
+  const stdout = createWritableOutput(dimensions);
   let output = "";
   stdout.on("data", (chunk) => {
     output += chunk.toString();
@@ -106,7 +106,7 @@ function renderWithInput(element) {
   const instance = render(element, {
     stdin,
     stdout,
-    stderr: createWritableError(),
+    stderr: createWritableError(dimensions),
     debug: true,
     patchConsole: false,
     exitOnCtrlC: false,
@@ -132,7 +132,7 @@ function getLastWorkFrame(output) {
   return finalFrameStart >= 0 ? output.slice(finalFrameStart) : output;
 }
 
-function createWorkShellPaneEngine(overrides = {}) {
+function createWorkShellPaneEngine(overrides = {}, controls = {}) {
   const submittedLines = [];
   let state = {
     entries: createScrollbackEntries(),
@@ -180,11 +180,12 @@ function createWorkShellPaneEngine(overrides = {}) {
       },
       setMode: async () => {},
       openSessionsPanel: async () => {},
+      ...controls,
     },
   };
 }
 
-function renderScrollbackPane(engine) {
+function renderScrollbackPane(engine, dimensions = {}) {
   return renderWithInput(
     React.createElement(WorkShellPane, {
       provider: "OpenAI",
@@ -211,6 +212,7 @@ function renderScrollbackPane(engine) {
       getReasoningLabel: () => "default medium",
       isReasoningSupported: () => true,
     }),
+    dimensions,
   );
 }
 
@@ -304,11 +306,11 @@ test("streaming assistant anchor follows the committed assistant entry", () => {
 test("scroll indicator localizes owned chrome while preserving key names", () => {
   assert.equal(
     formatWorkShellTranscriptScrollIndicator({ earlierRows: 12, newerRows: 4, uiLocale: "ko" }),
-    "↑ 12 이전 행 · Fn+Up/PageUp · ↓ 4 새 행 · Fn+Down/PageDown · Esc 최신",
+    "↑12 · PgUp/Fn+↑   ↓4 · PgDn/Fn+↓   Esc 최신",
   );
   assert.equal(
     formatWorkShellTranscriptScrollIndicator({ earlierRows: 12, newerRows: 4, uiLocale: "en" }),
-    "↑ 12 earlier rows · Fn+Up/PageUp · ↓ 4 newer rows · Fn+Down/PageDown · Esc latest",
+    "↑ 12 earlier rows · PgUp/Fn+↑ · ↓ 4 newer rows · PgDn/Fn+↓ · Esc",
   );
 });
 
@@ -429,7 +431,7 @@ test("PageUp traverses one 100-line reply from its newest tail to its first rows
     const middle = getLastWorkFrame(getOutput());
     assert.ok(middle.includes("👨‍👩‍👧‍👦 한글 응답"));
     assert.ok(!middle.includes("reply-099"));
-    assert.match(middle, /↑ \d+ earlier rows .+ ↓ \d+ newer rows/u);
+    assert.match(middle, /↑ \d+ earlier rows · PgUp\/Fn\+↑ · ↓ \d+ newer rows · PgDn\/Fn\+↓ · Esc/u);
 
     stdin.write(KEY_PAGE_UP);
     stdin.write(KEY_PAGE_UP);
@@ -438,7 +440,212 @@ test("PageUp traverses one 100-line reply from its newest tail to its first rows
     assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("reply-000")));
     const oldest = getLastWorkFrame(getOutput());
     assert.ok(!oldest.includes("reply-099"));
-    assert.match(oldest, /↑ 0 earlier rows .+ ↓ \d+ newer rows/u);
+    assert.match(oldest, /↑ 0 earlier rows · PgUp\/Fn\+↑ · ↓ \d+ newer rows · PgDn\/Fn\+↓ · Esc/u);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("SCC quiet-workspace row budget keeps a long reply contiguous", () => {
+  const entries = [{
+    role: "assistant",
+    text: Array.from({ length: 35 }, (_, index) =>
+      `L${String(index + 1).padStart(2, "0")} scrolltest`
+    ).join("\n"),
+  }];
+  const resolved = resolveWorkShellTranscriptWindow({
+    entries,
+    terminalRows: 39,
+    terminalColumns: 82,
+    scrollOffset: 0,
+    reservedRows: 13,
+  });
+  const visible = resolved.window.flatMap((entry) =>
+    entry.text.split("\n").filter((line) => /^L\d{2} scrolltest$/u.test(line))
+  );
+  const indexes = visible.map((line) => Number(line.slice(1, 3)));
+
+  assert.ok(indexes.length > 1, "the split-height viewport must expose a useful reply tail");
+  assert.deepEqual(
+    indexes,
+    Array.from({ length: indexes.length }, (_, index) => indexes[0] + index),
+    "row-window slicing must never create holes that Yoga later distributes through the reply",
+  );
+  assert.equal(indexes.at(-1), 35);
+
+  const scrolled = resolveWorkShellTranscriptWindow({
+    entries,
+    terminalRows: 39,
+    terminalColumns: 82,
+    scrollOffset: 14,
+    reservedRows: 14,
+  });
+  const scrolledIndexes = scrolled.window.flatMap((entry) =>
+    entry.text.split("\n").filter((line) => /^L\d{2} scrolltest$/u.test(line))
+  ).map((line) => Number(line.slice(1, 3)));
+  assert.deepEqual(
+    scrolledIndexes,
+    Array.from({ length: scrolledIndexes.length }, (_, index) => scrolledIndexes[0] + index),
+    "the SCC scroll indicator must be budgeted before slicing the older page",
+  );
+});
+
+test("39x82 PageUp keeps a long SCC reply contiguous while ask_user is pinned", async () => {
+  const entries = [
+    { role: "user", text: "review this long response before choosing" },
+    {
+      role: "assistant",
+      text: Array.from({ length: 35 }, (_, index) =>
+        `L${String(index + 1).padStart(2, "0")} decision-scroll`
+      ).join("\n"),
+    },
+  ];
+  const pendingDecision = {
+    kind: "user-decision",
+    id: "scroll-decision-1",
+    title: "Execution choice",
+    questions: [{
+      id: "strategy",
+      question: "Choose execution strategy.",
+      options: [{ label: "Safe" }, { label: "Fast" }, { label: "Inspect" }],
+      recommended: 0,
+    }],
+  };
+  const { engine } = createWorkShellPaneEngine({
+    entries,
+    isBusy: true,
+    panel: { title: "Decision", lines: [] },
+    agentConsole: {
+      profileId: "build",
+      pendingDecision,
+      activity: [],
+      agents: [],
+      jobs: [],
+    },
+  }, {
+    answerPendingDecisionByIndex: () => true,
+    cancelPendingDecision: () => true,
+  });
+  const { stdin, instance, getOutput } = renderScrollbackPane(engine, {
+    columns: 82,
+    rows: 39,
+  });
+
+  const visibleReplyIndexes = () => {
+    const frame = stripVTControlCharacters(getLastWorkFrame(getOutput()));
+    return [...frame.matchAll(/L(\d{2}) decision-scroll/gu)]
+      .map((match) => Number(match[1]));
+  };
+  const assertContiguous = (indexes, label) => {
+    assert.ok(indexes.length > 1, `${label} must show a useful portion of the reply`);
+    assert.deepEqual(
+      indexes,
+      Array.from({ length: indexes.length }, (_, index) => indexes[0] + index),
+      `${label} must not contain rows dropped by a second Yoga shrink pass`,
+    );
+  };
+
+  try {
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("L35 decision-scroll")));
+    const atRestFrame = stripVTControlCharacters(getLastWorkFrame(getOutput()));
+    assertContiguous(visibleReplyIndexes(), "latest page");
+    assert.match(atRestFrame, /◆ User decision · Execution choice/u);
+    assert.match(atRestFrame, /› 1\. Safe \(recommended\)/u);
+    assert.match(atRestFrame, /Describe a task|Type an answer/u);
+
+    stdin.write(KEY_PAGE_UP);
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")));
+    const scrolledFrame = stripVTControlCharacters(getLastWorkFrame(getOutput()));
+    const scrolledIndexes = visibleReplyIndexes();
+    assertContiguous(scrolledIndexes, "older page");
+    assert.ok(scrolledIndexes.at(-1) < 35, "PageUp must leave the newest reply tail");
+    assert.match(scrolledFrame, /◆ User decision · Execution choice/u);
+    assert.match(scrolledFrame, /↑ \d+ earlier rows · PgUp\/Fn\+↑ · ↓ \d+ newer rows/u);
+    assert.match(scrolledFrame, /fronmpt-academy|unclecode-test-workspace/u);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("39x82 PageUp keeps a long SCC reply contiguous with a multi-question ask_user", async () => {
+  const entries = [
+    { role: "user", text: "review the response before answering both questions" },
+    {
+      role: "assistant",
+      text: Array.from({ length: 35 }, (_, index) =>
+        `M${String(index + 1).padStart(2, "0")} multi-decision-scroll`
+      ).join("\n"),
+    },
+  ];
+  const pendingDecision = {
+    kind: "user-decision",
+    id: "scroll-multi-decision-1",
+    title: "Migration scope",
+    questions: [
+      {
+        id: "depth",
+        question: "How deep?",
+        options: [{ label: "Shallow" }, { label: "Deep" }],
+      },
+      {
+        id: "breadth",
+        question: "How wide?",
+        options: [{ label: "Narrow" }, { label: "Wide" }],
+      },
+    ],
+  };
+  const { engine } = createWorkShellPaneEngine({
+    entries,
+    isBusy: true,
+    panel: { title: "Decision", lines: ["Input needed · Answer both questions."] },
+    agentConsole: {
+      profileId: "build",
+      pendingDecision,
+      activity: [],
+      agents: [],
+      jobs: [],
+    },
+  }, {
+    answerPendingDecisionByIndex: () => true,
+    cancelPendingDecision: () => true,
+  });
+  const { stdin, instance, getOutput } = renderScrollbackPane(engine, {
+    columns: 82,
+    rows: 39,
+  });
+
+  const visibleReplyIndexes = () => {
+    const frame = stripVTControlCharacters(getLastWorkFrame(getOutput()));
+    return [...frame.matchAll(/M(\d{2}) multi-decision-scroll/gu)]
+      .map((match) => Number(match[1]));
+  };
+  const assertContiguous = (indexes, label) => {
+    assert.ok(indexes.length > 1, `${label} must show a useful portion of the reply`);
+    assert.deepEqual(
+      indexes,
+      Array.from({ length: indexes.length }, (_, index) => indexes[0] + index),
+      `${label} must not contain rows dropped by a second Yoga shrink pass`,
+    );
+  };
+
+  try {
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("M35 multi-decision-scroll")));
+    const atRestFrame = stripVTControlCharacters(getLastWorkFrame(getOutput()));
+    assertContiguous(visibleReplyIndexes(), "latest multi-question page");
+    assert.match(atRestFrame, /◆ User decision · Migration scope · 2 questions · type answers · \/cancel/u);
+    assert.match(atRestFrame, /Input needed · Answer both questions\./u);
+
+    stdin.write(KEY_PAGE_UP);
+    assert.ok(await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")));
+    const scrolledFrame = stripVTControlCharacters(getLastWorkFrame(getOutput()));
+    const scrolledIndexes = visibleReplyIndexes();
+    assertContiguous(scrolledIndexes, "older multi-question page");
+    assert.ok(scrolledIndexes.at(-1) < 35, "PageUp must leave the newest multi-question reply tail");
+    assert.match(scrolledFrame, /◆ User decision · Migration scope · 2 questions · type answers · \/cancel/u);
+    assert.match(scrolledFrame, /Input needed · Answer both questions\./u);
+    assert.match(scrolledFrame, /↑ \d+ earlier rows · PgUp\/Fn\+↑ · ↓ \d+ newer rows/u);
   } finally {
     instance.unmount();
     instance.cleanup();
@@ -472,7 +679,7 @@ test("PageUp scrolls older entries into view with the indicator row", async () =
     assert.ok(!scrolled.includes("sb-0010"));
     assert.match(
       scrolled,
-      /↑ \d+ earlier rows · Fn\+Up\/PageUp · ↓ \d+ newer rows · Fn\+Down\/PageDown · Esc latest/,
+      /↑ \d+ earlier rows · PgUp\/Fn\+↑ · ↓ \d+ newer rows · PgDn\/Fn\+↓ · Esc/,
     );
   } finally {
     instance.unmount();
@@ -507,7 +714,7 @@ test("PageUp shows older entries when multi-row tool entries fill the transcript
     assert.ok(!scrolled.includes(`sb-${padScrollbackIndex(TRANSCRIPT_ENTRY_COUNT - 1)}`));
     assert.match(
       scrolled,
-      /↑ \d+ earlier rows · Fn\+Up\/PageUp · ↓ \d+ newer rows · Fn\+Down\/PageDown · Esc latest/,
+      /↑ \d+ earlier rows · PgUp\/Fn\+↑ · ↓ \d+ newer rows · PgDn\/Fn\+↓ · Esc/,
     );
   } finally {
     instance.unmount();
@@ -702,7 +909,7 @@ test("PageUp works with text in the composer and keeps the draft", async () => {
       await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")),
     );
     const scrolled = getLastWorkFrame(getOutput());
-    assert.match(scrolled, /↑ \d+ earlier rows · Fn\+Up\/PageUp · ↓ \d+ newer rows · Fn\+Down\/PageDown · Esc latest/);
+    assert.match(scrolled, /↑ \d+ earlier rows · PgUp\/Fn\+↑ · ↓ \d+ newer rows · PgDn\/Fn\+↓ · Esc/);
     // Scrolling is not a print key: the draft survives it.
     assert.match(scrolled, /› hello/);
   } finally {

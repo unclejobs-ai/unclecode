@@ -100,7 +100,8 @@ export function WorkShellAgentConsoleOverlay(props: {
   }
   // The breakpoint is a promise about the operator's terminal. Measuring the
   // console's own inner width instead silently moved it four columns out.
-  const twoPane = props.terminalColumns >= CONSOLE_TWO_PANE_MIN_WIDTH;
+  const twoPane = props.terminalColumns >= CONSOLE_TWO_PANE_MIN_WIDTH
+    && (props.view.tab !== "quality" || props.view.inspectorVisible);
   const rosterWidth = twoPane ? Math.max(18, Math.trunc(body * CONSOLE_ROSTER_FRACTION)) : body;
   // The inspector column owns the divider as a left rule plus one column of
   // padding, so the panes are separated by exactly one line of chrome.
@@ -158,7 +159,7 @@ export function WorkShellAgentConsoleOverlay(props: {
   );
 
   const totalCost = formatAgentConsoleTotalCost(props.snapshot);
-  const recordedEvolution = qualityReview.length === 0
+  const recordedEvolution = props.view.tab === "quality" && props.view.inspectorVisible
     ? selectRecordedEvolutionProposalLines(props.snapshot.evolutionProposals?.at(-1), body)
     : [];
 
@@ -172,34 +173,40 @@ export function WorkShellAgentConsoleOverlay(props: {
       width={props.width}
     >
       <Text>
-        <Text color={props.palette.assistant} bold>{uiLocale === "ko" ? "▤ 에이전트 콘솔" : "▤ Agent Console"}</Text>
-        <Text color={props.palette.textMuted}>
-          {totalCost === undefined
-            ? (uiLocale === "ko" ? "  세션 실행" : "  session runs")
-            : (uiLocale === "ko" ? `  세션 실행 · ${totalCost} 사용` : `  session runs · ${totalCost} spent`)}
-        </Text>
-      </Text>
-      <Text>
-        {(["agents", "jobs", "plan", "quality"] as const).map((tab, index) => (
-          <Text key={tab}>
-            {index === 0 ? "" : "  "}
-            <Text
-              color={tab === props.view.tab ? props.palette.assistant : props.palette.textMuted}
-              bold={tab === props.view.tab}
-            >
-              {tab === props.view.tab ? `[${tabLabel(tab, uiLocale)}]` : tabLabel(tab, uiLocale)}
-            </Text>
+        <Text color={props.palette.assistant} bold>{props.view.tab === "quality"
+          ? (uiLocale === "ko" ? "◆ SCC 품질 엔진" : "◆ SCC Quality Engine")
+          : (uiLocale === "ko" ? "▤ 에이전트 콘솔" : "▤ Agent Console")}</Text>
+        {props.view.tab !== "quality" ? (
+          <Text color={props.palette.textMuted}>
+            {totalCost === undefined
+              ? (uiLocale === "ko" ? "  세션 실행" : "  session runs")
+              : (uiLocale === "ko" ? `  세션 실행 · ${totalCost} 사용` : `  session runs · ${totalCost} spent`)}
           </Text>
-        ))}
-        <Text color={props.palette.textDim}>
-          {truncateForDisplayWidth(
-            `  · ${props.snapshot.agents.length} ${props.snapshot.agents.length === 1 ? m.agent : m.agents}`
-            + ` · ${props.snapshot.jobs.length} ${props.snapshot.jobs.length === 1 ? m.job : m.jobs}`
-            + ` · ${props.snapshot.workGraph?.nodes.length ?? 0} ${uiLocale === "ko" ? "단계" : ((props.snapshot.workGraph?.nodes.length ?? 0) === 1 ? "task" : "tasks")}`,
-            Math.max(0, body - 26),
-          )}
-        </Text>
+        ) : null}
       </Text>
+      {props.view.tab !== "quality" ? (
+        <Text>
+          {(["agents", "jobs", "plan", "quality"] as const).map((tab, index) => (
+            <Text key={tab}>
+              {index === 0 ? "" : "  "}
+              <Text
+                color={tab === props.view.tab ? props.palette.assistant : props.palette.textMuted}
+                bold={tab === props.view.tab}
+              >
+                {tab === props.view.tab ? `[${tabLabel(tab, uiLocale)}]` : tabLabel(tab, uiLocale)}
+              </Text>
+            </Text>
+          ))}
+          <Text color={props.palette.textDim}>
+            {truncateForDisplayWidth(
+              `  · ${props.snapshot.agents.length} ${props.snapshot.agents.length === 1 ? m.agent : m.agents}`
+              + ` · ${props.snapshot.jobs.length} ${props.snapshot.jobs.length === 1 ? m.job : m.jobs}`
+              + ` · ${props.snapshot.workGraph?.nodes.length ?? 0} ${uiLocale === "ko" ? "단계" : ((props.snapshot.workGraph?.nodes.length ?? 0) === 1 ? "task" : "tasks")}`,
+              Math.max(0, body - 26),
+            )}
+          </Text>
+        </Text>
+      ) : null}
 
       {qualityReview.length > 0 ? (
         <Box marginTop={1} flexDirection="column">
@@ -217,17 +224,23 @@ export function WorkShellAgentConsoleOverlay(props: {
         </Box>
       ) : null}
 
-      <Box marginTop={1} flexDirection="row">
-        {twoPane ? roster : props.view.inspectorVisible ? inspectorPane : roster}
-        {twoPane ? inspectorPane : null}
-      </Box>
+      {props.view.tab !== "quality" || props.view.inspectorVisible ? (
+        <Box marginTop={1} flexDirection="row">
+          {twoPane ? roster : props.view.inspectorVisible ? inspectorPane : roster}
+          {twoPane ? inspectorPane : null}
+        </Box>
+      ) : null}
 
       <Box marginTop={1}>
         <Text color={props.palette.textDim}>{truncateForDisplayWidth(
           props.view.tab === "quality"
-            ? (uiLocale === "ko"
-              ? "j/k 이동 · Tab 창 · Enter 상세 · Esc 닫기 · 읽기 전용"
-              : "j/k move · Tab pane · Enter detail · Esc close · read-only")
+            ? (props.view.inspectorVisible
+              ? (uiLocale === "ko"
+                ? "j/k 기록 이동 · Enter 요약 · Esc 닫기 · 읽기 전용"
+                : "j/k history · Enter summary · Esc close · read-only")
+              : (uiLocale === "ko"
+                ? "Enter 증거 보기 · Esc 닫기 · 읽기 전용"
+                : "Enter evidence · Esc close · read-only"))
             : (uiLocale === "ko" ? "j/k 이동 · Tab 창 · s 조정 · x 취소 · r 계속 · Esc 닫기" : CONSOLE_KEY_HINTS),
           body,
         )}</Text>

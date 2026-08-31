@@ -160,6 +160,17 @@ test("composer frame budget reserves both overflow markers and the upper flex ro
   assert.equal(roomyBusy.maxVisibleRows, 4, "roomy dock keeps the normal four-row viewport");
 });
 
+test("work shell cursor anchor stays on the prompt row above the footer", () => {
+  const terminalRows = 24;
+  const frame = resolveWorkShellComposerFrameLayout({
+    terminalRows,
+    isBusy: false,
+    hasComposerHint: true,
+    liveTraceLineCount: 0,
+  });
+  assert.deepEqual(frame.cursorAnchor, { x: 5, bottom: terminalRows - 2 });
+});
+
 test("prompt dock stays on one terminal row as a session grows", async () => {
   const shortFrame = await frameForSessionLength(2);
   const longFrame = await frameForSessionLength(40);

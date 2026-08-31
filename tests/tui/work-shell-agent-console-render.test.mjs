@@ -312,7 +312,7 @@ test("the Korean plan inspector localizes counts, review state, hashes and evide
   }
 });
 
-test("the Quality tab presents the projected SCC gate, critic evidence, and iteration history", async () => {
+test("the Quality tab opens with a bounded result summary and reveals evidence on request", async () => {
   const base = runningSnapshot();
   const snapshot = {
     ...base,
@@ -376,31 +376,36 @@ test("the Quality tab presents the projected SCC gate, critic evidence, and iter
 
   const frame = await renderFrame({
     agentConsole: snapshot,
-    agentConsoleView: consoleView({ tab: "quality", cursor: 0 }),
+    agentConsoleView: consoleView({ tab: "quality", cursor: 0, inspectorVisible: false }),
   }, 120);
 
-  assert.match(frame, /\[Quality\]/);
-  assert.match(frame, /Quality Engine \(SCC\)/);
-  assert.match(frame, /Gate · unproven/);
-  assert.match(frame, /Unproven · independent review evidence is missing or stale/);
-  assert.match(frame, /Finding · Task 1 · failed/);
-  assert.match(frame, /Critic finding · Session expiry remains untested/);
-  assert.match(frame, /Evidence · evidence\/auth-review\.json/);
-  assert.match(frame, /Reviewed hash · sha256:reviewed-auth/);
-  assert.match(frame, /Current hash · sha256:current-auth · stale/);
-  assert.match(frame, /iteration 2 · work · refine/);
-  assert.match(frame, /iteration 3 · plan · pivot/);
-  assert.match(frame, /iteration 4 · promote · completed/);
-  assert.match(frame, /History · 1 refine · 1 pivot/);
-  assert.match(frame, /Promote · handoff\/synthesis only/);
-  assert.match(frame, /Enter detail · Esc close · read-only/);
+  assert.match(frame, /SCC Quality Engine/);
+  assert.doesNotMatch(frame, /Agent Console|Agents  Jobs  Plan/);
+  assert.match(frame, /SCC · Unproven · deep/);
+  assert.match(frame, /Checked · no recorded artifact check; independent review unproven/);
+  assert.match(frame, /Review · no independent review/);
+  assert.match(frame, /Reason · Independent proof expired/);
+  assert.match(frame, /Next · run \/scc review <target> for independent proof/);
+  assert.doesNotMatch(frame, /Reviewed hash|Current hash|evidence\/auth-review|iteration 2 · work/);
   assert.doesNotMatch(frame, /s steer · x cancel · r continue/);
+
+  const detailed = await renderFrame({
+    agentConsole: snapshot,
+    agentConsoleView: consoleView({ tab: "quality", cursor: 3, inspectorVisible: true }),
+  }, 120);
+  assert.match(detailed, /Evidence · evidence\/auth-review\.json/);
+  assert.match(detailed, /Reviewed hash\s+sha256:reviewed-auth/);
+  assert.match(detailed, /Current hash\s+sha256:current-auth · stale/);
+  assert.match(detailed, /iteration 4 · promote · completed/);
+  assert.match(detailed, /Enter summary · Esc close · read-only/);
 
   const korean = await renderFrame({
     uiLocale: "ko",
     agentConsole: snapshot,
-    agentConsoleView: consoleView({ tab: "quality", cursor: 0 }),
+    agentConsoleView: consoleView({ tab: "quality", cursor: 3, inspectorVisible: true }),
   }, 120);
+  assert.match(korean, /SCC · 미입증 · 심층/);
+  assert.match(korean, /확인 · 기록된 산출물 검증 없음; 독립 검토는 미입증/);
   assert.match(korean, /반복 1 · 비평 · 게이트/);
   assert.match(korean, /반복 2 · 작업 · 개선/);
   assert.match(korean, /반복 3 · 계획 · 전환/);
@@ -467,18 +472,15 @@ test("an active SCC run without history stays actionable and bounds thirty-two f
     agentConsoleView: consoleView({ tab: "quality", cursor: 0 }),
   }, 100);
 
-  assert.match(frame, /Quality Engine \(SCC\) · deep · critic · PDCA check · iteration 2/);
+  assert.match(frame, /SCC · Needs refinement · deep/);
   assert.match(frame, /No review history recorded yet\./);
-  assert.match(frame, /Critic findings · 32 total/);
-  assert.match(frame, /… \+29 more findings/);
-  assert.match(frame, /Next · /);
+  assert.match(frame, /Review · no independent review/);
+  assert.match(frame, /Next · fix 32 findings/);
+  assert.doesNotMatch(frame, /Critic findings|Finding · Critic finding|… \+29/);
   assert.doesNotMatch(frame, /No Quality Engine review history yet\./);
   assert.doesNotMatch(frame, /Select a row to inspect\./);
   assert.doesNotMatch(frame, /Enter detail/);
-  assert.ok(
-    frame.split("\n").filter((line) => /Finding · Critic finding/.test(line)).length <= 3,
-    "the quality summary must not turn thirty-two findings into thirty-two layout rows",
-  );
+  assert.ok(frame.split("\n").filter((line) => /^(?:\s*)(?:SCC|Checked|Review|No review|Next) ·?/.test(line)).length <= 5);
 });
 
 test("the SCC cockpit selects the latest history event by default", async () => {

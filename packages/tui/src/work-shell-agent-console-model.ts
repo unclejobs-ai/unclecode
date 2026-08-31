@@ -13,7 +13,6 @@ import type {
 import { getWorkShellMessages, type AgentConsoleSelection } from "@unclecode/orchestrator";
 
 import { getDisplayWidth, truncateForDisplayWidth } from "./text-width.js";
-import { selectRecordedEvolutionProposalLines } from "./evolution-proposal-lines.js";
 import {
   agentConsoleStatusGlyph,
   boundBlock,
@@ -52,8 +51,6 @@ const ACTIVE_AGENT_HUD_ROWS = 4;
 const INSPECTOR_TIMELINE_ROWS = 6;
 /** Inspector budget: a 400-character summary is evidence, not a paragraph. */
 const INSPECTOR_OUTCOME_ROWS = 3;
-/** A quality summary names the first few findings and counts the rest. */
-const QUALITY_FINDING_ROWS = 3;
 /** Columns between an inspector fact's label and its value. */
 const FACT_LABEL_GAP = 2;
 
@@ -237,98 +234,63 @@ export function selectQualityReviewLines(
   const latest = review?.history.at(-1);
   const evidenceReview = selectLastEvidenceBearingReview(review?.history) ?? latest;
   const hasHistory = (review?.history.length ?? 0) > 0;
-  const boundedFindings = findings.slice(0, QUALITY_FINDING_ROWS);
-  const hiddenFindingCount = Math.max(0, findings.length - boundedFindings.length);
-  const boundedFailures = evidenceReview?.failures.slice(0, QUALITY_FINDING_ROWS) ?? [];
-  const hiddenFailureCount = Math.max(0, (evidenceReview?.failures.length ?? 0) - boundedFailures.length);
-  const qualityFailureLabel = uiLocale === "ko" ? "실패" : "Critic finding";
-  const evolution = (snapshot.evolutionProposals ?? [])
-    .filter(proposal => review?.runId === undefined || proposal.runId === review.runId)
-    .at(-1);
-  return [
-    boundRow(
-      `${uiLocale === "ko" ? "품질 엔진" : "Quality Engine"} (SCC) · ${localizedQualityProfile(profile, uiLocale)} · ${localizedQualityStage(stage, uiLocale)}`
-      + ` · PDCA ${localizedPdcaPhase(stage, uiLocale)} · ${uiLocale === "ko" ? "반복" : "iteration"} ${iteration}`,
-      bound,
+  const reviewedArtifactHash = evidenceReview?.reviewedArtifactHash;
+  const currentArtifactHash = evidenceReview?.currentArtifactHash;
+  const artifactCheckRecorded = evidenceReview?.stale !== true && Boolean(
+    evidenceReview?.artifactHash
+    || (
+      reviewedArtifactHash
+      && currentArtifactHash
+      && reviewedArtifactHash === currentArtifactHash
     ),
-    boundRow(`${m.gate} · ${localizedGateDecision(gate, uiLocale)}`, bound),
+  );
+  const independentReview = evidenceReview?.independentVerification === true && evidenceReview.stale !== true;
+  const findingCount = Math.max(findings.length, evidenceReview?.failures.length ?? 0);
+  const verdict = gate === "proceed"
+    ? (uiLocale === "ko" ? "통과" : "Passed")
+    : gate === "refine"
+      ? (uiLocale === "ko" ? "수정 필요" : "Needs refinement")
+      : gate === "pivot"
+        ? (uiLocale === "ko" ? "계획 변경 필요" : "Plan change required")
+        : gate === "block"
+          ? (uiLocale === "ko" ? "차단" : "Blocked")
+          : (uiLocale === "ko" ? "미입증" : "Unproven");
+  const checks = profile === "minimal"
+    ? artifactCheckRecorded
+      ? (uiLocale === "ko" ? "완료 상태와 산출물 무결성" : "completion and artifact integrity")
+      : (uiLocale === "ko" ? "완료 상태; 기록된 산출물 검증 없음" : "completion state; no recorded artifact check")
+    : artifactCheckRecorded && independentReview
+      ? (uiLocale === "ko" ? "산출물 무결성과 독립 검토" : "artifact integrity and independent review")
+      : artifactCheckRecorded
+        ? (uiLocale === "ko" ? "산출물 무결성; 독립 검토는 미입증" : "artifact integrity; independent review unproven")
+        : independentReview
+          ? (uiLocale === "ko" ? "독립 검토; 기록된 산출물 검증 없음" : "independent review; no recorded artifact check")
+          : (uiLocale === "ko" ? "기록된 산출물 검증 없음; 독립 검토는 미입증" : "no recorded artifact check; independent review unproven");
+  const reviewStatus = profile === "minimal"
+    ? (uiLocale === "ko" ? "최소 프로필은 독립 critic 검토를 요구하지 않음" : "independent critic not required by minimal profile")
+    : independentReview
+      ? (uiLocale === "ko" ? "독립 검토 완료" : "independently reviewed")
+      : (uiLocale === "ko" ? "독립 검토 없음" : "no independent review");
+  const next = gate === "proceed"
+    ? (uiLocale === "ko" ? "조치 없음" : "no action")
+    : gate === "refine"
+      ? (uiLocale === "ko" ? `${findingCount || 1}개 발견사항 수정` : `fix ${findingCount || 1} finding${findingCount === 1 ? "" : "s"}`)
+      : gate === "pivot"
+        ? (uiLocale === "ko" ? "계획을 다시 세우기" : "re-plan the work")
+        : gate === "block"
+          ? (uiLocale === "ko" ? "차단 원인 해결" : "resolve the blocker")
+          : (uiLocale === "ko" ? "/scc review <대상>으로 독립 검토" : "run /scc review <target> for independent proof");
+  return [
+    boundRow(`SCC · ${verdict} · ${localizedQualityProfile(profile, uiLocale)}`, bound),
+    boundRow(`${uiLocale === "ko" ? "확인" : "Checked"} · ${checks}`, bound),
+    boundRow(`${uiLocale === "ko" ? "검토" : "Review"} · ${reviewStatus}`, bound),
     ...(review && !hasHistory
       ? [boundRow(uiLocale === "ko" ? "아직 검토 기록이 없습니다." : "No review history recorded yet.", bound)]
       : []),
-    ...(latest?.event === "completed"
-      ? [boundRow(`${uiLocale === "ko" ? "완료" : "Completion"} · ${localizedQualityStage(latest.stage, uiLocale)} · ${localizedGateDecision(latest.decision, uiLocale)}`, bound)]
+    ...(gate !== "proceed" && evidenceReview?.reason
+      ? [boundRow(`${m.reason} · ${evidenceReview.reason}`, bound)]
       : []),
-    ...(gate === "unproven"
-      ? [boundRow(uiLocale === "ko" ? "미입증 · 독립 검토 증거가 없거나 만료됨" : "Unproven · independent review evidence is missing or stale", bound)]
-      : []),
-    ...(findings.length > 0
-      ? [
-          boundRow(`${uiLocale === "ko" ? "비평 발견" : "Critic findings"} · ${findings.length} ${uiLocale === "ko" ? "개" : "total"}`, bound),
-          ...boundedFindings.map((node) => boundRow(`${uiLocale === "ko" ? "발견" : "Finding"} · ${node.title || node.id} · ${localizedWorkNodeStatus(node.status, uiLocale)}`, bound)),
-          ...(hiddenFindingCount > 0
-            ? [boundRow(uiLocale === "ko" ? `  … ${hiddenFindingCount}개 더 있음` : `  … +${hiddenFindingCount} more findings`, bound)]
-            : []),
-        ]
-      : [boundRow(
-          profile === "minimal"
-            ? (uiLocale === "ko" ? "비평 · 최소 프로필에서는 필요 없음" : "Critic · not required by minimal profile")
-            : (uiLocale === "ko"
-              ? `비평 결과 · ${criticNodes.length === 0 ? "기록 없음" : "열린 항목 없음"}`
-              : `Critic findings · ${criticNodes.length === 0 ? "not recorded" : "none open"}`),
-          bound,
-        )]),
-    ...(evidenceReview?.reason ? [boundRow(`${m.reason} · ${evidenceReview.reason}`, bound)] : []),
-    ...(boundedFailures.length > 0
-      ? [
-          ...boundedFailures.map((failure) => boundRow(`${qualityFailureLabel} · ${failure}`, bound)),
-          ...(hiddenFailureCount > 0
-            ? [boundRow(uiLocale === "ko" ? `  … ${hiddenFailureCount}개 실패 더 있음` : `  … +${hiddenFailureCount} more failures`, bound)]
-            : []),
-        ]
-      : []),
-    ...(evidenceReview?.reviewerId
-      ? [boundRow(`${m.reviewer} · ${evidenceReview.reviewerId} · ${evidenceReview.independentVerification ? m.independent : m.notIndependent}`, bound)]
-      : []),
-    ...(evidenceReview && !evidenceReview.reviewerId
-      ? [boundRow(`${uiLocale === "ko" ? "검증" : "Verification"} · ${evidenceReview.independentVerification ? m.independent : m.notIndependent}`, bound)]
-      : []),
-    ...(evidenceReview?.reviewerRunId ? [boundRow(`${uiLocale === "ko" ? "검토 실행" : "Reviewer run"} · ${evidenceReview.reviewerRunId}`, bound)] : []),
-    ...(evidenceReview?.route || evidenceReview?.provider || evidenceReview?.model
-      ? [boundRow(`${m.route} · ${[evidenceReview.route, evidenceReview.provider, evidenceReview.model].filter(Boolean).join(" · ")}`, bound)]
-      : []),
-    ...(evidenceReview?.reviewedArtifactHash
-      ? [boundRow(`${uiLocale === "ko" ? "검토 해시" : "Reviewed hash"} · ${evidenceReview.reviewedArtifactHash}`, bound)]
-      : []),
-    ...(evidenceReview?.currentArtifactHash
-      ? [boundRow(`${uiLocale === "ko" ? "현재 해시" : "Current hash"} · ${evidenceReview.currentArtifactHash}${evidenceReview.stale ? ` · ${m.stale}` : ` · ${m.current}`}`, bound)]
-      : []),
-    ...(!evidenceReview?.reviewedArtifactHash && evidenceReview?.artifactHash
-      ? [boundRow(`${uiLocale === "ko" ? "산출물 해시" : "Artifact hash"} · ${evidenceReview.artifactHash}${evidenceReview.stale ? ` · ${m.stale}` : ""}`, bound)]
-      : []),
-    ...(evidenceReview?.count !== undefined && evidenceReview.limit !== undefined
-      ? [boundRow(`${uiLocale === "ko"
-        ? (evidenceReview.event === "pivot" ? "전환 시도" : "개선 시도")
-        : `${evidenceReview.event === "pivot" ? "Pivot" : "Refine"} attempt`} · ${evidenceReview.count}/${evidenceReview.limit}`, bound)]
-      : []),
-    ...(evidenceReview && evidenceReview.evidenceRefs.length > 0
-      ? [boundRow(`${m.evidence} · ${evidenceReview.evidenceRefs.join(", ")}`, bound)]
-      : []),
-    ...(review ? [boundRow(uiLocale === "ko"
-      ? `기록 · 개선 ${review.refineCount} · 전환 ${review.pivotCount}`
-      : `History · ${review.refineCount} refine · ${review.pivotCount} pivot`, bound)] : []),
-    ...(review && !hasHistory
-      ? [boundRow(uiLocale === "ko"
-        ? (findings.length > 0
-          ? "다음 · 계획에서 비평 발견을 확인한 뒤 /scc review <대상> 실행"
-          : "다음 · 비평 증거를 기다리거나 /scc review <대상> 실행")
-        : (findings.length > 0
-          ? "Next · inspect Plan findings, then run /scc review <target>"
-          : "Next · wait for critic evidence or run /scc review <target>"), bound)]
-      : []),
-    ...selectRecordedEvolutionProposalLines(evolution, bound),
-    ...(graph !== undefined || hasHistory
-      ? [boundRow(uiLocale === "ko" ? "정리 · 인계/종합 전용" : "Promote · handoff/synthesis only", bound)]
-      : []),
+    boundRow(`${uiLocale === "ko" ? "다음" : "Next"} · ${next}`, bound),
   ];
 }
 

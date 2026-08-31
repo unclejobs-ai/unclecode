@@ -113,6 +113,25 @@ test("current and present labels are reserved for a fresh PR-ready candidate wit
 test("the actual Agent Console overlay calls the historical evolution projection", async () => {
   const snapshot = {
     profileId: "build",
+    qualityReview: {
+      runId: "run-1",
+      graphId: "graph-1",
+      refineCount: 0,
+      pivotCount: 0,
+      latestDecision: "proceed",
+      history: [{
+        event: "completed",
+        stage: "promote",
+        decision: "proceed",
+        iteration: 1,
+        failures: [],
+        evidenceRefs: ["evidence:evolution-proposal"],
+        artifactRefs: ["artifact:candidate"],
+        independentVerification: true,
+        stale: false,
+        startedAt: 1,
+      }],
+    },
     evolutionProposals: [
       proposal({
         state: "rejected",
@@ -151,7 +170,7 @@ test("the actual Agent Console overlay calls the historical evolution projection
   const { instance, getOutput } = renderDebugFrame(
     React.createElement(WorkShellAgentConsoleOverlay, {
       snapshot,
-      view: { open: true, tab: "agents", cursor: 0, inspectorVisible: false },
+      view: { open: true, tab: "quality", cursor: 0, inspectorVisible: true },
       terminalColumns: 100,
       width: 96,
       borderColor: "gray",

@@ -1572,6 +1572,10 @@ export function resolveWorkShellComposerFrameLayout(input: {
     dockOverheadRows,
     maxVisibleRows,
     ...(input.terminalRows !== undefined
+      // Ink cursor positions are zero-based rows inside the rendered frame.
+      // The prompt is immediately above the footer, so its one-row anchor is
+      // terminalRows - 2. This exact row also lets Ink return to the bottom
+      // before an incremental transcript repaint without overwriting content.
       ? { cursorAnchor: { x: 5, bottom: Math.max(0, terminalRows - 2) } }
       : {}),
   };
@@ -2043,9 +2047,12 @@ const WORK_SHELL_TRANSCRIPT_MIN_ENTRY_CAPACITY = 3;
  * Rows available for transcript entries after the shell chrome (header, status
  * strip, composer dock, and the scroll indicator itself).
  */
-export function getWorkShellTranscriptAvailableRows(terminalRows?: number): number {
+export function getWorkShellTranscriptAvailableRows(
+  terminalRows?: number,
+  reservedRows = WORK_SHELL_TRANSCRIPT_RESERVED_ROWS,
+): number {
   const rows = terminalRows ?? process.stdout.rows ?? 24;
-  return Math.max(WORK_SHELL_TRANSCRIPT_MIN_ENTRY_CAPACITY, rows - WORK_SHELL_TRANSCRIPT_RESERVED_ROWS);
+  return Math.max(WORK_SHELL_TRANSCRIPT_MIN_ENTRY_CAPACITY, rows - reservedRows);
 }
 
 /**
@@ -2061,8 +2068,9 @@ export function getWorkShellTranscriptEntryCapacity(
   terminalRows?: number,
   width?: number,
   toolHistoryMode: "minimal" | "verbose" = "verbose",
+  reservedRows = WORK_SHELL_TRANSCRIPT_RESERVED_ROWS,
 ): number {
-  const availableRows = getWorkShellTranscriptAvailableRows(terminalRows);
+  const availableRows = getWorkShellTranscriptAvailableRows(terminalRows, reservedRows);
   let usedRows = 0;
   let count = 0;
   for (let index = entries.length - 1; index >= 0; index -= 1) {
@@ -2182,6 +2190,8 @@ export function resolveWorkShellTranscriptWindow(input: {
   readonly terminalColumns?: number | undefined;
   readonly scrollOffset: number;
   readonly toolHistoryMode?: "minimal" | "verbose";
+  /** Rows owned by header/status/HUD/composer outside the transcript. */
+  readonly reservedRows?: number;
 }): {
   readonly window: readonly WorkShellEntry[];
   readonly entriesAbove: number;
@@ -2204,7 +2214,7 @@ export function resolveWorkShellTranscriptWindow(input: {
   if (rowWidth !== undefined) {
     const rowWindow = resolveWorkShellTranscriptDisplayRowWindow({
       entries: input.entries,
-      availableRows: getWorkShellTranscriptAvailableRows(input.terminalRows),
+      availableRows: getWorkShellTranscriptAvailableRows(input.terminalRows, input.reservedRows),
       rowWidth,
       scrollOffset: input.scrollOffset,
       ...(input.toolHistoryMode ? { toolHistoryMode: input.toolHistoryMode } : {}),
@@ -2218,7 +2228,7 @@ export function resolveWorkShellTranscriptWindow(input: {
     const weights = input.entries.map((entry) =>
       measureWorkShellEntryRows(entry, rowWidth, input.toolHistoryMode)
     );
-    const availableRows = getWorkShellTranscriptAvailableRows(input.terminalRows);
+    const availableRows = getWorkShellTranscriptAvailableRows(input.terminalRows, input.reservedRows);
     let start = input.entries.length;
     let usedRows = 0;
     while (start > 0) {
@@ -2240,6 +2250,7 @@ export function resolveWorkShellTranscriptWindow(input: {
     input.terminalRows,
     undefined,
     input.toolHistoryMode,
+    input.reservedRows,
   );
   const end = Math.min(
     input.entries.length,
@@ -2285,8 +2296,8 @@ export function formatWorkShellTranscriptScrollIndicator(input: {
   readonly uiLocale: "en" | "ko";
 }): string {
   return input.uiLocale === "ko"
-    ? `↑ ${input.earlierRows} 이전 행 · Fn+Up/PageUp · ↓ ${input.newerRows} 새 행 · Fn+Down/PageDown · Esc 최신`
-    : `↑ ${input.earlierRows} earlier rows · Fn+Up/PageUp · ↓ ${input.newerRows} newer rows · Fn+Down/PageDown · Esc latest`;
+    ? `↑${input.earlierRows} · PgUp/Fn+↑   ↓${input.newerRows} · PgDn/Fn+↓   Esc 최신`
+    : `↑ ${input.earlierRows} earlier rows · PgUp/Fn+↑ · ↓ ${input.newerRows} newer rows · PgDn/Fn+↓ · Esc`;
 }
 
 const WorkShellConversationBlock = React.memo(function WorkShellConversationBlock(props: {
@@ -2300,18 +2311,25 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
   readonly scrollOffset?: number;
   readonly toolHistoryMode?: "minimal" | "verbose";
   readonly uiLocale?: "en" | "ko";
+  readonly reservedRows?: number;
 }) {
   const conversationWidth = getWorkShellConversationWidth({
     panelPlacement: props.panelPlacement,
     ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
   });
   const entries = projectWorkShellTranscript(props.entries, props.streamingAssistantText);
+  // The SCC split-height frame is exact at rest. A scrolled page also owns the
+  // one-line navigation indicator, so take that row out before slicing rather
+  // than letting Yoga steal an arbitrary transcript/header row afterwards.
+  const reservedRows = (props.reservedRows ?? WORK_SHELL_TRANSCRIPT_RESERVED_ROWS)
+    + ((props.scrollOffset ?? 0) > 0 && (props.reservedRows ?? 0) >= 13 ? 1 : 0);
   const transcriptWindow = resolveWorkShellTranscriptWindow({
     entries,
     ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
     ...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {}),
     scrollOffset: props.scrollOffset ?? 0,
     ...(props.toolHistoryMode ? { toolHistoryMode: props.toolHistoryMode } : {}),
+    reservedRows,
   });
 
   return (
@@ -2908,6 +2926,7 @@ export function formatWorkShellDecisionKindLabel(
 
 const WorkShellDecisionBar = React.memo(function WorkShellDecisionBar(props: {
   readonly request: AskUserQuestionRequest;
+  readonly selectedIndex?: number | undefined;
   /**
    * Engine feedback for a rejected typed reply (`Input needed · …`). That
    * line normally lives in the passive "Decision" panel, which this bar
@@ -2955,6 +2974,10 @@ const WorkShellDecisionBar = React.memo(function WorkShellDecisionBar(props: {
   }
   const optionCount = singleQuestion.options.length;
   const keyRange = optionCount > 1 ? `1-${optionCount}` : "1";
+  const selectedIndex = Math.max(
+    0,
+    Math.min(optionCount - 1, props.selectedIndex ?? singleQuestion.recommended ?? 0),
+  );
   return (
     <Box marginTop={1} paddingLeft={1} flexDirection="column">
       <Text>
@@ -2964,15 +2987,19 @@ const WorkShellDecisionBar = React.memo(function WorkShellDecisionBar(props: {
       <Box paddingLeft={2} flexDirection="column">
         {singleQuestion.options.map((option, index) => (
           <Text key={`${index}-${option.label}`}>
-            <Text color={W.assistant} bold>{`${index + 1}. `}</Text>
-            <Text color={W.textDim}>
+            <Text color={index === selectedIndex ? W.assistant : W.textDim} bold={index === selectedIndex}>
+              {`${index === selectedIndex ? "› " : "  "}${index + 1}. `}
+            </Text>
+            <Text color={index === selectedIndex ? W.text : W.textDim} bold={index === selectedIndex}>
               {singleQuestion.recommended === index
                 ? `${option.label} (${uiLocale === "ko" ? "권장" : "recommended"})`
                 : option.label}
             </Text>
           </Text>
         ))}
-        <Text color={W.textDim}>{`${keyRange} ${messages.decisionBarHint}`}</Text>
+        <Text color={W.textDim}>{uiLocale === "ko"
+          ? `↑/↓ 이동 · Enter 답변 · ${keyRange} ${messages.decisionBarHint}`
+          : `↑/↓ select · Enter answer · ${keyRange} ${messages.decisionBarHint}`}</Text>
         {feedbackLine ? (
           <Text color={W.warning}>{feedbackLine}</Text>
         ) : null}
@@ -3148,6 +3175,23 @@ export function formatWorkShellQueueIndicator(
   return `⋯ ${queuedCount} ${label} · /queue`;
 }
 
+/**
+ * The quiet dock is a current-state surface, not a trace log. Tool start and
+ * completion events for one call often arrive back-to-back; showing the tail
+ * verbatim makes one read look like several executions. Keep only the latest
+ * meaningful state here. Ctrl+O remains the complete chronological history.
+ */
+export function selectWorkShellLiveTraceLines(
+  lines: readonly string[] | undefined,
+): readonly string[] {
+  if (!lines) return [];
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim();
+    if (line) return [line];
+  }
+  return [];
+}
+
 
 export function WorkShellView(props: {
   readonly provider: string;
@@ -3199,6 +3243,8 @@ export function WorkShellView(props: {
   readonly terminalRows?: number;
   /** Task 11 scrollback: transcript entries hidden below the window. */
   readonly transcriptScrollOffset?: number;
+  /** Exact non-transcript row budget supplied by the pane controller. */
+  readonly transcriptReservedRows?: number;
   readonly currentTurnStartedAt?: number;
   readonly lastTurnDurationMs?: number;
   readonly attachmentLines?: readonly string[];
@@ -3220,6 +3266,7 @@ export function WorkShellView(props: {
    * on the quiet default HUD; Task 8 supplies the keyboard that opens it.
    */
   readonly agentConsoleView?: AgentConsoleViewState;
+  readonly decisionSelectedIndex?: number;
   /** `/auth` OMP provider catalog, injected at the pane boundary. */
   readonly ompAuthCatalog?: OmpAuthPickerCatalog;
   readonly ompAuthPickerCursor?: number;
@@ -3302,6 +3349,9 @@ export function WorkShellView(props: {
     props.agentConsole?.lastTurnPerformance,
     getWorkShellDockWidth(props.terminalColumns),
   );
+  const visibleLiveToolTraceLines = props.traceMode === "verbose"
+    ? selectWorkShellLiveTraceLines(props.liveToolTraceLines)
+    : [];
   const agentConsoleOpen = props.agentConsole !== undefined && props.agentConsoleView?.open === true;
   const shouldRenderContextInspectorOverlay =
     props.activePanel.title === "Context expanded" && props.contextPacket !== undefined;
@@ -3323,7 +3373,7 @@ export function WorkShellView(props: {
       && (activeCounts.agents > 0 || activeCounts.jobs > 0),
     hasComposerHint: composerHint !== undefined,
     hasPerformanceReceipt: performanceReceipt !== undefined,
-    liveTraceLineCount: props.liveToolTraceLines?.length ?? 0,
+    liveTraceLineCount: visibleLiveToolTraceLines.length,
   });
 
   const conversation = (
@@ -3338,6 +3388,9 @@ export function WorkShellView(props: {
       {...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {})}
       {...(props.transcriptScrollOffset !== undefined
         ? { scrollOffset: props.transcriptScrollOffset }
+        : {})}
+      {...(props.transcriptReservedRows !== undefined
+        ? { reservedRows: props.transcriptReservedRows }
         : {})}
     />
   );
@@ -3391,8 +3444,8 @@ export function WorkShellView(props: {
         uiLocale={props.uiLocale ?? "en"}
         {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
         {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
-        {...(props.liveToolTraceLines && props.liveToolTraceLines.length > 0
-          ? { liveToolTraceLines: props.liveToolTraceLines }
+        {...(visibleLiveToolTraceLines.length > 0
+          ? { liveToolTraceLines: visibleLiveToolTraceLines }
           : {})}
         clock={clock}
         {...(activeCounts ? { activeCounts } : {})}
@@ -3623,6 +3676,9 @@ export function WorkShellView(props: {
       {pendingDecisionRequest ? (
         <WorkShellDecisionBar
           request={pendingDecisionRequest}
+          {...(props.decisionSelectedIndex !== undefined
+            ? { selectedIndex: props.decisionSelectedIndex }
+            : {})}
           {...(decisionInputNeededLine
             ? { inputNeededLine: decisionInputNeededLine }
             : {})}

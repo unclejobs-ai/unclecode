@@ -189,11 +189,14 @@ export function WorkShellPane<
     composerResetEpoch,
     engineState,
     transcriptScrollOffset,
+    transcriptReservedRows,
     composerPreview,
     activePanel,
     queueSelectedId,
     slashSuggestionCount,
     selectedSlashCommand,
+    decisionSelectedIndex,
+    decisionSelectionActive,
     contextAdviceKeyActionsEnabled,
     contextPinKeyActionsEnabled,
     contextDeliveryKeyActionsEnabled,
@@ -298,6 +301,7 @@ export function WorkShellPane<
     isBusy || (agentConsole !== undefined && hasActiveAgentConsoleWork(agentConsole)),
   );
   const isSecureApiKeyEntry = engineState.composerMode === "api-key-entry";
+  const decisionSelectionOwnsCursor = decisionSelectionActive && isRawComposerEmpty(inputValue);
   // Most recent rejection reason from the clipboard capture or cap gate.
   // Surfaces in the attachment preview area so the user sees one line of
   // explanation instead of a paste silently disappearing. Auto-clears when
@@ -313,14 +317,11 @@ export function WorkShellPane<
     () => props.getReasoningLabel(reasoning),
     [props.getReasoningLabel, reasoning],
   );
-  // Task 10: the dock's live tool feed carries only the trace tail — what the
-  // running turn touched most recently. The feed reads the engine's
-  // always-filled liveTraceLines buffer (cap 8, every trace mode), not the
-  // verbose-only traceLines, so it stays alive in default (minimal) mode.
-  // The transcript's own trace filtering is untouched; these raw lines never
-  // enter the conversation rail.
+  // Ctrl+O is the sole tool-history disclosure control. The pane retains only
+  // the newest live state for verbose mode; the default minimal frame carries
+  // the current activity row without replaying start/completion trace pairs.
   const liveToolTraceLines = liveTraceLines !== undefined && liveTraceLines.length > 0
-    ? liveTraceLines.slice(-3)
+    ? liveTraceLines.slice(-1)
     : undefined;
   const reasoningSupported = React.useMemo(
     () => props.isReasoningSupported(reasoning),
@@ -493,10 +494,12 @@ export function WorkShellPane<
       {...(modelWindow !== undefined ? { modelWindow } : {})}
       {...(agentConsole ? { agentConsole } : {})}
       {...(agentConsoleView ? { agentConsoleView } : {})}
+      {...(decisionSelectionActive ? { decisionSelectedIndex } : {})}
       {...(attachmentLines ? { attachmentLines } : {})}
       {...(pendingClipboardAttachmentCount > 0 ? { attachmentCount: pendingClipboardAttachmentCount } : {})}
       {...{ terminalRows }}
       {...(transcriptScrollOffset > 0 ? { transcriptScrollOffset } : {})}
+      transcriptReservedRows={transcriptReservedRows}
       {...(authPickerActive && authPicker.catalog ? { ompAuthCatalog: authPicker.catalog } : {})}
       ompAuthPickerCursor={authPicker.cursor}
       {...(authPickerActive && authPicker.signInReceipt ? { ompAuthSignInReceipt: authPicker.signInReceipt } : {})}
@@ -582,12 +585,15 @@ export function WorkShellPane<
           }}
           terminalColumns={terminalColumns}
           textColor={getWorkShellComposerTextColor()}
-          placeholder={getWorkShellMessages(uiLocale ?? "en").composerPlaceholder}
+          placeholder={decisionSelectionOwnsCursor
+            ? getWorkShellMessages(uiLocale ?? "en").decisionComposerPlaceholder
+            : getWorkShellMessages(uiLocale ?? "en").composerPlaceholder}
           {...(isSecureApiKeyEntry ? { mask: "•" } : {})}
           cursorVisible={
             !shouldSuppressComposerKeysForInspector
             && !shouldSuppressComposerKeysForTelemetry
             && !agentConsoleOwnsKeyboard
+            && !decisionSelectionOwnsCursor
           }
           {...(suppressAgentConsoleKey ? { suppressAgentConsoleKey } : {})}
           suppressShellActionKeys={suppressShellActionKeys}

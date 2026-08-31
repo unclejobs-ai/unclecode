@@ -580,6 +580,9 @@ export type ShellActionKeyOwnershipState = {
   readonly ctrl: boolean;
   /** Whether the keystroke was Esc (Ink delivers it with an empty `input`). */
   readonly escape?: boolean | undefined;
+  readonly upArrow?: boolean | undefined;
+  readonly downArrow?: boolean | undefined;
+  readonly return?: boolean | undefined;
   /** Whether the composer is raw-empty (no pending local draft either). */
   readonly composerEmpty: boolean;
   /** Whether the conversation transcript already has entries. */
@@ -645,6 +648,12 @@ export function resolveShellActionKeyOwnership(
   // swallowed without an action behind it.
   if (state.decisionPending) {
     if (state.escape) {
+      return "decision";
+    }
+    if (
+      state.decisionOptionCount !== undefined
+      && (state.upArrow || state.downArrow || state.return)
+    ) {
       return "decision";
     }
     if (isDecisionOneKeyDigit(state.input, state.decisionOptionCount)) {
@@ -777,6 +786,8 @@ export function useWorkShellInputController(input: {
   /** Decision bar capability probes — wired by engines that own decisions. */
   readonly submitPendingDecisionText?: ((value: string, decisionId: string) => boolean | Promise<boolean>) | undefined;
   readonly answerPendingDecisionByIndex?: ((index: number, decisionId: string) => boolean | Promise<boolean>) | undefined;
+  readonly movePendingDecisionSelection?: ((delta: -1 | 1) => void) | undefined;
+  readonly answerPendingDecisionSelection?: ((decisionId: string) => boolean | Promise<boolean>) | undefined;
   readonly cancelPendingDecision?: ((decisionId: string) => boolean | Promise<boolean>) | undefined;
   readonly queueOverlayOpen?: boolean | undefined;
   readonly queueSelectedId?: number | undefined;
@@ -1187,6 +1198,9 @@ export function useWorkShellInputController(input: {
       input: value,
       ctrl: key.ctrl === true,
       escape: key.escape === true,
+      upArrow: key.upArrow === true,
+      downArrow: key.downArrow === true,
+      return: key.return === true,
       composerEmpty: composerRawEmpty,
       hasConversation: input.hasConversation ?? true,
       isBusy: input.isBusy,
@@ -1214,6 +1228,21 @@ export function useWorkShellInputController(input: {
     // decision, so consuming it here keeps the Rust Esc ladder (busy-turn
     // interrupt, overlay close) untouched whenever no decision is pending.
     if (shellActionOwnership === "decision") {
+      if (key.upArrow && input.movePendingDecisionSelection) {
+        input.movePendingDecisionSelection(-1);
+        return;
+      }
+      if (key.downArrow && input.movePendingDecisionSelection) {
+        input.movePendingDecisionSelection(1);
+        return;
+      }
+      if (key.return && input.answerPendingDecisionSelection && input.pendingDecisionId) {
+        const decisionId = input.pendingDecisionId;
+        void Promise.resolve()
+          .then(() => input.answerPendingDecisionSelection?.(decisionId))
+          .catch(() => undefined);
+        return;
+      }
       if (key.escape && input.cancelPendingDecision && input.pendingDecisionId) {
         escapeResetArmedAtRef.current = undefined;
         const decisionId = input.pendingDecisionId;
@@ -1549,6 +1578,25 @@ export function useWorkShellPaneState<
     engineState.streamingAssistantText,
   );
   const transcriptRowWidth = Math.max(8, (input.terminalColumns ?? 80) - 4);
+  // The SCC/Agent Console quiet HUD expands the original ten-row shell budget
+  // to thirteen. A pending single-question decision is also pinned below the
+  // transcript: margin + header + options + hint, with one conservative row
+  // for rejection feedback. Reserve that variable height before row-slicing,
+  // otherwise Yoga shrinks the already-sliced reply and creates holes in it.
+  const pendingDecisionForTranscriptBudget = engineState.agentConsole?.pendingDecision;
+  const singleDecisionForTranscriptBudget =
+    pendingDecisionForTranscriptBudget?.questions.length === 1
+      ? pendingDecisionForTranscriptBudget.questions[0]
+      : undefined;
+  const decisionReservedRows = pendingDecisionForTranscriptBudget === undefined
+    ? 0
+    : singleDecisionForTranscriptBudget === undefined
+      // Multi-question decisions render a pinned margin + header and can add
+      // one rejected-input feedback row even though they have no option list.
+      ? 3
+      : singleDecisionForTranscriptBudget.options.length + 4;
+  const transcriptReservedRows =
+    (engineState.agentConsole === undefined ? 10 : 13) + decisionReservedRows;
   // The scroll position is content-addressed, not a mutable row delta. New
   // entries, streaming updates, and terminal resize all recompute from the
   // same entry id + intra-entry row and therefore cannot reinterpret wrapping
@@ -1575,7 +1623,10 @@ export function useWorkShellPaneState<
           currentAnchor,
           engineState.traceMode ?? "verbose",
         );
-        const transcriptPageRows = getWorkShellTranscriptAvailableRows(input.terminalRows);
+        const transcriptPageRows = getWorkShellTranscriptAvailableRows(
+          input.terminalRows,
+          transcriptReservedRows + (engineState.agentConsole === undefined ? 0 : 1),
+        );
         const totalRows = visibleEntries.reduce(
           (sum, entry) => sum + measureWorkShellEntryRows(entry, rowWidth, engineState.traceMode ?? "verbose"),
           0,
@@ -1592,7 +1643,7 @@ export function useWorkShellPaneState<
         );
       });
     },
-    [engineState.entries, engineState.streamingAssistantText, engineState.traceMode, input.terminalColumns, input.terminalRows],
+    [engineState.entries, engineState.streamingAssistantText, engineState.traceMode, input.terminalColumns, input.terminalRows, transcriptReservedRows],
   );
   const returnTranscriptToNewest = useCallback(() => {
     setTranscriptAnchor(undefined);
@@ -1961,17 +2012,65 @@ export function useWorkShellPaneState<
   const decisionOneKeyWired = input.engine.answerPendingDecisionByIndex !== undefined
     && input.engine.cancelPendingDecision !== undefined;
   const decisionPending = decisionOneKeyWired && pendingDecisionRequest !== undefined;
+  const decisionSelectionActive = decisionPending && decisionSingleQuestion !== undefined;
   const decisionOptionCount = decisionSingleQuestion?.options.length;
+  const [decisionSelection, setDecisionSelection] = useState<{
+    readonly decisionId: string;
+    readonly index: number;
+  } | undefined>(undefined);
+  const defaultDecisionSelection = Math.max(
+    0,
+    Math.min(
+      Math.max(0, (decisionOptionCount ?? 1) - 1),
+      decisionSingleQuestion?.recommended ?? 0,
+    ),
+  );
+  const decisionSelectedIndex = decisionSelection !== undefined
+    && decisionSelection.decisionId === pendingDecisionRequest?.id
+    ? Math.max(0, Math.min(Math.max(0, (decisionOptionCount ?? 1) - 1), decisionSelection.index))
+    : defaultDecisionSelection;
+  const decisionSelectionRef = useRef({
+    decisionId: pendingDecisionRequest?.id,
+    index: decisionSelectedIndex,
+  });
+  decisionSelectionRef.current = {
+    decisionId: pendingDecisionRequest?.id,
+    index: decisionSelectedIndex,
+  };
+  const movePendingDecisionSelection = useCallback((delta: -1 | 1) => {
+    const request = input.engine.getState().agentConsole?.pendingDecision;
+    const question = request?.questions.length === 1 ? request.questions[0] : undefined;
+    if (!request || !question || question.options.length === 0) return;
+    const current = decisionSelectionRef.current.decisionId === request.id
+      ? decisionSelectionRef.current.index
+      : Math.max(0, Math.min(question.options.length - 1, question.recommended ?? 0));
+    const index = Math.max(0, Math.min(question.options.length - 1, current + delta));
+    decisionSelectionRef.current = { decisionId: request.id, index };
+    setDecisionSelection({ decisionId: request.id, index });
+  }, [input.engine]);
+  const answerPendingDecisionSelection = useCallback((decisionId: string) => {
+    const selection = decisionSelectionRef.current;
+    if (selection.decisionId !== decisionId) return false;
+    return input.engine.answerPendingDecisionByIndex?.(selection.index + 1, decisionId) ?? false;
+  }, [input.engine]);
 
   // The Composer asks the same shared ownership predicate the input
   // controller dispatched on, so a shell action character (a starter digit,
   // a decision one-key reply) never also lands in the draft. Ctrl chords
   // arrive as control codes, which the predicate's exact character match
   // already rejects, so the keystroke's ctrl flag is not needed on this side.
-  const suppressShellActionKeys = (value: string, composerEmpty: boolean): boolean =>
+  const suppressShellActionKeys = (
+    value: string,
+    composerEmpty: boolean,
+    key: AgentConsoleKeyState,
+  ): boolean =>
     resolveShellActionKeyOwnership({
       input: value,
       ctrl: false,
+      escape: key.escape === true,
+      upArrow: key.upArrow === true,
+      downArrow: key.downArrow === true,
+      return: key.return === true,
       composerEmpty,
       hasConversation: engineState.entries.some(shouldShowWorkShellConversationEntry),
       isBusy: engineState.isBusy,
@@ -2057,6 +2156,12 @@ export function useWorkShellPaneState<
       ? {
           answerPendingDecisionByIndex: (index: number, decisionId: string) =>
             input.engine.answerPendingDecisionByIndex?.(index, decisionId) ?? false,
+        }
+      : {}),
+    ...(decisionSingleQuestion && input.engine.answerPendingDecisionByIndex
+      ? {
+          movePendingDecisionSelection,
+          answerPendingDecisionSelection,
         }
       : {}),
     ...(input.engine.cancelPendingDecision
@@ -2265,11 +2370,14 @@ export function useWorkShellPaneState<
     engineState,
     /** Task 11 scrollback: entries hidden below the transcript window. */
     transcriptScrollOffset,
+    transcriptReservedRows,
     composerPreview,
     activePanel: presentedActivePanel,
     queueSelectedId,
     slashSuggestionCount: slashSuggestions.length,
     selectedSlashCommand: selectedSuggestion?.command,
+    decisionSelectedIndex,
+    decisionSelectionActive,
     contextAdviceKeyActionsEnabled: contextAdviceActionsAvailable,
     contextUndoKeyActionsEnabled: contextUndoActionsAvailable,
     contextPinKeyActionsEnabled: contextPinActionsAvailable,

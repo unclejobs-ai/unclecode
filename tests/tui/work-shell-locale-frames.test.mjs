@@ -87,13 +87,12 @@ test("review frame exposes Korean Quality Engine chrome without changing evidenc
   };
   const ko = await frame({
     uiLocale: "ko", agentConsole: snapshot,
-    agentConsoleView: { open: true, tab: "quality", cursor: 0, activePane: "roster", inspectorVisible: false, control: { kind: "browse" } },
+    agentConsoleView: { open: true, tab: "quality", cursor: 0, activePane: "roster", inspectorVisible: true, control: { kind: "browse" } },
   });
-  assert.match(ko, /품질 엔진 \(SCC\) · 심층 · 비평 · PDCA 점검 · 반복 2/u);
-  assert.match(ko, /게이트 · 미입증/u);
-  assert.match(ko, /비평 결과 · 기록 없음/u);
-  assert.match(ko, /기록 · 개선 1 · 전환 0/u);
-  assert.match(ko, /정리 · 인계\/종합 전용/u);
+  assert.match(ko, /SCC · 미입증 · 심층/u);
+  assert.match(ko, /확인 · 기록된 산출물 검증 없음; 독립 검토는 미입증/u);
+  assert.match(ko, /검토 · 독립 검토 없음/u);
+  assert.match(ko, /다음 · \/scc review <대상>으로 독립 검토/u);
   assert.match(ko, /검증값-EXACT/u);
   assert.match(ko, /evidence:원문-EXACT/u);
   assert.doesNotMatch(

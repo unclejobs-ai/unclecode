@@ -18,6 +18,7 @@ import {
 } from "@unclecode/tui";
 import { applyTraceEventToAgentConsole } from "@unclecode/orchestrator";
 import { parseAgentConsoleSnapshot } from "@unclecode/contracts";
+import { selectRecordedEvolutionProposalLines } from "../../packages/tui/src/evolution-proposal-lines.ts";
 
 function node(id, status, overrides = {}) {
   return {
@@ -85,14 +86,14 @@ test("expanded quality HUD exposes the complete graph without mixing agents or j
 
 test("quality review lines name stale/unproven evidence and synthesis-only promote", () => {
   const lines = selectQualityReviewLines(snapshot(), 100);
-  assert.match(lines.join("\n"), /Gate · unproven/);
-  assert.match(lines.join("\n"), /independent review evidence is missing or stale/i);
-  assert.match(lines.join("\n"), /Promote · handoff\/synthesis only/i);
+  assert.match(lines.join("\n"), /SCC · Unproven · deep/);
+  assert.match(lines.join("\n"), /independent review unproven/i);
+  assert.match(lines.join("\n"), /Next · run \/scc review <target>/i);
   assert.doesNotMatch(lines.join("\n"), /deploy|publish|merge|release/i);
 });
 
 test("quality review renders explicit hash freshness, route, reviewer run, and bounded attempt", () => {
-  const lines = selectQualityReviewLines(snapshot({
+  const state = snapshot({
     qualityReview: {
       runId: "run-quality",
       graphId: "graph-1",
@@ -121,17 +122,24 @@ test("quality review renders explicit hash freshness, route, reviewer run, and b
         startedAt: 20,
       }],
     },
-  }), 100).join("\n");
+  });
+  const review = state.qualityReview.history[0];
+  const detail = selectAgentConsoleInspector(state, { tab: "quality", review }, 100, 100);
+  assert.ok(detail);
+  const lines = [
+    ...detail.facts.map((fact) => `${fact.label} · ${fact.value}`),
+    ...detail.timeline,
+  ].join("\n");
   assert.match(lines, /Reviewer run · review-run-2/);
   assert.match(lines, /Route · frontier · anthropic · claude-review/);
   assert.match(lines, /Reviewed hash · sha256:reviewed/);
   assert.match(lines, /Current hash · sha256:current · stale/);
-  assert.match(lines, /Refine attempt · 2\/3/);
+  assert.match(lines, /Attempt · 2\/3/);
 });
 
 test("quality detail progressively discloses only recorded evolution evidence", () => {
   const hash = `sha256:${"a".repeat(64)}`;
-  const lines = selectQualityReviewLines(snapshot({
+  const state = snapshot({
     qualityReview: {
       runId: "run-creator",
       graphId: "graph-1",
@@ -197,7 +205,8 @@ test("quality detail progressively discloses only recorded evolution evidence", 
       artifactRefs: [".unclecode/artifacts/run-creator/evolution-proposal.json"],
       createdAt: "2026-08-28T12:00:00.000Z",
     }],
-  }), 140).join("\n");
+  });
+  const lines = selectRecordedEvolutionProposalLines(state.evolutionProposals.at(-1), 140).join("\n");
 
   assert.match(lines, /Evolution · pr-ready · recorded/);
   assert.match(lines, /Isolation · worktree · unclecode\/evolve\/run-creator · attested/);
@@ -276,13 +285,11 @@ test("quality completed resume keeps completion status and the last evidence-bea
   assert.ok(resumed);
 
   const review = selectQualityReviewLines(resumed, 120).join("\n");
-  assert.match(review, /Completion · promote · proceed/);
-  assert.match(review, /Reason · Independent critic verified the final artifact/);
-  assert.match(review, /Critic finding · critic finding retained/);
-  assert.match(review, /Evidence · evidence:held-out-tests/);
-  assert.match(review, /Reviewed hash · sha256:reviewed-final/);
-  assert.match(review, /Route · frontier · anthropic · claude-review/);
-  assert.match(review, /Reviewer · critic:anthropic:claude-review · independent/);
+  assert.match(review, /SCC · Passed · deep/);
+  assert.match(review, /Checked · artifact integrity and independent review/);
+  assert.match(review, /Review · independently reviewed/);
+  assert.match(review, /Next · no action/);
+  assert.doesNotMatch(review, /sha256:|evidence:|critic finding retained/);
 
   const criticNode = resumed.workGraph.nodes[0];
   const detail = selectAgentConsoleInspector(
@@ -354,10 +361,105 @@ test("graph-less minimal quality traces remain visible and truthful through resu
   const hud = selectWorkGraphHudRows(resumed, 100).join("\n");
   assert.equal(hud, "Quality Engine · minimal · Gate proceed · /scc details");
   const review = selectQualityReviewLines(resumed, 100).join("\n");
-  assert.match(review, /Quality Engine \(SCC\) · minimal · promote/);
-  assert.match(review, /Artifact hash · sha256:turn-output/);
-  assert.match(review, /not independent/);
-  assert.doesNotMatch(review, /independent · proven|Critic findings · none open/);
+  assert.match(review, /SCC · Passed · minimal/);
+  assert.match(review, /Checked · completion and artifact integrity/);
+  assert.match(review, /Review · independent critic not required by minimal profile/);
+  assert.doesNotMatch(review, /Artifact hash|sha256:turn-output|not independent/);
+});
+
+test("graph-less minimal quality never invents an artifact check from absent, stale, or incomplete evidence", () => {
+  const noEvidence = {
+    profileId: "build",
+    activity: [],
+    agents: [],
+    jobs: [],
+    qualityReview: {
+      runId: "run-minimal-no-evidence",
+      graphId: "quality:run-minimal-no-evidence",
+      profile: "minimal",
+      currentStage: "work",
+      iteration: 0,
+      refineCount: 0,
+      pivotCount: 0,
+      latestDecision: "unproven",
+      history: [],
+    },
+  };
+
+  const english = selectQualityReviewLines(noEvidence, 100).join("\n");
+  assert.match(english, /Checked · completion state; no recorded artifact check/);
+  assert.match(english, /Review · independent critic not required by minimal profile/);
+  assert.doesNotMatch(english, /completion and artifact integrity|critic skipped/);
+
+  const staleEvidence = {
+    ...noEvidence,
+    qualityReview: {
+      ...noEvidence.qualityReview,
+      history: [{
+        event: "gate",
+        stage: "work",
+        decision: "unproven",
+        iteration: 0,
+        failures: [],
+        evidenceRefs: ["evidence:stale-turn"],
+        artifactRefs: ["artifact:stale-turn"],
+        artifactHash: "sha256:stale-turn",
+        independentVerification: false,
+        stale: true,
+        startedAt: 1,
+      }],
+    },
+  };
+  const korean = selectQualityReviewLines(staleEvidence, 100, "ko").join("\n");
+  assert.match(korean, /확인 · 완료 상태; 기록된 산출물 검증 없음/);
+  assert.match(korean, /검토 · 최소 프로필은 독립 critic 검토를 요구하지 않음/);
+  assert.doesNotMatch(korean, /완료 상태와 산출물 무결성|critic 생략/);
+
+  const incompleteEvidence = [
+    {
+      label: "evidence-ref-only",
+      evidenceRefs: ["evidence:turn-output"],
+    },
+    {
+      label: "current-hash-only",
+      currentArtifactHash: "sha256:current-only",
+    },
+  ];
+  for (const [index, partial] of incompleteEvidence.entries()) {
+    const state = {
+      ...noEvidence,
+      qualityReview: {
+        ...noEvidence.qualityReview,
+        history: [{
+          event: "gate",
+          stage: "work",
+          decision: "unproven",
+          iteration: 0,
+          failures: [],
+          evidenceRefs: [],
+          artifactRefs: [],
+          independentVerification: false,
+          stale: false,
+          startedAt: index + 2,
+          ...partial,
+        }],
+      },
+    };
+    const incompleteEnglish = selectQualityReviewLines(state, 100).join("\n");
+    const incompleteKorean = selectQualityReviewLines(state, 100, "ko").join("\n");
+    assert.match(
+      incompleteEnglish,
+      /Checked · completion state; no recorded artifact check/,
+      partial.label,
+    );
+    assert.match(
+      incompleteKorean,
+      /확인 · 완료 상태; 기록된 산출물 검증 없음/,
+      partial.label,
+    );
+    assert.doesNotMatch(incompleteEnglish, /completion and artifact integrity/, partial.label);
+    assert.doesNotMatch(incompleteKorean, /완료 상태와 산출물 무결성/, partial.label);
+  }
 });
 
 test("transcript window measures wrapped Korean and reports earlier/newer rendered rows", () => {
