@@ -1092,7 +1092,11 @@ test("Work pane publishes only the resized bottom-dock cursor row", async () => 
   instance.cleanup();
 
   const visiblePositions = positions.filter((position) => position !== undefined);
-  assert.equal(visiblePositions.at(-1)?.y, 28, "the prompt remains directly above its footer");
+  assert.equal(
+    visiblePositions.at(-1)?.y,
+    29,
+    "the hardware cursor stays on the painted prompt instead of the divider above it",
+  );
   assert.equal(
     visiblePositions.some((position) => position.y === 38),
     false,

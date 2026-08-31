@@ -22,6 +22,8 @@ const LEAVE_ALTERNATE_SCREEN = `${ESC}[?1049l`;
 /** Hide/show the hardware cursor; Ink draws its own. */
 const HIDE_CURSOR = `${ESC}[?25l`;
 const SHOW_CURSOR = `${ESC}[?25h`;
+const ENABLE_MOUSE_TRACKING = `${ESC}[?1000h${ESC}[?1006h`;
+const DISABLE_MOUSE_TRACKING = `${ESC}[?1006l${ESC}[?1000l`;
 
 export type AltScreenSession = {
   /** Idempotent — safe to call from both the exit path and a signal handler. */
@@ -30,6 +32,21 @@ export type AltScreenSession = {
 };
 
 const INACTIVE: AltScreenSession = { restore: () => {}, active: false };
+
+/** Enable SGR mouse reporting while the work pane owns transcript scrolling. */
+export function enterMouseTracking(stdout: NodeJS.WriteStream = process.stdout): AltScreenSession {
+  if (!stdout.isTTY || process.env.UNCLECODE_DISABLE_ALT_SCREEN === "1") return INACTIVE;
+  let restored = false;
+  stdout.write(ENABLE_MOUSE_TRACKING);
+  return {
+    active: true,
+    restore: () => {
+      if (restored) return;
+      restored = true;
+      stdout.write(DISABLE_MOUSE_TRACKING);
+    },
+  };
+}
 
 /**
  * Enter the alternate screen, returning a restore handle.
@@ -49,7 +66,7 @@ export function enterAlternateScreen(stdout: NodeJS.WriteStream = process.stdout
     restored = true;
     process.off("exit", onExit);
     for (const signal of FATAL_SIGNALS) process.off(signal, onSignal);
-    stdout.write(`${SHOW_CURSOR}${LEAVE_ALTERNATE_SCREEN}`);
+    stdout.write(`${DISABLE_MOUSE_TRACKING}${SHOW_CURSOR}${LEAVE_ALTERNATE_SCREEN}`);
   };
 
   const onExit = (): void => { restore(); };
@@ -76,4 +93,6 @@ export const ALT_SCREEN_SEQUENCES = {
   leave: LEAVE_ALTERNATE_SCREEN,
   hideCursor: HIDE_CURSOR,
   showCursor: SHOW_CURSOR,
+  enableMouseTracking: ENABLE_MOUSE_TRACKING,
+  disableMouseTracking: DISABLE_MOUSE_TRACKING,
 } as const;

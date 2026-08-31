@@ -17,6 +17,7 @@ export type { ClipboardImageResult };
 const COMPOSER_PASTE_THRESHOLD = 48;
 const PASTE_SETTLE_MS = 120;
 const BRACKETED_PASTE_ARTIFACT_PATTERN = /(?:\u001b\[(?:200|201|990)~|\[(?:200|201|990)~)/g;
+const TERMINAL_MOUSE_ARTIFACT_PATTERN = /(?:\u001b)?\[<\d+;\d+;\d+[mM]/g;
 const NON_TEXT_CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const COMPOSER_DEFAULT_VISIBLE_WIDTH = 72;
 const COMPOSER_MAX_VISIBLE_ROWS = 4;
@@ -45,6 +46,7 @@ export function isRawComposerEmpty(value: string, pendingValue?: string): boolea
 export function sanitizeComposerInput(value: string): string {
   return value
     .replace(BRACKETED_PASTE_ARTIFACT_PATTERN, "")
+    .replace(TERMINAL_MOUSE_ARTIFACT_PATTERN, "")
     .replace(NON_TEXT_CONTROL_PATTERN, "");
 }
 

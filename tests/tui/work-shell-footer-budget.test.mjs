@@ -156,6 +156,17 @@ test("footer compacts the path to its basename before it drops the cost", () => 
   assert.equal(footer.length, 56);
 });
 
+test("footer keeps all compact runtime facts when they fit at medium widths", () => {
+  const footer = workspaceFooter({
+    performance: "TTFT 6.6s · cache HIT",
+    width: 78,
+  });
+
+  assert.match(footer, /TTFT 6\.6s · cache HIT · \$1\.16$/u);
+  assert.match(footer, /25%\/272K/u);
+  assert.equal(footer.length, 78);
+});
+
 test("footer drops the cost only after the path is already a basename, never the dirty markers", () => {
   const footer = workspaceFooter({ width: 44 });
 

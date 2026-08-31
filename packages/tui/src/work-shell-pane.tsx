@@ -13,6 +13,7 @@ import {
   handleComposerClipboardPaste,
   isRawComposerEmpty,
 } from "./composer.js";
+import { enterMouseTracking } from "./alt-screen.js";
 import {
   buildAttachmentPreviewLines,
   formatAttachmentErrorLine,
@@ -172,6 +173,7 @@ export function WorkShellPane<
   const { stdout } = useStdout();
   const [terminalColumns, setTerminalColumns] = React.useState(() => resolveWorkShellPaneTerminalColumns(stdout));
   const [terminalRows, setTerminalRows] = React.useState(() => resolveWorkShellPaneTerminalRows(stdout));
+  React.useEffect(() => enterMouseTracking(stdout).restore, [stdout]);
   React.useEffect(() => {
     const updateTerminalSize = () => {
       setTerminalColumns(resolveWorkShellPaneTerminalColumns(stdout));

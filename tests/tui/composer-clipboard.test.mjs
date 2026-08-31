@@ -103,6 +103,7 @@ test("text-paste sanitizer and threshold heuristic remain wired alongside clipbo
   // Sanity check that exporting handleComposerClipboardPaste did not regress
   // the existing pure helpers consumers rely on.
   assert.equal(sanitizeComposerInput("hi[200~paste[201~"), "hipaste");
+  assert.equal(sanitizeComposerInput("hi[<64;12;8Mthere[<65;12;8M"), "hithere");
   assert.equal(shouldTreatComposerChangeAsPaste("a", "a".repeat(80)), true);
   assert.equal(shouldTreatComposerChangeAsPaste("foo", "foo bar"), false);
 });

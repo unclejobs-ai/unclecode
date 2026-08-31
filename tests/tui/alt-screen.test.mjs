@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ALT_SCREEN_SEQUENCES,
   enterAlternateScreen,
+  enterMouseTracking,
 } from "../../packages/tui/src/alt-screen.ts";
 import {
   RUNTIME_CONNECTION_STATUS,
@@ -46,8 +47,27 @@ test("entering the alternate screen swaps the buffer and hides the cursor", () =
     session.restore();
     assert.equal(
       stdout.output,
-      `${ALT_SCREEN_SEQUENCES.enter}${ALT_SCREEN_SEQUENCES.hideCursor}${ALT_SCREEN_SEQUENCES.showCursor}${ALT_SCREEN_SEQUENCES.leave}`,
+      `${ALT_SCREEN_SEQUENCES.enter}${ALT_SCREEN_SEQUENCES.hideCursor}${ALT_SCREEN_SEQUENCES.disableMouseTracking}${ALT_SCREEN_SEQUENCES.showCursor}${ALT_SCREEN_SEQUENCES.leave}`,
     );
+  });
+});
+
+test("mouse tracking is scoped to the work pane and restores idempotently", () => {
+  withoutDisableFlag(() => {
+    const stdout = fakeStdout();
+    const session = enterMouseTracking(stdout);
+
+    assert.equal(session.active, true);
+    assert.equal(stdout.output, ALT_SCREEN_SEQUENCES.enableMouseTracking);
+
+    session.restore();
+    const restored = stdout.output;
+    assert.equal(
+      restored,
+      `${ALT_SCREEN_SEQUENCES.enableMouseTracking}${ALT_SCREEN_SEQUENCES.disableMouseTracking}`,
+    );
+    session.restore();
+    assert.equal(stdout.output, restored);
   });
 });
 
@@ -71,6 +91,11 @@ test("a non-TTY stdout is left completely alone", () => {
     assert.equal(session.active, false);
     assert.equal(stdout.output, "");
     session.restore();
+    assert.equal(stdout.output, "");
+
+    const mouse = enterMouseTracking(stdout);
+    assert.equal(mouse.active, false);
+    mouse.restore();
     assert.equal(stdout.output, "");
   });
 });

@@ -2,6 +2,7 @@
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { extractNodeTestFailures } from "./health-qa/node-test-failures.mjs";
 import {
   hasDoctorJsonAuthContract,
   hasLiveProviderReportContract,
@@ -141,7 +142,8 @@ function printFailure(check, result, accepted) {
     : result.code === 0 && !accepted ? "contract check failed" : `exit ${result.code}`;
   process.stderr.write(`\n${check.label} failed with ${reason}\n`);
   if (output) {
-    process.stderr.write(`${tailLines(output, 80)}\n`);
+    const nodeTestFailures = check.label.endsWith(" tests") ? extractNodeTestFailures(output) : "";
+    process.stderr.write(`${nodeTestFailures || tailLines(output, 80)}\n`);
   }
   const recovery = recoveryHintForFailure(check, output);
   if (recovery) {

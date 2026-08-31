@@ -7,7 +7,75 @@ import {
   summarizeDoctorJson,
   summarizeRuntimeReport,
 } from "../../scripts/health-qa/summary.mjs";
+import { extractNodeTestFailures } from "../../scripts/health-qa/node-test-failures.mjs";
 import { hasRuntimeEvidenceContract } from "../../scripts/runtime-qa/report-evidence.mjs";
+
+test("extractNodeTestFailures preserves failing TAP blocks that precede a long successful tail", () => {
+  const output = [
+    "TAP version 13",
+    "# Subtest: keeps scrolling",
+    "not ok 4 - keeps scrolling",
+    "  ---",
+    "  error: 'expected PageUp to move'",
+    "  ...",
+    ...Array.from({ length: 100 }, (_, index) => `ok ${index + 5} - later ${index}`),
+    "1..104",
+    "# pass 103",
+    "# fail 1",
+  ].join("\n");
+
+  assert.equal(
+    extractNodeTestFailures(output),
+    [
+      "# Subtest: keeps scrolling",
+      "not ok 4 - keeps scrolling",
+      "  ---",
+      "  error: 'expected PageUp to move'",
+      "  ...",
+    ].join("\n"),
+  );
+});
+
+test("extractNodeTestFailures prefers and bounds the aggregate failure report", () => {
+  const output = [
+    "not ok 1 - earlier",
+    "✖ failing tests:",
+    "test at one.mjs:1:1",
+    "✖ first failure",
+    "test at two.mjs:2:2",
+    "✖ second failure",
+  ].join("\n");
+
+  assert.equal(
+    extractNodeTestFailures(output, 3),
+    ["✖ failing tests:", "test at one.mjs:1:1", "✖ first failure"].join("\n"),
+  );
+  assert.equal(extractNodeTestFailures("ok 1 - all good"), "");
+});
+
+test("extractNodeTestFailures reads ANSI aggregate headings and indented nested TAP", () => {
+  assert.equal(
+    extractNodeTestFailures("\u001b[31m✖ failing tests:\u001b[39m\n\u001b[31m✖ colored failure\u001b[39m"),
+    ["✖ failing tests:", "✖ colored failure"].join("\n"),
+  );
+  assert.equal(
+    extractNodeTestFailures([
+      "    # Subtest: nested failure",
+      "    not ok 2 - nested failure",
+      "      ---",
+      "      error: boom",
+      "      ...",
+      "    ok 3 - later",
+    ].join("\n")),
+    [
+      "# Subtest: nested failure",
+      "    not ok 2 - nested failure",
+      "      ---",
+      "      error: boom",
+      "      ...",
+    ].join("\n"),
+  );
+});
 
 test("summarizeDoctorJson keeps structured auth readiness visible", () => {
   const result = {

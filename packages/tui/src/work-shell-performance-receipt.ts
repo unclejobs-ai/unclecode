@@ -77,6 +77,37 @@ export function formatProviderPerformanceReceipt(
   return fitting ?? truncateForDisplayWidth(candidates[candidates.length - 1] ?? "✓", width);
 }
 
+/**
+ * Footer projection for the quiet workspace. The footer already owns the
+ * session cost and its visual hierarchy, so this variant carries only the
+ * last turn's latency/cache/rate facts and does not add a second success icon.
+ */
+export function formatProviderPerformanceStatus(
+  performance: ProviderTurnPerformance | undefined,
+  maxWidth = 120,
+): string | undefined {
+  if (!performance || performance.completedAt === undefined) return undefined;
+  const projection = projectProviderPerformanceReceipt(performance);
+  if (!projection) return undefined;
+
+  const ttft = projection.ttftMs === undefined
+    ? undefined
+    : `TTFT ${formatDuration(projection.ttftMs)}`;
+  const cache = `cache ${projection.cache}`;
+  const speed = projection.tokensPerSecond === undefined
+    ? undefined
+    : `${formatRate(projection.tokensPerSecond)} tok/s`;
+  const candidates = [
+    [ttft, cache, speed],
+    [ttft, cache],
+    [cache, speed],
+    [cache],
+  ].map((parts) => parts.filter((part): part is string => part !== undefined).join(" · "));
+  const width = Number.isFinite(maxWidth) ? Math.max(1, Math.floor(maxWidth)) : 120;
+  const fitting = candidates.find((candidate) => getDisplayWidth(candidate) <= width);
+  return fitting ?? truncateForDisplayWidth(candidates[candidates.length - 1] ?? "", width);
+}
+
 function joinReceiptParts(parts: readonly (string | undefined)[]): string {
   const present = parts.filter((part): part is string => part !== undefined);
   return present.length === 0 ? "✓" : `✓ ${present.join(" · ")}`;

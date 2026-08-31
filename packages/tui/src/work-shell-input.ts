@@ -50,6 +50,7 @@ const WORK_SHELL_TRANSCRIPT_NAVIGATION_NONE: WorkShellTranscriptNavigationAction
 const WORK_SHELL_KITTY_PAGE_UP_RE = /^\u001b\[57421(?:;\d+(?::\d+)?)?u$/u;
 const WORK_SHELL_KITTY_PAGE_DOWN_RE = /^\u001b\[57422(?:;\d+(?::\d+)?)?u$/u;
 const WORK_SHELL_KITTY_END_RE = /^\u001b\[57424(?:;\d+(?::\d+)?)?u$/u;
+const WORK_SHELL_SGR_MOUSE_RE = /\u001b\[<(\d+);\d+;\d+[mM]/gu;
 
 /**
  * Normalize the terminal key paths that Ink exposes to the work-shell
@@ -91,16 +92,37 @@ export function resolveWorkShellTranscriptNavigation(input: {
 export function resolveWorkShellRawTranscriptNavigation(
   value: string,
 ): WorkShellTranscriptNavigationAction {
+  return resolveWorkShellRawTranscriptNavigations(value).at(-1)
+    ?? WORK_SHELL_TRANSCRIPT_NAVIGATION_NONE;
+}
+
+/** Preserve every wheel report when a PTY coalesces a trackpad burst. */
+export function resolveWorkShellRawTranscriptNavigations(
+  value: string,
+): readonly WorkShellTranscriptNavigationAction[] {
+  const mouseActions = [...value.matchAll(WORK_SHELL_SGR_MOUSE_RE)]
+    .map((match): WorkShellTranscriptNavigationAction => {
+      const mouseButton = Number.parseInt(match[1] ?? "", 10);
+      // SGR button codes add Shift/Alt/Ctrl bits (4/8/16) to the base wheel
+      // code. Normalize those modifiers so a trackpad gesture keeps working
+      // while a terminal modifier is held.
+      const baseButton = mouseButton & ~28;
+      if (baseButton === 64) return { type: "page", direction: -1 };
+      if (baseButton === 65) return { type: "page", direction: 1 };
+      return WORK_SHELL_TRANSCRIPT_NAVIGATION_NONE;
+    })
+    .filter((action) => action.type !== "none");
+  if (mouseActions.length > 0) return mouseActions;
   if (isWorkShellKittyKeypadSequence(value, 57421)) {
-    return { type: "page", direction: -1 };
+    return [{ type: "page", direction: -1 }];
   }
   if (isWorkShellKittyKeypadSequence(value, 57422)) {
-    return { type: "page", direction: 1 };
+    return [{ type: "page", direction: 1 }];
   }
   if (isWorkShellKittyKeypadSequence(value, 57424)) {
-    return { type: "latest" };
+    return [{ type: "latest" }];
   }
-  return WORK_SHELL_TRANSCRIPT_NAVIGATION_NONE;
+  return [];
 }
 
 function isWorkShellKittyKeypadSequence(value: string, codepoint: number): boolean {

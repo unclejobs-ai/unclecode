@@ -31,6 +31,8 @@ const KEY_KITTY_PAGE_DOWN = "\u001b[57422u";
 const KEY_END = "\u001b[4~";
 const KEY_KITTY_END = "\u001b[57424u";
 const KEY_ESCAPE = "\u001b";
+const MOUSE_WHEEL_UP = "\u001b[<64;40;12M";
+const MOUSE_WHEEL_DOWN = "\u001b[<65;40;12M";
 
 function padScrollbackIndex(index) {
   return String(index).padStart(4, "0");
@@ -936,6 +938,48 @@ test("Kitty CSI-u PageUp/PageDown scroll the transcript through the real input p
     stdin.write(KEY_KITTY_PAGE_DOWN);
     assert.ok(await waitForNewestEntry(getOutput), "Kitty keypad PageDown must return to the newest entries");
     assert.ok(!getLastWorkFrame(getOutput()).includes("earlier rows"));
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("terminal mouse wheel scrolls the transcript without leaking escape text into the composer", async () => {
+  const { engine, submittedLines } = createWorkShellPaneEngine();
+  const { stdin, instance, getOutput } = renderScrollbackPane(engine);
+
+  try {
+    assert.ok(await waitForNewestEntry(getOutput));
+    stdin.write(MOUSE_WHEEL_UP);
+    assert.ok(
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes("earlier rows")),
+      "wheel up must move away from the newest transcript rows",
+    );
+    assert.doesNotMatch(getLastWorkFrame(getOutput()), /\[<64;40;12M/u);
+    assert.deepEqual(submittedLines, []);
+
+    stdin.write(MOUSE_WHEEL_DOWN);
+    assert.ok(await waitForNewestEntry(getOutput), "wheel down must return toward the newest transcript rows");
+    assert.doesNotMatch(getLastWorkFrame(getOutput()), /\[<65;40;12M/u);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+});
+
+test("coalesced trackpad reports preserve every wheel step in one stdin chunk", async () => {
+  const { engine } = createWorkShellPaneEngine();
+  const { stdin, instance, getOutput } = renderScrollbackPane(engine);
+
+  try {
+    assert.ok(await waitForNewestEntry(getOutput));
+    stdin.write(`${MOUSE_WHEEL_UP}${MOUSE_WHEEL_UP}`);
+    assert.ok(
+      await waitForCondition(() => getLastWorkFrame(getOutput()).includes(
+        `sb-${String(TRANSCRIPT_ENTRY_COUNT - 3 * TRANSCRIPT_CAPACITY).padStart(4, "0")}`,
+      )),
+      "two coalesced wheel reports must move two transcript pages",
+    );
   } finally {
     instance.unmount();
     instance.cleanup();

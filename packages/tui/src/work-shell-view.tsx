@@ -69,7 +69,7 @@ import {
   shouldShowOmpAuthPicker,
   type OmpAuthPickerCatalog,
 } from "./work-shell-auth-provider-picker-model.js";
-import { formatProviderPerformanceReceipt } from "./work-shell-performance-receipt.js";
+import { formatProviderPerformanceStatus } from "./work-shell-performance-receipt.js";
 
 function readWorkShellMonotonicMilliseconds(): number {
   return typeof globalThis.performance?.now === "function"
@@ -1431,6 +1431,7 @@ export function formatWorkShellFooterLine(input: {
   readonly modelWindow?: number;
   readonly gitFacts?: GitFacts;
   readonly cost?: string;
+  readonly performance?: string;
 }): string {
   return formatWorkShellFooterLineFast({
     ...input,
@@ -1536,7 +1537,6 @@ export function resolveWorkShellComposerFrameLayout(input: {
   readonly isBusy?: boolean | undefined;
   readonly hasBackgroundWork?: boolean | undefined;
   readonly hasComposerHint?: boolean | undefined;
-  readonly hasPerformanceReceipt?: boolean | undefined;
   readonly liveTraceLineCount?: number | undefined;
 }): WorkShellComposerFrameLayout {
   const terminalRows = Math.max(1, Math.trunc(input.terminalRows ?? process.stdout.rows ?? 24));
@@ -1547,18 +1547,13 @@ export function resolveWorkShellComposerFrameLayout(input: {
   const traceRows = busy && !compactHeightDock
     ? Math.min(3, Math.max(0, Math.trunc(input.liveTraceLineCount ?? 0)))
     : 0;
-  const showPerformanceReceipt = input.hasPerformanceReceipt === true
-    && !busy
-    && terminalRows >= 18;
   const hintRows = input.hasComposerHint === true
     && !minimalHeightDock
-    && !showPerformanceReceipt
     ? 1
     : 0;
-  const performanceReceiptRows = showPerformanceReceipt ? 1 : 0;
   // Divider + prompt wrapper + footer. The prompt wrapper is represented by
   // the Composer viewport's rows; reserve only the two fixed siblings here.
-  const dockOverheadRows = activityRows + traceRows + hintRows + performanceReceiptRows + 2;
+  const dockOverheadRows = activityRows + traceRows + hintRows + 2;
   const composerBudgetRows = Math.max(1, terminalRows - dockOverheadRows);
   // A long draft can need one marker above and one below the visible viewport.
   // Keep both markers inside the dock whenever possible, while retaining the
@@ -1572,11 +1567,11 @@ export function resolveWorkShellComposerFrameLayout(input: {
     dockOverheadRows,
     maxVisibleRows,
     ...(input.terminalRows !== undefined
-      // Ink cursor positions are zero-based rows inside the rendered frame.
-      // The prompt is immediately above the footer, so its one-row anchor is
-      // terminalRows - 2. This exact row also lets Ink return to the bottom
-      // before an incremental transcript repaint without overwriting content.
-      ? { cursorAnchor: { x: 5, bottom: Math.max(0, terminalRows - 2) } }
+      // Ink's visible-line cursor suffix is calculated from the row after the
+      // rendered frame. The bottom prompt therefore needs the final frame row
+      // as its anchor; subtracting another row paints the hardware/IME cursor
+      // on the divider above the prompt in a real terminal.
+      ? { cursorAnchor: { x: 5, bottom: Math.max(0, terminalRows - 1) } }
       : {}),
   };
 }
@@ -3011,7 +3006,7 @@ const WorkShellDecisionBar = React.memo(function WorkShellDecisionBar(props: {
 const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   readonly composer: React.ReactNode;
   readonly composerHint?: string;
-  readonly performanceReceipt?: string;
+  readonly performanceStatus?: string;
   readonly inputValue: string;
   readonly cwd?: string;
   readonly model: string;
@@ -3059,6 +3054,7 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
     ...(props.branch ? { branch: props.branch } : {}),
     ...(props.gitFacts ? { gitFacts: props.gitFacts } : {}),
     ...(props.cost ? { cost: props.cost } : {}),
+    ...(props.performanceStatus ? { performance: props.performanceStatus } : {}),
     ...(props.modelWindow !== undefined ? { modelWindow: props.modelWindow } : {}),
     width: dockWidth,
   });
@@ -3095,9 +3091,6 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
   // Same liveness rule the status block owns — a main turn OR live delegated
   // work — reusing its counts so the dock never invents a second definition.
   const busy = props.isBusy === true || backgroundBusy;
-  const showPerformanceReceipt = props.performanceReceipt !== undefined
-    && !busy
-    && (props.terminalRows ?? process.stdout.rows ?? 24) >= 18;
   // The busy half of the old status row, relocated to sit directly above the
   // hint row: spinner + activity phrase + elapsed, with agent/job counts
   // first when delegated work is live. Idle frames render nothing here, which
@@ -3144,9 +3137,7 @@ const WorkShellComposerDock = React.memo(function WorkShellComposerDock(props: {
           </Text>
         ))
         : null}
-      {showPerformanceReceipt ? (
-        <Text color={W.assistant}>{truncateForDisplayWidth(props.performanceReceipt!, dockWidth)}</Text>
-      ) : props.composerHint && !minimalHeightDock ? (
+      {props.composerHint && !minimalHeightDock ? (
         <Text {...hintColorProps}>{truncateForDisplayWidth(props.composerHint, dockWidth)}</Text>
       ) : null}
       <Text {...readableTextColorProps(W.borderSoft)}>{formatWorkShellComposerDockDivider(dockWidth)}</Text>
@@ -3345,10 +3336,16 @@ export function WorkShellView(props: {
     props.queuePaused ?? false,
     props.uiLocale ?? "en",
   );
-  const performanceReceipt = formatProviderPerformanceReceipt(
-    props.agentConsole?.lastTurnPerformance,
-    getWorkShellDockWidth(props.terminalColumns),
-  );
+  const backgroundBusy = activeCounts !== undefined
+    && (activeCounts.agents > 0 || activeCounts.jobs > 0);
+  // A completed turn's telemetry must not masquerade as the live turn's
+  // latency/cache evidence. The footer publishes it only while fully idle.
+  const performanceStatus = props.isBusy || backgroundBusy
+    ? undefined
+    : formatProviderPerformanceStatus(
+        props.agentConsole?.lastTurnPerformance,
+        getWorkShellDockWidth(props.terminalColumns),
+      );
   const visibleLiveToolTraceLines = props.traceMode === "verbose"
     ? selectWorkShellLiveTraceLines(props.liveToolTraceLines)
     : [];
@@ -3369,10 +3366,8 @@ export function WorkShellView(props: {
   const composerFrameLayout = resolveWorkShellComposerFrameLayout({
     ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
     isBusy: props.isBusy,
-    hasBackgroundWork: activeCounts !== undefined
-      && (activeCounts.agents > 0 || activeCounts.jobs > 0),
+    hasBackgroundWork: backgroundBusy,
     hasComposerHint: composerHint !== undefined,
-    hasPerformanceReceipt: performanceReceipt !== undefined,
     liveTraceLineCount: visibleLiveToolTraceLines.length,
   });
 
@@ -3425,7 +3420,7 @@ export function WorkShellView(props: {
       <WorkShellComposerDock
         composer={props.composer}
         {...(composerHint ? { composerHint } : {})}
-        {...(performanceReceipt ? { performanceReceipt } : {})}
+        {...(performanceStatus ? { performanceStatus } : {})}
         inputValue={props.inputValue}
         {...(props.cwd ? { cwd: props.cwd } : {})}
         model={props.model}

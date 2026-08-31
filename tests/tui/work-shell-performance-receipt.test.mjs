@@ -7,6 +7,7 @@ import { Text } from "ink";
 
 import {
   formatProviderPerformanceReceipt,
+  formatProviderPerformanceStatus,
   projectProviderPerformanceReceipt,
 } from "../../packages/tui/src/work-shell-performance-receipt.ts";
 import { WorkShellView } from "../../packages/tui/src/work-shell-view.tsx";
@@ -25,7 +26,7 @@ const completedPerformance = {
   costUsd: 0.04,
 };
 
-async function renderReceiptFrame(terminalRows) {
+async function renderReceiptFrame(terminalRows, isBusy = false) {
   const terminalColumns = 80;
   const { instance, getOutput, getFrame } = renderDebugFrame(
     React.createElement(WorkShellView, {
@@ -39,7 +40,7 @@ async function renderReceiptFrame(terminalRows) {
         { role: "user", text: "hi" },
         { role: "assistant", text: "hello" },
       ],
-      isBusy: false,
+      isBusy,
       activePanel: { title: "Session status", lines: ["Work context ready."] },
       composer: React.createElement(Text, null, ""),
       inputValue: "",
@@ -115,6 +116,13 @@ test("receipt does not fabricate speed, TTFT, cache miss, or zero cost from abse
   assert.equal(formatProviderPerformanceReceipt(undefined, 80), undefined);
 });
 
+test("footer status omits the decorative receipt mark and per-turn cost", () => {
+  assert.equal(
+    formatProviderPerformanceStatus(completedPerformance, 80),
+    "TTFT 180ms · cache HIT · 96 tok/s",
+  );
+});
+
 test("narrow receipt drops optional counters before it exceeds the available width", () => {
   const line = formatProviderPerformanceReceipt({
     provider: "anthropic",
@@ -134,17 +142,26 @@ test("narrow receipt drops optional counters before it exceeds the available wid
   assert.match(line, /cache MISS/);
 });
 
-test("roomy idle work shell shows one performance receipt instead of a second hint row", async () => {
+test("roomy idle work shell keeps performance in the footer and preserves the composer hint", async () => {
   const frame = await renderReceiptFrame(24);
   assert.equal((frame.match(/cache HIT/g) ?? []).length, 1);
   assert.match(frame, /tok\/s/);
   assert.match(frame, /TTFT/);
-  assert.doesNotMatch(frame, /Enter send/);
+  assert.match(frame, /Enter send/);
+  const rows = frame.split("\n");
+  const footer = rows.find((row) => row.includes("workspace"));
+  assert.match(footer ?? "", /TTFT 180ms · cache HIT · 96 tok\/s/);
 });
 
-test("short split suppresses the optional performance receipt and preserves the input dock", async () => {
+test("short split keeps performance inside the footer without consuming a dock row", async () => {
   const frame = await renderReceiptFrame(12);
-  assert.doesNotMatch(frame, /cache HIT/);
+  assert.equal((frame.match(/cache HIT/g) ?? []).length, 1);
   assert.match(frame, /›/);
   assert.match(frame, /workspace/);
+});
+
+test("a live turn does not label the previous turn's performance as current", async () => {
+  const frame = await renderReceiptFrame(24, true);
+  assert.doesNotMatch(frame, /TTFT|cache HIT|tok\/s/u);
+  assert.match(frame, /Thinking through the next step/u);
 });

@@ -148,7 +148,7 @@ test("composer frame budget reserves both overflow markers and the upper flex ro
   });
   assert.equal(narrowBusy.dockOverheadRows, 4, "9-row compact busy dock hides trace rows");
   assert.equal(narrowBusy.maxVisibleRows, 2, "9-row dock leaves room for two overflow markers");
-  assert.deepEqual(narrowBusy.cursorAnchor, { x: 5, bottom: 7 });
+  assert.deepEqual(narrowBusy.cursorAnchor, { x: 5, bottom: 8 });
 
   const roomyBusy = resolveWorkShellComposerFrameLayout({
     terminalRows: 24,
@@ -168,7 +168,7 @@ test("work shell cursor anchor stays on the prompt row above the footer", () => 
     hasComposerHint: true,
     liveTraceLineCount: 0,
   });
-  assert.deepEqual(frame.cursorAnchor, { x: 5, bottom: terminalRows - 2 });
+  assert.deepEqual(frame.cursorAnchor, { x: 5, bottom: terminalRows - 1 });
 });
 
 test("prompt dock stays on one terminal row as a session grows", async () => {

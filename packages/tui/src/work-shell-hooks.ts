@@ -49,7 +49,7 @@ import {
 import {
   resolveWorkShellContextInspectorAction,
   resolveWorkShellInputAction,
-  resolveWorkShellRawTranscriptNavigation,
+  resolveWorkShellRawTranscriptNavigations,
   resolveWorkShellTranscriptNavigation,
   resolveWorkShellSubmitAction,
 } from "./work-shell-input.js";
@@ -875,8 +875,8 @@ export function useWorkShellInputController(input: {
   // sequence and make key ownership flicker.
   rawTranscriptNavigationRef.current = (rawValue: unknown): void => {
     if (typeof rawValue !== "string") return;
-    const navigation = resolveWorkShellRawTranscriptNavigation(rawValue);
-    if (navigation.type === "none") return;
+    const navigations = resolveWorkShellRawTranscriptNavigations(rawValue);
+    if (navigations.length === 0) return;
 
     const telemetryPanelOpen =
       input.activePanelTitle === "Cache Telemetry"
@@ -895,34 +895,38 @@ export function useWorkShellInputController(input: {
     // authoritative owners. A raw page key must not leak through and move the
     // transcript underneath an overlay that cannot render that movement.
     if (input.queueOverlayOpen === true || transcriptOverlayOpen) {
-      if (
-        navigation.type === "page"
-        && input.hasOverlayOpen
-        && contextDeskOwnsKeyboard
-      ) {
-        input.moveContextInspectorPage?.(navigation.direction);
+      if (input.hasOverlayOpen && contextDeskOwnsKeyboard) {
+        for (const navigation of navigations) {
+          if (navigation.type === "page") {
+            input.moveContextInspectorPage?.(navigation.direction);
+          }
+        }
       }
       return;
     }
     if (contextDeskOwnsKeyboard) {
-      if (navigation.type === "page") {
-        input.moveContextInspectorPage?.(navigation.direction);
+      for (const navigation of navigations) {
+        if (navigation.type === "page") {
+          input.moveContextInspectorPage?.(navigation.direction);
+        }
       }
       return;
     }
 
-    if (navigation.type === "page") {
-      input.moveTranscriptPage?.(navigation.direction);
-      return;
-    }
-    if (
-      navigation.type === "latest"
-      && input.transcriptScrolledUp
-      && input.returnTranscriptToNewest
-      && !input.isBusy
-      && input.composerMode !== "api-key-entry"
-    ) {
-      input.returnTranscriptToNewest();
+    for (const navigation of navigations) {
+      if (navigation.type === "page") {
+        input.moveTranscriptPage?.(navigation.direction);
+        continue;
+      }
+      if (
+        navigation.type === "latest"
+        && input.transcriptScrolledUp
+        && input.returnTranscriptToNewest
+        && !input.isBusy
+        && input.composerMode !== "api-key-entry"
+      ) {
+        input.returnTranscriptToNewest();
+      }
     }
   };
 
