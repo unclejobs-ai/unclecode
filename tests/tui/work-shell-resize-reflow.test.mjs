@@ -9,6 +9,7 @@ import { renderDebugFrame, waitForSettledFrame } from "./work-shell-render-harne
 import {
   formatWorkShellHeaderLine,
   resolveWorkShellChromeWidth,
+  resolveWorkShellComposerFrameLayout,
   WorkShellView,
 } from "../../packages/tui/src/work-shell-view.tsx";
 import { Composer } from "../../packages/tui/src/composer.tsx";
@@ -136,6 +137,27 @@ test("header row never exceeds the padded chrome width", () => {
       `header at ${columns} columns used ${line.length} of ${columns - 4}`,
     );
   }
+});
+
+test("composer frame budget reserves both overflow markers and the upper flex row", () => {
+  const narrowBusy = resolveWorkShellComposerFrameLayout({
+    terminalRows: 9,
+    isBusy: true,
+    hasComposerHint: true,
+    liveTraceLineCount: 3,
+  });
+  assert.equal(narrowBusy.dockOverheadRows, 4, "9-row compact busy dock hides trace rows");
+  assert.equal(narrowBusy.maxVisibleRows, 2, "9-row dock leaves room for two overflow markers");
+  assert.deepEqual(narrowBusy.cursorAnchor, { x: 5, bottom: 7 });
+
+  const roomyBusy = resolveWorkShellComposerFrameLayout({
+    terminalRows: 24,
+    isBusy: true,
+    hasComposerHint: true,
+    liveTraceLineCount: 3,
+  });
+  assert.equal(roomyBusy.dockOverheadRows, 7, "roomy busy dock includes activity, trace, hint, divider, and footer");
+  assert.equal(roomyBusy.maxVisibleRows, 4, "roomy dock keeps the normal four-row viewport");
 });
 
 test("prompt dock stays on one terminal row as a session grows", async () => {
@@ -294,6 +316,58 @@ test("an 8-row split keeps the footer with a long CJK draft cursor in the middle
     instance.cleanup();
   }
 });
+
+for (const terminalRows of [9, 10]) {
+  test(`${terminalRows}-row busy split bounds a long CJK draft and keeps the footer below the cursor`, async () => {
+  const draft = "한".repeat(400);
+  const { stdin, instance, getOutput, getFrame } = renderDebugFrame(
+    React.createElement(WorkShellView, {
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      reasoningLabel: "unsupported",
+      reasoningSupported: false,
+      mode: "Work",
+      authLabel: "OAuth · pi engine",
+      entries: [],
+      isBusy: true,
+      busyStatus: "Implementing the fix",
+      liveToolTraceLines: ["read · first", "edit · second", "test · third"],
+      activePanel: { title: "Session status", lines: [] },
+      composer: React.createElement(Composer, {
+        value: draft,
+        onChange: () => {},
+        onSubmit: () => {},
+        terminalColumns: 80,
+        cursorAnchor: { x: 5, bottom: terminalRows - 2 },
+      }),
+      inputValue: draft,
+      slashSuggestionCount: 0,
+      terminalColumns: 80,
+      terminalRows,
+      cwd: "/Users/parkeungje/project/unclecode",
+    }),
+    { columns: 80, rows: terminalRows },
+  );
+
+  try {
+    await waitForSettledFrame(getOutput);
+    stdin.write("\u001b[D".repeat(200));
+    await waitForSettledFrame(getOutput);
+    const rows = stripVTControlCharacters(getFrame()).split("\n");
+    const upperMarkerAt = rows.findIndex((line) => /↑ \d+ more/u.test(line));
+    const lowerMarkerAt = rows.findIndex((line) => /↓ \d+ more/u.test(line));
+    const footerAt = rows.findIndex((line) => /unclecode/u.test(line));
+
+    assert.ok(upperMarkerAt >= 0, `the middle cursor must expose hidden rows above: ${JSON.stringify(rows)}`);
+    assert.ok(lowerMarkerAt > upperMarkerAt, `the middle cursor must expose hidden rows below: ${JSON.stringify(rows)}`);
+    assert.equal(footerAt, terminalRows - 1, `the footer must stay pinned to the final terminal row: ${JSON.stringify(rows)}`);
+    assert.ok(rows.length <= terminalRows, `the busy dock must stay inside ${terminalRows} rows: ${JSON.stringify(rows)}`);
+  } finally {
+    instance.unmount();
+    instance.cleanup();
+  }
+  });
+}
 
 for (const columns of [68, 96, 100, 120]) {
   test(`work shell reflows within ${columns} columns without spilling`, async () => {

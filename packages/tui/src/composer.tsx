@@ -4,7 +4,7 @@ import {
   type ClipboardImageResult,
 } from "@unclecode/orchestrator";
 import { Box, Text, useCursor, useInput, type DOMElement } from "ink";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useContext, useEffect, useRef, useState } from "react";
 
 import { getDisplayWidth, segmentDisplayGraphemes, truncateForDisplayWidth } from "./text-width.js";
 import type { AgentConsoleKeyState } from "./work-shell-agent-console-input.js";
@@ -20,6 +20,23 @@ const BRACKETED_PASTE_ARTIFACT_PATTERN = /(?:\u001b\[(?:200|201|990)~|\[(?:200|2
 const NON_TEXT_CONTROL_PATTERN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 const COMPOSER_DEFAULT_VISIBLE_WIDTH = 72;
 const COMPOSER_MAX_VISIBLE_ROWS = 4;
+
+/**
+ * Geometry supplied by the owning work-shell dock. The Composer still owns
+ * editing and grapheme layout, but it must not guess where a pinned dock ends
+ * or how many rows the surrounding frame can afford. Keeping this as context
+ * lets the WorkShellView provide the same budget to every branch (including
+ * overlays) without cloning an arbitrary user-supplied React node.
+ */
+export type ComposerFrameGeometry = {
+  readonly maxVisibleRows?: number;
+  readonly cursorAnchor?: {
+    readonly x: number;
+    readonly bottom: number;
+  };
+};
+
+export const WorkShellComposerFrameContext = React.createContext<ComposerFrameGeometry | undefined>(undefined);
 
 export function isRawComposerEmpty(value: string, pendingValue?: string): boolean {
   return (pendingValue ?? value).length === 0;
@@ -435,9 +452,10 @@ export function Composer(props: {
   readonly mask?: string | undefined;
   readonly terminalColumns?: number | undefined;
   /**
-   * Stable screen-space anchor for the last rendered composer row. The work
-   * shell pins its dock to the terminal bottom and supplies this so transcript
-   * growth and split-pane reflow cannot publish a one-frame-old IME cursor.
+   * Legacy screen-space anchor seam for hosts that render Composer outside the
+   * work-shell frame. WorkShellView supplies the equivalent geometry through
+   * WorkShellComposerFrameContext so the pinned dock remains the sole owner of
+   * its budget and cursor origin.
    */
   readonly cursorAnchor?: {
     readonly x: number;
@@ -527,6 +545,7 @@ export function Composer(props: {
   /** Explicit owner reset; unlike controlled value acknowledgements, this discards pending local input. */
   readonly resetEpoch?: number | undefined;
 }) {
+  const frameGeometry = useContext(WorkShellComposerFrameContext);
   const { setCursorPosition } = useCursor();
   const composerRef = useRef<DOMElement>(null);
   const [terminalOrigin, setTerminalOrigin] = useState<{ readonly x: number; readonly y: number }>();
@@ -583,7 +602,7 @@ export function Composer(props: {
     [],
   );
   useEffect(() => {
-    if (props.cursorAnchor) return;
+    if (props.cursorAnchor ?? frameGeometry?.cursorAnchor) return;
     const nextOrigin = getComposerAbsolutePosition(composerRef.current);
     setTerminalOrigin((current) => (
       current?.x === nextOrigin?.x && current?.y === nextOrigin?.y ? current : nextOrigin
@@ -814,10 +833,11 @@ export function Composer(props: {
     value: visibleValue,
     cursorOffset: visibleCursorOffset,
     width: visibleWidth,
-    maxRows: COMPOSER_MAX_VISIBLE_ROWS,
+    maxRows: frameGeometry?.maxVisibleRows ?? COMPOSER_MAX_VISIBLE_ROWS,
   });
-  const cursorOrigin = props.cursorAnchor
-    ? resolveAnchoredComposerOrigin(props.cursorAnchor, viewport)
+  const cursorAnchor = props.cursorAnchor ?? frameGeometry?.cursorAnchor;
+  const cursorOrigin = cursorAnchor
+    ? resolveAnchoredComposerOrigin(cursorAnchor, viewport)
     : terminalOrigin;
   const terminalCursor = resolveComposerTerminalCursor({
     origin: cursorOrigin,

@@ -59,7 +59,11 @@ import {
   WorkShellAgentConsoleOverlay,
 } from "./work-shell-agent-console-view.js";
 import { renderOmpAuthProviderPicker } from "./work-shell-auth-provider-picker.js";
-import { resolveComposerRenderedRowCount } from "./composer.js";
+import {
+  resolveComposerRenderedRowCount,
+  WorkShellComposerFrameContext,
+  type ComposerFrameGeometry,
+} from "./composer.js";
 import {
   resolveOmpAuthPickerQuery,
   shouldShowOmpAuthPicker,
@@ -1509,6 +1513,60 @@ export function resolveWorkShellComposerAdditionalRows(input: {
   return Math.max(0, composerRows - 1);
 }
 
+export type WorkShellComposerFrameLayout = ComposerFrameGeometry & {
+  /** Rows consumed by dock chrome before the Composer's own viewport. */
+  readonly dockOverheadRows: number;
+};
+
+/**
+ * Single source of truth for the pinned composer dock's physical budget.
+ *
+ * Ink will clip an over-sized fixed-height root without preserving the last
+ * rows. That is particularly destructive for the input cursor: a long CJK
+ * draft can render two overflow markers around the visible viewport, so the
+ * dock must reserve room for both markers before it chooses the viewport
+ * height. The activity and hint rows use the same gates as
+ * WorkShellComposerDock below. The returned cursor anchor is owned by this
+ * frame calculation, not by WorkShellPane, so a split resize and every
+ * overlay branch use one geometry contract.
+ */
+export function resolveWorkShellComposerFrameLayout(input: {
+  readonly terminalRows?: number | undefined;
+  readonly isBusy?: boolean | undefined;
+  readonly hasBackgroundWork?: boolean | undefined;
+  readonly hasComposerHint?: boolean | undefined;
+  readonly liveTraceLineCount?: number | undefined;
+}): WorkShellComposerFrameLayout {
+  const terminalRows = Math.max(1, Math.trunc(input.terminalRows ?? process.stdout.rows ?? 24));
+  const minimalHeightDock = terminalRows <= 8;
+  const compactHeightDock = terminalRows <= 14;
+  const busy = input.isBusy === true || input.hasBackgroundWork === true;
+  const activityRows = busy && !minimalHeightDock ? 1 : 0;
+  const traceRows = busy && !compactHeightDock
+    ? Math.min(3, Math.max(0, Math.trunc(input.liveTraceLineCount ?? 0)))
+    : 0;
+  const hintRows = input.hasComposerHint === true && !minimalHeightDock ? 1 : 0;
+  // Divider + prompt wrapper + footer. The prompt wrapper is represented by
+  // the Composer viewport's rows; reserve only the two fixed siblings here.
+  const dockOverheadRows = activityRows + traceRows + hintRows + 2;
+  const composerBudgetRows = Math.max(1, terminalRows - dockOverheadRows);
+  // A long draft can need one marker above and one below the visible viewport.
+  // Keep both markers inside the dock whenever possible, while retaining the
+  // Composer's normal four-row cap on roomy terminals.
+  // Keep one row for the flex-growing upper frame. When the dock is exactly
+  // terminal-height, Ink still preserves that flex slot and clips the footer
+  // on a middle-cursor frame (the two overflow markers are both present).
+  const maxVisibleRows = Math.max(1, Math.min(4, composerBudgetRows - 3));
+
+  return {
+    dockOverheadRows,
+    maxVisibleRows,
+    ...(input.terminalRows !== undefined
+      ? { cursorAnchor: { x: 5, bottom: Math.max(0, terminalRows - 2) } }
+      : {}),
+  };
+}
+
 
 function renderWorkShellEntryBlock(input: {
   readonly entry: WorkShellEntry;
@@ -1781,12 +1839,21 @@ const WORK_SHELL_WORDMARK_WIDTH = WORK_SHELL_WORDMARK[0]?.length ?? 0;
  */
 export const WORK_SHELL_COMPOSER_PLACEHOLDER = "Describe a task · / for commands";
 
-function renderWorkShellEmptyConversation(conversationWidth: number, uiLocale: "en" | "ko" = "en"): React.ReactNode {
+function renderWorkShellEmptyConversation(
+  conversationWidth: number,
+  uiLocale: "en" | "ko" = "en",
+  terminalRows?: number,
+): React.ReactNode {
   const messages = getWorkShellMessages(uiLocale);
-  // Width gate: the art needs its 47 columns plus 2 columns of breathing room
-  // on each side. Narrower containers skip it entirely (no wrapping, no
-  // shredding) and keep the pre-Task-13 text-only empty state.
-  const showWordmark = conversationWidth >= WORK_SHELL_WORDMARK_WIDTH + 4;
+  const availableRows = Math.max(1, Math.trunc(terminalRows ?? process.stdout.rows ?? 24));
+  // Empty-state density is a row contract, not an after-the-fact clip. The
+  // full art only earns a frame with enough room for the heading, prompt dock,
+  // and its own six rows; small splits receive the same product identity as
+  // text, never a shredded fragment of the wordmark.
+  const showWordmark = availableRows >= 24
+    && conversationWidth >= WORK_SHELL_WORDMARK_WIDTH + 4;
+  const compactHeight = availableRows <= 8;
+  const briefHeight = availableRows > 8 && availableRows <= 12;
   return (
     <Box flexDirection="column" paddingLeft={1}>
       {showWordmark ? WORK_SHELL_WORDMARK.map((row, index) => (
@@ -1797,16 +1864,26 @@ function renderWorkShellEmptyConversation(conversationWidth: number, uiLocale: "
         <Text color={W.text} bold>{messages.nextMove}</Text>
       </Text>
       <Box paddingLeft={2} flexDirection="column">
-        <Text color={W.textMuted}>{getWorkShellEmptyConversationHint(uiLocale)}</Text>
-        <Box marginTop={1} flexDirection="column">
-          {messages.starterPrompts.map((prompt, index) => (
-            <Text key={prompt}>
-              <Text color={W.assistant} bold>{`${index + 1}  `}</Text>
-              <Text color={W.textDim}>{prompt}</Text>
-            </Text>
-          ))}
-        </Box>
-        <Text color={W.textDim}>{messages.openers}</Text>
+        {compactHeight ? (
+          <Text color={W.textMuted}>{truncateForDisplayWidth(messages.emptyHint, Math.max(1, conversationWidth - 2))}</Text>
+        ) : briefHeight ? (
+          <Text color={W.textMuted}>
+            {truncateForDisplayWidth(`${messages.emptyHint} · ${messages.openers}`, Math.max(1, conversationWidth - 2))}
+          </Text>
+        ) : (
+          <>
+            <Text color={W.textMuted}>{getWorkShellEmptyConversationHint(uiLocale)}</Text>
+            <Box marginTop={1} flexDirection="column">
+              {messages.starterPrompts.map((prompt, index) => (
+                <Text key={prompt}>
+                  <Text color={W.assistant} bold>{`${index + 1}  `}</Text>
+                  <Text color={W.textDim}>{prompt}</Text>
+                </Text>
+              ))}
+            </Box>
+            <Text color={W.textDim}>{messages.openers}</Text>
+          </>
+        )}
       </Box>
     </Box>
   );
@@ -2231,7 +2308,13 @@ const WorkShellConversationBlock = React.memo(function WorkShellConversationBloc
     <Box flexDirection="column" width={props.panelPlacement === "side" ? "68%" : undefined} paddingRight={props.panelPlacement === "side" ? 1 : 0}>
       <Box flexDirection="column">
         {entries.length === 0 ? (
-          props.isBusy ? null : renderWorkShellEmptyConversation(conversationWidth, props.uiLocale ?? "en")
+          props.isBusy
+            ? null
+            : renderWorkShellEmptyConversation(
+                conversationWidth,
+                props.uiLocale ?? "en",
+                props.terminalRows,
+              )
         ) : transcriptWindow.window.map((entry, index) => renderWorkShellEntryBlock({
           entry,
           index,
@@ -3213,6 +3296,15 @@ export function WorkShellView(props: {
     && props.ompAuthCatalog !== undefined
     && shouldShowOmpAuthPicker(props.inputValue);
 
+  const composerFrameLayout = resolveWorkShellComposerFrameLayout({
+    ...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {}),
+    isBusy: props.isBusy,
+    hasBackgroundWork: activeCounts !== undefined
+      && (activeCounts.agents > 0 || activeCounts.jobs > 0),
+    hasComposerHint: composerHint !== undefined,
+    liveTraceLineCount: props.liveToolTraceLines?.length ?? 0,
+  });
+
   const conversation = (
       <WorkShellConversationBlock
       entries={props.entries}
@@ -3255,35 +3347,37 @@ export function WorkShellView(props: {
   );
 
   const composerDock = (
-    <WorkShellComposerDock
-      composer={props.composer}
-      {...(composerHint ? { composerHint } : {})}
-      inputValue={props.inputValue}
-      {...(props.cwd ? { cwd: props.cwd } : {})}
-      model={props.model}
-      reasoningLabel={props.reasoningLabel}
-      mode={props.mode}
-      authLabel={props.authLabel}
-      {...(props.contextIndicator ? { contextIndicator: props.contextIndicator } : {})}
-      {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
-      {...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {})}
-      {...(props.branch ? { branch: props.branch } : {})}
-      {...(props.gitFacts ? { gitFacts: props.gitFacts } : {})}
-      {...(sessionCost ? { cost: sessionCost } : {})}
-      {...(props.modelWindow !== undefined ? { modelWindow: props.modelWindow } : {})}
-      {...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {})}
-      isBusy={props.isBusy}
-      uiLocale={props.uiLocale ?? "en"}
-      {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
-      {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
-      {...(props.liveToolTraceLines && props.liveToolTraceLines.length > 0
-        ? { liveToolTraceLines: props.liveToolTraceLines }
-        : {})}
-      clock={clock}
-      {...(activeCounts ? { activeCounts } : {})}
-      {...(props.queuePaused !== undefined ? { queuePaused: props.queuePaused } : {})}
-      {...(props.queuedCount !== undefined ? { queuedCount: props.queuedCount } : {})}
-    />
+    <WorkShellComposerFrameContext.Provider value={composerFrameLayout}>
+      <WorkShellComposerDock
+        composer={props.composer}
+        {...(composerHint ? { composerHint } : {})}
+        inputValue={props.inputValue}
+        {...(props.cwd ? { cwd: props.cwd } : {})}
+        model={props.model}
+        reasoningLabel={props.reasoningLabel}
+        mode={props.mode}
+        authLabel={props.authLabel}
+        {...(props.contextIndicator ? { contextIndicator: props.contextIndicator } : {})}
+        {...(props.terminalColumns !== undefined ? { terminalColumns: props.terminalColumns } : {})}
+        {...(props.terminalRows !== undefined ? { terminalRows: props.terminalRows } : {})}
+        {...(props.branch ? { branch: props.branch } : {})}
+        {...(props.gitFacts ? { gitFacts: props.gitFacts } : {})}
+        {...(sessionCost ? { cost: sessionCost } : {})}
+        {...(props.modelWindow !== undefined ? { modelWindow: props.modelWindow } : {})}
+        {...(props.attachmentCount !== undefined ? { attachmentCount: props.attachmentCount } : {})}
+        isBusy={props.isBusy}
+        uiLocale={props.uiLocale ?? "en"}
+        {...(props.busyStatus ? { busyStatus: props.busyStatus } : {})}
+        {...(props.currentTurnStartedAt !== undefined ? { currentTurnStartedAt: props.currentTurnStartedAt } : {})}
+        {...(props.liveToolTraceLines && props.liveToolTraceLines.length > 0
+          ? { liveToolTraceLines: props.liveToolTraceLines }
+          : {})}
+        clock={clock}
+        {...(activeCounts ? { activeCounts } : {})}
+        {...(props.queuePaused !== undefined ? { queuePaused: props.queuePaused } : {})}
+        {...(props.queuedCount !== undefined ? { queuedCount: props.queuedCount } : {})}
+      />
+    </WorkShellComposerFrameContext.Provider>
   );
   const attachmentBlock = props.attachmentLines ? (
     <WorkShellAttachmentBlock
